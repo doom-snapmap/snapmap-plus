@@ -74,12 +74,11 @@ extern "C" {
 /* ---- the mods of this map (called by the runtime inside map_open) ---- */
 
 #define SH_SCRIPT_SALT_MAX 16
-#define SH_SCRIPT_NAME_MAX 96
 
-/* Register a mod with scripts for this map. Returns its slot (0 ..
- * SH_SCRIPT_MODS_MAX-1), the existing slot for a salt already registered, or
- * -1 (no free slot, bad salt, or out of memory: its line is written). The slot
- * is the `mod` of the queue and handle APIs. */
+/* Register a mod with scripts for this map. Returns its slot (from 0; the
+ * table grows with the map's mods), the existing slot for a salt already
+ * registered, or -1 (bad salt, or out of memory: its line is written). The
+ * slot is the `mod` of the queue and handle APIs. */
 int  sh_script_hooks_mod_add(const char *salt, const char *display_name);
 int  sh_script_hooks_mod_count(void);
 /* The slot of a registered salt (ASCII case-insensitive), or -1. */

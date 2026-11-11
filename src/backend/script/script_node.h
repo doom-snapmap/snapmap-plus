@@ -86,7 +86,6 @@ extern "C" {
 #define SH_SCRIPT_NODE_ROW_PARENT  "logic/relay"            /* the stock Relay row */
 #define SH_SCRIPT_NODE_FIRED       8                        /* SNAP_EVENT_LOGIC_FIRED */
 #define SH_SCRIPT_NODE_NAME_MAX    127                      /* SH_SCRIPT_EVENT_TEXT - 1 */
-#define SH_SCRIPT_NODE_STRING_MAX  1023                     /* bytes vars.set stores in a String variable */
 #define SH_SCRIPT_NODE_PER_MOD     256                      /* Script nodes node():fire() reaches per call */
 
 /* Variable types, as the engine numbers them (snapVarType_t). */
@@ -158,13 +157,15 @@ int  sh_script_node_uid_from_name(const char *game_name);
 
 /* ------------------------------------------------------------ the engine */
 
-/* A variable value; s holds a String variable's text. */
+/* A variable value; s is a String variable's text of any length: malloc'd by
+ * var_get and var_set's stored value (the caller frees it), the script's own
+ * text for var_set's input. */
 typedef struct sh_script_node_value {
     int       type;          /* SH_SCRIPT_VAR_* */
     long long i;             /* Integer */
     double    n;             /* Number */
     int       b;             /* Boolean */
-    char      s[SH_SCRIPT_NODE_STRING_MAX + 1];
+    char     *s;
 } sh_script_node_value;
 
 /* What the API asks of the engine. The engine side (script_node.c) supplies

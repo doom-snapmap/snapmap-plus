@@ -52,6 +52,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "script_api_ai.h"
 #include "script_runtime.h"
@@ -170,8 +171,7 @@ float sh_ai_position_score(float dist_to_target, float ideal, float path_len, fl
 
 /* ------------------------------------------------------------- per demon */
 
-#define AI_RECORDS_MAX 1024
-#define AI_FIND_MAX    16
+#define AI_FIND_MAX    16        /* candidate places find_position and firing_position try (the count argument) */
 #define AI_FOLLOW_MIN  32.0f     /* move_to_entity re-aims when the target moved this far */
 
 typedef struct ai_rec {
@@ -189,7 +189,11 @@ typedef struct ai_rec {
 
 #define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
 
-static ai_rec g_recs[AI_RECORDS_MAX];
+/* One record per demon a script drives, each allocated once and reused when
+ * its demon is gone; the list grows with the demons alive. A record's index
+ * is stable (it keys the path queries). Game thread only. */
+static ai_rec **g_recs;
+static int g_nrecs, g_crecs;
 static const sh_script_ai_engine *g_engine;
 
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = engine; }
@@ -197,27 +201,52 @@ void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = eng
 static void force_via_reset(void);
 void sh_script_ai_reset(void)
 {
-    memset(g_recs, 0, sizeof g_recs);
+    int i;
+    for (i = 0; i < g_nrecs; i++) memset(g_recs[i], 0, sizeof *g_recs[i]);
     force_via_reset();
     sh_ai_pain_records_reset();
 }
 
 /* The record of `h` (made when missing); a record whose handle no longer
- * belongs to this map is reused. NULL when the table is full. */
-static ai_rec *rec_of(sh_script_handle h)
+ * belongs to this map is reused, else the list grows. NULL only without
+ * memory. */
+static int rec_slot(sh_script_handle h)
 {
     int i, free_slot = -1;
-    for (i = 0; i < AI_RECORDS_MAX; i++) {
-        if (g_recs[i].handle == h) return &g_recs[i];
-        if (free_slot < 0 && (!g_recs[i].handle || !sh_script_handle_known(g_recs[i].handle))) free_slot = i;
+    for (i = 0; i < g_nrecs; i++) {
+        if (g_recs[i]->handle == h) return i;
+        if (free_slot < 0 && (!g_recs[i]->handle || !sh_script_handle_known(g_recs[i]->handle))) free_slot = i;
     }
-    if (free_slot < 0) return NULL;
-    memset(&g_recs[free_slot], 0, sizeof g_recs[free_slot]);
-    g_recs[free_slot].handle = h;
-    return &g_recs[free_slot];
+    if (free_slot < 0) {
+        ai_rec *r = (ai_rec *)calloc(1, sizeof *r);
+        if (!r) return -1;
+        if (g_nrecs == g_crecs) {
+            int cap = g_crecs ? g_crecs * 2 : 64;
+            ai_rec **grown = (ai_rec **)realloc(g_recs, (size_t)cap * sizeof *grown);
+            if (!grown) { free(r); return -1; }
+            g_recs = grown;
+            g_crecs = cap;
+        }
+        g_recs[g_nrecs] = r;
+        free_slot = g_nrecs++;
+    }
+    memset(g_recs[free_slot], 0, sizeof *g_recs[free_slot]);
+    g_recs[free_slot]->handle = h;
+    return free_slot;
 }
 
-static int rec_index(const ai_rec *r) { return (int)(r - g_recs); }
+static ai_rec *rec_of(sh_script_handle h)
+{
+    int i = rec_slot(h);
+    return i < 0 ? NULL : g_recs[i];
+}
+
+static int rec_index(const ai_rec *r)
+{
+    int i;
+    for (i = 0; i < g_nrecs; i++) if (g_recs[i] == r) return i;
+    return 0;
+}
 
 /* ------------------------------------------------------------- arguments */
 
@@ -1071,7 +1100,12 @@ int sh_ai_position_kind(const char *word)
 
 /* ------------------------------------ per-demon records other threads read */
 
-#define AI_PAIN_RECORDS 512
+/* One record per demon with a pain string or a block standing. Engine
+ * threads read the records without a lock, so they never move: the table is
+ * the engine's own size (one record per entity the game can hold at once,
+ * SH_SCRIPT_ENGINE_ENTITIES), readers look only below the high-water mark,
+ * and a record whose demon is gone is reused. */
+#define AI_PAIN_RECORDS SH_SCRIPT_ENGINE_ENTITIES
 typedef struct ai_pain_rec {
     void *volatile        ai;
     volatile LONG         spawn_id;
@@ -1079,21 +1113,21 @@ typedef struct ai_pain_rec {
     volatile LONG         until[SH_AI_PAIN_REACTIONS];   /* game ms; 0 none */
 } ai_pain_rec;
 static ai_pain_rec g_pain[AI_PAIN_RECORDS];
-static volatile LONG g_pain_used;   /* a record was ever made: the engine's threads look only then */
+static volatile LONG g_pain_used;   /* records below this were ever made: the engine's threads look only there */
 
 void sh_ai_pain_records_reset(void)
 {
     int i;
-    InterlockedExchange(&g_pain_used, 0);
-    for (i = 0; i < AI_PAIN_RECORDS; i++) InterlockedExchangePointer((PVOID volatile *)&g_pain[i].ai, NULL);
-    memset(g_pain, 0, sizeof g_pain);
+    int used = (int)InterlockedExchange(&g_pain_used, 0);
+    for (i = 0; i < used; i++) InterlockedExchangePointer((PVOID volatile *)&g_pain[i].ai, NULL);
+    memset(g_pain, 0, (size_t)used * sizeof g_pain[0]);
 }
 
 static ai_pain_rec *pain_find(void *ai, uint32_t id)
 {
-    int i;
-    if (!g_pain_used || !ai || id == SH_SCRIPT_SPAWN_ID_NONE) return NULL;
-    for (i = 0; i < AI_PAIN_RECORDS; i++)
+    int i, used = (int)g_pain_used;
+    if (!used || !ai || id == SH_SCRIPT_SPAWN_ID_NONE) return NULL;
+    for (i = 0; i < used; i++)
         if (g_pain[i].ai == ai && (uint32_t)g_pain[i].spawn_id == id) return &g_pain[i];
     return NULL;
 }
@@ -1103,24 +1137,23 @@ static ai_pain_rec *pain_find(void *ai, uint32_t id)
 static ai_pain_rec *pain_make(void *ai, uint32_t id)
 {
     ai_pain_rec *r = pain_find(ai, id);
-    int i;
+    const sh_script_engine *e = sh_script_api_engine();
+    int i, used = (int)g_pain_used;
     if (r || !ai || id == SH_SCRIPT_SPAWN_ID_NONE) return r;
-    for (i = 0; i < AI_PAIN_RECORDS && !r; i++) if (!g_pain[i].ai) r = &g_pain[i];
-    if (!r) {
-        /* every slot taken: reuse the one with nothing standing (no string, no block) */
-        for (i = 0; i < AI_PAIN_RECORDS && !r; i++) {
-            int k, idle = g_pain[i].pain_string == NULL;
-            for (k = 0; k < SH_AI_PAIN_REACTIONS && idle; k++) if (g_pain[i].until[k]) idle = 0;
-            if (idle) r = &g_pain[i];
-        }
+    for (i = 0; i < used && !r; i++) {
+        /* a free record, one with nothing standing, or one whose demon is gone */
+        int k, idle = !g_pain[i].ai || g_pain[i].pain_string == NULL;
+        for (k = 0; k < SH_AI_PAIN_REACTIONS && idle && g_pain[i].ai; k++) if (g_pain[i].until[k]) idle = 0;
+        if (idle || (e && e->resolve && e->resolve((uint32_t)g_pain[i].spawn_id) != g_pain[i].ai)) r = &g_pain[i];
     }
-    if (!r) return NULL;
-    InterlockedExchange(&g_pain_used, 1);
+    if (!r && used < AI_PAIN_RECORDS) r = &g_pain[used];
+    if (!r) return NULL;                /* every entity the game can hold is a demon with a standing record */
     InterlockedExchangePointer((PVOID volatile *)&r->ai, NULL);
     r->pain_string = NULL;
     for (i = 0; i < SH_AI_PAIN_REACTIONS; i++) r->until[i] = 0;
     InterlockedExchange(&r->spawn_id, (LONG)id);
     InterlockedExchangePointer((PVOID volatile *)&r->ai, ai);
+    if (r - g_pain >= used) InterlockedExchange(&g_pain_used, (LONG)(r - g_pain) + 1);
     return r;
 }
 
@@ -1425,7 +1458,7 @@ static const char *check_node(lua_State *L, int idx, const char *call, const cha
 {
     size_t n = 0, i;
     const char *s = lua_type(L, idx) == LUA_TSTRING ? lua_tolstring(L, idx, &n) : NULL;
-    if (!s || !n || n > SH_SCRIPT_ANIM_NAME_CAP - 1)
+    if (!s || !n)
         sh_script_refuse(L, "\"%s\" needs %s as \"subweb/state\" text, got %s", call, what,
                          lua_isnoneornil(L, idx) ? "nothing" : luaL_typename(L, idx));
     for (i = 0; i < n; i++)
@@ -1481,16 +1514,25 @@ static int l_anim_valid(lua_State *L)
 
 /* ------------------------------------------- forced animation through a via */
 
-#define AI_FORCE_VIA_MAX 64
 #define AI_FORCE_VIA_FRAMES 600   /* a via node not seen this many frames is given up */
 typedef struct ai_force_via {
     sh_script_handle handle;
-    char dest[SH_SCRIPT_ANIM_NAME_CAP];
-    char via[SH_SCRIPT_ANIM_NAME_CAP];
+    char *dest;              /* malloc'd node names */
+    char *via;
     uint32_t issued;
 } ai_force_via;
-static ai_force_via g_force_via[AI_FORCE_VIA_MAX];
-static void force_via_reset(void) { memset(g_force_via, 0, sizeof g_force_via); }
+/* One per demon with a forced via standing; the list grows. Game thread. */
+static ai_force_via *g_force_via;
+static int g_nforce, g_cforce;
+
+static void force_via_drop(int i)
+{
+    free(g_force_via[i].dest);
+    free(g_force_via[i].via);
+    g_force_via[i] = g_force_via[--g_nforce];
+}
+
+static void force_via_reset(void) { while (g_nforce) force_via_drop(g_nforce - 1); }
 
 /* Every frame: a forced via whose node has played and ended hands the web
  * to the destination (ssaction_ChangeAnimState). */
@@ -1509,25 +1551,28 @@ static void force_via_step(void)
         force_via_reset();
     }
     g_seen_frame = frame;
-    for (i = 0; i < AI_FORCE_VIA_MAX; i++) {
+    for (i = 0; i < g_nforce; i++) {
         ai_force_via *f = &g_force_via[i];
         void *ai;
         int requested = 0;
         unsigned flags;
-        char dest[SH_SCRIPT_ANIM_NAME_CAP];
-        if (!f->handle) continue;
+        char *dest = sh_script_api_anim_dest_of(f->handle);
         ai = g_engine->entity(f->handle);
-        if (!ai || !sh_script_api_anim_dest(f->handle, dest, sizeof dest) || _stricmp(dest, f->dest)) {
-            memset(f, 0, sizeof *f);                 /* gone, or another animation was asked for since */
+        if (!ai || !dest || _stricmp(dest, f->dest)) {
+            force_via_drop(i--);                      /* gone, or another animation was asked for since */
             continue;
         }
         flags = sh_script_api_anim_flags(f->handle, ai, &requested);
-        if (flags & SH_SCRIPT_ANIM_DEST) { memset(f, 0, sizeof *f); continue; }
+        if (flags & SH_SCRIPT_ANIM_DEST) { force_via_drop(i--); continue; }
         if (flags & SH_SCRIPT_ANIM_VIA_OUT) {
-            (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, 0, 0);
-            memset(f, 0, sizeof *f);
+            char *to = f->dest;
+            sh_script_handle h = f->handle;
+            f->dest = NULL;
+            force_via_drop(i--);
+            (void)sh_script_ai_anim(ai, h, to, NULL, 0, 0);
+            free(to);
         } else if (!(flags & SH_SCRIPT_ANIM_VIA_IN) && g_engine->frame() - f->issued > AI_FORCE_VIA_FRAMES) {
-            memset(f, 0, sizeof *f);
+            force_via_drop(i--);
         }
     }
 }
@@ -1544,21 +1589,34 @@ static int l_anim_force_via(lua_State *L)
     double blend = 0;
     void *ai;
     int i, slot = -1;
+    char *d, *v;
     if (sh_script_api_opt_number(L, 4, "anim_force_via", "the blend time in seconds", &blend) && (blend < 0 || blend > 10))
         sh_script_refuse(L, "\"anim_force_via\" needs a blend time from 0 to 10 seconds, got %g", blend);
     ai = self_ai(L, "anim_force_via", &h);
     if (!ai) return 0;
-    for (i = 0; i < AI_FORCE_VIA_MAX; i++) {
-        if (g_force_via[i].handle == h) { slot = i; break; }
-        if (slot < 0 && !g_force_via[i].handle) slot = i;
-    }
+    for (i = 0; i < g_nforce; i++) if (g_force_via[i].handle == h) { slot = i; break; }
     sh_script_api_anim_request(h, dest, via);
     if (!sh_script_ai_anim(ai, h, via, NULL, 1, (int)(blend * 1000.0 + 0.5))) return 0;
-    if (slot < 0) return 0;   /* more than AI_FORCE_VIA_MAX demons at once: the via plays, the web returns on its own */
+    d = _strdup(dest);
+    v = _strdup(via);
+    if (!d || !v) { free(d); free(v); return luaL_error(L, "not enough memory"); }
+    if (slot < 0) {
+        if (g_nforce == g_cforce) {
+            int cap = g_cforce ? g_cforce * 2 : 16;
+            ai_force_via *grown = (ai_force_via *)realloc(g_force_via, (size_t)cap * sizeof *grown);
+            if (!grown) { free(d); free(v); return luaL_error(L, "not enough memory"); }
+            g_force_via = grown;
+            g_cforce = cap;
+        }
+        slot = g_nforce++;
+    } else {
+        free(g_force_via[slot].dest);
+        free(g_force_via[slot].via);
+    }
     memset(&g_force_via[slot], 0, sizeof g_force_via[slot]);
     g_force_via[slot].handle = h;
-    strncpy_s(g_force_via[slot].dest, sizeof g_force_via[slot].dest, dest, _TRUNCATE);
-    strncpy_s(g_force_via[slot].via, sizeof g_force_via[slot].via, via, _TRUNCATE);
+    g_force_via[slot].dest = d;
+    g_force_via[slot].via = v;
     g_force_via[slot].issued = g_engine->frame();
     return 0;
 }
@@ -2157,17 +2215,22 @@ static uint32_t e_frame(void) { return sh_script_hooks_frame(); }
 
 /* ---------------------------------------------------------------- park */
 
-#define AI_PARKED_MAX 512
+/* One slot per parked demon. The engine's FSM threads read it without a
+ * lock, so it never moves: the engine's own size (one slot per entity the game
+ * can hold at once), read only below the high-water mark; a slot whose demon
+ * is gone is reused. */
+#define AI_PARKED_MAX SH_SCRIPT_ENGINE_ENTITIES
 typedef struct { void *volatile ai; volatile LONG spawn_id; } ai_parked;
 static ai_parked g_parked[AI_PARKED_MAX];
+static volatile LONG g_parked_used;   /* slots below this were ever used */
 
 /* IsRunningScript(ai): true for a parked demon whose spawn id still matches
  * (the same entity, not a new one in its memory), else the engine's answer.
  * FSM worker threads; reads only. */
 static uint64_t irs_detour(void *ai)
 {
-    int i;
-    for (i = 0; i < AI_PARKED_MAX; i++) {
+    int i, used = (int)g_parked_used;
+    for (i = 0; i < used; i++) {
         if (g_parked[i].ai == ai && ai) {
             uint32_t id = spawn_id_of(ai);
             if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id) return 1;
@@ -2208,21 +2271,19 @@ static int commit_detour(void)
 static int e_park(void *ai)
 {
     uint32_t id = spawn_id_of(ai);
-    int i, free_slot = -1;
+    int i, free_slot = -1, used = (int)g_parked_used;
     if (id == SH_SCRIPT_SPAWN_ID_NONE || !commit_detour()) return 0;
-    for (i = 0; i < AI_PARKED_MAX; i++) {
+    for (i = 0; i < used; i++) {
         void *p = g_parked[i].ai;
         if (p == ai && (uint32_t)g_parked[i].spawn_id == id) return 1;
         if (free_slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_parked[i].spawn_id)) free_slot = i;
     }
-    if (free_slot < 0) {
-        static int logged;
-        if (!logged) { logged = 1; ai_log("Mod scripts: more than %d demons driven at once; later ones keep their own behaviour.", AI_PARKED_MAX); }
-        return 0;
-    }
+    if (free_slot < 0 && used < AI_PARKED_MAX) free_slot = used;
+    if (free_slot < 0) return 0;   /* every entity the game can hold is a parked demon */
     g_parked[free_slot].ai = NULL;
     InterlockedExchange(&g_parked[free_slot].spawn_id, (LONG)id);
     InterlockedExchangePointer((PVOID volatile *)&g_parked[free_slot].ai, ai);
+    if (free_slot >= used) InterlockedExchange(&g_parked_used, free_slot + 1);
     return 1;
 }
 
@@ -2539,8 +2600,10 @@ static int e_block_pain(void *ai, int reaction, int ms)
 
 /* ---- the pain string: interned by the engine, put in the request by the stub */
 
-#define AI_INTERNED_MAX 64
-static struct { char text[64]; const char *atom; } g_interned[AI_INTERNED_MAX];
+/* The engine's interned atom of each pain string asked for (the engine keeps
+ * them for the session); the list grows. */
+static struct ai_interned { char *text; const char *atom; } *g_interned;
+static int g_ninterned, g_cinterned;
 
 /* Called by the stub on the pain request's thread: the demon's string or NULL. */
 static const char *pain_fetch(void *ai)
@@ -2587,14 +2650,24 @@ static int e_pain_string(void *ai, const char *text)
     int i;
     if (!text) return sh_ai_pain_string_set(ai, spawn_id_of(ai), NULL);
     if (!commit_pain_stub()) return 0;
-    for (i = 0; i < AI_INTERNED_MAX && g_interned[i].atom; i++)
+    for (i = 0; i < g_ninterned; i++)
         if (!strcmp(g_interned[i].text, text)) { atom = g_interned[i].atom; break; }
     if (!atom) {
-        if (i >= AI_INTERNED_MAX) return 0;
+        char *copy = _strdup(text);
         __try { g_intern(&atom, text); } __except (av_only(GetExceptionCode())) { atom = NULL; }
-        if (!atom) return 0;
-        strncpy_s(g_interned[i].text, sizeof g_interned[i].text, text, _TRUNCATE);
-        g_interned[i].atom = atom;
+        if (!atom) { free(copy); return 0; }
+        if (copy && g_ninterned == g_cinterned) {
+            int cap = g_cinterned ? g_cinterned * 2 : 16;
+            void *grown = realloc(g_interned, (size_t)cap * sizeof *g_interned);
+            if (grown) { g_interned = grown; g_cinterned = cap; }
+        }
+        if (copy && g_ninterned < g_cinterned) {
+            g_interned[g_ninterned].text = copy;
+            g_interned[g_ninterned].atom = atom;
+            g_ninterned++;
+        } else {
+            free(copy);   /* not kept: the next call interns it again, as the engine allows */
+        }
     }
     return sh_ai_pain_string_set(ai, spawn_id_of(ai), atom);
 }

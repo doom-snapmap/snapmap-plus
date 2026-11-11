@@ -998,13 +998,33 @@ test('details: the Scripts section and the script log, its Copy and its note', (
   assert.ok(ask.length >= 1 && ask[ask.length - 1].salt === 'doorsx8q', 'the selected mod\'s log is asked for');
   /* the answer: the log in place, and the state */
   h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 2}], salt: 'doorsx8q',
-                                             log: ['door: switch 1 of 3', 'door: switch 2 of 3']}});
+                                             total: 2, full: false, log: ['door: switch 1 of 3', 'door: switch 2 of 3']}});
   const log2 = section(h, 'scriptLog');
   assert.match(log2.textContent, /door: switch 1 of 3 door: switch 2 of 3/);
   assert.match(log2.textContent, /Running in this Play\./);
+  assert.doesNotMatch(log2.textContent, /The newest/);
+  /* Copy log asks the host for the whole log and copies what comes back */
   log2.tags('button').find(b => b.textContent === 'Copy log').click();
+  assert.deepEqual(h.sent[h.sent.length - 1], {cmd: 'modsScripts', salt: 'doorsx8q', full: 1});
+  assert.deepEqual(copied, [], 'nothing until the whole log arrives');
+  h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 2}], salt: 'doorsx8q',
+                                             total: 2, full: true, log: ['door: switch 1 of 3', 'door: switch 2 of 3']}});
   assert.deepEqual(copied, ['door: switch 1 of 3\ndoor: switch 2 of 3\n']);
   assert.equal(h.toasts[h.toasts.length - 1].text, 'Copied 2 lines of the script log.');
+  /* a long log: the window shows the newest lines and says so; Copy log copies every one */
+  {
+    const tail = [], all = [];
+    for (let i = 1; i <= 100000; i++) all.push('line ' + i);
+    for (let i = 99001; i <= 100000; i++) tail.push('line ' + i);
+    h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 100000}],
+                                               salt: 'doorsx8q', total: 100000, full: false, log: tail}});
+    assert.match(section(h, 'scriptLog').textContent, /The newest 1000 lines of 100000; Copy log copies them all\./);
+    section(h, 'scriptLog').tags('button').find(b => b.textContent === 'Copy log').click();
+    h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 100000}],
+                                               salt: 'doorsx8q', total: 100000, full: true, log: all}});
+    assert.equal(copied[copied.length - 1].split('\n').length, 100001);
+    assert.equal(h.toasts[h.toasts.length - 1].text, 'Copied 100000 lines of the script log.');
+  }
   /* the script stops: the row and the details show the stop line, the log its last line */
   h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'stopped', stop: STOP_LINE, lines: 3}], salt: 'doorsx8q',
                                              log: ['door: switch 1 of 3', 'door: switch 2 of 3', STOP_LINE]}});

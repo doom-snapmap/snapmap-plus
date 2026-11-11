@@ -14,7 +14,11 @@
  * attacker that is not the mod's, a projectile the mod did not launch, a
  * condition the game does not have); the hooks' records reach on.damage,
  * on.death, on.anim, on.frame_event, on.pain and on.projectile with their
- * values; the records the hooks keep (last hit, first death, launches). */
+ * values; the records the hooks keep (last hit, first death, launches), each
+ * released with its entity; a script holding projectiles as long as it likes:
+ * 300 alive at once steered every frame, 5,000 alive steered in one frame,
+ * every call on one that is gone answering nil or false and never stopping
+ * the mod, and the launch records gone with them. */
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -70,7 +74,7 @@ typedef struct fent {
 
 typedef struct fdecl { char type[16]; char name[128]; } fdecl;
 
-#define ENTS 64
+#define ENTS 8192
 static fent g_ents[ENTS];
 static int g_nents;
 static int g_ms;
@@ -112,10 +116,11 @@ static fent *add_ent(int kind, const char *def, float x, float y, float z)
 
 static fent *by_id(uint32_t id)
 {
-    int i;
+    uint32_t n;
     if (id == SH_SCRIPT_SPAWN_ID_WORLD) return g_world_ent;
-    for (i = 0; i < g_nents; i++) if (g_ents[i].id == id && g_ents[i].alive) return &g_ents[i];
-    return NULL;
+    if (id < 0x20000u || (id - 0x20000u) % 5u) return NULL;
+    n = (id - 0x20000u) / 5u;
+    return n < (uint32_t)g_nents && g_ents[n].alive ? &g_ents[n] : NULL;
 }
 
 static fent *by_name(const char *name)
@@ -140,7 +145,10 @@ static int f_place(void *ent, const float *o, const float *a)
 }
 static int f_def_name(void *ent, char *out, size_t cap) { strcpy_s(out, cap, ((fent *)ent)->def); return 1; }
 
-static void ev_cat(const char *s) { strcat_s(g_events, sizeof g_events, s); }
+static void ev_cat(const char *s)
+{
+    if (strlen(g_events) + strlen(s) + 1 < sizeof g_events) strcat_s(g_events, sizeof g_events, s);
+}
 
 static int f_event(void *ent, const char *name, const sh_script_earg *a, int n, sh_script_earg *ret, int post)
 {
@@ -187,7 +195,7 @@ static int f_event(void *ent, const char *name, const sh_script_earg *a, int n, 
             float l = (float)sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
             if (l > 0) { p->vel[0] = d[0] / l * 600; p->vel[1] = d[1] / l * 600; p->vel[2] = d[2] / l * 600; }
         }
-        sh_script_combat_note_launch(p->id, owner, mod);
+        sh_script_combat_launch(p->id, owner, mod);   /* as the launch hook does */
     }
     return 1;
 }
@@ -510,7 +518,7 @@ static void test_refusals(void)
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 0, y = 0, z = 0}, 'damage/rock')\nend)\n",
             "3", "\"hitscan\" needs a direction that is not zero");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 1, y = 0, z = 0}, 'damage/rock', 0)\nend)\n",
-            "3", "\"hitscan\" needs a range from 1 to 65536, got 0");
+            "3", "\"hitscan\" needs a range of at least 1, got 0");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(self, 'FX_NOPE')\nend)\n",
             "3", "\"fx\" knows no effect condition \"FX_NOPE\"; use one of the FX_ conditions the entity's fx decl lists");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(ent(1), 'FX_CINEMATIC_8')\nend)\n",
@@ -536,7 +544,7 @@ static void test_refusals(void)
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):steer({x = 1, y = 2, z = 3})\nend)\n",
             "3", "\"steer\" works on a projectile this mod's entities launched; this entity is not one");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  local p = self:fire('rocket', 'muzzle', ent(2))\n  p:steer(ent(2), -5)\nend)\n",
-            "4", "\"steer\" needs a speed above 0 and at most 100000, got -5");
+            "4", "\"steer\" needs a speed above 0, got -5");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:tag(5)\nend)\n",
             "3", "\"tag\" needs the joint name as text, got a number");
     refused("api = 1\non.frame_event('ai/brute', 'a:b', function(self, args) end)\n",
@@ -605,6 +613,69 @@ static void test_hook_records(void)
     CHECK(has(g_log, "death\tdamage/rock\tplayer/sp"));
 }
 
+/* A script holds its projectiles for as long as it likes. */
+static void test_projectiles_held(void)
+{
+    int i, steered, gone_ok;
+    run("api = 1\n"
+        "rockets = {}\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  for i = 1, 300 do rockets[i] = self:fire('rocket', 'muzzle', ent(2)) end\n"
+        "  every(0, function()\n"
+        "    local n = 0\n"
+        "    for i = 1, #rockets do if rockets[i]:steer({x = i, y = 0, z = 100}) then n = n + 1 end end\n"
+        "    print('steered', n)\n"
+        "  end)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(sh_script_combat_launches() == 300);
+    for (i = 0; i < 30; i++) frame();
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "steered\t300"));
+    /* every rocket goes (they hit something); the script keeps its handles */
+    for (i = 0; i < g_nents; i++) if (!strcmp(g_ents[i].def, "projectile/stock_rocket")) g_ents[i].alive = 0;
+    for (i = 0; i < 5; i++) frame();
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "steered\t0"));
+    CHECK(sh_script_combat_launches() == 0);   /* the records went with their projectiles */
+    steered = 0;
+    (void)steered;
+
+    /* A handle used after its projectile is gone: nil, nil, nil, false; the mod runs on. */
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local p = self:fire('rocket', 'muzzle', ent(2))\n"
+        "  after(0.05, function()\n"
+        "    print('gone', p:steer({x = 1, y = 2, z = 3}), p:explode(), p:pos(), p:alive(), tostring(p:steer(ent(2), 900)))\n"
+        "  end)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    for (i = 0; i < g_nents; i++) if (!strcmp(g_ents[i].def, "projectile/stock_rocket")) g_ents[i].alive = 0;
+    for (i = 0; i < 6; i++) frame();
+    gone_ok = sh_script_status(SALT) == SH_SCRIPT_RUNNING;
+    CHECK(gone_ok);
+    CHECK(has(log_now(), "gone\tnil\tnil\tnil\tfalse\tnil"));
+    CHECK(sh_script_combat_launches() == 0);
+
+    /* 5,000 alive at once, all steered in one frame. */
+    run("api = 1\n"
+        "rockets = {}\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  for i = 1, 5000 do rockets[i] = self:fire('rocket', 'muzzle', ent(2)) end\n"
+        "  after(0, function()\n"
+        "    local n = 0\n"
+        "    for i = 1, #rockets do if rockets[i]:steer(ent(2), 800) then n = n + 1 end end\n"
+        "    print('five thousand', n)\n"
+        "  end)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    frame();
+    frame();
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "five thousand\t5000"));
+    CHECK(sh_script_combat_launches() == 5000);
+}
+
 static void test_records(void)
 {
     char decl[64];
@@ -626,6 +697,26 @@ static void test_records(void)
     CHECK(sh_script_combat_channel("Weapon") == 7 && sh_script_combat_channel("item") == 14 && sh_script_combat_channel("x") == -1);
     sh_script_combat_reset();
     CHECK(!sh_script_combat_launched(0x1234, NULL, NULL));
+    /* Many records at once, each released with its entity by the handle table's sweep. */
+    {
+        sh_script_handle_change ch[256];
+        int i, n = 0;
+        uint32_t base;
+        run("api = 1\n");
+        base = 0x20000u + (uint32_t)g_nents * 5u;
+        for (i = 0; i < 3000; i++) {
+            fent *p = add_ent(SH_SCRIPT_KIND_OTHER, "projectile/stock_rocket", 0, 0, 0);
+            sh_script_handle h = sh_script_combat_launch(p->id, 5, 0);
+            CHECK(h != 0);
+            sh_script_combat_note_hit(h, "damage/rock", 9);
+            CHECK(sh_script_combat_first_death(h) == 1);
+        }
+        CHECK(sh_script_combat_launches() == 3000);
+        for (i = 0; i < 3000; i++) g_ents[(base - 0x20000u) / 5u + (uint32_t)i].alive = 0;
+        while ((n = sh_script_handles_sweep(ch, 256)) > 0) {}
+        CHECK(sh_script_combat_launches() == 0);
+        CHECK(!sh_script_combat_launched(base, NULL, NULL));
+    }
 }
 
 int main(void)
@@ -645,6 +736,7 @@ int main(void)
     test_fire();
     test_refusals();
     test_hook_records();
+    test_projectiles_held();
     test_records();
     sh_script_map_end();
     CHECK(sh_script_bytes_in_use() == 0);

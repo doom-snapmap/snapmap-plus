@@ -355,10 +355,13 @@ what should happen to its On Fired.", and, when a name is built while running, "
 while the map runs, so they are not listed here." A Script log section shows the state of its
 scripts in the current or last Play ("Running in this Play.", "They start when the Play begins.",
 "They ran in the last Play.", "They run when you play a map that uses this mod.", or the stop line),
-the log's lines (the scripts' `print` and `warn`, and the line saying why they stopped, at most 200,
-cleared when the next Play starts), Copy log ("Copied N lines of the script log.") and the note "The
-log keeps the last 200 lines of the current or last Play: the scripts' print and warn lines, and the
-line that says why they stopped. The next Play starts it again." While a script is stopped, its stop
+the log's newest lines (the scripts' `print` and `warn`, and the line saying why they stopped; the
+host answers the last 1,000 each second, and above them "The newest 1,000 lines of N; Copy log copies
+them all." when there are more; the log itself keeps every line, cleared when the next Play starts),
+Copy log (it asks the host for the whole log and says "Copied N lines of the script log.") and the
+note "The log keeps every line of the current or last Play: the scripts' print and warn lines, and
+the line that says why they stopped. This window shows the newest lines; Copy log copies them all.
+The next Play starts it again." While a script is stopped, its stop
 line ("Script stopped: <mod>, scripts\<file>.lua line <n>: <what went wrong>. <what to do>.") is the
 row's state (a red glyph, the line as the hover and the details sentence) until the next Play; the
 mod stays usable, so it is not "needs attention". A build that fails on a script shows the script's

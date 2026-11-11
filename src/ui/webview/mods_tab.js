@@ -146,8 +146,9 @@ var modsTab = (function () {
     ended: 'They ran in the last Play.',
     none: 'They run when you play a map that uses this mod.'
   };
-  var SCRIPT_LOG_NOTE = "The log keeps the last 200 lines of the current or last Play: the scripts' print and warn lines, " +
-                        'and the line that says why they stopped. The next Play starts it again.';
+  var SCRIPT_LOG_NOTE = "The log keeps every line of the current or last Play: the scripts' print and warn lines, " +
+                        'and the line that says why they stopped. This window shows the newest lines; Copy log copies them all. ' +
+                        'The next Play starts it again.';
   var SCRIPT_LOG_EMPTY = 'Nothing logged yet.';
   var SCRIPT_DYNAMIC_TEXT = 'Some names are set while the map runs, so they are not listed here.';
   /* The player's setting (design: scripts download with maps): on by default. */
@@ -1203,7 +1204,7 @@ var modsTab = (function () {
        modsScripts: read only, answered at once, during a Play too). The answer updates the rows'
        states and the log in place; the details pane is drawn again only when the selected mod's
        state changed. */
-    var sl = {visible: false, timer: null, salt: '', lines: [], box: null, stateNode: null, copy: null};
+    var sl = {visible: false, timer: null, salt: '', lines: [], total: 0, box: null, stateNode: null, copy: null, copyWanted: ''};
     function firstScript(b) { return 'assets/mods/' + b.salt.toLowerCase() + '/scripts/'; }
     function logLines(b) { return sl.salt && b && sl.salt.toLowerCase() === b.salt.toLowerCase() ? sl.lines : null; }
     function renderScriptLog(box, b) {
@@ -1221,8 +1222,9 @@ var modsTab = (function () {
       copy.addEventListener('click', function () {
         var lines = logLines(b);
         if (!lines || !lines.length) return;
-        if (env.copy) env.copy(lines.join('\n') + '\n');
-        env.toast('Copied ' + plural(lines.length, 'line') + ' of the script log.', 'ok');
+        /* the window holds the newest lines; the whole log comes from the host */
+        sl.copyWanted = b.salt;
+        env.post({cmd: 'modsScripts', salt: b.salt, full: 1});
       });
       sl.copy = s.appendChild(copy);
       s.appendChild(el('div', 'mods-note', SCRIPT_LOG_NOTE));
@@ -1237,6 +1239,8 @@ var modsTab = (function () {
       clear(box);
       if (!lines) box.appendChild(el('div', 'muted', 'Reading the log...'));
       else if (!lines.length) box.appendChild(el('div', 'muted', SCRIPT_LOG_EMPTY));
+      if (lines && sl.total > lines.length)
+        box.appendChild(el('div', 'muted', 'The newest ' + plural(lines.length, 'line') + ' of ' + sl.total + '; Copy log copies them all.'));
       if (lines) lines.forEach(function (l) { box.appendChild(el('div', /^Script stopped: /.test(l) ? 'mods-log-stop' : '', l)); });
       if (atEnd) box.scrollTop = box.scrollHeight;
       if (sl.copy) sl.copy.disabled = !lines || !lines.length;
@@ -1265,8 +1269,19 @@ var modsTab = (function () {
         changed = true;
         if (b === sel) selChanged = true;
       });
+      if (data.full === true) {
+        /* the whole log Copy log asked for: copied, not shown */
+        var all = arr(data.log).map(str);
+        if (sl.copyWanted && str(data.salt).toLowerCase() === sl.copyWanted.toLowerCase() && all.length) {
+          if (env.copy) env.copy(all.join('\n') + '\n');
+          env.toast('Copied ' + plural(all.length, 'line') + ' of the script log.', 'ok');
+        }
+        sl.copyWanted = '';
+        return;
+      }
       sl.salt = str(data.salt);
       sl.lines = arr(data.log).map(str);
+      sl.total = typeof data.total === 'number' ? data.total : sl.lines.length;
       if (changed) renderList();
       if (selChanged) renderDetail();
       else if (sel && sel.scripts) {

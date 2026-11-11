@@ -148,6 +148,20 @@ void sh_script_api_frame(void);
  * forced animation through a via node there). Up to 4; idempotent. */
 void sh_script_api_on_frame(void (*fn)(void));
 
+/* The engine's own entity table: the game holds at most
+ * SH_SCRIPT_ENGINE_ENTITIES entities at once (MAX_GENTITIES less the world
+ * and none), and one more is a fatal engine error ("No free managed
+ * instances"). A script's spawn or fire therefore needs a free entity slot
+ * beyond SH_SCRIPT_ENGINE_RESERVE kept for the game's own spawns (players,
+ * projectiles, effects, demons). The free count is read once a frame
+ * (sh_script_api_frame) and each spawn or launch a script asks for takes one.
+ * sh_script_api_check_room raises "<call> cannot add an entity now: the game
+ * holds at most 16382 entities at once and nearly all are in use; remove some
+ * first" when there is no room; it never refuses for any other reason. */
+#define SH_SCRIPT_ENGINE_ENTITIES 16382
+#define SH_SCRIPT_ENGINE_RESERVE  256
+void sh_script_api_check_room(lua_State *L, const char *call);
+
 /* The game clock in milliseconds (idGameLocal vtable +0x220). 1 when read. */
 int sh_script_api_now_ms(int *ms);
 
@@ -219,13 +233,14 @@ sh_script_earg sh_script_earg_no_anim(void);
 #define SH_SCRIPT_ANIM_VIA_OUT   0x02u   /* after the via node, another node played */
 #define SH_SCRIPT_ANIM_DEST      0x04u   /* the destination node became the node playing */
 #define SH_SCRIPT_ANIM_FINISHED  0x08u   /* the destination played and the web moved on */
-#define SH_SCRIPT_ANIM_NAME_CAP  96
 
 void sh_script_api_anim_request(sh_script_handle h, const char *dest, const char *via);
 /* The event bits of h's last request; *requested 0 when there was none. */
 unsigned sh_script_api_anim_flags(sh_script_handle h, void *ent, int *requested);
 /* The destination of h's last request into out; 0 when there was none. */
 int sh_script_api_anim_dest(sh_script_handle h, char *out, size_t cap);
+/* The same destination, in place (valid until the next request or frame), or NULL. */
+char *sh_script_api_anim_dest_of(sh_script_handle h);
 /* Observe one entity now (also done every frame). */
 void sh_script_api_anim_observe(sh_script_handle h, void *ent);
 /* Forget every request (a new map). */

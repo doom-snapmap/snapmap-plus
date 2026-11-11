@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "script_api_common.h"
 #include "script_hooks.h"
@@ -311,52 +312,64 @@ int sh_script_api_post(void *ent, const char *name, const sh_script_earg *args, 
 
 /* ------------------------------------------------- animation observation */
 
-#define ANIM_ROWS 256
-
+/* One row per entity with a standing request, made by the request and
+ * dropped when its entity is gone (each frame) or when the handle table
+ * releases it; the rows grow with the entities that have one. */
 typedef struct anim_row {
     sh_script_handle handle;
-    char dest[SH_SCRIPT_ANIM_NAME_CAP];
-    char via[SH_SCRIPT_ANIM_NAME_CAP];
+    char *dest;              /* malloc'd node names */
+    char *via;
     unsigned flags;
-    unsigned stamp;
 } anim_row;
 
-static anim_row g_anim[ANIM_ROWS];
-static unsigned g_anim_stamp;
+static anim_row *g_anim;
+static int g_nanim, g_canim;
 
 static anim_row *anim_find(sh_script_handle h)
 {
     int i;
     if (!h) return NULL;
-    for (i = 0; i < ANIM_ROWS; i++) if (g_anim[i].handle == h) return &g_anim[i];
+    for (i = 0; i < g_nanim; i++) if (g_anim[i].handle == h) return &g_anim[i];
     return NULL;
+}
+
+static void anim_drop(int i)
+{
+    free(g_anim[i].dest);
+    free(g_anim[i].via);
+    g_anim[i] = g_anim[--g_nanim];
 }
 
 void sh_script_api_anim_reset(void)
 {
-    memset(g_anim, 0, sizeof g_anim);
-    g_anim_stamp = 0;
+    while (g_nanim) anim_drop(g_nanim - 1);
 }
 
 void sh_script_api_anim_request(sh_script_handle h, const char *dest, const char *via)
 {
     anim_row *r = anim_find(h);
-    int i;
+    char *d, *v;
     if (!h) return;
+    d = _strdup(dest ? dest : "");
+    v = _strdup(via ? via : "");
+    if (!d || !v) { free(d); free(v); return; }
     if (!r) {
-        /* a free row, else one whose entity is gone, else the oldest */
-        for (i = 0; i < ANIM_ROWS && !r; i++) if (!g_anim[i].handle) r = &g_anim[i];
-        for (i = 0; i < ANIM_ROWS && !r; i++) if (!sh_script_handle_known(g_anim[i].handle)) r = &g_anim[i];
-        if (!r) {
-            r = &g_anim[0];
-            for (i = 1; i < ANIM_ROWS; i++) if (g_anim[i].stamp < r->stamp) r = &g_anim[i];
+        if (g_nanim == g_canim) {
+            int cap = g_canim ? g_canim * 2 : 64;
+            anim_row *grown = (anim_row *)realloc(g_anim, (size_t)cap * sizeof *grown);
+            if (!grown) { free(d); free(v); return; }
+            g_anim = grown;
+            g_canim = cap;
         }
+        r = &g_anim[g_nanim++];
+    } else {
+        free(r->dest);
+        free(r->via);
     }
     memset(r, 0, sizeof *r);
     r->handle = h;
-    strncpy_s(r->dest, sizeof r->dest, dest ? dest : "", _TRUNCATE);
-    strncpy_s(r->via, sizeof r->via, via ? via : "", _TRUNCATE);
-    r->stamp = ++g_anim_stamp;
+    r->dest = d;
+    r->via = v;
 }
 
 /* Node names compare without case; a request may name the state alone. */
@@ -372,7 +385,7 @@ static int node_is(const char *node, const char *want)
 
 static void observe_row(anim_row *r, void *ent)
 {
-    char node[SH_SCRIPT_ANIM_NAME_CAP * 2];
+    char node[1024];   /* the node the engine reports (its own names) */
     if (!ent || !ENG(anim_node) || !g_engine.anim_node(ent, node, sizeof node)) return;
     if (r->via[0]) {
         if (node_is(node, r->via)) r->flags |= SH_SCRIPT_ANIM_VIA_IN;
@@ -393,6 +406,12 @@ int sh_script_api_anim_dest(sh_script_handle h, char *out, size_t cap)
     if (!r || !r->dest[0]) return 0;
     strncpy_s(out, cap, r->dest, _TRUNCATE);
     return 1;
+}
+
+char *sh_script_api_anim_dest_of(sh_script_handle h)
+{
+    anim_row *r = anim_find(h);
+    return r && r->dest[0] ? r->dest : NULL;
 }
 
 void sh_script_api_anim_observe(sh_script_handle h, void *ent)
@@ -428,15 +447,36 @@ static void frame_fns(void)
     for (i = 0; i < FRAME_FNS; i++) if (g_frame_fns[i]) g_frame_fns[i]();
 }
 
+static int g_room = -1;   /* free engine entity slots this frame, -1 unread */
+
+static void read_room(void)
+{
+    int n, num, used = 0;
+    g_room = -1;
+    if (!ENG(slots) || !ENG(slot_spawn_id)) return;
+    n = g_engine.slots();
+    for (num = 0; num < n; num++) if (g_engine.slot_spawn_id(num) != SH_SCRIPT_SPAWN_ID_NONE) used++;
+    g_room = used < SH_SCRIPT_ENGINE_ENTITIES ? SH_SCRIPT_ENGINE_ENTITIES - used : 0;
+}
+
+void sh_script_api_check_room(lua_State *L, const char *call)
+{
+    if (g_room < 0) read_room();
+    if (g_room >= 0 && g_room <= SH_SCRIPT_ENGINE_RESERVE)
+        sh_script_refuse(L, "\"%s\" cannot add an entity now: the game holds at most %d entities at once and nearly "
+                            "all are in use; remove some first", call, SH_SCRIPT_ENGINE_ENTITIES);
+    if (g_room > 0) g_room--;
+}
+
 void sh_script_api_frame(void)
 {
     int i;
-    for (i = 0; i < ANIM_ROWS; i++) {
+    read_room();
+    for (i = 0; i < g_nanim; i++) {
         anim_row *r = &g_anim[i];
         void *ent;
-        if (!r->handle) continue;
         if (!sh_script_handle_known(r->handle)) {   /* removed, or a handle of an earlier map */
-            memset(r, 0, sizeof *r);
+            anim_drop(i--);
             continue;
         }
         if (r->flags & SH_SCRIPT_ANIM_FINISHED) continue;
@@ -512,7 +552,6 @@ enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRA
 #define TRACE_NORMAL        0x44u
 #define TRACE_HIT_ID        0x6Cu
 #define ENTITY_SLOTS        0x3FFE
-#define LOG_LINES_MAX       32
 
 typedef struct { char type; char pad[7]; uint64_t value; uint64_t extra; } eng_arg;
 typedef void *(*process_fn)(void *obj, void *ret, void *def, int n, eng_arg *a0, eng_arg *a1, eng_arg *a2,
@@ -554,18 +593,18 @@ static type_fn       g_decl_type;
 static find_decl_fn  g_decl_find;
 static difficulty_fn g_difficulty;
 static uintptr_t     g_vt_ai, g_vt_player, g_vt_health;
-static int           g_log_lines;
+static char          g_log_last[512];   /* the line written last */
 static const float   k_identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
 
 static void api_log(const char *fmt, ...)
 {
     char line[400];
     va_list ap;
-    if (g_log_lines >= LOG_LINES_MAX) return;
-    g_log_lines++;
     va_start(ap, fmt);
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
     va_end(ap);
+    if (!strcmp(line, g_log_last)) return;   /* the same line again says nothing new */
+    strcpy_s(g_log_last, sizeof g_log_last, line);
     backend_log(line);
 }
 

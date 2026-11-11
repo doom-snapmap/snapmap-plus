@@ -1784,8 +1784,31 @@ int main(int argc, char **argv)
             out = (char *)malloc((size_t)call.needed + 1);
             call.out = out;
             call.out_cap = call.needed + 1;
-            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"log\":[]}"));
+            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"total\":0,\"full\":false,\"log\":[]}"));
             free(out);
+            /* the tail the window shows, and the whole log Copy log asks for */
+            {
+                char full[64];
+                memset(&call, 0, sizeof call);
+                call.op = SH_MODS_SCRIPTS;
+                call.arg = s;
+                CHECK(sh_modui_slot(NULL, &call) == -1);
+                out = (char *)malloc((size_t)call.needed + 1);
+                call.out = out;
+                call.out_cap = call.needed + 1;
+                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":false,\"log\":["));
+                free(out);
+                _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s", SH_MODS_SCRIPTS_FULL, s);
+                memset(&call, 0, sizeof call);
+                call.op = SH_MODS_SCRIPTS;
+                call.arg = full;
+                CHECK(sh_modui_slot(NULL, &call) == -1);
+                out = (char *)malloc((size_t)call.needed + 1);
+                call.out = out;
+                call.out_cap = call.needed + 1;
+                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":true,\"log\":[\"door: switch 1 of 3\""));
+                free(out);
+            }
             g_script_on = 0;
             {
                 char tiny[256];

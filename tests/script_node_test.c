@@ -181,7 +181,8 @@ static int g_nfired;
 static int32_t g_int[2] = { 3, 10 }, g_int_bounds[2][2] = { { 0, 9 }, { 0, 100 } };
 static float g_num[2] = { 1.0f, 9.8f }, g_num_bounds[2][2] = { { 0.0f, 10.0f }, { -100.0f, 100.0f } };
 static int g_bool[2] = { 0, 0 };
-static char g_str[3][1024] = { "4;0", "start", "" };
+static char *g_str[3] = { "4;0", "start", "" };
+static int g_str_owned[3];
 static int g_notified[5];
 static int g_vars_ready = 1;
 
@@ -230,7 +231,7 @@ static int fake_get(void *c, int type, int index, sh_script_node_value *out)
     case SH_SCRIPT_VAR_INTEGER: out->i = g_int[index]; return 1;
     case SH_SCRIPT_VAR_NUMBER:  out->n = g_num[index]; return 1;
     case SH_SCRIPT_VAR_BOOLEAN: out->b = g_bool[index]; return 1;
-    case SH_SCRIPT_VAR_STRING:  strcpy_s(out->s, sizeof out->s, g_str[index]); return 1;
+    case SH_SCRIPT_VAR_STRING:  out->s = _strdup(g_str[index]); return out->s != NULL;
     }
     return 0;
 }
@@ -257,7 +258,14 @@ static int fake_set(void *c, int type, int index, const sh_script_node_value *in
         if (g_bool[index] != (in->b != 0)) { g_bool[index] = in->b != 0; changed = 1; }
         break;
     case SH_SCRIPT_VAR_STRING:
-        if (strcmp(g_str[index], in->s)) { strcpy_s(g_str[index], sizeof g_str[index], in->s); changed = 1; }
+        if (strcmp(g_str[index], in->s)) {
+            char *copy = _strdup(in->s);
+            if (!copy) return 0;
+            if (g_str_owned[index]) free(g_str[index]);
+            g_str[index] = copy;
+            g_str_owned[index] = 1;
+            changed = 1;
+        }
         break;
     default:
         return 0;
@@ -480,6 +488,8 @@ static void test_api(void)
         "  print('speed', vars.set('speed', 2.5), vars.get('Gravity'))\n"
         "  print('flag', vars.set('Door Open', true), vars.get('door open'))\n"
         "  print('text', vars.set('label', 'hello'), vars.set('label', 'hello'))\n"
+        "  print('long', #vars.set('label', string.rep('w', 50000)), #vars.get('label'))\n"
+        "  vars.set('label', 'hello')\n"
         "  print('n', tostring(node('open_door')), node('open_door').name)\n"
         "  print('fired', node('OPEN_DOOR'):fire(), node('open_door'):fire(nil))\n"
         "  print('missing', node('no_such_node'):fire(), node('no_such_node'):fire())\n"
@@ -501,11 +511,12 @@ static void test_api(void)
     CHECK(g_notified[SH_SCRIPT_VAR_INTEGER] == 1);
     CHECK(strstr(g_out, "speed\t2.5\t9.8") != NULL && g_notified[SH_SCRIPT_VAR_NUMBER] == 1);
     CHECK(strstr(g_out, "flag\ttrue\ttrue\n") != NULL && g_bool[0] == 1 && g_notified[SH_SCRIPT_VAR_BOOLEAN] == 1);
-    CHECK(strstr(g_out, "text\thello\thello\n") != NULL && g_notified[SH_SCRIPT_VAR_STRING] == 1);
+    CHECK(strstr(g_out, "text\thello\thello\n") != NULL && g_notified[SH_SCRIPT_VAR_STRING] == 3);
+    CHECK(strstr(g_out, "long\t50000\t50000\n") != NULL);   /* a String variable's text of any length */
     CHECK(strstr(g_out, "n\tScript node \"open_door\"\topen_door\n") != NULL);
     CHECK(strstr(g_out, "fired\t1\t1\n") != NULL && g_nfired == 2 && g_fired[0].activator == 0);
     CHECK(strstr(g_out, "missing\t0\t0\n") != NULL);
-    CHECK(strstr(g_out, "Warning: scripts\\main.lua line 12: node(\"no_such_node\"):fire() found no Script node of Vars Mod "
+    CHECK(strstr(g_out, "Warning: scripts\\main.lua line 14: node(\"no_such_node\"):fire() found no Script node of Vars Mod "
                         "named \"no_such_node\" in this map, so nothing fired. Place a Script node from Vars Mod and name it "
                         "\"no_such_node\".\n") != NULL);
     {

@@ -16,6 +16,9 @@
  *   ai:fire(projectile, joint, target) -> p or nil
  *   ai:can_see_from(other, joint) -> boolean
  *   p:steer(target, [speed])                   p:explode()
+ * p:steer and p:explode answer nil once the projectile no longer exists, as
+ * every call on a removed entity does; a script may hold `p` for as long as
+ * it likes.
  * `attacker` is one of the mod's own entities; without one the damage comes
  * from the world, as a trigger's does. `damage` is a damage decl, `projectile`
  * a projectile decl, `sound` a sound decl, `effect` an entityDef (an fx
@@ -96,17 +99,32 @@ void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
 /* Add the combat calls to every script state opened from now on. Idempotent. */
 void sh_script_combat_register(void);
 
-/* Forget every record (a new map's states, or the tests). */
+/* Forget every record (a new map's states, or the tests) and register the
+ * release of records with the handle table. */
 void sh_script_combat_reset(void);
 
 /* ------------------------------------------------- records from the hooks */
 
-/* A projectile was launched by `owner` (an entity of mod `mod`). Any thread. */
+/* Every record lives exactly as long as the entity it concerns: the handle
+ * table's sweep releases an entity's handle and tells this module, which
+ * drops its launch, last hit and death records (sh_script_handles_on_gone,
+ * registered by sh_script_combat_reset). No record table has a count of its
+ * own; each grows with the entities alive. */
+
+/* The launch hook: a projectile `owner` (an entity of mod `mod`) launched.
+ * Records the projectile's handle and its launch together and returns the
+ * handle (0 without memory: then nothing is recorded). Any thread. */
+sh_script_handle sh_script_combat_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod);
+
+/* The launch record alone, for a projectile whose handle exists. Any thread. */
 void sh_script_combat_note_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod);
 
-/* 1 when the projectile with this spawn id was launched by an entity of a
- * scripted mod this map, with that mod and launcher. Any thread. */
+/* 1 while the projectile with this spawn id, launched by an entity of a
+ * scripted mod this map, exists, with that mod and launcher. Any thread. */
 int  sh_script_combat_launched(uint32_t projectile_spawn_id, int *mod, sh_script_handle *owner);
+
+/* Launch records held now (projectiles alive that scripted entities launched). */
+int  sh_script_combat_launches(void);
 
 /* The last hit `victim` took: its damage decl and attacker (0 for none).
  * The pain hook reports them with the reaction. Any thread. */

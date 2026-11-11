@@ -1,9 +1,10 @@
 /* script_lib_base.c -- the libraries a mod script sees, timers and
  * coroutines, require, print and warn (script_runtime.h has the list).
  *
- * Library functions that do work in C the count hook never sees are wrapped
- * to charge it as steps first (sorting, moving and shifting table elements,
- * scanning UTF-8); pcall, xpcall, coroutine.resume and coroutine.close are
+ * Library functions that do work in C the clock hook never sees read the
+ * wall clock first (sorting, moving and shifting table elements, scanning
+ * UTF-8), so a script looping over them is still stopped when one call has
+ * run too long; pcall, xpcall, coroutine.resume and coroutine.close are
  * wrapped so a stop decided by the runtime cannot be caught; setmetatable
  * refuses "__gc" because Lua runs finalizers with hooks off, so a finalizer
  * could never be stopped. */
@@ -97,67 +98,60 @@ static int sb_collectgarbage(lua_State *L)
 
 /* ------------------------------------------------------- print and warn */
 
-static void join_args(lua_State *L, char *out, size_t cap)
+/* The arguments joined with tabs, pushed as one string (any length). */
+static const char *join_args(lua_State *L)
 {
     int n = lua_gettop(L), i;
-    size_t used = 0;
-    out[0] = 0;
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
     for (i = 1; i <= n; i++) {
-        size_t l;
-        const char *s = luaL_tolstring(L, i, &l);
-        if (i > 1 && used + 1 < cap) out[used++] = '\t';
-        if (used + l >= cap) l = cap - used - 1;
-        memcpy(out + used, s, l);
-        used += l;
-        out[used] = 0;
-        lua_pop(L, 1);
+        if (i > 1) luaL_addchar(&b, '\t');
+        luaL_tolstring(L, i, NULL);
+        luaL_addvalue(&b);
     }
+    luaL_pushresult(&b);
+    return lua_tostring(L, -1);
 }
 
 static int sb_print(lua_State *L)
 {
-    char line[SH_SCRIPT_LINE_CAP];
-    join_args(L, line, sizeof line);
-    shs_log(shs_mod_of(L), line);
+    shs_log(shs_mod_of(L), join_args(L));
     return 0;
 }
 
 static int sb_warn(lua_State *L)
 {
-    char text[SH_SCRIPT_LINE_CAP], line[SH_SCRIPT_LINE_CAP + 160], file[128];
-    int ln = 0;
-    join_args(L, text, sizeof text);
+    char file[SHS_PATH_CAP];
+    int ln = 0, at;
+    join_args(L);
+    at = lua_gettop(L);
     luaL_where(L, 1);
     sh_script_split_where(lua_tostring(L, -1), file, sizeof file, &ln);
     lua_pop(L, 1);
-    if (file[0] && ln) _snprintf_s(line, sizeof line, _TRUNCATE, "Warning: %s line %d: %s", file, ln, text);
-    else _snprintf_s(line, sizeof line, _TRUNCATE, "Warning: %s", text);
-    line[sizeof line - 1] = 0;
-    line[SH_SCRIPT_LINE_CAP - 1] = 0;
-    shs_log(shs_mod_of(L), line);
+    if (file[0] && ln) lua_pushfstring(L, "Warning: %s line %d: %s", file, ln, lua_tostring(L, at));
+    else lua_pushfstring(L, "Warning: %s", lua_tostring(L, at));
+    shs_log(shs_mod_of(L), lua_tostring(L, -1));
     return 0;
 }
 
 /* Lua's own warnings (lua_warning from the core), pieces joined. */
 static void core_warn(void *ud, const char *msg, int tocont)
 {
-    static char buf[SH_SCRIPT_LINE_CAP];
+    static char *buf;
     static size_t used;
     shs_mod *m = (shs_mod *)ud;
     size_t l = strlen(msg);
+    char *grown;
     if (!used && msg[0] == '@') return;          /* control messages */
-    if (used + l >= sizeof buf) l = sizeof buf - used - 1;
+    grown = (char *)realloc(buf, used + l + 10);
+    if (!grown) { free(buf); buf = NULL; used = 0; return; }
+    buf = grown;
+    if (!used) { memcpy(buf, "Warning: ", 9); used = 9; }
     memcpy(buf + used, msg, l);
     used += l;
     buf[used] = 0;
     if (tocont) return;
-    {
-        char line[SH_SCRIPT_LINE_CAP + 16];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Warning: %s", buf);
-        line[sizeof line - 1] = 0;
-        line[SH_SCRIPT_LINE_CAP - 1] = 0;
-        shs_log(m, line);
-    }
+    shs_log(m, buf);
     used = 0;
 }
 
@@ -166,17 +160,10 @@ static void core_warn(void *ud, const char *msg, int tocont)
 /* find, match, gmatch, gsub: upvalue 1 the original, 2 its name. */
 static int sb_pattern(lua_State *L)
 {
-    const char *name = lua_tostring(L, lua_upvalueindex(2));
-    size_t ls, lp;
     int n;
-    luaL_checklstring(L, 1, &ls);
-    luaL_checklstring(L, 2, &lp);
-    if (ls > SH_SCRIPT_PATTERN_CAP)
-        return sh_script_refuse(L, "\"string.%s\" can only search text of up to %d bytes, and this text has %u; search a shorter piece of it",
-                                name, SH_SCRIPT_PATTERN_CAP, (unsigned)ls);
-    if (lp > SH_SCRIPT_PATTERN_CAP)
-        return sh_script_refuse(L, "\"string.%s\" can only use a pattern of up to %d bytes, and this one has %u",
-                                name, SH_SCRIPT_PATTERN_CAP, (unsigned)lp);
+    luaL_checkstring(L, 1);
+    luaL_checkstring(L, 2);
+    shs_check_clock(L);
     n = lua_gettop(L);
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
@@ -184,15 +171,8 @@ static int sb_pattern(lua_State *L)
     return lua_gettop(L);
 }
 
-static long long ilog2(long long n)
-{
-    long long r = 1;
-    while (n > 1) { n >>= 1; r++; }
-    return r;
-}
-
 /* table.sort, move, insert, remove, concat and utf8.len, offset: upvalue 1
- * the original, 2 which charge. */
+ * the original, 2 which kind (kept for the wrapper's registration). */
 #define CH_SORT 1
 #define CH_MOVE 2
 #define CH_SHIFT 3
@@ -200,36 +180,8 @@ static long long ilog2(long long n)
 #define CH_SCAN 5
 static int sb_charged(lua_State *L)
 {
-    int how = (int)lua_tointeger(L, lua_upvalueindex(2));
-    long long steps = 0;
     int n;
-    switch (how) {
-    case CH_SORT:
-        if (lua_type(L, 1) == LUA_TTABLE) { long long c = (long long)lua_rawlen(L, 1); steps = c * ilog2(c); }
-        break;
-    case CH_MOVE: {
-        int okf, oke;
-        lua_Integer f = lua_tointegerx(L, 2, &okf), e = lua_tointegerx(L, 3, &oke);
-        if (okf && oke && e >= f) steps = (e - f > 1000000000) ? 1000000000 : (long long)(e - f + 1);
-        break;
-    }
-    case CH_SHIFT:
-        if (lua_type(L, 1) == LUA_TTABLE) steps = (long long)lua_rawlen(L, 1);
-        break;
-    case CH_CONCAT:
-        if (lua_type(L, 1) == LUA_TTABLE) {
-            int oki, okj;
-            lua_Integer len = (lua_Integer)lua_rawlen(L, 1);
-            lua_Integer i = lua_isnoneornil(L, 3) ? 1 : lua_tointegerx(L, 3, &oki);
-            lua_Integer j = lua_isnoneornil(L, 4) ? len : lua_tointegerx(L, 4, &okj);
-            if (j >= i) steps = (j - i > 1000000000) ? 1000000000 : (long long)(j - i + 1);
-        }
-        break;
-    case CH_SCAN:
-        if (lua_type(L, 1) == LUA_TSTRING) steps = (long long)(lua_rawlen(L, 1) / 16);
-        break;
-    }
-    if (steps) shs_charge(L, steps);
+    shs_check_clock(L);
     n = lua_gettop(L);
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
@@ -370,9 +322,7 @@ static void add_timer(lua_State *L, const char *call, int kind, double due, doub
 {
     shs_mod *m = shs_mod_of(L);
     int id;
-    if (m->ntimers >= SH_SCRIPT_TIMERS_MAX)
-        sh_script_refuse(L, "\"%s\" cannot start more than %d timers and run(...) sequences at once; cancel some first",
-                         call, SH_SCRIPT_TIMERS_MAX);
+    (void)call;
     if (m->ntimers == m->ctimers) {
         int c = m->ctimers ? m->ctimers * 2 : 16;
         shs_timer *p = (shs_timer *)realloc(m->timers, (size_t)c * sizeof *p);

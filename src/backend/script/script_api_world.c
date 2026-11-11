@@ -26,10 +26,7 @@
 #include <string.h>
 #include "script_api_common.h"
 
-#define NEAR_MAX        256        /* entities one entities_near answers */
-#define NEAR_RADIUS_MAX 1.0e6
-#define TRACE_RADIUS_MAX 512.0
-#define TRACE_RIM       8
+#define TRACE_RIM       8          /* rays around the centre line of a thick trace */
 #define PI              3.14159265358979323846
 
 typedef struct near_hit { void *ent; double d2; } near_hit;
@@ -45,12 +42,14 @@ static int l_entities_near(lua_State *L)
     const sh_script_engine *e = sh_script_api_engine();
     float c[3], o[3];
     double r = 0, r2;
-    near_hit hits[NEAR_MAX];
-    int n = 0, num, slots, i, far_index = 0;
+    near_hit *hits = NULL, *grown;
+    int n = 0, cap = 0, num, slots, i, buf;
     int have = sh_script_api_check_point(L, 1, "entities_near", "the center", c);
     r = sh_script_api_check_number(L, 2, "entities_near", "the radius");
-    if (r < 0 || r > NEAR_RADIUS_MAX)
-        sh_script_refuse(L, "\"entities_near\" needs a radius from 0 to %.0f, got %g", NEAR_RADIUS_MAX, r);
+    if (!(r >= 0))
+        sh_script_refuse(L, "\"entities_near\" needs a radius of 0 or more, got %g", r);
+    lua_pushnil(L);                         /* the hits, as a userdata the collector frees on any exit */
+    buf = lua_gettop(L);
     lua_newtable(L);
     if (!have || !e || !e->slots || !e->slot_spawn_id || !e->resolve || !e->origin) return 1;
     r2 = r * r;
@@ -65,21 +64,21 @@ static int l_entities_near(lua_State *L)
         dx = (double)o[0] - c[0]; dy = (double)o[1] - c[1]; dz = (double)o[2] - c[2];
         d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > r2) continue;
-        if (n < NEAR_MAX) {
-            hits[n].ent = ent;
-            hits[n].d2 = d2;
-            if (d2 > hits[far_index].d2) far_index = n;
-            n++;
-        } else if (d2 < hits[far_index].d2) {   /* keep the nearest NEAR_MAX */
-            hits[far_index].ent = ent;
-            hits[far_index].d2 = d2;
-            for (i = 0, far_index = 0; i < n; i++) if (hits[i].d2 > hits[far_index].d2) far_index = i;
+        if (n == cap) {                     /* every entity in range: the list grows */
+            cap = cap ? cap * 2 : 64;
+            grown = (near_hit *)lua_newuserdatauv(L, (size_t)cap * sizeof *grown, 0);
+            if (n) memcpy(grown, hits, (size_t)n * sizeof *grown);
+            lua_replace(L, buf);
+            hits = grown;
         }
+        hits[n].ent = ent;
+        hits[n].d2 = d2;
+        n++;
     }
-    qsort(hits, (size_t)n, sizeof hits[0], near_cmp);
+    if (n) qsort(hits, (size_t)n, sizeof hits[0], near_cmp);
     for (i = 0, num = 0; i < n; i++) {
         sh_script_handle h = sh_script_api_handle_of(hits[i].ent);
-        if (!h) continue;          /* the handle table is full */
+        if (!h) continue;          /* no memory to record it */
         sh_script_push_entity(L, h);
         lua_rawseti(L, -2, ++num);
     }
@@ -104,8 +103,8 @@ static int l_trace(lua_State *L)
     double dir[3], u[3], v[3], len, up[3] = { 0, 0, 1 }, side[3] = { 1, 0, 0 };
     have_from = sh_script_api_check_point(L, 1, "trace", "where the line starts", from);
     have_to = sh_script_api_check_point(L, 2, "trace", "where the line ends", to);
-    if (sh_script_api_opt_number(L, 3, "trace", "the radius", &radius) && (radius < 0 || radius > TRACE_RADIUS_MAX))
-        sh_script_refuse(L, "\"trace\" needs a radius from 0 to %.0f, got %g", TRACE_RADIUS_MAX, radius);
+    if (sh_script_api_opt_number(L, 3, "trace", "the radius", &radius) && !(radius >= 0))
+        sh_script_refuse(L, "\"trace\" needs a radius of 0 or more, got %g", radius);
     if (!lua_isnoneornil(L, 4)) {
         void *ent = sh_script_api_entity(L, 4, "trace", NULL);
         if (ent && e && e->spawn_id) ignore = e->spawn_id(ent);

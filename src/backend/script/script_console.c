@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "script_console.h"
@@ -97,7 +98,7 @@ static void check_line(void *context, const char *line)
 
 static void reload(con *c)
 {
-    sh_script_mod_desc mods[SH_SCRIPT_MODS_MAX];
+    sh_script_mod_desc *mods = NULL;
     int n, i;
     if (sh_script_hooks_open()) {
         n = sh_script_hooks_reload();
@@ -106,9 +107,14 @@ static void reload(con *c)
         else say(c, "No scripts were reloaded: this map's mods carry none now.");
         return;
     }
-    n = sh_script_source_map_mods(mods, SH_SCRIPT_MODS_MAX);
-    if (n < 0) { say(c, "The open map's mods could not be read; open the map again and retry."); return; }
-    if (!n) { say(c, "The open map's mods carry no scripts."); return; }
+    n = sh_script_source_map_mods(NULL, 0);           /* the count, then the mods */
+    if (n > 0) {
+        mods = (sh_script_mod_desc *)calloc((size_t)n, sizeof *mods);
+        if (!mods) { say(c, "There was not enough memory to check the scripts; close something and retry."); return; }
+        n = sh_script_source_map_mods(mods, n);
+    }
+    if (n < 0) { free(mods); say(c, "The open map's mods could not be read; open the map again and retry."); return; }
+    if (!n) { free(mods); say(c, "The open map's mods carry no scripts."); return; }
     for (i = 0; i < n; i++) {
         int before = c->shown, ok = sh_script_check_files(mods[i].salt, mods[i].name, sh_script_source_files(), check_line, c);
         if (ok < 0) say(c, "%s: its scripts could not be read; press Refresh in the Mods tab.", mods[i].name);
@@ -116,6 +122,7 @@ static void reload(con *c)
             say(c, "%s: %d script %s compiled without errors; %s at the next Play.", mods[i].name, ok,
                 plural(ok, "file", "files"), plural(ok, "it runs", "they run"));
     }
+    free(mods);
 }
 
 void sh_script_console(int argc, const char *const *argv, sh_script_console_line_fn line, void *context)

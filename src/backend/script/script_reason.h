@@ -5,8 +5,8 @@
  * by one table into a sentence an author can act on ("\"target\" is nothing
  * here", "\"end\" expected to close \"function\" on line 3"), plus what to do.
  * A message no rule matches (an author's own error("..."), an API call's
- * refusal) is kept as written. The stops the runtime decides itself (steps,
- * memory, pattern work, wall time) are worded from the limits.
+ * refusal) is kept as written. The stops the runtime decides itself (no
+ * memory left, a call that does not return) have their own wording.
  *
  * Pure: no Lua state, no allocation. */
 #ifndef SH_SCRIPT_REASON_H
@@ -20,11 +20,8 @@ extern "C" {
 
 /* Why the runtime stopped a mod when no Lua message says it. */
 #define SH_SCRIPT_STOP_ERROR    0   /* a Lua error: the message says why */
-#define SH_SCRIPT_STOP_STEPS    1   /* more than the steps of one call */
-#define SH_SCRIPT_STOP_TICK     2   /* more than the steps of one frame */
-#define SH_SCRIPT_STOP_MEMORY   3   /* more than the memory cap */
-#define SH_SCRIPT_STOP_PATTERN  4   /* more than the pattern steps of one call */
-#define SH_SCRIPT_STOP_WALL     5   /* more than the wall time of one call */
+#define SH_SCRIPT_STOP_MEMORY   3   /* the process had no memory to give */
+#define SH_SCRIPT_STOP_WALL     5   /* one call ran longer than the wall-clock stop */
 
 /* Split a Lua message "scripts\x.lua:12: text" into file ("scripts\x.lua"),
  * line (12) and the text after it, which is returned. Without that prefix,
@@ -36,7 +33,7 @@ const char *sh_script_split_where(const char *msg, char *file, size_t file_cap, 
  * its location already removed. Neither ends with a period. todo may be "". */
 void sh_script_reason(const char *text, char *what, size_t what_cap, char *todo, size_t todo_cap);
 
-/* The same for a stop the runtime decided; the numbers come from the limits. */
+/* The same for a stop the runtime decided; `limit` is the wall-clock stop in ms. */
 void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_t what_cap,
                            char *todo, size_t todo_cap);
 

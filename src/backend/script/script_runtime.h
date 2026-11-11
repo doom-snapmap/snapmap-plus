@@ -15,28 +15,28 @@
  *
  * The sandbox (script_lib_base.c): base (no dofile, loadfile, load, require,
  * collectgarbage except "count"; print and warn write the mod's log), string
- * (no dump; find, match, gmatch and gsub refuse a subject or pattern longer
- * than SH_SCRIPT_PATTERN_CAP bytes and every pattern step is counted), table,
+ * (no dump; find, match, gmatch and gsub read the clock as they match), table,
  * math (no randomseed; random seeded from the map seed), utf8, coroutine. No
  * io, os, debug, package. Chunks load as text only (mode "t"). The product's
  * require(name) loads scripts\lib\<name>.lua of the same mod, once.
  *
- * Bounds, per mod: SH_SCRIPT_MEM_CAP bytes through the state's allocator;
- * SH_SCRIPT_CALL_STEPS steps per delivery (one handler call, one timer, one
- * coroutine resume) and SH_SCRIPT_TICK_STEPS per tick, counted by the count
- * hook every SH_SCRIPT_HOOK_STRIDE VM instructions plus one step per
- * SH_SCRIPT_ALLOC_STEP bytes allocated and the work of C library calls the
- * hook cannot see (sorting, pattern steps), so the count is deterministic. A
- * delivery that still runs SH_SCRIPT_WALL_MS of wall time (an instruction
- * comparing very long strings) is stopped as well. A script's pcall,
- * xpcall, coroutine.resume and coroutine.close cannot catch a stop.
+ * No limits of its own: a state's memory, the work of a handler or a frame,
+ * the number of timers, files and log lines, and the size of a script grow
+ * as far as the process allows. One protection is not a limit: a single
+ * delivery (one handler call, one timer, one coroutine resume) still running
+ * after SH_SCRIPT_WALL_MS of wall time is stopped, so a script that never
+ * returns cannot hang the game. The clock is read by a hook every
+ * SH_SCRIPT_HOOK_STRIDE VM instructions, every 1024 pattern steps, and before
+ * the C library calls the hook cannot see (sorting, moving table elements).
+ * A script's pcall, xpcall, coroutine.resume and coroutine.close cannot catch
+ * a stop.
  *
- * Errors: any error, an exhausted budget, the memory cap or a refused call
- * stops that mod's scripts for the rest of the map (its state is closed, its
- * bindings withdrawn, its queue refused) and writes one line:
+ * Errors: any error, the wall-clock stop, running out of memory, or a
+ * refused call stops that mod's scripts for the rest of the map (its state is
+ * closed, its bindings withdrawn, its queue refused) and writes one line:
  *   Script stopped: <mod name>, scripts\<file>.lua line <n>: <what>. <what to do>.
- * The line, prints and warnings are the mod's script log (SH_SCRIPT_LOG_LINES
- * per map), kept until the mod's next map start and read by the UI through
+ * The line, prints and warnings are the mod's script log (every line of the
+ * map, whole), kept until the mod's next map start and read by the UI through
  * sh_script_log_read and sh_script_stop_line. Other mods keep running.
  *
  * Threads: sh_script_map_start, sh_script_tick and sh_script_map_close run
@@ -63,27 +63,14 @@ extern "C" {
 #endif
 
 #define SH_SCRIPT_API_VERSION   1
-#define SH_SCRIPT_MAX_MODS      64
 #define SH_SCRIPT_SALT_CAP      16
 #define SH_SCRIPT_MODNAME_CAP   96
 #define SH_SCRIPT_DEFNAME_CAP   192        /* a full entityDef name, mods/<salt>/... */
-#define SH_SCRIPT_LINE_CAP      512        /* one log line, truncated past this */
+#define SH_SCRIPT_LINE_CAP      512        /* a stop line the product composes (the UI's copy) */
 
-#define SH_SCRIPT_MEM_CAP       (32u << 20)
-#define SH_SCRIPT_MEM_RESERVE   (256u << 10) /* lent to a stopping state to write its error */
-#define SH_SCRIPT_CALL_STEPS    2000000
-#define SH_SCRIPT_TICK_STEPS    5000000
-#define SH_SCRIPT_HOOK_STRIDE   1000
-#define SH_SCRIPT_ALLOC_STEP    256        /* bytes allocated per counted step */
-#define SH_SCRIPT_PATTERN_CAP   4096       /* subject and pattern bytes */
-#define SH_SCRIPT_PATTERN_STEPS 1000000    /* pattern steps per delivery */
-#define SH_SCRIPT_WALL_MS       1000       /* wall time per delivery */
-#define SH_SCRIPT_PASSES        4          /* queue passes per tick */
-#define SH_SCRIPT_LOG_LINES     200
-#define SH_SCRIPT_FILE_MAX      (256u << 10)
-#define SH_SCRIPT_MOD_TEXT_MAX  (1u << 20)
-#define SH_SCRIPT_MOD_FILES_MAX 64
-#define SH_SCRIPT_TIMERS_MAX    4096       /* live timers and coroutines per mod */
+#define SH_SCRIPT_HOOK_STRIDE   1000       /* VM instructions between clock reads */
+#define SH_SCRIPT_WALL_MS       5000       /* wall time one delivery may run before it is stopped */
+#define SH_SCRIPT_PASSES        4          /* queue passes per tick; later records wait for the next frame */
 
 /* ------------------------------------------------------------ file access */
 
@@ -319,12 +306,8 @@ int sh_script_check_files(const char *salt, const char *name, const sh_script_so
  * sh_script_map_end. */
 size_t sh_script_bytes_in_use(void);
 
-/* The limits above, adjustable for a test; sh_script_limits_reset restores them. */
+/* The wall-clock stop, adjustable for a test; sh_script_limits_reset restores it. */
 typedef struct sh_script_limits {
-    size_t   mem_cap;
-    long long call_steps;
-    long long tick_steps;
-    long long pattern_steps;
     unsigned wall_ms;
 } sh_script_limits;
 void sh_script_limits_set(const sh_script_limits *limits);

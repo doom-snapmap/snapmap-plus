@@ -873,7 +873,7 @@ int sh_mb_script_request(const char *request, const char **name, size_t *name_le
     if (_strnicmp(p, "lib/", 4) == 0) { p += 4; kind = SH_MB_SCRIPT_LIB; }
     at = request + n - 4;
     len = (size_t)(at - p);
-    if (!len || len > SH_MB_SCRIPT_NAME_MAX) return SH_MB_SCRIPT_MISPLACED;
+    if (!len) return SH_MB_SCRIPT_MISPLACED;
     for (i = 0; i < len; i++) if (!mb_script_name_char(p[i])) return SH_MB_SCRIPT_MISPLACED;
     if (name) *name = p;
     if (name_len) *name_len = len;
@@ -4567,10 +4567,6 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
     b->script_files = s->files;
     if (!s->files) return;
     if (s->oom) { mb_error(b, "out of memory"); return; }
-    if (s->files > SH_MB_SCRIPT_FILES_MAX)
-        mb_error(b, "this mod has %u script files, more than the %u one mod may carry; combine some of them", s->files,
-                 SH_MB_SCRIPT_FILES_MAX);
-    if (s->bytes > SH_MB_SCRIPT_MOD_MAX) mb_error(b, "this mod's scripts are larger than 1 MB in all; make them smaller");
     ent = (char **)calloc(s->n + 1, sizeof(char *));
     ev = (unsigned *)calloc(s->n + 1, sizeof(unsigned));
     in = (char **)calloc(s->n + 1, sizeof(char *));
@@ -4582,7 +4578,7 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
         char rel[SH_MB_REQUEST_MAX + 1], what[SH_MB_CAUSE_MAX];
         if (u->what == SH_MB_SCRIPT_REQUIRE) {
             size_t n = strlen(u->name), c;
-            int ok = n > 0 && n <= SH_MB_SCRIPT_NAME_MAX;
+            int ok = n > 0;
             for (c = 0; ok && c < n; c++) ok = mb_script_name_char(u->name[c]);
             if (!ok) {
                 _snprintf_s(what, sizeof what, _TRUNCATE, "\"require\" was given \"%s\", which is not a file of this "
@@ -4604,7 +4600,7 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
         }
         if (!mb_script_own_name(b, u->name, rel, sizeof rel)) {
             _snprintf_s(what, sizeof what, _TRUNCATE, "\"%s\" is another mod's name", u->name);
-            mb_script_error(b, file, u->line, what, "name this mod's own content, without \"mods/<salt>/\"");
+            mb_script_error(b, file, u->line, what, "name this mod's own content by its path inside the mod, as \"ai/imp\"");
             continue;
         }
         if (u->what == SH_MB_SCRIPT_BIND) {
@@ -4844,10 +4840,10 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (sh_mb_bank_stem(f->request, stem, sizeof stem) && !sh_mb_bank_header_ok(bytes, len, stem, cause, sizeof cause))
                 mb_error(b, "%s: %s", f->path, cause);
             free(bytes);
-        } else if (sh_mb_script_request(f->request, NULL, NULL) > 0 && f->size <= SH_MB_SCRIPT_FILE_MAX) {
+        } else if (sh_mb_script_request(f->request, NULL, NULL) > 0) {
             /* A script is read whole: checked, compiled and scanned (mb_script_file). */
             size_t len = 0;
-            unsigned char *text = mb_read_wfile(full, SH_MB_SCRIPT_FILE_MAX, &len);
+            unsigned char *text = mb_read_wfile(full, (size_t)-1, &len);
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(text, len, f->blob);
             got = len;
@@ -4855,13 +4851,6 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             scripts.bytes += len;
             if (got == f->size) mb_script_file(b, i, text, len, &scripts);
             free(text);
-        } else if (sh_mb_script_request(f->request, NULL, NULL) > 0) {
-            char file[SH_MB_REQUEST_MAX + 16];
-            sh_mb_script_file_name(f->request, file, sizeof file);
-            mb_script_error(b, file, 0, "the file is larger than 256 KB", "split it into smaller files");
-            scripts.files++;
-            scripts.bytes += f->size;
-            if (!mb_hash_wfile(full, &got, f->blob)) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
         } else if (!mb_hash_wfile(full, &got, f->blob)) {
             mb_error(b, "cannot read %s", f->path);
             free(full);
