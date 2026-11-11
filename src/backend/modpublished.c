@@ -823,6 +823,25 @@ nomem:
     return -1;
 }
 
+/* The player turned off "Play maps whose mods include scripts": a map that
+ * arrived with its mods (it has a place; the player's own maps have none)
+ * whose builds carry scripts is not loaded, however its mods got here. The
+ * launch is refused with the setting's sentence. 1 when refused. */
+static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh_modmanifest_list *rows)
+{
+    if (!place[0] || !rows->count || !g_ops.scripted_maps_allowed || g_ops.scripted_maps_allowed(g_ops.context) ||
+        !g_ops.served_scripts || !g_ops.served_scripts(g_ops.context, rows, place))
+        return 0;
+    pub_logf("MODS: %s: the map's mods include scripts and the player turned scripts off; it is not loaded",
+             pub_hook_name(hook));
+    if (owner && g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
+    if (owner && g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, owner);
+    pub_launch_refused(hook);
+    pub_print(SH_MODUI_SCRIPTS_OFF);
+    pub_notice(SH_MODUI_SCRIPTS_OFF);
+    return 1;
+}
+
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision)
 {
@@ -840,6 +859,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
                      "so it is not gated", id ? id : "", revision ? revision : "");
             return 1;
         }
+        if (pub_refuse_scripts(hook, owner, seen->place, &seen->rows)) return 0;
         if (!seen->rows.count || !pub_count_missing(&seen->rows, seen->place)) {
             pub_place_decided(seen->place);
             return 1;
@@ -903,6 +923,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     }
     record->missing = pub_count_missing(&record->rows, place);
     if (pub_is_completion(hook)) pub_seen_note(item, rev, place, &record->rows);
+    if (pub_refuse_scripts(hook, owner, place, &record->rows)) { pub_record_clear(record); return 0; }
     if (!record->rows.count || !record->missing) {
         pub_record_clear(record);   /* consumed */
         pub_place_decided(place);
@@ -952,6 +973,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     pub_notes_gated();
     /* The parse no gate saw is decided in the place its map records. */
     strcpy_s(place, sizeof place, record->place);
+    if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); return 0; }
     missing = pub_count_missing(&record->rows, place);
     if (!missing) { pub_record_clear(record); pub_place_decided(place); return 1; }
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
@@ -2278,6 +2300,26 @@ static int eng_store_probe(void *c, const char *hash, volatile int *cancel, sh_m
 }
 
 static int eng_scripted_maps_allowed(void *c) { (void)c; return sh_modui_scripted_maps_allowed(); }
+
+/* The script files of the builds serving the rows in `place`, from each
+ * serving folder's mod.json. Asked only while scripts are turned off. */
+static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows, const char *place)
+{
+    char root[MAX_PATH * 4], folder[MAX_PATH * 4];
+    unsigned n = 0;
+    (void)c;
+    if (!sh_ms_root(root, sizeof root)) return 0;
+    for (size_t i = 0; i < rows->count; i++) {
+        sh_modserve_bundle_ref ref;
+        sh_mb_bundle b;
+        if (!sh_modserve_row_build_in(&rows->rows[i], place, &ref) || !ref.folder[0]) continue;
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", root, ref.folder);
+        memset(&b, 0, sizeof b);
+        if (sh_mb_load_folder(folder, &b)) n += b.script_files;
+        sh_mb_free(&b);
+    }
+    return n;
+}
 static void eng_scripts_approval(void *c, unsigned files, char *out, size_t cap)
 {
     (void)c;
@@ -2304,7 +2346,8 @@ static const sh_modpub_ops ENG_OPS = {
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
-    eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval
+    eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
+    eng_served_scripts
 };
 
 /* ------------------------------------------------------------ detours */

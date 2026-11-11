@@ -168,7 +168,10 @@ typedef struct sh_modpub_resume {
  * when any does and the player turned off "Play maps whose mods include
  * scripts" (sh_modpub_ops scripted_maps_allowed), nothing is downloaded and
  * the map is refused with that setting's sentence (modui.h
- * SH_MODUI_SCRIPTS_OFF); otherwise the player is asked once, with the mods'
+ * SH_MODUI_SCRIPTS_OFF). The same holds at every launch: a map with a place
+ * (one that arrived with its mods) whose served builds carry scripts is not
+ * loaded while the setting is off, though it was downloaded while it was on.
+ * Otherwise the player is asked once, with the mods'
  * names, the total size and, when they carry scripts, the scripts sentence,
  * and Yes fetches each archive into that place (the root, or
  * mods\maps\<segment>\<mod name>\). A gate that lets a map through, or a
@@ -319,6 +322,9 @@ typedef struct sh_modpub_ops {
     /* The question's sentence for builds carrying `files` script files
      * (modui.h sh_modui_scripts_approval). */
     void (*scripts_approval)(void *c, unsigned files, char *out, size_t cap);
+    /* The script files of the builds that serve `rows` in `place` (a map
+     * that arrived with its mods), as their folders record them. */
+    unsigned (*served_scripts)(void *c, const sh_modmanifest_list *rows, const char *place);
 } sh_modpub_ops;
 
 #define SH_MODPUB_PLACE_CAP 300

@@ -95,6 +95,8 @@ typedef struct fake {
     unsigned long long size_a;       /* the archive size the store reports for alexpink */
     unsigned scripts_a;              /* the script files the store says alexpink's build carries */
     int scripts_off;                 /* the player turned off "Play maps whose mods include scripts" */
+    unsigned served_scripts;         /* script files of the builds a place serves */
+    int served_scripts_calls;
     int store_calls;
     int incomplete_a;                /* the build serving alexpink lacks a name the row lists */
     int prints;
@@ -334,6 +336,12 @@ static int f_store_probe(void *c, const char *hash, volatile int *cancel, sh_mod
     return out->found;
 }
 static int f_scripted_maps_allowed(void *c) { (void)c; return !F.scripts_off; }
+static unsigned f_served_scripts(void *c, const sh_modmanifest_list *rows, const char *place)
+{
+    (void)c; (void)rows;
+    F.served_scripts_calls++;
+    return place && place[0] ? F.served_scripts : 0;
+}
 static void f_scripts_approval(void *c, unsigned files, char *out, size_t cap)
 {
     (void)c;
@@ -382,7 +390,7 @@ static const sh_modpub_ops OPS = {
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
-    f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval
+    f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts
 };
 
 static void reset(void)
@@ -1044,6 +1052,44 @@ static void the_question(void)
     }
 }
 
+static void scripts_off_at_launch(void)
+{
+    printf("-- scripts off: a stranger's map downloaded earlier does not launch either; the player's own maps do\n");
+    /* Its mods are in its place already: nothing is missing, nothing asked. */
+    reset();
+    F.titled = 1;
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    F.served_scripts = 4;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);   /* on: it plays */
+    reset();
+    F.titled = 1;
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    F.served_scripts = 4;
+    F.scripts_off = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(F.served_scripts_calls == 1 && F.store_calls == 0 && F.fetch_calls == 0 && F.resumes == 0 && F.drop_ui == 1);
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map's mods include scripts, which you turned off in the Mods tab; turn on "
+                                           "\"Play maps whose mods include scripts\" there to play it."));
+    CHECK(strstr(F.prints_all, "turned off in the Mods tab") != NULL);
+    /* A map without scripts in its place still launches with the setting off. */
+    reset();
+    F.titled = 1;
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    F.scripts_off = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    /* The player's own map (no place) follows the root folders: never refused. */
+    reset();
+    F.installed_a = 1;
+    F.served_scripts = 4;
+    F.scripts_off = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, (void *)0x5000, NULL, NULL) == 1);
+    CHECK(F.served_scripts_calls == 0);
+}
+
 static void download_progress_and_cancel(void)
 {
     ULONGLONG t0;
@@ -1663,6 +1709,7 @@ int main(void)
     the_question();
     scripts_and_the_setting();
     download_progress_and_cancel();
+    scripts_off_at_launch();
     rawmap_missing_counts_rows();
     a_map_carries_its_place();
     one_notice_queue();
