@@ -1876,6 +1876,9 @@ static int eng_own_item(void *c, const char *item)
 
 /* The map's serving context: the place the record gives the map, else the
  * one its title names (sh_ms_place_dir), and whether it is the player's own. */
+static char g_eng_place[SH_MODSERVE_PLACE_CAP];   /* the last gated map's place, for its launch */
+static int g_eng_own = 1;
+
 static void eng_scope_place(void *c, const char *title, const char *map_id, int own)
 {
     char dir[SH_MODSERVE_PLACE_CAP] = "";
@@ -1888,6 +1891,8 @@ static void eng_scope_place(void *c, const char *title, const char *map_id, int 
         place.map_id = map_id && map_id[0] ? map_id : NULL;
         if (!sh_ms_place_dir(&place, dir, sizeof dir)) dir[0] = 0;
     }
+    strcpy_s(g_eng_place, sizeof g_eng_place, dir);
+    g_eng_own = own ? 1 : 0;
     (void)sh_modserve_scope_set_place(dir, own);
 }
 
@@ -2080,7 +2085,9 @@ static int eng_cold_read(void *manager, const char *id, const char *revision)
 static void eng_scope_play(const char *why)
 {
     __try {
-        (void)sh_modui_scope_launch(why);
+        /* The launched map's context: the place and own flag its gate set
+         * (eng_scope_place), before its serving is computed. */
+        (void)sh_modui_scope_launch_at(why, g_eng_place[0] ? g_eng_place : NULL, g_eng_own);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the launch's serving mode change faulted; the launch continues");
     }
