@@ -1226,6 +1226,8 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     }
     g_bound = g_ctor && g_dtor && g_anchor && g_type && g_register && g_source && g_decl && g_generic_load &&
               sh_process_heap_bind(&g_heap, results, count, module_base) && g_main_thread_at;
+    /* Runtime string passes grow the game's string table in its process heap (strids.h). */
+    if (g_heap.get || sh_process_heap_bind(&g_heap, results, count, module_base)) sh_strids_set_process_heap(&g_heap);
     for (i = 0; i < count; ++i)
         if (results[i].name && !strcmp(results[i].name, "DeclResourceProbe") && results[i].status == SIG_OK) {
             g_probe_sig = results[i];

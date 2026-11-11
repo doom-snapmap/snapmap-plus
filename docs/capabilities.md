@@ -962,7 +962,7 @@ demons too; `monster_type` names any demon's type, `nav_ground` finds the floor 
 and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
 `hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and
 steers or explodes them, starts and stops effects (`fx`, `fx_move`, `fx_stop`), plays its own sounds
-(`sound`), reads a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
+(`sound`), reads a tag of its md6Def or a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
 (amount, decl, damage zone, direction, attacker), death, pain reactions, `ae_notify` rows and
 launched projectiles to the mod's handlers. A mod whose scripts handle an input gets a **Script** node in its Toybox
 category: a wire into a node runs the script's `on.input` handler for the node's name,

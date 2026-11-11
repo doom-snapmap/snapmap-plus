@@ -67,6 +67,7 @@ int sh_modsound_stock_before_map(const char *const *hashes, int n) { (void)hashe
 void sh_strids_request_refresh(void) {}
 int sh_strids_scope_check(void) { return 0; }
 int sh_strids_refresh_pending(void) { return 0; }
+void sh_strids_set_process_heap(const struct sh_process_heap_api *api) { (void)api; }
 int sh_editor_delete_native_pending(void) { return 0; }
 int sh_modtypeinfo_install(const struct sig_result *results, size_t count, const uint8_t *module_base)
 { (void)results; (void)count; (void)module_base; return 0; }

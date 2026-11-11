@@ -101,7 +101,7 @@ static void check_image(const char *path)
         rva[n] = r.rva;
         printf("  %-24s rva=0x%X\n", e->name, r.rva);
     }
-    CHECK(n == 6);
+    CHECK(n == 8);
 
     /* class vtables */
     {

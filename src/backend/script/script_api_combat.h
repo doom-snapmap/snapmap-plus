@@ -12,9 +12,10 @@
  *   fx(e, condition)                           fx_stop(e, condition)
  *   fx(effect, pos, [dir]) -> e                fx_move(e, pos, [dir])   fx_stop(e)
  *   sound(e, sound, [channel])
- *   e:tag(joint) -> pos, forward               e:pain() -> reaction or nil
- *   ai:fire(projectile, joint, target) -> p or nil
- *   ai:can_see_from(other, joint) -> boolean
+ *   e:tag(name) -> pos, forward                e:pain() -> reaction or nil
+ *     (name: a tag of a demon's md6Def, else a joint)
+ *   ai:fire(projectile, tag or joint, target) -> p or nil
+ *   ai:can_see_from(other, tag or joint) -> boolean
  *   p:steer(target, [speed])                   p:explode()
  * p:steer and p:explode answer nil once the projectile no longer exists, as
  * every call on a removed entity does; a script may hold `p` for as long as

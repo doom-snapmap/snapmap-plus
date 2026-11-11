@@ -42,7 +42,13 @@
  *                      path query (VK 0x140515300) calls it with the path it just built (segments +0x90,
  *                      count +0x70, stride 0x1C, from +4, to +0x10). Detoured; 14-byte window.
  *   AiAnimOfProp       VK 0x141712C60  GL 0x141713650  an animWeb node's animation (prop, model, 0) -> idMD6Anim.
- *   AiAnimDelta        VK 0x1415C5290  GL 0x1415C63F0  an animation's total root motion (anim, idVec3*, NULL). */
+ *   AiAnimDelta        VK 0x1415C5290  GL 0x1415C63F0  an animation's total root motion (anim, idVec3*, NULL).
+ *   AiWeaponInSlot     VK 0x14074AB30  GL 0x14074A440  the weapon in an equip slot: the demon's vtable +0x678 item
+ *                      of that equipSlot_t, cast to a weapon (NULL for none or another item). The ae pull and
+ *                      equip handlers and the fire control's per-hand loop read hands through it (evidence
+ *                      snaphak-re logs/shared-ghidra/SCF2-*).
+ *   AiInventoryItem    VK 0x140EEDC50  GL 0x140EED200  the inventory list's item `index` (the list the demon's
+ *                      vtable +0x660 returns, ai +0x9900), as EquipInventoryItem (VK 0x14040CB00) reads it. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -99,6 +105,13 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 53 56 57 48 81 EC D0 00 00 00 48 8B 41 58 33 FF 48 89 AC 24 F0 00 00 00 49 8B E8 48 8B F2 8B DF "
       "48 85 C0 74 08 48 8D 58 28 48 8D 78 58 0F 29 B4 24 C0 00 00 00 0F 29 BC 24 B0 00 00 00",
       0x15C5290u, 0x15C63F0u },
+    { "AiWeaponInSlot",
+      "48 83 EC 28 48 8B 01 FF 90 78 06 00 00 48 85 C0 75 05 48 83 C4 28 C3 48 8B C8 48 83 C4 28 E9",
+      0x74AB30u, 0x74A440u },
+    { "AiInventoryItem",
+      "48 83 EC 28 85 D2 78 4F 3B 51 08 7D 4A 48 89 5C 24 20 48 63 DA 48 C1 E3 05 48 03 19 8B 03 48 8D 53 04 "
+      "3B 02 75 1B 3D FE FF FF 01 74 1C 48 83 7B 08 00 75 15 48 83 3D",
+      0xEEDC50u, 0xEED200u },
     { NULL, NULL, 0, 0 }
 };
 

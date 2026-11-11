@@ -672,13 +672,27 @@ static int joint_of(void *ent, const char *name, float pos[3], float fwd[3])
     return 1;
 }
 
-/* e:tag(joint) -> pos, forward */
+/* The point `name` names on `ent` in world space: a tag of the demon's
+ * md6Def (its own position and axis, as the engine aims from it) or else a
+ * joint. 2 a tag, 1 a joint, 0 neither. */
+static int point_of(void *ent, const char *name, float pos[3], float fwd[3])
+{
+    const sh_script_engine *e = eng();
+    float axis[9];
+    if (e && e->tag && e->tag(ent, name, pos, axis) == 1) {
+        if (fwd) memcpy(fwd, axis, 3 * sizeof(float));   /* the axis' first row: forward */
+        return 2;
+    }
+    return joint_of(ent, name, pos, fwd);
+}
+
+/* e:tag(name) -> pos, forward: an md6Def tag or a joint */
 static int l_tag(lua_State *L)
 {
     float pos[3], fwd[3];
     void *ent = sh_script_api_entity(L, 1, "tag", NULL);
-    const char *name = sh_script_api_check_text(L, 2, "tag", "the joint name", NAME_ANY);
-    if (!ent || !joint_of(ent, name, pos, fwd)) return nil1(L);
+    const char *name = sh_script_api_check_text(L, 2, "tag", "the tag or joint name", NAME_ANY);
+    if (!ent || !point_of(ent, name, pos, fwd)) return nil1(L);
     sh_script_api_push_vec(L, pos);
     sh_script_api_push_vec(L, fwd);
     return 2;
@@ -696,7 +710,7 @@ static int l_pain(lua_State *L)
     return 1;
 }
 
-/* ai:can_see_from(other, joint) */
+/* ai:can_see_from(other, tag or joint) */
 static int l_can_see_from(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -705,9 +719,9 @@ static int l_can_see_from(lua_State *L)
     sh_script_trace t;
     void *self = sh_script_api_entity(L, 1, "can_see_from", NULL);
     void *other = sh_script_api_entity(L, 2, "can_see_from", &h);
-    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the joint to look from", NAME_ANY);
+    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the tag or joint to look from", NAME_ANY);
     if (!self || !other || !e || !e->trace || !e->spawn_id) return nil1(L);
-    if (!joint_of(self, joint, from, NULL)) return nil1(L);
+    if (!point_of(self, joint, from, NULL)) return nil1(L);
     origin_of(other, to);
     to[2] += SIGHT_RAISE;
     if (!e->trace(from, to, e->spawn_id(self), &t)) return nil1(L);
@@ -777,7 +791,9 @@ static int l_p_explode(lua_State *L)
     return bool1(L, g_ce.explode(p));
 }
 
-/* ai:fire(projectile, joint, target) -> p */
+/* ai:fire(projectile, tag or joint, target) -> p. The engine's launch
+ * event fires from a joint; from a tag the projectile is then placed on the
+ * tag and sent on to the target. */
 static int l_fire(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -788,10 +804,11 @@ static int l_fire(lua_State *L)
     void *self, *decl, *target = NULL;
     const char *joint;
     uint32_t id;
-    int at_point;
+    int at_point, from_tag = 0;
+    float tag_pos[3];
     self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
     decl = check_decl(L, 2, "fire", "projectile", "the projectile");
-    joint = sh_script_api_check_text(L, 3, "fire", "the joint to fire from", NAME_ANY);
+    joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", NAME_ANY);
     if (luaL_testudata(L, 4, "entity")) {
         at_point = 0;
         target = sh_script_api_entity(L, 4, "fire", NULL);
@@ -807,6 +824,7 @@ static int l_fire(lua_State *L)
     if (!self || !decl || !CE(entity_name) || (!at_point && !target)) return nil1(L);
     sh_script_api_check_room(L, "fire");
     if (!g_ce.entity_name(at_point ? self : target, name, sizeof name) || !name[0]) return nil1(L);
+    if (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1) from_tag = 1;
     (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
     a[0] = sh_script_earg_no_anim();
     memset(&a[1], 0, sizeof a[1]); a[1].type = 'd'; a[1].p = decl;
@@ -820,6 +838,11 @@ static int l_fire(lua_State *L)
     {
         void *p = e->resolve(id);
         if (!p) return nil1(L);
+        if (from_tag && e->place) {
+            (void)e->place(p, tag_pos, NULL);
+            if (!at_point) origin_of(target, point);
+            at_point = 1;
+        }
         if (at_point) steer_to(p, point, 0);
         sh_script_api_push_engine_entity(L, p);
     }

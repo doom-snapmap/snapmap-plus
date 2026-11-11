@@ -16,7 +16,15 @@
  *   ScriptDifficulty        VK 0x140391A80  GL 0x140391350  idGameLocal vtable +0x670 (game) -> int: the
  *                           g_gameDifficulty cvar when it is 0 or more, else the game's currentGameDifficulty
  *                           (+0x2C3010); 0 easy, 1 medium, 2 hard, 3 ultra-violent, 4 nightmare. Optional: the
- *                           calls work without it and difficulty() then answers nil. */
+ *                           calls work without it and difficulty() then answers nil.
+ *   ScriptTagFind           VK 0x1416CE1E0  GL 0x1416CEE90  (model decl +0x210 prop list, prop name, tag name) ->
+ *                           the tag row: +0 offset idVec3, +0xC rotation quaternion, +0x1C short parent joint
+ *                           (-1 for a default row when there is none). The engine reads aim and focus tags with
+ *                           it from the "_info" prop (VK 0x1407720A0, "can't find focus tracking tag").
+ *   ScriptTagWorld          VK 0x1415EFAA0  GL 0x1415F0CA0  (animator, 1, tag row, idVec3 *pos, idMat3 *axis) ->
+ *                           bool: the tag placed on its parent joint in world space, as idAI2 finds a muzzle
+ *                           tag (VK 0x140434E20). Both optional: without them a tag name answers as a joint.
+ *                           Evidence snaphak-re logs/shared-ghidra/SCF2-*. */
 const sig_entry SH_SCRIPT_API_SIGNATURES[] = {
     { "ScriptProcessEventArgs",
       "44 89 4C 24 20 53 55 56 57 41 56 41 57 48 81 EC 28 01 00 00", 0xB47350u, 0xB46940u },
@@ -36,5 +44,13 @@ const sig_entry SH_SCRIPT_API_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 48 8B C8 48 8B 10 FF 92 B8 00 00 00 80 BB 88 0B 30 00 00 "
       "48 8B 50 38 8B 42 30 74 10 83 F8 01 7E 0B B8 01 00 00 00",
       0x391A80u, 0x391350u },
+    { "ScriptTagFind",
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 20 33 FF "
+      "4D 8B E0 4C 8B FA 4C 8B F1 8B EF 39 79 08 7E 29",
+      0x16CE1E0u, 0x16CEE90u },
+    { "ScriptTagWorld",
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 20 57 48 83 EC 40 49 8B F8 B8 FF FF 00 00 49 83 C0 1C "
+      "49 8B F1 8B EA 48 8B D9 66 41 39 00 75 04 32 C0",
+      0x15EFAA0u, 0x15F0CA0u },
     { NULL, NULL, 0, 0 }
 };

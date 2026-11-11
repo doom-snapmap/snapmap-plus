@@ -104,6 +104,11 @@ typedef struct sh_script_engine {
     int      (*ground)(const float pos[3], float out[3]);
     /* The game difficulty, 0 easy .. 4 nightmare (1 when read). */
     int      (*difficulty)(int *level);
+    /* The md6Def tag `name` of a demon (a named point on a parent joint with
+     * its own offset and rotation) in world space: 1 with its position and
+     * axis (rows forward, left, up), 0 when the demon's model has no such
+     * tag (or the entity is not a demon), -1 unreadable. */
+    int      (*tag)(void *ent, const char *name, float pos[3], float axis[9]);
 } sh_script_engine;
 
 /* The floor under pos made of the engine's world trace: straight down from
