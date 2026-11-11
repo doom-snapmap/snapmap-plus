@@ -234,9 +234,9 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   The rescan's result
   and the backend log's `MODS: refresh:` lines say which applied.
   `sh_mods build "<folder>"` does it at once; `sh_mods install "<folder>"` copies a folder from
-  elsewhere into `mods\<id>\`, verifies it and makes it available at once (a folder without an
-  `id` or a key is copied in under a generated key with its references rewritten, as its first
-  build in `mods\` would, and the source folder is only read); given a folder without
+  elsewhere into `mods\<its name>\`, verifies it and makes it available at once (a folder never
+  built gets its salt there, as its first scan in `mods\` would, and the source folder is only
+  read); given a folder without
   `mod.json` it installs every mod folder found below it, with one rescan at the end. `sh_mods list`,
   `sh_mods verify` and `sh_mods status` report what is installed, whether its files still match,
   and what it serves. The Studio window's Mods tab runs the same actions and shows what the open
@@ -555,21 +555,20 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   Recycle Bin, and the maps in My Maps, `rawmap.json` and the prefabs have their mod rows and
   placed names rewritten to the salts, each with a copy of the file as it was beside it
   (`<name>.before-snapmap-plus-1.0`); a map naming a mod nothing provides is left untouched. Everything it
-  deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
-  at the next rescan. When its `mod.json` has neither an `id` nor a key in its `snapmap-plus`
-  member, that first build gives it a key the way New mod does (its folder name as a slug plus
-  four random characters, `cyberprobe_k3j9`), renames the folder to the key, rewrites your own
-  references from `mods/<folder>/` to `mods/<key>/` once (in decl text, in `mod.json` and in the
-  folder names under `assets/`, the cooked `_` spelling included) and records the key with origin
-  `by-hand`; the build log and the Mods tab ("Renamed from cyberprobe; 3 references rewritten")
-  say so, and from then on the folder is one New mod could have made. Two hand-made folders of one
-  name therefore never share a key. A folder inside organizing folders (`mods\demon-mods\x\`)
-  is renamed alone. A folder whose name already looks like a generated key but has no key in
-  `mod.json` gets a new one. When the rewrite cannot be done (a file it cannot read, a binary file
-  that names `mods/<folder>/`, two files that would land on one path, Windows refusing the rename
-  because a file in the folder is open), nothing in the folder is changed and that mod alone is
-  refused with the cause in its row; the next rescan tries again. A folder with an `id` (every
-  converted mod) or a key is never renamed.
+  deletes goes to the Windows Recycle Bin. A mod folder you add by hand is built at the next
+  Refresh (or start). Its first scan gives it its salt, eight random characters written in the
+  part of `mod.json` Snapmap+ writes; the folder's name stays yours and can change at any time.
+  At every scan, the first included, what you wrote under the folder's name moves under the salt
+  in one step: files under `assets\...\mods\<folder name>\`, `mods/<folder name>/` references in
+  your text files and `mod.json`, string keys that are not the game's or Snapmap+'s (with their
+  `#str_` references) and a sound bank named `<folder name>_<name>.bnk` (its bank id follows, and
+  so does every text of the mod that names it). You never need to know the salt. When the move
+  cannot be done (a file it cannot read, a binary file that names `mods/<folder name>/`, two files
+  that would land on one path), nothing in the folder is changed and that mod alone is refused with
+  the cause in its row; the next Refresh tries again. A folder copied in Explorer carries its
+  original's salt: the folder that held the salt first keeps it and the copy gets a new one, with
+  its own references rewritten. Files beside `mod.json` and `assets\` (a README, notes) are left
+  alone and never carried.
 - The installer leaves the DOOM folder holding exactly the two Snapmap+ files for the installed
   build, removing the other build's files, files of earlier releases and the backups earlier
   installers kept of their own DLLs, and naming any file that is not Snapmap+'s as left in place.

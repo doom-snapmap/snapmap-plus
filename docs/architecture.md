@@ -3088,7 +3088,8 @@ text; an identical one is counted, not named. The changed tree is built again at
 the next start or rescan by the rebuild rule, and its strings serve from that
 build. A file merged into a folder the player made is built under that folder's
 rules: a binary at a game name with other bytes than the game's is refused
-there, and the last good build keeps serving. A document that is not a strings
+there, and the folder's build is marked failed with that cause until it is
+fixed (there is no last good build). A document that is not a strings
 document is left with one line naming why. The record's `loose` section
 (`complete`, `migratedAt`, `folder`) marks the step done; a loose entry or a
 document created or written after `migratedAt` is due again. The step holds the
@@ -3109,10 +3110,9 @@ ends, and an unfinished record makes the next run do the pass again (every
 step is idempotent). Each folder logs one `MODS: migration:` line and the pass
 one summary line; a line that leaves files out names how many and how many of
 them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
-by `modswf.c`). A migrated pack keeps its id, so where it
-shares one with a delivered or converted package (the beta.19 `doors` packs),
-the two are builds of one key: each map serves the build it pins, and with no
-map open the migrated pack (the player's own) serves. Stock names are not checked during the migration because the
+by `modswf.c`). A migrated pack that shares its old key with a delivered or
+converted package (the beta.19 `doors` packs) is converted below like any
+copied folder: one keeps the salt and the other gets its own. Stock names are not checked during the migration because the
 pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.
 
@@ -3390,10 +3390,11 @@ map finds it: into its place, `mods\maps\<segment>\<mod name>\`
 (`modsync_fetch_build_for` under the record key `place:<segment>`; a published
 item's title is an idStr at metadata +0x398 beside the id at +0 and the
 revision at +0x30), replacing that place's earlier build of the same salt and
-nothing else; or, for a map without a place and a prefab, into a place of the
-build's own (`fetch:<salt>`) whose folder then moves to the root under its own
-name, the emptied place removed. The resume checks every row against the asset
-rule again, in the same place.
+nothing else; or, for a map without a place and a prefab, at the root as the
+player's own mod (`sh_ms_install_to_root`, from a copy unpacked in `%TEMP%`;
+a place that already holds this very build is installed from there with no
+download). The resume checks every row against the asset rule again, in the
+same place.
 
 ### Rawmaps that name mods
 
@@ -3588,7 +3589,7 @@ The page and the slot see a prefab's details as one flat object, the view:
 view composes into a block (`prefab_mods.c`). `META_READ` returns the view of
 a file's block; the Prefabs list reads at most the last 1 MB of each file,
 where the block is. `MODS_STATUS` names each row's mod by its name ("id",
-else its salt), with its salt and build.
+else "an unnamed mod": a player never sees a salt), with its salt and build.
 
 Resolving. Load / Place first reads the rows (`MODS_RESOLVE`). The rows
 resolve in the open map's own context (the root folders, else the map's own
@@ -3596,15 +3597,15 @@ place); a placement never changes where the open map finds its mods
 (decision 12), and neither does `sh_prefab mods`:
 
 - a row the open map does not serve whose very build a place of the store
-  holds (a prefab ZIP's import) is installed at the root first, when the root
-  holds no folder of its salt: off the game thread, under the store lock, the
-  place's folder is copied to a staging folder in `%TEMP%` and installed from
-  there (`sh_ms_install_from_folder`, so the root folder takes the place
-  folder's name), the index is rescanned and one console line says "Prefab
+  holds (a downloaded or imported map's mods) is installed at the root first,
+  when the root holds no folder of its salt: off the game thread, under the
+  store lock, through `sh_ms_install_to_root` (the root folder takes the place
+  folder's name and keeps its salt), the index is rescanned and one console
+  line says "Prefab
   <name>: N mod(s) it uses was installed in your mods folder, where your own
   maps find it." The player is putting the mod to use in their own maps, and
-  the import was the approval. A copy that fails refuses the placement with
-  the cause;
+  the map's download or import was the approval. A copy that fails refuses the
+  placement with the cause;
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
   console line, below; nothing is fetched, because nothing can install it;
@@ -3663,13 +3664,13 @@ prefab of that name with the same bytes is left alone; one with other bytes is
 kept and the import takes "<name> (2)" and so on), then installs each carried
 `mods/<folder>/` whose `mod.json` names a build the block's rows name, exactly
 as a map's import does (see [Rawmaps that name mods](#rawmaps-that-name-mods)):
-skipped when something serves its row, installed into the ZIP's place,
-`mods\maps\<prefab name>\<mod name>\`, otherwise, and removed again when it
+skipped when something serves its row, otherwise installed at the root as the
+player's own mod (decision 12: a prefab's mods are put to use in the player's
+own maps; the import is the approval), and removed again when it
 does not build to the hash its own `mod.json` names; a carried folder no row
 names is left out. When the install fails the prefab it added is deleted
 again, so a failed import leaves nothing. An import that finds everything
-already there writes nothing. The first Load / Place installs the mods at the
-root as above. A row the export does not
+already there writes nothing. A row the export does not
 carry is named in the result ("It also needs <name>, which the export
 does not carry."), and Load / Place asks for it as above. Each importer refuses
 the other's ZIP, told apart by the carried `.json` ("this is a map's export, not
@@ -3679,9 +3680,9 @@ ZIP or an extracted folder, an `export.json` index, a carried `mod.json` or
 rows in an earlier shape) is refused with "The prefab was not imported. This
 export was saved in a format this version does not read."
 `sh_prefab mods "<name>"` lists the block's rows by their names and whether
-each is served in the open map's context, held by an import (installed at the
-root by the first placement), or neither, with the asset rule's sentence. It
-changes nothing.
+each is served in the open map's context, held by a downloaded map's place
+(installed at the root by the placement), or neither, with the asset rule's
+sentence. It changes nothing.
 
 
 
@@ -3716,7 +3717,7 @@ name or author) are mirrored as build warnings in one table,
 `MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
 rather than at publish. They are derived again whenever a built `mod.json` is
 read, so they also reach `sh_mods doctor` (one "warning i of n" line per
-bundle), each rescan (one line per mod with warnings), the Rebuild result
+bundle), each rescan (one line per mod with warnings), the Refresh result
 (`warnings`, `firstWarning`) and each mod of the Mods tab's payload
 (`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
