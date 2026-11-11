@@ -65,11 +65,7 @@ function between(begin, end) {
   check(res.includes("d.result === 4) toast('The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again'"),
         'a hovered entity that is not selected is reported as such, not as an empty selection');
   check(res.includes('d.result === 5)'), 'the copy check refusing a real selection has its own message');
-  const create = host.slice(host.indexOf('static void poc_apply_create_prefab()'), host.indexOf('static bool poc_prefab_dir('));
-  check(create.includes('sh_prefab_host::create_precheck(sel, count, hovered, have_hover)') &&
-        create.indexOf('create_precheck') < create.indexOf('poc_serialize_selection_raw('),
-        'the host tells an empty selection from an unselected hover before it serializes');
-  check(create.includes('g_create_result = 5;'), 'a serialize that returns nothing after the precheck is result 5');
+  /* The host's precheck itself is a behaviour test: tests/prefab_host_test.cpp. */
 }
 
 /* ---- Load / Place says what is true ---- */
