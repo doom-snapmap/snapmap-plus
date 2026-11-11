@@ -1049,7 +1049,7 @@ static int mu_stock_banks(const sh_mb_bundle *bd, char banks[8][SH_MBI_LEAF_MAX]
     mpj *x;
     const mpj *v;
     int k, n = 0;
-    if (!bd->registries || !strstr(bd->registries, "\"banks\"")) return sh_mbi_served_banks(bd, banks, 8);
+    if (!bd->registries || !strstr(bd->registries, "\"banks\"")) return 0;
     x = mpj_parse(bd->registries, strlen(bd->registries));
     v = x ? mpj_get(x, "banks") : NULL;
     for (k = 0; v && v->type == MPJ_ARR && k < v->n && n < 8; k++) {

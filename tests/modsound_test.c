@@ -371,16 +371,11 @@ static void test_needs(void)
     CHECK(sh_modsound_needs_add_registries(t, H_OTHER, "local.other",
                                            "{\"banks\":[\"doom_weapon_sp.bnk\",\"evil_sp.bnk\",\"doom_vo_sp.bnk\"],\"conductor\":[\"x\"]}") == 2);
     CHECK(sh_modsound_needs_add_registries(t, H_OTHER, "local.other", "{\"conductor\":[\"x\"]}") == 0);
-    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/sound/play_wpn_sp_plasma_flyby_lp.decl") == 1);
-    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/sound/play_wpn_mp_plasma_flyby_lp.decl") == 0);
-    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/entitydef/play_wpn_sp_plasma_flyby_lp.decl") == 0);
     n = sh_modsound_needs_find(t, H_SPIDER);
     CHECK(n && n->count == 1 && !strcmp(n->banks[0], "doom_weapon_sp.bnk") && !strcmp(n->key, "local.spider-mastermind"));
     n = sh_modsound_needs_find(t, H_OTHER);
     CHECK(n && n->count == 2 && !strcmp(n->banks[1], "doom_vo_sp.bnk"));
-    n = sh_modsound_needs_find(t, H_SERVED);
-    CHECK(n && n->count == 1);
-    CHECK(t->count == 3 && !sh_modsound_needs_find(t, "dd"));
+    CHECK(t->count == 2 && !sh_modsound_needs_find(t, H_SERVED) && !sh_modsound_needs_find(t, "dd"));
     free(t);
 }
 
@@ -701,25 +696,13 @@ static void test_builder(void)
     }
     sh_mb_free(&b);
     sh_mb_set_bank_need(NULL);
-    /* A build made without the seam (before L8, or by the store tool) lists
-     * no "banks"; its served sound decls still give the need (ADD-V5 B1:
-     * the doctor and the Mods tab read it this way). */
-    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
-    CHECK(b.registries && !strstr(b.registries, "\"banks\""));
-    {
-        char served[4][SH_MBI_LEAF_MAX];
-        CHECK(sh_mbi_served_banks(&b, served, 4) == 1 && !strcmp(served[0], "doom_weapon_sp.bnk"));
-        CHECK(sh_mbi_served_banks(&b, served, 0) == 0 && sh_mbi_served_banks(NULL, served, 4) == 0);
-    }
-    sh_mb_free(&b);
+    /* Without the _sp sound decl, the build records no bank. */
     drop(SNDSP);
-    /* Without the _sp sound decl, nothing. */
+    sh_mb_set_bank_need(sh_mbi_bundle_need);
     CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
-    {
-        char served[4][SH_MBI_LEAF_MAX];
-        CHECK(sh_mbi_served_banks(&b, served, 4) == 0);
-    }
+    CHECK(b.registries == NULL || !strstr(b.registries, "\"banks\""));
     sh_mb_free(&b);
+    sh_mb_set_bank_need(NULL);
 
     /* A stock sound name is not a need; a mods/ one nobody provides is an error. */
     put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"play_arcade_ui_17\";\n\t}\n}\n");

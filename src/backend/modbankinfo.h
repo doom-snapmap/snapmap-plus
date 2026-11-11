@@ -88,14 +88,6 @@ void sh_mbi_get_stats(sh_mbi_stats *out);
  * sound decl named `decl_name` needs, else 0. */
 int sh_mbi_bundle_need(const char *decl_name, char *bank, size_t cap);
 
-/* The skipped banks a built bundle's sound decls need, as the serving side
- * derives them (modsound.c sh_modsound_needs_add_served): every file whose
- * request is generated/decls/sound/<name>.decl, carried or a stock pointer,
- * through sh_mbi_decl_needs, each bank once, in file order. For builds whose
- * block has no registries "banks" (made before the builder listed them).
- * Returns the number written to banks (at most max). */
-struct sh_mb_bundle;
-int sh_mbi_served_banks(const struct sh_mb_bundle *bd, char banks[][SH_MBI_LEAF_MAX], int max);
 
 /* ------------------------------------------------ per-process stock banks */
 

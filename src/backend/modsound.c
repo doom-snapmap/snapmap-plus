@@ -253,21 +253,6 @@ int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, con
     return added;
 }
 
-int sh_modsound_needs_add_served(sh_modsound_needs *t, const char *hash, const char *key, const char *request)
-{
-    static const char dir[] = "generated/decls/sound/";
-    char name[SH_MBI_EVENT_MAX], bank[SH_MODSOUND_LEAF_MAX];
-    size_t n;
-    if (!request || _strnicmp(request, dir, sizeof dir - 1)) return 0;
-    request += sizeof dir - 1;
-    n = strlen(request);
-    if (n <= 5 || n - 5 >= sizeof name || _stricmp(request + n - 5, ".decl")) return 0;
-    memcpy(name, request, n - 5);
-    name[n - 5] = 0;
-    if (sh_mbi_decl_needs(name, NULL, 0, bank, sizeof bank, NULL) != 1) return 0;
-    return sh_modsound_needs_add(t, hash, key, bank) == 1;
-}
-
 const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash)
 {
     int i;
@@ -810,42 +795,22 @@ static void ms_collect_file(void *context, const char *request, uint64_t size, c
     }
 }
 
-/* Stock-bank needs: the product block's "banks" and the served sound decls. */
-typedef struct ms_need_ctx { sh_modsound_needs *t; int sound_decls; } ms_need_ctx;
-
+/* Stock-bank needs: the "banks" the builder records in each build's block
+ * (every build records them: the game's builder and the store tool's
+ * conversion alike). */
 static void ms_need_registries(void *context, const char *id, const char *hash, const char *registries)
 {
-    ms_need_ctx *c = (ms_need_ctx *)context;
-    if (registries && strstr(registries, "\"banks\":[")) (void)sh_modsound_needs_add_registries(c->t, hash, id, registries);
-}
-
-static void ms_need_count(void *context, const char *request, uint64_t size, const char *bundle_id,
-                          const char *bundle_hash)
-{
-    (void)size; (void)bundle_id; (void)bundle_hash;
-    if (request && !_strnicmp(request, "generated/decls/sound/", 22)) ((ms_need_ctx *)context)->sound_decls++;
-}
-
-static void ms_need_served(void *context, const char *request, uint64_t size, const char *bundle_id,
-                           const char *bundle_hash)
-{
-    ms_need_ctx *c = (ms_need_ctx *)context;
-    (void)size;
-    (void)sh_modsound_needs_add_served(c->t, bundle_hash, bundle_id, request);
+    sh_modsound_needs *t = (sh_modsound_needs *)context;
+    if (registries && strstr(registries, "\"banks\":[")) (void)sh_modsound_needs_add_registries(t, hash, id, registries);
 }
 
 static void ms_rebuild_needs(void)
 {
     sh_modsound_needs *t = (sh_modsound_needs *)calloc(1, sizeof *t);
-    ms_need_ctx c;
     int i, banks = 0;
     if (!t) { ms_log("stock-bank needs refused (out of memory); the previous ones stay"); return; }
-    c.t = t;
-    c.sound_decls = 0;
-    sh_modserve_each_served(ms_need_count, &c);
-    /* The game's bank index is read only when a bundle has a sound decl or lists a bank. */
-    (void)sh_modserve_each_bundle_registries(ms_need_registries, &c);
-    if (c.sound_decls) sh_modserve_each_served(ms_need_served, &c);
+    /* The game's bank index is read only when a build lists a bank. */
+    (void)sh_modserve_each_bundle_registries(ms_need_registries, t);
     InterlockedExchangePointer((void *volatile *)&g_needs, t);   /* the old table is retired, never freed */
     for (i = 0; i < t->count; i++) banks += t->bundles[i].count;
     if (banks) {

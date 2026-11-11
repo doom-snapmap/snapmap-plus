@@ -49,8 +49,8 @@
  * event; an event filed only by a bank SnapMap's game-mode filter skips
  * (doom_weapon_sp.bnk on 13954591) fails to start until that bank is loaded.
  * Per build, the banks needed are the product block's registries "banks"
- * (the builder's list) together with what its served sound decls need now
- * (modbankinfo.h), each checked against the game's own bank index. At the
+ * (the builder's list, modbankinfo.h), each checked against the game's own
+ * bank index. At the
  * map pass (modserve_activate_bundles: main thread, before the level load),
  * each bank a declared build needs and this process has not asked for is
  * loaded through the call the per-bank wrapper makes once its filter passes:
@@ -182,9 +182,6 @@ int sh_modsound_needs_add(sh_modsound_needs *t, const char *hash, const char *ke
 /* Add every bank a registries object's "banks" array names. Returns the
  * number added. */
 int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, const char *key, const char *registries);
-/* Add what a served request needs when it is a sound decl
- * (generated/decls/sound/<name>.decl). Returns 1 when one was added. */
-int sh_modsound_needs_add_served(sh_modsound_needs *t, const char *hash, const char *key, const char *request);
 const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash);
 
 /* The banks whose file changed after the game loaded them this session:

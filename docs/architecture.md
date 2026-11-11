@@ -1454,8 +1454,8 @@ plasma fly-by and whiz-by among them). `modbankinfo.c` reads the game's
 `base\sound\soundbanks\pc\soundbanksinfo.xml` once, on the first question,
 and answers which skipped bank a sound decl's event needs (its name, else
 `play_` plus its last path component). The builder lists those banks as the
-product block's registries `"banks"`; the serving index adds what each
-bundle's served sound decls need, each checked against the game's index. At
+product block's registries `"banks"` (the game's builds and the store
+tool's conversion alike), each checked against the game's index. At
 the map pass `modsound.c` loads each bank a declared bundle needs, once per
 process: on the main thread inside process heap 0, through the call the
 per-bank wrapper makes once its filter passes (`operator new` and the cookie
