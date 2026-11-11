@@ -352,11 +352,12 @@ static void st_list(const st_scan *sc)
         st_say(0, "  strings\\strids.json: %s; fix it (a JSON object of \"id\": \"text\" pairs) or remove it", sc->lc.why);
     if (sc->lc.overrides_done) st_say(0, "  overrides\\: every entry is in mods\\; the folder goes to the Recycle Bin");
     if (sc->lc.strings_done) st_say(0, "  strings\\: nothing left to move; the folder goes to the Recycle Bin");
+    if (sc->cv.leftovers)
+        st_say(0, "  mods\\: %u item(s) an interrupted run left, to put right", sc->cv.leftovers);
     if (sc->cv.folders)
-        st_say(0, "  mods\\: %u mod folder(s) of an earlier release to convert to this version's shape (a salt, mods/<salt>/ "
-               "paths, strings named <salt>_<key>)", sc->cv.folders);
+        st_say(0, "  mods\\: %u mod folder(s) of an earlier release to convert to this version's shape", sc->cv.folders);
     if (sc->cv.duplicates)
-        st_say(0, "  mods\\: %u second build(s) of a mod that Snapmap+ made, to go to the Recycle Bin", sc->cv.duplicates);
+        st_say(0, "  mods\\: %u extra copies of a mod that Snapmap+ made, to go to the Recycle Bin", sc->cv.duplicates);
     if (sc->cv.folders_left)
         st_say(0, "  mods\\: %u folder(s) left as they were by an earlier run (they could not be converted)", sc->cv.folders_left);
     if (sc->cv.builds_dir) st_say(0, "  mods\\.builds\\: the retired last good builds; the folder goes to the Recycle Bin");
@@ -489,7 +490,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
+    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
@@ -562,7 +563,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         sh_conv_stats cs;
         st_store *ws = (st_store *)s;
         memset(&cs, 0, sizeof cs);
-        if ((before.cv.folders || before.layout_work || before.cv.maps) && doom && !ws->stock) {
+        if ((before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && doom && !ws->stock) {
             if (!doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
@@ -571,13 +572,13 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             ws->stock = 1;
         }
         st_conv_opts(ws, &o);
-        if (before.cv.folders || before.cv.duplicates || before.layout_work) {
+        if (before.cv.folders || before.cv.duplicates || before.cv.leftovers || before.layout_work) {
             /* (a folder the layout upgrade just wrote is beta.26's shape) */
             sh_conv_folders(&o, &cs);
             if (cs.waiting) need_doom = 1;
             if (cs.converted || cs.refused || cs.removed)
-                st_part(done, sizeof done, "%u mod folder(s) converted, %u left as they were, %u second build(s) removed",
-                        cs.converted, cs.refused, cs.removed);
+                st_part(done, sizeof done, "%u mod folder(s) converted (%u of them do not build yet), %u left as they were, "
+                        "%u extra copies removed", cs.converted, cs.failed, cs.refused, cs.removed);
         }
         sh_conv_maps(&o, &cs);
         if (cs.maps_converted || cs.maps_refused)

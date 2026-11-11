@@ -34,6 +34,7 @@
 #include "mod_test_util.h"
 #include "mod_stock_fixture.h"
 #include "store_lock.h"
+#include "modbundle_old.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -246,7 +247,8 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  removed-mods: alex.gone moved to the stand-in bin"));
     CHECK(said("  removed-mods: 1 folder(s) moved to the stand-in bin; the bin is retired"));
     CHECK(said("  overrides\\: not moved yet: it needs the DOOM folder"));
-    CHECK(said("  mods\\: 1 folder(s) of an earlier release are not converted yet: building them needs the DOOM folder"));
+    CHECK(said("  mods\\: 1 folder(s) of an earlier release are not converted yet, because building them needs the DOOM "
+               "folder"));
     CHECK(said("Partly done: the store layout upgraded, removed-mods\\ retired"));
     CHECK(said("Some items are left; close DOOM and run: snapmap-plus migrate"));
     CHECK(said("--doom \"<DOOM folder>\""));
@@ -281,8 +283,9 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  overrides\\: moving into mods\\, reading game files from "));
     CHECK(said("2 file(s), 1 of them stock pointer(s) to installed content"));
     CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused), "
-               "1 retired folder(s) moved to the stand-in bin, 1 mod folder(s) converted, 0 left as they were"));
-    CHECK(said("  mods\\alex.tiny: converted: old key alex.tiny, salt "));
+               "1 retired folder(s) moved to the stand-in bin, 1 mod folder(s) converted (0 of them do not build yet), 0 "
+               "left as they were"));
+    CHECK(said("  mods\\alex.tiny: converted (it was alex.tiny; its salt is now "));
     {
         /* The converted folder: format 2, salted, its files under mods/<salt>/, built and verified. */
         sh_mb_bundle t1;
@@ -474,7 +477,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
                                  "  \"strings\": {\"en\": {\"sh_a\": \"Mine A\", \"sh_mine\": \"Mine\"}}\n}\n");
     mt_write(folder, MO_DECL, DECL_MINE);
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\my-overrides: converted: old key my-overrides, salt "));
+    CHECK(said("  mods\\my-overrides: converted (it was my-overrides; its salt is now "));
     CHECK(said("migration: kept my-overrides' assets/generated/decls/entitydef/mods/my-overrides/x.decl; the copy in "
                "overrides\\ differs and was not taken"));
     CHECK(said("migration: kept my-overrides' sh_a; strings\\strids.json said \"Other\""));
@@ -721,7 +724,7 @@ static void test_beta26(const char *fixture, const char *tmp)
 
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
     CHECK(said("  mods\\: 2 mod folder(s) of an earlier release to convert"));
-    CHECK(said("  mods\\: 2 second build(s) of a mod that Snapmap+ made"));
+    CHECK(said("  mods\\: 2 extra copies of a mod that Snapmap+ made"));
     CHECK(said("  mods\\.builds\\: the retired last good builds"));
     CHECK(said("  mods\\snapmap-plus.json: retired section(s) cache, aliases, snapshots"));
     CHECK(said("  4 saved map(s), rawmap or prefab file(s) of an earlier release to convert"));
@@ -731,11 +734,12 @@ static void test_beta26(const char *fixture, const char *tmp)
     if (bin_before) snapshot(path, "", bin_before, 1 << 16);
 
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\alex.beta: converted: old key alex.beta, salt "));
-    CHECK(said("  mods\\alex.bin: left as it was: This mod folder is not in a shape Snapmap+ can build: "
+    CHECK(said("  mods\\alex.beta: converted (it was alex.beta; its salt is now "));
+    /* A folder the salting refuses is still written in the one shape, its build failed with the plain cause. */
+    CHECK(said("  mods\\alex.bin: converted (it was alex.bin; its salt is now ") && said("but it does not build yet: "
                "assets/generated/image/mods/alex.bin/x.bimage names mods/alex.bin/ inside a binary file"));
-    CHECK(said("  mods\\alex.beta@0123456789abcdef: a second build of alex.beta that Snapmap+ made; moved to the stand-in bin"));
-    CHECK(said("  mods\\downloads\\Old Map\\alex.beta: a second build of alex.beta that Snapmap+ made"));
+    CHECK(said("  mods\\alex.beta@0123456789abcdef: an extra copy of alex.beta that Snapmap+ made, moved to the stand-in bin"));
+    CHECK(said("  mods\\downloads\\Old Map\\alex.beta: an extra copy of alex.beta that Snapmap+ made"));
     CHECK(said("SNAPMAPS00000000000000000001\\map.decl: converted"));
     CHECK(said("SNAPMAPS00000000000000000002\\map.decl: left as it was: it uses nobody.else, which no installed mod folder "
                "provides"));
@@ -768,10 +772,17 @@ static void test_beta26(const char *fixture, const char *tmp)
     CHECK(!mt_exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.builds", mods);
     CHECK(!mt_exists(path) && in_bin(".builds"));
-    /* The unconvertible folder is exactly as it was. */
+    /* The folder the salting refused: in the one shape with a salt, its build failed with the cause, its files unchanged. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bin", mods);
-    if (bin_after) snapshot(path, "", bin_after, 1 << 16);
-    CHECK(bin_before && bin_after && !strcmp(bin_before, bin_after));
+    CHECK(!sh_mb_old_is_old(path));
+    t = text_of(path, "mod.json");
+    CHECK(t && strstr(t, "\"format\": 2") && strstr(t, "\"salt\"") && strstr(t, "\"cause\"") &&
+          strstr(t, "inside a binary file") && !strstr(t, "\"id\"") && !strstr(t, "the folder is unchanged"));
+    free(t);
+    t = text_of(path, "assets\\generated\\image\\mods\\alex.bin\\x.bimage");
+    CHECK(t != NULL);
+    free(t);
+    (void)bin_after;
     /* The record: old key and every old build hash to the salt; no retired section. */
     CHECK(sh_mb_record_get(mods, "converted", &record) == 1 && record);
     if (record && salt[0]) {
@@ -788,7 +799,7 @@ static void test_beta26(const char *fixture, const char *tmp)
         CHECK(strstr(record, want));
         _snprintf_s(want, sizeof want, _TRUNCATE, "\"" H5 "\":\"%s\"", salt);
         CHECK(strstr(record, want));
-        CHECK(strstr(record, "\"refused\":{\"alex.bin\":"));
+        CHECK(!strstr(record, "\"refused\"") && !strstr(record, "\"pending\"") && strstr(record, "\"alex.bin\":\""));
     }
     free(record);
     record = NULL;
@@ -842,8 +853,7 @@ static void test_beta26(const char *fixture, const char *tmp)
 
     /* A second run does nothing: what was left is listed, not work. */
     CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
-    CHECK(said("  mods\\: 1 folder(s) left as they were by an earlier run") &&
-          said("  1 map(s) left as they were by an earlier run"));
+    CHECK(!said("folder(s) left as they were") && said("  1 map(s) left as they were by an earlier run"));
     before = (char *)calloc(1, 1 << 20);
     after = (char *)calloc(1, 1 << 20);
     if (before && after) {
@@ -853,16 +863,207 @@ static void test_beta26(const char *fixture, const char *tmp)
         snapshot(data, "", after, 1 << 20);
         CHECK(!strcmp(before, after) && g_discards == discards);
     }
-    /* A left folder fixed by its author is work again. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bin", mods);
-    mt_delete(path, "assets\\generated\\image\\mods\\alex.bin\\x.bimage");
-    mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.bin\\b.decl", "{\n\tsize = \"2\";\n}\n");
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 mod folder(s) of an earlier release to convert"));
-    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("  mods\\alex.bin: converted: old key alex.bin"));
+    /* An earlier-shape folder copied in after the conversion (DECISIONS 21): the next run converts it alone. */
+    if (before && after) {
+        before[0] = after[0] = 0;
+        snapshot(mods, "", before, 1 << 20);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\late", mods);
+        mt_write(path, "mod.json", "{\n  \"id\": \"alex.late\",\n  \"name\": \"Late\"\n}\n");
+        mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.late\\l.decl", "{\n\tsize = \"3\";\n}\n");
+        mt_write(path, "README.txt", "mods/alex.late/ is where my files are\n");
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 mod folder(s) of an earlier release to convert"));
+        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("  mods\\late: converted (it was alex.late;"));
+        CHECK(!said("alex.beta") && !said("alex.bin"));
+        t = text_of(path, "README.txt");   /* a file beside the mod is never read or rewritten (DECISIONS 16) */
+        CHECK(t && !strcmp(t, "mods/alex.late/ is where my files are\n"));
+        free(t);
+        snapshot(mods, "", after, 1 << 20);
+        {
+            /* Every line of the earlier listing is still there unchanged, except the record. */
+            char *line = before, *nl;
+            for (; *line; line = nl + 1) {
+                nl = strchr(line, '\n');
+                if (!nl) break;
+                *nl = 0;
+                if (!strstr(line, "snapmap-plus.json")) CHECK(strstr(after, line) != NULL);
+                *nl = '\n';
+            }
+        }
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    }
     free(before);
     free(after);
     free(bin_before);
     free(bin_after);
+    sh_store_tool_set_saves(L"");
+    sh_modstock_reset();
+}
+
+static char *record_section(const char *mods)
+{
+    char *r = NULL;
+    if (sh_mb_record_get(mods, "converted", &r) != 1) { free(r); r = NULL; }
+    return r;
+}
+
+/* DECISIONS 14, 15 and 16: a run stopped part way resumes and loses nothing; of
+ * two folders of one old key the one named after it keeps the key's maps;
+ * banks are named for the salt. */
+static void test_interrupted(const char *fixture, const char *tmp)
+{
+    char data[MAX_PATH], doom[MAX_PATH], mods[MAX_PATH * 2], saves[MAX_PATH * 2], path[MAX_PATH * 2], p2[MAX_PATH * 2];
+    char salt[16] = "", want[160], *rec, *t;
+    wchar_t wsaves[MAX_PATH * 2];
+    sh_mb_bundle b;
+    int signed_ok = 0;
+    printf("-- an interrupted run resumes and loses nothing; copies; sound banks\n");
+    _snprintf_s(data, sizeof data, _TRUNCATE, "%s\\cut", tmp);
+    _snprintf_s(doom, sizeof doom, _TRUNCATE, "%s\\doom", tmp);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", data);
+    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\savegame.cut", tmp);
+    mt_remove_tree(data);
+    mt_remove_tree(saves);
+    make_doom(fixture, doom);
+    MultiByteToWideChar(CP_UTF8, 0, saves, -1, wsaves, MAX_PATH * 2);
+    sh_store_tool_set_saves(wsaves);
+
+    /* 1. Stopped between the two renames of a folder: the folder as it was is beside a staged copy. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.beta.old-999999", mods);
+    b26_folder(path, H1, 1790000000, NULL);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.beta.staging-999999", mods);
+    mt_write(path, "mod.json", "{\"name\": \"half\"}");
+    b26_slot(saves, "SNAPMAPS00000000000000000003", B26_MAP("alex.beta", H1));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("  mods\\: 2 item(s) an interrupted run left"));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("alex.beta: put back as it was before an interrupted run") &&
+          said("  mods\\alex.beta: converted (it was alex.beta; its salt is now "));
+    CHECK(!mt_exists(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.beta", mods);
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(path, &b) && sh_salt_valid(b.id, strlen(b.id)));
+    strcpy_s(salt, sizeof salt, b.id);
+    sh_mb_free(&b);
+    t = b26_slot_text(saves, "SNAPMAPS00000000000000000003", &signed_ok);
+    CHECK(t && signed_ok && salt[0] && strstr(t, salt));
+    free(t);
+
+    /* 2. Stopped after the swap, before the folder's row moved from "pending": the next run commits it. */
+    _snprintf_s(want, sizeof want, _TRUNCATE, "{\"pending\":{\"alex.beta\":\"%s alex.beta " H1 "\"}}", salt);
+    CHECK(sh_mb_record_put(mods, "converted", want));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 item(s) an interrupted run left"));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    rec = record_section(mods);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"alex.beta\":\"%s\"", salt);
+    CHECK(rec && strstr(rec, want) && !strstr(rec, "pending"));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"" H1 "\":\"%s\"", salt);
+    CHECK(rec && strstr(rec, want));
+    free(rec);
+
+    /* 3. A saved map stopped between its map.decl and its signature: the next run puts the signature in place. */
+    b26_slot(saves, "SNAPMAPS00000000000000000004", B26_MAP("alex.beta", H1));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("SNAPMAPS00000000000000000004\\map.decl: converted"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" B26_ACCOUNT "\\SNAPMAPS00000000000000000004\\map.decl.verify", saves);
+    _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s.snapmap-plus-tmp", path);
+    CHECK(MoveFileExA(path, p2, 0));
+    strcat_s(path, sizeof path, SH_CONV_BACKUP_SUFFIX);
+    {
+        char sig[MAX_PATH * 2];
+        _snprintf_s(sig, sizeof sig, _TRUNCATE, "%s\\" B26_ACCOUNT "\\SNAPMAPS00000000000000000004\\map.decl.verify", saves);
+        CHECK(CopyFileA(path, sig, FALSE));   /* the old signature beside the new map: it does not verify */
+    }
+    t = b26_slot_text(saves, "SNAPMAPS00000000000000000004", &signed_ok);
+    CHECK(t && !signed_ok);
+    free(t);
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("its signature, which an interrupted run had not put "
+                                                                      "in place, is in place"));
+    t = b26_slot_text(saves, "SNAPMAPS00000000000000000004", &signed_ok);
+    CHECK(t && signed_ok && strstr(t, salt));
+    free(t);
+    CHECK(!mt_exists(p2));
+    /* Stopped before map.decl was put in place: the temporaries go and the map converts. */
+    b26_slot(saves, "SNAPMAPS00000000000000000005", B26_MAP("alex.beta", H1));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" B26_ACCOUNT "\\SNAPMAPS00000000000000000005", saves);
+    mt_write(path, "map.decl.snapmap-plus-tmp", "half");
+    mt_write(path, "map.decl.verify.snapmap-plus-tmp", "half");
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("SNAPMAPS00000000000000000005\\map.decl: converted"));
+    t = b26_slot_text(saves, "SNAPMAPS00000000000000000005", &signed_ok);
+    CHECK(t && signed_ok && strstr(t, salt));
+    free(t);
+    _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\map.decl.snapmap-plus-tmp", path);
+    CHECK(!mt_exists(p2));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+
+    /* 4. An Explorer copy whose name sorts first: the folder named after the key keeps the key's maps. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.zed", mods);
+    mt_write(path, "mod.json", "{\n  \"id\": \"alex.zed\",\n  \"name\": \"Zed\"\n}\n");
+    mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.zed\\z.decl", "{\n\tsize = \"4\";\n}\n");
+    _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\a copy of zed", mods);
+    CHECK(copy_all(path, p2));
+    /* 5. A sound bank named for the old key. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bank", mods);
+    mt_write(path, "mod.json", "{\n  \"id\": \"alex.bank\",\n  \"name\": \"Bank\"\n}\n");
+    {
+        unsigned char bnk[24] = { 'B', 'K', 'H', 'D', 16, 0, 0, 0, 0x71, 0, 0, 0 };
+        uint32_t id = sh_mb_fnv1_lower("alex_bank_music", 15);
+        FILE *f = NULL;
+        char bp[MAX_PATH * 2];
+        memcpy(bnk + 12, &id, 4);
+        _snprintf_s(bp, sizeof bp, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc\\alex_bank_music.bnk", path);
+        mt_mkdirs_for(bp);
+        if (fopen_s(&f, bp, "wb") == 0 && f) { fwrite(bnk, 1, sizeof bnk, f); fclose(f); }
+    }
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    rec = record_section(mods);
+    {
+        sh_mb_bundle z;
+        memset(&z, 0, sizeof z);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.zed", mods);
+        CHECK(sh_mb_load_folder(path, &z) && sh_salt_valid(z.id, strlen(z.id)));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"alex.zed\":\"%s\"", z.id);
+        CHECK(rec && strstr(rec, want));
+        sh_mb_free(&z);
+    }
+    free(rec);
+    {
+        char bsalt[SH_SALT_LEN + 1] = "", bp[MAX_PATH * 2], stem[64];
+        unsigned char *bytes;
+        size_t n = 0;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bank", mods);
+        t = text_of(path, "mod.json");
+        if (t && strstr(t, "\"salt\": \"")) memcpy(bsalt, strstr(t, "\"salt\": \"") + 9, SH_SALT_LEN);
+        free(t);
+        CHECK(sh_salt_valid(bsalt, strlen(bsalt)));
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s_music", bsalt);
+        _snprintf_s(bp, sizeof bp, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc\\%s.bnk", path, stem);
+        bytes = sh_mb_read_file(bp, 4096, &n);
+        CHECK(bytes && n == 24);
+        if (bytes && n == 24) {
+            uint32_t id;
+            memcpy(&id, bytes + 12, 4);
+            CHECK(id == sh_mb_fnv1_lower(stem, strlen(stem)));
+        }
+        free(bytes);
+        _snprintf_s(bp, sizeof bp, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc\\alex_bank_music.bnk", path);
+        CHECK(!mt_exists(bp));
+    }
+    /* 6. A folder that cannot build (a new name outside its namespace, as the owner's cyberdemon boss): written in
+     * the one shape, its build failed, the cause naming the file and where it must go under the real salt. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber", mods);
+    mt_write(path, "mod.json", "{\n  \"id\": \"alex.cyber\",\n  \"name\": \"Cyber\"\n}\n");
+    mt_write(path, "assets\\generated\\decls\\animweb\\zion\\snapmap\\cyber_boss.decl", "{\n}\n");
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("  mods\\cyber: converted (it was alex.cyber; its salt is now ") && said("but it does not build yet: "));
+    CHECK(!sh_mb_old_is_old(path));
+    t = text_of(path, "mod.json");
+    if (t && strstr(t, "\"salt\": \"")) {
+        char csalt[SH_SALT_LEN + 1] = "", under[64];
+        memcpy(csalt, strstr(t, "\"salt\": \"") + 9, SH_SALT_LEN);
+        _snprintf_s(under, sizeof under, _TRUNCATE, "mods/%s/", csalt);
+        CHECK(strstr(t, "\"cause\"") && strstr(t, "cyber_boss") && strstr(t, under) && !strstr(t, "\"build\""));
+    } else CHECK(0);
+    free(t);
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
     sh_store_tool_set_saves(L"");
     sh_modstock_reset();
 }
@@ -964,6 +1165,7 @@ int main(int argc, char **argv)
     test_loose_layer(fixture, tmp);
     test_link_failures(fixture, tmp);
     test_beta26(fixture, tmp);
+    test_interrupted(fixture, tmp);
     test_errors(fixture, tmp);
     test_recycle_refusals();
     test_store_lock(tmp);
