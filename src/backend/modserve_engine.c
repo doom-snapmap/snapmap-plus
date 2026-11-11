@@ -1313,6 +1313,9 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
         }
         {
             int refused;
+            /* Its default tree follows the bytes it is parsed from now, the
+             * build the open map serves (a refresh, a map's own copy). */
+            sh_modtypeinfo_decl_changed(type, name);
             me_load_in_place(d, "reparse", type, name);
             state = d[RES_STATE_OFF];
             refused = me_refused(before, type, name);
@@ -1640,7 +1643,6 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
     if (it->kind == SH_MODSERVE_RF_ANIM && !g_anim_pass) { if (!c->stage) c->anims_waiting++; return 0; }
     if (it->kind == SH_MODSERVE_RF_DECL) {
         int before = c->decls.reparsed + c->decls.faulted;
-        sh_modtypeinfo_decl_changed(it->type, it->name);   /* its default tree follows the new bytes */
         (void)me_reparse_one(&c->decls, it->type, it->name, it->request, it->bundle_id);
         if (c->decls.reparsed + c->decls.faulted == before) c->not_held++;   /* its next parse reads the current bytes */
         return 1;

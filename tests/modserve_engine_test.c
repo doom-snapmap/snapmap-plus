@@ -268,9 +268,28 @@ static void test_held_model_kept(void)
     CHECK(m->loads == 1 && m->lifetime == 4 && sh_modserve_kept_has(m) && r.reloaded == 1 && !r.failed);
 }
 
+/* Every re-parse of a decl drops its default type-info tree, whichever path
+ * asks for it (a refresh, a map that serves its own copy of the salt, the
+ * early shadows), so the tree follows the bytes the open map serves. */
+static void test_reparse_drops_type_info(void)
+{
+    fe_res *def;
+    me_reparse r;
+    fe_reset();
+    def = fe_add("mods/abcdefgh/imp_blue", 1, 0);
+    memset(&r, 0, sizeof r);
+    g_typeinfo_dropped = 0;
+    fe_heap_push(g_memlocal, 0);
+    CHECK(me_reparse_one(&r, "entityDef", def->name, "generated/decls/entitydef/mods/abcdefgh/imp_blue.decl",
+                         "abcdefgh") == 1);
+    fe_heap_pop(g_memlocal);
+    CHECK(r.reparsed == 1 && def->loads == 1 && g_typeinfo_dropped == 1);
+}
+
 int main(void)
 {
     test_op_load_levels();
+    test_reparse_drops_type_info();
     test_keep_ref_map_heap();
     test_held_model_kept();
     if (g_failed) {

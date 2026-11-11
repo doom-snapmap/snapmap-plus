@@ -2449,7 +2449,14 @@ gated by the requirements of the build that serves its path for the listing
 winner's: with two builds of one salt installed (the root and a place) the
 winner of a path both carry can be the build the open map, or the Toybox, does
 not use, whose requirements are off, and gating on it blocked every row of the
-salt. A `mod.json` `"scope"` key is a retired key: the folder is refused. Per path,
+salt. The same holds for every per-path decision: a plan's order and blocking
+and the holds by name read the needs of the build that serves the path for the
+open map (`ms_serving_file`), so a map that brought its own copy of a salt
+keeps what its copy needs, never the root folder's; the editor closure, marked
+once per index before any map is open, follows the needs of every build of
+the salt; and a re-parse of an entityDef drops its default type-info tree
+whatever asked for it, so the tree follows the bytes now served. A `mod.json`
+`"scope"` key is a retired key: the folder is refused. Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the
 root folder's build first for one salt, index order for

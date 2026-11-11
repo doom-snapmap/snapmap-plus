@@ -4090,6 +4090,79 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
 }
 
+/* Two builds of one salt whose shared paths need different things: the
+ * root folder's md6Def needs skeleton A, a map's own copy needs skeleton B and
+ * a decl only that copy carries. With the map that brought its copy open, the
+ * holds by name keep B (not A) and the plan orders the copy's needs first; with
+ * no map the root folder's needs answer. */
+#define C3_MD6 "generated/decls/md6def/mods/c3mod000/body.md6.decl"
+#define C3_ENT "generated/decls/entitydef/mods/c3mod000/thing.decl"
+#define C3_DEP "generated/decls/entitydef/mods/c3mod000/dep.decl"
+static void test_serving_build_needs(void)
+{
+    static const fx_file root_files[] = {
+        { C3_MD6, "md6Def body { a }", -1, "md6Def", "mods/c3mod000/body.md6",
+          "[{\"type\":\"skeleton\",\"name\":\"md6/stock/a.md6skl\"}]", '1' },
+        { C3_ENT, "entityDef thing { a }", -1, "entityDef", "mods/c3mod000/thing",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/c3mod000/body.md6\"}]", '2' },
+    };
+    static const fx_file place_files[] = {
+        { C3_MD6, "md6Def body { b }", -1, "md6Def", "mods/c3mod000/body.md6",
+          "[{\"type\":\"skeleton\",\"name\":\"md6/stock/b.md6skl\"},"
+          "{\"type\":\"entityDef\",\"name\":\"mods/c3mod000/dep\"}]", '3' },
+        { C3_ENT, "entityDef thing { b }", -1, "entityDef", "mods/c3mod000/thing",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/c3mod000/body.md6\"}]", '4' },
+        { C3_DEP, "entityDef dep {}", -1, "entityDef", "mods/c3mod000/dep", NULL, '5' },
+    };
+    static kh_res body, ska, skb;
+    static kh_res *md6s[2], *skels[2];
+    static kh_list ld, ls;
+    kh_list *head = &ld;
+    char top[MAX_PATH], root[MAX_PATH], hroot[65], hplace[65], *slash;
+    const char *list[1];
+    sh_modserve_holds h;
+    sh_modserve_plan plan;
+    printf("-- two builds of one salt: holds and plans follow the build the open map serves\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\servingbuild\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "c3 mod", "c3mod000", NULL, '6', NULL, root_files, 2, "{\"installedAt\": 200}");
+    make_bundle(root, "maps\\C3 map\\c3 mod", "c3mod000", NULL, '7', NULL, place_files, 3, "{\"installedAt\": 100}");
+    hash64('6', hroot); hash64('7', hplace);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 2);
+    ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &ls; ld.entries = md6s; ld.count = 1;
+    ls.type = "skeleton"; ls.cls = "idMD6Skel"; ls.next = NULL; ls.entries = skels; ls.count = 2;
+    body.name = "mods/c3mod000/body.md6"; md6s[0] = &body;
+    ska.name = "md6/stock/a.md6skl"; skb.name = "md6/stock/b.md6skl"; skels[0] = &ska; skels[1] = &skb;
+    sh_modserve_attrib_reset();
+    sh_modserve_scope_enable(1);
+
+    /* The map that brought its own copy is open: its build serves the path. */
+    CHECK(sh_modserve_scope_set_place("maps\\C3 map", 0) >= 0);
+    list[0] = hplace;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    body.level = 4; ska.level = 1; skb.level = 1;
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1);
+    CHECK(skb.level == 4 && ska.level == 1);
+    CHECK(sh_modserve_plan_bundles(list, 1, &plan, NULL) >= 3);
+    CHECK(step_index(&plan, "entityDef", "mods/c3mod000/dep") >= 0 &&
+          step_index(&plan, "entityDef", "mods/c3mod000/dep") < step_index(&plan, "md6Def", "mods/c3mod000/body.md6"));
+    CHECK(step_index(&plan, "md6Def", "mods/c3mod000/body.md6") < step_index(&plan, "entityDef", "mods/c3mod000/thing"));
+    sh_modserve_plan_free(&plan);
+
+    /* No map: the root folder's build answers. */
+    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    ska.level = 1; skb.level = 1;
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1);
+    CHECK(ska.level == 4 && skb.level == 1);
+    sh_modserve_scope_enable(0);
+    sh_modserve_attrib_reset();
+}
+
 /* Two builds of one salt, both with requirements (V1 run 2, in the one
  * shape: the root folder's build and a map's place holding an older one).
  * Paths whose bytes the two builds share have one static winner; every step
@@ -5223,6 +5296,7 @@ int main(void)
     test_additive_determinism();
     test_additive_same_key();
     test_two_builds_requirements();
+    test_serving_build_needs();
     test_additive_compose();
     test_salt_and_place();
     test_resource_lock();

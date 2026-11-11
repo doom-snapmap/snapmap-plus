@@ -2243,27 +2243,37 @@ static void ms_resolve_needs(ms_index *x)
  * map pass already registered (R315 live: an open map's activation had made
  * the keycard md6Def a new row attaches, at level 1, and the keeper could
  * only raise the decl, not its model). Needs are closed under this mark, so a
- * closure decl's parents and models are in it too. */
+ * closure decl's parents and models are in it too. A path two builds of one
+ * salt carry (the root folder and a map's place) is marked on its winner, and
+ * the needs of every build of it are followed: the mark is made once per
+ * index, before any map says which build it serves. */
 static void ms_mark_editor_closure(ms_index *x)
 {
-    int *queue, nq = 0, qh = 0, i, k;
+    int *queue, nq = 0, qh = 0, i, k, a;
     if (!x->nfiles) return;
     queue = (int *)malloc(sizeof(int) * (size_t)x->nfiles);
     if (!queue) return;
     for (i = 0; i < x->nfiles; ++i) {
-        ms_file *f = &x->files[i];
-        if (f->served && x->bundles[f->bundle].admitted && (f->is_sedef || x->bundles[f->bundle].has_rows)) {
-            f->editor_closure = 1;
-            queue[nq++] = i;
-        }
+        const ms_file *f = &x->files[i];
+        int w = f->served ? i : f->alt_of;
+        if (w >= 0 && w != i && strcmp(x->bundles[x->files[w].bundle].id, x->bundles[f->bundle].id)) w = -1;
+        if (w < 0 || x->files[w].editor_closure || !x->bundles[f->bundle].admitted ||
+            !(f->is_sedef || x->bundles[f->bundle].has_rows))
+            continue;
+        x->files[w].editor_closure = 1;
+        queue[nq++] = w;
     }
     while (qh < nq) {
-        const ms_file *f = &x->files[queue[qh++]];
-        for (k = 0; k < f->need_count; ++k) {
-            int p = x->needs[f->need_first + k].file;
-            if (p < 0 || x->files[p].editor_closure || !x->files[p].served) continue;
-            x->files[p].editor_closure = 1;
-            queue[nq++] = p;
+        const ms_file *w = &x->files[queue[qh++]];
+        for (a = -1; a < w->alt_count; ++a) {
+            const ms_file *f = a < 0 ? w : &x->files[x->alts[w->alt_first + a]];
+            if (f != w && strcmp(x->bundles[f->bundle].id, x->bundles[w->bundle].id)) continue;
+            for (k = 0; k < f->need_count; ++k) {
+                int p = x->needs[f->need_first + k].file;
+                if (p < 0 || x->files[p].editor_closure || !x->files[p].served) continue;
+                x->files[p].editor_closure = 1;
+                queue[nq++] = p;
+            }
         }
     }
     free(queue);
@@ -2279,6 +2289,16 @@ static int ms_scoped(const ms_index *x, int f)
 {
     if (!InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
     return (int)InterlockedCompareExchange((volatile LONG *)&x->files[f].scope_alt, 0, 0);
+}
+
+/* The file whose recorded needs describe winner `f` for the open map: the
+ * build that serves its path now (a map's own copy of a salt, not the root
+ * folder's), or `f` itself when nothing serves the path in this scope (the
+ * engine may still hold what an earlier scope parsed). */
+static const ms_file *ms_serving_file(const ms_index *x, int f)
+{
+    int s = ms_scoped(x, f);
+    return &x->files[s >= 0 ? s : f];
 }
 
 /* The composed text a file serves instead of its own bytes, or NULL: the
@@ -4380,18 +4400,21 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     if (!in_plan || !queue || !cause) goto oom;
     for (i = 0; i < nf; ++i)
         if (root_mark[i]) { in_plan[i] = 1; queue[nq++] = i; }
+    /* Every step's needs are those of the build that serves its path for the
+     * open map (ms_serving_file); a step is still named by the path's winner. */
     while (qh < nq) {
-        const ms_file *f = &x->files[queue[qh++]];
+        int at = queue[qh++];
+        const ms_file *f = ms_serving_file(x, at);
         for (k = 0; k < f->need_count; ++k) {
             const ms_need *nd = &x->needs[f->need_first + k];
             int p = nd->file;
             if (p < 0) {
-                if (ms_need_blocks(nd->name) && !cause[f - x->files]) {
+                if (ms_need_blocks(nd->name) && !cause[at]) {
                     char buf[MS_CAUSE_MAX];
                     _snprintf_s(buf, sizeof buf, _TRUNCATE, "needs %s '%s', which no admitted bundle provides",
                                 nd->type, nd->name);
-                    cause[f - x->files] = ms_strdup((ms_index *)x, buf);
-                    if (!cause[f - x->files]) cause[f - x->files] = "needs a missing mod identity";
+                    cause[at] = ms_strdup((ms_index *)x, buf);
+                    if (!cause[at]) cause[at] = "needs a missing mod identity";
                 }
                 continue;
             }
@@ -4402,7 +4425,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     do {
         changed = 0;
         for (i = 0; i < nf; ++i) {
-            const ms_file *f = &x->files[i];
+            const ms_file *f = ms_serving_file(x, i);
             if (!in_plan[i] || cause[i]) continue;
             for (k = 0; k < f->need_count; ++k) {
                 const ms_need *nd = &x->needs[f->need_first + k];
@@ -4424,8 +4447,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     step_of = (int *)malloc(sizeof(int) * ((size_t)nf + 1));
     if (!order || !indeg || !step_of) goto oom;
     for (i = 0; i < nf; ++i) {
-        const ms_file *f = &x->files[i];
+        const ms_file *f;
         if (!in_plan[i]) continue;
+        f = ms_serving_file(x, i);
         for (k = 0; k < f->need_count; ++k) {
             int p = x->needs[f->need_first + k].file;
             if (p >= 0 && p != i && in_plan[p]) indeg[i]++;
@@ -4444,7 +4468,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         order[n++] = best;
         /* Release the steps that needed this one. */
         for (i = 0; i < nf; ++i) {
-            const ms_file *f = &x->files[i];
+            const ms_file *f = ms_serving_file(x, i);
             if (in_plan[i] != 1) continue;
             for (k = 0; k < f->need_count; ++k) {
                 int p = x->needs[f->need_first + k].file;
@@ -5404,7 +5428,11 @@ done:
 /* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
  * type case-insensitive, the name folded as the raw-name match folds it
  * (case, a backslash as '/', '-' as '_'). */
-typedef struct ms_hold { const char *type, *name; int file; } ms_hold;
+typedef struct ms_hold {
+    const char *type, *name;
+    int file;              /* the file that describes it for the open map, or -1 */
+    int live;              /* that file serves its path in the open map's scope */
+} ms_hold;
 
 static char ms_hold_fold(char c)
 {
@@ -5481,13 +5509,16 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     queue = (int *)malloc(sizeof *queue * (size_t)x->nfiles);
     if (!cands || !w.root || !queue) goto done;
     /* The roots: decls of admitted bundles the product serves (a surface is
-     * the game's own decl, kept at the game's level). */
+     * the game's own decl, kept at the game's level), each described by the
+     * build that serves its path for the open map (ms_serving_file): a map
+     * that brought its own copy of a salt holds what that copy needs. */
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
         if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
         cands[nc].type = f->ptype;
         cands[nc].name = f->pname;
-        cands[nc].file = i;
+        cands[nc].file = (int)(ms_serving_file(x, i) - x->files);
+        cands[nc].live = 1;
         nc++;
     }
     if (nc > 1) qsort(cands, nc, sizeof *cands, ms_hold_cmp);
@@ -5510,12 +5541,18 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
             }
             set[ns].type = nd->type;
             set[ns].name = nd->name;
-            set[ns].file = nd->file;
-            ns++;
-            if (nd->file >= 0 && nd->file < x->nfiles && !w.root[nd->file]) {
-                w.root[nd->file] = 1;
-                queue[nq++] = nd->file;
+            set[ns].file = -1;
+            set[ns].live = 0;
+            if (nd->file >= 0 && nd->file < x->nfiles) {
+                int s = ms_scoped(x, nd->file), p = s >= 0 ? s : nd->file;
+                set[ns].file = p;
+                set[ns].live = s >= 0;
+                if (!w.root[p]) {
+                    w.root[p] = 1;
+                    queue[nq++] = p;
+                }
             }
+            ns++;
         }
     }
     if (ns > 1) qsort(set, ns, sizeof *set, ms_hold_cmp);
@@ -5640,8 +5677,7 @@ int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn,
     if (!models) goto done;
     for (i = 0; i < ns; ++i)
         if (!_stricmp(set[i].type, SH_MODSERVE_HELD_MODEL_TYPE) && set[i].file >= 0 && set[i].file < x->nfiles &&
-            x->files[set[i].file].served && x->bundles[x->files[set[i].file].bundle].admitted &&
-            ms_scoped(x, set[i].file) >= 0)
+            set[i].live && x->bundles[x->files[set[i].file].bundle].admitted)
             models[nm++] = set[i];
     visited = 0;
     if (!nm) goto done;
