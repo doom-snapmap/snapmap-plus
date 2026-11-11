@@ -40,11 +40,8 @@
 #define MAX_PATH 260
 #endif
 
-/* Contract 1 caps, applied while reading the ZIP. */
-#define SH_MODLEGACY_MAX_FILES       4096u
-#define SH_MODLEGACY_MAX_FILE_BYTES  (64ull << 20)
-#define SH_MODLEGACY_MAX_TREE_BYTES  (256ull << 20)
-/* The beta.19 writer's representation bounds. */
+/* The beta.19 writer's representation bounds (the format's, not caps on a
+ * package: a package of any size and file count is read). */
 #define SH_MODLEGACY_MAX_PAYLOAD     (((size_t)0x7fffffff / 4) * 3)
 #define SH_MODLEGACY_MAX_SHARDS      (0x7fffffff / 8192 + 1)
 
@@ -154,15 +151,14 @@ int sh_modlegacy_normalize_id(const char *text, char *out, size_t cap);
 
 /* A first-generation tree already on disk (a retired overrides\ folder),
  * read as if it were a stored ZIP: every file and folder under `folder`
- * (UTF-8, long paths allowed), names relative and '/'-separated. Refuses
- * links, unusable names and more than `max_files` files or `max_bytes`
- * bytes. When `tree_hex` is given it receives the beta.16-19 tree
+ * (UTF-8, long paths allowed), names relative and '/'-separated, of any
+ * size and file count. Refuses links and unusable names. When `tree_hex` is given it receives the beta.16-19 tree
  * fingerprint (beta.19 package_sources.c: entries sorted case-insensitively,
  * then by bytes; per entry a 'd' or 'f' byte, the NUL-terminated relative
  * path and, for a file, its SHA-256), which is exactly the 64 hex of the
  * "smpkg.delivery.<tree>" key a map carries for the same tree. */
-int sh_modlegacy_zip_from_folder(const char *folder, unsigned max_files, unsigned long long max_bytes,
-                                 sh_modlegacy_zip *zip, char tree_hex[65], char *err, size_t err_cap);
+int sh_modlegacy_zip_from_folder(const char *folder, sh_modlegacy_zip *zip, char tree_hex[65], char *err,
+                                 size_t err_cap);
 
 /* The tree fingerprint of a tree read with sh_modlegacy_zip_from_folder
  * (hashes every file). Returns 1. */

@@ -8,7 +8,6 @@
 #include "map_old.h"
 
 /* Every map carries far fewer variables than this bound. */
-#define LEGACY_MAX_CUTS  (1u << 20)
 
 /* Read one dot-terminated decimal field backwards from `end`. */
 static int legacy_digits_back(const char *start, const char **end, unsigned *value)
@@ -128,7 +127,7 @@ char *sh_map_legacy_payload_strip_all(const char *json, size_t length, size_t *o
         !sh_shard_find(json, length, "smpbind.", 8) && !sh_shard_find(json, length, "smpref.", 7))
         return NULL;
     /* One structural pass for all three families: "smp" starts each. */
-    out = sh_shard_strip(json, length, "smp", 3, legacy_filter, &counts, LEGACY_MAX_CUTS,
+    out = sh_shard_strip(json, length, "smp", 3, legacy_filter, &counts,
                          &written, &elements, &runs, &failed);
     if (doc_failed) *doc_failed = failed;
     if (!out) return NULL;

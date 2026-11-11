@@ -155,6 +155,13 @@ unsigned char *sh_store_unzlib(const unsigned char *z, size_t n, size_t max, siz
     unsigned char *out = NULL;
     if (out_len) *out_len = 0;
     if (!z || n < 6 || (z[0] & 0x0f) != 8 || ((unsigned)z[0] << 8 | z[1]) % 31 || (z[1] & 0x20)) return NULL;
+    /* DEFLATE expands at most 1032 to 1 (258 bytes from two bits): past that
+     * the stream is malformed, not short of room. The format's bound, not a
+     * cap: `max` may be (size_t)-1. */
+    {
+        size_t bound = n > (((size_t)-1) - 65536) / 1032 ? ((size_t)-1) - 1 : n * 1032 + 65536;
+        if (max > bound) max = bound;
+    }
     for (;;) {
         unsigned char *g;
         if (cap > max + 1) cap = max + 1;

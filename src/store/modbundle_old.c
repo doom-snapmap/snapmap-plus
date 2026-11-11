@@ -8,7 +8,6 @@
 #include "modbundle_old.h"
 #include "mp_json.h"
 
-#define MBO_MODJSON_MAX (16u * 1024u * 1024u)
 #define MBO_WALK_DEPTH  48
 
 static const char *const MBO_RETIRED[] = { "id", "key", "shadows", "stock", "scope", "player", "extends", "replaces",
@@ -107,7 +106,7 @@ static unsigned char *mbo_read(const char *folder, const char *leaf, size_t *len
 {
     char path[MAX_PATH * 4];
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, leaf);
-    return sh_mb_read_file(path, MBO_MODJSON_MAX, len);
+    return sh_mb_read_file(path, (size_t)-1, len);
 }
 
 static void mbo_leaf_key(sh_mb_old *o, const char *folder)

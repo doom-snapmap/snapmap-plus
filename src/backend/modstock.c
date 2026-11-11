@@ -584,7 +584,6 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
 {
     unsigned char want[32], got[32];
     uint32_t i;
-    unsigned long long budget = 0;
     char stripped[SH_MB_REQUEST_MAX + 1];
     uint32_t ext;
     if (source && source_cap) source[0] = 0;
@@ -599,9 +598,9 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
         return SH_MB_STOCK_OK;
     if (source_cap) source[0] = 0;
     /* A renamed copy: rows of the same decoded size and extension, hashed
-     * lazily in (size, extension, archive, name) order until one matches or
-     * SH_MODSTOCK_RENAMED_BYTES are hashed. No candidate count: image sizes
-     * the game uses for thousands of rows are searched to the budget. */
+     * lazily in (size, extension, archive, name) order until one matches,
+     * every candidate (each slice is hashed once per process, so the game's
+     * own rows bound the work). */
     if (size > 0xffffffffull) return SH_MB_STOCK_ABSENT;
     ext = mst_ext_hash(request, strlen(request));
     {
@@ -617,10 +616,6 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
             if (m->size != size || m->ext != ext) break;
             /* One slice can be named by several rows; hash it once. */
             if (g_slice_dup[g_by_size[i]]) continue;
-            /* Every candidate counts, remembered or not, so the answer never
-             * depends on what the process hashed before. */
-            if (budget + size > SH_MODSTOCK_RENAMED_BYTES) break;
-            budget += size;
             if (mst_row_sha(g_by_size[i], got) && !memcmp(got, want, 32) &&
                 mst_copy_source(g_names + m->name, source, source_cap))
                 return SH_MB_STOCK_OK;

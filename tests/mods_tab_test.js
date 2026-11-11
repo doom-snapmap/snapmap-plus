@@ -172,7 +172,6 @@ function standIn(initial, folders) {
         data.name = str(mb.name);
         data.cause = str(mb.cause);
         data.files = JSON.parse(JSON.stringify(fo.files));
-        data.truncated = false;
       } else {
         var ent = fo.files.filter(function (f) { return f.path === fp; })[0];
         if (!ent) { ok = false; msg = "The mod's folder does not hold this file; it is read from your install."; }

@@ -133,13 +133,13 @@ static int shard_cut_cmp(const void *a, const void *b)
 }
 
 char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t magic_len,
-                     sh_shard_filter_fn filter, void *ctx, size_t max_cuts,
+                     sh_shard_filter_fn filter, void *ctx,
                      size_t *out_len, unsigned *elements_out, unsigned *runs_out,
                      int *doc_failed)
 {
     sh_shard_doc doc;
     shard_cut *cuts = NULL;
-    size_t cut_count = 0, pos = 0, i, w = 0, elements = 0;
+    size_t cut_count = 0, cut_cap = 0, pos = 0, i, w = 0, elements = 0;
     const char *hdr, *chunk;
     size_t hdr_len, chunk_len;
     char *out = NULL;
@@ -148,7 +148,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
     if (elements_out) *elements_out = 0;
     if (runs_out) *runs_out = 0;
     if (doc_failed) *doc_failed = 0;
-    if (!json || len == 0 || max_cuts == 0) return NULL;
+    if (!json || len == 0) return NULL;
 
     /* Skip the structural pass for payload-free maps. */
     if (!sh_shard_find(json, len, magic, magic_len)) return NULL;
@@ -157,11 +157,8 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
         return NULL;
     }
 
-    cuts = (shard_cut *)HeapAlloc(GetProcessHeap(), 0, max_cuts * sizeof(shard_cut));
-    if (!cuts) { sh_shard_doc_free(&doc); return NULL; }
-
-    while (cut_count < max_cuts &&
-           sh_shard_next(json, len, magic, magic_len, &pos, &hdr, &hdr_len, &chunk, &chunk_len)) {
+    /* The cuts grow: a map has as many earlier variables as it has. */
+    while (sh_shard_next(json, len, magic, magic_len, &pos, &hdr, &hdr_len, &chunk, &chunk_len)) {
         int el;
         size_t from, to;
         if (filter && !filter(hdr, hdr_len, ctx)) continue;
@@ -177,6 +174,18 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
             HeapFree(GetProcessHeap(), 0, cuts); sh_shard_doc_free(&doc); return NULL;
         }
 
+        if (cut_count == cut_cap) {
+            size_t nc = cut_cap ? cut_cap * 2 : 64;
+            shard_cut *grown = cuts ? (shard_cut *)HeapReAlloc(GetProcessHeap(), 0, cuts, nc * sizeof *grown)
+                                    : (shard_cut *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof *grown);
+            if (!grown) {
+                if (cuts) HeapFree(GetProcessHeap(), 0, cuts);
+                sh_shard_doc_free(&doc);
+                return NULL;
+            }
+            cuts = grown;
+            cut_cap = nc;
+        }
         cuts[cut_count].from = from;
         cuts[cut_count].to = to;
         cut_count++;
@@ -184,7 +193,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
     }
 
     if (cut_count == 0) {
-        HeapFree(GetProcessHeap(), 0, cuts);
+        if (cuts) HeapFree(GetProcessHeap(), 0, cuts);
         sh_shard_doc_free(&doc);
         return NULL;
     }
@@ -953,8 +962,6 @@ static int nav_parse_header(const char *p, size_t plen, nav_hdr *h)
 #define MO_PRODUCT_MAGIC_LEN 9
 #define MO_VALUE_WINDOW   4096
 /* The earlier shape's own bounds: a map saved before 1.0 never held more. */
-#define MO_MAX_ROWS       4096u
-#define MO_MAX_NAMES      256u
 
 static void mo_row_free(sh_map_old_row *row)
 {
@@ -1045,7 +1052,7 @@ static int mo_parse_row(const char *json, size_t length, sh_map_old_row *out)
         int r;
         while ((r = mo_array_next(&cursor, end, &elem, &elem_len)) == 1) {
             char *name;
-            if (*elem != '"' || out->name_count >= MO_MAX_NAMES) continue;
+            if (*elem != '"') continue;
             name = mo_decode(elem, elem_len);
             if (name && strlen(name) <= SH_MODMANIFEST_NAME_MAX && !mo_row_add_name(out, name)) r = -1;
             free(name);
@@ -1072,7 +1079,6 @@ static int mo_add_row(sh_map_old *o, sh_map_old_row *row)
         mo_row_free(row);
         return 1;
     }
-    if (o->row_count >= MO_MAX_ROWS) { mo_row_free(row); return 0; }
     grown = (sh_map_old_row *)realloc(o->rows, (o->row_count + 1) * sizeof *grown);
     if (!grown) { mo_row_free(row); return 0; }
     o->rows = grown;
@@ -1538,7 +1544,7 @@ char *sh_map_old_write(const char *json, size_t len, const sh_map_old *old,
     /* 1. Every earlier variable goes. */
 #define MO_STRIP(magic, filter) do { \
         next = sh_shard_strip(cur ? cur : json, cur_len, magic, strlen(magic), filter, NULL, \
-                              (size_t)MO_MAX_ROWS * 64u, &next_len, &elements, &runs, &failed); \
+                              &next_len, &elements, &runs, &failed); \
         if (failed) { MO_ERR("the map's variables do not read"); goto fail; } \
         mo_take(&cur, &cur_len, next, next_len); \
     } while (0)

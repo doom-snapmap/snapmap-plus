@@ -344,16 +344,8 @@ int sh_modlegacy_zip_open(const unsigned char *bytes, size_t length, sh_modlegac
         }
         if (!e->method && packed != size) { LG_ERR(err, err_cap, "stored member '%s' has two sizes", e->name); goto bad; }
         if (!e->directory) {
-            if (size > SH_MODLEGACY_MAX_FILE_BYTES) {
-                LG_ERR(err, err_cap, "member '%s' is over the 64 MiB file cap", e->name); goto bad;
-            }
             zip->expanded += size;
-            if (zip->expanded > SH_MODLEGACY_MAX_TREE_BYTES) {
-                LG_ERR(err, err_cap, "the package is over the 256 MiB tree cap"); goto bad;
-            }
-            if (++zip->files > SH_MODLEGACY_MAX_FILES) {
-                LG_ERR(err, err_cap, "the package is over the 4096-file cap"); goto bad;
-            }
+            zip->files++;
         }
         if (offset > (uint64_t)length || (uint64_t)length - offset < 30) {
             LG_ERR(err, err_cap, "member '%s' points outside the ZIP", e->name); goto bad;
@@ -677,8 +669,6 @@ static int lg_find_name(const WIN32_FIND_DATAW *fd, char *out, size_t cap)
 typedef struct lg_walk {
     sh_modlegacy_zip *zip;
     size_t cap;
-    unsigned max_files;
-    unsigned long long max_bytes;
     char *err;
     size_t err_cap;
 } lg_walk;
@@ -713,14 +703,6 @@ static int lg_walk_add(lg_walk *w, const char *rel, const wchar_t *full, int dir
     if (!directory) {
         w->zip->files++;
         w->zip->expanded += size;
-        if (w->zip->files > w->max_files) {
-            LG_ERR(w->err, w->err_cap, "the folder holds more than %u files", w->max_files);
-            return 0;
-        }
-        if (w->zip->expanded > w->max_bytes) {
-            LG_ERR(w->err, w->err_cap, "the folder holds more than %llu MiB", w->max_bytes >> 20);
-            return 0;
-        }
     }
     return 1;
 }
@@ -859,8 +841,8 @@ unsigned long long sh_modlegacy_zip_carried_bytes(const sh_modlegacy_zip *zip, u
     return bytes;
 }
 
-int sh_modlegacy_zip_from_folder(const char *folder, unsigned max_files, unsigned long long max_bytes,
-                                 sh_modlegacy_zip *zip, char tree_hex[65], char *err, size_t err_cap)
+int sh_modlegacy_zip_from_folder(const char *folder, sh_modlegacy_zip *zip, char tree_hex[65], char *err,
+                                 size_t err_cap)
 {
     lg_walk w;
     wchar_t *root;
@@ -885,8 +867,6 @@ int sh_modlegacy_zip_from_folder(const char *folder, unsigned max_files, unsigne
     }
     memset(&w, 0, sizeof w);
     w.zip = zip;
-    w.max_files = max_files;
-    w.max_bytes = max_bytes;
     w.err = err;
     w.err_cap = err_cap;
     if (!lg_walk_dir(&w, root, "", 0)) { free(root); sh_modlegacy_zip_free(zip); return 0; }

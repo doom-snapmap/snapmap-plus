@@ -171,8 +171,8 @@ static int mg_has_descriptor(const wchar_t *dir)
     return mg_is_file(dir, L"package.json") || mg_is_file(dir, L"mod.json");
 }
 
-/* Count files and bytes below `dir`, stopping past the caps. Links are
- * counted as found and stop nothing (the converter refuses them). */
+/* Count files and bytes below `dir`. Links are counted as found and stop
+ * nothing (the converter refuses them). */
 static void mg_measure(const wchar_t *dir, unsigned *files, unsigned long long *bytes, unsigned depth)
 {
     WIN32_FIND_DATAW fd;
@@ -184,7 +184,6 @@ static void mg_measure(const wchar_t *dir, unsigned *files, unsigned long long *
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        if (*files > SH_MODMIGRATE_MAX_FILES || *bytes > SH_MODMIGRATE_MAX_BYTES) break;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && depth < 64) {
                 wchar_t *sub = mg_wjoin(dir, fd.cFileName);
@@ -305,10 +304,6 @@ static unsigned mg_nested_packages(const wchar_t *dir, char *first, size_t cap)
 static void mg_measure_item(mg_item *it, const wchar_t *path)
 {
     mg_measure(path, &it->files, &it->bytes, 0);
-    if (it->files > SH_MODMIGRATE_MAX_FILES || it->bytes > SH_MODMIGRATE_MAX_BYTES)
-        mg_skip(it, "it holds at least %u file(s) and %llu MiB, more than the %u files or %llu MiB one folder can move; "
-                    "split it into smaller mod folders and put each in the mods folder yourself",
-                it->files, it->bytes >> 20, SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES >> 20);
 }
 
 /* The retired loose-file layer (SnapHak and early releases served
@@ -748,8 +743,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
     memset(&origin, 0, sizeof origin);
     _snprintf_s(folder_u8, sizeof folder_u8, _TRUNCATE, "%s\\%s", c->overrides_u8, it->name);
     for (i = strlen(c->overrides_u8); folder_u8[i]; i++) if (folder_u8[i] == '/') folder_u8[i] = '\\';
-    if (!sh_modlegacy_zip_from_folder(folder_u8, SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES, &zip, NULL,
-                                      err, sizeof err)) {
+    if (!sh_modlegacy_zip_from_folder(folder_u8, &zip, NULL, err, sizeof err)) {
         it->outcome = SH_MODMIGRATE_REFUSED;
         mg_cause(it->reason, sizeof it->reason, "the folder cannot be read: %s", err);
         goto out;
@@ -1533,7 +1527,7 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
             if (!files) { free(name); continue; }   /* an empty tree carries nothing */
             _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", l->overrides_u8, name);
             memset(&sub, 0, sizeof sub);
-            if (!sh_modlegacy_zip_from_folder(folder, SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES, &sub, NULL, err, sizeof err)) {
+            if (!sh_modlegacy_zip_from_folder(folder, &sub, NULL, err, sizeof err)) {
                 mg_cause(why, cap, MG_OVERRIDES "\\%s cannot be read: %s", name, err);
                 ok = 0;
             }
@@ -1549,12 +1543,6 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
             sh_modlegacy_zip_free(&sub);
         }
         free(name);
-        if (ok && (z->files > SH_MODMIGRATE_MAX_FILES || z->expanded > SH_MODMIGRATE_MAX_BYTES)) {
-            mg_cause(why, cap, "the loose files of the " MG_OVERRIDES " folder are over the migration cap of %u files or "
-                     "%llu MiB; move some of them into mod folders of their own first", SH_MODMIGRATE_MAX_FILES,
-                     SH_MODMIGRATE_MAX_BYTES >> 20);
-            ok = 0;
-        }
     } while (ok && FindNextFileW(h, &fd));
     FindClose(h);
     return ok;

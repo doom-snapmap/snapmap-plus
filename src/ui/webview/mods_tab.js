@@ -648,7 +648,7 @@ var modsTab = (function () {
     d = obj(d) || {};
     var files = arr(d.files).map(normFile).filter(function (f) { return f.path.length > 0; });
     files.sort(function (a, b) { return cmp(a.path.toLowerCase(), b.path.toLowerCase()); });
-    return {key: str(d.key), name: str(d.name), cause: str(d.cause), files: files, truncated: bool(d.truncated)};
+    return {key: str(d.key), name: str(d.name), cause: str(d.cause), files: files};
   }
   function fileLeaf(path) { var s = str(path); return s.slice(s.lastIndexOf('/') + 1); }
   /* A game file the mod carries unchanged: read-only, shown muted with the game glyph. */
@@ -1689,7 +1689,6 @@ var modsTab = (function () {
       var root = fileTree(fm.data.files, fm.filter);
       if (!root.count) { box.appendChild(el('div', 'list-empty', fm.data.files.length ? 'No file matches the filter.' : 'The folder holds no files.')); return; }
       treeInto(box, root, 0);
-      if (fm.data.truncated) box.appendChild(el('div', 'list-empty', 'The folder holds more files than the view lists.'));
     }
     /* Arrow keys walk the files shown. */
     function onFilesListKey(e) {

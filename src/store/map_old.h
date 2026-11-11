@@ -71,7 +71,7 @@ typedef int (*sh_shard_filter_fn)(const char *hdr, size_t hdr_len, void *ctx);
  * distinguishes a structural refusal from no matches. Never applies a partial
  * splice. */
 char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t magic_len,
-                     sh_shard_filter_fn filter, void *ctx, size_t max_cuts,
+                     sh_shard_filter_fn filter, void *ctx,
                      size_t *out_len, unsigned *elements_out, unsigned *runs_out,
                      int *doc_failed);
 

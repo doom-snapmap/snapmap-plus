@@ -20,8 +20,7 @@
 
 #define CV_PATH      (MAX_PATH * 4)
 #define CV_NEST_MAX  8
-#define CV_MAP_MAX   ((size_t)512 << 20)
-#define CV_DESC_MAX  ((size_t)16 << 20)
+#define CV_ANY_SIZE  ((size_t)-1)   /* a map, a descriptor or a bank of any size */
 
 /* ------------------------------------------------------------ output ---- */
 
@@ -794,7 +793,7 @@ static void cv_maps_each(const sh_conv_opts *o, cv_map_fn fn, void *ctx)
 /* A saved map's text: the 4-byte header and a zlib stream. */
 static char *cv_saved_text(const unsigned char *raw, size_t n, size_t *len)
 {
-    return n > 10 ? (char *)sh_store_unzlib(raw + 4, n - 4, CV_MAP_MAX, len) : NULL;
+    return n > 10 ? (char *)sh_store_unzlib(raw + 4, n - 4, CV_ANY_SIZE, len) : NULL;
 }
 
 typedef struct cv_scan_ctx { sh_conv_check *c; cv_rec *rec; int list; } cv_scan_ctx;
@@ -824,7 +823,7 @@ static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int
             return;
         }
     }
-    raw = cv_read(path, CV_MAP_MAX, &n);
+    raw = cv_read(path, CV_ANY_SIZE, &n);
     if (!raw) return;
     text = kind == CV_MAP_SAVED ? cv_saved_text(raw, n, &tn) : (char *)raw;
     if (kind != CV_MAP_SAVED) tn = n;
@@ -1028,7 +1027,6 @@ static int cv_link_top(const char *folder, const char *dest, int mod)
  * assets\sound\soundbanks\pc\ whose stem does not start with "<salt>_" becomes
  * "<salt>_<stem>" (an earlier mod's "<old key>_" prefix replaced), and its
  * BKHD bank id follows the new name when it followed the old one. */
-#define CV_BANKS_MAX 64
 typedef sh_ms_bank_rename cv_bank_name;
 
 /* Every text file under `dir` (a file without a NUL byte, sound banks
@@ -1055,7 +1053,7 @@ static void cv_rebank_texts(const char *dir, const cv_bank_name *names, size_t c
             if (depth < 64) cv_rebank_texts(path, names, count, depth + 1);
         } else if (path && !(ln > 4 && !_stricmp(leaf + ln - 4, ".bnk"))) {
             size_t n = 0, on = 0;
-            char *t = (char *)cv_read(path, CV_DESC_MAX, &n), *o = NULL;
+            char *t = (char *)cv_read(path, CV_ANY_SIZE, &n), *o = NULL;
             size_t c = t && !memchr(t, 0, n) ? sh_ms_rebank_text(t, n, names, count, &o, &on) : 0;
             if (c && c != (size_t)-1) cv_write(path, o, on);
             free(o);
@@ -1074,8 +1072,8 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
     WIN32_FIND_DATAW fd;
     HANDLE h;
     size_t i, pn, renamed = 0;
-    cv_bank_name *names = (cv_bank_name *)calloc(CV_BANKS_MAX, sizeof *names);
-    if (!names) return;
+    cv_bank_name *names = NULL;   /* grows: every bank the folder renames */
+    size_t names_cap = 0;
     for (i = 0; key[i] && i < SH_MB_ID_MAX; i++) prefix[i] = (key[i] == '.' || key[i] == '-') ? '_' : key[i];
     prefix[i] = '_';
     prefix[i + 1] = 0;
@@ -1086,7 +1084,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
     h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
     free(pat);
     free(w);
-    if (h == INVALID_HANDLE_VALUE) { free(names); return; }
+    if (h == INVALID_HANDLE_VALUE) return;
     do {
         char *leaf = sh_mb_utf8(fd.cFileName), stem[SH_MB_BANK_STEM_MAX + 1], fresh[SH_MB_BANK_STEM_MAX + 16];
         char *from = NULL, *to = NULL;
@@ -1106,7 +1104,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
             }
             if (from && to) {
                 size_t n = 0;
-                unsigned char *bytes = cv_read(from, (size_t)256 << 20, &n);
+                unsigned char *bytes = cv_read(from, CV_ANY_SIZE, &n);
                 uint32_t id, was = sh_mb_fnv1_lower(stem, strlen(stem));
                 if (bytes && n >= 16 && !memcmp(bytes, "BKHD", 4)) {
                     memcpy(&id, bytes + 12, 4);
@@ -1120,7 +1118,12 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
                     wchar_t *wf = sh_mb_wpath(from);
                     if (wf) DeleteFileW(wf);
                     free(wf);
-                    if (renamed < CV_BANKS_MAX) {
+                    if (renamed == names_cap) {
+                        size_t nc = names_cap ? names_cap * 2 : 16;
+                        cv_bank_name *grown = (cv_bank_name *)realloc(names, nc * sizeof *grown);
+                        if (grown) { names = grown; names_cap = nc; }
+                    }
+                    if (renamed < names_cap) {
                         strcpy_s(names[renamed].from, sizeof names[renamed].from, stem);
                         _snprintf_s(names[renamed].to, sizeof names[renamed].to, _TRUNCATE, "%.*s", (int)(strlen(fresh) - 4),
                                     fresh);
@@ -1173,7 +1176,7 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
     int r, result = CV_LEFT;
     (void)o;
     cause[0] = 0;
-    text = dpath ? cv_read(dpath, CV_DESC_MAX, &n) : NULL;
+    text = dpath ? cv_read(dpath, CV_ANY_SIZE, &n) : NULL;
     free(dpath);
     if (!text) { _snprintf_s(cause, cap, _TRUNCATE, "its %s cannot be read", f->descriptor); return CV_LEFT; }
     fresh = cv_fresh((const char *)text, n, f->key, &fl, &retired);
@@ -1415,7 +1418,7 @@ static void cv_folder_salt(const char *folder, char salt[SH_SALT_LEN + 1])
     size_t n = 0;
     mpj *j, *blk, *s;
     salt[0] = 0;
-    t = mj ? (char *)cv_read(mj, CV_DESC_MAX, &n) : NULL;
+    t = mj ? (char *)cv_read(mj, CV_ANY_SIZE, &n) : NULL;
     free(mj);
     j = t ? mpj_parse(t, n) : NULL;
     free(t);
@@ -1909,7 +1912,7 @@ static void cv_saved_repair(const sh_conv_opts *o, cv_map_ctx *x, const char *pa
             cv_drop_tmp(vpath);
         } else if (cv_attr(vt, NULL)) {
             size_t n = 0, sn = 0;
-            unsigned char *raw = cv_read(path, CV_MAP_MAX, &n), *side = cv_read(vt, 64, &sn);
+            unsigned char *raw = cv_read(path, CV_ANY_SIZE, &n), *side = cv_read(vt, 64, &sn);
             if (raw && side && sn == SH_STORE_SIDECAR_LEN &&
                 sh_store_sidecar_user(account, raw, n, side, "map.decl", user, sizeof user) && cv_put_tmp(vpath)) {
                 x->did = 1;
@@ -1932,7 +1935,7 @@ static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int k
     char *text = NULL, *out = NULL, cause[600] = "";
     int r;
     if (kind == CV_MAP_SAVED) cv_saved_repair(o, x, path, account);
-    raw = cv_read(path, CV_MAP_MAX, &n);
+    raw = cv_read(path, CV_ANY_SIZE, &n);
     if (!raw) return;
     if (kind == CV_MAP_SAVED) {
         text = cv_saved_text(raw, n, &tn);

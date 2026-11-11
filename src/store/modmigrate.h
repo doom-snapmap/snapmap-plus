@@ -56,8 +56,6 @@
 
 #include <stddef.h>
 
-#define SH_MODMIGRATE_MAX_BYTES   (512ull << 20)   /* a bigger folder is skipped */
-#define SH_MODMIGRATE_MAX_FILES   8192u            /* a folder with more files is skipped */
 #define SH_MODMIGRATE_RECORD      "migration"      /* the section of mods\snapmap-plus.json */
 
 /* Per-folder outcomes in the record. */

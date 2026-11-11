@@ -41,14 +41,6 @@
  * are trusted. */
 #define MU_STOCK_PROBE "generated/decls/md6def/zion/characters/monsters/imp/base/imp_snapeditor.md6.decl"
 
-#define MU_MAX_SHADOW_GROUPS 4000   /* shadow rows sent to the page; the total is always reported */
-#define MU_MAX_ROW_NAMES     12     /* names listed per map bundle; the count is always reported */
-#define MU_MAX_PLACED        65536  /* distinct placed names read from the map */
-#define MU_NAME_MAX          512
-#define MU_MAX_CARRIED       200    /* carried paths listed per mod; the page says how many more */
-#define MU_MAX_ROW_DECL      (256u * 1024u)   /* an editor row decl read for its display name */
-#define MU_MAX_MAP_ENTITIES  64     /* placed entity names listed per mod; the count is always sent */
-#define MU_MAX_MAP_REFS      64     /* references listed per mod */
 #define MU_TAG               "mods" /* the search tag a map with mods carries (modpublish.h) */
 
 /* ------------------------------------------------------------------ state */
@@ -766,7 +758,7 @@ static void mu_entry_rows(mu_model *m, size_t i)
         if (!f->stock) {
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", e->folder, f->path);
             for (c = path; *c; c++) if (*c == '/') *c = '\\';
-            text = (char *)sh_mb_read_file(path, MU_MAX_ROW_DECL, NULL);
+            text = (char *)sh_mb_read_file(path, (size_t)-1, NULL);
         }
         if (text) {
             tag = mu_decl_field(text, "displayNameTag");
@@ -1101,7 +1093,7 @@ static void mu_put_edit_file(void *context, const char *file, const sh_dt_counts
 
 static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
 {
-    size_t k, shown = 0;
+    size_t k;
     int first = 1;
     mu_edits_ctx ec;
     mu_puts(b, ",\"facts\":{");
@@ -1114,16 +1106,15 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
      * never records such a folder, so the tab offers no map action and no player needs it. */
     mu_kbool(b, "editorOnly", sh_mb_editor_only(bd), 0);
     mu_puts(b, ",\"editorTweaks\":[");
-    for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
+    for (k = 0; k < bd->file_count; k++) {
         if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;
         if (!first) mu_putn(b, ",", 1);
         mu_str(b, bd->files[k].request);
         first = 0;
-        shown++;
     }
     mu_puts(b, "],\"replacements\":[");
     first = 1;
-    for (k = 0, shown = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
+    for (k = 0; k < bd->file_count; k++) {
         const sh_mb_file *f = &bd->files[k];
         int edited = 0;
         if (f->cls != SH_MB_CLASS_REPLACE) continue;
@@ -1134,7 +1125,6 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
         mu_kbool(b, "edits", edited, 0);
         mu_putn(b, "}", 1);
         first = 0;
-        shown++;
     }
     mu_puts(b, "],\"edits\":[");
     ec.b = b;
@@ -1149,18 +1139,16 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
 
 /* What the mod borrows from the game: its game files read from the install
  * (borrows, and the game's own files it brings into view), each named by the
- * game file it reads ("source"), at most MU_MAX_CARRIED of them. */
+ * game file it reads ("source"), every one of them. */
 static void mu_put_borrows(mu_buf *b, const sh_mb_bundle *bd)
 {
-    size_t k, shown = 0;
+    size_t k;
     unsigned count = 0;
     mu_puts(b, ",\"borrows\":{\"paths\":[");
     for (k = 0; k < bd->file_count; k++) {
         const sh_mb_file *f = &bd->files[k];
         if (f->cls != SH_MB_CLASS_BORROW && f->cls != SH_MB_CLASS_SURFACE) continue;
-        count++;
-        if (shown >= MU_MAX_CARRIED) continue;
-        if (shown++) mu_putn(b, ",", 1);
+        if (count++) mu_putn(b, ",", 1);
         mu_str(b, f->stock_source && f->stock_source[0] ? f->stock_source : f->request);
     }
     mu_putn(b, "]", 1);
@@ -1364,7 +1352,6 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             groups++;
             if (pass == 2) {
                 edit_files++;
-                if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
                 mu_say(o, "edited game file %s: by %s; compared with the game's text when built, and written for each map "
                        "that uses the mod (the copy itself is never served)", paths[i].request, who);
                 printed++;
@@ -1373,7 +1360,6 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             }
             if (conflict) conflicts++;
             else replaced++;
-            if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
             served = sh_modserve_lookup_indexed(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
             /* With map scope on: which provider serves the path for the open
              * map (any provider the map uses, not only the winner). */
@@ -1440,7 +1426,6 @@ static void mu_names_add(void *context, const char *name)
     char *copy;
     if (!n || n->oom || !name || !name[0]) return;
     len = strlen(name);
-    if (len >= MU_NAME_MAX || n->count >= MU_MAX_PLACED) return;
     if (!n->slots || (n->count + 1) * 2 > n->mask + 1) {
         size_t size = n->slots ? (n->mask + 1) * 2 : 256, i;
         unsigned *ns = (unsigned *)calloc(size, sizeof *ns);
@@ -1488,8 +1473,8 @@ typedef struct mu_closure_bundle {
     char hash[SH_MODSERVE_HASH_HEX + 1];
     char id[SH_MB_ID_MAX + 1];
     unsigned long long size;
-    char *names[MU_MAX_ROW_NAMES];
-    int name_count;
+    char **names;             /* every placed name it provides (malloc'd) */
+    int name_count, name_cap;
     int via_needs;            /* reached only through another bundle's needs */
 } mu_closure_bundle;
 
@@ -1525,7 +1510,14 @@ static void mu_closure_visit(void *context, const char *bundle_id, const char *b
     }
     if (!name) return;
     cb->via_needs = 0;
-    if (cb->name_count < MU_MAX_ROW_NAMES) {
+    if (cb->name_count == cb->name_cap) {
+        int nc = cb->name_cap ? cb->name_cap * 2 : 8;
+        char **nn = (char **)realloc(cb->names, (size_t)nc * sizeof *nn);
+        if (!nn) { c->oom = 1; return; }
+        cb->names = nn;
+        cb->name_cap = nc;
+    }
+    {
         size_t len = strlen(name);
         cb->names[cb->name_count] = (char *)malloc(len + 1);
         if (cb->names[cb->name_count]) memcpy(cb->names[cb->name_count], name, len + 1);
@@ -1538,8 +1530,10 @@ static void mu_closure_free(mu_closure *c)
 {
     size_t i;
     int k;
-    for (i = 0; i < c->count; i++)
-        for (k = 0; k < c->items[i].name_count && k < MU_MAX_ROW_NAMES; k++) free(c->items[i].names[k]);
+    for (i = 0; i < c->count; i++) {
+        for (k = 0; k < c->items[i].name_count; k++) free(c->items[i].names[k]);
+        free(c->items[i].names);
+    }
     free(c->items);
     memset(c, 0, sizeof *c);
 }
@@ -2057,7 +2051,7 @@ static size_t mu_put_refs(mu_buf *b, const mu_model *m, const mu_map *mp, const 
     size_t n = mp->have_mm && x->uid_count ? sh_mm_references(&mp->mm, x->uids, x->uid_count, &refs) : 0, i;
     if (n == (size_t)-1) n = 0;
     mu_putn(b, "[", 1);
-    for (i = 0; i < n && i < MU_MAX_MAP_REFS; i++) {
+    for (i = 0; i < n; i++) {
         char name[700];
         mu_ref_name(m, mp, &refs[i], name, sizeof name);
         if (i) mu_putn(b, ",", 1);
@@ -2075,7 +2069,7 @@ static void mu_put_entity_names(mu_buf *b, const mu_model *m, const mu_map *mp, 
 {
     size_t i;
     mu_putn(b, "[", 1);
-    for (i = 0; i < x->uid_count && i < MU_MAX_MAP_ENTITIES; i++) {
+    for (i = 0; i < x->uid_count; i++) {
         char name[300];
         mu_entity_label(m, sh_mm_find(&mp->mm, x->uids[i]), x->uids[i], name, sizeof name);
         if (i) mu_putn(b, ",", 1);
@@ -2116,7 +2110,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_knum(b, "nameCount", (unsigned long long)r->name_count, 0);
         mu_key(b, "names", 0);
         mu_putn(b, "[", 1);
-        for (k = 0; k < r->name_count && k < MU_MAX_ROW_NAMES; k++) {
+        for (k = 0; k < r->name_count; k++) {
             if (k) mu_putn(b, ",", 1);
             mu_str(b, r->names[k]);
         }
@@ -2140,7 +2134,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_knum(b, "nameCount", (unsigned long long)cb->name_count, 0);
         mu_key(b, "names", 0);
         mu_putn(b, "[", 1);
-        for (k = 0; k < (size_t)cb->name_count && k < MU_MAX_ROW_NAMES; k++) {
+        for (k = 0; k < (size_t)cb->name_count; k++) {
             if (k) mu_putn(b, ",", 1);
             mu_str(b, cb->names[k]);
         }
@@ -2617,7 +2611,6 @@ static int mu_zip_name(const char *path)
     return n > 4 && !_stricmp(path + n - 4, ".zip");
 }
 
-#define MU_UNZIP_ENTRY_MAX (1024u * 1024u * 1024u)   /* the largest file a mod ZIP may hold */
 
 /* Unpack the ZIP at `zip` into a new folder under %TEMP% (`dir`), every
  * entry at its own path (the reader refuses an unsafe name). 1, else 0 with
@@ -2667,7 +2660,7 @@ static int mu_unzip(const char *zip, char *dir, size_t dir_cap, char *cause, siz
             free(wp);
             path[k] = '\\';
         }
-        bytes = sh_zip_reader_read(&r, (long)i, MU_UNZIP_ENTRY_MAX, &len, why, sizeof why);
+        bytes = sh_zip_reader_read(&r, (long)i, (size_t)-1, &len, why, sizeof why);
         if (!bytes) {
             _snprintf_s(cause, cause_cap, _TRUNCATE, "%s in it cannot be read (%s)", name, why);
             ok = 0;
@@ -2675,10 +2668,14 @@ static int mu_unzip(const char *zip, char *dir, size_t dir_cap, char *cause, siz
         }
         wp = sh_mb_wpath(path);
         h = wp ? CreateFileW(wp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
-        if (h == INVALID_HANDLE_VALUE || !WriteFile(h, bytes, (DWORD)len, &put, NULL) || put != (DWORD)len) {
-            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s could not be unpacked (error %lu)", name, GetLastError());
-            ok = 0;
+        if (h == INVALID_HANDLE_VALUE) ok = 0;
+        /* In pieces: one WriteFile moves at most 4 GB. */
+        for (k = 0; ok && k < len; k += put) {
+            DWORD piece = len - k > (1u << 30) ? (1u << 30) : (DWORD)(len - k);
+            if (!WriteFile(h, bytes + k, piece, &put, NULL) || !put) ok = 0;
         }
+        if (!ok)
+            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s could not be unpacked (error %lu)", name, GetLastError());
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         free(wp);
         free(bytes);
@@ -3023,12 +3020,11 @@ static ULONGLONG g_poll_next;
 #define MU_UNDO_WAIT_MS 10000
 
 /* A map remove's owed row drop (mu_drop_tick, with mu_map_apply). */
-#define MU_DROP_MAX 16
 static volatile LONG g_drop_owed;
 static ULONGLONG g_drop_owed_at;
 static char g_drop_key[SH_MS_NAME_MAX + 1];
 static char g_drop_hash[SH_MODSERVE_HASH_HEX + 1], g_drop_salt[SH_MB_ID_MAX + 1];
-static char g_drop_builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+static char (*g_drop_builds)[SH_MODMANIFEST_HASH_CAP];   /* malloc'd: every row the remove drops */
 static int g_drop_n, g_drop_tag;
 static void mu_drop_tick(void);
 
@@ -3072,16 +3068,17 @@ static void mu_undo_owe(const char *key)
 /* The text of a local save's map.decl: a 4-byte checksum, then zlib (a
  * 2-byte header, raw DEFLATE, a 4-byte Adler-32) of the map JSON. malloc'd,
  * NUL-terminated, or NULL. */
-#define MU_SAVED_MAP_MAX (256u << 20)
 static char *mu_saved_map_text(const char *path, size_t *len)
 {
     size_t n = 0, cap;
-    unsigned char *raw = (unsigned char *)sh_mb_read_file(path, 64u << 20, &n);
+    unsigned char *raw = (unsigned char *)sh_mb_read_file(path, (size_t)-1, &n);
     char *out = NULL;
     *len = 0;
     if (!raw) return NULL;
     if (n < 4 + 2 + 4 || (raw[4] & 0x0F) != 8 || ((raw[4] << 8) | raw[5]) % 31 || (raw[5] & 0x20)) { free(raw); return NULL; }
-    for (cap = n * 8 < 65536 ? 65536 : n * 8; cap <= MU_SAVED_MAP_MAX; cap *= 2) {
+    /* The buffer doubles until the whole text fits, of any size; DEFLATE
+     * expands at most 1032 to 1, so past that the stream is malformed. */
+    for (cap = n * 8 < 65536 ? 65536 : n * 8; cap / 2 <= n * 1032 + 65536 && cap < ((size_t)-1) / 2; cap *= 2) {
         size_t got;
         out = (char *)malloc(cap + 1);
         if (!out) break;
@@ -3166,8 +3163,7 @@ static int mu_saved_maps_using(const char *salt)
  * not played for the given days, goes at start; playing it downloads it
  * again. */
 
-#define MU_PLACES_SEEN_MAX 512
-typedef struct mu_places_seen { char dirs[MU_PLACES_SEEN_MAX][SH_MS_NAME_MAX + 1]; int n; } mu_places_seen;
+typedef struct mu_places_seen { char (*dirs)[SH_MS_NAME_MAX + 1]; int n, cap, oom; } mu_places_seen;
 
 /* The place a saved map records, as "maps\<segment>"; 0 when it has none. */
 static int mu_saved_place(const char *text, size_t len, char *dir, size_t cap)
@@ -3184,7 +3180,14 @@ static void mu_place_seen_one(void *ctx, const char *text, size_t len)
     int i;
     if (!mu_saved_place(text, len, dir, sizeof dir)) return;
     for (i = 0; i < seen->n; i++) if (!_stricmp(seen->dirs[i], dir)) return;
-    if (seen->n < MU_PLACES_SEEN_MAX) strcpy_s(seen->dirs[seen->n++], sizeof seen->dirs[0], dir);
+    if (seen->n == seen->cap) {
+        int nc = seen->cap ? seen->cap * 2 : 64;
+        void *grown = realloc(seen->dirs, (size_t)nc * sizeof *seen->dirs);
+        if (!grown) { seen->oom = 1; return; }
+        seen->dirs = (char (*)[SH_MS_NAME_MAX + 1])grown;
+        seen->cap = nc;
+    }
+    strcpy_s(seen->dirs[seen->n++], sizeof seen->dirs[0], dir);
 }
 
 typedef struct mu_place_count { const char *dir; int count; } mu_place_count;
@@ -3215,7 +3218,8 @@ int sh_ms_places_prune(unsigned days)
     int removed = 0, j;
     if (!seen) return -1;
     /* Saves that cannot be read keep every place: nothing can be told. */
-    if (mu_saved_maps_each(mu_place_seen_one, seen) < 0 || seen->n == MU_PLACES_SEEN_MAX || !sh_ms_enumerate(&l)) {
+    if (mu_saved_maps_each(mu_place_seen_one, seen) < 0 || seen->oom || !sh_ms_enumerate(&l)) {
+        free(seen->dirs);
         free(seen);
         return -1;
     }
@@ -3235,6 +3239,7 @@ int sh_ms_places_prune(unsigned days)
         } else mu_log("places: mods\\%s could not be removed: %s", e->name, cause);
     }
     sh_ms_list_free(&l);
+    free(seen->dirs);
     free(seen);
     return removed;
 }
@@ -3804,23 +3809,31 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
 {
     const sh_modui_engine *e = mu_engine();
     const mu_mapmod *x = &mp->mods[p->mod];
-    char builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+    char (*builds)[SH_MODMANIFEST_HASH_CAP];
     size_t i;
     int n = 0;
     if (p->refusal[0]) { _snprintf_s(msg, cap, _TRUNCATE, "%s", p->refusal); return 0; }
+    /* Every row the remove drops, however many the map has. */
+    builds = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(mp->rows.count ? mp->rows.count : 1, sizeof *builds);
+    if (!builds) { strncpy_s(msg, cap, "Snapmap+ ran out of memory; nothing was changed. Restart DOOM and try again.", _TRUNCATE); return 0; }
     if (x->uid_count) {
         int st;
-        if (!e->delete_entities) { strncpy_s(msg, cap, mu_delete_cause(SH_EDITOR_DELETE_UNAVAILABLE), _TRUNCATE); return 0; }
+        if (!e->delete_entities) {
+            strncpy_s(msg, cap, mu_delete_cause(SH_EDITOR_DELETE_UNAVAILABLE), _TRUNCATE);
+            free(builds);
+            return 0;
+        }
         st = e->delete_entities(x->uids, (int)x->uid_count);
         if (st != SH_EDITOR_DELETE_DISPATCHED) {
             mu_log("map remove %s: the delete of %zu entit%s was refused (status %d)", key, x->uid_count,
                    x->uid_count == 1 ? "y" : "ies", st);
             strncpy_s(msg, cap, mu_delete_cause(st), _TRUNCATE);
+            free(builds);
             return 0;
         }
     }
     /* Its row goes; with the last mod, so do the rows of mods only it needed. */
-    for (i = 0; i < mp->rows.count && n < MU_DROP_MAX; i++) {
+    for (i = 0; i < mp->rows.count; i++) {
         const sh_modmanifest_row *row = &mp->rows.rows[i];
         size_t k;
         int drop = 0;
@@ -3833,13 +3846,15 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
     if (!x->uid_count) {
         mu_log("map remove %s: nothing of it is placed", key);
         mu_drop_rows(key, builds, n, p->tag_removed);
+        free(builds);
     } else {
         mu_log("map remove %s: %zu entit%s deleted in one undo step; the row goes once the delete has committed", key,
                x->uid_count, x->uid_count == 1 ? "y" : "ies");
         strncpy_s(g_drop_key, sizeof g_drop_key, key, _TRUNCATE);
         strncpy_s(g_drop_hash, sizeof g_drop_hash, x->hash, _TRUNCATE);
         strncpy_s(g_drop_salt, sizeof g_drop_salt, x->id, _TRUNCATE);
-        memcpy(g_drop_builds, builds, sizeof builds);
+        free(g_drop_builds);
+        g_drop_builds = builds;   /* owned until the next remove */
         g_drop_n = n;
         g_drop_tag = p->tag_removed;
         g_drop_owed_at = GetTickCount64();
@@ -3867,7 +3882,7 @@ static void mu_put_plan(mu_buf *b, const mu_model *m, const mu_map *mp, const mu
     mu_put_entities_json(b, m, mp, x);
     mu_knum(b, "entityCount", (unsigned long long)x->uid_count, 0);
     mu_puts(b, ",\"references\":[");
-    for (i = 0; i < p->ref_count && i < MU_MAX_MAP_REFS; i++) {
+    for (i = 0; i < p->ref_count; i++) {
         char name[700];
         mu_ref_name(m, mp, &p->refs[i], name, sizeof name);
         if (i) mu_putn(b, ",", 1);
@@ -3893,13 +3908,13 @@ static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, co
     const char *where = mp->name[0] ? mp->name : "the open map";
     if (x->uid_count) mu_line(o, "%s: deletes %zu placed entit%s from %s (one undo step)", verb, x->uid_count,
                               x->uid_count == 1 ? "y" : "ies", where);
-    for (i = 0; i < x->uid_count && i < MU_MAX_MAP_ENTITIES; i++) {
+    for (i = 0; i < x->uid_count; i++) {
         char name[300];
         mu_entity_label(m, sh_mm_find(&mp->mm, x->uids[i]), x->uids[i], name, sizeof name);
         mu_line(o, "%s:   %s", verb, name);
     }
     if (p->ref_count) mu_line(o, "%s: severs %zu wire or timeline reference(s) to those entities", verb, p->ref_count);
-    for (i = 0; i < p->ref_count && i < MU_MAX_MAP_REFS; i++) {
+    for (i = 0; i < p->ref_count; i++) {
         char name[700];
         mu_ref_name(m, mp, &p->refs[i], name, sizeof name);
         mu_line(o, "%s:   %s: %s", verb, p->refs[i].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", name);
@@ -4352,8 +4367,6 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
 
 /* ---- the Files view (read-only) and New mod */
 
-#define MU_FILES_MAX  8192u              /* files listed per mod folder; "truncated" says when there are more */
-#define MU_TEXT_MAX   (1024u * 1024u)    /* the largest text file the view shows */
 
 /* The kinds the view shows as text; every other file is binary. */
 static int mu_text_kind(const char *path)
@@ -4365,7 +4378,7 @@ static int mu_text_kind(const char *path)
 }
 
 typedef struct mu_disk_file { char *path; unsigned long long size; } mu_disk_file;
-typedef struct mu_disk { mu_disk_file *v; size_t n, cap; int truncated; } mu_disk;
+typedef struct mu_disk { mu_disk_file *v; size_t n, cap; } mu_disk;
 
 /* Every file under `abs` (UTF-8), with its path below the mod folder ('/').
  * Dot folders and files (.builds, .git) and reparse points are skipped. */
@@ -4391,7 +4404,6 @@ static void mu_walk(const char *abs, const char *rel, mu_disk *d, int depth)
             _snprintf_s(crel, nl, _TRUNCATE, "%s%s%s", rel, rel[0] ? "/" : "", name);
             _snprintf_s(cabs, strlen(abs) + strlen(name) + 2, _TRUNCATE, "%s\\%s", abs, name);
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) mu_walk(cabs, crel, d, depth + 1);
-            else if (d->n >= MU_FILES_MAX) d->truncated = 1;
             else {
                 if (d->n == d->cap) {
                     size_t nc = d->cap ? d->cap * 2 : 64;
@@ -4556,7 +4568,6 @@ static int mu_files(const char *key)
         first = 0;
     }
     mu_putn(&b, "]", 1);
-    mu_kbool(&b, "truncated", d.truncated, 0);
     free(seen);
     mu_disk_free(&d);
     sh_ms_list_free(&l);
@@ -4627,12 +4638,7 @@ static int mu_file_text(const char *arg)
         return mu_simple_result(action, 0, "The mod's folder does not hold this file; it is read from your install.");
     }
     free(w);
-    if (fa.nFileSizeHigh || fa.nFileSizeLow > MU_TEXT_MAX) {
-        sh_ms_list_free(&l);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is larger than 1 MB; open it in a text editor from the mod's folder.", rel);
-        return mu_simple_result(action, 0, msg);
-    }
-    text = sh_mb_read_file(full, MU_TEXT_MAX, &len);
+    text = sh_mb_read_file(full, (size_t)-1, &len);
     if (!text) {
         sh_ms_list_free(&l);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be read; close any program that holds it and try again.", rel);
@@ -4865,12 +4871,12 @@ static void mu_say_map(const mu_out *o)
                     x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
                     x->in_rows ? "" : ", not listed yet (the next save lists it)", mu_mapmod_follows(x) ? ", needed by another mod" : "");
             if (x->declared[0]) mu_say_substituted(o, &m, "map:   ", x->id, x->declared, x->hash);
-            for (k = 0; k < x->uid_count && k < MU_MAX_MAP_ENTITIES; k++) {
+            for (k = 0; k < x->uid_count; k++) {
                 char name[300];
                 mu_entity_label(&m, sh_mm_find(&mp.mm, x->uids[k]), x->uids[k], name, sizeof name);
                 mu_line(o, "map:   entity %s", name);
             }
-            for (k = 0; k < n && k < MU_MAX_MAP_REFS; k++) {
+            for (k = 0; k < n; k++) {
                 char name[700];
                 mu_ref_name(&m, &mp, &refs[k], name, sizeof name);
                 mu_line(o, "map:   %s %s", refs[k].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", name);

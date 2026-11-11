@@ -1317,10 +1317,9 @@ segment cut (either spelling of the key; where a copy moved under a key came
 from), each time every row of the name in both archives (they hold different
 bytes under some names, and the one whose bytes match is named), then entries
 of the same size and extension elsewhere (a renamed copy, in size, extension,
-archive and name order until one matches or 256 MiB are hashed for the file;
-no candidate count, since image sizes the game uses for thousands of rows
-would otherwise stop the search early), and each slice is hashed at most once
-per process; measured on the
+archive and name order until one matches; no count or byte budget: each
+slice is hashed at most once per process, so the game's own rows bound the
+work); measured on the
 owner's packs, a build hashes about the bytes that become pointers, never the
 archives. Installing a downloaded bundle resolves every pointer first, and a
 game that lacks the entry or holds other bytes (a different revision) refuses

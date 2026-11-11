@@ -17,8 +17,8 @@
  * that name in both archives, which hold different bytes under some names),
  * then at the path with its mods/<salt>/ segment removed (a game file the
  * author copied under the mod's folder, sh_mb_strip_key), then entries of the same size and
- * extension elsewhere (a renamed copy, until SH_MODSTOCK_RENAMED_BYTES are
- * hashed for the file; no candidate count), so a build hashes about the bytes
+ * extension elsewhere (a renamed copy: every such entry until one matches,
+ * each hashed at most once per process), so a build hashes about the bytes
  * that become pointers rather than the archives.
  *
  * Thread-safe: the table is immutable once loaded; reads are positional.
@@ -30,7 +30,6 @@
 #include "modbundle.h"
 
 #define SH_MODSTOCK_MAX_SLICE      (512ull << 20)  /* the largest entry read or hashed in memory */
-#define SH_MODSTOCK_RENAMED_BYTES  (256ull << 20)  /* renamed-copy bytes hashed per file */
 
 /* The install folder (the one holding base\), UTF-8. NULL or "" restores the
  * default, the host executable's folder. Drops a loaded table. */

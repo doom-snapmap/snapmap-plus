@@ -959,6 +959,17 @@ static void test_places_prune(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep\\Crate\\mod.json", root);
     CHECK(mt_exists(dir));
     CHECK(sh_ms_places_prune(30) == 0);
+    /* Any number of saved maps with places: 600 of them are all read. */
+    for (i = 0; i < 600; i++) {
+        char seg[32];
+        _snprintf_s(seg, sizeof seg, _TRUNCATE, "Place %u", (unsigned)i);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s%c76561198000000000%cSNAPMAPS%024u", saves, 92, 92, (unsigned)i);
+        text = sh_carrier_put_place(MAP, sizeof MAP - 1, seg, &tl, cause, sizeof cause);
+        CHECK(text != NULL);
+        CreateDirectoryA(dir, NULL);
+        if (text) { put_saved_decl(dir, text, tl); HeapFree(GetProcessHeap(), 0, text); }
+    }
+    CHECK(sh_ms_places_prune(30) == 0 && sh_ms_place_saved_maps("maps\\Place 599") == 1);
     sh_modui_test_set_saves_root(NULL);
     CHECK(sh_ms_set_root(g_root));
 }

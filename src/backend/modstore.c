@@ -1216,8 +1216,7 @@ static char g_ms_fixed_salt[SH_SALT_LEN + 1];
  * folder segments of paths under assets/; a binary file naming mods/<from>/
  * refuses the folder. Nothing of a new folder serves before it is salted and
  * built: an entry serves only when its block records a build. */
-#define MS_RK_TEXT_MAX (16u << 20)   /* a file read whole; a larger one is scanned in chunks as a binary */
-#define MS_RK_CHUNK    (4u << 20)
+#define MS_RK_CHUNK    (4u << 20)   /* a binary is scanned in pieces; a text, of any size, is read whole */
 
 typedef struct ms_rk_file {
     char *rel, *new_rel;      /* under the folder, '/'-separated */
@@ -1258,14 +1257,38 @@ static void ms_rk_fail(ms_rk *r, const char *fmt, ...)
     va_end(ap);
 }
 
-/* Whether a binary file names the folder; -1 when it cannot be read. */
-static int ms_rk_binary_names(const wchar_t *path, const char *leaf)
+/* 1 when the file holds no NUL byte (a text, of any size), 0 when it does (a
+ * binary), -1 when it cannot be read. Read in pieces. */
+static int ms_rk_is_text(const wchar_t *path)
 {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    size_t keep = strlen(leaf) + 8, have = 0;
+    char *buf;
+    int text = 1;
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    buf = (char *)malloc(MS_RK_CHUNK);
+    if (!buf) { CloseHandle(h); return -1; }
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(h, buf, MS_RK_CHUNK, &got, NULL)) { text = -1; break; }
+        if (!got) break;
+        if (memchr(buf, 0, got)) { text = 0; break; }
+    }
+    free(buf);
+    CloseHandle(h);
+    return text;
+}
+
+/* Whether a binary file names the folder (1) or one of the renamed strings
+ * keys (2), scanned in pieces whatever its size; 0 neither, -1 when it
+ * cannot be read. */
+static int ms_rk_binary_names(const wchar_t *path, const ms_rk *r)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    size_t keep = (r->leaf ? strlen(r->leaf) : 0) + 8, have = 0, k;
     char *buf;
     int hit = 0;
     if (h == INVALID_HANDLE_VALUE) return -1;
+    for (k = 0; k < r->nskeys; k++) if (strlen(r->skeys[k].from) + 8 > keep) keep = strlen(r->skeys[k].from) + 8;
     buf = (char *)malloc(MS_RK_CHUNK + keep);
     if (!buf) { CloseHandle(h); return -1; }
     for (;;) {
@@ -1273,8 +1296,9 @@ static int ms_rk_binary_names(const wchar_t *path, const char *leaf)
         if (!ReadFile(h, buf + have, MS_RK_CHUNK, &got, NULL)) { hit = -1; break; }
         if (!got) break;
         have += got;
-        if (sh_mb_rekey_text(buf, have, leaf, "k", NULL, NULL)) { hit = 1; break; }
-        /* Keep the tail, so a name split across two chunks is still seen. */
+        if (r->leaf && sh_mb_rekey_text(buf, have, r->leaf, "k", NULL, NULL)) { hit = 1; break; }
+        if (r->nskeys && sh_mb_restr_text(buf, have, r->skeys, r->nskeys, NULL, NULL) > 0) { hit = 2; break; }
+        /* Keep the tail, so a name split across two pieces is still seen. */
         if (have > keep) { memmove(buf, buf + have - keep, keep); have = keep; }
     }
     free(buf);
@@ -1312,7 +1336,7 @@ static void ms_rk_bank(ms_rk *r, ms_rk_file *f, const wchar_t *path, const char 
     if (bl && !strncmp(low, r->bank_from, bl) && low[bl] == '_' && low[bl + 1])
         _snprintf_s(to, sizeof to, _TRUNCATE, "%s_%s", r->key, stem + bl + 1);
     if (strlen(to) > SH_MB_BANK_STEM_MAX) return;   /* the build names the length rule */
-    bytes = (unsigned char *)ms_read_text(path, MS_RK_TEXT_MAX, &len);
+    bytes = (unsigned char *)ms_read_text(path, (size_t)-1, &len);
     if (!bytes) return;   /* the build reads it again and names what is wrong */
     if (len < 16 || memcmp(bytes, "BKHD", 4)) { free(bytes); return; }
     memcpy(&id, bytes + 12, 4);
@@ -1406,9 +1430,9 @@ static void ms_rk_rebank(ms_rk *r, const wchar_t *src, char **modjson, size_t *m
         if (f->dir || _strnicmp(f->rel, "assets/", 7) || sh_mb_bank_stem(f->rel + 7, NULL, 0)) continue;
         if (!t) {
             wchar_t *p = ms_wjoin_utf8(src, f->rel);
-            t = a = p ? ms_read_text(p, MS_RK_TEXT_MAX, &len) : NULL;
+            t = a = p && ms_rk_is_text(p) == 1 ? ms_read_text(p, (size_t)-1, &len) : NULL;
             free(p);
-            if (!t || memchr(t, 0, len)) { free(a); continue; }   /* a binary, or too large to be a text */
+            if (!t) continue;   /* a binary */
         }
         c = sh_ms_rebank_text(t, len, names, count, &o, &ol);
         if (c == (size_t)-1) ms_rk_fail(r, "out of memory");
@@ -1490,12 +1514,12 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
         } else if (sh_mb_bank_stem(child + 7, NULL, 0)) {
             ms_rk_bank(r, f, path, child);
         } else {
-            unsigned long long size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
             size_t len = 0;
-            char *t = size <= MS_RK_TEXT_MAX ? ms_read_text(path, MS_RK_TEXT_MAX, &len) : NULL;
-            if (size <= MS_RK_TEXT_MAX && !t) {
+            int is_text = ms_rk_is_text(path);
+            char *t = is_text == 1 ? ms_read_text(path, (size_t)-1, &len) : NULL;
+            if (is_text < 0 || (is_text == 1 && !t)) {
                 ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
-            } else if (t && !memchr(t, 0, len)) {
+            } else if (t) {
                 /* A text: decl text, scripts and anything else without a NUL
                  * byte. mods/<from>/ first, then the #str_ references of the
                  * renamed strings keys. */
@@ -1513,15 +1537,13 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
                 /* A new mod's binary that spells its folder's name or one of
                  * its strings cannot be renamed with it. A mod that has its
                  * salt keeps its binaries as they are: the build decides. */
-                int hit = !r->leaf ? 0 : t ? (sh_mb_rekey_text(t, len, r->leaf, r->key, NULL, NULL) > 0)
-                                           : ms_rk_binary_names(path, r->leaf);
-                int shit = t && r->nskeys && sh_mb_restr_text(t, len, r->skeys, r->nskeys, NULL, NULL) > 0;
+                int hit = r->leaf || r->nskeys ? ms_rk_binary_names(path, r) : 0;
                 if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
-                else if (hit)
+                else if (hit == 1)
                     ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
                                "New mod in the Mods tab first, then export the file under the new mod's folder", child,
                                r->leaf);
-                else if (shit)
+                else if (hit == 2)
                     ms_rk_fail(r, "%s names one of this mod's strings (#str_) inside a binary file, which Snapmap+ cannot "
                                "rename; make the mod with New mod in the Mods tab first, then export the file with the "
                                "string names that mod's mod.json shows", child);
