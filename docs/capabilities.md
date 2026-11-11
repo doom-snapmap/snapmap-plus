@@ -906,8 +906,9 @@ and [`fidelity.md`](fidelity.md).
 The backend also carries **mod scripts**: a mod's `assets\mods\<salt>\scripts\*.lua` run during Play,
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
-API version 1 registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.input`, `on.map_start`,
-`on.map_end`, and `on.damage`, `on.death`, `on.anim`, which nothing delivers yet), keeps game time
+API version 1 registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
+`on.pain`, `on.anim`, `on.frame_event`, `on.projectile`, `on.input`, `on.map_start`, `on.map_end`),
+keeps game time
 (`now`, `after`, `every`, `run`, `wait`) and writes the mod's script log (`print`, `warn`). With
 entities and the world it can `spawn` its own entities, read any entity's position, facing,
 velocity, health and animation, move, turn, push, heal, animate and remove its own, heal players,
@@ -915,7 +916,12 @@ find `players()` and `entities_near`, and `trace` lines through the world. It dr
 demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
 `path_length`, `find_position`, `trigger`, `equip`, `laser`, `focus_tag` and the rest; `anim_state`
 and `anim_force` work on demons too): a commanded demon waits in the engine's own script state and
-keeps its pain and death. A mod whose scripts handle an input gets a **Script** node in its Toybox
+keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
+`hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and
+steers or explodes them, starts and stops effects (`fx`, `fx_move`, `fx_stop`), plays its own sounds
+(`sound`), reads a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
+(amount, decl, damage zone, direction, attacker), death, pain reactions, `ae_notify` rows and
+launched projectiles to the mod's handlers. A mod whose scripts handle an input gets a **Script** node in its Toybox
 category: a wire into a node runs the script's `on.input` handler for the node's name,
 `node(name):fire()` raises On Fired on the mod's nodes of that name, and `vars.get` / `vars.set`
 read and write the map's Integer, Number, Boolean and String variables so wired logic reacts; a map
@@ -923,9 +929,7 @@ with a Script node records the mod like any mod row. A script is checked when it
 syntax error, compiled Lua, a file over 256 KB, more than 64 files or 1 MB of scripts, a `require`
 of a file the mod does not carry or a name of another mod refuses the build with the file and line
 on the mod's row. Scripts travel with the mod everywhere it goes (publish, download, rawmap and
-prefab exports, installs); a Play runs the scripts as they were built at the last Refresh. The
-combat calls (`fire`, `hitscan`, `radius_damage`, `damage`, `fx`, `sound`) and the damage, death
-and animation-notify events come with the work that follows.
+prefab exports, installs); a Play runs the scripts as they were built at the last Refresh.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing
