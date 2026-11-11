@@ -906,12 +906,19 @@ The backend also carries **mod scripts**: a mod's `assets\mods\<salt>\scripts\*.
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
 Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
-`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps game time (`now`, `after`, `every`, `run`,
-`wait`), writes the mod's script log (`print`, `warn`), and works with entities and the world:
-`spawn` its own entities, read any entity's position, facing, velocity, health and animation, move,
-turn, push, heal, animate and remove its own, heal players, find `players()` and `entities_near`,
-and `trace` lines through the world. The AI, combat and logic calls, and the hooks that deliver
-damage, death, animation notifies and Script node inputs, come with the work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
+`on.pain`, `on.anim`, `on.frame_event`, `on.projectile`, `on.input`, `on.map_start`, `on.map_end`),
+keeps game time (`now`, `after`, `every`, `run`, `wait`), writes the mod's script log (`print`,
+`warn`), and works with entities and the world: `spawn` its own entities, read any entity's position,
+facing, velocity, health and animation, move, turn, push, heal, animate and remove its own, heal
+players, find `players()` and `entities_near`, and `trace` lines through the world. Combat: deal its
+own damage decls to any entity (`damage`, `hitscan`, `radius_damage`, `explode`), fire its own
+projectiles from its demons (`ai:fire`) and steer or explode them, start and stop effects from an
+entity's fx decl or place its own effect entities (`fx`, `fx_move`, `fx_stop`), play its own sounds
+(`sound`), read a joint's position and direction (`e:tag`) and the pain a demon is in (`e:pain`).
+The hooks deliver damage (amount, decl, damage zone, direction, attacker), death, pain reactions,
+`ae_notify` rows and launched projectiles to the mod's handlers. The AI and logic calls and the
+Script node input come with the work that follows. Placed and spawned entities of a scripted mod
+receive `spawn` and `think`.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing
