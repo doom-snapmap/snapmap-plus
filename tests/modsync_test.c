@@ -313,6 +313,14 @@ static sh_ms_place place_of(const char *title, const char *map_id)
 
 static void use_root(const char *root) { strcpy_s(g_root, sizeof g_root, root); }
 
+/* The player answers No while the download runs: the cancel flag is set at
+ * the first progress report. */
+static void cancel_on_progress(void *ctx, unsigned long long done, unsigned long long total)
+{
+    (void)done; (void)total;
+    InterlockedExchange((volatile long *)ctx, 1);
+}
+
 static int file_has(const char *path, const char *needle)
 {
     size_t len = 0;
@@ -644,6 +652,25 @@ int main(void)
         CHECK(g_rescans == rescans + 1 && g_notes == notes + 1 && !strcmp(g_note_folder, "maps\\Red Keep\\Alpha") &&
               !strcmp(g_note_title, "Red Keep"));
         CHECK(modsync_find_installed("alpha001", ha2, &red, NULL, 0) && !modsync_find_installed("alpha001", ha2, &blue, NULL, 0));
+        /* A download the player cancels mid-way installs nothing and leaves no
+         * downloaded file behind. */
+        {
+            sh_ms_place grey = place_of("Ash Keep", "item-11");
+            volatile long cancel = 0;
+            modnet_io io = { &cancel, cancel_on_progress, (void *)&cancel };
+            char pattern[MAX_PATH], dir[MAX_PATH * 2];
+            WIN32_FIND_DATAA fd;
+            HANDLE h;
+            CHECK(!modsync_fetch_build_for(&row, &grey, &io, &st) && st.code == MODNET_E_CANCELLED);
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Ash Keep\\Alpha", r2);
+            CHECK(!mt_exists(dir));
+            GetTempPathA(sizeof pattern, pattern);
+            _snprintf_s(pattern + strlen(pattern), sizeof pattern - strlen(pattern), _TRUNCATE, "snapmap-plus-%.16s-%lu-*",
+                        ha2, GetCurrentProcessId());
+            h = FindFirstFileA(pattern, &fd);
+            CHECK(h == INVALID_HANDLE_VALUE);
+            if (h != INVALID_HANDLE_VALUE) FindClose(h);
+        }
         /* Again: present in the place; nothing fetched. */
         gets = g_stub.build_gets;
         CHECK(modsync_fetch_build_for(&row, &red, NULL, &st) && st.already_installed && g_stub.build_gets == gets);

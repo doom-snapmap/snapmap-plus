@@ -379,6 +379,8 @@ typedef struct pub_hold {
     int waited;
     pub_job *job;
     ULONGLONG progress_at;
+    int progress_due;                    /* fresh numbers wait for the dialog surface */
+    int cancelled;                       /* the player answered No to the progress dialog */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -1016,18 +1018,66 @@ static int pub_job_rows(pub_job *job, const pub_hold *h)
     return 1;
 }
 
-/* The download's progress, as the player sees it: one console line every
- * PUB_PROGRESS_MS while a download runs. */
-static void pub_progress_line(const char *name, long current, size_t count, long long done, long long total)
+/* The download's progress, as the player sees it, in words: "Downloading
+ * <mod> (i of n): x of y MB, p%." */
+static void pub_progress_text(char *out, size_t cap, const char *name, long current, size_t count, long long done,
+                              long long total)
 {
-    char line[PUB_TEXT_CAP];
     if (total > 0)
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Downloading %s (%ld of %u): %.1f of %.1f MB, %d%%.", name, current + 1,
+        _snprintf_s(out, cap, _TRUNCATE, "Downloading %s (%ld of %u): %.1f of %.1f MB, %d%%.", name, current + 1,
                     (unsigned)count, done / 1048576.0, total / 1048576.0, (int)(done * 100 / total));
     else
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Downloading %s (%ld of %u): %.1f MB.", name, current + 1,
-                    (unsigned)count, done / 1048576.0);
-    pub_print(line);
+        _snprintf_s(out, cap, _TRUNCATE, "Downloading %s (%ld of %u): %.1f MB.", name, current + 1, (unsigned)count,
+                    done / 1048576.0);
+}
+
+/* Every PUB_PROGRESS_MS while a download runs, the player sees where it is
+ * in the game's own dialog (the one the question used), with the choice to
+ * keep waiting (Yes) or cancel (No), and one console line. The dialog is
+ * raised again with fresh numbers at each step; the engine's dialog shows
+ * fixed text, so the old one is taken down first. */
+static void pub_progress_step(pub_hold *h, pub_job *job)
+{
+    char text[PUB_TEXT_CAP], ask[PUB_TEXT_CAP];
+    ULONGLONG now = GetTickCount64();
+    if (h->ticket) {
+        int answer = g_ops.poll ? g_ops.poll(g_ops.context, h->ticket) : PUB_DIALOG_PENDING;
+        if (answer != PUB_DIALOG_PENDING) {
+            if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
+            h->ticket = 0;
+            if (answer != PUB_DIALOG_ACCEPTED) {
+                /* No: the download stops at its next chunk; what it fetched
+                 * is removed and nothing is installed half way. */
+                job->cancel = 1;
+                h->cancelled = 1;
+                pub_logf("MODS: the player cancelled the download of the %s's mods", pub_thing(h->hook));
+                return;
+            }
+        }
+    }
+    if (h->progress_due || now - h->progress_at >= PUB_PROGRESS_MS) {
+        LONG current = InterlockedCompareExchange(&job->current, 0, 0);
+        long long done = InterlockedCompareExchange64(&job->progress_done, 0, 0);
+        long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
+        if (!h->progress_due) {
+            h->progress_at = now;
+            pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->names[current], current + 1,
+                     (unsigned)job->count, done / 1048576.0, total / 1048576.0);
+            pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
+            pub_print(text);
+            if (h->ticket) {
+                if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
+                h->ticket = 0;
+            }
+            h->progress_due = 1;
+        }
+        if (!h->ticket && g_ops.can_ask && g_ops.can_ask(g_ops.context) && g_ops.ask) {
+            pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
+            _snprintf_s(ask, sizeof ask, _TRUNCATE, "%s Keep downloading? No cancels it and installs nothing more.", text);
+            h->ticket = g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_YES_NO, ask);
+            h->progress_due = 0;
+        }
+    }
 }
 
 static void pub_start_fetch(void)
@@ -1046,7 +1096,7 @@ static void pub_start_fetch(void)
     h->job = job;
     h->state = HOLD_FETCHING;
     h->progress_at = GetTickCount64();
-    pub_progress_line(job->names[0], 0, job->count, 0, (long long)h->missing_bytes);
+    h->progress_due = 1;   /* the progress dialog follows the question at once */
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "Snapmap+ is busy with another upload or download. %s Try again in a moment.", pub_not_done(h->hook));
@@ -1591,16 +1641,18 @@ void sh_modpublished_poll(void)
     case HOLD_FETCHING: {
         pub_job *job = h->job;
         if (!InterlockedCompareExchange(&job->done, 0, 0)) {
-            ULONGLONG now = GetTickCount64();
-            if (now - h->progress_at >= PUB_PROGRESS_MS) {
-                LONG current = InterlockedCompareExchange(&job->current, 0, 0);
-                long long done = InterlockedCompareExchange64(&job->progress_done, 0, 0);
-                long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
-                h->progress_at = now;
-                pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->names[current],
-                         current + 1, (unsigned)job->count, done / 1048576.0, total / 1048576.0);
-                pub_progress_line(job->names[current], current, job->count, done, total);
-            }
+            if (!h->cancelled) pub_progress_step(h, job);
+            break;
+        }
+        if (h->ticket) {
+            if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
+            h->ticket = 0;
+        }
+        if (h->cancelled) {
+            char line[PUB_TEXT_CAP];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "The download was cancelled. %s", pub_not_done(h->hook));
+            pub_print(line);
+            pub_drop(line, "the player cancelled the download");
             break;
         }
         pub_finish();

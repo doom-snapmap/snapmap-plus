@@ -1044,6 +1044,35 @@ static void the_question(void)
     }
 }
 
+static void download_progress_and_cancel(void)
+{
+    ULONGLONG t0;
+    printf("-- the download shows its progress in the game's dialog: Yes keeps waiting, No cancels and installs nothing\n");
+    reset();
+    F.fetch_gate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1);
+    F.answer = 1;   /* Yes to the question */
+    for (int i = 0; i < 200 && F.asks < 2; i++) { tick(1); Sleep(1); }
+    CHECK(F.asks == 2 && F.ask_buttons == 6 && sh_modpub_test_state() == 3);
+    CHECK(!strncmp(F.last_ask, "Downloading alex.pink-imp (1 of 1): ", 36) && strstr(F.last_ask, "%. Keep downloading?"));
+    /* Yes: the dialog goes, the download goes on, and the numbers come back. */
+    t0 = GetTickCount64();
+    tick(1);
+    CHECK(sh_modpub_test_state() == 3 && F.fetch_cancelled == 0);
+    F.answer = 2;   /* No, when it comes back */
+    for (int i = 0; i < 5000 && F.asks < 3; i++) { tick(1); Sleep(1); }
+    CHECK(F.asks == 3 && GetTickCount64() - t0 >= 1900);
+    CHECK(strstr(F.prints_all, "Downloading alex.pink-imp (1 of 1): ") != NULL);
+    tick_until_idle();
+    CHECK(F.fetch_cancelled == 1 && F.resumes == 0 && !F.installed_a && !F.place_a[0]);
+    CHECK(strstr(F.prints_all, "The download was cancelled. The map was not loaded.") != NULL);
+    CloseHandle(F.fetch_gate);
+    F.fetch_gate = NULL;
+}
+
 static void scripts_and_the_setting(void)
 {
     printf("-- a map whose missing builds carry scripts: the question says so; with scripts off it is refused\n");
@@ -1060,8 +1089,6 @@ static void scripts_and_the_setting(void)
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.resumes == 1);
-    /* The download says how far it is, on the console. */
-    CHECK(strstr(F.prints_all, "Downloading alex.pink-imp (1 of 1): 0.0 of 98.0 MB, 0%.") != NULL);
 
     /* Turned off: nothing is asked or downloaded, and the player is told what
      * to turn on and where. */
@@ -1635,6 +1662,7 @@ int main(void)
     a_newer_launch_replaces();
     the_question();
     scripts_and_the_setting();
+    download_progress_and_cancel();
     rawmap_missing_counts_rows();
     a_map_carries_its_place();
     one_notice_queue();
