@@ -18,6 +18,7 @@
 #include "decl_tree.h"
 #include "modmanifest.h"
 #include "modbundle.h"
+#include "store_lock.h"
 #include "modstore.h"
 #include "overrides.h"
 
@@ -4935,7 +4936,17 @@ static void test_bank_stems(void)
         for (t = stray; *t; ++t) if (*t == '/') *t = '\\';
         write_file(stray, "old", 3);
         write_file(tmp, "part", 4);
-        CHECK(sh_modserve_served_prune() == 2);
+        {
+            /* A game serving another mods folder (the player's own, under
+             * the name every game used before, or a mark named for another
+             * folder) does not stop the prune of this one. */
+            HANDLE other = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served");
+            HANDLE elsewhere = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served-0123456789abcdef");
+            CHECK(other && elsewhere);
+            CHECK(sh_modserve_served_prune() == 2);
+            CloseHandle(other);
+            CloseHandle(elsewhere);
+        }
         CHECK(GetFileAttributesA(stray) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA(tmp) == INVALID_FILE_ATTRIBUTES);
         CHECK(GetFileAttributesA(live) != INVALID_FILE_ATTRIBUTES);
         CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == 24);
@@ -5093,6 +5104,18 @@ static void test_store_root_utf8(void)
         CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Caf\xc3\xa9"));
         CHECK(sh_modserve_place_set(NULL) >= 0);
+        /* Playing a place notes it in the record of the folder the index
+         * serves from, whatever the store root is set to: never the
+         * player's own mods folder. */
+        {
+            sh_ms_place place = { "Caf\xc3\xa9", "item-cafe" };
+            CHECK(sh_ms_place_note(&place, "maps\\Caf\xc3\xa9"));
+            CHECK(sh_ms_set_root(NULL));
+            CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
+            CHECK(sh_ms_set_root(root));
+            CHECK(sh_ms_place_played_at("maps\\Caf\xc3\xa9") >= (long long)_time64(NULL) - 60);
+            CHECK(sh_modserve_place_set(NULL) >= 0);
+        }
     }
     sh_ms_set_root(NULL);
     strcpy_s(path, sizeof path, root);

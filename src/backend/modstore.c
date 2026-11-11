@@ -1159,7 +1159,7 @@ static void ms_block_salt(const wchar_t *folder, char out[SH_SALT_LEN + 1])
 {
     wchar_t *p = ms_wjoin(folder, L"mod.json");
     size_t len = 0;
-    char *text = p ? ms_read_text(p, SH_MB_DESCRIPTOR_MAX * 16, &len) : NULL;
+    char *text = p ? ms_read_text(p, (size_t)-1, &len) : NULL;
     mpj *j = text ? mpj_parse(text, len) : NULL;
     const mpj *block = j ? mpj_get(j, SH_MB_BLOCK_KEY) : NULL, *s = block ? mpj_get(block, "salt") : NULL;
     out[0] = 0;
@@ -1649,7 +1649,7 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         else { ms_cause(cause, ccap, "out of memory"); goto done; }
     } else {
         mj = ms_wjoin(src, L"mod.json");
-        author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX * 16, &alen);
+        author = ms_read_text(mj, (size_t)-1, &alen);
         free(mj);
     }
     if (!author) { ms_cause(cause, ccap, "mod.json could not be read (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
@@ -2153,12 +2153,14 @@ out:
     return ok;
 }
 
-int sh_ms_place_played(const char *dir_in)
+int sh_ms_place_played(const char *root, const char *dir_in)
 {
     char rootu[MAX_PATH * 4], dir[SH_MS_NAME_MAX + 1], f[SH_MS_NAME_MAX + 1], *c;
     mpj *doc;
     int i, hit = 0, ok = 1;
-    if (!dir_in || !dir_in[0] || !sh_ms_root(rootu, sizeof rootu)) return 0;
+    if (!dir_in || !dir_in[0]) return 0;
+    if (root && root[0]) strncpy_s(rootu, sizeof rootu, root, _TRUNCATE);
+    else if (!sh_ms_root(rootu, sizeof rootu)) return 0;
     strncpy_s(dir, sizeof dir, dir_in, _TRUNCATE);
     for (c = dir; *c; c++) if (*c == '/') *c = '\\';
     sh_mb_record_lock(rootu);
@@ -3083,7 +3085,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     }
     {
         wchar_t *mj = ms_wjoin(src, L"mod.json");
-        author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX * 16, &author_len);
+        author = ms_read_text(mj, (size_t)-1, &author_len);
         free(mj);
     }
     text = sh_mb_modjson_text(&b, author, author_len, &text_len);

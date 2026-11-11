@@ -344,12 +344,14 @@ int  sh_ms_place_saved_maps(const char *place);
 int  sh_ms_places_prune(unsigned days);
 
 /* Scripts from downloaded maps (design: the one download approval and the
- * player's setting). The download gate needs to know, before it asks,
- * whether the map's missing builds carry scripts and how many files: the
- * store's answer must say so (store and Worker side). Then it adds
+ * player's setting). The store says how many script files each build
+ * carries (its index records it; HEAD answers X-Mod-Scripts), so the
+ * download gate (modpublished.c) knows before it asks: it adds
  * sh_modui_scripts_approval's sentence to its one question, and, while
  * sh_modui_scripted_maps_allowed() is 0, refuses the map before any download
- * with SH_MODUI_SCRIPTS_OFF. The Mods tab offers the setting
+ * with SH_MODUI_SCRIPTS_OFF. A rawmap or prefab ZIP import (modexport.c)
+ * whose mods carry scripts is refused with the same sentence while the
+ * setting is off, and installs nothing. The Mods tab offers the setting
  * ("mods.scripted_maps", on by default). */
 #define SH_MODUI_SCRIPTS_OFF \
     "This map's mods include scripts, which you turned off in the Mods tab; turn on \"Play maps whose mods include " \

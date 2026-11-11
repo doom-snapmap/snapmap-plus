@@ -416,7 +416,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         int r;
         while ((r = mm_array_next(&cursor, end, &elem, &elem_len)) == 1) {
             char *name;
-            if (*elem != '"' || out->name_count >= SH_MODMANIFEST_MAX_NAMES) continue;
+            if (*elem != '"') continue;
             name = mm_decode(elem, elem_len);
             if (name && strlen(name) <= SH_MODMANIFEST_NAME_MAX) sh_modmanifest_row_add_name(out, name);
             free(name);
@@ -500,8 +500,7 @@ static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_li
 {
     const char *cursor = from, *elem;
     size_t elem_len, read = 0;
-    while (out->count < SH_MODMANIFEST_MAX_ROWS &&
-           sh_carrier_array_next(&cursor, to, &elem, &elem_len) == 1) {
+    while (sh_carrier_array_next(&cursor, to, &elem, &elem_len) == 1) {
         sh_modmanifest_row row;
         if (*elem != '{' || !sh_modmanifest_parse_value(elem, elem_len, &row, NULL, 0)) { (*bad)++; continue; }
         if (!mm_merge_row(out, &row)) (*bad)++;
@@ -533,7 +532,6 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
     if (out_length) *out_length = 0;
     if (err && err_cap) err[0] = 0;
     if (!json || !length) { MM_ERR("no map text"); return NULL; }
-    if (count > SH_MODMANIFEST_MAX_ROWS) { MM_ERR("This map uses more than 4096 mod builds; it was saved without its mod list"); goto done; }
     if (count) {
         mm_put(&value, "[", 1);
         for (i = 0; i < count; i++) {

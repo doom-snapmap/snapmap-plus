@@ -294,10 +294,12 @@ int  sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, siz
  * map of the record names). */
 int  sh_ms_place_title(const char *folder, char *title, size_t cap);
 
-/* A map whose place is `dir` ("maps\<segment>") was loaded now: every record
- * entry naming that place notes the time ("played"). Returns 1 when written,
- * 0 when no entry names it or the record cannot be written. */
-int  sh_ms_place_played(const char *dir);
+/* A map whose place is `dir` ("maps\<segment>") was loaded now: every entry
+ * of the record of the mods folder `root` (the folder the serving index
+ * reads; NULL: the store root) naming that place notes the time ("played").
+ * Returns 1 when written, 0 when no entry names it or the record cannot be
+ * written. */
+int  sh_ms_place_played(const char *root, const char *dir);
 
 /* When the map of place `dir` was last played (seconds since 1970): the
  * latest "played" of the entries naming it, and never earlier than the place

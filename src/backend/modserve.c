@@ -28,6 +28,12 @@
 #include "config_json.h"
 #include "backend_log.h"
 #include "script/script_node.h"   /* a scripted mod's Script node row (ms_script_node_row) */
+#include "store_lock.h"
+
+/* The mark a game instance leaves on the mods folder it serves from:
+ * "Local\snapmap-plus-served-<16 hex>", the hex that of the folder's store
+ * lock. */
+#define SH_SERVED_MARK_PREFIX L"Local\\snapmap-plus-served-"
 
 #define MS_NAME_MAX      1024u
 #define MS_JSON_DEPTH    16u
@@ -3647,12 +3653,24 @@ static int ms_place_apply(const char *norm, int remember)
     return changed;
 }
 
+/* The map of a place is being played: the start-up cleanup keeps it. The
+ * note goes to the record of the mods folder the index serves from, never
+ * another folder's. */
+static void ms_place_note_played(const char *norm)
+{
+    char root[MS_PATH_MAX] = "";
+    if (!norm[0]) return;
+    AcquireSRWLockShared(&g_build_lock);
+    if (g_index) strcpy_s(root, sizeof root, g_index->root);
+    ReleaseSRWLockShared(&g_build_lock);
+    if (root[0]) (void)sh_ms_place_played(root, norm);
+}
+
 int sh_modserve_place_set(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) return -1;
-    /* The map of a place is being played: the start-up cleanup keeps it. */
-    if (norm[0]) (void)sh_ms_place_played(norm);
+    ms_place_note_played(norm);
     return ms_place_apply(norm, 0);
 }
 
@@ -3660,7 +3678,7 @@ int sh_modserve_place_load(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) norm[0] = 0;
-    if (norm[0]) (void)sh_ms_place_played(norm);
+    ms_place_note_played(norm);
     return ms_place_apply(norm, 1);
 }
 
@@ -4169,20 +4187,33 @@ static int ms_prune_served_dir(const ms_index *x, const char *sub)
 int sh_modserve_served_prune(void)
 {
     static HANDLE instance;
+    static wchar_t instance_name[64];
     const ms_index *x;
-    int removed;
-    /* Another game instance on this account may serve files this table does
-     * not name (it read the folder at another time): it is left whole. */
-    if (!instance) {
-        instance = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served");
-        if (instance && GetLastError() == ERROR_ALREADY_EXISTS) {
-            ms_log("index: another game instance uses the mods folder; mods\\.served is left as it is");
-            return 0;
-        }
-    }
+    wchar_t name[64], *wroot;
+    int removed = 0, other = 0;
     AcquireSRWLockShared(&g_build_lock);
     x = g_index;
-    removed = x ? ms_prune_served_dir(x, "banks") + ms_prune_served_dir(x, "files") : 0;
+    /* Another game instance on this account that uses this same mods folder
+     * may serve files this table does not name (it read the folder at another
+     * time): the folder is left whole. The mark is named for the folder, as
+     * its store lock is (store_lock.h), so a game using another mods folder,
+     * or a test's own folder, is never mistaken for one. */
+    wroot = x && x->root[0] ? sh_mb_wpath(x->root) : NULL;
+    if (wroot && sh_store_lock_name(wroot, name, 64)) {
+        wchar_t hex[17];
+        wcscpy_s(hex, 17, name + wcslen(name) - 16);
+        _snwprintf_s(name, 64, _TRUNCATE, SH_SERVED_MARK_PREFIX L"%s", hex);
+        if (!instance || wcscmp(name, instance_name) != 0) {
+            if (instance) CloseHandle(instance);
+            instance = CreateMutexW(NULL, FALSE, name);
+            other = instance && GetLastError() == ERROR_ALREADY_EXISTS;
+            if (other) { CloseHandle(instance); instance = NULL; instance_name[0] = 0; }
+            else wcscpy_s(instance_name, 64, name);
+        }
+    }
+    free(wroot);
+    if (other) ms_log("index: another game instance uses this mods folder; mods\\.served is left as it is");
+    else if (x) removed = ms_prune_served_dir(x, "banks") + ms_prune_served_dir(x, "files");
     ReleaseSRWLockShared(&g_build_lock);
     if (removed) ms_log("index: %d file(s) no mod uses any more removed from mods\\.served", removed);
     return removed;

@@ -123,12 +123,10 @@
 #define SH_MB_NAME_MAX        80u      /* code points */
 #define SH_MB_AUTHOR_MAX      80u      /* code points */
 #define SH_MB_HOMEPAGE_MAX    512u     /* code points */
-#define SH_MB_MAX_FILES       4096u
-#define SH_MB_MAX_TOTAL       (256ull * 1024u * 1024u)
-#define SH_MB_MAX_FILE        (64ull * 1024u * 1024u)
+/* No count or size limit on a mod (DECISIONS 26): its files, one file, its
+ * total and its mod.json grow as the author needs. A published or exported
+ * mod's archive is bounded by the ZIP form alone (modzip.h). */
 #define SH_MB_REQUEST_MAX     400u     /* bytes of one request path */
-#define SH_MB_DESCRIPTOR_MAX  (1024u * 1024u)
-#define SH_MB_MANIFEST_MAX    (1024u * 1024u)   /* the store's bundle JSON cap */
 #define SH_MB_CAUSE_MAX       512u
 #define SH_MB_WARNINGS_KEPT   16u
 #define SH_MB_HASH_HEX        64u

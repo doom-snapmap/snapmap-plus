@@ -28,6 +28,10 @@
 #define MN_CONNECT_MS   15000
 #define MN_SEND_MS      30000
 #define MN_RECEIVE_MS   30000
+/* Joining an archive's parts: the store reads the whole archive back once to
+ * check it before it answers, so the answer waits that long. */
+#define MN_COMPLETE_MS  (15u * 60u * 1000u)
+#define MN_PART_TRIES   4       /* starts of one upload in parts, each resuming the last */
 
 /* ------------------------------------------------------------ session ---- */
 
@@ -316,8 +320,12 @@ typedef struct mn_req {
     const char *route;             /* "/mods/..." */
     const char *content_type;      /* NULL: no body */
     const unsigned char *body;     /* the body in memory, or ... */
-    HANDLE body_file;              /* ... read from this file (body_len bytes from its start) */
+    HANDLE body_file;              /* ... read from this file (body_len bytes from body_offset) */
+    unsigned long long body_offset;
     size_t body_len;
+    const wchar_t *headers;        /* extra request headers, each ending in CRLF, or NULL */
+    DWORD receive_ms;              /* 0: MN_RECEIVE_MS */
+    unsigned *scripts;             /* the answer's X-Mod-Scripts, when it has one */
     unsigned long long max_response;
     unsigned long long expect_total;   /* download progress total when no Content-Length */
     HANDLE sink;                   /* a 2xx body is written here, not returned */
@@ -346,7 +354,7 @@ static int mn_winhttp_error(modnet_result *r, const char *step)
 static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, const modnet_io *io, modnet_result *r)
 {
     HINTERNET conn = NULL, req = NULL;
-    wchar_t path[1024], wroute[512], headers[256];
+    wchar_t path[1024], wroute[512], headers[512];
     char why[160];
     DWORD status = 0, size, policy, features;
     unsigned char *buf = NULL;
@@ -372,14 +380,16 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy);
     features = WINHTTP_DISABLE_COOKIES;
     WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &features, sizeof features);
+    if (q->receive_ms) WinHttpSetTimeouts(req, MN_RESOLVE_MS, MN_CONNECT_MS, MN_SEND_MS, (int)q->receive_ms);
     if (q->content_type) {
         wchar_t ct[64];
         MultiByteToWideChar(CP_UTF8, 0, q->content_type, -1, ct, 64);
         /* Content-Length is written by WinHTTP from the total length below,
          * zero included, for every request that has a body. */
-        _snwprintf_s(headers, 256, _TRUNCATE, L"Content-Type: %s\r\nAccept: application/json, application/octet-stream\r\n", ct);
+        _snwprintf_s(headers, 512, _TRUNCATE, L"Content-Type: %s\r\nAccept: application/json, application/octet-stream\r\n%s", ct,
+                     q->headers ? q->headers : L"");
     } else {
-        _snwprintf_s(headers, 256, _TRUNCATE, L"Accept: application/json, application/octet-stream\r\n");
+        _snwprintf_s(headers, 512, _TRUNCATE, L"Accept: application/json, application/octet-stream\r\n");
     }
     r->requests++;
     if (!WinHttpSendRequest(req, headers, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0,
@@ -391,11 +401,11 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         size_t off = 0;
         unsigned char *chunkbuf = NULL;
         if (q->body_file) {
-            LARGE_INTEGER zero;
-            zero.QuadPart = 0;
+            LARGE_INTEGER from;
+            from.QuadPart = (LONGLONG)q->body_offset;
             chunkbuf = (unsigned char *)malloc(MN_CHUNK);
             if (!chunkbuf) { code = mn_fail(r, MODNET_E_NOMEM, NULL); goto done; }
-            if (!SetFilePointerEx(q->body_file, zero, NULL, FILE_BEGIN)) {
+            if (!SetFilePointerEx(q->body_file, from, NULL, FILE_BEGIN)) {
                 free(chunkbuf);
                 code = mn_fail(r, MODNET_E_ARG, "the archive file cannot be read (error %lu)", GetLastError());
                 goto done;
@@ -421,7 +431,8 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             }
             off += wrote;
             r->sent += wrote;
-            if (io && io->progress) io->progress(io->context, off, q->body_len);
+            /* Progress follows an archive's bytes, never a small JSON body. */
+            if (io && io->progress && q->body_file) io->progress(io->context, off, q->body_len);
         }
         free(chunkbuf);
     }
@@ -444,6 +455,13 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         }
     }
     if (q->length && have_declared) *q->length = declared;
+    if (q->scripts) {
+        wchar_t sv[32];
+        DWORD n = sizeof sv;
+        *q->scripts = 0;
+        if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-Mod-Scripts", sv, &n, WINHTTP_NO_HEADER_INDEX))
+            *q->scripts = (unsigned)wcstoul(sv, NULL, 10);
+    }
     if (q->head) {
         /* A HEAD answer has no body, whatever its Content-Length says. */
         buf = (unsigned char *)malloc(1);
@@ -654,7 +672,8 @@ static int mn_set_add(mn_hashset *s, const char *h)
     return 1;
 }
 
-int modnet_head_build(const char *hash, unsigned long long *size, const modnet_io *io, modnet_result *r)
+int modnet_head_build(const char *hash, unsigned long long *size, unsigned *scripts, const modnet_io *io,
+                      modnet_result *r)
 {
     modnet_result local;
     char route[96];
@@ -667,6 +686,7 @@ int modnet_head_build(const char *hash, unsigned long long *size, const modnet_i
     if (!r) r = &local;
     mn_begin(r, &t0);
     if (size) *size = 0;
+    if (scripts) *scripts = 0;
     if (!modnet_valid_hash(hash)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
     _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
     memset(&q, 0, sizeof q);
@@ -674,11 +694,151 @@ int modnet_head_build(const char *hash, unsigned long long *size, const modnet_i
     q.route = route;
     q.head = 1;
     q.length = &length;
+    q.scripts = scripts;
     code = mn_exchange(&q, &resp, &rlen, io, r);
     if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, NULL, 0, "build");
     else if (code == MODNET_OK && size) *size = length;
     free(resp);
     return mn_end(r, t0, code);
+}
+
+/* Progress of one request of an upload in parts, as progress of the whole
+ * archive: `base` bytes are already at the store. */
+typedef struct mn_part_progress { const modnet_io *outer; unsigned long long base, total; } mn_part_progress;
+
+static void mn_part_progress_cb(void *ctx, unsigned long long done, unsigned long long total)
+{
+    mn_part_progress *p = (mn_part_progress *)ctx;
+    (void)total;
+    p->outer->progress(p->outer->context, p->base + done, p->total);
+}
+
+/* One small JSON request of an upload in parts ({"size":N} to `route`). */
+static int mn_parts_post(const char *route, unsigned long long size, DWORD receive_ms, unsigned char **resp, size_t *rlen,
+                         const modnet_io *io, modnet_result *r)
+{
+    char body[64];
+    mn_req q;
+    modnet_io quiet;   /* the cancel flag only: progress follows the archive's bytes */
+    quiet.cancel = io ? io->cancel : NULL;
+    quiet.progress = NULL;
+    quiet.context = NULL;
+    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"size\":%llu}", size);
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = route;
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body;
+    q.body_len = strlen(body);
+    q.max_response = MN_SMALL_BODY;
+    q.receive_ms = receive_ms;
+    return mn_exchange(&q, resp, rlen, &quiet, r);
+}
+
+/* The store's account of an upload in parts: {"partSize","parts","have":[...]},
+ * or {"stored":true} when it holds the build already. `have` (malloc'd, one
+ * flag per part) is set when it is not stored. */
+static int mn_parts_state(const unsigned char *resp, size_t rlen, unsigned long long size, unsigned long long *part_size,
+                          unsigned *parts, unsigned char **have, int *stored)
+{
+    mpj *root = mpj_parse((const char *)resp, rlen);
+    const mpj *ps, *pn, *hv, *st;
+    int ok = 0, i;
+    *have = NULL;
+    *stored = 0;
+    if (!root || root->type != MPJ_OBJ) goto done;
+    st = mpj_get(root, "stored");
+    if (st && st->type == MPJ_BOOL && st->b) { *stored = 1; ok = 1; goto done; }
+    ps = mpj_get(root, "partSize");
+    pn = mpj_get(root, "parts");
+    hv = mpj_get(root, "have");
+    if (!ps || !mpj_is_num(ps) || mpj_int(ps) < 1 || !pn || !mpj_is_num(pn) || mpj_int(pn) < 1 || !hv || hv->type != MPJ_ARR)
+        goto done;
+    *part_size = (unsigned long long)mpj_int(ps);
+    *parts = (unsigned)mpj_int(pn);
+    if ((size + *part_size - 1) / *part_size != *parts) goto done;
+    *have = (unsigned char *)calloc(*parts, 1);
+    if (!*have) goto done;
+    for (i = 0; i < hv->n; i++) {
+        long long n = mpj_int(hv->items[i]);
+        if (n >= 1 && (unsigned long long)n <= *parts) (*have)[n - 1] = 1;
+    }
+    ok = 1;
+done:
+    mpj_free(root);
+    return ok;
+}
+
+/* An archive larger than one request, in parts: start (or resume), send the
+ * parts the store does not hold, complete. A failure a retry could fix
+ * starts again, and the store's answer then names the parts already held. */
+static int mn_put_parts(const char *hash, HANDLE h, unsigned long long size, const modnet_io *io, modnet_result *r)
+{
+    char start[128], complete[128];
+    int tries, code = MODNET_E_PROTOCOL;
+    _snprintf_s(start, sizeof start, _TRUNCATE, "/mods/build/%s/parts", hash);
+    _snprintf_s(complete, sizeof complete, _TRUNCATE, "/mods/build/%s/complete", hash);
+    for (tries = 0; tries < MN_PART_TRIES; tries++) {
+        unsigned char *resp = NULL, *have = NULL;
+        size_t rlen = 0;
+        unsigned long long part_size = 0, held = 0;
+        unsigned parts = 0, n;
+        int stored = 0;
+        code = mn_parts_post(start, size, 0, &resp, &rlen, io, r);
+        if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "parts");
+        else if (code == MODNET_OK && !mn_parts_state(resp, rlen, size, &part_size, &parts, &have, &stored))
+            code = mn_fail(r, MODNET_E_PROTOCOL, "the store's answer to an upload in parts is malformed");
+        free(resp);
+        if (code != MODNET_OK) { free(have); if (code == MODNET_E_CANCELLED || !modnet_transient(code)) return code; continue; }
+        if (stored) { r->created = 0; return MODNET_OK; }
+        for (n = 0; n < parts; n++) if (have[n]) held += n + 1 < parts ? part_size : size - part_size * n;
+        for (n = 0; n < parts && code == MODNET_OK; n++) {
+            char route[160];
+            wchar_t extra[64];
+            mn_part_progress pp;
+            modnet_io sub;
+            mn_req q;
+            unsigned long long at = part_size * n, len = n + 1 < parts ? part_size : size - at;
+            if (have[n]) continue;
+            _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s/parts/%u", hash, n + 1);
+            _snwprintf_s(extra, 64, _TRUNCATE, L"X-Build-Size: %llu\r\n", size);
+            pp.outer = io;
+            pp.base = held;
+            pp.total = size;
+            sub.cancel = io ? io->cancel : NULL;
+            sub.progress = io && io->progress ? mn_part_progress_cb : NULL;
+            sub.context = &pp;
+            memset(&q, 0, sizeof q);
+            q.verb = L"PUT";
+            q.route = route;
+            q.content_type = "application/octet-stream";
+            q.headers = extra;
+            q.body_file = h;
+            q.body_offset = at;
+            q.body_len = (size_t)len;
+            q.max_response = MN_SMALL_BODY;
+            resp = NULL;
+            code = mn_exchange(&q, &resp, &rlen, &sub, r);
+            if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "part");
+            free(resp);
+            if (code == MODNET_OK) held += len;
+        }
+        free(have);
+        if (code == MODNET_OK) {
+            resp = NULL;
+            code = mn_parts_post(complete, size, MN_COMPLETE_MS, &resp, &rlen, io, r);
+            if (code == MODNET_OK) {
+                if (r->status == 201) r->created = 1;
+                else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "complete");
+            }
+            free(resp);
+            if (code == MODNET_OK) return MODNET_OK;
+        }
+        /* The upload was abandoned or its parts did not join (404, 409): the
+         * next start says what the store holds. */
+        if (code == MODNET_E_CANCELLED || (!modnet_transient(code) && code != MODNET_E_NOT_FOUND)) return code;
+    }
+    return code;
 }
 
 int modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
@@ -697,9 +857,6 @@ int modnet_put_build(const char *hash, const char *path, unsigned long long size
     if (!r) r = &local;
     mn_begin(r, &t0);
     if (!modnet_valid_hash(hash) || !path || !path[0] || !size) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    if (size > MODNET_MAX_ARCHIVE)
-        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "the build archive is %llu MB; the limit is %llu MB",
-                                     (size + 1024 * 1024 - 1) / (1024 * 1024), MODNET_MAX_ARCHIVE / (1024 * 1024)));
     wpath = sh_mb_wpath(path);
     if (!wpath) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
     h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
@@ -709,6 +866,11 @@ int modnet_put_build(const char *hash, const char *path, unsigned long long size
     if (!GetFileSizeEx(h, &actual) || (unsigned long long)actual.QuadPart != size) {
         CloseHandle(h);
         return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the build archive is not the size given"));
+    }
+    if (size > MODNET_PART_SIZE) {
+        code = mn_put_parts(hash, h, size, io, r);
+        CloseHandle(h);
+        return mn_end(r, t0, code);
     }
     _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
     memset(&q, 0, sizeof q);
@@ -756,7 +918,7 @@ int modnet_get_build(const char *hash, const char *out_path, const modnet_io *io
     memset(&q, 0, sizeof q);
     q.verb = L"GET";
     q.route = route;
-    q.max_response = MODNET_MAX_ARCHIVE;
+    q.max_response = ~0ull;   /* any size: it streams to the file */
     q.sink = h;
     code = mn_exchange(&q, &resp, &rlen, io, r);
     if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "build");
@@ -793,7 +955,6 @@ int modnet_claim(const char *ref, const char *const *builds, int n, const char *
         if (!modnet_valid_hash(builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad build hash")); }
         if (!mn_set_has(&set, builds[i]) && !mn_set_add(&set, builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
     }
-    if (set.n > MODNET_MAX_CLAIM) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "more than %d builds in one claim", MODNET_MAX_CLAIM)); }
     mn_puts(&body, "{\"builds\":[");
     for (i = 0; i < set.n; i++) {
         if (i) mn_puts(&body, ",");

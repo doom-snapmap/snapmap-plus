@@ -11,9 +11,10 @@
  * salt at that hash is found (a root folder first, else a map's place); HEAD
  * asks whether the store holds the build; when it does not, the folder is
  * written as an archive to a temporary file, its every file checked against
- * its block, and PUT. An archive over MODNET_MAX_ARCHIVE is refused before
- * any upload ("<name>: this mod is too large to publish (N MB; the limit is
- * 96 MB)"). Then one claim names every build under the caller's ref. The
+ * its block, and sent (modnet_put_build: one request, or parts for an
+ * archive larger than one). Nothing limits a build's size, its number of
+ * files or how many builds a map names (the archive is ZIP64 where it must
+ * be). Then one claim names every build under the caller's ref. The
  * claim id and its secret are kept in the "claims" section of
  * <data>\mods\snapmap-plus.json, keyed by ref; uploading for a ref that has a
  * claim re-claims with the stored secret, which replaces its build set. A
@@ -23,7 +24,8 @@
  * launch and after the next store call that succeeds.
  *
  * Download (a map that names a build this machine does not serve): the
- * archive is fetched to a temporary file and unpacked into the map's place
+ * archive is streamed to a temporary file with progress, of any size, and
+ * unpacked into the map's place
  * (mods\maps\<map title>\<mod name>\, sh_ms_place_folder), replacing that
  * place's earlier build of the salt. Before anything is placed, the archive's
  * mod.json must load, its salt and build hash must be the row's, every file
@@ -46,7 +48,6 @@
 
 #define MODSYNC_CLAIMS_SECTION  "claims"    /* sections of mods\snapmap-plus.json */
 #define MODSYNC_PENDING_SECTION "pending"
-#define MODSYNC_MAX_BUILDS  MODNET_MAX_CLAIM
 #define MODSYNC_SALT_HEX    8
 #define MODSYNC_MOD_MAX     (MODSYNC_SALT_HEX + 1 + MODNET_HASH_HEX)   /* "<salt>@<hash>" */
 #define MODSYNC_FOLDER_MAX  1024
@@ -83,8 +84,8 @@ void modsync_store_unlock(void);
  * the parts. */
 int  modsync_parse_mod(const char *mod, char salt_out[MODSYNC_SALT_HEX + 1], char hash_out[MODNET_HASH_HEX + 1]);
 
-/* Upload the builds a map names ("<salt>@<hash>", at most MODSYNC_MAX_BUILDS)
- * and claim them under ref. Returns 1 on success; 0 with stats->cause (and
+/* Upload the builds a map names ("<salt>@<hash>", any number) and claim them
+ * under ref. Returns 1 on success; 0 with stats->cause (and
  * the failure queued when it was transient and the network had been
  * reached). */
 int  modsync_upload_builds(const char *const *mods, int n, const char *ref, const modnet_io *io,
@@ -93,9 +94,8 @@ int  modsync_upload_builds(const char *const *mods, int n, const char *ref, cons
 /* Write the build archive of `folder` (a built mod folder whose block names
  * `hash`) to `out_path`: mod.json, then assets/<request> for every carried
  * file, each checked against the block first. *size gets the archive's
- * bytes, *pointers (optional) the stock pointers left out. Over
- * MODNET_MAX_ARCHIVE is refused with the plain sentence and code
- * MODNET_E_TOO_LARGE in *code (optional). Returns 1 on success. */
+ * bytes, *pointers (optional) the stock pointers left out, *code (optional)
+ * MODNET_OK or the failure's code. Returns 1 on success. */
 int  modsync_write_archive(const char *folder, const char *hash, const char *out_path, unsigned long long *size,
                            unsigned *pointers, int *code, char *cause, size_t cause_cap);
 
@@ -173,6 +173,7 @@ typedef struct modsync_probe {
                                        list), -1 the store could not be asked or did not answer */
     int code;                       /* the MODNET_ code of HEAD /mods/build/<hash> */
     unsigned long long size;        /* found: the archive's bytes */
+    unsigned scripts;               /* found: the script files the build carries */
     char cause[256];
 } modsync_probe;
 

@@ -1,8 +1,9 @@
 /* modnet_test -- the WinHTTP store client against a loopback stub of the
  * store (mod_store_stub.h): base URL rules, HEAD, PUT and GET of a build
  * archive (streamed from and to a file, Content-Length and Content-Type on
- * the PUT, idempotent re-upload, the store's 422 cause carried back, the
- * 96 MiB cap refused before any request, a failed GET leaving no file),
+ * the PUT, idempotent re-upload, the store's 422 cause carried back, a build
+ * larger than one request sent in parts and resumed after a failed part, the
+ * scripts count of a HEAD, a failed GET leaving no file),
  * claims with "builds" and releases (a release deletes what no claim holds),
  * injected 5xx, 429 and 451, a refused connection, cancel, progress, and the
  * job helper's progress, cancel and one-job rule. No real store is contacted.
@@ -121,7 +122,7 @@ static int make_build(const char *dir, const char *salt, size_t n, const char *z
 
 static unsigned char *read_all(const char *path, size_t *len)
 {
-    return sh_mb_read_file(path, 128u * 1024u * 1024u, len);
+    return sh_mb_read_file(path, (size_t)-1, len);
 }
 
 int main(void)
@@ -158,7 +159,7 @@ int main(void)
     CHECK(!modnet_valid_ref("0123456789012345678901234567890123456789012345678901234567890123x"));   /* 65 */
     CHECK(modnet_valid_ref("0123456789012345678901234567890123456789012345678901234567890123"));    /* 64 */
     CHECK(!modnet_valid_hash("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"));
-    CHECK(modnet_head_build("nothex", NULL, NULL, &r) == MODNET_E_ARG);
+    CHECK(modnet_head_build("nothex", NULL, NULL, NULL, &r) == MODNET_E_ARG);
 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\a", tmp);
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\a.zip", tmp);
@@ -169,7 +170,7 @@ int main(void)
     sh_mb_sha256_hex("never stored", 12, h_none);
 
     /* ---- HEAD of a build the store does not hold ---- */
-    code = modnet_head_build(ha, &head, NULL, &r);
+    code = modnet_head_build(ha, &head, NULL, NULL, &r);
     CHECK(code == MODNET_E_NOT_FOUND && r.status == 404 && r.requests == 1 && head == 0);
     CHECK(!modnet_unreachable(code) && !modnet_transient(code));
 
@@ -186,7 +187,7 @@ int main(void)
     code = modnet_put_build(ha, zip, size_a, NULL, &r);
     CHECK(code == MODNET_OK && r.status == 200 && r.created == 0);
     CHECK(g_stub.build_created == 1 && g_stub.build_puts == 2);
-    code = modnet_head_build(ha, &head, NULL, &r);
+    code = modnet_head_build(ha, &head, NULL, NULL, &r);
     CHECK(code == MODNET_OK && r.status == 200 && head == size_a && r.received == 0);
 
     /* ---- PUT refusals ---- */
@@ -197,11 +198,52 @@ int main(void)
     /* The size given must be the file's. */
     before = g_stub.requests;
     CHECK(modnet_put_build(hb, zip2, size_b + 1, NULL, &r) == MODNET_E_ARG && g_stub.requests == before);
-    /* Over the cap: refused before any request. */
-    code = modnet_put_build(hb, zip2, MODNET_MAX_ARCHIVE + 1, NULL, &r);
-    CHECK(code == MODNET_E_TOO_LARGE && r.requests == 0 && g_stub.requests == before);
-    CHECK(strstr(r.message, "the limit is 96 MB") != NULL);
     CHECK(modnet_put_build(hb, zip2, size_b, NULL, &r) == MODNET_OK && r.created);
+
+    /* ---- a build larger than one request goes in parts, resumably ---- */
+    {
+        char hc[65], zip3[MAX_PATH * 2], got3[MAX_PATH * 2];
+        unsigned long long size_c = 0, head_c = 0;
+        unsigned scripts = 99;
+        modnet_io io = { NULL, progress, NULL };
+        unsigned char *x, *y;
+        size_t xl = 0, yl = 0;
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\c", tmp);
+        _snprintf_s(zip3, sizeof zip3, _TRUNCATE, "%s\c.zip", tmp);
+        CHECK(make_build(dir, "netcccc3", (size_t)MODNET_PART_SIZE + 4096, zip3, hc, &size_c));
+        CHECK(size_c > MODNET_PART_SIZE);
+        /* Part 2 fails once: the upload starts again and sends only part 2. */
+        g_stub.fail_part = 2;
+        memset(g_stub.part_sent, 0, sizeof g_stub.part_sent);
+        g_pr_calls = 0;
+        code = modnet_put_build(hc, zip3, size_c, &io, &r);
+        CHECK(code == MODNET_OK && r.created == 1);
+        CHECK(g_stub.part_starts == 2 && g_stub.part_sent[1] == 1 && g_stub.part_sent[2] == 2 && g_stub.part_completes == 1);
+        CHECK(strcmp(g_stub.last_ctype, "application/json") == 0);   /* the last request: complete */
+        CHECK(g_pr_done == size_c && g_pr_total == size_c);
+        /* Sent again: the store holds it, nothing is uploaded. */
+        before = g_stub.part_puts;
+        CHECK(modnet_put_build(hc, zip3, size_c, NULL, &r) == MODNET_OK && r.created == 0 && g_stub.part_puts == before);
+        /* Downloaded whole, streamed to the file, byte for byte. */
+        _snprintf_s(got3, sizeof got3, _TRUNCATE, "%s\got3.zip", tmp);
+        g_pr_calls = 0;
+        code = modnet_get_build(hc, got3, &io, &r);
+        CHECK(code == MODNET_OK && r.received == size_c && g_pr_done == size_c && g_pr_total == size_c && g_pr_calls > 100);
+        x = sh_mb_read_file(got3, (size_t)-1, &xl);
+        y = sh_mb_read_file(zip3, (size_t)-1, &yl);
+        CHECK(x && y && xl == yl && xl == size_c && !memcmp(x, y, xl));
+        free(x);
+        free(y);
+        /* HEAD says how many scripts a build carries. */
+        CHECK(modnet_head_build(hc, &head_c, &scripts, NULL, &r) == MODNET_OK && head_c == size_c && scripts == 0);
+        EnterCriticalSection(&g_stub.cs);
+        stub_find(g_stub.builds, g_stub.nbuilds, hc)->scripts = 15;
+        LeaveCriticalSection(&g_stub.cs);
+        CHECK(modnet_head_build(hc, NULL, &scripts, NULL, &r) == MODNET_OK && scripts == 15);
+        mt_remove_tree(dir);
+        DeleteFileA(zip3);
+        DeleteFileA(got3);
+    }
 
     /* ---- GET into a file ---- */
     _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\got.zip", tmp);
@@ -246,16 +288,33 @@ int main(void)
         /* The release deletes every build no live claim names: both here. */
         code = modnet_release(claim, secret, NULL, &r);
         CHECK(code == MODNET_OK && r.status == 204);
-        CHECK(!stub_has_build(ha) && !stub_has_build(hb) && g_stub.builds_deleted == 2);
-        CHECK(modnet_head_build(ha, NULL, NULL, &r) == MODNET_E_NOT_FOUND);
+        CHECK(!stub_has_build(ha) && !stub_has_build(hb) && g_stub.builds_deleted == 3);   /* and the unclaimed large one */
+        CHECK(modnet_head_build(ha, NULL, NULL, NULL, &r) == MODNET_E_NOT_FOUND);
         CHECK(modnet_release(claim, secret, NULL, &r) == MODNET_E_NOT_FOUND);
         /* Nothing the client logged carries the secret. */
         CHECK(strstr(g_log, secret) == NULL);
     }
 
+    /* ---- one claim names any number of builds ---- */
+    {
+        static char many[600][65];
+        static const char *list[600];
+        int i, deleted = g_stub.builds_deleted;
+        for (i = 0; i < 600; i++) {
+            char seed[16];
+            _snprintf_s(seed, sizeof seed, _TRUNCATE, "many-%d", i);
+            sh_mb_sha256_hex(seed, strlen(seed), many[i]);
+            stub_put_raw(many[i], "x", 1);
+            list[i] = many[i];
+        }
+        code = modnet_claim("a map naming 600 mods", list, 600, NULL, claim, secret, NULL, &r);
+        CHECK(code == MODNET_OK && r.status == 201 && stub_claim_builds("a map naming 600 mods", NULL) == 600);
+        CHECK(modnet_release(claim, secret, NULL, &r) == MODNET_OK && g_stub.builds_deleted == deleted + 600);
+    }
+
     /* ---- injected failures ---- */
     stub_fail_next("HEAD /mods/build/", 451);
-    code = modnet_head_build(ha, NULL, NULL, &r);
+    code = modnet_head_build(ha, NULL, NULL, NULL, &r);
     CHECK(code == MODNET_E_BLOCKED && !modnet_transient(code) && !modnet_unreachable(code));
     stub_fail_next("PUT /mods/build/", 429);
     code = modnet_put_build(ha, zip, size_a, NULL, &r);
@@ -268,13 +327,13 @@ int main(void)
         modnet_io io = { &cancel, NULL, NULL };
         before = g_stub.requests;
         CHECK(modnet_put_build(ha, zip, size_a, &io, &r) == MODNET_E_CANCELLED);
-        CHECK(modnet_head_build(ha, NULL, &io, &r) == MODNET_E_CANCELLED);
+        CHECK(modnet_head_build(ha, NULL, NULL, &io, &r) == MODNET_E_CANCELLED);
         CHECK(g_stub.requests == before);
     }
 
     /* ---- a refused connection ---- */
     CHECK(modnet_set_base_url("http://127.0.0.1:1"));
-    code = modnet_head_build(ha, NULL, NULL, &r);
+    code = modnet_head_build(ha, NULL, NULL, NULL, &r);
     CHECK(code == MODNET_E_NET || code == MODNET_E_TIMEOUT);
     CHECK(modnet_transient(code) && modnet_unreachable(code) && r.status == 0);
     CHECK(modnet_get_build(ha, got, NULL, &r) != MODNET_OK && !mt_exists(got));

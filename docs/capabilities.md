@@ -323,9 +323,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   mod store has the missing builds the game asks, as for a My Maps map, and downloads them and opens
   the map; otherwise it is denied with the cause, as below.
 - Publishing a map that uses mods uploads those mods to the mod store first, so other players can
-  download them: one archive per build, sent only when the store does not hold it already. A mod
-  whose archive would pass 96 MB is refused before anything is sent ("<name>: this mod is too
-  large to publish (N MB; the limit is 96 MB)"). A download is unpacked into the map's own folder,
+  download them: one archive per build, sent only when the store does not hold it already, of any
+  size: an archive larger than one request (95 MB) goes in parts, and a publish that was cut off
+  sends only the parts the store does not hold yet. A map may use any number of mods, and a mod may
+  have any number of files of any size (past 4 GB or 65,535 files the archive is ZIP64). A download
+  streams to disk, of any size, and shows how far it is in the game's own dialog every two seconds
+  ("Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%. Keep downloading? No cancels it and installs
+  nothing more."); No cancels it, nothing is installed half way, and the map is not loaded. It is
+  unpacked into the map's own folder,
   `mods\maps\<map title>\<mod name>\`, and only after every file matches the map's record of the
   build. The first time, the game asks once (the `mods.upload_confirmed` setting records
   the answer), and No leaves the map unpublished. A map over the map service's 10 MB limit,
@@ -375,7 +380,15 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   (local.hell-guard), which is not installed." or "Hell Guards (local.hell-guard) is installed but
   does not provide mods/local.hell-guard/hell_guard_combo_enc, which this map uses.". The question
   is the same whether or not you have another version of the mod: "This map needs 1 mod: Hell
-  Guards (1.2 MB). Download and install now?". Yes downloads only what you approve in the dialog,
+  Guards (1.2 MB). Download and install now?". When the mods include scripts the question says so
+  before it asks: "These mods include scripts (N files). Scripts run only inside this map and
+  cannot read or change your files.". With "Play maps whose mods include scripts" turned off in the
+  Mods tab, such a map is neither downloaded nor played: "This map's mods include scripts, which you
+  turned off in the Mods tab; turn on "Play maps whose mods include scripts" there to play it." A
+  map that was downloaded with its scripts while the setting was on does not play either once it is
+  off, with the same sentence; your own maps always play. A
+  rawmap or prefab ZIP whose mods include scripts is refused at import with the same sentence while
+  the setting is off, and nothing is installed. Yes downloads only what you approve in the dialog,
   verified by hash, installs it beside what you have, and starts the map, with no word about
   versions or builds; No leaves the map unloaded with that sentence. Joining a lobby
   asks the same way and checks that the host still runs that map before going on. Maps whose mods
@@ -593,8 +606,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   map reuses. A folder without a descriptor that holds exactly one package folder becomes that
   package's mod; a folder without a descriptor that holds several and a ZIP file are listed as
   skipped with the reason, and `.bswf` movies outside `generated/swf/` are counted when left out; two folders with the same id are both
-  kept, each in its own folder. A folder over 512 MiB or 8192 files is skipped, and one
-  larger than a mod can be (4096 files, 256 MiB) is refused. An empty `override-backups\` folder is
+  kept, each in its own folder. A folder over 512 MiB or 8192 files is skipped. An empty
+  `override-backups\` folder is
   removed.
 - It moves the loose files of `overrides\` (files directly in it, and folders of engine paths such
   as `overrides\generated\...` that hold no package) and your old custom strings file,

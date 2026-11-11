@@ -32,6 +32,7 @@
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modsync.h"
+#include "../src/backend/modui.h"
 #include "../src/backend/modzip.h"
 #include "../src/backend/script/script_compile.h"
 #include "mod_test_util.h"
@@ -44,6 +45,10 @@ static int g_failed, g_checks;
         g_failed++;                                                              \
     }                                                                            \
 } while (0)
+
+/* The player's setting "Play maps whose mods include scripts" (modui.c). */
+static int g_scripts_on = 1;
+int sh_modui_scripted_maps_allowed(void) { return g_scripts_on; }
 
 void backend_log(const char *line)
 {
@@ -424,6 +429,8 @@ static void test_store(void)
             for (p = b.files[i].path; *p; p++) if (*p >= 'A' && *p <= 'Z') upper = 1;
         }
         CHECK(found && !upper && b.script_files == 2 && b.scripts && strstr(b.scripts, "\"ai/door\""));
+        /* The block counts every script file, lib included: the store checks it against the archive. */
+        CHECK(strstr(b.scripts, "\"files\":2") != NULL);
     }
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, b.id);
@@ -461,6 +468,14 @@ static void test_store(void)
     CHECK(sh_ms_set_root(c));
     (void)sh_modserve_index_build(c);
     (void)sh_modserve_place_set(NULL);
+    printf("-- with scripts turned off, the import installs nothing and says what to turn on\n");
+    g_scripts_on = 0;
+    back = modexport_read(zip, &len, &es, cause, sizeof cause);
+    CHECK(!back && !strcmp(cause, SH_MODUI_SCRIPTS_OFF) && es.bundles_installed == 0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps", c);
+    CHECK(!mt_exists(path));
+    free(back);
+    g_scripts_on = 1;
     back = modexport_read(zip, &len, &es, cause, sizeof cause);
     if (!back) fprintf(stderr, "  import: %s\n", cause);
     CHECK(back && es.bundles_installed == 1);

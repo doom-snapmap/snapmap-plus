@@ -563,21 +563,20 @@ static void test_campaign_closure(const char *tmp)
     CHECK_CAUSE(b, "needs md6Def k/none.md6, which resolves to nothing");
     sh_mb_free(&b);
 
-    /* The file cap: 4095 carried images and the animWeb fill it, so the
-     * first name the closure would add fails the build, by name. */
+    /* No file cap (DECISIONS 26): 4095 carried images and the animWeb, and
+     * the closure still brings the campaign model along. */
     {
         unsigned n;
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close4", tmp);
         mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
-        for (n = 0; n < SH_MB_MAX_FILES - 1; n++) {
+        for (n = 0; n < 4095; n++) {
             char rel[96];
             _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\tclose00\\%04u.bimage", n);
             mt_write(dir, rel, "img");
         }
         mt_write(dir, K_WEB, K_WEB_TEXT);
-        CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign holds; bringing it along would take "
-                       "this mod past 4096 files");
+        CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.file_count > 4096);
+        if (b.first_cause[0]) fprintf(stderr, "  closure past 4096 files: %s\n", b.first_cause);
         sh_mb_free(&b);
     }
 }

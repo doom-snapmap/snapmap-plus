@@ -360,13 +360,13 @@ int main(int argc, char **argv)
         if (rows_text) HeapFree(GetProcessHeap(), 0, rows_text);
     }
 
-    printf("-- a map naming more mods than one claim carries is refused, not cut\n");
+    printf("-- a map naming 600 mods is published with all of them: no count is refused\n");
     {
-        static char hashes[MODSYNC_MAX_BUILDS + 1][80], names[MODSYNC_MAX_BUILDS + 1][16];
-        static const char *hp[MODSYNC_MAX_BUILDS + 1], *np[MODSYNC_MAX_BUILDS + 1];
+        static char hashes[600][80], names[600][16];
+        static const char *hp[600], *np[600];
         char *many;
         int fails = F.fails;
-        for (int i = 0; i <= MODSYNC_MAX_BUILDS; i++) {
+        for (int i = 0; i < 600; i++) {
             char salt[9];
             _snprintf_s(salt, sizeof salt, _TRUNCATE, "m%07d", i);
             _snprintf_s(hashes[i], sizeof hashes[i], _TRUNCATE, "%s@%064d", salt, i);
@@ -374,13 +374,24 @@ int main(int argc, char **argv)
             hp[i] = hashes[i];
             np[i] = names[i];
         }
-        many = map_with(hp, np, MODSYNC_MAX_BUILDS + 1, &len);
+        many = map_with(hp, np, 600, &len);
         CHECK(many != NULL);
         if (many) {
+            sh_modmanifest_list rows;
+            memset(&rows, 0, sizeof rows);
+            CHECK(sh_modmanifest_read(many, len, &rows, NULL) == 600 && rows.count == 600);
+            sh_modmanifest_list_free(&rows);
+            F.toast[0] = 0;
             sh_modpublish_save_seen(many, len);
-            CHECK(sh_modpublish_after_save(EDITOR) == 0);
-            CHECK(!sh_modpublish_holding() && F.fails == fails + 1 && F.asks == 0);
-            CHECK(strstr(F.toast, "it uses 257 mods, more than the 256 one map can carry") != NULL);
+            /* Held for the one upload question, which names all of them. */
+            CHECK(sh_modpublish_after_save(EDITOR) == 0 && sh_modpublish_test_state() == 1 && F.fails == fails);
+            F.answer = 0;
+            sh_modpublish_poll();
+            CHECK(sh_modpublish_test_state() == 2 && strstr(F.asked, "This map uses 600 mods") != NULL);
+            F.answer = 2;   /* declined: nothing is uploaded */
+            sh_modpublish_poll();
+            CHECK(!sh_modpublish_holding() && strstr(F.toast, "more than") == NULL);
+            F.asks = 0;
             HeapFree(GetProcessHeap(), 0, many);
         }
         F.fails = fails;   /* the counts below are of the publishes after this one */

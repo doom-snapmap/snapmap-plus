@@ -609,7 +609,6 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
     char mj[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
     unsigned char *text = NULL;
     size_t text_len = 0, i;
-    unsigned long long carried = 0;
     sh_mb_bundle b;
     sh_zip_writer w;
     wchar_t *wout = NULL;
@@ -624,10 +623,10 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
     w.h = INVALID_HANDLE_VALUE;
     if (!folder || !modnet_valid_hash(hash) || !out_path) return msy_cause(cause, cap, "bad argument");
     msy_join(mj, sizeof mj, folder, "mod.json");
-    text = sh_mb_read_file(mj, SH_MB_DESCRIPTOR_MAX + 1, &text_len);
+    text = sh_mb_read_file(mj, (size_t)-1, &text_len);
     if (!text) return msy_cause(cause, cap, "%s cannot be read: %s", mj, sh_reason_win32(GetLastError(), mj, 0));
-    if (text_len > SH_MB_DESCRIPTOR_MAX || !sh_mb_load_text((const char *)text, text_len, &b)) {
-        msy_cause(cause, cap, "%s is not a built mod: %s", mj, b.first_cause[0] ? b.first_cause : "over 1 MiB");
+    if (!sh_mb_load_text((const char *)text, text_len, &b)) {
+        msy_cause(cause, cap, "%s is not a built mod: %s", mj, b.first_cause);
         goto done;
     }
     label = b.name && b.name[0] ? b.name : b.id;
@@ -639,16 +638,7 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
         msy_cause(cause, cap, "%s does not build: %s", label, b.state_cause[0] ? b.state_cause : "see the Mods tab");
         goto done;
     }
-    for (i = 0; i < b.file_count; i++) {
-        if (b.files[i].stock) { if (pointers) (*pointers)++; continue; }
-        carried += b.files[i].size;
-    }
-    if (carried + text_len > MODNET_MAX_ARCHIVE) {
-        if (code) *code = MODNET_E_TOO_LARGE;
-        msy_cause(cause, cap, "%s: this mod is too large to publish (%u MB; the limit is %u MB)", label,
-                  msy_mb(carried + text_len), msy_mb(MODNET_MAX_ARCHIVE));
-        goto done;
-    }
+    for (i = 0; i < b.file_count; i++) if (b.files[i].stock && pointers) (*pointers)++;
     wout = sh_mb_wpath(out_path);
     if (!wout || !sh_zip_writer_open(&w, wout)) {
         msy_cause(cause, cap, "cannot write the archive %s: %s", out_path, sh_reason_win32(GetLastError(), out_path, 0));
@@ -663,7 +653,7 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
         size_t len = 0;
         if (f->stock) continue;   /* the player's own game holds it */
         msy_join(path, sizeof path, folder, f->path);
-        bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE + 1, &len);
+        bytes = sh_mb_read_file(path, (size_t)-1, &len);
         if (!bytes) {
             msy_cause(cause, cap, "%s: %s cannot be read; open the Mods tab and Refresh", label, f->path);
             goto done;
@@ -682,12 +672,6 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
     }
     if (!sh_zip_writer_finish(&w) || !FlushFileBuffers(w.h)) {
         msy_cause(cause, cap, "cannot write the archive %s: %s", out_path, w.cause[0] ? w.cause : "flush failed");
-        goto done;
-    }
-    if (w.off > MODNET_MAX_ARCHIVE) {
-        if (code) *code = MODNET_E_TOO_LARGE;
-        msy_cause(cause, cap, "%s: this mod is too large to publish (%u MB; the limit is %u MB)", label, msy_mb(w.off),
-                  msy_mb(MODNET_MAX_ARCHIVE));
         goto done;
     }
     if (size) *size = w.off;
@@ -719,7 +703,7 @@ static int msy_archive_modjson(const sh_zip_reader *zr, sh_mb_bundle *b, unsigne
     memset(b, 0, sizeof *b);
     if (idx < 0) return msy_cause(cause, cap, MSY_MISMATCH " (it has no mod.json)");
     why[0] = 0;
-    *text = sh_zip_reader_read(zr, idx, SH_MB_DESCRIPTOR_MAX, len, why, sizeof why);
+    *text = sh_zip_reader_read(zr, idx, (size_t)-1, len, why, sizeof why);
     if (!*text) return msy_cause(cause, cap, MSY_MISMATCH " (mod.json: %s)", why[0] ? why : "unreadable");
     if (!sh_mb_load_text((const char *)*text, *len, b)) {
         msy_cause(cause, cap, MSY_MISMATCH " (mod.json: %s)", b->first_cause);
@@ -1105,7 +1089,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
     /* The store keeps one archive per build: ask before writing one. */
     for (i = 0; i < nb; i++) {
         if (msy_cancelled(io)) { msy_stats_fail(st, MODNET_E_CANCELLED, "cancelled"); goto done; }
-        code = modnet_head_build(u[i].hash, NULL, io, &r);
+        code = modnet_head_build(u[i].hash, NULL, NULL, io, &r);
         msy_absorb(st, &r);
         if (code == MODNET_OK) { u[i].present = 1; st->builds_present++; continue; }
         if (code != MODNET_E_NOT_FOUND) { msy_stats_fail(st, code, "%s: %s", u[i].label, r.message); goto done; }
@@ -1190,8 +1174,7 @@ int modsync_upload_builds(const char *const *mods, int n, const char *ref, const
     int i, ok;
     memset(st, 0, sizeof *st);
     if (!modnet_valid_ref(ref)) return msy_stats_fail(st, MODNET_E_ARG, "the ref must be 1-64 characters of text");
-    if (n <= 0 || n > MODSYNC_MAX_BUILDS || !mods)
-        return msy_stats_fail(st, MODNET_E_ARG, "name 1 to %d builds", MODSYNC_MAX_BUILDS);
+    if (n <= 0 || !mods) return msy_stats_fail(st, MODNET_E_ARG, "name at least one build");
     for (i = 0; i < n; i++)
         if (!modsync_parse_mod(mods[i], NULL, NULL))
             return msy_stats_fail(st, MODNET_E_ARG, "mod %d is not <salt>@<build hash>", i + 1);
@@ -1319,7 +1302,7 @@ int modsync_probe_build(const char *hash, const modnet_io *io, modsync_probe *ou
     if (!out) out = &local;
     memset(out, 0, sizeof *out);
     if (!modnet_valid_hash(hash)) { out->found = -1; out->code = MODNET_E_ARG; return -1; }
-    code = modnet_head_build(hash, &out->size, io, &r);
+    code = modnet_head_build(hash, &out->size, &out->scripts, io, &r);
     out->code = code;
     if (code == MODNET_OK) { out->found = 1; return 1; }
     if (code == MODNET_E_NOT_FOUND || code == MODNET_E_BLOCKED) { out->found = 0; return 0; }
@@ -1439,7 +1422,7 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
     if (!pend) { mpj_free(doc); return -1; }
     for (i = 0; i < pend->n; i++) {
         const mpj *e = pend->items[i], *arr = mpj_get(e, "builds");
-        const char *mods[MODSYNC_MAX_BUILDS];
+        const char **mods;
         char ref[4 * MODNET_REF_MAX + 1];
         modsync_stats st;
         int n = 0, k, valid = 1;
@@ -1463,7 +1446,9 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
          * rather than decoded (refs are plain text in practice). */
         if (rl >= sizeof ref || strchr(pend->keys[i], '\\')) valid = 0;
         else strcpy_s(ref, sizeof ref, pend->keys[i]);
-        if (!arr || arr->type != MPJ_ARR || arr->n < 1 || arr->n > MODSYNC_MAX_BUILDS) valid = 0;
+        if (!arr || arr->type != MPJ_ARR || arr->n < 1) valid = 0;
+        mods = valid ? (const char **)calloc((size_t)arr->n, sizeof *mods) : NULL;
+        if (valid && !mods) break;   /* out of memory: the queue stays for the next try */
         for (k = 0; valid && k < arr->n; k++) {
             if (arr->items[k]->type != MPJ_STR || !modsync_parse_mod(arr->items[k]->text, NULL, NULL)) valid = 0;
             else mods[n++] = arr->items[k]->text;
@@ -1472,6 +1457,7 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
             msy_log("MODS: retry: a queued upload is malformed; dropped");
             if (rl < sizeof ref && !strchr(pend->keys[i], '\\')) msy_pending_drop(pend->keys[i]);
             drop_n++;
+            free((void *)mods);
             continue;
         }
         if (modsync_upload_builds(mods, n, ref, io, &st)) {
@@ -1485,6 +1471,7 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
         } else {
             msy_log("MODS: retry %s: still failing: %s", ref, st.cause);
         }
+        free((void *)mods);
         if (last) *last = st;
     }
     mpj_free(doc);

@@ -48,8 +48,6 @@
 
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
 #define SH_MODMANIFEST_NAME_MAX   512
-#define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */
-#define SH_MODMANIFEST_MAX_ROWS   4096
 /* Registry choices a row carries ("slot\tsalt\n" lines) and per map. */
 #define SH_MODMANIFEST_CHOICES_CAP 768
 #define SH_MODMANIFEST_SLOT_MAX    160

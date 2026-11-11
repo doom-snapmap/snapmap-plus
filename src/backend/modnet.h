@@ -8,6 +8,20 @@
  * against its mod.json and the build hash against the map's row before
  * anything is installed.
  *
+ * Nothing here limits a build's size or how many builds a claim names. One
+ * request body is the platform's limit (100 MB on the Worker's plan), so an
+ * archive larger than one part (MODNET_PART_SIZE) goes up in parts:
+ *   POST /mods/build/<hash>/parts {"size"} starts the upload, or resumes the
+ *        one of that build and size, answering {"partSize","parts","have"};
+ *   PUT  /mods/build/<hash>/parts/<n> (application/octet-stream, X-Build-Size)
+ *        sends part n, every part but the last exactly partSize bytes; a part
+ *        the store has ("have") is never sent again;
+ *   POST /mods/build/<hash>/complete {"size"} joins them, and the store checks
+ *        the whole archive by the same rules as a one-request upload.
+ * The store's answers say how many scripts a build carries (X-Mod-Scripts on
+ * GET and HEAD, "scripts" in an upload's answer). An archive past 4 GiB or
+ * 65,535 entries is ZIP64 (modzip.h), which the store reads too.
+ *
  * Transport: WinHTTP, one process-wide session. The base URL is the product
  * setting "mods.store" (config.c; default https://api.snapmapplus.com). HTTPS
  * only, TLS 1.2 or newer; plain http is accepted for a loopback host
@@ -36,10 +50,10 @@
 #define MODNET_CLAIM_HEX      32
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
 #define MODNET_URL_MAX        512
-#define MODNET_MAX_CLAIM      256                     /* builds per claim */
-/* One build archive: under the 100 MB request body limit of the Worker's
- * plan. A larger mod is refused at publish with a plain reason. */
-#define MODNET_MAX_ARCHIVE    (96ull * 1024u * 1024u)
+/* One part, and the largest archive one request sends: the Worker's part
+ * size (api/mods_store.js PART_SIZE), under the platform's 100 MB (decimal)
+ * request body limit. The store's own answer names the part size it uses. */
+#define MODNET_PART_SIZE      (95ull * 1024u * 1024u)
 #define MODNET_ARCHIVE_TYPE   "application/zip"
 #define MODNET_REF_MAX        64                      /* UTF-16 code units, as the store counts */
 
@@ -119,23 +133,26 @@ int  modnet_valid_hash(const char *text);
 int  modnet_valid_ref(const char *ref);
 
 /* HEAD /mods/build/<hash>. MODNET_OK with *size (optional) the archive's
- * bytes when the store serves it; MODNET_E_NOT_FOUND when it does not (never
- * uploaded, purged, or unclaimed past its hour); MODNET_E_BLOCKED on the
- * takedown list. */
-int  modnet_head_build(const char *hash, unsigned long long *size, const modnet_io *io, modnet_result *r);
+ * bytes and *scripts (optional) the script files it carries, when the store
+ * serves it; MODNET_E_NOT_FOUND when it does not (never uploaded, purged, or
+ * unclaimed past its hour); MODNET_E_BLOCKED on the takedown list. */
+int  modnet_head_build(const char *hash, unsigned long long *size, unsigned *scripts, const modnet_io *io,
+                       modnet_result *r);
 
-/* PUT /mods/build/<hash> with the archive file at `path` (UTF-8), streamed,
- * Content-Type application/zip. `size` must be the file's size; over
- * MODNET_MAX_ARCHIVE is refused locally (MODNET_E_TOO_LARGE) before any
- * request. 201 (created) and 200 (already stored) are success; r->created
- * tells them apart. A 422 carries the store's first cause. */
+/* Upload the archive file at `path` (UTF-8, `size` its size), streamed: up
+ * to MODNET_PART_SIZE in one PUT /mods/build/<hash> (application/zip), a
+ * larger one in parts (above), sending only the parts the store does not
+ * hold yet, so a later call resumes an interrupted upload. Progress counts
+ * the whole archive. 201 (created) and 200 (already stored) are success;
+ * r->created tells them apart. A 422 carries the store's first cause. */
 int  modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
                       modnet_result *r);
 
 /* GET /mods/build/<hash> into the file `out_path` (UTF-8, created or
- * replaced), at most MODNET_MAX_ARCHIVE bytes, streamed. r->received is its
- * size. On any failure the file is removed. The bytes are not checked here:
- * the archive's mod.json names the build, which the caller verifies. */
+ * replaced), streamed to disk a chunk at a time, of any size, with progress
+ * (done of the declared length). r->received is its size. On any failure the
+ * file is removed. The bytes are not checked here: the archive's mod.json
+ * names the build, which the caller verifies before anything is installed. */
 int  modnet_get_build(const char *hash, const char *out_path, const modnet_io *io, modnet_result *r);
 
 /* POST /mods/claim {"builds":[...],"ref":...,"secret"?}: one claim per

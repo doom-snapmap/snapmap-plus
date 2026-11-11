@@ -754,19 +754,6 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         mg_cause(it->reason, sizeof it->reason, "the folder cannot be read: %s", err);
         goto out;
     }
-    {
-        /* A tree whose carried part is already over the bundle caps is refused
-         * before anything is hashed. */
-        unsigned carried_files = 0;
-        unsigned long long carried = sh_modlegacy_zip_carried_bytes(&zip, &carried_files);
-        if (carried > SH_MB_MAX_TOTAL || carried_files > SH_MB_MAX_FILES) {
-            it->outcome = SH_MODMIGRATE_REFUSED;
-            mg_cause(it->reason, sizeof it->reason, "it would hold at least %u file(s) and %llu MiB, more than one mod can "
-                     "hold (%u files, %llu MiB); split it into smaller mods", carried_files, carried >> 20,
-                     SH_MB_MAX_FILES, SH_MB_MAX_TOTAL >> 20);
-            goto out;
-        }
-    }
     if (!sh_modlegacy_zip_tree(&zip, it->tree, err, sizeof err)) {
         it->outcome = SH_MODMIGRATE_REFUSED;
         mg_cause(it->reason, sizeof it->reason, "the folder cannot be fingerprinted: %s", err);
