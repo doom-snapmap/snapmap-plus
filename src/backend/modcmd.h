@@ -85,11 +85,11 @@
                               "which layer serves each " \
                               "path several mods carry, and the game files generated from the mods' edits with their clashes."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
-#define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
-                             "'sh_mods pull \"<bundle hash>\"' downloads and installs one, 'sh_mods release \"<ref>\"' drops " \
-                             "a claim, 'sh_mods retry' retries uploads queued after a failure, 'sh_mods export \"<path.zip>\"' " \
-                             "writes the open map with its mods, 'sh_mods import \"<path.zip>\"' installs them and stages the " \
-                             "map, 'sh_mods cancel' stops the running job."
+#define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<folder or salt>\" \"<ref>\"' uploads a mod's build and claims it " \
+                             "under ref, 'sh_mods pull \"<salt>@<build hash>\"' downloads one into mods\\maps\\Pulled mods\\, " \
+                             "'sh_mods release \"<ref>\"' drops a claim, 'sh_mods retry' retries uploads queued after a failure, " \
+                             "'sh_mods export \"<path.zip>\"' writes the open map with its mods, 'sh_mods import \"<path.zip>\"' " \
+                             "installs them and opens the map, 'sh_mods cancel' stops the running job."
 
 /* The console handler (idCmdArgs layout from commands.h). */
 void h_sh_mods(idCmdArgs *args);

@@ -1,13 +1,15 @@
 /* modpublished_test -- the published-map and offline-play gates: return-address
- * classification, pass-through for installed bundles, the hold, the question,
- * Yes (fetch on a worker, activation, resume with a fresh parse of the retained
- * text), No, a failed fetch, a bundle that will not install, a second load
- * abandoning the hold, the joiner's host re-check, the warm-cache joiner branch
- * and My Maps play; a parse whose classification another detour broke, the
- * SnapMap feed's play and the launch boundary; and the rawmap gate: the rows a rawmap names counted
- * under the asset rule (an installed folder of the row's id serving its
- * names, whatever its hash), the store check, the refusal that names each
- * mod and the download that reopens the rawmap.
+ * classification, pass-through for served builds, the hold, the question
+ * (names and total size), Yes (fetch into the map's place on a worker,
+ * activation, resume with a fresh parse of the retained text), No, a failed
+ * fetch, a build that will not install, a second load abandoning the hold, the
+ * joiner's host re-check, the warm-cache joiner branch and My Maps play; a
+ * parse whose classification another detour broke, the SnapMap feed's play
+ * and the launch boundary; the serving context every hold sets (a stranger's
+ * map its place, the player's own maps the root folders); and the rawmap
+ * gate: the rows a rawmap names counted under the asset rule, the store
+ * check, the refusal that names each mod and the download that reopens the
+ * rawmap.
  *
  * The real map manifest (modmanifest.c) reads the rows; the engine and the
  * modsync worker are doubles behind sh_modpub_ops. The worker double runs the
@@ -32,65 +34,36 @@ static int g_failed, g_checks;
     }                                                                            \
 } while (0)
 
-/* ---- serving-layer doubles the real manifest calls ------------------------------------------ */
-
-/* The manifest's "MODS: map: <key>: <sentence>" lines (ADD-V5 B5). */
-static int g_map_notes;
-void backend_log(const char *line)
-{
-    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not installed on this computer")) g_map_notes++;
-}
-int sh_modserve_active(void) { return 1; }
-/* The registry choices' input (modmanifest.c gives them at every load). */
-int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
-{ (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
-
-int modserve_activate_bundles(const char *const *bundle_hashes, int count)
-{
-    (void)bundle_hashes;
-    return count;
-}
-int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
-{
-    (void)bundle_hash; (void)id;
-    if (out) memset(out, 0, sizeof *out);
-    return 0;
-}
-size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
-                                        sh_modserve_closure_fn visit, void *context)
-{
-    (void)names; (void)count; (void)visit; (void)context;
-    return 0;
-}
-
 /* ---- fixtures ------------------------------------------------------------------------------- */
 
 #define HASH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define HASH_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define SALT_A "alexpink"
+#define SALT_B "bobroom1"
 
 #define VAR(name, value) \
     "{\"info\":{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"}," \
     "\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\",\"~type\":\"snapVarString_t\"}"
-#define ROW(id, hash, size) \
-    "{\\\"id\\\":\\\"" id "\\\",\\\"version\\\":\\\"1\\\",\\\"bundle\\\":\\\"" hash "\\\",\\\"size\\\":" size \
-    ",\\\"names\\\":[]}"
+#define ROW(salt, name, hash, size) \
+    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"version\":\"1\",\"size\":" size ",\"names\":[]}"
+#define MEMBER(rows) ",\"snapmap-plus\":{\"format\":1,\"mods\":[" rows "]}"
 
 static const char VANILLA[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     VAR("door_label", "Open") "]}}";
 static const char ONE_MOD[] =
-    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-    VAR("door_label", "Open") "," VAR("smpmod1.0.1", ROW("alex.pink-imp", HASH_A, "3145728")) "]}}";
+    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
+    VAR("door_label", "Open") "]}" MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728")) "}";
 static const char TWO_MODS[] =
-    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-    VAR("smpmod1.0.2", ROW("alex.pink-imp", HASH_A, "3145728")) ","
-    VAR("smpmod1.1.2", ROW("bob.room", HASH_B, "1048576")) "]}}";
+    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+    MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728") "," ROW(SALT_B, "bob.room", HASH_B, "1048576")) "}";
 
 /* ---- engine and worker doubles -------------------------------------------------------------- */
 
 typedef struct fake {
     int installed_a, installed_b, install_on_fetch, refuse_install;
-    int fetch_fails;                 /* nonzero: the fetch of the first bundle returns this */
+    int root_a;                      /* a root folder holds alexpink at another build (own maps follow it) */
+    int fetch_fails;                 /* nonzero: the fetch of the first build returns this */
     int fetch_calls, fetch_cancelled;
     HANDLE fetch_gate;               /* when set, the fetch waits on it */
     int can_ask_after;               /* ticks before the surface is idle */
@@ -111,46 +84,92 @@ typedef struct fake {
     int owner_ok;
     unsigned long long token;
     HANDLE worker;
-    int store_a, store_b;            /* store_has: 1 held, 0 absent, -1 unreachable */
-    int editor_only_a;               /* the fetch finds alex.pink-imp editor-only: recorded, not installed */
-    int recorded_a;                  /* the record's editorOnly section names alex.pink-imp's bundle */
+    int store_a, store_b;            /* the probe: 1 held, 0 absent, -1 unreachable */
+    unsigned long long size_a;       /* the archive size the store reports for alexpink */
+    int editor_only_a;               /* the fetch finds alexpink editor-only: recorded, not installed */
+    int recorded_a;                  /* the record's editorOnly section names alexpink's build */
     int store_calls;
-    int other_a;                     /* another build of alex.pink-imp: 1 serves its names, 2 lacks one */
+    int incomplete_a;                /* the build serving alexpink lacks a name the row lists */
     int prints;
     char last_print[1024];
     char prints_all[8192];
-    /* the gate */
-    int probe_ops;                   /* 1: store_probe is bound (else store_has answers alone) */
-    int game_lacks_a;                /* the store has alex.pink-imp, but its borrow names a file this game lacks */
-    int claimed_a;                   /* a claim this machine holds names alex.pink-imp */
-    int other_build_a;               /* alex.pink-imp is installed at another build (OTHER_A) */
+    int claimed_a;                   /* a claim this machine holds names alexpink's build */
     int fetch_detail_calls;
     int launch_refused, refused_hook; /* launch_refused: how often, and the last hook */
     /* the map a fetch is for, and the author's own published map */
-    char fetch_title[160], fetch_map[96];
+    char fetch_title[160], fetch_map[96], fetch_salt[16];
     int titled;                      /* metadata_title answers "Pink Arena" */
     int own_item;                    /* this machine published item 1234abcd */
-    int own_a;                       /* an own folder builds alex.pink-imp at OWN_A */
+    /* the serving context the gate set (scope_place) */
+    int scopes;
+    char scope_title[160], scope_map[96];
+    int scope_own;
 } fake;
 
 static fake F;
 static int g_metadata_cookie;
 
-static int f_on_main(void *c) { (void)c; return 1; }
-#define OWN_A "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 #define METADATA_ID "1234abcd"   /* METADATA below: the double reads the item id from it */
+
+/* What sh_modserve_row_build answers in the context the gate set: a
+ * stranger's map is served at the row's build (its place, or the root at
+ * that build); the player's own map by any root build of the salt. */
+static int f_served(const sh_modmanifest_row *row)
+{
+    if (!strcmp(row->build, HASH_A) || !strcmp(row->salt, SALT_A))
+        return F.installed_a || (F.scope_own && F.root_a);
+    if (!strcmp(row->build, HASH_B)) return F.installed_b;
+    return 0;
+}
+
+/* ---- serving-layer doubles the real manifest calls ------------------------------------------ */
+
+/* The manifest's "MODS: map: <salt>: <sentence>" lines (ADD-V5 B5). */
+static int g_map_notes;
+void backend_log(const char *line)
+{
+    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not installed on this computer")) g_map_notes++;
+}
+int sh_modserve_active(void) { return 1; }
+/* The registry choices' input (modmanifest.c gives them at every load). */
+int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
+{ (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
+
+int modserve_activate_bundles(const char *const *bundle_hashes, int count)
+{
+    (void)bundle_hashes;
+    return count;
+}
+int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+{
+    if (out) memset(out, 0, sizeof *out);
+    if (!row || !f_served(row)) return 0;
+    if (out) {
+        strcpy_s(out->id, sizeof out->id, row->salt);
+        strcpy_s(out->hash, sizeof out->hash, row->build);
+    }
+    return 1;
+}
+size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
+                                        sh_modserve_closure_fn visit, void *context)
+{
+    (void)names; (void)count; (void)visit; (void)context;
+    return 0;
+}
+
+static int f_on_main(void *c) { (void)c; return 1; }
 /* The asset rule as modserve.c answers it, over the fixture's two mods. */
 static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     const char *what = subject ? subject : "map";
     (void)c;
     if (cause && cap) cause[0] = 0;
-    if (F.own_a && !strcmp(row->bundle, OWN_A)) return SH_MODPUB_ROW_SERVED;   /* the own folder's build */
-    if (!strcmp(row->bundle, HASH_A) || !strcmp(row->id, "alex.pink-imp")) {
-        if (F.installed_a || F.other_a == 1 || F.recorded_a) return SH_MODPUB_ROW_SERVED;
-        if (F.other_a == 2) {
-            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "Pink Imp (alex.pink-imp) is installed but does not provide "
-                                   "mods/alex.pink-imp/imp, which this %s uses.", what);
+    if (!strcmp(row->build, HASH_A)) {
+        if (F.recorded_a) return SH_MODPUB_ROW_SERVED;
+        if (f_served(row) && !F.incomplete_a) return SH_MODPUB_ROW_SERVED;
+        if (f_served(row)) {
+            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "alex.pink-imp is installed but does not provide "
+                                   "mods/alexpink/imp, which this %s uses.", what);
             return SH_MODPUB_ROW_INCOMPLETE;
         }
         if (cause) {
@@ -161,7 +180,7 @@ static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subje
         }
         return SH_MODPUB_ROW_MISSING;
     }
-    if (!strcmp(row->bundle, HASH_B)) {
+    if (!strcmp(row->build, HASH_B)) {
         if (F.installed_b) return SH_MODPUB_ROW_SERVED;
         if (cause) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses bob.room, which is not installed.", what);
     }
@@ -173,7 +192,7 @@ static int f_activate(void *c, const sh_modmanifest_list *rows)
     (void)c;
     F.activations++;
     F.activated_count = (int)rows->count;
-    for (size_t i = 0; i < rows->count && i < 4; i++) strcpy_s(F.activated[i], sizeof F.activated[i], rows->rows[i].bundle);
+    for (size_t i = 0; i < rows->count && i < 4; i++) strcpy_s(F.activated[i], sizeof F.activated[i], rows->rows[i].build);
     return (int)rows->count;
 }
 static int f_can_ask(void *c) { (void)c; return F.ticks >= F.can_ask_after; }
@@ -213,20 +232,24 @@ static int f_worker_run(void *c, void (*job)(void *), void *ctx)
     F.worker = CreateThread(NULL, 0, f_thread, t, 0, NULL);
     return F.worker != NULL;
 }
-static int f_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, volatile int *cancel)
+static int f_fetch_for(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
+                       sh_modpub_progress_fn progress, volatile int *cancel)
 {
     (void)c;
     F.fetch_calls++;
+    strcpy_s(F.fetch_title, sizeof F.fetch_title, title ? title : "");
+    strcpy_s(F.fetch_map, sizeof F.fetch_map, map_id ? map_id : "");
+    strcpy_s(F.fetch_salt, sizeof F.fetch_salt, row->salt);
     if (progress) progress(NULL, 1, 2);
     if (F.fetch_gate) {
         while (WaitForSingleObject(F.fetch_gate, 5) == WAIT_TIMEOUT)
             if (*cancel) { F.fetch_cancelled++; return -2; }
     }
     if (F.fetch_fails && F.fetch_calls == 1) return F.fetch_fails;
-    if (F.editor_only_a && !strcmp(hash, HASH_A)) { F.recorded_a = 1; return 0; }   /* modsync: recorded, nothing installed */
+    if (F.editor_only_a && !strcmp(row->build, HASH_A)) { F.recorded_a = 1; return 0; }   /* recorded, nothing installed */
     if (F.install_on_fetch && !F.refuse_install) {
-        if (!strcmp(hash, HASH_A)) F.installed_a = 1;
-        if (!strcmp(hash, HASH_B)) F.installed_b = 1;
+        if (!strcmp(row->build, HASH_A)) F.installed_a = 1;
+        if (!strcmp(row->build, HASH_B)) F.installed_b = 1;
     }
     return 0;
 }
@@ -286,14 +309,6 @@ static void f_log(void *c, const char *line)
     if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line);
 }
 static void f_launch_refused(void *c, int hook) { (void)c; F.launch_refused++; F.refused_hook = hook; }
-static int f_store_has(void *c, const char *hash, volatile int *cancel)
-{
-    (void)c; (void)cancel;
-    F.store_calls++;
-    if (!strcmp(hash, HASH_A)) return F.store_a;
-    if (!strcmp(hash, HASH_B)) return F.store_b;
-    return 0;
-}
 static void f_print(void *c, const char *line)
 {
     (void)c;
@@ -303,46 +318,23 @@ static void f_print(void *c, const char *line)
     strncat_s(F.prints_all, sizeof F.prints_all, "\n", _TRUNCATE);
 }
 
-#define OTHER_A "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 #define ROCK    "generated/image/stock/rock.bimage"
 static int f_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
 {
+    (void)c; (void)cancel;
     memset(out, 0, sizeof *out);
-    out->found = f_store_has(c, hash, cancel);
-    if (!strcmp(hash, HASH_A) && out->found > 0) {
-        strcpy_s(out->name, sizeof out->name, "Pink Imp");
-        if (F.game_lacks_a) { out->game_lacks = 1; strcpy_s(out->source, sizeof out->source, ROCK); }
-    }
+    F.store_calls++;
+    out->found = !strcmp(hash, HASH_A) ? F.store_a : !strcmp(hash, HASH_B) ? F.store_b : 0;
+    if (out->found > 0 && !strcmp(hash, HASH_A)) out->size = F.size_a;
     return out->found;
 }
 static int f_claimed(void *c, const char *hash) { (void)c; return F.claimed_a && !strcmp(hash, HASH_A); }
-static int f_other_build(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name, size_t name_cap)
-{
-    (void)c;
-    if (!F.other_build_a || strcmp(row->id, "alex.pink-imp")) return 0;
-    strcpy_s(hash, hash_cap, OTHER_A);
-    strcpy_s(name, name_cap, "Pink Imp");
-    return 1;
-}
-static int f_mod_name(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
-{
-    (void)c; (void)row; (void)out; (void)cap;
-    return 0;   /* nothing installed names it */
-}
 static int f_fetch_detail(void *c, const char *hash, char *out, size_t cap)
 {
     (void)c; (void)hash;
     F.fetch_detail_calls++;
     strcpy_s(out, cap, ROCK);
     return 1;
-}
-
-static int f_fetch_for(void *c, const char *hash, const char *title, const char *map_id, sh_modpub_progress_fn progress,
-                       volatile int *cancel)
-{
-    strcpy_s(F.fetch_title, sizeof F.fetch_title, title ? title : "");
-    strcpy_s(F.fetch_map, sizeof F.fetch_map, map_id ? map_id : "");
-    return f_fetch(c, hash, progress, cancel);
 }
 static int f_metadata_title(void *c, const void *metadata, char *out, size_t cap)
 {
@@ -352,25 +344,21 @@ static int f_metadata_title(void *c, const void *metadata, char *out, size_t cap
     return 1;
 }
 static int f_own_item(void *c, const char *item) { (void)c; return F.own_item && !strcmp(item, METADATA_ID); }
-static int f_follow_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+static void f_scope_place(void *c, const char *title, const char *map_id, int own)
 {
-    (void)bundle_hash;
-    if (!F.own_a || strcmp(id, "alex.pink-imp")) return 0;
-    memset(out, 0, sizeof *out);
-    strcpy_s(out->id, sizeof out->id, "alex.pink-imp");
-    strcpy_s(out->version, sizeof out->version, "1.0.0");
-    strcpy_s(out->bundle, sizeof out->bundle, OWN_A);
-    out->size = 10;
-    return 1;
+    (void)c;
+    F.scopes++;
+    strcpy_s(F.scope_title, sizeof F.scope_title, title ? title : "");
+    strcpy_s(F.scope_map, sizeof F.scope_map, map_id ? map_id : "");
+    F.scope_own = own;
 }
-static int f_follow_own(void *c, const char *item) { (void)c; return sh_modmanifest_current_follow(f_follow_row, item); }
 
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
-    f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
+    f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
-    f_store_has, f_print, f_store_probe, f_claimed, f_other_build, f_mod_name,
-    f_fetch_detail, f_launch_refused, f_fetch_for, f_metadata_title, f_own_item, f_follow_own
+    f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
+    f_scope_place
 };
 
 static void reset(void)
@@ -466,29 +454,30 @@ static void vanilla_and_installed_pass_through(void)
     tick(5);
     CHECK(F.asks == 0 && F.activations == 0 && F.resumes == 0);
 
-    /* The asset rule: another build of the row's id that provides its names
-     * plays, whatever its hash; nothing is asked. */
+    /* A stranger's map is served only at the row's build: a root folder of
+     * the salt at another build does not serve it, so it is asked for. */
     reset();
-    F.other_a = 1;
+    F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
-    CHECK(!sh_modpublished_holding() && !F.hold_ui);
-    tick(5);
-    CHECK(F.asks == 0);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding() && F.scopes == 1 && F.scope_own == 0 && !strcmp(F.scope_map, METADATA_ID));
+    tick(1);
+    CHECK(F.asks == 1 && !strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
 
-    /* A folder of the id that lacks a listed name goes to the store offer. */
+    /* The build that serves it lacks a listed name: the store offer, then No. */
     reset();
-    F.other_a = 2;
+    F.installed_a = 1;
+    F.incomplete_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(sh_modpublished_holding());
-    CHECK(strstr(F.last_print, "is installed but does not provide mods/alex.pink-imp/imp, which this map uses.") != NULL);
+    CHECK(strstr(F.last_print, "is installed but does not provide mods/alexpink/imp, which this map uses.") != NULL);
     tick(1);
     CHECK(F.asks == 1 && strstr(F.last_ask, "Download and install now?") != NULL);
     F.answer = 2;   /* No: the launch is dropped with the asset rule's sentence */
     tick(3);
     CHECK(!sh_modpublished_holding());
-    CHECK(!strcmp(F.last_ask, "Pink Imp (alex.pink-imp) is installed but does not provide mods/alex.pink-imp/imp, which "
+    CHECK(!strcmp(F.last_ask, "alex.pink-imp is installed but does not provide mods/alexpink/imp, which "
                               "this map uses. The map was not loaded."));
 
     /* A completion whose map is not the last parse's object is not gated. */
@@ -662,44 +651,55 @@ static void yes_resumes_with_a_fresh_map(void)
 static void downloads_are_for_a_map(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a fetch is told the map it is for: its title and item\n");
-    /* A stranger's map: fetched for its title and item, so the build lands
-     * in mods\\downloads\\<title>\\ (modsync_fetch_bundle_for). */
+    printf("-- a stranger's map is served from its own place; a fetch lands there, the pin kept\n");
+    /* A stranger's map: its context is its place (the item), and the fetch
+     * is told the map's title and item, so the build lands in
+     * mods\maps\<title>\<mod name>\ (modsync_fetch_build_for). A root folder
+     * of the salt at another build does not serve it. */
     reset();
     F.titled = 1;
-    F.own_a = 1;   /* an own folder of the key exists, but the map is not this machine's */
+    F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(!strcmp(F.scope_title, "Pink Arena") && !strcmp(F.scope_map, METADATA_ID) && F.scope_own == 0);
     tick(1);
     CHECK(F.asks == 1);
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_title, "Pink Arena") && !strcmp(F.fetch_map, METADATA_ID));
+    CHECK(!strcmp(F.fetch_salt, SALT_A));
     memset(&rows, 0, sizeof rows);
-    CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].bundle, HASH_A));   /* its pin is kept */
+    CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].build, HASH_A));   /* its pin is kept */
     sh_modmanifest_list_free(&rows);
+
+    /* The size the question names is the archive's, as the store reported it. */
+    reset();
+    F.size_a = 5u << 20;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(!strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (5.0 MB). Download and install now?"));
 }
 
 static void own_published_map_follows_own_folder(void)
 {
-    sh_modmanifest_list rows;
-    printf("-- the author's own published map follows their own folder; nothing is downloaded\n");
-    /* The author's own published map: its row follows the own folder's
-     * build with one line, nothing is asked and nothing downloaded. */
+    printf("-- the author's own published map follows the root folders; nothing is downloaded\n");
+    /* The author's own published map: its context is own, so a root folder
+     * of the salt serves the row whatever its build; nothing is asked and
+     * nothing downloaded, and the row is left as it is (the next save writes
+     * the root build). */
     reset();
     F.titled = 1;
     F.own_item = 1;
-    F.own_a = 1;
+    F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(F.scope_own == 1 && !strcmp(F.scope_map, METADATA_ID));
     CHECK(!sh_modpublished_holding() && !F.hold_ui);
     tick(5);
     CHECK(F.asks == 0 && F.fetch_calls == 0);
-    memset(&rows, 0, sizeof rows);
-    CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].bundle, OWN_A));
-    sh_modmanifest_list_free(&rows);
 
-    /* Own, but no own folder builds the key: it is fetched as any map is. */
+    /* Own, but no root folder holds the salt: it is fetched as any map is. */
     reset();
     F.own_item = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
@@ -708,6 +708,13 @@ static void own_published_map_follows_own_folder(void)
     tick(1);
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_map, METADATA_ID));
+
+    /* A My Maps play is the player's own: the root folder serves it. */
+    reset();
+    F.root_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(F.scope_own == 1 && !F.scope_map[0] && !sh_modpublished_holding());
 }
 
 static void editor_only_row_plays_without_a_folder(void)
@@ -967,13 +974,18 @@ static void rawmap_missing_counts_rows(void)
     F.installed_b = 1;
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
     sh_modmanifest_list_free(&rows);
-    F.other_a = 2;                       /* a folder of the id that lacks a listed name: still missing */
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
-    sh_modmanifest_list_free(&rows);
-    F.other_a = 1;                       /* another build of the id that serves the names: nothing to ask */
+    /* The rawmap's context: the author's own, its place named after the file
+     * (a ZIP's is the place its import filled). A root folder of the salt
+     * at any build serves it then. */
+    F.root_a = 1;
+    sh_modpub_rawmap_source("C:\\maps\\shared.zip");
+    CHECK(F.scope_own == 1 && !strcmp(F.scope_title, "shared") && !strcmp(F.scope_map, "zip:shared.zip"));
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0);
     sh_modmanifest_list_free(&rows);
-    F.other_a = 0;
+    sh_modpub_rawmap_source("arena.rawmap.json");
+    CHECK(!strcmp(F.scope_title, "arena.rawmap") && !F.scope_map[0]);
+    F.root_a = 0;
+    F.scope_own = 0;
     /* Not a published-map parse: the rawmap check never touches the parse record. */
     CHECK(sh_modpublished_last_parse(NULL) == -1);
     /* Without bound gates nothing is missing: the rawmap loads as it always did. */
@@ -1064,38 +1076,21 @@ static void rawmap_store_has_downloads_and_reopens(void)
     sh_modmanifest_list_free(&rows);
 }
 
-/* ---- the denial gate (DESIGN-additive 2.8) ------------------------------------------------- */
+/* ---- the denial gate ------------------------------------------------------------------------ */
 
-/* The author's map in the editor: a declared build that is gone while the
- * key is installed at another build substitutes (2.5); with no build of the
- * key it is the same cause as everywhere; Play and the hub keep the gate. */
+/* The author's map in the editor: its rows follow the root folders, so a
+ * row nothing serves names a salt no root folder holds. Nothing substitutes;
+ * the note says what this computer knows. */
 static void gate_editor_substitutes(void)
 {
-    sh_modpub_gate_facts f;
     sh_modmanifest_row row;
     char hash[80], why[600];
-    printf("-- the gate: the editor opens the author's map with the installed build of a key\n");
-    memset(&f, 0, sizeof f);
-    f.editor = 1;
-    f.store = SH_MODPUB_STORE_ABSENT;
-    f.other_build = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
-    f.store = SH_MODPUB_STORE_UNREACHABLE;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
-    f.other_build = 0;
-    f.store = SH_MODPUB_STORE_ABSENT;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);   /* the key is not installed: denied */
-    f.editor = 0;
-    f.other_build = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);   /* Play, the hub: denied as before */
-    /* The manifest's op: the other build's hash, or the cause. */
+    printf("-- the gate: the editor opens the author's map; nothing substitutes, the note is plain\n");
     reset();
     memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "alex.pink-imp");
-    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
-    F.other_build_a = 1;
-    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
-    F.other_build_a = 0;
+    strcpy_s(row.salt, sizeof row.salt, SALT_A);
+    strcpy_s(row.name, sizeof row.name, "alex.pink-imp");
+    strcpy_s(row.build, sizeof row.build, HASH_A);
     /* The store is not asked at an editor open: the note says what this
      * computer knows, never "permanent" or "never published". */
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 0 && !hash[0] &&
@@ -1110,10 +1105,10 @@ static void gate_editor_substitutes(void)
           !strcmp(why, "This map needs alex.pink-imp, which is not installed on this computer, so the editor cannot "
                        "open the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps to "
                        "get it from the mod store.") && strlen(why) < 256);
-    /* A placed mod with an installed build of its key still substitutes. */
-    F.other_build_a = 1;
-    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 1, why, sizeof why) == 1 && !strcmp(hash, OTHER_A));
-    F.other_build_a = 0;
+    /* A row without a name says its salt. */
+    row.name[0] = 0;
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 0 &&
+          !strncmp(why, "This map needs alexpink, which", 30));
     reset();
 }
 
@@ -1124,9 +1119,9 @@ static void gate_editor_substitutes(void)
 static void editor_open_missing_placed_mod(void)
 {
     static const char PLACED[] =
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"mods/alex.pink-imp/imp\"}}],\"instances\":[],"
-        "\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-        VAR("door_label", "Open") "," VAR("smpmod1.0.1", ROW("alex.pink-imp", HASH_A, "3145728")) "]}}";
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"mods/" SALT_A "/imp\"}}],\"instances\":[],"
+        "\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[" VAR("door_label", "Open") "]}"
+        MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728")) "}";
     printf("-- the editor cannot open a map that places a mod not installed: one plain notice\n");
     reset();
     g_map_notes = 0;
@@ -1196,8 +1191,8 @@ static void gate_decision_and_wording(void)
     memset(&f, 0, sizeof f);
     f.store = SH_MODPUB_STORE_HAS;
     CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);
-    f.other_build = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);   /* another build installed: obtainable */
+    f.published = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);
     f.game_lacks = 1;
     CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GAME_REVISION);
     memset(&f, 0, sizeof f);
@@ -1263,9 +1258,8 @@ static void published_denial(int hook)
 static void gate_causes_through_the_hold(void)
 {
     sh_modmanifest_list rows;
-    printf("-- cause 1: a published map whose bundle left the store; never asked, permanent\n");
+    printf("-- cause 1: a published map whose build left the store; never asked, permanent\n");
     reset();
-    F.probe_ops = 1;
     F.store_a = 0;
     published_denial(SH_MODPUB_ON_SNAP_PLAY);
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 1 && F.metadata_frees == 1);
@@ -1300,7 +1294,7 @@ static void gate_causes_through_the_hold(void)
     published_denial(SH_MODPUB_CACHE_READY);   /* a joiner: the same sentence */
     CHECK(strstr(F.last_ask, "could not be downloaded: the mod store did not answer; try again in a few minutes.") != NULL);
 
-    printf("-- cause 3: a My Maps map never published whose folder is gone\n");
+    printf("-- cause 3: a My Maps map never published whose salt no folder holds\n");
     reset();
     F.store_a = 0;
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
@@ -1323,16 +1317,6 @@ static void gate_causes_through_the_hold(void)
                               "prefab was not placed."));
     CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a placement is not a launch */
 
-    printf("-- cause 4: the store has it, but a borrow names a file this game does not hold\n");
-    reset();
-    F.game_lacks_a = 1;
-    published_denial(SH_MODPUB_ON_SNAP_PLAY);
-    CHECK(F.fetch_calls == 0 && !sh_modpublished_holding());
-    CHECK(!strcmp(F.last_ask, "This map needs Pink Imp (alex.pink-imp), which needs a file this game does not "
-                              "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent "
-                              "on this machine."));
-    CHECK(!strcmp(F.last_print, F.last_ask));
-
     printf("-- the fetch's own failure is decided by the same gate\n");
     reset();
     F.fetch_fails = -11;                 /* MODNET_E_NOT_FOUND: purged between the probe and the fetch */
@@ -1352,7 +1336,12 @@ static void gate_causes_through_the_hold(void)
     F.answer = 1;
     tick_until_idle();
     tick(2);
-    CHECK(F.fetch_detail_calls == 1 && strstr(F.last_ask, "(generated/image/stock/rock.bimage): a different game revision.") != NULL);
+    /* Cause 4: the archive arrived, but a borrow names a file this game does
+     * not hold; learned at the install. */
+    CHECK(F.fetch_detail_calls == 1 &&
+          !strcmp(F.last_ask, "This map needs alex.pink-imp, which needs a file this game does not hold "
+                              "(generated/image/stock/rock.bimage): a different game revision. This is permanent on "
+                              "this machine."));
     reset();
     F.fetch_fails = -4;                  /* MODNET_E_NET */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
@@ -1377,9 +1366,9 @@ static void gate_causes_through_the_hold(void)
 
 static void gate_other_build_prompt(void)
 {
-    printf("-- installed at another build: obtainable; the ordinary question, no build talk\n");
+    printf("-- a stranger's map with a root build of the salt at another build: the ordinary question\n");
     reset();
-    F.other_build_a = 1;
+    F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
@@ -1392,17 +1381,19 @@ static void gate_other_build_prompt(void)
     CHECK(F.fetch_calls == 1 && F.resumes == 1);
     /* With another missing mod, the list names the mods alone. */
     reset();
-    F.other_build_a = 1;
+    F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
+
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
     CHECK(!strcmp(F.last_ask, "This map needs 2 mods: alex.pink-imp, bob.room (4.0 MB). Download and install now?"));
 }
 
-/* The player's own content (DESIGN-additive 2.8 as amended by ADD-L13): a My
- * Maps play, a rawmap load or a prefab placement whose declared build cannot
- * be obtained, while its key is installed at another build, goes on with that
- * build, as the editor does; a community map from the browser still denies. */
+/* The player's own content (ONE-SHAPE rule 4): a My Maps play, a rawmap load
+ * and a prefab placement follow the root folders, so a root folder of the
+ * salt at any build serves the row and nothing is held; with no root folder
+ * of the salt the gate asks the store as for any map. A community map from
+ * the browser keeps exactly the build it pins. */
 static int g_ready_calls;
 static char g_ready_name[96];
 static void f_prefab_ready(const char *name, const sh_modmanifest_list *rows)
@@ -1412,122 +1403,43 @@ static void f_prefab_ready(const char *name, const sh_modmanifest_list *rows)
     strcpy_s(g_ready_name, sizeof g_ready_name, name ? name : "");
 }
 
-#define SUBST_LINE_A "alex.pink-imp: uses the installed mod"
-
 static void gate_own_substitutes(void)
 {
-    sh_modpub_gate_facts f;
     sh_modmanifest_list rows;
-    sh_modmanifest_row row;
-    char hash[80];
-    printf("-- the gate: the player's own content substitutes the installed build of a key it cannot obtain\n");
-    memset(&f, 0, sizeof f);
-    f.own = 1;
-    f.other_build = 1;
-    f.store = SH_MODPUB_STORE_ABSENT;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
-    f.published = 1;                                                   /* published from here, then gone */
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
-    f.published = 0;
-    f.store = SH_MODPUB_STORE_UNREACHABLE;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
-    f.store = SH_MODPUB_STORE_HAS;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);         /* obtainable: fetched beside */
-    f.game_lacks = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);     /* listed but not installable here */
-    /* Nothing of the key installed: the four causes, as everywhere. */
-    memset(&f, 0, sizeof f);
-    f.own = 1;
-    f.store = SH_MODPUB_STORE_ABSENT;
-    f.published = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GONE);
-    f.published = 0;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);
-    f.store = SH_MODPUB_STORE_UNREACHABLE;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_UNREACHABLE);
-    f.store = SH_MODPUB_STORE_HAS;
-    f.game_lacks = 1;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GAME_REVISION);
-    /* A community map (not own): the author's build or cause 1. */
-    memset(&f, 0, sizeof f);
-    f.other_build = 1;
-    f.published = 1;
-    f.store = SH_MODPUB_STORE_ABSENT;
-    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GONE);
-
-    printf("-- the gate: a My Maps play substitutes, says so, and the Play serves the installed build\n");
+    printf("-- the player's own content follows the root folders: a My Maps play is not held\n");
     reset();
     F.store_a = 0;
-    F.other_build_a = 1;
+    F.root_a = 1;
     sh_modmanifest_set_editor_load(1);                 /* the parse detour: a read that is not a published map's */
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
-    tick(3);
-    CHECK(!sh_modpublished_holding() && F.resumes == 1 && F.resume_hook == SH_MODPUB_LOCAL_OFFLINE);
-    CHECK(F.asks == 0 && F.fetch_calls == 0 && F.launch_refused == 0 && F.drop_ui == 0 && F.store_calls == 1);
-    CHECK(strstr(F.prints_all, "My Maps play: " SUBST_LINE_A "; the next save of the map records it") != NULL);
-    if (getenv("MODPUB_TEST_WORDS")) printf("    substitute: %s", F.prints_all);
-    CHECK(F.activations == 1);
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "alex.pink-imp");
-    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
-    CHECK(sh_modpub_row_substitute(&row, hash, sizeof hash) == 1 && !strcmp(hash, OTHER_A));
-    /* The launched map's listing declares the installed build (modui's
-     * mu_listing_set reads the manifest's substitution). */
-    CHECK(sh_modmanifest_substituted(HASH_A, hash, sizeof hash) == 1 && !strcmp(hash, OTHER_A));
-    /* The same map again this session: no hold, no store check. */
-    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
-    CHECK(!sh_modpublished_holding() && F.store_calls == 1);
-    /* The installed build changed: the substitution no longer holds. */
-    F.other_build_a = 0;
-    CHECK(sh_modpub_row_substitute(&row, hash, sizeof hash) == 0 && !hash[0]);
-    F.other_build_a = 1;
-    /* A community map naming the same build, from the browser: cause 1. */
+    CHECK(!sh_modpublished_holding() && F.scope_own == 1 && F.store_calls == 0 && F.asks == 0);
+    /* A community map naming the same build, from the browser: its own
+     * context, and cause 1 when the store lacks it. */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(F.scope_own == 0);
     tick(3);
-    CHECK(F.resumes == 1 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_BROWSER_PLAY);
-    CHECK(!strcmp(F.last_ask, "This map needs Pink Imp (alex.pink-imp), which is no longer available: its "
+    CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_BROWSER_PLAY);
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is no longer available: its "
                               "author unpublished it, or it was removed. This is permanent on this machine."));
     sh_modmanifest_set_editor_load(0);
 
-    /* The store did not answer: the player's own map still plays. */
+    printf("-- own content with no root folder of the salt asks the store; two mods, one served\n");
     reset();
-    F.store_a = -1;
-    F.other_build_a = 1;
-    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
-    tick(3);
-    CHECK(F.resumes == 1 && F.asks == 0 && F.launch_refused == 0);
-    /* The store has the declared build: it is offered with the ordinary question. */
-    reset();
-    F.other_build_a = 1;
-    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
-    tick(1);
-    CHECK(F.asks == 1 && !strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
-    /* ...and when that fetch then fails (the build left the store), it substitutes. */
-    F.fetch_fails = -11;
-    F.answer = 1;
-    tick_until_idle();
-    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.launch_refused == 0 && strstr(F.prints_all, SUBST_LINE_A) != NULL);
-    /* Two mods: one substituted, the other offered alone and fetched. */
-    reset();
-    F.other_build_a = 1;
-    F.store_a = 0;
+    F.root_a = 1;
+    F.store_b = 1;
     parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
     tick(1);
     CHECK(F.asks == 1 && strstr(F.last_ask, "bob.room") != NULL && !strstr(F.last_ask, "alex.pink-imp"));
-    if (getenv("MODPUB_TEST_WORDS")) printf("    mixed: %s\n", F.last_ask);
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.installed_b && F.activated_count == 2);
-    /* A substitution with another mod nothing serves: denied for that one alone. */
+    CHECK(!F.fetch_map[0]);   /* a My Maps map has no item: its place is named after nothing but the mod */
+    /* The other one nothing serves and the store lacks: denied for it alone. */
     reset();
-    F.other_build_a = 1;
-    F.store_a = 0;
+    F.root_a = 1;
     F.store_b = 0;
     parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
@@ -1536,31 +1448,27 @@ static void gate_own_substitutes(void)
                                                                         "installed and was never published.") == F.last_ask);
     CHECK(!strstr(F.last_ask, "more mod"));
 
-    printf("-- the gate: a rawmap load and a prefab placement substitute the same way\n");
+    printf("-- a rawmap load and a prefab placement follow the root folders the same way\n");
     reset();
-    F.store_a = 0;
-    F.other_build_a = 1;
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
-    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    F.root_a = 1;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);   /* checked before any context */
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 0);                 /* its own context serves it */
+    CHECK(!sh_modpublished_holding() && F.scope_own == 1 && !strcmp(F.scope_title, "rawmap"));
     sh_modmanifest_list_free(&rows);
-    tick(3);
-    CHECK(!sh_modpublished_holding() && F.resumes == 1 && F.resume_hook == SH_MODPUB_RAWMAP_LOAD && F.asks == 0);
-    CHECK(strstr(F.prints_all, "rawmap load: " SUBST_LINE_A) != NULL);
-    /* Its reopen finds the row served. */
     CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
     sh_modmanifest_list_free(&rows);
     reset();
     g_ready_calls = 0;
     sh_modpub_set_prefab_ready(f_prefab_ready);
-    F.store_a = 0;
-    F.other_build_a = 1;
     CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
     CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
     sh_modmanifest_list_free(&rows);
-    tick(3);
+    tick(1);
+    CHECK(F.asks == 1 && !strcmp(F.last_ask, "This prefab needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
+    F.answer = 1;
+    tick_until_idle();
     CHECK(!sh_modpublished_holding() && g_ready_calls == 1 && !strcmp(g_ready_name, "Door Kit") && F.resumes == 0);
-    CHECK(F.drop_ui == 0 && strstr(F.prints_all, "prefab placement 'Door Kit': " SUBST_LINE_A
-                                                 "; the placement adds it to the map") != NULL);
+    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_title, "Door Kit"));
     reset();
 }
 

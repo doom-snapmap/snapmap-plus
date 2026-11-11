@@ -155,10 +155,13 @@ static int idle_all(void) { return !sh_modpublish_holding() && !sh_modpublish_te
 
 /* ------------------------------------------------------------ fixtures */
 
-static void make_mod(const char *dir, const char *id, const char *const *files, const char *const *bytes)
+/* A mod given its salt already (the builder block holds the salt only), named `name`. */
+static void make_mod(const char *dir, const char *salt, const char *name, const char *const *files, const char *const *bytes)
 {
     char text[512];
-    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"tester\"}", id, id);
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\"name\":\"%s\",\"version\":\"1.0.0\",\"author\":\"tester\",\"snapmap-plus\":{\"format\":2,"
+                "\"salt\":\"%s\"}}", name, salt);
     mt_write(dir, "mod.json", text);
     for (int i = 0; files[i]; i++) {
         char rel[MAX_PATH];
@@ -168,14 +171,20 @@ static void make_mod(const char *dir, const char *id, const char *const *files, 
     }
 }
 
-static int install(const char *folder, char hash[65])
+/* Install at the root: the build hash, and "<salt>@<hash>" in mod. */
+static int install(const char *folder, char hash[65], char mod[MODSYNC_MOD_MAX + 1])
 {
     sh_ms_install_stats st;
     sh_mb_bundle b;
-    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
-    int ok = sh_ms_install_from_folder(folder, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+    char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    int ok;
+    memset(&b, 0, sizeof b);
+    ok = sh_ms_install_from_folder(folder, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
     if (!ok) fprintf(stderr, "install %s: %s\n", folder, cause);
-    if (ok) strcpy_s(hash, 65, b.hash);
+    if (ok) {
+        strcpy_s(hash, 65, b.hash);
+        _snprintf_s(mod, MODSYNC_MOD_MAX + 1, _TRUNCATE, "%s@%s", b.id, b.hash);
+    }
     sh_mb_free(&b);
     return ok;
 }
@@ -186,7 +195,8 @@ static const char EMPTY_MAP[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[
  * without placing anything uploads and claims like any other. */
 static int g_attach_second;
 
-/* A saved map naming these bundles in its manifest rows (HeapFree). */
+/* A saved map naming these builds ("<salt>@<hash>") in its manifest rows,
+ * `ids` their names (HeapFree). */
 static char *map_with(const char *const *hashes, const char *const *ids, int n, size_t *len)
 {
     sh_modmanifest_list rows;
@@ -196,9 +206,9 @@ static char *map_with(const char *const *hashes, const char *const *ids, int n, 
     for (int i = 0; i < n; i++) {
         sh_modmanifest_row row;
         memset(&row, 0, sizeof row);
-        strcpy_s(row.id, sizeof row.id, ids[i]);
+        strcpy_s(row.name, sizeof row.name, ids[i]);
         strcpy_s(row.version, sizeof row.version, "1.0.0");
-        strcpy_s(row.bundle, sizeof row.bundle, hashes[i]);
+        (void)modsync_parse_mod(hashes[i], row.salt, row.build);
         row.size = 1000 + (unsigned long long)i;
         row.attached = g_attach_second && i == 1;
         sh_modmanifest_list_add(&rows, &row);
@@ -262,16 +272,16 @@ static int make_sized(const char *path, unsigned long long size)
     return ok;
 }
 
-static const char *const A_FILES[] = { "assets/generated/image/mods/test.alpha/a.bimage", NULL };
+static const char *const A_FILES[] = { "assets/generated/image/mods/testalph/a.bimage", NULL };
 static const char *const A_BYTES[] = { "alpha bytes for the publish test", NULL };
-static const char *const B_FILES[] = { "assets/generated/image/mods/test.beta/b.bimage", NULL };
+static const char *const B_FILES[] = { "assets/generated/image/mods/testbeta/b.bimage", NULL };
 static const char *const B_BYTES[] = { "beta bytes for the publish test", NULL };
 
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], store[MAX_PATH * 2], dir[MAX_PATH * 2], cache[MAX_PATH * 2], path[MAX_PATH * 2], url[64];
     wchar_t wtmp[MAX_PATH * 2];
-    char hA[65], hB[65], provisional[MODNET_REF_MAX * 4 + 1];
+    char hA[65], hB[65], mA[MODSYNC_MOD_MAX + 1], mB[MODSYNC_MOD_MAX + 1], provisional[MODNET_REF_MAX * 4 + 1];
     const char *both_h[2], *both_id[2] = { "test.alpha", "test.beta" };
     char *text;
     size_t len = 0;
@@ -288,11 +298,11 @@ int main(int argc, char **argv)
     _snprintf_s(cache, sizeof cache, _TRUNCATE, "%s\\published-maps", tmp);
     CreateDirectoryA(cache, NULL);
     CHECK(sh_ms_set_root(store));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src-alpha", tmp); make_mod(dir, "test.alpha", A_FILES, A_BYTES);
-    CHECK(install(dir, hA));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src-beta", tmp); make_mod(dir, "test.beta", B_FILES, B_BYTES);
-    CHECK(install(dir, hB));
-    both_h[0] = hA; both_h[1] = hB;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src-alpha", tmp); make_mod(dir, "testalph", "test.alpha", A_FILES, A_BYTES);
+    CHECK(install(dir, hA, mA));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src-beta", tmp); make_mod(dir, "testbeta", "test.beta", B_FILES, B_BYTES);
+    CHECK(install(dir, hB, mB));
+    both_h[0] = mA; both_h[1] = mB;
     sh_modpublish_test_set_cache_root(cache);
     set_ops(0);
     memset(&F, 0, sizeof F);
@@ -393,7 +403,7 @@ int main(int argc, char **argv)
 
     printf("-- first time: No cancels and leaves the setting\n");
     {
-        int puts = g_stub.blob_puts, missing = g_stub.missing_calls;
+        int puts = g_stub.build_puts, missing = g_stub.head_calls;
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_after_save(EDITOR) == 0);
         CHECK(sh_modpublish_test_state() == 1);
@@ -407,7 +417,7 @@ int main(int argc, char **argv)
         CHECK(F.tag_calls == 0);   /* a cancelled publish is not tagged */
         CHECK(strstr(F.toast, "only with your agreement") != NULL);
         CHECK(setting_confirmed() == 0);
-        CHECK(g_stub.blob_puts == puts && g_stub.missing_calls == missing);
+        CHECK(g_stub.build_puts == puts && g_stub.head_calls == missing);
     }
 
     printf("-- first time: Yes sets the setting, uploads and resumes\n");
@@ -430,7 +440,7 @@ int main(int argc, char **argv)
         CHECK(setting_confirmed() == 1);
         CHECK(F.resumes == 1 && F.fails == 2);
         CHECK(F.tag_calls == 1);   /* nothing more at the resume */
-        CHECK(stub_has_bundle(hA) && stub_has_bundle(hB));
+        CHECK(stub_has_build(hA) && stub_has_build(hB));
         c = stub_live_claim(provisional);
         CHECK(c && c->nb == 2);
         CHECK(!strcmp(sh_modpublish_test_provisional(), provisional));
@@ -450,7 +460,7 @@ int main(int argc, char **argv)
         CHECK(modsync_claim_lookup("aaaaaaaaaaaaaaaaaaaaaaa1", claim, NULL) && !strcmp(claim, c->id));
         CHECK(!modsync_claim_lookup(provisional, NULL, NULL));
         CHECK(section_contains(store, "claims", "aaaaaaaaaaaaaaaaaaaaaaa1") && !section_contains(store, "claims", provisional));
-        CHECK(strstr(g_log, "claimed 2 bundle(s) under item 'aaaaaaaaaaaaaaaaaaaaaaa1'") != NULL);
+        CHECK(strstr(g_log, "claimed 2 build(s) under item 'aaaaaaaaaaaaaaaaaaaaaaa1'") != NULL);
     }
 
     printf("-- a republish re-claims with the stored secret and replaces the set\n");
@@ -460,7 +470,7 @@ int main(int argc, char **argv)
         char before[33];
         size_t a_len = 0;
         int with_secret = g_stub.claim_with_secret, asks = F.asks;
-        const char *one_h[1] = { hA }, *one_id[1] = { "test.alpha" };
+        const char *one_h[1] = { mA }, *one_id[1] = { "test.alpha" };
         strcpy_s(before, sizeof before, stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1")->id);
         only_a = map_with(one_h, one_id, 1, &a_len);
         CHECK(only_a != NULL);
@@ -477,7 +487,7 @@ int main(int argc, char **argv)
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa1", "rev2");
         PUMP_UNTIL(idle_all());
         c = stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1");
-        CHECK(c && c->nb == 1 && !strcmp(c->bundles[0], hA) && !strcmp(c->id, before));
+        CHECK(c && c->nb == 1 && !strcmp(c->builds[0], hA) && !strcmp(c->id, before));
         CHECK(g_stub.claim_with_secret == with_secret + 1);
         CHECK(strstr(g_log, "replacing the previous set") != NULL);
         if (only_a) HeapFree(GetProcessHeap(), 0, only_a);
@@ -685,13 +695,28 @@ int main(int argc, char **argv)
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_after_save(EDITOR) == 0);
         strcpy_s(provisional, sizeof provisional, sh_modpublish_test_provisional());
-        stub_fail_next("POST /mods/missing", 503);
+        stub_fail_next("POST /mods/claim", 503);
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(F.resumes == resumes && F.fails == fails + 1);
         CHECK(strstr(F.toast, "could not be uploaded") != NULL && strstr(F.toast, "It was not published.") != NULL);
         PUMP_UNTIL(idle_all());
         /* modsync queued the transient failure under the provisional ref. */
         CHECK(modsync_pending_count() == 1);
+    }
+
+    printf("-- a claim refused because a release raced it (409) uploads again once\n");
+    {
+        int resumes = F.resumes, pending = modsync_pending_count();
+        char prov3[MODNET_REF_MAX * 4 + 1];
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        strcpy_s(prov3, sizeof prov3, sh_modpublish_test_provisional());
+        stub_fail_next("POST /mods/claim", 409);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.resumes == resumes + 1 && stub_live_claim(prov3) != NULL);
+        CHECK(strstr(g_log, "was released while it was claimed; uploading again") != NULL);
+        CHECK(modsync_pending_count() == pending);
+        PUMP_UNTIL(idle_all());
     }
 
     printf("-- the editor leaving abandons; another save cancels\n");
@@ -759,13 +784,13 @@ int main(int argc, char **argv)
     printf("-- launch: leftover provisional claims released, the queue retried\n");
     {
         modsync_stats st;
-        const char *one[1] = { hB };
+        const char *one[1] = { mB };
         int left;
         /* A provisional claim a closed game left behind. */
-        CHECK(modsync_upload_bundles(one, 1, SH_MODPUBLISH_PENDING_PREFIX "00000000deadbeef", NULL, &st));
+        CHECK(modsync_upload_builds(one, 1, SH_MODPUBLISH_PENDING_PREFIX "00000000deadbeef", NULL, &st));
         /* An item claim that failed after its upload: queued for retry. */
         stub_fail_next("POST /mods/claim", 503);
-        CHECK(!modsync_upload_bundles(one, 1, "fffffffffffffffffffffff6", NULL, &st) && st.queued);
+        CHECK(!modsync_upload_builds(one, 1, "fffffffffffffffffffffff6", NULL, &st) && st.queued);
         CHECK(modsync_pending_count() == 2);   /* plus the failed publish's provisional upload */
         sh_modpublish_launch();
         PUMP_UNTIL(idle_all());
@@ -808,8 +833,8 @@ int main(int argc, char **argv)
         /* The next launch claims the item first, while the bundles are still
          * on the store, and only then releases the provisional claim. */
         g_stub.trail[0] = 0;
-        blobs = g_stub.blob_puts;
-        bundles = g_stub.bundle_created;
+        blobs = g_stub.build_puts;
+        bundles = g_stub.build_created;
         sh_modpublish_launch();
         PUMP_UNTIL(idle_all());
         CHECK(stub_live_claim(item) != NULL && stub_live_claim(prov2) == NULL && modsync_pending_count() == 0);
@@ -818,7 +843,7 @@ int main(int argc, char **argv)
         claim_at = strstr(g_stub.trail, want_claim);
         release_at = strstr(g_stub.trail, want_release);
         CHECK(claim_at && release_at && claim_at < release_at);
-        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_created == bundles);
+        CHECK(g_stub.build_puts == blobs && g_stub.build_created == bundles);
         CHECK(!modsync_pending_waits_on(prov2));
     }
 

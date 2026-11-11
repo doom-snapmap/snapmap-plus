@@ -877,8 +877,14 @@ static int r_poll(void *c, int ticket)
 { (void)c; (void)ticket; if (R.answered || !R.answer) return 0; R.answered = 1; return R.answer; }
 static void r_release(void *c, int ticket) { (void)c; (void)ticket; }
 static int r_worker_run(void *c, void (*job)(void *), void *ctx) { (void)c; job(ctx); return 1; }
-static int r_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, volatile int *cancel)
-{ (void)c; (void)progress; (void)cancel; R.fetches++; if (!strcmp(hash, HASH_A)) R.installed = 1; return 0; }
+static int r_fetch(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
+                   sh_modpub_progress_fn progress, volatile int *cancel)
+{
+    (void)c; (void)title; (void)map_id; (void)progress; (void)cancel;
+    R.fetches++;
+    if (!strcmp(row->build, HASH_A)) R.installed = 1;
+    return 0;
+}
 static int r_resume(void *c, const sh_modpub_resume *r)
 {
     (void)c;
@@ -887,14 +893,19 @@ static int r_resume(void *c, const sh_modpub_resume *r)
     /* What the engine's resume does for a rawmap hold. */
     return sh_rawmap_reopen_after_mods(R.resume_note, sizeof R.resume_note);
 }
-static int r_store_has(void *c, const char *hash, volatile int *cancel)
-{ (void)c; (void)cancel; return strcmp(hash, HASH_A) ? 0 : R.store; }
+static int r_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
+{
+    (void)c; (void)cancel;
+    memset(out, 0, sizeof *out);
+    out->found = strcmp(hash, HASH_A) ? 0 : R.store;
+    return out->found;
+}
 static void r_print(void *c, const char *line) { (void)c; R.prints++; strcpy_s(R.print, sizeof R.print, line); }
 
 static const sh_modpub_ops RAWMAP_OPS = {
     NULL, r_on_main, r_row_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
     r_worker_run, r_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, r_resume, NULL,
-    r_store_has, r_print
+    r_print, r_store_probe
 };
 
 static void notify_toast(const char *title, const char *text)
