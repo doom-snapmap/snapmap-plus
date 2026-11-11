@@ -110,6 +110,57 @@ int main(void)
     ++generation; /* The next map may reuse exactly the same allocation. */
     sh_editor_frame_detour(editor, NULL);
     CHECK(!writes);
+    CHECK(tells == 1);   /* the cancelled save is told */
+
+    /* A reload opens through the map it was asked for. */
+    reset();
+    queue_reload(&map_a);
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(loads == 1 && done_rc == 0 && done_faulted == 0 && !g_reload_pending);
+
+    /* A reload request does not outlive its map: another map, or the same
+     * allocation reused by a newer load, cancels it and says so. */
+    reset();
+    queue_reload(&map_a);
+    *(void **)(editor + ED_MAP_PTR_OFF) = &map_b;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(!loads && done_rc == -1 && tells == 1 && !g_reload_pending);
+    reset();
+    queue_reload(&map_a);
+    ++generation;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(!loads && tells == 1);
+
+    /* Mid-transition the request waits for a live frame. */
+    reset();
+    queue_reload(&map_a);
+    *(int *)(editor + ED_SUBSTATE_OFF) = 5;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(!loads && g_reload_pending);
+    *(int *)(editor + ED_SUBSTATE_OFF) = 0;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(loads == 1);
+
+    /* A LoadMap fault turns off the reload only; the per-frame features and the
+     * rawmap save keep running. */
+    reset();
+    fault_load = 1;
+    queue_reload(&map_a);
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(loads == 1 && done_faulted == 1 && g_reload_faulted);
+    ticks = 0;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(ticks == 1);
+    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "restart DOOM"));
+    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(writes == 1);
+
+    /* The editor at the menu: the map pointer survives, the state does not. */
+    reset();
+    *(int *)(editor + ED_STATE_OFF) = 0;
+    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "Open a map"));
+    CHECK(!sh_editor_frame_request_reload(msg, sizeof msg) && strstr(msg, "Open a map"));
     printf("editor_frame_test: %d failures\n", failed);
     return failed ? 1 : 0;
 }

@@ -36,10 +36,6 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
  * overwrites the prologue, so a later signature scan for this function finds nothing. */
 void *sh_editor_frame_target(void);
 
-/* 1 when the editor is live with a loaded map (the editor's state machine running, no shutdown or
- * transition in progress). The map pointer alone survives leaving the editor. Any thread. */
-int sh_editor_frame_editor_live(void);
-
 /* Could a rawmap save happen right now? 1 = yes, and it changes NOTHING either way -- ask before
  * applying a destination of your own, so a refusal cannot leave the save path moved. */
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);

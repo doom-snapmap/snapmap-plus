@@ -212,11 +212,6 @@ static void *ef_live_map(void *editor)
     return map;
 }
 
-int sh_editor_frame_editor_live(void)
-{
-    return g_editor_obj && ef_editor_live_with_map((void *)g_editor_obj);
-}
-
 /* ------------------------------------------------------------------ the rawmap save ------------- */
 
 static void ef_service_rawmap_save(void *editor)
