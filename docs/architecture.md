@@ -1352,7 +1352,12 @@ submitted to the engine's own per-bank wrapper (`AudioBankSubmit`, the
 filter and the async LoadBank) on the main thread inside process heap 0, at
 the first editor entry or map load once Wwise is up (the hardware object is
 `soundSystem+0x140`, decoded from the `s_loadBanks` function), and at once
-when `sh_mods install` rebuilds the index. The engine prints its own result,
+when `sh_mods install` rebuilds the index. The bank list is taken again at
+every main-thread pass from the serving index in the open map's context
+(each served bank's file through `sh_modserve_lookup`), so a map that uses
+another build of a mod than the root's gets that build's banks at its map
+pass; a list equal to the current one is not published again. The engine prints its own result,
+
 `async load success id <id> : <name>` with the id as a signed number. The
 LoadBanks slot (`AudioLoadBanks`, hardware vtable `+0x30`) resubmits every
 bank after `s_loadBanks` and `s_restart`, and runs them in process heap 0:

@@ -134,7 +134,16 @@ static int fake_submit(void *hw, const char *name)
     return submit_result;
 }
 
+static int g_log_lines;
+static char g_log_last[512];
+static void log_sink(const char *line)
+{
+    g_log_lines++;
+    strncpy_s(g_log_last, sizeof g_log_last, line, _TRUNCATE);
+}
+
 static void test_routes(void)
+
 {
     char tmp[MAX_PATH], path[MAX_PATH];
     uint8_t bytes[300], back[300], sync = 0;
@@ -214,6 +223,33 @@ static void test_routes(void)
     fputc(0, f);
     fclose(f);
     CHECK(sh_modsound_test_open(resolver, L"p6probe_sfx.bnk", 0, NULL, &sync, &d) == 0x42 && n_orig_open == 4);
+
+    /* A map pass rebuilds the table in the open map's context. The same banks
+     * change nothing; a map that serves another build of a loaded bank is told
+     * plainly that the new bytes need a restart, and nothing is submitted again. */
+    {
+        char path2[MAX_PATH];
+        sh_modsound_table u;
+        int before = n_submit;
+        _snprintf_s(path2, sizeof path2, _TRUNCATE, "%ssh_modsound_test_%lu_b.bnk", tmp, GetCurrentProcessId());
+        f = fopen(path2, "wb");
+        fwrite(bytes, 1, sizeof bytes, f);
+        fclose(f);
+        g_log_lines = 0;
+        g_log_last[0] = 0;
+        sh_modsound_test_log(log_sink);
+        sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+        CHECK(g_log_lines == 0 && sh_modsound_test_pass() == 0 && n_submit == before);
+        memset(&u, 0, sizeof u);
+        CHECK(sh_modsound_table_add(&u, "sound/soundbanks/pc/p6probe_sfx.bnk", path2, sizeof bytes, "p6probe", 0) == 1);
+        CHECK(sh_modsound_table_add(&u, "sound/soundbanks/pc/p6probe_more.bnk", path, sizeof bytes + 1, "p6probe", 0) == 1);
+        sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &u);
+        CHECK(strstr(g_log_last, "Restart DOOM to hear the new p6probe_") != NULL);
+        CHECK(sh_modsound_test_pass() == 0 && n_submit == before);
+        sh_modsound_test_log(NULL);
+        sh_modsound_table_free(&u);
+        DeleteFileA(path2);
+    }
     sh_modsound_table_free(&t);
     DeleteFileA(path);
 }

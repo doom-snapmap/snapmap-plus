@@ -496,11 +496,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
       "companions": { "mods/<id>/my_panel": [
         { "entityDef": "mods/<id>/screen_left", "origin": [-57.4, 80.6, 98.3],
           "axis": [[-0.7071, -0.7071, 0], [0.7071, -0.7071, 0], [0, 0, 1]] } ] }
-- A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<id>/` plays the Wwise
+- A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<salt>/` plays the Wwise
   event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
-  bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<id>_<name>.bnk`, built with Wwise or
+  bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<salt>_<name>.bnk`, built with Wwise or
   snaphak-re's `make_bank.py`) is loaded into the game when the editor is first opened or a map
-  loads, and right away when the mod is installed during a session. Entities the mod adds can name
+  loads, and right away when the mod is installed during a session; each map load takes the bank
+  from the build of the mod that map uses, so a downloaded map that carries its own build of a
+  mod hears that build's bank. Entities the mod adds can name
+
   those sounds (`soundShader`). A changed bank takes effect after a restart. Music, switch and
   blend containers and streamed media still need Wwise itself.
 - A mod can serve a SnapMap module, including a multiplayer map's arena: a module decl at

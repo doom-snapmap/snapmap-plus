@@ -38,18 +38,21 @@
  *
  * A bank installed mid-session is submitted at once (the engine's own
  * s_loadBanks submits newly listed banks after boot the same way, live on
- * 13954591). A bank whose bundle is removed stays loaded until the game
+ * 13954591). The bank list is taken again at every main-thread pass, each
+ * served bank's file looked up in the open map's context, so a map that uses
+ * another build of a mod gets that build's banks; a bank already loaded under
+ * a name keeps its first bytes until DOOM restarts ("Restart DOOM to hear the
+ * new <bank>"). A bank whose mod is removed stays loaded until the game
  * restarts; nothing here unloads.
  *
- * Stock banks on demand (DESIGN-additive 2.4, "Sound events"; snaphak-re
- * lanes G4 and L8). A mod's sound decl at a stock event's name borrows the
+ * Stock banks on demand. A mod's sound decl at a stock event's name borrows the
  * event; an event filed only by a bank SnapMap's game-mode filter skips
  * (doom_weapon_sp.bnk on 13954591) fails to start until that bank is loaded.
- * Per bundle, the banks needed are the product block's registries "banks"
+ * Per build, the banks needed are the product block's registries "banks"
  * (the builder's list) together with what its served sound decls need now
  * (modbankinfo.h), each checked against the game's own bank index. At the
  * map pass (modserve_activate_bundles: main thread, before the level load),
- * each bank a declared bundle needs and this process has not asked for is
+ * each bank a declared build needs and this process has not asked for is
  * loaded through the call the per-bank wrapper makes once its filter passes:
  * operator new(0x130), the wrapper's cookie ctor (the bank name), then the
  * async LoadBank(name, callback, cookie, -1, &id). The callback is the
@@ -65,8 +68,10 @@
  *
  * Logs (backend log; echoed to the console on the main thread):
  *   MODS: sound: bank routes installed (...)
- *   MODS: sound: submitted <file> (<bundle id>) ...
- *   MODS: sound: opened <file> for Wwise from <bundle id> (N bytes)    first 32
+ *   MODS: sound: submitted <file> (<salt>) ...
+ *   MODS: sound: opened <file> for Wwise from <salt> (N bytes)    first 32
+ *   MODS: sound: Restart DOOM to hear the new <file>: Wwise keeps the bank it loaded first
+
  *   MODS: sound: loaded stock bank <name> (<ms> ms) for <key>
  */
 #ifndef SH_MODSOUND_H
