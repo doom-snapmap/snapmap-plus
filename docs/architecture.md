@@ -766,95 +766,104 @@ tree hash, build hash, cause while failing, the derived `classes` counts
 counts under `edits`, never `replaces`, which is only what a folder the product received replaces;
 the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
 conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
-`stock` (pointers; `"closure": true` on those the campaign-only closure derived). When a
-rebuild fails, `mod.json` is left as it was, so the last good build keeps
-serving, and the store records the failure on the folder (`sh_mods list`:
-"build failed: <cause>; the last working version keeps serving (kept in <path>)"); a folder that
-never built is skipped. Because authors edit files in place, every successful
-build of a store folder keeps a snapshot of its carried files and its
-`mod.json` under `mods\.builds\<key>@<hash16>\` (one per folder, named in the
-record's `snapshots` section, replaced by the next successful build, removed
-with the folder); while a rebuild is failed, `sh_ms_entry.snapshot` names the
-folder the last good bytes are read from, and the serving index reads that
-snapshot's `bundle.json` and carried files (`ms_parse_bundle`, from the cause
-`sh_ms_build_cause` reports), logging `bundle '<folder>': its latest build
-failed (<cause>); serving the last good build <key>@<hash16> from <snapshot>`;
-without a snapshot it serves the folder's last good block and says so. A
-`mod.json` that does not parse is a refused build too (`sh_ms_descriptor_unparsable`,
-recorded by `sh_ms_sync`): the folder needs attention with the parse error as its cause,
-and the enumeration and the serving index find its snapshot through the record's
-`snapshots` row and serve it until the author fixes the file. The
-serving index takes a bundle's key from the author block's `id` when present,
-else from the product block's `key`, so a folder made by `sh_mods new` is
-served. The
+`stock` (pointers; `"closure": true` on those the campaign-only closure derived).
+There is no last good build (ONE-SHAPE rule 2): a build that fails writes the
+block of a failed build (`sh_mb_write_failed`: format, salt, rules, built, tree
+and the cause), the folder serves nothing until it is fixed, and the Mods tab
+and `sh_mods list` show the cause. A `mod.json` that does not parse is listed
+with its parse error (`sh_ms_descriptor_unparsable`) and nothing in it is
+written. The
 product writes the block by splicing: the old member is cut from the end of
 the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
-is derived from both blocks in memory, for the hash and for the upload; its
-text is the Contract 1 text, so an unchanged mod keeps its hash. There is no
+is derived from both blocks in memory, for the hash and for the upload. There is no
 blob store and there are no hard links: a mod's files live in its own
-`assets\` only. A folder the author drops in keeps its name and may sit at any
-depth: a folder under `mods\` without `mod.json` or `package.json` is an
-organizing folder and is looked into (to eight levels, `SH_MS_NEST_MAX`), one
-with a descriptor is a mod and is not entered, so `mods\demon-mods\local.cyberdemon\`
-is the mod `local.cyberdemon` named `demon-mods\local.cyberdemon` (its path under
-`mods\`, which the listing, the console, the Mods tab and `sh_mods build` use; the
-console also takes a nested folder by its own name). Every scan walks the same way:
-the store listing (`sh_ms_enumerate`), the rebuild rule and the serving scan at boot.
-An install of a folder from elsewhere places it by hash (rule 1 of DESIGN-additive 4,
-`sh_ms_build_folder_name`): the first build of a key is `<key>` at the root, every later
-build `<key>@<first 16 hex of its bundle hash>` beside it (`-2`, `-3` ... when that is
-taken). A build the product receives for a map is never placed beside the player's own
-folders (owner 2026-11-10, `sh_ms_placed_folder_name`): a download goes under an
-organizing folder named after the map, `mods\downloads\<map title>\<key>\` (the title
-made a folder name by `sh_ms_title_segment`: the characters Windows refuses dropped, at
-most 60 bytes, a device name given a `_`; ` (<map id>)` appended only when the record's
-`downloads` section already gives that title folder to another map of the same title;
-with no title, `mods\downloads\<key>\`), and a build a rawmap or prefab ZIP carried goes
-under `mods\imports\<ZIP name>\<key>\` by the same rule; a later build there is `<key>-2`,
-`-3` .... No hash names a visible folder: `.builds\` (hidden) is the only place one
-appears. A build already installed anywhere is not installed again
-(`sh_ms_install_stats.present`), and nothing installed is replaced, so "same version,
-other files" is never a refusal. Each records its `origin` (`install`, `imported` for a
-rawmap or prefab ZIP, `download`). A download notes the map it was fetched for in the
-record's `downloads` section (`sh_ms_downloads_note`: map id, or `title:<segment>`, to the
-title and the folders that serve it), also when the build was already present elsewhere
-in the store, so the Mods tab says "Downloaded for <map title>" (`downloadedFor`,
-`sh_ms_downloaded_for`, else the title folder's name). A migration's named target keeps the older rule
-(`<id>`, else `<id>@<version>`), and the upgrade's renames leave nested folders where
-they are. A package a map
-delivered without a version gets one
-generated from its digest (`legacy-<digest16>`); it is part of the manifest
-and its hash, so it stays in `mod.json`, but it never names a folder (`<id>`,
-else `<id>-<hash 8>`) and the Mods tab and the doctor do not show it.
-Identity is the bundle hash: two folders declaring one key are two builds,
-both kept and both listed. A download whose content an installed mod of the same key already
-serves is not stored; its hash is recorded as an alias of the installed
-bundle. A package a map delivered is not stored when an installed mod that
-was not itself delivered declares its id (whatever the content), or provides
-every path it provides under another id (a copy renamed by its packager);
-the installed mod answers the carrier, and the second upgrade step records
-the copy's hash as an alias of it. A folder built again in place with new
-content (the rebuild rule, `sh_mods build`, an install of a folder of the store
-itself or a migration's target) records the hash its product block named before as an
-alias of the new one, so a map saved against any earlier build loads the
-current one. An author's own map follows their own root folders with no prompt
+`assets\` only.
+
+Identity is the salt (`modsalt.h`), never the folder name: an author may
+rename any folder at any time and the next scan reads the same salt. A folder
+under `mods\` without `mod.json` or `package.json` is an organizing folder and
+is looked into (to eight levels, `SH_MS_NEST_MAX`); one with a descriptor is a
+mod and is not entered, named by its path under `mods\`
+(`demon-mods\cyberdemon`), which the listing, the console, the Mods tab and
+`sh_mods build` use; the console also takes a nested folder by its own name or
+by its salt. Every reader walks the same way (`sh_ms_walk`: the listing
+`sh_ms_enumerate`, the scan `sh_ms_sync`, the serving scan): dot folders,
+reparse points and `<name>.staging-<pid>` / `<name>.old-<pid>` work folders are
+skipped, and the top folder `maps` is the places (below). The root is
+everything else, and one salt has one folder there.
+
+The scan (`sh_ms_sync`), at boot, on Refresh, and after an install, a download
+or New mod; there is no folder watcher. Under the store lock it:
+
+1. salts every root folder with no builder block (`sh_ms_assign_salt` with
+   `from` its folder name): a new salt (`sh_salt_generate_except`, never one a
+   folder of the store holds), every reference to `mods/<folder name>/` in its
+   own files rewritten to `mods/<salt>/` (decl text and any other text, the
+   folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
+   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s strings keys and
+   its block `{"format": 2, "salt": ...}`). Everything is read and rewritten in
+   memory first, staged beside the folder as `<name>.staging-<pid>` (unchanged
+   files hard-linked), then swapped in with two renames under the same name, the
+   second undone on failure; the folder as it was goes to the Recycle Bin. A
+   binary file naming `mods/<folder name>/` ("<file> names mods/<x>/ inside a
+   binary file, which Snapmap+ cannot rewrite"), files under another mod's
+   `mods/<x>/`, a file that cannot be read, two files landing on one path or a
+   refused rename leave the folder exactly as it was, refused alone with that
+   cause (`MODS: store: <folder> refused: ...`);
+2. settles a salt two root folders carry (a copied folder): the one whose
+   block's `built` is earliest keeps it (a folder never built last; ties by
+   folder path), every other one is salted anew with `from` the old salt, one
+   line each ("mods\<b> is a copy of mods\<a>; it is a new mod now");
+   until then the listing shows the copy refused with that reason;
+3. builds every root folder whose block's tree hash (`sh_mb_tree_hash`: the
+   author's bytes and the size and time of every file under `assets\`) or rules
+   (`SH_MB_RULES`) differ from the folder's, or whose last build failed
+   (`sh_ms_sync_pending` counts them, with the folders of steps 1 and 2). Place
+   folders are never built.
+
+A folder in an earlier shape (a format-1 block, `package.json`, a retired
+author key) is listed with its plain reason ("This mod folder is not in a shape
+Snapmap+ can build: ...") and nothing in it is written; the installer's store
+tool converts those once, at update.
+
+Places (rule 4). A build the product receives for a map lives in the map's
+place, `mods\maps\<segment>\<mod name>\`: the segment is `sh_ms_title_segment`
+of the map's title (a rawmap's file name, a prefab ZIP's name: the characters
+Windows refuses dropped, at most 60 bytes, a device name given a `_`), followed
+by ` (<map id>)` only when the record's `places` section already gives that
+segment to another map; the folder is named after the mod (` (2)` when another
+mod of the place has the name). One build per salt per place: a later build of
+the salt for that map replaces the place's folder (`sh_ms_place_folder`
+answers 2 with it), the old one to the Recycle Bin. The `places` section maps
+each map (its item id, `zip:<file name>`, else `title:<segment>`) to its title
+and place (`sh_ms_place_note`, `sh_ms_place_of`, `sh_ms_place_title`), so the
+Mods tab says which map a place serves. A new folder dropped into a place is
+refused ("it was not built by the mod store"); a hand copy inside one place is
+refused as "another folder of this map has the same mod".
+
+Install (`sh_ms_install_from_folder`). A folder of the store is built in
+place. From elsewhere the source is only read: a new mod is copied whole to
+`mods\<its name>` (` (2)` when taken), salted with its references to
+`mods/<its name>/` rewritten, and built, and a refused build leaves nothing
+installed; a built mod is built in memory, and when the root folder of its
+salt already holds that build nothing is copied (`present`), else its carried
+files and `mod.json` are copied beside the others under its own name and
+verified, and when the root already holds the salt the arriving copy gets a
+new salt and is built under it (`resalted`: the arriving folder is the newer
+copy whatever its `built`). `sh_ms_install_placed` installs a built mod into a
+map's place instead; `sh_ms_install_as` names the store tool's target, which it
+replaces. An author's own map follows their own root folders with no prompt
 (owner 2026-11-09, 2026-11-10): every row is activated through the build
 `sh_modserve_row_build` answers for it, which for an editor load, a My Maps play
 and a published map this machine published is the root folder of the row's
 salt whatever hash the row pins, and the next save writes that build's hash, as
-the save already writes rows from the serving index. There is no
-upgrade action. The aliases stay flat: an alias naming the old hash is re-pointed
-at the new one, so one hop always resolves. After each pass of the rebuild rule
-the store drops every alias whose target no folder builds to any more (a
-folder deleted or replaced by hand), with one `MODS: store:` line. Aliases are a lookup aid for
-store downloads and exports only: upload sends and claims the current build,
-and export, when no folder or snapshot holds the declared hash itself, carries
-the aliased build and rewrites the exported map's rows to name it, both
-through `sh_ms_resolve`. Nothing refuses or brings anything back because of an
-alias. Saving a map writes rows from the serving index, so they name the
-build that serves. Removing a folder keeps its aliases while a folder of that
-id remains and drops them once none does.
+the save already writes rows from the serving index. There are no aliases.
+
+New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
+name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
+example crate at `mods/<salt>/example_crate` and its Toybox row, and the row's
+strings under `mods/<salt>/` in `mod.json`; the scan that follows builds it.
 
 The asset rule. A map, rawmap or prefab pins the builds its manifest rows
 name by bundle hash (DESIGN-additive 2.5: what the author saw is what every
@@ -904,10 +913,11 @@ that section names, so maps published before this rule neither ask for nor
 download an author's editor overrides again.
 
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
-`aliases`, `editorOnly` (bundle hash to id, name and when: bundles a map
-named that change only the editor) and `downloads` (the maps downloaded builds were
-fetched for, above), each section written whole under one lock.
+`claims`, `links`, `pending`, `migration`, `editorOnly` (bundle hash to id,
+name and when: bundles a map named that change only the editor) and `places`
+(each map's place, above), each section written whole under one lock. The
+build cache, aliases, snapshots and first-build renames of earlier releases
+are gone: the block's `tree` is the rebuild rule's key.
 A record another program holds open is waited for, up to a second. A read
 that still fails logs `MODS: record: cannot read <file> (<why>)`, and that
 section is not written until a read of it succeeds again, so a
@@ -922,15 +932,13 @@ try again" to their result, and a publish whose claim could not be saved
 shows that sentence as its upload cause (`sh_mb_record_why`).
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
-covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct
-child of the store root, under the store lock, through `SHFileOperationW`
+covered builds move the folder there (`sh_ms_delete_mod_folder`: a mod
+folder of the store, under the store lock, through `SHFileOperationW`
 `FO_DELETE` with `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT |
 FOF_NOERRORUI | FOF_NORECURSEREPARSE`, a double-NUL-terminated plain path,
-reparse points moved as themselves and never entered; a folder under
-`downloads\` or `imports\` takes its emptied title and group folders with it and
-leaves the record's `downloads` section), drop its aliases once
-no folder of its id remains (`sh_ms_alias_forget`), and rescan; the build cache
-follows at that rescan. `sh_ms_remove_folder`, which the store upgrade and an
+reparse points moved as themselves and never entered; a folder in a map's
+place takes its emptied place folder with it and leaves the record's `places`
+section), and rescan. `sh_ms_remove_folder`, which the store upgrade and an
 import's rollback use, takes the same route under the same lock. The shell is
 offered only a folder on a fixed drive whose plain path is shorter than
 `MAX_PATH`; on a network or removable drive there is no bin and the shell would
@@ -960,6 +968,9 @@ stays for the next run.
 
 The store migration tool. The game runs no store migration at boot.
 `snapmap-plus-store.exe` (`src/store/`) links the store sources (`modstore.c`,
+`modstore_upgrade.c`, the store tool's half of the store: the Contract 2
+layout, the second upgrade step over format-1 folders read with
+`modbundle_old.c`, and the bin sweep, never linked into the game DLL;
 `modmigrate.c`, `modlegacy.c`, `modbundle.c`, `modstock.c` and what they use)
 with a stand-in for the serving layer (`store_seam.c`), and no engine, DLL or
 WebView code. `check <store>` lists the work it finds, one line per kind
@@ -983,14 +994,15 @@ lines as its action lines and a summary, and exits 0 when nothing is left to do,
 1 when a later run could still do something, 2 on an error; a second run finds
 nothing and changes nothing. The installer runs it on install and update (see
 [installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
-The rebuild rule is unchanged: a folder without a product block is built at the
-next rescan, or at the next boot (below).
+A folder without a builder block is salted and built at the next scan, or at
+the next boot (below). A Contract 2 folder whose `bundle.json` this release
+cannot read is left as it was and logged.
 
-Crash leftovers. An install, a download and a first-build rename assemble a
+Crash leftovers. An install, a download and a salting assemble a
 folder as `<name>.staging-<pid>` and move the folder they replace aside as
 `<name>.old-<pid>` before the swap; the listing and the serving scan skip both.
 At boot, before the serving index is read, `sh_ms_recover_work` walks the store
-(organizing folders included) and `.builds\`: a work folder whose process is
+(organizing folders and places included): a work folder whose process is
 still running is left; a `.old-<pid>` folder whose target is missing is the
 folder a session took away when it ended between the two renames, and is put
 back ("put <folder> back from <work folder>: an earlier session ended while it
@@ -1011,9 +1023,9 @@ store is scanned at boot, on Refresh (the Mods tab's button, `sh_mods rescan`),
 and at the end of an install, a download and New mod; an author's edit in a
 folder shows after the next Refresh.
 
-The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
-and the path, size and time of every file under `assets\`) is not a key of the
-cache for its bundle; that runs on a rescan (the Mods tab, `sh_mods rescan`,
+The rebuild rule: a root folder is built again when its tree hash (the author's bytes of `mod.json`
+and the path, size and time of every file under `assets\`) or the builder's rules differ from
+its block's, or its last build failed; that runs on a rescan (the Mods tab, `sh_mods rescan`,
 an install) and at boot (`sh_ms_boot_sync`): after the boot index, a thread of
 its own checks the trees and, when a folder is not built yet or changed while
 the game was closed (the first boot after a conversion), builds it as a rescan

@@ -167,9 +167,18 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes` or `schema`) is
   listed with "This mod folder is not in a shape Snapmap+ can build:" and the cause, and serves
   nothing. Everything about mods is in `mods\`: the folders and one product file,
-  `snapmap-plus.json` (publish claims, the migration record, the build cache).
-- A folder you drop into `mods\` keeps its name and is built when the Mods tab opens (or on
-  `sh_mods rescan`); a folder whose files or `mod.json` changed is built again the same way.
+  `snapmap-plus.json` (publish claims, the migration record, the maps' places).
+- A mod's identity is its salt: eight characters the product writes once into `mod.json`. The
+  folder name is yours; rename a folder any time and it stays the same mod. A folder you drop into
+  `mods\` with a `mod.json` of your own (no `snapmap-plus` part) is a new mod: at the next Refresh
+  (the Mods tab's button, `sh_mods rescan`), or the next start, it keeps its name, gets its salt,
+  its references to `mods/<folder name>/` become `mods/<salt>/` (decls, other text files, the
+  folders under `assets\`, `mod.json`'s strings), the folder as it was goes to the Recycle Bin, and
+  it is built. A binary file that names `mods/<folder name>/`, or files under another mod's
+  `mods/<x>/`, refuse that folder alone and leave it untouched. A copy of a mod folder is a new
+  mod: the folder built first keeps the salt and the copy gets its own, with one line saying so.
+  A folder whose files or `mod.json` changed is built again at the next Refresh; a build that fails
+  shows its cause and the mod serves nothing until it is fixed.
   The rescan (the Mods tab's refresh, `sh_mods rescan`) also brings what changed into the running
   game: every decl whose served bytes changed, and every served decl that inherits from it, is
   parsed again, and changed models and images are reloaded in place, so an edit to a mod's FSM,
@@ -314,20 +323,18 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folder of the mod offers its Toybox rows (the newest build when you have no folder of it of your
   own: a mod downloaded for a map never takes over from the one you edit), each ready with that build's required console settings. `sh_mods doctor`
   lists one row per build under the mod.
-- Mods are installed by hash, whichever way they arrive (the Mods tab's install, `sh_mods install`,
-  a rawmap or prefab ZIP, a download for a map): a build you already have is not installed again,
-  and any other build lands as its own folder. A folder you install sits at the top of `mods\`, the
-  first build of a mod under its key and every later one as `<key>@<first 16 hex of its hash>`
-  beside it. A mod downloaded for a map lives in a folder named after that map,
-  `mods\downloads\<map title>\<key>\`, and a mod a rawmap or prefab ZIP brought in
-  `mods\imports\<ZIP name>\<key>\`; the Mods tab shows those as organizing folders and says
-  "Downloaded for <map title>".
+- A mod you install (the Mods tab's install, `sh_mods install`) lands at the top of `mods\` under
+  its own folder name (` (2)` when taken); a build you already have is not installed again, and a
+  second folder of a mod you already have becomes a new mod with its own salt. A mod that came with
+  a map (a download, a rawmap or prefab ZIP) lives in that map's place,
+  `mods\maps\<map title>\<mod name>\`, one folder per mod per map, replaced when the map brings a
+  newer build; place folders are never built again, and a folder you make inside one is refused.
+  Removing the last mod of a place removes the place.
 - Playing your own published map uses your own mod folders, as opening it from My Maps does: a row
   whose mod one of your folders builds follows that folder's current build, and nothing is
   downloaded for it. A map someone else published plays exactly the builds it pins. Nothing installed is replaced, and
-  nothing is ever refused for "same version, different files": the hash is the identity. Each
-  folder records where it came from (`origin`: `by-hand`, `install`, `imported`, `download`).
-  Uninstalling one build leaves the others.
+  nothing is ever refused for "same version, different files". Where a folder sits says where it
+  came from: the root is yours, `mods\maps\` holds what maps brought.
 - Playing a published map (or a My Maps map) that uses a mod no installed folder provides first
   asks the mod store about each missing build, then asks you, in the game's own Yes/No dialog,
   naming the mods and their size, after one console line per mod: "This map uses Hell Guards
