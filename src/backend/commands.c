@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "commands.h"
+#include "cmd_lists.h"
 #include "text.h"
 #include "cvars.h"
 #include "overrides.h"
@@ -1757,24 +1758,12 @@ static void h_sh_help(idCmdArgs *a)
     }
 }
 
-/* Expose commands to both full/developer lookup tables with flags 0x06.
- * Hook future registrations and backfill existing commands into the developer
- * list using the engine allocator. Never alias the full/developer arrays: their
- * independent counts would make later appends overwrite or duplicate entries.
- * idCommand layout: name@0, handler@8, completion@0x10, help@0x18, flags@0x20. */
-#define CMD_FULL_ARRAY_OFF  0x08u
-#define CMD_FULL_COUNT_OFF  0x10u
-#define CMD_DEV_ARRAY_OFF   0x20u
-#define CMD_DEV_COUNT_OFF   0x28u
-#define CMD_DEV_CAP_OFF     0x2cu
-#define CMD_OBJ_FLAGS_OFF   0x20u
-#define CMD_DEV_FLAGS       0x6u        /* 0x2 cheat-exempt | 0x4 dev-table membership */
-#define CMD_COUNT_SANITY    100000u
-
+/* Every command answers in and out of developer mode: cmd_lists.h has the
+ * two lists, the flags, and why their room is reserved off this thread. */
 /* Resolve list growth from AddCommand's LEA RCX,[RSI+8]; CALL rel32.
  * Generic idList instantiations share their bytes, so use this relationship
  * rather than a direct signature or raw RVA. */
-typedef void (*idlist_grow_fn)(void *idlist);
+typedef sh_idlist_grow_fn idlist_grow_fn;
 static idlist_grow_fn g_idlist_grow;
 
 /* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found
@@ -1813,67 +1802,13 @@ static add_command6_fn g_addcmd_tramp = NULL;
 static void hook_add_command(void *cmdsys, const char *name, void *handler, const char *help,
                              void *argComp, unsigned int flags)
 {
-    if (g_addcmd_tramp)
-        g_addcmd_tramp(cmdsys, name, handler, help, argComp, flags | CMD_DEV_FLAGS);
-}
-
-/* On an unreadable developer list, assume present to avoid a duplicate append. */
-static int cmd_in_dev(uint8_t *cmdSys, void *cmd)
-{
-    __try {
-        void   **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);
-        uint32_t n   = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
-        if (dev == NULL) return 0;
-        if (n > CMD_COUNT_SANITY) return 1;
-        for (uint32_t i = 0; i < n; i++)
-            if (dev[i] == cmd) return 1;
-        return 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
-}
-
-/* Append using the engine's own list allocator; keep the full array separate. */
-static void cmd_dev_append(uint8_t *cmdSys, void *cmd, idlist_grow_fn grow)
-{
-    __try {
-        uint32_t count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
-        uint32_t cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
-        if (count >= cap) {
-            if (!grow) return;
-            grow(cmdSys + CMD_DEV_ARRAY_OFF);        /* Growth can replace the backing array. */
-            count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
-            cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
-        }
-        if (count < cap) {
-            void **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);
-            if (dev != NULL) {
-                dev[count] = cmd;
-                *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF) = count + 1;
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {   }
-}
-
-/* Expose preexisting commands and add missing developer-list entries. */
-static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
-{
-    void   **full = NULL;
-    uint32_t n = 0;
-    __try {
-        full = *(void ***)(cmdSys + CMD_FULL_ARRAY_OFF);
-        n    = *(uint32_t *)(cmdSys + CMD_FULL_COUNT_OFF);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-    if (full == NULL || n == 0 || n > CMD_COUNT_SANITY) return 0;
-
-    for (uint32_t i = 0; i < n; i++) {
-        void *cmd = NULL;
-        __try { cmd = full[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-        if (cmd == NULL) continue;
-        __try { *(uint32_t *)((uint8_t *)cmd + CMD_OBJ_FLAGS_OFF) |= CMD_DEV_FLAGS; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
-        if (!cmd_in_dev(cmdSys, cmd))
-            cmd_dev_append(cmdSys, cmd, grow);
-    }
-    return n;
+    if (!g_addcmd_tramp) return;
+    /* The exposure flags make the engine append the command to the developer
+     * list as well. They are added only while that list has room, so the
+     * append never grows the list inside a frame (cmd_lists.h); without room
+     * the registration goes through as the engine asked for it. */
+    if (sh_cmd_lists_room((const uint8_t *)cmdsys, 1)) flags |= SH_CMD_BOTH_FLAGS;
+    g_addcmd_tramp(cmdsys, name, handler, help, argComp, flags);
 }
 
 /* Later registrations inherit the exposure flags through the AddCommand
@@ -1921,18 +1856,30 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
 }
 
 /* The engine's command lists are its main thread's: registration and the
- * developer-list backfill both run here, once, on the first frame. */
+ * developer-list backfill both run here, once, on the first frame. Room for
+ * them is reserved first, off this thread, so nothing here grows a list. */
 void sh_commands_main_frame(void)
 {
     if (InterlockedCompareExchange(&g_register_pending, 0, 1) != 1) return;
     int n = 0;
+    uint32_t left = 0, walked;
+    char line[240];
+    if (!sh_cmd_lists_reserve((uint8_t *)g_cmdsys, g_idlist_grow, (uint32_t)CMD_COUNT)) {
+        backend_log("commands: off -- DOOM's command lists have no room for Snapmap+'s commands and could not be "
+                    "given more");
+        return;
+    }
     for (int i = 0; i < CMD_COUNT; i++)
         if (register_cmd(&CMD_TABLE[i])) n++;
     (void)sh_modcmd_register();   /* logs the mods store root for sh_mods */
-    uint32_t walked = command_unlock_pass((uint8_t *)g_cmdsys, g_idlist_grow);
-    char line[160];
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "commands: registered %d/%d console commands; %u engine commands usable in and out of developer mode",
-        n, CMD_COUNT, walked);
+    walked = sh_cmd_lists_unlock((uint8_t *)g_cmdsys, &left);
+    if (left)
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "commands: registered %d/%d console commands; %u engine commands usable outside developer mode, %u of "
+            "them not inside it (its list had no room)", n, CMD_COUNT, walked, left);
+    else
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "commands: registered %d/%d console commands; %u engine commands usable in and out of developer mode",
+            n, CMD_COUNT, walked);
     backend_log(line);
 }
