@@ -2,7 +2,9 @@
 
 The services used by the repository and the in-app feedback relay, their
 credentials, and fork setup requirements. The website and its Community API are
-inventoried in the [snapmap-web](https://github.com/doom-snapmap/snapmap-web/blob/main/docs/services.md) repository. Hosting charges depend on the account plan and usage;
+inventoried in the [snapmap-web](https://github.com/doom-snapmap/snapmap-web/blob/main/docs/services.md) repository,
+among them the mod store the product uploads published maps' mods to and downloads them from
+(`https://api.snapmapplus.com`, the `mods.store` setting). Hosting charges depend on the account plan and usage;
 release drafting makes a paid API call when its key is configured.
 
 | Service | Purpose | Credentials or bindings | Without it |
@@ -38,8 +40,8 @@ separate from the repository's write permissions. The intended deployment uses:
 
 1. **A monthly spend limit on a dedicated Anthropic workspace**, set in the Console. This is the only control
    that bounds the financial exposure, and it is deliberately outside GitHub.
-2. **The `changelog` environment's deployment branch policy, restricted to the release branch** (`main`;
-   the former `port/build-13954591` branch is gone, main is the April 2024 line). A GitHub Environment
+2. **The `changelog` environment's deployment branch policy, restricted to the release branch**
+   (`main`). A GitHub Environment
    defaults to "All branches", and `workflow_dispatch` lets the caller pick the ref — the workflow file that
    *runs* is the one on the chosen ref. Without this policy the key is scoped to a declared job, not to
    reviewed code.
