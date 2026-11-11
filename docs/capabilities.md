@@ -906,10 +906,12 @@ The backend also carries **mod scripts**: a mod's `assets\mods\<salt>\scripts\*.
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
 Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
-`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps time (`now`, `after`, `every`, `run`,
-`wait`) and writes the mod's script log (`print`, `warn`); the entity, AI, combat and logic calls,
-and the hooks that deliver damage, death, animation notifies and Script node inputs, come with the
-work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
+`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps game time (`now`, `after`, `every`, `run`,
+`wait`), writes the mod's script log (`print`, `warn`), and works with entities and the world:
+`spawn` its own entities, read any entity's position, facing, velocity, health and animation, move,
+turn, push, heal, animate and remove its own, heal players, find `players()` and `entities_near`,
+and `trace` lines through the world. The AI, combat and logic calls, and the hooks that deliver
+damage, death, animation notifies and Script node inputs, come with the work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing
