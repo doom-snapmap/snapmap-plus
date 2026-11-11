@@ -7329,7 +7329,12 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
         ms_lower(lower);
         if (ms_bundle_carries(x, declared, lower) || ms_row_name_resolves(x, lower)) continue;
         if (absent < 3) {
-            int n = _snprintf_s(missing + w, sizeof missing - w, _TRUNCATE, "%s%s", absent ? ", " : "", row->names[k]);
+            /* Named under the mod, never by its salt: "mods/<salt>/x" reads "x". */
+            const char *shown = row->names[k];
+            size_t sl = strlen(salt);
+            if (!_strnicmp(shown, "mods/", 5) && !_strnicmp(shown + 5, salt, sl) && shown[5 + sl] == '/' && shown[6 + sl])
+                shown += 6 + sl;
+            int n = _snprintf_s(missing + w, sizeof missing - w, _TRUNCATE, "%s%s", absent ? ", " : "", shown);
             if (n > 0) w += (size_t)n;
         }
         absent++;

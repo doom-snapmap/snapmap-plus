@@ -4766,8 +4766,9 @@ static void test_row_served(void)
     make_bundle(root, "localhel", "localhel", 'd', NULL, HG + 1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
+    /* Named under the mod, never by its salt. */
     CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
-                         "mods/localhel/hell_guard_combo_enc, which this map uses."));
+                         "hell_guard_combo_enc, which this map uses."));
     /* More than three missing: the first three and the count. */
     names[2] = "mods/localhel/a";
     names[3] = "mods/localhel/b";
@@ -4775,7 +4776,7 @@ static void test_row_served(void)
     row.name_count = 5;
     CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
     CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
-                         "mods/localhel/hell_guard_combo_enc, mods/localhel/a, mods/localhel/b and 1 more, "
+                         "hell_guard_combo_enc, a, b and 1 more, "
                          "which this prefab uses."));
     /* A row that lists no names (a map-level row) is served by its build alone. */
     row.name_count = 0;
