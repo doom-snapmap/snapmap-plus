@@ -13,7 +13,10 @@ $Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c", 
              "../backend/modsalt.c", "../backend/strkeys.c", "../backend/modbundle_old.c", "../backend/companion.c", "../backend/modstock.c",
              "../backend/modmanifest.c", "../backend/map_legacy_payload.c", "../backend/map_old.c",
              "../backend/map_shards.c", "../backend/map_carrier.c", "../backend/raw_deflate.c", "../backend/mp_json.c",
-             "../backend/config_json.c", "../backend/decl_text.c", "../backend/decl_tree.c")
+             "../backend/config_json.c", "../backend/decl_text.c", "../backend/decl_tree.c",
+             # A build that carries mod scripts compiles them (never runs them): the Lua parser only.
+             "../backend/script/script_compile.c", "../backend/script/script_reason.c",
+             "../third_party/lua/lapi.c", "../third_party/lua/lauxlib.c", "../third_party/lua/lcode.c", "../third_party/lua/lctype.c", "../third_party/lua/ldebug.c", "../third_party/lua/ldo.c", "../third_party/lua/ldump.c", "../third_party/lua/lfunc.c", "../third_party/lua/lgc.c", "../third_party/lua/llex.c", "../third_party/lua/lmem.c", "../third_party/lua/lobject.c", "../third_party/lua/lopcodes.c", "../third_party/lua/lparser.c", "../third_party/lua/lstate.c", "../third_party/lua/lstring.c", "../third_party/lua/ltable.c", "../third_party/lua/ltm.c", "../third_party/lua/lundump.c", "../third_party/lua/lvm.c", "../third_party/lua/lzio.c")
 
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "tools\cbuild.ps1")
 $toolset = Import-MsvcEnv $VcVarsVer

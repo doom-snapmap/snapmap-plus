@@ -41,7 +41,7 @@ param(
                            "companion.c", "companion_sigs.c", "companion_engine.c",
                            # Mod scripts: the sandboxed Lua runtime and the vendored Lua 5.4 core
                            # (lstrlib.c is compiled only through script_lstrlib.c).
-                           "script/script_runtime.c", "script/script_reason.c", "script/script_lib_base.c", "script/script_lstrlib.c",
+                           "script/script_runtime.c", "script/script_reason.c", "script/script_compile.c", "script/script_lib_base.c", "script/script_lstrlib.c",
                            # Mod scripts' engine side: the frame hook, map gates, entity handles and queues,
                            # the served folders' file source and the sh_scripts console command.
                            "script/script_hooks.c", "script/script_sigs.c", "script/script_queue.c", "script/script_handles.c",

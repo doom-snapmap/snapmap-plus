@@ -12,6 +12,7 @@
  * map start or map end, never from inside a call into Lua. */
 #include "script_internal.h"
 #include "script_reason.h"
+#include "script_compile.h"
 #include "script_hooks.h"
 
 #include <windows.h>
@@ -766,59 +767,6 @@ static void list_cb(void *ctx, const char *relpath)
 
 static int name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-/* The first statement must be "api = <integer>" (comments, blank lines and
- * a UTF-8 byte order mark may come before it). 1 with the version and its
- * line; 0 when the file does not start with it. */
-static int api_declared(const char *t, size_t n, long *version, int *line)
-{
-    size_t i = 0;
-    int ln = 1;
-    if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) i = 3;
-    for (;;) {
-        while (i < n && (t[i] == ' ' || t[i] == '\t' || t[i] == '\r' || t[i] == '\n' || t[i] == ';')) { if (t[i] == '\n') ln++; i++; }
-        if (i + 1 < n && t[i] == '-' && t[i + 1] == '-') {
-            size_t eq = 0, j = i + 2;
-            if (j < n && t[j] == '[') {
-                size_t k = j + 1;
-                while (k < n && t[k] == '=') { eq++; k++; }
-                if (k < n && t[k] == '[') {
-                    /* long comment: find ]=*] with the same level */
-                    for (k = k + 1; k < n; k++) {
-                        if (t[k] == '\n') ln++;
-                        if (t[k] == ']') {
-                            size_t e = 0, q = k + 1;
-                            while (q < n && t[q] == '=') { e++; q++; }
-                            if (e == eq && q < n && t[q] == ']') { i = q + 1; break; }
-                        }
-                    }
-                    if (k >= n) return 0;
-                    continue;
-                }
-            }
-            while (i < n && t[i] != '\n') i++;
-            continue;
-        }
-        break;
-    }
-    *line = ln;
-    if (i + 3 > n || strncmp(t + i, "api", 3) != 0) return 0;
-    i += 3;
-    if (i < n && ((t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= '0' && t[i] <= '9') || t[i] == '_')) return 0;
-    while (i < n && (t[i] == ' ' || t[i] == '\t')) i++;
-    if (i >= n || t[i] != '=' || (i + 1 < n && t[i + 1] == '=')) return 0;
-    i++;
-    while (i < n && (t[i] == ' ' || t[i] == '\t')) i++;
-    if (i >= n || t[i] < '0' || t[i] > '9') return 0;
-    {
-        long v = 0;
-        while (i < n && t[i] >= '0' && t[i] <= '9') { if (v < 1000000) v = v * 10 + (t[i] - '0'); i++; }
-        if (i < n && (t[i] == '.' || t[i] == 'x' || t[i] == 'X' || t[i] == 'e' || t[i] == 'E' ||
-                      (t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') || t[i] == '_')) return 0;
-        *version = v;
-    }
-    return 1;
-}
-
 typedef struct { const char *relpath; const char *text; size_t len; } shs_file_job;
 
 int shs_load_file(lua_State *L, shs_mod *m, const char *relpath)
@@ -897,7 +845,7 @@ static int check_api(shs_mod *m, const char *relpath)
                   "Put the .lua source text in the file");
         return 0;
     }
-    ok = api_declared(text, len, &version, &line);
+    ok = sh_script_api_declared(text, len, &version, &line);
     if (m->source->release) m->source->release(m->source->context, text);
     if (!ok) {
         stop_line(m, file, line, "the file does not start with \"api = 1\", so it did not run",
@@ -1704,7 +1652,7 @@ int sh_script_check_files(const char *salt, const char *name, const sh_script_so
             check_line(fn, context, mod, file, 0, "the file is compiled Lua, not script text", "Put the .lua source text in the file");
         } else if (len > SH_SCRIPT_FILE_MAX) {
             check_line(fn, context, mod, file, 0, "the file is larger than 256 KB", "Split it into smaller files");
-        } else if (!strchr(files.names[i], '/') && !api_declared(text, len, &version, &line)) {
+        } else if (!strchr(files.names[i], '/') && !sh_script_api_declared(text, len, &version, &line)) {
             check_line(fn, context, mod, file, line, "the file does not start with \"api = 1\"", "Add \"api = 1\" as its first line");
         } else {
             size_t m = len;

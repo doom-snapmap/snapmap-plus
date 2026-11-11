@@ -22,6 +22,9 @@
  *     "editor": ["<request>", ...],    files classified as editor tweaks
  *     "registries": {"banks": [...], "conductor": [...], "strings": [...]},
  *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
+ *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "dynamic"},
+ *                                      what the mod's scripts bind, read without running them
+ *                                      (sh_mb_script_scan); only when the mod carries scripts
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
@@ -102,8 +105,9 @@
 /* The builder's rules, written into the builder block as "rules". A root
  * folder whose block carries another number is built again once by the
  * rebuild rule, so a product update reclassifies every own folder. Raise it
- * when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           9
+ * when a build's classification, edits or manifest change. 10: mod scripts
+ * (a folder that failed only on a .lua file builds now). */
+#define SH_MB_RULES           10
 /* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
 #define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
 #define SH_MB_ID_MAX          64u
@@ -222,6 +226,8 @@ typedef struct sh_mb_bundle {
     size_t warning_list_count;
     sh_mb_classes classes; /* counts of the files' classes */
     char *registries;      /* compact JSON of the block's "registries" object, or NULL */
+    char *scripts;         /* compact JSON of the block's "scripts" object, or NULL (no scripts) */
+    unsigned script_files; /* files of kind script (sh_mb_script_request) */
     /* Derived edits (DESIGN-additive 2.4): the block's "edits", a JSON array
      * with one element per decl the mod carries at a game name with other
      * bytes (decl_tree.h), or NULL; edit_files elements. */
@@ -519,6 +525,80 @@ int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
 /* Extension whitelist (Contract 1). A .bswf movie is admitted only under
  * generated/swf/. */
 int  sh_mb_extension_allowed(const char *request);
+
+/* ------------------------------------------------------- mod scripts ---- */
+/* A script is a carried text file of kind "script" (provides type "script",
+ * name its request): assets/mods/<salt>/scripts/<name>.lua, an entry file the
+ * runtime runs at map start, or assets/mods/<salt>/scripts/lib/<name>.lua, a
+ * module only `require` loads, of the same mod. <name> is [A-Za-z0-9_-], at
+ * most 64 characters. The engine never opens a script: it is hashed, carried
+ * and indexed like every file, and the runtime reads its built bytes through
+ * the serving index (modserve.h sh_modserve_script_files). mod.json's author
+ * part declares nothing about scripts.
+ *
+ * Checked at build: UTF-8 text without NUL, not compiled Lua (a chunk starting
+ * "\x1bLua"), at most SH_MB_SCRIPT_FILE_MAX bytes each, at most
+ * SH_MB_SCRIPT_FILES_MAX files and SH_MB_SCRIPT_MOD_MAX bytes per mod, and
+ * compiled (nothing runs) by the registered check; a literal require of a
+ * module the mod does not carry, and a name of another mod's namespace, are
+ * refused with the file and line. The builder block records what the scripts
+ * bind ("scripts", sh_mb_script_scan). The limits equal the runtime's
+ * (script_runtime.h; script_compile.c asserts it). */
+#define SH_MB_SCRIPT_FILE_MAX   (256u << 10)
+#define SH_MB_SCRIPT_MOD_MAX    (1u << 20)
+#define SH_MB_SCRIPT_FILES_MAX  64u
+#define SH_MB_SCRIPT_NAME_MAX   64u
+
+/* What `request` (lower-cased, below assets/) is to scripts: SH_MB_SCRIPT_ENTRY
+ * or SH_MB_SCRIPT_LIB for a script path (`*name` then points at its <name>,
+ * `*name_len` its length; either may be NULL), SH_MB_SCRIPT_MISPLACED for any
+ * other .lua (refused with SH_MB_SCRIPT_WHERE), else 0. Pure. */
+#define SH_MB_SCRIPT_ENTRY      1
+#define SH_MB_SCRIPT_LIB        2
+#define SH_MB_SCRIPT_MISPLACED  (-1)
+#define SH_MB_SCRIPT_WHERE \
+    "a script goes in this mod's scripts folder, assets\\mods\\<salt>\\scripts\\ (entry files) or scripts\\lib\\ " \
+    "(files loaded with require); move it there"
+int  sh_mb_script_request(const char *request, const char **name, size_t *name_len);
+
+/* The author's spelling of a script request: "scripts\<name>.lua" or
+ * "scripts\lib\<name>.lua", the name every script message uses. */
+void sh_mb_script_file_name(const char *request, char *out, size_t cap);
+
+/* The compile check the product registers (script_compile.c): `file` is the
+ * author's spelling, `entry` 1 for an entry file (which must start with
+ * "api = 1"), 0 for a scripts\lib file. 1 when the text compiles (nothing
+ * runs); 0 with *line (0 when none) and the plain what and todo, neither
+ * ending with a period. Any thread. Without a registered check a build that
+ * carries a script fails, naming the file: nothing unchecked serves. */
+typedef int (*sh_mb_script_check_fn)(const char *file, int entry, const char *text, size_t len, int *line,
+                                     char *what, size_t what_cap, char *todo, size_t todo_cap);
+void sh_mb_set_script_check(sh_mb_script_check_fn fn);
+
+/* The static registration pass: every literal call of the registration API in
+ * one script's text, without running it. Lua comments and strings are
+ * skipped; a call is recognised where the code spells it:
+ *   on.<event>("<name>", ...)    event spawn, think, remove, damage, death, anim  -> SH_MB_SCRIPT_BIND
+ *   on.input("<node name>", ...)                                                   -> SH_MB_SCRIPT_INPUT
+ *   node("<node name>")                                                            -> SH_MB_SCRIPT_OUTPUT
+ *   require("<module>") or require "<module>"                                      -> SH_MB_SCRIPT_REQUIRE
+ * with SH_MB_SCRIPT_DYNAMIC or'ed in (name NULL) when the argument is not a
+ * plain string literal (a name set while running). `event` is the word after
+ * "on." ("input" for inputs, "" otherwise); `line` is 1-based. on.map_start
+ * and on.map_end name nothing and are not reported. Pure. */
+#define SH_MB_SCRIPT_BIND     1
+#define SH_MB_SCRIPT_INPUT    2
+#define SH_MB_SCRIPT_OUTPUT   3
+#define SH_MB_SCRIPT_REQUIRE  4
+#define SH_MB_SCRIPT_DYNAMIC  0x100
+typedef void (*sh_mb_script_call_fn)(void *context, int what, const char *event, const char *name, size_t name_len,
+                                     int line);
+void sh_mb_script_scan(const char *text, size_t len, sh_mb_script_call_fn fn, void *context);
+
+/* 0 when the bundle carries a script: a per-map slice would drop names its
+ * scripts build while running, so the slicer ships such a build whole (D1
+ * slicing step 5's whole-build fallback); else 1. */
+int  sh_mb_sliceable(const sh_mb_bundle *bundle);
 
 /* Kinds a bundle admits only as stock pointers, never as carried bytes:
  * .sbsp, .ambientsh, .tome and .pages (per-map engine files, never authored

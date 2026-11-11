@@ -78,6 +78,7 @@
 #include "engine_globals.h"
 #include "feature_health.h"
 #include "script/script_hooks.h"
+#include "script/script_compile.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -174,6 +175,8 @@ static void install_features(const sig_result *results, size_t db)
     /* Borrowed sound events: the game's bank index answers which stock bank
      * a sound decl needs (modbankinfo.h); read on the first question. */
     sh_mb_set_bank_need(sh_mbi_bundle_need);
+    /* Mod scripts are compiled (never run) by every build that carries one. */
+    sh_mb_set_script_check(sh_script_compile_check);
     /* No store migration runs here: the installer runs snapmap-plus-store,
      * which upgrades the retired layout (modstore.h, modmigrate.h). A folder a
      * crash took away mid-replacement is put back first, so it serves on

@@ -2,10 +2,14 @@
 #include <windows.h>
 
 #include "store_tool.h"
+#include "modbundle.h"
+#include "script/script_compile.h"
 
 int wmain(int argc, wchar_t **argv)
 {
     /* The tool prints UTF-8; a console shows it as such. */
     if (GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR) SetConsoleOutputCP(CP_UTF8);
+    /* A converted folder that carries scripts is compiled like any build (never run). */
+    sh_mb_set_script_check(sh_script_compile_check);
     return sh_store_tool_run(argc, argv);
 }

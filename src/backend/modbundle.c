@@ -945,6 +945,8 @@ int sh_mb_extension_allowed(const char *request)
     for (i = 0; allowed[i]; i++) if (mb_ieq_n(dot, strlen(dot), allowed[i])) return 1;
     /* A cooked movie only where the engine asks for one (modswf.c serves it). */
     if (mb_ieq_n(dot, strlen(dot), ".bswf")) return _strnicmp(request, "generated/swf/", 14) == 0;
+    /* A script only in the mod's scripts folder (sh_mb_script_request). */
+    if (mb_ieq_n(dot, strlen(dot), ".lua")) return sh_mb_script_request(request, NULL, NULL) > 0;
     /* A virtual-texture family member only at a name the engine's loader builds. */
     if (mb_ieq_n(dot, strlen(dot), ".mega2")) return sh_mb_vt_member(request, NULL, 0, NULL);
     /* .baas_<class>, for example .baas_monster48 */
@@ -968,6 +970,260 @@ int sh_mb_pointer_only_kind(const char *request)
     if (!dot) return 0;
     for (i = 0; kinds[i]; i++) if (mb_ieq_n(dot, strlen(dot), kinds[i])) return 1;
     return 0;
+}
+
+/* ------------------------------------------------------- mod scripts ---- */
+
+static int mb_script_name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+
+int sh_mb_script_request(const char *request, const char **name, size_t *name_len)
+{
+    const char *p, *at, *slash;
+    size_t n, i, len;
+    int kind = SH_MB_SCRIPT_ENTRY;
+    if (name) *name = NULL;
+    if (name_len) *name_len = 0;
+    n = request ? strlen(request) : 0;
+    if (n < 4 || !mb_ieq_n(request + n - 4, 4, ".lua")) return 0;
+    /* mods/<salt>/scripts/<name>.lua or mods/<salt>/scripts/lib/<name>.lua */
+    if (_strnicmp(request, "mods/", 5) != 0) return SH_MB_SCRIPT_MISPLACED;
+    slash = strchr(request + 5, '/');
+    if (!slash || slash == request + 5 || _strnicmp(slash + 1, "scripts/", 8) != 0) return SH_MB_SCRIPT_MISPLACED;
+    p = slash + 9;
+    if (_strnicmp(p, "lib/", 4) == 0) { p += 4; kind = SH_MB_SCRIPT_LIB; }
+    at = request + n - 4;
+    len = (size_t)(at - p);
+    if (!len || len > SH_MB_SCRIPT_NAME_MAX) return SH_MB_SCRIPT_MISPLACED;
+    for (i = 0; i < len; i++) if (!mb_script_name_char(p[i])) return SH_MB_SCRIPT_MISPLACED;
+    if (name) *name = p;
+    if (name_len) *name_len = len;
+    return kind;
+}
+
+void sh_mb_script_file_name(const char *request, char *out, size_t cap)
+{
+    const char *name = NULL;
+    size_t len = 0;
+    int kind = sh_mb_script_request(request, &name, &len);
+    if (!cap) return;
+    if (kind > 0)
+        _snprintf_s(out, cap, _TRUNCATE, "scripts\\%s%.*s.lua", kind == SH_MB_SCRIPT_LIB ? "lib\\" : "", (int)len, name);
+    else
+        _snprintf_s(out, cap, _TRUNCATE, "%s", request ? request : "");
+}
+
+static volatile sh_mb_script_check_fn g_mb_script_check;
+
+void sh_mb_set_script_check(sh_mb_script_check_fn fn)
+{
+    g_mb_script_check = fn;
+}
+
+int sh_mb_sliceable(const sh_mb_bundle *b)
+{
+    size_t i;
+    if (!b) return 0;
+    for (i = 0; i < b->file_count; i++)
+        if (!b->files[i].stock && sh_mb_script_request(b->files[i].request, NULL, NULL) > 0) return 0;
+    return 1;
+}
+
+/* The static pass's lexer: just enough of Lua 5.4's to step over comments,
+ * strings and numbers and to see the registration calls. */
+static int mbs_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static int mbs_ident(char c) { return mbs_ident_start(c) || (c >= '0' && c <= '9'); }
+
+/* At t[i] == '[': the level of a long bracket ([[ is 0, [==[ is 2), or -1. */
+static int mbs_long_level(const char *t, size_t n, size_t i)
+{
+    size_t j = i + 1;
+    int level = 0;
+    while (j < n && t[j] == '=') { level++; j++; }
+    return j < n && t[j] == '[' ? level : -1;
+}
+
+/* Past the long bracket opening at i (level `level`) and its closing. */
+static size_t mbs_skip_long(const char *t, size_t n, size_t i, int level, int *line)
+{
+    size_t j = i + (size_t)level + 2;
+    for (; j < n; j++) {
+        if (t[j] == '\n') (*line)++;
+        else if (t[j] == ']') {
+            size_t k = j + 1;
+            int e = 0;
+            while (k < n && t[k] == '=') { e++; k++; }
+            if (e == level && k < n && t[k] == ']') return k + 1;
+        }
+    }
+    return n;
+}
+
+/* Past the short string opening at i; *escaped when it holds a backslash. */
+static size_t mbs_skip_short(const char *t, size_t n, size_t i, int *line, int *escaped)
+{
+    char q = t[i];
+    size_t j = i + 1;
+    if (escaped) *escaped = 0;
+    while (j < n && t[j] != q) {
+        if (t[j] == '\n') { (*line)++; return j; }          /* unfinished: the compile check names it */
+        if (t[j] == '\\') {
+            if (escaped) *escaped = 1;
+            if (j + 1 < n && t[j + 1] == '\n') (*line)++;
+            j += 2;
+            continue;
+        }
+        j++;
+    }
+    return j < n ? j + 1 : n;
+}
+
+/* Past whitespace and comments from i. */
+static size_t mbs_skip_space(const char *t, size_t n, size_t i, int *line)
+{
+    while (i < n) {
+        char c = t[i];
+        if (c == '\n') { (*line)++; i++; }
+        else if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') i++;
+        else if (c == '-' && i + 1 < n && t[i + 1] == '-') {
+            int level;
+            i += 2;
+            if (i < n && t[i] == '[' && (level = mbs_long_level(t, n, i)) >= 0) i = mbs_skip_long(t, n, i, level, line);
+            else while (i < n && t[i] != '\n') i++;
+        } else break;
+    }
+    return i;
+}
+
+/* A string literal at i: 1 with its contents (a short string without escapes,
+ * or a long string), 0 for anything else. *end is past what was read. */
+static int mbs_literal(const char *t, size_t n, size_t i, int *line, const char **s, size_t *len, size_t *end)
+{
+    int level, escaped = 0;
+    *end = i;
+    if (i >= n) return 0;
+    if (t[i] == '"' || t[i] == '\'') {
+        size_t j = mbs_skip_short(t, n, i, line, &escaped);
+        *end = j;
+        if (escaped || j < i + 2 || t[j - 1] != t[i]) return 0;
+        *s = t + i + 1;
+        *len = j - i - 2;
+        return 1;
+    }
+    if (t[i] == '[' && (level = mbs_long_level(t, n, i)) >= 0) {
+        size_t open = i + (size_t)level + 2, j = mbs_skip_long(t, n, i, level, line);
+        *end = j;
+        if (j < open + (size_t)level + 2) return 0;
+        if (open < n && t[open] == '\n') open++;               /* Lua drops a first newline */
+        *s = t + open;
+        *len = j - (size_t)level - 2 - open;
+        return 1;
+    }
+    return 0;
+}
+
+/* After the callee at i: "(" literal, or a bare string argument when
+ * `bare_ok`. 1 literal, 0 a call with another argument, -1 not a call. */
+static int mbs_call_arg(const char *t, size_t n, size_t i, int bare_ok, const char **s, size_t *len)
+{
+    int line = 0;
+    size_t end;
+    i = mbs_skip_space(t, n, i, &line);
+    if (i >= n) return -1;
+    if (t[i] == '(') {
+        i = mbs_skip_space(t, n, i + 1, &line);
+        if (!mbs_literal(t, n, i, &line, s, len, &end)) return 0;
+        end = mbs_skip_space(t, n, end, &line);
+        return end < n && (t[end] == ',' || t[end] == ')') ? 1 : 0;
+    }
+    if (bare_ok && (t[i] == '"' || t[i] == '\'' || t[i] == '[')) return mbs_literal(t, n, i, &line, s, len, &end) ? 1 : 0;
+    return -1;
+}
+
+void sh_mb_script_scan(const char *t, size_t n, sh_mb_script_call_fn fn, void *context)
+{
+    size_t i = 0;
+    int line = 1, field = 0;   /* field: the previous token was a single '.' or ':' */
+    if (!t || !fn) return;
+    if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) i = 3;
+    if (i + 1 < n && t[i] == '#') while (i < n && t[i] != '\n') i++;   /* a first line "#..." is skipped by Lua */
+    while (i < n) {
+        char c = t[i];
+        size_t next = mbs_skip_space(t, n, i, &line);
+        if (next != i) { i = next; continue; }
+        if (c == '"' || c == '\'') { i = mbs_skip_short(t, n, i, &line, NULL); field = 0; continue; }
+        if (c == '[') {
+            int level = mbs_long_level(t, n, i);
+            if (level >= 0) { i = mbs_skip_long(t, n, i, level, &line); field = 0; continue; }
+        }
+        if (c >= '0' && c <= '9') {
+            i++;
+            while (i < n && (mbs_ident(t[i]) || t[i] == '.' ||
+                             ((t[i] == '+' || t[i] == '-') && strchr("eEpP", t[i - 1])))) i++;
+            field = 0;
+            continue;
+        }
+        if (mbs_ident_start(c)) {
+            size_t s = i, wl;
+            const char *name = NULL;
+            size_t nlen = 0;
+            while (i < n && mbs_ident(t[i])) i++;
+            wl = i - s;
+            if (!field) {
+                if (wl == 2 && !memcmp(t + s, "on", 2)) {
+                    int l2 = 0;
+                    size_t j = mbs_skip_space(t, n, i, &l2), e;
+                    if (j < n && t[j] == '.' && !(j + 1 < n && t[j + 1] == '.')) {
+                        j = mbs_skip_space(t, n, j + 1, &l2);
+                        e = j;
+                        while (e < n && mbs_ident(t[e])) e++;
+                        if (e > j && mbs_ident_start(t[j])) {
+                            char ev[16];
+                            int what = 0, got;
+                            size_t el = e - j;
+                            if (el < sizeof ev) {
+                                memcpy(ev, t + j, el);
+                                ev[el] = 0;
+                                if (!strcmp(ev, "spawn") || !strcmp(ev, "think") || !strcmp(ev, "remove") ||
+                                    !strcmp(ev, "damage") || !strcmp(ev, "death") || !strcmp(ev, "anim"))
+                                    what = SH_MB_SCRIPT_BIND;
+                                else if (!strcmp(ev, "input")) what = SH_MB_SCRIPT_INPUT;
+                            }
+                            if (what && (got = mbs_call_arg(t, n, e, 0, &name, &nlen)) >= 0)
+                                fn(context, got ? what : what | SH_MB_SCRIPT_DYNAMIC, ev, got ? name : NULL,
+                                   got ? nlen : 0, line);
+                        }
+                    }
+                } else if (wl == 4 && !memcmp(t + s, "node", 4)) {
+                    int got = mbs_call_arg(t, n, i, 0, &name, &nlen);
+                    if (got >= 0)
+                        fn(context, got ? SH_MB_SCRIPT_OUTPUT : SH_MB_SCRIPT_OUTPUT | SH_MB_SCRIPT_DYNAMIC, "",
+                           got ? name : NULL, got ? nlen : 0, line);
+                } else if (wl == 7 && !memcmp(t + s, "require", 7)) {
+                    int got = mbs_call_arg(t, n, i, 1, &name, &nlen);
+                    if (got >= 0)
+                        fn(context, got ? SH_MB_SCRIPT_REQUIRE : SH_MB_SCRIPT_REQUIRE | SH_MB_SCRIPT_DYNAMIC, "",
+                           got ? name : NULL, got ? nlen : 0, line);
+                }
+            }
+            field = 0;
+            continue;
+        }
+        if (c == '.') {
+            if (i + 1 < n && t[i + 1] == '.') { i += 2; while (i < n && t[i] == '.') i++; field = 0; }
+            else { i++; field = 1; }
+            continue;
+        }
+        if (c == ':') {
+            if (i + 1 < n && t[i + 1] == ':') { i += 2; field = 0; }
+            else { i++; field = 1; }
+            continue;
+        }
+        i++;
+        field = 0;
+    }
 }
 
 int sh_mb_stock_restore(const char *request, const char *source)
@@ -1188,6 +1444,7 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
      * a generated/decls/ decl, so it is never registered; it is served when
      * opened and checked with its program (mb_check_renderprogs). */
     if (sh_mb_bank_stem(r, NULL, 0)) cls = "soundBank";
+    else if (sh_mb_script_request(r, NULL, NULL) > 0) cls = "script";
     else if (mb_ends(r, ".bmodel")) cls = "model";
     else if (mb_ends(r, ".bcm")) cls = "cm";
     else if (strstr(r, ".baas_") && !strchr(strstr(r, ".baas_"), '/')) cls = "aas";
@@ -1708,6 +1965,7 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->extra);
     free(b->canonical);
     free(b->registries);
+    free(b->scripts);
     free(b->edits);
     for (i = 0; i < b->note_count; i++) free(b->notes[i]);
     free(b->notes);
@@ -2584,6 +2842,8 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 mb_error(w->b, "%s: %s", child, cause);
             } else if (mb_rp_forbidden(req_lower)) {
                 mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
+            } else if (sh_mb_script_request(req_lower, NULL, NULL) == SH_MB_SCRIPT_MISPLACED) {
+                mb_error(w->b, "%s: " SH_MB_SCRIPT_WHERE, child);
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
                 if (sh_mb_pointer_only_kind(req_lower))
                     mb_error(w->b, "%s can only be a stock pointer to the installed game, never carried "
@@ -4264,14 +4524,333 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wc
     qsort(b->files, b->file_count, sizeof(sh_mb_file), mb_file_cmp);
 }
 
+/* ------------------------------------------------- scripts at build ---- */
+
+/* The event words of on.<event>(name, ...) that bind an entityDef, in the
+ * order the builder block lists them. */
+static const char *const mb_script_events[] = { "spawn", "think", "remove", "damage", "death", "anim", NULL };
+
+typedef struct mb_script_use {
+    int what;              /* SH_MB_SCRIPT_BIND .. SH_MB_SCRIPT_REQUIRE */
+    unsigned events;       /* BIND: the bit of its event in mb_script_events */
+    char *name;            /* as written */
+    char *file;            /* the script's name as an author sees it (sh_mb_script_file_name) */
+    int line;
+} mb_script_use;
+
+typedef struct mb_scripts {
+    mb_script_use *u;
+    size_t n, cap;
+    char cur[SH_MB_REQUEST_MAX + 16];   /* the file being scanned */
+    unsigned files, dynamic;
+    unsigned long long bytes;
+    int oom;
+} mb_scripts;
+
+static void mb_scripts_free(mb_scripts *s)
+{
+    size_t i;
+    for (i = 0; i < s->n; i++) { free(s->u[i].name); free(s->u[i].file); }
+    free(s->u);
+    memset(s, 0, sizeof *s);
+}
+
+static void mb_script_use_cb(void *context, int what, const char *event, const char *name, size_t len, int line)
+{
+    mb_scripts *s = (mb_scripts *)context;
+    mb_script_use *u;
+    unsigned k;
+    if (what & SH_MB_SCRIPT_DYNAMIC) {
+        /* A module chosen while running is the runtime's to check. */
+        if ((what & 0xff) != SH_MB_SCRIPT_REQUIRE) s->dynamic++;
+        return;
+    }
+    if (s->n == s->cap) {
+        size_t cap = s->cap ? s->cap * 2 : 32;
+        mb_script_use *grown = (mb_script_use *)realloc(s->u, cap * sizeof *grown);
+        if (!grown) { s->oom = 1; return; }
+        s->u = grown;
+        s->cap = cap;
+    }
+    u = &s->u[s->n];
+    memset(u, 0, sizeof *u);
+    u->what = what;
+    for (k = 0; what == SH_MB_SCRIPT_BIND && mb_script_events[k]; k++)
+        if (!strcmp(event, mb_script_events[k])) u->events = 1u << k;
+    u->name = mb_strndup(name, len);
+    u->file = mb_strdup(s->cur);
+    if (!u->name || !u->file) { free(u->name); free(u->file); s->oom = 1; return; }
+    u->line = line;
+    s->n++;
+}
+
+/* Well-formed UTF-8 (no overlong form, surrogate or code point past U+10FFFF). */
+static int mb_utf8_ok(const unsigned char *t, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = t[i];
+        size_t k, more;
+        unsigned long cp;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) { more = 1; cp = c & 0x1Fu; }
+        else if (c >= 0xE0 && c <= 0xEF) { more = 2; cp = c & 0x0Fu; }
+        else if (c >= 0xF0 && c <= 0xF4) { more = 3; cp = c & 0x07u; }
+        else return 0;
+        if (i + more >= n) return 0;
+        for (k = 1; k <= more; k++) {
+            if ((t[i + k] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (t[i + k] & 0x3Fu);
+        }
+        if ((more == 2 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (more == 3 && (cp < 0x10000 || cp > 0x10FFFF)))
+            return 0;
+        i += more + 1;
+    }
+    return 1;
+}
+
+/* A script message: "scripts\x.lua line N: what. Todo." (without the line
+ * when there is none), as the runtime's stop line words a file and line. */
+static void mb_script_error(sh_mb_bundle *b, const char *file, int line, const char *what, const char *todo)
+{
+    char where[SH_MB_REQUEST_MAX + 32];
+    char first[8];
+    if (line > 0) _snprintf_s(where, sizeof where, _TRUNCATE, "%s line %d", file, line);
+    else _snprintf_s(where, sizeof where, _TRUNCATE, "%s", file);
+    if (todo && todo[0]) {
+        first[0] = (char)toupper((unsigned char)todo[0]);
+        first[1] = 0;
+        mb_error(b, "%s: %s. %s%s.", where, what, first, todo + 1);
+    } else {
+        mb_error(b, "%s: %s.", where, what);
+    }
+}
+
+/* One script's text: the checks of modbundle.h, the compile check, then the
+ * static pass (only for a file that compiles). */
+static void mb_script_file(sh_mb_bundle *b, size_t fi, const unsigned char *text, size_t len, mb_scripts *s)
+{
+    const sh_mb_file *f = &b->files[fi];
+    sh_mb_script_check_fn check = g_mb_script_check;
+    char file[SH_MB_REQUEST_MAX + 16], what[400], todo[200];
+    int line = 0;
+    sh_mb_script_file_name(f->request, file, sizeof file);
+    if (len >= 4 && !memcmp(text, "\x1bLua", 4)) {
+        mb_script_error(b, file, 0, "the file is compiled Lua, not script text", "put the .lua source text in the file");
+        return;
+    }
+    if (memchr(text, 0, len) || !mb_utf8_ok(text, len)) {
+        mb_script_error(b, file, 0, "the file is not UTF-8 text", "save it as UTF-8 text");
+        return;
+    }
+    if (!check) {
+        mb_script_error(b, file, 0, "the file cannot be checked by this program", "build the mod in Snapmap+");
+        return;
+    }
+    what[0] = todo[0] = 0;
+    if (!check(file, sh_mb_script_request(f->request, NULL, NULL) == SH_MB_SCRIPT_ENTRY, (const char *)text, len,
+               &line, what, sizeof what, todo, sizeof todo)) {
+        mb_script_error(b, file, line, what[0] ? what : "does not compile", todo);
+        return;
+    }
+    strcpy_s(s->cur, sizeof s->cur, file);
+    sh_mb_script_scan((const char *)text, len, mb_script_use_cb, s);
+}
+
+/* A use's name with this mod's own "mods/<salt>/" taken off: 1 with the
+ * mod-relative name in out; 0 when it names another mod's namespace. */
+static int mb_script_own_name(const sh_mb_bundle *b, const char *name, char *out, size_t cap)
+{
+    size_t sl = strlen(b->id);
+    if (_strnicmp(name, "mods/", 5) != 0) { strncpy_s(out, cap, name, _TRUNCATE); return 1; }
+    if (_strnicmp(name + 5, b->id, sl) != 0 || name[5 + sl] != '/' || !name[6 + sl]) return 0;
+    strncpy_s(out, cap, name + 6 + sl, _TRUNCATE);
+    return 1;
+}
+
+static int mb_script_name_cmp(const void *a, const void *b)
+{
+    const char *x = *(const char *const *)a, *y = *(const char *const *)b;
+    int c = _stricmp(x, y);
+    return c ? c : strcmp(x, y);
+}
+
+/* Sorted, one of each spelling without case, as a JSON array member. */
+static void mb_script_put_names(mb_buf *o, const char *key, char **names, size_t n)
+{
+    size_t i;
+    int first = 1;
+    if (!n) return;
+    qsort(names, n, sizeof(char *), mb_script_name_cmp);
+    mb_puts(o, ",\"");
+    mb_puts(o, key);
+    mb_puts(o, "\":[");
+    for (i = 0; i < n; i++) {
+        if (i && !_stricmp(names[i - 1], names[i])) continue;
+        if (!first) mb_put(o, ",", 1);
+        first = 0;
+        mb_put_jcstr(o, names[i]);
+    }
+    mb_put(o, "]", 1);
+}
+
+static int mb_script_entity_owned(const sh_mb_bundle *b, const char *rel)
+{
+    char full[SH_MB_REQUEST_MAX + 1];
+    size_t i;
+    _snprintf_s(full, sizeof full, _TRUNCATE, "mods/%s/%s", b->id, rel);
+    for (i = 0; i < b->file_count; i++)
+        if (b->files[i].ptype && b->files[i].pname && !_stricmp(b->files[i].ptype, "entityDef") &&
+            !_stricmp(b->files[i].pname, full)) return 1;
+    return 0;
+}
+
+/* The mod's scripts as one: the per-mod caps, each literal require and name
+ * checked against the mod's own files, and the builder block's "scripts". */
+static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scripts *s)
+{
+    char **ent = NULL, **in = NULL, **outn = NULL;
+    unsigned *ev = NULL;
+    size_t nent = 0, nin = 0, nout = 0, i, k;
+    mb_buf o = {0};
+    char num[64];
+    b->script_files = s->files;
+    if (!s->files) return;
+    if (s->oom) { mb_error(b, "out of memory"); return; }
+    if (s->files > SH_MB_SCRIPT_FILES_MAX)
+        mb_error(b, "this mod has %u script files, more than the %u one mod may carry; combine some of them", s->files,
+                 SH_MB_SCRIPT_FILES_MAX);
+    if (s->bytes > SH_MB_SCRIPT_MOD_MAX) mb_error(b, "this mod's scripts are larger than 1 MB in all; make them smaller");
+    ent = (char **)calloc(s->n + 1, sizeof(char *));
+    ev = (unsigned *)calloc(s->n + 1, sizeof(unsigned));
+    in = (char **)calloc(s->n + 1, sizeof(char *));
+    outn = (char **)calloc(s->n + 1, sizeof(char *));
+    if (!ent || !ev || !in || !outn) { mb_error(b, "out of memory"); goto done; }
+    for (i = 0; i < s->n; i++) {
+        const mb_script_use *u = &s->u[i];
+        const char *file = u->file;
+        char rel[SH_MB_REQUEST_MAX + 1], what[SH_MB_CAUSE_MAX];
+        if (u->what == SH_MB_SCRIPT_REQUIRE) {
+            size_t n = strlen(u->name), c;
+            int ok = n > 0 && n <= SH_MB_SCRIPT_NAME_MAX;
+            for (c = 0; ok && c < n; c++) ok = mb_script_name_char(u->name[c]);
+            if (!ok) {
+                _snprintf_s(what, sizeof what, _TRUNCATE, "\"require\" was given \"%s\", which is not a file of this "
+                            "mod's scripts\\lib", u->name);
+                mb_script_error(b, file, u->line, what, "use the file's name in scripts\\lib without folders or "
+                                "\".lua\", as require(\"fsm\") for scripts\\lib\\fsm.lua; a script loads only its own "
+                                "mod's files");
+                continue;
+            }
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/scripts/lib/%s.lua", b->id, u->name);
+            mb_lower(rel);
+            if (!mb_req_has(own, rel)) {
+                _snprintf_s(what, sizeof what, _TRUNCATE, "\"require\" found no scripts\\lib\\%s.lua in this mod",
+                            u->name);
+                mb_script_error(b, file, u->line, what, "add the file to scripts\\lib or correct the name; a script "
+                                "loads only its own mod's files");
+            }
+            continue;
+        }
+        if (!mb_script_own_name(b, u->name, rel, sizeof rel)) {
+            _snprintf_s(what, sizeof what, _TRUNCATE, "\"%s\" is another mod's name", u->name);
+            mb_script_error(b, file, u->line, what, "name this mod's own content, without \"mods/<salt>/\"");
+            continue;
+        }
+        if (u->what == SH_MB_SCRIPT_BIND) {
+            for (k = 0; k < nent && _stricmp(ent[k], rel); k++) {}
+            if (k == nent) {
+                if (!mb_script_entity_owned(b, rel)) {
+                    const char *word = "spawn";
+                    unsigned e;
+                    for (e = 0; mb_script_events[e]; e++) if (u->events == 1u << e) word = mb_script_events[e];
+                    mb_warn(b, "%s line %d: this mod has no entityDef \"%s\" for on.%s; check the name", file, u->line,
+                            rel, word);
+                }
+                if (!(ent[nent] = mb_strdup(rel))) { mb_error(b, "out of memory"); goto done; }
+                nent++;
+            }
+            ev[k] |= u->events;
+        } else if (u->what == SH_MB_SCRIPT_INPUT) {
+            if (!(in[nin++] = mb_strdup(rel))) { mb_error(b, "out of memory"); goto done; }
+        } else if (u->what == SH_MB_SCRIPT_OUTPUT) {
+            if (!(outn[nout++] = mb_strdup(rel))) { mb_error(b, "out of memory"); goto done; }
+        }
+    }
+    _snprintf_s(num, sizeof num, _TRUNCATE, "{\"files\":%u", s->files);
+    mb_puts(&o, num);
+    if (nent) {
+        /* Sort the names with their events. */
+        for (i = 1; i < nent; i++) {
+            char *nm = ent[i];
+            unsigned e = ev[i];
+            k = i;
+            while (k > 0 && mb_script_name_cmp(&ent[k - 1], &nm) > 0) { ent[k] = ent[k - 1]; ev[k] = ev[k - 1]; k--; }
+            ent[k] = nm;
+            ev[k] = e;
+        }
+        mb_puts(&o, ",\"entities\":[");
+        for (i = 0; i < nent; i++) {
+            unsigned e;
+            int first = 1;
+            if (i) mb_put(&o, ",", 1);
+            mb_puts(&o, "{\"name\":");
+            mb_put_jcstr(&o, ent[i]);
+            mb_puts(&o, ",\"events\":[");
+            for (e = 0; mb_script_events[e]; e++) {
+                if (!(ev[i] & (1u << e))) continue;
+                if (!first) mb_put(&o, ",", 1);
+                first = 0;
+                mb_put_jcstr(&o, mb_script_events[e]);
+            }
+            mb_puts(&o, "]}");
+        }
+        mb_put(&o, "]", 1);
+    }
+    mb_script_put_names(&o, "inputs", in, nin);
+    mb_script_put_names(&o, "outputs", outn, nout);
+    if (s->dynamic) {
+        _snprintf_s(num, sizeof num, _TRUNCATE, ",\"dynamic\":%u", s->dynamic);
+        mb_puts(&o, num);
+    }
+    mb_put(&o, "}", 1);
+    if (o.oom) { free(o.p); mb_error(b, "out of memory"); goto done; }
+    {
+        /* Canonical (keys in byte order), as a load of the block reads it. */
+        mbj *parsed = mbj_parse(o.p, o.n, NULL, 0);
+        mb_buf canon = {0};
+        free(o.p);
+        if (!parsed || !mbj_canon(parsed, &canon, NULL, 0) || canon.oom) {
+            mbj_free(parsed);
+            free(canon.p);
+            mb_error(b, "out of memory");
+            goto done;
+        }
+        mbj_free(parsed);
+        free(b->scripts);
+        b->scripts = canon.p;
+    }
+    mb_note(b, "carries %u script file%s; a build with scripts is never sliced", s->files, s->files == 1 ? "" : "s");
+done:
+    for (i = 0; ent && i < nent; i++) free(ent[i]);
+    for (i = 0; in && i < nin; i++) free(in[i]);
+    for (i = 0; outn && i < nout; i++) free(outn[i]);
+    free(ent);
+    free(ev);
+    free(in);
+    free(outn);
+}
+
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
     char sanitized[SH_MB_ID_MAX + 1], ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8],
          ns_raw_s[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
     const sh_mb_stock_ops *stock = mb_stock();
+    mb_scripts scripts;
     size_t i, k;
 
+    memset(&scripts, 0, sizeof scripts);
     sh_mb_id_sanitized(b->id, sanitized);
     _snprintf_s(ns_decl, sizeof ns_decl, _TRUNCATE, "mods/%s/", b->id);
     _snprintf_s(ns_raw, sizeof ns_raw, _TRUNCATE, "/mods/%s/", b->id);
@@ -4354,6 +4933,24 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (sh_mb_bank_stem(f->request, stem, sizeof stem) && !sh_mb_bank_header_ok(bytes, len, stem, cause, sizeof cause))
                 mb_error(b, "%s: %s", f->path, cause);
             free(bytes);
+        } else if (sh_mb_script_request(f->request, NULL, NULL) > 0 && f->size <= SH_MB_SCRIPT_FILE_MAX) {
+            /* A script is read whole: checked, compiled and scanned (mb_script_file). */
+            size_t len = 0;
+            unsigned char *text = mb_read_wfile(full, SH_MB_SCRIPT_FILE_MAX, &len);
+            if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
+            sh_mb_sha256_hex(text, len, f->blob);
+            got = len;
+            scripts.files++;
+            scripts.bytes += len;
+            if (got == f->size) mb_script_file(b, i, text, len, &scripts);
+            free(text);
+        } else if (sh_mb_script_request(f->request, NULL, NULL) > 0) {
+            char file[SH_MB_REQUEST_MAX + 16];
+            sh_mb_script_file_name(f->request, file, sizeof file);
+            mb_script_error(b, file, 0, "the file is larger than 256 KB", "split it into smaller files");
+            scripts.files++;
+            scripts.bytes += f->size;
+            if (!mb_hash_wfile(full, &got, f->blob)) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
         } else if (!mb_hash_wfile(full, &got, f->blob)) {
             mb_error(b, "cannot read %s", f->path);
             free(full);
@@ -4485,7 +5082,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             free(own.req);
             own.req = (const char **)malloc(sizeof(char *) * b->file_count);
             own.n = 0;
-            if (!own.req) { mb_error(b, "out of memory"); return; }
+            if (!own.req) { mb_error(b, "out of memory"); mb_scripts_free(&scripts); return; }
             for (i = 0; i < b->file_count; i++) own.req[i] = b->files[i].request;
             own.n = b->file_count;
             qsort(own.req, own.n, sizeof(char *), mb_req_cmp);
@@ -4549,6 +5146,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         }
         mb_twin_reset(&twin);
     }
+    mb_scripts_finish(b, &own, &scripts);
+    mb_scripts_free(&scripts);
     mb_classify_all(b);
     mb_derive_edits(b, root);
     mb_registries(b);
@@ -5005,7 +5604,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 {
     static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
-                                         "registries", "rules", "salt", "shadows", "stock", "tree", "warnings", NULL };
+                                         "registries", "rules", "salt", "scripts", "shadows", "stock", "tree", "warnings", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i, total;
     if (root->t != MBJ_OBJ) { mb_error(out, "mod.json must contain one JSON object"); return 0; }
@@ -5075,6 +5674,16 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         out->edits = eb.p;
         out->edit_files = (unsigned)v->count;
     }
+    v = mbj_get(block, "scripts");
+    if (v) {
+        mb_buf sb = {0};
+        if (v->t != MBJ_OBJ || !mbj_canon(v, &sb, NULL, 0)) {
+            free(sb.p);
+            mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" scripts must be an object");
+            return 0;
+        }
+        out->scripts = sb.p;
+    }
     sh = mbj_get(block, "shadows");
     if (sh) {
         if (!mb_set_shadows(out, sh)) return 0;
@@ -5108,7 +5717,10 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
             }
     }
     if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "mod.json files exceed 256 MiB"); return 0; }
-    for (i = 0; i < out->file_count; i++) out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
+    for (i = 0; i < out->file_count; i++) {
+        out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
+        if (!out->files[i].stock && sh_mb_script_request(out->files[i].request, NULL, NULL) > 0) out->script_files++;
+    }
     mb_classify_all(out);
     mb_mark_edited(out);
     mb_finish(out);
@@ -5695,6 +6307,7 @@ static char *mb_block_text(const sh_mb_bundle *b)
     mb_puts(&o, ",\"registries\":");
     mb_puts(&o, b->registries ? b->registries : "{}");
     if (b->edits) { mb_puts(&o, ",\"edits\":"); mb_puts(&o, b->edits); }
+    if (b->scripts) { mb_puts(&o, ",\"scripts\":"); mb_puts(&o, b->scripts); }
     if (b->shadow_count) {
         mb_puts(&o, ",\"shadows\":[");
         for (i = 0; i < b->shadow_count; i++) {
