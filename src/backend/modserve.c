@@ -4907,6 +4907,9 @@ int sh_modserve_error_names_decl(const char *text, const char *type, const char 
 #define MS_RL_TYPE    0x08
 #define MS_RES_LEVEL  0x28
 #define MS_RES_NAME   0x08
+#define MS_RES_STATE  0x2c
+#define MS_RES_FAILED  0x01   /* +0x2c bit 0: the load failed */
+#define MS_RES_DEFAULT 0x04   /* +0x2c bit 2: the engine made a default (a failed read, GenericLoad) */
 #define MS_RL_MAX_LISTS   4096
 #define MS_RL_MAX_ENTRIES (1 << 22)
 
@@ -5598,27 +5601,18 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
         _snprintf_s(w->out->first + at, sizeof w->out->first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
 }
 
-/* Everything a level-4 decl of a served bundle holds, by name: the needs the
- * builder recorded for its file and, through every need another file of the
- * index provides (a served decl or model, a closure pointer), that file's
- * needs, at any depth. A decl the pass keeps may have been parsed before its
- * watermark (an open map's own load created the chainsaw pickup's web at level
- * 1 and its parse created the clip; the pass then raised the web, and the
- * clip, older than the watermark, stayed at 1 and was freed under the web by
- * the Play purge, report X1), so the watermark alone cannot keep what it
- * holds. Each named resource found at level 1 is raised to 4; one the engine
- * does not hold yet is raised by the first pass after it is created. */
-int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
+/* The closure of what level-4 decls of served bundles hold (the comment on
+ * sh_modserve_holds_raise): `*set_out` the distinct (type, name) needs, sorted
+ * by ms_hold_cmp, each with the index file that provides it (-1: none). */
+static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **set_out, size_t *ns_out,
+                            sh_modserve_holds *out)
 {
-    const ms_index *x = g_index;
-    sh_modserve_holds local;
     ms_holds_walk w;
     ms_hold *cands = NULL, *set = NULL;
     int *queue = NULL, nq = 0, qh = 0, i, k, ok = 0;
     size_t nc = 0, ns = 0, cs = 0;
-    if (!out) out = &local;
-    memset(out, 0, sizeof *out);
-    if (!x || !head_slot || !x->nfiles) return 0;
+    *set_out = NULL;
+    *ns_out = 0;
     memset(&w, 0, sizeof w);
     cands = (ms_hold *)malloc(sizeof *cands * (size_t)x->nfiles);
     w.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
@@ -5667,16 +5661,147 @@ int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
         if (!k || ms_hold_cmp(&set[k - 1], &set[i])) set[k++] = set[i];
     ns = (size_t)k;
     out->names = (unsigned)ns;
-    w.set = set;
-    w.n = ns;
-    w.out = out;
-    ok = ns ? ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists) : 1;
+    *set_out = set;
+    *ns_out = ns;
+    set = NULL;
+    ok = 1;
 done:
     free(cands);
     free(set);
     free(queue);
     free(w.root);
     return ok;
+}
+
+/* Everything a level-4 decl of a served bundle holds, by name: the needs the
+ * builder recorded for its file and, through every need another file of the
+ * index provides (a served decl or model, a closure pointer), that file's
+ * needs, at any depth. A decl the pass keeps may have been parsed before its
+ * watermark (an open map's own load created the chainsaw pickup's web at level
+ * 1 and its parse created the clip; the pass then raised the web, and the
+ * clip, older than the watermark, stayed at 1 and was freed under the web by
+ * the Play purge, report X1), so the watermark alone cannot keep what it
+ * holds. Each named resource found at level 1 is raised to 4; one the engine
+ * does not hold yet is raised by the first pass after it is created. */
+int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
+{
+    const ms_index *x = g_index;
+    sh_modserve_holds local;
+    ms_holds_walk w;
+    ms_hold *set = NULL;
+    size_t ns = 0;
+    int ok;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    if (!x || !head_slot || !x->nfiles) return 0;
+    if (!ms_holds_closure(x, head_slot, &set, &ns, out)) return 0;
+    memset(&w, 0, sizeof w);
+    w.set = set;
+    w.n = ns;
+    w.out = out;
+    ok = ns ? ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists) : 1;
+    free(set);
+    return ok;
+}
+
+/* The resource list of a type (its +0x08 type name), as the walks find it. */
+void *sh_modserve_resource_list(const void *head_slot, const char *type)
+{
+    void *found = NULL;
+    unsigned nl = 0;
+    CRITICAL_SECTION *cs;
+    if (!head_slot || !type) return NULL;
+    cs = ms_res_lock();
+    if (cs) EnterCriticalSection(cs);
+    __try {
+        const unsigned char *l = *(const unsigned char *const *)head_slot;
+        for (; l && nl < MS_RL_MAX_LISTS && !found; l = *(const unsigned char *const *)(l + MS_RL_NEXT), nl++) {
+            const char *t = *(const char *const *)(l + MS_RL_TYPE);
+            if (t && !_stricmp(t, type)) found = (void *)l;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { found = NULL; }
+    if (cs) LeaveCriticalSection(cs);
+    return found;
+}
+
+/* The render models kept decls hold (sh_modserve_held_models). */
+typedef struct ms_held_model_walk {
+    const ms_hold *set; size_t n;
+    void **res;                 /* per entry: the resource the lists hold, or NULL */
+    unsigned char *load;        /* per entry: 1 when it is to be loaded */
+} ms_held_model_walk;
+
+static void ms_held_model_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_held_model_walk *w = (ms_held_model_walk *)context;
+    ms_hold key;
+    const ms_hold *h;
+    size_t i;
+    unsigned state;
+    key.type = *(const char *const *)(list + MS_RL_TYPE);
+    key.name = *(const char *const *)(res + MS_RES_NAME);
+    key.file = -1;
+    if (!key.type || !key.name || _stricmp(key.type, SH_MODSERVE_HELD_MODEL_TYPE)) return;
+    h = (const ms_hold *)bsearch(&key, w->set, w->n, sizeof *w->set, ms_hold_cmp);
+    if (!h) return;
+    i = (size_t)(h - w->set);
+    w->res[i] = res;
+    state = *(const unsigned char *)(res + MS_RES_STATE);
+    /* Held for the session and whole: nothing to do. Loaded at level 1 in
+     * process heap 0: the holds raise keeps it. The default box (the engine's
+     * model for a file it could not read: loaded where the file was not
+     * served, report X2), or one whose load allocated from a map heap
+     * (ms_keepable), is loaded again. */
+    if (state & (MS_RES_FAILED | MS_RES_DEFAULT)) w->load[i] = 1;
+    else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4) w->load[i] = 0;
+    else w->load[i] = ms_aset_has(&g_mapheap, (uintptr_t)res) ? 1 : 0;
+}
+
+int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
+                            sh_modserve_holds *out)
+{
+    const ms_index *x = g_index;
+    sh_modserve_holds local;
+    ms_held_model_walk w;
+    ms_hold *set = NULL, *models = NULL;
+    size_t ns = 0, nm = 0, i;
+    int visited = -1;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    memset(&w, 0, sizeof w);
+    if (!x || !head_slot || !x->nfiles || !fn) return -1;
+    if (!ms_holds_closure(x, head_slot, &set, &ns, out)) return -1;
+    /* Only render models whose own file the index serves in this scope: one
+     * loaded where its file is not served comes out as the default box, and
+     * a stock model (no provider) is the game's bytes in every scope. */
+    models = (ms_hold *)malloc(sizeof *models * (ns ? ns : 1));
+    if (!models) goto done;
+    for (i = 0; i < ns; ++i)
+        if (!_stricmp(set[i].type, SH_MODSERVE_HELD_MODEL_TYPE) && set[i].file >= 0 && set[i].file < x->nfiles &&
+            x->files[set[i].file].served && x->bundles[x->files[set[i].file].bundle].admitted &&
+            ms_scoped(x, set[i].file) >= 0)
+            models[nm++] = set[i];
+    visited = 0;
+    if (!nm) goto done;
+    w.set = models;
+    w.n = nm;
+    w.res = (void **)calloc(nm, sizeof *w.res);
+    w.load = (unsigned char *)malloc(nm);
+    if (!w.res || !w.load) { visited = -1; goto done; }
+    memset(w.load, 1, nm);   /* not held at all: loaded */
+    if (!ms_res_walk(head_slot, ms_held_model_one, &w, &out->lists)) { visited = -1; goto done; }
+    /* Outside the resource lock: the callback loads. */
+    for (i = 0; i < nm; ++i) {
+        if (!w.load[i]) continue;
+        visited++;
+        if (!fn(context, models[i].name, w.res[i])) break;
+    }
+done:
+    free(w.res);
+    free(w.load);
+    free(models);
+    free(set);
+    return visited;
 }
 
 unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was)

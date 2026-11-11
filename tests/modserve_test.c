@@ -2399,6 +2399,145 @@ static void test_kept_holds(void)
     CHECK(sh_modserve_holds_raise(NULL, &h) == 0);
 }
 
+/* ------------------------------------------------------------------ models kept decls hold (X2) */
+
+#define HM_ENT   "generated/decls/entitydef/mods/hm.mod/snapmaps/props/rock.decl"
+#define HM_LOOSE "generated/decls/entitydef/mods/hm.mod/snapmaps/props/loose.decl"
+#define HM_ROCK  "cooked/model/mods/hm.mod/models/rock.bmodel"
+#define HM_SPIRE "cooked/model/mods/hm.mod/models/spire.bmodel"
+#define HM_PEB   "cooked/model/mods/hm.mod/models/pebble.bmodel"
+
+typedef struct hm_seen { char order[1024]; int n; void *res[8]; } hm_seen;
+static int hm_visit(void *context, const char *name, void *resource)
+{
+    hm_seen *c = (hm_seen *)context;
+    size_t at = strlen(c->order);
+    _snprintf_s(c->order + at, sizeof c->order - at, _TRUNCATE, "%s%s;", name, resource ? "" : "(new)");
+    if (c->n < 8) c->res[c->n] = resource;
+    c->n++;
+    return 1;
+}
+
+/* A mod prop's model (report X2): the entityDef is kept for the session, its
+ * model is loaded per map at the entity's spawn. The product loads each model
+ * a kept decl needs while the model's file serves: one not held yet, a default
+ * box, or one a map heap holds; never one already held whole, a stock model,
+ * one whose file this scope does not serve, or one only an unkept decl needs. */
+static void test_held_models(void)
+{
+    static const fx_file files[] = {
+        { HM_ENT, "entityDef rock {}", -1, "entityDef", "mods/hm.mod/snapmaps/props/rock",
+          "[{\"type\":\"model\",\"name\":\"mods/hm.mod/models/rock.lwo\"},"
+          "{\"type\":\"model\",\"name\":\"mods/hm.mod/models/spire.lwo\"},"
+          "{\"type\":\"model\",\"name\":\"models/mapobjects/hell_terrain/stock_rock.lwo\"}]", '1' },
+        { HM_LOOSE, "entityDef loose {}", -1, "entityDef", "mods/hm.mod/snapmaps/props/loose",
+          "[{\"type\":\"model\",\"name\":\"mods/hm.mod/models/pebble.lwo\"}]", '2' },
+        { HM_ROCK, "ROCK", -1, "model", "cooked/model/mods/hm.mod/models/rock.bmodel", NULL, '3' },
+        { HM_SPIRE, "SPIRE", -1, "model", "cooked/model/mods/hm.mod/models/spire.bmodel", NULL, '4' },
+        { HM_PEB, "PEBBLE", -1, "model", "cooked/model/mods/hm.mod/models/pebble.bmodel", NULL, '6' },
+    };
+    static kh_res rock, loose, spire, stock, pebble;
+    static kh_res *ents[4], *models[8];
+    static kh_list le, lm;
+    kh_list *head = &le;
+    char top[MAX_PATH], root[MAX_PATH], *slash;
+    sh_modserve_holds h;
+    hm_seen seen;
+    int kept = 0, depth;
+    printf("-- held models: the models a kept decl needs are loaded for the session while their files serve\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\heldmodels\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "hm.mod", "hm.mod", "1.0.0", '5', NULL, files, 5, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_attrib_reset();
+
+    le.type = "entityDef"; le.cls = "idDeclEntityDef"; le.next = &lm; le.entries = ents;
+    lm.type = "model"; lm.cls = "idStaticModel"; lm.next = NULL; lm.entries = models;
+    rock.name = "mods/hm.mod/snapmaps/props/rock"; rock.level = 4;
+    loose.name = "mods/hm.mod/snapmaps/props/loose"; loose.level = 1;
+    ents[0] = &rock; ents[1] = &loose; le.count = 2;
+    stock.name = "models/mapobjects/hell_terrain/stock_rock.lwo"; stock.level = 1; stock.state = 0x64;
+    models[0] = &stock; lm.count = 1;
+
+    /* The editor rows registered the decl; nothing has loaded its models:
+     * both of its own are loaded, the stock one and the unkept decl's are not. */
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 2);
+    CHECK(!strcmp(seen.order, "mods/hm.mod/models/rock.lwo(new);mods/hm.mod/models/spire.lwo(new);"));
+    CHECK(h.roots == 1);
+
+    /* Loaded whole and held: nothing more to do, a second run calls nothing. */
+    spire.name = "Mods/HM.mod/models/spire.lwo"; spire.level = 4; spire.state = 0x60;
+    rock.state = 0;
+    {
+        static kh_res rock_model;
+        rock_model.name = "mods/hm.mod/models/rock.lwo"; rock_model.level = 4; rock_model.state = 0x70;
+        models[1] = &rock_model; models[2] = &spire; lm.count = 3;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0 && seen.order[0] == 0);
+
+        /* The engine's default box (bit 2), at level 1: loaded again in place. */
+        rock_model.level = 1; rock_model.state = 0x64;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1 && seen.res[0] == &rock_model &&
+              !strcmp(seen.order, "mods/hm.mod/models/rock.lwo;"));
+        /* A failed load (bit 0) the same way, even at level 4. */
+        rock_model.level = 4; rock_model.state = 0x01;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1 && seen.res[0] == &rock_model);
+
+        /* Whole at level 1, loaded in process heap 0: the holds raise keeps it,
+         * no load. Loaded under a map heap: loaded again (F9's gate would leave
+         * it to the purge, and the next load may be where its file is not served). */
+        rock_model.level = 1; rock_model.state = 0x60;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0);
+        depth = sh_modserve_attrib_enter(&rock_model, 3, &kept);
+        sh_modserve_attrib_leave(depth);
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1 && seen.res[0] == &rock_model);
+        /* A load in process heap 0 clears the mark. */
+        depth = sh_modserve_attrib_enter(&rock_model, 0, &kept);
+        sh_modserve_attrib_leave(depth);
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0);
+
+        /* Map scope on, a map open that does not declare hm.mod: in the editor
+         * its names serve (the Toybox), so a default is loaded again; in Play
+         * they do not, and nothing is loaded (it would come out a default). */
+        rock_model.state = 0x64;
+        sh_modserve_scope_enable(1);
+        CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0 && seen.order[0] == 0);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1);
+        CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+        sh_modserve_scope_enable(0);
+
+        /* The decl released: nothing it needs is loaded. */
+        rock.level = 1;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0);
+        rock.level = 4;
+        /* An unreadable list: the walk fails, nothing is called. */
+        lm.entries = NULL; lm.count = 2;
+        memset(&seen, 0, sizeof seen);
+        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == -1 && seen.n == 0);
+        lm.entries = models; lm.count = 3;
+        CHECK(sh_modserve_held_models(NULL, hm_visit, &seen, &h) == -1);
+    }
+    (void)pebble;
+    sh_modserve_attrib_reset();
+}
+
 /* ------------------------------------------------------------------ editor closure after an in-session install (R-315) */
 
 #define CL_ROW   "generated/decls/snapeditorentitydef/mods/cl.mod/tile.decl"
@@ -5273,6 +5412,7 @@ int main(void)
     test_editor_refs();
     test_watermark();
     test_kept_holds();
+    test_held_models();
     test_pass_lookups();
     test_load_attribution();
     test_editor_closure();
