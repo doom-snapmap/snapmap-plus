@@ -240,6 +240,15 @@ func mkdirAll(t *testing.T, dir string) {
 	}
 }
 
+// saveRecord replaces install.json with rec, as a test's starting state.
+func saveRecord(rec *installRecord) error {
+	p, err := recordPath()
+	if err != nil {
+		return err
+	}
+	return saveStateAt(filepath.Dir(p), rec)
+}
+
 func writeF(t *testing.T, path, content string) {
 	t.Helper()
 	mkdirAll(t, filepath.Dir(path))
