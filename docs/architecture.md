@@ -444,11 +444,12 @@ Installer updates and uninstall preserve player configuration.
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
 holding `mod.json` and an `assets/` tree at the engine's own request paths.
-Mods reach other machines two ways: a published map's
-bundles are uploaded to the Community API's mod store when the map is published,
-and a player who opens that map is asked first and downloads only what they
-approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
-see [Published maps and missing mods](#published-maps-and-missing-mods)); that
+Mods reach other machines two ways: each build a published map names is
+uploaded to the Community API's mod store as one archive when the map is
+published, and a player who opens that map is asked first and downloads only
+what they approve in the dialog, verified against the map's row (`modnet.c`,
+`modsync.c`, `modpublished.c`; see [The mod store transport](#the-mod-store-transport) and
+[Published maps and missing mods](#published-maps-and-missing-mods)); that
 transport is for publications only. An exported rawmap or prefab is a ZIP that
 carries each mod exactly as it sits in the mods folder, its folder with
 `mod.json` and `assets/` (`modexport.c`), and importing one is the ordinary
@@ -2518,8 +2519,9 @@ row it asks for prints the asset rule's sentence on the console first.
 The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
 completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
 the modsync worker that asks the store about each missing bundle
-(`modsync_probe_bundle`: `GET /mods/bundle/<hash>`, then each borrow checked
-against the installed game with `sh_mb_stock_verify`). One function,
+(`modsync_probe_build`: `HEAD /mods/build/<hash>`; whether a borrow names game
+bytes this machine lacks is learned when the archive is unpacked, as the
+fetch's `MODNET_E_GAME`). One function,
 `sh_modpub_gate_decide`, then decides each bundle from three facts: what the
 store answered (held, absent for 404 and 451, unreachable for a network
 failure, a timeout, an unusable address, 429, 5xx or an unexpected response),
@@ -2600,11 +2602,12 @@ abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled. After No, a hold that
 asked for one row shows that row's sentence and "The map was not loaded."
 (for example "This map uses Hell Guards (local.hell-guard), which is not
-installed. The map was not loaded."). The download lands by hash under
-`mods\downloads\<map title>\<key>\` (`modsync_fetch_bundle_for`; the title is the
+installed. The map was not loaded."). The download is unpacked into the map's place,
+`mods\maps\<map title>\<mod name>\` (`modsync_fetch_build_for`; the title is the
 published item's, an idStr at metadata +0x398 beside the id at +0 and the revision at
-+0x30, a rawmap's file name, a prefab's name), never over a folder; the resume
-checks every row against the asset rule again.
++0x30, a rawmap's file name, a prefab's name), replacing that place's earlier
+build of the same salt and nothing else; the resume checks every row against the
+asset rule again.
 
 ### Rawmaps that name mods
 
@@ -2906,14 +2909,12 @@ installation asks once through `sh_engine_dialog_ask` (Yes sets
 `mods.upload_confirmed`); the ask site is one function, and an alternative
 route shows the explanation as `PublishFail`'s editor toast instead, cancels
 that publish, and treats the next one as the agreement. One worker job then
-uploads every bundle (`modsync_upload_bundles`: each bundle's canonical
-manifest with its blob list to `POST /mods/missing`, the missing blobs, the
-manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
-main tick resumes the original `PublishAfterSave`. The store checks a manifest
-sent to `/mods/missing` as its bundle PUT would (`modnet_missing_bundle`), so a
-manifest it refuses stops the publish with the store's message in one request,
-before any blob is sent; a store that does not name the bundle back did not
-check it, and its bundle PUT still does. The rules of the store's that the
+uploads every build the rows name (`modsync_upload_builds`, see [The mod store
+transport](#the-mod-store-transport): a HEAD per build, an archive PUT for each
+the store lacks, one claim) under a provisional ref `publish-pending-<16 hex>`,
+and a main tick resumes the original `PublishAfterSave`. The store checks each
+archive at its PUT and answers a refusal with its first cause, which stops the
+publish. The rules of the store's that the
 builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
 such as `displayName` or `$schema`, a control character such as a tab in the
 name or author) are mirrored as build warnings in one table,
@@ -2948,7 +2949,7 @@ leaving abandons the hold; another save cancels it.
 The claim and its secret: `PublishFeedPost`, the one function both success
 paths reach, carries the item id and revision. The worker claims the bundle
 set under the item id. On a republish the stored secret re-claims that ref,
-which replaces the set (Contract 4); a republish without rows releases the
+which replaces the set; a republish without rows releases the
 item's claim. The claim id and secret live in the record's `claims`
 section (modsync); the secret is never logged. The provisional claim is released once the item
 claim succeeds, or when its publish never reaches the feed post. Claims,
@@ -2981,16 +2982,60 @@ engine creates the saved item, with a one-button notice.
 The retry queue: a failure modsync can retry stays in the record's `pending`
 section, an upload or a claim release alike. A release the store does not
 take (a busy store at unpublish, say) is queued under its ref rather than only
-logged, since a leaked claim keeps its bundles on the store; it replaces a
+logged, since a leaked claim keeps its builds on the store; it replaces a
 queued upload of the same ref. Queued releases are retried after the next
 store call that succeeds and at startup. At startup the backend first forgets
 the queued work of provisional refs left by a closed game (their publish never
 completed), then retries the queue once on the worker, then releases each
 provisional claim, except one an item's queued claim still waits on: the item
 claim records its provisional ref when it is queued, and the provisional claim
-keeps the bundles on the store until that claim succeeds. Releasing it first
-would let the store delete a bundle the retry then has to upload again from
-whatever build serves now. The worker logs the counts.
+keeps the builds on the store until that claim succeeds. Releasing it first
+would let the store delete a build the retry then has to upload again. The
+worker logs the counts.
+
+### The mod store transport
+
+The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
+(`modzip.c`, method 0, no ZIP64) named by the build hash at
+`/mods/build/<hash>`, holding the folder's `mod.json`, the whole file, and
+`assets/<request>` for every carried file its block lists. Stock pointers are
+never in it: their bytes are the player's own game. `modnet.c` speaks the
+routes: `HEAD` (held, with the archive's size, or 404, or 451), `PUT`
+(`application/zip`, Content-Length, streamed from a file; 201 new, 200
+already held, 422 with the store's first cause), `GET` (streamed to a file,
+at most 96 MiB), `POST /mods/claim` (`{"builds": [...], "ref", "secret"?}`,
+one claim per published item, 409 when a build is not stored) and
+`POST /mods/release`, after which the store deletes every build no claim
+names. There is no blob store and no manifest of its own: two mods with the
+same files are two archives.
+
+Upload (`modsync_upload_builds`) takes the map's rows as `<salt>@<hash>`. Each
+build is found in the mods folder (a root folder at that hash first, else a
+map's place); a salt the root holds only at another hash is refused with
+"<name> was built again since the map was saved; save the map again, then
+publish it", and a salt the machine lacks with "the map uses a mod this machine
+does not have". HEAD asks whether the store holds it; only when it does not is
+the archive written to a temporary file (`modsync_write_archive`: every file
+read and checked against the block, "<name>: <file> changed since the mod was
+built; open the Mods tab and Refresh" otherwise) and PUT. An archive over
+96 MiB, the Worker plan's request body limit less a margin, is refused before
+anything is sent: "<name>: this mod is too large to publish (N MB; the limit is
+96 MB)". Then one claim names every build.
+
+Download (`modsync_fetch_build_for(row, place)`): when the root holds the
+row's salt at the row's hash, or the map's place holds it, nothing is
+fetched. Otherwise the archive is fetched to a temporary file and
+`modsync_install_archive` installs it: its `mod.json` must load and name the
+row's salt and build hash, every carried file must be an entry with the size
+and SHA-256 the block records, no other entry may be present, and every stock
+pointer must resolve against the installed game (`MODNET_E_GAME` otherwise).
+Any mismatch installs nothing: "the mod store sent a build that does not match
+the map". The files are unpacked into `<place folder>.staging-<pid>` beside
+the target (`sh_ms_place_folder`) without the store lock, then swapped in,
+replacing the place's earlier build of the salt; the place is noted in the
+record (`sh_ms_place_note`) and the serving index rescanned. Two maps that
+name one build each unpack their own copy. A build of editor-time content
+only is recorded in the record's `editorOnly` section and not installed.
 
 ## Module prefabs
 

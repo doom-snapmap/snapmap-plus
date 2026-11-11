@@ -1,35 +1,37 @@
 /* modsync.h -- upload, download and claims between the local mod store
- * (modstore.c) and the product's mod store (modnet.c, Contract 4).
+ * (modstore.c) and the product's mod store (modnet.c, ONE-SHAPE rule 5).
  *
- * Stock pointers (modbundle.h) carry no blob: an upload never sends their
- * bytes, and a download resolves each one against the installed game before
- * anything is fetched, refusing the bundle with the first cause when the game
- * lacks the entry or holds other bytes.
+ * The store keeps one archive per build (modnet.h): a stored ZIP (modzip.h)
+ * holding the folder's mod.json, the whole file, and assets/<request> for
+ * every carried file its block lists. Stock pointers never upload: their
+ * bytes are the player's own game, resolved against it at install.
  *
- * Upload (publish, lobby host, an explicit push): for every bundle, the
- * blobs the store lacks are negotiated and sent from the mod folder's own
- * files, then the exact canonical manifest (derived from mod.json in memory,
- * byte-identical to what Contract 4 always received), then one claim names
- * every bundle under the caller's ref. The claim id and its secret are kept
- * in the "claims" section of <data>\mods\snapmap-plus.json, keyed by ref;
- * uploading for a ref that has a claim re-claims with the stored secret,
- * which replaces its bundle set. A failure after the first request that a
- * retry could fix is queued in its "pending" section and retried by
- * modsync_retry_pending. A release the store did not take is queued there
- * too ("kind": "release") and retried at the next launch and after the next
- * store call that succeeds.
+ * Upload (publish, an explicit push): a map names its mods as
+ * "<salt>@<build hash>" (modmanifest.h). For each, the folder that holds the
+ * salt at that hash is found (a root folder first, else a map's place); HEAD
+ * asks whether the store holds the build; when it does not, the folder is
+ * written as an archive to a temporary file, its every file checked against
+ * its block, and PUT. An archive over MODNET_MAX_ARCHIVE is refused before
+ * any upload ("<name>: this mod is too large to publish (N MB; the limit is
+ * 96 MB)"). Then one claim names every build under the caller's ref. The
+ * claim id and its secret are kept in the "claims" section of
+ * <data>\mods\snapmap-plus.json, keyed by ref; uploading for a ref that has a
+ * claim re-claims with the stored secret, which replaces its build set. A
+ * failure after the first request that a retry could fix is queued in its
+ * "pending" section and retried by modsync_retry_pending. A release the store
+ * did not take is queued there too ("kind": "release") and retried at the next
+ * launch and after the next store call that succeeds.
  *
- * Download (install by hash, DESIGN-additive 4): the bundle manifest is
- * fetched and verified against its hash; a borrow the installed game lacks
- * refuses it before anything is fetched (MODNET_E_GAME, the source named);
- * each file is copied from an installed mod that holds the same bytes, else
- * fetched, and verified; the folder <data>\mods\downloads\<map title>\<key>\
- * (sh_ms_placed_folder_name; no hash in its name, never beside the player's
- * own folders) gets mod.json (an author block from the manifest and the product block,
- * origin "download") and assets\, is verified by sh_ms_verify, and the
- * serving index is rebuilt. Nothing installed is replaced. A bundle whose
- * content an installed mod of the same key already serves is not stored
- * twice: its hash is recorded as an alias.
+ * Download (a map that names a build this machine does not serve): the
+ * archive is fetched to a temporary file and unpacked into the map's place
+ * (mods\maps\<map title>\<mod name>\, sh_ms_place_folder), replacing that
+ * place's earlier build of the salt. Before anything is placed, the archive's
+ * mod.json must load, its salt and build hash must be the row's, every file
+ * must be an entry with the size and SHA-256 its block records and no other
+ * entry may be present ("the mod store sent a build that does not match the
+ * map"), and every stock pointer must resolve against the installed game
+ * (MODNET_E_GAME). The place is noted in the record and the serving index is
+ * rebuilt. Two maps that name one build each unpack their own copy.
  *
  * Every call blocks and does file and network work: never on DOOM's main
  * thread for the network calls. Calls into the store are serialised by
@@ -44,25 +46,29 @@
 
 #define MODSYNC_CLAIMS_SECTION  "claims"    /* sections of mods\snapmap-plus.json */
 #define MODSYNC_PENDING_SECTION "pending"
-#define MODSYNC_MAX_BUNDLES  MODNET_MAX_CLAIM
+#define MODSYNC_MAX_BUILDS  MODNET_MAX_CLAIM
+#define MODSYNC_SALT_HEX    8
+#define MODSYNC_MOD_MAX     (MODSYNC_SALT_HEX + 1 + MODNET_HASH_HEX)   /* "<salt>@<hash>" */
+#define MODSYNC_FOLDER_MAX  1024
+
+struct sh_ms_place;
+struct sh_modmanifest_row;
 
 typedef struct modsync_stats {
-    unsigned bundles;               /* bundles handled */
-    unsigned bundles_created;       /* bundle manifests the store did not have (upload) or installed now (download) */
-    unsigned blobs_total;           /* distinct blobs named */
-    unsigned blobs_missing;         /* the store lacked (upload) or the local store lacked (download) */
-    unsigned blobs_transferred;
-    unsigned stock_files;           /* upload: stock pointers named, whose bytes are never sent */
-    unsigned manifests_checked;     /* upload: manifests the store checked at /mods/missing, before any blob */
+    unsigned builds;                /* builds handled */
+    unsigned builds_present;        /* upload: the store held them already (HEAD) */
+    unsigned builds_sent;           /* upload: archives sent */
+    unsigned builds_created;        /* upload: archives the store did not have; download: installed now */
+    unsigned stock_files;           /* upload: stock pointers left out of the archives */
     unsigned long long bytes_up, bytes_down;
     unsigned requests;
     double ms;
     char claim[MODNET_CLAIM_HEX + 1];   /* upload: the claim id */
-    int reclaimed;                  /* upload: the stored secret replaced the ref's bundle set */
+    int reclaimed;                  /* upload: the stored secret replaced the ref's build set */
     int queued;                     /* upload or release: the failure was queued for retry */
     int already_installed;          /* download: nothing was fetched */
-    int editor_only;                /* download: the bundle changes only the editor; recorded, not installed */
-    char key[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* download: the installed folder (relative) */
+    int editor_only;                /* download: the build changes only the editor; recorded, not installed */
+    char folder[MODSYNC_FOLDER_MAX];   /* download: the folder under mods\ that serves the row */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
     char cause[1024];               /* room for a record path and its next step (sh_mb_record_why) */
     int game_lacks;                 /* download: refused because a borrow names game bytes this machine lacks */
@@ -74,22 +80,57 @@ typedef struct modsync_stats {
 void modsync_store_lock(void);
 void modsync_store_unlock(void);
 
-/* Upload the installed bundles named by hash and claim them under ref.
- * Returns 1 on success; 0 with stats->cause (and the failure queued when it
- * was transient and the network had been reached). */
-int  modsync_upload_bundles(const char *const *bundle_hashes, int n, const char *ref,
-                            const modnet_io *io, modsync_stats *stats);
+/* 1 when `mod` is "<salt>@<64 hex>"; salt_out and hash_out (optional) get
+ * the parts. */
+int  modsync_parse_mod(const char *mod, char salt_out[MODSYNC_SALT_HEX + 1], char hash_out[MODNET_HASH_HEX + 1]);
 
-/* Download one bundle by hash into the local store and rescan the serving
- * index. Returns 1 on success (including already installed). The build is
- * placed under mods\downloads\ (sh_ms_placed_folder_name). */
-int  modsync_fetch_bundle(const char *bundle_hash, const modnet_io *io, modsync_stats *stats);
-/* The same, for a map: placed as mods\downloads\<map title>\<key>\, and the
- * record's "downloads" section notes the folder that serves the map (a new
- * one, or one already present anywhere in the store). `map_title` and
- * `map_id` may be NULL. */
-int  modsync_fetch_bundle_for(const char *bundle_hash, const char *map_title, const char *map_id, const modnet_io *io,
-                              modsync_stats *stats);
+/* Upload the builds a map names ("<salt>@<hash>", at most MODSYNC_MAX_BUILDS)
+ * and claim them under ref. Returns 1 on success; 0 with stats->cause (and
+ * the failure queued when it was transient and the network had been
+ * reached). */
+int  modsync_upload_builds(const char *const *mods, int n, const char *ref, const modnet_io *io,
+                           modsync_stats *stats);
+
+/* Write the build archive of `folder` (a built mod folder whose block names
+ * `hash`) to `out_path`: mod.json, then assets/<request> for every carried
+ * file, each checked against the block first. *size gets the archive's
+ * bytes, *pointers (optional) the stock pointers left out. Over
+ * MODNET_MAX_ARCHIVE is refused with the plain sentence and code
+ * MODNET_E_TOO_LARGE in *code (optional). Returns 1 on success. */
+int  modsync_write_archive(const char *folder, const char *hash, const char *out_path, unsigned long long *size,
+                           unsigned *pointers, int *code, char *cause, size_t cause_cap);
+
+typedef struct modsync_install_info {
+    unsigned files;                 /* carried files placed */
+    unsigned stock_files;           /* stock pointers resolved against the installed game */
+    unsigned long long bytes;       /* carried bytes placed */
+    int already_installed;          /* the root or the place held the build: nothing was placed */
+    int replaced;                   /* the place's earlier build of the salt was replaced */
+    int mismatch;                   /* refused: the archive is not the build the row names */
+    char rel[MODSYNC_FOLDER_MAX];   /* the folder under mods\ that serves the build */
+    char name[128];                 /* the build's display name */
+    int game_lacks;                 /* refused: a borrow names game bytes this machine lacks */
+    char game_source[260];          /* that borrow's installed source path */
+} modsync_install_info;
+
+/* Install the archive file `archive` (UTF-8) as the build `hash` of `salt`
+ * into `place` (a map's, or a ZIP's): verified (above), unpacked beside its
+ * target as <name>.staging-<pid>, then swapped in. Does not rescan the
+ * serving index. Takes the store lock. Returns 1 on success. */
+int  modsync_install_archive(const char *archive, const char *salt, const char *hash, const struct sh_ms_place *place,
+                             modsync_install_info *info, char *cause, size_t cause_cap);
+
+/* Fetch the row's build into `place` and rescan the serving index. Returns 1
+ * on success, also when the root (at the row's hash) or the place already
+ * holds it (stats->already_installed, nothing fetched). */
+int  modsync_fetch_build_for(const struct sh_modmanifest_row *row, const struct sh_ms_place *place,
+                             const modnet_io *io, modsync_stats *stats);
+
+/* The usable folder that serves salt at hash: a root folder, else the
+ * place's folder of the salt (place NULL: any place). 1 and its folder
+ * (absolute, UTF-8), else 0. */
+int  modsync_find_installed(const char *salt, const char *hash, const struct sh_ms_place *place, char *folder,
+                            size_t cap);
 
 /* Release the claim stored for ref and forget it (also when the store no
  * longer knows the claim). A pending upload for ref is dropped. Returns 1 on
@@ -119,67 +160,24 @@ int  modsync_pending_waits_on(const char *provisional);
 /* The claim stored for ref: 1 and the id (secret_out optional), else 0. */
 int  modsync_claim_lookup(const char *ref, char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1]);
 
-/* ---------------------------------------------------- install core ---- */
-
-/* Supply the bytes of one blob for an install: 1 with a malloc'd buffer, 0
- * when unavailable (cause filled). The caller verifies the hash. */
-typedef int (*modsync_blob_source_fn)(void *context, const char *sha, unsigned long long size,
-                                      unsigned char **bytes, size_t *len, char *cause, size_t cause_cap);
-
-typedef struct modsync_install_info {
-    unsigned blobs_present, blobs_fetched;
-    unsigned stock_files;           /* stock pointers resolved against the installed game */
-    unsigned long long bytes_fetched;
-    int already_installed;
-    char rel[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* the folder under mods\ */
-    int game_lacks;                 /* refused: a borrow names game bytes this machine lacks */
-    char game_source[260];          /* that borrow's installed source path */
-} modsync_install_info;
-
-/* Install a bundle from its canonical manifest text (whose SHA-256 must be
- * hash) with file bytes from `source` (for the files no installed mod
- * already holds): verified, written to a new folder with mod.json, verified
- * again and recorded. Does not rescan the serving index. Takes the store
- * lock. Returns 1 on success. */
-int  modsync_install_manifest(const char *canonical, size_t len, const char *hash,
-                              modsync_blob_source_fn source, void *context,
-                              modsync_install_info *info, char *cause, size_t cause_cap);
-/* The same, placed by `place` (modstore.h; NULL: under mods\downloads\ with no
- * title). A place in the downloads group also notes the map in the record's
- * "downloads" section, for a new folder or one already present. */
-struct sh_ms_place;
-int  modsync_install_manifest_for(const char *canonical, size_t len, const char *hash, const struct sh_ms_place *place,
-                                  modsync_blob_source_fn source, void *context,
-                                  modsync_install_info *info, char *cause, size_t cause_cap);
-
-/* The installed, usable bundle with this hash: 1 and its folder (UTF-8),
- * else 0. */
-int  modsync_find_installed(const char *hash, char *folder, size_t cap);
-
 /* ------------------------------------------------------ the gate's probe ---- */
 
 /* What the denial gate (modpublished.h, sh_modpub_gate_decide) asks the mod
- * store about one bundle before the player is asked anything. */
+ * store about one build before the player is asked anything. Whether the
+ * build's borrows resolve against this game is learned at install. */
 typedef struct modsync_probe {
     int found;                      /* 1 the store holds it, 0 absent (404, or 451 on the takedown
                                        list), -1 the store could not be asked or did not answer */
-    int code;                       /* the MODNET_ code of GET /mods/bundle/<hash> */
-    int game_lacks;                 /* found, but a borrow names game bytes this machine lacks */
-    char source[260];               /* that borrow's installed source path */
-    char name[128];                 /* found: the bundle's display name */
-    char id[SH_MB_ID_MAX + 1];      /* found: its key */
-    char version[4 * SH_MB_VERSION_MAX + 1];
-    unsigned long long size;        /* found: carried bytes */
+    int code;                       /* the MODNET_ code of HEAD /mods/build/<hash> */
+    unsigned long long size;        /* found: the archive's bytes */
     char cause[256];
 } modsync_probe;
 
-/* GET the bundle manifest (at most 1 MB, nothing installed) and check each
- * borrow against the installed game (sh_mb_stock_verify). Returns out->found.
- * Worker thread; network. */
-int  modsync_probe_bundle(const char *bundle_hash, const modnet_io *io, modsync_probe *out);
+/* HEAD the build. Returns out->found. Worker thread; network. */
+int  modsync_probe_build(const char *build_hash, const modnet_io *io, modsync_probe *out);
 
-/* 1 when a claim this machine holds (the "claims" section) names the bundle:
+/* 1 when a claim this machine holds (the "claims" section) names the build:
  * a map of this machine's was published with it and not unpublished. */
-int  modsync_claim_names(const char *bundle_hash);
+int  modsync_claim_names(const char *build_hash);
 
 #endif /* SNAPMAP_PLUS_MODSYNC_H */
