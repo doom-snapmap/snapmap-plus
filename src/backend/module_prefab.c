@@ -65,6 +65,8 @@
 #define MODULE_CAP           1024
 #define GRAB_WAIT_FRAMES     90
 #define IDSTR_BYTES          0x30
+#define MP_NOT_PLACED        "This prefab could not be placed in this map; nothing was changed. Save the map, reload it and try again."
+#define MP_UNAVAILABLE       "Module prefabs do not work with this version of DOOM; the Feedback tab can report it."
 
 typedef void  (*snapmap_ctor_fn)(void *map);
 typedef void  (*snapmap_dtor_fn)(void *map);
@@ -116,7 +118,7 @@ static int             g_status = 0;     /* g_done_seq's outcome */
 static char            g_status_msg[192];
 static char           *g_merged;         /* malloc */
 static char           *g_original;       /* HeapAlloc (process heap), the map before the merge */
-static int             g_first, g_added, g_has_boxes;
+static int             g_first, g_added;
 static void           *g_fp_cursor;      /* undo cursor at capture */
 static int             g_fp_records;
 static void           *g_grab_cursor;    /* undo cursor when the grab began */
@@ -250,7 +252,8 @@ static int mp_install(unsigned char *ed, const char *json, char *why, int why_ca
     int ok;
     if (limits) *limits = 0;
     if (!sh_process_heap_enter(&g_heap, &scope)) {
-        _snprintf_s(why, why_cap, _TRUNCATE, "the engine heap scope could not be entered");
+        backend_log("MODPREFAB: the process heap scope could not be entered");
+        _snprintf_s(why, why_cap, _TRUNCATE, "the placement could not be made; nothing was changed");
         return 0;
     }
     ok = mp_install_scoped(ed, json, why, why_cap);
@@ -283,12 +286,20 @@ static int mp_install_scoped(unsigned char *ed, const char *json, char *why, int
         if (!map || !undo) { _snprintf_s(why, why_cap, _TRUNCATE, "no map is open"); __leave; }
         g_map_ctor(sm); built_map = 1;
         rc = sh_rawmap_deserialize_plain(g_deser, json, sm);
-        if (!rc) { _snprintf_s(why, why_cap, _TRUNCATE, "the engine could not read the merged map"); __leave; }
+        if (!rc) {
+            backend_log("MODPREFAB: the engine could not read the merged map");
+            _snprintf_s(why, why_cap, _TRUNCATE, MP_NOT_PLACED);
+            __leave;
+        }
         r98 = ((vcall_fn)(*(void ***)ed)[0x98 / 8])(ed);
         r88 = ((vcall_fn)(*(void ***)ed)[0x88 / 8])(ed);
         if (g_validate) {
             rc = g_validate(sm, r98, r88);
-            if (rc != 0) { _snprintf_s(why, why_cap, _TRUNCATE, "the engine refused the merged map (validator %d)", rc); __leave; }
+            if (rc != 0) {
+                mp_logf("MODPREFAB: the engine refused the merged map (validator %d)", rc);
+                _snprintf_s(why, why_cap, _TRUNCATE, MP_NOT_PLACED);
+                __leave;
+            }
         }
         g_edit_ctor(edit, (unsigned char *)map + MAP_SETTINGS_OFF, sm, r98, r88); built_edit = 1;
         /* Redo steps the cursor from entries[0] to entries[1] and assigns it. */
@@ -301,14 +312,20 @@ static int mp_install_scoped(unsigned char *ed, const char *json, char *why, int
         swapped = 1;
         __try { stepped = g_redo(ed); }
         __finally { memcpy(undo, saved, sizeof saved); swapped = 0; }
-        if (!stepped) { _snprintf_s(why, why_cap, _TRUNCATE, "the editor did not take the map"); __leave; }
+        if (!stepped) {
+            backend_log("MODPREFAB: the editor did not take the merged map");
+            _snprintf_s(why, why_cap, _TRUNCATE, MP_NOT_PLACED);
+            __leave;
+        }
         *(unsigned char *)(ed + ED_MODE_OFF + MODE_PENDING_OFF) = 1;
         *(unsigned char *)(ed + ED_MODE_OFF + MODE_REFRESH_OFF) = 1;
         ok = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (swapped && undo) memcpy(undo, saved, sizeof saved);
         InterlockedExchange(&g_faulted, 1);
-        _snprintf_s(why, why_cap, _TRUNCATE, "the install faulted; module prefabs are off for this session");
+        backend_log("MODPREFAB: the install faulted; module prefabs are off for this session");
+        _snprintf_s(why, why_cap, _TRUNCATE, "Placing the prefab failed and module prefabs are off until DOOM restarts; "
+                    "nothing was changed.");
         ok = 0;
     }
     __try {
@@ -433,10 +450,13 @@ static void mp_commit(unsigned char *ed, const char *label)
     if (!sh_process_heap_leave(&scope)) InterlockedExchange(&g_faulted, 1);
 }
 
-/* The placement could not be grabbed: keep it, as one undo step, where it landed. */
+/* The placement could not be grabbed: keep it, as one undo step, where it
+ * landed, and have the navigation follow it as an accepted one does. */
 static void mp_keep_unmoved(unsigned char *ed, const char *why)
 {
     mp_commit(ed, "Place Module Prefab");
+    mp_logf("MODPREFAB: placement kept where it landed (%d module(s)); navigation update requested", g_added);
+    sh_apply_engine_nav_request_update();
     mp_finish(1, why);
     InterlockedExchange(&g_phase, MP_IDLE);
 }
@@ -452,7 +472,7 @@ void sh_module_prefab_tick(void *editor)
     if (phase == MP_IDLE || !ed) return;
     if (InterlockedCompareExchange(&g_faulted, 0, 0)) {
         mp_release_buffers();
-        mp_finish(0, "module prefabs are off for this session");
+        mp_finish(0, "Module prefabs are off until DOOM restarts, after an earlier failure.");
         InterlockedExchange(&g_phase, MP_IDLE);
         return;
     }
@@ -475,12 +495,23 @@ void sh_module_prefab_tick(void *editor)
         if (mp_record_count(ed) != g_fp_records + g_added)
             mp_logf("MODPREFAB: record count %d after install, expected %d", mp_record_count(ed), g_fp_records + g_added);
         if (limits) {
+            /* The map as it was goes back in; when it cannot, the placement is
+             * committed as one undo step, so Ctrl+Z takes all of it back. */
             unsigned char again = 0;
             int back = g_original && mp_install(ed, g_original, why, (int)sizeof why, &again);
+            const char *text;
             mp_release_buffers();
-            mp_finish(-5, back ? "the prefab would put the map over the editor's limits"
-                               : "over the editor's limits, and the map could not be put back");
-            mp_toast("This prefab would put the map over the editor's limits.");
+            if (back) text = "This prefab would put the map over the editor's limits; nothing was placed. Remove something "
+                             "or place a smaller prefab.";
+            else if (g_commit) {
+                mp_commit(ed, "Place Module Prefab");
+                text = "This prefab put the map over the editor's limits and could not be taken back by itself; press "
+                       "Ctrl+Z to undo it.";
+            } else text = "This prefab put the map over the editor's limits and could not be taken back. Reload the map "
+                          "without saving.";
+            mp_logf("MODPREFAB: over the editor's limits; the map %s", back ? "was put back" : "could not be put back");
+            mp_finish(-5, text);
+            mp_toast(text);
             InterlockedExchange(&g_phase, MP_IDLE); return;
         }
         mp_release_buffers();
@@ -760,7 +791,7 @@ static int mp_place(sh_module_prefab_call *call)
     char *merged = NULL;
     size_t mlen = 0;
     float at[3];
-    int first = 0, added = 0, boxes = 0;
+    int first = 0, added = 0;
     sh_mp_summary sum;
     char *engine;
     size_t elen = 0;
@@ -769,7 +800,6 @@ static int mp_place(sh_module_prefab_call *call)
     engine = sh_prefab_mods_strip_copy(call->text, call->text_len, &elen);
     if (!engine) { mp_out(call, "out of memory"); return -1; }
     if (!sh_mp_inspect(engine, elen, &sum, err, (int)sizeof err)) { free(engine); mp_out(call, err); return -1; }
-    boxes = sum.has_nav_boxes;
     if (InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE) { sh_mp_summary_free(&sum); free(engine); mp_out(call, "a placement is still in progress"); return 0; }
     c = (mp_capture *)calloc(1, sizeof *c);
     if (!c) { sh_mp_summary_free(&sum); free(engine); return 0; }
@@ -820,7 +850,7 @@ static int mp_place(sh_module_prefab_call *call)
     }
     g_merged = merged;
     g_original = c->json;
-    g_first = first; g_added = added; g_has_boxes = boxes;
+    g_first = first; g_added = added;
     g_fp_cursor = c->undo_cursor; g_fp_records = c->records;
     call->seq = ++g_seq;
     InterlockedExchange(&g_phase, MP_INSTALL);
@@ -855,7 +885,8 @@ static int mp_check(sh_module_prefab_call *call)
     c->op = SH_MODULE_PREFAB_CHECK;
     c->modules = &sum;
     c->checked = -1;
-    /* The rows of its block, else of a sidecar beside it. */
+    /* The rows of its block. */
+
     if (sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows) > 0) c->rows = &rows;
     if (mp_capture_run(c) && c->result == 1) r = c->checked;
     sh_modmanifest_list_free(&rows);
@@ -888,14 +919,14 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         if (call->out && call->out_cap > 0 &&
             sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return -1;
         if (InterlockedCompareExchange(&g_faulted, 0, 0) || !sh_rawmap_live_serialize_ready()) {
-            mp_out(call, "module prefabs are unavailable on this build");
+            mp_out(call, MP_UNAVAILABLE);
             return -1;
         }
         return mp_save(call);
     case SH_MODULE_PREFAB_PLACE:
         if (call->out && call->out_cap > 0 &&
             sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return 0;
-        if (!mp_ready_place()) { mp_out(call, "module prefab placement is unavailable on this build"); return 0; }
+        if (!mp_ready_place()) { mp_out(call, MP_UNAVAILABLE); return 0; }
         return mp_place(call);
     case SH_MODULE_PREFAB_CHECK:
         return mp_check(call);
