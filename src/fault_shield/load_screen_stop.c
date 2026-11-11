@@ -48,9 +48,14 @@ static int thread_still_drawing(void)
     }
 }
 
+static sh_map_end_fn g_map_end = NULL;
+
 static void sh_cancel_map_change_detour(void *common, uint8_t arg)
 {
-    if (thread_still_drawing()) {
+    int drawing = thread_still_drawing();
+    sh_map_end_fn map_end = g_map_end;
+    if (map_end) map_end(drawing);
+    if (drawing) {
         LONG n = InterlockedIncrement(&g_stops);
         if (n <= 8) {
             shield_fault f = { "load", -1,
@@ -132,6 +137,11 @@ int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *re
         shield_emit(&f);
     }
     return 1;
+}
+
+void sh_load_screen_stop_set_map_end(sh_map_end_fn fn)
+{
+    g_map_end = fn;
 }
 
 int sh_load_screen_stop_armed(void)

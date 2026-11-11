@@ -1367,6 +1367,58 @@ private to `companion_sigs.c` and checked on both executables by
 `companion_test`. The capability name `snapmap.owner_companions` is reserved
 for the engine-capability facility once it carries hook rows.
 
+### Mod scripts: the engine side
+
+`src/backend/script/script_hooks.c` connects mod scripts to the engine; the
+runtime that runs them is `script_runtime.c`, behind three calls
+(`script_hooks.h`): `sh_script_map_open` at a map gate, `sh_script_tick` once
+per host game frame, `sh_script_map_close` at map end. No script code runs
+anywhere else.
+
+- **Tick.** A 15-byte detour on the SuperScript per-frame wrapper (VK
+  0x140E9C9D0, GL 0x140E9BF10). Its only caller is `idGameLocal::RunFrame`
+  (game vtable `+0x08`), after the entity think loop; RunFrame is reached from
+  `idCommonLocal::Frame` on DOOM's main thread, through the host's game-frame
+  loop and the two client frame loops, so the tick also runs on clients. It
+  runs the scripts only when this map opened states, on the main thread, not
+  re-entrantly, on the host (`idGameLocal::IsClient`), while no loading screen
+  draws (`load_screen` thread byte `+0x4B2`), during SnapMap Play
+  (`sh_modserve_engine_in_play`); an unreadable state runs nothing
+  (`sh_script_tick_decide`). The detour is committed at the first map gate
+  that opens a state, on the main thread with its prologue verified, and is
+  never unhooked.
+- **Map start and end.** The map gates are the main-thread gates that arm the
+  companions detour (`sh_companions_ensure` calls a gate subscriber first):
+  the map load (`map`) and the Play start (`play`) end the previous map's
+  scripts without end handlers (its entities are gone) and open the new map's
+  states before its spawns. A tick that finds Play over closes them with end
+  handlers. The CancelMapChange detour (`load_screen_stop.c`) calls a map-end
+  subscriber: end handlers run unless a loading screen was still drawing. A
+  map end during the tick waits for the tick to return.
+- **Spawns and handles.** The CallSpawn detour calls a spawn subscriber after
+  the companions, with the entityDef's name and its `mods/` inherits; the
+  detour is armed for scripts as for companions. An entity whose names reach
+  `mods/<salt>/` of a mod with states is recorded by its engine spawn id
+  (idGameLocal `+0x653F8` + 4 x idEntity `+0x08`) in `script_handles.c`. A
+  script holds a handle (the record's index and the map's epoch), never a
+  pointer: every use resolves the spawn id through game vtable `+0x7F8` (the
+  `+0x7F0` lookup and the idEntity cast), which fails once the entity is gone.
+  Each tick sweeps the table and reports new entities as spawns and vanished
+  ones once as removals. 8,192 entities per map.
+- **Queues.** Hooks on any thread (damage, death, animation notify, Script
+  node input) enqueue fixed-size records with copied strings into the owning
+  mod's queue (`script_queue.c`, a spin lock per mod, 1,024 records). Only the
+  tick's thread drains; a full queue drops and counts, and the tick writes one
+  line per map for that mod.
+
+The signatures are private to `script_sigs.c` (the tick, the spawn-id lookup,
+IsClient, and the OnDamage, Killed and Relay DoAction sites for the event
+hooks; OnAnimNotify shares its bytes with OnMoverNotify and is resolved by the
+callback name it loads). `script_sigs_test` checks all of them, their detour
+windows, the tick's single caller and the resolver's vtable slots on both
+executables; `script_hooks_test` covers the queues, the handle table and the
+tick's guards.
+
 ### Mod modules
 
 A bundle module is `maps/modules/mods/<id>/<leaf>.decl` (provides `snapModule`,
