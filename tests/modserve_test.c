@@ -4742,6 +4742,22 @@ static void test_row_served(void)
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses Hell Guards, which is not installed."));
+    /* The player's own map saved before the author edited and rebuilt the
+     * folder: it follows the root at any build, in the editor, at Play and
+     * from My Maps alike (no place: the root). */
+    {
+        sh_modserve_bundle_ref ref;
+        char e_hash[65];
+        hash64('e', e_hash);
+        CHECK(sh_modserve_row_served_in(&row, "", "map", cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+        CHECK(sh_modserve_row_build_in(&row, "", &ref) && !strcmp(ref.hash, e_hash) && !strcmp(ref.folder, "hand-made"));
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
+        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+    }
 
     /* The folder at the hash that lacks one listed path: incomplete, naming it. */
     remove_tree(top);
