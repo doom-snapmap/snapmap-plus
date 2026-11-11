@@ -165,61 +165,31 @@ static const char *g_bundle_name;
  * same name (modbundle.h sh_mb_stock_restore), or NULL. */
 static const char *g_fx_restore;
 static const char *g_fx_restore2;   /* a second one, or NULL */
-/* The next make_bundle writes no author "id" and gives the key in the product block. */
-static int g_bundle_keyonly;
-
-/* Write <root>\<folder>\mod.json (an author block and its product block) and
- * its files. A folder written under <root>\legacy stands for a package a map
- * delivered: it goes to <root> itself with a "legacy" record (Contract 5 has
- * no legacy folder); an author "legacy" record elsewhere is a migrated pack's
- * ("source": "overrides"). `state` is the old .state.json shape, mapped to
- * the block's validated, cause and built. */
+/* Write <root>\<folder>\mod.json (an author block and its format-2 builder
+ * block, keyed by the salt `id`) and its files. A folder under
+ * <root>\maps\<segment>\ sits in that map's place. `state` is the old
+ * .state.json shape, mapped to the block's cause and built. */
 static void make_bundle(const char *parent, const char *folder, const char *id, const char *version,
                         char hash_digit, const char *shadows, const fx_file *files, int n, const char *state)
 {
-    char dir[MAX_PATH], path[MAX_PATH], h[65], top[MAX_PATH], author[2048];
+    char dir[MAX_PATH], path[MAX_PATH], h[65];
     static char json[32768];
     size_t at = 0;
-    int i, delivered = 0;
+    int i;
     const char *extra = g_bundle_extra ? g_bundle_extra : "";
-    strcpy_s(top, sizeof top, parent);
-    {
-        size_t tl = strlen(top);
-        if (tl > 7 && !_stricmp(top + tl - 7, "\\legacy")) { top[tl - 7] = 0; delivered = 1; }
-    }
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", top, folder);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", parent, folder);
     mkdirs(dir);
-    author[0] = 0;
-    {
-        const char *lg = strstr(extra, "\"legacy\": {}");
-        if (lg && !delivered) {
-            /* A migrated pack: its legacy record names the overrides source. */
-            _snprintf_s(author, sizeof author, _TRUNCATE, "%.*s\"legacy\": {\"source\": \"overrides\"}%s", (int)(lg - extra), extra,
-                        lg + 12);
-        } else if (!lg && delivered) {
-            _snprintf_s(author, sizeof author, _TRUNCATE, "\"legacy\": {}, %s", extra);
-        } else strcpy_s(author, sizeof author, extra);
-    }
-    if (g_bundle_keyonly)
-        at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                          "{\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
-                          "  \"snapmap-plus\": {\"format\": 1, \"key\": \"%s\", \"build\": 1, \"bundle\": \"%s\"",
-                          version, g_bundle_name ? g_bundle_name : id, author, id, hash64(hash_digit, h));
-    else
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
-                      "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\"",
-                      id, version, g_bundle_name ? g_bundle_name : id, author, hash64(hash_digit, h));
+                      "{\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
+                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\"",
+                      version, g_bundle_name ? g_bundle_name : id, extra, id, hash64(hash_digit, h));
     if (state) {
-        const char *v = strstr(state, "\"validated\": false"), *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
-        if (v) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"validated\": false");
+        const char *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (c) {
             const char *e = strchr(c + 15, '"');
             at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"cause\": \"%.*s\"", (int)(e - c - 15), c + 15);
         }
         if (t) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"built\": %d", atoi(t + 15));
-        if (strstr(state, "\"origin\": \"download\""))
-            at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"origin\": \"download\"");
     }
     if (g_block_edits) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ",\n    \"edits\": %s", g_block_edits);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ",\n    \"shadows\": [%s],\n    \"files\": [\n", shadows ? shadows : "");
@@ -251,61 +221,62 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     write_file(path, json, at);
 }
 
-#define A_MD6    "generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl"
-#define A_MESH   "generated/basemodel/md6/mods/alex.pink-imp/mesh/imp.bmd6model"
-#define A_ENT    "generated/decls/entitydef/mods/alex.pink-imp/imp.decl"
-#define A_SEDEF  "generated/decls/snapeditorentitydef/mods/alex.pink-imp/imp.decl"
-#define A_FIRE   "generated/decls/entitydef/mods/alex.pink-imp/fireball.decl"
-#define A_MAT    "generated/decls/material2/mods/alex.pink-imp/skin.decl"
+#define A_MD6    "generated/decls/md6def/mods/alexpink/imp.md6.decl"
+#define A_MESH   "generated/basemodel/md6/mods/alexpink/mesh/imp.bmd6model"
+#define A_ENT    "generated/decls/entitydef/mods/alexpink/imp.decl"
+#define A_SEDEF  "generated/decls/snapeditorentitydef/mods/alexpink/imp.decl"
+#define A_FIRE   "generated/decls/entitydef/mods/alexpink/fireball.decl"
+#define A_MAT    "generated/decls/material2/mods/alexpink/skin.decl"
 #define SHADOW   "generated/decls/entitydef/monster/imp.decl"
 #define LIFT     "generated/decls/snapeditorentitydef/func/lift.decl"
 #define GRID     "generated/decls/snapmoduleinfo/smpgrid/v1/c/512_768_384.decl"
-#define B_THING  "generated/decls/entitydef/mods/bob.skins/thing.decl"
-#define B_SEDEF  "generated/decls/snapeditorentitydef/mods/bob.skins/thing.decl"
-#define C_ONLY   "generated/decls/entitydef/mods/carol.broken/only.decl"
-#define F_BLOB   "generated/image/mods/fay.blob/tex.bimage"
+#define B_THING  "generated/decls/entitydef/mods/bobskins/thing.decl"
+#define B_SEDEF  "generated/decls/snapeditorentitydef/mods/bobskins/thing.decl"
+#define C_ONLY   "generated/decls/entitydef/mods/carolbro/only.decl"
+#define F_BLOB   "generated/image/mods/fayblob0/tex.bimage"
 
 static char g_hash_a[65], g_hash_a2[65], g_hash_b[65], g_hash_c[65], g_hash_f[65], g_hash_l[65];
 
 static void build_fixture(void)
 {
-    char tmp[MAX_PATH], path[MAX_PATH], legacy[MAX_PATH];
+    char tmp[MAX_PATH], path[MAX_PATH];
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%smodserve_test_%lu\\mods", tmp, GetCurrentProcessId());
     mkdirs(g_root);
     {
         static const fx_file a[] = {
-            { A_MESH, "MESHBYTES-0123456789", -1, "baseModel", "md6/mods/alex.pink-imp/mesh/imp.md6mesh", NULL, '1' },
-            { A_MAT, "material2 skin {}", -1, "material2", "mods/alex.pink-imp/skin", NULL, '2' },
-            { A_MD6, "md6Def imp { mesh \"md6/mods/alex.pink-imp/mesh/imp.md6mesh\" }", -1, "md6Def",
-              "mods/alex.pink-imp/imp.md6",
-              "[{\"type\":\"baseModel\",\"name\":\"md6/mods/alex.pink-imp/mesh/imp.md6mesh\"},"
-              "{\"type\":\"material2\",\"name\":\"mods/alex.pink-imp/skin\"},"
+            { A_MESH, "MESHBYTES-0123456789", -1, "baseModel", "md6/mods/alexpink/mesh/imp.md6mesh", NULL, '1' },
+            { A_MAT, "material2 skin {}", -1, "material2", "mods/alexpink/skin", NULL, '2' },
+            { A_MD6, "md6Def imp { mesh \"md6/mods/alexpink/mesh/imp.md6mesh\" }", -1, "md6Def",
+              "mods/alexpink/imp.md6",
+              "[{\"type\":\"baseModel\",\"name\":\"md6/mods/alexpink/mesh/imp.md6mesh\"},"
+              "{\"type\":\"material2\",\"name\":\"mods/alexpink/skin\"},"
               "{\"type\":\"material2\",\"name\":\"models/monsters/imp/imp\"}]", '3' },
             { A_ENT, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }", -1, "entityDef",
-              "mods/alex.pink-imp/imp", "[{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", '4' },
+              "mods/alexpink/imp", "[{\"type\":\"md6Def\",\"name\":\"mods/alexpink/imp.md6\"}]", '4' },
             /* Listed before its needs on purpose: the plan reorders. */
-            { A_SEDEF, "{ entityDef \"mods/alex.pink-imp/imp\" }", -1, "snapEditorEntityDef", "mods/alex.pink-imp/imp",
-              "[{\"type\":\"entityDef\",\"name\":\"mods/alex.pink-imp/imp\"},"
-              "{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", '5' },
-            { A_FIRE, "entityDef fireball {}", -1, "entityDef", "mods/alex.pink-imp/fireball", NULL, '6' },
+            { A_SEDEF, "{ entityDef \"mods/alexpink/imp\" }", -1, "snapEditorEntityDef", "mods/alexpink/imp",
+              "[{\"type\":\"entityDef\",\"name\":\"mods/alexpink/imp\"},"
+              "{\"type\":\"md6Def\",\"name\":\"mods/alexpink/imp.md6\"}]", '5' },
+            { A_FIRE, "entityDef fireball {}", -1, "entityDef", "mods/alexpink/fireball", NULL, '6' },
             { SHADOW, "entityDef pink { }", -1, "entityDef", "monster/imp", NULL, '7' },
             { LIFT, "MODLIFT", -1, "snapEditorEntityDef", "func/lift", NULL, '8' },
             { GRID, "MODGRID", -1, "snapModuleInfo", "smpgrid/v1/c/512_768_384", NULL, '9' },
             { "maps/game/snapmap/test/nav_owned.decl", "MODNAV", -1, "file", "maps/game/snapmap/test/nav_owned.decl", NULL, 'a' },
         };
         /* The NAV shadow path is not namespaced; it is declared a shadow. */
-        make_bundle(g_root, "alex.pink-imp@1.0.0", "alex.pink-imp", "1.0.0", 'a',
+        make_bundle(g_root, "alexpink@1.0.0", "alexpink", "1.0.0", 'a',
                     "\"" SHADOW "\", \"" LIFT "\", \"" GRID "\", \"maps/game/snapmap/test/nav_owned.decl\"",
                     a, (int)(sizeof a / sizeof a[0]), "{\"validated\": true, \"installedAt\": 100}");
         hash64('a', g_hash_a);
     }
     {
-        /* A later version of the same mod changing one file. */
+        /* A later build of the same mod changing one file, in a map's place
+         * (a downloaded map pinned it); the root folder serves with no map. */
         static const fx_file a2[] = {
-            { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alex.pink-imp/fireball", NULL, 'b' },
+            { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alexpink/fireball", NULL, 'b' },
         };
-        make_bundle(g_root, "alex.pink-imp@1.1.0", "alex.pink-imp", "1.1.0", 'b', NULL, a2, 1,
+        make_bundle(g_root, "maps\\Pinks\\alexpink@1.1.0", "alexpink", "1.1.0", 'b', NULL, a2, 1,
                     "{\"validated\": true, \"installedAt\": 200}");
         hash64('b', g_hash_a2);
     }
@@ -314,28 +285,28 @@ static void build_fixture(void)
          * an md6Def nobody provides: blocked. */
         static const fx_file b[] = {
             { SHADOW, "entityDef bob { }", -1, "entityDef", "monster/imp", NULL, 'c' },
-            { B_THING, "entityDef thing {}", -1, "entityDef", "mods/bob.skins/thing",
-              "[{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", 'd' },
-            { B_SEDEF, "{ entityDef \"mods/bob.skins/thing\" }", -1, "snapEditorEntityDef", "mods/bob.skins/thing",
-              "[{\"type\":\"entityDef\",\"name\":\"mods/bob.skins/thing\"},"
-              "{\"type\":\"md6Def\",\"name\":\"mods/bob.skins/missing.md6\"}]", 'e' },
+            { B_THING, "entityDef thing {}", -1, "entityDef", "mods/bobskins/thing",
+              "[{\"type\":\"md6Def\",\"name\":\"mods/alexpink/imp.md6\"}]", 'd' },
+            { B_SEDEF, "{ entityDef \"mods/bobskins/thing\" }", -1, "snapEditorEntityDef", "mods/bobskins/thing",
+              "[{\"type\":\"entityDef\",\"name\":\"mods/bobskins/thing\"},"
+              "{\"type\":\"md6Def\",\"name\":\"mods/bobskins/missing.md6\"}]", 'e' },
         };
-        make_bundle(g_root, "bob.skins@2.0.0", "bob.skins", "2.0.0", 'c', "\"" SHADOW "\"", b, 3, NULL);
+        make_bundle(g_root, "bobskins@2.0.0", "bobskins", "2.0.0", 'c', "\"" SHADOW "\"", b, 3, NULL);
         hash64('c', g_hash_b);
     }
     {
         /* Size mismatch: skipped entirely. */
         static const fx_file c[] = {
-            { C_ONLY, "entityDef only {}", 999, "entityDef", "mods/carol.broken/only", NULL, 'f' },
+            { C_ONLY, "entityDef only {}", 999, "entityDef", "mods/carolbro/only", NULL, 'f' },
         };
-        make_bundle(g_root, "carol.broken@1.0.0", "carol.broken", "1.0.0", 'd', NULL, c, 1, NULL);
+        make_bundle(g_root, "carolbro@1.0.0", "carolbro", "1.0.0", 'd', NULL, c, 1, NULL);
         hash64('d', g_hash_c);
     }
     {
         static const fx_file d[] = {
-            { "generated/decls/entitydef/mods/dave.x/a.decl", "x", -1, "entityDef", "mods/dave.x/a", NULL, '1' },
+            { "generated/decls/entitydef/mods/davex000/a.decl", "x", -1, "entityDef", "mods/davex000/a", NULL, '1' },
         };
-        make_bundle(g_root, "dave.x@1.0.0", "dave.x", "1.0.0", 'e', NULL, d, 1,
+        make_bundle(g_root, "davex000@1.0.0", "davex000", "1.0.0", 'e', NULL, d, 1,
                     "{\"validated\": false, \"firstCause\": \"md6Def mesh missing\"}");
     }
     {
@@ -343,42 +314,33 @@ static void build_fixture(void)
         static const fx_file e[] = {
             { "generated/decls/entitydef/monster/sneaky.decl", "x", -1, "entityDef", "monster/sneaky", NULL, '1' },
         };
-        make_bundle(g_root, "erin.ns@1.0.0", "erin.ns", "1.0.0", '1', NULL, e, 1, NULL);
+        make_bundle(g_root, "erinns00@1.0.0", "erinns00", "1.0.0", '1', NULL, e, 1, NULL);
     }
     {
         /* A raw file: its own tree holds it (there is no blob store). */
-        static const fx_file f[] = { { F_BLOB, "BLOBBYTES", 9, "image", "mods/fay.blob/tex", NULL, '2' } };
-        make_bundle(g_root, "fay.blob@1.0.0", "fay.blob", "1.0.0", '2', NULL, f, 1, NULL);
+        static const fx_file f[] = { { F_BLOB, "BLOBBYTES", 9, "image", "mods/fayblob0/tex", NULL, '2' } };
+        make_bundle(g_root, "fayblob0@1.0.0", "fayblob0", "1.0.0", '2', NULL, f, 1, NULL);
         hash64('2', g_hash_f);
     }
     {
-        /* Converted first-generation package: its names are not namespaced. */
-        static const fx_file l[] = {
-            { "generated/decls/entitydef/smp/oldthing.decl", "entityDef old {}", -1, "entityDef", "smp/oldthing", NULL, '3' },
-        };
-        _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", g_root);
-        make_bundle(legacy, "old.pkg@0123456789abcdef", "old.pkg", "0123456789abcdef", '3', NULL, l, 1, NULL);
-        hash64('3', g_hash_l);
-    }
-    {
-        /* A sound bank is named by its stem: <id with '.' and '-' as '_'>_<rest>
+        /* A sound bank is named by its stem: <salt>_<rest>
          * is inside the namespace, any other stem is outside it. */
         static const fx_file g[] = {
-            { "sound/soundbanks/pc/gail_snd_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/gail_snd_fx.bnk", NULL, '5' },
+            { "sound/soundbanks/pc/gailsnd0_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/gailsnd0_fx.bnk", NULL, '5' },
         };
         static const fx_file h[] = {
             { "sound/soundbanks/pc/other_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/other_fx.bnk", NULL, '6' },
         };
-        make_bundle(g_root, "gail.snd@1.0.0", "gail.snd", "1.0.0", '5', NULL, g, 1, NULL);
-        make_bundle(g_root, "hank.snd@1.0.0", "hank.snd", "1.0.0", '6', NULL, h, 1, NULL);
+        make_bundle(g_root, "gailsnd0@1.0.0", "gailsnd0", "1.0.0", '5', NULL, g, 1, NULL);
+        make_bundle(g_root, "hanksnd0@1.0.0", "hanksnd0", "1.0.0", '6', NULL, h, 1, NULL);
     }
     {
         /* A mod the player filed under an organizing folder: found by its
          * path under mods\. An empty organizing folder holds nothing. */
         static const fx_file nested[] = {
-            { "generated/decls/entitydef/mods/ivy.nested/thing.decl", "entityDef nested {}", -1, "entityDef", "mods/ivy.nested/thing", NULL, '7' },
+            { "generated/decls/entitydef/mods/ivyneste/thing.decl", "entityDef nested {}", -1, "entityDef", "mods/ivyneste/thing", NULL, '7' },
         };
-        make_bundle(g_root, "demon-mods\\ivy.nested", "ivy.nested", "1.0.0", '8', NULL, nested, 1, NULL);
+        make_bundle(g_root, "demon-mods\\ivyneste", "ivyneste", "1.0.0", '8', NULL, nested, 1, NULL);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\empty-group\\deeper", g_root);
         mkdirs(path);
     }
@@ -493,28 +455,28 @@ static void test_index_and_isolation(void)
 {
     sh_modserve_stats st;
     log_clear();
-    CHECK(sh_modserve_index_build(g_root) == 7);   /* alex x2, bob, fay, gail, legacy, ivy (nested) */
+    CHECK(sh_modserve_index_build(g_root) == 6);   /* alex (root and a place), bob, fay, gail, ivy (nested) */
     sh_modserve_get_stats(&st);
-    CHECK(st.bundles_seen == 12);
-    CHECK(st.bundles_admitted == 7);
+    CHECK(st.bundles_seen == 11);
+    CHECK(st.bundles_admitted == 6);
     CHECK(st.conflicts == 1);
-    CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
-    CHECK(log_has("bundle 'dave.x@1.0.0' skipped: not validated: md6Def mesh missing"));
-    CHECK(log_has("bundle 'erin.ns@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erin.ns/"));
+    CHECK(log_has("bundle 'carolbro@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
+    CHECK(log_has("bundle 'davex000@1.0.0' skipped: not built: md6Def mesh missing"));
+    CHECK(log_has("bundle 'erinns00@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erinns00/"));
     CHECK(log_has("bundle 'unbuilt' skipped: not built yet"));
-    CHECK(log_has("bundle 'hank.snd@1.0.0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hank.snd/"));
-    CHECK(!log_has("bundle 'gail.snd@1.0.0' skipped"));
+    CHECK(log_has("bundle 'hanksnd0@1.0.0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hanksnd0/"));
+    CHECK(!log_has("bundle 'gailsnd0@1.0.0' skipped"));
     CHECK(log_count("skipped:") == 5);   /* one line per skipped bundle */
     /* Two mods' shadows of one stock decl: with no map, the static winner
-     * (no rule separates them: the first key; the install time never counts;
+     * (no rule separates them: the first salt; the install time never counts;
      * the texts are outside the composable grammar). */
-    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
-                  "alex.pink-imp@1.0.0 (no rule separates them; the first key in name order"));
-    /* Two builds of one key are never a conflict. */
-    CHECK(log_has("MODS: key alex.pink-imp: bundles ") && log_has("each map serves the bundle it declares"));
+    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alexpink@1.0.0, bobskins@2.0.0; serving "
+                  "alexpink@1.0.0 (no rule separates them; the first salt in name order"));
+    /* Two builds of one salt (the root and a place) are never a conflict. */
+    CHECK(log_has("MODS: mod alexpink: builds ") && log_has("each map serves the build it declares"));
     CHECK(!log_has("superseded"));
-    CHECK(log_has("MODS: index built in ") && log_has("(7 bundles, "));
-    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivy.nested/thing.decl", NULL) != NULL);
+    CHECK(log_has("MODS: index built in ") && log_has("(6 bundles, "));
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivyneste/thing.decl", NULL) != NULL);
     CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
     {
         char cause[200];
@@ -546,9 +508,9 @@ static void test_unopened_shadows(void)
     CHECK(sh_modserve_open_count(SHADOW) == 0 && sh_modserve_open_count(LIFT) == 0);
     memset(&u, 0, sizeof u);
     CHECK(sh_modserve_each_unopened_shadow(unopened_visit, &u) >= 2);
-    CHECK(strstr(u.order, "entityDef:monster/imp:alex.pink-imp;") && strstr(u.order, "snapEditorEntityDef:func/lift:alex.pink-imp;"));
+    CHECK(strstr(u.order, "entityDef:monster/imp:alexpink;") && strstr(u.order, "snapEditorEntityDef:func/lift:alexpink;"));
     CHECK(strstr(u.order, "entityDef:monster/imp:") < strstr(u.order, "snapEditorEntityDef:func/lift:"));
-    CHECK(!strstr(u.order, "bob.skins"));
+    CHECK(!strstr(u.order, "bobskins"));
     CHECK(!strstr(u.order, "mods/"));   /* new identities are registered, never re-parsed */
     /* The lift is settled; the imp is not parsed yet and is offered again. */
     memset(&u, 0, sizeof u); u.settle_lift = 1;
@@ -580,35 +542,34 @@ static void test_lookup(void)
     sh_modserve_hit hit;
     char text[256];
     CHECK(sh_modserve_lookup(A_MD6, &hit) && hit.is_decl && !hit.is_shadow && hit.size > 0 &&
-          !strcmp(hit.bundle_id, "alex.pink-imp"));
+          !strcmp(hit.bundle_id, "alexpink"));
     /* Case and separators fold; the engine spells md6Def and baseModel. */
-    CHECK(sh_modserve_lookup("generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl", NULL));
-    CHECK(sh_modserve_lookup("GENERATED\\baseModel\\md6\\mods\\alex.pink-imp\\mesh\\imp.bmd6model", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/md6Def/mods/alexpink/imp.md6.decl", NULL));
+    CHECK(sh_modserve_lookup("GENERATED\\baseModel\\md6\\mods\\alexpink\\mesh\\imp.bmd6model", NULL));
     /* The registration source read and the sanitised raw spelling. */
-    CHECK(sh_modserve_lookup("decltree/md6def/mods/alex.pink-imp/imp.md6.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/baseModel/md6/mods/alex.pink_imp/mesh/imp.bmd6model", NULL));
+    CHECK(sh_modserve_lookup("decltree/md6def/mods/alexpink/imp.md6.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/baseModel/md6/mods/alexpink/mesh/imp.bmd6model", NULL));
     /* Misses: stock, a skipped bundle's file, near names. */
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/monster/hellknight.decl", NULL));
     {
         sh_modserve_hit w;
         sh_modserve_conflict c;
-        CHECK(sh_modserve_lookup(SHADOW, &w) && !strcmp(w.bundle_id, "alex.pink-imp"));
+        CHECK(sh_modserve_lookup(SHADOW, &w) && !strcmp(w.bundle_id, "alexpink"));
         CHECK(sh_modserve_conflict_info("GENERATED/decls/entitydef/monster/imp.decl", &c) && c.count == 2 &&
-              !c.composed && !strcmp(c.served_id, "alex.pink-imp") && strstr(c.reason, "the first key in name order") &&
-              !strcmp(c.providers, "alex.pink-imp@1.0.0, bob.skins@2.0.0"));
+              !c.composed && !strcmp(c.served_id, "alexpink") && strstr(c.reason, "the first salt in name order") &&
+              !strcmp(c.providers, "alexpink@1.0.0, bobskins@2.0.0"));
         CHECK(!sh_modserve_conflict_info(A_ENT, &c));
         CHECK(open_text(SHADOW, text, sizeof text) == 1 && !strcmp(text, "entityDef pink { }"));
     }
     CHECK(!sh_modserve_lookup(C_ONLY, NULL));
-    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/dave.x/a.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/davex000/a.decl", NULL));
     CHECK(!sh_modserve_lookup(A_ENT "x", NULL));
     CHECK(!sh_modserve_lookup("", NULL));
     CHECK(!sh_modserve_lookup(NULL, NULL));
-    /* Bytes, version supersession and a delivered package. */
+    /* Bytes; the root folder's build over the one in a map's place. */
     CHECK(open_text(A_ENT, text, sizeof text) == 1 && !strcmp(text, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }"));
-    CHECK(open_text(A_FIRE, text, sizeof text) == 1 && !strcmp(text, "entityDef fireball { v2 }"));
+    CHECK(open_text(A_FIRE, text, sizeof text) == 1 && !strcmp(text, "entityDef fireball {}"));
     CHECK(open_text(F_BLOB, text, sizeof text) == 1 && !strcmp(text, "BLOBBYTES"));
-    CHECK(open_text("generated/decls/entitydef/smp/oldthing.decl", text, sizeof text) == 1);
 }
 
 static void test_precedence(void)
@@ -616,8 +577,8 @@ static void test_precedence(void)
     char text[256];
     log_clear();
     /* A new mod name reaches the engine through the provider's stream. */
-    CHECK(provider_text(A_SEDEF, 0, text, sizeof text) && !strcmp(text, "{ entityDef \"mods/alex.pink-imp/imp\" }"));
-    CHECK(provider_text("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl", 1, text, sizeof text));
+    CHECK(provider_text(A_SEDEF, 0, text, sizeof text) && !strcmp(text, "{ entityDef \"mods/alexpink/imp\" }"));
+    CHECK(provider_text("generated/decls/snapEditorEntityDef/mods/alexpink/imp.decl", 1, text, sizeof text));
     /* Mode 2 is never served. */
     CHECK(!provider_text(A_SEDEF, 2, text, sizeof text));
     /* A bundle shadow of a built-in name wins over the built-in default (the
@@ -637,13 +598,13 @@ static void test_precedence(void)
 
 static void test_probe(void)
 {
-    CHECK(sh_modserve_probe_claims("generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl"));
-    CHECK(sh_modserve_probe_claims("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl"));
+    CHECK(sh_modserve_probe_claims("generated/decls/md6Def/mods/alexpink/imp.md6.decl"));
+    CHECK(sh_modserve_probe_claims("generated/decls/snapEditorEntityDef/mods/alexpink/imp.decl"));
     CHECK(!sh_modserve_probe_claims(A_MESH));                 /* raw files are not decls */
     CHECK(sh_modserve_probe_claims(SHADOW));                  /* conflicted, and served by its winner */
     CHECK(!sh_modserve_probe_claims("generated/decls/entitydef/monster/hellknight.decl"));
-    CHECK(sh_modserve_is_mod_sedef("mods/alex.pink-imp/imp"));
-    CHECK(sh_modserve_is_mod_sedef("MODS/alex.pink-imp/IMP"));
+    CHECK(sh_modserve_is_mod_sedef("mods/alexpink/imp"));
+    CHECK(sh_modserve_is_mod_sedef("MODS/alexpink/IMP"));
     CHECK(!sh_modserve_is_mod_sedef("demons/imp_enc"));
 }
 
@@ -653,22 +614,22 @@ static void test_plan(void)
     int md6, mat, ent, sedef, bsedef, bthing, i, unknown = 0;
     const char *hashes[3];
     CHECK(sh_modserve_plan_editor(&p) >= 4);
-    md6 = step_index(&p, "md6Def", "mods/alex.pink-imp/imp.md6");
-    mat = step_index(&p, "material2", "mods/alex.pink-imp/skin");
-    ent = step_index(&p, "entityDef", "mods/alex.pink-imp/imp");
-    sedef = step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp");
-    bsedef = step_index(&p, "snapEditorEntityDef", "mods/bob.skins/thing");
-    bthing = step_index(&p, "entityDef", "mods/bob.skins/thing");
+    md6 = step_index(&p, "md6Def", "mods/alexpink/imp.md6");
+    mat = step_index(&p, "material2", "mods/alexpink/skin");
+    ent = step_index(&p, "entityDef", "mods/alexpink/imp");
+    sedef = step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp");
+    bsedef = step_index(&p, "snapEditorEntityDef", "mods/bobskins/thing");
+    bthing = step_index(&p, "entityDef", "mods/bobskins/thing");
     CHECK(md6 >= 0 && mat >= 0 && ent >= 0 && sedef >= 0 && bsedef >= 0 && bthing >= 0);
     CHECK(mat < md6 && md6 < ent && ent < sedef);           /* dependency order */
     CHECK(md6 < bthing);                                     /* across bundles */
-    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") < 0);   /* gameplay only */
+    CHECK(step_index(&p, "entityDef", "mods/alexpink/fireball") < 0);   /* gameplay only */
     CHECK(step_index(&p, "entityDef", "monster/imp") < 0);   /* shadows are never registered */
     for (i = 0; i < p.count; ++i) CHECK(_stricmp(p.steps[i].type, "baseModel"));   /* raw: no step */
     /* The editor plan keeps every step for the session (lane MG2). */
     CHECK(p.steps[sedef].persist == 1 && p.steps[ent].persist == 1 && p.steps[md6].persist == 1);
-    CHECK(!strcmp(p.steps[md6].reg_path, "md6def/mods/alex.pink-imp/imp.md6.decl"));
-    CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bob.skins/missing.md6"));
+    CHECK(!strcmp(p.steps[md6].reg_path, "md6def/mods/alexpink/imp.md6.decl"));
+    CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bobskins/missing.md6"));
     CHECK(!p.steps[bthing].blocked && !p.steps[sedef].blocked);
     CHECK(p.blocked == 1);
     sh_modserve_plan_free(&p);
@@ -678,80 +639,16 @@ static void test_plan(void)
     hashes[2] = g_hash_a2;
     CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
     CHECK(unknown == 1);
-    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
-    CHECK(step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp") < 0);
-    CHECK(step_index(&p, "md6Def", "mods/alex.pink-imp/imp.md6") < step_index(&p, "entityDef", "mods/alex.pink-imp/imp"));
-    CHECK(step_index(&p, "entityDef", "mods/bob.skins/thing") < 0);   /* not named */
+    CHECK(step_index(&p, "entityDef", "mods/alexpink/fireball") >= 0);
+    CHECK(step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp") < 0);
+    CHECK(step_index(&p, "md6Def", "mods/alexpink/imp.md6") < step_index(&p, "entityDef", "mods/alexpink/imp"));
+    CHECK(step_index(&p, "entityDef", "mods/bobskins/thing") < 0);   /* not named */
     /* A map pass keeps what the editor closure holds unless the engine holds it
-     * permanently (2), as the editor pass would; the fireball the row-less
-     * 1.1.0 build serves stays at the engine's level. */
-    for (i = 0; i < p.count; ++i) {
-        int closure = !strcmp(p.steps[i].name, "mods/alex.pink-imp/imp.md6") ||
-                      !strcmp(p.steps[i].name, "mods/alex.pink-imp/imp") || !strcmp(p.steps[i].name, "mods/alex.pink-imp/skin");
-        CHECK(p.steps[i].persist == (closure ? 2 : 0));
-    }
-    CHECK(!p.steps[step_index(&p, "entityDef", "mods/alex.pink-imp/fireball")].persist);
-    sh_modserve_plan_free(&p);
-}
-
-/* A map pinning an earlier build of a folder: the record's alias names the
- * current build, and the plan resolves the pinned hash through it. */
-static void test_plan_alias(void)
-{
-    static const char OLD[] = "1234567890123456789012345678901234567890123456789012345678901234";
-    char aliases[160];
-    sh_modserve_plan p;
-    const char *hashes[1];
-    int unknown = 0, n;
-    _snprintf_s(aliases, sizeof aliases, _TRUNCATE, "{\"%s\":\"%s\"}", OLD, g_hash_a);
-    CHECK(sh_mb_record_put(g_root, "aliases", aliases));
-    n = sh_modserve_index_build(g_root);
-    CHECK(n == 7);
-    hashes[0] = OLD;
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) >= 1 && unknown == 0);
-    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
-    sh_modserve_plan_free(&p);
-    CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
-    /* The author's own folder (no origin: made by hand): a row pinning the
-     * earlier hash follows it; a hash installed as itself is no alias. */
-    {
-        sh_modserve_bundle_ref ref;
-        char path[MAX_PATH], *text = NULL, *edited;
-        size_t len = 0;
-        const char *at;
-        CHECK(sh_modserve_row_follow(OLD, &ref) == 1 && !strcmp(ref.hash, g_hash_a) && !strcmp(ref.id, "alex.pink-imp") &&
-              !strcmp(ref.version, "1.0.0"));
-        CHECK(sh_modserve_row_follow(g_hash_a, &ref) == 0 && sh_modserve_row_follow(g_hash_a2, &ref) == 0);
-        CHECK(sh_modserve_row_follow("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", &ref) == 0);
-        /* The same folder downloaded for a map (origin download): the alias
-         * still serves the pin, but the row is never rewritten. */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.pink-imp@1.0.0\\mod.json", g_root);
-        text = (char *)sh_mb_read_file(path, 1u << 20, &len);
-        at = text ? strstr(text, "\"snapmap-plus\": {\"format\": 1,") : NULL;
-        CHECK(at != NULL);
-        if (at) {
-            size_t head = (size_t)(at - text) + strlen("\"snapmap-plus\": {\"format\": 1,");
-            static const char ins[] = " \"origin\": \"download\",";
-            const size_t il = sizeof ins - 1;
-            edited = (char *)malloc(len + il + 1);
-            memcpy(edited, text, head);
-            memcpy(edited + head, ins, il);
-            memcpy(edited + head + il, text + head, len - head);
-            write_file(path, edited, len + il);
-            CHECK(sh_modserve_index_build(g_root) == n);
-            CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
-            CHECK(sh_modserve_row_follow(OLD, &ref) == 0);
-            write_file(path, text, len);
-            CHECK(sh_modserve_index_build(g_root) == n);
-            CHECK(sh_modserve_row_follow(OLD, &ref) == 1);
-            free(edited);
-        }
-        free(text);
-    }
-    /* Without the alias the pinned hash is unknown. */
-    CHECK(sh_mb_record_put(g_root, "aliases", NULL));
-    CHECK(sh_modserve_index_build(g_root) == n);
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 0 && unknown == 1);
+     * permanently (2), as the editor pass would: every served file of the
+     * root build, which has rows, the fireball included (the row-less 1.1.0
+     * build in the place does not serve its path with no map open). */
+    for (i = 0; i < p.count; ++i) CHECK(p.steps[i].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/alexpink/fireball")].persist == 2);
     sh_modserve_plan_free(&p);
 }
 
@@ -762,34 +659,34 @@ static void test_plan_run(void)
     const char *r_last, *l_first;
     sh_modserve_test_reset_registration();
     g_calls[0] = 0;
-    g_fail_load = "mods/alex.pink-imp/imp";       /* the alex entityDef fails to load */
-    g_already = "mods/alex.pink-imp/skin";        /* this source is already registered */
+    g_fail_load = "mods/alexpink/imp";       /* the alex entityDef fails to load */
+    g_already = "mods/alexpink/skin";        /* this source is already registered */
     log_clear();
     total = sh_modserve_plan_editor(&p);
     ready = sh_modserve_plan_run(&p, &g_fake_published, "editor");
     /* skin, md6 and bob's entityDef are ready; the alex entityDef fails, so
      * its sedef is not loaded; bob's sedef is blocked. */
     CHECK(ready == 3);
-    CHECK(!strstr(g_calls, "R:material2:mods/alex.pink-imp/skin"));    /* source existed */
-    CHECK(strstr(g_calls, "P:material2:mods/alex.pink-imp/skin") != NULL);
-    CHECK(strstr(g_calls, "R:md6Def:mods/alex.pink-imp/imp.md6") != NULL);
-    CHECK(strstr(g_calls, "P:entityDef:mods/alex.pink-imp/imp;") != NULL);
-    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/alex.pink-imp/imp;") != NULL);
-    CHECK(!strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
-    CHECK(!strstr(g_calls, "snapEditorEntityDef:mods/bob.skins/thing"));
+    CHECK(!strstr(g_calls, "R:material2:mods/alexpink/skin"));    /* source existed */
+    CHECK(strstr(g_calls, "P:material2:mods/alexpink/skin") != NULL);
+    CHECK(strstr(g_calls, "R:md6Def:mods/alexpink/imp.md6") != NULL);
+    CHECK(strstr(g_calls, "P:entityDef:mods/alexpink/imp;") != NULL);
+    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/alexpink/imp;") != NULL);
+    CHECK(!strstr(g_calls, "P:snapEditorEntityDef:mods/alexpink/imp;"));
+    CHECK(!strstr(g_calls, "snapEditorEntityDef:mods/bobskins/thing"));
     /* Every registration precedes every load. */
     r_last = strrchr(g_calls, 'R');
     l_first = strstr(g_calls, "P:");
     CHECK(r_last && l_first && r_last < l_first);
     /* The early-decl hook runs once, after the registrations and before the loads. */
     CHECK(log_count_in(g_calls, "S::;") == 1 && strstr(g_calls, "S::;") > r_last && strstr(g_calls, "S::;") < l_first);
-    CHECK(log_has("editor: entityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: state 0x01"));
-    CHECK(log_has("editor: snapEditorEntityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: needs entityDef 'mods/alex.pink-imp/imp', which failed"));
-    CHECK(log_has("editor: snapEditorEntityDef 'mods/bob.skins/thing' (bob.skins) BLOCKED"));
-    CHECK(log_has("editor: entityDef 'mods/bob.skins/thing' (bob.skins) READY: state 0xa0 lifetime 4"));
-    CHECK(log_has("editor: md6Def 'mods/alex.pink-imp/imp.md6' (alex.pink-imp) READY"));
-    CHECK(p.steps[step_index(&p, "entityDef", "mods/bob.skins/thing")].ready == 1);
-    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp")].ready == -1);
+    CHECK(log_has("editor: entityDef 'mods/alexpink/imp' (alexpink) NOT READY: state 0x01"));
+    CHECK(log_has("editor: snapEditorEntityDef 'mods/alexpink/imp' (alexpink) NOT READY: needs entityDef 'mods/alexpink/imp', which failed"));
+    CHECK(log_has("editor: snapEditorEntityDef 'mods/bobskins/thing' (bobskins) BLOCKED"));
+    CHECK(log_has("editor: entityDef 'mods/bobskins/thing' (bobskins) READY: state 0xa0 lifetime 4"));
+    CHECK(log_has("editor: md6Def 'mods/alexpink/imp.md6' (alexpink) READY"));
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/bobskins/thing")].ready == 1);
+    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp")].ready == -1);
     sh_modserve_plan_free(&p);
     (void)total;
 
@@ -798,9 +695,9 @@ static void test_plan_run(void)
     g_fail_load = NULL;
     sh_modserve_plan_editor(&p);
     ready = sh_modserve_plan_run(&p, &g_fake, "editor");
-    CHECK(!strstr(g_calls, "entityDef:mods/bob.skins/thing"));
-    CHECK(!strstr(g_calls, "md6Def:mods/alex.pink-imp/imp.md6"));
-    CHECK(strstr(g_calls, "P:entityDef:mods/alex.pink-imp/imp;") && strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
+    CHECK(!strstr(g_calls, "entityDef:mods/bobskins/thing"));
+    CHECK(!strstr(g_calls, "md6Def:mods/alexpink/imp.md6"));
+    CHECK(strstr(g_calls, "P:entityDef:mods/alexpink/imp;") && strstr(g_calls, "P:snapEditorEntityDef:mods/alexpink/imp;"));
     CHECK(ready == p.count - p.blocked);
     sh_modserve_plan_free(&p);
     g_already = NULL;
@@ -809,24 +706,25 @@ static void test_plan_run(void)
 static void test_bundles_for_names(void)
 {
     char out[4][SH_MODSERVE_HASH_HEX + 1];
-    const char *names[] = { "mods/alex.pink-imp/fireball", "snapmaps/placeablesnapaiencounter/imp", "MODS/bob.skins/thing" };
+    const char *names[] = { "mods/alexpink/fireball", "snapmaps/placeablesnapaiencounter/imp", "MODS/bobskins/thing" };
     int n = modserve_bundles_for_names(names, 3, out, 4), i, has_a2 = 0, has_b = 0, has_a = 0;
-    /* fireball comes from 1.1.0; bob's thing needs alex 1.0.0's md6Def. */
-    CHECK(n == 3);
+    /* fireball comes from the root folder's build (the place's 1.1.0 serves
+     * only for its map); bob's thing needs alex 1.0.0's md6Def. */
+    CHECK(n == 2);
     for (i = 0; i < n && i < 4; ++i) {
         has_a |= !strcmp(out[i], g_hash_a);
         has_a2 |= !strcmp(out[i], g_hash_a2);
         has_b |= !strcmp(out[i], g_hash_b);
     }
-    CHECK(has_a && has_a2 && has_b);
-    CHECK(modserve_bundles_for_names(names, 3, out, 1) == 3);   /* counts past cap */
+    CHECK(has_a && !has_a2 && has_b);
+    CHECK(modserve_bundles_for_names(names, 3, out, 1) == 2);   /* counts past cap */
     CHECK(modserve_bundles_for_names(names + 1, 1, out, 4) == 0);   /* stock */
 }
 
 static void test_cost(void)
 {
     const int N = 1000000;
-    const char *hit = "generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl";
+    const char *hit = "generated/decls/md6Def/mods/alexpink/imp.md6.decl";
     const char *miss = "generated/decls/entitydef/characters/monsters/hellknight/hellknight_base.decl";
     volatile int sink = 0;
     double t0, hit_ns, miss_ns, cold_ns, warm_ns;
@@ -858,19 +756,19 @@ static void test_cost(void)
 static void test_rescan(void)
 {
     static const fx_file g[] = {
-        { "generated/decls/entitydef/mods/gus.new/a.decl", "entityDef a {}", -1, "entityDef", "mods/gus.new/a", NULL, '4' },
+        { "generated/decls/entitydef/mods/gusnew00/a.decl", "entityDef a {}", -1, "entityDef", "mods/gusnew00/a", NULL, '4' },
     };
     sh_modserve_plan p;
-    make_bundle(g_root, "gus.new@1.0.0", "gus.new", "1.0.0", '4', NULL, g, 1, NULL);
-    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
-    CHECK(sh_modserve_index_rescan() == 8);
-    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
+    make_bundle(g_root, "gusnew00@1.0.0", "gusnew00", "1.0.0", '4', NULL, g, 1, NULL);
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gusnew00/a.decl", NULL));
+    CHECK(sh_modserve_index_rescan() == 7);
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gusnew00/a.decl", NULL));
     CHECK(sh_modserve_lookup(A_ENT, NULL));
     /* Registrations made before the rescan are kept: nothing re-runs. */
     g_calls[0] = 0;
     sh_modserve_plan_editor(&p);
     sh_modserve_plan_run(&p, &g_fake, "editor");
-    CHECK(!strstr(g_calls, "mods/alex.pink-imp/imp"));
+    CHECK(!strstr(g_calls, "mods/alexpink/imp"));
     sh_modserve_plan_free(&p);
     /* Opened and settled shadows with unchanged bytes stay settled. */
     {
@@ -1001,51 +899,51 @@ static long ev_last(const char *needle)
     return last ? (long)(last - g_events) : -1;
 }
 
-#define CY_MD6   "generated/decls/md6def/mods/cyd.cut/cyber.md6.decl"
-#define CY_ENT   "generated/decls/entitydef/mods/cyd.cut/cyber.decl"
-#define CY_SEDEF "generated/decls/snapeditorentitydef/mods/cyd.cut/cyber.decl"
-#define IM_SEDEF "generated/decls/snapeditorentitydef/mods/img.only/font.decl"
-#define PL_SEDEF "generated/decls/snapeditorentitydef/mods/plain.mod/thing.decl"
+#define CY_MD6   "generated/decls/md6def/mods/cydcut00/cyber.md6.decl"
+#define CY_ENT   "generated/decls/entitydef/mods/cydcut00/cyber.decl"
+#define CY_SEDEF "generated/decls/snapeditorentitydef/mods/cydcut00/cyber.decl"
+#define IM_SEDEF "generated/decls/snapeditorentitydef/mods/imgonly0/font.decl"
+#define PL_SEDEF "generated/decls/snapeditorentitydef/mods/plainmod/thing.decl"
 
 static void make_plain(const char *root)
 {
     static const fx_file p[] = {
-        { PL_SEDEF, "{ plain }", -1, "snapEditorEntityDef", "mods/plain.mod/thing", NULL, '1' },
+        { PL_SEDEF, "{ plain }", -1, "snapEditorEntityDef", "mods/plainmod/thing", NULL, '1' },
     };
     g_bundle_extra = NULL;
-    make_bundle(root, "plain.mod@1.0.0", "plain.mod", "1.0.0", '7', NULL, p, 1, NULL);
+    make_bundle(root, "plainmod@1.0.0", "plainmod", "1.0.0", '7', NULL, p, 1, NULL);
 }
 
 static void build_requirements_fixture(const char *root)
 {
     static const fx_file cy[] = {
-        { CY_MD6, "md6Def cyber {}", -1, "md6Def", "mods/cyd.cut/cyber.md6", NULL, '1' },
-        { CY_ENT, "entityDef cyber {}", -1, "entityDef", "mods/cyd.cut/cyber",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/cyd.cut/cyber.md6\"}]", '2' },
-        { CY_SEDEF, "{ entityDef \"mods/cyd.cut/cyber\" }", -1, "snapEditorEntityDef", "mods/cyd.cut/cyber",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/cyd.cut/cyber\"}]", '3' },
+        { CY_MD6, "md6Def cyber {}", -1, "md6Def", "mods/cydcut00/cyber.md6", NULL, '1' },
+        { CY_ENT, "entityDef cyber {}", -1, "entityDef", "mods/cydcut00/cyber",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cydcut00/cyber.md6\"}]", '2' },
+        { CY_SEDEF, "{ entityDef \"mods/cydcut00/cyber\" }", -1, "snapEditorEntityDef", "mods/cydcut00/cyber",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/cydcut00/cyber\"}]", '3' },
     };
     static const fx_file im[] = {
-        { IM_SEDEF, "{ font }", -1, "snapEditorEntityDef", "mods/img.only/font", NULL, '4' },
+        { IM_SEDEF, "{ font }", -1, "snapEditorEntityDef", "mods/imgonly0/font", NULL, '4' },
     };
     static const fx_file one[] = {
-        { "generated/decls/entitydef/mods/bad.x/a.decl", "x", -1, "entityDef", "mods/bad.x/a", NULL, '5' },
+        { "generated/decls/entitydef/mods/badx0000/a.decl", "x", -1, "entityDef", "mods/badx0000/a", NULL, '5' },
     };
     /* Both gates, in the converter's spelling and as a number. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": 0}},\n  ";
-    make_bundle(root, "cyd.cut@1.0.0", "cyd.cut", "1.0.0", '1', NULL, cy, 3, NULL);
+    make_bundle(root, "cydcut00@1.0.0", "cydcut00", "1.0.0", '1', NULL, cy, 3, NULL);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "img.only@2.0.0", "img.only", "2.0.0", '2', NULL, im, 1, NULL);
+    make_bundle(root, "imgonly0@2.0.0", "imgonly0", "2.0.0", '2', NULL, im, 1, NULL);
     /* What the builder refuses: a name that is not a cvar's, a decimal
      * number, a line holding two commands, an unknown key. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"9lives\": \"0\"}},\n  ";
-    make_bundle(root, "bad.cvar@1.0.0", "bad.x", "1.0.0", '3', NULL, one, 1, NULL);
+    make_bundle(root, "bad.cvar@1.0.0", "badx0000", "1.0.0", '3', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxFps\": 0.5}},\n  ";
-    make_bundle(root, "bad.value@1.0.0", "bad.x", "1.0.0", '4', NULL, one, 1, NULL);
+    make_bundle(root, "bad.value@1.0.0", "badx0000", "1.0.0", '4', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"dlls\": {\"x\": \"0\"}},\n  ";
-    make_bundle(root, "bad.key@1.0.0", "bad.x", "1.0.0", '5', NULL, one, 1, NULL);
+    make_bundle(root, "bad.key@1.0.0", "badx0000", "1.0.0", '5', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"commands\": {\"activate\": [\"echo a; quit\"]}},\n  ";
-    make_bundle(root, "bad.line@1.0.0", "bad.x", "1.0.0", '6', NULL, one, 1, NULL);
+    make_bundle(root, "bad.line@1.0.0", "badx0000", "1.0.0", '6', NULL, one, 1, NULL);
     make_plain(root);
     g_bundle_extra = NULL;
 }
@@ -1070,15 +968,15 @@ static void test_requirements(void)
      * first cause; each requirement is logged once per bundle. */
     log_clear();
     CHECK(sh_modserve_index_build(req_root) == 3);
-    CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cyd.cut@1.0.0") == 1);
-    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cyd.cut@1.0.0") == 1);
-    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for img.only@2.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cydcut00@1.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cydcut00@1.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for imgonly0@2.0.0") == 1);
     CHECK(log_count("MODS: requirements:") == 3);
     CHECK(log_has("bundle 'bad.cvar@1.0.0' skipped: requirements.cvars key 9lives is not a cvar name"));
     CHECK(log_has("bundle 'bad.value@1.0.0' skipped: requirements.cvars.com_maxFps must be a string, an integer or a boolean"));
     CHECK(log_has("bundle 'bad.key@1.0.0' skipped: requirements key dlls is not supported (cvars, commands)"));
     CHECK(log_has("bundle 'bad.line@1.0.0' skipped: requirements.commands.activate[0] must be one console command"));
-    CHECK(!log_has("plain.mod@1.0.0' skipped"));
+    CHECK(!log_has("plainmod@1.0.0' skipped"));
     /* The distinct cvars the admitted bundles set. */
     CHECK(sh_modserve_requirements() == 2 && sh_modserve_requirements_held() == 1);
     /* A rescan of the same bundles does not repeat the lines. */
@@ -1096,7 +994,7 @@ static void test_requirements(void)
     CHECK(g_gate_val[0] == 0 && g_gate_val[1] == 0 && g_gate_drains == 1 && g_gate_sets == 2);
     CHECK(ev_first("S:g_useImageBlackList=0") >= 0 && ev_first("S:g_useResourceBlackList=0") >= 0);
     CHECK(ev_last("S:") < ev_first("D;") && ev_first("D;") < ev_first("R:"));
-    CHECK(ev_first("R:md6Def:mods/cyd.cut/cyber.md6") > ev_first("D;"));
+    CHECK(ev_first("R:md6Def:mods/cydcut00/cyber.md6") > ev_first("D;"));
     CHECK(log_has("MODS: editor: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
                   "(queued, live after a command-buffer drain)"));
     CHECK(sh_modserve_test_gates_owned() == 2);
@@ -1126,12 +1024,12 @@ static void test_requirements(void)
     sh_modserve_plan_editor(&p);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 1);
     CHECK(r.not_live == 2 && !r.live && !r.drained);
-    CHECK(ev_first("R:snapEditorEntityDef:mods/plain.mod/thing") >= 0);
-    CHECK(ev_first("cyd.cut") < 0 && ev_first("img.only") < 0);
+    CHECK(ev_first("R:snapEditorEntityDef:mods/plainmod/thing") >= 0);
+    CHECK(ev_first("cydcut00") < 0 && ev_first("imgonly0") < 0);
     CHECK(log_has("queued but the command buffer could not be drained"));
-    CHECK(log_has("editor: md6Def 'mods/cyd.cut/cyber.md6' (cyd.cut) BLOCKED: requirements g_useImageBlackList=0, "
+    CHECK(log_has("editor: md6Def 'mods/cydcut00/cyber.md6' (cydcut00) BLOCKED: requirements g_useImageBlackList=0, "
                   "g_useResourceBlackList=0 are not live"));
-    CHECK(log_has("(img.only) BLOCKED: requirement g_useImageBlackList=0 is not live"));
+    CHECK(log_has("(imgonly0) BLOCKED: requirement g_useImageBlackList=0 is not live"));
     sh_modserve_plan_free(&p);
 
     /* A refused set and an unavailable cvar system block the same way. */
@@ -1216,24 +1114,24 @@ static void test_requirements_general(void)
     _snprintf_s(plain_root, sizeof plain_root, _TRUNCATE, "%s\\plain\\mods", top);
     mkdirs(root);
     mkdirs(root2);
-    make_gen(root, "a.first", 'a', A, 100);
-    make_gen(root, "b.second", 'b', B, 200);
-    make_gen(root, "c.locked", 'c', C, 300);
-    make_gen(root, "d.same", 'd', D, 400);
-    make_gen(root, "e.lines", 'e', E, 500);
-    make_gen(root2, "c.locked", 'c', C, 300);
-    make_gen(root2, "d.same", 'd', D, 400);
-    make_gen(root2, "e.lines", 'e', E, 500);
+    make_gen(root, "afirst00", 'a', A, 100);
+    make_gen(root, "bsecond0", 'b', B, 200);
+    make_gen(root, "clocked0", 'c', C, 300);
+    make_gen(root, "dsame000", 'd', D, 400);
+    make_gen(root, "elines00", 'e', E, 500);
+    make_gen(root2, "clocked0", 'c', C, 300);
+    make_gen(root2, "dsame000", 'd', D, 400);
+    make_gen(root2, "elines00", 'e', E, 500);
 
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 5);
     /* The later install asking another value loses, both named. */
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: b.second@1.0.0 asks \"60\", a.first@1.0.0 asks \"120\"; "
-                  "b.second@1.0.0, the later install, loses"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120 for a.first@1.0.0") && log_has("MODS: requirements: r_fancy=1 for a.first@1.0.0"));
-    CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for a.first@1.0.0"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for d.same@1.0.0") && !log_has("for b.second@1.0.0"));
+    CHECK(log_has("MODS: requirements: conflict: com_maxFps: bsecond0@1.0.0 asks \"60\", afirst00@1.0.0 asks \"120\"; "
+                  "bsecond0@1.0.0, the later install, loses"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120 for afirst00@1.0.0") && log_has("MODS: requirements: r_fancy=1 for afirst00@1.0.0"));
+    CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for afirst00@1.0.0"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for dsame000@1.0.0") && !log_has("for bsecond0@1.0.0"));
     CHECK(sh_modserve_requirements() == 4);
 
     log_clear();
@@ -1244,45 +1142,45 @@ static void test_requirements_general(void)
     /* Activate lines run after the cvars, in order, trimmed, once. */
     CHECK(ev_first("C:echo first on") > ev_last("S:") && ev_first("C:bind x \"say hi\";") > ev_first("C:echo first on"));
     CHECK(ev_first("C:echo second on") < 0 && ev_first("C:echo e off") < 0 && ev_first("C:echo first off") < 0);
-    CHECK(log_has("MODS: requirements: a.first: command \"echo first on\""));
-    CHECK(log_has("MODS: requirements: a.first: command \"bind x \"say hi\"\""));
-    CHECK(log_has("MODS: editor: requirement ro_locked=1 (c.locked@1.0.0) is not live: the engine marks it read-only"));
+    CHECK(log_has("MODS: requirements: afirst00: command \"echo first on\""));
+    CHECK(log_has("MODS: requirements: afirst00: command \"bind x \"say hi\"\""));
+    CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0@1.0.0) is not live: the engine marks it read-only"));
     /* Only the bundles whose requirements are not live are blocked. */
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 5);
     log_clear();
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 3);
-    CHECK(log_has("(b.second) BLOCKED: requirement com_maxFps=60 lost to a.first@1.0.0, installed earlier, which asks \"120\""));
-    CHECK(log_has("(c.locked) BLOCKED: requirement ro_locked=1 is not live"));
-    CHECK(ev_first("R:snapEditorEntityDef:mods/a.first/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/d.same/thing") >= 0 &&
-          ev_first("R:snapEditorEntityDef:mods/e.lines/thing") >= 0);
+    CHECK(log_has("(bsecond0) BLOCKED: requirement com_maxFps=60 lost to afirst00@1.0.0, installed earlier, which asks \"120\""));
+    CHECK(log_has("(clocked0) BLOCKED: requirement ro_locked=1 is not live"));
+    CHECK(ev_first("R:snapEditorEntityDef:mods/afirst00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/dsame000/thing") >= 0 &&
+          ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0);
     sh_modserve_plan_free(&p);
     /* Nothing runs twice. */
     CHECK(g_gate_lines == 2 && !log_has("command \""));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 8);
-    CHECK(strstr(g_report, "requirements: a.first@1.0.0: cvar com_maxFps=120: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: d.same@1.0.0: cvar g_label=two words: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: a.first@1.0.0: activate command \"echo first on\": ran\n") != NULL);
-    CHECK(strstr(g_report, "requirements: a.first@1.0.0: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
-    CHECK(strstr(g_report, "requirements: b.second@1.0.0: cvar com_maxFps=60: refused (com_maxFps=60 lost to a.first@1.0.0") != NULL);
-    CHECK(strstr(g_report, "requirements: b.second@1.0.0: activate command \"echo second on\": not run") != NULL);
-    CHECK(strstr(g_report, "requirements: c.locked@1.0.0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
-    CHECK(strstr(g_report, "requirements: e.lines@1.0.0: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: cvar com_maxFps=120: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: dsame000@1.0.0: cvar g_label=two words: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: activate command \"echo first on\": ran\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0@1.0.0: cvar com_maxFps=60: refused (com_maxFps=60 lost to afirst00@1.0.0") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0@1.0.0: activate command \"echo second on\": not run") != NULL);
+    CHECK(strstr(g_report, "requirements: clocked0@1.0.0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: elines00@1.0.0: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
 
-    /* a.first and b.second go: a.first's deactivate line runs, r_fancy is
-     * restored, com_maxFps stays (d.same asks the same number). */
+    /* afirst00 and bsecond0 go: afirst00's deactivate line runs, r_fancy is
+     * restored, com_maxFps stays (dsame000 asks the same number). */
     CHECK(sh_modserve_index_build(root2) == 3);
     log_clear();
     g_events[0] = 0;
     (void)sh_modserve_requirements_apply(&g_gates, "rescan", &r);
     CHECK(ev_first("C:echo first off") >= 0 && ev_first("C:echo second on") < 0 && r.commands == 1);
-    CHECK(log_has("MODS: rescan: requirements of a.first@1.0.0 stopped; running its deactivate commands"));
+    CHECK(log_has("MODS: rescan: requirements of afirst00@1.0.0 stopped; running its deactivate commands"));
     CHECK(!strcmp(g_text_val[1], "0") && log_has("requirement released: r_fancy restored to 0"));
     CHECK(!strcmp(g_text_val[0], "120") && r.restored == 1);
 
     /* Nothing installed asks anything: com_maxFps and g_label return to what
-     * they displaced, e.lines's line runs, and nothing is held. */
+     * they displaced, elines00's line runs, and nothing is held. */
     CHECK(sh_modserve_index_build(plain_root) == 1);
     g_events[0] = 0;
     log_clear();
@@ -1300,8 +1198,8 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
 
 #define CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
 #define WHITELIST "generated/decls/snappropertyinspector_whitelistencounterdecl/single_encounters_white_list_inspector.decl"
-#define CYB_AW    "generated/decls/animweb/zion/boss/cyberdemon_ai.decl"
-#define NEEDY     "generated/decls/aipaingraph/cyberdemon_ai.decl"
+#define CYB_AW    "generated/decls/animweb/zion/boss/cyberdem_ai.decl"
+#define NEEDY     "generated/decls/aipaingraph/cyberdem_ai.decl"
 
 #define CONDUCTOR_HEAD \
     "{\r\n\tinherit = \"ai/base/conductor\";\r\n\tclass = \"idAIConductor_Coop\";\r\n" \
@@ -1313,7 +1211,7 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
 #define ITEM(n, type, def) "\t\t\titem[" #n "] = {\r\n\t\t\t\taiType = \"" type "\";\r\n\t\t\t\tentityDef = \"" def "\";\r\n\t\t\t}\r\n"
 
 #define CONDUCTOR_CYBER CONDUCTOR_HEAD "\t\t\tnum = 3;\r\n" CONDUCTOR_STOCK_ITEMS \
-    ITEM(2, "524288", "ai/demon/cyberdemon_hell") CONDUCTOR_TAIL
+    ITEM(2, "524288", "ai/demon/cyberdem_hell") CONDUCTOR_TAIL
 #define CONDUCTOR_GUARD CONDUCTOR_HEAD "\t\t\tnum = 4;\r\n" CONDUCTOR_STOCK_ITEMS \
     ITEM(2, "2097152", "ai/demon/talismanguard/staff") ITEM(3, "4194304", "ai/demon/talismanguard/hammer") CONDUCTOR_TAIL
 #define CONDUCTOR_SPIDER CONDUCTOR_HEAD "\t\t\tnum = 3;\r\n" CONDUCTOR_STOCK_ITEMS \
@@ -1328,7 +1226,7 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
 #define MD6_HEAD "{\n\tinit {\n\t\tinherit \"player/tp_body\"\n\t}\n\tevents {\n"
 #define MD6_STOCK "\t\tanim \"md6/stock/walk.md6anim\" {\n\t\t\tevent \"ae_footstep\" {\n\t\t\t\tframe 4\n\t\t\t\trow 0\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n"
 #define MD6_TAIL(extra) "\t}\n\taliases {\n" extra "\t}\n\tuserChannelWeightGroupOverride {\n\t\t\"MD6_WEIGHTGROUP_ALL\"\n\t}\n}\n"
-#define AW_TEXT(extra) "{\n\tprops {\n\t\tgridSize 32\n\t\tmodelInfos {\n\t\t\t\"zion/characters/monsters/cyberdemon/base/cyberdemon.md6\" \"\"\n\t\t}\n\t}\n" extra "}\n"
+#define AW_TEXT(extra) "{\n\tprops {\n\t\tgridSize 32\n\t\tmodelInfos {\n\t\t\t\"zion/characters/monsters/cyberdem/base/cyberdemon.md6\" \"\"\n\t\t}\n\t}\n" extra "}\n"
 
 /* The stock module_lift_door md6Def (bare statement grammar; its meshKits pair
  * `"doors" = ""` has no terminator), split where its events block closes. */
@@ -1344,7 +1242,7 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
     "\tjointGroups {\r\n" \
     "\t}\r\n" \
     "\tevents {\r\n" \
-    "\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdemon_intro_door.md6anim\" {\r\n" \
+    "\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdem_intro_door.md6anim\" {\r\n" \
     "\t\t\tevent \"ae_startFX\" {\r\n" \
     "\t\t\t\tframe 26\r\n" \
     "\t\t\t\trow 0\r\n" \
@@ -1378,8 +1276,8 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
     "\t\t\tanim \"md6/objects/props_set/doors/module_lift_door/motion/open_out.md6anim\"\r\n" \
     "\t\t}\r\n" \
     "\t\talias {\r\n" \
-    "\t\t\tname \"cyber_intro/cyberdemon_intro_door\"\r\n" \
-    "\t\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdemon_intro_door.md6anim\"\r\n" \
+    "\t\t\tname \"cyber_intro/cyberdem_intro_door\"\r\n" \
+    "\t\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdem_intro_door.md6anim\"\r\n" \
     "\t\t}\r\n" \
     "\t}\r\n" \
     "\tprops {\r\n" \
@@ -1435,10 +1333,10 @@ static const sh_modserve_engine_ops g_cf = { NULL, cf_source, fake_register, fak
 
 /* ------------------------------------------------------------------ gated raw resources */
 
-#define GT_MODEL "generated/basemodel/md6/mods/gt.raw/body.bmd6model"
-#define GT_IMAGE "generated/image/mods/gt.raw/skin.bimage"
-#define GT_ANIM  "cooked/anim/md6/mods/gt.raw/idle.bmd6anim"
-#define GT_LATE  "generated/image/mods/gt.raw/late.bimage"
+#define GT_MODEL "generated/basemodel/md6/mods/gtraw000/body.bmd6model"
+#define GT_IMAGE "generated/image/mods/gtraw000/skin.bimage"
+#define GT_ANIM  "cooked/anim/md6/mods/gtraw000/idle.bmd6anim"
+#define GT_LATE  "generated/image/mods/gtraw000/late.bimage"
 
 static int raw_visit(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
 {
@@ -1455,10 +1353,10 @@ static int raw_visit(void *context, const char *type, const char *name, const ch
 static void test_ungated_raw(void)
 {
     static const fx_file gt[] = {
-        { GT_MODEL, "MODEL", -1, "baseModel", "md6/mods/gt.raw/body.md6mesh", NULL, '1' },
-        { GT_IMAGE, "IMAGE", -1, "image", "mods/gt.raw/skin", NULL, '2' },
-        { GT_ANIM, "ANIM", -1, "anim", "md6/mods/gt.raw/idle.md6anim", NULL, '3' },
-        { GT_LATE, "LATE", -1, "image", "mods/gt.raw/late", NULL, '4' },
+        { GT_MODEL, "MODEL", -1, "baseModel", "md6/mods/gtraw000/body.md6mesh", NULL, '1' },
+        { GT_IMAGE, "IMAGE", -1, "image", "mods/gtraw000/skin", NULL, '2' },
+        { GT_ANIM, "ANIM", -1, "anim", "md6/mods/gtraw000/idle.md6anim", NULL, '3' },
+        { GT_LATE, "LATE", -1, "image", "mods/gtraw000/late", NULL, '4' },
     };
     char top[MAX_PATH], root[MAX_PATH], text[64], seen[1024];
     char *slash;
@@ -1469,7 +1367,7 @@ static void test_ungated_raw(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\gated\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "gt.raw@1.0.0", "gt.raw", "1.0.0", '6', NULL, gt, 4, NULL);
+    make_bundle(root, "gtraw000@1.0.0", "gtraw000", "1.0.0", '6', NULL, gt, 4, NULL);
     g_bundle_extra = NULL;
     CHECK(sh_modserve_index_build(root) == 1);
     /* The gates cannot be set: not live; the boot-time opens are ungated. */
@@ -1485,7 +1383,7 @@ static void test_ungated_raw(void)
     CHECK(open_text(GT_LATE, text, sizeof text) == 1);
     seen[0] = 0;
     CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 2);
-    CHECK(strstr(seen, "baseModel:md6/mods/gt.raw/body.md6mesh:gt.raw;") && strstr(seen, "image:mods/gt.raw/skin:gt.raw;"));
+    CHECK(strstr(seen, "baseModel:md6/mods/gtraw000/body.md6mesh:gtraw000;") && strstr(seen, "image:mods/gtraw000/skin:gtraw000;"));
     CHECK(!strstr(seen, "idle") && !strstr(seen, "late"));
     /* Settled: not offered again, also after a rescan of the same bytes. */
     seen[0] = 0;
@@ -1506,7 +1404,7 @@ static void test_ungated_raw(void)
  * and no early-decl list (ADD-L11 holds for decls). */
 #define GS_MESH "generated/basemodel/md6/characters/monsters/gs/body.bmd6model"
 #define GS_MAT  "generated/decls/material/models/monsters/gs/body.decl"
-#define GS_ENT  "generated/decls/entitydef/mods/gs.mod/thing.decl"
+#define GS_ENT  "generated/decls/entitydef/mods/gsmod000/thing.decl"
 #define GL_MESH "generated/basemodel/md6/characters/monsters/gl/body.bmd6model"
 #define GS_MESH_BYTES "stock gs mesh"
 #define GS_MAT_BYTES "{ diffusemap models/monsters/gs/body }"
@@ -1528,7 +1426,7 @@ static void test_surface_gated_reload(void)
         { GS_MESH, GS_MESH_BYTES, -1, "baseModel", "md6/characters/monsters/gs/body.md6mesh",
           "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '1' },
         { GS_MAT, GS_MAT_BYTES, -1, "material", "models/monsters/gs/body", NULL, '2' },
-        { GS_ENT, "{ thing }", -1, "entityDef", "mods/gs.mod/thing",
+        { GS_ENT, "{ thing }", -1, "entityDef", "mods/gsmod000/thing",
           "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '3' },
     };
     char top[MAX_PATH], root[MAX_PATH], text[64], seen[1024], h[65];
@@ -1550,7 +1448,7 @@ static void test_surface_gated_reload(void)
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
     g_fx_restore = GS_MESH;
     g_fx_restore2 = GS_MAT;
-    make_bundle(root, "gs.mod", "gs.mod", "1.0.0", 'c', NULL, gs, 3, NULL);
+    make_bundle(root, "gsmod000", "gsmod000", "1.0.0", 'c', NULL, gs, 3, NULL);
     g_fx_restore = g_fx_restore2 = NULL;
     g_bundle_extra = NULL;
     CHECK(sh_modserve_index_build(root) == 1);
@@ -1566,7 +1464,7 @@ static void test_surface_gated_reload(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && r.live == 2);
     seen[0] = 0;
     n = sh_modserve_each_ungated_raw(raw_visit, seen);
-    CHECK(n == 1 && strstr(seen, "baseModel:md6/characters/monsters/gs/body.md6mesh:gs.mod;") != NULL);
+    CHECK(n == 1 && strstr(seen, "baseModel:md6/characters/monsters/gs/body.md6mesh:gsmod000;") != NULL);
     if (n != 1) printf("  gated reload list (%d): %s\n", n, seen);
     /* That reload runs outside any watermark (the map load's scope apply):
      * it opens its own keeper; inside the editor pass that pass's keeps it. */
@@ -1577,7 +1475,7 @@ static void test_surface_gated_reload(void)
     /* The surface material decl (and the mesh) are in no plan; no early-decl re-parse. */
     hashes[0] = hash64('c', h);
     CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) >= 1);
-    CHECK(step_index(&map, "material", "models/monsters/gs/body") < 0 && step_index(&map, "entityDef", "mods/gs.mod/thing") >= 0);
+    CHECK(step_index(&map, "material", "models/monsters/gs/body") < 0 && step_index(&map, "entityDef", "mods/gsmod000/thing") >= 0);
     CHECK(step_index(&map, "baseModel", "md6/characters/monsters/gs/body.md6mesh") < 0);
     g_calls[0] = 0;
     g_already = NULL;
@@ -1608,7 +1506,7 @@ static void test_surface_built_after_boot(void)
         { GL_MESH, GS_MESH_BYTES, -1, "baseModel", "md6/characters/monsters/gl/body.md6mesh",
           "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '1' },
         { GS_MAT, GS_MAT_BYTES, -1, "material", "models/monsters/gs/body", NULL, '2' },
-        { GS_ENT, "{ thing }", -1, "entityDef", "mods/gs.mod/thing",
+        { GS_ENT, "{ thing }", -1, "entityDef", "mods/gsmod000/thing",
           "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '3' },
     };
     char top[MAX_PATH], root[MAX_PATH], empty[MAX_PATH], seen[1024];
@@ -1636,7 +1534,7 @@ static void test_surface_built_after_boot(void)
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
     g_fx_restore = GL_MESH;
     g_fx_restore2 = GS_MAT;
-    make_bundle(root, "gs.mod", "gs.mod", "1.0.0", 'c', NULL, gs, 3, NULL);
+    make_bundle(root, "gsmod000", "gsmod000", "1.0.0", 'c', NULL, gs, 3, NULL);
     g_fx_restore = g_fx_restore2 = NULL;
     g_bundle_extra = NULL;
     CHECK(sh_modserve_index_build(root) == 1);
@@ -1649,7 +1547,7 @@ static void test_surface_built_after_boot(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && r.live == 2);
     seen[0] = 0;
     n = sh_modserve_each_ungated_raw(raw_visit, seen);
-    CHECK(n == 1 && strstr(seen, "baseModel:md6/characters/monsters/gl/body.md6mesh:gs.mod;") != NULL);
+    CHECK(n == 1 && strstr(seen, "baseModel:md6/characters/monsters/gl/body.md6mesh:gsmod000;") != NULL);
     if (n != 1) printf("  gated reload list (%d): %s\n", n, seen);
     /* Repaired: not offered again, also after a rescan of the same bytes. */
     seen[0] = 0;
@@ -1667,24 +1565,24 @@ static void test_surface_built_after_boot(void)
 
 #define RF_SH      "generated/decls/entitydef/monster/zombie.decl"
 #define RF_SH_GONE "generated/decls/entitydef/monster/gonezombie.decl"
-#define RF_KEEP    "generated/decls/entitydef/mods/rf.mod/keep.decl"
-#define RF_NAME    "generated/decls/entitydef/mods/rf.mod/name.decl"
-#define RF_OLD     "generated/decls/entitydef/mods/rf.mod/oldname.decl"
-#define RF_MODEL   "generated/basemodel/md6/mods/rf.mod/body.bmd6model"
-#define RF_IMAGE   "generated/image/mods/rf.mod/skin.bimage"
-#define RF_ANIM    "cooked/anim/md6/mods/rf.mod/idle.bmd6anim"
-#define RF_NEW     "generated/decls/entitydef/mods/rf.mod/new.decl"
-#define RF_ROW     "generated/decls/snapeditorentitydef/mods/rf.mod/new.decl"
-#define RF_CHILD   "generated/decls/entitydef/mods/rf.mod/child.decl"
-#define RF_GRAND   "generated/decls/entitydef/mods/rf.mod/grandchild.decl"
-#define RF_ORPHAN  "generated/decls/entitydef/mods/rf.mod/orphan.decl"
-#define RF_DECOY   "generated/decls/entitydef/mods/rf.mod/decoy.decl"
-#define RF_OLDROW  "generated/decls/snapeditorentitydef/mods/rf.mod/oldrow.decl"
+#define RF_KEEP    "generated/decls/entitydef/mods/rfmod000/keep.decl"
+#define RF_NAME    "generated/decls/entitydef/mods/rfmod000/name.decl"
+#define RF_OLD     "generated/decls/entitydef/mods/rfmod000/oldname.decl"
+#define RF_MODEL   "generated/basemodel/md6/mods/rfmod000/body.bmd6model"
+#define RF_IMAGE   "generated/image/mods/rfmod000/skin.bimage"
+#define RF_ANIM    "cooked/anim/md6/mods/rfmod000/idle.bmd6anim"
+#define RF_NEW     "generated/decls/entitydef/mods/rfmod000/new.decl"
+#define RF_ROW     "generated/decls/snapeditorentitydef/mods/rfmod000/new.decl"
+#define RF_CHILD   "generated/decls/entitydef/mods/rfmod000/child.decl"
+#define RF_GRAND   "generated/decls/entitydef/mods/rfmod000/grandchild.decl"
+#define RF_ORPHAN  "generated/decls/entitydef/mods/rfmod000/orphan.decl"
+#define RF_DECOY   "generated/decls/entitydef/mods/rfmod000/decoy.decl"
+#define RF_OLDROW  "generated/decls/snapeditorentitydef/mods/rfmod000/oldrow.decl"
 #define RF_SHROW   "generated/decls/snapeditorentitydef/func/shadowrow.decl"   /* a stock editor row the mod shadows */
-#define RF_INHERIT_CHILD  "{\n\tinherit = \"mods/rf.mod/name\";\n}\n"
-#define RF_INHERIT_GRAND  "{\n\t// a parent\n\tinherit = \"mods/rf.mod/child\";\n}\n"
+#define RF_INHERIT_CHILD  "{\n\tinherit = \"mods/rfmod000/name\";\n}\n"
+#define RF_INHERIT_GRAND  "{\n\t// a parent\n\tinherit = \"mods/rfmod000/child\";\n}\n"
 #define RF_INHERIT_ORPHAN "{\n\tinherit=\"monster/gonezombie\";\n}\n"
-#define RF_INHERIT_DECOY  "{\n\t// inherit = \"mods/rf.mod/name\"\n\tedit = { inherit = \"mods/rf.mod/name\"; }\n}\n"
+#define RF_INHERIT_DECOY  "{\n\t// inherit = \"mods/rfmod000/name\"\n\tedit = { inherit = \"mods/rfmod000/name\"; }\n}\n"
 
 typedef struct rf_seen { char order[2048]; int keep_raw; int visits; } rf_seen;
 static int rf_visit(void *context, const sh_modserve_refresh_item *it)
@@ -1707,35 +1605,35 @@ static void test_refresh(void)
     static const fx_file v1[] = {
         { RF_SH, "entityDef z1 {}", -1, "entityDef", "monster/zombie", NULL, '1' },
         { RF_SH_GONE, "entityDef g1 {}", -1, "entityDef", "monster/gonezombie", NULL, '3' },
-        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rf.mod/keep", NULL, '4' },
-        { RF_NAME, "entityDef n1 {}", -1, "entityDef", "mods/rf.mod/name", NULL, '5' },
-        { RF_OLD, "entityDef old {}", -1, "entityDef", "mods/rf.mod/oldname", NULL, '7' },
-        { RF_MODEL, "MODEL1", -1, "baseModel", "md6/mods/rf.mod/body.md6mesh", NULL, '8' },
-        { RF_IMAGE, "IMAGE", -1, "image", "mods/rf.mod/skin", NULL, 'a' },
-        { RF_ANIM, "ANIM1", -1, "anim", "md6/mods/rf.mod/idle.md6anim", NULL, 'b' },
-        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rf.mod/child", NULL, 'f' },
-        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rf.mod/grandchild", NULL, '0' },
-        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rf.mod/orphan", NULL, '1' },
-        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rf.mod/decoy", NULL, '2' },
-        { RF_OLDROW, "{ entityDef \"mods/rf.mod/keep\" }", -1, "snapEditorEntityDef", "mods/rf.mod/oldrow",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/rf.mod/keep\"}]", '3' },
+        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rfmod000/keep", NULL, '4' },
+        { RF_NAME, "entityDef n1 {}", -1, "entityDef", "mods/rfmod000/name", NULL, '5' },
+        { RF_OLD, "entityDef old {}", -1, "entityDef", "mods/rfmod000/oldname", NULL, '7' },
+        { RF_MODEL, "MODEL1", -1, "baseModel", "md6/mods/rfmod000/body.md6mesh", NULL, '8' },
+        { RF_IMAGE, "IMAGE", -1, "image", "mods/rfmod000/skin", NULL, 'a' },
+        { RF_ANIM, "ANIM1", -1, "anim", "md6/mods/rfmod000/idle.md6anim", NULL, 'b' },
+        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rfmod000/child", NULL, 'f' },
+        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rfmod000/grandchild", NULL, '0' },
+        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rfmod000/orphan", NULL, '1' },
+        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rfmod000/decoy", NULL, '2' },
+        { RF_OLDROW, "{ entityDef \"mods/rfmod000/keep\" }", -1, "snapEditorEntityDef", "mods/rfmod000/oldrow",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/rfmod000/keep\"}]", '3' },
         { RF_SHROW, "{ entityDef \"monster/zombie\" }", -1, "snapEditorEntityDef", "func/shadowrow",
           "[{\"type\":\"entityDef\",\"name\":\"monster/zombie\"}]", 'g' },
     };
     static const fx_file v2[] = {
         { RF_SH, "entityDef z2 {}", -1, "entityDef", "monster/zombie", NULL, '2' },
-        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rf.mod/keep", NULL, '4' },
-        { RF_NAME, "entityDef n2 {}", -1, "entityDef", "mods/rf.mod/name", NULL, '6' },
-        { RF_MODEL, "MODEL2", -1, "baseModel", "md6/mods/rf.mod/body.md6mesh", NULL, '9' },
-        { RF_IMAGE, "IMAGE", -1, "image", "mods/rf.mod/skin", NULL, 'a' },
-        { RF_ANIM, "ANIM2", -1, "anim", "md6/mods/rf.mod/idle.md6anim", NULL, 'c' },
-        { RF_NEW, "entityDef new {}", -1, "entityDef", "mods/rf.mod/new", NULL, 'd' },
-        { RF_ROW, "{ entityDef \"mods/rf.mod/new\" }", -1, "snapEditorEntityDef", "mods/rf.mod/new",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/rf.mod/new\"}]", 'e' },
-        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rf.mod/child", NULL, 'f' },
-        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rf.mod/grandchild", NULL, '0' },
-        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rf.mod/orphan", NULL, '1' },
-        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rf.mod/decoy", NULL, '2' },
+        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rfmod000/keep", NULL, '4' },
+        { RF_NAME, "entityDef n2 {}", -1, "entityDef", "mods/rfmod000/name", NULL, '6' },
+        { RF_MODEL, "MODEL2", -1, "baseModel", "md6/mods/rfmod000/body.md6mesh", NULL, '9' },
+        { RF_IMAGE, "IMAGE", -1, "image", "mods/rfmod000/skin", NULL, 'a' },
+        { RF_ANIM, "ANIM2", -1, "anim", "md6/mods/rfmod000/idle.md6anim", NULL, 'c' },
+        { RF_NEW, "entityDef new {}", -1, "entityDef", "mods/rfmod000/new", NULL, 'd' },
+        { RF_ROW, "{ entityDef \"mods/rfmod000/new\" }", -1, "snapEditorEntityDef", "mods/rfmod000/new",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/rfmod000/new\"}]", 'e' },
+        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rfmod000/child", NULL, 'f' },
+        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rfmod000/grandchild", NULL, '0' },
+        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rfmod000/orphan", NULL, '1' },
+        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rfmod000/decoy", NULL, '2' },
     };
     char top[MAX_PATH], root[MAX_PATH], text[64];
     char *slash;
@@ -1747,7 +1645,7 @@ static void test_refresh(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refresh\\mods", top);
     mkdirs(root);
-    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\", \"" RF_SHROW "\"", v1, 14, NULL);
+    make_bundle(root, "rfmod000", "rfmod000", "1.0.0", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\", \"" RF_SHROW "\"", v1, 14, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     /* The first table of this root replaces another root's: every file is
      * new. Shadows the earlier tables served and no table serves since are
@@ -1761,7 +1659,7 @@ static void test_refresh(void)
     memset(&s, 0, sizeof s);
     CHECK(sh_modserve_each_refresh(rf_visit, &s) == d.pending);
     CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && strstr(s.order, "1:entityDef:monster/zombie:now;") &&
-          strstr(s.order, "1:entityDef:monster/gonezombie:now;") && !strstr(s.order, "rf.mod"));
+          strstr(s.order, "1:entityDef:monster/gonezombie:now;") && !strstr(s.order, "rfmod000"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
     /* The engine read some of v1 through the provider. */
@@ -1781,7 +1679,7 @@ static void test_refresh(void)
     }
 
     /* The author edits the folder; the rebuild rule writes v2; the rescan publishes it. */
-    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '2', "\"" RF_SH "\"", v2, 12, NULL);
+    make_bundle(root, "rfmod000", "rfmod000", "1.0.0", '2', "\"" RF_SH "\"", v2, 12, NULL);
     log_clear();
     CHECK(sh_modserve_index_rescan() == 1);
     sh_modserve_last_diff(&d);
@@ -1796,7 +1694,7 @@ static void test_refresh(void)
     /* The new gameplay decl of the mod in use is planned once; the new row is the palette's. */
     {
         sh_modserve_plan p;
-        CHECK(sh_modserve_plan_refresh(&p) == 1 && p.count == 1 && !strcmp(p.steps[0].name, "mods/rf.mod/new"));
+        CHECK(sh_modserve_plan_refresh(&p) == 1 && p.count == 1 && !strcmp(p.steps[0].name, "mods/rfmod000/new"));
         sh_modserve_plan_free(&p);
         CHECK(sh_modserve_plan_refresh(&p) == 0);
         sh_modserve_plan_free(&p);
@@ -1812,21 +1710,21 @@ static void test_refresh(void)
     memset(&s, 0, sizeof s);
     s.keep_raw = 1;
     CHECK(sh_modserve_each_refresh(rf_visit, &s) == 10);
-    CHECK(strstr(s.order, "1:snapEditorEntityDef:mods/rf.mod/oldrow:gone;"));
-    CHECK(strstr(s.order, "mods/rf.mod/child:now;") && strstr(s.order, "mods/rf.mod/orphan:now;") &&
-          strstr(s.order, "mods/rf.mod/grandchild:now;") && !strstr(s.order, "decoy"));
-    CHECK(strstr(s.order, "gonezombie:gone;") < strstr(s.order, "rf.mod/child:") &&
-          strstr(s.order, "rf.mod/child:") < strstr(s.order, "rf.mod/grandchild:") &&
-          strstr(s.order, "rf.mod/grandchild:") < strstr(s.order, "baseModel"));
-    CHECK(strstr(s.order, "1:entityDef:monster/zombie:now;") && strstr(s.order, "1:entityDef:mods/rf.mod/name:now;"));
+    CHECK(strstr(s.order, "1:snapEditorEntityDef:mods/rfmod000/oldrow:gone;"));
+    CHECK(strstr(s.order, "mods/rfmod000/child:now;") && strstr(s.order, "mods/rfmod000/orphan:now;") &&
+          strstr(s.order, "mods/rfmod000/grandchild:now;") && !strstr(s.order, "decoy"));
+    CHECK(strstr(s.order, "gonezombie:gone;") < strstr(s.order, "rfmod000/child:") &&
+          strstr(s.order, "rfmod000/child:") < strstr(s.order, "rfmod000/grandchild:") &&
+          strstr(s.order, "rfmod000/grandchild:") < strstr(s.order, "baseModel"));
+    CHECK(strstr(s.order, "1:entityDef:monster/zombie:now;") && strstr(s.order, "1:entityDef:mods/rfmod000/name:now;"));
     CHECK(strstr(s.order, "1:entityDef:monster/gonezombie:gone;"));
-    CHECK(strstr(s.order, "2:baseModel:md6/mods/rf.mod/body.md6mesh:now;"));
-    CHECK(strstr(s.order, "4:anim:md6/mods/rf.mod/idle.md6anim:now;") &&
-          strstr(s.order, "rf.mod/grandchild:") < strstr(s.order, "4:anim:"));
-    CHECK(strstr(s.order, "mods/rf.mod/name:now;") < strstr(s.order, "gonezombie") &&
+    CHECK(strstr(s.order, "2:baseModel:md6/mods/rfmod000/body.md6mesh:now;"));
+    CHECK(strstr(s.order, "4:anim:md6/mods/rfmod000/idle.md6anim:now;") &&
+          strstr(s.order, "rfmod000/grandchild:") < strstr(s.order, "4:anim:"));
+    CHECK(strstr(s.order, "mods/rfmod000/name:now;") < strstr(s.order, "gonezombie") &&
           strstr(s.order, "gonezombie") < strstr(s.order, "baseModel"));
     CHECK(!strstr(s.order, "keep") && !strstr(s.order, "skin") &&
-          !strstr(s.order, "rf.mod/new") && !strstr(s.order, "oldname") && !strstr(s.order, ":gated"));
+          !strstr(s.order, "rfmod000/new") && !strstr(s.order, "oldname") && !strstr(s.order, ":gated"));
     /* The decls are settled and no early decl; the model and the anim are still pending. */
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 2);
@@ -2000,7 +1898,7 @@ static void test_compose_unit(void)
 
 static void test_conflicts(void)
 {
-    char top[MAX_PATH], root[MAX_PATH], legacy[MAX_PATH], text[4096], aw_hash[65];
+    char top[MAX_PATH], root[MAX_PATH], text[4096], aw_hash[65];
     char *slash;
     sh_modserve_conflict c;
     sh_modserve_hit hit;
@@ -2013,21 +1911,19 @@ static void test_conflicts(void)
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\conflicts\\mods", top);
-    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", root);
-    mkdirs(legacy);
-    g_bundle_extra = "\"legacy\": {},\n  ";
+    mkdirs(root);
     {
-        /* The owner's tree, reduced: two builds of one authored boss mod with
-         * the same animWeb bytes, the map-delivered copy of it with one line
-         * different, and two more bosses, all appending to the conductor and
-         * the whitelist. */
+        /* The owner's tree, reduced: one authored boss mod at the root and
+         * the build a map pinned in its place, with the same animWeb bytes,
+         * another boss pack carrying it with one line different, and two more
+         * bosses, all appending to the conductor and the whitelist. */
         static const fx_file cy[] = {
-            { CYB_AW, AW_TEXT("\tcustomFlags AW_CF_IDLE_CYCLE\n"), -1, "animWeb", "zion/boss/cyberdemon_ai", NULL, 'a' },
+            { CYB_AW, AW_TEXT("\tcustomFlags AW_CF_IDLE_CYCLE\n"), -1, "animWeb", "zion/boss/cyberdem_ai", NULL, 'a' },
             { CONDUCTOR, CONDUCTOR_CYBER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'c' },
             { WHITELIST, WL_A, -1, "snapPropertyInspector_WhiteListEncounterDecl", "single_encounters_white_list_inspector", NULL, 'w' },
         };
         static const fx_file dl[] = {
-            { CYB_AW, AW_TEXT(""), -1, "animWeb", "zion/boss/cyberdemon_ai", NULL, 'b' },
+            { CYB_AW, AW_TEXT(""), -1, "animWeb", "zion/boss/cyberdem_ai", NULL, 'b' },
             { CONDUCTOR, CONDUCTOR_CYBER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'c' },
         };
         static const fx_file gd[] = {
@@ -2037,70 +1933,64 @@ static void test_conflicts(void)
             { CONDUCTOR, CONDUCTOR_SPIDER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'e' },
             { WHITELIST, WL_B, -1, "snapPropertyInspector_WhiteListEncounterDecl", "single_encounters_white_list_inspector", NULL, 'f' },
         };
-        make_bundle(root, "local.cyberdemon@0.0.0+1", "local.cyberdemon", "0.0.0", '1',
+        make_bundle(root, "localcyb@0.0.0+1", "localcyb", "0.0.0", '1',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 10}");
-        make_bundle(root, "local.cyberdemon@0.0.0-05238b2e+1", "local.cyberdemon", "0.0.0-05238b2e", '2',
+        make_bundle(root, "maps\\Boss map\\localcyb", "localcyb", "0.0.0-05238b2e", '2',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 11}");
-        make_bundle(legacy, "cyberdemon@3d0fabc7bbc8194f", "cyberdemon", "legacy-3d0fabc7bbc8194f", '3',
+        make_bundle(root, "cyberdem", "cyberdem", "1.0.0", '3',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\"", dl, 2, "{\"validated\": true, \"installedAt\": 99}");
-        make_bundle(root, "local.hell-guard@0.0.0+1", "local.hell-guard", "0.0.0", '4', "\"" CONDUCTOR "\"", gd, 1,
+        make_bundle(root, "localhel@0.0.0+1", "localhel", "0.0.0", '4', "\"" CONDUCTOR "\"", gd, 1,
                     "{\"validated\": true, \"installedAt\": 12}");
-        make_bundle(root, "local.spider-mastermind@0.0.0+1", "local.spider-mastermind", "0.0.0", '5',
+        make_bundle(root, "localspi@0.0.0+1", "localspi", "0.0.0", '5',
                     "\"" CONDUCTOR "\", \"" WHITELIST "\"", sp, 2, "{\"validated\": true, \"installedAt\": 13}");
     }
     {
         /* Needs decide: the later-installed copy names an md6Def nothing installed provides. */
         static const fx_file n1[] = {
-            { NEEDY, "{ pain a }", -1, "aiPainGraph", "cyberdemon_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/nowhere.md6\"}]", '1' },
+            { NEEDY, "{ pain a }", -1, "aiPainGraph", "cyberdem_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/nowhere.md6\"}]", '1' },
         };
         static const fx_file n2[] = {
-            { NEEDY, "{ pain b }", -1, "aiPainGraph", "cyberdemon_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/here.md6\"}]", '2' },
+            { NEEDY, "{ pain b }", -1, "aiPainGraph", "cyberdem_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/here.md6\"}]", '2' },
             { "generated/decls/md6def/zion/here.md6.decl", "{ md6 }", -1, "md6Def", "zion/here.md6", NULL, '3' },
         };
-        make_bundle(root, "needs.late@1.0.0", "needs.late", "1.0.0", '6', "\"" NEEDY "\"", n1, 1,
+        make_bundle(root, "needslat@1.0.0", "needslat", "1.0.0", '6', "\"" NEEDY "\"", n1, 1,
                     "{\"validated\": true, \"installedAt\": 500}");
-        make_bundle(root, "needs.ok@1.0.0", "needs.ok", "1.0.0", '7', "\"" NEEDY "\", \"generated/decls/md6def/zion/here.md6.decl\"",
+        make_bundle(root, "needsok0@1.0.0", "needsok0", "1.0.0", '7', "\"" NEEDY "\", \"generated/decls/md6def/zion/here.md6.decl\"",
                     n2, 2, "{\"validated\": true, \"installedAt\": 400}");
     }
     {
-        /* animWebs naming models: missing (a new name and a stock shadow),
-         * provided by the bundle, and known to the engine. */
+        /* animWebs naming models: missing, and provided by the bundle (a
+         * model the engine knows serves as well). */
         static const fx_file aw[] = {
-            { "generated/decls/animweb/designsystems/med_station.decl",
+            { "generated/decls/animweb/mods/awpack00/med_station.decl",
               "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/objects/props_set/kiosks/wallhealthstation.md6\" \"\"\t// modelIndex 0\n\t\t}\n\t}\n}\n",
-              -1, "animWeb", "designsystems/med_station", NULL, '1' },
-            { "generated/decls/animweb/designsystems/good.decl",
-              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/props/door.md6\" \"\"\n\t\t\t\"zion/stock/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
-              -1, "animWeb", "designsystems/good", NULL, '2' },
-            { "generated/decls/md6def/zion/props/door.md6.decl", "{ md6 }", -1, "md6Def", "zion/props/door.md6", NULL, '3' },
-            { "generated/decls/animweb/player/fp_hands_mp.decl",
-              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/mp.md6\" \"\"\n\t\t}\n\t}\n}\n",
-              -1, "animWeb", "player/fp_hands_mp", NULL, '4' },
-            { "generated/decls/animweb/player/fp_hands_sp.decl",
-              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/sp_gone.md6\" \"\"\n\t\t}\n\t}\n}\n",
-              -1, "animWeb", "player/fp_hands_sp", NULL, '5' },
+              -1, "animWeb", "mods/awpack00/med_station", NULL, '1' },
+            { "generated/decls/animweb/mods/awpack00/good.decl",
+              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"mods/awpack00/door.md6\" \"\"\n\t\t\t\"zion/stock/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
+              -1, "animWeb", "mods/awpack00/good", NULL, '2' },
+            { "generated/decls/md6def/mods/awpack00/door.md6.decl", "{ md6 }", -1, "md6Def", "mods/awpack00/door.md6", NULL, '3' },
         };
-        g_bundle_extra = "\"legacy\": {},\n  \"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
-        make_bundle(root, "aw.pack@0.0.0+1", "aw.pack", "0.0.0", '8',
-                    "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/good.decl\", "
-                    "\"generated/decls/md6def/zion/props/door.md6.decl\", \"generated/decls/animweb/player/fp_hands_mp.decl\", "
-                    "\"generated/decls/animweb/player/fp_hands_sp.decl\"",
-                    aw, 5, NULL);
+        g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
+        make_bundle(root, "awpack00@0.0.0+1", "awpack00", "0.0.0", '8', NULL, aw, 3, NULL);
         hash64('8', aw_hash);
     }
     g_bundle_extra = NULL;
 
     log_clear();
+    CHECK(sh_modserve_index_build(root) == 8);    g_bundle_extra = NULL;
+
+    log_clear();
     CHECK(sh_modserve_index_build(root) == 8);
     /* The animWeb the boss bundles carry: one copy serves, never none. */
-    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdemon@legacy-3d0fabc7bbc8194f, local.cyberdemon@0.0.0, "
-                  "local.cyberdemon@0.0.0-05238b2e; serving local.cyberdemon@0.0.0-05238b2e (most providers carry these bytes)"));
-    CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "local.cyberdemon"));
+    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdem@1.0.0, localcyb@0.0.0, "
+                  "localcyb@0.0.0-05238b2e; serving localcyb@0.0.0 (most providers carry these bytes)"));
+    CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "localcyb"));
     CHECK(open_text(CYB_AW, text, sizeof text) == 1 && strstr(text, "AW_CF_IDLE_CYCLE"));
     CHECK(sh_modserve_probe_claims(CYB_AW));
     /* The conductor: every boss's aiTypeList entry is served. */
-    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdemon@legacy-3d0fabc7bbc8194f, local.cyberdemon@0.0.0, "
-                  "local.cyberdemon@0.0.0-05238b2e, local.hell-guard@0.0.0, local.spider-mastermind@0.0.0; serving "));
+    /* (index order: the root folders, then maps' places) */
+    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdem@1.0.0, localcyb@0.0.0, "
+                  "localhel@0.0.0, localspi@0.0.0, localcyb@0.0.0-05238b2e; serving "));
     CHECK(log_has("'s text with the others' list entries (3 added)"));
     CHECK(sh_modserve_conflict_info(CONDUCTOR, &c) && c.composed && c.count == 5 && strstr(c.reason, "composed: 3 list entries"));
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 6;") && strstr(text, "\"524288\"") &&
@@ -2113,39 +2003,30 @@ static void test_conflicts(void)
         CHECK(st.conflicts == 4 && st.conflicts_composed == 2);
     }
     /* Needs before recency. */
-    CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needs.late@1.0.0, needs.ok@1.0.0; serving needs.ok@1.0.0 "
+    CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needslat@1.0.0, needsok0@1.0.0; serving needsok0@1.0.0 "
                   "(its needs resolve against the installed bundles where the others' do not)"));
     CHECK(open_text(NEEDY, text, sizeof text) == 1 && !strcmp(text, "{ pain b }"));
     CHECK(!log_has("serving neither"));
 
     /* Registration: an animWeb whose models block names a model nothing
-     * provides is withdrawn; the stock one is served by the game again. A
-     * model the registry does not know yet but the game archives hold (the
-     * player hands) keeps its shadow served. */
+     * provides is withdrawn and never registered. */
     hashes[0] = aw_hash;
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5 && unknown == 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3 && unknown == 0);
     log_clear();
     g_calls[0] = 0;
     ready = sh_modserve_plan_run(&p, &g_cf, "map");
-    CHECK(ready == 4);
-    CHECK(log_has("map: animWeb 'designsystems/med_station' (aw.pack) NOT READY: it names model "
+    CHECK(ready == 2);
+    CHECK(log_has("map: animWeb 'mods/awpack00/med_station' (awpack00) NOT READY: it names model "
                   "'zion/objects/props_set/kiosks/wallhealthstation.md6', which neither a bundle nor the game provides"));
-    CHECK(log_has("map: animWeb 'player/fp_hands_sp' (aw.pack) shadow WITHDRAWN: it names model 'zion/player/human/base/sp_gone.md6'"));
-    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (aw.pack) shadows a stock decl; served by the provider"));
-    CHECK(!log_has("'player/fp_hands_mp' (aw.pack) shadow WITHDRAWN"));
-    CHECK(log_has("map: animWeb 'designsystems/good' (aw.pack) READY"));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
-    CHECK(!sh_modserve_probe_claims("generated/decls/animweb/designsystems/med_station.decl"));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_sp.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
+    CHECK(log_has("map: animWeb 'mods/awpack00/good' (awpack00) READY"));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/awpack00/med_station.decl", NULL));
+    CHECK(!sh_modserve_probe_claims("generated/decls/animweb/mods/awpack00/med_station.decl"));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/mods/awpack00/good.decl", NULL));
     sh_modserve_plan_free(&p);
     /* A rescan (an install, a conversion) keeps them withdrawn. */
     CHECK(sh_modserve_index_rescan() == 8);
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_sp.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/awpack00/med_station.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/mods/awpack00/good.decl", NULL));
     CHECK(sh_modserve_lookup(CONDUCTOR, &hit) && hit.size > 0);
 
     /* The Play-time re-check: live gates log once and set nothing; a gate set
@@ -2177,30 +2058,25 @@ static void test_editor_refs(void)
     char *slash;
     sh_modserve_plan p;
     static const fx_file row[] = {
-        { "generated/decls/snapeditorentitydef/demons/cyberdemon_enc.decl",
+        { "generated/decls/snapeditorentitydef/mods/localcyb/cyberdem_enc.decl",
           "{\n\tinherit = \"demons/demon_base\";\n\tedit = {\n"
-          "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc\";\n"
-          "\t\tentityDef = \"snapmaps/placeablesnapaiencounter/cyberdemon\";\n"
-          "\t\trenderInfo = {\n\t\t\trenderModelName = \"zion/characters/monsters/cyberdemon/base/cyberdemon_snapeditor.md6\";\n\t\t}\n"
-          "\t\teventInfo = {\n\t\t\tanimWebDecl = \"zion/snapmap/demons/cyberdemon_snapeditor\";\n\t\t}\n\t}\n}\n",
-          -1, "snapEditorEntityDef", "demons/cyberdemon_enc", NULL, '1' },
-        { "generated/decls/snapeditorentitydef/prop/crate.decl",
+          "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/demons/cyberdem_enc\";\n"
+          "\t\tentityDef = \"snapmaps/placeablesnapaiencounter/cyberdem\";\n"
+          "\t\trenderInfo = {\n\t\t\trenderModelName = \"zion/characters/monsters/cyberdem/base/cyberdem_snapeditor.md6\";\n\t\t}\n"
+          "\t\teventInfo = {\n\t\t\tanimWebDecl = \"mods/localcyb/cyberdem_snapeditor\";\n\t\t}\n\t}\n}\n",
+          -1, "snapEditorEntityDef", "mods/localcyb/cyberdem_enc", NULL, '1' },
+        { "generated/decls/snapeditorentitydef/mods/localcyb/crate.decl",
           "{\n\tedit = {\n\t\trenderInfo = {\n\t\t\trenderModelName = \"models/mapobjects/crate.lwo\";\n\t\t}\n\t}\n}\n",
-          -1, "snapEditorEntityDef", "prop/crate", NULL, '2' },
-        { "generated/decls/animweb/zion/snapmap/demons/cyberdemon_snapeditor.decl", "{ web }", -1, "animWeb",
-          "zion/snapmap/demons/cyberdemon_snapeditor", NULL, '3' },
+          -1, "snapEditorEntityDef", "mods/localcyb/crate", NULL, '2' },
+        { "generated/decls/animweb/mods/localcyb/cyberdem_snapeditor.decl", "{ web }", -1, "animWeb",
+          "mods/localcyb/cyberdem_snapeditor", NULL, '3' },
     };
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\edrefs\\mods", top);
     mkdirs(root);
-    g_bundle_extra = "\"legacy\": {},\n  ";
-    make_bundle(root, "local.cyberdemon@0.0.0+1", "local.cyberdemon", "0.0.0", '9',
-                "\"generated/decls/snapeditorentitydef/demons/cyberdemon_enc.decl\", "
-                "\"generated/decls/snapeditorentitydef/prop/crate.decl\", "
-                "\"generated/decls/animweb/zion/snapmap/demons/cyberdemon_snapeditor.decl\"", row, 3, NULL);
-    g_bundle_extra = NULL;
+    make_bundle(root, "localcyb@0.0.0+1", "localcyb", "0.0.0", '9', NULL, row, 3, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_plan_editor(&p) == 2);
     /* Rows that did not get ready point at nothing yet. */
@@ -2213,9 +2089,9 @@ static void test_editor_refs(void)
     /* The editor animWeb, the md6 render model and the preview material; the
      * entityDef (re-resolved by name) and a non-md6 model are not decls a row
      * holds this way. */
-    CHECK(strstr(g_refs, "animWeb:zion/snapmap/demons/cyberdemon_snapeditor<demons/cyberdemon_enc;") != NULL);
-    CHECK(strstr(g_refs, "md6Def:zion/characters/monsters/cyberdemon/base/cyberdemon_snapeditor.md6<demons/cyberdemon_enc;") != NULL);
-    CHECK(strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc<demons/cyberdemon_enc;") != NULL);
+    CHECK(strstr(g_refs, "animWeb:mods/localcyb/cyberdem_snapeditor<mods/localcyb/cyberdem_enc;") != NULL);
+    CHECK(strstr(g_refs, "md6Def:zion/characters/monsters/cyberdem/base/cyberdem_snapeditor.md6<mods/localcyb/cyberdem_enc;") != NULL);
+    CHECK(strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/demons/cyberdem_enc<mods/localcyb/cyberdem_enc;") != NULL);
     CHECK(!strstr(g_refs, "crate") && !strstr(g_refs, "entityDef"));
     CHECK(sh_modserve_editor_refs(NULL, collect_ref, NULL) == 0 && sh_modserve_editor_refs(&p, NULL, NULL) == 0);
     sh_modserve_plan_free(&p);
@@ -2299,10 +2175,10 @@ typedef struct kh_list {
     int count, cap;
 } kh_list;
 
-#define KH_WEB   "generated/decls/animweb/mods/kh.mod/s/web.decl"
-#define KH_LOOSE "generated/decls/animweb/mods/kh.mod/s/loose.decl"
-#define KH_MD6   "generated/decls/md6def/mods/kh.mod/s/body.md6.decl"
-#define KH_MESH  "generated/basemodel/md6/mods/kh.mod/body.bmd6model"
+#define KH_WEB   "generated/decls/animweb/mods/khmod000/s/web.decl"
+#define KH_LOOSE "generated/decls/animweb/mods/khmod000/s/loose.decl"
+#define KH_MD6   "generated/decls/md6def/mods/khmod000/s/body.md6.decl"
+#define KH_MESH  "generated/basemodel/md6/mods/khmod000/body.bmd6model"
 
 /* A pickup's web kept at level 4 by a pass after the map's own load parsed it
  * at level 1, so the clip that parse created is older than the pass's
@@ -2311,16 +2187,16 @@ typedef struct kh_list {
 static void test_kept_holds(void)
 {
     static const fx_file files[] = {
-        { KH_WEB, "animWeb web {}", -1, "animWeb", "mods/kh.mod/s/web",
+        { KH_WEB, "animWeb web {}", -1, "animWeb", "mods/khmod000/s/web",
           "[{\"type\":\"anim\",\"name\":\"md6/stock/pickups-melee/chainsaw_pre_idle.md6anim\"},"
-          "{\"type\":\"md6Def\",\"name\":\"mods/kh.mod/s/body.md6\"}]", '1' },
-        { KH_MD6, "md6Def body {}", -1, "md6Def", "mods/kh.mod/s/body.md6",
-          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/kh.mod/body.md6mesh\"},"
+          "{\"type\":\"md6Def\",\"name\":\"mods/khmod000/s/body.md6\"}]", '1' },
+        { KH_MD6, "md6Def body {}", -1, "md6Def", "mods/khmod000/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/khmod000/body.md6mesh\"},"
           "{\"type\":\"skeleton\",\"name\":\"md6/stock/body.md6skl\"},"
           "{\"type\":\"anim\",\"name\":\"md6/stock/body_idle.md6anim\"},"
           "{\"type\":\"anim\",\"name\":\"md6/stock/body.md6skl/_default.md6anim\"}]", '2' },
-        { KH_MESH, "MESH", -1, "baseModel", "md6/mods/kh.mod/body.md6mesh", NULL, '3' },
-        { KH_LOOSE, "animWeb loose {}", -1, "animWeb", "mods/kh.mod/s/loose",
+        { KH_MESH, "MESH", -1, "baseModel", "md6/mods/khmod000/body.md6mesh", NULL, '3' },
+        { KH_LOOSE, "animWeb loose {}", -1, "animWeb", "mods/khmod000/s/loose",
           "[{\"type\":\"anim\",\"name\":\"md6/stock/loose.md6anim\"}]", '4' },
     };
     static kh_res web, loose, body, mesh, skel, idle, bind, clip, other, loose_clip, wrong_type, clip2;
@@ -2338,7 +2214,7 @@ static void test_kept_holds(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\holds\\mods", top);
     mkdirs(root);
-    make_bundle(root, "kh.mod", "kh.mod", "1.0.0", '5', NULL, files, 4, NULL);
+    make_bundle(root, "khmod000", "khmod000", "1.0.0", '5', NULL, files, 4, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
 
     lw.type = "animWeb"; lw.cls = "idDeclAnimWeb"; lw.next = &ld; lw.entries = webs;
@@ -2349,11 +2225,11 @@ static void test_kept_holds(void)
     li.type = "image"; li.cls = "idImage"; li.next = NULL; li.entries = images;
     /* After the map pass: the web and the md6Def kept (4), what the engine's
      * own load created for them at 1, a web no pass kept and its clip at 1. */
-    web.name = "mods/kh.mod/s/web"; web.level = 4;
-    loose.name = "mods/kh.mod/s/loose"; loose.level = 1;
+    web.name = "mods/khmod000/s/web"; web.level = 4;
+    loose.name = "mods/khmod000/s/loose"; loose.level = 1;
     webs[0] = &web; webs[1] = &loose; lw.count = 2;
-    body.name = "mods/kh.mod/s/body.md6"; body.level = 4; md6s[0] = &body; ld.count = 1;
-    mesh.name = "md6/mods/kh.mod/body.md6mesh"; mesh.level = 1; meshes[0] = &mesh; lm.count = 1;
+    body.name = "mods/khmod000/s/body.md6"; body.level = 4; md6s[0] = &body; ld.count = 1;
+    mesh.name = "md6/mods/khmod000/body.md6mesh"; mesh.level = 1; meshes[0] = &mesh; lm.count = 1;
     skel.name = "md6/stock/body.md6skl"; skel.level = 1; skels[0] = &skel; ls.count = 1;
     idle.name = "md6/stock/body_idle.md6anim"; idle.level = 1;
     other.name = "md6/stock/other.md6anim"; other.level = 1;
@@ -2372,7 +2248,7 @@ static void test_kept_holds(void)
     CHECK(h.roots == 2 && h.names == 6 && h.raised == 4 && h.lists == 6);
     CHECK(mesh.level == 4 && skel.level == 4 && idle.level == 4 && bind.level == 4);
     CHECK(other.level == 1 && loose_clip.level == 1 && loose.level == 1 && wrong_type.level == 1);
-    CHECK(strstr(h.first, "md6/mods/kh.mod/body.md6mesh") && strstr(h.first, "md6/stock/body.md6skl") &&
+    CHECK(strstr(h.first, "md6/mods/khmod000/body.md6mesh") && strstr(h.first, "md6/stock/body.md6skl") &&
           strstr(h.first, "md6/stock/body_idle.md6anim") && strstr(h.first, "md6/stock/body.md6skl/_default.md6anim"));
 
     /* The web's clip, created after the keep (the editor's spawn, say), at 1,
@@ -2401,11 +2277,11 @@ static void test_kept_holds(void)
 
 /* ------------------------------------------------------------------ models kept decls hold (X2) */
 
-#define HM_ENT   "generated/decls/entitydef/mods/hm.mod/snapmaps/props/rock.decl"
-#define HM_LOOSE "generated/decls/entitydef/mods/hm.mod/snapmaps/props/loose.decl"
-#define HM_ROCK  "cooked/model/mods/hm.mod/models/rock.bmodel"
-#define HM_SPIRE "cooked/model/mods/hm.mod/models/spire.bmodel"
-#define HM_PEB   "cooked/model/mods/hm.mod/models/pebble.bmodel"
+#define HM_ENT   "generated/decls/entitydef/mods/hmmod000/snapmaps/props/rock.decl"
+#define HM_LOOSE "generated/decls/entitydef/mods/hmmod000/snapmaps/props/loose.decl"
+#define HM_ROCK  "cooked/model/mods/hmmod000/models/rock.bmodel"
+#define HM_SPIRE "cooked/model/mods/hmmod000/models/spire.bmodel"
+#define HM_PEB   "cooked/model/mods/hmmod000/models/pebble.bmodel"
 
 typedef struct hm_seen { char order[1024]; int n; void *res[8]; } hm_seen;
 static int hm_visit(void *context, const char *name, void *resource)
@@ -2426,15 +2302,15 @@ static int hm_visit(void *context, const char *name, void *resource)
 static void test_held_models(void)
 {
     static const fx_file files[] = {
-        { HM_ENT, "entityDef rock {}", -1, "entityDef", "mods/hm.mod/snapmaps/props/rock",
-          "[{\"type\":\"model\",\"name\":\"mods/hm.mod/models/rock.lwo\"},"
-          "{\"type\":\"model\",\"name\":\"mods/hm.mod/models/spire.lwo\"},"
+        { HM_ENT, "entityDef rock {}", -1, "entityDef", "mods/hmmod000/snapmaps/props/rock",
+          "[{\"type\":\"model\",\"name\":\"mods/hmmod000/models/rock.lwo\"},"
+          "{\"type\":\"model\",\"name\":\"mods/hmmod000/models/spire.lwo\"},"
           "{\"type\":\"model\",\"name\":\"models/mapobjects/hell_terrain/stock_rock.lwo\"}]", '1' },
-        { HM_LOOSE, "entityDef loose {}", -1, "entityDef", "mods/hm.mod/snapmaps/props/loose",
-          "[{\"type\":\"model\",\"name\":\"mods/hm.mod/models/pebble.lwo\"}]", '2' },
-        { HM_ROCK, "ROCK", -1, "model", "cooked/model/mods/hm.mod/models/rock.bmodel", NULL, '3' },
-        { HM_SPIRE, "SPIRE", -1, "model", "cooked/model/mods/hm.mod/models/spire.bmodel", NULL, '4' },
-        { HM_PEB, "PEBBLE", -1, "model", "cooked/model/mods/hm.mod/models/pebble.bmodel", NULL, '6' },
+        { HM_LOOSE, "entityDef loose {}", -1, "entityDef", "mods/hmmod000/snapmaps/props/loose",
+          "[{\"type\":\"model\",\"name\":\"mods/hmmod000/models/pebble.lwo\"}]", '2' },
+        { HM_ROCK, "ROCK", -1, "model", "cooked/model/mods/hmmod000/models/rock.bmodel", NULL, '3' },
+        { HM_SPIRE, "SPIRE", -1, "model", "cooked/model/mods/hmmod000/models/spire.bmodel", NULL, '4' },
+        { HM_PEB, "PEBBLE", -1, "model", "cooked/model/mods/hmmod000/models/pebble.bmodel", NULL, '6' },
     };
     static kh_res rock, loose, spire, stock, pebble;
     static kh_res *ents[4], *models[8];
@@ -2450,14 +2326,14 @@ static void test_held_models(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\heldmodels\\mods", top);
     mkdirs(root);
-    make_bundle(root, "hm.mod", "hm.mod", "1.0.0", '5', NULL, files, 5, NULL);
+    make_bundle(root, "hmmod000", "hmmod000", "1.0.0", '5', NULL, files, 5, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     sh_modserve_attrib_reset();
 
     le.type = "entityDef"; le.cls = "idDeclEntityDef"; le.next = &lm; le.entries = ents;
     lm.type = "model"; lm.cls = "idStaticModel"; lm.next = NULL; lm.entries = models;
-    rock.name = "mods/hm.mod/snapmaps/props/rock"; rock.level = 4;
-    loose.name = "mods/hm.mod/snapmaps/props/loose"; loose.level = 1;
+    rock.name = "mods/hmmod000/snapmaps/props/rock"; rock.level = 4;
+    loose.name = "mods/hmmod000/snapmaps/props/loose"; loose.level = 1;
     ents[0] = &rock; ents[1] = &loose; le.count = 2;
     stock.name = "models/mapobjects/hell_terrain/stock_rock.lwo"; stock.level = 1; stock.state = 0x64;
     models[0] = &stock; lm.count = 1;
@@ -2466,15 +2342,15 @@ static void test_held_models(void)
      * both of its own are loaded, the stock one and the unkept decl's are not. */
     memset(&seen, 0, sizeof seen);
     CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 2);
-    CHECK(!strcmp(seen.order, "mods/hm.mod/models/rock.lwo(new);mods/hm.mod/models/spire.lwo(new);"));
+    CHECK(!strcmp(seen.order, "mods/hmmod000/models/rock.lwo(new);mods/hmmod000/models/spire.lwo(new);"));
     CHECK(h.roots == 1);
 
     /* Loaded whole and held: nothing more to do, a second run calls nothing. */
-    spire.name = "Mods/HM.mod/models/spire.lwo"; spire.level = 4; spire.state = 0x60;
+    spire.name = "Mods/HMMOD000/models/spire.lwo"; spire.level = 4; spire.state = 0x60;
     rock.state = 0;
     {
         static kh_res rock_model;
-        rock_model.name = "mods/hm.mod/models/rock.lwo"; rock_model.level = 4; rock_model.state = 0x70;
+        rock_model.name = "mods/hmmod000/models/rock.lwo"; rock_model.level = 4; rock_model.state = 0x70;
         models[1] = &rock_model; models[2] = &spire; lm.count = 3;
         memset(&seen, 0, sizeof seen);
         CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0 && seen.order[0] == 0);
@@ -2483,7 +2359,7 @@ static void test_held_models(void)
         rock_model.level = 1; rock_model.state = 0x64;
         memset(&seen, 0, sizeof seen);
         CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1 && seen.res[0] == &rock_model &&
-              !strcmp(seen.order, "mods/hm.mod/models/rock.lwo;"));
+              !strcmp(seen.order, "mods/hmmod000/models/rock.lwo;"));
         /* A failed load (bit 0) the same way, even at level 4. */
         rock_model.level = 4; rock_model.state = 0x01;
         memset(&seen, 0, sizeof seen);
@@ -2505,7 +2381,7 @@ static void test_held_models(void)
         memset(&seen, 0, sizeof seen);
         CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0);
 
-        /* Map scope on, a map open that does not declare hm.mod: in the editor
+        /* Map scope on, a map open that does not declare hmmod000: in the editor
          * its names serve (the Toybox), so a default is loaded again; in Play
          * they do not, and nothing is loaded (it would come out a default). */
         rock_model.state = 0x64;
@@ -2540,19 +2416,19 @@ static void test_held_models(void)
 
 /* ------------------------------------------------------------------ editor closure after an in-session install (R-315) */
 
-#define CL_ROW   "generated/decls/snapeditorentitydef/mods/cl.mod/tile.decl"
-#define CL_ENT   "generated/decls/entitydef/mods/cl.mod/tile.decl"
-#define CL_MD6   "generated/decls/md6def/mods/cl.mod/s/body.md6.decl"
-#define CL_MESH  "generated/basemodel/md6/mods/cl.mod/body.bmd6model"
-#define CL_SCENE "generated/decls/entitydef/mods/cl.mod/scene.decl"
-#define CL_GAME  "generated/decls/entitydef/mods/cl.game/gameplay.decl"
-#define CL_PRIV  "generated/decls/md6def/mods/cl.mod/editor_preview/tile.md6.decl"
-#define CL_NEW   "generated/decls/entitydef/mods/cl.game/newgame.decl"
+#define CL_ROW   "generated/decls/snapeditorentitydef/mods/clmod000/tile.decl"
+#define CL_ENT   "generated/decls/entitydef/mods/clmod000/tile.decl"
+#define CL_MD6   "generated/decls/md6def/mods/clmod000/s/body.md6.decl"
+#define CL_MESH  "generated/basemodel/md6/mods/clmod000/body.bmd6model"
+#define CL_SCENE "generated/decls/entitydef/mods/clmod000/scene.decl"
+#define CL_GAME  "generated/decls/entitydef/mods/clgame00/gameplay.decl"
+#define CL_PRIV  "generated/decls/md6def/mods/clmod000/editor_preview/tile.md6.decl"
+#define CL_NEW   "generated/decls/entitydef/mods/clgame00/newgame.decl"
 #define CL_ROW_V2 "{\n\tedit = {\n\t\teventInfo = { idleEvent = { animInfo = { animHandle = \"ci_editor_preview/idle\"; } } }\n" \
-    "\t\trenderInfo = {\n\t\t\trenderModelName = \"mods/cl.mod/editor_preview/tile.md6\";\n" \
+    "\t\trenderInfo = {\n\t\t\trenderModelName = \"mods/clmod000/editor_preview/tile.md6\";\n" \
     "\t\t\trenderModelAttachments = { num = 1; item[0] = { renderModelName = \"zion/objects/props_char/keycard_blue.md6\"; tagName = \"pre_pickup\"; } }\n" \
     "\t\t}\n\t\tfxInfo = { fxDecl = \"fx/titan_hell_switch\"; startCondition = \"FX_NONE\"; }\n" \
-    "\t\tentityDef = \"mods/cl.mod/tile\";\n\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/cl\";\n\t}\n}\n"
+    "\t\tentityDef = \"mods/clmod000/tile\";\n\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/cl\";\n\t}\n}\n"
 
 typedef struct cl_seen { char order[1024]; } cl_seen;
 static int cl_visit(void *context, const sh_modserve_refresh_item *it)
@@ -2573,33 +2449,33 @@ static int cl_visit(void *context, const sh_modserve_refresh_item *it)
 static void test_editor_closure(void)
 {
     static const fx_file v1[] = {
-        { CL_ROW, "{ edit = { entityDef = \"mods/cl.mod/tile\"; } }", -1, "snapEditorEntityDef", "mods/cl.mod/tile",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/cl.mod/tile\"}]", '1' },
-        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/cl.mod/tile",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", '2' },
-        { CL_MD6, "md6Def body { mesh 1 }", -1, "md6Def", "mods/cl.mod/s/body.md6",
-          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/cl.mod/body.md6mesh\"}]", '3' },
-        { CL_MESH, "MESH1", -1, "baseModel", "md6/mods/cl.mod/body.md6mesh", NULL, '4' },
-        { CL_SCENE, "entityDef scene1 {}", -1, "entityDef", "mods/cl.mod/scene", NULL, '5' },
+        { CL_ROW, "{ edit = { entityDef = \"mods/clmod000/tile\"; } }", -1, "snapEditorEntityDef", "mods/clmod000/tile",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/clmod000/tile\"}]", '1' },
+        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/clmod000/tile",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/clmod000/s/body.md6\"}]", '2' },
+        { CL_MD6, "md6Def body { mesh 1 }", -1, "md6Def", "mods/clmod000/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/clmod000/body.md6mesh\"}]", '3' },
+        { CL_MESH, "MESH1", -1, "baseModel", "md6/mods/clmod000/body.md6mesh", NULL, '4' },
+        { CL_SCENE, "entityDef scene1 {}", -1, "entityDef", "mods/clmod000/scene", NULL, '5' },
     };
-    static const fx_file g1[] = { { CL_GAME, "entityDef game1 {}", -1, "entityDef", "mods/cl.game/gameplay", NULL, '5' } };
+    static const fx_file g1[] = { { CL_GAME, "entityDef game1 {}", -1, "entityDef", "mods/clgame00/gameplay", NULL, '5' } };
     static const fx_file v2[] = {
-        { CL_ROW, CL_ROW_V2, -1, "snapEditorEntityDef", "mods/cl.mod/tile",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/cl.mod/tile\"},"
-          "{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/editor_preview/tile.md6\"}]", '6' },
-        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/cl.mod/tile",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", '2' },
-        { CL_MD6, "md6Def body { mesh 2 }", -1, "md6Def", "mods/cl.mod/s/body.md6",
-          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/cl.mod/body.md6mesh\"}]", '7' },
-        { CL_MESH, "MESH2", -1, "baseModel", "md6/mods/cl.mod/body.md6mesh", NULL, '8' },
-        { CL_SCENE, "entityDef scene2 {}", -1, "entityDef", "mods/cl.mod/scene", NULL, '9' },
-        { CL_PRIV, "md6Def tile { inherit = \"mods/cl.mod/s/body.md6\" }", -1, "md6Def", "mods/cl.mod/editor_preview/tile.md6",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", 'a' },
+        { CL_ROW, CL_ROW_V2, -1, "snapEditorEntityDef", "mods/clmod000/tile",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/clmod000/tile\"},"
+          "{\"type\":\"md6Def\",\"name\":\"mods/clmod000/editor_preview/tile.md6\"}]", '6' },
+        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/clmod000/tile",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/clmod000/s/body.md6\"}]", '2' },
+        { CL_MD6, "md6Def body { mesh 2 }", -1, "md6Def", "mods/clmod000/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/clmod000/body.md6mesh\"}]", '7' },
+        { CL_MESH, "MESH2", -1, "baseModel", "md6/mods/clmod000/body.md6mesh", NULL, '8' },
+        { CL_SCENE, "entityDef scene2 {}", -1, "entityDef", "mods/clmod000/scene", NULL, '9' },
+        { CL_PRIV, "md6Def tile { inherit = \"mods/clmod000/s/body.md6\" }", -1, "md6Def", "mods/clmod000/editor_preview/tile.md6",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/clmod000/s/body.md6\"}]", 'a' },
     };
     static const fx_file g2[] = {
-        { CL_GAME, "entityDef game2 {}", -1, "entityDef", "mods/cl.game/gameplay", NULL, '9' },
-        { CL_NEW, "entityDef newgame {}", -1, "entityDef", "mods/cl.game/newgame",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/editor_preview/tile.md6\"}]", 'b' },
+        { CL_GAME, "entityDef game2 {}", -1, "entityDef", "mods/clgame00/gameplay", NULL, '9' },
+        { CL_NEW, "entityDef newgame {}", -1, "entityDef", "mods/clgame00/newgame",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/clmod000/editor_preview/tile.md6\"}]", 'b' },
     };
     char top[MAX_PATH], root[MAX_PATH], hash[65];
     char *slash;
@@ -2615,8 +2491,8 @@ static void test_editor_closure(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\closure\\mods", top);
     mkdirs(root);
-    make_bundle(root, "cl.mod", "cl.mod", "1.0.0", 'c', NULL, v1, 5, NULL);
-    make_bundle(root, "cl.game", "cl.game", "1.0.0", 'e', NULL, g1, 1, NULL);
+    make_bundle(root, "clmod000", "clmod000", "1.0.0", 'c', NULL, v1, 5, NULL);
+    make_bundle(root, "clgame00", "clgame00", "1.0.0", 'e', NULL, g1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 2);
     /* What earlier tests' tables left pending (their gone shadows) is settled first. */
     memset(&seen, 0, sizeof seen);
@@ -2634,25 +2510,25 @@ static void test_editor_closure(void)
     CHECK(sh_modserve_plan_bundles(h, 2, &p, NULL) == 4);
     /* A map pass keeps every decl of a bundle with rows unless the engine
      * holds it permanently (2); a row-less bundle's decl stays at the engine's level. */
-    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.mod/tile")].persist == 2);
-    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/s/body.md6")].persist == 2);
-    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.mod/scene")].persist == 2);
-    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.game/gameplay")].persist == 0);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/clmod000/tile")].persist == 2);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/clmod000/s/body.md6")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/clmod000/scene")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/clgame00/gameplay")].persist == 0);
     /* The row bundle's unregistered scene decl is kept; the registered ones and the gameplay decl are not. */
-    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1 && kept.count == 1 && !strcmp(kept.steps[0].name, "mods/cl.mod/scene") &&
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1 && kept.count == 1 && !strcmp(kept.steps[0].name, "mods/clmod000/scene") &&
           rest.count == 3);
     sh_modserve_plan_free(&kept);
     sh_modserve_plan_free(&rest);
     g_calls[0] = 0;
-    CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 4 && strstr(g_calls, "P:entityDef:mods/cl.mod/scene;") &&
-          strstr(g_calls, "L:entityDef:mods/cl.game/gameplay;"));
+    CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 4 && strstr(g_calls, "P:entityDef:mods/clmod000/scene;") &&
+          strstr(g_calls, "L:entityDef:mods/clgame00/gameplay;"));
     sh_modserve_plan_free(&p);
     CHECK(sh_modserve_refresh_editor_pending() == 0);
 
     /* The in-session install: the row gains an editor-only md6Def, an
      * attachment and an FX; the body model changes; a gameplay decl changes. */
-    make_bundle(root, "cl.mod", "cl.mod", "1.0.0", 'd', NULL, v2, 6, NULL);
-    make_bundle(root, "cl.game", "cl.game", "1.0.0", 'f', NULL, g2, 2, NULL);
+    make_bundle(root, "clmod000", "clmod000", "1.0.0", 'd', NULL, v2, 6, NULL);
+    make_bundle(root, "clgame00", "clgame00", "1.0.0", 'f', NULL, g2, 2, NULL);
     CHECK(sh_modserve_index_rescan() == 2);
     sh_modserve_last_diff(&d);
     CHECK(d.changed == 5 && d.changed_rows == 1 && d.added_active == 2 && d.pending == 5);
@@ -2661,17 +2537,17 @@ static void test_editor_closure(void)
     CHECK(sh_modserve_refresh_editor_pending() == 4);
     memset(&seen, 0, sizeof seen);
     CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_EDITOR) == 4);
-    CHECK(strstr(seen.order, "mods/cl.mod/tile;") && strstr(seen.order, "mods/cl.mod/s/body.md6;") &&
-          strstr(seen.order, "mods/cl.mod/scene;") && strstr(seen.order, "md6/mods/cl.mod/body.md6mesh;") &&
+    CHECK(strstr(seen.order, "mods/clmod000/tile;") && strstr(seen.order, "mods/clmod000/s/body.md6;") &&
+          strstr(seen.order, "mods/clmod000/scene;") && strstr(seen.order, "md6/mods/clmod000/body.md6mesh;") &&
           !strstr(seen.order, "gameplay"));
     /* Dependency order inside the part: the md6Def before the row, the model last. */
-    CHECK(strstr(seen.order, "body.md6;") < strstr(seen.order, "mods/cl.mod/tile;") &&
-          strstr(seen.order, "mods/cl.mod/tile;") < strstr(seen.order, "body.md6mesh;"));
+    CHECK(strstr(seen.order, "body.md6;") < strstr(seen.order, "mods/clmod000/tile;") &&
+          strstr(seen.order, "mods/clmod000/tile;") < strstr(seen.order, "body.md6mesh;"));
     CHECK(sh_modserve_refresh_editor_pending() == 0);
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 1);
     memset(&seen, 0, sizeof seen);
-    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST) == 1 && !strcmp(seen.order, "mods/cl.game/gameplay;"));
+    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST) == 1 && !strcmp(seen.order, "mods/clgame00/gameplay;"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
     CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_ALL) == 0);
@@ -2680,24 +2556,24 @@ static void test_editor_closure(void)
      * gameplay decl that needs it runs after, at the engine's level, with the
      * registered md6Def both need. */
     CHECK(sh_modserve_plan_refresh(&p) == 3);
-    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/editor_preview/tile.md6")].persist == 2);
-    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.game/newgame")].persist == 0);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/clmod000/editor_preview/tile.md6")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/clgame00/newgame")].persist == 0);
     CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1 && kept.count == 1 && rest.count == 2);
-    CHECK(!strcmp(kept.steps[0].name, "mods/cl.mod/editor_preview/tile.md6") && step_index(&rest, "entityDef", "mods/cl.game/newgame") >= 0 &&
-          step_index(&rest, "md6Def", "mods/cl.mod/s/body.md6") >= 0);
+    CHECK(!strcmp(kept.steps[0].name, "mods/clmod000/editor_preview/tile.md6") && step_index(&rest, "entityDef", "mods/clgame00/newgame") >= 0 &&
+          step_index(&rest, "md6Def", "mods/clmod000/s/body.md6") >= 0);
     /* The kept part fails: the later part does not load what needs it. */
     g_calls[0] = 0;
-    g_fail_load = "mods/cl.mod/editor_preview/tile.md6";
+    g_fail_load = "mods/clmod000/editor_preview/tile.md6";
     log_clear();
     CHECK(sh_modserve_plan_run(&kept, &g_fake, "refresh") == 0);
     CHECK(sh_modserve_plan_block_failed_needs(&rest) == 1 && rest.blocked == 1);
     CHECK(sh_modserve_plan_run(&rest, &g_fake, "refresh") == 1);   /* the registered md6Def only */
-    CHECK(!strstr(g_calls, "newgame") && log_has("refresh: entityDef 'mods/cl.game/newgame' (cl.game) BLOCKED"));
+    CHECK(!strstr(g_calls, "newgame") && log_has("refresh: entityDef 'mods/clgame00/newgame' (clgame00) BLOCKED"));
     sh_modserve_plan_merge_ready(&p, &kept);
     sh_modserve_plan_merge_ready(&p, &rest);
-    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/editor_preview/tile.md6")].ready == -1 &&
-          p.steps[step_index(&p, "entityDef", "mods/cl.game/newgame")].ready == -1 &&
-          p.steps[step_index(&p, "md6Def", "mods/cl.mod/s/body.md6")].ready == 1);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/clmod000/editor_preview/tile.md6")].ready == -1 &&
+          p.steps[step_index(&p, "entityDef", "mods/clgame00/newgame")].ready == -1 &&
+          p.steps[step_index(&p, "md6Def", "mods/clmod000/s/body.md6")].ready == 1);
     sh_modserve_plan_free(&kept);
     sh_modserve_plan_free(&rest);
     CHECK(kept.steps == NULL && rest.count == 0);
@@ -2705,9 +2581,9 @@ static void test_editor_closure(void)
     /* The retry keeps it: persist load, after which nothing is left to keep. */
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1);
-    CHECK(sh_modserve_plan_run(&kept, &g_fake, "refresh") == 1 && strstr(g_calls, "P:md6Def:mods/cl.mod/editor_preview/tile.md6;"));
+    CHECK(sh_modserve_plan_run(&kept, &g_fake, "refresh") == 1 && strstr(g_calls, "P:md6Def:mods/clmod000/editor_preview/tile.md6;"));
     CHECK(sh_modserve_plan_block_failed_needs(&rest) == 0);
-    CHECK(sh_modserve_plan_run(&rest, &g_fake, "refresh") == 2 && strstr(g_calls, "L:entityDef:mods/cl.game/newgame;"));
+    CHECK(sh_modserve_plan_run(&rest, &g_fake, "refresh") == 2 && strstr(g_calls, "L:entityDef:mods/clgame00/newgame;"));
     sh_modserve_plan_free(&kept);
     sh_modserve_plan_free(&rest);
     CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 0);
@@ -2720,11 +2596,11 @@ static void test_editor_closure(void)
     g_refs[0] = 0;
     CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 0);
     sh_modserve_plan_mark_registered(&p);
-    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/cl.mod/tile")].ready == 1);
+    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/clmod000/tile")].ready == 1);
     CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 3);
-    CHECK(strstr(g_refs, "md6Def:mods/cl.mod/editor_preview/tile.md6<mods/cl.mod/tile;") &&
-          strstr(g_refs, "md6Def:zion/objects/props_char/keycard_blue.md6<mods/cl.mod/tile;") &&
-          strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/cl<mods/cl.mod/tile;"));
+    CHECK(strstr(g_refs, "md6Def:mods/clmod000/editor_preview/tile.md6<mods/clmod000/tile;") &&
+          strstr(g_refs, "md6Def:zion/objects/props_char/keycard_blue.md6<mods/clmod000/tile;") &&
+          strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/cl<mods/clmod000/tile;"));
     sh_modserve_plan_free(&p);
     /* Leave the table the next test expects. */
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
@@ -2737,25 +2613,25 @@ static void test_editor_closure(void)
  * first parse. The material comes first in its bundle's file list; the
  * renderParms (one in the same bundle, one in another declared bundle) still
  * come first in the map plan, its run, the kept part of a split and a refresh. */
-#define RP_MAT   "generated/decls/material2/mods/rp.mat/skull_key.decl"
-#define RP_OWN   "generated/decls/renderparm/mods/rp.mat/own_parm.decl"
-#define RP_OTHER "generated/decls/renderparm/mods/rp.parm/other_parm.decl"
+#define RP_MAT   "generated/decls/material2/mods/rpmat000/skull_key.decl"
+#define RP_OWN   "generated/decls/renderparm/mods/rpmat000/own_parm.decl"
+#define RP_OTHER "generated/decls/renderparm/mods/rpparm00/other_parm.decl"
 #define RP_SURF  "generated/decls/renderparm/skinsssmap.decl"
 static void test_renderparm_first(void)
 {
     static const fx_file m1[] = {
-        { RP_MAT, "{ mods/rp.mat/own_parm textures/system/constant_color/white mods/rp.parm/other_parm 1 skinsssmap x }", -1, "material2",
-          "mods/rp.mat/skull_key", NULL, '1' },
-        { RP_OWN, "{ Tex2D textures/system/constant_color/white }", -1, "renderParm", "mods/rp.mat/own_parm", NULL, '2' },
+        { RP_MAT, "{ mods/rpmat000/own_parm textures/system/constant_color/white mods/rpparm00/other_parm 1 skinsssmap x }", -1, "material2",
+          "mods/rpmat000/skull_key", NULL, '1' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/white }", -1, "renderParm", "mods/rpmat000/own_parm", NULL, '2' },
         { RP_SURF, "{ Tex2D }", -1, "renderParm", "skinsssmap", NULL, '6' },
     };
     static const fx_file p1[] = {
-        { RP_OTHER, "{ Vec4 }", -1, "renderParm", "mods/rp.parm/other_parm", NULL, '3' },
+        { RP_OTHER, "{ Vec4 }", -1, "renderParm", "mods/rpparm00/other_parm", NULL, '3' },
     };
     static const fx_file m2[] = {
-        { RP_MAT, "{ mods/rp.mat/own_parm textures/system/constant_color/black mods/rp.parm/other_parm 1 skinsssmap x }", -1, "material2",
-          "mods/rp.mat/skull_key", NULL, '4' },
-        { RP_OWN, "{ Tex2D textures/system/constant_color/black }", -1, "renderParm", "mods/rp.mat/own_parm", NULL, '5' },
+        { RP_MAT, "{ mods/rpmat000/own_parm textures/system/constant_color/black mods/rpparm00/other_parm 1 skinsssmap x }", -1, "material2",
+          "mods/rpmat000/skull_key", NULL, '4' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/black }", -1, "renderParm", "mods/rpmat000/own_parm", NULL, '5' },
         { RP_SURF, "{ Tex2D }", -1, "renderParm", "skinsssmap", NULL, '7' },
     };
     char top[MAX_PATH], root[MAX_PATH], ha[65], hb[65];
@@ -2775,9 +2651,9 @@ static void test_renderparm_first(void)
      * stock pointer at its game path (a surface): the game parses that one
      * itself, so it is in no plan (ADD-L11). */
     g_fx_restore = RP_SURF;
-    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'a', NULL, m1, 3, NULL);
+    make_bundle(root, "rpmat000", "rpmat000", "1.0.0", 'a', NULL, m1, 3, NULL);
     g_fx_restore = NULL;
-    make_bundle(root, "rp.parm", "rp.parm", "1.0.0", 'b', NULL, p1, 1, NULL);
+    make_bundle(root, "rpparm00", "rpparm00", "1.0.0", 'b', NULL, p1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 2);
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh(cl_visit, &seen);   /* what earlier tables left pending */
@@ -2785,27 +2661,27 @@ static void test_renderparm_first(void)
     h[0] = hash64('a', ha);
     h[1] = hash64('b', hb);
     CHECK(sh_modserve_plan_bundles(h, 2, &p, NULL) == 3);
-    mat = step_index(&p, "material2", "mods/rp.mat/skull_key");
-    own = step_index(&p, "renderParm", "mods/rp.mat/own_parm");
-    other = step_index(&p, "renderParm", "mods/rp.parm/other_parm");
+    mat = step_index(&p, "material2", "mods/rpmat000/skull_key");
+    own = step_index(&p, "renderParm", "mods/rpmat000/own_parm");
+    other = step_index(&p, "renderParm", "mods/rpparm00/other_parm");
     CHECK(mat >= 0 && own >= 0 && other >= 0);
     CHECK(step_index(&p, "renderParm", "skinsssmap") < 0 && sh_modserve_is_surface(RP_SURF));
     CHECK(own < mat && other < mat);
     CHECK(p.steps[own].rank == SH_MODSERVE_RANK_RENDERPARM && p.steps[mat].rank == SH_MODSERVE_RANK_OTHER);
     /* A split runs every unregistered renderParm in the part that runs first. */
     CHECK(sh_modserve_plan_split(&p, &kept, &rest) >= 2);
-    CHECK(step_index(&kept, "renderParm", "mods/rp.mat/own_parm") >= 0 &&
-          step_index(&kept, "renderParm", "mods/rp.parm/other_parm") >= 0);
-    CHECK(step_index(&rest, "renderParm", "mods/rp.mat/own_parm") < 0 &&
-          step_index(&rest, "renderParm", "mods/rp.parm/other_parm") < 0);
+    CHECK(step_index(&kept, "renderParm", "mods/rpmat000/own_parm") >= 0 &&
+          step_index(&kept, "renderParm", "mods/rpparm00/other_parm") >= 0);
+    CHECK(step_index(&rest, "renderParm", "mods/rpmat000/own_parm") < 0 &&
+          step_index(&rest, "renderParm", "mods/rpparm00/other_parm") < 0);
     sh_modserve_plan_free(&kept);
     sh_modserve_plan_free(&rest);
     /* The run registers and loads them in that order. */
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 3);
-    lmat = strstr(g_calls, ":material2:mods/rp.mat/skull_key;");
-    lown = strstr(g_calls, ":renderParm:mods/rp.mat/own_parm;");
-    lother = strstr(g_calls, ":renderParm:mods/rp.parm/other_parm;");
+    lmat = strstr(g_calls, ":material2:mods/rpmat000/skull_key;");
+    lown = strstr(g_calls, ":renderParm:mods/rpmat000/own_parm;");
+    lother = strstr(g_calls, ":renderParm:mods/rpparm00/other_parm;");
     CHECK(lmat && lown && lother && lown < lmat && lother < lmat);
     CHECK(!strstr(g_calls, "skinsssmap"));
     if (!(lown && lmat && lown < lmat)) printf("  calls: %s\n", g_calls);
@@ -2813,18 +2689,18 @@ static void test_renderparm_first(void)
     /* A refresh of both changed decls visits the renderParm first, and in the
      * editor part, which runs before the rest. */
     g_fx_restore = RP_SURF;
-    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'c', NULL, m2, 3, NULL);
+    make_bundle(root, "rpmat000", "rpmat000", "1.0.0", 'c', NULL, m2, 3, NULL);
     g_fx_restore = NULL;
     CHECK(sh_modserve_index_rescan() >= 1);
     memset(&seen, 0, sizeof seen);
     CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_EDITOR) >= 1);
-    CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") != NULL);
-    if (strstr(seen.order, "mods/rp.mat/skull_key;"))
-        CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") < strstr(seen.order, "mods/rp.mat/skull_key;"));
+    CHECK(strstr(seen.order, "mods/rpmat000/own_parm;") != NULL);
+    if (strstr(seen.order, "mods/rpmat000/skull_key;"))
+        CHECK(strstr(seen.order, "mods/rpmat000/own_parm;") < strstr(seen.order, "mods/rpmat000/skull_key;"));
     CHECK(strstr(seen.order, "skinsssmap;") == NULL);   /* a surface is never refreshed */
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST);
-    CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") == NULL && strstr(seen.order, "skinsssmap;") == NULL);
+    CHECK(strstr(seen.order, "mods/rpmat000/own_parm;") == NULL && strstr(seen.order, "skinsssmap;") == NULL);
     /* Leave the table the next test expects. */
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
     (void)sh_modserve_index_build(root);
@@ -2833,40 +2709,40 @@ static void test_renderparm_first(void)
 /* ------------------------------------------------------------------ surfaces (ADD-L11) */
 
 #define SF_SURF  "generated/decls/material/models/monsters/sf/body.decl"     /* a surface */
-#define SF_SKIN  "generated/decls/material/mods/sf.mod/skin.decl"
-#define SF_ENT   "generated/decls/entitydef/mods/sf.mod/thing.decl"
-#define SF_GAME  "generated/decls/entitydef/mods/sf.mod/gameplay.decl"
-#define SF_ROW   "generated/decls/snapeditorentitydef/mods/sf.mod/thing.decl"
-#define SO_ENT   "generated/decls/entitydef/mods/sf.other/rock.decl"
-#define SO_ROW   "generated/decls/snapeditorentitydef/mods/sf.other/rock.decl"
+#define SF_SKIN  "generated/decls/material/mods/sfmod000/skin.decl"
+#define SF_ENT   "generated/decls/entitydef/mods/sfmod000/thing.decl"
+#define SF_GAME  "generated/decls/entitydef/mods/sfmod000/gameplay.decl"
+#define SF_ROW   "generated/decls/snapeditorentitydef/mods/sfmod000/thing.decl"
+#define SO_ENT   "generated/decls/entitydef/mods/sfother0/rock.decl"
+#define SO_ROW   "generated/decls/snapeditorentitydef/mods/sfother0/rock.decl"
 #define SF_NEEDS_SURF "[{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]"
 
 static void sf_fixture(char *root, size_t cap)
 {
     static const fx_file m1[] = {
         { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '1' },
-        { SF_SKIN, "{ skin }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '2' },
-        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
-        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
-        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
-                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+        { SF_SKIN, "{ skin }", -1, "material", "mods/sfmod000/skin", SF_NEEDS_SURF, '2' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sfmod000/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sfmod000/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sfmod000/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfmod000/thing\"}]", '5' },
     };
     static const fx_file m2[] = {   /* a rebuild: the surface's pointer and the skin's bytes change */
         { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '6' },
-        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '7' },
-        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
-        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
-        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
-                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sfmod000/skin", SF_NEEDS_SURF, '7' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sfmod000/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sfmod000/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sfmod000/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfmod000/thing\"}]", '5' },
     };
     static const fx_file o1[] = {   /* a mod the launched map does not declare: its row serves for the Toybox */
-        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sf.other/rock", NULL, '8' },
-        { SO_ROW, "{ entityDef \"mods/sf.other/rock\" }", -1, "snapEditorEntityDef", "mods/sf.other/rock",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.other/rock\"}]", '9' },
+        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sfother0/rock", NULL, '8' },
+        { SO_ROW, "{ entityDef \"mods/sfother0/rock\" }", -1, "snapEditorEntityDef", "mods/sfother0/rock",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfother0/rock\"}]", '9' },
     };
     char top[MAX_PATH];
     char *slash;
@@ -2876,9 +2752,9 @@ static void sf_fixture(char *root, size_t cap)
     _snprintf_s(root, cap, _TRUNCATE, "%s\\surfaces\\mods", top);
     mkdirs(root);
     g_fx_restore = SF_SURF;
-    make_bundle(root, "sf.mod", "sf.mod", "1.0.0", 'a', NULL, m1, 5, NULL);
+    make_bundle(root, "sfmod000", "sfmod000", "1.0.0", 'a', NULL, m1, 5, NULL);
     g_fx_restore = NULL;
-    make_bundle(root, "sf.other", "sf.other", "1.0.0", 'b', NULL, o1, 2, NULL);
+    make_bundle(root, "sfother0", "sfother0", "1.0.0", 'b', NULL, o1, 2, NULL);
     (void)m2;
 }
 
@@ -2886,33 +2762,33 @@ static void sf_rebuild(const char *root)
 {
     static const fx_file m1[] = {
         { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '1' },
-        { SF_SKIN, "{ skin }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '2' },
-        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
-        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
-        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
-                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+        { SF_SKIN, "{ skin }", -1, "material", "mods/sfmod000/skin", SF_NEEDS_SURF, '2' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sfmod000/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sfmod000/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sfmod000/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfmod000/thing\"}]", '5' },
     };
     static const fx_file m2[] = {   /* a rebuild: the surface's pointer and the skin's bytes change */
         { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '6' },
-        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '7' },
-        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
-        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
-        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
-                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sfmod000/skin", SF_NEEDS_SURF, '7' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sfmod000/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sfmod000/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sfmod000/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sfmod000/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfmod000/thing\"}]", '5' },
     };
     static const fx_file o1[] = {   /* a mod the launched map does not declare: its row serves for the Toybox */
-        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sf.other/rock", NULL, '8' },
-        { SO_ROW, "{ entityDef \"mods/sf.other/rock\" }", -1, "snapEditorEntityDef", "mods/sf.other/rock",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.other/rock\"}]", '9' },
+        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sfother0/rock", NULL, '8' },
+        { SO_ROW, "{ entityDef \"mods/sfother0/rock\" }", -1, "snapEditorEntityDef", "mods/sfother0/rock",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sfother0/rock\"}]", '9' },
     };
     (void)m1;
     (void)o1;
     g_fx_restore = SF_SURF;
-    make_bundle(root, "sf.mod", "sf.mod", "1.0.0", 'a', NULL, m2, 5, NULL);
+    make_bundle(root, "sfmod000", "sfmod000", "1.0.0", 'a', NULL, m2, 5, NULL);
     g_fx_restore = NULL;
 }
 
@@ -2954,11 +2830,11 @@ static void test_surfaces_never_parsed(void)
     hashes[0] = hash64('a', h);
     CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 3);
     CHECK(step_index(&map, "material", "models/monsters/sf/body") < 0);
-    CHECK(step_index(&map, "entityDef", "mods/sf.mod/gameplay") >= 0 && step_index(&map, "material", "mods/sf.mod/skin") >= 0);
+    CHECK(step_index(&map, "entityDef", "mods/sfmod000/gameplay") >= 0 && step_index(&map, "material", "mods/sfmod000/skin") >= 0);
     g_calls[0] = 0;
     g_already = NULL;
     CHECK(sh_modserve_plan_run(&map, &g_fake, "map") == map.count);
-    CHECK(!strstr(g_calls, "models/monsters/sf/body") && strstr(g_calls, "R:entityDef:mods/sf.mod/gameplay;"));
+    CHECK(!strstr(g_calls, "models/monsters/sf/body") && strstr(g_calls, "R:entityDef:mods/sfmod000/gameplay;"));
     sh_modserve_plan_free(&map);
     CHECK(sh_modserve_plan_editor(&ed) == 5);
     CHECK(step_index(&ed, "material", "models/monsters/sf/body") < 0);
@@ -2980,7 +2856,7 @@ static void test_surfaces_never_parsed(void)
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_refresh_expand();
     CHECK(sh_modserve_each_refresh(rf_visit, &seen) >= 1);
-    CHECK(strstr(seen.order, ":mods/sf.mod/skin:") != NULL);
+    CHECK(strstr(seen.order, ":mods/sfmod000/skin:") != NULL);
     CHECK(strstr(seen.order, "models/monsters/sf/body") == NULL);
     if (strstr(seen.order, "models/monsters/sf/body")) printf("  refresh: %s\n", seen.order);
     CHECK(sh_modserve_plan_refresh(&rf) >= 0);
@@ -3028,7 +2904,7 @@ static void test_launch_preload(void)
     CHECK(n == 3);   /* the rows and the other mod's entityDef; the declared closure was the map pass's */
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_run(&ed, &g_fake, "launch") == ed.count);
-    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/sf.mod/thing;") && strstr(g_calls, "R:snapEditorEntityDef:mods/sf.other/rock;"));
+    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/sfmod000/thing;") && strstr(g_calls, "R:snapEditorEntityDef:mods/sfother0/rock;"));
     CHECK(!strstr(g_calls, "models/monsters/sf/body"));
     sh_modserve_plan_free(&ed);
     CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 3 && sh_modserve_plan_unvisited(&map) == 0);
@@ -3083,12 +2959,12 @@ static int rf_load(void *c, const char *type, const char *name, int persist, uns
     call_log(persist ? "P" : "L", type, name);
     *lifetime = 1;
     *state = 0;
-    return !strcmp(name, "designsystems/throws") ? SH_MODSERVE_LOAD_REFUSED : 1;
+    return !strcmp(name, "mods/dzpack00/throws") ? SH_MODSERVE_LOAD_REFUSED : 1;
 }
 static void rf_refusal(void *c, char *out, size_t cap)
 {
     (void)c;
-    strncpy_s(out, cap, "S:\\DOOM\\base\\generated\\decls\\animWeb\\designsystems\\throws.decl(9): error : "
+    strncpy_s(out, cap, "S:\\DOOM\\base\\generated\\decls\\animWeb\\mods\\dzpack00\\throws.decl(9): error : "
               "Could not find animweb decl: 'gone'", _TRUNCATE);
 }
 static const sh_modserve_engine_ops g_rf = { NULL, rf_source, fake_register, rf_load, rf_stock, NULL, rf_found, rf_refusal };
@@ -3108,21 +2984,18 @@ static void test_refusals(void)
     static fake_res res;
     unsigned was = 0;
     static const fx_file files[] = {
-        { "generated/decls/animweb/designsystems/med_station.decl",
+        { "generated/decls/animweb/mods/dzpack00/med_station.decl",
           "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/objects/props_set/kiosks/wallhealthstation.md6\" \"\"\t// modelIndex 0\n\t\t}\n\t}\n}\n",
-          -1, "animWeb", "designsystems/med_station", NULL, '1' },
-        { "generated/decls/animweb/designsystems/turret.decl",
+          -1, "animWeb", "mods/dzpack00/med_station", NULL, '1' },
+        { "generated/decls/animweb/mods/dzpack00/turret.decl",
           "{\n\tprops {\n\t\tmodels {\n\t\t\t\"zion/snap/known.md6\"\n\t\t\t\"zion/objects/weapons/turret_campaign.md6\"\n\t\t}\n\t}\n}\n",
-          -1, "animWeb", "designsystems/turret", NULL, '2' },
-        { "generated/decls/animweb/designsystems/fine.decl",
+          -1, "animWeb", "mods/dzpack00/turret", NULL, '2' },
+        { "generated/decls/animweb/mods/dzpack00/fine.decl",
           "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/snap/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
-          -1, "animWeb", "designsystems/fine", NULL, '3' },
-        { "generated/decls/animweb/designsystems/throws.decl",
+          -1, "animWeb", "mods/dzpack00/fine", NULL, '3' },
+        { "generated/decls/animweb/mods/dzpack00/throws.decl",
           "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/snap/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
-          -1, "animWeb", "designsystems/throws", NULL, '4' },
-        { "generated/decls/animweb/player/fp_hands_mp.decl",
-          "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/mp.md6\" \"\"\n\t\t}\n\t}\n}\n",
-          -1, "animWeb", "player/fp_hands_mp", NULL, '5' },
+          -1, "animWeb", "mods/dzpack00/throws", NULL, '4' },
     };
 
     /* The error text names the decl's own file, either slash, any case. */
@@ -3146,79 +3019,71 @@ static void test_refusals(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refusals\\mods", top);
     mkdirs(root);
-    /* A converted first-generation package (the issue-132 "SP doors"): every
-     * name it carries is listed as a shadow, new names included. */
-    g_bundle_extra = "\"legacy\": {},\n  ";
-    make_bundle(root, "dz.pack@0.0.0+1", "dz.pack", "0.0.0", '9',
-                "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/turret.decl\", "
-                "\"generated/decls/animweb/designsystems/fine.decl\", \"generated/decls/animweb/designsystems/throws.decl\", "
-                "\"generated/decls/animweb/player/fp_hands_mp.decl\"",
-                files, 5, NULL);
-    g_bundle_extra = NULL;
+    /* A pack whose animWebs name models (the issue-132 "SP doors", in the one
+     * shape: its own names under its salt). */
+    make_bundle(root, "dzpack00@0.0.0+1", "dzpack00", "0.0.0", '9', NULL, files, 4, NULL);
     hash64('9', hash);
     hashes[0] = hash;
     CHECK(sh_modserve_index_build(root) == 1);
 
     /* The check alone: the engine lookup decides a load now. */
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/med_station.decl", &g_rf, model, sizeof model) == 1 &&
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf, model, sizeof model) == 1 &&
           !strcmp(model, "zion/objects/props_set/kiosks/wallhealthstation.md6"));
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/turret.decl", &g_rf, model, sizeof model) == 1 &&
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/turret.decl", &g_rf, model, sizeof model) == 1 &&
           !strcmp(model, "zion/objects/weapons/turret_campaign.md6"));
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/fine.decl", &g_rf, model, sizeof model) == 0);
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/fine.decl", &g_rf, model, sizeof model) == 0);
     CHECK(sh_modserve_animweb_check("generated/decls/md6def/zion/none.md6.decl", &g_rf, model, sizeof model) == -1);
     /* Without the lookup the archives answer, which is what let issue 132's
      * campaign models through. */
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/med_station.decl", &g_rf_old, model, sizeof model) == 0);
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf_old, model, sizeof model) == 0);
 
     g_console_seen[0] = 0;
     sh_modserve_set_console(rf_console);
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5 && unknown == 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 4 && unknown == 0);
     log_clear();
     g_calls[0] = 0;
     g_rf_loads = 0;
     ready = sh_modserve_plan_run(&p, &g_rf, "map");
-    CHECK(ready == 2);
-    CHECK(log_has("map: animWeb 'designsystems/med_station' (dz.pack) NOT READY: it names model "
+    CHECK(ready == 1);
+    CHECK(log_has("map: animWeb 'mods/dzpack00/med_station' (dzpack00) NOT READY: it names model "
                   "'zion/objects/props_set/kiosks/wallhealthstation.md6', which neither a bundle nor the game provides"));
-    CHECK(log_has("map: animWeb 'designsystems/turret' (dz.pack) NOT READY: it names model 'zion/objects/weapons/turret_campaign.md6'"));
-    CHECK(log_has("map: animWeb 'designsystems/fine' (dz.pack) READY"));
-    CHECK(log_has("map: animWeb 'designsystems/throws' (dz.pack) NOT READY: the engine refused its parse: "
-                  "S:\\DOOM\\base\\generated\\decls\\animWeb\\designsystems\\throws.decl(9): error : Could not find animweb decl: 'gone'; "
+    CHECK(log_has("map: animWeb 'mods/dzpack00/turret' (dzpack00) NOT READY: it names model 'zion/objects/weapons/turret_campaign.md6'"));
+    CHECK(log_has("map: animWeb 'mods/dzpack00/fine' (dzpack00) READY"));
+    CHECK(log_has("map: animWeb 'mods/dzpack00/throws' (dzpack00) NOT READY: the engine refused its parse: "
+                  "S:\\DOOM\\base\\generated\\decls\\animWeb\\mods\\dzpack00\\throws.decl(9): error : Could not find animweb decl: 'gone'; "
                   "withdrawn, not loaded again"));
-    /* The known stock shadow parses later, on demand: the archives keep it served. */
-    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (dz.pack) shadows a stock decl; served by the provider"));
     /* Never loaded: the two whose models SnapMap cannot load. */
-    CHECK(!strstr(g_calls, "designsystems/med_station") && !strstr(g_calls, "designsystems/turret"));
+    CHECK(!strstr(g_calls, "mods/dzpack00/med_station") && !strstr(g_calls, "mods/dzpack00/turret"));
     CHECK(g_rf_loads == 2);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/med_station' not loaded: it names model "
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/med_station' not loaded: it names model "
                                  "'zion/objects/props_set/kiosks/wallhealthstation.md6', which SnapMap cannot load (campaign-only or missing)\n") != NULL);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/throws' not loaded: the game refused it: ") != NULL);
-    CHECK(!strstr(g_console_seen, "designsystems/fine"));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/throws.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/fine.decl", NULL));
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/throws' not loaded: the game refused it: ") != NULL);
+    CHECK(!strstr(g_console_seen, "mods/dzpack00/fine"));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/med_station.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/throws.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/fine.decl", NULL));
     sh_modserve_plan_free(&p);
 
     /* The next map load with the same bundle parses none of them again. */
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 4);
     log_clear();
     g_calls[0] = 0;
     g_rf_loads = 0;
     g_console_seen[0] = 0;
     ready = sh_modserve_plan_run(&p, &g_rf, "map");
-    CHECK(ready == 2 && g_rf_loads == 0);
-    CHECK(log_has("map: animWeb 'designsystems/throws' (dz.pack) NOT READY: withdrawn earlier in this session"));
-    CHECK(log_has("map: animWeb 'designsystems/med_station' (dz.pack) NOT READY: withdrawn earlier in this session"));
+    CHECK(ready == 1 && g_rf_loads == 0);
+    CHECK(log_has("map: animWeb 'mods/dzpack00/throws' (dzpack00) NOT READY: withdrawn earlier in this session"));
+    CHECK(log_has("map: animWeb 'mods/dzpack00/med_station' (dzpack00) NOT READY: withdrawn earlier in this session"));
     CHECK(g_console_seen[0] == 0);
     sh_modserve_plan_free(&p);
 
     /* A withdrawal by request (the early re-parse's refusal) names the file once. */
-    CHECK(sh_modserve_withdraw("generated/decls/animweb/designsystems/fine.decl", "animWeb", "designsystems/fine",
+    CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine",
                                "the game refused its bytes; the game's own decl is restored") == 1);
-    CHECK(log_has("MODS: withdrawn: animWeb 'designsystems/fine' (dz.pack): the game refused its bytes"));
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/fine' not loaded: the game refused its bytes") != NULL);
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/fine.decl", NULL));
-    CHECK(sh_modserve_withdraw("generated/decls/animweb/designsystems/fine.decl", "animWeb", "designsystems/fine", "again") == 0);
+    CHECK(log_has("MODS: withdrawn: animWeb 'mods/dzpack00/fine' (dzpack00): the game refused its bytes"));
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/fine' not loaded: the game refused its bytes") != NULL);
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/fine.decl", NULL));
+    CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine", "again") == 0);
     sh_modserve_set_console(NULL);
 }
 
@@ -3267,12 +3132,12 @@ static void test_permanent_first_parse(void)
     const char *hashes[1];
     int unknown = 0, ready;
     static const fx_file files[] = {
-        { "generated/decls/unlockmodel/spidermastermind.decl",
-          "{\n\tedit = {\n\t\tunlockModel = \"zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6\";\n\t}\n}\n",
-          -1, "unlockModel", "spidermastermind", NULL, '1' },
-        { "generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl",
+        { "generated/decls/unlockmodel/mods/pfspider/spidermastermind.decl",
+          "{\n\tedit = {\n\t\tunlockModel = \"mods/pfspider/spider_mastermind.md6\";\n\t}\n}\n",
+          -1, "unlockModel", "mods/pfspider/spidermastermind", NULL, '1' },
+        { "generated/decls/md6def/mods/pfspider/spider_mastermind.md6.decl",
           "{\n\tinit = {\n\t}\n}\n",
-          -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6", NULL, '2' },
+          -1, "md6Def", "mods/pfspider/spider_mastermind.md6", NULL, '2' },
     };
 
     int round;
@@ -3303,14 +3168,11 @@ static void test_permanent_first_parse(void)
         char line[400];
         _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\firstparse%d\\mods", top, round);
         mkdirs(root);
-        g_bundle_extra = "\"legacy\": {},\n  ";
+        g_bundle_extra = NULL;
         /* The second time the unlockModel is what the real bundle ships: a
          * pointer to the game's own bytes under the same name. */
-        g_fx_restore = round ? "generated/decls/unlockmodel/spidermastermind.decl" : NULL;
-        make_bundle(root, "pf.spider@0.0.0+1", "pf.spider", "0.0.0", digit,
-                    "\"generated/decls/unlockmodel/spidermastermind.decl\", "
-                    "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\"",
-                    files, 2, NULL);
+        g_fx_restore = round ? "generated/decls/unlockmodel/mods/pfspider/spidermastermind.decl" : NULL;
+        make_bundle(root, "pfspider@0.0.0+1", "pfspider", "0.0.0", digit, NULL, files, 2, NULL);
         g_fx_restore = NULL;
         g_bundle_extra = NULL;
         hash64(digit, hash);
@@ -3318,38 +3180,37 @@ static void test_permanent_first_parse(void)
         CHECK(sh_modserve_index_build(root) == 1);
         sh_modserve_test_reset_registration();   /* a new session: nothing remembered as ready */
         /* The refresh and the early re-parse ask this before re-parsing a permanent decl. */
-        CHECK(sh_modserve_is_restore("generated/decls/unlockmodel/spidermastermind.decl") == round);
-        CHECK(sh_modserve_is_restore("generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/"
-                                     "spider_mastermind.md6.decl") == 0);
+        CHECK(sh_modserve_is_restore("generated/decls/unlockmodel/mods/pfspider/spidermastermind.decl") == round);
+        CHECK(sh_modserve_is_restore("generated/decls/md6def/mods/pfspider/spider_mastermind.md6.decl") == 0);
         CHECK(sh_modserve_is_restore("generated/decls/unlockmodel/nothing.decl") == 0);
-        g_pf[0].type = "unlockModel"; g_pf[0].name = "spidermastermind";
+        g_pf[0].type = "unlockModel"; g_pf[0].name = "mods/pfspider/spidermastermind";
         g_pf[0].level = 4; g_pf[0].state = before; g_pf[0].parses = 0;
-        g_pf[1].type = "md6Def"; g_pf[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
+        g_pf[1].type = "md6Def"; g_pf[1].name = "mods/pfspider/spider_mastermind.md6";
         g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
 
         /* Round 1's unlockModel is a surface (the game's bytes at the game's
          * name): no plan holds it at all (ADD-L11). */
         CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == (round ? 1 : 2) && unknown == 0);
-        CHECK((step_index(&p, "unlockModel", "spidermastermind") < 0) == round);
+        CHECK((step_index(&p, "unlockModel", "mods/pfspider/spidermastermind") < 0) == round);
         log_clear();
         g_calls[0] = 0;
         ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
         CHECK(ready == (round ? 1 : 2));
         /* The map pass never parses the permanent collectible... */
         CHECK(g_pf[0].parses == 0 && g_pf[0].state == before && g_pf[0].level == 4);
-        CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;") && (!round || !strstr(g_calls, "unlockModel")));
-        _snprintf_s(line, sizeof line, _TRUNCATE, "map: unlockModel 'spidermastermind' (pf.spider) left to the game: "
+        CHECK(!strstr(g_calls, "L:unlockModel:mods/pfspider/spidermastermind;") && (!round || !strstr(g_calls, "unlockModel")));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "map: unlockModel 'mods/pfspider/spidermastermind' (pfspider) left to the game: "
                     "permanent, %s (state 0x%02x lifetime 4); the provider serves these bytes whenever the game parses it",
                     round ? "already parsed" : "not parsed yet", before);
         CHECK(log_has(line) == !round);
-        CHECK(!log_has("map: unlockModel 'spidermastermind' (pf.spider) READY"));
+        CHECK(!log_has("map: unlockModel 'mods/pfspider/spidermastermind' (pfspider) READY"));
         /* ...while the map-scoped md6Def is still loaded with the bundle's bytes. */
         CHECK(g_pf[1].parses == 1 &&
-              strstr(g_calls, "L:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;"));
-        CHECK(log_has("map: md6Def 'zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6' (pf.spider) READY: "
+              strstr(g_calls, "L:md6Def:mods/pfspider/spider_mastermind.md6;"));
+        CHECK(log_has("map: md6Def 'mods/pfspider/spider_mastermind.md6' (pfspider) READY: "
                       "state 0x00 lifetime 1"));
         /* The provider still serves the shadow for the game's own parse. */
-        CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
+        CHECK(sh_modserve_lookup("generated/decls/unlockmodel/mods/pfspider/spidermastermind.decl", NULL));
         sh_modserve_plan_free(&p);
 
         /* The next map load skips both quietly. */
@@ -3447,10 +3308,10 @@ static const sh_modserve_engine_ops g_hr_ops_unaware = { NULL, hr_source, hr_reg
 static void hr_reset(unsigned unlock_level, unsigned unlock_state, int map_scoped_held)
 {
     memset(g_hr, 0, sizeof g_hr);
-    g_hr[0].type = "unlockModel"; g_hr[0].name = "spidermastermind";
+    g_hr[0].type = "unlockModel"; g_hr[0].name = "mods/hrspider/spidermastermind";
     g_hr[0].level = unlock_level; g_hr[0].state = unlock_state; g_hr[0].held = 1;
-    g_hr[1].type = "md6Def"; g_hr[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
-    g_hr[2].type = "animWeb"; g_hr[2].name = "doors/airlock";
+    g_hr[1].type = "md6Def"; g_hr[1].name = "mods/hrspider/spider_mastermind.md6";
+    g_hr[2].type = "animWeb"; g_hr[2].name = "mods/hrspider/airlock";
     g_hr[2].held = map_scoped_held; g_hr[2].level = 1; g_hr[2].state = 0;
     g_calls[0] = 0;
     sh_modserve_test_reset_registration();   /* a new session: nothing remembered as registered */
@@ -3464,14 +3325,14 @@ static void test_registration_reparse_of_held_permanent(void)
     const char *hashes[1];
     int unknown = 0, ready;
     static const fx_file files[] = {
-        { "generated/decls/unlockmodel/spidermastermind.decl",
-          "{\n\tedit = {\n\t\tunlockModel = \"zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6\";\n\t}\n}\n",
-          -1, "unlockModel", "spidermastermind", NULL, '1' },
-        { "generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl",
+        { "generated/decls/unlockmodel/mods/hrspider/spidermastermind.decl",
+          "{\n\tedit = {\n\t\tunlockModel = \"mods/hrspider/spider_mastermind.md6\";\n\t}\n}\n",
+          -1, "unlockModel", "mods/hrspider/spidermastermind", NULL, '1' },
+        { "generated/decls/md6def/mods/hrspider/spider_mastermind.md6.decl",
           "{\n\tinit = {\n\t}\n}\n",
-          -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6", NULL, '2' },
-        { "generated/decls/animweb/doors/airlock.decl",
-          "{\n}\n", -1, "animWeb", "doors/airlock", NULL, '3' },
+          -1, "md6Def", "mods/hrspider/spider_mastermind.md6", NULL, '2' },
+        { "generated/decls/animweb/mods/hrspider/airlock.decl",
+          "{\n}\n", -1, "animWeb", "mods/hrspider/airlock", NULL, '3' },
     };
 
     strcpy_s(top, sizeof top, g_root);
@@ -3479,15 +3340,11 @@ static void test_registration_reparse_of_held_permanent(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\heldreparse\\mods", top);
     mkdirs(root);
-    g_bundle_extra = "\"legacy\": {},\n  ";
-    /* The unlockModel as a grandfathered shadow carrying its own bytes: a
-     * surface (the game's bytes under its name) is never planned at all. */
+    g_bundle_extra = NULL;
+    /* The unlockModel carrying its own bytes (a surface, the game's bytes
+     * under its name, is never planned at all). */
     g_fx_restore = NULL;
-    make_bundle(root, "hr.spider@0.0.0+1", "hr.spider", "0.0.0", '6',
-                "\"generated/decls/unlockmodel/spidermastermind.decl\", "
-                "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\", "
-                "\"generated/decls/animweb/doors/airlock.decl\"",
-                files, 3, NULL);
+    make_bundle(root, "hrspider@0.0.0+1", "hrspider", "0.0.0", '6', NULL, files, 3, NULL);
     g_fx_restore = NULL;
     g_bundle_extra = NULL;
     hash64('6', hash);
@@ -3501,7 +3358,7 @@ static void test_registration_reparse_of_held_permanent(void)
     CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3 && unknown == 0);
     log_clear();
     (void)sh_modserve_plan_run(&p, &g_hr_ops_unaware, "map");
-    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    CHECK(strstr(g_calls, "R:unlockModel:mods/hrspider/spidermastermind;") != NULL);
     CHECK(g_hr[0].parses == 1 && g_hr[0].bound_level == 1);
     sh_modserve_plan_free(&p);
 
@@ -3511,18 +3368,18 @@ static void test_registration_reparse_of_held_permanent(void)
     log_clear();
     ready = sh_modserve_plan_run(&p, &g_hr_ops, "map");
     CHECK(ready == 3);
-    CHECK(!strstr(g_calls, "R:unlockModel:spidermastermind;") && !strstr(g_calls, "L:unlockModel:spidermastermind;"));
+    CHECK(!strstr(g_calls, "R:unlockModel:mods/hrspider/spidermastermind;") && !strstr(g_calls, "L:unlockModel:mods/hrspider/spidermastermind;"));
     CHECK(g_hr[0].parses == 0 && g_hr[0].bound_level == 0 && g_hr[0].level == 4);
-    CHECK(log_has("map: unlockModel 'spidermastermind' (hr.spider) left to the game: permanent, already parsed "
+    CHECK(log_has("map: unlockModel 'mods/hrspider/spidermastermind' (hrspider) left to the game: permanent, already parsed "
                   "(state 0x00 lifetime 4); not registered by this pass, whose registration would re-parse it in place"));
-    CHECK(!log_has("map: unlockModel 'spidermastermind' (hr.spider) READY"));
+    CHECK(!log_has("map: unlockModel 'mods/hrspider/spidermastermind' (hrspider) READY"));
     /* The md6Def, new to the engine, is registered and loaded as before (level 1). */
-    CHECK(strstr(g_calls, "R:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;") != NULL);
+    CHECK(strstr(g_calls, "R:md6Def:mods/hrspider/spider_mastermind.md6;") != NULL);
     CHECK(g_hr[1].held && g_hr[1].level == 1);
     /* A held map-scoped decl is still registered: what it binds dies with it. */
-    CHECK(strstr(g_calls, "R:animWeb:doors/airlock;") != NULL && g_hr[2].parses >= 1);
+    CHECK(strstr(g_calls, "R:animWeb:mods/hrspider/airlock;") != NULL && g_hr[2].parses >= 1);
     /* The provider still serves the shadow for the game's own parse. */
-    CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/unlockmodel/mods/hrspider/spidermastermind.decl", NULL));
     sh_modserve_plan_free(&p);
 
     /* The next map load asks again (nothing was remembered as registered) and leaves it again. */
@@ -3539,10 +3396,10 @@ static void test_registration_reparse_of_held_permanent(void)
     log_clear();
     ready = sh_modserve_plan_run(&p, &g_hr_ops, "map");
     CHECK(ready == 3 && g_hr[0].parses == 0);
-    CHECK(log_has("map: unlockModel 'spidermastermind' (hr.spider) left to the game: permanent, not parsed yet "
+    CHECK(log_has("map: unlockModel 'mods/hrspider/spidermastermind' (hrspider) left to the game: permanent, not parsed yet "
                   "(state 0x02 lifetime 4); not registered by this pass"));
     /* Not held before: the animWeb is registered (and then loaded at level 1). */
-    CHECK(strstr(g_calls, "R:animWeb:doors/airlock;") != NULL);
+    CHECK(strstr(g_calls, "R:animWeb:mods/hrspider/airlock;") != NULL);
     sh_modserve_plan_free(&p);
 
     /* A permanent decl whose earlier parse failed is registered as before. */
@@ -3550,7 +3407,7 @@ static void test_registration_reparse_of_held_permanent(void)
     CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
     log_clear();
     (void)sh_modserve_plan_run(&p, &g_hr_ops, "map");
-    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    CHECK(strstr(g_calls, "R:unlockModel:mods/hrspider/spidermastermind;") != NULL);
     sh_modserve_plan_free(&p);
 
     /* A map-scoped unlockModel (level 1) is registered too: it is purged with what it names. */
@@ -3558,7 +3415,7 @@ static void test_registration_reparse_of_held_permanent(void)
     CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
     log_clear();
     (void)sh_modserve_plan_run(&p, &g_hr_ops, "map");
-    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    CHECK(strstr(g_calls, "R:unlockModel:mods/hrspider/spidermastermind;") != NULL);
     sh_modserve_plan_free(&p);
     sh_modserve_test_reset_registration();
 }
@@ -3566,46 +3423,46 @@ static void test_registration_reparse_of_held_permanent(void)
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
-static void collect_extra(void *c, const char *id, const char *version, int legacy, const char *extra)
+static void collect_extra(void *c, const char *id, const char *version, int place, const char *extra)
 {
     (void)c;
     CHECK(extra && extra[0] == '{' && strstr(extra, "\"strings\""));
     _snprintf_s(g_extra_seen + strlen(g_extra_seen), sizeof g_extra_seen - strlen(g_extra_seen), _TRUNCATE,
-                "%s@%s%s;", id, version, legacy ? "(legacy)" : "");
+                "%s@%s%s;", id, version, place ? "(place)" : "");
 }
 
 static void test_bundle_extra(void)
 {
-    static const fx_file z[] = { { "generated/decls/entitydef/mods/zed.mod/a.decl", "x", -1, "entityDef", "mods/zed.mod/a", NULL, '1' } };
-    static const fx_file a1[] = { { "generated/decls/entitydef/mods/abe.mod/a1.decl", "x", -1, "entityDef", "mods/abe.mod/a1", NULL, '2' } };
-    static const fx_file a2[] = { { "generated/decls/entitydef/mods/abe.mod/a2.decl", "x", -1, "entityDef", "mods/abe.mod/a2", NULL, '3' } };
-    static const fx_file bad[] = { { "generated/decls/entitydef/mods/bad.size/a.decl", "x", 99, "entityDef", "mods/bad.size/a", NULL, '4' } };
-    static const fx_file plain[] = { { "generated/decls/entitydef/mods/plain.mod/a.decl", "x", -1, "entityDef", "mods/plain.mod/a", NULL, '5' } };
-    static const fx_file old[] = { { "generated/decls/entitydef/smp/aaa_old.decl", "x", -1, "entityDef", "smp/aaa_old", NULL, '6' } };
-    char top[MAX_PATH], mods[MAX_PATH], legacy[MAX_PATH], *slash;
+    static const fx_file z[] = { { "generated/decls/entitydef/mods/zedmod00/a.decl", "x", -1, "entityDef", "mods/zedmod00/a", NULL, '1' } };
+    static const fx_file a1[] = { { "generated/decls/entitydef/mods/abemod00/a1.decl", "x", -1, "entityDef", "mods/abemod00/a1", NULL, '2' } };
+    static const fx_file a2[] = { { "generated/decls/entitydef/mods/abemod00/a2.decl", "x", -1, "entityDef", "mods/abemod00/a2", NULL, '3' } };
+    static const fx_file bad[] = { { "generated/decls/entitydef/mods/badsize0/a.decl", "x", 99, "entityDef", "mods/badsize0/a", NULL, '4' } };
+    static const fx_file plain[] = { { "generated/decls/entitydef/mods/plainmod/a.decl", "x", -1, "entityDef", "mods/plainmod/a", NULL, '5' } };
+    static const fx_file old[] = { { "generated/decls/entitydef/mods/aaaold00/a.decl", "x", -1, "entityDef", "mods/aaaold00/a", NULL, '6' } };
+    char top[MAX_PATH], mods[MAX_PATH], *slash;
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\extra_mods", top);
-    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods);
     mkdirs(mods);
     g_bundle_extra = "\"strings\": {\"en\": {\"zed_name\": \"Zed\"}},";
-    make_bundle(mods, "zed.mod@1.0.0", "zed.mod", "1.0.0", '7', NULL, z, 1, NULL);
+    make_bundle(mods, "zedmod00@1.0.0", "zedmod00", "1.0.0", '7', NULL, z, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}},";
-    make_bundle(mods, "abe.mod@2.0.0", "abe.mod", "2.0.0", '8', NULL, a2, 1, NULL);
+    make_bundle(mods, "abemod00", "abemod00", "2.0.0", '8', NULL, a2, 1, NULL);
     g_bundle_extra = "\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}},";
-    make_bundle(mods, "abe.mod@1.0.0", "abe.mod", "1.0.0", '9', NULL, a1, 1, NULL);
+    make_bundle(mods, "maps\\Abe map\\abemod00", "abemod00", "1.0.0", '9', NULL, a1, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"bad_name\": \"Bad\"}},";
-    make_bundle(mods, "bad.size@1.0.0", "bad.size", "1.0.0", '0', NULL, bad, 1, NULL);
-    g_bundle_extra = "\"legacy\": {}, \"strings\": {\"en\": {\"old_name\": \"Old\"}},";
-    make_bundle(legacy, "aaa.old@0123456789abcdef", "aaa.old", "0123456789abcdef", 'f', NULL, old, 1, NULL);
+    make_bundle(mods, "badsize0@1.0.0", "badsize0", "1.0.0", '0', NULL, bad, 1, NULL);
+    g_bundle_extra = "\"strings\": {\"en\": {\"old_name\": \"Old\"}},";
+    make_bundle(mods, "maps\\Old map\\old", "aaaold00", "0.1.0", 'f', NULL, old, 1, NULL);
     g_bundle_extra = NULL;
-    make_bundle(mods, "plain.mod@1.0.0", "plain.mod", "1.0.0", 'e', NULL, plain, 1, NULL);
+    make_bundle(mods, "plainmod@1.0.0", "plainmod", "1.0.0", 'e', NULL, plain, 1, NULL);
     CHECK(sh_modserve_index_build(mods) == 5);
     g_extra_seen[0] = 0;
     CHECK(sh_modserve_each_bundle_extra(collect_extra, NULL) == 4);
-    CHECK(!strcmp(g_extra_seen, "abe.mod@1.0.0;abe.mod@2.0.0;zed.mod@1.0.0;aaa.old@0123456789abcdef(legacy);"));
-    if (strcmp(g_extra_seen, "abe.mod@1.0.0;abe.mod@2.0.0;zed.mod@1.0.0;aaa.old@0123456789abcdef(legacy);"))
+    /* Root folders first, then maps' places; by salt, then folder. */
+    CHECK(!strcmp(g_extra_seen, "abemod00@2.0.0;zedmod00@1.0.0;aaaold00@0.1.0(place);abemod00@1.0.0(place);"));
+    if (strcmp(g_extra_seen, "abemod00@2.0.0;zedmod00@1.0.0;aaaold00@0.1.0(place);abemod00@1.0.0(place);"))
         fprintf(stderr, "bundle extra order: %s\n", g_extra_seen);
 }
 
@@ -3641,8 +3498,8 @@ static void remove_tree(const char *dir)
 #define SC_IMAGE  "generated/image/models/hands/arms.bimage"
 #define SC_SET    "generated/decls/snapeditorsettings/default.decl"
 #define SC_ROWDEF "generated/decls/entitydef/monster/hellknight.decl"
-#define SC_ROW    "generated/decls/snapeditorentitydef/mods/r.rows/knight.decl"
-#define SC_NEW    "generated/decls/entitydef/mods/n.names/thing.decl"
+#define SC_ROW    "generated/decls/snapeditorentitydef/mods/rrows000/knight.decl"
+#define SC_NEW    "generated/decls/entitydef/mods/nnames00/thing.decl"
 #define SC_DECL   "generated/decls/entitydef/monster/revenant.decl"
 #define SC_MAPED  "generated/decls/snapeditorsettings/other.decl"
 
@@ -3671,9 +3528,9 @@ static void test_scope(void)
     static const fx_file maped[] = { { SC_MAPED, "settings {}", -1, "snapEditorSettings", "other", NULL, '5' } };
     static const fx_file rows[] = {
         { SC_ROWDEF, "entityDef hk {}", -1, "entityDef", "monster/hellknight", NULL, '6' },
-        { SC_ROW, "{ entityDef \"monster/hellknight\" }", -1, "snapEditorEntityDef", "mods/r.rows/knight", NULL, '7' },
+        { SC_ROW, "{ entityDef \"monster/hellknight\" }", -1, "snapEditorEntityDef", "mods/rrows000/knight", NULL, '7' },
     };
-    static const fx_file names[] = { { SC_NEW, "entityDef t {}", -1, "entityDef", "mods/n.names/thing", NULL, '8' } };
+    static const fx_file names[] = { { SC_NEW, "entityDef t {}", -1, "entityDef", "mods/nnames00/thing", NULL, '8' } };
     char top[MAX_PATH], root[MAX_PATH], h_hands[65], h_rows[65], h_maped[65], h_none[65];
     const char *list[2];
     char *slash;
@@ -3688,20 +3545,18 @@ static void test_scope(void)
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"r_fancy\": true}, \"commands\": {\"activate\": [\"echo hands on\"], "
                      "\"deactivate\": [\"echo hands off\"]}},\n  ";
-    make_bundle(root, "a.hands", "a.hands", "1.0.0", '1', "\"" SC_COOP "\", \"" SC_IMAGE "\"", hands, 2, "{\"installedAt\": 100}");
+    make_bundle(root, "ahands00", "ahands00", "1.0.0", '1', "\"" SC_COOP "\", \"" SC_IMAGE "\"", hands, 2, "{\"installedAt\": 100}");
     hash64('1', h_hands);
     g_bundle_extra = NULL;
-    make_bundle(root, "e.editor", "e.editor", "1.0.0", '2', "\"" SC_SET "\"", editor, 1, "{\"installedAt\": 110}");
-    g_bundle_extra = "\"scope\": \"always\",\n  ";
-    make_bundle(root, "d.declared", "d.declared", "1.0.0", '3', "\"" SC_DECL "\"", declared, 1, "{\"installedAt\": 120}");
-    g_bundle_extra = "\"scope\": \"map\",\n  ";
-    make_bundle(root, "m.editor", "m.editor", "1.0.0", '4', "\"" SC_MAPED "\"", maped, 1, "{\"installedAt\": 130}");
+    make_bundle(root, "eeditor0", "eeditor0", "1.0.0", '2', "\"" SC_SET "\"", editor, 1, "{\"installedAt\": 110}");
+    make_bundle(root, "ddeclare", "ddeclare", "1.0.0", '3', "\"" SC_DECL "\"", declared, 1, "{\"installedAt\": 120}");
+    make_bundle(root, "meditor0", "meditor0", "1.0.0", '4', "\"" SC_MAPED "\"", maped, 1, "{\"installedAt\": 130}");
     hash64('4', h_maped);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_label\": \"knights\"}},\n  ";
-    make_bundle(root, "r.rows", "r.rows", "1.0.0", '5', "\"" SC_ROWDEF "\"", rows, 2, "{\"installedAt\": 140}");
+    make_bundle(root, "rrows000", "rrows000", "1.0.0", '5', "\"" SC_ROWDEF "\"", rows, 2, "{\"installedAt\": 140}");
     hash64('5', h_rows);
     g_bundle_extra = NULL;
-    make_bundle(root, "n.names", "n.names", "1.0.0", '6', NULL, names, 1, "{\"installedAt\": 150}");
+    make_bundle(root, "nnames00", "nnames00", "1.0.0", '6', NULL, names, 1, "{\"installedAt\": 150}");
     hash64('9', h_none);
 
     printf("-- map scope: a map serves the bundles it declares, then the game\n");
@@ -3714,17 +3569,16 @@ static void test_scope(void)
     sh_modserve_each_refresh(scope_refresh, &seen);
     /* Off (as every earlier test): everything serves. */
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL) && sh_modserve_lookup(SC_MAPED, NULL));
-    CHECK(log_has("MODS: scope: e.editor@1.0.0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
-    CHECK(log_has("MODS: scope: m.editor@1.0.0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
-    CHECK(log_has("MODS: scope: d.declared@1.0.0: its mod.json \"scope\" is ignored; a map serves exactly the mods it declares"));
-    CHECK(log_count("MODS: scope:") == 3);
+    CHECK(log_has("MODS: scope: eeditor0@1.0.0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
+    CHECK(log_has("MODS: scope: meditor0@1.0.0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
+    CHECK(log_count("MODS: scope:") == 2);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: map scope is off; every bundle serves in every map\n") != NULL);
     CHECK(!sh_modserve_scope_relevant());
 
-    /* On, no map open: undeclared shadows are withdrawn ("scope": "always"
-     * included), names and editor-time content serve. */
+    /* On, no map open: undeclared shadows are withdrawn, names and
+     * editor-time content serve. */
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_scope_enabled() && !sh_modserve_scope_map_open() && sh_modserve_scope_relevant());
     CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_lookup(SC_IMAGE, NULL) && !sh_modserve_lookup(SC_ROWDEF, NULL));
@@ -3741,9 +3595,9 @@ static void test_scope(void)
     /* The engine is told to read the game's bytes again: gone, no gate. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "a.hands:player/coop:gone=1:gates=1;") && strstr(seen.order, "a.hands:models/hands/arms:gone=1:gates=1;"));
-    CHECK(strstr(seen.order, "r.rows:monster/hellknight:gone=1") && strstr(seen.order, "d.declared:monster/revenant:gone=1"));
-    CHECK(!strstr(seen.order, "e.editor") && !strstr(seen.order, "m.editor") && !strstr(seen.order, "n.names"));
+    CHECK(strstr(seen.order, "ahands00:player/coop:gone=1:gates=1;") && strstr(seen.order, "ahands00:models/hands/arms:gone=1:gates=1;"));
+    CHECK(strstr(seen.order, "rrows000:monster/hellknight:gone=1") && strstr(seen.order, "ddeclare:monster/revenant:gone=1"));
+    CHECK(!strstr(seen.order, "eeditor0") && !strstr(seen.order, "meditor0") && !strstr(seen.order, "nnames00"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
     /* No early-decl offer for a withdrawn shadow. */
@@ -3753,7 +3607,7 @@ static void test_scope(void)
         sh_modserve_each_unopened_shadow(unopened_visit, &u);
         CHECK(!strstr(u.order, "player/coop"));
     }
-    /* No map: a.hands' requirement is not live; r.rows keeps its own, because
+    /* No map: ahands00' requirement is not live; rrows000 keeps its own, because
      * the palette registers its row with no map open too. */
     CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && r.commands == 0 && !strcmp(g_text_val[1], "0") &&
           !strcmp(g_text_val[3], "knights"));
@@ -3761,13 +3615,13 @@ static void test_scope(void)
           si.shadows == 2 && si.requirements && !si.requirements_live && si.rank == -1 && !si.inert && si.newest);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: a.hands@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not\n") != NULL);
-    CHECK(strstr(g_report, "scope: e.editor@1.0.0 (2222222222222222) (0 names, 1 shadow, 0 surfaces): editor-time content ("
+    CHECK(strstr(g_report, "scope: eeditor0@1.0.0 (2222222222222222) (0 names, 1 shadow, 0 surfaces): editor-time content ("
                            SC_SET "): its editor tweaks serve in every map; the rest only in maps that declare it\n") != NULL);
-    CHECK(strstr(g_report, "scope: n.names@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared (no map is "
+    CHECK(strstr(g_report, "scope: nnames00@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
-    CHECK(strstr(g_report, "scope: r.rows@1.0.0 (5555555555555555) (1 name, 1 shadow, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: rrows000@1.0.0 (5555555555555555) (1 name, 1 shadow, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not; its "
                            "requirements stay live because it adds Toybox rows\n") != NULL);
     CHECK(strstr(g_report, "serving: 0 path(s) from bundles the open map declares, ") != NULL);
@@ -3779,39 +3633,39 @@ static void test_scope(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[3], "knights") && !strcmp(g_text_val[1], "0"));
     CHECK(ev_first("C:echo hands on") < 0);
     /* Its Play (ADD-L6 K): no undeclared bundle keeps its requirements,
-     * Toybox rows or not, so r.rows' cvar is the game's again; back in the
+     * Toybox rows or not, so rrows000' cvar is the game's again; back in the
      * editor its rows need it, and it is applied again. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], ""));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: r.rows@1.0.0 (5555555555555555)") && !strstr(g_report, "requirements stay live"));
+    CHECK(strstr(g_report, "scope: rrows000@1.0.0 (5555555555555555)") && !strstr(g_report, "requirements stay live"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], "knights"));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: a.hands@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
                            "by the open map: its names serve") != NULL);
 
-    /* The map declares a.hands (its row's hash): its shadows serve, marked to be re-parsed and reloaded. */
+    /* The map declares ahands00 (its row's hash): its shadows serve, marked to be re-parsed and reloaded. */
     list[0] = h_hands;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 1);
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "a.hands:player/coop:gone=0:gates=0;") != NULL);   /* waits for its gate */
+    CHECK(strstr(seen.order, "ahands00:player/coop:gone=0:gates=0;") != NULL);   /* waits for its gate */
     g_events[0] = 0;
     log_clear();
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[1], "1"));
     CHECK(ev_first("S:r_fancy=1") >= 0 && ev_first("C:echo hands on") > ev_first("S:r_fancy=1"));
-    CHECK(log_has("MODS: requirements: a.hands: command \"echo hands on\""));
+    CHECK(log_has("MODS: requirements: ahands00: command \"echo hands on\""));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "a.hands:player/coop:gone=0:gates=1;") && strstr(seen.order, "a.hands:models/hands/arms:gone=0:gates=1;"));
+    CHECK(strstr(seen.order, "ahands00:player/coop:gone=0:gates=1;") && strstr(seen.order, "ahands00:models/hands/arms:gone=0:gates=1;"));
     CHECK(sh_modserve_bundle_scope(h_hands, &si) && si.listed && si.rank == 0 && si.shadows_live && si.requirements_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: a.hands@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): declared by "
+    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): declared by "
                            "the open map (row 1): serves everything it carries\n") != NULL);
     /* The same listing again changes nothing. */
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 0);
@@ -3819,20 +3673,32 @@ static void test_scope(void)
     CHECK(sh_modserve_index_rescan() == 6 && sh_modserve_lookup(SC_COOP, NULL));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
-    /* A key alone declares nothing (a row names its build by hash). */
+    /* A salt alone declares nothing (a row names its build by hash). */
     list[0] = "A.Hands";
     CHECK(sh_modserve_scope_set(NULL, 0, list, 1, 1) == 1 && !sh_modserve_lookup(SC_COOP, NULL));
     list[0] = h_hands;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 1 && sh_modserve_lookup(SC_COOP, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    /* The build a map-level row is rewritten to: its own hash, never another build. */
+    /* The build a map-level row is rewritten to: for a stranger's map its own
+     * hash, never another build; for the author's own map the root folder's. */
     {
         sh_modserve_bundle_ref ref;
-        CHECK(sh_modserve_bundle_serving(NULL, "a.hands", &ref) && !strcmp(ref.hash, h_hands) && !strcmp(ref.version, "1.0.0"));
-        CHECK(sh_modserve_bundle_serving(h_rows, NULL, &ref) && !strcmp(ref.id, "r.rows"));
-        CHECK(!sh_modserve_bundle_serving(h_none, "a.hands", &ref));   /* pinned: that build is not installed */
-        CHECK(!sh_modserve_bundle_serving(NULL, "nobody.here", &ref));
+        sh_modmanifest_row row;
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.salt, sizeof row.salt, "ahands00");
+        strcpy_s(row.build, sizeof row.build, h_hands);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands) && !strcmp(ref.version, "1.0.0"));
+        strcpy_s(row.build, sizeof row.build, h_none);
+        CHECK(!sh_modserve_row_build(&row, &ref));   /* pinned: that build is not installed */
+        CHECK(sh_modserve_scope_set_place(NULL, 1) == 0);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));
+        CHECK(sh_modserve_scope_set_place(NULL, 0) == 0);
+        strcpy_s(row.salt, sizeof row.salt, "rrows000");
+        strcpy_s(row.build, sizeof row.build, h_rows);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.id, "rrows000"));
+        strcpy_s(row.salt, sizeof row.salt, "nobody.h");
+        CHECK(!sh_modserve_row_build(&row, &ref));
     }
 
     /* Play: the undeclared bundles serve nothing, the declared one all it carries. */
@@ -3843,21 +3709,21 @@ static void test_scope(void)
     CHECK(sh_modserve_bundle_scope(h_rows, &si) && si.play && !si.names_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: n.names@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared by the map "
+    CHECK(strstr(g_report, "scope: nnames00@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared by the map "
                            "being played: serves nothing\n") != NULL);
     /* A withdrawn name is not re-read: the engine keeps what it parsed. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(!strstr(seen.order, "n.names") && !strstr(seen.order, "r.rows"));
+    CHECK(!strstr(seen.order, "nnames00") && !strstr(seen.order, "rrows000"));
     /* Back in the editor: the names serve again, nothing to re-read (the same bytes). */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 2 && sh_modserve_lookup(SC_NEW, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(!strstr(seen.order, "n.names"));
+    CHECK(!strstr(seen.order, "nnames00"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) == 0);
 
     /* The map closes (the hub): the hands' deactivate line runs and r_fancy
-     * is restored; g_label stays, r.rows' row is in the palette. */
+     * is restored; g_label stays, rrows000' row is in the palette. */
     g_events[0] = 0;
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) == 1);
     CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_scope_map_open());
@@ -3894,14 +3760,14 @@ static void test_scope_providers(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\scope2\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"r_fancy\": true}},\n  ";
-    make_bundle(root, "a.bare", "a.bare", "1.0.0", 'c', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "abare000", "abare000", "1.0.0", 'c', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 100}");
     hash64('c', h_bare);
-    make_bundle(root, "b.req", "b.req", "1.0.0", 'd', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 200}");
+    make_bundle(root, "breq0000", "breq0000", "1.0.0", 'd', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 200}");
     hash64('d', h_req);
     g_bundle_extra = NULL;
-    make_bundle(root, "x.one", "x.one", "1.0.0", 'e', "\"" SC_DECL "\"", one, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "xone0000", "xone0000", "1.0.0", 'e', "\"" SC_DECL "\"", one, 1, "{\"installedAt\": 100}");
     hash64('e', h_one);
-    make_bundle(root, "y.two", "y.two", "1.0.0", 'f', "\"" SC_DECL "\"", two, 1, "{\"installedAt\": 200}");
+    make_bundle(root, "ytwo0000", "ytwo0000", "1.0.0", 'f', "\"" SC_DECL "\"", two, 1, "{\"installedAt\": 200}");
     hash64('f', h_two);
 
     printf("-- map scope: a shadow path is served by the provider the open map declares\n");
@@ -3915,46 +3781,46 @@ static void test_scope_providers(void)
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_lookup(SC_DECL, NULL));
-    CHECK(sh_modserve_lookup_indexed(SC_COOP, &hit) && !strcmp(hit.bundle_id, "a.bare"));   /* the static winner */
-    CHECK(sh_modserve_conflict_info(SC_DECL, &ci) && ci.game && !strcmp(ci.served_id, "x.one"));
+    CHECK(sh_modserve_lookup_indexed(SC_COOP, &hit) && !strcmp(hit.bundle_id, "abare000"));   /* the static winner */
+    CHECK(sh_modserve_conflict_info(SC_DECL, &ci) && ci.game && !strcmp(ci.served_id, "xone0000"));
 
-    /* Only b.req is declared (P27: alex.bare-hands-req attached, alex.bare-hands not): its copy serves, re-parsed now. */
+    /* Only breq0000 is declared (P27: alex.bare-hands-req attached, alex.bare-hands not): its copy serves, re-parsed now. */
     list[0] = h_req;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 1);
-    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "b.req") && strstr(hit.disk_path, "b.req") != NULL);
+    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "breq0000") && strstr(hit.disk_path, "breq0000") != NULL);
     CHECK(sh_modserve_open(SC_COOP, &bytes, &len) == 1 && len == strlen("entityDef coop { bare }") &&
           !memcmp(bytes, "entityDef coop { bare }", len));
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     CHECK(sh_modserve_probe_claims(SC_COOP) == 1);
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "b.req:player/coop:gone=0") != NULL);
+    CHECK(strstr(seen.order, "breq0000:player/coop:gone=0") != NULL);
     CHECK(sh_modserve_bundle_scope(h_req, &si) && si.shadows == 1 && si.shadows_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: b.req@1.0.0 (dddddddddddddddd) (0 names, 1 shadow, 0 surfaces, requirements): declared by the "
+    CHECK(strstr(g_report, "scope: breq0000@1.0.0 (dddddddddddddddd) (0 names, 1 shadow, 0 surfaces, requirements): declared by the "
                            "open map (row 1): serves everything it carries\n") != NULL);
     CHECK(!strstr(g_report, "serving: " SC_COOP ": ") &&
           strstr(g_report, "serving: 1 path(s) several bundles carry with the same bytes; one copy serves when any provider may\n"));
-    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no declared bundle provides it); not served: x.one@1.0.0 "
-                           "(eeeeeeeeeeeeeeee), y.two@1.0.0 (ffffffffffffffff)\n") != NULL);
+    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no declared bundle provides it); not served: xone0000@1.0.0 "
+                           "(eeeeeeeeeeeeeeee), ytwo0000@1.0.0 (ffffffffffffffff)\n") != NULL);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[1], "1"));
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: live\n") != NULL);
-    /* a.bare asks the same value but the map does not declare it: not live for it. */
-    CHECK(strstr(g_report, "requirements: a.bare@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
-                           "the cvar has this value because b.req@1.0.0 asks it)\n") != NULL);
-    CHECK(!strstr(g_report, "a.bare@1.0.0: cvar r_fancy=1: live"));
+    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: live\n") != NULL);
+    /* abare000 asks the same value but the map does not declare it: not live for it. */
+    CHECK(strstr(g_report, "requirements: abare000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
+                           "the cvar has this value because breq0000@1.0.0 asks it)\n") != NULL);
+    CHECK(!strstr(g_report, "abare000@1.0.0: cvar r_fancy=1: live"));
     /* Its gate is live now: the re-parse that waited for it runs. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "b.req:player/coop:gone=0:gates=1;") != NULL);
+    CHECK(strstr(seen.order, "breq0000:player/coop:gone=0:gates=1;") != NULL);
 
     /* Moving the declaration to the other copy of the same bytes changes nothing the engine holds. */
     list[0] = h_bare;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 2);
-    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "a.bare"));
+    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "abare000"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(!strstr(seen.order, "player/coop"));
@@ -3962,39 +3828,39 @@ static void test_scope_providers(void)
     /* Different bytes: the declared provider's own file serves. */
     list[0] = h_one;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
-    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "x.one"));
+    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "xone0000"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "x.one:monster/revenant:gone=0") && strstr(seen.order, "a.bare:player/coop:gone=1"));
+    CHECK(strstr(seen.order, "xone0000:monster/revenant:gone=0") && strstr(seen.order, "abare000:player/coop:gone=1"));
     /* Both declared: the first of the map's rows, whatever was installed last. */
     list[0] = h_one; list[1] = h_two;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
-    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "x.one"));
-    CHECK(sh_modserve_conflict_info(SC_DECL, &ci) && !ci.game && !strcmp(ci.served_id, "x.one") &&
+    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "xone0000"));
+    CHECK(sh_modserve_conflict_info(SC_DECL, &ci) && !ci.game && !strcmp(ci.served_id, "xone0000") &&
           !strcmp(ci.reason, "the first of the map's rows"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(!strstr(seen.order, "monster/revenant"));   /* the same bytes as before */
     list[0] = h_two; list[1] = h_one;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
-    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "y.two"));
+    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "ytwo0000"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "y.two:monster/revenant:gone=0") != NULL);   /* other bytes: read again */
+    CHECK(strstr(seen.order, "ytwo0000:monster/revenant:gone=0") != NULL);   /* other bytes: read again */
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 1 && !sh_modserve_lookup(SC_DECL, NULL));
 
     /* The requirement lines after the map stops using the mods, then after it closes. */
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 0 && !strcmp(g_text_val[1], "0"));
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
+    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
                            "restored: the cvar is back at the value it displaced)\n") != NULL);
-    CHECK(strstr(g_report, "requirements: a.bare@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: abare000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it)\n") != NULL);
     CHECK(!strstr(g_report, "not applied yet") && !strstr(g_report, ": live"));
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: not active for this map (no map is open; restored") != NULL);
+    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: not active for this map (no map is open; restored") != NULL);
 
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
@@ -4003,11 +3869,11 @@ static void test_scope_providers(void)
 /* ------------------------------------------------------------------ additive phase 2 (lane L2a) */
 
 #define AD_P     "generated/decls/entitydef/player/coop.decl"            /* a game name several keys shadow */
-#define AD_HELP  "generated/decls/entitydef/mods/z.local/helper.decl"
-#define AD_THING "generated/decls/entitydef/mods/k.fork/thing.decl"
-#define AD_OLD   "generated/decls/entitydef/mods/k.fork/old_only.decl"
-#define AD_NEW   "generated/decls/entitydef/mods/k.fork/new_only.decl"
-#define AD_ROW   "generated/decls/snapeditorentitydef/mods/k.fork/thing.decl"
+#define AD_HELP  "generated/decls/entitydef/mods/zlocal00/helper.decl"
+#define AD_THING "generated/decls/entitydef/mods/kfork000/thing.decl"
+#define AD_OLD   "generated/decls/entitydef/mods/kfork000/old_only.decl"
+#define AD_NEW   "generated/decls/entitydef/mods/kfork000/new_only.decl"
+#define AD_ROW   "generated/decls/snapeditorentitydef/mods/kfork000/thing.decl"
 
 /* The serving for one manifest: which bundle serves AD_P for each declaration. */
 static void ad_determinism_root(const char *root, int alpha_at, int beta_at, int local)
@@ -4015,28 +3881,28 @@ static void ad_determinism_root(const char *root, int alpha_at, int beta_at, int
     char state[64];
     static const fx_file alpha[] = {
         { AD_P, "entityDef coop { alpha }", -1, "entityDef", "player/coop",
-          "[{\"name\": \"mods/z.local/helper\", \"type\": \"entityDef\"}]", '1' },
+          "[{\"name\": \"mods/zlocal00/helper\", \"type\": \"entityDef\"}]", '1' },
     };
     static const fx_file beta[] = { { AD_P, "entityDef coop { beta }", -1, "entityDef", "player/coop", NULL, '2' } };
     static const fx_file gamma[] = { { AD_P, "entityDef coop { beta }", -1, "entityDef", "player/coop", NULL, '2' } };
     static const fx_file c1[] = { { SC_DECL, "entityDef rev { c1 }", -1, "entityDef", "monster/revenant", NULL, '4' } };
     static const fx_file c2[] = { { SC_DECL, "entityDef rev { c2 }", -1, "entityDef", "monster/revenant", NULL, '5' } };
     static const fx_file zl[] = {
-        { AD_HELP, "entityDef helper {}", -1, "entityDef", "mods/z.local/helper", NULL, '6' },
+        { AD_HELP, "entityDef helper {}", -1, "entityDef", "mods/zlocal00/helper", NULL, '6' },
         { AD_P, "entityDef coop { local }", -1, "entityDef", "player/coop", NULL, '7' },
         { SC_DECL, "entityDef rev { local }", -1, "entityDef", "monster/revenant", NULL, '8' },
     };
     mkdirs(root);
     _snprintf_s(state, sizeof state, _TRUNCATE, "{\"installedAt\": %d}", alpha_at);
-    make_bundle(root, "alpha", "k.alpha", "1.0.0", 'a', "\"" AD_P "\"", alpha, 1, state);
+    make_bundle(root, "alpha", "kalpha00", "1.0.0", 'a', "\"" AD_P "\"", alpha, 1, state);
     _snprintf_s(state, sizeof state, _TRUNCATE, "{\"installedAt\": %d}", beta_at);
-    make_bundle(root, "beta", "k.beta", "1.0.0", 'b', "\"" AD_P "\"", beta, 1, state);
-    make_bundle(root, "gamma", "k.gamma", "1.0.0", 'c', "\"" AD_P "\"", gamma, 1, "{\"installedAt\": 50}");
+    make_bundle(root, "beta", "kbeta000", "1.0.0", 'b', "\"" AD_P "\"", beta, 1, state);
+    make_bundle(root, "gamma", "kgamma00", "1.0.0", 'c', "\"" AD_P "\"", gamma, 1, "{\"installedAt\": 50}");
     _snprintf_s(state, sizeof state, _TRUNCATE, "{\"installedAt\": %d}", beta_at);
-    make_bundle(root, "c1", "k.c1", "1.0.0", 'd', "\"" SC_DECL "\"", c1, 1, state);
+    make_bundle(root, "c1", "kc100000", "1.0.0", 'd', "\"" SC_DECL "\"", c1, 1, state);
     _snprintf_s(state, sizeof state, _TRUNCATE, "{\"installedAt\": %d}", alpha_at);
-    make_bundle(root, "c2", "k.c2", "1.0.0", 'e', "\"" SC_DECL "\"", c2, 1, state);
-    if (local) make_bundle(root, "z.local", "z.local", "1.0.0", 'f', "\"" AD_P "\", \"" SC_DECL "\"", zl, 3, "{\"installedAt\": 999}");
+    make_bundle(root, "c2", "kc200000", "1.0.0", 'e', "\"" SC_DECL "\"", c2, 1, state);
+    if (local) make_bundle(root, "zlocal00", "zlocal00", "1.0.0", 'f', "\"" AD_P "\", \"" SC_DECL "\"", zl, 3, "{\"installedAt\": 999}");
 }
 
 /* The text the provider serves for `request` now, "" when nothing does. */
@@ -4099,106 +3965,20 @@ static void test_additive_determinism(void)
     sh_modserve_scope_enable(0);
 }
 
-/* Owner 2026-11-10: with no map open the player's own folder of a key
- * serves, not a newer download of it (the legacy SP doors download became
- * "newest" over the owner's folder); an own published map's row follows
- * the own folder (sh_modserve_row_follow_own). */
-#define OWN_THING "generated/decls/entitydef/mods/k.own/thing.decl"
-static void test_own_folder_over_download(void)
-{
-    static const fx_file mine[] = {
-        { OWN_THING, "entityDef thing { mine }", -1, "entityDef", "mods/k.own/thing", NULL, '1' },
-    };
-    static const fx_file theirs[] = {
-        { OWN_THING, "entityDef thing { downloaded }", -1, "entityDef", "mods/k.own/thing", NULL, '2' },
-    };
-    char top[MAX_PATH], root[MAX_PATH], hm[65], hd[65], hx[65];
-    char *slash;
-    sh_modserve_bundle_ref ref;
-    sh_modmanifest_row row;
-    printf("-- with no map open the player's own folder serves, never a newer download of its key\n");
-    strcpy_s(top, sizeof top, g_root);
-    slash = strrchr(top, '\\');
-    if (slash) *slash = 0;
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownkey\\mods", top);
-    mkdirs(root);
-    make_bundle(root, "k.own", "k.own", "1.0.0", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
-    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
-                "{\"installedAt\": 900, \"origin\": \"download\"}");
-    hash64('a', hm); hash64('b', hd); hash64('c', hx);
-    sh_modserve_scope_enable(0);
-    CHECK(sh_modserve_index_build(root) == 2);
-    sh_modserve_scope_enable(1);
-    CHECK(!strcmp(ad_served(OWN_THING), "entityDef thing { mine }"));
-    CHECK(sh_modserve_bundle_serving(NULL, "k.own", &ref) && !strcmp(ref.hash, hm));
-    /* A map that pins the download still gets exactly it. */
-    CHECK(sh_modserve_bundle_serving(hd, "k.own", &ref) && !strcmp(ref.hash, hd));
-    /* The other build the gate words for a missing pin is the own folder. */
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "k.own");
-    strcpy_s(row.bundle, sizeof row.bundle, hx);
-    CHECK(sh_modserve_row_other_build(&row, &ref) && !strcmp(ref.hash, hm));
-    sh_modserve_scope_enable(0);
-    /* Only a download of the key: it serves as the newest. */
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownkey2\\mods", top);
-    mkdirs(root);
-    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
-                "{\"installedAt\": 900, \"origin\": \"download\"}");
-    CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(sh_modserve_bundle_serving(NULL, "k.own", &ref) && !strcmp(ref.hash, hd));
-}
-
-/* Owner 2026-11-10: an own published map's row follows the own folder of
- * its key (sh_modserve_row_follow_own), whatever build it pins; a key only
- * a download holds keeps the pin. */
-static void test_follow_own(void)
-{
-    static const fx_file mine[] = {
-        { OWN_THING, "entityDef thing { mine }", -1, "entityDef", "mods/k.own/thing", NULL, '1' },
-    };
-    static const fx_file theirs[] = {
-        { OWN_THING, "entityDef thing { downloaded }", -1, "entityDef", "mods/k.own/thing", NULL, '2' },
-    };
-    char top[MAX_PATH], root[MAX_PATH], hm[65], hd[65], hx[65];
-    char *slash;
-    sh_modserve_bundle_ref ref;
-    printf("-- an own published map's row follows the own folder of its key\n");
-    strcpy_s(top, sizeof top, g_root);
-    slash = strrchr(top, '\\');
-    if (slash) *slash = 0;
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownfollow\\mods", top);
-    mkdirs(root);
-    make_bundle(root, "k.own", "k.own", "1.0.0", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
-    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
-                "{\"installedAt\": 900, \"origin\": \"download\"}");
-    hash64('a', hm); hash64('b', hd); hash64('c', hx);
-    CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(sh_modserve_row_follow_own("k.own", hd, &ref) && !strcmp(ref.hash, hm));
-    CHECK(sh_modserve_row_follow_own("K.Own", hx, &ref) && !strcmp(ref.hash, hm));
-    CHECK(!sh_modserve_row_follow_own("k.own", hm, &ref));      /* it already names it */
-    CHECK(!sh_modserve_row_follow_own("k.nobody", hd, &ref));   /* no own folder of the key */
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownfollow2\\mods", top);
-    mkdirs(root);
-    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
-                "{\"installedAt\": 900, \"origin\": \"download\"}");
-    CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(!sh_modserve_row_follow_own("k.own", hx, &ref));
-}
-
 static void test_additive_same_key(void)
 {
     static const fx_file b1[] = {
-        { AD_THING, "entityDef thing { one }", -1, "entityDef", "mods/k.fork/thing", NULL, '1' },
-        { AD_OLD, "entityDef old {}", -1, "entityDef", "mods/k.fork/old_only", NULL, '2' },
-        { AD_ROW, "{ entityDef \"mods/k.fork/thing\" }", -1, "snapEditorEntityDef", "mods/k.fork/thing", NULL, '5' },
+        { AD_THING, "entityDef thing { one }", -1, "entityDef", "mods/kfork000/thing", NULL, '1' },
+        { AD_OLD, "entityDef old {}", -1, "entityDef", "mods/kfork000/old_only", NULL, '2' },
+        { AD_ROW, "{ entityDef \"mods/kfork000/thing\" }", -1, "snapEditorEntityDef", "mods/kfork000/thing", NULL, '5' },
     };
     static const fx_file b2[] = {
-        { AD_THING, "entityDef thing { two }", -1, "entityDef", "mods/k.fork/thing", NULL, '3' },
-        { AD_NEW, "entityDef new {}", -1, "entityDef", "mods/k.fork/new_only", NULL, '4' },
-        { AD_ROW, "{ entityDef \"mods/k.fork/thing\" }", -1, "snapEditorEntityDef", "mods/k.fork/thing", NULL, '5' },
+        { AD_THING, "entityDef thing { two }", -1, "entityDef", "mods/kfork000/thing", NULL, '3' },
+        { AD_NEW, "entityDef new {}", -1, "entityDef", "mods/kfork000/new_only", NULL, '4' },
+        { AD_ROW, "{ entityDef \"mods/kfork000/thing\" }", -1, "snapEditorEntityDef", "mods/kfork000/thing", NULL, '5' },
     };
     char top[MAX_PATH], root[MAX_PATH], h1[65], h2[65], h3[65], cause[400], out[4][SH_MODSERVE_HASH_HEX + 1];
-    const char *list[2], *placed[1] = { "mods/k.fork/thing" };
+    const char *list[2], *placed[1] = { "mods/kfork000/thing" };
     char *slash;
     scope_seen seen;
     sh_modserve_scope_info si;
@@ -4211,24 +3991,24 @@ static void test_additive_same_key(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\samekey\\mods", top);
     mkdirs(root);
     g_bundle_name = "Fork";
-    make_bundle(root, "fork-a", "k.fork", "1.0.0", '6', NULL, b1, 3, "{\"installedAt\": 100}");
-    make_bundle(root, "fork-b", "k.fork", "1.0.0", '7', NULL, b2, 3, "{\"installedAt\": 200}");
+    make_bundle(root, "maps\\Fork map\\fork-a", "kfork000", "1.0.0", '6', NULL, b1, 3, "{\"installedAt\": 100}");
+    make_bundle(root, "fork-b", "kfork000", "1.0.0", '7', NULL, b2, 3, "{\"installedAt\": 200}");
     g_bundle_name = NULL;
     hash64('6', h1); hash64('7', h2); hash64('8', h3);
-    printf("-- additive: one key at two hashes, each map served by its own build\n");
+    printf("-- additive: one salt at the root and in a map's place, each map served by its own build\n");
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("MODS: key k.fork: bundles 6666666666666666 (1.0.0) and 7777777777777777 (1.0.0) both provide paths"));
+    CHECK(log_has("MODS: mod kfork000: builds 6666666666666666 (maps\\Fork map\\fork-a) and 7777777777777777 (fork-b) both "
+                  "provide paths"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     sh_modserve_scope_enable(1);
-    /* No map: the newest build serves its names, and only its names. */
+    /* No map: the root folder's build serves its names, and only its names. */
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { two }"));
     CHECK(sh_modserve_lookup(AD_NEW, NULL) && !sh_modserve_lookup(AD_OLD, NULL));
-    CHECK(sh_modserve_bundle_serving(NULL, "k.fork", &ref) && !strcmp(ref.hash, h2));
     CHECK(modserve_bundles_for_names(placed, 1, out, 4) == 1 && !strcmp(out[0], h2));
-    /* The editor plan registers the newest build's row only. */
+    /* The editor plan registers the root build's row only. */
     CHECK(sh_modserve_plan_editor(&plan) >= 1);
     {
         int k, rows = 0;
@@ -4238,11 +4018,11 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: key k.fork: 2 bundles installed; each map serves the bundle it was saved with, and with no map "
-                           "open the newest\n") != NULL);
-    CHECK(strstr(g_report, "scope: k.fork@1.0.0 (6666666666666666) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
-                           "open): an older bundle of its key; only its surfaces serve\n") != NULL);
-    CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
+    CHECK(strstr(g_report, "scope: mod kfork000: 2 builds installed (the root folder and maps' places); each map serves the build "
+                           "it declares, and with no map open the root folder's\n") != NULL);
+    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (6666666666666666) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
+                           "open): a build in maps\\Fork map; it serves only for that map\n") != NULL);
+    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
     /* Map A pins the first build: its bytes, its own names; the other build is inert. */
@@ -4254,21 +4034,20 @@ static void test_additive_same_key(void)
     CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && si.rank == 0);
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "k.fork:mods/k.fork/thing:gone=0") != NULL);   /* the other build's bytes: read again */
+    CHECK(strstr(seen.order, "kfork000:mods/kfork000/thing:gone=0") != NULL);   /* the other build's bytes: read again */
     /* The save-time closure keeps the map's pin; the row's own build answers. */
     CHECK(modserve_bundles_for_names(placed, 1, out, 4) == 1 && !strcmp(out[0], h1));
-    CHECK(sh_modserve_bundle_serving(h1, "k.fork", &ref) && !strcmp(ref.hash, h1));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
-                           "another bundle of its key\n") != NULL);
-    CHECK(strstr(g_report, "serving: " AD_THING ": k.fork@1.0.0 (6666666666666666), declared (row 1): the only provider; not "
-                           "served: k.fork@1.0.0 (7777777777777777)\n") != NULL);
+    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
+                           "another build of its salt\n") != NULL);
+    CHECK(strstr(g_report, "serving: " AD_THING ": kfork000@1.0.0 (6666666666666666), declared (row 1): the only provider; not "
+                           "served: kfork000@1.0.0 (7777777777777777)\n") != NULL);
     /* The registration plan of the map's bundle names its own paths. */
     list[0] = h1;
     CHECK(sh_modserve_plan_bundles(list, 1, &plan, NULL) >= 2);
-    CHECK(step_index(&plan, "entityDef", "mods/k.fork/thing") >= 0 && step_index(&plan, "entityDef", "mods/k.fork/old_only") >= 0);
-    CHECK(step_index(&plan, "entityDef", "mods/k.fork/new_only") < 0);
+    CHECK(step_index(&plan, "entityDef", "mods/kfork000/thing") >= 0 && step_index(&plan, "entityDef", "mods/kfork000/old_only") >= 0);
+    CHECK(step_index(&plan, "entityDef", "mods/kfork000/new_only") < 0);
     sh_modserve_plan_free(&plan);
     /* In Play the same. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
@@ -4281,54 +4060,61 @@ static void test_additive_same_key(void)
     CHECK(!sh_modserve_lookup(AD_OLD, NULL) && sh_modserve_lookup(AD_NEW, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(strstr(seen.order, "k.fork:mods/k.fork/thing:gone=0") != NULL);
+    CHECK(strstr(seen.order, "kfork000:mods/kfork000/thing:gone=0") != NULL);
     /* Both hashes in one listing (a row and a stale closure): the first row's build. */
     list[0] = h1; list[1] = h2;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) == 2 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
     CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert);
 
-    /* The asset rule: the folder at the row's hash; another build is not it. */
+    /* The asset rule: a stranger's map is served by the build at the row's
+     * hash in its own place, never another map's place; another build is not
+     * it. The author's own map follows the root folder whatever it pins. */
     memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "k.fork");
-    strcpy_s(row.bundle, sizeof row.bundle, h1);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
-    strcpy_s(row.bundle, sizeof row.bundle, h3);
+    strcpy_s(row.salt, sizeof row.salt, "kfork000");
+    strcpy_s(row.build, sizeof row.build, h1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Fork (k.fork), which is not installed."));
-    CHECK(sh_modserve_row_other_build(&row, &ref) && !strcmp(ref.hash, h2));
-    strcpy_s(row.bundle, sizeof row.bundle, h2);
-    CHECK(!sh_modserve_row_other_build(&row, &ref));
+    CHECK(sh_modserve_scope_set_place("maps\\Fork map", 0) >= 0);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
+    strcpy_s(row.build, sizeof row.build, h3);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(!strcmp(cause, "This map uses Fork, which is not installed."));
+    CHECK(!sh_modserve_row_build(&row, &ref));
+    CHECK(sh_modserve_scope_set_place("maps\\Fork map", 1) >= 0);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
 }
 
-/* Two builds of one key, both with requirements (V1 run 2: the owner's build
- * of a key and a newer one installed beside it). Paths whose bytes the two
- * builds share have the first in index order as their static winner, here
- * the older build; every step must be gated by the build that serves its
- * path for the listing, not by the static winner's. */
-#define TB_MD6   "generated/decls/md6def/mods/two.build/gun.md6.decl"
-#define TB_ENT   "generated/decls/entitydef/mods/two.build/gun.decl"
-#define TB_SEDEF "generated/decls/snapeditorentitydef/mods/two.build/gun.decl"
-#define TB_OLD   "generated/decls/entitydef/mods/two.build/old_only.decl"
-#define TB_NEW   "generated/decls/entitydef/mods/two.build/new_only.decl"
+/* Two builds of one salt, both with requirements (V1 run 2, in the one
+ * shape: the root folder's build and a map's place holding an older one).
+ * Paths whose bytes the two builds share have one static winner; every step
+ * must be gated by the build that serves its path for the listing, not by
+ * the static winner's. */
+#define TB_MD6   "generated/decls/md6def/mods/twobuild/gun.md6.decl"
+#define TB_ENT   "generated/decls/entitydef/mods/twobuild/gun.decl"
+#define TB_SEDEF "generated/decls/snapeditorentitydef/mods/twobuild/gun.decl"
+#define TB_OLD   "generated/decls/entitydef/mods/twobuild/old_only.decl"
+#define TB_NEW   "generated/decls/entitydef/mods/twobuild/new_only.decl"
 static void test_two_builds_requirements(void)
 {
     static const fx_file b_old[] = {
-        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/two.build/gun.md6", NULL, '1' },
-        { TB_ENT, "entityDef gun { old }", -1, "entityDef", "mods/two.build/gun",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/two.build/gun.md6\"}]", '2' },
-        { TB_OLD, "entityDef old_only {}", -1, "entityDef", "mods/two.build/old_only", NULL, '3' },
-        { TB_SEDEF, "{ entityDef \"mods/two.build/gun\" }", -1, "snapEditorEntityDef", "mods/two.build/gun",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/two.build/gun\"}]", '5' },
+        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/twobuild/gun.md6", NULL, '1' },
+        { TB_ENT, "entityDef gun { old }", -1, "entityDef", "mods/twobuild/gun",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/twobuild/gun.md6\"}]", '2' },
+        { TB_OLD, "entityDef old_only {}", -1, "entityDef", "mods/twobuild/old_only", NULL, '3' },
+        { TB_SEDEF, "{ entityDef \"mods/twobuild/gun\" }", -1, "snapEditorEntityDef", "mods/twobuild/gun",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/twobuild/gun\"}]", '5' },
     };
     static const fx_file b_new[] = {
-        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/two.build/gun.md6", NULL, '1' },
-        { TB_ENT, "entityDef gun { new }", -1, "entityDef", "mods/two.build/gun",
-          "[{\"type\":\"md6Def\",\"name\":\"mods/two.build/gun.md6\"}]", '6' },
-        { TB_NEW, "entityDef new_only {}", -1, "entityDef", "mods/two.build/new_only", NULL, '4' },
-        { TB_SEDEF, "{ entityDef \"mods/two.build/gun\" }", -1, "snapEditorEntityDef", "mods/two.build/gun",
-          "[{\"type\":\"entityDef\",\"name\":\"mods/two.build/gun\"}]", '5' },
+        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/twobuild/gun.md6", NULL, '1' },
+        { TB_ENT, "entityDef gun { new }", -1, "entityDef", "mods/twobuild/gun",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/twobuild/gun.md6\"}]", '6' },
+        { TB_NEW, "entityDef new_only {}", -1, "entityDef", "mods/twobuild/new_only", NULL, '4' },
+        { TB_SEDEF, "{ entityDef \"mods/twobuild/gun\" }", -1, "snapEditorEntityDef", "mods/twobuild/gun",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/twobuild/gun\"}]", '5' },
     };
     char top[MAX_PATH], root[MAX_PATH], h_old[65], h_new[65], h_other[65];
     const char *list[1];
@@ -4343,16 +4129,16 @@ static void test_two_builds_requirements(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\twobuilds\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "a-owner", "two.build", "0.1.0", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
-    make_bundle(root, "b-beside", "two.build", "0.1.0", 'b', NULL, b_new, 4, "{\"installedAt\": 200}");
+    make_bundle(root, "maps\\Old map\\a-owner", "twobuild", "0.1.0", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
+    make_bundle(root, "b-beside", "twobuild", "0.1.0", 'b', NULL, b_new, 4, "{\"installedAt\": 200}");
     g_bundle_extra = NULL;
     hash64('a', h_old); hash64('b', h_new); hash64('c', h_other);
-    printf("-- two builds of one key with requirements: rows ready, gates applied once, each map its build\n");
+    printf("-- the root build and a place build of one salt with requirements: rows ready, gates applied once, each map its build\n");
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 2);
     sh_modserve_scope_enable(1);
 
-    /* No map open (boot, the editor's palette): the newest build's rows, all ready. */
+    /* No map open (boot, the editor's palette): the root build's rows, all ready. */
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
     CHECK(sh_modserve_bundle_scope(h_new, &si) && si.newest && si.requirements_live);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && !si.newest && !si.requirements_live);
@@ -4360,7 +4146,7 @@ static void test_two_builds_requirements(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
     CHECK(sh_modserve_plan_editor(&p) == 3);
-    CHECK(step_index(&p, "snapEditorEntityDef", "mods/two.build/gun") >= 0);
+    CHECK(step_index(&p, "snapEditorEntityDef", "mods/twobuild/gun") >= 0);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 3);
     CHECK(p.blocked == 0 && r.live == 2 && !r.not_live && !log_has("BLOCKED"));
     for (k = 0; k < p.count; ++k) CHECK(p.steps[k].ready == 1);
@@ -4369,7 +4155,7 @@ static void test_two_builds_requirements(void)
     CHECK(log_count("MODS: editor: requirements applied:") == 1);
     sh_modserve_plan_free(&p);
 
-    /* A map pinning the older build: that build's bytes and names, all ready. */
+    /* A map pinning the place's build: that build's bytes and names, all ready. */
     list[0] = h_old;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && si.listed && si.requirements_live);
@@ -4379,13 +4165,13 @@ static void test_two_builds_requirements(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
     CHECK(sh_modserve_plan_bundles(list, 1, &p, NULL) == 3);
-    CHECK(step_index(&p, "entityDef", "mods/two.build/old_only") >= 0 && step_index(&p, "entityDef", "mods/two.build/new_only") < 0);
+    CHECK(step_index(&p, "entityDef", "mods/twobuild/old_only") >= 0 && step_index(&p, "entityDef", "mods/twobuild/new_only") < 0);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "map load", &r) == 3);
     CHECK(p.blocked == 0 && r.live == 2 && !log_has("BLOCKED"));
     CHECK(g_gate_sets == 2);
     sh_modserve_plan_free(&p);
 
-    /* A map pinning the newer build: the same, the other way round. */
+    /* A map pinning the root build: the same, the other way round. */
     list[0] = h_new;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
@@ -4397,8 +4183,8 @@ static void test_two_builds_requirements(void)
     sh_modserve_plan_free(&p);
 
     /* A map pinning a third build that is not installed declares nothing
-     * here (substitution is decided before the listing, modpub): the editor
-     * serves the newest build's names as with no map open. */
+     * here (the listing holds the builds that serve its rows): the editor
+     * serves the root build's names as with no map open. */
     list[0] = h_other;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 0);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
@@ -4460,11 +4246,11 @@ static void test_additive_compose(void)
             free(one);
         }
         g_block_edits = edits[0];
-        make_bundle(root, "cy", "k.cy", "1.0.0", '1', "\"" CONDUCTOR "\"", cy, 1, "{\"installedAt\": 100}");
+        make_bundle(root, "cy", "kcy00000", "1.0.0", '1', "\"" CONDUCTOR "\"", cy, 1, "{\"installedAt\": 100}");
         g_block_edits = edits[1];
-        make_bundle(root, "gd", "k.gd", "1.0.0", '2', "\"" CONDUCTOR "\"", gd, 1, "{\"installedAt\": 200}");
+        make_bundle(root, "gd", "kgd00000", "1.0.0", '2', "\"" CONDUCTOR "\"", gd, 1, "{\"installedAt\": 200}");
         g_block_edits = edits[2];
-        make_bundle(root, "sp", "k.sp", "1.0.0", '3', "\"" CONDUCTOR "\"", sp, 1, "{\"installedAt\": 300}");
+        make_bundle(root, "sp", "ksp00000", "1.0.0", '3', "\"" CONDUCTOR "\"", sp, 1, "{\"installedAt\": 300}");
         g_block_edits = NULL;
     }
     hash64('1', hc); hash64('2', hg);
@@ -4482,7 +4268,7 @@ static void test_additive_compose(void)
     sh_modserve_scope_enable(1);
     list[0] = hc; list[1] = hg;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
-    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "cyberdemon_hell") && strstr(text, "talismanguard/hammer") &&
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "cyberdem_hell") && strstr(text, "talismanguard/hammer") &&
           !strstr(text, "spider_mastermind_base"));
     /* The conductor is generated (modregistry.h): the game's list plus the
      * declared bundles' items, the spawn-type bits assigned per map; the
@@ -4494,7 +4280,7 @@ static void test_additive_compose(void)
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 4;") &&
           strstr(text, "aiType = \"524288\";\r\n\t\t\t\tentityDef = \"ai/demon/talismanguard/hammer\"") &&
           strstr(text, "aiType = \"1048576\";\r\n\t\t\t\tentityDef = \"ai/demon/talismanguard/staff\"") &&
-          !strstr(text, "cyberdemon"));
+          !strstr(text, "cyberdem"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(strstr(seen.order, "ai/conductor/coop/snapmap_default:gone=0") != NULL);   /* other bytes than the composed text */
@@ -4519,10 +4305,9 @@ static void test_additive_compose(void)
         char groot[MAX_PATH];
         _snprintf_s(groot, sizeof groot, _TRUNCATE, "%s\\compose-legacy\\mods", top);
         mkdirs(groot);
-        g_bundle_extra = "\"legacy\": {},\n  ";
-        make_bundle(groot, "local.guard", "local.guard", "0.0.0", '4',
+        make_bundle(groot, "localgua", "localgua", "0.0.0", '4',
                     "\"" CONDUCTOR "\", \"generated/decls/snapeditorentitydef/demons/guard_enc.decl\"", lg1, 2, NULL);
-        make_bundle(groot, "local.spider", "local.spider", "0.0.0", '5',
+        make_bundle(groot, "localsp1", "localsp1", "0.0.0", '5',
                     "\"" CONDUCTOR "\", \"generated/decls/snapeditorentitydef/demons/spider_enc.decl\"", lg2, 2, NULL);
         g_bundle_extra = NULL;
         char h4[65], h5[65];
@@ -4543,139 +4328,159 @@ static void test_additive_compose(void)
     sh_mb_set_stock_ops(NULL);
 }
 
-/* The key from the product block; the last good build from the store's snapshot. */
-static char g_fail_folder[MAX_PATH];
-static void ad_build_cause(const char *folder, char *out, size_t cap)
+/* ONE-SHAPE rules 1, 2, 4 and 6 at the serving index: a mod is its salt,
+ * whatever its folder is called; the root holds one build per salt and each
+ * map's place one; a stranger's map is served by its place's build at the
+ * row's hash, else the root's when it is at that hash, the author's own map
+ * by the root's at any hash, and either by any place's at the row's hash; a
+ * folder in an earlier shape or whose build failed serves nothing, with a
+ * plain cause. */
+#define SP_THING "generated/decls/entitydef/mods/kown0000/thing.decl"
+static void sp_modjson(const char *root, const char *folder, const char *text)
 {
-    if (g_fail_folder[0] && !_stricmp(folder, g_fail_folder)) strncpy_s(out, cap, "assets/mods/s.snap/x.decl: parse error", _TRUNCATE);
-    else if (cap) out[0] = 0;
+    char path[MAX_PATH];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", root, folder);
+    write_file(path, text, strlen(text));
 }
 
-static void test_additive_key_and_snapshot(void)
+static void test_salt_and_place(void)
 {
-    static const fx_file keyed[] = {
-        { "generated/decls/entitydef/mods/h.key-7f3k/thing.decl", "entityDef t {}", -1, "entityDef", "mods/h.key-7f3k/thing", NULL, '1' },
+    static const fx_file mine[] = {
+        { SP_THING, "entityDef thing { mine }", -1, "entityDef", "mods/kown0000/thing", NULL, '1' },
     };
-    static const fx_file snapf[] = {
-        { "generated/decls/entitydef/mods/s.snap/x.decl", "entityDef x { good }", -1, "entityDef", "mods/s.snap/x", NULL, '2' },
+    static const fx_file theirs[] = {
+        { SP_THING, "entityDef thing { downloaded }", -1, "entityDef", "mods/kown0000/thing", NULL, '2' },
     };
-    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], snap[MAX_PATH], h[65], manifest[2048];
+    static const fx_file stray[] = {
+        { SP_THING, "entityDef thing { stray }", -1, "entityDef", "mods/kown0000/thing", NULL, '3' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], hm[65], hd[65], hx[65], cause[400];
     char *slash;
+    sh_modserve_bundle_ref ref;
+    sh_modserve_scope_info si;
+    sh_modserve_hit hit;
+    sh_modmanifest_row row;
+    const char *list[1];
+    printf("-- one shape: the salt, the root and maps' places, earlier shapes refused\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\keysnap\\mods", top);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\saltplace\\mods", top);
     mkdirs(root);
-    printf("-- additive: the key from the product block, the last good build from its snapshot\n");
-    /* A folder made by 'sh_mods new' has no author id: its product block's key. */
-    g_bundle_keyonly = 1;
-    make_bundle(root, "h.key-7f3k", "h.key-7f3k", "0.1.0", '3', NULL, keyed, 1, NULL);
-    g_bundle_keyonly = 0;
-    /* The last good build, then the author's edit in place (a longer text). */
-    make_bundle(root, "snap", "s.snap", "1.0.0", '4', NULL, snapf, 1, NULL);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snap\\assets\\generated\\decls\\entitydef\\mods\\s.snap\\x.decl", root);
-    write_file(path, "entityDef x { broken edit", strlen("entityDef x { broken edit"));
+    hash64('a', hm); hash64('b', hd); hash64('c', hx);
+    /* The author's folder, named as they like; the build a downloaded map
+     * pinned, in its place and in a second map's place. */
+    g_bundle_name = "Doors Pack";
+    make_bundle(root, "My doors (work)", "kown0000", "1.0.0", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "maps\\Doors\\Doors Pack", "kown0000", "1.0.0", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
+    make_bundle(root, "maps\\Gates\\Doors Pack", "kown0000", "1.0.0", 'b', NULL, theirs, 1, "{\"installedAt\": 950}");
+    /* A copy of the author's folder (same salt, built later) and a second
+     * folder of the salt in one map's place: one build per salt per area. */
+    make_bundle(root, "My doors (copy)", "kown0000", "1.0.0", 'e', NULL, stray, 1, "{\"installedAt\": 300}");
+    make_bundle(root, "maps\\Doors\\Doors Pack (2)", "kown0000", "1.0.0", 'f', NULL, stray, 1, "{\"installedAt\": 990}");
+    g_bundle_name = NULL;
+    /* Earlier shapes and unbuilt or failed folders. */
+    sp_modjson(root, "format-one", "{\"name\": \"Old\", \"snapmap-plus\": {\"format\": 1, \"key\": \"old\", \"bundle\": \""
+               "0000000000000000000000000000000000000000000000000000000000000000\", \"files\": []}}");
+    sp_modjson(root, "retired-id", "{\"id\": \"local.thing\", \"name\": \"Retired\"}");
+    sp_modjson(root, "hud-schema", "{\"name\": \"Hud\", \"hud\": {\"schema\": 1}}");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\package-only\\package.json", root);
+    write_file(path, "{}", 2);
+    sp_modjson(root, "bad-salt", "{\"name\": \"Bad\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"1abcdefg\"}}");
+    sp_modjson(root, "salted-only", "{\"name\": \"Salted\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"saltonly\"}}");
+    sp_modjson(root, "failed", "{\"name\": \"Failed\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"failedmd\", "
+               "\"rules\": 8, \"cause\": \"generated/decls/entitydef/mods/failedmd/a.decl: parse error\"}}");
+    sp_modjson(root, "fresh", "{\"name\": \"Fresh\"}");
+    sp_modjson(root, "maps\\Doors\\fresh", "{\"name\": \"Fresh\"}");
+    {
+        /* A build whose files sit under another salt's namespace. */
+        static const fx_file other[] = {
+            { SP_THING, "entityDef thing { other }", -1, "entityDef", "mods/kown0000/thing", NULL, '4' },
+        };
+        make_bundle(root, "elsewhere", "zother00", "1.0.0", 'd', NULL, other, 1, NULL);
+    }
     sh_modserve_scope_enable(0);
     log_clear();
-    CHECK(sh_modserve_index_build(root) == 1);   /* the edited folder fails its size check */
-    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/h.key-7f3k/thing.decl", NULL));
-    CHECK(log_has("bundle 'snap' skipped: size mismatch"));
-    {
-        sh_modserve_bundle_ref ref;
-        CHECK(sh_modserve_bundle_serving(NULL, "h.key-7f3k", &ref) && !strcmp(ref.id, "h.key-7f3k"));
-    }
-    /* The store records the failed build and keeps a snapshot of the last good one. */
-    _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\s.snap@%.16s", root, hash64('4', h));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\s.snap\\x.decl", snap);
-    {
-        char dir[MAX_PATH], *p;
-        strcpy_s(dir, sizeof dir, path);
-        p = strrchr(dir, '\\');
-        *p = 0;
-        mkdirs(dir);
-    }
-    write_file(path, "entityDef x { good }", strlen("entityDef x { good }"));
-    _snprintf_s(manifest, sizeof manifest, _TRUNCATE,
-                "{\"id\": \"s.snap\", \"version\": \"1.0.0\", \"name\": \"Snap\", \"build\": 1, \"bundle\": \"%s\", "
-                "\"extra\": {\"strings\": {\"en\": {\"mods/s.snap/row\": \"Snap\"}}}, \"shadows\": [], \"files\": ["
-                "{\"path\": \"assets/generated/decls/entitydef/mods/s.snap/x.decl\", \"blob\": \"%s\", \"size\": %u, "
-                "\"provides\": {\"type\": \"entityDef\", \"name\": \"mods/s.snap/x\"}, \"needs\": [], "
-                "\"request\": \"generated/decls/entitydef/mods/s.snap/x.decl\"}]}",
-                h, "2222222222222222222222222222222222222222222222222222222222222222", (unsigned)strlen("entityDef x { good }"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
-    write_file(path, manifest, strlen(manifest));
-    _snprintf_s(g_fail_folder, sizeof g_fail_folder, _TRUNCATE, "%s\\snap", root);
-    sh_modserve_set_build_cause(ad_build_cause);
-    log_clear();
-    CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("bundle 'snap': its latest build failed (assets/mods/s.snap/x.decl: parse error); serving the last good "
-                  "build s.snap@4444444444444444 from "));
-    CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
-    {
-        sh_modserve_hit hit;
-        CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/s.snap/x.decl", &hit) && strstr(hit.disk_path, ".builds") &&
-              !strcmp(hit.bundle_hash, h));
-    }
-    /* The store's own snapshot is the folder's mod.json at that build (author
-     * block plus product block, modstore.c ms_snap_fill), and serves the same. */
-    {
-        char mj[MAX_PATH];
-        size_t mlen = 0;
-        unsigned char *mtext;
-        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\snap\\mod.json", root);
-        mtext = sh_mb_read_file(mj, 1u << 20, &mlen);
-        CHECK(mtext && strstr((const char *)mtext, "\"" SH_MB_BLOCK_KEY "\""));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
-        if (mtext) write_file(path, (const char *)mtext, mlen);
-        free(mtext);
-        log_clear();
-        CHECK(sh_modserve_index_build(root) == 2);
-        CHECK(log_has("bundle 'snap': its latest build failed (assets/mods/s.snap/x.decl: parse error); serving the last good "
-                      "build s.snap@4444444444444444 from "));
-        CHECK(!log_has("mod.json has no bundle hash"));
-        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
-    }
-    /* V12: a mod.json that does not parse. The record's snapshots row names
-     * the folder's last good build, which serves; the parse error is the
-     * failed build's cause when the store recorded none. */
-    {
-        char mj[MAX_PATH], keep[MAX_PATH];
-        size_t mlen = 0;
-        unsigned char *mtext;
-        static const char broken[] = "{\"id\": \"s.snap\", \"version\": \"1.0.0\",, }";
-        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\snap\\mod.json", root);
-        mtext = sh_mb_read_file(mj, 1u << 20, &mlen);
-        CHECK(mtext != NULL);
-        _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\snap\\mod.json.keep", root);
-        if (mtext) write_file(keep, (const char *)mtext, mlen);
-        write_file(mj, broken, strlen(broken));
-        sh_modserve_set_build_cause(NULL);
-        /* No row: skipped, as before. */
-        log_clear();
-        CHECK(sh_modserve_index_build(root) == 1 && log_has("bundle 'snap' skipped: mod.json is not a valid JSON object"));
-        CHECK(sh_mb_record_put(root, "snapshots", "{\"snap\": \"s.snap@4444444444444444\"}"));
-        log_clear();
-        CHECK(sh_modserve_index_build(root) == 2);
-        CHECK(log_has("bundle 'snap': its latest build failed (mod.json is not a valid JSON object (") &&
-              log_has("); serving the last good build s.snap@4444444444444444 from "));
-        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
-        /* The store's recorded cause wins. */
-        sh_modserve_set_build_cause(ad_build_cause);
-        log_clear();
-        CHECK(sh_modserve_index_build(root) == 2 && log_has("its latest build failed (assets/mods/s.snap/x.decl: parse error)"));
-        if (mtext) write_file(mj, (const char *)mtext, mlen);
-        free(mtext);
-        DeleteFileA(keep);
-        CHECK(sh_mb_record_put(root, "snapshots", NULL));
-    }
-    /* No snapshot: the folder's last good block, as phase 1 left it. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
-    DeleteFileA(path);
-    log_clear();
-    CHECK(sh_modserve_index_build(root) == 1 && log_has("no snapshot of the last good build s.snap@4444444444444444 exists"));
-    sh_modserve_set_build_cause(NULL);
-    g_fail_folder[0] = 0;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\keysnap", top);
+    CHECK(sh_modserve_index_build(root) == 3);
+    CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of mods\\My doors (work) (the same salt kown0000); Refresh "
+                  "in the Mods tab makes it a new mod"));
+    CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: " SH_MB_SHAPE "another folder of this map has the same mod: "
+                  "maps\\Doors\\Doors Pack"));
+    CHECK(log_has("bundle 'format-one' skipped: " SH_MB_SHAPE "it was built by an earlier version of Snapmap+"));
+    CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_SHAPE "mod.json uses \"id\", which this version does not read"));
+    CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_SHAPE "mod.json uses \"hud.schema\", which this version does not read"));
+    CHECK(log_has("bundle 'package-only' skipped: " SH_MB_SHAPE "its descriptor is package.json, which this version does not read"));
+    CHECK(log_has("bundle 'bad-salt' skipped: " SH_MB_SHAPE "its \"snapmap-plus\" block has no valid salt"));
+    CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));
+    CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
+    CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
+    CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MB_SHAPE "it was not built by the mod store"));
+    CHECK(log_has("bundle 'elsewhere' skipped: '" SP_THING "' is outside mods/zother00/ (its salt)"));
+    CHECK(!log_has("repair"));
+    sh_modserve_scope_enable(1);
+
+    /* No map: the root folder's build serves; a place build only for its map. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { mine }"));
+    CHECK(sh_modserve_bundle_scope(hm, &si) && si.newest && !si.in_place && si.names_live);
+    CHECK(sh_modserve_bundle_scope(hd, &si) && !si.newest && si.in_place && !si.names_live);
+
+    /* Rows of a stranger's map with no place: the root at the row's hash;
+     * another map's place never serves it, and another hash is missing (the
+     * owner's decision: the root serves a stranger only at the row's hash). */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "kown0000");
+    strcpy_s(row.name, sizeof row.name, "Doors Pack");
+    strcpy_s(row.build, sizeof row.build, hm);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0] && !strcmp(ref.id, "kown0000") &&
+          !strcmp(ref.folder, "My doors (work)") && !strcmp(ref.name, "Doors Pack"));
+    strcpy_s(row.build, sizeof row.build, hd);
+    CHECK(!sh_modserve_row_build(&row, &ref));
+    strcpy_s(row.build, sizeof row.build, hx);
+    CHECK(!sh_modserve_row_build(&row, &ref));
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+          !strcmp(cause, "This map uses Doors Pack, which is not installed."));
+    /* In a map's place: that place's folder first (the segment alone names it too). */
+    CHECK(sh_modserve_scope_set_place("maps\\Gates", 0) >= 0);
+    strcpy_s(row.build, sizeof row.build, hd);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Gates") && !strcmp(ref.folder, "maps\\Gates\\Doors Pack"));
+    CHECK(sh_modserve_scope_set_place("Doors", 0) >= 0);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Doors"));
+    strcpy_s(row.build, sizeof row.build, hm);   /* the place does not hold it: the root at that hash */
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0]);
+    strcpy_s(row.build, sizeof row.build, hx);
+    CHECK(!sh_modserve_row_build(&row, &ref));
+    /* The map's listing serves the place's folder of the declared build. */
+    list[0] = hd;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { downloaded }"));
+    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Doors\\Doors Pack\\"));
+    CHECK(sh_modserve_bundle_scope(hm, &si) && si.inert);
+    CHECK(sh_modserve_scope_set_place("maps\\Gates\\", 0) >= 0);   /* the same build from the other place */
+    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Gates\\Doors Pack\\"));
+    /* The author's own map follows the root folder whatever it pins; with
+     * no root folder of the salt, its own place's build at the row's hash. */
+    CHECK(sh_modserve_scope_set_place("maps\\Doors", 1) >= 0);
+    strcpy_s(row.build, sizeof row.build, hd);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
+    strcpy_s(row.build, sizeof row.build, hx);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    /* A salt whose only folder is skipped: the folder's cause. */
+    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "saltonly");
+    strcpy_s(row.build, sizeof row.build, hx);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+          !strcmp(cause, "This map uses Salted, which is installed but cannot be used: not built yet (Refresh in the Mods tab "
+                         "builds it)."));
+    /* A row that names no salt (an earlier shape the detour let through). */
+    memset(&row, 0, sizeof row);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+          !strcmp(cause, "This map names a mod this version does not read."));
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    sh_modserve_scope_enable(0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\saltplace", top);
     remove_tree(path);
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
@@ -4747,16 +4552,16 @@ static void test_row_served(void)
     sh_modmanifest_row row;
     char *names[5];
     static const fx_file HG[] = {
-        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_combo_enc.decl", "{ inherit = \"x\"; }", -1,
-          "entityDef", "mods/local.hell-guard/hell_guard_combo_enc", NULL, '1' },
-        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_shield.decl", "{ inherit = \"y\"; }", -1,
-          "entityDef", "mods/local.hell-guard/hell_guard_shield", NULL, '2' },
+        { "generated/decls/entitydef/mods/localhel/hell_guard_combo_enc.decl", "{ inherit = \"x\"; }", -1,
+          "entityDef", "mods/localhel/hell_guard_combo_enc", NULL, '1' },
+        { "generated/decls/entitydef/mods/localhel/hell_guard_shield.decl", "{ inherit = \"y\"; }", -1,
+          "entityDef", "mods/localhel/hell_guard_shield", NULL, '2' },
     };
     static const fx_file HG_NEW[] = {   /* recreated: the same paths, new bytes */
-        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_combo_enc.decl", "{ inherit = \"x2\"; }", -1,
-          "entityDef", "mods/local.hell-guard/hell_guard_combo_enc", NULL, '3' },
-        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_shield.decl", "{ inherit = \"y2\"; }", -1,
-          "entityDef", "mods/local.hell-guard/hell_guard_shield", NULL, '4' },
+        { "generated/decls/entitydef/mods/localhel/hell_guard_combo_enc.decl", "{ inherit = \"x2\"; }", -1,
+          "entityDef", "mods/localhel/hell_guard_combo_enc", NULL, '3' },
+        { "generated/decls/entitydef/mods/localhel/hell_guard_shield.decl", "{ inherit = \"y2\"; }", -1,
+          "entityDef", "mods/localhel/hell_guard_shield", NULL, '4' },
     };
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%smodserve_rows_%lu\\mods", tmp, GetCurrentProcessId());
@@ -4766,65 +4571,65 @@ static void test_row_served(void)
     remove_tree(top);
     mkdirs(root);
     memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "local.hell-guard");
+    strcpy_s(row.salt, sizeof row.salt, "localhel");
     strcpy_s(row.version, sizeof row.version, "1.0.0");
-    hash64('d', row.bundle);                 /* the build the map was saved with */
-    names[0] = "mods/local.hell-guard/hell_guard_combo_enc";
-    names[1] = "MODS/local.hell-guard/hell_guard_shield";   /* names fold case */
+    hash64('d', row.build);                 /* the build the map was saved with */
+    names[0] = "mods/localhel/hell_guard_combo_enc";
+    names[1] = "MODS/localhel/hell_guard_shield";   /* names fold case */
     row.names = names;
     row.name_count = 2;
 
-    /* No folder of the key: missing. */
+    /* No folder of the salt: missing. */
     CHECK(sh_modserve_index_build(root) >= 0);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses local.hell-guard, which is not installed."));
+    CHECK(!strcmp(cause, "This map uses localhel, which is not installed."));
     CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
-          !strcmp(cause, "This prefab uses local.hell-guard, which is not installed."));
+          !strcmp(cause, "This prefab uses localhel, which is not installed."));
 
     /* The folder at the row's hash: served. */
     g_bundle_name = "Hell Guards";
-    make_bundle(root, "local.hell-guard", "local.hell-guard", "1.0.0", 'd', NULL, HG, 2, NULL);
+    make_bundle(root, "localhel", "localhel", "1.0.0", 'd', NULL, HG, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
 
-    /* Recreated with the same key and paths but new bytes (a new hash): another build, not this map's. */
+    /* Recreated with the same salt and paths but new bytes (a new hash): another build, not this map's. */
     remove_tree(top);
     mkdirs(root);
-    make_bundle(root, "hand-made", "local.hell-guard", "2.0.0", 'e', NULL, HG_NEW, 2, NULL);
+    make_bundle(root, "hand-made", "localhel", "2.0.0", 'e', NULL, HG_NEW, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Hell Guards (local.hell-guard), which is not installed."));
+    CHECK(!strcmp(cause, "This map uses Hell Guards, which is not installed."));
 
     /* The folder at the hash that lacks one listed path: incomplete, naming it. */
     remove_tree(top);
     mkdirs(root);
-    make_bundle(root, "local.hell-guard", "local.hell-guard", "1.0.0", 'd', NULL, HG + 1, 1, NULL);
+    make_bundle(root, "localhel", "localhel", "1.0.0", 'd', NULL, HG + 1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
-    CHECK(!strcmp(cause, "Hell Guards (local.hell-guard) is installed but does not provide "
-                         "mods/local.hell-guard/hell_guard_combo_enc, which this map uses."));
+    CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
+                         "mods/localhel/hell_guard_combo_enc, which this map uses."));
     /* More than three missing: the first three and the count. */
-    names[2] = "mods/local.hell-guard/a";
-    names[3] = "mods/local.hell-guard/b";
-    names[4] = "mods/local.hell-guard/c";
+    names[2] = "mods/localhel/a";
+    names[3] = "mods/localhel/b";
+    names[4] = "mods/localhel/c";
     row.name_count = 5;
     CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
-    CHECK(!strcmp(cause, "Hell Guards (local.hell-guard) is installed but does not provide "
-                         "mods/local.hell-guard/hell_guard_combo_enc, mods/local.hell-guard/a, mods/local.hell-guard/b and 1 more, "
+    CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
+                         "mods/localhel/hell_guard_combo_enc, mods/localhel/a, mods/localhel/b and 1 more, "
                          "which this prefab uses."));
     /* A row that lists no names (a map-level row) is served by its build alone. */
     row.name_count = 0;
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
-    /* Another key's folder providing the names does not serve the row. */
+    /* Another salt's folder providing the names does not serve the row. */
     remove_tree(top);
     mkdirs(root);
     g_bundle_name = NULL;
     row.name_count = 2;
     {
         static const fx_file OTHER[] = {
-            { "generated/decls/entitydef/mods/local.other/x.decl", "{ }", -1, "entityDef", "mods/local.other/x", NULL, '5' },
+            { "generated/decls/entitydef/mods/localoth/x.decl", "{ }", -1, "entityDef", "mods/localoth/x", NULL, '5' },
         };
-        make_bundle(root, "local.other", "local.other", "1.0.0", 'c', NULL, OTHER, 1, NULL);
+        make_bundle(root, "localoth", "localoth", "1.0.0", 'c', NULL, OTHER, 1, NULL);
     }
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, NULL, 0) == SH_MODSERVE_ROW_MISSING);
@@ -4867,10 +4672,10 @@ static void test_dependency_names(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\deps\\mods", top);
     mkdirs(root);
     g_bundle_extra = NULL;
-    make_bundle(root, "ivy.airlock@1.0.0", "ivy.airlock", "1.0.0", 'a',
+    make_bundle(root, "ivyairlo@1.0.0", "ivyairlo", "1.0.0", 'a',
                 "\"cooked/model/models/modular/airlock/air_lock_shell.bmodel\"", ivy, 1, NULL);
-    make_bundle(root, "jo.editor@1.0.0", "jo.editor", "1.0.0", 'b', "\"" LIFT "\"", jo, 1, NULL);
-    make_bundle(root, "kay.game@1.0.0", "kay.game", "1.0.0", 'c', "\"" SHADOW "\"", kay, 1, NULL);
+    make_bundle(root, "joeditor@1.0.0", "joeditor", "1.0.0", 'b', "\"" LIFT "\"", jo, 1, NULL);
+    make_bundle(root, "kaygame0@1.0.0", "kaygame0", "1.0.0", 'c', "\"" SHADOW "\"", kay, 1, NULL);
     hash64('a', ha); hash64('c', hc); hash64('d', hd); hash64('e', he);
     _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zed.editor\", \"name\": \"Zed\", \"at\": 1}}", hd);
     CHECK(sh_mb_record_put(root, "editorOnly", record));
@@ -4898,13 +4703,13 @@ static void test_dependency_names(void)
     /* The record: a row whose bundle the editorOnly section names is served
      * with no folder at all; any other hash is judged as before. */
     memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "zed.editor");
-    strcpy_s(row.bundle, sizeof row.bundle, hd);
+    strcpy_s(row.salt, sizeof row.salt, "zededit0");
+    strcpy_s(row.build, sizeof row.build, hd);
     CHECK(sh_modserve_editor_only_recorded(hd) && !sh_modserve_editor_only_recorded(he));
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
-    strcpy_s(row.bundle, sizeof row.bundle, he);
+    strcpy_s(row.build, sizeof row.build, he);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(strstr(cause, "zed.editor, which is not installed") != NULL);
+    CHECK(strstr(cause, "zededit0, which is not installed") != NULL);
 
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
@@ -4914,10 +4719,10 @@ static void test_dependency_names(void)
  * bank follows; another build of the key is another bank to Wwise. */
 static void test_bank_stems(void)
 {
-    static const char DECL[] = "sound mods/b.bank/hit {\r\n\tbank = \"b_bank_sfx.bnk\";\r\n\tevent = \"play_hit\";\r\n}";
+    static const char DECL[] = "sound mods/bbank000/hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_hit\";\r\n}";
     static const fx_file files[] = {
-        { "sound/soundbanks/pc/b_bank_sfx.bnk", NULL, 24, "soundBank", "sound/soundbanks/pc/b_bank_sfx.bnk", NULL, '1' },
-        { "generated/decls/sound/mods/b.bank/hit.decl", DECL, -1, "sound", "mods/b.bank/hit", NULL, '2' },
+        { "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, 24, "soundBank", "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, '1' },
+        { "generated/decls/sound/mods/bbank000/hit.decl", DECL, -1, "sound", "mods/bbank000/hit", NULL, '2' },
     };
     char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], req[160], h[65], stem[64];
     unsigned char bank[24], *bytes = NULL;
@@ -4925,15 +4730,15 @@ static void test_bank_stems(void)
     uint32_t v, id;
     char *slash, *t;
     int pass;
-    printf("-- additive: per-build bank stems\n");
+    printf("-- additive: bank stems keyed by the bank's own hash\n");
     /* The text rewrite alone. */
-    t = sh_modserve_bank_rename_text("a = \"b_bank_sfx\"; c = \"x/b_bank_sfx.bnk\"; d = \"B_BANK_SFX.bnk\"; e = \"b_bank_sfxy\";",
-                                     strlen("a = \"b_bank_sfx\"; c = \"x/b_bank_sfx.bnk\"; d = \"B_BANK_SFX.bnk\"; e = \"b_bank_sfxy\";"),
-                                     "b_bank_sfx", "b_bank_sfx.1111111111111111", &len);
-    CHECK(t && !strcmp(t, "a = \"b_bank_sfx.1111111111111111\"; c = \"x/b_bank_sfx.1111111111111111.bnk\"; "
-                          "d = \"b_bank_sfx.1111111111111111.bnk\"; e = \"b_bank_sfxy\";"));
+    t = sh_modserve_bank_rename_text("a = \"bbank000_sfx\"; c = \"x/bbank000_sfx.bnk\"; d = \"BBANK000_SFX.bnk\"; e = \"bbank000_sfxy\";",
+                                     strlen("a = \"bbank000_sfx\"; c = \"x/bbank000_sfx.bnk\"; d = \"BBANK000_SFX.bnk\"; e = \"bbank000_sfxy\";"),
+                                     "bbank000_sfx", "bbank000_sfx.1111111111111111", &len);
+    CHECK(t && !strcmp(t, "a = \"bbank000_sfx.1111111111111111\"; c = \"x/bbank000_sfx.1111111111111111.bnk\"; "
+                          "d = \"bbank000_sfx.1111111111111111.bnk\"; e = \"bbank000_sfxy\";"));
     free(t);
-    CHECK(sh_modserve_bank_rename_text("nothing here", 12, "b_bank_sfx", "b_bank_sfx.1", &len) == NULL);
+    CHECK(sh_modserve_bank_rename_text("nothing here", 12, "bbank000_sfx", "bbank000_sfx.1", &len) == NULL);
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -4945,32 +4750,33 @@ static void test_bank_stems(void)
         memcpy(bank, "BKHD", 4);
         v = 16; memcpy(bank + 4, &v, 4);
         v = 0x71; memcpy(bank + 8, &v, 4);
-        v = sh_mb_fnv1_lower("b_bank_sfx", 10); memcpy(bank + 12, &v, 4);
-        make_bundle(root, "b.bank", "b.bank", "1.0.0", digit, NULL, files, 2, NULL);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\b.bank\\assets\\sound\\soundbanks\\pc\\b_bank_sfx.bnk", root);
+        v = sh_mb_fnv1_lower("bbank000_sfx", 12); memcpy(bank + 12, &v, 4);
+        make_bundle(root, "bbank000", "bbank000", "1.0.0", digit, NULL, files, 2, NULL);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bbank000\\assets\\sound\\soundbanks\\pc\\bbank000_sfx.bnk", root);
         write_file(path, (const char *)bank, sizeof bank);
         sh_modserve_scope_enable(0);
         log_clear();
         CHECK(sh_modserve_index_build(root) == 1);
-        _snprintf_s(stem, sizeof stem, _TRUNCATE, "b_bank_sfx.%.16s", hash64(digit, h));
+        /* The bank file's own hash names it: both builds carry the same bank. */
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "bbank000_sfx.%.16s", hash64('1', h));
         _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s.bnk", stem);
-        CHECK(!sh_modserve_lookup("sound/soundbanks/pc/b_bank_sfx.bnk", NULL));
+        CHECK(!sh_modserve_lookup("sound/soundbanks/pc/bbank000_sfx.bnk", NULL));
         {
             sh_modserve_hit hit;
-            CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path && strstr(hit.disk_path, "\\.served\\b.bank@") && hit.size == 24);
+            CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path && strstr(hit.disk_path, "\\.served\\banks\\bbank000_sfx.1111111111111111.bnk") && hit.size == 24);
         }
-        CHECK(log_has("bank b_bank_sfx.bnk served as b_bank_sfx."));
+        CHECK(log_has("bank bbank000_sfx.bnk served as bbank000_sfx."));
         CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == 24 && !memcmp(bytes, "BKHD", 4));
         if (bytes) {
             memcpy(&id, bytes + 12, 4);
-            CHECK(id == sh_mb_fnv1_lower(stem, strlen(stem)) && id != sh_mb_fnv1_lower("b_bank_sfx", 10));
+            CHECK(id == sh_mb_fnv1_lower(stem, strlen(stem)) && id != sh_mb_fnv1_lower("bbank000_sfx", 12));
             HeapFree(GetProcessHeap(), 0, bytes);
             bytes = NULL;
         }
         {
             char want[200];
             _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s.bnk\";", stem);
-            CHECK(strstr(ad_served("generated/decls/sound/mods/b.bank/hit.decl"), want) != NULL);
+            CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/hit.decl"), want) != NULL);
         }
     }
 }
@@ -4981,15 +4787,15 @@ static void test_bank_stems(void)
  * declared rule, so in Play of a map that declares nothing they are off
  * (DESIGN-additive 2.3 and 2.6). Declared, everything serves. */
 #define MX_SET  "generated/decls/snapeditorsettings/mixed.decl"
-#define MX_NEW  "generated/decls/entitydef/mods/x.mixed/thing.decl"
-#define PU_NEW  "generated/decls/entitydef/mods/y.pure/thing.decl"
+#define MX_NEW  "generated/decls/entitydef/mods/xmixed00/thing.decl"
+#define PU_NEW  "generated/decls/entitydef/mods/ypure000/thing.decl"
 static void test_mixed_editor_bundle(void)
 {
     static const fx_file mixed[] = {
         { MX_SET, "settings {}", -1, "snapEditorSettings", "mixed", NULL, '1' },
-        { MX_NEW, "entityDef t {}", -1, "entityDef", "mods/x.mixed/thing", NULL, '2' },
+        { MX_NEW, "entityDef t {}", -1, "entityDef", "mods/xmixed00/thing", NULL, '2' },
     };
-    static const fx_file pure[] = { { PU_NEW, "entityDef u {}", -1, "entityDef", "mods/y.pure/thing", NULL, '3' } };
+    static const fx_file pure[] = { { PU_NEW, "entityDef u {}", -1, "entityDef", "mods/ypure000/thing", NULL, '3' } };
     char top[MAX_PATH], root[MAX_PATH], h_mixed[65];
     const char *list[1];
     char *slash;
@@ -5002,10 +4808,10 @@ static void test_mixed_editor_bundle(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\mixed\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_label\": \"mixed\"}},\n  ";
-    make_bundle(root, "x.mixed", "x.mixed", "1.0.0", '7', "\"" MX_SET "\"", mixed, 2, "{\"installedAt\": 100}");
+    make_bundle(root, "xmixed00", "xmixed00", "1.0.0", '7', "\"" MX_SET "\"", mixed, 2, "{\"installedAt\": 100}");
     hash64('7', h_mixed);
     g_bundle_extra = NULL;
-    make_bundle(root, "y.pure", "y.pure", "1.0.0", '8', NULL, pure, 1, "{\"installedAt\": 110}");
+    make_bundle(root, "ypure000", "ypure000", "1.0.0", '8', NULL, pure, 1, "{\"installedAt\": 110}");
     printf("-- editor tweaks: a mixed folder's tweak serves in every map, its addition only where declared\n");
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     sh_modserve_scope_enable(0);
@@ -5013,7 +4819,7 @@ static void test_mixed_editor_bundle(void)
     CHECK(sh_modserve_index_build(root) == 2);
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(log_has("MODS: scope: x.mixed@1.0.0 shadows editor-time content (" MX_SET "); its editor tweaks serve in every "
+    CHECK(log_has("MODS: scope: xmixed00@1.0.0 shadows editor-time content (" MX_SET "); its editor tweaks serve in every "
                   "map this editor opens, the rest only in maps that declare it"));
     sh_modserve_scope_enable(1);
     /* No map: the tweak and the Toybox names serve; the cvar is not accepted. */
@@ -5048,18 +4854,15 @@ static void test_mixed_editor_bundle(void)
  * under it, as the store wrote them (lane C, probes E and G2). */
 static void test_store_root_utf8(void)
 {
-    static const char OLD[] = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
     static const fx_file plain[] = {
-        { "generated/decls/entitydef/mods/u.plain/p.decl", "entityDef p {}", -1, "entityDef", "mods/u.plain/p", NULL, '6' },
+        { "generated/decls/entitydef/mods/uplain00/p.decl", "entityDef p {}", -1, "entityDef", "mods/uplain00/p", NULL, '6' },
     };
-    static const fx_file snapf[] = {
-        { "generated/decls/entitydef/mods/u.snap/x.decl", "entityDef x { good }", -1, "entityDef", "mods/u.snap/x", NULL, '2' },
+    static const fx_file placed[] = {
+        { "generated/decls/entitydef/mods/usnap000/x.decl", "entityDef x { good }", -1, "entityDef", "mods/usnap000/x", NULL, '2' },
     };
-    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], snap[MAX_PATH], h7[65], h8[65], hd[65], record[256];
+    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], h8[65], hd[65], record[256];
     char *slash, *accent;
-    unsigned char *mtext;
-    size_t mlen = 0;
-    printf("-- the store root holds a non-ASCII character: aliases, editorOnly and the last good snapshot are read\n");
+    printf("-- the store root holds a non-ASCII character: the editorOnly record and a map's place are read\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -5069,28 +4872,11 @@ static void test_store_root_utf8(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\%s\\mods", top, accent);
     free(accent);
     mkdirs(root);
-    make_bundle(root, "plain", "u.plain", "1.0.0", '7', NULL, plain, 1, NULL);
-    make_bundle(root, "snap", "u.snap", "1.0.0", '8', NULL, snapf, 1, NULL);
-    hash64('7', h7); hash64('8', h8); hash64('d', hd);
-    /* The store's snapshot of the last good build: the folder's mod.json at
-     * that build and its carried file; then the author's edit in place. */
-    _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\u.snap@%.16s", root, h8);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\u.snap\\x.decl", snap);
-    write_file(path, "entityDef x { good }", strlen("entityDef x { good }"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snap\\mod.json", root);
-    mtext = sh_mb_read_file(path, 1u << 20, &mlen);
-    CHECK(mtext != NULL);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
-    if (mtext) write_file(path, (const char *)mtext, mlen);
-    free(mtext);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snap\\assets\\generated\\decls\\entitydef\\mods\\u.snap\\x.decl", root);
-    write_file(path, "entityDef x { BROKEN }", strlen("entityDef x { BROKEN }"));
-    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\":\"%s\"}", OLD, h7);
-    CHECK(sh_mb_record_put(root, "aliases", record));
-    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zed.editor\", \"name\": \"Zed\", \"at\": 1}}", hd);
+    make_bundle(root, "plain", "uplain00", "1.0.0", '7', NULL, plain, 1, NULL);
+    make_bundle(root, "maps\\Caf\xc3\xa9\\snap", "usnap000", "1.0.0", '8', NULL, placed, 1, NULL);
+    hash64('8', h8); hash64('d', hd);
+    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zededit0\", \"name\": \"Zed\", \"at\": 1}}", hd);
     CHECK(sh_mb_record_put(root, "editorOnly", record));
-    _snprintf_s(g_fail_folder, sizeof g_fail_folder, _TRUNCATE, "%s\\snap", root);
-    sh_modserve_set_build_cause(ad_build_cause);
 
     /* The boot resolves the store's root, as the product's boot does. */
     CHECK(sh_ms_set_root(root));
@@ -5100,25 +4886,22 @@ static void test_store_root_utf8(void)
     CHECK(sh_modserve_index_rescan() == 2);   /* the rescan reuses the boot's root */
     {
         sh_modserve_bundle_ref ref;
-        sh_modserve_hit hit;
-        CHECK(sh_modserve_bundle_serving(OLD, NULL, &ref) && !strcmp(ref.id, "u.plain"));
-        CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+        sh_modmanifest_row row;
         CHECK(sh_modserve_editor_only_recorded(hd));
-        CHECK(log_has("bundle 'snap': its latest build failed (assets/mods/s.snap/x.decl: parse error); serving the last good "
-                      "build u.snap@8888888888888888 from "));
-        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/u.snap/x.decl"), "entityDef x { good }"));
-        CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/u.snap/x.decl", &hit) && strstr(hit.disk_path, ".builds") &&
-              !strcmp(hit.bundle_hash, h8));
-        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/u.plain/p.decl"), "entityDef p {}"));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/uplain00/p.decl"), "entityDef p {}"));
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.salt, sizeof row.salt, "usnap000");
+        strcpy_s(row.build, sizeof row.build, h8);
+        CHECK(sh_modserve_scope_set_place("maps\\Caf\xc3\xa9", 0) >= 0);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Caf\xc3\xa9"));
+        CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
     }
     sh_ms_set_root(NULL);
-    sh_modserve_set_build_cause(NULL);
-    g_fail_folder[0] = 0;
     strcpy_s(path, sizeof path, root);
     slash = strrchr(path, '\\');
     if (slash) *slash = 0;
     remove_tree(path);
-    CHECK(sh_modserve_index_build(g_root) >= 6);
+    CHECK(sh_modserve_index_build(g_root) >= 5);
 }
 
 /* ------------------------------------------------------------------ what a kept pass looks up (triage F8b) */
@@ -5397,7 +5180,6 @@ int main(void)
     test_precedence();
     test_probe();
     test_plan();
-    test_plan_alias();
     test_plan_run();
     test_bundles_for_names();
     test_cost();
@@ -5428,11 +5210,9 @@ int main(void)
     test_scope_providers();
     test_additive_determinism();
     test_additive_same_key();
-    test_follow_own();
-    test_own_folder_over_download();
     test_two_builds_requirements();
     test_additive_compose();
-    test_additive_key_and_snapshot();
+    test_salt_and_place();
     test_resource_lock();
     test_row_served();
     test_dependency_names();

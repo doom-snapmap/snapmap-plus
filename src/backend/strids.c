@@ -518,7 +518,7 @@ typedef struct strids_bundle_pass {
  * without the #str_ prefix. Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
-static void inject_bundle(void *context, const char *id, const char *version, int legacy, const char *extra)
+static void inject_bundle(void *context, const char *id, const char *version, int place, const char *extra)
 {
     strids_bundle_pass *pass = (strids_bundle_pass *)context;
     sh_json_object root = {0}, languages = {0}, pairs = {0};
@@ -526,7 +526,7 @@ static void inject_bundle(void *context, const char *id, const char *version, in
     size_t before, name_cap;
     char *name;
     int owner;
-    (void)legacy;   /* the order already places map-delivered bundles last */
+    (void)place;   /* the order already places maps' places after the root */
     if (!id) id = "";
     if (!version) version = "";
     if (!extra || !sh_json_parse_object(extra, strlen(extra), STRIDS_BUNDLE_JSON_DEPTH, &root)) goto done;
@@ -571,8 +571,8 @@ done:
     sh_json_object_free(&root);
 }
 
-/* Admitted bundles, installed before map-delivered, then id and version
- * (sh_modserve_each_bundle_extra). Before the serving index exists this layer
+/* Admitted bundles, root folders before maps' places, then salt, then
+ * folder (sh_modserve_each_bundle_extra). Before the serving index exists this layer
  * is empty; each index build then requests a refresh (sh_strids_request_refresh). */
 static void inject_bundles(void)
 {

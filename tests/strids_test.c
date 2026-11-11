@@ -77,7 +77,7 @@ int hook_unpatch(void *tramp)
  * visits only admitted bundles that carry an extra object. */
 typedef struct fake_bundle {
     const char *id, *version;
-    int legacy, admitted;
+    int place, admitted;
     const char *extra;
 } fake_bundle;
 static fake_bundle g_bundles[8];
@@ -90,7 +90,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     if (g_bundle_refuse) return -1;
     for (i = 0; i < g_nbundles; i++) {
         if (!g_bundles[i].admitted || !g_bundles[i].extra) continue;
-        fn(context, g_bundles[i].id, g_bundles[i].version, g_bundles[i].legacy, g_bundles[i].extra);
+        fn(context, g_bundles[i].id, g_bundles[i].version, g_bundles[i].place, g_bundles[i].extra);
         n++;
     }
     return n;

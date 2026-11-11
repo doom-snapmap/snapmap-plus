@@ -306,14 +306,18 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   limit cannot be copied to My Maps.
 - The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
-- A map plays with the exact build of each mod it was saved with: a map, rawmap or prefab is served
-  by the installed folder at the bundle hash its row records. A folder of the same mod at another
-  hash (an update, a fork) is another build: it is installed beside the one a map uses and never
-  replaces it for that map, and the map's own build is downloaded by its hash ("installed at another
-  build"). Both builds stay installed; each map serves its own, and with no map open your own
-  folder of the mod offers its Toybox rows (the newest build when you have no folder of it of your
-  own: a mod downloaded for a map never takes over from the one you edit), each ready with that build's required console settings. `sh_mods doctor`
-  lists one row per build under the mod.
+- A mod is its salt, eight characters in its `mod.json`, never its folder name, which you may
+  rename at any time. Your own folders sit at the root of the mods folder, one build per mod; the
+  mods a downloaded map, a rawmap or a prefab ZIP brought sit in that map's place,
+  `mods\maps\<map title>\<mod name>\`, one build per mod per map. Someone else's map plays with
+  its own place's build at the hash its row records, or with your root folder of the mod when that
+  folder is at the same hash; otherwise the map's build is downloaded into its place. Your own maps
+  always use your root folders, whatever build they were saved with, and the next save records it.
+  With no map open only your root folders offer Toybox rows, each ready with its required console
+  settings; a build in a map's place serves only for that map. `sh_mods doctor` lists one row per
+  build under the mod. A folder in an earlier shape, or whose build failed, serves nothing, and the
+  Mods tab shows why ("This mod folder is not in a shape Snapmap+ can build: ...", or the build's
+  cause).
 - Mods are installed by hash, whichever way they arrive (the Mods tab's install, `sh_mods install`,
   a rawmap or prefab ZIP, a download for a map): a build you already have is not installed again,
   and any other build lands as its own folder. A folder you install sits at the top of `mods\`, the
