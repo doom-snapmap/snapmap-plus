@@ -14,9 +14,7 @@
 
 #define PI               3.14159265358979323846
 #define HITSCAN_RANGE    8192.0
-#define RANGE_MAX        65536.0
-#define SPEED_MAX        100000.0
-#define JOINT_CAP        64
+#define NAME_ANY         ((size_t)-1 >> 1)   /* text of any length */
 #define SIGHT_RAISE      40.0f     /* can_see_from aims this far above the other entity's origin */
 #define REG_EFFECTS      "snapmap-plus.effects"
 
@@ -35,111 +33,231 @@ void sh_script_combat_set_engine(const sh_script_combat_engine *engine)
 
 /* -------------------------------------------------- records from the hooks */
 
-#define LAUNCHES 256
-#define HITS     256
-#define DEATHS   512
+/* Three maps keyed by a 32-bit value: launches by projectile spawn id, last
+ * hits and deaths by victim handle. Each grows (open addressing, at most half
+ * full) and each record is dropped when the handle table releases the entity
+ * it concerns (rec_gone), so a record lives exactly as long as its entity and
+ * none has a count of its own. */
+typedef struct rec_map {
+    uint32_t *keys;          /* key + 1; 0 = empty */
+    uint8_t  *vals;
+    size_t    vsize;
+    uint32_t  cap, n;        /* cap: a power of two, or 0 */
+} rec_map;
 
-typedef struct launch_rec { uint32_t spawn_id; int mod; sh_script_handle owner; uint32_t seq; } launch_rec;
-typedef struct hit_rec { sh_script_handle victim; sh_script_handle attacker; char decl[SH_SCRIPT_EVENT_TEXT]; } hit_rec;
+typedef struct launch_val { int mod; sh_script_handle owner; } launch_val;
+typedef struct hit_val { sh_script_handle attacker; char decl[SH_SCRIPT_EVENT_TEXT]; } hit_val;
 
 static SRWLOCK g_rec_lock = SRWLOCK_INIT;
-static launch_rec g_launch[LAUNCHES];
-static uint32_t g_launch_seq;
-static hit_rec g_hits[HITS];
-static unsigned g_hit_next;
-static sh_script_handle g_dead[DEATHS];
-static unsigned g_dead_next;
+static rec_map g_launch = { NULL, NULL, sizeof(launch_val), 0, 0 };
+static rec_map g_hits = { NULL, NULL, sizeof(hit_val), 0, 0 };
+static rec_map g_dead = { NULL, NULL, 1, 0, 0 };
+static sh_script_handle g_fire_owner;    /* ai:fire waiting for its own launch, 0 none */
+static uint32_t g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
+
+static uint32_t rec_slot(const rec_map *m, uint32_t key)
+{
+    uint32_t h = key + 1;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    return h & (m->cap - 1);
+}
+
+/* The value of key, or NULL. Lock held. */
+static void *rec_get(const rec_map *m, uint32_t key)
+{
+    uint32_t s;
+    if (!m->cap) return NULL;
+    for (s = rec_slot(m, key); m->keys[s]; s = (s + 1) & (m->cap - 1))
+        if (m->keys[s] == key + 1) return m->vals + (size_t)s * m->vsize;
+    return NULL;
+}
+
+static int rec_grow(rec_map *m)
+{
+    rec_map g = *m;
+    uint32_t i;
+    g.cap = m->cap ? m->cap * 2 : 64;
+    if (g.cap <= m->cap) return 0;
+    g.keys = (uint32_t *)calloc(g.cap, sizeof *g.keys);
+    g.vals = (uint8_t *)calloc(g.cap, g.vsize);
+    if (!g.keys || !g.vals) { free(g.keys); free(g.vals); return 0; }
+    for (i = 0; i < m->cap; i++) {
+        uint32_t s;
+        if (!m->keys[i]) continue;
+        for (s = rec_slot(&g, m->keys[i] - 1); g.keys[s]; s = (s + 1) & (g.cap - 1)) {}
+        g.keys[s] = m->keys[i];
+        memcpy(g.vals + (size_t)s * g.vsize, m->vals + (size_t)i * m->vsize, m->vsize);
+    }
+    free(m->keys);
+    free(m->vals);
+    *m = g;
+    return 1;
+}
+
+/* The value of key, made (zeroed) when missing; NULL without memory. Lock held. */
+static void *rec_put(rec_map *m, uint32_t key)
+{
+    uint32_t s;
+    void *v = rec_get(m, key);
+    if (v) return v;
+    if ((m->n + 1) * 2 > m->cap && !rec_grow(m)) return NULL;
+    for (s = rec_slot(m, key); m->keys[s]; s = (s + 1) & (m->cap - 1)) {}
+    m->keys[s] = key + 1;
+    memset(m->vals + (size_t)s * m->vsize, 0, m->vsize);
+    m->n++;
+    return m->vals + (size_t)s * m->vsize;
+}
+
+/* Drop key, shifting the run after it back. Lock held. */
+static void rec_del(rec_map *m, uint32_t key)
+{
+    uint32_t mask, s, j;
+    if (!m->cap) return;
+    mask = m->cap - 1;
+    for (s = rec_slot(m, key); m->keys[s] != key + 1; s = (s + 1) & mask)
+        if (!m->keys[s]) return;
+    j = s;
+    for (;;) {
+        uint32_t k;
+        j = (j + 1) & mask;
+        if (!m->keys[j]) break;
+        k = rec_slot(m, m->keys[j] - 1);
+        if (s <= j ? (s < k && k <= j) : (s < k || k <= j)) continue;
+        m->keys[s] = m->keys[j];
+        memcpy(m->vals + (size_t)s * m->vsize, m->vals + (size_t)j * m->vsize, m->vsize);
+        s = j;
+    }
+    m->keys[s] = 0;
+    m->n--;
+}
+
+static void rec_free(rec_map *m)
+{
+    free(m->keys);
+    free(m->vals);
+    m->keys = NULL;
+    m->vals = NULL;
+    m->cap = m->n = 0;
+}
+
+/* The handle table released an entity: its records go. */
+static void rec_gone(sh_script_handle h, uint32_t spawn_id)
+{
+    AcquireSRWLockExclusive(&g_rec_lock);
+    rec_del(&g_launch, spawn_id);
+    rec_del(&g_hits, h);
+    rec_del(&g_dead, h);
+    ReleaseSRWLockExclusive(&g_rec_lock);
+}
 
 void sh_script_combat_reset(void)
 {
     AcquireSRWLockExclusive(&g_rec_lock);
-    memset(g_launch, 0, sizeof g_launch);
-    memset(g_hits, 0, sizeof g_hits);
-    memset(g_dead, 0, sizeof g_dead);
-    g_launch_seq = 0;
-    g_hit_next = 0;
-    g_dead_next = 0;
+    rec_free(&g_launch);
+    rec_free(&g_hits);
+    rec_free(&g_dead);
+    g_fire_owner = 0;
+    g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
     ReleaseSRWLockExclusive(&g_rec_lock);
+    sh_script_handles_on_gone(rec_gone);
 }
 
 void sh_script_combat_note_launch(uint32_t spawn_id, sh_script_handle owner, int mod)
 {
-    launch_rec *r;
+    launch_val *v;
     if (spawn_id == SH_SCRIPT_SPAWN_ID_NONE || mod < 0) return;
     AcquireSRWLockExclusive(&g_rec_lock);
-    g_launch_seq++;
-    r = &g_launch[g_launch_seq % LAUNCHES];
-    r->spawn_id = spawn_id;
-    r->mod = mod;
-    r->owner = owner;
-    r->seq = g_launch_seq;
+    v = (launch_val *)rec_put(&g_launch, spawn_id);
+    if (v) { v->mod = mod; v->owner = owner; }
+    if (owner && owner == g_fire_owner) g_fire_id = spawn_id;
     ReleaseSRWLockExclusive(&g_rec_lock);
+}
+
+sh_script_handle sh_script_combat_launch(uint32_t spawn_id, sh_script_handle owner, int mod)
+{
+    sh_script_handle p;
+    if (spawn_id == SH_SCRIPT_SPAWN_ID_NONE || mod < 0) return 0;
+    p = sh_script_handles_find(spawn_id, NULL);
+    if (!p) p = sh_script_handles_ref(spawn_id);
+    if (!p) return 0;   /* no handle, no record: nothing would release it */
+    sh_script_combat_note_launch(spawn_id, owner, mod);
+    return p;
 }
 
 int sh_script_combat_launched(uint32_t spawn_id, int *mod, sh_script_handle *owner)
 {
-    int i, found = 0;
-    uint32_t best = 0;
+    const launch_val *v;
+    int found = 0;
     if (spawn_id == SH_SCRIPT_SPAWN_ID_NONE) return 0;
     AcquireSRWLockShared(&g_rec_lock);
-    for (i = 0; i < LAUNCHES; i++)
-        if (g_launch[i].seq && g_launch[i].spawn_id == spawn_id && g_launch[i].seq > best) {
-            best = g_launch[i].seq;
-            if (mod) *mod = g_launch[i].mod;
-            if (owner) *owner = g_launch[i].owner;
-            found = 1;
-        }
+    v = (const launch_val *)rec_get(&g_launch, spawn_id);
+    if (v) {
+        if (mod) *mod = v->mod;
+        if (owner) *owner = v->owner;
+        found = 1;
+    }
     ReleaseSRWLockShared(&g_rec_lock);
     return found;
 }
 
-/* The newest launch by `owner` after sequence `after`: its spawn id, or NONE. */
-static uint32_t launch_after(sh_script_handle owner, uint32_t after)
+int sh_script_combat_launches(void)
 {
-    int i;
-    uint32_t best = after, id = SH_SCRIPT_SPAWN_ID_NONE;
+    int n;
     AcquireSRWLockShared(&g_rec_lock);
-    for (i = 0; i < LAUNCHES; i++)
-        if (g_launch[i].seq > best && g_launch[i].owner == owner) { best = g_launch[i].seq; id = g_launch[i].spawn_id; }
+    n = (int)g_launch.n;
     ReleaseSRWLockShared(&g_rec_lock);
-    return id;
+    return n;
 }
 
-static uint32_t launch_seq(void)
+/* ai:fire: catch the launch its own event makes (the event runs at once on
+ * this thread, and the launch hook reports it before the event returns). */
+static void fire_begin(sh_script_handle owner)
 {
-    uint32_t s;
-    AcquireSRWLockShared(&g_rec_lock);
-    s = g_launch_seq;
-    ReleaseSRWLockShared(&g_rec_lock);
-    return s;
+    AcquireSRWLockExclusive(&g_rec_lock);
+    g_fire_owner = owner;
+    g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
+    ReleaseSRWLockExclusive(&g_rec_lock);
+}
+
+static uint32_t fire_end(void)
+{
+    uint32_t id;
+    AcquireSRWLockExclusive(&g_rec_lock);
+    id = g_fire_id;
+    g_fire_owner = 0;
+    g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
+    ReleaseSRWLockExclusive(&g_rec_lock);
+    return id;
 }
 
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker)
 {
-    hit_rec *r = NULL;
-    int i;
+    hit_val *v;
     if (!victim) return;
     AcquireSRWLockExclusive(&g_rec_lock);
-    for (i = 0; i < HITS && !r; i++) if (g_hits[i].victim == victim) r = &g_hits[i];
-    if (!r) r = &g_hits[g_hit_next++ % HITS];
-    r->victim = victim;
-    r->attacker = attacker;
-    strncpy_s(r->decl, sizeof r->decl, decl ? decl : "", _TRUNCATE);
+    v = (hit_val *)rec_put(&g_hits, victim);
+    if (v) {
+        v->attacker = attacker;
+        strncpy_s(v->decl, sizeof v->decl, decl ? decl : "", _TRUNCATE);
+    }
     ReleaseSRWLockExclusive(&g_rec_lock);
 }
 
 int sh_script_combat_last_hit(sh_script_handle victim, char *decl, size_t cap, sh_script_handle *attacker)
 {
-    int i, found = 0;
+    const hit_val *v;
+    int found = 0;
     if (decl && cap) decl[0] = 0;
     if (attacker) *attacker = 0;
     if (!victim) return 0;
     AcquireSRWLockShared(&g_rec_lock);
-    for (i = 0; i < HITS; i++) if (g_hits[i].victim == victim) {
-        if (decl && cap) strncpy_s(decl, cap, g_hits[i].decl, _TRUNCATE);
-        if (attacker) *attacker = g_hits[i].attacker;
+    v = (const hit_val *)rec_get(&g_hits, victim);
+    if (v) {
+        if (decl && cap) strncpy_s(decl, cap, v->decl, _TRUNCATE);
+        if (attacker) *attacker = v->attacker;
         found = 1;
-        break;
     }
     ReleaseSRWLockShared(&g_rec_lock);
     return found;
@@ -147,11 +265,10 @@ int sh_script_combat_last_hit(sh_script_handle victim, char *decl, size_t cap, s
 
 int sh_script_combat_first_death(sh_script_handle victim)
 {
-    int i, first = 1;
+    int first = 0;
     if (!victim) return 0;
     AcquireSRWLockExclusive(&g_rec_lock);
-    for (i = 0; i < DEATHS; i++) if (g_dead[i] == victim) { first = 0; break; }
-    if (first) g_dead[g_dead_next++ % DEATHS] = victim;
+    if (!rec_get(&g_dead, victim)) { (void)rec_put(&g_dead, victim); first = 1; }
     ReleaseSRWLockExclusive(&g_rec_lock);
     return first;
 }
@@ -318,8 +435,8 @@ static int l_hitscan(lua_State *L)
     sh_script_api_check_vec(L, 2, "hitscan", "the direction", dir);
     if (!normalize(dir)) sh_script_refuse(L, "\"hitscan\" needs a direction that is not zero");
     decl = check_decl(L, 3, "hitscan", "damage", "the damage");
-    if (sh_script_api_opt_number(L, 4, "hitscan", "the range", &range) && (range < 1 || range > RANGE_MAX))
-        sh_script_refuse(L, "\"hitscan\" needs a range from 1 to %.0f, got %g", RANGE_MAX, range);
+    if (sh_script_api_opt_number(L, 4, "hitscan", "the range", &range) && !(range >= 1))
+        sh_script_refuse(L, "\"hitscan\" needs a range of at least 1, got %g", range);
     attacker = opt_attacker(L, 5, "hitscan");
     if (!have || !decl || !attacker || !e || !e->trace) return nil1(L);
     if (!lua_isnoneornil(L, 5) && e->spawn_id) ignore = e->spawn_id(attacker);
@@ -350,7 +467,7 @@ static int l_radius_damage(lua_State *L)
 
 /* ------------------------------------------------------------ effects */
 
-/* Call the API's own spawn (its caps and ownership) with name, pos, yaw.
+/* Call the API's own spawn (its ownership and the engine's room) with name, pos, yaw.
  * Leaves the entity (or nil) on the stack. */
 static void call_spawn(lua_State *L, int name_arg, const float pos[3], double yaw)
 {
@@ -405,7 +522,7 @@ static int place_effect(lua_State *L, int ent_index, const float pos[3], const f
 
 static int fx_condition(lua_State *L, int arg, const char *call)
 {
-    const char *name = sh_script_api_check_text(L, arg, call, "the effect condition (FX_... of the entity's fx decl)", 63);
+    const char *name = sh_script_api_check_text(L, arg, call, "the effect condition (FX_... of the entity's fx decl)", NAME_ANY);
     int v;
     if (!CE(fx_condition)) return -2;
     v = g_ce.fx_condition(name);
@@ -505,7 +622,7 @@ static int l_sound(lua_State *L)
     void *ent = sh_script_api_owned(L, 1, "sound", "play sounds on", NULL);
     void *decl = check_decl(L, 2, "sound", "sound", "the sound");
     if (!lua_isnoneornil(L, 3)) {
-        const char *c = sh_script_api_check_text(L, 3, "sound", "the channel", 32);
+        const char *c = sh_script_api_check_text(L, 3, "sound", "the channel", NAME_ANY);
         channel = sh_script_combat_channel(c);
         if (channel < 0)
             sh_script_refuse(L, "\"sound\" knows no channel \"%s\"; use any, voice, body, weapon or item", c);
@@ -540,7 +657,7 @@ static int l_tag(lua_State *L)
 {
     float pos[3], fwd[3];
     void *ent = sh_script_api_entity(L, 1, "tag", NULL);
-    const char *name = sh_script_api_check_text(L, 2, "tag", "the joint name", JOINT_CAP - 1);
+    const char *name = sh_script_api_check_text(L, 2, "tag", "the joint name", NAME_ANY);
     if (!ent || !joint_of(ent, name, pos, fwd)) return nil1(L);
     sh_script_api_push_vec(L, pos);
     sh_script_api_push_vec(L, fwd);
@@ -568,7 +685,7 @@ static int l_can_see_from(lua_State *L)
     sh_script_trace t;
     void *self = sh_script_api_entity(L, 1, "can_see_from", NULL);
     void *other = sh_script_api_entity(L, 2, "can_see_from", &h);
-    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the joint to look from", JOINT_CAP - 1);
+    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the joint to look from", NAME_ANY);
     if (!self || !other || !e || !e->trace || !e->spawn_id) return nil1(L);
     if (!joint_of(self, joint, from, NULL)) return nil1(L);
     origin_of(other, to);
@@ -579,13 +696,17 @@ static int l_can_see_from(lua_State *L)
 
 /* ------------------------------------------------------------ projectiles */
 
-/* The projectile at arg: one this mod's entities launched, or the mod's own. */
+/* The projectile at arg, one this mod's entities launched. NULL when it no
+ * longer exists (the call answers nil, as every call on a removed entity
+ * does); its launch record lives exactly as long as it does, so a projectile
+ * that still exists always has one. A refusal only for an entity that exists
+ * and is not such a projectile. */
 static void *own_projectile(lua_State *L, int arg, const char *call)
 {
     sh_script_handle h = 0;
     void *p = sh_script_api_entity(L, arg, call, &h);
     int mod = -1;
-    if (!h) return NULL;
+    if (!h || !p) return NULL;
     if (sh_script_combat_launched(sh_script_handle_spawn_id(h), &mod, NULL)) {
         if (mod != sh_script_hooks_mod_find(sh_script_salt(L)))
             sh_script_refuse(L, "\"%s\" can only steer projectiles this mod's entities launched; this one is not", call);
@@ -617,11 +738,13 @@ static int l_steer(lua_State *L)
 {
     float point[3];
     double speed = 0;
-    void *p = own_projectile(L, 1, "steer");
+    void *p;
     int have = sh_script_api_check_point(L, 2, "steer", "where to fly (an entity or a position)", point);
-    if (sh_script_api_opt_number(L, 3, "steer", "the speed", &speed) && (speed <= 0 || speed > SPEED_MAX))
-        sh_script_refuse(L, "\"steer\" needs a speed above 0 and at most %.0f, got %g", SPEED_MAX, speed);
-    if (!p || !have) return bool1(L, 0);
+    if (sh_script_api_opt_number(L, 3, "steer", "the speed", &speed) && !(speed > 0))
+        sh_script_refuse(L, "\"steer\" needs a speed above 0, got %g", speed);
+    p = own_projectile(L, 1, "steer");
+    if (!p) return nil1(L);
+    if (!have) return bool1(L, 0);
     return bool1(L, steer_to(p, point, speed));
 }
 
@@ -629,7 +752,8 @@ static int l_steer(lua_State *L)
 static int l_p_explode(lua_State *L)
 {
     void *p = own_projectile(L, 1, "explode");
-    if (!p || !CE(explode)) return bool1(L, 0);
+    if (!p) return nil1(L);
+    if (!CE(explode)) return bool1(L, 0);
     return bool1(L, g_ce.explode(p));
 }
 
@@ -643,11 +767,11 @@ static int l_fire(lua_State *L)
     float point[3];
     void *self, *decl, *target = NULL;
     const char *joint;
-    uint32_t before, id;
+    uint32_t id;
     int at_point;
     self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
     decl = check_decl(L, 2, "fire", "projectile", "the projectile");
-    joint = sh_script_api_check_text(L, 3, "fire", "the joint to fire from", JOINT_CAP - 1);
+    joint = sh_script_api_check_text(L, 3, "fire", "the joint to fire from", NAME_ANY);
     if (luaL_testudata(L, 4, "entity")) {
         at_point = 0;
         target = sh_script_api_entity(L, 4, "fire", NULL);
@@ -661,6 +785,7 @@ static int l_fire(lua_State *L)
     if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
         sh_script_refuse(L, "\"fire\" works on demons; this entity is not one");
     if (!self || !decl || !CE(entity_name) || (!at_point && !target)) return nil1(L);
+    sh_script_api_check_room(L, "fire");
     if (!g_ce.entity_name(at_point ? self : target, name, sizeof name) || !name[0]) return nil1(L);
     (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
     a[0] = sh_script_earg_no_anim();
@@ -668,9 +793,9 @@ static int l_fire(lua_State *L)
     memset(&a[2], 0, sizeof a[2]); a[2].type = '2'; a[2].s = joint;
     a[3] = sh_script_earg_text('s', name);
     a[4] = sh_script_earg_int(0);
-    before = launch_seq();
-    if (!sh_script_api_event(self, "ae_launchProjectileAtTarget", a, 5, NULL)) return nil1(L);
-    id = launch_after(self_h, before);
+    fire_begin(self_h);
+    if (!sh_script_api_event(self, "ae_launchProjectileAtTarget", a, 5, NULL)) { (void)fire_end(); return nil1(L); }
+    id = fire_end();
     if (id == SH_SCRIPT_SPAWN_ID_NONE || !e || !e->resolve) return nil1(L);
     {
         void *p = e->resolve(id);
@@ -718,7 +843,6 @@ void sh_script_combat_register(void)
 
 #define DECL_STATE     0x2Cu       /* bit 0 failed to load, bit 1 not loaded */
 #define FX_MAX         1024
-#define LOG_LINES_MAX  16
 
 typedef void  (*radius_fn)(void *game, const float *origin, void *inflictor, void *attacker, const void *parms,
                            float scale, unsigned char flag, void *ignore);
@@ -736,17 +860,17 @@ static find_decl_fn  g_decl_find;
 static uintptr_t     g_vt_ai;
 static const uint8_t *g_fx_table;
 static int           g_fx_count;
-static int           g_log_lines;
+static char          g_log_last[512];   /* the line written last */
 
 static void combat_log(const char *fmt, ...)
 {
     char line[400];
     va_list ap;
-    if (g_log_lines >= LOG_LINES_MAX) return;
-    g_log_lines++;
     va_start(ap, fmt);
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
     va_end(ap);
+    if (!strcmp(line, g_log_last)) return;   /* the same line again says nothing new */
+    strcpy_s(g_log_last, sizeof g_log_last, line);
     backend_log(line);
 }
 

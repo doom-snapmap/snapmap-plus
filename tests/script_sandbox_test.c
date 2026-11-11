@@ -9,16 +9,17 @@
  * the mod's queue (sh_script_queue_post). Test ids are spawn ids.
  *
  * Covers: each forbidden facility absent; bytecode refused (an entry file
- * and a required one, real lua_dump output); a runaway loop, also inside
- * pcall and inside run(), stopped by the step budget; an allocation bomb
- * stopped by the memory cap, also when pcall catches it; a backtracking
- * pattern stopped by the pattern-step bound and a long subject refused; work
- * the count hook cannot see (sort, long comparisons) bounded; the api
- * declaration; the plain stop line with file and line; two mods isolated;
- * registration, the bound-name and owner queries, and dispatch of every
- * event kind; the re-entrancy queue and its passes; queue overflow; timers
- * and coroutines; deterministic random; teardown with nothing left; and
- * the loader fed malformed text. */
+ * and a required one, real lua_dump output); a script that never returns
+ * stopped by the wall clock, also inside pcall, xpcall, run() and
+ * coroutine.resume, inside a backtracking pattern and inside long string
+ * comparisons; no limit of its own otherwise: a 20 MiB table, long work in
+ * one call, a long subject searched, 5,000 records in one frame, 100,000 log
+ * lines kept whole; the api declaration; the plain stop line with file and
+ * line; two mods isolated; registration, the bound-name and owner queries,
+ * and dispatch of every event kind; the re-entrancy queue and its passes;
+ * timers and coroutines; deterministic random; teardown with nothing left;
+ * and the loader fed malformed text. The wall-clock stop is set to 300 ms for
+ * the test (the product's is 5 s). */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -307,25 +308,27 @@ static void test_bytecode(void)
     sh_script_map_end();
 }
 
-static void test_budget(void)
+/* The one protection: a call that never returns is stopped by the wall clock. */
+static void test_never_returns(void)
 {
     DWORD t0 = GetTickCount();
     int st = run_one("api = 1\non.map_start(function()\n  while true do end\nend)\n");
     CHECK(st == SH_SCRIPT_STOPPED);
     CHECK(!strcmp(stop_of("aaaaaaaa"),
-        "Script stopped: Test Mod, scripts\\main.lua line 3: took too long (more than 2 million steps in one call), "
-        "so this mod's scripts stopped for this map. Look for a loop that does not end."));
+        "Script stopped: Test Mod, scripts\\main.lua line 3: ran for more than 300 ms in one call without "
+        "returning, so this mod's scripts stopped for this map. Look for a loop that does not end, or spread long "
+        "work over several frames with after or run."));
     CHECK(GetTickCount() - t0 < 3000);
     sh_script_map_end();
 
     /* pcall and xpcall cannot catch it */
     st = run_one("api = 1\nwhile true do pcall(function() while true do end end) end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "took too long") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "without returning") != NULL);
     sh_script_map_end();
     st = run_one("api = 1\nwhile true do xpcall(function() while true do end end, function(e) while true do end end) end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "took too long") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "without returning") != NULL);
     sh_script_map_end();
 
     /* nor a coroutine, nor coroutine.resume */
@@ -335,10 +338,10 @@ static void test_budget(void)
     st = run_one("api = 1\nlocal co = coroutine.create(function() while true do end end)\n"
                  "while true do coroutine.resume(co) end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "took too long") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "without returning") != NULL);
     sh_script_map_end();
 
-    /* a loop that waits each frame is fine; one that never yields after a wait is not */
+    /* a loop that waits each frame is fine */
     st = run_one("api = 1\nrun(function() local n = 0 while true do n = n + 1 wait() end end)\n");
     CHECK(st == SH_SCRIPT_RUNNING);
     sh_script_tick(0.1, 0.1);
@@ -346,119 +349,80 @@ static void test_budget(void)
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
     sh_script_map_end();
 
-    /* sorting is charged: one sort of 200,000 already crosses the call budget */
-    st = run_one("api = 1\nlocal t = {} for i = 1, 200000 do t[i] = -i end\ntable.sort(t)\n");
+    /* comparing long texts is one instruction each: the clock still stops it */
+    t0 = GetTickCount();
+    st = run_one("api = 1\nlocal a = string.rep('x', 2000000) .. 'a'\nlocal b = string.rep('x', 2000000) .. 'b'\n"
+                 "while true do local same = (a == b) end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "line 3: took too long") != NULL);
-    sh_script_map_end();
-
-    /* the per-frame budget across calls */
-    files_clear();
-    file_add("aaaaaaaa", "main.lua",
-             "api = 1\non.think('ai/x', function(self) local n = 0 for i = 1, 600000 do n = n + i end end)\n");
-    start1("aaaaaaaa", "Test Mod", 1);
-    {
-        tev ev;
-        int i;
-        memset(&ev, 0, sizeof ev);
-        ev.kind = TEV_SPAWN;
-        strcpy(ev.names, "mods/aaaaaaaa/ai/x");
-        for (i = 1; i <= 8; i++) { ev.entity = (uint64_t)i; CHECK(t_enqueue("aaaaaaaa", &ev)); }
-    }
-    sh_script_tick(0.016, 0.016);
-    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "steps in one frame") != NULL);
-    sh_script_map_end();
-
-    /* wall time: comparing long texts is one instruction each */
-    {
-        sh_script_limits lim;
-        lim.mem_cap = SH_SCRIPT_MEM_CAP;
-        lim.call_steps = SH_SCRIPT_CALL_STEPS;
-        lim.tick_steps = SH_SCRIPT_TICK_STEPS;
-        lim.pattern_steps = SH_SCRIPT_PATTERN_STEPS;
-        lim.wall_ms = 100;
-        sh_script_limits_set(&lim);
-        t0 = GetTickCount();
-        st = run_one("api = 1\nlocal a = string.rep('x', 2000000) .. 'a'\nlocal b = string.rep('x', 2000000) .. 'b'\n"
-                     "while true do local same = (a == b) end\n");
-        CHECK(st == SH_SCRIPT_STOPPED);
-        CHECK(strstr(stop_of("aaaaaaaa"), "more than 100 ms in one call") != NULL);
-        CHECK(GetTickCount() - t0 < 5000);
-        sh_script_limits_reset();
-        sh_script_map_end();
-    }
-}
-
-static void test_memory(void)
-{
-    DWORD t0 = GetTickCount();
-    int st = run_one("api = 1\nlocal t = {}\nfor i = 1, 1e9 do t[i] = string.rep('x', 1000) .. i end\n");
-    CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "used more than 32 MB of memory, so this mod's scripts stopped for this map. "
-                                      "Look for a table or text that keeps growing.") != NULL);
-    CHECK(strstr(stop_of("aaaaaaaa"), "scripts\\main.lua line 3") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "without returning") != NULL);
     CHECK(GetTickCount() - t0 < 5000);
     sh_script_map_end();
-    CHECK(sh_script_bytes_in_use() == 0);
 
-    /* caught by pcall: still the memory stop */
-    st = run_one("api = 1\nwhile true do pcall(function() local t = {} for i = 1, 1e9 do t[i] = {i} end end) end\n");
+    /* a pattern that backtracks without end, also when pcall catches it */
+    t0 = GetTickCount();
+    st = run_one("api = 1\nlocal s = string.rep('a', 4000)\n"
+                 "local r = string.find(s, string.rep('a*', 12) .. 'b')\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "more than 32 MB") != NULL);
-    sh_script_map_end();
-
-    /* one huge request */
-    st = run_one("api = 1\nlocal s = string.rep('x', 100 * 1024 * 1024)\n");
-    CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "more than 32 MB") != NULL);
-    sh_script_map_end();
-
-    /* doubling a text: memory or steps, never a hang */
-    st = run_one("api = 1\nlocal s = 'x'\nwhile true do s = s .. s end\n");
-    CHECK(st == SH_SCRIPT_STOPPED);
-    sh_script_map_end();
-    CHECK(sh_script_bytes_in_use() == 0);
-}
-
-static void test_pattern(void)
-{
-    DWORD t0 = GetTickCount();
-    int st = run_one("api = 1\nlocal s = string.rep('a', 4000)\n"
-                     "local r = string.find(s, string.rep('a*', 12) .. 'b')\n");
-    CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "a text pattern took too long to match (more than 1 million steps)") != NULL);
-    CHECK(strstr(stop_of("aaaaaaaa"), "scripts\\main.lua line 3") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "scripts\\main.lua line 3: ran for more than") != NULL);
     CHECK(GetTickCount() - t0 < 3000);
     sh_script_map_end();
-
-    /* caught by pcall in a loop: still stopped, quickly */
     t0 = GetTickCount();
     st = run_one("api = 1\nlocal s = string.rep('a', 4000)\n"
                  "while true do pcall(string.match, s, string.rep('a*', 12) .. 'b') end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
     CHECK(GetTickCount() - t0 < 3000);
     sh_script_map_end();
-
-    /* method form and gsub, gmatch */
     st = run_one("api = 1\nlocal s = string.rep('a', 4000)\nfor w in s:gmatch(string.rep('a*', 10) .. 'b') do end\n");
     CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"), "pattern took too long") != NULL);
+    sh_script_map_end();
+}
+
+/* No limit of its own: memory, work and text grow as far as the process allows. */
+static void test_growth(void)
+{
+    int st;
+    size_t before;
+    sh_script_limits_reset();   /* the product's wall-clock stop: this work is long but returns */
+    /* a 20 MiB script table (the old cap was 32 MiB in all) */
+    st = run_one("api = 1\nbig = {}\nfor i = 1, 400000 do big[i] = string.rep('x', 32) .. i end\n"
+                 "print('rows', #big, collectgarbage('count') > 20 * 1024)\n");
+    CHECK(st == SH_SCRIPT_RUNNING);
+    CHECK(strstr(log_of("aaaaaaaa"), "rows\t400000\ttrue") != NULL);
+    before = sh_script_bytes_in_use();
+    CHECK(before > (size_t)20 << 20);
+    sh_script_map_end();
+    CHECK(sh_script_bytes_in_use() == 0);
+
+    /* long work in one call (the old budget stopped this at 2 million steps) */
+    st = run_one("api = 1\nlocal n = 0\nfor i = 1, 20000000 do n = n + i end\nprint('sum', n)\n"
+                 "local t = {} for i = 1, 200000 do t[i] = -i end\ntable.sort(t)\nprint('sorted', t[1])\n");
+    CHECK(st == SH_SCRIPT_RUNNING);
+    CHECK(strstr(log_of("aaaaaaaa"), "sum\t200000010000000") != NULL);
+    CHECK(strstr(g_log, "sorted\t-200000") != NULL);
     sh_script_map_end();
 
-    st = run_one("api = 1\nlocal s = string.rep('a', 5000)\nlocal n = s:find('b')\n");
-    CHECK(st == SH_SCRIPT_STOPPED);
-    CHECK(strstr(stop_of("aaaaaaaa"),
-                 "scripts\\main.lua line 3: \"string.find\" can only search text of up to 4096 bytes, and this text has 5000") != NULL);
-    sh_script_map_end();
-
-    /* ordinary patterns work */
-    st = run_one("api = 1\nlocal k, v = ('speed = 42'):match('^(%w+)%s*=%s*(%d+)$')\n"
+    /* a long subject searched (the old cap was 4,096 bytes), ordinary patterns */
+    st = run_one("api = 1\nlocal s = string.rep('a', 500000) .. 'b'\nprint('found', s:find('b'))\n"
+                 "local k, v = ('speed = 42'):match('^(%w+)%s*=%s*(%d+)$')\n"
                  "assert(k == 'speed' and v == '42')\n"
                  "local n = select(2, string.gsub(string.rep('ab ', 1000), '%a+', ''))\nassert(n == 1000)\nprint('patterns ok')\n");
     CHECK(st == SH_SCRIPT_RUNNING);
-    CHECK(strstr(log_of("aaaaaaaa"), "patterns ok") != NULL);
+    CHECK(strstr(log_of("aaaaaaaa"), "found\t500001\t500001") != NULL);
+    CHECK(strstr(g_log, "patterns ok") != NULL);
     sh_script_map_end();
+
+    /* 20,000 timers at once (the old cap was 4,096) */
+    st = run_one("api = 1\nlocal fired = 0\nfor i = 1, 20000 do after(0.1, function() fired = fired + 1 end) end\n"
+                 "after(0.2, function() print('fired', fired) end)\n");
+    CHECK(st == SH_SCRIPT_RUNNING);
+    sh_script_tick(0.15, 0.15);
+    sh_script_tick(0.3, 0.15);
+    CHECK(strstr(log_of("aaaaaaaa"), "fired\t20000") != NULL);
+    sh_script_map_end();
+    {
+        sh_script_limits lim = { 300 };
+        sh_script_limits_set(&lim);
+    }
 }
 
 static void test_api_declaration(void)
@@ -769,19 +733,20 @@ static void test_reentrancy(void)
     CHECK(sh_script_bytes_in_use() == 0);
     sh_script_map_end();
 
-    /* overflow: 1024 records, then refusals and one line */
+    /* 5,000 records in one frame (the old queue held 1,024): every one delivered */
     files_clear();
-    file_add("aaaaaaaa", "main.lua", "api = 1\non.input('x', function() end)\n");
+    file_add("aaaaaaaa", "main.lua", "api = 1\nlocal n = 0\non.input('x', function() n = n + 1 end)\n"
+                                     "every(0.5, function() print('inputs', n) end)\n");
     start1("aaaaaaaa", "Test Mod", 1);
     {
         int i, ok = 0;
-        for (i = 0; i < 1100; i++) ok += t_enqueue("aaaaaaaa", &ev);
-        CHECK(ok == SH_SCRIPT_QUEUE_CAP);
+        strcpy(ev.names, "x");
+        for (i = 0; i < 5000; i++) ok += t_enqueue("aaaaaaaa", &ev);
+        CHECK(ok == 5000);
         sh_script_tick(1.0, 1.0);
-        for (i = 0; i < 1100; i++) t_enqueue("aaaaaaaa", &ev);
         log_of("aaaaaaaa");
-        CHECK(strstr(g_log, "more than 1024 arrived in one frame") != NULL);
-        CHECK(strstr(strstr(g_log, "more than 1024") + 1, "more than 1024") == NULL);   /* once a map */
+        CHECK(strstr(g_log, "inputs\t5000") != NULL);
+        CHECK(strstr(g_log, "were not given") == NULL);
     }
     sh_script_tick(2.0, 1.0);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
@@ -909,7 +874,7 @@ static void test_teardown(void)
     CHECK(strstr(log_of("aaaaaaaa"), "map end 20000") != NULL);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_ENDED);
     CHECK(sh_script_status("bbbbbbbb") == SH_SCRIPT_STOPPED);      /* its map_end ran too long */
-    CHECK(strstr(stop_of("bbbbbbbb"), "took too long") != NULL);
+    CHECK(strstr(stop_of("bbbbbbbb"), "without returning") != NULL);
     CHECK(t_owner(1, NULL, 0) == 0);
     /* calls after the map are harmless */
     sh_script_tick(5.0, 0.1);
@@ -930,14 +895,26 @@ static void test_teardown(void)
     CHECK(sh_script_bytes_in_use() == 0);
 }
 
-static void test_log_cap(void)
+/* The log keeps every line, whole: 100,000 lines and one of 100,000 characters. */
+static long g_lines_seen, g_longest;
+static void count_line(void *ctx, const char *line)
+{
+    long n = (long)strlen(line);
+    (void)ctx;
+    g_lines_seen++;
+    if (n > g_longest) g_longest = n;
+}
+
+static void test_log_whole(void)
 {
     int n;
-    run_one("api = 1\nfor i = 1, 500 do print('line ' .. i) end\nerror('done')\n");
+    run_one("api = 1\nfor i = 1, 100000 do print('line ' .. i) end\nprint(string.rep('w', 100000))\nerror('done')\n");
     n = sh_script_log_read("aaaaaaaa", NULL, NULL);
-    CHECK(n == SH_SCRIPT_LOG_LINES + 2);
-    log_of("aaaaaaaa");
-    CHECK(strstr(g_log, "line 200\nMore than 200 lines were written in this map; the rest are not kept.\nScript stopped: ") != NULL);
+    CHECK(n == 100002);
+    g_lines_seen = g_longest = 0;
+    sh_script_log_read("aaaaaaaa", count_line, NULL);
+    CHECK(g_lines_seen == 100002 && g_longest == 100000);
+    CHECK(strstr(stop_of("aaaaaaaa"), "Script stopped: ") == stop_of("aaaaaaaa"));
     sh_script_map_end();
 }
 
@@ -1043,13 +1020,16 @@ int main(void)
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "handle", t_handle);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "owns", t_owns);
     sh_script_handles_set_resolver(fake_resolve);
+    {
+        sh_script_limits lim = { 300 };   /* the wall-clock stop, short for the test */
+        sh_script_limits_set(&lim);
+    }
 
     test_reason_table();
     test_absent();
     test_bytecode();
-    test_budget();
-    test_memory();
-    test_pattern();
+    test_never_returns();
+    test_growth();
     test_api_declaration();
     test_error_lines();
     test_dispatch();
@@ -1058,7 +1038,7 @@ int main(void)
     test_timers();
     test_random();
     test_teardown();
-    test_log_cap();
+    test_log_whole();
     test_fuzz();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);

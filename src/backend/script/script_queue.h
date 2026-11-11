@@ -9,11 +9,13 @@
  * re-entrantly. A record carries values, never pointers: entities travel as
  * handles (script_handles.h) and strings are copied.
  *
- * Each queue holds at most SH_SCRIPT_QUEUE_CAP records. A record that does not
- * fit is dropped and counted; the tick reports the count once per map for that
- * mod in one plain line (sh_script_queue_take_dropped). Enqueue takes a short
- * spin lock per mod and never allocates, so it is safe on any thread. Pure C,
- * no engine calls; tests/script_hooks_test.c covers it. */
+ * A queue grows with what arrives in a frame and has no count of its own;
+ * one per scripted mod, and the queues grow with the map's mods. Only a record
+ * the process has no memory for is dropped and counted; the tick reports that
+ * once per map for the mod in one plain line (sh_script_queue_take_dropped).
+ * Enqueue takes a short spin lock per mod (allocating only when its queue
+ * grows), so it is safe on any thread. Pure C, no engine calls;
+ * tests/script_hooks_test.c covers it. */
 #ifndef SH_SCRIPT_QUEUE_H
 #define SH_SCRIPT_QUEUE_H
 #include <stdint.h>
@@ -23,8 +25,6 @@
 extern "C" {
 #endif
 
-#define SH_SCRIPT_QUEUE_CAP   1024   /* records per mod */
-#define SH_SCRIPT_MODS_MAX    32     /* mods with scripts in one map */
 #define SH_SCRIPT_EVENT_TEXT  128    /* bytes of each copied string, NUL included (a full decl name fits) */
 
 /* What happened. Spawn and removal are not queued: the handle table finds
@@ -57,9 +57,9 @@ typedef struct sh_script_event {
     char text2[SH_SCRIPT_EVENT_TEXT];
 } sh_script_event;
 
-/* Open queue `mod` (0 .. SH_SCRIPT_MODS_MAX-1) for a new map: empty, counters
- * reset, accepting records. Allocates once per slot for the session. Returns
- * 1, or 0 when out of memory (the slot then refuses records). Tick thread. */
+/* Open queue `mod` (from 0; made when new) for a new map: empty, counters
+ * reset, accepting records. Returns 1, or 0 when out of memory (the slot then
+ * refuses records). Tick thread. */
 int  sh_script_queue_open(int mod);
 
 /* Close queue `mod`: records still queued are discarded and new ones refused.
@@ -70,8 +70,8 @@ void sh_script_queue_close(int mod);
 void sh_script_queue_close_all(void);
 
 /* Put a copy of *ev in mod's queue; ev->seq is assigned here. Any thread.
- * Returns 1 queued, 0 dropped (queue full: counted), -1 refused (no such open
- * queue: a hook raced the map end, nothing to report). */
+ * Returns 1 queued, 0 dropped (no memory to grow: counted), -1 refused (no
+ * such open queue: a hook raced the map end, nothing to report). */
 int  sh_script_queue_push(int mod, const sh_script_event *ev);
 
 /* Convenience for hooks: fill and push one record. Strings may be NULL; they

@@ -11,11 +11,11 @@
 #include "../modbundle.h"
 #endif
 
-#define SRC_PATH_MAX 1024
-#define SRC_REL_MAX  128
+#define SRC_PATH_MAX 1024   /* the tests' stand-in reads a folder: Windows paths */
+#define SRC_REL_MAX  300
 
 typedef struct src_file {
-    char rel[SRC_REL_MAX];       /* "x.lua" or "lib/x.lua" */
+    char *rel;                   /* "x.lua" or "lib/x.lua", malloc'd */
     char *text;                  /* the built bytes (NUL-terminated), NULL when they could not be read */
     size_t len;
 } src_file;
@@ -27,8 +27,8 @@ typedef struct src_mod {
     int n, cap;
 } src_mod;
 
-static src_mod g_src[SH_SCRIPT_MODS_MAX];
-static int     g_nsrc;
+static src_mod *g_src;        /* grows with the map's scripted mods */
+static int     g_nsrc, g_csrc;
 
 static const src_mod *find_src(const char *salt)
 {
@@ -41,7 +41,7 @@ static const src_mod *find_src(const char *salt)
 static void mod_free(src_mod *m)
 {
     int i;
-    for (i = 0; i < m->n; i++) free(m->f[i].text);
+    for (i = 0; i < m->n; i++) { free(m->f[i].text); free(m->f[i].rel); }
     free(m->f);
     memset(m, 0, sizeof *m);
 }
@@ -56,7 +56,14 @@ void sh_script_source_clear(void)
 static src_mod *mod_add(const char *salt, const char *name)
 {
     src_mod *m;
-    if (!salt || !salt[0] || strlen(salt) >= SH_SCRIPT_SALT_CAP || g_nsrc >= SH_SCRIPT_MODS_MAX) return NULL;
+    if (!salt || !salt[0] || strlen(salt) >= SH_SCRIPT_SALT_CAP) return NULL;
+    if (g_nsrc == g_csrc) {
+        int cap = g_csrc ? g_csrc * 2 : 16;
+        src_mod *grown = (src_mod *)realloc(g_src, (size_t)cap * sizeof *grown);
+        if (!grown) return NULL;
+        g_src = grown;
+        g_csrc = cap;
+    }
     m = &g_src[g_nsrc++];
     memset(m, 0, sizeof *m);
     strncpy_s(m->salt, sizeof m->salt, salt, _TRUNCATE);
@@ -69,7 +76,6 @@ static src_mod *mod_add(const char *salt, const char *name)
 static int file_add(src_mod *m, const char *rel, char *text, size_t len)
 {
     src_file *f;
-    if (strlen(rel) >= SRC_REL_MAX) { free(text); return 0; }
     if (m->n == m->cap) {
         int cap = m->cap ? m->cap * 2 : 16;
         src_file *grown = (src_file *)realloc(m->f, (size_t)cap * sizeof *grown);
@@ -77,8 +83,10 @@ static int file_add(src_mod *m, const char *rel, char *text, size_t len)
         m->f = grown;
         m->cap = cap;
     }
-    f = &m->f[m->n++];
-    strncpy_s(f->rel, sizeof f->rel, rel, _TRUNCATE);
+    f = &m->f[m->n];
+    f->rel = _strdup(rel);
+    if (!f->rel) { free(text); return 0; }
+    m->n++;
     f->text = text;
     f->len = text ? len : 0;
     return 1;
@@ -133,13 +141,16 @@ const sh_script_source *sh_script_source_files(void)
     return &k_files;
 }
 
+/* Every mod with scripts: up to cap written, the whole count returned. */
 static int fill(sh_script_mod_desc *out, int cap)
 {
     int i, n = 0;
-    for (i = 0; i < g_nsrc && n < cap; i++) {
+    for (i = 0; i < g_nsrc; i++) {
         if (!g_src[i].n) continue;
-        out[n].salt = g_src[i].salt;
-        out[n].name = g_src[i].name;
+        if (out && n < cap) {
+            out[n].salt = g_src[i].salt;
+            out[n].name = g_src[i].name;
+        }
         n++;
     }
     return n;
@@ -158,7 +169,7 @@ static int read_whole(const char *path, char **text, size_t *len)
     if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, SRC_PATH_MAX)) return 0;
     h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > (LONGLONG)SH_SCRIPT_FILE_MAX + 1) {
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart >= 0xFFFFFFFFll) {   /* one ReadFile */
         CloseHandle(h);
         return 0;
     }
@@ -250,7 +261,7 @@ static void keep_script(void *context, const char *relpath, const char *request,
     size_t len = 0;
     char *text = NULL, actual[SH_MB_HASH_HEX + 1];
     (void)bundle_hash;
-    if (size <= (uint64_t)SH_SCRIPT_FILE_MAX + 1 && sh_modserve_open(request, &bytes, &len) == 1) {
+    if (sh_modserve_open(request, &bytes, &len) == 1) {
         sh_mb_sha256_hex(bytes, len, actual);
         if (len == size && sha256 && !_stricmp(actual, sha256) && (text = (char *)malloc(len + 1)) != NULL) {
             memcpy(text, bytes, len);
@@ -275,7 +286,7 @@ static int collect(uint64_t *seed)
     hashes = (char (*)[SH_MODSERVE_HASH_HEX + 1])calloc((size_t)n, sizeof *hashes);
     if (!hashes) return -1;
     n = sh_modserve_scope_hashes(hashes, n);
-    for (i = 0; i < n && g_nsrc < SH_SCRIPT_MODS_MAX; i++) {
+    for (i = 0; i < n; i++) {
         hash_salt hs;
         sh_modmanifest_row row;
         sh_modserve_bundle_ref ref;

@@ -408,6 +408,7 @@ int sh_script_node_lua_vars_get(lua_State *L)
     if (!v) return luaL_error(L, "not enough memory");
     if (g_ops.var_get(g_ops.context, type, index, v) && v->type == type) push_value(L, v);
     else lua_pushnil(L);
+    free(v->s);
     free(v);
     return 1;
 }
@@ -458,11 +459,9 @@ int sh_script_node_lua_vars_set(lua_State *L)
         if (!s)
             sh_script_refuse(L, "\"vars.set\": \"%s\" is a String variable, so it needs text, got %s", name,
                              lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
-        if (n > SH_SCRIPT_NODE_STRING_MAX || strlen(s) != n)
-            sh_script_refuse(L, "\"vars.set\": \"%s\" is a String variable, and the text given is longer than %d "
-                             "characters or holds a zero byte", name, SH_SCRIPT_NODE_STRING_MAX);
-        memcpy(in.s, s, n);
-        in.s[n] = 0;
+        if (strlen(s) != n)
+            sh_script_refuse(L, "\"vars.set\": \"%s\" is a String variable, and the text given holds a zero byte", name);
+        in.s = (char *)s;   /* the script's text, alive for this call */
         break;
     }
     default:
@@ -475,6 +474,7 @@ int sh_script_node_lua_vars_set(lua_State *L)
     ok = g_ops.var_set(g_ops.context, type, index, &in, stored);
     if (ok && stored->type == type) push_value(L, stored);
     else lua_pushnil(L);
+    free(stored->s);
     free(stored);
     return 1;
 }
@@ -774,8 +774,9 @@ static int read_value(int type, const uint8_t *data, int index, sh_script_node_v
             const uint8_t *str = data + (size_t)index * IDSTR_SIZE;
             uint32_t len = *(const uint32_t *)(str + IDSTR_LEN_OFF);
             const char *text = *(const char *const *)(str + IDSTR_DATA_OFF);
-            if (len > SH_SCRIPT_NODE_STRING_MAX) len = SH_SCRIPT_NODE_STRING_MAX;
             if (len && !text) return 0;
+            out->s = (char *)malloc((size_t)len + 1);   /* the whole text, whatever its length */
+            if (!out->s) return 0;
             if (len) memcpy(out->s, text, len);
             out->s[len] = 0;
             break;
