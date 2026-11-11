@@ -290,11 +290,10 @@ static int c_event(void *e, const char *name, const sh_script_earg *args, int n,
     if (ret && !strcmp(name, "getLinearVelocity")) { ret->type = 'v'; memcpy(ret->v, ((fent *)e)->vel, 12); }
     return 1;
 }
-static int c_anim_node(void *e, char *out, size_t cap)
+static char *c_anim_node(void *e)
 {
-    if (!((fent *)e)->node[0]) return 0;
-    strcpy_s(out, cap, ((fent *)e)->node);
-    return 1;
+    if (!((fent *)e)->node[0]) return NULL;
+    return _strdup(((fent *)e)->node);
 }
 /* the demon's md6Def tags: its aim tags only */
 static int c_tag(void *e, const char *name, float pos[3], float axis[9])

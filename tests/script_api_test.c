@@ -65,7 +65,7 @@ typedef struct fent {
     float    pos[3], ax[9], vel[3];
     float    cur, max;
     char     def[128];
-    char     node[96];
+    char     node[2048];
     float    view[3];        /* a player's pitch, yaw, roll */
 } fent;
 
@@ -170,12 +170,11 @@ static int f_ai_health(void *ai, float *cur, float *max)
 }
 static int f_ai_heal(void *ai, float amount) { fent *e = (fent *)ai; e->cur += amount; if (e->cur > e->max) e->cur = e->max; return 1; }
 static int f_ai_set_health(void *ai, float v) { ((fent *)ai)->cur = v; return 1; }
-static int f_anim_node(void *ai, char *out, size_t cap)
+static char *f_anim_node(void *ai)
 {
     fent *e = (fent *)ai;
-    if (e->kind != SH_SCRIPT_KIND_AI || !e->node[0]) return 0;
-    strcpy_s(out, cap, e->node);
-    return 1;
+    if (e->kind != SH_SCRIPT_KIND_AI || !e->node[0]) return NULL;
+    return _strdup(e->node);
 }
 
 static void *f_spawn(const char *def, const float o[3], float yaw, const char **why)
@@ -600,6 +599,16 @@ static void test_animation(void)
     strcpy_s(ai->node, sizeof ai->node, "combat/melee");
     frame(16);
     CHECK(has(log_now(), "frame\tcombat/melee\ttrue\ttrue\ttrue\ttrue\ttrue"));
+    {
+        /* a node name of any length the animWeb gives it is reported whole */
+        char want[1600];
+        memset(ai->node, 0, sizeof ai->node);
+        strcpy_s(ai->node, sizeof ai->node, "combat/");
+        memset(ai->node + 7, 'x', 1500);
+        frame(16);
+        sprintf_s(want, sizeof want, "frame\t%s\t", ai->node);
+        CHECK(has(log_now(), want));
+    }
 
     /* a node the web passes through between two frames of the script still counts */
     run("api = 1\n"

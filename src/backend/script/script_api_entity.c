@@ -31,12 +31,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "../../common/text.h"
 #include "script_api_common.h"
 #include "script_hooks.h"
 #include "script_api_ai.h"   /* a demon's animation goes through its park (sh_script_ai_anim) */
 
 #define PLAYER_SLOTS       64      /* players take the first entity numbers */
-#define PATH_CAP           1024    /* a node name the engine reports (its own names) */
 #define TEXT_ANY           ((size_t)-1 >> 1)
 #define PI                 3.14159265358979323846
 
@@ -338,16 +338,14 @@ static int l_view_angle_to(lua_State *L)
 static char *anim_path(void *ent, const char *node)
 {
     const sh_script_engine *e = eng();
-    char cur[PATH_CAP];
+    char *cur, *out;
     const char *slash;
-    char *out;
-    size_t n;
     if (strchr(node, '/') || sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI || !e || !e->anim_node ||
-        !e->anim_node(ent, cur, sizeof cur) || !(slash = strchr(cur, '/')))
+        !(cur = e->anim_node(ent)))
         return _strdup(node);
-    n = (size_t)(slash - cur) + 1 + strlen(node) + 1;
-    out = (char *)malloc(n);
-    if (out) _snprintf_s(out, n, _TRUNCATE, "%.*s/%s", (int)(slash - cur), cur, node);
+    slash = strchr(cur, '/');
+    out = slash ? sh_textf("%.*s/%s", (int)(slash - cur), cur, node) : _strdup(node);
+    free(cur);
     return out;
 }
 
@@ -435,11 +433,12 @@ static int l_anim_force(lua_State *L)
 static int l_anim_current(lua_State *L)
 {
     const sh_script_engine *e = eng();
-    char node[PATH_CAP];
+    char *node;
     void *ent = sh_script_api_entity(L, 1, "anim_current", NULL);
-    if (sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI || !e || !e->anim_node || !e->anim_node(ent, node, sizeof node))
+    if (sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI || !e || !e->anim_node || !(node = e->anim_node(ent)))
         return nil1(L);
     lua_pushstring(L, node);
+    free(node);
     return 1;
 }
 

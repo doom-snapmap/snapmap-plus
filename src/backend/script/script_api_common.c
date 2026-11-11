@@ -386,8 +386,8 @@ static int node_is(const char *node, const char *want)
 
 static void observe_row(anim_row *r, void *ent)
 {
-    char node[1024];   /* the node the engine reports (its own names) */
-    if (!ent || !ENG(anim_node) || !g_engine.anim_node(ent, node, sizeof node)) return;
+    char *node;   /* the node the engine reports, whole */
+    if (!ent || !ENG(anim_node) || !(node = g_engine.anim_node(ent))) return;
     if (r->via[0]) {
         if (node_is(node, r->via)) r->flags |= SH_SCRIPT_ANIM_VIA_IN;
         else if (r->flags & SH_SCRIPT_ANIM_VIA_IN) r->flags |= SH_SCRIPT_ANIM_VIA_OUT;
@@ -398,15 +398,7 @@ static void observe_row(anim_row *r, void *ent)
     } else if (r->flags & SH_SCRIPT_ANIM_DEST) {
         r->flags |= SH_SCRIPT_ANIM_FINISHED;
     }
-}
-
-int sh_script_api_anim_dest(sh_script_handle h, char *out, size_t cap)
-{
-    anim_row *r = anim_find(h);
-    if (out && cap) out[0] = 0;
-    if (!r || !r->dest[0]) return 0;
-    strncpy_s(out, cap, r->dest, _TRUNCATE);
-    return 1;
+    free(node);
 }
 
 char *sh_script_api_anim_dest_of(sh_script_handle h)
@@ -632,6 +624,21 @@ static void *vfn(void *obj, size_t slot)
 {
     void *vt = read_ptr(obj, 0);
     return vt ? read_ptr(vt, slot) : NULL;
+}
+
+/* The engine's NUL-terminated text at src, whole (malloc'd; free); NULL when
+ * unreadable or out of memory. */
+static char *read_cstr_dup(const char *src)
+{
+    size_t n = 0;
+    char *out;
+    if (!src) return NULL;
+    __try { while (src[n]) n++; } __except (av_only(GetExceptionCode())) { return NULL; }
+    out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    __try { memcpy(out, src, n); } __except (av_only(GetExceptionCode())) { free(out); return NULL; }
+    out[n] = 0;
+    return out;
 }
 
 static int read_cstr(const char *src, char *out, size_t cap)
@@ -930,34 +937,34 @@ static int e_ai_set_health(void *ai, float value)
     return ok;
 }
 
-static int e_anim_node(void *ai, char *out, size_t cap)
+static char *e_anim_node(void *ai)
 {
     void *web = read_ptr(ai, AI_ANIMWEB);
-    char sub[96], state[96];
-    int ok = 0;
-    if (!web || !out || cap < 2) return 0;
-    out[0] = 0;
+    const char *sub_at = NULL, *state_at = NULL;
+    char *sub, *state, *out = NULL;
+    if (!web) return NULL;
     __try {
         short index = *(const short *)((const uint8_t *)ai + AI_ANIM_NODE);
         const uint8_t *node, *subwebs, *states;
         short si, ti;
-        if (index < 0) return 0;
+        if (index < 0) return NULL;
         node = *(const uint8_t * const *)(*(const uint8_t * const *)((const uint8_t *)web + WEB_NODES) + (size_t)index * 8);
-        if (!node) return 0;
+        if (!node) return NULL;
         si = *(const short *)(node + 2);
         ti = *(const short *)(node + 4);
         subwebs = *(const uint8_t * const *)((const uint8_t *)web + WEB_SUBWEBS);
         states = *(const uint8_t * const *)((const uint8_t *)web + WEB_STATES);
-        sub[0] = state[0] = 0;
         if (si >= 0 && si < *(const int *)((const uint8_t *)web + WEB_SUBWEB_COUNT))
-            read_cstr(*(const char * const *)(subwebs + (size_t)si * WEB_SUBWEB_STRIDE + WEB_SUBWEB_NAME), sub, sizeof sub);
+            sub_at = *(const char * const *)(subwebs + (size_t)si * WEB_SUBWEB_STRIDE + WEB_SUBWEB_NAME);
         if (ti >= 0 && ti < *(const int *)((const uint8_t *)web + WEB_STATE_COUNT))
-            read_cstr(*(const char * const *)(states + (size_t)ti * 8), state, sizeof state);
-        ok = state[0] != 0;
-    } __except (av_only(GetExceptionCode())) { ok = 0; }
-    if (!ok) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s%s%s", sub, sub[0] ? "/" : "", state);
-    return 1;
+            state_at = *(const char * const *)(states + (size_t)ti * 8);
+    } __except (av_only(GetExceptionCode())) { return NULL; }
+    sub = read_cstr_dup(sub_at);
+    state = read_cstr_dup(state_at);
+    if (state && state[0]) out = sh_textf("%s%s%s", sub ? sub : "", sub && sub[0] ? "/" : "", state);
+    free(sub);
+    free(state);
+    return out;
 }
 
 static void *entitydef_manager(void)

@@ -96,7 +96,7 @@ typedef struct sh_script_engine {
     int      (*ai_health)(void *ai, float *cur, float *max);
     int      (*ai_heal)(void *ai, float amount);
     int      (*ai_set_health)(void *ai, float value);   /* lowers only; value >= 1 */
-    int      (*anim_node)(void *ai, char *out, size_t cap);   /* "subweb/state" now playing; 0 when none */
+    char    *(*anim_node)(void *ai);   /* "subweb/state" now playing, whole (malloc'd; free); NULL when none */
     void    *(*spawn)(const char *def, const float origin[3], float yaw, const char **why);
     int      (*trace)(const float from[3], const float to[3], uint32_t ignore_spawn_id, sh_script_trace *out);
     int      (*game_time_ms)(int *ms);
@@ -242,8 +242,6 @@ sh_script_earg sh_script_earg_no_anim(void);
 void sh_script_api_anim_request(sh_script_handle h, const char *dest, const char *via);
 /* The event bits of h's last request; *requested 0 when there was none. */
 unsigned sh_script_api_anim_flags(sh_script_handle h, void *ent, int *requested);
-/* The destination of h's last request into out; 0 when there was none. */
-int sh_script_api_anim_dest(sh_script_handle h, char *out, size_t cap);
 /* The same destination, in place (valid until the next request or frame), or NULL. */
 char *sh_script_api_anim_dest_of(sh_script_handle h);
 /* Observe one entity now (also done every frame). */
