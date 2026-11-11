@@ -893,6 +893,25 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "8B 08 89 8B DC 00 00 00 83 3D ?? ?? ?? ?? 00 75 19 48 8D 4B 70 48 8B D0 E8 16 00 00 00 "
       "48 8B CB 48 83 C4 20 5B E9",
       0x16CCC80u, 0x16CD930u },
+    { "VtViewPageTable",    /* site in the per-view parameter setter: MOV R8,[record 1 + 0x3E8];
+                             * MOV RCX,R15; MOV RDX,[vmtrPageTableMap handle]; CALL set texture. */
+      "4C 8B 05 ?? ?? ?? ?? 49 8B CF 48 8B 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B 83 E0 00 00 00 49 8B CF",
+      0x17B4578u, 0x17B5808u },
+    { "VtViewFeedback",     /* site in the same setter: MOV RBX,[vmtrFeedbackFloat handle];
+                             * LEA RCX,[record 1]; CALL the record's feedback word. */
+      "48 8B 1D ?? ?? ?? ?? 48 8D 95 E0 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B C0 48 8B D3 49 8B CF E8",
+      0x17B4643u, 0x17B58D3u },
+    { "JobsWaitAll",        /* void(jobManager): idParallelJobManagerLocal waits for every job list;
+                             * LEA RCX,[jobManager] at +0x2E. The engine calls it before releasing
+                             * records at a map unload. */
+      "40 53 48 83 EC 20 33 DB 48 89 7C 24 38 48 8B F9 39 99 20 2C 00 00 7E 35 48 89 74 24 30 8B F3 90 "
+      "48 8B 87 18 2C 00 00 48 8B 0C 06 0F B7 11 48 8D 0D ?? ?? ?? ?? E8",
+      0x31BF50u, 0x31BAE0u },
+    { "VtFrameCall",        /* site in idRenderSystemLocal's EndFrame: MOVZX R8D,BPL; CALL [RAX+0x80] (sync the
+                             * render thread); LEA RCX,[VT system]; CALL the VT frame update; INC [RBX+0x10].
+                             * modvt.c detours the update it calls. */
+      "44 0F B6 C5 FF 90 80 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? FF 43 10",
+      0x1558A79u, 0x1559E29u },
     { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",

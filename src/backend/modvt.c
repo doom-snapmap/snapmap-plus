@@ -13,17 +13,22 @@
  *                     GL 0x185A460).
  *   VtForMaterial     VirtualTextureForMaterial(sys, material), VK 0x17E8230, GL 0x17E9100
  *                     (detoured): its MOV RAX,[R13+disp32] returns record 1 for "_vmtr", so
- *                     disp32 - 8 is the record pointer table (VK sys+0x8B00, GL sys+0xA400);
- *                     its DeclFind(renderParm type, "landDimensions", 1) gives the renderParm
- *                     decl type the vmtr* handles are found in.
+ *                     disp32 - 8 is the record pointer table (VK sys+0x8B00, GL sys+0xA400).
  *   VtMaterialBind    the material binder (parms, record), VK 0x16CCCF0, GL 0x16CD9A0
  *                     (detoured): its calls give the record's feedback word (VK 0x1859780), the
  *                     vec4 setter (VK 0x15B9560) and the texture setter (VK 0x15B93C0).
  *   VtMaterialRebind  the material rebind (material), VK 0x16CCC80, GL 0x16CD930: it calls
  *                     VtForMaterial and VtMaterialBind (checked against their signatures) and
  *                     ends in the parameter-block copy (VK 0x16C9BD0) behind a VT-off flag.
- *   DeclFind          finds the renderParm decls vmtrPageTableMap and vmtrFeedbackFloat, the
- *                     handles the per-view setter fills from record 1.
+ *   VtViewPageTable   the per-view setter's vmtrPageTableMap site, VK 0x17B4578, GL 0x17B5808:
+ *   VtViewFeedback    and its vmtrFeedbackFloat site, VK 0x17B4643, GL 0x17B58D3. They give the
+ *                     globals holding those two renderParm handles (VK 0x3844FB8 / 0x38450D8), and
+ *                     are checked to read record 1 and call the binder's feedback function.
+ *   JobsWaitAll       idParallelJobManagerLocal's wait for every job list, VK 0x31BF50, GL 0x31BAE0,
+ *                     and the job manager it is given (VK 0x5842040).
+ *   VtFrameCall       the site in EndFrame, VK 0x1558A79, GL 0x1559E29, right after the render-thread
+ *                     sync: LEA RCX,[sys] (checked); CALL the VT frame update (VK 0x17E7AE0,
+ *                     GL 0x17E89B0), detoured: boards change there, before the engine's update.
  * SetSource and Release run the VT system's synchronisation and allocate from
  * the current heap, so they are called on the main thread inside process heap
  * 0 (the page tables live as long as the record).
@@ -515,7 +520,6 @@ int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, co
 {
     sh_modvt_layout l;
     int at;
-    size_t i;
     uint32_t d;
     memset(&l, 0, sizeof l);
     if (out) *out = l;
@@ -528,15 +532,6 @@ int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, co
     d = sh_modvt_find_table_disp(vf, vf_len);
     if (d < 8 || d >= 0x20000) return 0;
     l.table_off = d - 8;
-    /* MOV R8B,1; LEA RDX,["landDimensions"]; LEA RCX,[renderParm type]; CALL DeclFind. */
-    for (i = 0; i + 22 <= vf_len; ++i)
-        if (!memcmp(vf + i, "\x41\xB0\x01\x48\x8D\x15", 6) && vf[i + 10] == 0x48 && vf[i + 11] == 0x8D &&
-            vf[i + 12] == 0x0D && vf[i + 17] == 0xE8) {
-            l.parmtype_rva = mv_target(vf_rva, i + 10, 7, vf, i + 13);
-            l.declfind_rva = mv_target(vf_rva, i + 17, 5, vf, i + 18);
-            break;
-        }
-    if (!l.parmtype_rva) return 0;
     *out = l;
     return 1;
 }
@@ -582,6 +577,52 @@ int sh_modvt_decode_rebind(const uint8_t *code, size_t len, uint32_t rva, sh_mod
     return 1;
 }
 
+/* VtViewPageTable: MOV R8,[record 1 + 0x3E8]; MOV RCX,R15; MOV RDX,[handle]; CALL.
+ * VtViewFeedback: MOV RBX,[handle]; LEA RDX,[RBP+0xE0]; LEA RCX,[record 1]; CALL feedback. */
+int sh_modvt_decode_view(const uint8_t *pt, size_t pt_len, uint32_t pt_rva, const uint8_t *fb, size_t fb_len,
+                         uint32_t fb_rva, sh_modvt_view *out)
+{
+    sh_modvt_view v;
+    memset(&v, 0, sizeof v);
+    if (out) *out = v;
+    if (!pt || !fb || !out || pt_len < 22 || fb_len < 26 || memcmp(pt, "\x4C\x8B\x05", 3) ||
+        memcmp(pt + 7, "\x49\x8B\xCF\x48\x8B\x15", 6) || pt[17] != 0xE8 || memcmp(fb, "\x48\x8B\x1D", 3) ||
+        memcmp(fb + 7, "\x48\x8D\x95", 3) || memcmp(fb + 14, "\x48\x8D\x0D", 3) || fb[21] != 0xE8)
+        return 0;
+    v.pagetable_src_rva = mv_target(pt_rva, 0, 7, pt, 3);
+    v.pagetable_handle_rva = mv_target(pt_rva, 10, 7, pt, 13);
+    v.feedback_handle_rva = mv_target(fb_rva, 0, 7, fb, 3);
+    v.feedback_rec_rva = mv_target(fb_rva, 14, 7, fb, 17);
+    v.feedback_fn_rva = mv_target(fb_rva, 21, 5, fb, 22);
+    if (v.pagetable_src_rva != v.feedback_rec_rva + SH_VT_REC_PTIMAGE) return 0;
+    *out = v;
+    return 1;
+}
+
+uint32_t sh_modvt_decode_jobs(const uint8_t *code, size_t len, uint32_t rva)
+{
+    if (!code || len < 0x3A || memcmp(code + 0x2E, "\x48\x8D\x0D", 3) || code[0x35] != 0xE8) return 0;
+    return mv_target(rva, 0x2E, 7, code, 0x31);
+}
+
+/* MOVZX R8D,BPL; CALL [RAX+0x80]; LEA RCX,[sys]; CALL update. */
+int sh_modvt_decode_frame_call(const uint8_t *code, size_t len, uint32_t rva, uint32_t *sys_rva, uint32_t *update_rva)
+{
+    if (sys_rva) *sys_rva = 0;
+    if (update_rva) *update_rva = 0;
+    if (!code || !sys_rva || !update_rva || len < 0x16 || memcmp(code + 4, "\xFF\x90\x80\x00\x00\x00\x48\x8D\x0D", 9) ||
+        code[0x11] != 0xE8)
+        return 0;
+    *sys_rva = mv_target(rva, 0x0A, 7, code, 0x0D);
+    *update_rva = mv_target(rva, 0x11, 5, code, 0x12);
+    return 1;
+}
+
+int sh_modvt_frame_head_ok(const uint8_t *code, size_t len)
+{
+    return code && len >= 15 && !memcmp(code, "\x48\x89\x5C\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xEC\x50", 15);
+}
+
 #ifndef SH_MODVT_PURE
 /* ================================================================== engine */
 #include "signatures.h"
@@ -592,11 +633,17 @@ int sh_modvt_decode_rebind(const uint8_t *code, size_t len, uint32_t rva, sh_mod
 #include "modpublished.h"
 #include "process_heap_scope.h"
 
+/* idResource fields (images are resources): +0x28 the lifetime a map purge
+ * compares; 4 lives for the session (modserve_engine.c keeps its own the same way). */
+#define MV_RES_LIFETIME  0x28
+#define MV_RES_SESSION   4u
+
 typedef char (*mv_setsource_fn)(void *rec, const char *name, const char *path, int flavor, int type, char direct,
                                 void *reader);
 typedef void (*mv_record_fn)(void *rec);
 typedef void (*mv_sys_fn)(void *sys);
-typedef void *(*mv_declfind_fn)(void *type, const char *name, char make);
+typedef void (*mv_waitall_fn)(void *jobs);
+typedef void (*mv_frame_fn)(void *sys);
 typedef void *(*mv_vf_fn)(void *sys, void *material);
 typedef void (*mv_bind_fn)(void *parms, void *rec);
 typedef void (*mv_copy_fn)(void *material);
@@ -604,13 +651,17 @@ typedef void (*mv_copy_fn)(void *material);
 static mv_setsource_fn g_setsource;
 static mv_record_fn g_release;
 static mv_sys_fn g_sync;
-static mv_declfind_fn g_declfind;
-static void *g_parmtype;
+static mv_waitall_fn g_waitall;
+static void *g_jobs;
+static void *const *g_pagetable_handle;   /* the per-view setter's handle globals */
+static void *const *g_feedback_handle;
+static const uint8_t *g_view_record;      /* the record the per-view setter reads: record 1 */
 static mv_bind_fn g_binder;          /* the binder's entry (its detour runs first) */
 static mv_copy_fn g_copy;
 static const int32_t *g_vt_off;
 static mv_vf_fn g_vf_tramp;
 static mv_bind_fn g_bind_tramp;
+static mv_frame_fn g_frame_tramp;
 static sh_modvt_bind_ops g_bind_ops;
 static volatile LONG g_handles;      /* 0 not tried, 1 found, -1 missing */
 static uint8_t *g_sys;
@@ -680,6 +731,15 @@ int sh_modvt_engine_ready(void)
 static DWORD g_fault_code;
 static int mv_filter(DWORD code) { g_fault_code = code; return EXCEPTION_EXECUTE_HANDLER; }
 
+/* No job may read the record table while a record changes: wait for every
+ * job list, as the engine does before it releases records at a map unload.
+ * Main thread only; the main thread kicks no job until it returns. */
+static int mv_quiesce(void)
+{
+    __try { g_waitall(g_jobs); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
 int sh_modvt_engine_set_source(int k, const char *name, const char *path, int flavor, int *result, double *ms,
                                unsigned *fault)
 {
@@ -692,6 +752,7 @@ int sh_modvt_engine_set_source(int k, const char *name, const char *path, int fl
     if (ms) *ms = 0;
     if (fault) *fault = 0;
     if (!g_bound || !r || k < 1 || k > SH_MODVT_LAST_USED || sh_modvt_engine_on_main() != 1) return 0;
+    if (!mv_quiesce()) return 0;
     if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&a);
@@ -717,6 +778,7 @@ int sh_modvt_engine_release(int k, unsigned *fault)
     int ok = 0;
     if (fault) *fault = 0;
     if (!g_bound || !r || k < 1 || k > SH_MODVT_LAST_USED || sh_modvt_engine_on_main() != 1) return 0;
+    if (!mv_quiesce()) return 0;
     if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
     g_fault_code = 0;
     __try {
@@ -729,25 +791,21 @@ int sh_modvt_engine_release(int k, unsigned *fault)
     return 1;
 }
 
-/* The renderParm handles the lit programs read, found once by name. */
+/* The renderParm handles the lit programs read: the ones the per-view
+ * setter fills from record 1, read from its own globals once the renderer
+ * has set them; the record it reads must be the table's record 1. */
 static int mv_handles(void)
 {
     LONG state = InterlockedCompareExchange(&g_handles, 0, 0);
-    sh_process_heap_scope heap = { 0 };
     void *fb = NULL, *pt = NULL;
     if (state) return state > 0;
-    if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
-    __try {
-        __try {
-            fb = g_declfind(g_parmtype, "vmtrFeedbackFloat", 1);
-            pt = g_declfind(g_parmtype, "vmtrPageTableMap", 1);
-        } __except (EXCEPTION_EXECUTE_HANDLER) { fb = pt = NULL; }
-    } __finally {
-        if (!sh_process_heap_leave(&heap)) mv_log("DeclFind: the process heap scope did not balance");
-    }
-    if (!fb || !pt) {
+    mv_rd_ptr(g_feedback_handle, &fb);
+    mv_rd_ptr(g_pagetable_handle, &pt);
+    if (!fb || !pt) return 0;   /* not set yet: asked again at the next sync */
+    if (sh_modvt_engine_record(1) != g_view_record) {
         InterlockedExchange(&g_handles, -1);
-        mv_log("boards unavailable: the renderParm %s was not found", !fb ? "vmtrFeedbackFloat" : "vmtrPageTableMap");
+        mv_log("boards unavailable: the per-view setter reads record %p, the table's record 1 is %p", (void *)g_view_record,
+               (void *)sh_modvt_engine_record(1));
         return 0;
     }
     g_bind_ops.feedback_handle = fb;
@@ -815,10 +873,22 @@ static int op_set_source(void *c, int k, const char *name, const char *path)
     if (r == 0) { mv_log("SetSource(record %d, '%s') not called (heap scope or main thread)", k, name); return 0; }
     if (result) {
         short levels = 0;
-        __try { levels = *(const short *)(sh_modvt_engine_record(k) + SH_VT_REC_LEVELS); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { levels = 0; }
-        mv_log("SetSource(record %d, '%s', '%s', flavor %d, type 2) -> 1 in %.1f ms; %d levels", k, name, path,
-               SH_MODVT_FLAVOR, ms, (int)levels);
+        unsigned was = 0;
+        uint8_t *image = NULL;
+        /* The page-table image is a resource of the level it was made in: the
+         * next map load purges it while the record, and every material bound
+         * to the board, still points at it. A board lives for the session. */
+        __try {
+            levels = *(const short *)(sh_modvt_engine_record(k) + SH_VT_REC_LEVELS);
+            image = *(uint8_t *const *)(sh_modvt_engine_record(k) + SH_VT_REC_PTIMAGE);
+            if (image) {
+                was = *(const unsigned *)(image + MV_RES_LIFETIME);
+                *(unsigned *)(image + MV_RES_LIFETIME) = MV_RES_SESSION;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { levels = 0; image = NULL; }
+        if (!image) { mv_log("SetSource(record %d, '%s') left no page-table image", k, name); return 0; }
+        mv_log("SetSource(record %d, '%s', '%s', flavor %d, type 2) -> 1 in %.1f ms; %d levels; page-table image "
+               "lifetime %u -> %u (the session)", k, name, path, SH_MODVT_FLAVOR, ms, (int)levels, was, MV_RES_SESSION);
     }
     return result ? 1 : 0;
 }
@@ -835,6 +905,7 @@ static int op_adopt_cache(void *c, int k)
     if (!one || !r || k < 2 || !mv_rd_ptr(one + SH_VT_REC_CACHE, &cache) || !cache || !mv_rd_i32(cache, &flavor) ||
         flavor != 0)
         return 0;
+    if (!mv_quiesce()) return 0;
     __try { g_sync(g_sys); *(void **)(r + SH_VT_REC_CACHE) = cache; ok = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     return ok;
@@ -863,6 +934,7 @@ static int op_rebind(void *c, void *material, int k, const char *name)
     if (!m || !r || sh_modvt_engine_on_main() != 1) return 0;
     mv_rd_cstr(m + SH_VT_MAT_LANDPAGE, landpage, sizeof landpage);
     if (strcmp(landpage, name) || !mv_rd_i32(r + SH_VT_REC_TYPE, &type)) return 0;
+    if (!mv_quiesce()) return 0;
     if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
     __try {
         __try {
@@ -901,7 +973,12 @@ static void mv_sync_now(const char *phase, int release_now)
     }
     n = sh_modvt_collect(&fams);
     if (!n && !sh_modvt_owned_count()) { free(fams); InterlockedExchange(&g_pending, 0); return; }
-    if (!mv_handles()) { free(fams); InterlockedExchange(&g_pending, 0); return; }
+    if (!mv_handles()) {
+        /* Not set yet (the renderer is still starting), or unavailable for the session. */
+        InterlockedExchange(&g_pending, InterlockedCompareExchange(&g_handles, 0, 0) == 0);
+        free(fams);
+        return;
+    }
     if (sh_modvt_sync(fams, n, &g_ops, phase, release_now, &res) < 0) InterlockedExchange(&g_pending, 1);
     else InterlockedExchange(&g_pending, res.pending ? 1 : 0);
     free(fams);
@@ -919,10 +996,13 @@ void sh_modvt_before_pass(const char *phase)
     mv_sync_now(phase, 0);
 }
 
-void sh_modvt_frame(void)
+/* The VT frame update, in EndFrame right after the render-thread sync: the
+ * point the engine changes VT state itself. A queued sync runs first. */
+static void mv_frame_detour(void *sys)
 {
-    if (!g_bound || !InterlockedCompareExchange(&g_pending, 0, 0) || sh_modvt_engine_on_main() != 1) return;
-    mv_sync_now("frame", 1);
+    if (g_bound && InterlockedCompareExchange(&g_pending, 0, 0) && sh_modvt_engine_on_main() == 1)
+        mv_sync_now("frame", 1);
+    g_frame_tramp(sys);
 }
 
 void sh_modvt_print_status(void)
@@ -964,18 +1044,22 @@ static const sig_result *mv_clean(const sig_result *r, size_t n, const char *nam
 
 int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
-    static const char *const names[] = { "VtSetSource", "VtForMaterial", "VtMaterialBind", "VtMaterialRebind", "DeclFind" };
-    const sig_result *s[5];
+    static const char *const names[] = { "VtSetSource", "VtForMaterial", "VtMaterialBind", "VtMaterialRebind",
+                                         "VtViewPageTable", "VtViewFeedback", "JobsWaitAll", "VtFrameCall" };
+    const sig_result *s[8];
     const sh_build_identity *id = sh_host_identity();
-    uint8_t sc[0xC0], vc[0x400], bc[0xC0], rc[0x70], relc[0x50];
+    uint8_t sc[0xC0], vc[0xC0], bc[0xC0], rc[0x70], relc[0x50], pc[0x20], fc[0x20], jc[0x40], tc[0x20], uc[0x10];
+    uint32_t frame_sys = 0, frame_update = 0;
     sh_modvt_layout l;
     sh_modvt_binder b;
     sh_modvt_rebind rb;
+    sh_modvt_view v;
+    uint32_t jobs;
     size_t i;
     g_echo = mv_echo;
     g_vulkan = id ? id->vulkan : -1;
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
-    for (i = 0; i < 5; ++i)
+    for (i = 0; i < 8; ++i)
         if ((s[i] = mv_clean(results, count, names[i])) == NULL) {
             mv_log("boards unavailable: %s is not a clean signature match", names[i]);
             return 0;
@@ -989,9 +1073,16 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
         !sh_modvt_decode_layout(sc, sizeof sc, s[0]->rva, vc, sizeof vc, s[1]->rva, &l) ||
         !mv_rd_code(module_base + l.release_rva, relc, sizeof relc) || !sh_modvt_release_head_ok(relc, sizeof relc) ||
         !sh_modvt_decode_binder(bc, sizeof bc, s[2]->rva, &b) || !sh_modvt_decode_rebind(rc, sizeof rc, s[3]->rva, &rb) ||
-        rb.sys_rva != l.sys_rva || rb.vf_rva != s[1]->rva || rb.binder_rva != s[2]->rva || l.declfind_rva != s[4]->rva) {
-        mv_log("boards unavailable: the VT system, its record table, Release, the binder's setters or the rebind could "
-               "not be decoded from the signed code");
+        !mv_rd_code((const uint8_t *)s[4]->addr, pc, sizeof pc) || !mv_rd_code((const uint8_t *)s[5]->addr, fc, sizeof fc) ||
+        !mv_rd_code((const uint8_t *)s[6]->addr, jc, sizeof jc) || !mv_rd_code((const uint8_t *)s[7]->addr, tc, sizeof tc) ||
+        !sh_modvt_decode_frame_call(tc, sizeof tc, s[7]->rva, &frame_sys, &frame_update) ||
+        !mv_rd_code(module_base + frame_update, uc, sizeof uc) || !sh_modvt_frame_head_ok(uc, sizeof uc) ||
+        frame_sys != l.sys_rva ||
+        !sh_modvt_decode_view(pc, sizeof pc, s[4]->rva, fc, sizeof fc, s[5]->rva, &v) ||
+        !(jobs = sh_modvt_decode_jobs(jc, sizeof jc, s[6]->rva)) || rb.sys_rva != l.sys_rva || rb.vf_rva != s[1]->rva ||
+        rb.binder_rva != s[2]->rva || v.feedback_fn_rva != b.feedback_rva) {
+        mv_log("boards unavailable: the VT system, its record table, Release, the binder's setters, the rebind, the "
+               "per-view handles, the job manager or the VT frame update could not be decoded from the signed code");
         return 0;
     }
     g_sys = (uint8_t *)module_base + l.sys_rva;
@@ -999,8 +1090,11 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
     g_sync = (mv_sys_fn)(module_base + l.sync_rva);
     g_release = (mv_record_fn)(module_base + l.release_rva);
     g_setsource = (mv_setsource_fn)s[0]->addr;
-    g_declfind = (mv_declfind_fn)s[4]->addr;
-    g_parmtype = (void *)(module_base + l.parmtype_rva);
+    g_waitall = (mv_waitall_fn)s[6]->addr;
+    g_jobs = (void *)(module_base + jobs);
+    g_pagetable_handle = (void *const *)(module_base + v.pagetable_handle_rva);
+    g_feedback_handle = (void *const *)(module_base + v.feedback_handle_rva);
+    g_view_record = module_base + v.feedback_rec_rva;
     g_binder = (mv_bind_fn)s[2]->addr;
     g_copy = (mv_copy_fn)(module_base + rb.copy_rva);
     g_vt_off = (const int32_t *)(module_base + rb.vt_off_rva);
@@ -1012,10 +1106,13 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
      * which the trampoline rewrites. */
     g_vf_tramp = (mv_vf_fn)hook_prepare_rip_load((void *)s[1]->addr, (void *)mv_vf_detour, 18, 11);
     g_bind_tramp = (mv_bind_fn)hook_prepare_rip_load((void *)s[2]->addr, (void *)mv_bind_detour, 17, 10);
-    if (!g_vf_tramp || !g_bind_tramp || hook_commit((void *)g_vf_tramp) != B2_PATCH_OK ||
-        hook_commit((void *)g_bind_tramp) != B2_PATCH_OK) {
-        mv_log("boards unavailable: the material lookup and binder detours could not be installed (%s)",
+    /* The frame update's 15-byte prologue is whole and position independent. */
+    g_frame_tramp = (mv_frame_fn)hook_prepare((void *)(module_base + frame_update), (void *)mv_frame_detour, 15);
+    if (!g_vf_tramp || !g_bind_tramp || !g_frame_tramp || hook_commit((void *)g_vf_tramp) != B2_PATCH_OK ||
+        hook_commit((void *)g_bind_tramp) != B2_PATCH_OK || hook_commit((void *)g_frame_tramp) != B2_PATCH_OK) {
+        mv_log("boards unavailable: the material lookup, binder and frame update detours could not be installed (%s)",
                hook_last_failure());
+        if (g_frame_tramp && hook_unpatch((void *)g_frame_tramp)) g_frame_tramp = NULL;
         if (g_bind_tramp && hook_unpatch((void *)g_bind_tramp)) g_bind_tramp = NULL;
         if (g_vf_tramp && hook_unpatch((void *)g_vf_tramp)) g_vf_tramp = NULL;
         return 0;

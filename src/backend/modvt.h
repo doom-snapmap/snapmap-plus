@@ -25,7 +25,8 @@
  *      own writes, also sets `vmtrPageTableMap` (the board's page-table image)
  *      and `vmtrFeedbackFloat` (its feedback word, whose source field is the
  *      record index) in the material's parameter block, for a material bound
- *      to a board only. VirtualTextureForMaterial (VtForMaterial) returns the
+ *      to a board only, under the very handles the per-view setter fills
+ *      from record 1 (VtViewPageTable, VtViewFeedback). VirtualTextureForMaterial (VtForMaterial) returns the
  *      board's record for a material whose landpagefile names it: the engine's
  *      own lookup also compares the record's cache flavor with the
  *      material's, which no longer agree after step 2.
@@ -36,16 +37,22 @@
  * map serves (sh_modserve_each_served_here: the map's own copy of a salt, or
  * the root folder's; in the editor every mod whose rows the Toybox shows).
  *
- * When (DOOM's game thread only):
- *   - Registration, at the start of every decl registration pass (the editor
- *     palette build, a map's activation), before the pass parses any material:
- *     the material parser binds a material to the record whose name equals its
- *     landpagefile, so the record must exist first. A board registered again
- *     after a release has its earlier materials bound again at once.
- *   - Release, queued to the next frame boundary (sh_modvt_frame, after a
- *     native frame), never inside a pass or a load: the VT system's jobs are
- *     synchronised first, as SetSource does at its own head, and only then is
- *     the record released (its pages leave the shared cache).
+ * When (DOOM's game thread only): the render thread and the renderer's view
+ * jobs read the record table every frame (the per-view setter, and the
+ * per-cache pass at VK 0x17E7830 that reads each named record's cache), and
+ * SetSource fills a record's name long before its cache. The engine changes
+ * VT state at one point of its frame: EndFrame first syncs the render thread
+ * (renderSystem vtable +0x80), then runs the VT system's frame update
+ * (VtFrameCall). Boards are changed there: a detour on that frame update runs
+ * the queued sync (registrations, releases, rebinds) before the engine's own
+ * update, after the job manager has also finished every job list
+ * (JobsWaitAll), as the engine does before it releases records at a map unload.
+ *   - Every index change, boot and Refresh queues a sync for that point.
+ *   - At the start of every decl registration pass (the editor palette build, a
+ *     map's activation) a board still missing is registered at once, since the
+ *     material parser binds a material to the record whose name equals its
+ *     landpagefile; releases always wait for the frame point. A board
+ *     registered again after a release has its earlier materials bound again.
  *
  * How many: the record table has 32 slots and the feedback word a 5-bit
  * source, so the engine has records 1..31. Record 1 is the game's own board,
@@ -198,8 +205,6 @@ typedef struct sh_modvt_layout {
     uint32_t sync_rva;         /* the VT system's job synchronisation, called there first */
     uint32_t release_rva;      /* Release(record), called there next */
     uint32_t table_off;        /* record pointer table, from the VT system */
-    uint32_t declfind_rva;     /* DeclFind(type, name, 1), called by VirtualTextureForMaterial */
-    uint32_t parmtype_rva;     /* the renderParm decl type it is given */
 } sh_modvt_layout;
 
 /* "48 8D 0D d32 E8 r32 48 8B CE E8 r32" in code[0..len): offset of the LEA, else -1. */
@@ -213,9 +218,9 @@ uint32_t sh_modvt_find_table_disp(const uint8_t *code, size_t len);
 int sh_modvt_release_head_ok(const uint8_t *code, size_t len);
 
 /* Decode the layout from SetSource's first bytes (at ss_rva) and
- * VirtualTextureForMaterial's (at vf_rva; at least 0x400 bytes). Returns 1
- * when every field was found (the caller still checks Release with
- * sh_modvt_release_head_ok), else 0. */
+ * VirtualTextureForMaterial's (at vf_rva). Returns 1 when every field was
+ * found (the caller still checks Release with sh_modvt_release_head_ok),
+ * else 0. */
 int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, const uint8_t *vf, size_t vf_len,
                            uint32_t vf_rva, sh_modvt_layout *out);
 
@@ -240,12 +245,40 @@ typedef struct sh_modvt_rebind {
 } sh_modvt_rebind;
 int sh_modvt_decode_rebind(const uint8_t *code, size_t len, uint32_t rva, sh_modvt_rebind *out);
 
+/* The per-view setter's two sites (VtViewPageTable, VtViewFeedback): the
+ * globals holding the renderParm handles it sets from record 1, record 1's
+ * page-table slot and record 1 itself, and the feedback function it calls. */
+typedef struct sh_modvt_view {
+    uint32_t pagetable_handle_rva;
+    uint32_t pagetable_src_rva;     /* record 1 + 0x3E8 */
+    uint32_t feedback_handle_rva;
+    uint32_t feedback_rec_rva;      /* record 1 */
+    uint32_t feedback_fn_rva;
+} sh_modvt_view;
+int sh_modvt_decode_view(const uint8_t *pt, size_t pt_len, uint32_t pt_rva, const uint8_t *fb, size_t fb_len,
+                         uint32_t fb_rva, sh_modvt_view *out);
+
+/* JobsWaitAll (idParallelJobManagerLocal's wait for every job list, at least
+ * 0x40 bytes at rva): the job manager it waits on (its LEA RCX at +0x2E), or 0. */
+uint32_t sh_modvt_decode_jobs(const uint8_t *code, size_t len, uint32_t rva);
+
+/* VtFrameCall (EndFrame's CALL [RAX+0x80]; LEA RCX,[sys]; CALL update, at
+ * least 0x16 bytes at rva): the VT system it passes and the frame update it
+ * calls. Returns 1 when both were found. */
+int sh_modvt_decode_frame_call(const uint8_t *code, size_t len, uint32_t rva, uint32_t *sys_rva, uint32_t *update_rva);
+
+/* The frame update's prologue: MOV [RSP+8],RBX; MOV [RSP+0x10],RSI; PUSH RDI;
+ * SUB RSP,0x50, the 15 whole position-independent bytes the detour takes. */
+int sh_modvt_frame_head_ok(const uint8_t *code, size_t len);
+
 /* ------------------------------------------------------------------ engine */
 #ifndef SH_MODVT_PURE
 #include "signatures.h"
 
-/* Bind VtSetSource, VtForMaterial, VtMaterialBind and VtMaterialRebind, what
- * is decoded from them, the process-heap scope and the main-thread identity;
+/* Bind VtSetSource, VtForMaterial, VtMaterialBind, VtMaterialRebind,
+ * VtViewPageTable, VtViewFeedback, JobsWaitAll and VtFrameCall, what is
+ * decoded from them,
+ * the process-heap scope and the main-thread identity;
  * install the two detours; listen to the serving index. Logs one VT: line.
  * Returns 1 when boards can be registered; 0 leaves every engine site as
  * shipped. */
@@ -254,10 +287,6 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
 /* Called by modserve_engine.c before every decl registration pass (editor
  * palette build, map activation), on the main thread: registers boards. */
 void sh_modvt_before_pass(const char *phase);
-
-/* Called after every native frame on the main thread: runs a queued sync with
- * its releases. Idle cost: one read. */
-void sh_modvt_frame(void);
 
 /* One status line through sh_printf (sh_mods status, sh_vt status). */
 void sh_modvt_print_status(void);
