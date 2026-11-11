@@ -3,12 +3,14 @@
  */
 
 #include <windows.h>
-#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "preview.h"
 #include "backend_log.h"
+#include "snapmap_plus_iface.h"
+#include "../common/text.h"
 
 /* One published buffer, consumed through iface ext 13. A shared lock
  * serializes publication, probing, consumption and invalidation; release the
@@ -19,37 +21,36 @@ static volatile LONG  g_preview_ready = 0;
 static SRWLOCK        g_preview_lock  = SRWLOCK_INIT;
 
 /* Stage requests under the same lock as published images. */
-static char           g_requested[512] = { 0 };
+static char          *g_requested      = NULL;   /* malloc'd, or NULL for none */
 static int            g_requested_kind = SH_PREVIEW_KIND_AUTO;
 static volatile LONG  g_request_gen    = 0;
-/* Why the latest request produced no picture; empty while it is pending or served. */
-static char           g_failed[SH_PREVIEW_REASON_CAP] = { 0 };
+/* Why the latest request produced no picture (malloc'd); NULL while it is pending or served. */
+static char          *g_failed         = NULL;
 
-int sh_preview_get(char *out, size_t cap)
+/* Drop the request and its reason (lock held); the caller frees what it returns. */
+static void preview_forget_locked(char **request, char **failed)
 {
-    if (!out || cap == 0) return 0;
-    out[0] = '\0';
+    *request = g_requested;
+    *failed = g_failed;
+    g_requested = NULL;
+    g_failed = NULL;
+    g_requested_kind = SH_PREVIEW_KIND_AUTO;
+}
 
-    char *consumed = NULL;
+char *sh_preview_take(void)
+{
+    char *taken = NULL, *request = NULL, *failed = NULL;
     AcquireSRWLockExclusive(&g_preview_lock);
-    int rc = 0;
     if (g_preview_ready && g_preview_b64) {
-        size_t len = strlen(g_preview_b64);
-        if (len + 1 > cap) {
-            rc = -(int)(len + 1);                /* negative = required size, so the UI can re-ask */
-        } else {
-            memcpy(out, g_preview_b64, len + 1);
-            rc = (int)len;
-            consumed = g_preview_b64;
-            g_preview_b64 = NULL;
-            g_requested[0] = '\0';
-            g_requested_kind = SH_PREVIEW_KIND_AUTO;
-            InterlockedExchange(&g_preview_ready, 0);
-        }
+        taken = g_preview_b64;   /* process heap: the caller releases it as owned text */
+        g_preview_b64 = NULL;
+        preview_forget_locked(&request, &failed);
+        InterlockedExchange(&g_preview_ready, 0);
     }
     ReleaseSRWLockExclusive(&g_preview_lock);
-    if (consumed) HeapFree(GetProcessHeap(), 0, consumed);
-    return rc;
+    free(request);
+    free(failed);
+    return taken;
 }
 
 void sh_preview_request(const char *name)
@@ -59,12 +60,13 @@ void sh_preview_request(const char *name)
 
 void sh_preview_request_kind(const char *name, int kind)
 {
-    if (!name || !*name) return;
+    char *copy, *old_request, *old_failed;
+    if (!name || !*name || (copy = sh_text(name)) == NULL) return;
 
     AcquireSRWLockExclusive(&g_preview_lock);
-    strncpy_s(g_requested, sizeof g_requested, name, _TRUNCATE);
+    preview_forget_locked(&old_request, &old_failed);
+    g_requested = copy;
     g_requested_kind = kind;
-    g_failed[0] = '\0';
     /* Invalidate the current image BEFORE the generation bump, or a poll can see the new request with
      * the previous request's picture still marked ready and stop polling one image too early. */
     char *superseded = g_preview_b64;
@@ -73,76 +75,76 @@ void sh_preview_request_kind(const char *name, int kind)
     LONG gen = InterlockedIncrement(&g_request_gen);
     ReleaseSRWLockExclusive(&g_preview_lock);
     if (superseded) HeapFree(GetProcessHeap(), 0, superseded);
+    free(old_request);
+    free(old_failed);
 
-    char line[600];
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "preview: request #%ld '%s' staged (%s)", gen, name,
-        kind == SH_PREVIEW_KIND_AUTO ? "automatic route" : "typed route");
-    backend_log(line);
+    char *line = sh_textf("preview: request #%ld '%s' staged (%s)", gen, name,
+                          kind == SH_PREVIEW_KIND_AUTO ? "automatic route" : "typed route");
+    backend_log(line ? line : "preview: request staged");
+    free(line);
 }
 
 void sh_preview_cancel(void)
 {
-    char *discarded = NULL;
+    char *discarded = NULL, *request, *failed;
     AcquireSRWLockExclusive(&g_preview_lock);
-    g_requested[0] = '\0';
-    g_requested_kind = SH_PREVIEW_KIND_AUTO;
-    g_failed[0] = '\0';
+    preview_forget_locked(&request, &failed);
     discarded = g_preview_b64;
     g_preview_b64 = NULL;
     InterlockedExchange(&g_preview_ready, 0);
     InterlockedIncrement(&g_request_gen);   /* any producer already decoding now publishes stale */
     ReleaseSRWLockExclusive(&g_preview_lock);
     if (discarded) HeapFree(GetProcessHeap(), 0, discarded);
+    free(request);
+    free(failed);
 }
 
-int sh_preview_take_request(char *out, size_t cap, unsigned long *generation, int *kind)
+char *sh_preview_take_request(unsigned long *generation, int *kind)
 {
-    if (!out || cap == 0 || !generation || !kind) return 0;
-    out[0] = '\0';
+    char *name = NULL;
+    if (!generation || !kind) return NULL;
     *generation = 0;
     *kind = SH_PREVIEW_KIND_AUTO;
 
     AcquireSRWLockShared(&g_preview_lock);
-    int pending = (!g_preview_ready && !g_failed[0] && g_requested[0] != '\0');
-    if (pending) {
-        strncpy_s(out, cap, g_requested, _TRUNCATE);
+    if (!g_preview_ready && !g_failed && g_requested && (name = sh_text(g_requested)) != NULL) {
         *generation = (unsigned long)g_request_gen;
         *kind = g_requested_kind;
     }
     ReleaseSRWLockShared(&g_preview_lock);
-    return pending;
+    return name;
 }
 
 int sh_preview_fail(unsigned long generation, const char *reason)
 {
     int rc = SH_PREVIEW_STALE;
+    char *kept = sh_text(reason && *reason ? reason : "This asset has no preview."), *old = NULL;
     AcquireSRWLockExclusive(&g_preview_lock);
-    if (generation && (unsigned long)g_request_gen == generation && g_requested[0] && !g_preview_ready) {
-        strncpy_s(g_failed, sizeof g_failed,
-                  reason && *reason ? reason : "This asset has no preview.", _TRUNCATE);
+    if (kept && generation && (unsigned long)g_request_gen == generation && g_requested && !g_preview_ready) {
+        old = g_failed;
+        g_failed = kept;
+        kept = NULL;
         rc = SH_PREVIEW_FAILED;
     }
     ReleaseSRWLockExclusive(&g_preview_lock);
+    free(kept);
+    free(old);
     if (rc == SH_PREVIEW_FAILED) {
-        char line[260];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "preview: request #%lu failed: %s", generation,
-                    reason && *reason ? reason : "no reason given");
-        backend_log(line);
+        char *line = sh_textf("preview: request #%lu failed: %s", generation,
+                              reason && *reason ? reason : "no reason given");
+        backend_log(line ? line : "preview: a request failed");
+        free(line);
     }
     return rc;
 }
 
-int sh_preview_failure(char *out, size_t cap)
+char *sh_preview_failure(void)
 {
-    int failed;
-    if (!out || cap == 0) return 0;
-    out[0] = '\0';
+    char *out = NULL;
     AcquireSRWLockShared(&g_preview_lock);
-    failed = g_failed[0] != '\0';
-    if (failed) strncpy_s(out, cap, g_failed, _TRUNCATE);
+    if (g_failed) out = sh_iface_text(g_failed);
     ReleaseSRWLockShared(&g_preview_lock);
-    return failed;
+    return out;
 }
 
 /* Copy `h` rows of `w` RGBA pixels behind a zero filter byte each. Returns 0 on a fault reading
@@ -279,12 +281,6 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
             return SH_PREVIEW_FAILED;
         }
         size_t outCap    = prefixLen + ((size_t)fileSize + 2) / 3 * 4 + 1;
-        /* sh_preview_get reports a required capacity as a negative int, so never publish a payload
-         * whose size cannot be represented by that ABI. */
-        if (outCap > INT_MAX) {
-            HeapFree(GetProcessHeap(), 0, png_bytes);
-            return SH_PREVIEW_FAILED;
-        }
         char  *out       = (char *)HeapAlloc(GetProcessHeap(), 0, outCap);
         if (!out) {
             HeapFree(GetProcessHeap(), 0, png_bytes);
@@ -320,12 +316,13 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
             HeapFree(GetProcessHeap(), 0, out);
             return SH_PREVIEW_STALE;
         }
-        char *old = g_preview_b64;
+        char *old = g_preview_b64, *old_failed = g_failed;
         g_preview_b64 = out;
         InterlockedExchange(&g_preview_ready, 1);
-        g_failed[0] = '\0';
+        g_failed = NULL;
         ReleaseSRWLockExclusive(&g_preview_lock);
         if (old) HeapFree(GetProcessHeap(), 0, old);   /* safe: no reader can still hold it */
+        free(old_failed);
 
         char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,

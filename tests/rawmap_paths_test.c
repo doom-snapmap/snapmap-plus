@@ -93,6 +93,26 @@ static int g_checks;
 
 static const char BODY[] = "{\"entities\":[]}";
 
+/* The interface hands text over as process-heap strings (sh_iface_text_free). HOIF copies a
+ * slot's *out into the test's buffer and releases it, as HO does for malloc'd results;
+ * HOIFS does the same for a returned string and is 1 when there was one. */
+static intptr_t hoif_take(char *buf, size_t cap, intptr_t r)
+{
+    ho_copy(buf, cap, g_ho[0], "hoif");
+    sh_iface_text_free(g_ho[0]);
+    g_ho[0] = NULL;
+    return r;
+}
+static int hoif_str(char *buf, size_t cap, char *text)
+{
+    ho_copy(buf, cap, text, "hoif");
+    if (!text && buf && cap) buf[0] = 0;
+    sh_iface_text_free(text);
+    return text != NULL;
+}
+#define HOIF(buf, call) ((int)hoif_take((buf), sizeof(buf), (g_ho[0] = NULL, (intptr_t)(call))))
+#define HOIFS(buf, call) hoif_str((buf), sizeof(buf), (call))
+
 /* The paths in force, into the test's buffers (whole, or the test ends). */
 static void eff_paths(char *load, int load_cap, char *save, int save_cap)
 {
@@ -433,11 +453,11 @@ static void refused_menu_save_changes_nothing(void)
     CHECK(temp_path("rawmap_review_requested.json", requested, sizeof requested));
     CHECK(sh_rawmap_set_save_target(original));
     sh_rawmap_get_slots(NULL, &configure, NULL);
-    CHECK(configure(NULL, NULL, requested, -1, message, sizeof message) == 0);
+    CHECK(HOIF(message, configure(NULL, NULL, requested, -1, HO_P(0))) == 0);
     HOS(actual, sh_rawmap_save_target());
     CHECK(strcmp(actual, original) == 0);
     CHECK(strstr(message, "no editor") != NULL);
-    CHECK(configure(NULL, NULL, NULL, 5, message, sizeof message) == 0);
+    CHECK(HOIF(message, configure(NULL, NULL, NULL, 5, HO_P(0))) == 0);
     clean_state();
 }
 
@@ -450,7 +470,7 @@ static void missing_overwrite_protection_refuses_opening(const char *archive)
     HOS(before, sh_rawmap_load_path());
     sh_rawmap_get_slots(NULL, &configure, NULL);
     CHECK(!sh_rawmap_load_is_safe());
-    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
+    CHECK(!HOIF(message, configure(NULL, archive, NULL, 2, HO_P(0))));
     HOS(after, sh_rawmap_load_path());
     CHECK(strcmp(before, after) == 0);
     CHECK(strstr(message, "overwriting the map a rawmap opens over") != NULL);
@@ -1230,7 +1250,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(R.toasts == 1);                       /* once */
 
     sh_rawmap_get_slots(&status_fn, NULL, NULL);
-    CHECK(status_fn && status_fn(NULL, status, (int)sizeof status) > 0);
+    CHECK(status_fn && HOIFS(status, status_fn(NULL)));
     CHECK(strstr(status, "\"lastZip\":\"") && strstr(status, "rawmap_share.zip\"") &&
           strstr(status, "\"lastZipBytes\":4321") && strstr(status, "\"lastMods\":1") &&
           strstr(status, "\"mapMods\":") && status[strlen(status) - 1] == '}');
@@ -1308,11 +1328,12 @@ static void a_long_unicode_path_saves_exports_loads_and_imports(void)
     /* "Карты-ü-地図" in UTF-8: a folder name outside every ANSI code page. */
     static const char folder[] = "\xD0\x9A\xD0\xB0\xD1\x80\xD1\x82\xD1\x8B-\xC3\xBC-\xE5\x9C\xB0\xE5\x9B\xB3";
     wchar_t temp[MAX_PATH + 1];
-    char *base, *deep = NULL, *json = NULL, *zip = NULL, *next, why[1280];
+    char *base, *deep = NULL, *json = NULL, *zip = NULL, *next, why[1280], *status;
     wchar_t *w;
     sh_rawmap_save_report last;
+    sh_rawmap_status_fn status_fn = NULL;
     size_t depth = 0;
-    int units;
+    int length, units;
     printf("\n-- a rawmap 3,000 characters deep under non-ASCII folders saves, exports, loads and imports\n");
     mods_begin();
     CHECK(GetTempPathW(MAX_PATH + 1, temp) != 0);
@@ -1349,6 +1370,17 @@ static void a_long_unicode_path_saves_exports_loads_and_imports(void)
     sh_rawmap_last_save(&last);
     CHECK(last.json && !strcmp(last.json, json) && last.zip && !strcmp(last.zip, zip) && last.zip_bytes == 77);
     sh_rawmap_save_report_free(&last);
+    sh_rawmap_get_slots(&status_fn, NULL, NULL);
+    status = status_fn ? status_fn(NULL) : NULL;
+    CHECK(status != NULL);
+    if (status) {
+        char *escaped = json_escape(zip);
+        length = (int)strlen(status);
+        CHECK(escaped && length > 6000 && strstr(status, escaped) != NULL);
+        free(escaped);
+    }
+    sh_iface_text_free(status);
+
     /* Load: a map without mods written to the same deep file opens from there. */
     CHECK(sh_rawmap_test_write(ENGINE_MAP, sizeof ENGINE_MAP - 1) == sizeof ENGINE_MAP - 1);
     CHECK(sh_rawmap_validate_source(json, NULL) == 1 && sh_rawmap_looks_like_rawmap(json) == 1);
@@ -1414,7 +1446,7 @@ static void a_load_path_never_replaces_another_parse(const char *archive)
     /* Load Rawmap with no live editor: refused now, the load path unchanged. */
     sh_rawmap_swap_set_source(NULL);
     sh_rawmap_get_slots(NULL, &configure, NULL);
-    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
+    CHECK(!HOIF(message, configure(NULL, archive, NULL, 2, HO_P(0))));
     CHECK(strstr(message, "no editor") != NULL);
     {
         char load[MAX_PATH], dflt[MAX_PATH];

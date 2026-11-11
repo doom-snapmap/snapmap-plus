@@ -53,6 +53,7 @@
 #include "../src/backend/prefab_mods.h"
 #include "../src/backend/prefab_block.h"
 #include "../src/backend/modpublished.h"
+
 #include "../src/backend/modexport.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
@@ -63,6 +64,21 @@
 #include "../src/backend/modnet.h"
 #include "../src/common/snapmap_plus_iface.h"
 #include "mod_test_util.h"
+
+/* The slot's answer (owned interface text) into the test's buffer, whole or the test ends. */
+static int pm_slot(sh_module_prefab_call *call, char *out, size_t cap)
+{
+    int r;
+    call->out = NULL;
+    r = sh_prefab_mods_slot(call);
+    if (call->out && strlen(call->out) >= cap) { fprintf(stderr, "a slot answer longer than the test's buffer\n"); abort(); }
+    out[0] = 0;
+    if (call->out) strcpy_s(out, cap, call->out);
+    sh_iface_text_free(call->out);
+    call->out = NULL;
+    return r;
+}
+
 
 static int g_failed, g_checks, g_echo;
 #define CHECK(expr) do {                                                         \
@@ -645,9 +661,7 @@ static void status(const sh_modmanifest_row *door)
     call.op = SH_MODULE_PREFAB_MODS_STATUS;
     call.text = json;
     call.text_len = json ? strlen(json) : 0;
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    CHECK(sh_prefab_mods_slot(&call) == 1 && strstr(out, "\"missing\":1"));
+    CHECK(pm_slot(&call, out, sizeof out) == 1 && strstr(out, "\"missing\":1"));
     free(json);
     sh_modmanifest_list_free(&rows);
 }
@@ -814,15 +828,13 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text_len = sizeof OBJECT_PREFAB - 1;
     call.meta_path = none;
     call.name = "Nothing";
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE && F.main_calls == 0);
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 0);
     text = slurp(path, &len);   /* Door.json carries its block */
     call.text = text;
     call.text_len = len;
     call.meta_path = meta;
     call.name = "Door";
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 1 &&
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 1 &&
           !strcmp(F.attached[0], door->build));
     {
         /* A prefab an earlier version saved: refused with its sentence. */
@@ -832,7 +844,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.text_len = sizeof OBJECT_PREFAB - 1;
         call.meta_path = old;
         call.name = "Old hall";
-        CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
+        CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
               !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier version of Snapmap+. "
                                      "Ask its author to export it again."));
     }
@@ -843,21 +855,19 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text = text;
     call.text_len = len;
     call.meta_path = meta;
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, door->build));
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, door->build));
     call.text = text + 40;
     call.text_len = len - 40;
     call.tail = 1;
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\""));
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\""));
     call.text = OBJECT_PREFAB;
     call.text_len = sizeof OBJECT_PREFAB - 1;
     call.tail = 0;
     call.meta_path = none;
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_META_NONE && out[0] == 0);
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_NONE && out[0] == 0);
     _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Old hall.meta.json", lib);
     call.meta_path = meta;
-    CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_META_EARLIER && out[0] == 0);
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_EARLIER && out[0] == 0);
     free(text);
 
     printf("-- META_WRITE and MODS_RECORD through the slot\n");
@@ -870,16 +880,14 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.text = OBJECT_PREFAB;
         call.text_len = sizeof OBJECT_PREFAB - 1;
         call.path = p2;
-        call.out = out;
-        call.out_cap = (int)sizeof out;
-        CHECK(sh_prefab_mods_slot(&call) == 1 && strstr(out, door->build));
+        CHECK(pm_slot(&call, out, sizeof out) == 1 && strstr(out, door->build));
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_META_WRITE;
         call.text = "{\"desc\":\"s\",\"tags\":[]}";
         call.text_len = strlen(call.text);
         call.path = p2;
         call.meta_path = none;
-        CHECK(sh_prefab_mods_slot(&call) == 1 && !mt_exists(none));
+        CHECK(pm_slot(&call, out, sizeof out) == 1 && !mt_exists(none));
         text = slurp(p2, &len);
         CHECK(strstr(block_of(text, len), "\"description\":\"s\"") && strstr(block_of(text, len), door->build));
         free(text);
@@ -1121,10 +1129,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         call.text = pt;
         call.text_len = tl;
         call.name = "Door (2)";
-        call.out = out;
-        call.out_cap = (int)sizeof out;
         F.prints_all[0] = 0;
-        CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE);
+        CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE);
         CHECK(strstr(F.prints_all, "Prefab Door (2): 1 mod it uses was installed in your mods folder, where your own "
                                    "maps find it.") != NULL);
         memset(&list, 0, sizeof list);
@@ -1134,7 +1140,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(sh_modserve_row_served(door, NULL) == SH_MODSERVE_ROW_SERVED);
         /* A second placement installs nothing. */
         F.prints_all[0] = 0;
-        CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE && !strstr(F.prints_all, "installed in your mods folder"));
+        CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && !strstr(F.prints_all, "installed in your mods folder"));
         free(pt);
     }
 
@@ -1208,9 +1214,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         call.op = SH_MODULE_PREFAB_IMPORT;
         call.zip_path = zipA;
         call.path = libB;
-        call.out = out;
-        call.out_cap = (int)sizeof out;
-        CHECK(sh_prefab_mods_slot(&call) == 0 && strstr(out, "{\"ok\":true,\"added\":false,\"name\":\"Door (2)\",\"message\":\""));
+        CHECK(pm_slot(&call, out, sizeof out) == 0 && strstr(out, "{\"ok\":true,\"added\":false,\"name\":\"Door (2)\",\"message\":\""));
     }
 
     printf("-- a prefab whose row names a bundle that is not installed is not exported\n");

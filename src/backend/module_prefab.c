@@ -115,7 +115,7 @@ static volatile LONG   g_phase = MP_IDLE;
 static int             g_seq;            /* last placement accepted */
 static int             g_done_seq;       /* last placement finished */
 static int             g_status = 0;     /* g_done_seq's outcome */
-static char            g_status_msg[192];
+static char           *g_status_msg;      /* malloc'd, whole */
 static char           *g_merged;         /* malloc */
 static char           *g_original;       /* HeapAlloc (process heap), the map before the merge */
 static int             g_first, g_added;
@@ -343,11 +343,14 @@ out:
 
 static void mp_finish(int status, const char *msg)
 {
+    char *kept = _strdup(msg ? msg : ""), *old;
     AcquireSRWLockExclusive(&g_lock);
     g_status = status;
-    strncpy_s(g_status_msg, sizeof g_status_msg, msg ? msg : "", _TRUNCATE);
+    old = g_status_msg;
+    g_status_msg = kept;
     g_done_seq = g_seq;
     ReleaseSRWLockExclusive(&g_lock);
+    free(old);
     mp_logf("MODPREFAB: placement %d -> %d (%s)", g_seq, status, msg ? msg : "");
 }
 
@@ -722,9 +725,10 @@ static int mp_write_file(const char *path, const char *data, size_t len)
     return path && *path && sh_prefab_mods_write_file(path, data, len);
 }
 
+/* The page's answer: the text whole, as owned interface text in call->out. */
 static void mp_out(sh_module_prefab_call *call, const char *text)
 {
-    if (call->out && call->out_cap > 0) strncpy_s(call->out, (size_t)call->out_cap, text ? text : "", _TRUNCATE);
+    sh_iface_text_set(&call->out, text ? text : "");
 }
 
 static int mp_save(sh_module_prefab_call *call)
@@ -904,6 +908,7 @@ static int mp_check(sh_module_prefab_call *call)
 
 int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
 {
+    char refusal[128];
     (void)self;
     if (!call) return 0;
     switch (call->op) {
@@ -921,16 +926,14 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         return 1;
     }
     case SH_MODULE_PREFAB_SAVE:
-        if (call->out && call->out_cap > 0 &&
-            sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return -1;
+        if (sh_feature_refusal(SH_FEATURE_PREFABS, refusal, sizeof refusal)) { mp_out(call, refusal); return -1; }
         if (InterlockedCompareExchange(&g_faulted, 0, 0) || !sh_rawmap_live_serialize_ready()) {
             mp_out(call, MP_UNAVAILABLE);
             return -1;
         }
         return mp_save(call);
     case SH_MODULE_PREFAB_PLACE:
-        if (call->out && call->out_cap > 0 &&
-            sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return 0;
+        if (sh_feature_refusal(SH_FEATURE_PREFABS, refusal, sizeof refusal)) { mp_out(call, refusal); return 0; }
         if (!mp_ready_place()) { mp_out(call, MP_UNAVAILABLE); return 0; }
         return mp_place(call);
     case SH_MODULE_PREFAB_CHECK:
@@ -949,7 +952,7 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         int r;
         AcquireSRWLockShared(&g_lock);
         if (call->seq > g_done_seq) { r = 2; mp_out(call, "pending"); }
-        else { r = g_status; mp_out(call, g_status_msg); }
+        else { r = g_status; mp_out(call, g_status_msg ? g_status_msg : ""); }
         ReleaseSRWLockShared(&g_lock);
         return r;
     }

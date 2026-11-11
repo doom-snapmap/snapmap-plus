@@ -5204,44 +5204,67 @@ int sh_modui_run(int action, const char *arg)
 
 /* ------------------------------------------------------------------ the slot */
 
+/* A size-query reader (sh_modui_fetch, sh_modui_scripts) as owned interface
+ * text in *out: asked again until the text fits, since it can grow between
+ * the two reads. Returns the reader's answer (1 copied, 0 nothing). */
+typedef int (*mu_reader)(void *ctx, char *out, int cap, int *needed);
+static int mu_owned(mu_reader read, void *ctx, char **out)
+{
+    int needed = 0, r = read(ctx, NULL, 0, &needed);
+    *out = NULL;
+    while (r == -1 && needed >= 0) {
+        char *text = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)needed + 1);
+        if (!text) return 0;
+        r = read(ctx, text, needed + 1, &needed);
+        if (r == 1) { *out = text; return 1; }
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    return r == 1 ? 1 : 0;
+}
+
+static int mu_read_fetch(void *ctx, char *out, int cap, int *needed)
+{
+    return sh_modui_fetch(out, cap, needed, (unsigned *)ctx);
+}
+
+static int mu_read_scripts(void *ctx, char *out, int cap, int *needed)
+{
+    return sh_modui_scripts((const char *)ctx, out, cap, needed);
+}
+
 int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
 {
     int n;
     (void)self;
     if (!call) return 0;
+    call->out = NULL;
     call->generation = (unsigned)g_gen;
     switch (call->op) {
     case SH_MODS_LIST:
         n = sh_modui_list();
-        call->needed = n < 0 ? 0 : n;
         call->generation = (unsigned)g_gen;
         return n >= 0;
     case SH_MODS_RUN:
         n = sh_modui_run(call->action, call->arg);
-        call->needed = n < 0 ? 0 : n;
         call->generation = (unsigned)g_gen;
         return n >= 0;
     case SH_MODS_FETCH:
-        return sh_modui_fetch(call->out, call->out_cap, &call->needed, &call->generation);
+        return mu_owned(mu_read_fetch, &call->generation, &call->out);
     case SH_MODS_SCRIPTS:
-        /* Read only and on any thread: the runtime's own state, straight into out. */
-        return sh_modui_scripts(call->arg, call->out, call->out_cap, &call->needed);
+        /* Read only and on any thread: the runtime's own state, not the shared buffer. */
+        return mu_owned(mu_read_scripts, (void *)(call->arg ? call->arg : ""), &call->out);
     case SH_MODS_STORE: {
         unsigned gen = 0;
-        call->needed = modstore_lock_busy(&gen) ? 1 : 0;
+        call->busy = modstore_lock_busy(&gen) ? 1 : 0;
         call->generation = gen;
         return 1;
     }
+    case SH_MODS_GENERATION:
+        return 1;
     case SH_MODS_ROOT: {
         const char *root = sh_ms_root();
-        size_t len;
-        call->needed = 0;
         if (!root) return 0;
-        len = strlen(root);
-        call->needed = (int)len;
-        if (!call->out || call->out_cap <= (int)len) return -1;
-        memcpy(call->out, root, len + 1);
-        return 1;
+        return (call->out = sh_iface_text(root)) != NULL;
     }
     default:
         return 0;

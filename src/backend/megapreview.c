@@ -538,7 +538,6 @@ static int megapreview_service_request(const char *want, unsigned long generatio
 static DWORD WINAPI megapreview_worker(LPVOID unused)
 {
     (void)unused;
-    char want[512];
 
     for (;;) {
         DWORD wait = WaitForSingleObject(g_requestEvent, 30000);
@@ -553,9 +552,11 @@ static DWORD WINAPI megapreview_worker(LPVOID unused)
         unsigned long generation = 0;
         int kind = SH_PREVIEW_KIND_AUTO;
         const char *why = NULL;
-        if (!sh_preview_take_request(want, sizeof want, &generation, &kind)) continue;
+        char *want = sh_preview_take_request(&generation, &kind);
+        if (!want) continue;
         if (megapreview_service_request(want, generation, kind, &why) == SH_PREVIEW_FAILED)
             sh_preview_fail(generation, why);
+        free(want);
     }
     return 0;
 }

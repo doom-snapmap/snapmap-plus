@@ -1471,13 +1471,23 @@ char *sh_config_get_text(const char *key)
     return out;
 }
 
+/* The window's read: the value as owned interface text in *out_json, and its
+ * length; -1 (and NULL) for a key it may not read or when memory runs out. */
 static int iface_config_get_json(sh_iface *self, const char *key,
-                                 char *out_json, int out_capacity,
-                                 unsigned int *out_flags)
+                                 char **out_json, unsigned int *out_flags)
 {
+    int index, length = -1;
     (void)self;
-    return get_json_for_access(key, SH_CONFIG_UI_READ, out_json,
-                               out_capacity, out_flags);
+    if (!out_json) return -1;
+    *out_json = NULL;
+    AcquireSRWLockShared(&g_config_lock);
+    if (out_flags) *out_flags = g_status_flags;
+    index = find_descriptor(key);
+    if (g_initialized && index >= 0 && (g_registry[index].access & SH_CONFIG_UI_READ) && g_values[index] &&
+        strlen(g_values[index]) <= INT_MAX && (*out_json = sh_iface_text(g_values[index])) != NULL)
+        length = (int)strlen(g_values[index]);
+    ReleaseSRWLockShared(&g_config_lock);
+    return length;
 }
 
 static int iface_config_set_json(sh_iface *self, const char *key,

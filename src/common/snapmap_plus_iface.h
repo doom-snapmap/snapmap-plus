@@ -2,9 +2,17 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x398, making the current vtable 0x3A0 bytes. The backend records that
- * size in the object (see sh_iface_vtbl_bytes); check it before calling a
- * slot at or past +0x350.
+ * at +0x3A0, making the current vtable 0x3A8 bytes. The backend records that
+ * size in the object (see sh_iface_vtbl_bytes); the window refuses a backend
+ * whose table is not its own size.
+ *
+ * Text crosses as owned strings. Every slot that hands text (or a block of
+ * bytes) to the window returns it, or stores it in its call record, as a
+ * string the backend allocated from the process heap, sized to what it holds
+ * and NUL-terminated; the window reads it and releases it with free_text
+ * (+0x3A0). NULL means none (each slot says when). No slot copies text into
+ * a buffer the caller sized, so nothing is cut. Text the window passes in is a
+ * NUL-terminated string of any length, read before the call returns.
  * Engine layouts remain private to backend implementations. Reserved cells
  * preserve ABI offsets; optional callbacks can be null. */
 #ifndef SNAPMAP_PLUS_IFACE_H
@@ -46,18 +54,19 @@ typedef int          (*sh_is_entity_mode_fn)(struct sh_iface *self);            
  * original interface's true-when-invalid convention; keep both DLLs aligned. */
 typedef int          (*sh_is_valid_id_fn)(struct sh_iface *self, int id);                      /* +0x28  */
 typedef int          (*sh_entity_count_fn)(struct sh_iface *self);                             /* +0x10  */
-typedef const char  *(*sh_id_to_string_fn)(struct sh_iface *self, int id, char *buf, int cap); /* +0x18  */
-typedef const char  *(*sh_classname_fn)(struct sh_iface *self, int id, char *buf, int cap);    /* +0x48  */
-typedef const char  *(*sh_inherit_fn)(struct sh_iface *self, int id, char *buf, int cap);      /* +0x50  */
+/* The entity's target-reference string, classname and inherit, owned; NULL for an invalid id. */
+typedef char        *(*sh_id_to_string_fn)(struct sh_iface *self, int id);                     /* +0x18  */
+typedef char        *(*sh_classname_fn)(struct sh_iface *self, int id);                        /* +0x48  */
+typedef char        *(*sh_inherit_fn)(struct sh_iface *self, int id);                          /* +0x50  */
 typedef void         (*sh_toast_fn)(struct sh_iface *self, const char *title, const char *text);/* +0x1b8 */
 
 /* Entity, prefab, and timeline operations. */
 
-/* Copy display name into caller storage and return buf. */
-typedef const char  *(*sh_get_displayname_fn)(struct sh_iface *self, int id, char *buf, int cap);  /* +0x58 */
+/* The display name, owned; NULL for an invalid id. */
+typedef char        *(*sh_get_displayname_fn)(struct sh_iface *self, int id);                  /* +0x58 */
 
-/* Copy canonical entity decl source into caller storage and return buf. */
-typedef const char  *(*sh_get_declsource_fn)(struct sh_iface *self, int id, char *buf, int cap);   /* +0x30 */
+/* The entity's own decl source, owned; NULL for an invalid id. */
+typedef char        *(*sh_get_declsource_fn)(struct sh_iface *self, int id);                   /* +0x30 */
 
 /* Set nonempty classname when the resulting class/inherit pair is not known invalid. */
 typedef void         (*sh_set_classname_fn)(struct sh_iface *self, int id, const char *cstr);      /* +0x78 */
@@ -68,20 +77,20 @@ typedef void         (*sh_set_displayname_fn)(struct sh_iface *self, int id, con
 /* Rebuild canonical decl source from current class/inherit and the supplied body. */
 typedef void         (*sh_rebuild_declsource_fn)(struct sh_iface *self, int id, const char *cstr); /* +0x40 */
 
-/* Serialize selected entities as prefab JSON. Return copied bytes (up to cap - 1), or zero. */
-typedef int          (*sh_serialize_selection_fn)(struct sh_iface *self, char *out_json, int cap);  /* +0xb0 */
+/* Serialize selected entities as prefab JSON, owned; NULL on failure. */
+typedef char        *(*sh_serialize_selection_fn)(struct sh_iface *self);                      /* +0xb0 */
 
-/* Join the local app-data snapmap-plus root, prefix, and name into out_path.
- * Caller supplies separators and suffix. Return 1 when formatting succeeds. */
-/* %LOCALAPPDATA%/snapmap-plus/<prefix><name> as UTF-8; open it with the wide file calls. */
-typedef int          (*sh_resolve_prefab_path_fn)(struct sh_iface *self, const char *prefix,
-                                                  const char *name, char *out_path, int cap);       /* +0xc0 */
+/* %LOCALAPPDATA%/snapmap-plus/<prefix><name> as UTF-8, owned (open it with the wide file calls);
+ * the caller supplies separators and suffix. NULL when the folder is unknown. */
+typedef char        *(*sh_resolve_prefab_path_fn)(struct sh_iface *self, const char *prefix,
+                                                  const char *name);                           /* +0xc0 */
 
-/* Enumerate names from the decl manager for a short decl type. Pack NUL-
- * terminated names in out_buf and set out_count; return 1 for a nonempty
- * result. Unknown/unavailable types return zero for editable-text fallback. */
+/* Names from the decl manager for a short decl type, owned in *out: each name
+ * followed by its NUL, the block ended by an empty name. Sets out_count;
+ * returns 1 for a nonempty result. Unknown/unavailable types return zero (and
+ * *out NULL) for editable-text fallback. */
 typedef int          (*sh_enum_decls_of_resclass_fn)(struct sh_iface *self, const char *res_class,
-                                                    char *out_buf, int cap, int *out_count);       /* +0x110 */
+                                                    char **out, int *out_count);               /* +0x110 */
 
 /* Validate the final class/inherit pair once, then assign supplied fields.
  * Null/empty retains a field. Return 1 only when all requested writes succeed,
@@ -90,18 +99,17 @@ typedef int          (*sh_enum_decls_of_resclass_fn)(struct sh_iface *self, cons
 typedef int          (*sh_apply_class_inherit_fn)(struct sh_iface *self, int id,
                                                   const char *cls, const char *inh);              /* +0x268 (ext 0) */
 
-/* Pack classes derived from the inherit's base into NUL-separated output.
- * Uses collected live type records, with a static fallback if unavailable;
- * empty/unresolved inherit uses idEntity. Return 1 and count for a nonempty
- * result. Caller capacity can truncate the set. */
+/* Classes derived from the inherit's base, packed as enum_decls_of_resclass
+ * packs. Uses collected live type records, with a static fallback if
+ * unavailable; empty/unresolved inherit uses idEntity. Return 1 and count for a
+ * nonempty result. */
 typedef int          (*sh_enum_valid_classes_fn)(struct sh_iface *self, const char *inherit,
-                                                 char *out_buf, int cap, int *out_count);          /* +0x270 (ext 1) */
+                                                 char **out, int *out_count);                  /* +0x270 (ext 1) */
 
-/* Pack sorted, deduplicated loaded entityDef paths into NUL-separated output.
- * Return 1 and count for a nonempty result; zero permits frontend fallback.
- * Shared enumeration scratch requires serialized calls. */
-typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self,
-                                            char *out_buf, int cap, int *out_count);               /* +0x278 (ext 2) */
+/* Sorted, deduplicated loaded entityDef paths, packed the same way. Return 1
+ * and count for a nonempty result; zero permits frontend fallback. Shared
+ * enumeration scratch requires serialized calls. */
+typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self, char **out, int *out_count); /* +0x278 (ext 2) */
 
 /* Hide non-base-layer entities only when the dev-layer cvar is confirmed
  * disabled. Unknown cvar or entity state leaves them visible. This list
@@ -136,10 +144,9 @@ typedef int           (*sh_clear_stack_fn)(struct sh_iface *self, int index);   
 typedef int           (*sh_manipulation_in_progress_fn)(struct sh_iface *self);                     /* +0x2C0 (ext 11) */
 
 
-/* +0x2D0 (ext 13) Consume the latest asset preview as a `data:image/png;base64,...` URI. Returns
- * length, 0 if nothing is published, or -(required size) when `cap` is too small. A successful copy
- * releases the backend buffer; an undersized probe leaves it available for the required retry. */
-typedef int           (*sh_get_preview_fn)(struct sh_iface *self, char *out, int cap);
+/* +0x2D0 (ext 13) Consume the latest asset preview as a `data:image/png;base64,...` URI, owned;
+ * NULL when nothing is published. */
+typedef char         *(*sh_get_preview_fn)(struct sh_iface *self);
 
 /* Preserve the string-only request ABI: this non-path prefix distinguishes
  * direct Image previews from same-named Materials. */
@@ -150,12 +157,11 @@ typedef int           (*sh_get_preview_fn)(struct sh_iface *self, char *out, int
  * selects an Image; plain names use Material-first lookup. Return acceptance. */
 typedef int           (*sh_request_preview_fn)(struct sh_iface *self, const char *name);
 
-typedef int           (*sh_find_material_fn)(struct sh_iface *self, const char *name,
-                                             char *out_info, int cap);                              /* +0x2C8: cached material lookup; write a short result and return 1 on a hit. */
+/* +0x2C8: cached material lookup; a short result, owned, on a hit, else NULL. */
+typedef char         *(*sh_find_material_fn)(struct sh_iface *self, const char *name);
 
-/* Page newline-separated material names. Advance start by the returned count;
- * zero ends the listing. */
-typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, char *out, int cap);
+/* Every material name, one per line, owned; NULL when the catalog is unavailable. */
+typedef char         *(*sh_list_materials_fn)(struct sh_iface *self);
 
 /* Asset kind IDs cross the ABI: append only, never renumber. Material and
  * Image retain the container catalog IDs 0 and 1. */
@@ -198,9 +204,9 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
 #define SH_ASSET_WEAPON       18
 #define SH_ASSET_COUNT       19
 
-/* Page an asset kind, skipping start names. list_materials remains the
- * kind-0 compatibility slot. */
-typedef int           (*sh_list_assets_fn)(struct sh_iface *self, int kind, int start, char *out, int cap);
+/* Every name of an asset kind, one per line, owned; NULL when the catalog is
+ * unavailable. list_materials is kind 0. */
+typedef char         *(*sh_list_assets_fn)(struct sh_iface *self, int kind);
 /* A material's .vmtr atlas rect -> out_xywh = {x,y,w,h} in atlas pixels; 1 if virtual-textured,
  * 0 if it has no rect. Divide by 245760 for the `virtualmapping` renderParm value form. */
 typedef int           (*sh_material_rect_fn)(struct sh_iface *self, const char *name, int *out_xywh);
@@ -211,14 +217,14 @@ typedef int           (*sh_sound_preview_fn)(struct sh_iface *self, const char *
  * off stops playback; session scope avoids cvar changes on every click. */
 typedef void          (*sh_sound_session_fn)(struct sh_iface *self, int on);
 
-/* Resolve prefab model/defaults through live or installed decl data. Mesh
- * requests are asynchronous and generation-keyed; empty cancels stale work,
- * and get consumes one bounded binary completion. */
-typedef int (*sh_resolve_prefab_model_fn)(struct sh_iface *self, const char *inherit_name,
-                                          char *out_model, int out_capacity);
+/* Resolve prefab model/defaults through live or installed decl data: the
+ * model, owned, or NULL. Mesh requests are asynchronous and generation-keyed;
+ * empty cancels stale work, and get consumes one binary completion into *out
+ * (owned) and returns its byte count, 0 when none is ready. */
+typedef char *(*sh_resolve_prefab_model_fn)(struct sh_iface *self, const char *inherit_name);
 typedef int (*sh_request_prefab_mesh_fn)(struct sh_iface *self, unsigned long generation,
                                          const char *model_name);
-typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void *out_blob, int out_capacity);
+typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void **out);
 #ifndef SH_PREFAB_DEFAULT_MODEL
 #define SH_PREFAB_DEFAULT_MODEL 0x1
 #define SH_PREFAB_DEFAULT_SCALE 0x2
@@ -226,10 +232,9 @@ typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void *out_blob, int 
 #define SH_PREFAB_DEFAULT_SIZE  0x8 /* out_scale[3..5] holds that row's renderInfo.size */
 #endif
 /* The navigation view. `update` asks for it to be brought up to date on the
- * game's next frame; 0 only reports. Writes {"stale","pending","floors","walls",
- * "red","rooms","refused"}, all integers, and returns its length. */
-typedef int (*sh_navmesh_view_fn)(struct sh_iface *self, int update,
-                                  char *out_json, int cap);
+ * game's next frame; 0 only reports. Returns {"stale","pending","floors","walls",
+ * "red","rooms","refused",...} as JSON, owned. */
+typedef char *(*sh_navmesh_view_fn)(struct sh_iface *self, int update);
 
 /* Run fn(ctx) on DOOM's main thread after the next native frame; inline when the
  * caller is already there. Return 1 with *out_result set when fn ran, 0 when it
@@ -387,8 +392,8 @@ typedef struct sh_module_prefab_call {
     const char *text;        /* PLACE, CHECK, MODS_RECORD, MODS_RESOLVE, META_READ: prefab file text;
                                 MODS_STATUS, META_WRITE: a view */
     size_t      text_len;
-    char       *out;         /* SAVE, MODS_RECORD, META_READ: the view; STATUS/PLACE: message */
-    int         out_cap;
+    char       *out;         /* out, owned (NULL in): SAVE, MODS_RECORD, META_READ: the view;
+                                STATUS/PLACE: message */
     int         seq;         /* PLACE out; STATUS in; MODS_RESOLVE out; MODS_POLL in */
     int         blueprint;   /* STATE out */
     int         entity_mode; /* STATE out */
@@ -411,13 +416,11 @@ typedef struct sh_timeline_tile_call {
     int  last_rebinds;      /* entities rebound by the most recent pass */
     int  total_rebinds;     /* entities rebound since the backend loaded */
     int  registered;        /* 1 once the tile decl is registered */
-    char record_class[64];  /* class of the tile's prototype record */
+    char *record_class;     /* out, owned: class of the tile's prototype record, or NULL */
 } sh_timeline_tile_call;
 typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call *call); /* +0x368 (ext 32) */
 /* Editor budget table for the Prefabs tab's Limits section
- * (backend/budget_table.c). Text crosses as UTF-8 JSON. out == NULL or an
- * out_cap not above needed is a size query: needed is set, out is untouched
- * and the call returns -1.
+ * (backend/budget_table.c). Text crosses as UTF-8 JSON in out, owned.
  *   TABLE  any thread. Copies the table built on the game thread after the
  *          last palette build: limits, usage, reached, layers, sedefs (per
  *          palette row), inherits (inherit -> row), modules (per resident
@@ -430,19 +433,17 @@ typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call 
 #define SH_BUDGET_USAGE 2
 typedef struct sh_budget_call {
     int          op;
-    char        *out;
-    int          out_cap;
-    int          needed;       /* out: bytes of JSON excluding the NUL */
+    char        *out;          /* out, owned (NULL in) */
     unsigned int generation;   /* out: table generation, 0 = none built */
     int          reached;      /* out: the limits-reached byte (USAGE) */
 } sh_budget_call;
 typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x370 (ext 33) */
 /* Mods tab (backend/modui.c). Text crosses as UTF-8 JSON through one buffer the
- * backend keeps: LIST and RUN fill it, FETCH copies it.
+ * backend keeps: LIST and RUN fill it, FETCH hands a copy of it in out, owned.
  *   LIST   main thread (call inside run_on_main). Builds the tab's document:
  *          the mod folders (one row per folder) and the open map's manifest
  *          rows and placed-name closure. Returns 1, or 0 when refused (off the
- *          main thread, no memory). needed is set.
+ *          main thread, no memory).
  *   RUN    main thread, except INSTALL, NEW_MOD, RESCAN and ADD_MINE, which may run on
  *          any thread: their file work (copies, salts, builds) runs there with
  *          no time limit, and off the main thread their result says
@@ -452,19 +453,15 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *          actions: a mod's folder under mods\, see modui.h) and keeps its
  *          result document. Returns 1 when the action ran (the document's "ok"
  *          says whether it succeeded), 0 when refused before it ran.
- *   FETCH  any thread. Copies the buffer: 1 copied, -1 a size query (out NULL
- *          or out_cap not above needed; needed set, out untouched), 0 nothing
- *          built yet.
- *   ROOT   any thread. Copies the store folder as UTF-8: 1, -1 too small, 0
- *          unresolved.
- *   STORE  any thread. 1 with needed = 1 while a store write holds the store
+ *   FETCH  any thread. The buffer in out: 1, 0 nothing built yet.
+ *   ROOT   any thread. The store folder as UTF-8 in out: 1, 0 unresolved.
+ *   STORE  any thread. 1 with busy = 1 while a store write holds the store
  *          lock (else 0) and generation = the store lock's released holds
- *          (not the document generation). An older backend answers 0.
- *   SCRIPTS any thread, read only. arg: a mod's salt, or empty. Copies the
- *          mod scripts' state of the current or last Play straight into out
- *          (not the shared buffer): every mod whose scripts ran, with its
- *          stop line, and arg's script log (modui.h sh_modui_scripts). 1, -1
- *          a size query (needed set), 0 failed. An older backend answers 0.
+ *          (not the document generation).
+ *   SCRIPTS any thread, read only. arg: a mod's salt, or empty. The mod
+ *          scripts' state of the current or last Play in out (not the shared
+ *          buffer): every mod whose scripts ran, with its stop line, and arg's
+ *          script log (modui.h sh_modui_scripts). 1, 0 failed.
  * generation is set by every op; it changes after each action that can change
  * the store or the serving index. */
 #define SH_MODS_LIST    1
@@ -473,6 +470,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ROOT    4
 #define SH_MODS_STORE   6
 #define SH_MODS_SCRIPTS 7
+#define SH_MODS_GENERATION 8   /* any thread: 1 with generation set, nothing else */
 /* SH_MODS_SCRIPTS answers a log's tail; an arg of this prefix and the salt asks for the whole log (Copy log). */
 #define SH_MODS_SCRIPTS_FULL "full:"
 /* Op 5 and actions 2, 5 to 9, 14, 15, 17 and 19 are retired; the slot answers them "Unknown action.". */
@@ -494,9 +492,8 @@ typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */
     const char  *arg;          /* RUN, SCRIPTS */
-    char        *out;
-    int          out_cap;
-    int          needed;       /* out: bytes excluding the NUL */
+    char        *out;          /* out, owned (NULL in): FETCH, ROOT, SCRIPTS */
+    int          busy;         /* out: STORE */
     unsigned int generation;   /* out */
 } sh_mods_call;
 typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 (ext 34) */
@@ -514,7 +511,8 @@ typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 
  *                     changes once the game thread has decided each one.
  *   place_result      that decision: SH_PREFAB_PLACE_*.
  *   place_reason      for STAGED, why the paste was not queued, as a phrase
- *                     the page can show ("the cursor is over an entity").
+ *                     the page can show ("the cursor is over an entity"),
+ *                     owned; NULL when there is none.
  * Returns 1, or 0 when no editor is open (the fields are then zero). */
 #define SH_PREFAB_HELD_NONE     0
 #define SH_PREFAB_HELD_OBJECTS  1
@@ -527,39 +525,41 @@ typedef struct sh_prefab_watch {
     int  held;
     int  place_seq;
     int  place_result;
-    char place_reason[96];
+    char *place_reason;
 } sh_prefab_watch;
 typedef int (*sh_prefab_watch_fn)(struct sh_iface *self, sh_prefab_watch *out); /* +0x380 (ext 35) */
 
 /* +0x388 (ext 36): the features that are off this session, as the one line the
  * Snapmap+ window shows ("These features are unavailable in this session:
- * ..."), or an empty string when every feature is available. Returns the
- * length written; any thread. */
-typedef size_t (*sh_features_off_fn)(struct sh_iface *self, char *out, size_t cap);
+ * ..."), owned; NULL when every feature is available. Any thread. */
+typedef char *(*sh_features_off_fn)(struct sh_iface *self);
 
 /* +0x390 (ext 37): why the latest image preview request (request_preview)
- * failed, as one plain sentence; 1 with the reason in out, 0 while it is
- * pending, published or cancelled. Any thread. */
-typedef int (*sh_preview_failure_fn)(struct sh_iface *self, char *out, size_t cap);
+ * failed, as one plain sentence, owned; NULL while it is pending, published or
+ * cancelled. Any thread. */
+typedef char *(*sh_preview_failure_fn)(struct sh_iface *self);
 
 /* +0x398 (ext 38): why the latest sound audition (sound_preview) was refused,
- * at once or later on the game thread ("Sounds play only inside a map."); 1
- * with the reason in out, 0 with "" when it was accepted. Any thread. */
-typedef int (*sh_sound_refusal_fn)(struct sh_iface *self, char *out, size_t cap);
+ * at once or later on the game thread ("Sounds play only inside a map."),
+ * owned; NULL when it was accepted. Any thread. */
+typedef char *(*sh_sound_refusal_fn)(struct sh_iface *self);
 
-/* +0x320 (ext 23): the preview model and renderModelInfo.scale for an entityDef inherit, as
- * SH_PREFAB_DEFAULT_* bits. When the def chain names no .lwo/.bmodel/.md6, the model is the one the
- * editor draws for the inherit's palette row (SH_PREFAB_DEFAULT_EDITOR). With out_scale_count >= 6,
- * out_scale[3..5] receives that row's renderInfo.size (SH_PREFAB_DEFAULT_SIZE); callers passing 3
- * get the original three-float result. */
+/* +0x3A0 (ext 39): release text a slot handed over (NULL is ignored). Any thread. */
+typedef void (*sh_free_text_fn)(struct sh_iface *self, void *text);
+
+/* +0x320 (ext 23): the preview model (in *out_model, owned, with SH_PREFAB_DEFAULT_MODEL) and
+ * renderModelInfo.scale for an entityDef inherit, as SH_PREFAB_DEFAULT_* bits. When the def chain
+ * names no .lwo/.bmodel/.md6, the model is the one the editor draws for the inherit's palette row
+ * (SH_PREFAB_DEFAULT_EDITOR). With out_scale_count >= 6, out_scale[3..5] receives that row's
+ * renderInfo.size (SH_PREFAB_DEFAULT_SIZE). */
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
-                                             char *out_model, int out_capacity,
+                                             char **out_model,
                                              float *out_scale, int out_scale_count);
 
 /* +0x2B0/+0x2B8 (ext 9/10) backend-owned persistent configuration. Values cross the matched-pair
  * boundary as complete UTF-8 JSON fragments so future booleans/numbers/objects do not need new ABI
- * slots. `get` returns the required byte count excluding NUL; a NULL/zero buffer is a size query and an
- * undersized buffer is untouched. The registry in backend/config.c enforces frontend access. */
+ * slots. `get` stores the value in *out_json, owned, and returns its byte count excluding the NUL,
+ * or a negative refusal (*out_json NULL). The registry in backend/config.c enforces frontend access. */
 #define SH_CONFIG_SET_VOLATILE  (-1)
 #define SH_CONFIG_SET_REJECTED  0
 #define SH_CONFIG_SET_PERSISTED 1
@@ -570,15 +570,13 @@ typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *
 #define SH_CONFIG_STATUS_REPAIRED           0x08u
 
 typedef int (*sh_config_get_json_fn)(struct sh_iface *self, const char *key,
-                                     char *out_json, int out_capacity,
-                                     unsigned int *out_flags);               /* +0x2B0 (ext 9) */
+                                     char **out_json, unsigned int *out_flags); /* +0x2B0 (ext 9) */
 typedef int (*sh_config_set_json_fn)(struct sh_iface *self, const char *key,
                                      const char *value_json);                /* +0x2B8 (ext 10) */
 
 /* Rawmap file slots for the File menu. Status crosses as a UTF-8 JSON fragment,
- * so both paths and the save counters travel in one call. */
-typedef int (*sh_rawmap_status_fn)(struct sh_iface *self,
-                                   char *out_json, int out_capacity);         /* +0x328 (ext 24) */
+ * owned, so both paths and the save counters travel in one call. */
+typedef char *(*sh_rawmap_status_fn)(struct sh_iface *self);                 /* +0x328 (ext 24) */
 
 /* Paths are UTF-8. With arm 2 a nonempty load path becomes the rawmap to open
  * now: it is checked, and refused when the editor cannot open it now; an empty
@@ -587,24 +585,23 @@ typedef int (*sh_rawmap_status_fn)(struct sh_iface *self,
  * leaves that side unchanged. arm: -1 leave, 2 open (see above), 3 keep the
  * current save path, 4 release it, 5 queue a save to the current backend
  * destination; 0 and 1 named the retired every-load switch and are refused.
- * Refused saves neither change the destination nor queue a later save. */
+ * Refused saves neither change the destination nor queue a later save. *out_msg
+ * receives the sentence for the player, owned (NULL when there is none). */
 typedef int (*sh_rawmap_configure_fn)(struct sh_iface *self,
                                       const char *load_path, const char *save_path, int arm,
-                                      char *out_msg, int msg_capacity);       /* +0x330 (ext 25) */
+                                      char **out_msg);                        /* +0x330 (ext 25) */
 
 /* Open the load path in the editor on the next frame. Returns 1 when the request
  * was accepted, not when the map is open -- the frame hook re-checks, and a
  * failure there is told to the player. Requires overwrite protection unless the
- * user explicitly disabled it. */
-typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self,
-                                     char *out_msg, int msg_capacity);        /* +0x338 (ext 26) */
+ * user explicitly disabled it. *out_msg receives the sentence, owned. */
+typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self, char **out_msg);  /* +0x338 (ext 26) */
 
 /* Reflection and apply callbacks. Engine work prefers the main-thread
  * command drain; apply_sync documents its inline compatibility fallback. */
 
-/* Serialize a full idSnapEntity into NUL-terminated caller storage.
- * Return copied bytes, up to cap - 1, or zero when unavailable. */
-typedef int          (*sh_serialize_entity_fn)(struct sh_iface *self, int id, char *out_json, int cap); /* +0xc8 */
+/* Serialize a full idSnapEntity as JSON, owned; NULL when unavailable. */
+typedef char        *(*sh_serialize_entity_fn)(struct sh_iface *self, int id);                /* +0xc8 */
 
 /* Shared apply item. Kind 0 commits entity text; 1 stages prefab text;
  * 2 stages and arms native paste; 3 writes a target reference. Scheduling
@@ -621,9 +618,8 @@ typedef struct sh_apply_item {
 typedef int          (*sh_schedule_apply_fn)(struct sh_iface *self, const sh_apply_item *items, int count,
                                              const char *op_label);                              /* +0xd0 */
 
-/* Serialize the pending prefab into caller storage. Return copied bytes
- * up to cap - 1, or zero on failure. */
-typedef int          (*sh_read_prefab_fn)(struct sh_iface *self, char *out_json, int cap);      /* +0xb8 */
+/* Serialize the pending prefab as JSON, owned; NULL on failure. */
+typedef char        *(*sh_read_prefab_fn)(struct sh_iface *self);                              /* +0xb8 */
 
 /* Work record executed on the drain caller's thread, normally the UI worker. */
 typedef struct sh_work_item {
@@ -771,6 +767,7 @@ typedef struct sh_iface_vtbl {
     sh_features_off_fn         features_off;         /* +0x388 (ext 36) features off this session */
     sh_preview_failure_fn      preview_failure;      /* +0x390 (ext 37) why an image preview failed */
     sh_sound_refusal_fn        sound_refusal;        /* +0x398 (ext 38) why a sound audition was refused */
+    sh_free_text_fn            free_text;            /* +0x3A0 (ext 39) release text a slot handed over */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -803,8 +800,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, features_off) == 0x388);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, preview_failure) == 0x390);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_refusal) == 0x398);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x3A0);
-SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, free_text) == 0x3A0);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x3A8);
+SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 24);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -870,8 +868,19 @@ typedef struct sh_ui_argblock {
 } sh_ui_argblock;
 
 /* Allocate the backend-owned object and private registry/queue state.
- * Bind registry/drain callbacks immediately; return null on allocation failure. */
+ * Bind registry/drain callbacks and free_text immediately; return null on
+ * allocation failure. */
 sh_iface *sh_iface_create(void);
+
+/* The backend's side of owned text: a process-heap copy of s (n bytes, or a
+ * formatted string) with its NUL, which free_text releases; NULL for NULL or
+ * when memory runs out. sh_iface_text_set replaces *slot (releasing the old
+ * text) and returns 0 when memory ran out. */
+char *sh_iface_text(const char *s);
+char *sh_iface_textn(const void *s, size_t n);
+char *sh_iface_textf(const char *fmt, ...);
+int   sh_iface_text_set(char **slot, const char *s);
+void  sh_iface_text_free(void *text);
 
 /* Set the optional callback run before each UI queue drain. Null clears it;
  * registration avoids an engine link dependency in the common module. */

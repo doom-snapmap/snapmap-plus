@@ -1257,6 +1257,17 @@ static void test_process_writers_are_serialized(void)
     cleanup_temp_root(root);
 }
 
+/* The window's read of a setting: the slot's owned text copied into value, and released. */
+static int iface_get(sh_iface *iface, const char *key, char *value, size_t cap, unsigned int *flags)
+{
+    char *json = NULL;
+    int n = iface->vtbl->config_get_json(iface, key, &json, flags);
+    if (value && cap) value[0] = '\0';
+    if (json && value && strlen(json) < cap) strcpy_s(value, cap, json);
+    iface->vtbl->free_text(iface, json);
+    return n;
+}
+
 static void test_shared_interface_uses_registered_config_service(void)
 {
     wchar_t root[MAX_PATH];
@@ -1275,38 +1286,28 @@ static void test_shared_interface_uses_registered_config_service(void)
     CHECK(iface && iface->vtbl && iface->vtbl->config_set_json);
     if (iface && iface->vtbl && iface->vtbl->config_get_json &&
         iface->vtbl->config_set_json) {
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "theme", value, (int)sizeof(value), &flags) == 7);
+        CHECK(iface_get(iface, "theme", value, sizeof value, &flags) == 7);
         CHECK(strcmp(value, "\"light\"") == 0);
         CHECK(flags == 0);
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "entities.show_hidden", value,
-                  (int)sizeof(value), NULL) == 5);
+        CHECK(iface_get(iface, "entities.show_hidden", value, sizeof value, NULL) == 5);
         CHECK(strcmp(value, "false") == 0);
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "navmesh.enabled", value,
-                  (int)sizeof(value), NULL) == 4);
+        CHECK(iface_get(iface, "navmesh.enabled", value, sizeof value, NULL) == 4);
         CHECK(strcmp(value, "true") == 0);
         CHECK(iface->vtbl->config_set_json(
                   iface, "navmesh.enabled", "false") ==
               SH_CONFIG_SET_PERSISTED);
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "navmesh.enabled", value,
-                  (int)sizeof(value), NULL) == 5);
+        CHECK(iface_get(iface, "navmesh.enabled", value, sizeof value, NULL) == 5);
         CHECK(strcmp(value, "false") == 0);
         CHECK(iface->vtbl->config_set_json(
                   iface, "entities.selection_mode", "\"follow\"") ==
               SH_CONFIG_SET_PERSISTED);
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "entities.selection_mode", value,
-                  (int)sizeof(value), NULL) == 8);
+        CHECK(iface_get(iface, "entities.selection_mode", value, sizeof value, NULL) == 8);
         CHECK(strcmp(value, "\"follow\"") == 0);
         CHECK(iface->vtbl->config_set_json(iface, "theme", "\"dark\"") ==
               SH_CONFIG_SET_PERSISTED);
         CHECK(iface->vtbl->config_set_json(iface, "unknown", "true") ==
               SH_CONFIG_SET_REJECTED);
-        CHECK(iface->vtbl->config_get_json(
-                  iface, "theme", value, (int)sizeof(value), NULL) == 6);
+        CHECK(iface_get(iface, "theme", value, sizeof value, NULL) == 6);
         CHECK(strcmp(value, "\"dark\"") == 0);
     }
 

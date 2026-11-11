@@ -640,14 +640,13 @@ static void h_sh_listres(idCmdArgs *a)
 
 /* List live idEntity subclasses, including decl-less types and idTarget_Command.
  * Fall back to the static snapshot when reflection is unavailable. */
-#define SH_ENTLIST_MAX  16384   /* Candidate capacity. */
 static void h_sh_entlist(idCmdArgs *a)
 {
     const char *filter = cmd_argv(a, 1);
 
-    static const char *names[SH_ENTLIST_MAX];   /* main-thread-serial console handler -> static is safe */
+    const char **names = NULL;
     int printed = 0;
-    int k = sh_typeinfo_collect_classnames(names, SH_ENTLIST_MAX);
+    int k = sh_typeinfo_collect_classnames(&names);
     if (k > 0) {
         for (int i = 0; i < k; i++) {
             const char *name = names[i];
@@ -657,8 +656,6 @@ static void h_sh_entlist(idCmdArgs *a)
             sh_printf("%s\n", name);
             printed++;
         }
-        if (k >= SH_ENTLIST_MAX)
-            sh_printf("(list truncated)\n");
     } else {
         for (int i = 0; i < B2_ENTLIST_CLASS_COUNT; i++) {
             const char *name = B2_ENTLIST_CLASSES[i];
@@ -669,6 +666,7 @@ static void h_sh_entlist(idCmdArgs *a)
     }
     sh_printf("(%d entity classes%s%s)\n", printed,
               filter ? " matching " : "", filter ? filter : "");
+    free((void *)names);
 }
 
 /* Force the session devmode getter to return 0, retaining its original bytes

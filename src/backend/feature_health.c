@@ -1,16 +1,17 @@
 /* The features that are off this session (feature_health.h). */
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "feature_health.h"
 #include "backend_log.h"
+#include "snapmap_plus_iface.h"
+#include "../common/text.h"
 
-#define MAX_OFF  48
-#define NAME_MAX 64
-
+/* As many features as are off, each name its own copy. */
 static SRWLOCK g_lock = SRWLOCK_INIT;
-static char    g_off[MAX_OFF][NAME_MAX];
-static int     g_count;
+static char  **g_off;
+static int     g_count, g_capacity;
 
 static int find_locked(const char *feature)
 {
@@ -21,20 +22,25 @@ static int find_locked(const char *feature)
 
 void sh_feature_off(const char *feature, const char *why)
 {
-    char line[320];
+    char *line, *name;
     int added = 0;
-    if (!feature || !*feature) return;
+    if (!feature || !*feature || (name = sh_text(feature)) == NULL) return;
     AcquireSRWLockExclusive(&g_lock);
-    if (find_locked(feature) < 0 && g_count < MAX_OFF) {
-        strncpy_s(g_off[g_count], NAME_MAX, feature, _TRUNCATE);
-        g_count++;
-        added = 1;
+    if (find_locked(feature) < 0) {
+        if (g_count == g_capacity) {
+            int capacity = g_capacity ? g_capacity * 2 : 16;
+            char **grown = (char **)realloc(g_off, (size_t)capacity * sizeof *grown);
+            if (grown) { g_off = grown; g_capacity = capacity; }
+        }
+        if (g_count < g_capacity) { g_off[g_count++] = name; name = NULL; added = 1; }
     }
     ReleaseSRWLockExclusive(&g_lock);
+    free(name);
     if (!added) return;
-    _snprintf_s(line, sizeof line, _TRUNCATE, "%s: off for this session -- %s", feature,
-                why && *why ? why : "its engine function could not be patched");
-    backend_log(line);
+    line = sh_textf("%s: off for this session -- %s", feature,
+                    why && *why ? why : "its engine function could not be patched");
+    backend_log(line ? line : feature);
+    free(line);
 }
 
 int sh_feature_is_off(const char *feature)
@@ -58,33 +64,34 @@ char *sh_feature_off_name(int index)
 }
 #endif
 
-/* Append s; stop silently at the end of out (always terminated). */
-static void append(char *out, size_t cap, size_t *len, const char *s)
-{
-    size_t n = strlen(s);
-    if (*len + 1 >= cap) return;
-    if (n > cap - 1 - *len) n = cap - 1 - *len;
-    memcpy(out + *len, s, n);
-    *len += n;
-    out[*len] = '\0';
-}
-
-size_t sh_features_off_line(char *out, size_t cap)
+/* The line built with `copy` (sh_text or the interface's process-heap copy). */
+static char *features_off_line(char *(*copy)(const char *))
 {
     size_t len = 0;
-    if (!out || !cap) return 0;
-    out[0] = '\0';
+    char *text, *out = NULL;
+    static const char head[] = "These features are unavailable in this session: ";
     AcquireSRWLockShared(&g_lock);
     if (g_count) {
-        append(out, cap, &len, "These features are unavailable in this session: ");
-        for (int i = 0; i < g_count; i++) {
-            if (i) append(out, cap, &len, ", ");
-            append(out, cap, &len, g_off[i]);
+        for (int i = 0; i < g_count; i++) len += strlen(g_off[i]) + 2;
+        text = (char *)malloc(sizeof head + len + 1);
+        if (text) {
+            strcpy_s(text, sizeof head + len + 1, head);
+            for (int i = 0; i < g_count; i++) {
+                if (i) strcat_s(text, sizeof head + len + 1, ", ");
+                strcat_s(text, sizeof head + len + 1, g_off[i]);
+            }
+            strcat_s(text, sizeof head + len + 1, ".");
+            out = copy(text);
+            free(text);
         }
-        append(out, cap, &len, ".");
     }
     ReleaseSRWLockShared(&g_lock);
-    return len;
+    return out;
+}
+
+char *sh_features_off_text(void)
+{
+    return features_off_line(sh_text);
 }
 
 size_t sh_feature_refusal(const char *feature, char *out, size_t cap)
@@ -99,17 +106,20 @@ size_t sh_feature_refusal(const char *feature, char *out, size_t cap)
     return (size_t)n;
 }
 
-size_t sh_feature_health_slot(struct sh_iface *self, char *out, size_t cap)
+char *sh_feature_health_slot(struct sh_iface *self)
 {
     (void)self;
-    return sh_features_off_line(out, cap);
+    return features_off_line(sh_iface_text);
 }
 
 #ifdef SH_FEATURE_HEALTH_TESTING
 void sh_feature_health_test_reset(void)
 {
     AcquireSRWLockExclusive(&g_lock);
-    g_count = 0;
+    for (int i = 0; i < g_count; i++) free(g_off[i]);
+    free(g_off);
+    g_off = NULL;
+    g_count = g_capacity = 0;
     ReleaseSRWLockExclusive(&g_lock);
 }
 #endif

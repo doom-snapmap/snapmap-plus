@@ -25,8 +25,6 @@
 #include "snapmap_plus_iface.h"
 #include "mockup_html.h"
 #include "config_message.h"
-#include "growing_text_buffer.h"
-#include "serialization_buffer.h"
 #include "theme_bootstrap.h"
 #include "rawmap_picker.h"
 #include "prefab_host.h"    /* Create's precheck, a prefab's kind by its ~type, the live usage gate */
@@ -83,11 +81,6 @@ static uint64_t      g_last_list_sig  = 0;
 static uint64_t      g_last_state_sig = 0;
 static uint64_t      g_last_sel_sig   = 0;       /* forward-sync: last editor-selection signature */
 
-/* Retain a growing read buffer for large declarations. At the 32 MiB cap,
- * report truncation instead of exposing partial JSON as editable text. */
-#define UI_DECL_INITIAL_CAP (64u * 1024u)
-#define UI_DECL_MAX_CAP     (32u * 1024u * 1024u)
-static std::vector<char> g_state_decl;
 
 static volatile bool g_pending_save = false;
 static int           g_save_eid     = -1;
@@ -106,7 +99,6 @@ static volatile bool g_pending_select = false;   /* list -> editor selection pus
 static std::vector<int> g_select_eids;
 static volatile bool g_pending_deselect = false;  /* UI blank-space deselect -- clear_selection convenience */
 static volatile int  g_select_refused   = 0;      /* refusal reason: 1 grab/hold, 2 native action finishing */
-static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
 
 /* Camera-manipulation state for the editable footer controls. camSet queues a one-shot write; camLock
  * holds the supplied target through the per-frame writer until the page releases it. */
@@ -161,7 +153,7 @@ static std::string   g_mods_wait_name, g_mods_wait_folder;
 static volatile bool g_pending_sound_preview = false;
 static std::string   g_sound_preview_name;
 static int           g_sound_preview_result = 0;
-static char          g_sound_preview_reason[256];   /* why it was refused, '' when it was not */
+static std::string   g_sound_preview_reason;        /* why it was refused, '' when it was not */
 /* Preview-mode session, held while the asset browser is on screen. Separate pending flag from the
  * play above so opening the browser and clicking Play in the same frame still arrive in order. */
 static volatile bool g_pending_sound_session = false;
@@ -246,17 +238,35 @@ static int           g_save_timeline_eid = -1;
 static std::string   g_save_timeline_json;          /* UTF-8; the page's JSON.stringify output, already fully patched */
 static int           g_save_timeline_result = 0;     /* 1 ok, 0 apply_edit refused/failed */
 
-#define UI_MAX_ENTS 8192
-#define UI_ID_CAP   384
-#define UI_NAME_CAP 192
-struct UiEnt { int eid; char id[UI_ID_CAP]; char name[UI_NAME_CAP]; int hidden; };
-static UiEnt *g_ents = nullptr;
+/* Every entity the editor holds, its reference and name whole. */
+struct UiEnt { int eid; std::string id, name; int hidden; };
+static std::vector<UiEnt> g_ents;
 
 /* Rebuild the Timeline and Encounter Manager list when the entity signature changes. */
-#define UI_MAX_TLS 2048
-struct UiTl { int eid; char id[UI_ID_CAP]; char name[UI_NAME_CAP]; };
-static UiTl *g_tls = nullptr;
+struct UiTl { int eid; std::string id, name; };
+static std::vector<UiTl> g_tls;
 static int    g_tl_count = 0;
+
+/* Text a slot handed over (snapmap_plus_iface.h): copied whole, then released
+ * through free_text. */
+static void ui_free_text(void *text)
+{
+    if (text && g_iface && g_iface->vtbl && g_iface->vtbl->free_text) g_iface->vtbl->free_text(g_iface, text);
+}
+static std::string ui_take(char *text)
+{
+    std::string s(text ? text : "");
+    ui_free_text(text);
+    return s;
+}
+/* A packed name list (each name and its NUL, ended by an empty name) as names. */
+static std::vector<std::string> ui_take_packed(char *text)
+{
+    std::vector<std::string> names;
+    for (const char *p = text; p && *p; p += strlen(p) + 1) names.push_back(p);
+    ui_free_text(text);
+    return names;
+}
 static unsigned long g_list_seq = 0;
 
 struct UiCollectPerf {
@@ -394,14 +404,25 @@ static std::wstring ui_widen(const char *utf8)
     if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
     return w;
 }
+/* A UTF-8 path for the wide file calls, in the long form ("\\?\C:\..." or "\\?\UNC\...")
+ * when it is absolute, so a path of any depth Windows accepts opens. */
+static std::wstring ui_wpath(const char *utf8)
+{
+    std::wstring w = ui_widen(utf8);
+    for (wchar_t &c : w) if (c == L'/') c = L'\\';
+    if (w.compare(0, 4, L"\\\\?\\") == 0) return w;
+    if (w.size() >= 3 && w[1] == L':' && w[2] == L'\\') return L"\\\\?\\" + w;
+    if (w.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + w.substr(2);
+    return w;
+}
 static FILE *ui_open(const char *utf8_path, const wchar_t *mode)
 {
     FILE *f = nullptr;
-    if (!utf8_path || _wfopen_s(&f, ui_widen(utf8_path).c_str(), mode) != 0) return nullptr;
+    if (!utf8_path || _wfopen_s(&f, ui_wpath(utf8_path).c_str(), mode) != 0) return nullptr;
     return f;
 }
-static bool ui_exists(const char *utf8_path) { return GetFileAttributesW(ui_widen(utf8_path).c_str()) != INVALID_FILE_ATTRIBUTES; }
-static bool ui_move(const char *from, const char *to) { return MoveFileW(ui_widen(from).c_str(), ui_widen(to).c_str()) != 0; }
+static bool ui_exists(const char *utf8_path) { return GetFileAttributesW(ui_wpath(utf8_path).c_str()) != INVALID_FILE_ATTRIBUTES; }
+static bool ui_move(const char *from, const char *to) { return MoveFileW(ui_wpath(from).c_str(), ui_wpath(to).c_str()) != 0; }
 /* Why the file operation just made failed, as the page names it: "exists" (the name is taken),
  * "inUse" (another program holds the file), "missing" (it is gone), "notEmpty" (a folder kept a
  * file), or "" (another Windows error, logged with its code). Call right after the failure. */
@@ -499,31 +520,69 @@ static int ui_editor_ready()
     } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; }
     return r;
 }
-static int ui_collect(int *out_ready)
+/* The entity reads, SEH-guarded with PODs only in scope (MSVC forbids __try beside C++
+ * locals that unwind). A faulting read reads as absent. */
+static int ui_entity_count_seh(int *out_ready)
 {
-    int n = 0; *out_ready = 0;
     __try {
         if (!g_iface || !g_iface->vtbl) return 0;
         if (g_iface->vtbl->editor_ready_poll) *out_ready = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
-        int count = g_iface->vtbl->entity_count ? g_iface->vtbl->entity_count(g_iface) : 0;
-        for (int id = 0; id < count && n < UI_MAX_ENTS; id++) {
-            if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) continue;
-            char idbuf[UI_ID_CAP]; idbuf[0] = 0; const char *s = idbuf;
-            if (g_iface->vtbl->id_to_string) { const char *r = g_iface->vtbl->id_to_string(g_iface, id, idbuf, sizeof idbuf); if (r) s = r; }
-            if (!s || s[0] == 0) continue;
-            if (s[0]=='N' && s[1]=='U' && s[2]=='L' && s[3]=='L' && s[4]=='_') continue;
-            char nmbuf[UI_NAME_CAP]; nmbuf[0] = 0; const char *nm = nmbuf;
-            if (g_iface->vtbl->get_displayname) { const char *r = g_iface->vtbl->get_displayname(g_iface, id, nmbuf, sizeof nmbuf); if (r) nm = r; }
-            int hidden = 0;
-            if (g_iface->vtbl->id_dev_layer_hidden) hidden = g_iface->vtbl->id_dev_layer_hidden(g_iface, id) ? 1 : 0;
-            g_ents[n].eid = id;
-            strncpy_s(g_ents[n].id, UI_ID_CAP, s, _TRUNCATE);
-            strncpy_s(g_ents[n].name, UI_NAME_CAP, nm ? nm : "", _TRUNCATE);
-            g_ents[n].hidden = hidden;
-            n++;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-    return n;
+        return g_iface->vtbl->entity_count ? g_iface->vtbl->entity_count(g_iface) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int ui_valid_id_seh(int id)
+{
+    __try { return !g_iface->vtbl->is_valid_id || g_iface->vtbl->is_valid_id(g_iface, id); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static char *ui_id_string_seh(int id)
+{
+    __try { return g_iface->vtbl->id_to_string ? g_iface->vtbl->id_to_string(g_iface, id) : nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+static char *ui_displayname_seh(int id)
+{
+    __try { return g_iface->vtbl->get_displayname ? g_iface->vtbl->get_displayname(g_iface, id) : nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+static char *ui_classname_seh(int id)
+{
+    __try { return g_iface->vtbl->get_classname_copy ? g_iface->vtbl->get_classname_copy(g_iface, id) : nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+static char *ui_inherit_seh(int id)
+{
+    __try { return g_iface->vtbl->get_inherit_copy ? g_iface->vtbl->get_inherit_copy(g_iface, id) : nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+static char *ui_declsource_seh(int id)
+{
+    __try { return g_iface->vtbl->get_declsource_copy ? g_iface->vtbl->get_declsource_copy(g_iface, id) : nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+static int ui_dev_hidden_seh(int id)
+{
+    __try { return g_iface->vtbl->id_dev_layer_hidden && g_iface->vtbl->id_dev_layer_hidden(g_iface, id) ? 1 : 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int ui_collect(int *out_ready)
+{
+    *out_ready = 0;
+    g_ents.clear();
+    if (!g_iface || !g_iface->vtbl) return 0;
+    int count = ui_entity_count_seh(out_ready);
+    for (int id = 0; id < count; id++) {
+        if (!ui_valid_id_seh(id)) continue;
+        std::string s = ui_take(ui_id_string_seh(id));
+        if (s.empty() || s.compare(0, 5, "NULL_") == 0) continue;
+        UiEnt e;
+        e.eid = id;
+        e.id = s;
+        e.name = ui_take(ui_displayname_seh(id));
+        e.hidden = ui_dev_hidden_seh(id);
+        g_ents.push_back(e);
+    }
+    return (int)g_ents.size();
 }
 static int ui_collect_timed(int *out_ready, const char *reason,
                              unsigned long long *elapsed_us = nullptr)
@@ -541,26 +600,21 @@ static int ui_collect_timed(int *out_ready, const char *reason,
  * Guard each class read so one bad entity cannot abort the rescan. */
 static void ui_rescan_timelines(int n)
 {
-    int tn = 0;
-    if (!g_tls || !g_iface || !g_iface->vtbl || !g_iface->vtbl->get_classname_copy) { g_tl_count = 0; return; }
-    for (int i = 0; i < n && tn < UI_MAX_TLS; i++) {
+    g_tls.clear();
+    g_tl_count = 0;
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->get_classname_copy) return;
+    for (int i = 0; i < n; i++) {
         if (g_ents[i].hidden) continue;   /* dev-layer hidden -> excluded from both lists, as the editor hides it */
-        char clsbuf[128]; clsbuf[0] = 0;
-        const char *c = NULL;
-        __try {
-            c = g_iface->vtbl->get_classname_copy(g_iface, g_ents[i].eid, clsbuf, sizeof clsbuf);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            c = NULL;
-            ui_logf("ui_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
-        }
-        if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
-            g_tls[tn].eid = g_ents[i].eid;
-            strncpy_s(g_tls[tn].id, UI_ID_CAP, g_ents[i].id, _TRUNCATE);
-            strncpy_s(g_tls[tn].name, UI_NAME_CAP, g_ents[i].name, _TRUNCATE);
-            tn++;
+        std::string c = ui_take(ui_classname_seh(g_ents[i].eid));
+        if (c == "idTarget_Timeline" || c == "idEncounterManager") {
+            UiTl t;
+            t.eid = g_ents[i].eid;
+            t.id = g_ents[i].id;
+            t.name = g_ents[i].name;
+            g_tls.push_back(t);
         }
     }
-    g_tl_count = tn;
+    g_tl_count = (int)g_tls.size();
 }
 static void ui_rescan_timelines_timed(int n, const char *reason)
 {
@@ -574,29 +628,16 @@ static void ui_rescan_timelines_timed(int n, const char *reason)
                 finished >= started ? finished - started : 0);
     ui_log(l);
 }
-static bool ui_collect_state(int id, char *decl, int dcap, char *cls, int ccap, char *inh, int icap, char *dnm, int ncap)
+/* The state panel's four texts, whole. */
+static bool ui_collect_state(int id, std::string &decl, std::string &cls, std::string &inh, std::string &dnm)
 {
-    bool ok = false; decl[0] = cls[0] = inh[0] = dnm[0] = 0;
-    __try {
-        if (!g_iface || !g_iface->vtbl) return false;
-        if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) return false;
-        if (g_iface->vtbl->get_declsource_copy) { const char *r = g_iface->vtbl->get_declsource_copy(g_iface, id, decl, dcap); if (r && r != decl) strncpy_s(decl, dcap, r, _TRUNCATE); }
-        if (g_iface->vtbl->get_classname_copy)  { const char *r = g_iface->vtbl->get_classname_copy(g_iface, id, cls, ccap);  if (r && r != cls)  strncpy_s(cls,  ccap, r, _TRUNCATE); }
-        if (g_iface->vtbl->get_inherit_copy)    { const char *r = g_iface->vtbl->get_inherit_copy(g_iface, id, inh, icap);    if (r && r != inh)  strncpy_s(inh,  icap, r, _TRUNCATE); }
-        if (g_iface->vtbl->get_displayname)     { const char *r = g_iface->vtbl->get_displayname(g_iface, id, dnm, ncap);     if (r && r != dnm)  strncpy_s(dnm,  ncap, r, _TRUNCATE); }
-        ok = true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-    return ok;
-}
-static bool ui_collect_state_growing(int id, char *cls, int ccap, char *inh, int icap,
-                                      char *dnm, int ncap, bool *truncated)
-{
-    return sh_read_growing_text(
-        g_state_decl, UI_DECL_INITIAL_CAP, UI_DECL_MAX_CAP,
-        [&](char *decl, int dcap) {
-            return ui_collect_state(id, decl, dcap, cls, ccap, inh, icap, dnm, ncap);
-        },
-        truncated);
+    decl.clear(); cls.clear(); inh.clear(); dnm.clear();
+    if (!g_iface || !g_iface->vtbl || !ui_valid_id_seh(id)) return false;
+    decl = ui_take(ui_declsource_seh(id));
+    cls = ui_take(ui_classname_seh(id));
+    inh = ui_take(ui_inherit_seh(id));
+    dnm = ui_take(ui_displayname_seh(id));
+    return true;
 }
 static void ui_post_json(const wchar_t *json);   /* fwd */
 
@@ -629,7 +670,7 @@ static void ui_cam_read_send()
     g_cam_read_published = true;
 }
 
-static int ui_get_selection(int *out, int max)
+static int ui_get_selection_seh(int *out, int max)
 {
     int n = 0;
     __try {
@@ -640,6 +681,15 @@ static int ui_get_selection(int *out, int max)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
+}
+/* The whole selection. It never holds more ids than the editor has entities (the
+ * engine's own table), so that count sizes the read. */
+static int ui_get_selection(std::vector<int> &ids)
+{
+    int ready = 0, count = ui_entity_count_seh(&ready);
+    ids.assign((size_t)(count > 0 ? count : 0) + 1, 0);
+    ids.resize((size_t)ui_get_selection_seh(ids.data(), (int)ids.size()));
+    return (int)ids.size();
 }
 static void ui_apply_save()
 {
@@ -685,76 +735,47 @@ static void ui_apply_deletes()
                                                                     &g_entity_delete_result);
     } __except (EXCEPTION_EXECUTE_HANDLER) { g_entity_delete_status = SH_DELETE_FAULT; }
 }
-/* Serialize into caller-owned storage under SEH. Timeline-open and target-inherit
- * requests use separate buffers so requests in one drain cannot overwrite each other. */
-/* A clean zero can mean insufficient capacity. An exception is a terminal
- * failure, so keep its negative result distinct and do not retry it as a size issue. */
-static int ui_serialize_entity_into(int id, char *buf, int cap)
+/* Serialize under SEH (PODs only in scope): the entity's JSON as the slot's owned text,
+ * NULL when it could not be read, or SH_UI_SERIALIZE_THREW when the engine faulted. */
+#define SH_UI_SERIALIZE_THREW ((char *)(intptr_t)-1)
+static char *ui_serialize_entity_seh(int id)
 {
-    int n = 0;
-    if (cap > 0) buf[0] = 0;
-    if (!(g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0))
-        return SH_SERIALIZE_UNAVAILABLE;
-    __try {
-        n = g_iface->vtbl->serialize_entity(g_iface, id, buf, cap - 1);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return SH_SERIALIZE_THREW; }
-    if (n < 0) n = 0;
-    if (n > cap - 1) n = cap - 1;
-    buf[n] = 0;
-    return n;
+    __try { return g_iface->vtbl->serialize_entity(g_iface, id); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return SH_UI_SERIALIZE_THREW; }
 }
-/* Retry zero or cap-filling results with a larger retained buffer. The engine
- * does not report required size; an exact fit needs one extra read to confirm it. */
-#define UI_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* initial capacity; grows for larger timelines */
-#define UI_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* transport safety cap */
-
-static int ui_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
+/* The entity's JSON, whole, into buf; its length, 0 when it could not be read. */
+static int ui_serialize_entity_whole(int id, std::string &buf, const char *what)
 {
     char l[256];
-    int n = sh_serialize_growing_buffer(
-        buf, UI_SERIALIZE_INITIAL_CAP, UI_SERIALIZE_MAX_CAP,
-        [&](char *out, int cap) { return ui_serialize_entity_into(id, out, cap); },
-        [&](size_t cap, int result, bool terminal) {
-        /* Negative results are terminal failures, not capacity problems. */
-        if (result == SH_SERIALIZE_UNAVAILABLE) {
-            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id",
-                        what, id);
-            ui_log(l);
-            return;
-        }
-        if (result == SH_SERIALIZE_THREW) {
-            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d RAISED inside serialize_entity at %lu bytes -- "
-                        "engine fault, not a buffer size", what, id, (unsigned long)cap);
-            ui_log(l);
-            return;
-        }
-        /* Log each retry to distinguish persistent zero results from truncating writes. */
-        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d attempt at %lu bytes returned %d",
-                    what, id, (unsigned long)cap, result);
+    buf.clear();
+    if (!(g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0)) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id", what, id);
         ui_log(l);
-        if (terminal) {
-            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d does not fit in %lu bytes (last result %d); refusing",
-                        what, id, (unsigned long)cap, result);
-            ui_log(l);
-        }
-    });
-    if (n > 0 && buf.size() > UI_SERIALIZE_INITIAL_CAP) {
-        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d serialized %d bytes (buffer grown to %lu)",
-                    what, id, n, (unsigned long)buf.size());
+        return 0;
+    }
+    char *json = ui_serialize_entity_seh(id);
+    if (json == SH_UI_SERIALIZE_THREW) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d RAISED inside serialize_entity -- engine fault", what, id);
+        ui_log(l);
+        return 0;
+    }
+    buf = ui_take(json);
+    if (buf.empty()) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d could not be read", what, id);
         ui_log(l);
     }
-    return n > 0 ? n : 0;
+    return (int)buf.size();
 }
-/* Serialize an entity on DOOM's main thread into reusable storage that can grow for
- * generated content. 0 when it failed or the game did not run the request. */
-struct UiSerializeMain { int id; std::vector<char> *buf; const char *what; int n; };
+/* Serialize an entity on DOOM's main thread, whole. 0 when it failed or the game did not
+ * run the request. */
+struct UiSerializeMain { int id; std::string *buf; const char *what; int n; };
 static int ui_serialize_entity_main(void *ctx)
 {
     UiSerializeMain *m = (UiSerializeMain *)ctx;
-    m->n = ui_serialize_entity_grow(m->id, *m->buf, m->what);
+    m->n = ui_serialize_entity_whole(m->id, *m->buf, m->what);
     return 1;
 }
-static int ui_serialize_entity_on_main(int id, std::vector<char> &buf, const char *what)
+static int ui_serialize_entity_on_main(int id, std::string &buf, const char *what)
 {
     UiSerializeMain m = { id, &buf, what, 0 };
     if (!ui_on_main(ui_serialize_entity_main, &m, UI_MAIN_WAIT_MS)) {
@@ -765,7 +786,7 @@ static int ui_serialize_entity_on_main(int id, std::vector<char> &buf, const cha
     }
     return m.n;
 }
-static std::vector<char> g_tl_json;
+static std::string g_tl_json;
 static int ui_serialize_entity_raw(int id) { return ui_serialize_entity_on_main(id, g_tl_json, "timeline-open"); }
 /* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
  * `json` and walks entityDef.state.edit.componentTimeLine / encounterComponent itself (the engine's
@@ -776,12 +797,12 @@ static void ui_emit_timeline_data(int eid, int json_len)
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"timelineData\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_tl_json.data()); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_tl_json.c_str()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Serialize the event's target entity into its own buffer. The page reads
  * entityDef.inherit to select the appropriate model/animation choices. */
-static std::vector<char> g_resolve_json;
+static std::string g_resolve_json;
 static int ui_serialize_entity_resolve(int id) { return ui_serialize_entity_on_main(id, g_resolve_json, "entity-resolve"); }
 static void ui_emit_entity_inherit(int eid, int json_len)
 {
@@ -789,7 +810,7 @@ static void ui_emit_entity_inherit(int eid, int json_len)
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"entityInherit\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_resolve_json.data()); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_resolve_json.c_str()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Replace editor selection from the list. Log each call to locate a stalled slot. */
@@ -888,12 +909,10 @@ static int ui_main_edits(void *ctx)
 }
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- this leaf has only
  * PODs in scope, so the SEH guard around the engine call is safe here. */
-static int ui_serialize_selection_raw(char *buf, int cap)
+static char *ui_serialize_selection_raw()
 {
-    int n = 0;
-    __try { n = g_iface->vtbl->serialize_selection(g_iface, buf, cap); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
-    return n;
+    __try { return g_iface->vtbl->serialize_selection(g_iface); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 static int ui_hovered_id_seh()
 {
@@ -902,13 +921,22 @@ static int ui_hovered_id_seh()
 }
 /* The Prefabs tab's watch (+0x380): the Blueprint module selection, what is held and the last
  * paste decision. An older backend reads as unknown (modules_selected -1, nothing held). */
-static int ui_prefab_watch(sh_prefab_watch *w)
+static int ui_prefab_watch_seh(sh_prefab_watch *w)
 {
     memset(w, 0, sizeof *w);
     w->modules_selected = -1;
     if (!SH_IFACE_HAS_SLOT(g_iface, prefab_watch)) return -1;
     __try { return g_iface->vtbl->prefab_watch(g_iface, w); }
     __except (EXCEPTION_EXECUTE_HANDLER) { memset(w, 0, sizeof *w); w->modules_selected = -1; return -1; }
+}
+/* The watch, with its reason (owned by the slot) taken whole into reason. */
+static int ui_prefab_watch(sh_prefab_watch *w, std::string *reason = nullptr)
+{
+    int r = ui_prefab_watch_seh(w);
+    std::string text = ui_take(w->place_reason);
+    w->place_reason = nullptr;
+    if (reason) *reason = text;
+    return r;
 }
 /* The backend's grab-frame guard verdict on the serialize just made, or
  * UNCHECKED when this backend has no guard. */
@@ -932,11 +960,11 @@ static int ui_prefab_grab_status(sh_prefab_grab_info *info)
  * 4 = the hovered entity is not selected, 5 = the copy check refused a selection
  * it was otherwise given, 6 = the file could not be written whole, 7 = the game
  * did not run the request, -1 = the name or its path was refused. */
-static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
-static int ui_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
+static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out);   /* fwd */
+static int ui_module_prefab_call(sh_module_prefab_call *call, std::string *out = nullptr);   /* fwd */
 struct UiCreateMain {
-    char *buf; int cap;
-    int  count, hovered, pre, n, grab_status;
+    char *json;   /* the slot's owned text */
+    int  count, hovered, pre, grab_status;
     sh_prefab_grab_info grab;
 };
 /* Runs on DOOM's main thread inside run_on_main. */
@@ -945,13 +973,13 @@ static int ui_create_prefab_main(void *ctx)
     UiCreateMain *c = (UiCreateMain *)ctx;
     /* DOOM's copy check refuses an empty selection and a hovered entity that is not
      * selected alike; tell the page which (prefab_host.h). */
-    static int sel[UI_MAX_ENTS];
-    c->count = ui_get_selection(sel, UI_MAX_ENTS);
+    std::vector<int> sel;
+    c->count = ui_get_selection(sel);
     bool have_hover = g_iface->vtbl->hovered_id != nullptr;
     c->hovered = have_hover ? ui_hovered_id_seh() : -1;
-    c->pre = sh_prefab_host::create_precheck(sel, c->count, c->hovered, have_hover);
+    c->pre = sh_prefab_host::create_precheck(sel.data(), c->count, c->hovered, have_hover);
     if (c->pre != sh_prefab_host::CREATE_GO) return 1;
-    c->n = ui_serialize_selection_raw(c->buf, c->cap);
+    c->json = ui_serialize_selection_raw();
     c->grab_status = ui_prefab_grab_status(&c->grab);
     return 1;
 }
@@ -967,16 +995,15 @@ static void ui_apply_create_prefab()
         ui_log("create-prefab: ABORT (the name is not one Windows can hold)");
         return;
     }
-    char path[1024]; path[0] = '\0';
     std::string fname = g_create_prefab_name + ".json";
-    if (!g_iface->vtbl->resolve_prefab_path(g_iface, "prefabs/", fname.c_str(), path, (int)sizeof path) || !path[0]) {
+    std::string path = ui_take(g_iface->vtbl->resolve_prefab_path(g_iface, "prefabs/", fname.c_str()));
+    if (path.empty()) {
         ui_log("create-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    static char buf[4 * 1024 * 1024];
     UiCreateMain cm;
     memset(&cm, 0, sizeof cm);
-    cm.buf = buf; cm.cap = (int)sizeof buf; cm.pre = sh_prefab_host::CREATE_GO;
+    cm.pre = sh_prefab_host::CREATE_GO;
     if (!ui_on_main(ui_create_prefab_main, &cm, UI_MAIN_WAIT_MS)) {
         ui_log("create-prefab: ABORT (the game did not run the request within the wait)");
         g_create_result = 7;
@@ -992,7 +1019,8 @@ static void ui_apply_create_prefab()
         g_create_result = cm.pre;
         return;
     }
-    int n = cm.n;
+    std::string buf = ui_take(cm.json);
+    int n = (int)buf.size();
     int grab_status = cm.grab_status;
     const sh_prefab_grab_info &grab = cm.grab;
     ui_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
@@ -1017,7 +1045,7 @@ static void ui_apply_create_prefab()
         ui_log(l);
     } else if (grab_status == SH_PREFAB_GRAB_UNCHECKED) {
         double d = 0.0;
-        if (sh_prefab_grab_json_check(buf, (size_t)n, &d) == 0) {
+        if (sh_prefab_grab_json_check(buf.c_str(), (size_t)n, &d) == 0) {
             char l[200];
             _snprintf_s(l, sizeof l, _TRUNCATE,
                         "create-prefab: ABORT (grabDistance=%g: the view-centre line missed the hovered entity and "
@@ -1031,18 +1059,19 @@ static void ui_apply_create_prefab()
      * (backend/prefab_block.h); readers still skip them in files earlier builds wrote. */
     {
         size_t before = (size_t)n;
-        n = (int)sh_prefab_block_strip_comments(buf, before);
+        n = (int)sh_prefab_block_strip_comments(&buf[0], before);
+        buf.resize((size_t)n);
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: comments removed, %lu byte(s) -> %lu",
                     (unsigned long)before, (unsigned long)n);
         ui_log(l);
     }
-    FILE *fp = ui_open(path, L"wb");
+    FILE *fp = ui_open(path.c_str(), L"wb");
     if (!fp) { ui_log("create-prefab: ABORT (the file could not be opened for writing)"); return; }
-    size_t wrote = fwrite(buf, 1, (size_t)n, fp);
+    size_t wrote = fwrite(buf.data(), 1, (size_t)n, fp);
     if (fclose(fp) != 0 || wrote != (size_t)n) {
         /* A short write leaves a damaged prefab: remove it and report the failure. */
-        DeleteFileW(ui_widen(path).c_str());
+        DeleteFileW(ui_wpath(path.c_str()).c_str());
         ui_logf("create-prefab: ABORT (short write: %lu byte(s) written); the partial file was removed", (unsigned long)wrote);
         g_create_result = 6;
         return;
@@ -1055,42 +1084,43 @@ static void ui_apply_create_prefab()
         sh_module_prefab_call call;
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_MODS_RECORD;
-        call.text = buf;
+        call.text = buf.c_str();
         call.text_len = (size_t)n;
-        call.path = path;
+        call.path = path.c_str();
         int r = ui_module_prefab_call(&call);
         ui_logf("create-prefab: mods recorded in the file's block=%lu", (unsigned long)(r > 0 ? r : 0));
     }
 }
 /* folder="" -> the root prefabs\ dir; else prefabs\<folder>\ (one real level, no nesting). Shared by every
  * prefab/folder file op below so they all agree on where a folder actually lives on disk. */
-static bool ui_prefab_dir(const std::string &folder, char *out, int cap)
+static bool ui_prefab_dir(const std::string &folder, std::string &out)
 {
-    if (cap) out[0] = '\0';
+    out.clear();
     if (!folder.empty() && !ui_valid_name(folder)) return false;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path) return false;
     std::string prefix = folder.empty() ? "prefabs/" : ("prefabs/" + folder + "/");
-    return g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), "", out, cap) && out[0] != '\0';
+    out = ui_take(g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), ""));
+    return !out.empty();
 }
-static bool ui_prefab_file_path(const std::string &folder, const std::string &name, char *out, int cap)
+static bool ui_prefab_file_path(const std::string &folder, const std::string &name, std::string &out)
 {
-    if (cap) out[0] = '\0';
+    out.clear();
     if (!folder.empty() && !ui_valid_name(folder)) return false;
     if (!ui_valid_name(name)) return false;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path) return false;
     std::string prefix = folder.empty() ? "prefabs/" : ("prefabs/" + folder + "/");
     std::string fname = name + ".json";
-    return g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), fname.c_str(), out, cap) && out[0] != '\0';
+    out = ui_take(g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), fname.c_str()));
+    return !out.empty();
 }
 /* A prefab is one file: its description, tags, summary and mods live in its snapmapPlus
  * block (backend/prefab_block.h). <name>.meta.json is only the read-only fallback of a
  * prefab saved before the block; it is never written, and it follows its prefab when the
  * prefab is moved, renamed or deleted. The validated path helper handles both filenames. */
-static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap)
+static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out)
 {
-    return ui_prefab_file_path(folder, name + ".meta", out, cap);
+    return ui_prefab_file_path(folder, name + ".meta", out);
 }
-static int ui_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
 static bool ui_read_small_file(const char *path, std::string &body);   /* fwd */
 /* Save the selected Blueprint modules, with every entity inside them, as a module
  * prefab at the prefab root. The backend writes the file, its summary and mods in its block.
@@ -1104,55 +1134,46 @@ static void ui_apply_create_module_prefab()
         ui_log("create-module-prefab: ABORT (name rejected)");
         return;
     }
-    char path[1024];
-    if (!ui_prefab_file_path("", g_create_module_name, path, (int)sizeof path)) {
+    std::string path, out;
+    if (!ui_prefab_file_path("", g_create_module_name, path)) {
         ui_log("create-module-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    if (ui_exists(path)) {
+    if (ui_exists(path.c_str())) {
         g_create_module_result = 0;
         ui_log("create-module-prefab: REFUSED (a prefab with that name exists)");
         return;
     }
-    static char out[1024 * 1024];
-    out[0] = '\0';
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_SAVE;
-    call.path = path;
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    int r = ui_module_prefab_call(&call);
+    call.path = path.c_str();
+    int r = ui_module_prefab_call(&call, &out);
     g_create_module_result = (r == 1 || r == -2 || r == -3) ? r : -1;
     if (r == 1) g_create_module_summary = out;
-    else g_create_module_message.assign(out, strnlen(out, 1024));   /* the page shows it when it is a sentence */
-    char l[512];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "create-module-prefab: name='%s' result=%d %s", g_create_module_name.c_str(), r,
-                r == 1 ? "" : out);
-    ui_log(l);
+    else g_create_module_message = out;   /* the page shows it when it is a sentence */
+    ui_log(("create-module-prefab: name='" + g_create_module_name + "' result=" + std::to_string(r) + " " +
+            (r == 1 ? std::string() : out)).c_str());
 }
 /* Post the module-prefab placement result once the backend has it. */
 static void ui_poll_module_place()
 {
     if (!g_module_place_seq) return;
-    char msg[256] = "";
+    std::string msg;
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_STATUS;
     call.seq = g_module_place_seq;
-    call.out = msg;
-    call.out_cap = (int)sizeof msg;
-    int r = ui_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call, &msg);
     bool late = GetTickCount64() > g_module_place_deadline;
     if (r == 2 && !late) return;
     if (r == 2) r = 0;
     std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(r);
     m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_module_place_name.c_str());
-    m += L"\",\"prefabKind\":\"modules\",\"message\":\""; m += sh_webview_json::escape_wide(msg); m += L"\"}";
+    m += L"\",\"prefabKind\":\"modules\",\"message\":\""; m += sh_webview_json::escape_wide(msg.c_str()); m += L"\"}";
     ui_post_json(m.c_str());
-    char l[400];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: module placement %d finished %d (%s)", g_module_place_seq, r, msg);
-    ui_log(l);
+    ui_log(("load-prefab: module placement " + std::to_string(g_module_place_seq) + " finished " + std::to_string(r) +
+            " (" + msg + ")").c_str());
     g_module_place_seq = 0;
 }
 /* Tell the page which editor mode is up: Object Mode gates object prefabs, Blueprint
@@ -1181,15 +1202,14 @@ static void ui_post_editor_mode(bool force)
                  entity, blueprint, modules, map_open);
     ui_post_json(m);
 }
-static void ui_strip_trailing_sep(char *s)
+static void ui_strip_trailing_sep(std::string &s)
 {
-    size_t n = strlen(s);
-    if (n && (s[n - 1] == '\\' || s[n - 1] == '/')) s[n - 1] = '\0';
+    if (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();
 }
 /* list the *.json stems directly inside a resolved directory (non-recursive), sorted. */
 static void ui_list_json_dir(const std::string &dirPath, std::vector<std::string> &names)
 {
-    std::wstring pattern = ui_widen(dirPath.c_str()) + L"*.json";
+    std::wstring pattern = ui_wpath(dirPath.c_str()) + L"*.json";
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -1212,11 +1232,13 @@ static void ui_list_json_dir(const std::string &dirPath, std::vector<std::string
  * file is always gone afterwards when this returns 1. 0 = still there. */
 static int ui_recycle_file(const char *path)
 {
-    wchar_t full[1024 + 2];
+    /* The shell's recycle call takes a path of at most MAX_PATH (Windows' own limit for
+     * SHFileOperation); a longer one is deleted outright, and the log says so. */
+    wchar_t full[MAX_PATH + 2];
     std::wstring wide = ui_widen(path);
     if (!wide.empty()) {
-        DWORD len = GetFullPathNameW(wide.c_str(), 1024, full, NULL);
-        if (len > 0 && len < 1024) {
+        DWORD len = GetFullPathNameW(wide.c_str(), MAX_PATH, full, NULL);
+        if (len > 0 && len < MAX_PATH) {
             full[len + 1] = 0;   /* double NUL: one path */
             SHFILEOPSTRUCTW op;
             memset(&op, 0, sizeof op);
@@ -1228,7 +1250,7 @@ static int ui_recycle_file(const char *path)
         }
     }
     ui_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
-    return DeleteFileW(wide.c_str()) ? 1 : 0;
+    return DeleteFileW(ui_wpath(path).c_str()) ? 1 : 0;
 }
 
 /* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed (*reason), -1 = path refused. */
@@ -1236,14 +1258,14 @@ static int ui_delete_one_prefab(const std::string &folder, const std::string &na
 {
     *reason = L"";
     if (name.empty()) return -1;
-    char path[1024];
-    if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return -1;
-    int result = ui_recycle_file(path);
+    std::string path;
+    if (!ui_prefab_file_path(folder, name, path)) return -1;
+    int result = ui_recycle_file(path.c_str());
     if (result != 1) *reason = ui_fs_reason();
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
-        char mp[1024];
-        if (ui_prefab_meta_path(folder, name, mp, (int)sizeof mp) && ui_exists(mp))
-            ui_recycle_file(mp);
+        std::string mp;
+        if (ui_prefab_meta_path(folder, name, mp) && ui_exists(mp.c_str()))
+            ui_recycle_file(mp.c_str());
     }
     return result;
 }
@@ -1267,16 +1289,16 @@ static void ui_apply_rename_prefab()
 {
     g_rename_result = -1;
     if (g_rename_prefab_old.empty() || g_rename_prefab_new.empty()) return;
-    char oldp[1024], newp[1024];
-    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
-    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
-    g_rename_result = ui_move(oldp, newp) ? 1 : 0;
+    std::string oldp, newp;
+    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp)) return;
+    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp)) return;
+    g_rename_result = ui_move(oldp.c_str(), newp.c_str()) ? 1 : 0;
     g_rename_reason = g_rename_result == 1 ? L"" : ui_fs_reason();
     if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
-        char oldm[1024], newm[1024];
-        if (ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
-            ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm, (int)sizeof newm))
-            ui_move(oldm, newm);
+        std::string oldm, newm;
+        if (ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm) &&
+            ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm))
+            ui_move(oldm.c_str(), newm.c_str());
     }
 }
 /* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
@@ -1328,8 +1350,8 @@ static void ui_apply_new_entity()
         g_new_entity_result = -2;
         return;
     }
-    static int ne_selids[UI_MAX_ENTS];
-    if (ui_get_selection(ne_selids, UI_MAX_ENTS) > 0) {
+    std::vector<int> ne_selids;
+    if (ui_get_selection(ne_selids) > 0) {
         ui_log("new-entity: REFUSED (editor selection is not empty)");
         g_new_entity_result = -3;
         return;
@@ -1351,6 +1373,11 @@ static void ui_apply_sound_session()
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+static int ui_sound_preview_seh(const char *n)
+{
+    __try { return g_iface->vtbl->sound_preview(g_iface, n); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static void ui_apply_sound_preview()
 {
     g_sound_preview_result = 0;
@@ -1359,37 +1386,42 @@ static void ui_apply_sound_preview()
         return;
     }
     const char *n = g_sound_preview_name.empty() ? nullptr : g_sound_preview_name.c_str();
-    __try { g_sound_preview_result = g_iface->vtbl->sound_preview(g_iface, n); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { g_sound_preview_result = 0; }
-    g_sound_preview_reason[0] = '\0';
+    g_sound_preview_result = ui_sound_preview_seh(n);
+    g_sound_preview_reason.clear();
     if (!g_sound_preview_result && n && SH_IFACE_HAS_SLOT(g_iface, sound_refusal))
-        (void)g_iface->vtbl->sound_refusal(g_iface, g_sound_preview_reason, sizeof g_sound_preview_reason);
+        g_sound_preview_reason = ui_take(g_iface->vtbl->sound_refusal(g_iface));
 }
 
 /* The module-prefab slot, SEH-guarded (PODs only in scope). 0 when this backend has no slot. */
-static int ui_module_prefab_call(sh_module_prefab_call *call)
+static int ui_module_prefab_seh(sh_module_prefab_call *call)
 {
     if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return 0;
     __try { return g_iface->vtbl->module_prefab(g_iface, call); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+/* The call, with its answer (owned by the slot) taken whole into out. */
+static int ui_module_prefab_call(sh_module_prefab_call *call, std::string *out)
+{
+    call->out = nullptr;
+    int r = ui_module_prefab_seh(call);
+    std::string text = ui_take(call->out);
+    call->out = nullptr;
+    if (out) *out = text;
+    return r;
+}
 /* Stage a module prefab placement. The result is posted by the think loop once the
  * backend reports it (placed and grabbed, refused, or over budget). */
 static void ui_apply_place_module_prefab(const std::string &body)
 {
-    char msg[256] = "";
+    std::string msg;
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_PLACE;
     call.text = body.c_str();
     call.text_len = body.size();
-    call.out = msg;
-    call.out_cap = (int)sizeof msg;
-    int r = ui_module_prefab_call(&call);
-    char l[400];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: module prefab '%s' place=%d seq=%d (%s)",
-                g_load_prefab_name.c_str(), r, call.seq, msg);
-    ui_log(l);
+    int r = ui_module_prefab_call(&call, &msg);
+    ui_log(("load-prefab: module prefab '" + g_load_prefab_name + "' place=" + std::to_string(r) + " seq=" +
+            std::to_string(call.seq) + " (" + msg + ")").c_str());
     if (r == -6) {                  /* needs a module the editor cannot build; nothing was placed */
         g_load_result = -6;
         g_load_message = msg;
@@ -1414,23 +1446,19 @@ static void ui_apply_place_module_prefab(const std::string &body)
  * prefab naming none goes on as before, and the backend answers that without the game. */
 static bool ui_resolve_prefab_mods(const std::string &body)
 {
-    char meta[1024], msg[700] = "";
+    std::string meta, msg;
     if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return true;   /* a backend that records no mods */
-    if (!ui_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta, (int)sizeof meta)) meta[0] = '\0';
+    if (!ui_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta)) meta.clear();
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
     call.text = body.c_str();
     call.text_len = body.size();
-    call.meta_path = meta;
+    call.meta_path = meta.c_str();
     call.name = g_load_prefab_name.c_str();
-    call.out = msg;
-    call.out_cap = (int)sizeof msg;
-    int r = ui_module_prefab_call(&call);
-    char l[900];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' resolve=%d seq=%d (%s)", g_load_prefab_name.c_str(), r,
-                call.seq, msg);
-    ui_log(l);
+    int r = ui_module_prefab_call(&call, &msg);
+    ui_log(("load-prefab: mods of '" + g_load_prefab_name + "' resolve=" + std::to_string(r) + " seq=" +
+            std::to_string(call.seq) + " (" + msg + ")").c_str());
     if (r == 1) return true;                       /* every mod installed and in the open map */
     if (r == 2 && call.seq > 0) {                  /* the download is asked for; Yes downloads, then it is placed */
         g_mods_wait_seq = call.seq;
@@ -1441,7 +1469,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
         return false;
     }
     g_load_result = r == -6 ? -6 : -7;
-    g_load_message = msg[0] ? msg : "This prefab's mods could not be checked, so it was not placed. Try again.";
+    g_load_message = !msg.empty() ? msg : "This prefab's mods could not be checked, so it was not placed. Try again.";
     return false;
 }
 /* Follow a held placement: once its mods are installed, place it again; a refusal (the game
@@ -1479,12 +1507,12 @@ static void ui_apply_load_prefab()
     g_place_wait = false;   /* a newer Load / Place answers for itself */
     if (g_load_prefab_name.empty()) return;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { ui_log("load-prefab: ABORT (iface/slot missing)"); return; }
-    char path[1024];
-    if (!ui_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path, (int)sizeof path)) {
+    std::string path;
+    if (!ui_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path)) {
         ui_log("load-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    FILE *fp = ui_open(path, L"rb");
+    FILE *fp = ui_open(path.c_str(), L"rb");
     if (!fp) { ui_log("load-prefab: ABORT (the file could not be opened)"); return; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     std::string body;
@@ -1543,7 +1571,8 @@ static void ui_poll_place_outcome()
 {
     if (!g_place_wait) return;
     sh_prefab_watch watch;
-    ui_prefab_watch(&watch);
+    std::string reason;
+    ui_prefab_watch(&watch, &reason);
     bool decided = watch.place_seq != g_place_wait_seq;
     if (!decided && GetTickCount64() < g_place_wait_deadline) return;
     g_place_wait = false;
@@ -1559,13 +1588,10 @@ static void ui_poll_place_outcome()
     m += decided && watch.place_result == SH_PREFAB_PLACE_FAILED ? L"-1" : L"1";
     m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_place_wait_name.c_str());
     m += L"\",\"placed\":\""; m += sh_webview_json::escape_wide(placed);
-    m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(decided ? watch.place_reason : "");
+    m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(decided ? reason.c_str() : "");
     m += L"\"}";
     ui_post_json(m.c_str());
-    char l[300];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: '%s' %s%s%s", g_place_wait_name.c_str(), placed,
-                decided && watch.place_reason[0] ? ": " : "", decided ? watch.place_reason : "");
-    ui_log(l);
+    ui_log(("load-prefab: '" + g_place_wait_name + "' " + placed + (decided && !reason.empty() ? ": " + reason : "")).c_str());
 }
 /* Commit the page's refreshed, patched entity JSON with kind=0. Prefer the
  * synchronous applied result; see ui_apply_sync_seh for the older-backend fallback. */
@@ -1588,16 +1614,15 @@ static int ui_move_one_prefab(const std::string &from, const std::string &name, 
 {
     *reason = L"";
     if (name.empty()) return -1;
-    char oldp[1024], newp[1024];
-    if (!ui_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
-    if (!ui_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
-    int result = ui_move(oldp, newp) ? 1 : 0;
+    std::string oldp, newp;
+    if (!ui_prefab_file_path(from, name, oldp)) return -1;
+    if (!ui_prefab_file_path(to, name, newp)) return -1;
+    int result = ui_move(oldp.c_str(), newp.c_str()) ? 1 : 0;
     if (result != 1) *reason = ui_fs_reason();
     if (result == 1) {   /* the sidecar follows the move; absent is fine */
-        char oldm[1024], newm[1024];
-        if (ui_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
-            ui_prefab_meta_path(to, name, newm, (int)sizeof newm))
-            ui_move(oldm, newm);
+        std::string oldm, newm;
+        if (ui_prefab_meta_path(from, name, oldm) && ui_prefab_meta_path(to, name, newm))
+            ui_move(oldm.c_str(), newm.c_str());
     }
     return result;
 }
@@ -1621,10 +1646,10 @@ static void ui_apply_create_folder()
     g_create_folder_result = -1;
     g_create_folder_reason = L"";
     if (g_create_folder_name.empty()) return;
-    char dir[1024];
-    if (!ui_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
+    std::string dir;
+    if (!ui_prefab_dir(g_create_folder_name, dir)) return;
     ui_strip_trailing_sep(dir);
-    if (CreateDirectoryW(ui_widen(dir).c_str(), nullptr)) { g_create_folder_result = 1; return; }
+    if (CreateDirectoryW(ui_wpath(dir.c_str()).c_str(), nullptr)) { g_create_folder_result = 1; return; }
     g_create_folder_reason = ui_fs_reason();
     g_create_folder_result = 0;
 }
@@ -1633,11 +1658,11 @@ static void ui_apply_rename_folder()
 {
     g_rename_folder_result = -1;
     if (g_rename_folder_old.empty() || g_rename_folder_new.empty()) return;
-    char oldd[1024], newd[1024];
-    if (!ui_prefab_dir(g_rename_folder_old, oldd, (int)sizeof oldd)) return;
-    if (!ui_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
+    std::string oldd, newd;
+    if (!ui_prefab_dir(g_rename_folder_old, oldd)) return;
+    if (!ui_prefab_dir(g_rename_folder_new, newd)) return;
     ui_strip_trailing_sep(oldd); ui_strip_trailing_sep(newd);
-    g_rename_folder_result = ui_move(oldd, newd) ? 1 : 0;
+    g_rename_folder_result = ui_move(oldd.c_str(), newd.c_str()) ? 1 : 0;
     g_rename_folder_reason = g_rename_folder_result == 1 ? L"" : ui_fs_reason();
 }
 /* Move contents to the prefab root before removing a folder. A name collision
@@ -1646,47 +1671,47 @@ static void ui_apply_delete_folder()
 {
     g_delete_folder_result = -1;
     if (g_delete_folder_name.empty()) return;
-    char dir[1024], rootDir[1024];
-    if (!ui_prefab_dir(g_delete_folder_name, dir, (int)sizeof dir)) return;
-    if (!ui_prefab_dir("", rootDir, (int)sizeof rootDir)) return;
+    std::string dir, rootDir;
+    if (!ui_prefab_dir(g_delete_folder_name, dir)) return;
+    if (!ui_prefab_dir("", rootDir)) return;
     std::vector<std::string> items;
     ui_list_json_dir(dir, items);
     for (size_t i = 0; i < items.size(); i++) {
-        std::string src = std::string(dir) + items[i] + ".json";
-        std::string dst = std::string(rootDir) + items[i] + ".json";
+        std::string src = dir + items[i] + ".json";
+        std::string dst = rootDir + items[i] + ".json";
         if (!ui_move(src.c_str(), dst.c_str())) continue;
-        char oldm[1024], newm[1024];   /* the sidecar follows its prefab; absent is fine */
-        if (ui_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
-            ui_prefab_meta_path("", items[i], newm, (int)sizeof newm))
-            ui_move(oldm, newm);
+        std::string oldm, newm;   /* the sidecar follows its prefab; absent is fine */
+        if (ui_prefab_meta_path(g_delete_folder_name, items[i], oldm) && ui_prefab_meta_path("", items[i], newm))
+            ui_move(oldm.c_str(), newm.c_str());
     }
     ui_strip_trailing_sep(dir);
-    g_delete_folder_result = RemoveDirectoryW(ui_widen(dir).c_str()) ? 1 : 0;
+    g_delete_folder_result = RemoveDirectoryW(ui_wpath(dir.c_str()).c_str()) ? 1 : 0;
 }
-/* Run enum_inherits (+0x278) or enum_valid_classes (+0x270) into buf; returns 1 + *pcount packed strings
- * (consecutive NUL-terminated, double-NUL end). SEH-guarded, no C++ objects. */
-static int ui_run_enum(int classes, const char *inherit, char *buf, int cap, int *pcount)
+/* Run enum_inherits (+0x278) or enum_valid_classes (+0x270): the packed list, owned by the slot.
+ * SEH-guarded, no C++ objects. */
+static char *ui_run_enum(int classes, const char *inherit)
 {
-    int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
+    char *out = nullptr;
+    int count = 0;
     __try {
         if (g_iface && g_iface->vtbl) {
-            if (classes) { if (g_iface->vtbl->enum_valid_classes) r = g_iface->vtbl->enum_valid_classes(g_iface, inherit ? inherit : "", buf, cap, pcount); }
-            else         { if (g_iface->vtbl->enum_inherits)      r = g_iface->vtbl->enum_inherits(g_iface, buf, cap, pcount); }
+            if (classes) { if (g_iface->vtbl->enum_valid_classes) g_iface->vtbl->enum_valid_classes(g_iface, inherit ? inherit : "", &out, &count); }
+            else         { if (g_iface->vtbl->enum_inherits)      g_iface->vtbl->enum_inherits(g_iface, &out, &count); }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; *pcount = 0; }
-    return r;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { out = nullptr; }
+    return out;
 }
 
 /* Messages to the page. */
 static uint64_t ui_list_sig(int n)
 {
     uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < n; i++) { h = hint(h, g_ents[i].eid); h = hstr(h, g_ents[i].id); h = hstr(h, g_ents[i].name); h = hint(h, g_ents[i].hidden); }
+    for (int i = 0; i < n; i++) { h = hint(h, g_ents[i].eid); h = hstr(h, g_ents[i].id.c_str()); h = hstr(h, g_ents[i].name.c_str()); h = hint(h, g_ents[i].hidden); }
     return h ^ (uint64_t)n;
 }
 static void ui_emit_list(int n, int ready, const char *reason)
 {
-    if (!g_webview || !g_ents) return;
+    if (!g_webview) return;
     unsigned long long started = ui_perf_now_us();
     unsigned long seq = ++g_list_seq;
     std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
@@ -1699,9 +1724,9 @@ static void ui_emit_list(int n, int ready, const char *reason)
     json += L"\",\"game\":\""; json += sh_webview_json::escape_wide(g_game.c_str());
     /* the features that are off this session, the one line the status bar shows ('' = none) */
     {
-        char off[512] = "";
-        if (SH_IFACE_HAS_SLOT(g_iface, features_off)) (void)g_iface->vtbl->features_off(g_iface, off, sizeof off);
-        json += L"\",\"featuresOff\":\""; json += sh_webview_json::escape_wide(off);
+        std::string off;
+        if (SH_IFACE_HAS_SLOT(g_iface, features_off)) off = ui_take(g_iface->vtbl->features_off(g_iface));
+        json += L"\",\"featuresOff\":\""; json += sh_webview_json::escape_wide(off.c_str());
     }
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
@@ -1709,8 +1734,8 @@ static void ui_emit_list(int n, int ready, const char *reason)
     for (int i = 0; i < n; i++) {
         if (i) json += L",";
         json += L"{\"eid\":"; json += std::to_wstring(g_ents[i].eid);
-        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_ents[i].id);
-        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_ents[i].name);
+        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_ents[i].id.c_str());
+        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_ents[i].name.c_str());
         json += L"\",\"hidden\":"; json += g_ents[i].hidden ? L"true" : L"false";
         json += L"}";
     }
@@ -1718,8 +1743,8 @@ static void ui_emit_list(int n, int ready, const char *reason)
     for (int i = 0; i < g_tl_count; i++) {
         if (i) json += L",";
         json += L"{\"eid\":"; json += std::to_wstring(g_tls[i].eid);
-        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_tls[i].id);
-        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_tls[i].name);
+        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_tls[i].id.c_str());
+        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_tls[i].name.c_str());
         json += L"\"}";   /* close the "name" string before the object brace */
     }
     json += L"]}";
@@ -1746,17 +1771,16 @@ static void ui_send_list(const char *reason)
 static void ui_send_state(int id, bool autoflag)
 {
     if (!g_webview) return;
-    char cls[512], inh[512], dnm[512]; bool truncated = false;
-    bool ok = ui_collect_state_growing(id, cls, sizeof cls, inh, sizeof inh, dnm, sizeof dnm, &truncated);
-    const char *decl = g_state_decl.empty() ? "" : g_state_decl.data();
+    std::string declText, clsText, inhText, dnmText;
+    bool ok = ui_collect_state(id, declText, clsText, inhText, dnmText);
+    const char *decl = declText.c_str(), *cls = clsText.c_str(), *inh = inhText.c_str(), *dnm = dnmText.c_str();
     uint64_t sig = hstr(hstr(hstr(hstr(1469598103934665603ull, decl), cls), inh), dnm) ^ (uint64_t)id;
     if (autoflag && sig == g_last_state_sig) return;   /* nothing changed -> skip the auto push */
     g_last_state_sig = sig;
     std::wstring json = L"{\"kind\":\"state\",\"auto\":"; json += autoflag ? L"true" : L"false";
     json += L",\"eid\":"; json += std::to_wstring(id);
     json += L",\"ok\":"; json += ok ? L"true" : L"false";
-    json += L",\"truncated\":"; json += truncated ? L"true" : L"false";
-    json += L",\"decl\":\"";        if (!truncated) json += sh_webview_json::escape_wide(decl); json += L"\"";
+    json += L",\"decl\":\"";        json += sh_webview_json::escape_wide(decl); json += L"\"";
     json += L",\"classname\":\"";   json += sh_webview_json::escape_wide(cls);  json += L"\"";
     json += L",\"inherit\":\"";     json += sh_webview_json::escape_wide(inh);  json += L"\"";
     json += L",\"displayname\":\""; json += sh_webview_json::escape_wide(dnm);  json += L"\"}";
@@ -1766,60 +1790,39 @@ static void ui_send_state(int id, bool autoflag)
 static void ui_send_enum(int classes, const char *inherit)
 {
     if (!g_webview) return;
-    int count = 0;
-    ui_run_enum(classes, inherit, g_enumbuf, (int)sizeof g_enumbuf, &count);
-    if (count < 0) count = 0;
+    std::vector<std::string> names = ui_take_packed(ui_run_enum(classes, inherit));
     std::wstring json = classes ? L"{\"kind\":\"classes\",\"inherit\":\"" : L"{\"kind\":\"inherits\"";
     if (classes) { json += sh_webview_json::escape_wide(inherit ? inherit : ""); json += L"\""; }
     json += L",\"items\":[";
-    const char *p = g_enumbuf;
-    const char *end = g_enumbuf + sizeof g_enumbuf;
-    int emitted = 0;
-    for (int i = 0; i < count && p < end; i++) {
-        size_t len = strnlen(p, (size_t)(end - p));
-        if (len > 0) {
-            if (emitted) json += L",";
-            std::string s(p, len);
-            json += L"\""; json += sh_webview_json::escape_wide(s.c_str()); json += L"\"";
-            emitted++;
-        }
-        p += len + 1;
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i) json += L",";
+        json += L"\""; json += sh_webview_json::escape_wide(names[i].c_str()); json += L"\"";
     }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* Keep SEH in a POD-only helper: MSVC forbids __try alongside C++ locals
  * that require unwinding. */
-static int ui_run_arg_resclass(const char *resClass, char *buf, int cap, int *pcount)
+static char *ui_run_arg_resclass(const char *resClass)
 {
-    int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
+    char *out = nullptr;
+    int count = 0;
     __try {
         if (g_iface && g_iface->vtbl && g_iface->vtbl->enum_decls_of_resclass && resClass && resClass[0])
-            r = g_iface->vtbl->enum_decls_of_resclass(g_iface, resClass, buf, cap, pcount);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; *pcount = 0; }
-    return r;
+            g_iface->vtbl->enum_decls_of_resclass(g_iface, resClass, &out, &count);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { out = nullptr; }
+    return out;
 }
 /* Query declaration classes by short name and enum types by catalog name.
  * Empty results leave the page with an editable text field. */
 static void ui_send_arg_resclass(const char *resClass)
 {
     if (!g_webview) return;
-    int count = 0;
-    ui_run_arg_resclass(resClass, g_enumbuf, (int)sizeof g_enumbuf, &count);
-    if (count < 0) count = 0;
+    std::vector<std::string> names = ui_take_packed(ui_run_arg_resclass(resClass));
     std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += sh_webview_json::escape_wide(resClass ? resClass : ""); json += L"\",\"items\":[";
-    const char *p = g_enumbuf;
-    const char *end = g_enumbuf + sizeof g_enumbuf;
-    int emitted = 0;
-    for (int i = 0; i < count && p < end; i++) {
-        size_t len = strnlen(p, (size_t)(end - p));
-        if (len > 0) {
-            if (emitted) json += L",";
-            std::string s(p, len);
-            json += L"\""; json += sh_webview_json::escape_wide(s.c_str()); json += L"\"";
-            emitted++;
-        }
-        p += len + 1;
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i) json += L",";
+        json += L"\""; json += sh_webview_json::escape_wide(names[i].c_str()); json += L"\"";
     }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
@@ -1966,16 +1969,16 @@ static bool ui_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, s
 static void ui_send_navmesh_state()
 {
     if (!g_webview) return;
-    char state[512] = "";
-    bool have = false;
+    std::string state;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view)
-        have = g_iface->vtbl->navmesh_view(g_iface, 0, state, (int)sizeof state) > 0;
+        state = ui_take(g_iface->vtbl->navmesh_view(g_iface, 0));
+    bool have = !state.empty();
 
     std::wstring json = L"{\"kind\":\"navmeshState\",\"ok\":";
     json += have ? L"true" : L"false";
     if (have) {
         json += L",\"state\":";
-        json += ui_widen(state);   /* already a JSON object -- forward it */
+        json += ui_widen(state.c_str());   /* already a JSON object -- forward it */
     }
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
@@ -1986,17 +1989,16 @@ static void ui_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_fi
 {
     if (!g_webview) return;
 
-    char status[2048] = "";
-    bool have = false;
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status) {
-        have = g_iface->vtbl->rawmap_status(g_iface, status, (int)sizeof status) > 0;
-    }
+    std::string status;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status)
+        status = ui_take(g_iface->vtbl->rawmap_status(g_iface));
+    bool have = !status.empty();
 
     std::wstring json = L"{\"kind\":\"rawmapStatus\",\"ok\":";
     json += have ? L"true" : L"false";
     if (have) {
         json += L",\"status\":";
-        json += ui_widen(status);   /* already a JSON object -- forward it, do not escape it */
+        json += ui_widen(status.c_str());   /* already a JSON object -- forward it, do not escape it */
     }
     json += L",\"note\":\"";
     json += note ? note : L"";
@@ -2016,28 +2018,22 @@ static void ui_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_fi
 static void ui_rawmap_configure(const char *load_path, const char *save_path, int arm,
                                  const wchar_t *ok_note)
 {
-    char msg[1024] = "";
-    int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm,
-                                             msg, (int)sizeof msg);
+    char *said = nullptr;
+    int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm, &said);
+    std::string msg = ui_take(said);
     /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
      * (wrong type, too big, unreadable). On success its "ok" is not worth showing, so the caller's
      * own sentence wins -- unless the caller passes no sentence, which is how Save Rawmap As asks for
      * the backend's own: only the backend knows whether it wrote the file there and then or is
      * waiting for an editor save, and how many bytes went out. */
-    std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg))
-                           : sh_webview_json::escape_wide(msg);
+    std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg.c_str()))
+                           : sh_webview_json::escape_wide(msg.c_str());
 
     /* ui_logf carries exactly one unsigned long, so compose the detail line first. The paths are
      * what makes this log worth having when someone reports "it did not load my file". */
-    {
-        char line[2048];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "rawmap configure: ok=%d arm=%d load=%s save=%s msg=%s",
-                    ok, arm,
-                    load_path ? load_path : "(unchanged)",
-                    save_path ? save_path : "(unchanged)", msg);
-        ui_log(line);
-    }
+    ui_log(("rawmap configure: ok=" + std::to_string(ok) + " arm=" + std::to_string(arm) + " load=" +
+            (load_path ? load_path : "(unchanged)") + " save=" + (save_path ? save_path : "(unchanged)") +
+            " msg=" + msg).c_str());
     ui_send_rawmap_status(note.c_str(), nullptr, !ok);
 }
 
@@ -2127,12 +2123,10 @@ static void ui_begin_pick(int kind)
     }
     /* Asked here, on the UI thread: the picker thread touches no backend slot. */
     {
-        char status[2048] = "";
-        int mods = 0;
-        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status &&
-            g_iface->vtbl->rawmap_status(g_iface, status, (int)sizeof status) > 0)
-            mods = sh_rawmap_picker::map_mods_from_status(status);
-        InterlockedExchange(&g_pick_mods, mods);
+        std::string status;
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status)
+            status = ui_take(g_iface->vtbl->rawmap_status(g_iface));
+        InterlockedExchange(&g_pick_mods, sh_rawmap_picker::map_mods_from_status(status.c_str()));
     }
     g_pick_folder = ui_pick_start_folder(kind);   /* read by the dialog's thread, which starts below */
     h = CreateThread(nullptr, 0, ui_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
@@ -2156,46 +2150,39 @@ static void ui_finish_prefab_pick(int kind, bool picked, const std::string &zip8
         ui_post_json(m.c_str());
         return;
     }
-    static char out[4096];
-    out[0] = '\0';
+    std::string out;
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.zip_path = zip8.c_str();
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    char path[1024] = "", meta[1024] = "";
+    std::string path, meta;
     int r;
     if (kind == 2) {
-        if (!ui_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path, (int)sizeof path) ||
-            !ui_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta, (int)sizeof meta)) {
+        if (!ui_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path) ||
+            !ui_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta)) {
             ui_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"That prefab cannot be found.\"}");
             return;
         }
         call.op = SH_MODULE_PREFAB_EXPORT;
-        call.path = path;
-        call.meta_path = meta;
+        call.path = path.c_str();
+        call.meta_path = meta.c_str();
         call.name = g_pick_prefab_name.c_str();
-        r = ui_module_prefab_call(&call);
+        r = ui_module_prefab_call(&call, &out);
     } else {
-        if (!ui_prefab_dir("", path, (int)sizeof path)) {
+        if (!ui_prefab_dir("", path)) {
             ui_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"The prefabs folder cannot be found.\"}");
             return;
         }
         call.op = SH_MODULE_PREFAB_IMPORT;
-        call.path = path;
-        r = ui_module_prefab_call(&call);
+        call.path = path.c_str();
+        r = ui_module_prefab_call(&call, &out);
     }
-    {
-        char l[1400];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "prefab %s: result=%d zip='%s' %s", kind == 2 ? "export" : "import", r,
-                    zip8.c_str(), out);
-        ui_log(l);
-    }
+    ui_log((std::string("prefab ") + (kind == 2 ? "export" : "import") + ": result=" + std::to_string(r) + " zip='" +
+            zip8 + "' " + out).c_str());
     std::wstring m = L"{\"kind\":\"prefabFileResult\",\"op\":\""; m += op;
     m += L"\",\"ok\":"; m += r >= 0 && (kind == 3 || r == 1) ? L"true" : L"false";
     m += L",\"result\":"; m += std::to_wstring(r);
     if (kind == 2) {
-        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "The prefab could not be exported. Try again."); m += L"\"";
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(!out.empty() ? out.c_str() : "The prefab could not be exported. Try again."); m += L"\"";
     } else {
         /* the backend's {"ok","added","name","message"}: only its message and name are forwarded */
         std::string text = out, message, name;
@@ -2257,19 +2244,16 @@ static void ui_finish_pick()
     /* arm = 2: the picked file is the one to open now. The backend checks the file and that the
      * editor can open it, and refuses at once otherwise; nothing waits for a later map. */
     {
-        char msg[1024] = "";
+        char *said = nullptr;
         int accepted = 0;
-        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure) {
-            accepted = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
-                                                       msg, (int)sizeof msg);
-        }
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure)
+            accepted = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2, &said);
+        std::string msg = ui_take(said);
         if (!accepted) {
             /* The backend logs the refusal and prints it to the console (rawmap.c); this is the UI
              * log's line, as the prefab Import's refusal has one. */
-            char l[1400];
-            _snprintf_s(l, sizeof l, _TRUNCATE, "rawmap load: refused '%s': %s", p8.c_str(), msg);
-            ui_log(l);
-            ui_send_rawmap_status(sh_webview_json::escape_wide(msg).c_str(), nullptr, true);
+            ui_log(("rawmap load: refused '" + p8 + "': " + msg).c_str());
+            ui_send_rawmap_status(sh_webview_json::escape_wide(msg.c_str()).c_str(), nullptr, true);
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
              * offers no "has unsaved changes" query. Answering no opens nothing. The page owns
@@ -2284,26 +2268,13 @@ static void ui_finish_pick()
 static void ui_send_preview(const char *name)
 {
     if (!g_webview) return;
-    std::string uri;
-    int rc = 0;
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->get_preview) {
-        char probe[8] = "";
-        rc = g_iface->vtbl->get_preview(g_iface, probe, (int)sizeof probe);
-        if (rc < 0) {                       /* -(required size) */
-            size_t need = (size_t)(-rc);
-            uri.resize(need);
-            rc = g_iface->vtbl->get_preview(g_iface, &uri[0], (int)need);
-            if (rc > 0) uri.resize((size_t)rc); else uri.clear();
-        } else if (rc > 0) {
-            uri.assign(probe, (size_t)rc);  /* implausibly small, but handle it */
-        }
-    }
-    char reason[256] = "";
+    std::string uri, reason;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->get_preview) uri = ui_take(g_iface->vtbl->get_preview(g_iface));
     if (uri.empty() && SH_IFACE_HAS_SLOT(g_iface, preview_failure))
-        (void)g_iface->vtbl->preview_failure(g_iface, reason, sizeof reason);
+        reason = ui_take(g_iface->vtbl->preview_failure(g_iface));
     std::wstring json = L"{\"kind\":\"previewImage\",\"ok\":";
     json += uri.empty() ? L"false" : L"true";
-    json += L",\"reason\":\""; json += sh_webview_json::escape_wide(reason); json += L"\"";
+    json += L",\"reason\":\""; json += sh_webview_json::escape_wide(reason.c_str()); json += L"\"";
     json += L",\"uri\":\"";
     json += sh_webview_json::escape_wide(uri.c_str());
     json += L"\",\"name\":\"";
@@ -2342,25 +2313,15 @@ static void ui_cancel_preview()
         g_iface->vtbl->request_preview(g_iface, "");
 }
 
-/* Collect catalog pages into one response for the page's bounded cache.
- * Older backends can still supply materials through list_materials. */
+/* One kind's whole catalog in one response for the page's cache. */
 static void ui_send_asset_list(int kind)
 {
     if (!g_webview) return;
     std::string all;
     int total = 0;
-    if (g_iface && g_iface->vtbl) {
-        std::string chunk(64 * 1024, '\0');
-        for (int guard = 0; guard < 512; ++guard) {      /* guard: never spin if the backend lies */
-            int n = 0;
-            if (g_iface->vtbl->list_assets)
-                n = g_iface->vtbl->list_assets(g_iface, kind, total, &chunk[0], (int)chunk.size());
-            else if (kind == SH_ASSET_MATERIAL && g_iface->vtbl->list_materials)
-                n = g_iface->vtbl->list_materials(g_iface, total, &chunk[0], (int)chunk.size());
-            if (n <= 0) break;
-            all += chunk.c_str();                        /* NUL-terminated, newline-separated */
-            total += n;
-        }
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->list_assets) {
+        all = ui_take(g_iface->vtbl->list_assets(g_iface, kind));   /* newline-separated */
+        for (char c : all) total += c == '\n';
     }
     std::wstring json = L"{\"kind\":\"assetList\",\"assetKind\":";
     json += std::to_wstring(kind);
@@ -2456,36 +2417,21 @@ static void ui_post_json(const wchar_t *json) { if (g_webview) g_webview->PostWe
 static void ui_send_prefab_mesh_completion()
 {
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->get_prefab_mesh) return;
-    int query = g_iface->vtbl->get_prefab_mesh(g_iface, nullptr, 0);
-    if (query >= 0) return;
-    int needed = -query;
-    if (needed <= 0 || needed > 16 * 1024 * 1024) return;
-
-    if (!g_webview_environment12 || !g_webview17) {
-        std::vector<unsigned char> discard((size_t)needed);
-        g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
-        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
-        return;
-    }
+    void *blob = nullptr;
+    int needed = g_iface->vtbl->get_prefab_mesh(g_iface, &blob);
+    if (needed <= 0 || !blob) { ui_free_text(blob); return; }
 
     ComPtr<ICoreWebView2SharedBuffer> shared;
-    if (FAILED(g_webview_environment12->CreateSharedBuffer((UINT64)needed, shared.GetAddressOf())) || !shared) {
-        std::vector<unsigned char> discard((size_t)needed);
-        g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
-        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
-        return;
-    }
     BYTE *dst = nullptr;
-    if (FAILED(shared->get_Buffer(&dst)) || !dst) {
-        std::vector<unsigned char> discard((size_t)needed);
-        g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
+    if (!g_webview_environment12 || !g_webview17 ||
+        FAILED(g_webview_environment12->CreateSharedBuffer((UINT64)needed, shared.GetAddressOf())) || !shared ||
+        FAILED(shared->get_Buffer(&dst)) || !dst) {
+        ui_free_text(blob);
         ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
         return;
     }
-    if (g_iface->vtbl->get_prefab_mesh(g_iface, dst, needed) != needed) {
-        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
-        return;
-    }
+    memcpy(dst, blob, (size_t)needed);
+    ui_free_text(blob);
 
     std::wstring meta = L"{\"kind\":\"prefabMesh\",\"bytes\":";
     meta += std::to_wstring(needed); meta += L"}";
@@ -2503,35 +2449,20 @@ static void ui_post_window_state(HWND hwnd)
         : L"{\"kind\":\"windowState\",\"maximized\":false}");
 }
 
-/* The two append-only config slots transport canonical JSON fragments. The getter is deliberately
- * retried because another process can replace config.json between its size query and copy call. */
+/* The two append-only config slots transport canonical JSON fragments, whole. */
 static int ui_config_get_json(const std::string &key, std::string &value,
                                unsigned int *out_flags)
 {
     unsigned int flags = 0;
+    char *json = nullptr;
     value.clear();
     if (out_flags) *out_flags = 0;
-    if (key.empty() || key.size() > UI_CONFIG_KEY_CAP ||
-        !g_iface || !g_iface->vtbl || !g_iface->vtbl->config_get_json)
+    if (key.empty() || !g_iface || !g_iface->vtbl || !g_iface->vtbl->config_get_json)
         return -1;
-    for (int attempt = 0; attempt < 3; attempt++) {
-        int needed = g_iface->vtbl->config_get_json(
-            g_iface, key.c_str(), nullptr, 0, &flags);
-        if (out_flags) *out_flags = flags;
-        if (needed < 0 || (unsigned int)needed > UI_CONFIG_VALUE_CAP)
-            return -1;
-        std::vector<char> buffer((size_t)needed + 1u, 0);
-        int got = g_iface->vtbl->config_get_json(
-            g_iface, key.c_str(), buffer.data(), (int)buffer.size(), &flags);
-        if (out_flags) *out_flags = flags;
-        if (got >= 0 && (size_t)got < buffer.size()) {
-            value.assign(buffer.data(), (size_t)got);
-            return got;
-        }
-        if (got < 0 || (unsigned int)got > UI_CONFIG_VALUE_CAP)
-            return -1;
-    }
-    return -1;
+    int got = g_iface->vtbl->config_get_json(g_iface, key.c_str(), &json, &flags);
+    if (out_flags) *out_flags = flags;
+    value = ui_take(json);
+    return got < 0 ? -1 : (int)value.size();
 }
 
 static void ui_post_config_value(const std::string &key)
@@ -2675,8 +2606,7 @@ static bool ui_read_prefab_scene(const char *path, std::string &body)
  * where the block sits. Empty when there are none or this backend cannot answer. */
 static std::string ui_prefab_view(const char *path, const char *meta_path, const std::string *text)
 {
-    static char out[256 * 1024];
-    std::string tail;
+    std::string tail, out;
     bool is_tail = false;
     if (!text) {
         FILE *fp = ui_open(path, L"rb");
@@ -2693,7 +2623,6 @@ static std::string ui_prefab_view(const char *path, const char *meta_path, const
         }
         text = &tail;
     }
-    out[0] = '\0';
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_META_READ;
@@ -2701,49 +2630,38 @@ static std::string ui_prefab_view(const char *path, const char *meta_path, const
     call.text_len = text->size();
     call.tail = is_tail ? 1 : 0;
     call.meta_path = meta_path;
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    int r = ui_module_prefab_call(&call);
-    if (r <= 0 || !out[0]) return std::string();
-    return std::string(out);
+    int r = ui_module_prefab_call(&call, &out);
+    return r <= 0 ? std::string() : out;
 }
 /* The backend's module check for a module prefab's text (SH_MODULE_PREFAB_CHECK):
  * its JSON, or empty when this backend or editor cannot answer. The text is the
  * whole file; the backend leaves its block out and reads its mod rows from it. */
 static std::string ui_module_prefab_check(const std::string &scene, const char *meta_path)
 {
-    static char out[16 * 1024];
+    std::string out;
     sh_module_prefab_call call;
     if (scene.empty()) return std::string();
-    out[0] = '\0';
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_CHECK;
     call.text = scene.c_str();
     call.text_len = scene.size();
     call.meta_path = meta_path;   /* a module one of its mods provides is listed under Mods instead */
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    int r = ui_module_prefab_call(&call);
-    if (r < 0 || !out[0]) return std::string();
-    return std::string(out);
+    int r = ui_module_prefab_call(&call, &out);
+    return r < 0 ? std::string() : out;
 }
 /* The mods a view records, with whether each is installed (SH_MODULE_PREFAB_MODS_STATUS):
  * its JSON, or empty when the view records none or this backend cannot answer. */
 static std::string ui_prefab_mods_status(const std::string &meta)
 {
-    static char out[64 * 1024];
+    std::string out;
     if (meta.empty() || meta.find("\"mods\"") == std::string::npos) return std::string();
-    out[0] = '\0';
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_STATUS;
     call.text = meta.c_str();
     call.text_len = meta.size();
-    call.out = out;
-    call.out_cap = (int)sizeof out;
-    int r = ui_module_prefab_call(&call);
-    if (r < 0 || !out[0]) return std::string();
-    return std::string(out);
+    int r = ui_module_prefab_call(&call, &out);
+    return r < 0 ? std::string() : out;
 }
 static void ui_send_prefab_detail(const std::string &name, const std::string &folder)
 {
@@ -2752,9 +2670,10 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
     bool ok = false, modules = false;
     std::string metaBody, sceneBody, fileBody;
     std::wstring sig;
-    char path[1024] = "", mp[1024] = "";
-    if (!name.empty() && ui_prefab_file_path(folder, name, path, (int)sizeof path) && ui_exists(path)) {
-        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
+    std::string pathText, mpText;
+    if (!name.empty() && ui_prefab_file_path(folder, name, pathText) && ui_exists(pathText.c_str())) {
+        if (!ui_prefab_meta_path(folder, name, mpText)) mpText.clear();
+        const char *path = pathText.c_str(), *mp = mpText.c_str();
         /* The scene is sent only for the selected prefab, without the product's block. */
         bool whole = ui_read_prefab_scene(path, fileBody);
         /* the view ships as an ESCAPED STRING (the page JSON.parses it with a try/catch), never
@@ -2787,7 +2706,7 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
     if (modules) {
         /* an escaped string, parsed by the page under try/catch like the view */
-        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(ui_module_prefab_check(fileBody, mp).c_str());
+        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(ui_module_prefab_check(fileBody, mpText.c_str()).c_str());
         json += L"\"";
     }
     json += L",\"modsStatus\":\""; json += sh_webview_json::escape_wide(ui_prefab_mods_status(metaBody).c_str());
@@ -2805,6 +2724,7 @@ static unsigned g_budget_sent_gen = 0;     /* table generation last posted */
 
 static int ui_budget_call(sh_budget_call *call)
 {
+    call->out = nullptr;
     if (!SH_IFACE_HAS_SLOT(g_iface, budget)) return 0;
     __try { return g_iface->vtbl->budget(g_iface, call); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -2838,12 +2758,7 @@ static unsigned ui_budget_read(int op, std::string &out)
     memset(&call, 0, sizeof call);
     call.op = op;
     int r = ui_budget_call(&call);
-    if (r == -1 && call.needed > 0 && call.needed < 64 * 1024 * 1024) {
-        std::vector<char> buf((size_t)call.needed + 1);
-        call.out = buf.data(); call.out_cap = (int)buf.size();
-        r = ui_budget_call(&call);
-        if (r == 1) out.assign(buf.data());
-    }
+    out = ui_take(call.out);
     return r == 1 ? call.generation : 0;
 }
 
@@ -2959,18 +2874,28 @@ static ULONGLONG     g_mods_push_next = 0;
 
 struct UiModsMain { sh_mods_call call; int rc; };
 
-static int ui_mods_slot(sh_mods_call *call)
+static int ui_mods_slot_seh(sh_mods_call *call)
 {
     if (!SH_IFACE_HAS_SLOT(g_iface, mods)) return 0;
     __try { return g_iface->vtbl->mods(g_iface, call); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+/* The call, with its text (owned by the slot) taken whole into out. */
+static int ui_mods_slot(sh_mods_call *call, std::string *out = nullptr)
+{
+    call->out = nullptr;
+    int r = ui_mods_slot_seh(call);
+    std::string text = ui_take(call->out);
+    call->out = nullptr;
+    if (out) *out = text;
+    return r;
 }
 
 /* Runs on DOOM's main thread inside run_on_main. */
 static int ui_mods_main_call(void *ctx)
 {
     UiModsMain *m = (UiModsMain *)ctx;
-    m->rc = ui_mods_slot(&m->call);
+    m->rc = ui_mods_slot_seh(&m->call);   /* LIST and RUN hand no text over */
     return m->rc;
 }
 
@@ -2995,13 +2920,7 @@ static bool ui_mods_fetch(std::string &out)
     out.clear();
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_FETCH;
-    if (ui_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > UI_MODS_DOC_MAX) return false;
-    std::vector<char> buf((size_t)call.needed + 1);
-    call.out = buf.data();
-    call.out_cap = (int)buf.size();
-    if (ui_mods_slot(&call) != 1) return false;
-    out.assign(buf.data());
-    return true;
+    return ui_mods_slot(&call, &out) == 1;
 }
 
 /* The dialog for Install, on the worker thread (its own apartment): mod folders, or with `zip` mod
@@ -3239,19 +3158,11 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
 static void ui_mods_send_scripts(const std::string &salt)
 {
     std::string doc;
-    if (salt.size() <= 64 + sizeof SH_MODS_SCRIPTS_FULL) {
-        for (int attempt = 0; attempt < 3 && doc.empty(); attempt++) {
-            sh_mods_call call;
-            memset(&call, 0, sizeof call);
-            call.op = SH_MODS_SCRIPTS;
-            call.arg = salt.c_str();
-            if (ui_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > UI_MODS_DOC_MAX) break;
-            std::vector<char> buf((size_t)call.needed + 1);
-            call.out = buf.data();
-            call.out_cap = (int)buf.size();
-            if (ui_mods_slot(&call) == 1) doc.assign(buf.data());   /* -1: the log grew; ask again */
-        }
-    }
+    sh_mods_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_SCRIPTS;
+    call.arg = salt.c_str();
+    if (ui_mods_slot(&call, &doc) != 1) doc.clear();
     ui_mods_post(L"{\"kind\":\"modsScripts\",\"data\":", doc, L"}");
 }
 
@@ -3328,10 +3239,10 @@ static volatile LONG     g_watch_started = 0;
 
 static bool ui_watch_dir(std::wstring &out)
 {
-    char path[MAX_PATH * 4];
+    std::string path;
     out.clear();
-    if (!ui_prefab_dir("", path, (int)sizeof path)) return false;
-    out = ui_widen(path);
+    if (!ui_prefab_dir("", path)) return false;
+    out = ui_wpath(path.c_str());
     while (!out.empty() && (out.back() == L'\\' || out.back() == L'/')) out.pop_back();
     return !out.empty();
 }
@@ -3405,7 +3316,7 @@ static void ui_mods_push_tick()
     if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0) return;
     sh_mods_call call;
     memset(&call, 0, sizeof call);
-    call.op = SH_MODS_FETCH;   /* out NULL: the size query, which sets the generation */
+    call.op = SH_MODS_GENERATION;
     if (ui_mods_slot(&call) == 0 && !call.generation) return;
     if (!call.generation || call.generation == g_mods_doc_gen) return;
     if (!ui_mods_begin(0, false, std::string())) return;
@@ -3466,7 +3377,7 @@ static bool ui_mods_relative_folder(const std::wstring &path)
 static void ui_mods_open_folder(const std::wstring &folder)
 {
     sh_mods_call call;
-    char root[MAX_PATH * 4];
+    std::string root;
     bool ok = false;
     if (!folder.empty() && !ui_mods_relative_folder(folder)) {
         ui_mods_post_result(L"openFolder", false, L"That folder is not a mod folder.", nullptr);
@@ -3474,14 +3385,9 @@ static void ui_mods_open_folder(const std::wstring &folder)
     }
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_ROOT;
-    call.out = root;
-    call.out_cap = (int)sizeof root;
-    if (ui_mods_slot(&call) == 1) {
-        int wl = MultiByteToWideChar(CP_UTF8, 0, root, -1, nullptr, 0);
-        if (wl > 0) {
-            std::wstring w((size_t)wl, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, root, -1, &w[0], wl);
-            w.resize(wcslen(w.c_str()));
+    if (ui_mods_slot(&call, &root) == 1) {
+        std::wstring w = ui_widen(root.c_str());
+        if (!w.empty()) {
             if (folder.empty()) SHCreateDirectoryExW(nullptr, w.c_str(), nullptr);
             else {
                 w += L"\\";
@@ -3523,7 +3429,7 @@ static void ui_mods_open_file(const std::wstring &arg)
     size_t tab = arg.find(L'\t');
     std::wstring folder = tab == std::wstring::npos ? L"" : arg.substr(0, tab), rel = tab == std::wstring::npos ? L"" : arg.substr(tab + 1);
     sh_mods_call call;
-    char root[MAX_PATH * 4];
+    std::string root;
     bool ok = false;
     if (!ui_mods_relative_folder(folder) || !ui_mods_relative_file(rel)) {
         ui_mods_post_result(L"openFile", false, L"That file is not inside a mod folder.", nullptr);
@@ -3531,10 +3437,8 @@ static void ui_mods_open_file(const std::wstring &arg)
     }
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_ROOT;
-    call.out = root;
-    call.out_cap = (int)sizeof root;
-    if (ui_mods_slot(&call) == 1) {
-        std::wstring w = ui_widen(root) + L"\\" + folder + L"\\" + rel;
+    if (ui_mods_slot(&call, &root) == 1) {
+        std::wstring w = ui_widen(root.c_str()) + L"\\" + folder + L"\\" + rel;
         for (wchar_t &c : w) if (c == L'/') c = L'\\';
         DWORD at = GetFileAttributesW(w.c_str());
         if (at == INVALID_FILE_ATTRIBUTES || (at & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -3576,12 +3480,12 @@ static void ui_send_prefabs()
     if (!g_webview) return;
     std::vector<std::string> rootNames;
     std::vector<std::pair<std::string, std::vector<std::string>>> folders;
-    char rootDir[1024];
-    if (ui_prefab_dir("", rootDir, (int)sizeof rootDir)) {
+    std::string rootDir;
+    if (ui_prefab_dir("", rootDir)) {
         ui_list_json_dir(rootDir, rootNames);
 
         std::vector<std::string> subdirs;
-        std::wstring pattern = ui_widen(rootDir) + L"*";
+        std::wstring pattern = ui_wpath(rootDir.c_str()) + L"*";
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
@@ -3596,17 +3500,17 @@ static void ui_send_prefabs()
         std::sort(subdirs.begin(), subdirs.end());
         for (size_t i = 0; i < subdirs.size(); i++) {
             std::vector<std::string> items;
-            ui_list_json_dir(std::string(rootDir) + subdirs[i] + "\\", items);
+            ui_list_json_dir(rootDir + subdirs[i] + "\\", items);
             folders.push_back(std::make_pair(subdirs[i], items));
         }
     }
     /* One view per prefab, keyed like the page keys them. */
     std::vector<std::pair<std::string, std::string>> views;
     auto readView = [&](const std::string &folder, const std::string &name) {
-        char path[1024], mp[1024];
-        if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return;
-        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
-        std::string view = ui_prefab_view(path, mp, nullptr);
+        std::string path, mp;
+        if (!ui_prefab_file_path(folder, name, path)) return;
+        if (!ui_prefab_meta_path(folder, name, mp)) mp.clear();
+        std::string view = ui_prefab_view(path.c_str(), mp.c_str(), nullptr);
         if (view.empty()) return;
         views.push_back(std::make_pair(folder.empty() ? name : (folder + "/" + name), view));
     };
@@ -3648,10 +3552,10 @@ static void ui_send_prefabs()
     json += L"},\"kinds\":{";
     bool firstKind = true;
     auto kindOf = [&](const std::string &folder, const std::string &name) {
-        char path[1024];
-        if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return;
+        std::string path;
+        if (!ui_prefab_file_path(folder, name, path)) return;
         std::string key = folder.empty() ? name : (folder + "/" + name);
-        std::string kind = sh_prefab_host::kind_of_type(ui_file_top_type(path));
+        std::string kind = sh_prefab_host::kind_of_type(ui_file_top_type(path.c_str()));
         if (kind.empty())
             for (size_t v = 0; v < views.size(); v++)
                 if (views[v].first == key && ui_meta_kind_of(views[v].second) == "modules") kind = "modules";
@@ -3685,16 +3589,16 @@ static void ui_send_prefabs()
 static void ui_apply_save_prefab_meta(const std::string &name, const std::string &folder, const std::string &body)
 {
     int result = -1;
-    char path[1024], mp[1024];
-    if (!name.empty() && ui_prefab_file_path(folder, name, path, (int)sizeof path)) {
-        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
+    std::string path, mp;
+    if (!name.empty() && ui_prefab_file_path(folder, name, path)) {
+        if (!ui_prefab_meta_path(folder, name, mp)) mp.clear();
         sh_module_prefab_call call;
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_META_WRITE;
         call.text = body.c_str();
         call.text_len = body.size();
-        call.path = path;
-        call.meta_path = mp;
+        call.path = path.c_str();
+        call.meta_path = mp.c_str();
         int w = ui_module_prefab_call(&call);
         result = w == 1 ? 1 : -1;   /* 0: this backend cannot write details */
     }
@@ -4011,7 +3915,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     sh_webview_json::get_int(json, L"mounted", &mounted) &&
                     sh_webview_json::get_double(json, L"renderMs", &render_ms) &&
                     sh_webview_json::get_double(json, L"handlerMs", &handler_ms) &&
-                    seq >= 0 && entities >= 0 && entities <= UI_MAX_ENTS &&
+                    seq >= 0 && entities >= 0 &&
                     matched >= 0 && matched <= entities && mounted >= 0 && mounted <= matched &&
                     std::isfinite(render_ms) && std::isfinite(handler_ms) &&
                     render_ms >= 0.0 && render_ms <= 600000.0 &&
@@ -4062,25 +3966,17 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 sh_webview_json::get_string(json, L"inherit", inherit);
                 std::string inherit8 = sh_webview_json::to_utf8(inherit);
                 /* scale[0..2] renderModelInfo.scale, scale[3..5] the palette row's renderInfo.size. */
-                char model[512] = {0}; float scale[6] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f}; int flags = 0;
-                if (generation >= 0 && inherit8.size() < 512 && g_iface && g_iface->vtbl) {
-                    if (g_iface->vtbl->resolve_prefab_defaults)
-                        flags = g_iface->vtbl->resolve_prefab_defaults(g_iface, inherit8.c_str(),
-                                                                       model, (int)sizeof model,
-                                                                       scale, 6);
-                    /* Keep ext 20 as an ABI-compatible model-only fallback. New paired builds use
-                     * ext 23 so sparse prefab scale can be merged with the installed entityDef. */
-                    if (!(flags & SH_PREFAB_DEFAULT_MODEL) &&
-                        g_iface->vtbl->resolve_prefab_model &&
-                        g_iface->vtbl->resolve_prefab_model(g_iface, inherit8.c_str(),
-                                                            model, (int)sizeof model))
-                        flags |= SH_PREFAB_DEFAULT_MODEL;
+                std::string model; float scale[6] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f}; int flags = 0;
+                if (generation >= 0 && g_iface && g_iface->vtbl && g_iface->vtbl->resolve_prefab_defaults) {
+                    char *owned = nullptr;
+                    flags = g_iface->vtbl->resolve_prefab_defaults(g_iface, inherit8.c_str(), &owned, scale, 6);
+                    model = ui_take(owned);
                 }
                 std::wstring m = L"{\"kind\":\"prefabModelResolved\",\"generation\":";
                 m += std::to_wstring(generation);
                 m += L",\"inherit\":\""; m += sh_webview_json::escape_wide(inherit8.c_str());
                 m += L"\",\"model\":\"";
-                if (flags & SH_PREFAB_DEFAULT_MODEL) m += sh_webview_json::escape_wide(model);
+                if (flags & SH_PREFAB_DEFAULT_MODEL) m += sh_webview_json::escape_wide(model.c_str());
                 m += L"\",\"scale\":";
                 if (flags & SH_PREFAB_DEFAULT_SCALE) {
                     m += L"["; m += std::to_wstring(scale[0]); m += L",";
@@ -4245,21 +4141,20 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"navmeshState") {
                 ui_send_navmesh_state();
             } else if (cmd == L"navmeshUpdate") {
-                if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view) {
-                    char state[512] = "";
-                    g_iface->vtbl->navmesh_view(g_iface, 1, state, (int)sizeof state);
-                }
+                if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view)
+                    ui_free_text(g_iface->vtbl->navmesh_view(g_iface, 1));
                 ui_send_navmesh_state();
             } else if (cmd == L"rawmapLoadNow") {
                 /* Open the load path now through the backend's editor-frame hook. The reply is a
                  * REQUEST result; the reload lands a frame later, and a failure there is told by the
                  * backend's own toast and console line. */
                 {
-                    char msg[1024] = "";
-                    int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
+                    char *said = nullptr;
+                    int ok = g_iface->vtbl->rawmap_load_now(g_iface, &said);
+                    std::string msg = ui_take(said);
                     ui_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
                     ui_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
-                                              : sh_webview_json::escape_wide(msg).c_str(), nullptr, !ok);
+                                              : sh_webview_json::escape_wide(msg.c_str()).c_str(), nullptr, !ok);
                 }
             } else if (cmd == L"rawmapKeepHere") {
                 /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
@@ -4424,8 +4319,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"tlUseSelection") {
                 /* Fetch current selection on demand, using the full entity capacity so the
                  * reported count is not truncated. */
-                static int uselids[UI_MAX_ENTS];
-                int un = ui_get_selection(uselids, UI_MAX_ENTS);
+                std::vector<int> uselids;
+                int un = ui_get_selection(uselids);
                 wchar_t m[96];
                 if (un == 1) _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":true,\"eid\":%d}", uselids[0]);
                 else _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":false,\"count\":%d}", un);
@@ -4758,7 +4653,7 @@ static void ui_think_loop()
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
             m += (g_sound_preview_result ? L"true" : L"false");
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_sound_preview_name.c_str());
-            m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(g_sound_preview_reason); m += L"\"}";
+            m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(g_sound_preview_reason.c_str()); m += L"\"}";
             ui_post_json(m.c_str());
         }
         if (did_new_entity) {
@@ -4927,8 +4822,8 @@ static void ui_think_loop()
 
                 /* Publish selection count regardless of sync direction for prefab creation. */
                 unsigned long long selection_started = ui_perf_now_us();
-                static int selids[UI_MAX_ENTS];
-                int sn = ui_get_selection(selids, UI_MAX_ENTS);
+                std::vector<int> selids;
+                int sn = ui_get_selection(selids);
                 if (sn != g_last_selcount) {
                     g_last_selcount = sn;
                     wchar_t m[64]; _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"selCount\",\"count\":%d}", sn);
@@ -4941,7 +4836,7 @@ static void ui_think_loop()
                 ui_budget_usage_poll();
                 if (g_sync_on) {
                     /* mirror the WHOLE editor selection (any N) into the list, only when it changes. */
-                    std::sort(selids, selids + sn);
+                    std::sort(selids.begin(), selids.end());
                     uint64_t sig = 1469598103934665603ull;
                     for (int a = 0; a < sn; a++) sig = hint(sig, selids[a]);
                     sig ^= (uint64_t)sn;
@@ -4989,14 +4884,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     std::string backend_version = args ? sh_game_identity::backend_version(args->argc, args->argv) : std::string();
     g_pair_mismatch = g_iface && (sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl) ||
                                   (!backend_version.empty() && backend_version != g_version));
-    g_ents = (UiEnt *)malloc(sizeof(UiEnt) * UI_MAX_ENTS);
-    g_tls  = (UiTl  *)malloc(sizeof(UiTl)  * UI_MAX_TLS);
-    if (!g_ents || !g_tls) {
-        ui_log("sh_ui_init: FATAL -- malloc failed for g_ents/g_tls, aborting init");
-        free(g_ents); g_ents = nullptr;
-        free(g_tls);  g_tls  = nullptr;
-        return 1;
-    }
     g_game = args ? sh_game_identity::from_argv(args->argc, args->argv) : std::string();
 
     ui_log("=== sh_ui_init: the Snapmap+ window is starting ===");

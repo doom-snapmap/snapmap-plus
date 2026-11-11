@@ -2,6 +2,22 @@
 #include <assert.h>
 #include "../src/backend/snapstack.c"
 
+/* The interface's owned text (snapmap_plus_iface.c, not linked here: this test defines the
+ * registry calls itself). */
+char *sh_iface_textf(const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    char *out;
+    va_start(ap, fmt);
+    n = _vscprintf(fmt, ap);
+    va_end(ap);
+    out = n < 0 ? NULL : (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)n + 1);
+    if (out) { va_start(ap, fmt); vsnprintf(out, (size_t)n + 1, fmt, ap); va_end(ap); }
+    return out;
+}
+void sh_iface_text_free(void *text) { if (text) HeapFree(GetProcessHeap(), 0, text); }
+
 static int pair_calls[6], rebuild_calls[6], reads[6];
 static int toasts, applies, apply_result = 1;
 static unsigned long generation = 7;
@@ -18,13 +34,12 @@ static int pair(sh_iface *self, int id, const char *cls, const char *inh)
     if (id == 4 && call == 1) return -2;
     return 1;
 }
-static const char *source(sh_iface *self, int id, char *out, int cap)
+static char *source(sh_iface *self, int id)
 {
     (void)self;
-    assert(id != 1 && id != 2 && pair_calls[id] == 1 && cap > 8);
+    assert(id != 1 && id != 2 && pair_calls[id] == 1);
     reads[id]++;
-    strcpy_s(out, (size_t)cap, "source");
-    return out;
+    return sh_iface_textf("source");
 }
 static void rebuild(sh_iface *self, int id, const char *text)
 {
@@ -40,8 +55,8 @@ static void toast(sh_iface *self, const char *title, const char *text)
     toasts++;
 }
 static int valid(sh_iface *self, int id) { (void)self; return id >= 0; }
-static int serialize(sh_iface *self, int id, char *out, int cap)
-{ (void)self; _snprintf_s(out, (size_t)cap, _TRUNCATE, "{\"id\":%d}", id); return 1; }
+static char *serialize(sh_iface *self, int id)
+{ (void)self; return sh_iface_textf("{\"id\":%d}", id); }
 static int apply_sync(sh_iface *self, const sh_apply_item *items, int n, const char *op)
 { (void)self; (void)items; (void)op; applies++; return apply_result < 0 ? apply_result : (apply_result ? n : 0); }
 

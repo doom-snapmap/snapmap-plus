@@ -756,21 +756,19 @@ int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)
     int r = 0, fresh;
     (void)self;
     if (!call) return 0;
-    call->needed = 0;
+    call->out = NULL;
     fresh = (ULONGLONG)GetTickCount64() - (ULONGLONG)InterlockedCompareExchange64(&g_usage_at, 0, 0) <= BT_USAGE_FRESH_MS;
     AcquireSRWLockShared(&g_lock);
     call->generation = g_generation;
     call->reached = fresh ? g_reached : 0;
     if (call->op == SH_BUDGET_TABLE && g_table) {
-        call->needed = (int)g_table_len;
-        if (!call->out || call->out_cap <= (int)g_table_len) r = -1;
-        else { memcpy(call->out, g_table, g_table_len + 1); r = 1; }
+        r = (call->out = sh_iface_textn(g_table, g_table_len)) != NULL;
     } else if (call->op == SH_BUDGET_USAGE && g_usage_ok && fresh) {
         int n = sh_bt_usage_json(NULL, 0, g_limits, g_usage, g_reached, g_generation);
-        call->needed = n < 0 ? 0 : n;
-        if (n < 0) r = 0;
-        else if (!call->out || call->out_cap <= n) r = -1;
-        else r = sh_bt_usage_json(call->out, call->out_cap, g_limits, g_usage, g_reached, g_generation) >= 0 ? 1 : 0;
+        if (n >= 0 && (call->out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)n + 1)) != NULL &&
+            sh_bt_usage_json(call->out, (size_t)n + 1, g_limits, g_usage, g_reached, g_generation) >= 0)
+            r = 1;
+        else { sh_iface_text_free(call->out); call->out = NULL; }
     }
     ReleaseSRWLockShared(&g_lock);
     return r;

@@ -516,8 +516,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     sh_ms_boot_release();
 
     {
-        char off[512];
-        if (sh_features_off_line(off, sizeof off)) backend_log(off);
+        char *off = sh_features_off_text();
+        if (off) backend_log(off);
+        free(off);
     }
     _snprintf_s(line, sizeof line, _TRUNCATE, "startup: install complete at process age %lu ms",
                 sh_boot_pacing_process_age_ms());

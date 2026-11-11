@@ -2083,10 +2083,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   function showState(d) {
     acClose();   // selection changed -- drop any completion popup from the previous entity
-    if (!d.ok || d.truncated) {
-      showPlaceholder(d.truncated
-        ? 'This entity declaration exceeds the 32 MiB editor safety limit and was not opened.<br><span style="opacity:0.75;">The declaration remains unchanged in the map.</span>'
-        : 'This entity could not be read; select it again.');
+    if (!d.ok) {
+      showPlaceholder('This entity could not be read; select it again.');
       return;
     }
     var decl = declLanguage.naturalize(d.decl || '');
@@ -2328,10 +2326,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       closeEntityEditor();
     } else if (d.kind === 'state') {
       if (d.eid !== primaryEid) return;
-      // A failed/over-limit refresh cannot safely coexist with an editable stale snapshot. Close the
+      // A failed refresh cannot safely coexist with an editable stale snapshot. Close the
       // editor even when it is dirty so Save cannot overwrite an authoritative declaration we could
       // not read in full.
-      if (!d.ok || d.truncated) { showState(d); return; }
+      if (!d.ok) { showState(d); return; }
       if (!d.auto) { showState(d); return; }   // explicit (non-auto) refresh always applies
       if (!isDirty()) { showState(d); return; }   // panel clean -- apply the whole snapshot as before
       // Preserve dirty fields, but accept a backend inherit correction when that field is

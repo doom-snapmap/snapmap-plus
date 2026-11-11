@@ -18,7 +18,7 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
  * decided object pastes, result is the last one's SH_PREFAB_PLACE_* and reason
  * says why it was staged only. Returns 1 while a queued paste is held in the
  * 3D view (EntityMode in its grab), 0 otherwise. Any thread; guarded reads. */
-int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reason_cap);
+int sh_apply_engine_place_watch(int *seq, int *result, const char **reason);
 
 /* Maintenance after a successful native Frame, outside recovery. Unknown or
  * off-main callers do nothing. On leaving RUNNING, preserve verified persistent
@@ -62,6 +62,8 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
 /* Live entity callbacks shaped for nav_regions, without a reverse link dependency. */
 int sh_apply_engine_entity_count(void *ctx);
 int sh_apply_engine_entity_valid(int id, void *ctx);
+/* The entity's JSON into out when it fits, and its whole length either way
+ * (a length of cap or more was not copied); 0 when it cannot be read. */
 int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
 /* The editor's live transform for an entity. A serialized spawnPosition is the
  * value the box was created with, so only this sees one the user has moved. */

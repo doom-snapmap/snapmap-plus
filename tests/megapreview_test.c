@@ -36,8 +36,8 @@ int sh_imgpreview_produce_image(const char *name, unsigned long generation, cons
     _snprintf_s(direct_image_name, sizeof direct_image_name, _TRUNCATE, "%s", name);
     return SH_PREVIEW_PUBLISHED;
 }
-int sh_preview_take_request(char *out, size_t cap, unsigned long *generation, int *kind)
-{ (void)out; (void)cap; (void)generation; (void)kind; return 0; }
+char *sh_preview_take_request(unsigned long *generation, int *kind)
+{ (void)generation; (void)kind; return NULL; }
 int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsigned w, unsigned h)
 { (void)generation; (void)rgba; (void)w; (void)h; return SH_PREVIEW_FAILED; }
 

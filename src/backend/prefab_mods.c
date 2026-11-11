@@ -20,9 +20,6 @@
 #include "../common/text.h"
 
 #define PM_NAME_MAX SH_PREFAB_NAME_MAX
-/* A message longer than the Prefabs tab's own buffer for it (the page's
- * call->out_cap) is said whole on the console, and the tab says so. */
-#define PM_OUT_OVER "The message is longer than the Prefabs tab can show; it is on the console."
 
 static sh_prefab_mods_ops g_ops;
 static int g_ops_bound;
@@ -1223,18 +1220,10 @@ static int pm_promote(const sh_modmanifest_list *rows, const char *name, char **
 /* the slot                                                            */
 /* ==================================================================== */
 
-/* The page's answer buffer (call->out, call->out_cap: the page's own size):
- * the text whole when it fits, else the whole text on the console and
- * PM_OUT_OVER in the buffer. */
+/* The page's answer: the text whole, as owned interface text in call->out. */
 static void pm_out(sh_module_prefab_call *call, const char *text)
 {
-    if (!text) text = "";
-    if (!call->out || call->out_cap <= 0) return;
-    if (strlen(text) < (size_t)call->out_cap) { strcpy_s(call->out, (size_t)call->out_cap, text); return; }
-    pm_print(text);
-    pm_logf("PREFABS: %s", text);
-    if (strlen(PM_OUT_OVER) < (size_t)call->out_cap) strcpy_s(call->out, (size_t)call->out_cap, PM_OUT_OVER);
-    else call->out[0] = 0;
+    sh_iface_text_set(&call->out, text ? text : "");
 }
 
 typedef struct pm_resolve_job {
@@ -1362,18 +1351,6 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         pm_json_put_kv(&b, "name", r >= 0 && name ? name : "", 1);
         pm_json_put_kv(&b, "message", msg ? msg : "", 0);
         pm_puts(&b, "}");
-        /* The answer is JSON: when it does not fit the page's buffer the
-         * message goes to the console and the page gets the short form. */
-        if (!b.bad && b.p && strlen(b.p) >= (size_t)call->out_cap) {
-            if (msg) pm_print(msg);
-            free(b.p);
-            memset(&b, 0, sizeof b);
-            pm_puts(&b, r >= 0 ? "{\"ok\":true" : "{\"ok\":false");
-            pm_puts(&b, r == 1 ? ",\"added\":true," : ",\"added\":false,");
-            pm_json_put_kv(&b, "name", r >= 0 && name && strlen(name) < 512 ? name : "", 1);
-            pm_json_put_kv(&b, "message", PM_OUT_OVER, 0);
-            pm_puts(&b, "}");
-        }
         pm_out(call, b.bad ? "{\"ok\":false,\"message\":\"The prefab was not imported: Snapmap+ ran out of memory. "
                              "Close other programs and try again.\"}" : b.p);
         free(b.p);

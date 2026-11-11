@@ -128,7 +128,7 @@ check(hostSrc.indexOf('"perf ui-list: seq=%d') >= 0 &&
 check(hostSrc.indexOf('perf poll-window:') >= 0 &&
       hostSrc.indexOf('ui_perf_note_poll(') >= 0,
   'complete periodic-task timing is missing');
-check(hostSrc.indexOf('std::sort(selids, selids + sn);') >= 0 &&
+check(hostSrc.indexOf('std::sort(selids.begin(), selids.end());') >= 0 &&
       hostSrc.indexOf('for (int a = 1; a < sn; a++)') < 0,
   'quadratic selection ordering returned');
 

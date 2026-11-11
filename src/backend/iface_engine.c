@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -346,18 +347,20 @@ static int slot_manipulation_in_progress(sh_iface *self)
     return manipulation_in_progress();
 }
 
-/* Cached material lookup only; do not invoke the fatal-on-miss loader. */
-static int slot_find_material(sh_iface *self, const char *name, char *out_info, int cap)
+/* Cached material lookup only; do not invoke the fatal-on-miss loader. The
+ * result is a fixed short phrase with two numbers. */
+static char *slot_find_material(sh_iface *self, const char *name)
 {
+    char info[64];
     (void)self;
-    return sh_typeinfo_find_material(name, out_info, (size_t)cap);
+    return sh_typeinfo_find_material(name, info, sizeof info) ? sh_iface_text(info) : NULL;
 }
 
-/* Consume published preview bytes; negative required size preserves them for retry. */
-static int slot_get_preview(sh_iface *self, char *out, int cap)
+/* Consume the published preview, owned. */
+static char *slot_get_preview(sh_iface *self)
 {
     (void)self;
-    return sh_preview_get(out, (size_t)(cap > 0 ? cap : 0));
+    return sh_preview_take();
 }
 
 /* Stage asynchronous preview work; null/empty cancels and releases pending output. */
@@ -378,20 +381,18 @@ static int slot_request_preview(sh_iface *self, const char *name)
     return 1;
 }
 
-/* Page the installed material index without touching engine state. */
-static int slot_list_materials(sh_iface *self, int start, char *out, int cap)
+/* The installed material index, whole, without touching engine state. */
+static char *slot_list_materials(sh_iface *self)
 {
     (void)self;
-    if (!out || cap <= 1) return 0;
-    return sh_imgpreview_list(SH_ASSET_MATERIAL, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
+    return sh_imgpreview_list(SH_ASSET_MATERIAL);
 }
 
-/* Page the selected asset catalog; invalid kinds return an empty result. */
-static int slot_list_assets(sh_iface *self, int kind, int start, char *out, int cap)
+/* The selected asset catalog, whole; invalid kinds return NULL. */
+static char *slot_list_assets(sh_iface *self, int kind)
 {
     (void)self;
-    if (!out || cap <= 1) return 0;
-    return sh_imgpreview_list(kind, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
+    return sh_imgpreview_list(kind);
 }
 
 /* Read the material's atlas rectangle from installed data. */
@@ -410,16 +411,16 @@ static int slot_sound_preview(sh_iface *self, const char *name)
 }
 
 /* Why the latest image preview failed, and why the latest audition was refused. */
-static int slot_preview_failure(sh_iface *self, char *out, size_t cap)
+static char *slot_preview_failure(sh_iface *self)
 {
     (void)self;
-    return sh_preview_failure(out, cap);
+    return sh_preview_failure();
 }
 
-static int slot_sound_refusal(sh_iface *self, char *out, size_t cap)
+static char *slot_sound_refusal(sh_iface *self)
 {
     (void)self;
-    return sh_soundpreview_refusal(out, cap);
+    return sh_soundpreview_refusal();
 }
 
 /* Main thread only: hold audition cvars for the browser session to avoid
@@ -491,15 +492,19 @@ static int prefab_model_rule(const char *inherit_name, char *out_model, int out_
     return def ? SH_PREFAB_DEFAULT_MODEL : 0;
 }
 
+/* The decl readers below fill a model name into a field of this size and
+ * refuse (no model) a name that does not fit; they never cut one. */
+#define IE_MODEL_NAME_CAP 1024
+
 /* Resolve prefab models from decl/installed data; mesh extraction is asynchronous. */
-static int slot_resolve_prefab_model(sh_iface *self, const char *inherit_name,
-                                     char *out_model, int out_capacity)
+static char *slot_resolve_prefab_model(sh_iface *self, const char *inherit_name)
 {
+    char model[IE_MODEL_NAME_CAP];
     float size[3];
     int have_size;
     (void)self;
-    return (prefab_model_rule(inherit_name, out_model, out_capacity, size, &have_size) &
-            SH_PREFAB_DEFAULT_MODEL) != 0;
+    return (prefab_model_rule(inherit_name, model, (int)sizeof model, size, &have_size) & SH_PREFAB_DEFAULT_MODEL)
+           ? sh_iface_text(model) : NULL;
 }
 
 static int slot_request_prefab_mesh(sh_iface *self, unsigned long generation, const char *model_name)
@@ -508,17 +513,17 @@ static int slot_request_prefab_mesh(sh_iface *self, unsigned long generation, co
     return sh_prefabpreview_request(generation, model_name);
 }
 
-static int slot_get_prefab_mesh(sh_iface *self, void *out_blob, int out_capacity)
+static int slot_get_prefab_mesh(sh_iface *self, void **out)
 {
     (void)self;
-    return sh_prefabpreview_get(out_blob, out_capacity);
+    return sh_prefabpreview_take(out);
 }
 
 /* The View menu's navigation entry. The read itself runs on the game's thread
  * a frame later, so this only asks and reports. */
-static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap)
+static char *slot_navmesh_view(sh_iface *self, int update)
 {
-    int state, floors = 0, walls = 0, pending, red = 0, rooms = 0, n;
+    int state, floors = 0, walls = 0, pending, red = 0, rooms = 0;
     sh_nav_bake_summary sum;
     char note[2 * sizeof sum.first + 8];
     const char *why;
@@ -526,7 +531,6 @@ static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap
     (void)self;
     if (update) sh_apply_engine_nav_request_update();
     state = sh_apply_engine_nav_view_state();
-    if (!out_json || cap <= 0) return 0;
     sh_nav_bake_volume_counts(&floors, &walls);
     /* Still working while the read is owed or the bake is on the worker. */
     pending = ((state & 2) || sh_nav_bake_preview_pending()) ? 1 : 0;
@@ -541,39 +545,31 @@ static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap
         else if (ch >= 0x20 && ch < 0x7f) note[k++] = (char)ch;
     }
     note[k] = 0;
-    n = _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
-                    "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
-                    "\"red\":%d,\"rooms\":%d,\"refused\":%d,\"total\":%d,\"built\":%d,"
-                    "\"partial\":%d,\"left\":%d,\"note\":\"%s\"}",
-                    (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
-                    (state & 4) ? 1 : 0, sum.rooms, sum.built, sum.partial,
-                    sum.boxes_left_out, note);
-    /* A caller with an older, smaller buffer still gets whole JSON. */
-    if (n < 0)
-        n = _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
-                        "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
-                        "\"red\":%d,\"rooms\":%d,\"refused\":%d}",
-                        (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
-                        (state & 4) ? 1 : 0);
-    return n;
+    return sh_iface_textf("{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
+                          "\"red\":%d,\"rooms\":%d,\"refused\":%d,\"total\":%d,\"built\":%d,"
+                          "\"partial\":%d,\"left\":%d,\"note\":\"%s\"}",
+                          (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
+                          (state & 4) ? 1 : 0, sum.rooms, sum.built, sum.partial,
+                          sum.boxes_left_out, note);
 }
 
 /* Sparse prefab state omits inherited scale; resolve defaults for preview dimensions. */
-static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name,
-                                        char *out_model, int out_capacity,
+static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name, char **out_model,
                                         float *out_scale, int out_scale_count)
 {
+    char model[IE_MODEL_NAME_CAP];
     float size[3];
     int have_size = 0, rule;
     (void)self;
-    if (!out_model || out_capacity <= 0 || !out_scale || out_scale_count < 3) return 0;
-    int flags = sh_prefabpreview_resolve_defaults(inherit_name, out_model,
-                                                  (size_t)out_capacity, out_scale);
+    if (out_model) *out_model = NULL;
+    if (!out_model || !out_scale || out_scale_count < 3) return 0;
+    int flags = sh_prefabpreview_resolve_defaults(inherit_name, model, sizeof model, out_scale);
     /* Keep live-model preference while the installed resolver supplies scale. */
-    rule = prefab_model_rule(inherit_name, out_model, out_capacity, size, &have_size);
+    rule = prefab_model_rule(inherit_name, model, (int)sizeof model, size, &have_size);
     flags &= ~(SH_PREFAB_DEFAULT_MODEL | SH_PREFAB_DEFAULT_EDITOR);
-    if (rule & SH_PREFAB_DEFAULT_MODEL) flags |= rule;
-    else out_model[0] = '\0';
+    if (rule & SH_PREFAB_DEFAULT_MODEL) {
+        if ((*out_model = sh_iface_text(model)) != NULL) flags |= rule;
+    }
     if (out_scale_count >= 6 && have_size) {
         memcpy(out_scale + 3, size, sizeof size);
         flags |= SH_PREFAB_DEFAULT_SIZE;
@@ -669,65 +665,85 @@ static int id_module_index(const uint8_t *lm, uint32_t id)
     return (instIdx >= 0 && instIdx < modCnt) ? instIdx : -1;   /* instIdx == modCnt => global/no-module */
 }
 
+/* A guarded copy of an engine C string, owned (process heap); NULL when it is
+ * absent or unreadable. */
+static char *ie_owned_cstr(const char *p)
+{
+    size_t n = 0;
+    char *out;
+    if (!p) return NULL;
+    __try { n = strlen(p); } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
+    if (!out) return NULL;
+    __try { memcpy(out, p, n); out[n] = '\0'; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HeapFree(GetProcessHeap(), 0, out); return NULL; }
+    return out;
+}
+
+/* A guarded copy of n engine bytes as owned text; NULL when unreadable. */
+static char *ie_owned_bytes(const void *p, size_t n)
+{
+    char *out;
+    if (!p) return NULL;
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
+    if (!out) return NULL;
+    __try { memcpy(out, p, n); out[n] = '\0'; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HeapFree(GetProcessHeap(), 0, out); return NULL; }
+    return out;
+}
+
+/* The module name of the module holding `id`, owned, with its index; NULL outside every module. */
+static char *ie_module_of(int id, int *index)
+{
+    const uint8_t *ed = editor_session();
+    void *lm = NULL, *modTable = NULL, *modObj = NULL, *np = NULL;
+    int modIdx;
+    /* Module table stride 0x98 and name +0x48: confirmed live on build 13954591. */
+    if (!ed || !ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || !lm) return NULL;
+    __try { modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { modIdx = -1; }
+    if (modIdx < 0) return NULL;
+    /* Dereference the table entry, then its module-name pointer. */
+    if (!ie_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) || !modTable ||
+        !ie_read_ptr((const uint8_t *)modTable + (size_t)modIdx * MOD_STRIDE, &modObj) || !modObj ||
+        !ie_read_ptr((const uint8_t *)modObj + MOD_NAME_OFF, &np))
+        return NULL;
+    *index = modIdx;
+    return ie_owned_cstr((const char *)np);
+}
+
 /* Format module_index_module_name/inherit_id. The table entry contains a
  * module-object pointer whose +0x48 is the name pointer. Without a module,
- * show inherit/class and ID with an explicit no-module marker. */
-static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
+ * show inherit/class and ID with an explicit no-module marker. Owned text. */
+static char *slot_id_to_string(sh_iface *self, int id)
 {
+    char *cls = NULL, *inh = NULL, *mod = NULL, *out;
+    void *array = NULL, *ent = NULL, *defsub = NULL, *p = NULL;
+    uint32_t count = 0;
+    int modIdx = -1;
     (void)self;
-    if (!buf || cap <= 0) return "";
-    buf[0] = '\0';
-    char clsbuf[128] = {0};
-    char inhbuf[160] = {0};
-    __try {
-
-        void *array = NULL; uint32_t count = 0;
-        if (entity_array(&array, &count)) {
-            void *ent = entity_ptr(array, count, id), *defsub = NULL, *cp = NULL, *ip = NULL;
-            if (ent && ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub) {
-                if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &cp) && cp) {
-                    const char *c = (const char *)cp;
-                    int k = 0; for (; k < (int)sizeof(clsbuf) - 1 && c[k]; k++) clsbuf[k] = c[k];
-                }
-                if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &ip) && ip) {
-                    const char *c = (const char *)ip;
-                    int k = 0; for (; k < (int)sizeof(inhbuf) - 1 && c[k]; k++) inhbuf[k] = c[k];
-                }
-            }
-        }
-
-        const uint8_t *ed = editor_session();
-        void *lm = NULL;
-        /* Module table stride 0x98 and name +0x48: confirmed live on build 13954591. */
-        if (ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
-            int modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id);
-            if (modIdx >= 0) {
-                /* Dereference the table entry, then its module-name pointer. */
-                const char *modName = NULL;
-                void *modTable = NULL, *modObj = NULL, *np = NULL;
-                if (ie_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) && modTable &&
-                    ie_read_ptr((const uint8_t *)modTable + (size_t)modIdx * MOD_STRIDE, &modObj) && modObj &&
-                    ie_read_ptr((const uint8_t *)modObj + MOD_NAME_OFF, &np))
-                    modName = (const char *)np;
-                if (modName && modName[0]) {
-                    _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%d_%s/%s_%d",
-                                modIdx, modName, inhbuf[0] ? inhbuf : "NULL", id);
-                    if (buf[0]) return buf;
-                }
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; }
+    if (entity_array(&array, &count)) ent = entity_ptr(array, count, id);
+    if (ent && ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub) {
+        if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) && p) cls = ie_owned_cstr((const char *)p);
+        if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) && p) inh = ie_owned_cstr((const char *)p);
+    }
+    mod = ie_module_of(id, &modIdx);
+    if (mod && mod[0])
+        out = sh_iface_textf("%d_%s/%s_%d", modIdx, mod, inh && inh[0] ? inh : "NULL", id);
     /* Global or unresolved membership is explicit and is not a usable target reference. */
-    if (inhbuf[0])      _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s_%d (no module)", inhbuf, id);
-    else if (clsbuf[0]) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s_%d (no module)", clsbuf, id);
-    else                _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%d (no module)", id);
-    return buf;
+    else if (inh && inh[0]) out = sh_iface_textf("%s_%d (no module)", inh, id);
+    else if (cls && cls[0]) out = sh_iface_textf("%s_%d (no module)", cls, id);
+    else                    out = sh_iface_textf("%d (no module)", id);
+    sh_iface_text_free(cls);
+    sh_iface_text_free(inh);
+    sh_iface_text_free(mod);
+    return out;
 }
 
 /* Target-reference wrapper; callers reject the no-module form. */
-const char *ie_resolve_id_string(int id, char *buf, int cap)
+char *ie_resolve_id_string(int id)
 {
-    return slot_id_to_string(NULL, id, buf, cap);
+    return slot_id_to_string(NULL, id);
 }
 
 static void *defsub_for_id(int id)
@@ -742,37 +758,25 @@ static void *defsub_for_id(int id)
 }
 
 /* Read the pooled classname directly so morphs appear before resolved
- * source blobs refresh. */
-static const char *slot_get_classname(sh_iface *self, int id, char *buf, int cap)
+ * source blobs refresh. Owned; NULL for an invalid id. */
+static char *slot_get_classname(sh_iface *self, int id)
 {
+    void *defsub = defsub_for_id(id), *p = NULL;
     (void)self;
-    if (cap > 0) buf[0] = '\0';
-    void *array = NULL; uint32_t count = 0;
-    if (!entity_array(&array, &count)) return buf;
-    void *ent = entity_ptr(array, count, id);
-    if (!ent) return buf;
-    void *defsub = NULL;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return buf;
-    __try {
-        const char *cn = *(const char * const *)((const uint8_t *)defsub + DEFSUB_CLASS_OFF);
-        if (cn) lstrcpynA(buf, cn, cap);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { if (cap > 0) buf[0] = '\0'; }
-    return buf;
+    if (!defsub) return NULL;
+    if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) || !p) return sh_iface_text("");
+    return ie_owned_cstr((const char *)p);
 }
 
 /* Read the pooled inherit directly, as the classname is read, so an applied
  * class/inherit pair reads back at once (the source text refreshes later). */
-static const char *slot_get_inherit(sh_iface *self, int id, char *buf, int cap)
+static char *slot_get_inherit(sh_iface *self, int id)
 {
+    void *defsub = defsub_for_id(id), *p = NULL;
     (void)self;
-    if (cap > 0) buf[0] = '\0';
-    void *defsub = defsub_for_id(id);
-    if (!defsub) return buf;
-    __try {
-        const char *inh = *(const char * const *)((const uint8_t *)defsub + DEFSUB_INHERIT_OFF);
-        if (inh) lstrcpynA(buf, inh, cap);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { if (cap > 0) buf[0] = '\0'; }
-    return buf;
+    if (!defsub) return NULL;
+    if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) || !p) return sh_iface_text("");
+    return ie_owned_cstr((const char *)p);
 }
 
 /* Construct title/text idStr objects, show the toast, then destroy both. */
@@ -781,9 +785,9 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
     (void)self;
     /* Log before editor guards so unavailable/short-lived toasts remain observable. */
     {
-        char _tl[256];
-        _snprintf_s(_tl, sizeof _tl, _TRUNCATE, "TOAST: \"%s\" / \"%s\"", title ? title : "", text ? text : "");
-        backend_log(_tl);
+        char *line = sh_textf("TOAST: \"%s\" / \"%s\"", title ? title : "", text ? text : "");
+        backend_log(line ? line : "TOAST: (out of memory)");
+        free(line);
     }
     if (!g_toast || !g_idstr_ctor || !g_idstr_dtor) return;
     const uint8_t *ed = editor_session();
@@ -805,27 +809,21 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
 }
 
 
-/* Copy display name using the full idStr length/data fields. */
-static const char *slot_get_displayname(sh_iface *self, int id, char *buf, int cap)
+/* The display name, whole, from the idStr's own length and data. Owned; NULL
+ * for an invalid id, "" for an entity without one. */
+static char *slot_get_displayname(sh_iface *self, int id)
 {
     (void)self;
-    if (cap > 0) buf[0] = '\0';
     void *array = NULL; uint32_t count = 0;
-    if (!entity_array(&array, &count)) return buf;
+    if (!entity_array(&array, &count)) return NULL;
     void *ent = entity_ptr(array, count, id);
-    if (!ent) return buf;
+    if (!ent) return NULL;
     uint32_t len = 0;
     void *data = NULL;
-    if (!ie_read_u32((const uint8_t *)ent + ENT_DISPLAYNAME_LEN_OFF, &len)) return buf;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_DISPLAYNAME_PTR_OFF, &data) || data == NULL) return buf;
-    if (len == 0 || len > (uint32_t)(cap - 1)) len = (len > (uint32_t)(cap - 1)) ? (uint32_t)(cap - 1) : len;
-    __try {
-        uint32_t i = 0;
-        const char *p = (const char *)data;
-        for (; i < len; i++) buf[i] = p[i];
-        buf[i] = '\0';
-    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; }
-    return buf;
+    if (!ie_read_u32((const uint8_t *)ent + ENT_DISPLAYNAME_LEN_OFF, &len) ||
+        !ie_read_ptr((const uint8_t *)ent + ENT_DISPLAYNAME_PTR_OFF, &data) || data == NULL || len > INT_MAX)
+        return sh_iface_text("");
+    return ie_owned_bytes(data, len);
 }
 
 /* Reduce a whole prepared text in buf to the entity's own state: the
@@ -839,13 +837,8 @@ static void declsource_own_state(void *defsub, char *buf, int len)
     const char *inherit = NULL;
     __try { inherit = *(const char * const *)((const uint8_t *)defsub + DEFSUB_INHERIT_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { inherit = NULL; }
-    char name[512];
-    name[0] = '\0';
-    if (inherit) {
-        __try { lstrcpynA(name, inherit, (int)sizeof name); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { name[0] = '\0'; }
-    }
-    if (!name[0]) return;
+    char *name = ie_owned_cstr(inherit);
+    if (!name || !name[0]) { sh_iface_text_free(name); return; }
     size_t pcap = 4u * 1024u * 1024u;
     char *parent = (char *)malloc(pcap);
     char *own = (char *)malloc((size_t)len + 1u);
@@ -860,30 +853,23 @@ static void declsource_own_state(void *defsub, char *buf, int len)
     }
     free(parent);
     free(own);
+    sh_iface_text_free(name);
 }
 
-/* Copy the entity's own decl text, which Save to Decl writes back. */
-static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int cap)
+/* The entity's own decl text, which Save to Decl writes back, whole. Owned;
+ * NULL for an invalid id, "" for an entity without source text. */
+static char *slot_get_declsource(sh_iface *self, int id)
 {
     (void)self;
-    if (cap > 0) buf[0] = '\0';
     void *defsub = defsub_for_id(id);
-    if (!defsub) return buf;
+    if (!defsub) return NULL;
     int len = 0;
     void *data = NULL;
-    if (!ie_read_s32((const uint8_t *)defsub + DEFSUB_SRC_LEN_OFF, &len)) return buf;
-    if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_SRC_PTR_OFF, &data) || data == NULL) return buf;
-    if (len <= 0) return buf;
-    int whole = len <= cap - 1;
-    if (len > cap - 1) len = cap - 1;
-    __try {
-        const char *p = (const char *)data;
-        int i = 0;
-        for (; i < len; i++) buf[i] = p[i];
-        buf[i] = '\0';
-    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; whole = 0; }
-    /* A truncated copy stays as it is, so a growing caller still sees it fill. */
-    if (whole) declsource_own_state(defsub, buf, len);
+    char *buf;
+    if (!ie_read_s32((const uint8_t *)defsub + DEFSUB_SRC_LEN_OFF, &len) ||
+        !ie_read_ptr((const uint8_t *)defsub + DEFSUB_SRC_PTR_OFF, &data) || data == NULL || len <= 0)
+        return sh_iface_text("");
+    if ((buf = ie_owned_bytes(data, (size_t)len)) != NULL) declsource_own_state(defsub, buf, len);
     return buf;
 }
 
@@ -1025,11 +1011,14 @@ static int slot_prefab_grab_status(sh_iface *self, sh_prefab_grab_info *out)
  * Blueprint. */
 static int slot_prefab_watch(sh_iface *self, sh_prefab_watch *out)
 {
+    const char *reason = "";
+    int held;
     (void)self;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
-    if (sh_apply_engine_place_watch(&out->place_seq, &out->place_result, out->place_reason,
-                                    sizeof out->place_reason))
+    held = sh_apply_engine_place_watch(&out->place_seq, &out->place_result, &reason);
+    if (reason && reason[0]) out->place_reason = sh_iface_text(reason);
+    if (held)
         out->held = SH_PREFAB_HELD_OBJECTS;
     else if (sh_module_prefab_held())
         out->held = SH_PREFAB_HELD_MODULES;
@@ -1063,25 +1052,19 @@ SH_STATIC_ASSERT(SH_DELETE_BUSY_SUBSTATE == SH_EDITOR_DELETE_BUSY_SUBSTATE &&
                  SH_DELETE_BUSY_QUEUED == SH_EDITOR_DELETE_BUSY_QUEUED &&
                  SH_DELETE_BUSY_MANIPULATION == SH_EDITOR_DELETE_BUSY_MANIPULATION);
 
-/* Pack decl names for a short decl type into NUL-separated output. */
-static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, char *out_buf, int cap,
-                                       int *out_count)
+/* Pack decl names for a short decl type: each name and its NUL, then an empty name. */
+static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, char **out, int *out_count)
 {
     (void)self;
     /* Use the non-logging decl-manager enumerator. GetDeclsOfType belongs to
  * the asset registry and logs errors for these decl-type names. */
-    return sh_typeinfo_enum_decls_of_type(res_class, out_buf, cap, out_count);
+    return sh_typeinfo_enum_decls_of_type(res_class, out, out_count);
 }
 
-/* Append a NUL-terminated name while reserving the final arena terminator. */
-static int vcm_pack(char *out_buf, int cap, int *pw, const char *s)
+/* Append a name and its NUL to a packed list; 0 when memory runs out. */
+static int vcm_pack(sh_ti_pack *p, const char *s)
 {
-    int nlen = (int)strlen(s);
-    if (*pw + nlen + 1 > cap - 1) return 0;
-    memcpy(out_buf + *pw, s, (size_t)nlen);
-    out_buf[*pw + nlen] = '\0';
-    *pw += nlen + 1;
-    return 1;
+    return sh_ti_pack_put(p, s);
 }
 
 /* Sort collected type records and walk superclass names locally. This avoids
@@ -1107,7 +1090,7 @@ static int ec_derives(const sh_ti_record *sorted, int n, const char *C, const ch
     return 0;
 }
 /* Static corpus fallback when the live registry cannot be collected. */
-static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap, int *written, int *names)
+static int ec_fallback_valid_classes(const char *inherit, sh_ti_pack *p, int *names)
 {
     const char *ey = NULL;
     for (int i = 0; i < SH_VCM_INHERIT_Y_N; i++)
@@ -1116,7 +1099,7 @@ static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap
     for (int i = 0; i < SH_VCM_Y_CLASSES_N; i++)
         if (strcmp(SH_VCM_Y_CLASSES[i].y, ey) == 0) {
             const vcm_yc *e = &SH_VCM_Y_CLASSES[i];
-            for (int j = 0; j < e->n; j++) { if (!vcm_pack(out_buf, cap, written, e->classes[j])) break; (*names)++; }
+            for (int j = 0; j < e->n; j++) { if (!vcm_pack(p, e->classes[j])) break; (*names)++; }
             return 1;
         }
     return 0;
@@ -1124,38 +1107,37 @@ static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap
 
 /* Enumerate classes derived from the inherit's base using collected live
  * type records; use idEntity when inherit is empty/unresolved. Fall back to
- * the static corpus if collection fails. Output is bounded by caller capacity. */
-static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *out_buf, int cap, int *out_count)
+ * the static corpus if collection fails. */
+static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char **out, int *out_count)
 {
+    sh_ti_pack pack = { NULL, 0, 0, 0 };
     (void)self;
     if (out_count) *out_count = 0;
-    if (cap > 0 && out_buf) out_buf[0] = '\0';
-    if (!out_buf || cap <= 1) return 0;
+    if (out) *out = NULL;
+    if (!out) return 0;
 
     char ybuf[256];
     const char *Y = NULL;
     if (inherit && inherit[0]) Y = sh_typeinfo_inherit_base(inherit, ybuf, sizeof ybuf);
     if (!Y || !Y[0]) Y = "idEntity";
 
-    static sh_ti_record recs[SH_REGISTRY_MAX];   /* Shared scratch: callers must serialize dropdown enumeration. */
-    int k = sh_typeinfo_collect_records(recs, SH_REGISTRY_MAX);
-    int written = 0, names = 0;
+    sh_ti_record *recs = NULL;
+    int k = sh_typeinfo_collect_records(&recs);
+    int names = 0;
     if (k > 0) {
         qsort(recs, (size_t)k, sizeof(sh_ti_record), ec_rec_cmp);
         for (int i = 0; i < k; i++) {
             const char *C = recs[i].name;
             if (C && C[0] && ec_derives(recs, k, C, Y)) {
-                if (!vcm_pack(out_buf, cap, &written, C)) break;
+                if (!vcm_pack(&pack, C)) break;
                 names++;
             }
         }
     } else if (inherit && inherit[0]) {
-        ec_fallback_valid_classes(inherit, out_buf, cap, &written, &names);
+        ec_fallback_valid_classes(inherit, &pack, &names);
     }
-
-    out_buf[written] = '\0';               /* double-NUL end marker */
-    if (out_count) *out_count = names;
-    return names > 0 ? 1 : 0;
+    free(recs);
+    return sh_ti_pack_finish(&pack, names, out, out_count);
 }
 
 /* Collect loaded entityDef names, sort/deduplicate, and pack into caller storage.
@@ -1164,51 +1146,42 @@ static int ec_cstr_ptr_cmp(const void *a, const void *b)
 {
     return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
-static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_count)
+static int slot_enum_inherits(sh_iface *self, char **out, int *out_count)
 {
+    sh_ti_pack pack = { NULL, 0, 0, 0 };
     (void)self;
     if (out_count) *out_count = 0;
-    if (cap > 0 && out_buf) out_buf[0] = '\0';
-    if (!out_buf || cap <= 1) return 0;
+    if (out) *out = NULL;
+    if (!out) return 0;
 
-    static const char *names[SH_REGISTRY_MAX];   /* Shared scratch: callers must serialize dropdown enumeration. */
-    int k = sh_typeinfo_collect_inherits(names, SH_REGISTRY_MAX);
-    if (k <= 0) return 0;
+    const char **names = NULL;
+    int k = sh_typeinfo_collect_inherits(&names);
+    if (k <= 0) { free((void *)names); return 0; }
     qsort((void *)names, (size_t)k, sizeof(const char *), ec_cstr_ptr_cmp);   /* Sort for adjacent deduplication; cast removes top-level pointer const. */
-    int written = 0, cnt = 0;
+    int cnt = 0;
     for (int i = 0; i < k; i++) {
         if (i > 0 && strcmp(names[i], names[i - 1]) == 0) continue;
-        if (!vcm_pack(out_buf, cap, &written, names[i])) break;
+        if (!vcm_pack(&pack, names[i])) break;
         cnt++;
     }
-    out_buf[written] = '\0';
-    if (out_count) *out_count = cnt;
-    return cnt > 0 ? 1 : 0;
+    free((void *)names);
+    return sh_ti_pack_finish(&pack, cnt, out, out_count);
 }
 
 /* Join the local app-data root, snapmap-plus, prefix, and name, as UTF-8 (the
  * caller opens it with the wide file calls). The caller supplies separators and
  * any .json suffix. This is path formatting only. */
-static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const char *name,
-                                    char *out_path, int cap)
+static char *slot_resolve_prefab_path(sh_iface *self, const char *prefix, const char *name)
 {
     PWSTR wide = NULL;
     char *base = NULL, *path;
-    int ok = 0;
     (void)self;
-    if (!out_path || cap <= 0) return 0;
-    out_path[0] = '\0';
     if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &wide)) && wide)
         base = sh_rawmap_path_utf8(wide);
     if (wide) CoTaskMemFree(wide);
-    path = base ? sh_textf("%s/snapmap-plus/%s%s", base, prefix ? prefix : "", name ? name : "") : NULL;
+    path = base ? sh_iface_textf("%s/snapmap-plus/%s%s", base, prefix ? prefix : "", name ? name : "") : NULL;
     free(base);
-    if (path && strlen(path) < (size_t)cap) {   /* a cut path names another file */
-        memcpy(out_path, path, strlen(path) + 1);
-        ok = 1;
-    }
-    free(path);
-    return ok;
+    return path;
 }
 
 /* Cache registry objects, whose lifetimes match the engine process. */

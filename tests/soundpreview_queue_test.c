@@ -133,14 +133,18 @@ static void check_settings_restored(void)
 
 static void check_refusals(void)
 {
-    char why[200];
+    char *why;
     g_preview = NULL;
     CHECK(sh_soundpreview_play("any") == 0);
-    CHECK(sh_soundpreview_refusal(why, sizeof why) == 1 && strstr(why, "not available") != NULL);
+    why = sh_soundpreview_refusal();
+    CHECK(why && strstr(why, "not available") != NULL);
+    sh_iface_text_free(why);
     g_preview = (snd_preview_fn)1;
     g_slot = NULL;                                     /* no sound world: not in a map */
     CHECK(sh_soundpreview_play("any") == 0);
-    CHECK(sh_soundpreview_refusal(why, sizeof why) == 1 && strcmp(why, WHY_NO_MAP) == 0);
+    why = sh_soundpreview_refusal();
+    CHECK(why && strcmp(why, WHY_NO_MAP) == 0);
+    sh_iface_text_free(why);
     CHECK(sh_soundpreview_play("") == 0);
     g_preview = NULL;
 }

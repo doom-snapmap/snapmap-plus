@@ -38,24 +38,6 @@
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
 #include "../common/text.h"
 
-/* A reason given to a caller's fixed message buffer (the page's slots, the
- * console commands): whole when it fits, else this sentence, with the whole
- * reason in the backend log. */
-#define RAWMAP_MSG_OVER "the reason is longer than this message holds; it is in the backend log"
-static void rawmap_msg_put(char *out, int cap, const char *text)
-{
-    if (!out || cap <= 0) return;
-    if (!text) text = "";
-    if (strlen(text) < (size_t)cap) { strcpy_s(out, (size_t)cap, text); return; }
-    {
-        char *line = sh_textf("RAWMAP: %s", text);
-        backend_log(line ? line : "RAWMAP: (a reason too long for its message, and out of memory)");
-        free(line);
-    }
-    if (strlen(RAWMAP_MSG_OVER) < (size_t)cap) strcpy_s(out, (size_t)cap, RAWMAP_MSG_OVER);
-    else out[0] = '\0';
-}
-
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
  *   56               push rsi                      (1)
@@ -2629,25 +2611,20 @@ char *sh_rawmap_diag_status(void)
 }
 #endif
 
-/* A sentence for a caller's message buffer (the page's slots): whole when it
- * fits, else RAWMAP_MSG_OVER with the whole sentence in the backend log.
- * `text` (malloc'd) is freed. */
-static void rawmap_msg_give(char *out, int cap, char *text)
+/* Hand `text` to the window as owned interface text in *out (the old one
+ * released); `text` (malloc'd) is freed. */
+static void rawmap_give(char **out, char *text)
 {
-    rawmap_msg_put(out, cap, text);
+    if (out) sh_iface_text_set(out, text);
     free(text);
 }
 
-static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
+static char *slot_rawmap_status(sh_iface *self)
 {
     char *load_path, *save_path, *target, *load_esc, *save_esc, *target_esc, *json_esc, *zip_esc, *err_esc, *text;
     sh_rawmap_save_report last;
-    int written = 0;
 
     (void)self;
-    if (out_json == NULL || out_capacity <= 0) return 0;
-    out_json[0] = '\0';
-
     load_path = resolve_source_path();
     save_path = resolve_dest_path();
     target = sh_rawmap_save_target();
@@ -2664,22 +2641,17 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
      * the console can set it too. What the last save wrote, and how many mods
      * the open map uses (the File menu offers .zip first when it uses any). */
     text = load_esc && save_esc && target_esc && json_esc && zip_esc && err_esc
-         ? sh_textf("{\"load\":\"%s\",\"save\":\"%s\",\"saves\":%lu,\"lastBytes\":%llu,\"loads\":%lu,"
-                    "\"saveTarget\":\"%s\",\"lastJson\":\"%s\",\"lastJsonBytes\":%llu,\"lastZip\":\"%s\","
-                    "\"lastZipBytes\":%llu,\"lastMods\":%u,\"lastZipError\":\"%s\",\"mapMods\":%d}",
-                    load_esc, save_esc, sh_rawmap_save_count(), sh_rawmap_save_last_bytes(), sh_rawmap_swap_count(),
-                    target_esc, json_esc, last.json_bytes, zip_esc, last.zip_bytes, last.mods, err_esc,
-                    sh_rawmap_open_map_mods())
+         ? sh_iface_textf("{\"load\":\"%s\",\"save\":\"%s\",\"saves\":%lu,\"lastBytes\":%llu,\"loads\":%lu,"
+                          "\"saveTarget\":\"%s\",\"lastJson\":\"%s\",\"lastJsonBytes\":%llu,\"lastZip\":\"%s\","
+                          "\"lastZipBytes\":%llu,\"lastMods\":%u,\"lastZipError\":\"%s\",\"mapMods\":%d}",
+                          load_esc, save_esc, sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
+                          sh_rawmap_swap_count(), target_esc, json_esc, last.json_bytes, zip_esc, last.zip_bytes,
+                          last.mods, err_esc, sh_rawmap_open_map_mods())
          : NULL;
     sh_rawmap_save_report_free(&last);
     free(load_path); free(save_path); free(target);
     free(load_esc); free(save_esc); free(target_esc); free(json_esc); free(zip_esc); free(err_esc);
-    if (text && strlen(text) < (size_t)out_capacity) {
-        memcpy(out_json, text, strlen(text) + 1);
-        written = (int)strlen(text);
-    }
-    free(text);
-    return written;
+    return text;
 }
 
 /* `arm` is a verb code (the vtable is matched slot for slot between the DLLs):
@@ -2688,17 +2660,17 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
  *   current save path   4 saves go back to the default file   5 save now.
  * 0 and 1 named the retired every-load switch and are refused. */
 static int slot_rawmap_configure(sh_iface *self, const char *load_path, const char *save_path,
-                                 int arm, char *out_msg, int msg_capacity)
+                                 int arm, char **out_msg)
 {
     char *reason = NULL, refusal[128];
     int ok = 1;
 
     (void)self;
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (out_msg) *out_msg = NULL;
     /* Opening or saving a rawmap needs the map-load and map-save hooks. */
     if ((arm == 2 || arm == 5 || (save_path && save_path[0])) &&
         sh_feature_refusal(SH_FEATURE_RAWMAPS, refusal, sizeof refusal)) {
-        rawmap_msg_put(out_msg, msg_capacity, refusal);
+        rawmap_give(out_msg, sh_text(refusal));
         return 0;
     }
 
@@ -2707,22 +2679,22 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
             sh_rawmap_swap_set_source(NULL);          /* empty = restore the default */
         } else {
             if (arm == 2 && !sh_rawmap_load_is_safe()) {
-                rawmap_msg_put(out_msg, msg_capacity, RAWMAP_OPEN_UNSAFE);
+                rawmap_give(out_msg, sh_text(RAWMAP_OPEN_UNSAFE));
                 return 0;
             }
             if (arm == 2 && !sh_editor_frame_can_reload(&reason)) {
-                rawmap_msg_give(out_msg, msg_capacity, reason);
+                rawmap_give(out_msg, reason);
                 return 0;
             }
             if (!sh_rawmap_validate_source(load_path, &reason)) {
                 rawmap_tell_load_refused(load_path, reason);
-                rawmap_msg_give(out_msg, msg_capacity, reason);
+                rawmap_give(out_msg, reason);
                 return 0;
             }
             free(reason);
             reason = NULL;
             if (!sh_rawmap_swap_set_source(load_path)) {
-                rawmap_msg_put(out_msg, msg_capacity, "the game ran out of memory; restart DOOM and try again");
+                rawmap_give(out_msg, sh_text("the game ran out of memory; restart DOOM and try again"));
                 return 0;
             }
         }
@@ -2732,7 +2704,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      * not export a different saved map. */
     if ((save_path && save_path[0]) || arm == 5) {
         ok = sh_editor_frame_request_rawmap_save_to(save_path, &reason);
-        rawmap_msg_give(out_msg, msg_capacity, reason);
+        rawmap_give(out_msg, reason);
         if (!ok) return 0;
     } else if (save_path) {
         ok = sh_rawmap_set_save_target(NULL);
@@ -2747,25 +2719,24 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
     }
     else if (arm == 4) sh_rawmap_set_save_target(NULL);
 
-    if (!ok && out_msg && msg_capacity > 0 && out_msg[0] == '\0')
-        rawmap_msg_put(out_msg, msg_capacity, "that save path cannot be used");
+    if (!ok && out_msg && !*out_msg) rawmap_give(out_msg, sh_text("that save path cannot be used"));
     return ok;
 }
 
 /* Open the load path now. The engine call and its frame-boundary discipline live in
  * editor_frame.c; this is only the slot. */
-static int slot_rawmap_load_now(sh_iface *self, char *out_msg, int msg_capacity)
+static int slot_rawmap_load_now(sh_iface *self, char **out_msg)
 {
     char refusal[128], *msg = NULL;
     int ok;
     (void)self;
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (out_msg) *out_msg = NULL;
     if (sh_feature_refusal(SH_FEATURE_RAWMAPS, refusal, sizeof refusal)) {
-        rawmap_msg_put(out_msg, msg_capacity, refusal);
+        rawmap_give(out_msg, sh_text(refusal));
         return 0;
     }
     ok = sh_rawmap_open_now(NULL, &msg);
-    rawmap_msg_give(out_msg, msg_capacity, msg);
+    rawmap_give(out_msg, msg);
     return ok;
 }
 

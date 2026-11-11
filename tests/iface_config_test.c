@@ -1,5 +1,7 @@
+#include <windows.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "snapmap_plus_iface.h"
@@ -50,23 +52,22 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
 /* ext 35: the Prefabs tab's editor watch (module selection, held prefab, paste decision). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x3A0);
-SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
+/* ext 39: text a slot hands over is released through free_text. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, free_text) == 0x3A0);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x3A8);
+SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 24);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
-static int stub_get(sh_iface *self, const char *key, char *out_json,
-                    int out_capacity, unsigned int *out_flags)
+static int stub_get(sh_iface *self, const char *key, char **out_json, unsigned int *out_flags)
 {
-    static const char value[] = "\"dark\"";
     (void)self;
     (void)key;
     if (out_flags) *out_flags = SH_CONFIG_STATUS_REPAIRED;
-    if (out_json && out_capacity >= (int)sizeof(value))
-        memcpy(out_json, value, sizeof(value));
-    return (int)sizeof(value) - 1;
+    *out_json = sh_iface_text("\"dark\"");
+    return 6;
 }
 
 static int stub_delete(sh_iface *self, const int *ids, int count, sh_delete_result *out)
@@ -96,29 +97,28 @@ static int stub_timeline_tile(sh_iface *self, sh_timeline_tile_call *call)
     if (!call || call->op != SH_TIMELINE_TILE_STATUS) return 0;
     call->tile_row = 7; call->unknown_row = 6; call->last_rebinds = 1; call->total_rebinds = 3;
     call->registered = 1;
-    strcpy(call->record_class, "idTarget_Timeline");
+    call->record_class = sh_iface_text("idTarget_Timeline");
     return 1;
 }
 static int stub_budget(sh_iface *self, sh_budget_call *call)
 {
-    static const char table[] = "{\"gen\":4}";
     (void)self;
     if (!call || call->op != SH_BUDGET_TABLE) return 0;
     call->generation = 4;
-    call->needed = (int)strlen(table);
-    if (!call->out || call->out_cap <= call->needed) return -1;
-    memcpy(call->out, table, sizeof table);
+    call->out = sh_iface_text("{\"gen\":4}");
     return 1;
 }
+/* The Mods tab's document, of any length: 4 MiB of it here. */
+#define STUB_DOC_BYTES (4u * 1024u * 1024u)
 static int stub_mods(sh_iface *self, sh_mods_call *call)
 {
-    static const char doc[] = "{\"v\":1}";
     (void)self;
     if (!call || call->op != SH_MODS_FETCH) return 0;
     call->generation = 2;
-    call->needed = (int)strlen(doc);
-    if (!call->out || call->out_cap <= call->needed) return -1;
-    memcpy(call->out, doc, sizeof doc);
+    call->out = (char *)HeapAlloc(GetProcessHeap(), 0, STUB_DOC_BYTES + 1);
+    if (!call->out) return 0;
+    memset(call->out, 'm', STUB_DOC_BYTES);
+    call->out[STUB_DOC_BYTES] = 0;
     return 1;
 }
 static int stub_prefab_watch(sh_iface *self, sh_prefab_watch *out)
@@ -130,7 +130,7 @@ static int stub_prefab_watch(sh_iface *self, sh_prefab_watch *out)
     out->held = SH_PREFAB_HELD_OBJECTS;
     out->place_seq = 5;
     out->place_result = SH_PREFAB_PLACE_STAGED;
-    strcpy(out->place_reason, "the editor is not in Object mode");
+    out->place_reason = sh_iface_text("the editor is not in Object mode");
     return 1;
 }
 /* A frontend must never read a slot the backend's vtable does not have. */
@@ -159,8 +159,21 @@ static int check_vtable_size_contract(sh_iface *iface)
         cell[0] = SH_IFACE_VTBL_MARK; cell[1] = 0x380u;
         if (!SH_IFACE_HAS_SLOT(&ext34, mods) || SH_IFACE_HAS_SLOT(&ext34, prefab_watch)) return 0;
     }
+    {
+        /* A backend from before free_text (ext 39) ends its table at +0x3A0: the window's
+         * load-time check (its table size against the backend's) refuses the pair. */
+        static sh_iface ext38;
+        uint32_t *cell = (uint32_t *)(void *)ext38.mtx;
+        memset(&ext38, 0, sizeof ext38);
+        ext38.vtbl = (const sh_iface_vtbl *)(const void *)old_vtbl;
+        cell[0] = SH_IFACE_VTBL_MARK; cell[1] = 0x3A0u;
+        if (SH_IFACE_HAS_SLOT(&ext38, free_text)) return 0;
+        if (sh_iface_vtbl_bytes(&ext38) == (uint32_t)sizeof(sh_iface_vtbl)) return 0;
+    }
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
+    /* free_text is bound by sh_iface_create itself, before any engine slot. */
+    if (!SH_IFACE_HAS_SLOT(iface, free_text)) return 0;
     return 1;
 }
 
@@ -175,7 +188,7 @@ int main(void)
     sh_iface_config_slots slots;
     sh_iface_engine_slots engine_slots;
     sh_iface *iface;
-    char value[16] = {0};
+    char *value = NULL;
     unsigned int flags = 0;
 
     memset(&slots, 0, sizeof(slots));
@@ -195,12 +208,23 @@ int main(void)
         fprintf(stderr, "iface_config_test: config callbacks were not preserved\n");
         return 1;
     }
-    if (iface->vtbl->config_get_json(iface, "theme", value,
-                                     (int)sizeof(value), &flags) != 6 ||
-        strcmp(value, "\"dark\"") != 0 ||
+    if (iface->vtbl->config_get_json(iface, "theme", &value, &flags) != 6 ||
+        !value || strcmp(value, "\"dark\"") != 0 ||
         flags != SH_CONFIG_STATUS_REPAIRED) {
         fprintf(stderr, "iface_config_test: getter callback contract failed\n");
         return 1;
+    }
+    iface->vtbl->free_text(iface, value);
+    iface->vtbl->free_text(iface, NULL);   /* nothing to release is fine */
+    {
+        /* The backend's text helpers: process-heap strings sized to what they hold. */
+        char *a = sh_iface_textf("%s-%d", "slot", 39), *b = NULL;
+        if (!a || strcmp(a, "slot-39") != 0 || !sh_iface_text_set(&b, "x") || !b || strcmp(b, "x") != 0 ||
+            !sh_iface_text_set(&b, NULL) || b != NULL) {
+            fprintf(stderr, "iface_config_test: owned text helpers failed\n");
+            return 1;
+        }
+        iface->vtbl->free_text(iface, a);
     }
     if (iface->vtbl->config_set_json(iface, "theme", "\"light\"") !=
         SH_CONFIG_SET_PERSISTED) {
@@ -273,10 +297,11 @@ int main(void)
         call.op = SH_TIMELINE_TILE_STATUS;
         if (!SH_IFACE_HAS_SLOT(iface, timeline_tile) ||
             iface->vtbl->timeline_tile(iface, &call) != 1 || call.tile_row != 7 ||
-            strcmp(call.record_class, "idTarget_Timeline") != 0) {
+            !call.record_class || strcmp(call.record_class, "idTarget_Timeline") != 0) {
             fprintf(stderr, "iface_config_test: timeline-tile slot was not bound\n");
             return 1;
         }
+        iface->vtbl->free_text(iface, call.record_class);
     }
 
     if (SH_IFACE_HAS_SLOT(iface, budget)) {
@@ -287,19 +312,14 @@ int main(void)
     sh_iface_bind_engine_slots(&engine_slots);
     {
         sh_budget_call call;
-        char buf[32];
         memset(&call, 0, sizeof call);
         call.op = SH_BUDGET_TABLE;
-        if (!SH_IFACE_HAS_SLOT(iface, budget) || iface->vtbl->budget(iface, &call) != -1 ||
-            call.needed != 9) {
-            fprintf(stderr, "iface_config_test: budget size query failed\n");
-            return 1;
-        }
-        call.out = buf; call.out_cap = (int)sizeof buf;
-        if (iface->vtbl->budget(iface, &call) != 1 || call.generation != 4 || strcmp(buf, "{\"gen\":4}") != 0) {
+        if (!SH_IFACE_HAS_SLOT(iface, budget) || iface->vtbl->budget(iface, &call) != 1 || call.generation != 4 ||
+            !call.out || strcmp(call.out, "{\"gen\":4}") != 0) {
             fprintf(stderr, "iface_config_test: budget slot was not bound\n");
             return 1;
         }
+        iface->vtbl->free_text(iface, call.out);
     }
 
     if (SH_IFACE_HAS_SLOT(iface, mods)) {
@@ -310,18 +330,14 @@ int main(void)
     sh_iface_bind_engine_slots(&engine_slots);
     {
         sh_mods_call call;
-        char buf[16];
         memset(&call, 0, sizeof call);
         call.op = SH_MODS_FETCH;
-        if (!SH_IFACE_HAS_SLOT(iface, mods) || iface->vtbl->mods(iface, &call) != -1 || call.needed != 7) {
-            fprintf(stderr, "iface_config_test: mods size query failed\n");
+        if (!SH_IFACE_HAS_SLOT(iface, mods) || iface->vtbl->mods(iface, &call) != 1 || call.generation != 2 ||
+            !call.out || strlen(call.out) != STUB_DOC_BYTES) {
+            fprintf(stderr, "iface_config_test: mods slot did not carry its whole document\n");
             return 1;
         }
-        call.out = buf; call.out_cap = (int)sizeof buf;
-        if (iface->vtbl->mods(iface, &call) != 1 || call.generation != 2 || strcmp(buf, "{\"v\":1}") != 0) {
-            fprintf(stderr, "iface_config_test: mods slot was not bound\n");
-            return 1;
-        }
+        iface->vtbl->free_text(iface, call.out);
     }
 
     if (SH_IFACE_HAS_SLOT(iface, prefab_watch)) {
@@ -335,7 +351,8 @@ int main(void)
         memset(&w, 0xCC, sizeof w);
         if (!SH_IFACE_HAS_SLOT(iface, prefab_watch) || iface->vtbl->prefab_watch(iface, &w) != 1 ||
             w.modules_selected != 2 || w.held != SH_PREFAB_HELD_OBJECTS || w.place_seq != 5 ||
-            w.place_result != SH_PREFAB_PLACE_STAGED || strcmp(w.place_reason, "the editor is not in Object mode") != 0) {
+            w.place_result != SH_PREFAB_PLACE_STAGED || !w.place_reason ||
+            strcmp(w.place_reason, "the editor is not in Object mode") != 0) {
             fprintf(stderr, "iface_config_test: prefab_watch slot was not bound\n");
             return 1;
         }

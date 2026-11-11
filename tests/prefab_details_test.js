@@ -108,7 +108,7 @@ function between(begin, end) {
   check(host.includes('json += modules ? L",\\"prefabKind\\":\\"modules\\"" : L",\\"prefabKind\\":\\"objects\\"";'),
         'the host always sends the kind it read');
   const ls = host.indexOf('static void ui_send_prefabs()\n{'), list = host.slice(ls, host.indexOf('\n}\n', ls));
-  check(list.includes('sh_prefab_host::kind_of_type(ui_file_top_type(path))'), 'the list classifies by ~type too');
+  check(list.includes('sh_prefab_host::kind_of_type(ui_file_top_type(path.c_str()))'), 'the list classifies by ~type too');
 }
 
 /* ---- Live Limits, with and without a held prefab ---- */

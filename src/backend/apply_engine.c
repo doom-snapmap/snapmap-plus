@@ -5,10 +5,12 @@
  * arrays need process-heap lifetime across Play and map teardown. */
 #include <windows.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "snapmap_plus_iface.h"
+#include "../common/text.h"
 #include "apply_engine.h"
 #include "modpublished.h"
 #include "modpublish.h"
@@ -161,8 +163,6 @@ typedef void (*memlocal_popheap_fn)(void *self);
 
 /* Apply batches and diagnostics. */
 #define CLONE_BSS_CMD          "clone_bss_apply"
-#define APPLY_TEXT_CAP         (4 * 1024 * 1024) /* Maximum copied text per item; shared with the frontend payload limit. */
-#define APPLY_MAX_ITEMS        4096         /* sanity cap on a scheduled batch */
 
 /* Optional reflection serialization diagnostics. */
 
@@ -242,7 +242,7 @@ static volatile LONG        g_we_staged_count = 0;
 #define AE_PASTE_HOLD_WAIT_MS 3000ULL
 static volatile LONG        g_place_seq;
 static volatile LONG        g_place_decided;
-static char                 g_place_reason[160];
+static const char *volatile  g_place_reason = "";  /* one of the g_place_why phrases, or "" */
 static const char          *g_place_why;          /* game thread: the staged-only cause */
 static volatile LONG        g_paste_watch;        /* 0 none, 1 queued, 2 held */
 static volatile ULONGLONG   g_paste_queued_at;
@@ -603,7 +603,7 @@ static int ae_read_idstr(const void *p, char *out, int cap)
     int written = 0;
     __try {
         int len = *(const int *)((const uint8_t *)p + IDSTR_LEN_OFF);
-        if (len <= 0 || len > APPLY_TEXT_CAP) return 0;
+        if (len <= 0) return 0;
         const char *base = *(const char * const *)((const uint8_t *)p + IDSTR_DATA_OFF);
         if (!base) return 0;
         int n = len < (cap - 1) ? len : (cap - 1);
@@ -617,6 +617,26 @@ static int ae_read_idstr(const void *p, char *out, int cap)
     return written;
 }
 
+
+/* An idStr's whole text as owned text (process heap, sh_iface_text_free); NULL
+ * when it is empty or unreadable. Its length is the engine's own int. */
+static char *ae_idstr_owned(const void *p)
+{
+    int len = 0;
+    const char *base = NULL;
+    char *out;
+    if (!p) return NULL;
+    __try {
+        len = *(const int *)((const uint8_t *)p + IDSTR_LEN_OFF);
+        base = *(const char * const *)((const uint8_t *)p + IDSTR_DATA_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    if (len <= 0 || !base) return NULL;
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 1);
+    if (!out) return NULL;
+    __try { memcpy(out, base, (size_t)len); out[len] = '\0'; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HeapFree(GetProcessHeap(), 0, out); return NULL; }
+    return out;
+}
 
 static int ae_serialize_bound(void)
 {
@@ -633,16 +653,16 @@ static int ae_commit_bound(void)
 }
 
 /* Clone ent + 8, serialize its defsub, then render JSON. Return bytes copied or zero. */
-static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out_json, int cap)
+/* The entity's JSON, whole, as owned text (sh_iface_text_free); NULL on failure. */
+static char *ae_serialize_to_json(const char *typeName, void *cloneBase)
 {
-    if (cap > 0) out_json[0] = '\0';
     if (!ae_serialize_bound() || !cloneBase) {
-        return 0;
+        return NULL;
     }
 
     void *reflect = ae_get_reflect();
     if (!reflect) {
-        return 0;
+        return NULL;
     }
 
     /* Clear scratch fields not initialized by the engine constructors. */
@@ -655,7 +675,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
     memset(outTree, 0, sizeof outTree);
     memset(jsStr, 0, sizeof jsStr);
     int def_ctored = 0, node7_ctored = 0, tree_ctored = 0, js_ctored = 0;
-    int written = 0;
+    char *written = NULL;
 
     __try {
         g_def_ctor(tmpDef);     def_ctored = 1;
@@ -683,11 +703,11 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
         char ok = g_ser(reflect, typeName, tmpDef, outTree, arg5, NULL);
         if (ok & 0xff) {
             g_render(outTree, jsStr);
-            int rlen = 0; ae_read_u32_safe(jsStr + IDSTR_LEN_OFF, &rlen);
-            written = ae_read_idstr(jsStr, out_json, cap);
+            written = ae_idstr_owned(jsStr);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        written = 0;
+        sh_iface_text_free(written);
+        written = NULL;
     }
 
     /* Destroy rendered string, output tree, tag node, then the temporary entity. */
@@ -1011,12 +1031,7 @@ static int ae_apply_one(int id, const char *patched_text)
     if (want_static >= 0 && ae_entity_static_supported((const uint8_t *)ent) &&
         ae_read_u8_safe((const uint8_t *)ent + ENT_NET_STATIC_OFF, &static_before)) {
         if (want_static == 0 && static_before != 0 && g_budget_update) {
-            original = (char *)malloc(APPLY_TEXT_CAP);
-            int got = original ? ae_serialize_to_json("idSnapEntity", (uint8_t *)ent + ENT_VALID_OFF,
-                                                      original, APPLY_TEXT_CAP) : 0;
-            if (original && (got <= 0 || got >= APPLY_TEXT_CAP - 1)) {   /* unreadable or truncated */
-                free(original); original = NULL;
-            }
+            original = ae_serialize_to_json("idSnapEntity", (uint8_t *)ent + ENT_VALID_OFF);
             if (!original) backend_log("APPLY apply: Static off applied without the limits guard (entity text unreadable)");
         }
     } else {
@@ -1139,45 +1154,41 @@ static int ae_splice_targets(const char *src, const char *ref, char *out, int ca
 /* Serialize the source, append a module-qualified target ID, and commit. */
 static int ae_apply_target_write(int source_id, int target_id)
 {
-    char ref[256] = {0};
-    const char *r = ie_resolve_id_string(target_id, ref, (int)sizeof ref);
-    if (!r || !ref[0]) return 0;
+    char *ref = ie_resolve_id_string(target_id), *srcjson = NULL, *patched = NULL, *quoted = NULL;
+    size_t cap;
+    int ok = 0;
+    if (!ref || !ref[0]) { sh_iface_text_free(ref); return 0; }
     if (strstr(ref, "(no module)")) {
         sh_iface *iface = sh_ui_get_iface();
         backend_log("wire-target: target is outside every module (skipped)");
         if (iface && iface->vtbl && iface->vtbl->toast)
             iface->vtbl->toast(iface, "Entity edit",
                                "That target is outside every module; move it into a room, then wire it again.");
+        sh_iface_text_free(ref);
         return 0;
     }
     void *array = NULL; uint32_t count = 0;
-    if (!ae_entity_array(&array, &count)) return 0;
-    void *ent = ae_entity_ptr(array, count, source_id);
-    if (!ent) return 0;
-    void *cloneBase = (uint8_t *)ent + ENT_VALID_OFF;
-    /* Sized as every other apply text: an entity's JSON can pass 64 KB. */
-    char *srcjson = (char *)malloc(APPLY_TEXT_CAP);
-    char *patched = (char *)malloc(APPLY_TEXT_CAP + 512);
-    int ok = 0;
-    if (!srcjson || !patched) goto done;
-    {
-        int got = ae_serialize_to_json("idSnapEntity", cloneBase, srcjson, APPLY_TEXT_CAP);
-        if (got <= 0 || got >= APPLY_TEXT_CAP - 1) goto done;   /* unreadable or truncated */
-    }
-    {
-        char quoted[264];
-        _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", ref);
-        if (strstr(srcjson, quoted)) { backend_log("wire-target: target already in source.targets -- skipped (idempotent)"); ok = 1; goto done; }
-    }
-    if (!ae_splice_targets(srcjson, ref, patched, APPLY_TEXT_CAP + 512)) goto done;
+    void *ent = ae_entity_array(&array, &count) ? ae_entity_ptr(array, count, source_id) : NULL;
+    if (!ent) goto done;
+    srcjson = ae_serialize_to_json("idSnapEntity", (uint8_t *)ent + ENT_VALID_OFF);
+    if (!srcjson) goto done;
+    quoted = sh_textf("\"%s\"", ref);
+    if (!quoted) goto done;
+    if (strstr(srcjson, quoted)) { backend_log("wire-target: target already in source.targets -- skipped (idempotent)"); ok = 1; goto done; }
+    /* The source, the reference and the few members the splice adds. */
+    cap = strlen(srcjson) + strlen(ref) + 64;
+    if (cap > INT_MAX || (patched = (char *)malloc(cap)) == NULL) goto done;
+    if (!ae_splice_targets(srcjson, ref, patched, (int)cap)) goto done;
     ok = ae_apply_one(source_id, patched);
     if (ok) {
-        char m[200];
-        _snprintf_s(m, sizeof m, _TRUNCATE, "wire-target: source %d -> state.edit.targets += \"%s\" (applied)", source_id, ref);
-        backend_log(m);
+        char *m = sh_textf("wire-target: source %d -> state.edit.targets += \"%s\" (applied)", source_id, ref);
+        backend_log(m ? m : "wire-target: applied");
+        free(m);
     }
 done:
-    free(srcjson);
+    sh_iface_text_free(srcjson);
+    sh_iface_text_free(ref);
+    free(quoted);
     free(patched);
     return ok;
 }
@@ -1398,8 +1409,7 @@ static int ae_run_item(int kind, int id, const char *text)
     if (!text) return 0;
     if (kind == 2) {
         int pr = ae_mkcmd_instantiate(text);
-        strncpy_s(g_place_reason, sizeof g_place_reason,
-                  pr == AE_PASTE_ARMED ? "" : (g_place_why ? g_place_why : ""), _TRUNCATE);
+        g_place_reason = pr == AE_PASTE_ARMED ? "" : (g_place_why ? g_place_why : "");
         InterlockedExchange(&g_place_decided, pr);
         if (pr == AE_PASTE_ARMED) {
             g_nav_place_tick = GetTickCount64();
@@ -1589,7 +1599,6 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len >= APPLY_TEXT_CAP) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -1608,15 +1617,14 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
 
 /* Shared interface slots. */
 
-/* Serialize a live entity using the clone base at ent + 8. */
-static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap)
+/* Serialize a live entity using the clone base at ent + 8: owned text, or NULL. */
+static char *slot_serialize_entity(sh_iface *self, int id)
 {
     (void)self;
-    if (cap > 0 && out_json) out_json[0] = '\0';
     void *array = NULL; uint32_t count = 0;
-    if (!ae_entity_array(&array, &count)) return 0;
+    if (!ae_entity_array(&array, &count)) return NULL;
     void *ent = ae_entity_ptr(array, count, id);
-    if (!ent) return 0;
+    if (!ent) return NULL;
 
     void *cloneBase = (void *)((uint8_t *)ent + ENT_VALID_OFF);
     /* EntityClone later dereferences cloneBase + 0x150 without a null check.
@@ -1626,9 +1634,9 @@ static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap
         void *defsub = NULL;
         if (!ae_read_ptr((const uint8_t *)cloneBase + ENT_CLONE_DEFSUB_OFF, &defsub) ||
             defsub == NULL)
-            return 0;
+            return NULL;
     }
-    return ae_serialize_to_json("idSnapEntity", cloneBase, out_json, cap);
+    return ae_serialize_to_json("idSnapEntity", cloneBase);
 }
 
 /* Navigation callbacks read current editor entities, including unsaved changes. */
@@ -1650,8 +1658,13 @@ int sh_apply_engine_entity_valid(int id, void *ctx)
 
 int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx)
 {
+    char *json = slot_serialize_entity(NULL, id);
+    size_t n = json ? strlen(json) : 0;
     (void)ctx;
-    return slot_serialize_entity(NULL, id, out, cap);
+    if (out && cap > 0) out[0] = '\0';
+    if (json && out && n < (size_t)cap) memcpy(out, json, n + 1);
+    sh_iface_text_free(json);
+    return n > INT_MAX ? INT_MAX : (int)n;   /* the whole length; not copied when it is cap or more */
 }
 
 /* Which room an entity belongs to, as the editor holds it. The paste path
@@ -1712,7 +1725,7 @@ static int ae_map_json(void *map, char **out, size_t *len)
         SH_PERF_END(SH_PERF_MAP_SERIALIZE, t0);
         if (wrote &&
             ae_read_u32_safe(str + IDSTR_LEN_OFF, &length) &&
-            length > 0 && length < 32 * 1024 * 1024) {
+            length > 0) {
             copy = (char *)malloc((size_t)length + 1);
             if (copy && ae_read_idstr(str, copy, length + 1) == length) ok = 1;
         }
@@ -1944,7 +1957,6 @@ static double ae_perf_msf(LONGLONG ticks)
  * The bake reads the whole map through the engine's serializer. The marked
  * volumes are a handful of entities, and the engine can write one entity at a
  * time. This says whether reading only those would be cheaper, and by how much. */
-#define AE_PROBE_ENTITY_CAP  (256 * 1024)
 #define AE_PROBE_VOLUME      "snapmaps/volume/blocking"
 
 void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
@@ -1975,16 +1987,14 @@ void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
     whole_ms = ae_perf_msf(sh_perf_now() - t0);
     free(json);
 
-    one = (char *)malloc(AE_PROBE_ENTITY_CAP);
-    if (!one) { out("Out of memory.\n"); return; }
     t0 = sh_perf_now();
     for (id = 0; id < (int)count; id++) {
-        if (slot_serialize_entity(NULL, id, one, AE_PROBE_ENTITY_CAP) <= 0) continue;
+        if ((one = slot_serialize_entity(NULL, id)) == NULL) continue;
         served++;
         if (strstr(one, AE_PROBE_VOLUME)) volumes++;
+        sh_iface_text_free(one);
     }
     each_ms = ae_perf_msf(sh_perf_now() - t0);
-    free(one);
 
     out("reading the current editor geometry:\n");
     out("  the whole map at once      %.1f ms  (%u bytes)\n", whole_ms, (unsigned)len);
@@ -2856,7 +2866,7 @@ static int slot_normalize_timeline_inherit(sh_iface *self, int id)
 static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
 {
     (void)self;
-    if (!items || count <= 0 || count > APPLY_MAX_ITEMS) return 0;
+    if (!items || count <= 0) return 0;
     if (!ae_editor_session()) return 0;
     if (!g_buffer_cmd || !g_cmdsys || !g_pending_lock_init) return 0;
     if (!ae_ensure_command()) return 0;
@@ -2868,7 +2878,6 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len >= APPLY_TEXT_CAP) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -2921,16 +2930,15 @@ void ae_schedule_target_write(int source_id, int target_id)
 }
 
 /* Reflect the pending idSnapEntityPrefab directly; it is already a live object
- * and needs no entity clone. */
-static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
+ * and needs no entity clone. Owned text, or NULL. */
+static char *slot_read_prefab(sh_iface *self)
 {
     (void)self;
-    if (cap > 0 && out_json) out_json[0] = '\0';
-    if (!g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor) return 0;
+    if (!g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor) return NULL;
     const uint8_t *ed = ae_editor_session();
-    if (!ed) return 0;
+    if (!ed) return NULL;
     void *reflect = ae_get_reflect();
-    if (!reflect) return 0;
+    if (!reflect) return NULL;
     void *staging = (void *)(ed + PASTE_STAGING_OFF);
 
     uint8_t node7[PARSE_NODE_SIZE];
@@ -2940,7 +2948,7 @@ static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
     memset(outTree, 0, sizeof outTree);
     memset(jsStr, 0, sizeof jsStr);
     int node7_ctored = 0, tree_ctored = 0, js_ctored = 0;
-    int written = 0;
+    char *written = NULL;
     __try {
         g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
         g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;
@@ -2953,9 +2961,10 @@ static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
         arg5[3] = 0;
         memcpy(arg5 + 8, node7, PARSE_NODE_SIZE);
         char ok = g_ser(reflect, "idSnapEntityPrefab", staging, outTree, arg5, NULL);
-        if (ok & 0xff) { g_render(outTree, jsStr); written = ae_read_idstr(jsStr, out_json, cap); }
+        if (ok & 0xff) { g_render(outTree, jsStr); written = ae_idstr_owned(jsStr); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        written = 0;
+        sh_iface_text_free(written);
+        written = NULL;
     }
     if (js_ctored)    { __try { g_idstr_dtor(jsStr); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (tree_ctored)  { __try { g_node_dtor(outTree); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
@@ -2964,18 +2973,17 @@ static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
 }
 
 /* Construct a temporary prefab, populate from selection, then render JSON.
- * Return copied bytes or zero; destroy every successfully constructed object. */
-static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
+ * Owned text, or NULL; destroy every successfully constructed object. */
+static char *slot_serialize_selection(sh_iface *self)
 {
     (void)self;
-    if (cap > 0 && out_json) out_json[0] = '\0';
     if (!g_prefab_ctor || !g_prefab_populate || !g_prefab_dtor ||
         !g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor)
-        return 0;
+        return NULL;
     const uint8_t *ed = ae_editor_session();
-    if (!ed) return 0;
+    if (!ed) return NULL;
     void *reflect = ae_get_reflect();
-    if (!reflect) return 0;
+    if (!reflect) return NULL;
 
     uint8_t prefab[PREFAB_TEMP_SIZE];
     uint8_t node7[PARSE_NODE_SIZE];
@@ -2986,7 +2994,7 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
     memset(outTree, 0, sizeof outTree);
     memset(jsStr, 0, sizeof jsStr);
     int prefab_ctored = 0, node7_ctored = 0, tree_ctored = 0, js_ctored = 0;
-    int written = 0;
+    char *written = NULL;
 
     __try {
         g_prefab_ctor(prefab); prefab_ctored = 1;
@@ -3015,11 +3023,12 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
             arg5[3] = 0;
             memcpy(arg5 + 8, node7, PARSE_NODE_SIZE);
             char ok = g_ser(reflect, "idSnapEntityPrefab", prefab, outTree, arg5, NULL);
-            if (ok & 0xff) { g_render(outTree, jsStr); written = ae_read_idstr(jsStr, out_json, cap); }
+            if (ok & 0xff) { g_render(outTree, jsStr); written = ae_idstr_owned(jsStr); }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_grab_armed_thread = 0;
-        written = 0;
+        sh_iface_text_free(written);
+        written = NULL;
     }
     if (js_ctored)     { __try { g_idstr_dtor(jsStr); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (tree_ctored)   { __try { g_node_dtor(outTree); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
@@ -3033,7 +3042,7 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
 static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
 {
     (void)self;
-    if (!items || count <= 0 || count > APPLY_MAX_ITEMS) return 0;
+    if (!items || count <= 0) return 0;
     if (!ae_editor_session()) {
         sh_iface *iface = sh_ui_get_iface();
         if (iface && iface->vtbl && iface->vtbl->toast)
@@ -3044,8 +3053,6 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
 
     int on_main = ae_on_main_thread();
     if (on_main < 0) return 0;
-    for (int i = 0; i < count; i++)
-        if (items[i].text && strlen(items[i].text) >= APPLY_TEXT_CAP) return 0;
     if (on_main == 0) {
         int applied = 0;
         int mr = ae_apply_marshal(items, count, op, &applied);
@@ -3084,13 +3091,13 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
     if (serialize_selection) *serialize_selection = slot_serialize_selection;
 }
 
-int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reason_cap)
+int sh_apply_engine_place_watch(int *seq, int *result, const char **reason)
 {
     LONG w = InterlockedCompareExchange(&g_paste_watch, 0, 0);
     int held = 0, state = 0, mode = 0;
     if (seq) *seq = (int)InterlockedCompareExchange(&g_place_seq, 0, 0);
     if (result) *result = (int)InterlockedCompareExchange(&g_place_decided, 0, 0);
-    if (reason && reason_cap) strncpy_s(reason, reason_cap, g_place_reason, _TRUNCATE);
+    if (reason) *reason = g_place_reason;
     if (!w) return 0;
     {
         const uint8_t *ed = ae_editor_session();

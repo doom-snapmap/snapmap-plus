@@ -22,11 +22,11 @@ int sh_imgpreview_produce_image(const char *name, unsigned long generation, cons
 /* The SH_ASSET_* type ids live in the shared ABI header -- the UI sends one across the iface. */
 #include "../common/snapmap_plus_iface.h"
 
-/* Enumerate installed asset names of one type for the Assets browser, newline-separated, starting
- * at index `start`. Returns how many names were written; 0 means "no more" (or unavailable data).
- * The caller pages by adding the returned count to `start`. Base index metadata is compacted after
- * parsing; the Wwise sound union and decl-less .vmtr material union are loaded only for those kinds. */
-int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap);
+/* Every installed asset name of one type for the Assets browser, one per line, as owned interface
+ * text (sh_iface_text_free); NULL for an invalid kind, unavailable data or when memory runs out
+ * ("" when the kind has no names). Base index metadata is compacted after parsing; the Wwise sound
+ * union and decl-less .vmtr material union are loaded only for those kinds. */
+char *sh_imgpreview_list(int kind);
 
 /* Check a selectable name against the installed catalog without calling the
  * engine. Use this before native find-or-create lookups, whose missing-name
