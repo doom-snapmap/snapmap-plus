@@ -213,7 +213,7 @@ static const uint8_t k_strset_prologue[MA_STRSET_STOLEN] = {
 #define MA_IDSTR_DATA_OFF       0x10u
 #define MA_NO_VARIABLE_RVA      SH_RVA(0x236E9D0u, 0x2388720u)
 
-/* Event system (lane P22): ProcessEventArgs(obj, ret[0x18], eventDef, n,
+/* Event system: ProcessEventArgs(obj, ret[0x18], eventDef, n,
  * idEventArg *a0, ...) copies up to eight 0x18-byte arguments and calls
  * idEvent::Execute; the return slot is cleared with the argument clear. */
 #define MA_PROCESS_EVENT_ARGS_RVA SH_RVA(0xB47350u, 0xB46940u)

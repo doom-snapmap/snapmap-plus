@@ -221,7 +221,7 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n"
+                      "{\n  \"name\": \"%s\",\n"
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d,\n"
                       "    \"shadows\": [],\n    \"files\": [\n", id, id, hash64(hash_digit, h), built);
     for (i = 0; i < n; ++i) {
@@ -336,7 +336,7 @@ static void test_anim_kind(const char *top)
     /* A map pinning its place's build: the anim whose bytes differ is marked,
      * as an anim; the one both builds carry is not. */
     list[0] = h1;
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h1));
     /* One anim waits for the map pass; settling it there leaves none (ADD-L6 K). */
     CHECK(sh_modserve_refresh_pending_anims() == 1);
@@ -357,18 +357,18 @@ static void test_anim_kind(const char *top)
     CHECK(sh_modledger_decide(NULL, &now, 0, sh_modledger_complete()) == SH_MODLEDGER_GAME);
 
     /* The same listing again: nothing is marked. */
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
     memset(&s, 0, sizeof s);
     sh_modserve_each_refresh(on_refresh, &s);
     CHECK(s.walk == 0 && s.idle == 0 && s.skel == 0 && s.other == 0);
 
     /* Back to the second build: marked again. */
     list[0] = h2;
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     memset(&s, 0, sizeof s);
     sh_modserve_each_refresh(on_refresh, &s);
     CHECK(s.walk == 1 && s.idle == 0);
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
 
     /* A rescan that changes the root build's anim and skeleton: the anim is
@@ -439,8 +439,8 @@ static void test_tally(void)
     CHECK(sh_modledger_tally_add(NULL, "x", "y") == NULL);
 }
 
-/* `sh_mods held <filter>` folds names as the product does (ADD-L6 K): the id
- * may be spelled with '-' or '_', in any case, with either slash. */
+/* `sh_mods held <filter>` folds names as the product does: '-' and '_' are
+ * one, in any case, with either slash. */
 static void test_name_filter(void)
 {
     const char *req = "cooked/anim/md6/mods/v3_anim/loop.bmd6anim";

@@ -15,7 +15,7 @@
  *   plus LEA RBP,[RSP-0x88]; no relative operand). All seven arguments are
  *   forwarded; for a path a bundle serves the engine is asked quietly, since
  *   its own miss is fatal with quiet 0 (S1 consequence 9).
- * The registration sequence is the one lane R2 ran live (R-001): source
+ * The registration sequence is the one verified live: source
  * registration with a native idStr, a true probe answer, bytes through the
  * provider, DeclFind, then the generic load once for a new identity.
  *
@@ -187,7 +187,7 @@ static void me_log_fault(const char *what, const char *type, const char *name, c
            (after[0] && strcmp(after, before)) ? after : "");
 }
 
-/* The engine's resource lock (report ADD-G3): every list add, remove and find
+/* The engine's resource lock: every list add, remove and find
  * takes it, and list add swap-removes and grows the entry arrays, so every
  * walk of a list here holds it. Recursive on one thread. Its accessor builds
  * the CRITICAL_SECTION on first use, so a NULL pointer means no list has been
@@ -203,8 +203,9 @@ static CRITICAL_SECTION *me_lock(void)
 
 static void me_unlock(CRITICAL_SECTION *cs) { if (cs) LeaveCriticalSection(cs); }
 
-/* Raw resource names: case-insensitive, and the id's '-' and '_' are one
- * (a decl names md6/mods/<id>/..., the file may spell the id either way). */
+/* Raw resource names: case-insensitive, either slash, and '-' and '_' are
+ * one (the engine's binary names spell every '-' of a source path as '_',
+ * ms_sanitize in modserve.c). */
 static char me_fold(char c)
 {
     if (c == '-') return '_';
@@ -700,7 +701,7 @@ typedef struct me_closure { sh_modserve_watermark mark; int counted; } me_closur
 
 /* What the pass looks up (sh_modserve_lookups_*): recorded from the outermost
  * watermark's start to its end by the ResourceLookup detour, so a kept decl
- * never binds to an object that outlives it by less (report F8b). */
+ * never binds to an object that outlives it by less. */
 static void me_lookups_open(void)
 {
     if (g_lookup_orig) sh_modserve_lookups_open();
@@ -739,7 +740,7 @@ static int me_in_play(void);
  * create, as op_load) and loaded; a default box or a model a map heap holds is
  * loaded again in place. All inside process heap 0 and a keeper of its own
  * (what the load creates, its materials and images, lives as long as the
- * model, ADD-G6), then held at level 4. A load that still ends in a default
+ * model), then held at level 4. A load that still ends in a default
  * stays at the engine's level and is named. */
 typedef struct me_held_load {
     int loaded, reloaded, failed, faulted, skipped;
@@ -983,7 +984,7 @@ void sh_modserve_play_begin(void)
     sh_modscene_place_play_begin();
     on_main = me_on_main();
     /* Companions first: Play precedes every spawn burst of the session
-     * (report ADD-V1) and does not parse the map again, so the map gate alone
+     * and does not parse the map again, so the map gate alone
      * misses a mod installed since the last map load. */
     if (on_main == 1) (void)sh_companions_ensure("play");
     /* Map scope: entities placed since the load or the last save may list a
@@ -1038,7 +1039,7 @@ static void *me_lookup_hook(void *list, const char *name, uint64_t quiet)
 /* The engine's load nesting on the main thread: ResourceMaterialize creates a
  * resource it does not find and loads it here, and that load materializes
  * what the resource uses, so a load opened inside another is that one's
- * (report F9: the chainsaw gore md6Def loads its mesh, whose load creates its
+ * (the chainsaw gore md6Def loads its mesh, whose load creates its
  * material). The pair is recorded; a kept parent keeps the child, raised
  * when its own load returns (the load's failure path reconstructs the object
  * at level 1). The depth is restored however the load leaves. */
@@ -1283,7 +1284,7 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     char before[ERROR_TEXT_MAX];
     int result = 0;
     /* A surface is the game's own decl under its own name: never re-parsed
-     * by any pass (ADD-L11); the game parses it from these same bytes. */
+     * by any pass; the game parses it from these same bytes. */
     if (request && sh_modserve_is_surface(request)) { r->surfaces++; return 1; }
     me_error_text(before, sizeof before);
     __try {
@@ -1404,7 +1405,7 @@ static int me_raw_collect(void *context, const char *type, const char *name, con
     /* A surface model or image is collected like any other: the gated reload
      * is the one pass that loads the game's own bytes again, inside its
      * keeper, so a boot-held stock mesh gets its blacklisted materials
-     * (ADD-L13). */
+     *. */
     if (r->n < r->cap) {
         r->names[r->n].name = name;
         r->names[r->n].request = request;
@@ -1489,7 +1490,7 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
 /* After anims reloaded in place: the md6Def and animWeb decls the open map
  * serves that name one are parsed again, so whatever they built from the old
  * data is rebuilt from the new (which objects cache an anim's data pointer
- * is not established, report ADD-G1). Inside process heap 0, main thread. */
+ * is not established). Inside process heap 0, main thread. */
 #define ME_DEP_SEEN 256
 typedef struct me_dep {
     const me_raw *raw;
@@ -1560,7 +1561,7 @@ static void me_reload_ungated(const char *phase, int in_heap)
     /* A reload in place of a held model resolves its materials and images
      * again: whatever that creates must live as long as the held model, or
      * the next purge frees images a permanent material still points at (the
-     * cold-launch crash, ADD-G6). Outside an editor pass's watermark this
+     * cold-launch crash). Outside an editor pass's watermark this
      * reload opens its own keeper (sh_modserve_inplace_keeper). */
     own = sh_modserve_inplace_keeper(g_mark_depth, r.n);
     if (own) me_closure_begin(&keeper);
@@ -1618,7 +1619,7 @@ static int me_in_play(void)
 
 /* A map pass (modserve_activate_bundles): the engine's purge has run, the
  * departed map's entities are gone and the next map's are not spawned, so a
- * held anim may be reloaded in place (report ADD-G1). Anims marked at any
+ * held anim may be reloaded in place. Anims marked at any
  * other point wait for it. */
 static int g_anim_pass;
 /* Anims the last refresh outside a map pass left waiting: the map pass says
@@ -1688,7 +1689,7 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     /* A re-parse or reload in place of a held resource binds it to what it
      * resolves now; outside a watermark (the rest of a refresh, a scope
      * change) that is kept by a keeper of its own, as inside the editor's
-     * pass (ADD-G6). Only when there is something to apply. */
+     * pass. Only when there is something to apply. */
     (void)sh_modserve_each_refresh_part(me_refresh_count, &items, part);
     own = sh_modserve_inplace_keeper(g_mark_depth, items);
     if (own) me_closure_begin(&keeper);
@@ -2107,7 +2108,7 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
              * (the editor finds it at entity Init, VK FUN_14123b340 / GL
              * FUN_14123a7e0, without creating it), so such an md6Def is left
              * whole at level 1: kept alone it would outlive its MD6 model, and
-             * the next Play built an animator on the freed model (R315 live,
+             * the next Play built an animator on the freed model (seen live,
              * VK DOOM+0x173fb46). An animWeb or material the row holds by
              * pointer is kept, as before. */
             int older = k->mark && sh_modserve_watermark_has(k->mark, decl);
@@ -2499,7 +2500,7 @@ int modserve_palette_rebuild_requested(void)
     }
     /* The module palette (editor+0x206c0, FUN_141213220) is built against the
      * entity palette and is NOT re-run here: whether it keeps entity-row
-     * pointers across this rebuild is an open trace (lane R3 section 3.6). */
+     * pointers across this rebuild is an open trace. */
     t0 = me_now_ms();
     r = sh_timeline_tile_rebuild_palette(&before, &after);
     switch (r) {
@@ -2746,7 +2747,7 @@ static void me_print_line(void *context, const char *line) { (void)context; sh_p
 static int me_rebuild_main(void *context) { (void)context; return modserve_palette_rebuild_requested(); }
 
 /* `sh_mods held [filter]`: the census of level-4 resources whose names the
- * product served this session, by type (report ADD-G1's open item: whether
+ * product served this session, by type (an open question: whether
  * a mod skeleton ever reaches level 4), then the ledger itself. */
 #define ME_HELD_TYPES 24
 #define ME_HELD_LINES 200

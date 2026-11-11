@@ -116,7 +116,7 @@ typedef struct sh_modserve_hit {
     const char *stock_source;/* its installed source, or NULL */
 } sh_modserve_hit;
 
-/* Bank stems of their own (DESIGN-additive 6, ONE-SHAPE plan R8): every
+/* Bank stems of their own : every
  * carried .bnk of a bundle is served as sound/soundbanks/pc/<stem>.<sha16>.bnk,
  * <sha16> the first 16 hex characters of the bank file's own SHA-256, its BKHD
  * bank id rewritten to the FNV-1 of that stem, and every quoted "<stem>",
@@ -176,7 +176,7 @@ int sh_modserve_probe_claims(const char *path);
  * first: the engine gives a renderParm its slot and kind at its first parse
  * and keeps them on a reparse, so a material or program that resolves the
  * parm before the renderParm's own parse binds a slot whose kind the parse
- * then changes (snaphak-re ADD-G5: the render job read floats as a sampler
+ * then changes (the render job read floats as a sampler
  * pointer). A material's parm keys are bare names, so no need orders them. */
 #define SH_MODSERVE_RANK_RENDERPARM 0
 #define SH_MODSERVE_RANK_OTHER      1
@@ -328,7 +328,7 @@ int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persi
  * does not keep its decls (ops->held, sh_modserve_load_left_to_engine): the
  * re-parse inside the registration binds it to objects the pass creates at
  * level 1, which is how the menu collectible 'spidermastermind' came to point
- * at a map-scoped spider_mastermind.md6 (lane P53, observed with a hardware
+ * at a map-scoped spider_mastermind.md6 (observed with a hardware
  * watchpoint on the unlockModel's md6Def field).
  * Steps already registered by an earlier plan are skipped. One MODS: line per
  * step with the result and the state byte. Returns the number of steps that
@@ -348,7 +348,7 @@ int sh_modserve_plan_unvisited(const sh_modserve_plan *plan);
  * created for one of those names after boot sits at level 1, and the purge at
  * the next map unload (entering Play, and leaving it) frees the object while
  * the row still points at it. The editor entity rebuilt after Play then binds
- * the freed animWeb (lane MG2: AV in the animator's node set-up, VK
+ * the freed animWeb (AV in the animator's node set-up, VK
  * 0x14170a5d3). Stock rows never meet this: everything they name was alive at
  * the boot promotion. For every ready row of the plan, this calls `fn` once per
  * reference: eventInfo animWebDecl (animWeb), renderInfo renderModelName ending
@@ -360,7 +360,7 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
  * decls a row names is not enough: an md6Def holds its MD6 model (+0x60), the
  * model its skeleton and joint tables, an animWeb its anims, a material its
  * images, all separate resources the engine created at level 1 while the pass
- * loaded the row (lane MG2: the second site, idJointAnimator's joint blend
+ * loaded the row (the second site, idJointAnimator's joint blend
  * reading a freed model's table, VK 0x14173fb46). The engine records no such
  * closure, so the pass takes a watermark of every resource before it runs and
  * raises every resource created since then that is still at level 1 to 4, as
@@ -400,7 +400,7 @@ int  sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resou
  * +0x08) and name (folded) and raised from level 1 to 4. A watermark keeps
  * only what a pass creates; a decl kept by a pass may have been parsed by
  * the engine's own map load before it, and what that parse created is older
- * than the watermark (report X1). Run after every serving pass and before
+ * than the watermark. Run after every serving pass and before
  * the Play level load; a named resource the engine creates later is raised
  * by the next run. Returns 1 when both walks completed. */
 typedef struct sh_modserve_holds {
@@ -418,7 +418,7 @@ int  sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out);
  * the entity's spawn, in the map's heap, and the Play purge frees it; the
  * next Play of a map that does not declare the bundle (whose files it then
  * does not serve) loads it again from the kept decl and gets the engine's
- * default box, which no editor map change purges (report X2). For each
+ * default box, which no editor map change purges. For each
  * "model" need whose providing file the index serves in the current scope
  * and which the lists hold not at all, as a default (+0x2c bit 0 or 2), or at
  * level 1 loaded under a map heap: fn(context, name, resource or NULL),
@@ -437,7 +437,7 @@ void *sh_modserve_resource_list(const void *head_slot, const char *type);
  * add`) parses decls that bind to those objects: they are older than its
  * watermark and no recorded need names them (an entityDef records its own
  * md6Def, not its attachments), so the Play purge freed them under the kept
- * decl (report F8b). While a watermark is open the engine side records every
+ * decl. While a watermark is open the engine side records every
  * resource the engine's ResourceLookup returns on the main thread
  * (`note`); `close` raises each one the lists still hold at level 1 to 4,
  * under the resource lock, and empties the set. Opened at the outermost
@@ -464,7 +464,7 @@ int  sh_modserve_lookups_close(const void *head_slot, sh_modserve_lookups *out);
  * recorded, and when the parent is kept the child joins the kept set at once
  * (`keep` raises it from level 1 to 4 when its load returns). A Play's spawns
  * load objects no kept decl held yet (the chainsaw gore md6Defs, their meshes
- * and the meshes' materials, report F9); a later pass keeps the md6Defs by
+ * and the meshes' materials); a later pass keeps the md6Defs by
  * name, and `close` then follows the recorded pairs from every kept resource,
  * transitively, so what they loaded is kept too. The close walks the lists
  * once, drops kept and recorded addresses no list holds any longer, raises
@@ -520,7 +520,7 @@ int  sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_att
 /* Tests: forget everything. */
 void sh_modserve_attrib_reset(void);
 
-/* Editor rows at map load (lane M6). The palette is built once per process,
+/* Editor rows at map load. The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring
  * snapEditorEntityDef rows that build never saw. `palette_ready` answers 1
@@ -665,7 +665,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
 
 /* ------------------------------------------------------------------ map scope */
 
-/* Two layers (DESIGN-additive 2.3, 2.5): while a map is open or played, the
+/* Two layers: while a map is open or played, the
  * bundles it declares serve, then the game. A map declares a bundle by the
  * hash of its manifest rows (a placed mod's row or a map-level row,
  * modmanifest.h) and of its placed names (the save-time closure); the first
@@ -723,13 +723,12 @@ int  sh_modserve_scope_enabled(void);
 
 /* Set what the current map declares: `hashes` are the hashes of the builds
  * that serve its rows (sh_modserve_row_build) in row order, then the placed
- * closure; `ids` are ignored (a salt alone declares nothing; kept for the
- * callers), `map_open` 1 while a
+ * closure (a salt alone declares nothing), `map_open` 1 while a
  * map is open in the editor or playing and 0 with none (0 also returns the
  * mode to SH_MODSERVE_MODE_EDITOR). Marks the files whose served bytes
  * changed (above) and returns how many bundles changed what they serve or
  * their requirements. Any thread; serialised with index builds. */
-int  sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open);
+int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open);
 
 /* The open map's context for serving its rows (ONE-SHAPE rule 4): `place` is
  * its place, "maps\<segment>" below the store root (or the segment alone;
@@ -861,12 +860,6 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
 struct sh_modmanifest_row;
 int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, size_t cap);
 
-/* 1 when the store record (mods\snapmap-plus.json, section "editorOnly")
- * names `bundle_hash` as a bundle a map listed that changes only the editor:
- * the fetch classified it (modsync.c) and installed nothing. Such a row is
- * served (the map plays without it) and is never asked for again. Read at
- * the index build. */
-int sh_modserve_editor_only_recorded(const char *bundle_hash);
 int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
 
 /* The build that serves a row now (ONE-SHAPE rule 4; the owner's decision of
@@ -1147,7 +1140,7 @@ typedef struct sh_modserve_refresh {
 typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
 int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context);
 
-/* The engine's resource lock (report ADD-G3): `lock` is the address of the
+/* The engine's resource lock: `lock` is the address of the
  * static struct whose first qword is the CRITICAL_SECTION pointer every list
  * add, remove and find takes (13954591: VK RVA 0x5D79238, GL 0x467E8B8).
  * Every walk of the lists here (watermarks, sh_modserve_resource_each) holds
@@ -1179,8 +1172,9 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
  * in-place re-parse changes nothing but what the decl points at. */
 int sh_modserve_is_restore(const char *request);
 
-/* 1 when any build in the index carries `request` as a surface (a stock
- * pointer at the game's own path, whatever the open map serves now). No pass
+/* 1 when the file the index keys at `request` (the path's static winner,
+ * whatever the open map serves now) is a surface (a stock pointer at the
+ * game's own path). No pass
  * registers, re-parses or refreshes a surface: plans, refresh lists, the
  * editor-row keeper and the ledger sweep all skip it, and the game parses it
  * from the served (its own) bytes when it needs it. The one exception is the
@@ -1195,7 +1189,7 @@ int sh_modserve_is_surface(const char *request);
  * watermark (mark_depth 0, the engine side's nesting count). What a reload
  * of a held resource creates (the images its materials resolve) must live as
  * long as the held resource; a purge would otherwise free images a permanent
- * material still points at (report ADD-G6). */
+ * material still points at. */
 int sh_modserve_inplace_keeper(int mark_depth, int work);
 
 /* Functions called after every table this layer publishes (boot, rescan),
@@ -1235,7 +1229,7 @@ void sh_modserve_palette_before_build(void);
 void sh_modserve_palette_after_build(void *palette);
 
 /* Rebuild the live editor palette so rows of bundles indexed after the first
- * build appear, the way the engine's own callers build it (lane R3): main
+ * build appear, the way the engine's own callers build it: main
  * thread only, refused while the editor holds an entity or a wire, inside
  * process heap 0 (verified on entry and exit), pending registrations first,
  * then SnapPaletteBuild(editor+0x20660, NULL) through the detour, then the
@@ -1272,7 +1266,7 @@ int sh_modserve_launch_preload(const char *why);
  * on the main thread: re-checks the accepted bundles' requirements with
  * sh_modserve_requirements_check (phase "play"). The engine does not reset
  * the blacklist gates between the editor and the level load on 13954591
- * (lane MG2: each gate's int has one reader, its matcher, and no engine
+ * (each gate's int has one reader, its matcher, and no engine
  * writer; both are plain bool cvars that no shipped config names), so this
  * normally logs "requirements live"; a cvar someone changed back is set
  * again before the level's decls load. No-op when nothing is asked or held
@@ -1298,8 +1292,8 @@ int sh_modserve_scope_apply(const char *phase);
  * order: up to cap copied into out (NULL to count). Returns the count. */
 int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap);
 
-/* A declared set the author changed in the editor ("Use in this map", an
- * upgrade): the map load's activation for the listing's builds, then the
+/* A declared set the author changed in the editor ("Use in this map"):
+ * the map load's activation for the listing's builds, then the
  * scope apply. Their decls not registered this session are registered (a
  * name the map now uses resolves at the next Play without a reload), the
  * generated registries and every other pending change are re-parsed and

@@ -1,4 +1,4 @@
-/* modregistry.h -- derived edits applied per map (DESIGN-additive 2.4).
+/* modregistry.h -- derived edits applied per map.
  *
  * A mod that edits a game file carries the edited copy at the game's name;
  * the builder records the structural diff against the game's text in the
@@ -48,8 +48,8 @@ typedef struct sh_mr_decl {
 
 /* One bundle that serves for the listing, in serving order. */
 typedef struct sh_mr_source {
-    const char *key;           /* its key */
-    const char *who;           /* key@version (hash16), for lines */
+    const char *key;           /* its salt */
+    const char *who;           /* the mod's name, for lines */
     const char *edits;         /* its product block's "edits" (JSON array), or NULL */
     size_t edits_len;
     const sh_mr_decl *decls;   /* its encounters and scores (the conductor's bit rewrite) */

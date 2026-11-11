@@ -8,7 +8,7 @@
  * assigned bits), the spider's FSM states (a keyed replace and an add), two
  * bodies merged per clip, the player fields of one bundle, a clash with and
  * without the map's choice, a weapon's field only when declared, map add and
- * remove, rescan marks, gates, a grandfathered copy and an old partial. */
+ * remove, rescan marks, gates and a whole copy at a generated name. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -247,7 +247,7 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n  %s\n"
+                      "{\n  \"name\": \"%s\",\n  %s\n"
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d%s%s,\n"
                       "    \"shadows\": [%s],\n    \"files\": [\n",
                       id, author ? author : "", id, h, 100 + digit, ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
@@ -397,7 +397,7 @@ static void test_generation(void)
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 5);
     /* No map open, nothing declared: the game's files; an edited copy is never served. */
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) <= 0 && open_text(REQ_CONDUCTOR, text, sizeof text) <= 0);
     CHECK(!sh_modserve_lookup(REQ_PISTOL, &hit));
 
@@ -405,7 +405,7 @@ static void test_generation(void)
      * without collision (both authors wrote 2097152), in row order then by
      * encounter name; the encounters and the score served with them. */
     list[0] = hg; list[1] = hs;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 2);
     CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1);
     conductor_lines(text, rows1);
     CHECK(!strcmp(rows1, "SPAWN_AI_TYPE_IMP=ai/demon/imp_coop;SPAWN_AI_TYPE_ARCHVILE=ai/demon/archvile_coop;"
@@ -425,7 +425,7 @@ static void test_generation(void)
           strstr(text, "spiderMastermind_attacks") && count_of(text, "name = \"spiderMastermind\"") == 1);
     /* The other row order swaps them, deterministically. */
     list[0] = hs; list[1] = hg;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
     CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1);
     conductor_lines(text, rows2);
     CHECK(strstr(rows2, "524288=ai/demon/spider_mastermind_base;") != NULL);
@@ -434,7 +434,7 @@ static void test_generation(void)
     /* The same manifest on an install in the opposite folder order: the same texts. */
     list[0] = hg; list[1] = hs;
     CHECK(sh_modserve_index_build(root2) == 5);
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 0);
     CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1);
     conductor_lines(text, rows2);
     CHECK(!strcmp(rows1, rows2));
@@ -443,7 +443,7 @@ static void test_generation(void)
     /* Two bodies merged per clip (a clip both add keeps both rows), the
      * player fields and a weapon field of one bundle. */
     list[0] = hsc; list[1] = hh;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 2);
     CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/kscenes0/a.md6anim") &&
           strstr(text, "md6/mods/khands00/b.md6anim") && strstr(text, "anim \"md6/a.md6anim\"") && strstr(text, "mods/kscenes0/x"));
     CHECK(count_of(text, "anim \"md6/shared.md6anim\"") == 1 && strstr(text, "ae_scene") && strstr(text, "ae_hands"));
@@ -467,14 +467,14 @@ static void test_generation(void)
 
     /* The weapon's edits apply only when its bundle is declared. */
     list[0] = hsc;
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(!sh_modserve_lookup(REQ_PISTOL, &hit) && open_text(REQ_PISTOL, text, sizeof text) <= 0);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) <= 0);   /* no declared bundle edits it: the game's */
 
     /* A clash: row order without a choice, one line naming it; the map's choice wins. */
     list[0] = hh; list[1] = hr;
     g_log_len = 0; g_log[0] = 0;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 2);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
     CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00, "
                   "krival00; serving khands00 (row order; choose with "
@@ -518,20 +518,20 @@ static void test_generation(void)
         /* Another map in between: no choice; row order serves. */
         sh_modmanifest_reset();
         CHECK(!sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key));
-        CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
+        CHECK(sh_modserve_scope_set(list, 2, 1) >= 0);
         CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
         /* The saved map loaded again: its choice is read back and applied. */
         loaded = saved ? sh_modmanifest_prepare_load(saved, slen, &llen) : NULL;
         CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) &&
               !strcmp(key, "krival00"));
-        CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
+        CHECK(sh_modserve_scope_set(list, 2, 1) >= 0);
         CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 &&
               strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";"));
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         if (saved) HeapFree(GetProcessHeap(), 0, saved);
     }
 
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modmanifest_reset();
     sh_modserve_scope_enable(0);
     sh_mb_set_stock_ops(NULL);
@@ -573,13 +573,13 @@ static void test_map_add_remove(void)
     hash_of('4', hh);
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 5);
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh(rf_apply, &seen);
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0 && open_text(REQ_PLAYER, text, sizeof text) <= 0);
     list[0] = hh;
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     sh_modserve_last_diff(&d);
     CHECK(d.pending >= 2);
     memset(&seen, 0, sizeof seen);
@@ -599,22 +599,21 @@ static void test_map_add_remove(void)
         CHECK(!sh_modserve_conflict_info(REQ_PLAYER, NULL) && !sh_modserve_conflict_info(REQ_BODY, NULL));
     }
     /* Map remove: back to the game's texts, pending and offered as the game's. */
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 1);
     sh_modserve_last_diff(&d);
     CHECK(d.pending >= 2);
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh(rf_apply, &seen);
     CHECK(strstr(seen.requests, REQ_PLAYER "(game);") && strstr(seen.requests, REQ_PISTOL "(game);"));
     CHECK(open_text(REQ_PLAYER, text, sizeof text) <= 0 && !sh_modserve_lookup(REQ_PISTOL, NULL));
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
     sh_mb_set_stock_ops(NULL);
 }
 
 /* A rescan marks changed generated text, generated text is gated by its
- * sources' requirements, a grandfathered package's own copy is its edits,
- * and a partial of a bundle built before derived edits never reaches the
- * engine. */
+ * sources' requirements, and a whole copy at a generated name is its mod's
+ * edits. */
 static void test_leftovers(void)
 {
     static const fx body1[] = {
@@ -664,7 +663,7 @@ static void test_leftovers(void)
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 4);
     list[0] = he; list[1] = hg;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
     CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/kedit000/one.md6anim") && !strstr(text, "two.md6anim"));
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "mods/kgated00/body"));
     /* The author edits the copy and rebuilds; the rescan marks the body for refresh. */
@@ -686,14 +685,14 @@ static void test_leftovers(void)
     CHECK(seen.player_gates == 0 || (printf("  player gates %d: %s\n", seen.player_gates, seen.requests), 0));
     /* A whole copy at a generated name is that mod's edits. */
     list[0] = hc; list[1] = hx;
-    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
     CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && strstr(text, "ext_root") &&
           strstr(text, "spiderMastermind"));
     /* Alone, the whole copy serves as it is (no bundle edits that file). */
     list[0] = hc;
-    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && !strstr(text, "ext_root"));
-    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modmanifest_reset();
     sh_modserve_scope_enable(0);
     sh_mb_set_stock_ops(NULL);

@@ -264,10 +264,10 @@ static int owner_frame(void *owner, float origin[3], float axis[9])
 }
 
 /* Spawn `decl` at a world pose the way idTarget_Spawn::SpawnSingleEntity does
- * (snaphak-re R320): create it, write spawnPosition and spawnOrientation,
+ *: create it, write spawnPosition and spawnOrientation,
  * then finish, whose CallSpawn runs the class's Spawn with that pose. The
  * class places itself, which is the only placement an idProp_Coop keeps
- * (ADD-L6 G). NULL when the route is unavailable, or when the created object
+ *. NULL when the route is unavailable, or when the created object
  * is not an entity (it is still finished, and returned in *loose). */
 
 static void *spawn_posed(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS], void **loose)
@@ -566,7 +566,7 @@ int sh_companions_install(const sig_result *results, size_t count, const uint8_t
     if (g_orig && hook_is_installed((void *)g_orig)) return 1;
     if (!g_resolved) {
         if (!module_base || !resolve(results, count, module_base, &g_target)) return 0;
-        /* For the runtime arm: only DOOM's main thread runs CallSpawn (ADD-G2, ADD-V1). */
+        /* For the runtime arm: only DOOM's main thread runs CallSpawn. */
         g_main_thread_at = (const uint32_t *)glb_resolve(module_base, "main_thread_id", NULL);
         g_resolved = 1;
     }

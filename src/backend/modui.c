@@ -2960,7 +2960,7 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     }
     if (names && name_count && sh_modserve_active())
         (void)modserve_bundles_for_names_visit(names, name_count, mu_listing_visit, &l);
-    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, l.ids, (int)l.ni, map_open);
+    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, map_open);
     free((void *)l.hashes);
     free((void *)l.ids);
     for (i = 0; i < l.no; i++) free(l.own[i]);
@@ -3122,7 +3122,7 @@ int sh_modui_scope_launch_refused(const char *why)
         mu_settings_close();
         InterlockedExchange(&g_scope_editor, 0);
         (void)sh_modserve_scope_set_place(NULL, 1);
-        changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
+        changed = sh_modserve_scope_set(NULL, 0, 0);
         mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
     }
     if (changed || moved) (void)mu_scope_apply("launch refused");
@@ -3167,7 +3167,7 @@ static void mu_scope_tick(int editor_map)
             sh_modmanifest_current_close();
             mu_settings_close();
             (void)sh_modserve_scope_set_place(NULL, 1);
-            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+            if (sh_modserve_scope_set(NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
             }
@@ -3180,7 +3180,7 @@ static void mu_scope_tick(int editor_map)
             sh_modmanifest_current_close();
             mu_settings_close();
             (void)sh_modserve_scope_set_place(NULL, 1);
-            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+            if (sh_modserve_scope_set(NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
                 (void)mu_scope_apply("hub");
             }

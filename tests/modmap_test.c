@@ -40,16 +40,16 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, 
  * reported), a module instance, and edit values that are names too. */
 static const char MAP[] =
     "{\"entities\":["
-    "{\"displayName\":\"\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alex.guard/guard\","
-    "\"state\":{\"edit\":{\"skin\":\"mods/alex.guard/red\",\"spawnPosition\":{\"x\":1}}}},\"uniqueId\":4},"
+    "{\"displayName\":\"\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/kguard00/guard\","
+    "\"state\":{\"edit\":{\"skin\":\"mods/kguard00/red\",\"spawnPosition\":{\"x\":1}}}},\"uniqueId\":4},"
     "{\"displayName\":\"Relay \\\"A\\\"\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/logic/relay\"},"
     "\"uniqueId\":5},"
-    "{\"displayName\":\"Boss \\u00e9\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alex.guard/guard\"},"
+    "{\"displayName\":\"Boss \\u00e9\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/kguard00/guard\"},"
     "\"uniqueId\":7},"
     "{\"displayName\":\"\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/encounter\"},\"uniqueId\":8},"
     "{\"displayName\":\"Wave 2\",\"entityDef\":{\"className\":\"idTarget_Timeline\",\"inherit\":\"snapmaps/unknown\"},"
     "\"uniqueId\":9}],"
-    "\"instances\":[{\"moduleName\":\"maps/modules/mods/alex.guard/room\",\"origin\":{\"x\":0}}],"
+    "\"instances\":[{\"moduleName\":\"maps/modules/mods/kguard00/room\",\"origin\":{\"x\":0}}],"
     "\"targets\":{\"connections\":[-5,7,-6,4,-8,9],\"~type\":\"idSnapTargets\"},"
     "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,0,0,0,0,0,0,0,0,1,3],\"values\":[4,-1,7]}},"
     "\"variables\":{\"allocCount\":[0,0,0,0,0]}}";
@@ -75,9 +75,9 @@ int main(void)
     CHECK(!strcmp(sh_mm_find(&m, 5)->label, "Relay \"A\""));
     CHECK(!strcmp(sh_mm_find(&m, 7)->label, "Boss \xc3\xa9"));
     CHECK(sh_mm_find(&m, 9)->timeline && !sh_mm_find(&m, 8)->timeline);
-    CHECK(has_name(sh_mm_find(&m, 4), "mods/alex.guard/guard") && has_name(sh_mm_find(&m, 4), "mods/alex.guard/red"));
+    CHECK(has_name(sh_mm_find(&m, 4), "mods/kguard00/guard") && has_name(sh_mm_find(&m, 4), "mods/kguard00/red"));
     CHECK(!has_name(sh_mm_find(&m, 4), "idSnapEntity"));   /* className is not a placed name */
-    CHECK(m.module_count == 1 && !strcmp(m.modules[0], "maps/modules/mods/alex.guard/room"));
+    CHECK(m.module_count == 1 && !strcmp(m.modules[0], "maps/modules/mods/kguard00/room"));
     CHECK(m.wire_count == 3);
     CHECK(m.wire_src[0] == 4 && m.wire_dst[0] == 7 && m.wire_src[1] == 5 && m.wire_dst[1] == 4);
     CHECK(m.wire_src[2] == 7 && m.wire_dst[2] == 9);
@@ -92,7 +92,7 @@ int main(void)
             size_t k;
             int in = 0;
             for (k = 0; k < m.ent_count && !in; k++) in = has_name(&m.ents[k], all[i]);
-            found += in || !strcmp(all[i], "maps/modules/mods/alex.guard/room");
+            found += in || !strcmp(all[i], "maps/modules/mods/kguard00/room");
         }
         CHECK(found == count);
         sh_modmanifest_names_free(all, count);

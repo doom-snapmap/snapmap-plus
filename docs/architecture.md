@@ -994,13 +994,10 @@ shadow changes what the author can set, never what plays, so an author's
 editor overrides never become a dependency of a map, vanilla or not. A
 gameplay shadow (an entityDef, a material, a model) still does.
 
-The player side of the same rule: a fetch whose bundle manifest holds only
-editor-time content and no requirements (`sh_mb_editor_only`) installs
-nothing, logs `MODS: pull <hash>: <name> (<id>) changes only the editor (...);
-not installed, the map plays without it`, and records the hash in the
-`editorOnly` section; `sh_modserve_row_served_for` serves a row whose bundle
-that section names, so maps published before this rule neither ask for nor
-download an author's editor overrides again.
+The player side of the same rule: a row is served only by an installed build
+(`sh_modserve_row_served_for`); the serving index no longer reads the record's
+former `editorOnly` section, so a build a map names is installed like any
+other (an install drops nothing).
 
 `mods\snapmap-plus.json` is the product's one record:
 `claims`, `links`, `pending`, `migration`, `editorOnly` (bundle hash to id,
@@ -2194,7 +2191,7 @@ row of a mod that is not installed is kept as it is.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
-store, a legacy conversion, the end of the overrides migration's worker,
+store, a download or import,
 `sh_mods rescan`). Readers see one complete table. A new table carries what
 later questions need from the one it replaces (the salts registered this
 session, which bytes the engine already read, the removed paths a refresh

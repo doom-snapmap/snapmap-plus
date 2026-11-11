@@ -13,7 +13,7 @@
  * CallSpawn), so the class's own Spawn places it. Placing after the spawn is
  * not enough: SpawnEntityDef (+0x450) runs CallSpawn before it returns, the
  * entity SetOrigin/SetAxis slots write the physics only, and an idProp_Coop
- * stays where its Spawn presented it, the world origin (ADD-L6 G). When the
+ * stays where its Spawn presented it, the world origin. When the
  * create and finish calls do not resolve, the companion falls back to
  * SpawnEntityDef, SetOrigin, SetAxis and UpdateVisuals (+0x3C0), the pair the
  * engine's setOrigin event makes. It is then bound with idEntity::Bind
@@ -63,7 +63,7 @@ extern "C" {
 int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
 /* Arm the detour after boot, at a gate the product owns on DOOM's main
- * thread, before the spawns it precedes (reports ADD-G2, ADD-V1). Checks, in
+ * thread, before the spawns it precedes. Checks, in
  * order: boot resolution succeeded (it is cached, so no signature is resolved
  * here); the detour is not live yet (1 at once when it is: it is never
  * unhooked mid-session); the caller is DOOM's main thread (main_thread_id;
