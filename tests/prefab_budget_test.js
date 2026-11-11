@@ -178,7 +178,7 @@ check(nearly.meters.network.after === 504 / 672 && nearly.meters.network.level =
 
 /* Formatting and the bounded memo. */
 check(budget.formatPercent(30 / 672) === '4.5%' && budget.formatPercent(0) === '0.0%' &&
-      budget.formatPercent(1 / 8192) === '<0.1%' && budget.formatPercent(Infinity) === 'over', 'percent format');
+      budget.formatPercent(1 / 8192) === '<0.1%' && budget.formatPercent(Infinity) === 'over 100%', 'percent format');
 check(budget.rawText('objects', obj.block) === '4 entities, 1560 KB memory', 'raw tooltip text');
 const cache = budget.createCache(2);
 cache.set('a', 1); cache.set('b', 2); cache.get('a'); cache.set('c', 3);

@@ -150,9 +150,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <div class="panel left-pane">
       <div class="panel-head">
         <span class="panel-title">Entities</span><span class="badge" id="entBadge">0</span>
-        <div class="panel-actions">
-          <button type="button" class="btn icon icon-button" id="refreshBtn" title="Refresh the entity list" aria-label="Refresh the entity list"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
-        </div>
       </div>
       <div class="panel-toolbar">
         <input type="text" id="filterBox" placeholder="Filter entities...">
@@ -179,12 +176,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <span class="panel-title">Entity State</span>
         <div class="panel-actions" id="panelActions">
           <span class="hint" id="dirtyNote"></span>
-          <button type="button" class="btn icon icon-button" id="flyToBtn" disabled title="Fly to entity: switch to Object mode and put the cursor on this entity" aria-label="Fly to entity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-locate"></use></svg></button>
+          <button type="button" class="btn" id="flyToBtn" disabled title="Switch to Object mode and put the cursor on this entity">Fly to</button>
           <button class="btn" id="revertBtn" disabled>Revert</button>
           <button class="btn primary" id="saveBtn" disabled title="Write these changes into the map">Save</button>
         </div>
       </div>
-      <div class="panel-body placeholder" id="selInfo">Select an entity from the list.</div>
+      <div class="panel-body placeholder" id="selInfo"><div>Every object in the open map, with its properties.<br>Select an entity from the list.</div></div>
       <div class="panel-body pad editor-col" id="editor" style="display:none;">
         <div class="ident" id="entityIdRow">
           <div class="ident-sub">
@@ -252,7 +249,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <button class="btn primary" id="prefabLoadBtn" disabled title="Select a prefab first">Load / Place</button>
         </div>
       </div>
-      <div class="panel-body placeholder" id="pcEmpty">Select a prefab to see its details.</div>
+      <div class="panel-body placeholder" id="pcEmpty">Prefabs are groups of objects or modules you save and place again.<br>Select a prefab to see its details, or press + to make one from the editor&rsquo;s selection.</div>
       <div class="panel-body pad prefab-card" id="prefabCard" style="display:none;">
         <div class="pc-preview" id="pcPreview">
           <canvas id="pcCanvas" aria-label="Interactive 3D prefab preview"></canvas>
@@ -339,11 +336,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <span class="panel-title">Timeline</span>
         <div class="panel-actions">
           <button class="btn" id="revertTimelineBtn" disabled title="Discard local edits and re-fetch this timeline as it currently exists on the map">Revert</button>
-          <button class="btn primary" id="saveTimelineBtn" disabled>Save Timeline</button>
+          <button class="btn primary" id="saveTimelineBtn" disabled title="Write this timeline into the map">Save</button>
         </div>
       </div>
       <div class="panel-body pad editor-col">
-        <div class="tl-head" id="tlHead">Select a timeline from the list.</div>
+        <div class="tl-head" id="tlHead">Timelines run events on the map&rsquo;s entities, in order and over time.<br>Select a timeline from the list, or press + to create one.</div>
         <div class="tl-inner-tabs" id="tlTabs"></div>
         <div class="tl-inner-body" id="tlBody"></div>
       </div>
@@ -406,9 +403,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <span>Selected: <b id="selCount">0</b></span>
     </div>
     <div class="status-group status-camera" aria-label="Camera origin controls">
-      <label>X <input type="text" id="camX" value="797.638489" inputmode="decimal" aria-label="Camera X coordinate"></label>
-      <label>Y <input type="text" id="camY" value="183.456985" inputmode="decimal" aria-label="Camera Y coordinate"></label>
-      <label>Z <input type="text" id="camZ" value="-950.475159" inputmode="decimal" aria-label="Camera Z coordinate"></label>
+      <label>X <input type="text" id="camX" value="" inputmode="decimal" aria-label="Camera X coordinate"></label>
+      <label>Y <input type="text" id="camY" value="" inputmode="decimal" aria-label="Camera Y coordinate"></label>
+      <label>Z <input type="text" id="camZ" value="" inputmode="decimal" aria-label="Camera Z coordinate"></label>
       <label class="cam-lock"><input type="checkbox" id="camLockChk"> Lock position</label>
     </div>
     <div class="status-group status-right">
@@ -1702,7 +1699,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var head = document.getElementById('tlHead');
     var tabsEl = document.getElementById('tlTabs');
     var bodyEl = document.getElementById('tlBody');
-    if (head) head.textContent = 'Select a timeline from the list.';
+    if (head) head.innerHTML = EMPTY_TIMELINES;
     if (tabsEl) tabsEl.innerHTML = '';
     if (bodyEl) bodyEl.innerHTML = '';
     var revertBtn = document.getElementById('revertTimelineBtn');
@@ -1737,16 +1734,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('saveTimelineBtn').disabled = false;
     document.getElementById('revertTimelineBtn').disabled = false;
   }
-  // Number tabs from zero to match item[N] keys. The plus button appends an empty target tab.
+  // A tab per entity the timeline runs events on, named by that entity. The plus button adds one.
+  function tlTabLabel(tab) {
+    var e = tlFindEntity(tab.entity), ref = e ? e.id : String(tab.entity || '');
+    if (e && e.name) return e.name;
+    return ref ? ref.slice(ref.lastIndexOf('/') + 1) : 'No entity';
+  }
   function renderTlTabs() {
     var tabsEl = document.getElementById('tlTabs'); if (!tabsEl || !tlModel) return;
     var html = '';
     for (var i = 0; i < tlModel.tabs.length; i++) {
       var cls = 'tl-inner-tab' + (i === tlModel.active ? ' active' : '');
-      html += '<div class="' + cls + '" data-tlidx="' + i + '">Item ' + i
-            + '<button type="button" class="tl-tab-del icon-button" title="Remove this entity event list" aria-label="Remove this entity event list">' + iconSvg('x') + '</button></div>';
+      html += '<div class="' + cls + '" data-tlidx="' + i + '" title="' + esc(tlEntityLabel(tlModel.tabs[i].entity)) + '">' + esc(tlTabLabel(tlModel.tabs[i]))
+            + '<button type="button" class="tl-tab-del icon-button" title="Remove the events for this entity" aria-label="Remove the events for this entity">' + iconSvg('x') + '</button></div>';
     }
-    html += '<button type="button" class="tl-inner-tab tl-add icon-button" title="Add an entity-event list" aria-label="Add an entity-event list">' + iconSvg('plus') + '</button>';
+    html += '<button type="button" class="tl-inner-tab tl-add icon-button" title="Add events for another entity" aria-label="Add events for another entity">' + iconSvg('plus') + '</button>';
     tabsEl.innerHTML = html;
   }
   // Runs on shows ID and name. Use current selection requests a fresh backend read
@@ -2021,7 +2023,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var el = document.getElementById('selInfo'); el.style.display = 'flex'; el.innerHTML = '<div>' + html + '</div>';
     loaded = null; loadedEid = -1; updateDirty();
   }
-  function hideEditor() { showPlaceholder('Select an entity from the list.'); }
+  function hideEditor() { showPlaceholder(EMPTY_ENTITIES); }
   // Close entity editing and clear selection after Play/reload. IDs can be reused, so
   // an old editable snapshot might otherwise overwrite an unrelated new entity.
   function closeEntityEditor() {
@@ -2029,7 +2031,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     anchorEid = -1;
     primaryEid = -1;
     updateSelDom();
-    showPlaceholder('Select an entity from the list.');
+    showPlaceholder(EMPTY_ENTITIES);
   }
   // Route blank-space deselection centrally. Protect controls and detail panes;
   // left-side whitespace also clears the selected prefab or timeline.
@@ -2073,7 +2075,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // unsaved edits. Compare loadedEid because primaryEid has already been reassigned.
       if (eid !== loadedEid) post({cmd:'select', eid: primaryEid});
     }
-    else if (n === 0) { primaryEid = -1; showPlaceholder('Select an entity from the list.'); }
+    else if (n === 0) { primaryEid = -1; showPlaceholder(EMPTY_ENTITIES); }
     else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its properties.<br><span style="opacity:0.75;">Right-click for actions on all ' + n + '.</span>'); }
     if (push !== false) pushSelectionToEditor();
     // The asset browser applies to ONE entity, so it follows the same single-selection rule the
@@ -2217,6 +2219,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   var EDITOR_NOT_ANSWERED = 'The editor did not answer. Open a map in the SnapMap editor and try again.';
 
+  // Each tab's empty state says what the tab is for, then what to do.
+  var EMPTY_ENTITIES = 'Every object in the open map, with its properties.<br>Select an entity from the list.';
+  var EMPTY_TIMELINES = 'Timelines run events on the map&rsquo;s entities, in order and over time.<br>Select a timeline from the list, or press + to create one.';
+  var EMPTY_PREFABS = 'Prefabs are groups of objects or modules you save and place again.<br>Select a prefab to see its details, or press + to make one from the editor&rsquo;s selection.';
+  var EMPTY_ASSETS = 'The game&rsquo;s models, materials, sounds and effects. Apply puts the selected asset on the entity selected on the Entities tab.<br>Select an asset to preview it.';
+
   // ---- messages from native ----
   function onMessage(d) {
     if (typeof modsUi !== 'undefined' && modsUi.onMessage(d)) return;
@@ -2255,18 +2263,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (d.note) toast(d.note, d.note.indexOf('Refused') === 0 ? 'err' : '');
       // "Load it now?" -- raised only when the backend reports a file was just staged.
       //
-      // This was retired for a while: an in-place load used to land in an existing save slot and the
-      // next save overwrote that map, so the only honest answer was no. A load now opens as a
-      // genuinely NEW map the person names, so the question is real again and the prompt is back.
-      //
-      // Answering no is not a dead end -- the file stays staged, so they can save their work and
+      // A load opens as a new map the person names. Answering no is not a dead end -- the file stays staged, so they can save their work and
       // then use File > Open Rawmap as New Map, or simply open any map.
       if (d.confirmLoad) {
         showConfirm('Open "' + d.confirmLoad + '" now?\n\n' +
                     'It opens as a NEW map you will be asked to name. Your saved maps are not ' +
                     'changed. Any unsaved edits in the editor right now are discarded.\n\n' +
                     'Cancel keeps it staged so you can save your work first.',
-                    function(){ post({cmd: 'rawmapLoadNow'}); });
+                    function(){ post({cmd: 'rawmapLoadNow'}); }, 'Open rawmap', 'Open');
       }
     } else if (d.kind === 'windowState') {
       renderWindowState(d.maximized);
@@ -3097,7 +3101,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       row.appendChild(pfLimitsCell(prefabBudget.LABELS[name], 'pcl-label', '', 'rowheader'));
       row.appendChild(pfLimitsBar(v));
       var addText = prefabBudget.formatPercent(v.add);
-      row.appendChild(pfLimitsCell(addText.charAt(0) === '<' ? addText : '+' + addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
+      row.appendChild(pfLimitsCell(/^[0-9]/.test(addText) ? '+' + addText : addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
       row.appendChild(pfLimitsCell(prefabBudget.formatPercent(v.after), 'pcl-num pcl-after pcl-' + v.level,
         held ? 'Now ' + prefabBudget.formatPercent(v.after) + ' with this prefab held' +
                (v.level === 'over' ? '; it reaches this limit' : v.level === 'warn' ? '; it comes close to this limit' : '')
@@ -3282,7 +3286,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     finally { window.chrome.webview.releaseBuffer(buffer); }
   });
 
-  document.getElementById('refreshBtn').addEventListener('click', function(){ post({cmd:'refresh'}); });
   document.getElementById('filterBox').addEventListener('input', renderList);
   // Arrow keys move the entity selection from the list's filter box or when nothing owns them;
   // a text field, list box, dialog or menu keeps its own keys.
@@ -3695,7 +3698,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   document.getElementById('menuRawmapReload').addEventListener('click', function(){
     showConfirm('Open "' + rawmapBaseName(RAWMAP_LOAD_PATH) + '" now?\n\n' +
                 'Any unsaved edits in the editor are discarded. Cancel to save your work first.',
-                function(){ post({cmd: 'rawmapLoadNow'}); });
+                function(){ post({cmd: 'rawmapLoadNow'}); }, 'Open rawmap', 'Open');
     closeMenus();
   });
   document.getElementById('menuRawmapKeepHere').addEventListener('click', function(){
@@ -4834,7 +4837,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
        * meaningless outside the megatexture atlas. */
       +     '<label class="ab-xplat" data-ab="xplatwrap" style="display:none;align-items:center;gap:5px;'
       +       'margin-top:5px;font-size:12px;cursor:pointer" '
-      +       'title="Show only the 224 textures tested to show the same art on PC, Xbox and '
+      +       'title="Show only the ' + AB_XPLAT_NAMES.length + ' textures tested to show the same art on PC, Xbox and '
       +       'PlayStation. Most virtual-mapped textures do NOT match across platforms; this is a '
       +       'hand-tested list, not everything the megatexture can address. Apply them with Virtual '
       +       'Mapping &mdash; most have no material decl SnapMap can load, so they cannot go on by name.">'
@@ -4991,7 +4994,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
 
   function abApply(m) {
-    if (!m.sel || primaryEid < 0 || !loaded) { toast('Select a single entity first', 'err'); return; }
+    if (!m.sel || primaryEid < 0 || !loaded) { toast('Select a single entity on the Entities tab first', 'warn'); return; }
+    if (isDirty()) { toast('Save or revert your changes in Entity State first, then apply.', 'warn'); return; }
     var cls = document.getElementById('fClassname').value || '';
     var denied = abApplyDenied(m.carrier, cls);
     if (denied) { toast(denied, 'err'); return; }
@@ -5304,7 +5308,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   function abRenderInsp(m) {
     var body = m.el('insp');
-    if (!m.sel) { body.innerHTML = '<div class="placeholder">Select an asset to preview it.</div>'; return; }
+    if (!m.sel) { body.innerHTML = '<div class="placeholder"><div>' + EMPTY_ASSETS + '</div></div>'; return; }
     var path = m.sel, cut = path.lastIndexOf('/');
     var leaf = path.slice(cut + 1), folder = cut > 0 ? path.slice(0, cut) : '/';
     var opts = abCarriers(abSelType(m), path), okAny = false, cur = null;
@@ -6033,7 +6037,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!name) return;
     var members = 0; for (var k in tlLabels) if (tlLabels.hasOwnProperty(k) && tlLabels[k].folder === name) members++;
     var msg = members ? ('Move ' + members + ' timeline' + (members === 1 ? '' : 's') + ' to the root and delete the folder "' + name + '"?') : 'Delete the empty folder "' + name + '"?';
-    showConfirm(msg, function(){ tlRenameFolderTo(name, ''); });
+    showConfirm(msg, function(){ tlRenameFolderTo(name, ''); }, 'Delete folder', 'Delete');
   }
   function tlRenameFolderInline(folderEl) {
     var lbl = folderEl.querySelector('.pf-fname'); if (!lbl) return;
@@ -6393,7 +6397,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var card = document.getElementById('prefabCard'), empty = document.getElementById('pcEmpty');
     if (card) card.style.display = 'none';
     /* 'flex' (see renderPrefabDetail) -- keeps the empty state centered like the Entities tab's */
-    if (empty) { empty.style.display = 'flex'; empty.textContent = 'Select a prefab to see its details.'; }
+    if (empty) { empty.style.display = 'flex'; empty.innerHTML = EMPTY_PREFABS; }
     ['pcName', 'pcDesc', 'pcTags'].forEach(function(id){ var el = document.getElementById(id); if (el) el.value = ''; });
     var count = document.getElementById('pcEntityCount'); if (count) count.textContent = '';
     prefabViewport.clear();
@@ -6492,8 +6496,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       for (var j = 0; j < items.length; j++) { var k = r.folder + '/' + items[j]; if (seen[k]) continue; seen[k] = true; names.push(items[j]); folders.push(r.folder); }
     }
     if (!names.length) return;
-    if (names.length === 1) { showConfirm('Delete "' + names[0] + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: names[0], folder: folders[0]}); }); return; }
-    showConfirm('Delete ' + names.length + ' prefabs? Their files go to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefabs', names: names, folders: folders}); });
+    if (names.length === 1) { showConfirm('Delete "' + names[0] + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: names[0], folder: folders[0]}); }, 'Delete prefab', 'Delete'); return; }
+    showConfirm('Delete ' + names.length + ' prefabs? Their files go to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefabs', names: names, folders: folders}); }, 'Delete prefabs', 'Delete');
   }
   var newFolderBtn = document.getElementById('newFolderBtn');
   if (newFolderBtn) newFolderBtn.addEventListener('click', function(){
@@ -6522,7 +6526,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var name = folder.getAttribute('data-folder-name') || '';
     var count = allPrefabNamesInFolder(name).length;   // not the DOM: a collapsed folder renders no item rows
     var msg = count ? ('Move ' + count + ' prefab(s) to the root list and delete this folder?') : 'Delete this empty folder?';
-    showConfirm(msg, function(){ post({cmd:'deleteFolder', name: name}); });
+    showConfirm(msg, function(){ post({cmd:'deleteFolder', name: name}); }, 'Delete folder', 'Delete');
   }
   // reusable confirm modal
   var confirmModal = document.getElementById('confirmModal');
@@ -6601,7 +6605,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');
   if (prefabDeleteBtn) prefabDeleteBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;
-    showConfirm('Delete "' + name + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: name, folder: selectedPrefabFolder}); });
+    showConfirm('Delete "' + name + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: name, folder: selectedPrefabFolder}); }, 'Delete prefab', 'Delete');
   });
   // Description and tags live in the prefab file's own snapmapPlus block, which every reader strips
   // before the engine sees the file. Save changed metadata on blur; clearing both fields clears them.
@@ -6891,12 +6895,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       showPrefabModal(false);
       document.getElementById('npName').value=''; document.getElementById('npDesc').value=''; document.getElementById('npTags').value='';
     }
-    if (currentPrefabNames.indexOf(name) !== -1) showConfirm('A prefab named "' + name + '" already exists. Overwrite?', doCreate);
+    if (currentPrefabNames.indexOf(name) !== -1) {
+      if (npModuleMode) { toast('A prefab named "' + name + '" already exists. Choose another name.', 'warn'); return; }
+      showConfirm('A prefab named "' + name + '" already exists. Replace it with this selection?', doCreate, 'Replace prefab', 'Replace');
+    }
     else doCreate();
   });
 
   measureFont();   // once at boot -- the completion popup positions itself off the editor's char/line metrics
-  post({cmd:'refresh'});
   post({cmd:'rawmapStatus'});   // so the File menu never opens showing "Loading..."
 </script>
 </body>
