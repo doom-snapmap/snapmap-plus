@@ -8,6 +8,7 @@
 
 #include "snapmap_plus_iface.h"
 #include "modui.h"
+#include "feature_health.h"
 #include "modbundle.h"
 #include "modstore.h"
 #include "modserve.h"
@@ -4595,6 +4596,10 @@ int sh_modui_run(int action, const char *arg)
     const sh_modui_engine *e = mu_engine();
     char note[160];
     if (!mu_on_main()) return -1;
+    /* Reading a mod's files needs no engine hook; every other action does. */
+    if (action != SH_MODS_ACT_FILES && action != SH_MODS_ACT_FILE_TEXT &&
+        sh_feature_refusal(SH_FEATURE_MODS, note, sizeof note))
+        return mu_simple_result(action, 0, note);
     switch (action) {
     case SH_MODS_ACT_INSTALL:
         return mu_install(arg);

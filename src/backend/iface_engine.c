@@ -39,6 +39,7 @@
 #include "modserve.h"
 #include "modpublish.h"
 #include "engine_build.h"
+#include "feature_health.h"
 
 /* Editor layout. */
 /* Extraction RVA for re-derivation only; runtime uses editor_singleton.
@@ -404,6 +405,19 @@ static int slot_sound_preview(sh_iface *self, const char *name)
     (void)self;
     if (!name || !name[0]) { sh_soundpreview_stop(); return 0; }
     return sh_soundpreview_play(name);
+}
+
+/* Why the latest image preview failed, and why the latest audition was refused. */
+static int slot_preview_failure(sh_iface *self, char *out, size_t cap)
+{
+    (void)self;
+    return sh_preview_failure(out, cap);
+}
+
+static int slot_sound_refusal(sh_iface *self, char *out, size_t cap)
+{
+    (void)self;
+    return sh_soundpreview_refusal(out, cap);
 }
 
 /* Main thread only: hold audition cvars for the browser session to avoid
@@ -1588,6 +1602,9 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.material_rect           = slot_material_rect;              /* +0x2F0 ext 17 */
     slots.sound_preview           = slot_sound_preview;              /* +0x2F8 ext 18 */
     slots.sound_session           = slot_sound_session;              /* +0x300 ext 19 */
+    slots.features_off            = sh_feature_health_slot;          /* +0x388 ext 36 */
+    slots.preview_failure         = slot_preview_failure;            /* +0x390 ext 37 */
+    slots.sound_refusal           = slot_sound_refusal;              /* +0x398 ext 38 */
     slots.resolve_prefab_model    = slot_resolve_prefab_model;       /* +0x308 ext 20 */
     slots.request_prefab_mesh     = slot_request_prefab_mesh;        /* +0x310 ext 21 */
     slots.get_prefab_mesh         = slot_get_prefab_mesh;            /* +0x318 ext 22 */

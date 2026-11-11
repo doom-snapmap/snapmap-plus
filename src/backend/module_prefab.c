@@ -20,6 +20,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include "module_prefab.h"
+#include "feature_health.h"
 #include "module_prefab_map.h"
 #include "rawmap.h"
 #include "apply_engine.h"
@@ -884,12 +885,16 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         return 1;
     }
     case SH_MODULE_PREFAB_SAVE:
+        if (call->out && call->out_cap > 0 &&
+            sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return -1;
         if (InterlockedCompareExchange(&g_faulted, 0, 0) || !sh_rawmap_live_serialize_ready()) {
             mp_out(call, "module prefabs are unavailable on this build");
             return -1;
         }
         return mp_save(call);
     case SH_MODULE_PREFAB_PLACE:
+        if (call->out && call->out_cap > 0 &&
+            sh_feature_refusal(SH_FEATURE_PREFABS, call->out, (size_t)call->out_cap)) return 0;
         if (!mp_ready_place()) { mp_out(call, "module prefab placement is unavailable on this build"); return 0; }
         return mp_place(call);
     case SH_MODULE_PREFAB_CHECK:

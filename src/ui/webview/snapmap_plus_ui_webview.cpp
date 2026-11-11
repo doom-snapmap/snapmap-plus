@@ -161,6 +161,7 @@ static std::string   g_mods_wait_name, g_mods_wait_folder;
 static volatile bool g_pending_sound_preview = false;
 static std::string   g_sound_preview_name;
 static int           g_sound_preview_result = 0;
+static char          g_sound_preview_reason[256];   /* why it was refused, '' when it was not */
 /* Preview-mode session, held while the asset browser is on screen. Separate pending flag from the
  * play above so opening the browser and clicking Play in the same frame still arrive in order. */
 static volatile bool g_pending_sound_session = false;
@@ -1357,6 +1358,9 @@ static void ui_apply_sound_preview()
     const char *n = g_sound_preview_name.empty() ? nullptr : g_sound_preview_name.c_str();
     __try { g_sound_preview_result = g_iface->vtbl->sound_preview(g_iface, n); }
     __except (EXCEPTION_EXECUTE_HANDLER) { g_sound_preview_result = 0; }
+    g_sound_preview_reason[0] = '\0';
+    if (!g_sound_preview_result && n && SH_IFACE_HAS_SLOT(g_iface, sound_refusal))
+        (void)g_iface->vtbl->sound_refusal(g_iface, g_sound_preview_reason, sizeof g_sound_preview_reason);
 }
 
 /* The module-prefab slot, SEH-guarded (PODs only in scope). 0 when this backend has no slot. */
@@ -1689,6 +1693,12 @@ static void ui_emit_list(int n, int ready, const char *reason)
     json += L"\",\"renderer\":\""; json += sh_webview_json::escape_wide(sh_host_renderer_name());
     /* and the game identity: '' means the backend is not attached ("- Game: not attached") */
     json += L"\",\"game\":\""; json += sh_webview_json::escape_wide(g_game.c_str());
+    /* the features that are off this session, the one line the status bar shows ('' = none) */
+    {
+        char off[512] = "";
+        if (SH_IFACE_HAS_SLOT(g_iface, features_off)) (void)g_iface->vtbl->features_off(g_iface, off, sizeof off);
+        json += L"\",\"featuresOff\":\""; json += sh_webview_json::escape_wide(off);
+    }
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
     json += L",\"entities\":[";
@@ -2284,8 +2294,12 @@ static void ui_send_preview(const char *name)
             uri.assign(probe, (size_t)rc);  /* implausibly small, but handle it */
         }
     }
+    char reason[256] = "";
+    if (uri.empty() && SH_IFACE_HAS_SLOT(g_iface, preview_failure))
+        (void)g_iface->vtbl->preview_failure(g_iface, reason, sizeof reason);
     std::wstring json = L"{\"kind\":\"previewImage\",\"ok\":";
     json += uri.empty() ? L"false" : L"true";
+    json += L",\"reason\":\""; json += sh_webview_json::escape_wide(reason); json += L"\"";
     json += L",\"uri\":\"";
     json += sh_webview_json::escape_wide(uri.c_str());
     json += L"\",\"name\":\"";
@@ -4603,7 +4617,8 @@ static void ui_think_loop()
         if (did_sound_preview) {
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
             m += (g_sound_preview_result ? L"true" : L"false");
-            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_sound_preview_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_sound_preview_name.c_str());
+            m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(g_sound_preview_reason); m += L"\"}";
             ui_post_json(m.c_str());
         }
         if (did_new_entity) {

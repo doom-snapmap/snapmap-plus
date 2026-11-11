@@ -286,6 +286,9 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.budget                  = s->budget;                  /* +0x370 */
     g_iface_vtbl_live.mods                    = s->mods;                    /* +0x378 */
     g_iface_vtbl_live.prefab_watch            = s->prefab_watch;            /* +0x380 */
+    g_iface_vtbl_live.features_off            = s->features_off;            /* +0x388 */
+    g_iface_vtbl_live.preview_failure         = s->preview_failure;         /* +0x390 */
+    g_iface_vtbl_live.sound_refusal           = s->sound_refusal;           /* +0x398 */
 }
 
 /* Allocate the fixed object and private subobject with an empty registry/queue. */
