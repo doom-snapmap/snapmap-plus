@@ -800,7 +800,7 @@ These backend files share the work:
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
   inserts and strips it, and removes the serializer's comments so the file is
-  plain JSON), reads an older prefab's sidecar read-only, resolves
+  plain JSON), refuses an older prefab (a sidecar and no block), resolves
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree and `strings\strids.json`
@@ -3184,9 +3184,10 @@ summary and rows. No sidecar is written.
 An earlier shape. A prefab with a `<name>.meta.json` sidecar and no block, or a
 block whose rows name `id` and `bundle`, was saved by an earlier version: its
 details are not read (`META_READ` answers `SH_PREFAB_META_EARLIER` with an
-empty view), Load / Place, export and `sh_prefab mods` refuse it with "This
-prefab was saved in a format this version does not read.", and a description
-edit writes nothing. A prefab with neither names no mods and loads as before.
+empty view), Load / Place, export and `sh_prefab mods` refuse it ("Prefab
+<name> was not placed: it was saved by an earlier version of Snapmap+. Ask its
+author to export it again."), and a description edit writes nothing. A prefab
+with neither names no mods and loads as before.
 A sidecar is never listed as a prefab, and it follows its prefab when that is
 moved, renamed or deleted. Prefab paths and names are UTF-8 and every file is
 opened with the wide calls.
@@ -3198,11 +3199,21 @@ a file's block; the Prefabs list reads at most the last 1 MB of each file,
 where the block is. `MODS_STATUS` names each row's mod by its name ("id",
 else its salt), with its salt and build.
 
-Resolving. Load / Place first reads the rows (`MODS_RESOLVE`, on the game
-thread) and sets the placement's serving context: the player's own (the open
-map's root folders first), with the place the prefab's import filled,
-`mods\maps\<prefab name>\`:
+Resolving. Load / Place first reads the rows (`MODS_RESOLVE`). The rows
+resolve in the open map's own context (the root folders, else the map's own
+place); a placement never changes where the open map finds its mods
+(decision 12), and neither does `sh_prefab mods`:
 
+- a row the open map does not serve whose very build a place of the store
+  holds (a prefab ZIP's import) is installed at the root first, when the root
+  holds no folder of its salt: off the game thread, under the store lock, the
+  place's folder is copied to a staging folder in `%TEMP%` and installed from
+  there (`sh_ms_install_from_folder`, so the root folder takes the place
+  folder's name), the index is rescanned and one console line says "Prefab
+  <name>: N mod(s) it uses was installed in your mods folder, where your own
+  maps find it." The player is putting the mod to use in their own maps, and
+  the import was the approval. A copy that fails refuses the placement with
+  the cause;
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
   console line, below; nothing is fetched, because nothing can install it;
@@ -3219,7 +3230,8 @@ map's root folders first), with the place the prefab's import filled,
   with its own hook (`SH_MODPUB_PREFAB_PLACE`): the denial gate asks the store
   on the worker; when every missing bundle is obtainable the engine's Yes/No asks
   "This prefab needs N mod(s): <names> (<size>). Download and install now?", Yes
-  fetches each archive into `mods\maps\<prefab name>\`, and the ready callback runs the step above;
+  fetches each archive (`modpublished.c` decides where; decision 12 wants the
+  root), and the ready callback runs the step above;
   only rows the asset rule reports missing or incomplete are asked for; the
   Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
   Load / Place. Otherwise the placement is denied with the gate's prefab
@@ -3256,18 +3268,19 @@ Open dialog's "Prefab exports (*.zip, *.json)") take the ZIP, or a `.json`
 inside an extracted export folder: that folder is the export, the picked file is
 the prefab and a `mods/` folder beside it holds the mod folders. The importer
 takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
-carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
-names a build the block's rows name, exactly as a map's import does (see
-[Rawmaps that name mods](#rawmaps-that-name-mods)), in the placement's context:
-skipped when something serves its row, installed into the prefab's place,
-`mods\maps\<prefab name>\<mod name>\`, otherwise (a library name of
-"<name> (2)" is noted on the same place), and removed again when it does not
-build to the hash its own `mod.json` names; a carried folder no row names is
-left out. It then rescans and adds the prefab under the `.json`'s file
-name. A prefab of that name with the same bytes is left alone (an
-import that finds everything already there writes nothing); one with other bytes
-is kept and the import takes "<name> (2)" and so on. A row the export does not
-carry is named in the result ("It also needs <name> <version>, which the export
+carries a block), first adds the prefab under the `.json`'s file name (a
+prefab of that name with the same bytes is left alone; one with other bytes is
+kept and the import takes "<name> (2)" and so on), then installs each carried
+`mods/<folder>/` whose `mod.json` names a build the block's rows name, exactly
+as a map's import does (see [Rawmaps that name mods](#rawmaps-that-name-mods)):
+skipped when something serves its row, installed into the ZIP's place,
+`mods\maps\<prefab name>\<mod name>\`, otherwise, and removed again when it
+does not build to the hash its own `mod.json` names; a carried folder no row
+names is left out. When the install fails the prefab it added is deleted
+again, so a failed import leaves nothing. An import that finds everything
+already there writes nothing. The first Load / Place installs the mods at the
+root as above. A row the export does not
+carry is named in the result ("It also needs <name>, which the export
 does not carry."), and Load / Place asks for it as above. Each importer refuses
 the other's ZIP, told apart by the carried `.json` ("this is a map's export, not
 a prefab's"), and the prefab importer also refuses a map's JSON and two prefabs
@@ -3275,9 +3288,11 @@ in one ZIP. An export in an earlier shape (any `bundle.canonical.json`, in a
 ZIP or an extracted folder, an `export.json` index, a carried `mod.json` or
 rows in an earlier shape) is refused with "The prefab was not imported. This
 export was saved in a format this version does not read."
-`sh_prefab mods "<name>"` lists the block's rows, each as `<name>
-(<salt>@<build16>)`, and whether each is served in the placement's context,
-with the asset rule's sentence for one that is not.
+`sh_prefab mods "<name>"` lists the block's rows by their names and whether
+each is served in the open map's context, held by an import (installed at the
+root by the first placement), or neither, with the asset rule's sentence. It
+changes nothing.
+
 
 
 ### Publishing a map with mods
