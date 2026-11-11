@@ -78,6 +78,7 @@ enum sh_ai_ev {
     SH_AI_EV_GET_MONSTER_TYPE,       /* getMonsterType             -> i  */
     SH_AI_EV_PULL_TRIGGER_LEFT,      /* pullTriggerLeft                  */
     SH_AI_EV_RELEASE_TRIGGER_LEFT,   /* releaseTriggerLeft               */
+    SH_AI_EV_SET_FIRE_MODE,          /* setFireMode                i     */
     SH_AI_EV_COUNT
 };
 

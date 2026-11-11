@@ -510,6 +510,8 @@ static void test_commands(void)
         "    self:trigger(true, 'left')\n"
         "    self:trigger(false, 'left')\n"
         "    self:equip(2)\n"
+        "    self:fire_mode('weapon')\n"
+        "    self:fire_mode('AIFIREMODE_HOLDFIRE')\n"
         "    self:laser('laser_sources', true)\n"
         "    self:laser_sweep('rain')\n"
         "    self:laser_state('main_beam', false)\n"
@@ -539,7 +541,8 @@ static void test_commands(void)
     CHECK(strstr(g_events, "1:setPlayerEnemy(0)\n1:setEnemy(e2,1)\n") != NULL);
     CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n1:clearAimFocus()\n") != NULL);
     CHECK(strstr(g_events, "1:pullTriggerRight()\n1:releaseTriggerRight()\n1:pullTriggerLeft()\n"
-                           "1:releaseTriggerLeft()\n1:equipInventoryItemByIndex(2)\n") != NULL);
+                           "1:releaseTriggerLeft()\n1:equipInventoryItemByIndex(2)\n1:setFireMode(2)\n"
+                           "1:setFireMode(0)\n") != NULL);
     CHECK(strstr(g_events, "1:setLaserState(1,laser_sources)\n1:ae_startLaserSweep(noanim,rain)\n"
                            "1:ae_setLaserState(noanim,0,main_beam)\n") != NULL);
     CHECK(strstr(g_events, "1:ae_setOverrideFocusTagName(noanim,0,focus_aim_idle)\n1:ae_clearOverrideFocusTag(noanim,0)\n") != NULL);
@@ -1203,7 +1206,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 34);
+    CHECK(sh_script_ai_register() == 35);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

@@ -92,6 +92,7 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "getMonsterType",              "" },
     { "pullTriggerLeft",             "" },
     { "releaseTriggerLeft",          "" },
+    { "setFireMode",                 "i" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -974,6 +975,36 @@ static int l_trigger(lua_State *L)
     if (!park(ai, h)) return 0;
     if (hand == SH_AI_HAND_LEFT) run(ai, on ? SH_AI_EV_PULL_TRIGGER_LEFT : SH_AI_EV_RELEASE_TRIGGER_LEFT, NULL, 0, NULL);
     else run(ai, on ? SH_AI_EV_PULL_TRIGGER : SH_AI_EV_RELEASE_TRIGGER, NULL, 0, NULL);
+    return 0;
+}
+
+/* ai:fire_mode(mode) sets the demon's fire control mode (aiFireMode_t):
+ * "hold", "explicit_release", "weapon", "when_ready" or "spray", or the
+ * engine's AIFIREMODE_ names. The fire control update (VK 0x1404456E0 /
+ * fire control +0x1C) pulls and fires a weapon's trigger only in the weapon
+ * modes; a demon a script parks holds fire, so a pulled trigger launches
+ * nothing until the mode is "weapon". */
+static int l_fire_mode(lua_State *L)
+{
+    static const char *const names[][2] = {
+        { "hold", "AIFIREMODE_HOLDFIRE" }, { "explicit_release", "AIFIREMODE_WEAPON_EXPLICIT_RELEASE" },
+        { "weapon", "AIFIREMODE_WEAPON" }, { "when_ready", "AIFIREMODE_FIREWHENREADY" },
+        { "spray", "AIFIREMODE_SPRAYWHENREADY" },
+    };
+    sh_script_handle h = 0;
+    const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tostring(L, 2) : NULL;
+    int mode = -1, i;
+    void *ai;
+    sh_ai_arg a;
+    for (i = 0; s && i < (int)(sizeof names / sizeof names[0]); i++)
+        if (!strcmp(s, names[i][0]) || !strcmp(s, names[i][1])) mode = i;
+    if (mode < 0)
+        return sh_script_refuse(L, "\"fire_mode\" needs \"hold\", \"explicit_release\", \"weapon\", \"when_ready\" or "
+                                "\"spray\", got %s", s ? s : luaL_typename(L, 2));
+    ai = self_ai(L, "fire_mode", &h);
+    if (!ai || !park(ai, h)) return 0;
+    a = arg_i(mode);
+    run(ai, SH_AI_EV_SET_FIRE_MODE, &a, 1, NULL);
     return 0;
 }
 
@@ -2194,6 +2225,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "awareness", l_awareness },       { "path_length", l_path_length },
     { "can_reach", l_can_reach },       { "find_position", l_find_position },
     { "trigger", l_trigger },           { "trigger_pulled", l_trigger_pulled },
+    { "fire_mode", l_fire_mode },
     { "equip", l_equip },               { "laser", l_laser },
     { "laser_sweep", l_laser_sweep },   { "focus_tag", l_focus_tag },
     { "turn_done", l_turn_done },       { "laser_state", l_laser_state },

@@ -2012,6 +2012,10 @@ is touched, and a removed demon answers nil.
   the weapon hand, read through the engine's own per-hand read (VK
   0x14074AB30 / GL 0x14074A440); `equip` by name reads the inventory (vtable
   +0x660, item VK 0x140EEDC50 / GL 0x140EED200).
+- **The fire mode.** The fire control pulls and fires a weapon only in the
+  weapon modes of its mode word (fire control +0x1C: hold, explicit release,
+  weapon, fire when ready, spray; VK 0x140444580); a demon a script parks
+  holds fire. `fire_mode(mode)` sends `setFireMode` with that mode.
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
