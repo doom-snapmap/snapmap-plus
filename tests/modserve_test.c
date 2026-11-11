@@ -5105,18 +5105,6 @@ static void test_store_root_utf8(void)
         CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Caf\xc3\xa9"));
         CHECK(sh_modserve_place_set(NULL) >= 0);
-        /* Playing a place notes it in the record of the folder the index
-         * serves from, whatever the store root is set to: never the
-         * player's own mods folder. */
-        {
-            sh_ms_place place = { "Caf\xc3\xa9", "item-cafe" };
-            CHECK(sh_ms_place_note(&place, "maps\\Caf\xc3\xa9"));
-            CHECK(sh_ms_set_root(NULL));
-            CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
-            CHECK(sh_ms_set_root(root));
-            CHECK(sh_ms_place_played_at("maps\\Caf\xc3\xa9") >= (long long)_time64(NULL) - 60);
-            CHECK(sh_modserve_place_set(NULL) >= 0);
-        }
     }
     sh_ms_set_root(NULL);
     strcpy_s(path, sizeof path, root);

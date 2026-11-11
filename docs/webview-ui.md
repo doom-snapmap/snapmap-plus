@@ -433,9 +433,8 @@ downloaded map's mod "Came with the map <name>; only that map uses it."). Arrows
 the selection over the rows shown.
 
 **A downloaded map's mods: the short view.** A mod in a map's place (`place`) shows only its name,
-"Came with the map <name>; only that map uses it.", Came with, and one note: "Snapmap+ removes it at
-start when none of your saved maps uses it and you have not played that map for 30 days; playing
-the map downloads it again." The head offers **Add to my mods** (`addToMine`: a copy at the root of
+"Came with the map <name>; only that map uses it.", Came with, and one note: "It stays on this
+computer until you remove it here." Nothing removes it but the player's own Remove. The head offers **Add to my mods** (`addToMine`: a copy at the root of
 `mods\` under the same salt, which the player's own maps use; the new folder is selected) and
 **Remove** (the uninstall, under that name, with its confirmation titled "Remove <name>?"); Files is
 hidden.

@@ -326,23 +326,6 @@ void sh_modui_note_changed(void);
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
-/* ---- the places cleanup (DECISIONS 22). mods\maps\ is a cache of other
- * people's maps; the saved maps that record a place are read here, where the
- * window reads the player's saves.
- *
- * sh_ms_place_saved_maps: how many of the player's saved maps record `place`
- *   ("maps\<segment>", or the bare segment) as where they find their mods;
- *   -1 when the saves cannot be read.
- * sh_ms_places_prune: at start, every mod folder of a place that no saved map
- *   records and whose map was not played for `days` days
- *   (sh_ms_place_played_at) is removed as the short view's Remove removes
- *   one (sh_ms_delete_mod_folder; an emptied place goes with its record
- *   entry). Playing the map again downloads it again. Returns how many mod
- *   folders went; -1, removing nothing, when the saves or the store cannot be
- *   read. */
-int  sh_ms_place_saved_maps(const char *place);
-int  sh_ms_places_prune(unsigned days);
-
 /* Scripts from downloaded maps (design: the one download approval and the
  * player's setting). The store says how many script files each build
  * carries (its index records it; HEAD answers X-Mod-Scripts), so the

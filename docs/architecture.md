@@ -965,17 +965,11 @@ Mods tab says which map a place serves. A new folder dropped into a place is
 refused (`SH_MODSERVE_PLACE_FRESH`: move it out into your own mods); a hand
 copy inside one place is refused ("This map's folder holds this mod twice").
 
-`mods\maps\` is a cache of other people's maps (DECISIONS 22). Every load of a
-map with a place notes when it was played in the record's entries for that
-place (`sh_ms_place_played`, from `sh_modserve_place_load` and
-`sh_modserve_place_set`). At start, before the boot index, `sh_ms_places_prune(30)`
-(`modui.c`, where the saved maps are read) removes every mod folder of a place
-that no saved map of the player records (`sh_ms_place_saved_maps`: the
-`place` part of each saved map's member) and whose map was not played for 30
-days (`sh_ms_place_played_at`, never earlier than the place folder's
-creation), through `sh_ms_delete_mod_folder` as the Mods tab's Remove does; an
-emptied place goes with its record entry. Saves that cannot be read keep every
-place. Playing the map again downloads its mods again.
+Nothing in the product removes a downloaded map's mods by itself (DECISIONS
+29): a place under `mods\maps\` stays, played or not and used by a saved map or
+not, until the player removes a mod of it with the Mods tab's Remove
+(`sh_ms_delete_mod_folder`, one folder; an emptied place goes with its record
+entry).
 
 Install at the root (`sh_ms_install_to_root`). A built folder of a map's place,
 or a received build unpacked outside the store, is copied to `mods\<its name>`
@@ -1477,9 +1471,7 @@ rebuild of the index removes the files there that no build serves any more,
 unless another game instance serves the same mods folder: each instance holds
 the mark `Local\snapmap-plus-served-<16 hex>`, named for the mods folder as its
 store lock is (`store_lock.h`), so a game on another folder, or a test on its
-own, never holds the cleanup back. Playing a map with a place notes the time
-in the record of the folder the index serves from (`sh_ms_place_played(root,
-place)`), never through the store's default root. A changed
+own, never holds the cleanup back. A changed
 bank is therefore a new bank to Wwise, two builds that carry one bank's bytes
 (the root and a map's place) share it and Wwise loads it once, and the ledger
 and the refresh see a new name. `sh_mods status` lists each bank and whether it was

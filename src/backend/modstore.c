@@ -11,7 +11,6 @@
 #include <limits.h>
 #include <ctype.h>
 #include <stdint.h>
-#include <time.h>
 
 #include "modstore.h"
 #include "config_json.h"
@@ -2173,65 +2172,6 @@ out:
     free(et);
     free(ef);
     return ok;
-}
-
-int sh_ms_place_played(const char *root, const char *dir_in)
-{
-    char rootu[MAX_PATH * 4], dir[SH_MS_NAME_MAX + 1], f[SH_MS_NAME_MAX + 1], *c;
-    mpj *doc;
-    int i, hit = 0, ok = 1;
-    if (!dir_in || !dir_in[0]) return 0;
-    if (root && root[0]) strncpy_s(rootu, sizeof rootu, root, _TRUNCATE);
-    else if (!sh_ms_root(rootu, sizeof rootu)) return 0;
-    strncpy_s(dir, sizeof dir, dir_in, _TRUNCATE);
-    for (c = dir; *c; c++) if (*c == '/') *c = '\\';
-    sh_mb_record_lock(rootu);
-    doc = ms_pl_load(rootu);
-    for (i = 0; doc && i < doc->n; i++)
-        if (doc->items[i]->type == MPJ_OBJ && ms_pl_folder(doc, i, f, sizeof f) && !_stricmp(f, dir)) {
-            hit = 1;
-            if (!mpj_set(doc->items[i], "played", mpj_new_int((long long)_time64(NULL)))) ok = 0;
-        }
-    if (hit) ok = ok && ms_pl_save(rootu, doc);
-    mpj_free(doc);
-    sh_mb_record_unlock();
-    return hit && ok;
-}
-
-long long sh_ms_place_played_at(const char *dir_in)
-{
-    char rootu[MAX_PATH * 4], dir[SH_MS_NAME_MAX + 1], f[SH_MS_NAME_MAX + 1], path[MAX_PATH * 4], *c;
-    WIN32_FILE_ATTRIBUTE_DATA d;
-    wchar_t *w;
-    mpj *doc;
-    long long at = 0;
-    int i;
-    if (!dir_in || !dir_in[0] || !sh_ms_root(rootu, sizeof rootu)) return 0;
-    strncpy_s(dir, sizeof dir, dir_in, _TRUNCATE);
-    for (c = dir; *c; c++) if (*c == '/') *c = '\\';
-    sh_mb_record_lock(rootu);
-    doc = ms_pl_load(rootu);
-    sh_mb_record_unlock();
-    for (i = 0; doc && i < doc->n; i++) {
-        const mpj *p;
-        if (doc->items[i]->type != MPJ_OBJ || !ms_pl_folder(doc, i, f, sizeof f) || _stricmp(f, dir)) continue;
-        p = mpj_get(doc->items[i], "played");
-        if (p && mpj_int(p) > at) at = mpj_int(p);
-    }
-    mpj_free(doc);
-    /* A place never played since it arrived counts from its arrival. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", rootu, dir);
-    w = sh_mb_wpath(path);
-    if (w && GetFileAttributesExW(w, GetFileExInfoStandard, &d)) {
-        ULARGE_INTEGER t;
-        long long made;
-        t.LowPart = d.ftCreationTime.dwLowDateTime;
-        t.HighPart = d.ftCreationTime.dwHighDateTime;
-        made = (long long)(t.QuadPart / 10000000ULL) - 11644473600LL;
-        if (made > at) at = made;
-    }
-    free(w);
-    return at;
 }
 
 int sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size_t title_cap)

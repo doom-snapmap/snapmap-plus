@@ -903,22 +903,22 @@ static void age_dir(const char *dir, unsigned days)
     free(w);
 }
 
-static void test_places_prune(const char *tmp)
+static void test_places_stay(const char *tmp)
 {
-    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], *text;
-    static const char *const keeps[] = { "Old Keep", "Kept Keep", "New Keep" };
+    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], *doc;
+    static const char *const keeps[] = { "Old Keep", "Other Keep" };
     sh_mb_bundle b;
-    size_t tl = 0, i;
-    printf("-- places: a downloaded map's mods no saved map uses and not played for 30 days go at start\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\prune\\mods", tmp);
+    size_t i;
+    printf("-- places: nothing removes a downloaded map's mods by itself; the short view's Remove removes one folder\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\stay\\mods", tmp);
     CHECK(sh_ms_set_root(root));
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\prune\\built", tmp);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\stay\\built", tmp);
     mt_write(src, "mod.json", "{\"name\":\"Crate\"}");
     mt_write(src, "assets\\generated\\image\\mods\\cratebox\\a.bimage", "crate bytes");
     memset(&b, 0, sizeof b);
     CHECK(sh_mb_build(src, "cratebox", NULL, &b) && sh_mb_write(&b, src, cause, sizeof cause));
     sh_mb_free(&b);
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 2; i++) {
         sh_ms_place pl;
         char note[MAX_PATH];
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate", root, keeps[i]);
@@ -929,49 +929,36 @@ static void test_places_prune(const char *tmp)
         _snprintf_s(note, sizeof note, _TRUNCATE, "maps\\%s", keeps[i]);
         CHECK(sh_ms_place_note(&pl, note));
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s", root, keeps[i]);
-        if (i < 2) age_dir(dir, 40);   /* arrived long ago, never played since */
+        age_dir(dir, 365);   /* arrived a year ago, never played since */
     }
-    /* New Keep arrived long ago too, but its map was played just now. */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep", root);
-    age_dir(dir, 40);
-    CHECK(sh_ms_place_played(NULL, "maps\\New Keep") == 1);
-    /* A saved map of the player records Kept Keep. */
-    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\prune\\saves", tmp);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPS0000000000000000PRUNE", saves);
-    text = sh_carrier_put_place(MAP, sizeof MAP - 1, "Kept Keep", &tl, cause, sizeof cause);
-    CHECK(text != NULL);
-    mt_mkdirs_for(dir);
-    CreateDirectoryA(dir, NULL);
-    if (text) { put_saved_decl(dir, text, tl); HeapFree(GetProcessHeap(), 0, text); }
-    /* Saves that cannot be read keep everything. */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\nowhere", saves);
-    sh_modui_test_set_saves_root(dir);
-    CHECK(sh_ms_places_prune(30) == -1 && sh_ms_place_saved_maps("maps\\Kept Keep") == -1);
+    /* No saved map of the player records either place. */
+    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\stay\\saves", tmp);
+    CreateDirectoryA(saves, NULL);
     sh_modui_test_set_saves_root(saves);
-    CHECK(sh_ms_place_saved_maps("maps\\Kept Keep") == 1 && sh_ms_place_saved_maps("Old Keep") == 0);
-    sh_ms_recycle_refuse_for_test(1);
-    CHECK(sh_ms_places_prune(30) == 1);
-    sh_ms_recycle_refuse_for_test(0);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep", root);
-    CHECK(!mt_exists(dir));   /* the emptied place goes with its folder */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Kept Keep\\Crate\\mod.json", root);
-    CHECK(mt_exists(dir));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep\\Crate\\mod.json", root);
-    CHECK(mt_exists(dir));
-    CHECK(sh_ms_places_prune(30) == 0);
-    /* Any number of saved maps with places: 600 of them are all read. */
-    for (i = 0; i < 600; i++) {
-        char seg[32];
-        _snprintf_s(seg, sizeof seg, _TRUNCATE, "Place %u", (unsigned)i);
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s%c76561198000000000%cSNAPMAPS%024u", saves, 92, 92, (unsigned)i);
-        text = sh_carrier_put_place(MAP, sizeof MAP - 1, seg, &tl, cause, sizeof cause);
-        CHECK(text != NULL);
-        CreateDirectoryA(dir, NULL);
-        if (text) { put_saved_decl(dir, text, tl); HeapFree(GetProcessHeap(), 0, text); }
+    /* What the product does at start: both places are still there. */
+    (void)sh_ms_recover_work();
+    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+    for (i = 0; i < 2; i++) {
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate\\mod.json", root, keeps[i]);
+        CHECK(mt_exists(dir));
     }
-    CHECK(sh_ms_places_prune(30) == 0 && sh_ms_place_saved_maps("maps\\Place 599") == 1);
+    /* The player's Remove of one of them removes exactly that folder. */
+    sh_ms_recycle_refuse_for_test(1);
+    doc = run_doc(SH_MODS_ACT_UNINSTALL, "maps\\Old Keep\\Crate");
+    CHECK(has(doc, "\"ok\":true"));
+    free(doc);
+    sh_ms_recycle_refuse_for_test(0);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep\\Crate", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Other Keep\\Crate\\mod.json", root);
+    CHECK(mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\built\\mod.json", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod.json", src);
+    CHECK(mt_exists(dir));
     sh_modui_test_set_saves_root(NULL);
     CHECK(sh_ms_set_root(g_root));
+    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
 }
 
 int main(int argc, char **argv)
@@ -1865,7 +1852,7 @@ int main(int argc, char **argv)
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     }
 
-    test_places_prune(tmp);
+    test_places_stay(tmp);
 
     printf("-- the page's fixture keys are the backend's\n");
     keys_match_fixture(payload, g_union ? g_union : "");

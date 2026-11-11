@@ -294,19 +294,6 @@ int  sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, siz
  * map of the record names). */
 int  sh_ms_place_title(const char *folder, char *title, size_t cap);
 
-/* A map whose place is `dir` ("maps\<segment>") was loaded now: every entry
- * of the record of the mods folder `root` (the folder the serving index
- * reads; NULL: the store root) naming that place notes the time ("played").
- * Returns 1 when written, 0 when no entry names it or the record cannot be
- * written. */
-int  sh_ms_place_played(const char *root, const char *dir);
-
-/* When the map of place `dir` was last played (seconds since 1970): the
- * latest "played" of the entries naming it, and never earlier than the place
- * folder's creation, so a place that arrived and was never played counts
- * from its arrival. 0 when neither is known. */
-long long sh_ms_place_played_at(const char *dir);
-
 /* sh_ms_install_from_folder into `place`: the source must be built (a
  * received build); the place's folder of its salt is replaced (the old one to
  * the Recycle Bin), else a free name is taken (sh_ms_place_folder), and the
