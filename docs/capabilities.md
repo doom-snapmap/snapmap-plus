@@ -144,8 +144,9 @@ the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, an
 is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl as `#str_<salt>_<name>`.
 A folder made by hand has no salt until its first scan: write its strings with plain keys
 (`imp_blue_name`, referenced `#str_imp_blue_name`), and that scan names them `<salt>_imp_blue_name`
-and rewrites the folder's own references with them. After that scan a new key must carry the
-prefix itself; one without it is refused with a sentence naming the expected prefix. A key the game
+and rewrites the folder's own references with them. Every later Refresh does the same for what
+you add: new files under `assets\...\mods\<folder name>\`, references to `mods/<folder name>/`
+and new plain string keys move under the salt, so you never need to know it. A key the game
 or Snapmap+ already defines (`snapentity_demon_baron`, referenced `#str_snapentity_demon_baron`) is
 a string edit instead: it keeps its name in any mod, the Mods tab lists it as "Changes the text of N
 game strings", and it applies where the mod's other edits apply (an editor-tweaks mod's in your
@@ -178,8 +179,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   like any key of your own and means nothing to Snapmap+. A folder in a shape this version does not
   read (a `package.json`, a `mod.json` built by an earlier version, or one using `id`, `key`,
   `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes` or `schema`) is
-  listed with "This mod folder is not in a shape Snapmap+ can build:" and the cause, and serves
-  nothing. Everything about mods is in `mods\`: the folders and one product file,
+  listed with "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer
+  again and it converts it." and serves nothing. Files beside `mod.json` and `assets\` (a README,
+  notes, `desktop.ini`) are ignored and never carried. A mistake in `scenes` or `hud` fails the
+  build with a sentence naming the block. A mod that brings campaign content gets the requirement
+  `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. Everything about mods is in `mods\`: the folders and one product file,
   `snapmap-plus.json` (publish claims, the migration record, the maps' places).
 - A mod's identity is its salt: eight characters the product writes once into `mod.json`. The
   folder name is yours; rename a folder any time and it stays the same mod. A folder you drop into
@@ -189,7 +193,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folders under `assets\`, `mod.json`'s strings), the folder as it was goes to the Recycle Bin, and
   it is built. A binary file that names `mods/<folder name>/`, or files under another mod's
   `mods/<x>/`, refuse that folder alone and leave it untouched. A copy of a mod folder is a new
-  mod: the folder built first keeps the salt and the copy gets its own, with one line saying so.
+  mod: the folder that held the salt keeps it (else the one created first) and the copy gets its
+  own, with one line saying so. A folder named like another mod's salt is refused until renamed.
   A new folder whose `mod.json` already names a salt (`"snapmap-plus": {"format": 2, "salt":
   "<salt>"}`, as an outside converter such as Doomforge writes it, its binaries naming that salt)
   keeps that salt and is built; when another root folder built earlier holds the salt, the copy
@@ -493,7 +498,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
           "axis": [[-0.7071, -0.7071, 0], [0.7071, -0.7071, 0], [0, 0, 1]] } ] }
 - A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<id>/` plays the Wwise
   event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
-  bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<id>_<name>.bnk`, built with Wwise or
+  bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<folder name>_<name>.bnk`, which Refresh
+  renames `<salt>_<name>.bnk` with its bank id to match, built with Wwise or
   snaphak-re's `make_bank.py`) is loaded into the game when the editor is first opened or a map
   loads, and right away when the mod is installed during a session. Entities the mod adds can name
   those sounds (`soundShader`). A changed bank takes effect after a restart. Music, switch and

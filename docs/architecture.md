@@ -547,12 +547,13 @@ These backend files share the work:
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
   `mods/<salt>/`. Of the 494 permutation decls the installed archives hold,
-  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 8 (`SH_MB_RULES`) is
-  `mod.json` format 2, so every own folder is built again once.
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 11 (`SH_MB_RULES`):
+  files beside `mod.json` and `assets\` are ignored, and campaign content derives its requirements, so
+  every own folder is built again once.
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
-  (`name`, `version`, `description`, `author`, `homepage`, `requirements`,
-  `strings`, `hud`, `companions`; any other key is kept in the manifest's
+  (`name`, `description`, `author`, `homepage`, `requirements`,
+  `strings`, `hud`, `scenes`, `companions`; any other key is kept in the manifest's
   `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
@@ -563,13 +564,23 @@ These backend files share the work:
   `salt`, `rules`, `built`, `tree` and `cause` only (`sh_mb_write_failed`):
   the folder serves nothing until fixed and the load says "not built:
   <cause>". The canonical manifest has `format` 2 and `id` the salt; there is
-  no build counter. Any other shape is refused with "This mod folder is not
-  in a shape Snapmap+ can build: <cause>" (`SH_MB_SHAPE`,
-  `sh_mb_descriptor_state`): `package.json`, a block of an earlier format, a
-  format-2 block without a salt, or a retired author key (`id`, `key`,
-  `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`,
-  `composes`, `schema`, a `hud` `schema`); so is a folder whose files lie
-  under `mods/<x>/` for another `x` than its salt (`sh_mb_salt_paths_check`).
+  no build counter. An earlier shape (`package.json`, a block of an earlier
+  format, or a retired author key: `id`, `key`, `shadows`, `stock`, `scope`,
+  `player`, `extends`, `replaces`, `legacy`, `composes`, `schema`, a `hud`
+  `schema`) is refused with one sentence, "This mod was made for an earlier
+  version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+  (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
+  is damage the sentence names, and a file under `mods/<x>/` for another `x`
+  than the folder's name or salt is refused naming the file
+  (`sh_mb_salt_paths_check`). Files beside `mod.json` and `assets\` (a README,
+  `desktop.ini`, a `.git` folder) are ignored and never carried. A mod that
+  brings campaign content (a closure pointer or a surface) gets the
+  requirement `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 derived by
+  every build and load (`mb_derive_requirements`); an author value for either
+  is replaced with a warning. The registered extra check
+  (`sh_mb_set_extra_check`, `modcontent.c`) reads the author's `scenes` and
+  `hud` blocks with the game's grammar at build, so a mistake is the build's
+  cause in the Mods tab.
   `sh_mb_build` takes the salt from the block, or from its caller for a folder
   not salted yet; `sh_mb_salt_modjson` writes the block a first scan gives a
   folder (`{"format": 2, "salt": ...}`) and rewrites the author's own
@@ -882,9 +893,16 @@ or New mod; there is no folder watcher. Under the store lock it:
    and every `#str_<key>` reference in its own text files, `mod.json` among
    them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
    writes plain keys in a new folder; a binary file naming one of them refuses
-   the folder as a binary naming `mods/<folder name>/` does. After the first
-   scan a key without the prefix is refused by the build ("mod.json strings key
-   <key> is not named <salt>_<name>"). Everything is read and rewritten in
+   the folder as a binary naming `mods/<folder name>/` does. A sound bank
+   named `<folder name>_x.bnk` is renamed `<salt>_x.bnk` and its 4-byte BKHD
+   id set to FNV-1 of the new name; a bank whose id does not match its name
+   has it corrected. The same move runs before every later build of a root
+   folder (`ms_rehome`, DECISIONS 20) with the salt kept: files under
+   `mods/<folder name>/`, references to it, new plain strings keys and banks
+   named for the folder follow the salt, the builder block stays, binaries are
+   left to the build, and nothing is written when nothing is under the name.
+   A folder name that is a salt of the store names that mod and is never moved;
+   renaming a folder changes nothing already moved. Everything is read and rewritten in
    memory first, staged beside the folder as `<name>.staging-<pid>` (unchanged
    files hard-linked), then swapped in with two renames under the same name, the
    second undone on failure; the folder as it was goes to the Recycle Bin. A
@@ -893,9 +911,10 @@ or New mod; there is no folder watcher. Under the store lock it:
    `mods/<x>/`, a file that cannot be read, two files landing on one path or a
    refused rename leave the folder exactly as it was, refused alone with that
    cause (`MODS: store: <folder> refused: ...`);
-2. settles a salt two root folders carry (a copied folder): the one whose
-   block's `built` is earliest keeps it (a folder never built last; ties by
-   folder path), every other one is salted anew with `from` the old salt, one
+2. settles a salt two root folders carry (a copied folder): the folder the
+   record's `salts` section names (the one that held it at the last scan)
+   keeps it, else the folder created first, never the build time (an Explorer
+   copy carries the same `built`); every other one is salted anew with `from` the old salt, one
    line each ("mods\<b> is a copy of mods\<a>; it is a new mod now");
    until then the listing shows the copy refused with that reason;
 3. builds every root folder whose block's tree hash (`sh_mb_tree_hash`: the
@@ -2688,7 +2707,11 @@ pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.
 
 Every writer of the store serialises on one recursive lock, `modstore_lock`
-(`modstore.c`; `modsync_store_lock` is the same lock under its older name).
+(`modstore.c`; `modsync_store_lock` takes the same lock): the mods folder's
+named mutex (`src/common/store_lock.h`), which the record lock
+(`sh_mb_record_lock`) shares and which the store tool holds for its whole run,
+so a second game or the store tool waits instead of overwriting. The scan
+records each root salt's folder in the record's `salts` section.
 Each install and verification takes it; each migration folder, a download
 install, `sh_mods install` and an export hold it around their
 whole step. A second writer waits for the first instead of failing, and logs
