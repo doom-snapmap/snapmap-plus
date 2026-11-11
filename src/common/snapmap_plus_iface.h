@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x378, making the current vtable 0x380 bytes. The backend records that
+ * at +0x380, making the current vtable 0x388 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -73,11 +73,9 @@ typedef int          (*sh_serialize_selection_fn)(struct sh_iface *self, char *o
 
 /* Join the local app-data snapmap-plus root, prefix, and name into out_path.
  * Caller supplies separators and suffix. Return 1 when formatting succeeds. */
+/* %LOCALAPPDATA%/snapmap-plus/<prefix><name> as UTF-8; open it with the wide file calls. */
 typedef int          (*sh_resolve_prefab_path_fn)(struct sh_iface *self, const char *prefix,
                                                   const char *name, char *out_path, int cap);       /* +0xc0 */
-
-/* Remove an ID from selection unless the manipulation guard refuses. */
-typedef void         (*sh_remove_from_selection_fn)(struct sh_iface *self, int id);                 /* +0x130 */
 
 /* Enumerate names from the decl manager for a short decl type. Pack NUL-
  * terminated names in out_buf and set out_count; return 1 for a nonempty
@@ -563,25 +561,27 @@ typedef int (*sh_config_get_json_fn)(struct sh_iface *self, const char *key,
 typedef int (*sh_config_set_json_fn)(struct sh_iface *self, const char *key,
                                      const char *value_json);                /* +0x2B8 (ext 10) */
 
-/* Rawmap file slots for the File menu. Status crosses as a JSON fragment, so
- * both paths, the arm state and the save counter travel in one call. */
+/* Rawmap file slots for the File menu. Status crosses as a UTF-8 JSON fragment,
+ * so both paths and the save counters travel in one call. */
 typedef int (*sh_rawmap_status_fn)(struct sh_iface *self,
                                    char *out_json, int out_capacity);         /* +0x328 (ext 24) */
 
-/* A nonempty load path stages a validated file; an empty one restores the default.
- * A nonempty save path queues an export of the live map to that file; an empty
- * one releases the chosen destination. NULL leaves that side unchanged.
- * arm: -1 leave, 0/1 gate off/on, 2 stage one load, 3 keep the current save path,
- * 4 release it, 5 queue a save to the current backend destination. Refused saves
- * neither change the destination nor arm a future save. */
+/* Paths are UTF-8. With arm 2 a nonempty load path becomes the rawmap to open
+ * now: it is checked, and refused when the editor cannot open it now; an empty
+ * load path restores the default. A nonempty save path queues an export of the
+ * live map to that file; an empty one releases the chosen destination. NULL
+ * leaves that side unchanged. arm: -1 leave, 2 open (see above), 3 keep the
+ * current save path, 4 release it, 5 queue a save to the current backend
+ * destination; 0 and 1 named the retired every-load switch and are refused.
+ * Refused saves neither change the destination nor queue a later save. */
 typedef int (*sh_rawmap_configure_fn)(struct sh_iface *self,
                                       const char *load_path, const char *save_path, int arm,
                                       char *out_msg, int msg_capacity);       /* +0x330 (ext 25) */
 
-/* Reload the editor's map on the next frame, so a staged rawmap opens. Returns 1
- * when the request was accepted, not when the map is open -- the frame hook
- * re-checks and may decline. The reload brackets its own call with the swap arm
- * and requires overwrite protection unless the user explicitly disabled it. */
+/* Open the load path in the editor on the next frame. Returns 1 when the request
+ * was accepted, not when the map is open -- the frame hook re-checks, and a
+ * failure there is told to the player. Requires overwrite protection unless the
+ * user explicitly disabled it. */
 typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self,
                                      char *out_msg, int msg_capacity);        /* +0x338 (ext 26) */
 
@@ -670,7 +670,7 @@ typedef struct sh_iface_vtbl {
     void *parse_json_file;          /* +0x118 (0x7190) */
     void *spawn_idsnapentity;       /* +0x120 (0x71a0) */
     sh_set_displayname_fn set_entity_0x170; /* +0x128 (0x72A0) display-name setter */
-    sh_remove_from_selection_fn selection_guard; /* +0x130 (0x73C0) selection removal */
+    void *reserved_0x130;           /* +0x130 (0x73C0) retired: no caller */
     sh_add_to_selection_fn add_to_selection; /* +0x138 (0x73F0) */
     void *remove_from_selection;    /* +0x140 (0x7420) */
     sh_clear_selection_fn clear_selection;   /* +0x148 (0x7450) */
@@ -742,9 +742,9 @@ typedef struct sh_iface_vtbl {
     sh_request_prefab_mesh_fn  request_prefab_mesh;  /* +0x310 (ext 21) async installed geometry */
     sh_get_prefab_mesh_fn      get_prefab_mesh;      /* +0x318 (ext 22) consume geometry blob */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults; /* +0x320 (ext 23) model + scale defaults */
-    sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) staged paths + arm state */
-    sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose those paths / arm */
-    sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
+    sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) rawmap paths + last save */
+    sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose paths / open / save */
+    sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) open the load path now */
     sh_navmesh_view_fn         navmesh_view;         /* +0x340 (ext 27) the navigation view */
     sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
@@ -905,7 +905,6 @@ typedef struct sh_iface_engine_slots {
     sh_set_displayname_fn      set_displayname;       /* +0x128 */
     sh_serialize_selection_fn  serialize_selection;   /* +0xb0  */
     sh_resolve_prefab_path_fn  resolve_prefab_path;   /* +0xc0  */
-    sh_remove_from_selection_fn remove_from_selection;/* +0x130 */
 
     sh_enum_decls_of_resclass_fn enum_decls_of_resclass;/* +0x110 */
 
@@ -941,7 +940,7 @@ typedef struct sh_iface_engine_slots {
     sh_request_prefab_mesh_fn  request_prefab_mesh;         /* +0x310 (ext 21) */
     sh_get_prefab_mesh_fn      get_prefab_mesh;             /* +0x318 (ext 22) */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults;  /* +0x320 (ext 23) */
-    /* clone-extension: the File menu's rawmap load/save file surface. */
+    /* the File menu's rawmap load/save file surface. */
     sh_rawmap_status_fn        rawmap_status;               /* +0x328 (ext 24) */
     sh_rawmap_configure_fn     rawmap_configure;            /* +0x330 (ext 25) */
     sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */

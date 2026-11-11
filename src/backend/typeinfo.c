@@ -207,12 +207,17 @@ static void *ti_get_validator_reflect(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
+static const uint8_t *ti_type_array_base(void);
+static int ti_derives_by_records(const char *className, const char *baseName);
+
 int sh_typeinfo_class_derives(const char *className, const char *baseName)
 {
     if (!className || !baseName || !className[0] || !baseName[0]) return -1;
     void *reflect = ti_get_validator_reflect();      /* the validator's context (resolves SnapMap classes) */
     if (!reflect) reflect = ti_get_reflect();        /* fallback: the declMgr->[+0x80] reflect */
-    if (!reflect) return -1;
+    /* Off the main thread the accessors can answer nothing; the type records
+     * hold the same name -> superclass chain and read from any thread. */
+    if (!reflect) return ti_derives_by_records(className, baseName);
     const char *cur = className;
     for (int i = 0; i < 64 && cur && cur[0]; i++) {
         if (strcmp(cur, baseName) == 0) return 1;
@@ -354,27 +359,6 @@ size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap)
 #define MATERIAL_WIDTH_FN_RVA   SH_RVA(0x16C90A0u, 0x16C9D80u)   /* verified idMaterial width getter                       */
 #define MATERIAL_HEIGHT_FN_RVA  SH_RVA(0x16C8EA0u, 0x16C9B80u)   /* verified idMaterial height getter                      */
 
-/* Probe the virtual texture's resident minimum-LOD image without GPU calls.
- * Re-derive image extent fields from idImage_Vulkan_PC::Create (0xDADB70 on the
- * pinned Vulkan build): VkImageCreateInfo width/height/mips read +0x60/+0x64/+0x70.
- * SetSource (0xE11C50) supplies the _minlod controls type=0, format=0x13, mips=1;
- * mismatched controls invalidate the probe. Image+0xBD reports creation failure
- * and +0xE0 stores VkImage. File-loading fields +0x38/+0x3C are source-art
- * dimensions and must not substitute for the created image extent. */
-#define MATERIAL_VTEX_OFF        0x170u  /* material -> idVirtualTexture* (0 if not virtual-textured) */
-#define VTEX_MINLOD_IMAGE_OFF    0x3F0u  /* idVirtualTexture -> idImage* (always-resident low-res fallback) */
-/* This material branch stores atlas x/y/w/h at +0x18/+0x1C/+0x20/+0x24.
- * +0x1C is atlas Y, not a page count; width conversion uses *128/120. */
-#define VTEX_ATLAS_Y_OFF         0x1Cu   /* idVirtualTexture -> atlas Y coordinate (px) -- cross-check only */
-#define VTEX_ATLAS_W_OFF         0x20u   /* idVirtualTexture -> atlas width (px); getter does *128/120 */
-#define IMAGE_TYPE_OFF           0x54u   /* idImage -> image type; min-LOD control value: 0 (2D) */
-#define IMAGE_FMT_OFF            0x58u   /* idImage -> engine format enum; min-LOD control value: 0x13 */
-#define IMAGE_EXTENT_W_OFF       0x60u   /* idImage -> VkImageCreateInfo.extent.width  (authoritative) */
-#define IMAGE_EXTENT_H_OFF       0x64u   /* idImage -> VkImageCreateInfo.extent.height (authoritative) */
-#define IMAGE_MIPS_OFF           0x70u   /* idImage -> VkImageCreateInfo.mipLevels; min-LOD control value: 1 */
-#define IMAGE_CREATEFAIL_OFF     0xBDu   /* idImage -> creation-failure byte SetSource tests (expect 0) */
-#define IMAGE_VKIMAGE_OFF        0xE0u   /* idImage -> live VkImage handle (expect non-NULL if resident) */
-
 int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
@@ -393,54 +377,10 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
             } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
         }
 
-        /* Optional structural diagnostics do not change the lookup result. */
-        int has_vtex = 0, has_minlod = 0;
-        int img_w = -1, img_h = -1, img_type = -1, img_fmt = -1, img_mips = -1;
-        int pages = -1, fail = -1, resident = 0;
-        __try {
-            void *vtex = *(void * const *)((const uint8_t *)material + MATERIAL_VTEX_OFF);
-            if (vtex) {
-                has_vtex = 1;
-                pages = *(const int *)((const uint8_t *)vtex + VTEX_ATLAS_Y_OFF);
-                void *minlod = *(void * const *)((const uint8_t *)vtex + VTEX_MINLOD_IMAGE_OFF);
-                if (minlod) {
-                    const uint8_t *im = (const uint8_t *)minlod;
-                    has_minlod = 1;
-                    img_type = *(const int *)(im + IMAGE_TYPE_OFF);
-                    img_fmt  = *(const int *)(im + IMAGE_FMT_OFF);
-                    img_w    = *(const int *)(im + IMAGE_EXTENT_W_OFF);
-                    img_h    = *(const int *)(im + IMAGE_EXTENT_H_OFF);
-                    img_mips = *(const int *)(im + IMAGE_MIPS_OFF);
-                    fail     = *(const uint8_t *)(im + IMAGE_CREATEFAIL_OFF);
-                    resident = *(void * const *)(im + IMAGE_VKIMAGE_OFF) != NULL;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            has_vtex = 0; has_minlod = 0;
-            img_w = -1; img_h = -1; img_type = -1; img_fmt = -1; img_mips = -1;
-            pages = -1; fail = -1; resident = 0;
-        }
-
-        char tag[192] = "";
-        if (has_vtex) {
-            char pagetag[32] = "";
-            if (pages > 0) _snprintf_s(pagetag, sizeof pagetag, _TRUNCATE, " atlasY=%d", pages);
-            if (has_minlod) {
-                /* Verify SetSource's literal controls before trusting image dimensions. */
-                int ctl = (img_type == 0 && img_fmt == 0x13 && img_mips == 1);
-                _snprintf_s(tag, sizeof tag, _TRUNCATE,
-                            " [vt+minlod %dx%d ctl=%s(t%d/f%#x/m%d) fail=%d vk=%s%s]",
-                            img_w, img_h, ctl ? "OK" : "BAD", img_type, (unsigned)img_fmt, img_mips,
-                            fail, resident ? "yes" : "no", pagetag);
-            } else {
-                _snprintf_s(tag, sizeof tag, _TRUNCATE, " [vt, no minlod%s]", pagetag);
-            }
-        }
-
         if (w > 0 && h > 0)
-            _snprintf_s(buf, cap, _TRUNCATE, "found (%dx%d)%s", w, h, tag);
+            _snprintf_s(buf, cap, _TRUNCATE, "found (%dx%d)", w, h);
         else
-            _snprintf_s(buf, cap, _TRUNCATE, "found%s", tag);
+            _snprintf_s(buf, cap, _TRUNCATE, "found");
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (cap) buf[0] = '\0';
@@ -474,6 +414,34 @@ static const uint8_t *ti_type_array_base(void)
     __try { B = *(const uint8_t * const *)(P + REGISTRY_TYPEBASE_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { B = NULL; }
     return B;
+}
+
+/* The superclass of `name` from the type records, or NULL. */
+static const char *ti_record_super(const uint8_t *B, const char *name)
+{
+    __try {
+        for (uint32_t i = 0; i < REGISTRY_WALK_CAP; i++) {
+            const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
+            const char *n = *(const char * const *)(rec + REGISTRY_NAME_OFF);
+            if (n == NULL) break;
+            if (strcmp(n, name) == 0) return *(const char * const *)(rec + REGISTRY_SUPER_OFF);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return NULL;
+}
+
+/* sh_typeinfo_class_derives through the type records: 1, 0, or -1 when no
+ * records can be read. */
+static int ti_derives_by_records(const char *className, const char *baseName)
+{
+    const uint8_t *B = ti_type_array_base();
+    const char *cur = className;
+    if (!B) return -1;
+    for (int i = 0; i < 64 && cur && cur[0]; i++) {
+        if (strcmp(cur, baseName) == 0) return 1;
+        cur = ti_record_super(B, cur);
+    }
+    return 0;
 }
 
 int sh_typeinfo_collect_classnames(const char **out_names, int cap)
@@ -635,7 +603,7 @@ void h_sh_type(idCmdArgs *a)
 {
     const char *type = cmd_argv(a, 1);
     if (type == NULL) {
-        sh_printf("No type provided!\n");
+        sh_printf("usage: sh_type <type or enum> [-v]\n");
         return;
     }
 
@@ -702,7 +670,7 @@ void h_sh_type(idCmdArgs *a)
 
         if (dlen == SIZE_MAX) { free(dump); sh_printf("sh_type: cannot allocate the complete type dump.\n"); return; }
         ti_emit_long(dump);
-        sh_printf("Dumped type is a Class\n");
+        sh_printf("Dumped type is a class.\n");
         if (sh_clipboard_set(dump))
             sh_printf("sh_type: copied type '%s' to the clipboard.\n", type);
         free(dump);
@@ -712,7 +680,7 @@ void h_sh_type(idCmdArgs *a)
     /* Fall back to enum lookup when no class record exists. */
     void *en = ti_find_enum(reflect, type);
     if (en == NULL) {
-        sh_printf("Couldn't find type %s!\n", type);
+        sh_printf("sh_type: no class or enum named '%s'.\n", type);
         return;
     }
 
@@ -734,7 +702,7 @@ void h_sh_type(idCmdArgs *a)
 
     if (dlen == SIZE_MAX) { free(dump); sh_printf("sh_type: cannot allocate the complete enum dump.\n"); return; }
     ti_emit_long(dump);
-    sh_printf("Dumped type is a Enum\n");
+    sh_printf("Dumped type is an enum.\n");
     if (sh_clipboard_set(dump))
         sh_printf("sh_type: copied enum '%s' to the clipboard.\n", type);
     free(dump);
@@ -776,7 +744,7 @@ void h_sh_validclasses(idCmdArgs *a)
     if (k > 0) {
         for (int i = 0; i < k; i++) vc_emit(names[i], Y, &count, &y_seen);
         if (k >= SH_REGISTRY_MAX)
-            sh_printf("  (registry list truncated at %d -- raise SH_REGISTRY_MAX)\n", SH_REGISTRY_MAX);
+            sh_printf("  (list truncated)\n");
     } else {
         sh_printf("  (live type registry unavailable -- using the static candidate set)\n");
         for (int i = 0; i < SH_CLASS_UNIVERSE_N; i++) vc_emit(SH_CLASS_UNIVERSE[i], Y, &count, &y_seen);

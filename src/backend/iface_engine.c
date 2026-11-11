@@ -103,7 +103,6 @@
 #define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
 #define DEVL_CVAR_NAME         "snapEdit_enableDevLayer"
 #define ENT_DECL_OFF           0x8          /* *(ent+8) -> the entity's decl object (classname blob root) */
-#define DECL_BLOB_A_OFF        0x1c8        /* Decl object to resolved source object. */
 #define DECL_BLOB_B_OFF        0x38         /* Resolved source text pointer. */
 #define IDSTR_SIZE             0x30         /* sizeof(idStr) for the toast title/text temporaries */
 
@@ -273,41 +272,6 @@ static void *entity_ptr(void *array, uint32_t count, int id)
     void *e = NULL;
     if (!ie_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
     return e;
-}
-
-/* Copy a bounded decl prefix, then find key followed by an assigned quoted
- * value. This is a textual field lookup, not a decl parser. */
-static const char *parse_decl_field(const void *blob_ptr_addr, const char *key, char *buf, int cap)
-{
-    if (cap > 0) buf[0] = '\0';
-    void *blob = NULL;
-    if (!ie_read_ptr(blob_ptr_addr, &blob) || blob == NULL) return buf;
-    char text[1024];
-    int got = 0;
-    __try {
-        const char *p = (const char *)blob;
-        int i = 0;
-        for (; i < (int)sizeof(text) - 1 && p[i]; i++) text[i] = p[i];
-        text[i] = '\0';
-        got = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { got = 0; }
-    if (!got) return buf;
-
-
-    const char *k = strstr(text, key);
-    if (!k) return buf;
-    const char *eq = strchr(k, '=');
-    if (!eq) return buf;
-    const char *q1 = strchr(eq, '"');
-    if (!q1) return buf;
-    const char *q2 = strchr(q1 + 1, '"');
-    if (!q2) return buf;
-    int len = (int)(q2 - (q1 + 1));
-    if (len < 0) len = 0;
-    if (len > cap - 1) len = cap - 1;
-    memcpy(buf, q1 + 1, (size_t)len);
-    buf[len] = '\0';
-    return buf;
 }
 
 /* Shared interface slots. */
@@ -717,7 +681,7 @@ static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
 
         const uint8_t *ed = editor_session();
         void *lm = NULL;
-        /* Module table stride 0x98 and name +0x48: confirmed live on 13954591 (R-012). */
+        /* Module table stride 0x98 and name +0x48: confirmed live on build 13954591. */
         if (ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
             int modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id);
             if (modIdx >= 0) {
@@ -749,6 +713,17 @@ const char *ie_resolve_id_string(int id, char *buf, int cap)
     return slot_id_to_string(NULL, id, buf, cap);
 }
 
+static void *defsub_for_id(int id)
+{
+    void *array = NULL; uint32_t count = 0;
+    if (!entity_array(&array, &count)) return NULL;
+    void *ent = entity_ptr(array, count, id);
+    if (!ent) return NULL;
+    void *defsub = NULL;
+    if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return NULL;
+    return defsub;
+}
+
 /* Read the pooled classname directly so morphs appear before resolved
  * source blobs refresh. */
 static const char *slot_get_classname(sh_iface *self, int id, char *buf, int cap)
@@ -768,18 +743,19 @@ static const char *slot_get_classname(sh_iface *self, int id, char *buf, int cap
     return buf;
 }
 
-/* Read inherit from the defsub source blob, which can lag a raw-field change. */
+/* Read the pooled inherit directly, as the classname is read, so an applied
+ * class/inherit pair reads back at once (the source text refreshes later). */
 static const char *slot_get_inherit(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
     if (cap > 0) buf[0] = '\0';
-    void *array = NULL; uint32_t count = 0;
-    if (!entity_array(&array, &count)) return buf;
-    void *ent = entity_ptr(array, count, id);
-    if (!ent) return buf;
-    void *defsub = NULL;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return buf;
-    return parse_decl_field((const uint8_t *)defsub + DECL_BLOB_B_OFF, "inherit", buf, cap);
+    void *defsub = defsub_for_id(id);
+    if (!defsub) return buf;
+    __try {
+        const char *inh = *(const char * const *)((const uint8_t *)defsub + DEFSUB_INHERIT_OFF);
+        if (inh) lstrcpynA(buf, inh, cap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { if (cap > 0) buf[0] = '\0'; }
+    return buf;
 }
 
 /* Construct title/text idStr objects, show the toast, then destroy both. */
@@ -789,7 +765,7 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
     /* Log before editor guards so unavailable/short-lived toasts remain observable. */
     {
         char _tl[256];
-        _snprintf_s(_tl, sizeof _tl, _TRUNCATE, "C2 toast: \"%s\" / \"%s\"", title ? title : "", text ? text : "");
+        _snprintf_s(_tl, sizeof _tl, _TRUNCATE, "TOAST: \"%s\" / \"%s\"", title ? title : "", text ? text : "");
         backend_log(_tl);
     }
     if (!g_toast || !g_idstr_ctor || !g_idstr_dtor) return;
@@ -811,19 +787,6 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
     __try { g_idstr_dtor(tStr); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* Entity-state editing. */
-
-
-static void *defsub_for_id(int id)
-{
-    void *array = NULL; uint32_t count = 0;
-    if (!entity_array(&array, &count)) return NULL;
-    void *ent = entity_ptr(array, count, id);
-    if (!ent) return NULL;
-    void *defsub = NULL;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return NULL;
-    return defsub;
-}
 
 /* Copy display name using the full idStr length/data fields. */
 static const char *slot_get_displayname(sh_iface *self, int id, char *buf, int cap)
@@ -908,9 +871,11 @@ static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int ca
 }
 
 
-/* Reject known class/inherit derivation mismatches before engine parsing.
- * Null/empty arguments retain live values. Missing types/decls fail open;
- * this checks the known fatal mismatch, not all declaration validity. */
+/* Reject known class/inherit derivation mismatches before engine parsing,
+ * and tell the player. Null/empty arguments retain live values. A pair whose
+ * types cannot be read at all passes; this checks the known fatal mismatch,
+ * not all declaration validity. The ancestry walk reads the type records from
+ * any thread (typeinfo.c), so the check holds on the UI thread too. */
 int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInherit)
 {
     void *defsub = defsub_for_id(id);
@@ -935,9 +900,13 @@ int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInher
     if (sh_typeinfo_class_derives(cls, Y) == 0) {     /* Known incompatible pair. */
         char msg[360];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
-            "B2 iface: class/inherit change REJECTED -- class '%s' does not derive from inherit '%s's base "
-            "type '%s' (would fatally fault the engine decl reparse); apply skipped.", cls, inh, Y);
+            "IFACE: class/inherit change REJECTED -- class '%s' does not derive from inherit '%s's base "
+            "type '%s' (the engine's decl reparse would fault); nothing was changed.", cls, inh, Y);
         backend_log(msg);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE,
+            "Class %s cannot be used with inherit %s (it does not derive from %s); nothing was changed.",
+            cls, inh, Y);
+        slot_toast(NULL, "Entity edit", msg);
         return 0;
     }
     return 1;
@@ -983,8 +952,12 @@ static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, con
     int result = sh_edit_pair_apply((uint8_t *)defsub + DEFSUB_CLASS_OFF,
                                     (uint8_t *)defsub + DEFSUB_INHERIT_OFF,
                                     c, h, g_idstr_assign);
-    if (result == SH_EDIT_PAIR_PARTIAL)
-        backend_log("Class/inherit update faulted and rollback failed; inspect the entity before editing again");
+    if (result == SH_EDIT_PAIR_PARTIAL) {
+        backend_log("IFACE: class/inherit update faulted and rollback failed");
+        slot_toast(NULL, "Entity edit",
+                   "Changing the class and inherit failed partway and could not be undone; check the entity "
+                   "before editing it again.");
+    }
     return result;
 }
 
@@ -1011,15 +984,6 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
     __try { g_decl_rebuild(defsub, cstr, 1); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
     sh_apply_engine_nav_decl_rewritten(id);
-}
-
-/* The legacy single-ID Delete slot. It used to call the engine's destructive
- * leaf directly; it now takes the same native Delete Selection route as the
- * batch slot, so one call deletes at most one entity. */
-static void slot_remove_from_selection(sh_iface *self, int id)
-{
-    (void)self;
-    if (id >= 0) sh_editor_delete_batch(&id, 1, NULL);
 }
 
 /* Batch Delete through DOOM's Delete Selection. Main thread only. */
@@ -1205,21 +1169,24 @@ static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_c
     return cnt > 0 ? 1 : 0;
 }
 
-/* Join the local app-data root, snapmap-plus, prefix, and name. The caller
- * supplies separators and any .json suffix. This is path formatting only. */
+/* Join the local app-data root, snapmap-plus, prefix, and name, as UTF-8 (the
+ * caller opens it with the wide file calls). The caller supplies separators and
+ * any .json suffix. This is path formatting only. */
 static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const char *name,
                                     char *out_path, int cap)
 {
+    wchar_t wide[MAX_PATH];
+    char base[MAX_PATH * 3];
     (void)self;
     if (!out_path || cap <= 0) return 0;
     out_path[0] = '\0';
-    char base[MAX_PATH];
-    base[0] = '\0';
-
-    HRESULT hr = SHGetFolderPathA(NULL, 0x1c /*CSIDL_LOCAL_APPDATA*/, NULL, 0, base);
-    if (FAILED(hr)) return 0;
-    _snprintf_s(out_path, (size_t)cap, _TRUNCATE, "%s/snapmap-plus/%s%s",
-                base, prefix ? prefix : "", name ? name : "");
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, wide))) return 0;
+    if (!sh_rawmap_path_utf8(wide, base, sizeof base)) return 0;
+    if (_snprintf_s(out_path, (size_t)cap, _TRUNCATE, "%s/snapmap-plus/%s%s",
+                    base, prefix ? prefix : "", name ? name : "") < 0) {
+        out_path[0] = '\0';   /* a truncated path names another file */
+        return 0;
+    }
     return out_path[0] != '\0';
 }
 
@@ -1451,7 +1418,7 @@ static int ie_mods_busy(char *cause, size_t cap)
         if (!active && reason == 3) { strncpy_s(cause, cap, "Play is running; return to the editor first", _TRUNCATE); return 1; }
     }
     if (g_mods_load_state_at && ie_read_s32(g_mods_load_state_at, &state) && state != 0 && state != IE_LOAD_STATE_RUNNING) {
-        _snprintf_s(cause, cap, _TRUNCATE, "a map is loading (state %d); try again when it has loaded", state);
+        strncpy_s(cause, cap, "a map is loading; try again when it has loaded", _TRUNCATE);
         return 1;
     }
     if (g_mods_load_screen_at) {
@@ -1474,7 +1441,7 @@ static int ie_mods_busy(char *cause, size_t cap)
  * editor's state machine (editor+0x23618 reads 0, the test editor_frame.c's
  * reload makes), and an exit passes through state 8. A menu screen opened
  * from the Start menu (Settings) also reads state 8 with the deactivate byte
- * set (lane P33 probed it live), so only the deactivate reason at +0x2366C
+ * set (observed live), so only the deactivate reason at +0x2366C
  * tells the two apart: 4 while Settings is up, 1 for a shutdown. The
  * loaded-map pointer persists in the hub, so it decides nothing alone. */
 #define IE_EDITOR_STATE_EXITING 8
@@ -1507,7 +1474,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         if (!g_editor) {
             char el[192];
             _snprintf_s(el, sizeof el, _TRUNCATE,
-                "C2: the editor singleton did not resolve (status=%d, pinned 0x%x) -- every editor slot "
+                "IFACE: the editor singleton did not resolve (status=%d, pinned 0x%x) -- every editor slot "
                 "will return its empty answer rather than read a pinned address",
                 (int)est, (unsigned)EDITOR_SINGLETON_PINNED_RVA);
             backend_log(el);
@@ -1550,7 +1517,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.set_inherit            = slot_set_inherit;          /* +0x80  */
     slots.set_displayname        = slot_set_displayname;      /* +0x128 */
     slots.resolve_prefab_path    = slot_resolve_prefab_path;  /* +0xc0  */
-    slots.remove_from_selection  = slot_remove_from_selection;/* +0x130 */
     /* Deletion runs DOOM's Delete Selection; product selection writes wait
      * while its commit is pending. */
     sh_editor_delete_install(results, n, module_base, g_editor, manipulation_in_progress);
@@ -1623,9 +1589,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.request_prefab_mesh     = slot_request_prefab_mesh;        /* +0x310 ext 21 */
     slots.get_prefab_mesh         = slot_get_prefab_mesh;            /* +0x318 ext 22 */
     slots.resolve_prefab_defaults = slot_resolve_prefab_defaults;    /* +0x320 ext 23 */
-    /* the File menu's rawmap load/save file surface. These bodies live in rawmap.c beside the gate and
-     * path state they act on, and touch no engine memory, so they bind unconditionally -- there is no
-     * signature for them to depend on and nothing for a shifted build to break. */
+    /* the File menu's rawmap load/save file surface. These bodies live in rawmap.c beside the path
+     * state they act on and touch no engine memory, so they bind unconditionally. */
     slots.navmesh_view            = slot_navmesh_view;               /* +0x340 ext 27 */
     sh_rawmap_get_slots(&slots.rawmap_status,        /* +0x328 ext 24 */
                         &slots.rawmap_configure,     /* +0x330 ext 25 */
@@ -1634,7 +1599,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
 
     char line[200];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "C2: iface engine slots bound (editor=%p add_sel=%p clear_sel=%p toast=%p idstr=%p/%p)",
+        "IFACE: engine slots bound (editor=%p add_sel=%p clear_sel=%p toast=%p idstr=%p/%p)",
         (void *)g_editor, (void *)g_add_sel, (void *)g_clear_sel, (void *)g_toast,
         (void *)g_idstr_ctor, (void *)g_idstr_dtor);
     backend_log(line);
