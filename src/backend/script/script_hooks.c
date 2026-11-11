@@ -913,9 +913,13 @@ note:
             if (w > 0) used += (size_t)w;
         }
     }
-    if (failed)
+    if (failed) {
+        char why[220];
         hooks_log("Mod scripts: these game events cannot reach scripts in this session: %s. Other script calls work.",
                   missing);
+        _snprintf_s(why, sizeof why, _TRUNCATE, "the hooks for %s could not be installed", missing);
+        sh_feature_off(SH_FEATURE_SCRIPT_EVENTS, why);
+    }
     else
         hooks_log("SCRIPTS: damage, death, pain, animation and projectile hooks installed");
 }
@@ -945,6 +949,26 @@ static void resolve_combat_hooks(const sig_result *r, const uint8_t *module_base
     combat_hook_set(CH_LAUNCH, "projectile launch",
                     sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PROJECTILE_LAUNCH], &s) == SIG_OK ? s.addr : 0,
                     (void *)launch_detour, SH_COMBAT_LAUNCH_STOLEN);
+    /* The boot check: every target found by its signature on this
+     * executable; what is missing is a feature-registry row now, not a
+     * surprise at the first Play. */
+    {
+        char missing[160], why[220];
+        size_t used = 0;
+        int i;
+        missing[0] = 0;
+        for (i = 0; i < CH_COUNT; i++) {
+            int w;
+            if (g_ch[i].target) continue;
+            w = _snprintf_s(missing + used, sizeof missing - used, _TRUNCATE, "%s%s", used ? ", " : "", g_ch[i].what);
+            if (w > 0) used += (size_t)w;
+        }
+        if (used) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "the game functions for %s were not found in this executable",
+                        missing);
+            sh_feature_off(SH_FEATURE_SCRIPT_EVENTS, why);
+        }
+    }
 }
 
 
@@ -982,8 +1006,13 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     }
     sh_script_handles_set_resolver(resolve_spawn_id);
     (void)sh_script_api_install(results, count, module_base);   /* logs its own line when it cannot */
-    (void)sh_script_combat_install(results, count, module_base);
+    (void)sh_script_combat_install(results, count, module_base);   /* a missing part is its own registry row */
     resolve_combat_hooks(r, module_base);
+    /* Spawns during Play reach scripts through the companions' CallSpawn
+     * detour, resolved and checked at their install (before this one). */
+    if (!sh_companions_spawn_ready())
+        sh_feature_off(SH_FEATURE_SCRIPT_SPAWNS, "the game's spawn function is not the expected one in this executable, "
+                       "so only entities placed in the map reach scripts");
     sh_script_source_install();
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
     sh_load_screen_stop_set_map_end(sh_script_hooks_map_cancel);

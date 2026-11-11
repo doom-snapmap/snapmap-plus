@@ -10,6 +10,7 @@
 #include "script_api_combat.h"
 #include "script_api_common.h"
 #include "script_hooks.h"
+#include "script_api_ai.h"   /* ai:fire parks the demon it fires from */
 
 #define PI               3.14159265358979323846
 #define HITSCAN_RANGE    8192.0
@@ -661,6 +662,7 @@ static int l_fire(lua_State *L)
         sh_script_refuse(L, "\"fire\" works on demons; this entity is not one");
     if (!self || !decl || !CE(entity_name) || (!at_point && !target)) return nil1(L);
     if (!g_ce.entity_name(at_point ? self : target, name, sizeof name) || !name[0]) return nil1(L);
+    (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
     a[0] = sh_script_earg_no_anim();
     memset(&a[1], 0, sizeof a[1]); a[1].type = 'd'; a[1].p = decl;
     memset(&a[2], 0, sizeof a[2]); a[2].type = '2'; a[2].s = joint;
@@ -710,6 +712,7 @@ void sh_script_combat_register(void)
 #ifndef SH_SCRIPT_PURE /* the engine side ------------------------------------ */
 
 #include "../backend_log.h"
+#include "../feature_health.h"
 #include "../entity.h"
 #include "../engine_build.h"
 
@@ -882,6 +885,14 @@ static void *clean(const sig_result *r, size_t n, const char *name)
     return NULL;
 }
 
+/* A part of the combat calls this executable cannot serve: one log line, and
+ * the feature registry's row says why (feature_health.h). */
+static void combat_off(const char *why)
+{
+    combat_log("Mod scripts: %s.", why);
+    sh_feature_off(SH_FEATURE_SCRIPT_COMBAT, why);
+}
+
 int sh_script_combat_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const sh_script_combat_engine engine = {
@@ -907,15 +918,15 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_RADIUS_DAMAGE], &r) == SIG_OK)
         g_radius = (radius_fn)r.addr;
     else
-        combat_log("Mod scripts: the game's radius damage was not found in this executable, so radius_damage and "
-                   "explode do nothing.");
+        combat_off("the game's radius damage was not found in this executable, so radius_damage and explode do "
+                   "nothing");
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
     g_decl_register = clean(results, count, "DeclRegisterFile");
     g_decl_type = (type_fn)clean(results, count, "DeclTypeByName");
     g_decl_find = (find_decl_fn)clean(results, count, "DeclFind");
     if (!g_decl_anchor || !g_decl_register || !g_decl_type || !g_decl_find)
-        combat_log("Mod scripts: the game's decl lookup was not found in this executable, so the combat calls that "
-                   "name a decl answer nothing.");
+        combat_off("the game's decl lookup was not found in this executable, so the combat calls that name a decl "
+                   "answer nothing");
     g_vt_ai = SH_RVA(0x2035B30u, 0x204F900u) ? (uintptr_t)module_base + SH_RVA(0x2035B30u, 0x204F900u) : 0;
     fx = sh_script_combat_enum_find(module_base, (uint64_t)(uintptr_t)module_base, "FX_NONE", "FX_EXPLOSIVE_ARMED",
                                     "FX_", &g_fx_count);
@@ -931,8 +942,8 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     if (!g_fx_table || g_fx_count < 2 || g_fx_count > FX_MAX) {
         g_fx_table = NULL;
         g_fx_count = 0;
-        combat_log("Mod scripts: the game's effect conditions were not found in this executable, so fx(e, condition) "
-                   "refuses every condition.");
+        combat_off("the game's effect conditions were not found in this executable, so fx(e, condition) refuses "
+                   "every condition");
     }
     sh_script_combat_set_engine(&engine);
     sh_script_combat_register();

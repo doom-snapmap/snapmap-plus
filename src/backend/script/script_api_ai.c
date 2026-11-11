@@ -889,6 +889,11 @@ static int l_focus_tag(lua_State *L)
     return 0;
 }
 
+int sh_script_ai_park(void *ai, sh_script_handle h)
+{
+    return g_engine && ai && park(ai, h) != NULL;
+}
+
 int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms)
 {
     sh_ai_arg a[4];

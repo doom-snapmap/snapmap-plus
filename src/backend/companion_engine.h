@@ -62,6 +62,10 @@ extern "C" {
  * one owner is declared. Idempotent. Returns 1 when the detour is live. */
 int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
+/* 1 when CallSpawn was resolved at install and its prologue is the expected
+ * one, so the chain can be armed for mod scripts at a Play. */
+int sh_companions_spawn_ready(void);
+
 /* Arm the detour after boot, at a gate the product owns on DOOM's main
  * thread, before the spawns it precedes (reports ADD-G2, ADD-V1). Checks, in
  * order: boot resolution succeeded (it is cached, so no signature is resolved

@@ -198,6 +198,11 @@ int sh_script_ai_register(void);
  * this session. Game thread, inside the script tick. */
 int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms);
 
+/* Park the mod's own demon `ai` (handle h) without a command: 1 when it is
+ * parked. ai:fire uses it, so a demon a script fires from stops its own
+ * behaviour like one it moves. Game thread, inside the script tick. */
+int sh_script_ai_park(void *ai, sh_script_handle h);
+
 /* Forget every per-demon record (a new map). The parked table is the
  * engine side's and is checked by spawn id, so a stale entry never parks
  * another map's demon. */
