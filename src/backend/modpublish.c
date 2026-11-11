@@ -48,6 +48,8 @@
 #include "modmanifest.h"
 #include "modnet.h"
 #include "modsync.h"
+/* A build the publish names: "<salt>@<build hash>" (modsync.h). */
+#define MP_MOD_CAP (MODSYNC_MOD_MAX + 1)
 #include "modstore.h"
 #include "mp_json.h"
 #include "map_carrier.h"
@@ -142,7 +144,7 @@ typedef struct mp_save {
     size_t length;
     ULONGLONG at;
     size_t count;                              /* distinct bundles named */
-    char (*hashes)[SH_MODMANIFEST_HASH_CAP];
+    char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;                  /* their sizes, summed */
     int carrier;                               /* the text carries the snapmap-plus member */
 } mp_save;
@@ -194,7 +196,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
             return;
         }
         for (size_t i = 0; i < rows.count; i++) {
-            strcpy_s(g_save.hashes[i], sizeof g_save.hashes[i], rows.rows[i].build);
+            _snprintf_s(g_save.hashes[i], sizeof g_save.hashes[i], _TRUNCATE, "%s@%s", rows.rows[i].salt, rows.rows[i].build);
             g_save.bytes += rows.rows[i].size;
         }
         g_save.count = rows.count;
@@ -273,7 +275,7 @@ typedef struct mp_job {
     int kind;
     char ref[MP_REF_CAP];                      /* upload/claim: the claim ref; release: the ref */
     char provisional[MP_REF_CAP];              /* claim: released after the claim succeeds */
-    char (*hashes)[SH_MODMANIFEST_HASH_CAP];
+    char (*hashes)[MP_MOD_CAP];
     int count;
     volatile LONG done;
     int ok, ok2, had_claim;
@@ -295,7 +297,7 @@ static void mp_job_free(mp_job *job)
     free(job);
 }
 
-static mp_job *mp_job_new(int kind, const char *ref, const char (*hashes)[SH_MODMANIFEST_HASH_CAP], int count)
+static mp_job *mp_job_new(int kind, const char *ref, const char (*hashes)[MP_MOD_CAP], int count)
 {
     mp_job *job = calloc(1, sizeof(*job));
     if (!job) return NULL;
@@ -366,19 +368,31 @@ static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
     return out;
 }
 
+/* Upload the builds the store lacks and claim them all (modsync.h). A claim
+ * that races the release of one of its builds is refused (409, the archive
+ * went with its last claim): the builds are uploaded again, once. */
+static int mp_upload(const char *const *mods, int n, const char *ref, const modnet_io *io, modsync_stats *st)
+{
+    if (modsync_upload_builds(mods, n, ref, io, st)) return 1;
+    if (st->code != MODNET_E_CONFLICT || (io && io->cancel && *io->cancel)) return 0;
+    mp_logf("MODS: publish: a build of '%s' was released while it was claimed; uploading again", ref);
+    memset(st, 0, sizeof *st);
+    return modsync_upload_builds(mods, n, ref, io, st);
+}
+
 /* Worker thread. Touches only the job. */
 static int mp_job_run(void *context, const modnet_io *io)
 {
     mp_job *job = context;
-    const char *list[MODSYNC_MAX_BUNDLES];
-    int n = job->count < MODSYNC_MAX_BUNDLES ? job->count : MODSYNC_MAX_BUNDLES;
+    const char *list[MODSYNC_MAX_BUILDS];
+    int n = job->count < MODSYNC_MAX_BUILDS ? job->count : MODSYNC_MAX_BUILDS;
     for (int i = 0; i < n; i++) list[i] = job->hashes[i];
     switch (job->kind) {
     case JOB_UPLOAD:
-        job->ok = modsync_upload_bundles(list, n, job->ref, io, &job->st);
+        job->ok = mp_upload(list, n, job->ref, io, &job->st);
         break;
     case JOB_CLAIM:
-        job->ok = modsync_upload_bundles(list, n, job->ref, io, &job->st);
+        job->ok = mp_upload(list, n, job->ref, io, &job->st);
         if (job->ok && job->provisional[0] && strcmp(job->provisional, job->ref))
             job->ok2 = modsync_release(job->provisional, io, &job->st2);
         else if (!job->ok && job->st.queued && job->provisional[0])
@@ -480,9 +494,9 @@ static void mp_job_report(mp_job *job)
     switch (job->kind) {
     case JOB_CLAIM:
         if (job->ok)
-            mp_logf("MODS: publish: claimed %d bundle(s) under item '%s'%s (claim %s, %u blob(s) sent, %.0f ms)",
+            mp_logf("MODS: publish: claimed %d build(s) under item '%s'%s (claim %s, %u archive(s) sent, %.0f ms)",
                     job->count, job->ref, job->st.reclaimed ? ", replacing the previous set" : "", job->st.claim,
-                    job->st.blobs_transferred, job->st.ms);
+                    job->st.builds_sent, job->st.ms);
         else
             mp_logf("MODS: publish: the claim under item '%s' failed: %s%s; the map is published, but other "
                     "players cannot download its mods until it succeeds", job->ref, cause,
@@ -519,7 +533,7 @@ typedef struct mp_hold {
     unsigned long long token;
     unsigned long save_sequence;
     int count;
-    char (*hashes)[SH_MODMANIFEST_HASH_CAP];
+    char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;
     size_t length;
     int ticket;
@@ -533,7 +547,7 @@ typedef struct mp_context {
     void *editor;
     unsigned long long token;
     int count;
-    char (*hashes)[SH_MODMANIFEST_HASH_CAP];
+    char (*hashes)[MP_MOD_CAP];
     char provisional[MP_REF_CAP];
     ULONGLONG at;
 } mp_context;
@@ -712,7 +726,7 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
     }
     switch (g_ctx.kind) {
     case CTX_ROWS:
-        job = mp_job_new(JOB_CLAIM, item_id, (const char (*)[SH_MODMANIFEST_HASH_CAP])g_ctx.hashes, g_ctx.count);
+        job = mp_job_new(JOB_CLAIM, item_id, (const char (*)[MP_MOD_CAP])g_ctx.hashes, g_ctx.count);
         if (!job) {
             mp_log("MODS: publish: no memory to queue the claim; the provisional claim stays");
             mp_ctx_clear(0, NULL);
@@ -1166,8 +1180,8 @@ static void mp_upload_finished(void)
         mp_cancel(line, "the upload failed");
         return;
     }
-    mp_logf("MODS: publish: uploaded %d bundle(s): %u of %u blob(s) sent, %llu bytes, %u request(s), %.0f ms; "
-            "resuming the publish", h->count, job->st.blobs_transferred, job->st.blobs_total, job->st.bytes_up,
+    mp_logf("MODS: publish: uploaded %d build(s): %u archive(s) sent, %u already stored, %llu bytes, %u request(s), "
+            "%.0f ms; resuming the publish", h->count, job->st.builds_sent, job->st.builds_present, job->st.bytes_up,
             job->st.requests, job->st.ms);
     /* The context the feed post claims from. */
     g_ctx.kind = CTX_ROWS;
@@ -1259,7 +1273,7 @@ static void mp_poll_hold(void)
         /* fall through */
     case HOLD_WORKER:
         if (!h->job) {
-            h->job = mp_job_new(JOB_UPLOAD, h->ref, (const char (*)[SH_MODMANIFEST_HASH_CAP])h->hashes, h->count);
+            h->job = mp_job_new(JOB_UPLOAD, h->ref, (const char (*)[MP_MOD_CAP])h->hashes, h->count);
             if (!h->job) { mp_cancel("The map's mods could not be uploaded (out of memory). It was not published.",
                                      "no memory for the upload job"); break; }
         }
