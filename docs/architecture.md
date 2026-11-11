@@ -841,12 +841,14 @@ not parse is listed with its parse error (`sh_ms_descriptor_unparsable`),
 nothing in it is written, and it serves nothing either (its cause is the
 store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
 folder's identity from the block's `salt` only (`ms_parse_bundle`), and
-refuses every earlier shape with the builder's sentence (`SH_MB_SHAPE`, "This
-mod folder is not in a shape Snapmap+ can build: ..."): a block of another
-format ("it was built by an earlier version of Snapmap+"), a retired author key
-(`id`, `key`, `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`,
-`legacy`, `composes`, `schema`, `hud.schema`), `package.json`, a block without
-a valid salt, and a folder in a map's place that the store did not build. A
+refuses every earlier shape with one sentence and the next step: a block of
+another format and `package.json` with "This mod was made for an earlier
+version of Snapmap+. Run the Snapmap+ installer again and it converts it.", a
+retired author key (`id`, `key`, `shadows`, `stock`, `scope`, `player`,
+`extends`, `replaces`, `legacy`, `composes`, `schema`, `hud.schema`) with the
+builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
+a valid salt as a damaged block, and a folder in a map's place that the store
+did not build. A
 root folder with no block is "not built yet": the store's next scan salts and
 builds it. The
 product writes the block by splicing: the old member is cut from the end of

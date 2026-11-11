@@ -899,8 +899,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             ms_fail(b, "mod.json could not be read (it may be open in another program, or larger than %u MB). Close it "
                     "and press Refresh.", SH_MODSERVE_MAX_JSON >> 20);
         else if (ms_file_size(pkg) >= 0)
-            ms_fail(b, SH_MB_SHAPE "its descriptor is package.json, which this version does not read. Run the Snapmap+ "
-                    "installer again to convert it.");
+            ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                    "converts it.");
         else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
         return;
     }
@@ -983,8 +983,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
      * sh_mb_descriptor_state_why words it. */
     if (block_v && (!block_object || format != (double)SH_MB_FORMAT))
-        ms_fail(b, SH_MB_SHAPE "it was built by an earlier version of Snapmap+. Run the Snapmap+ installer again to "
-                "convert it.");
+        ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                "converts it.");
     else if (retired)
         ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read. Remove \"%s\" from mod.json and "
                 "press Refresh.", retired, retired);
@@ -4559,7 +4559,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
                     _snprintf_s(buf, sizeof buf, _TRUNCATE, "needs %s '%s', which no admitted bundle provides",
                                 nd->type, nd->name);
                     cause[at] = ms_strdup((ms_index *)x, buf);
-                    if (!cause[at]) cause[at] = "needs a missing mod identity";
+                    if (!cause[at]) cause[at] = "needs a file no installed mod provides";
                 }
                 continue;
             }

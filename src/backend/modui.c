@@ -4438,22 +4438,12 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     if (!mu_on_main()) return -1;
     if (!_stricmp(verb, "choose")) {
         if (argc < 2 || argc > 3 || !argv[1][0]) {
-            mu_line(&o, "choose: usage: sh_mods choose \"<slot>\" \"<mod folder>\" (none clears the choice)");
+            mu_line(&o, "choose: usage: sh_mods choose \"<setting>\" \"<mod name>\" (no name clears the choice)");
             return 1;
         }
-        {
-            /* The console names a mod by its folder; the registry takes its salt. */
-            char salt[SH_SALT_LEN + 1] = "";
-            sh_ms_list l;
-            size_t q;
-            if (argc == 3 && argv[2][0] && sh_ms_enumerate(&l)) {
-                for (q = 0; q < l.count && !salt[0]; q++)
-                    if (sh_ms_entry_matches(&l.items[q], argv[2]) && l.items[q].salt[0])
-                        strcpy_s(salt, sizeof salt, l.items[q].salt);
-                sh_ms_list_free(&l);
-            }
-            (void)mu_choose(argv[1], salt[0] ? salt : argc == 3 ? argv[2] : "", &o);
-        }
+        /* The mod by its name or folder, among the mods the open map uses
+         * (sh_modregistry_choose_command resolves it). */
+        (void)mu_choose(argv[1], argc == 3 ? argv[2] : "", &o);
         return 1;
     }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
