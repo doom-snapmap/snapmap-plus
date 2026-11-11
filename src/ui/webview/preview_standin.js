@@ -49,7 +49,7 @@ function previewConfigHandle(o) {
 
 /* browser-preview stand-in for the backend's rawmap path pair (see previewHandle) */
 var PREVIEW_RAWMAP_DEFAULT = 'C:\\Users\\you\\AppData\\Local\\snapmap-plus\\rawmap.json';
-var previewRawmap = {load: PREVIEW_RAWMAP_DEFAULT, save: PREVIEW_RAWMAP_DEFAULT, armed: 0};
+var previewRawmap = {load: PREVIEW_RAWMAP_DEFAULT, save: PREVIEW_RAWMAP_DEFAULT, loads: 0};
 var previewPinsDoc = '';      // session-only stand-in for %LOCALAPPDATA%\snapmap-plus\pinned.json
 var previewStack0Count = 0;   // fake backend-owned stack 0 count, so Push/Clear feel connected in the demo
 var previewReportSigs = {};   // fake dedup memory for the feedback dialog demo (category|title -> seen)
@@ -545,29 +545,19 @@ function previewHandle(o) {
   // The File menu in browser preview: no native picker and no backend, so answer with the default
   // pair the backend would report. Without this the menu's readout would sit on "Loading..." and
   // the layout could never be checked outside the game.
-  if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' ||
-      o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow' || o.cmd === 'rawmapArm' ||
-      o.cmd === 'rawmapKeepHere' || o.cmd === 'rawmapLoadNow') {
-    if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
+  if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' || o.cmd === 'rawmapSavePick' ||
+      o.cmd === 'rawmapSaveNow' || o.cmd === 'rawmapKeepHere' || o.cmd === 'rawmapLoadNow') {
     // Ticking pins the path already shown, so the readout does not move on the click.
     if (o.cmd === 'rawmapKeepHere') previewRawmap.saveTarget = o.on ? previewRawmap.save : '';
-    // The load half, so the greying of "Open ... as New Map" is reachable in browser preview:
-    // picking stages a file, opening it spends the stage.
-    if (o.cmd === 'rawmapLoadPick') previewRawmap.loadPending = 1;
-    if (o.cmd === 'rawmapLoadNow') previewRawmap.loadPending = 0;
+    // Opening a rawmap makes "Open ... Again" live, as in the game.
+    if (o.cmd === 'rawmapLoadNow') previewRawmap.loads = (previewRawmap.loads || 0) + 1;
     var msg = {kind:'rawmapStatus', ok:true, status:{
       load: previewRawmap.load,
       save: previewRawmap.save,
       saveTarget: previewRawmap.saveTarget || '',
-      armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
-      loadPending: previewRawmap.loadPending || 0,
-      // No test file in browser preview, so this can only be the gate. Sent rather than omitted
-      // so the preview exercises the field the game sends.
-      willFire: previewRawmap.armed
+      saves: 0, lastBytes: 0, loads: previewRawmap.loads || 0
     }, note: o.cmd === 'rawmapStatus' ? '' : 'Preview only - no backend attached.'};
-    // Raise the confirm on a pick, exactly as the backend does now that a load opens as a
-    // genuinely new map. Answering Cancel leaves loadPending set, which is the state the
-    // greyed/named menu item exists to make visible.
+    // A pick asks before opening, as the backend's checked file does.
     if (o.cmd === 'rawmapLoadPick') msg.confirmLoad = rawmapBaseName(previewRawmap.load);
     onMessage(msg);
     return;

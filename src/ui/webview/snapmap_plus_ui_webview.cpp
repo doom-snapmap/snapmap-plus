@@ -1971,7 +1971,8 @@ static void poc_send_navmesh_state()
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
+/* `error` marks the note as a refusal: the page shows it as an error toast. */
+static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr, bool error = false)
 {
     if (!g_webview) return;
 
@@ -1990,6 +1991,7 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
     json += L",\"note\":\"";
     json += note ? note : L"";
     json += L"\"";
+    if (error) json += L",\"error\":true";
     if (confirm_file && *confirm_file) {
         json += L",\"confirmLoad\":\"";
         json += confirm_file;
@@ -2013,7 +2015,7 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
      * the backend's own: only the backend knows whether it wrote the file there and then or is
      * waiting for an editor save, and how many bytes went out. */
     std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg))
-                           : (L"Refused: " + sh_webview_json::escape_wide(msg));
+                           : sh_webview_json::escape_wide(msg);
 
     /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
      * what makes this log worth having when someone reports "it did not load my file". */
@@ -2026,7 +2028,7 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
                     save_path ? save_path : "(unchanged)", msg);
         poc_log(line);
     }
-    poc_send_rawmap_status(note.c_str());
+    poc_send_rawmap_status(note.c_str(), nullptr, !ok);
 }
 
 /* The picker thread. Its ONLY job is the modal dialog: it touches no backend slot and posts nothing
@@ -2110,7 +2112,7 @@ static void poc_begin_pick(int kind)
         if (kind >= 2)
             poc_post_json(kind == 2 ? L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"A file dialog is already open.\"}"
                                     : L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"A file dialog is already open.\"}");
-        else poc_send_rawmap_status(L"A file dialog is already open.");
+        else poc_send_rawmap_status(L"A file dialog is already open. Finish it first.", nullptr, true);
         return;
     }
     /* Asked here, on the UI thread: the picker thread touches no backend slot. */
@@ -2126,7 +2128,7 @@ static void poc_begin_pick(int kind)
     h = CreateThread(nullptr, 0, poc_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
     if (h == nullptr) {
         InterlockedExchange(&g_pick_busy, 0);
-        poc_send_rawmap_status(L"Could not open the file dialog.");
+        poc_send_rawmap_status(L"Windows could not open the file dialog. Try again.", nullptr, true);
         return;
     }
     CloseHandle(h);
@@ -2257,7 +2259,7 @@ static void poc_finish_pick()
             char l[1400];
             _snprintf_s(l, sizeof l, _TRUNCATE, "rawmap load: refused '%s': %s", p8.c_str(), msg);
             poc_log(l);
-            poc_send_rawmap_status((L"Refused: " + sh_webview_json::escape_wide(msg)).c_str());
+            poc_send_rawmap_status(sh_webview_json::escape_wide(msg).c_str(), nullptr, true);
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
              * offers no "has unsaved changes" query. Answering no opens nothing. The page owns
@@ -4147,7 +4149,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
                     poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
                     poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
-                                              : (L"Could not open the rawmap: " + sh_webview_json::escape_wide(msg)).c_str());
+                                              : sh_webview_json::escape_wide(msg).c_str(), nullptr, !ok);
                 }
             } else if (cmd == L"rawmapKeepHere") {
                 /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
