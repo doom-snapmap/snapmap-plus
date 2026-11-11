@@ -48,7 +48,7 @@ int main(void)
     for (i = 0; i < 2; i++) {
         sites[i].status = SIG_AMBIGUOUS;
         CHECK(!sh_map_payload_install(sites, 2));
-        sites[i].status = SIG_OK_HOOKED;
+        sites[i].status = SIG_CHANGED;
         CHECK(!sh_map_payload_install(sites, 2));
         sites[i].status = SIG_OK;
     }

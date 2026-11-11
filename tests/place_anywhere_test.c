@@ -52,7 +52,7 @@ int main(void)
     r[0].addr=(uintptr_t)p;r[1].addr=(uintptr_t)(p+0x100);
     assert(!sh_place_anywhere_install(r,1)&&strstr(last_log,"ghost colour test was not found"));
     assert(p[6]==0x75&&p[0x123]==0x75&&!g_live);
-    r[1].status=SIG_OK_HOOKED;
+    r[1].status=SIG_CHANGED;
     assert(!sh_place_anywhere_install(r,2)&&strstr(last_log,"unavailable")&&p[6]==0x75);
     r[1].status=SIG_OK;p[0x101]^=1;
     assert(!sh_place_anywhere_install(r,2)&&strstr(last_log,"unexpected bytes")&&p[6]==0x75&&p[0x123]==0x75);

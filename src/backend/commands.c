@@ -848,7 +848,7 @@ static void *eng_default_idstr_ctor(void *self)
 {
     sig_result r;
     if (!resolve_sig_by_name("DefaultIdStrCtor", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return NULL;
+        r.status != SIG_OK || r.addr == 0) return NULL;
     __try { return ((default_idstr_ctor_fn)r.addr)(self); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
@@ -856,7 +856,7 @@ static void *eng_idstr_ctor_copy(void *self, const char *cstr)
 {
     sig_result r;
     if (!resolve_sig_by_name("IdStrCtor", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return NULL;
+        r.status != SIG_OK || r.addr == 0) return NULL;
     __try { return ((idstr_ctor2_fn)r.addr)(self, cstr); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
@@ -864,7 +864,7 @@ static int eng_idstr_assign(void *dstField, const char *cstr)
 {
     sig_result r;
     if (!resolve_sig_by_name("IdStrAssign", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return 0;
+        r.status != SIG_OK || r.addr == 0) return 0;
     __try { ((idstr_assign2_fn)r.addr)(dstField, cstr); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -872,7 +872,7 @@ static void eng_idstr_dtor(void *self)
 {
     sig_result r;
     if (!resolve_sig_by_name("IdStrDtor", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return;
+        r.status != SIG_OK || r.addr == 0) return;
     __try { ((idstr_dtor2_fn)r.addr)(self); }
     __except (EXCEPTION_EXECUTE_HANDLER) { /* Leave failed cleanup to the process lifetime. */ }
 }
@@ -880,7 +880,7 @@ static int eng_md6_ctor(void *md6)
 {
     sig_result r;
     if (!resolve_sig_by_name("Md6Ctor", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return 0;
+        r.status != SIG_OK || r.addr == 0) return 0;
     __try { ((md6_ctor_fn)r.addr)(md6); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -888,7 +888,7 @@ static int eng_md6_setoutput(void *md6, void *output_idstr)
 {
     sig_result r;
     if (!resolve_sig_by_name("Md6SetOutput", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return 0;
+        r.status != SIG_OK || r.addr == 0) return 0;
     __try { ((md6_setoutput_fn)r.addr)(md6, output_idstr); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -896,7 +896,7 @@ static int eng_md6_build(void *md6)
 {
     sig_result r;
     if (!resolve_sig_by_name("Md6Build", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return 0;
+        r.status != SIG_OK || r.addr == 0) return 0;
     __try { ((md6_build_fn)r.addr)(md6); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -904,7 +904,7 @@ static int eng_bmodel_builder(void *out208, const char *input, const char *outpu
 {
     sig_result r;
     if (!resolve_sig_by_name("BModelBuilder", &r) ||
-        (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return 0;
+        r.status != SIG_OK || r.addr == 0) return 0;
     __try { ((bmodel_builder_fn)r.addr)(out208, input, output, opts); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -1016,7 +1016,7 @@ static void *dr_resolve_renderworld(void)
 {
     sig_result r;
     if (resolve_sig_by_name("RenderWorldGetter", &r) &&
-        (r.status == SIG_OK || r.status == SIG_OK_HOOKED) && r.addr != 0) {
+        r.status == SIG_OK && r.addr != 0) {
         const uint8_t *slot = sh_decode_rip_slot((const uint8_t *)r.addr);
         if (slot) {
             void *rw = NULL;

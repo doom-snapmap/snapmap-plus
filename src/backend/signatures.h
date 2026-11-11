@@ -26,7 +26,6 @@ typedef enum sig_status {
     SIG_AMBIGUOUS,      /* (scan) more than one match -- not an identification */
     SIG_BAD_PATTERN,    /* empty / malformed pattern, or pattern longer than the scan buffer */
     SIG_BAD_MODULE,     /* the module base is not a parseable PE32+ image */
-    SIG_OK_HOOKED,      /* never produced; kept until the remaining comparisons drop it */
     SIG_CHANGED         /* the bytes at the recorded RVA differ from the pattern */
 } sig_status;
 

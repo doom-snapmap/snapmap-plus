@@ -141,7 +141,7 @@ static uintptr_t mp_clean(const sig_result *r, size_t n, const char *name)
 {
     size_t i;
     for (i = 0; i < n; i++)
-        if (r[i].name && !strcmp(r[i].name, name) && (r[i].status == SIG_OK || r[i].status == SIG_OK_HOOKED))
+        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK)
             return r[i].addr;
     return 0;
 }

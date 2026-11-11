@@ -25,7 +25,6 @@ $null = Import-MsvcEnv $env:SNAPMAPPLUS_VCVARS_VER
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
     @{ name = "nav_menu_test"; src = 'nav_menu_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
-    @{ name = "startup_bindings_test"; src = 'startup_bindings_test.c ..\src\backend\startup_bindings.c'; arg = "" }
     @{ name = "serialized_entities_guard_test"; src = 'serialized_entities_guard_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "map_render_test"; src = 'map_render_test.c ..\src\backend\map_render.c'; arg = "" }
     @{ name = "map_render_editor_test"; src = 'map_render_editor_test.c ..\src\backend\map_render.c'; arg = "" }

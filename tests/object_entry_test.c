@@ -56,7 +56,7 @@ int main(void)
     assert(site_reads(bad)==18000.0f);
     {float native=18364.0f;memcpy(bad+0x40,&native,4);bad[9]=0x90;}
     assert(!sh_object_entry_install(&r,1)&&strstr(last_log,"unexpected bytes")&&!g_page);
-    r.status=SIG_OK_HOOKED;r.addr=(uintptr_t)site;
+    r.status=SIG_CHANGED;r.addr=(uintptr_t)site;
     assert(!sh_object_entry_install(&r,1)&&!g_live&&strstr(last_log,"lands under its roof"));
     assert(sh_object_entry_drop()==SH_OBJECT_ENTRY_NATIVE_DROP&&site_reads(site)==18364.0f);
 
