@@ -4188,8 +4188,10 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                     mu_line(o, "%s: another folder of %s stays installed (mods\\%s); maps that use it open with it", verb,
                             title, stay->name);
                 else if (saved > 0)
-                    mu_line(o, "%s: %d of your saved maps use it; they will not open until a mod folder provides its assets "
-                            "again", verb, saved);
+                    mu_line(o, saved == 1 ? "%s: %d of your saved maps uses it; it will not open until a mod folder provides "
+                                            "its assets again"
+                                          : "%s: %d of your saved maps use it; they will not open until a mod folder provides "
+                                            "its assets again", verb, saved);
                 else if (saved == 0) mu_line(o, "%s: none of your saved maps use it", verb);
                 if (mp.entities >= 0) mu_line(o, "%s: Undo history is cleared.", verb);
             }

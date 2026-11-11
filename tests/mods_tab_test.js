@@ -841,6 +841,9 @@ test('Uninstall: the confirmation lists what it does; the folder goes to the Rec
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 3}})).map(c => c.text),
     ['Moves the folder mods\\a to the Windows Recycle Bin.',
      '3 of your saved maps use it; they will not open until you restore it from the Recycle Bin.']);
+  assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 1}})).map(c => c.text),
+    ['Moves the folder mods\\a to the Windows Recycle Bin.',
+     '1 of your saved maps uses it; it will not open until you restore it from the Recycle Bin.']);
 });
 
 /* ---- New mod and the Files view --------------------------------------------------------------- */

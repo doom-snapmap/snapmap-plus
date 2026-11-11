@@ -1648,8 +1648,13 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         prog.base += size;
         st->builds_sent++;
         if (r.created) st->builds_created++;
-        msy_log("MODS: push %s (%.16s): %u MB sent, %u pointer(s) left to the player's game", u[i].label, u[i].hash,
-                msy_mb(size), pointers);
+        {
+            char sent[32];
+            if (size < 1024ull * 100ull) _snprintf_s(sent, sizeof sent, _TRUNCATE, "%llu byte%s", size, size == 1 ? "" : "s");
+            else _snprintf_s(sent, sizeof sent, _TRUNCATE, "%.1f MB", (double)size / (1024.0 * 1024.0));
+            msy_log("MODS: push %s (%.16s): %s sent, %u pointer(s) left to the player's game", u[i].label, u[i].hash,
+                    sent, pointers);
+        }
     }
 
     /* One claim for the whole set: re-claim with the stored secret when the
