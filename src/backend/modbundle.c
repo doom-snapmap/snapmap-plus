@@ -2605,7 +2605,11 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
             } else if ((f = mb_add_file(w->b)) == NULL) {
                 mb_error(w->b, "out of memory");
             } else {
-                f->path = mb_strdup(child);
+                /* DECISIONS 13: the recorded path is the game name, lower
+                 * case with '/', whatever the spelling on disk (Windows
+                 * opens it either way); archives and installs use it. */
+                f->path = (char *)malloc(strlen(req_lower) + 8);
+                if (f->path) { memcpy(f->path, "assets/", 7); strcpy_s(f->path + 7, strlen(req_lower) + 1, req_lower); }
                 f->request = req_lower;
                 req_lower = NULL;
                 f->size = size;

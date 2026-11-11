@@ -134,7 +134,8 @@ typedef struct sh_mb_need {
 } sh_mb_need;
 
 typedef struct sh_mb_file {
-    char *path;            /* "assets/..." with '/', the author's spelling */
+    char *path;            /* "assets/" + request: a build records the game name, lower case with '/',
+                              whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
     char *request;         /* path below assets/, lower-cased: what the provider is asked for */
     char  blob[SH_MB_HASH_HEX + 1];
     unsigned long long size;

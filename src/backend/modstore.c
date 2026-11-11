@@ -2419,8 +2419,9 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
 }
 
 /* Copy every file and folder below `src` into `dst` (created), real copies,
- * no link followed. 1 when all of it was copied. */
-static int ms_copy_tree(const wchar_t *src, const wchar_t *dst, int depth, char *cause, size_t cap)
+ * no link followed; everything below assets\ is named in lower case, the game
+ * names the builder records (DECISIONS 13). 1 when all of it was copied. */
+static int ms_copy_tree(const wchar_t *src, const wchar_t *dst, int depth, int lower, char *cause, size_t cap)
 {
     WIN32_FIND_DATAW fd;
     wchar_t *pattern;
@@ -2436,14 +2437,21 @@ static int ms_copy_tree(const wchar_t *src, const wchar_t *dst, int depth, char 
         wchar_t *from, *to;
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ok = ms_cause(cause, cap, "a symbolic link or junction is not allowed in a mod folder"); break; }
-        from = ms_wjoin(src, fd.cFileName);
-        to = ms_wjoin(dst, fd.cFileName);
-        if (!from || !to) ok = ms_cause(cause, cap, "out of memory");
-        else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = ms_copy_tree(from, to, depth + 1, cause, cap);
-        else if (!sh_ms_copy_file(from, to)) {
-            char *u = sh_mb_utf8(fd.cFileName);
-            ok = ms_cause(cause, cap, "cannot copy %s into the store: %s", u ? u : "a file", ms_why(GetLastError(), u ? u : "", 0, 0));
-            free(u);
+        {
+            int sub = lower || (depth == 0 && !_wcsicmp(fd.cFileName, L"assets"));
+            wchar_t name[MAX_PATH];
+            size_t k;
+            wcsncpy_s(name, MAX_PATH, fd.cFileName, _TRUNCATE);
+            for (k = 0; sub && name[k]; k++) if (name[k] >= L'A' && name[k] <= L'Z') name[k] = (wchar_t)(name[k] - L'A' + L'a');
+            from = ms_wjoin(src, fd.cFileName);
+            to = ms_wjoin(dst, name);
+            if (!from || !to) ok = ms_cause(cause, cap, "out of memory");
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = ms_copy_tree(from, to, depth + 1, sub, cause, cap);
+            else if (!sh_ms_copy_file(from, to)) {
+                char *u = sh_mb_utf8(fd.cFileName);
+                ok = ms_cause(cause, cap, "cannot copy %s into the store: %s", u ? u : "a file", ms_why(GetLastError(), u ? u : "", 0, 0));
+                free(u);
+            }
         }
         free(from);
         free(to);
@@ -2574,7 +2582,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         final = ms_wjoin_utf8(root, name);
         if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, cap, "out of memory"); goto done; }
         if (ms_exists(staging)) ms_rmtree(staging, root);
-        if (!ms_copy_tree(src, staging, 0, cause, cap)) { ms_rmtree(staging, root); goto done; }
+        if (!ms_copy_tree(src, staging, 0, 0, cause, cap)) { ms_rmtree(staging, root); goto done; }
         if (!ms_swap_in(staging, final, old, root, name, &replaced, cause, cap)) goto done;
         st->replaced = replaced;
         fu = sh_mb_utf8(final);
