@@ -3548,14 +3548,17 @@ index equals the engine's "no variable" constant (-1), held in an `idStr` at
 `+0xCB0` (length `+0x08`, data `+0x10`). It acts only when all of these hold:
 the master switch (`sh_smp on|off`) is on, the game manager reports the host
 (`IsServer`, gameMgr `+0x2BB3A4`), the SnapMap logic manager exists (the same
-check every stock action makes), and the optional map gate
-(`sh_modaction_set_map_gate`, unset by default because the `smp:` prefix is the
-map's own opt-in) admits the open map. Logic only runs on the host, so a client
-never reaches the hook. The activator becomes a player by an `idPlayer` cast,
-else through the owner slot (vtable `+0x558`) the stock Give Item action uses.
-The command runs on the game thread inside `DoAction`, then the stock write
-proceeds unchanged; a fault inside the command is caught and logged and never
-stops the write.
+check every stock action makes); the `smp:` prefix is the map's own opt-in.
+Logic only runs on the host, so a client never reaches the hook. The literal
+must pass `smp_check` (the verb is `event` or `doomhands`, an event is one of
+the verified names `smp_event_allowed` lists, as the guide's table does), so a
+downloaded map fires nothing else. The activator becomes a player by an
+`idPlayer` cast, else through the owner slot (vtable `+0x558`) the stock Give
+Item action uses. The command runs on the game thread inside `DoAction`, then
+the stock write proceeds unchanged. Every engine call it makes catches an
+access violation only (`ma_filter`): that stops the command with one `SMP:`
+line and the write still runs; any other exception (an `idException` is a C++
+throw) is named in one line and passed on to the engine's own handler.
 
 `smp:event` looks the event up through the decl manager's event interface
 (`+0x90`, FindByName `+0x10`), types the arguments from the record's compact

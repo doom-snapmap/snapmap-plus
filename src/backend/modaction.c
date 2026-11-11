@@ -144,6 +144,44 @@ int smp_type_args(const char *format, const char values[][SMP_MAX_TOKEN], int co
     return want;
 }
 
+/* The events smp:event may fire, each verified on the SnapMap player; the
+ * guide's String Set table lists the same names. */
+static const char *const k_smp_events[] = {
+    "forcePraetorHandsAndBody",   /* event 678: the hands and body slot (bool) */
+};
+
+int smp_event_allowed(const char *name)
+{
+    size_t i;
+    if (!name) return 0;
+    for (i = 0; i < sizeof k_smp_events / sizeof k_smp_events[0]; i++)
+        if (!strcmp(name, k_smp_events[i])) return 1;
+    return 0;
+}
+
+int smp_check(const char *literal, smp_command *out, char *err, size_t err_cap)
+{
+    int on;
+    if (!smp_parse(literal, out, err, err_cap)) return 0;
+    if (!strcmp(out->verb, "event")) {
+        if (out->argc < 1) { smp_err(err, err_cap, "usage: smp:event <eventName> [args...]", NULL); return 0; }
+        if (!smp_event_allowed(out->argv[0])) {
+            smp_err(err, err_cap, "String Set commands cannot fire the event", out->argv[0]);
+            return 0;
+        }
+        return 1;
+    }
+    if (!strcmp(out->verb, "doomhands")) {
+        if (out->argc != 1 || !smp_parse_bool(out->argv[0], &on)) {
+            smp_err(err, err_cap, "usage: smp:doomhands <0|1>", NULL);
+            return 0;
+        }
+        return 1;
+    }
+    smp_err(err, err_cap, "unknown command", out->verb);
+    return 0;
+}
+
 #ifndef SH_MODACTION_PURE
 /* ------------------------------------------------------------------------- */
 /* Engine half: build 13954591 only (SH_RVA yields 0 on any other image).     */
@@ -228,10 +266,20 @@ typedef void *(*ma_cast_fn)(void *obj);
 static ma_doaction_fn            g_orig_doaction = NULL;
 static volatile LONG             g_installed = 0;
 static volatile LONG             g_enabled = 1;
-static sh_modaction_map_gate_fn  g_map_gate = NULL;
 static uint8_t                  *g_base = NULL;
 
-void sh_modaction_set_map_gate(sh_modaction_map_gate_fn fn) { g_map_gate = fn; }
+/* The engine calls a command makes: an access violation stops the command
+ * with one line; any other exception (an idException is a C++ throw) is
+ * named in one line and goes on to the engine's own handler, never
+ * swallowed. */
+static const char *g_ma_doing;
+static int ma_filter(DWORD code)
+{
+    if (code == EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_EXECUTE_HANDLER;
+    sh_printf("SMP: the game raised an error in %s (exception 0x%08lx); the game handles it\n",
+              g_ma_doing ? g_ma_doing : "a String Set command", (unsigned long)code);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 static void *ma_fn(uint32_t rva) { return (g_base && rva) ? (void *)(g_base + rva) : NULL; }
 
@@ -249,7 +297,7 @@ static void *ma_evmgr(void)
     void *declmgr = sh_typeinfo_get_declmgr();
     ma_vfn0 acc = (ma_vfn0)ma_vfn(declmgr, MA_EVMGR_VSLOT);
     if (!acc) return NULL;
-    __try { return acc(declmgr); } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    __try { return acc(declmgr); } __except (ma_filter(GetExceptionCode())) { return NULL; }
 }
 
 static void *ma_find_event(const char *name)
@@ -257,7 +305,7 @@ static void *ma_find_event(const char *name)
     void *evmgr = ma_evmgr();
     ma_vfn_name find = (ma_vfn_name)ma_vfn(evmgr, MA_EV_FIND_VSLOT);
     if (!find) return NULL;
-    __try { return find(evmgr, name); } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    __try { return find(evmgr, name); } __except (ma_filter(GetExceptionCode())) { return NULL; }
 }
 
 /* Copy a NUL-terminated engine string; returns 0 when unreadable. */
@@ -298,7 +346,7 @@ static const char *ma_entity_name(void *ent, char *buf, size_t cap)
 {
     const char *p = NULL;
     if (!ent || !ma_read_ptr((uint8_t *)ent + MA_ENTITY_NAME_OFF, &p, sizeof p) || !ma_read_cstr(p, buf, cap) || !buf[0])
-        snprintf(buf, cap, "%p", ent);
+        snprintf(buf, cap, "an unnamed entity");
     return buf;
 }
 
@@ -315,7 +363,7 @@ static void *ma_player_of(void *activator)
         if (!o) return NULL;
         ma_vfn0 owner = (ma_vfn0)ma_vfn(o, MA_OWNER_PLAYER_VSLOT);
         return owner ? owner(o) : NULL;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    } __except (ma_filter(GetExceptionCode())) { return NULL; }
 }
 
 /* Host-side SnapMap session with a logic manager. */
@@ -341,10 +389,10 @@ static void ma_mark_models_stale(uint8_t *player)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* Fire `cmd` (verb "event") on player. Returns 1 when the engine ran it. */
+/* Fire `cmd` (verb "event", accepted by smp_check) on player. Returns 1 when
+ * the engine ran it. */
 static int ma_run_event(const smp_command *cmd, void *player, const char *who, char *err, size_t cap)
 {
-    if (cmd->argc < 1) { smp_err(err, cap, "usage: smp:event <eventName> [args...]", NULL); return 0; }
     ma_event ev;
     if (!ma_event_info(cmd->argv[0], &ev)) { smp_err(err, cap, "no event named", cmd->argv[0]); return 0; }
     if ((int)strlen(ev.format) != ev.numargs) { smp_err(err, cap, "unreadable event format for", cmd->argv[0]); return 0; }
@@ -354,7 +402,10 @@ static int ma_run_event(const smp_command *cmd, void *player, const char *who, c
     ma_process_args_fn process = (ma_process_args_fn)ma_fn(MA_PROCESS_EVENT_ARGS_RVA);
     ma_clear_fn clear = (ma_clear_fn)ma_fn(MA_EVENTARG_CLEAR_RVA);
     ma_arg_entity_fn from_entity = (ma_arg_entity_fn)ma_fn(MA_EVENTARG_ENTITY_RVA);
-    if (!process || !clear || !from_entity) { smp_err(err, cap, "unsupported executable", NULL); return 0; }
+    if (!process || !clear || !from_entity) {
+        smp_err(err, cap, "this copy of DOOM is not the one Snapmap+ supports, so String Set commands are off", NULL);
+        return 0;
+    }
     ma_event_arg a[SMP_MAX_ARGS];
     memset(a, 0, sizeof a);
     for (int i = 0; i < n; i++) {
@@ -365,7 +416,9 @@ static int ma_run_event(const smp_command *cmd, void *player, const char *who, c
         case 'e': {
             void *ent = sh_entity_find(typed[i].text);
             if (!ent) { smp_err(err, cap, "no entity named", typed[i].text); return 0; }
-            __try { from_entity(&a[i], ent); } __except (EXCEPTION_EXECUTE_HANDLER) { smp_err(err, cap, "entity argument faulted", NULL); return 0; }
+            g_ma_doing = "an entity argument";
+            __try { from_entity(&a[i], ent); }
+            __except (ma_filter(GetExceptionCode())) { smp_err(err, cap, "the game could not use the entity", typed[i].text); return 0; }
             break;
         }
         }
@@ -374,12 +427,13 @@ static int ma_run_event(const smp_command *cmd, void *player, const char *who, c
     for (int i = 0; i < SMP_MAX_ARGS; i++) p[i] = &a[i];
     uint8_t ret[0x18] = {0};
     int ok = 0;
+    g_ma_doing = cmd->argv[0];
     __try {
         process(player, ret, ev.rec, n, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         clear(ret);
         ok = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
-    if (!ok) { smp_err(err, cap, "event faulted", cmd->argv[0]); return 0; }
+    } __except (ma_filter(GetExceptionCode())) { ok = 0; }
+    if (!ok) { smp_err(err, cap, "the game stopped the event", cmd->argv[0]); return 0; }
     char line[SMP_MAX_TOKEN * 3];
     size_t off = (size_t)snprintf(line, sizeof line, "%s(", cmd->argv[0]);
     for (int i = 1; i < cmd->argc && off < sizeof line; i++)
@@ -392,13 +446,14 @@ static int ma_run_event(const smp_command *cmd, void *player, const char *who, c
 static int ma_run_doomhands(const smp_command *cmd, void *player, const char *who, char *err, size_t cap)
 {
     int on = 0;
-    if (cmd->argc != 1 || !smp_parse_bool(cmd->argv[0], &on)) { smp_err(err, cap, "usage: smp:doomhands <0|1>", NULL); return 0; }
     uint8_t before = 0;
     uint8_t *pl = (uint8_t *)player;
-    if (!ma_read_ptr(pl + MA_PLAYER_DOOMHANDS_OFF, &before, 1)) { smp_err(err, cap, "player unreadable", NULL); return 0; }
-    __try { pl[MA_PLAYER_DOOMHANDS_OFF] = (uint8_t)on; } __except (EXCEPTION_EXECUTE_HANDLER) { smp_err(err, cap, "player unwritable", NULL); return 0; }
+    (void)smp_parse_bool(cmd->argv[0], &on);   /* smp_check accepted it */
+    if (!ma_read_ptr(pl + MA_PLAYER_DOOMHANDS_OFF, &before, 1)) { smp_err(err, cap, "the player could not be changed", NULL); return 0; }
+    __try { pl[MA_PLAYER_DOOMHANDS_OFF] = (uint8_t)on; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { smp_err(err, cap, "the player could not be changed", NULL); return 0; }
     ma_mark_models_stale(pl);
-    sh_printf("SMP: doomhands %d on %s (was %u): hands and body rebuild on the next think\n", on, who, before);
+    sh_printf("SMP: doomhands %d on %s: the hands change on the next frame\n", on, who);
     return 1;
 }
 
@@ -408,7 +463,7 @@ static void ma_run_literal(const char *literal, void *activator)
     smp_command cmd;
     char err[192] = "";
     char who[96];
-    if (!smp_parse(literal, &cmd, err, sizeof err)) { sh_printf("SMP: \"%s\": %s\n", literal, err); return; }
+    if (!smp_check(literal, &cmd, err, sizeof err)) { sh_printf("SMP: \"%s\": %s; nothing done\n", literal, err); return; }
     void *player = ma_player_of(activator);
     if (!player) {
         char an[64];
@@ -416,10 +471,8 @@ static void ma_run_literal(const char *literal, void *activator)
         return;
     }
     ma_entity_name(player, who, sizeof who);
-    int ok;
-    if (!strcmp(cmd.verb, "event")) ok = ma_run_event(&cmd, player, who, err, sizeof err);
-    else if (!strcmp(cmd.verb, "doomhands")) ok = ma_run_doomhands(&cmd, player, who, err, sizeof err);
-    else { smp_err(err, sizeof err, "unknown command", cmd.verb); ok = 0; }
+    int ok = !strcmp(cmd.verb, "event") ? ma_run_event(&cmd, player, who, err, sizeof err)
+                                        : ma_run_doomhands(&cmd, player, who, err, sizeof err);
     if (!ok) sh_printf("SMP: \"%s\": %s; nothing done\n", literal, err);
 }
 
@@ -439,17 +492,17 @@ static int ma_action_literal(const uint8_t *self, char *out, size_t cap)
 
 static void ma_strset_doaction(void *self, void *activator)
 {
+    g_ma_doing = NULL;
     __try {
         char literal[SMP_MAX_LITERAL + 1];
         if (InterlockedCompareExchange(&g_enabled, 0, 0) &&
             ma_action_literal((const uint8_t *)self, literal, sizeof literal) && smp_is_command(literal)) {
             const char *why = NULL;
             if (!ma_session_ok(&why)) sh_printf("SMP: \"%s\": %s; nothing done\n", literal, why);
-            else if (g_map_gate && !g_map_gate()) sh_printf("SMP: \"%s\": the open map does not use Snapmap+ behaviour; nothing done\n", literal);
             else ma_run_literal(literal, activator);
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sh_printf("SMP: a String Set command faulted; the stock write continues\n");
+    } __except (ma_filter(GetExceptionCode())) {
+        sh_printf("SMP: a String Set command stopped after a fault; the node still stores its string\n");
     }
     g_orig_doaction(self, activator);
 }
@@ -526,14 +579,14 @@ static int ma_registry_count(void *evmgr)
 {
     ma_vfn_count cnt = (ma_vfn_count)ma_vfn(evmgr, MA_EV_COUNT_VSLOT);
     if (!cnt) return 0;
-    __try { return cnt(evmgr); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return cnt(evmgr); } __except (ma_filter(GetExceptionCode())) { return 0; }
 }
 
 static void *ma_registry_at(void *evmgr, int i)
 {
     ma_vfn_index at = (ma_vfn_index)ma_vfn(evmgr, MA_EV_COMMAND_VSLOT);
     if (!at) return NULL;
-    __try { return at(evmgr, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    __try { return at(evmgr, i); } __except (ma_filter(GetExceptionCode())) { return NULL; }
 }
 
 int sh_modaction_registry_text(char *out, int cap)

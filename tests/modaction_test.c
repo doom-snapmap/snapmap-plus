@@ -115,12 +115,33 @@ static void test_typing(void)
     CHECK(smp_type_args("iiiiiiiii", (const char (*)[SMP_MAX_TOKEN])&c.argv[1], 9, a, err, sizeof err) == -1);
 }
 
+/* What a map may run: the listed events and doomhands with one bool; any
+ * other event, verb or shape is refused with a plain reason. */
+static void test_check(void)
+{
+    smp_command c;
+    char err[160];
+    CHECK(smp_event_allowed("forcePraetorHandsAndBody"));
+    CHECK(!smp_event_allowed("forcepraetorhandsandbody"));
+    CHECK(!smp_event_allowed("remove") && !smp_event_allowed("kill") && !smp_event_allowed(NULL));
+    CHECK(smp_check("smp:event forcePraetorHandsAndBody 1", &c, err, sizeof err) && c.argc == 2);
+    CHECK(!smp_check("smp:event remove", &c, err, sizeof err) &&
+          !strcmp(err, "String Set commands cannot fire the event 'remove'"));
+    CHECK(!smp_check("smp:event", &c, err, sizeof err) && strstr(err, "usage: smp:event"));
+    CHECK(smp_check("smp:doomhands on", &c, err, sizeof err));
+    CHECK(!smp_check("smp:doomhands maybe", &c, err, sizeof err) && strstr(err, "usage: smp:doomhands"));
+    CHECK(!smp_check("smp:doomhands 1 2", &c, err, sizeof err));
+    CHECK(!smp_check("smp:status", &c, err, sizeof err) && !strcmp(err, "unknown command 'status'"));
+    CHECK(!smp_check("hello", &c, err, sizeof err) && strstr(err, "not an smp: command"));
+}
+
 int main(void)
 {
     test_prefix();
     test_parse();
     test_bool();
     test_typing();
+    test_check();
     if (g_fail) return 1;
     printf("modaction_test: ok\n");
     return 0;

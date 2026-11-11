@@ -604,8 +604,20 @@ switches them off for the session.
 
 | Command | What it does |
 |---|---|
-| `smp:event <eventName> [args...]` | Fires any engine event on the activating player at once. The arguments are read by the event's own signature: integers (an enum takes its number), floats, text, `1/0`, `true/false`, `on/off` or `yes/no` for a bool, and an entity name. `sh_event info <name>` prints a signature. An unknown event, a wrong argument count, a value that does not parse, an argument type it cannot build (vectors, colours, declarations) or an activator that is not a player prints one line and does nothing. Example: `smp:event forcePraetorHandsAndBody 1` swaps the player's hands to the Praetor slot, which on the SnapMap player draws no arms, and `... 0` brings the multiplayer glove back. |
+| `smp:event <eventName> [args...]` | Fires one of the engine events listed below on the activating player at once. The arguments are read by the event's own signature: integers (an enum takes its number), floats, text, `1/0`, `true/false`, `on/off` or `yes/no` for a bool, and an entity name. `sh_event info <name>` prints a signature. Any other event, a wrong argument count, a value that does not parse or an activator that is not a player prints one line and does nothing. |
 | `smp:doomhands <0\|1>` | Sets the player's Doom-hands switch, the per-player form of `g_weaponDoomMPUseDoomHands`, and rebuilds the hands and body. With a mod that points `handsModelMPUseDoomHands` at another model (the `alex.bare-hands` example shows bare arms) the hands change at once. A player who spawned with the multiplayer hands keeps that armour's forearm attachment drawn over the new hands; a respawn resets the switch to the map's setting. |
+
+What a map's commands may do is fixed by this list, whoever made the map: `smp:doomhands`, and
+`smp:event` with these events, each verified on the SnapMap player.
+
+| Event | What it does |
+|---|---|
+| `forcePraetorHandsAndBody <bool>` | `1` swaps the player's hands to the Praetor slot, which on the SnapMap player draws no arms; `0` brings the multiplayer glove back. |
+
+A command is checked against the list before it runs (`smp_check`); one that is not on it prints
+`SMP: "<command>": String Set commands cannot fire the event '<name>'; nothing done`. If the game
+stops an event part way, the command stops with one `SMP:` line naming the event and the node still
+stores its string; an error the game raises itself is named in one line and left to the game.
 
 For a whole map, the switch needs no command: a map whose **useSPModels** setting is on gives the
 player the Doom-hands slot at every spawn while fewer than two players are in the game, the same
