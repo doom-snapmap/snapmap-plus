@@ -10,12 +10,22 @@ ones. This document is the contract between a tool that writes such a family
 (`src/backend/modvt.c`, `src/backend/modbundle.c`). Everything here is for
 build 13954591 on both executables unless marked.
 
-Status: the file layout, the material text, the registration and the drawing
-of a family made from copied stock pages are confirmed in game on Vulkan. The
-plane contents are confirmed by decoding stock pages, except the split of the
-normal across the two alpha channels, which is inferred. Whether the page
-codec is standard JPEG XR is not settled, so a new encoder must pass the
-round trip in [Validation](#validation) before its output ships.
+Status: the file layout, the registration and the page codec are confirmed in
+game on both renderers, but a private family does not draw on a lit model.
+Every lit model program the game ships (`skinvmtr`, `skinvmtrwounds`,
+`outside` and the rest) samples only the global vmtr bindings
+(`vmtrpagetablemap`, `vmtrphysicalpagesmaparray0`), which belong to record 1,
+the stock `_vmtr` family. A material naming a private family is bound to that
+family's own `pageTableMap` and to the UniqueVmtrs page cache, whose only
+image is a 128 x 128 `physicalPagesMap4` (cvar `vt_pageImageSizeVmtrUnique`)
+read by the landscape programs alone, so it draws stock `_vmtr` pages at its
+own coordinates. The material parser gives every family other than record 1
+flavor 2, so such a record cannot use the stock cache either. The earlier
+"drew identically" check copied stock pages to their stock coordinates and so
+could not tell the two apart. What draws (TL2, Vulkan and OpenGL): the
+family's pages served inside a square of the stock family (square 16 is
+nearly empty) and materials with no `landpagefile`; see Doomforge
+`tools/vt/vmtr_square.py`. Serving such a member is not implemented here.
 
 ## Contents
 
