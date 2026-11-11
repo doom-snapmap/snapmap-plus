@@ -95,7 +95,8 @@ int main(void)
     _snwprintf_s(p1, MAX_PATH, _TRUNCATE, L"%s\\game.details", slot);
     _snwprintf_s(p2, MAX_PATH, _TRUNCATE, L"%s\\SNAPMAPS%S\\game.details", kept, ID1);
     CHECK(smg_same_file(p1, p2));
-    CHECK(tells == 1 && strstr(told, "\"test5\"") && strstr(told, "kept a copy in"));
+    CHECK(tells == 1 && strstr(told, "\"test5\"") && strstr(told, "with a copy to send in a report in"));
+    CHECK(strlen(told) <= 255);   /* the engine's dialog holds 255 bytes */
     sh_wpath_utf8(kept, want, sizeof want);
     CHECK(strstr(told, want) != NULL);
     CHECK(emitted >= 2);
@@ -120,9 +121,22 @@ int main(void)
     _snwprintf_s(g_kept_root, SH_WPATH_MAX, _TRUNCATE, L"%s\\map.decl\\kept", slot);
     g_told_count = 0;
     run(names, 1);
-    CHECK(tells == 3 && strstr(told, "its files are still in") && !strstr(told, "kept a copy"));
+    CHECK(tells == 3 && strstr(told, "Snapmap+ kept it in") && !strstr(told, "copy"));
     _snwprintf_s(p1, MAX_PATH, _TRUNCATE, L"%s\\map.decl", slot);
     CHECK(GetFileAttributesW(p1) != INVALID_FILE_ATTRIBUTES);
+
+    /* A long title and a long path still fit the engine's 255-byte dialog. */
+    {
+        smg_kept k;
+        char said[1024];
+        memset(&k, 0, sizeof k);
+        k.result = SMG_KEPT_COPY;
+        strcpy_s(k.folder, sizeof k.folder, "SNAPMAPSAAAA6E84712D438B91B0");
+        memset(k.title, 'T', 90);
+        memset(k.where, 'p', 300);
+        CHECK(smg_sentence(&k, said, sizeof said) && strlen(said) <= 255);
+        CHECK(strstr(said, "%LOCALAPPDATA%\\snapmap-plus\\kept-maps\\SNAPMAPSAAAA") != NULL);
+    }
 
     /* An unreadable list deletes nothing and does not fault. */
     smg_delete_bad_slots(NULL, (void *)(uintptr_t)0x10);

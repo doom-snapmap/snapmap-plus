@@ -273,20 +273,43 @@ static int smg_told(const char *folder)
     return 0;
 }
 
-/* The player's sentence for one kept slot, or NULL when nothing may be claimed. */
+/* The engine's dialog carries at most 255 bytes (engine_dialog.c), so the title
+ * is cut at 40 bytes on a character boundary and a long folder path is named
+ * by its known-folder form. */
+#define SMG_SENTENCE_MAX 255
+#define SMG_TITLE_MAX 40
+
+static void smg_short_title(const char *title, char *out, size_t cap)
+{
+    size_t n = strlen(title);
+    if (n <= SMG_TITLE_MAX) { strcpy_s(out, cap, title); return; }
+    n = SMG_TITLE_MAX;
+    while (n > 0 && ((unsigned char)title[n] & 0xC0) == 0x80) n--;   /* not inside a UTF-8 sequence */
+    memcpy(out, title, n);
+    strcpy_s(out + n, cap - n, "...");
+}
+
+/* The player's sentence for one kept slot, or 0 when nothing may be claimed. */
 static int smg_sentence(const smg_kept *k, char *out, size_t cap)
 {
+    char title[SMG_TITLE_MAX + 4], where[96];
+    int n;
+    if (k->result != SMG_KEPT_COPY && k->result != SMG_KEPT_IN_PLACE) return 0;
+    smg_short_title(k->title, title, sizeof title);
+    n = _snprintf_s(out, cap, _TRUNCATE, k->result == SMG_KEPT_COPY
+        ? "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ kept it, with a copy to send in a report in %s."
+        : "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ kept it in %s.",
+        title, k->where);
+    if (n > 0 && n <= SMG_SENTENCE_MAX) return 1;
     if (k->result == SMG_KEPT_COPY)
-        return _snprintf_s(out, cap, _TRUNCATE,
-            "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ stopped "
-            "it and kept a copy in %s, which you can send with a report from the Snapmap+ window.",
-            k->title, k->where) > 0;
-    if (k->result == SMG_KEPT_IN_PLACE)
-        return _snprintf_s(out, cap, _TRUNCATE,
-            "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ stopped "
-            "it, and its files are still in %s, which you can send with a report from the Snapmap+ window.",
-            k->title, k->where) > 0;
-    return 0;
+        _snprintf_s(where, sizeof where, _TRUNCATE, "%%LOCALAPPDATA%%\\snapmap-plus\\kept-maps\\%s", k->folder);
+    else
+        _snprintf_s(where, sizeof where, _TRUNCATE, "your saved games folder (%s)", k->folder);
+    n = _snprintf_s(out, cap, _TRUNCATE, k->result == SMG_KEPT_COPY
+        ? "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ kept it, with a copy to send in a report in %s."
+        : "DOOM could not read your saved map \"%s\" and was about to delete it; Snapmap+ kept it in %s.",
+        title, where);
+    return n > 0 && n <= SMG_SENTENCE_MAX;
 }
 
 static void smg_delete_bad_slots(void *helper, void *names)

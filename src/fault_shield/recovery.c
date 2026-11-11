@@ -244,7 +244,8 @@ const char SHIELD_DAMAGED_SAVE_TEXT[] =
     "This map could not be opened because DOOM could not read its save file; "
     "Snapmap+ did not let the game delete it.";
 
-/* A sentence waits until the dismissed dialog has left the queue. */
+/* A sentence waits until the engine can show a dialog (the dismissed one has
+ * left the queue and no widget is active). */
 #define DAMAGED_NOTICE_WAIT_FRAMES 600
 static char        g_tell_text[2048];
 static const char *g_damaged_text;
@@ -273,10 +274,10 @@ static void damaged_notice_tick(void)
         g_damaged_ticket = sh_engine_dialog_ask(NOTICE_GDM_ID, NOTICE_BUTTONSET, g_damaged_text);
         if (g_damaged_ticket) { g_damaged_text = NULL; return; }
     }
-    if (--g_damaged_wait <= 0) {
-        shield_fault f = { "save", -1, "save-guard: the notice could not be shown", 0, 0 };
+    /* A sentence is never dropped: it waits for the queue, and the log says so once. */
+    if (g_damaged_wait > 0 && --g_damaged_wait == 0) {
+        shield_fault f = { "save", -1, "save-guard: the notice is waiting for the dialog queue", 0, 0 };
         shield_emit(&f);
-        g_damaged_text = NULL;
     }
 }
 
