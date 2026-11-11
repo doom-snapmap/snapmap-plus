@@ -22,9 +22,28 @@ const CATEGORIES = {
  * guard. The client already tails each log before sending. */
 const LOGS_CAP = 50000;
 
-/* Use a four-backtick fence so ordinary triple-backtick log text stays inside it. */
+/* Fence the logs with more backticks than any run inside them, so no log line can close the block. */
 function logsBlock(logs) {
-  return '<details><summary>Attached logs (anonymized)</summary>\n\n````text\n' + logs + '\n````\n</details>';
+  const longest = Math.max(0, ...(logs.match(/`+/g) || []).map(run => run.length));
+  const fence = '`'.repeat(Math.max(4, longest + 1));
+  return '<details><summary>Attached logs (anonymized)</summary>\n\n' + fence + 'text\n' + logs + '\n' + fence + '\n</details>';
+}
+
+/* Player text goes into a public issue: an @name in it must not notify anyone. A zero-width space
+ * after the @ keeps the text readable and stops GitHub's mention. */
+function noMentions(text) {
+  return text.replace(/@(?=[A-Za-z0-9_-])/g, '@\u200b');
+}
+
+/* A contact line is shown as inline code, so it can carry no mention, link or markup. */
+function contactText(contact) {
+  return '`' + contact.replace(/[`\r\n]/g, ' ') + '`';
+}
+
+/* Only a release-shaped version reaches the issue; anything else is reported as unknown. */
+function versionOf(raw) {
+  const v = String(raw || '').trim();
+  return /^v?\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,20})?$|^(?:dev|local)$/.test(v) ? v : 'unknown';
 }
 
 function json(obj, status) {
@@ -145,7 +164,7 @@ function issueBody(details, version, channel, contact, renderer, sig, game) {
   ];
   if (renderer) meta.push('- Renderer: ' + RENDERERS[renderer]);
   meta.push('- Game: ' + gameLine(game === undefined ? null : game));
-  if (contact) meta.push('- Contact: ' + contact);
+  if (contact) meta.push('- Contact: ' + contactText(contact));
   meta.push('', '<!-- report-sig:' + sig + ' -->');
   meta.push('<sub>Filed automatically from the in-app feedback dialog.</sub>');
   return details + '\n' + meta.join('\n');
@@ -156,7 +175,7 @@ function commentBody(details, version, channel, contact, renderer, logs, game) {
                  (renderer ? ', ' + RENDERERS[renderer] : '') +
                  (game ? ', build ' + game.build : '') + ':', '', details];
   lines.push('', '- Game: ' + gameLine(game === undefined ? null : game));
-  if (contact) lines.push('', '- Contact: ' + contact);
+  if (contact) lines.push('', '- Contact: ' + contactText(contact));
   if (logs) lines.push('', logsBlock(logs));
   lines.push('', '<sub>Added automatically from the in-app feedback dialog (matching report signature).</sub>');
   return lines.join('\n');
@@ -184,7 +203,7 @@ export default {
     const title = String(body.title || '').trim();
     const details = String(body.body || '').trim();
     const contact = String(body.contact || '').trim().slice(0, 200);
-    const version = String(body.version || 'unknown').trim().slice(0, 40) || 'unknown';
+    const version = versionOf(body.version);
     const renderer = rendererOf(String(body.renderer || '').trim().toLowerCase());
     const game = gameOf(String(body.game || '').slice(0, 160));
     /* optional log attachment (crash reports only -- ignored for the other categories). */
@@ -213,7 +232,7 @@ export default {
       const n = match.number;
       const c = await gh(token, '/repos/' + REPO + '/issues/' + n + '/comments', {
         method: 'POST',
-        body: { body: commentBody(details, version, channel, contact, renderer, logs, game) },
+        body: { body: commentBody(noMentions(details), version, channel, contact, renderer, logs, game) },
       });
       if (c) return json({ ok: true, mode: 'appended', number: n });
       /* comment failed -> fall through and file a fresh issue rather than dropping the report */
@@ -226,8 +245,8 @@ export default {
     const issue = await gh(token, '/repos/' + REPO + '/issues', {
       method: 'POST',
       body: {
-        title: '[' + cat.tag + '] ' + title,
-        body: issueBody(details, version, channel, contact, renderer, sig, game),
+        title: '[' + cat.tag + '] ' + noMentions(title),
+        body: issueBody(noMentions(details), version, channel, contact, renderer, sig, game),
         labels,
       },
     });
