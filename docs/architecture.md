@@ -771,9 +771,20 @@ conductor, strings), `edits` (the derived edits of each decl at a game name), sh
 There is no last good build (ONE-SHAPE rule 2): a build that fails writes the
 block of a failed build (`sh_mb_write_failed`: format, salt, rules, built, tree
 and the cause), the folder serves nothing until it is fixed, and the Mods tab
-and `sh_mods list` show the cause. A `mod.json` that does not parse is listed
-with its parse error (`sh_ms_descriptor_unparsable`) and nothing in it is
-written. The
+and `sh_mods list` show the cause; the serving index skips such a folder with
+`MODS: bundle '<folder>' skipped: not built: <cause>`. A `mod.json` that does
+not parse is listed with its parse error (`sh_ms_descriptor_unparsable`),
+nothing in it is written, and it serves nothing either (its cause is the
+store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
+folder's identity from the block's `salt` only (`ms_parse_bundle`), and
+refuses every earlier shape with the builder's sentence (`SH_MB_SHAPE`, "This
+mod folder is not in a shape Snapmap+ can build: ..."): a block of another
+format ("it was built by an earlier version of Snapmap+"), a retired author key
+(`id`, `key`, `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`,
+`legacy`, `composes`, `schema`, `hud.schema`), `package.json`, a block without
+a valid salt, and a folder in a map's place that the store did not build. A
+root folder with no block is "not built yet": the store's next scan salts and
+builds it. The
 product writes the block by splicing: the old member is cut from the end of
 the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
@@ -859,36 +870,40 @@ replaces. An author's own map follows their own root folders with no prompt
 `sh_modserve_row_build` answers for it, which for an editor load, a My Maps play
 and a published map this machine published is the root folder of the row's
 salt whatever hash the row pins, and the next save writes that build's hash, as
-the save already writes rows from the serving index. There are no aliases.
+the save already writes rows from the serving index. There is no upgrade
+action and there are no aliases: a row names a salt and a build, and
+`sh_modserve_row_build` answers it from the folders as they are.
 
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
 example crate at `mods/<salt>/example_crate` and its Toybox row, and the row's
 strings under `mods/<salt>/` in `mod.json`; the scan that follows builds it.
 
-The asset rule. A map, rawmap or prefab pins the builds its manifest rows
-name by bundle hash (DESIGN-additive 2.5: what the author saw is what every
-player gets). `sh_modserve_row_served(row, cause, cap)` (`modserve.c`,
-`sh_modserve_row_served_for` with the word "prefab") is the one predicate
-every hold uses: a row is served when the installed folder at the row's hash
-(or an alias of it) is admitted and every name it lists resolves, in that
-build or through the serving index; missing when no admitted folder has that
-hash, also when the key is installed at another hash (another build, inert
-for the map); incomplete when the build is admitted but a listed name does
-not resolve. Its cause is the refusal: "This map uses Hell Guards
-(local.hell-guard), which is not installed." (also when another build of the
-key is installed: the player is never told about builds, owner 2026-11-09) or "Hell Guards
-(local.hell-guard) is installed but does not provide
-mods/local.hell-guard/hell_guard_combo_enc, which this map uses." (the first
-three missing names, then "and N more"; the folder's own name, else the key
-alone; "prefab" for a prefab). A missing row is fetched by its hash, so a
-folder rebuilt with new bytes is installed beside the build a map pins, never
-over it; `sh_modserve_row_other_build` answers the other build for the launch
-gate's wording. `sh_modserve_bundle_serving` with a hash answers exactly that
-build (an alias resolves), never a newer one of the key, so activation and the
-save keep each row's pin; without a hash it answers the build of the key that
-serves with no map open: the player's own folder when one is admitted, else the
-newest. The scope listing is keyed by hash too ([Map scope](#map-scope)).
+The asset rule. A map, rawmap or prefab names the builds its manifest rows
+pin by salt and build hash. `sh_modserve_row_build(row, ref)` (`modserve.c`)
+answers which installed build serves a row, in the open map's context
+(`sh_modserve_scope_set_place(place, own)`: the map's place,
+`maps\<segment>`, and whether it is the author's own map), by the same rule the
+fetch uses to decide a build is present (`modsync.c`): for a stranger's map,
+its own place's folder of the salt at the row's hash, else the root folder of
+the salt when it is at that hash (the owner's decision of 2026-11-10); for the
+author's own map, the root folder of the salt at any hash, else its own
+place's folder at the row's hash. Another map's place never answers: each map
+keeps its own copy. `sh_modserve_row_served(row, cause, cap)`
+(`sh_modserve_row_served_for` with the word "prefab") is the one predicate
+every hold uses: a row is served when that build is admitted and every name it
+lists resolves, in that build or through the serving index; missing when no
+build answers (the fetch brings the row's build into the map's place);
+incomplete when the build is admitted but a listed name does not resolve. Its
+cause is the refusal: "This map uses Hell Guards, which is not installed.",
+"... which is installed but cannot be used: <cause>." (a folder of the salt
+was skipped: the one at the row's hash, else any when no folder of the salt
+serves) or "Hell Guards is installed but does not provide
+mods/<salt>/hell_guard_combo_enc, which this map uses." (the first three
+missing names, then "and N more"; the installed folder's name, else the row's,
+else the salt; "prefab" for a prefab). The scope listing is keyed by hash
+([Map scope](#map-scope)); a hash held in several areas names the open map's
+place's folder first, then the root's (`ms_bundle_by_hash`).
 What a placed entity depends on. The save closure and the map listing resolve
 each placed name (`sh_modmanifest_placed_names`: the `inherit` and
 `moduleName` values and every string in an entity's `edit` state) through
@@ -1124,18 +1139,20 @@ retired overrides layer did). Opens with mode 2 or higher are
 never served. A shadow applies while a map that lists its bundle is open or
 played (see [Map scope](#map-scope)); a new name applies once it is registered: editor rows at the first palette build (or
 `sh_mods palette rebuild`, or the load of a map that names their bundle, below),
-gameplay decls when a map that names their bundle loads. Two builds of one key
-are never a conflict: each map serves the build its rows pin and the other is
-inert for it; with no map open the player's own folder of the key (origin
-by-hand, install or migration) serves its names for the Toybox when one is
-admitted, else the newest build (built time, then folder): a build the product
-received for a map (a download, an import, a delivered package) never serves
-over the folder its author edits (owner 2026-11-10, `ms_preferred`: the legacy
-SP doors download had become "newest" over the owner's folder). The gate's
-"installed at another build" answer (`sh_modserve_row_other_build`) follows the
-same rule. The index build logs one `MODS: key <key>: bundles
-<hash16> (<version>) and <hash16> (<version>) both provide paths with other
-bytes; ...` line.
+gameplay decls when a map that names their bundle loads. The serving index
+holds one build per salt per area (ONE-SHAPE rule 4, `ms_one_per_area`): the
+root of `mods\` (everything but `mods\maps\`) and each map's place,
+`mods\maps\<segment>\`. Of two folders of one salt in one area the one built
+first keeps it (`built`, then folder path); the other is skipped ("it is a copy
+of mods\<folder> (the same salt <salt>); Refresh in the Mods tab makes it a new
+mod" at the root, SH_MB_SHAPE "another folder of this map has the same mod:
+<folder>" in a place) until the store's next scan settles it. The root build
+and a place build of one salt are never a conflict: each map serves the build
+it declares and the other is inert for it; with no map open only the root
+folder's build serves its names for the Toybox (`ms_preferred`, `root_build`),
+and a place build serves only for a map that declares it. The index build logs
+one `MODS: mod <salt>: builds <hash16> (<folder>) and <hash16> (<folder>) both
+provide paths with other bytes; ...` line.
 
 Cooked movies need a second route (`modswf.c`). A `.bswf` is an idFileResource,
 and its Load (vtable `+0x40`, signature `FileResourceLoad`) opens through the
@@ -1222,15 +1239,18 @@ main-thread pass, never through `s_loadBanks` with a map open. A bank whose
 bytes change under a name already loaded keeps the loaded copy (Wwise keeps the
 first bytes for a bank id and answers a second load with 69,
 AK_BankAlreadyLoaded) until the game restarts, and a removed bank stays
-loaded until then. Two builds of one key never share a stem: the serving
-index serves every carried bank of a keyed bundle as
-`sound/soundbanks/pc/<stem>.<hash16>.bnk`, with its BKHD bank id rewritten
-to that stem's FNV-1, and rewrites every quoted `"<stem>"`, `"<stem>.bnk"` or
-`".../<stem>.bnk"` in the bundle's served decl texts to match; the rewritten
-bytes are written once under `mods\.served\<key>@<hash16>\` (a dot folder
-the scanners skip) and served from there, with their own size and hash. A
-changed build is therefore a new bank to Wwise, and the ledger and the
-refresh see a new name. A grandfathered package keeps its banks as they are. `sh_mods status` lists each bank and whether it was
+loaded until then. A bank is named by its own bytes: the serving index
+serves every carried bank as `sound/soundbanks/pc/<stem>.<sha16>.bnk`,
+`<sha16>` the first 16 hex characters of the bank file's SHA-256, with its
+BKHD bank id rewritten to that stem's FNV-1, and rewrites every quoted
+`"<stem>"`, `"<stem>.bnk"` or `".../<stem>.bnk"` in the bundle's served decl
+texts to match; the rewritten bytes are written once under `mods\.served\`
+(a dot folder the scanners skip), keyed by their own hash
+(`banks\<stem>.<sha16>.bnk`, `files\<sha16>.<extension>`; no folder is named
+by a build), and served from there, with their own size and hash. A changed
+bank is therefore a new bank to Wwise, two builds that carry one bank's bytes
+(the root and a map's place) share it and Wwise loads it once, and the ledger
+and the refresh see a new name. `sh_mods status` lists each bank and whether it was
 submitted. The events file (`soundbanksinfo.events`) is not extended: a mod
 event needs no record to play (it only feeds the by-id lookup; without one
 the event is never distance-virtualized).
@@ -1952,35 +1972,31 @@ the count of mod skeletons held at level 4.
 Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
 in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
-rows and the placed closure (hashes resolve through aliases; a key alone
-declares nothing), with whether a map is open, and a mode,
+rows (the builds `sh_modserve_row_build` answers for them) and the placed
+closure (a salt alone declares nothing), with whether a map is open, the map's
+context (`sh_modserve_scope_set_place`: a hash held in several areas names the
+open map's place's folder, else the root's), and a mode,
 `sh_modserve_scope_mode`: `SH_MODSERVE_MODE_PLAY` from the Play entry
 (`sh_modserve_scope_source` with `SH_MODSERVE_AT_PLAY`) until the editor's
 tick sets `SH_MODSERVE_MODE_EDITOR` again (`modui.c`), and EDITOR with no map.
-The first hash of a key in row order declares that key; every other build of
+The first hash of a salt in row order declares that salt; every other build of
 it is inert for the map. Each admitted bundle gets serve flags computed from
-the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
+the listing and read lock-free (`sv`: names under its salt, shadows, surfaces):
 
 - declared: everything it carries;
-- another build of a declared key: nothing;
+- another build of a declared salt: nothing;
 - an editor-time bundle (its shadows include a `generated/decls/snapeditor*`,
   `snappropertyinspector*` or `snappalette*` decl, or the editor's own movies
   under `generated/swf/snapmaps/`): its editor tweaks, in every map this
-  editor opens; the rest of it follows the other rules. That is
-  `my-overrides`' editor tweaks and the Toybox rows of converted
-  first-generation packages (hell guard, spider mastermind, rocks, Olivia):
-  their other files serve only where a map's row declares them, as every
-  mod's do (owner 2026-11-09: the grandfathered serving rule is gone, and
-  nothing a player reads says legacy; a package converts at install through
-  `modlegacy.c` and `modmigrate.c`, a folder built under earlier builder
-  rules rebuilds at boot, and a map in an earlier shape is refused at load);
-- otherwise, in the editor and with no map open: the names under its key, for
-  the one build of the key that serves with no map (the player's own folder,
-  else the newest; the Toybox offers its rows; placing one
-  declares it at the next save), and its surfaces; never its shadows. In Play:
-  nothing.
+  editor opens; the rest of it follows the other rules (that is
+  `my-overrides`' editor tweaks);
+- otherwise, in the editor and with no map open: for the root folder's build
+  of the salt, the names under its salt (the Toybox offers its rows; placing
+  one declares it at the next save) and its surfaces, never its shadows; a
+  build in a map's place, nothing (it serves only for a map that declares
+  it). In Play: nothing.
 
-Requirements: a declared bundle's apply; an undeclared newest build that adds
+Requirements: a declared bundle's apply; an undeclared root build that adds
 Toybox rows keeps them outside Play, because the palette registers its rows
 in every editor map and with none open; in Play (the editor's, or a hub
 launch) no undeclared bundle's are accepted, so their cvars are the game's
@@ -1988,13 +2004,13 @@ from the Play entry and applied again when the editor shows a map; any other
 undeclared bundle's are not accepted (`req_off`). A registration step is
 gated by the requirements of the build that serves its path for the listing
 (`sh_modserve_plan_block_unmet` through `ms_scoped`), not by the path's static
-winner's: with two builds of one key installed the winner of a path both carry
-can be the build the open map, or the Toybox, does not use, whose requirements
-are off, and gating on it blocked every row of the key.
-A `mod.json` `"scope"` key no longer chooses (logged once). Per path,
+winner's: with two builds of one salt installed (the root and a place) the
+winner of a path both carry can be the build the open map, or the Toybox, does
+not use, whose requirements are off, and gating on it blocked every row of the
+salt. A `mod.json` `"scope"` key is a retired key: the folder is refused. Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the
-player's own build, then the newest, first for one key, index order for
+root folder's build first for one salt, index order for
 identical bytes), and
 `ms_scope_compute` chooses the file that serves it for the listing
 (`scope_alt`, read by `ms_scoped` on every lookup): among the declared (and
@@ -2235,15 +2251,13 @@ map's choices).
   (`sh_editor_mark_modified`, one undo step, as a placed entity does), so
   leaving the editor asks to save; the wording stays "applies now; saved with
   the map's next save".
-- **Rescans, gates and old builds.** A rescan that changes a generated text
+- **Rescans and gates.** A rescan that changes a generated text
   for the listing (a mod rebuilt with other edits) marks the path that serves
   it for refresh, as a changed decl is marked. A generated text is gated by the
   requirement gates of the first source with requirements whose edits changed
   it (bare-hands' cvar gates its player entity text), as a bundle's own file
-  is. A bundle built before derived edits keeps serving until it is rebuilt:
-  its partials (the product block's `registries.extends` values and
-  `player.bodyEvents`) are never registered, planned, refreshed, probed or
-  served to the engine, and its retired intent is not read.
+  is. A folder built before derived edits is in an earlier shape and serves
+  nothing; the serving index reads no partials.
 
 ### Migration of the retired overrides folder
 

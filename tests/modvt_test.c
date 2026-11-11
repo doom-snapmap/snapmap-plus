@@ -123,7 +123,7 @@ static int build_folder(const char *folder, char *hash_out)
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
     char cause[SH_MB_CAUSE_MAX];
-    int ok = sh_mb_build(folder, &r, &b) == 1 && b.errors == 0 && sh_mb_write(&b, folder, cause, sizeof cause) == 1;
+    int ok = sh_mb_build(folder, NULL, &r, &b) == 1 && b.errors == 0 && sh_mb_write(&b, folder, cause, sizeof cause) == 1;
     if (!ok) printf("    build %s: %u error(s): %s\n", folder, b.errors, b.errors ? b.first_cause : "");
     if (hash_out) strcpy_s(hash_out, 65, b.hash);
     sh_mb_free(&b);
@@ -134,7 +134,7 @@ static const char *build_cause(const char *folder, char *cause, size_t cap)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
-    sh_mb_build(folder, &r, &b);
+    sh_mb_build(folder, NULL, &r, &b);
     strcpy_s(cause, cap, b.errors ? b.first_cause : "");
     sh_mb_free(&b);
     return cause;
@@ -143,7 +143,9 @@ static const char *build_cause(const char *folder, char *cause, size_t cap)
 static void put_mod(const char *folder, const char *id)
 {
     char json[256];
-    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"t\"}", id, id);
+    /* The block the store's scan writes for a fresh folder: the salt alone. */
+    _snprintf_s(json, sizeof json, _TRUNCATE,
+                "{\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"t\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", id, id);
     mt_write(folder, "mod.json", json);
 }
 
@@ -157,25 +159,25 @@ static void member_rule(void)
     char fam[SH_MODVT_NAME_MAX];
     int m = 0;
     printf("-- the member path rule\n");
-    CHECK(sh_mb_vt_member("virtualtextures/mods/rctest/fam_sq1.mega2", fam, sizeof fam, &m) == 1 &&
-          !strcmp(fam, "mods/rctest/fam") && m == 1);
-    CHECK(sh_mb_vt_member("virtualtextures/mods/alex.pink-imp/skin/body_sq16.mega2", fam, sizeof fam, &m) == 1 &&
-          !strcmp(fam, "mods/alex.pink-imp/skin/body") && m == 16);
-    CHECK(sh_mb_vt_member("VirtualTextures/Mods/rctest/Fam_SQ3.MEGA2", NULL, 0, &m) == 1 && m == 3);
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam_sq17.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam_sq0.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam_sq01.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam_q1.mega2", NULL, 0, NULL));
+    CHECK(sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.mega2", fam, sizeof fam, &m) == 1 &&
+          !strcmp(fam, "mods/rctest00/fam") && m == 1);
+    CHECK(sh_mb_vt_member("virtualtextures/mods/alexpink/skin/body_sq16.mega2", fam, sizeof fam, &m) == 1 &&
+          !strcmp(fam, "mods/alexpink/skin/body") && m == 16);
+    CHECK(sh_mb_vt_member("VirtualTextures/Mods/rctest00/Fam_SQ3.MEGA2", NULL, 0, &m) == 1 && m == 3);
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq17.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq0.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq01.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/_sq1.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_q1.mega2", NULL, 0, NULL));
     CHECK(!sh_mb_vt_member("virtualtextures/mods/fam_sq1.mega2", NULL, 0, NULL));
     CHECK(!sh_mb_vt_member("virtualtextures/_vmtr_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/my_vmtr_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest/fam_sq1.pages", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("models/mods/rctest/fam_sq1.mega2", NULL, 0, NULL));
-    CHECK(sh_mb_extension_allowed("virtualtextures/mods/rctest/fam_sq2.mega2"));
-    CHECK(!sh_mb_extension_allowed("models/mods/rctest/fam_sq2.mega2"));
-    CHECK(!sh_mb_extension_allowed("virtualtextures/mods/rctest/fam.pages"));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/my_vmtr_sq1.mega2", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.pages", NULL, 0, NULL));
+    CHECK(!sh_mb_vt_member("models/mods/rctest00/fam_sq1.mega2", NULL, 0, NULL));
+    CHECK(sh_mb_extension_allowed("virtualtextures/mods/rctest00/fam_sq2.mega2"));
+    CHECK(!sh_mb_extension_allowed("models/mods/rctest00/fam_sq2.mega2"));
+    CHECK(!sh_mb_extension_allowed("virtualtextures/mods/rctest00/fam.pages"));
 }
 
 static void decode_helpers(void)
@@ -212,30 +214,30 @@ static void families(void)
     printf("-- families from the serving index, registration and release with a fake engine\n");
     CHECK(mt_temp_dir("modvt", root, sizeof root));
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\vtmod", mods);
-    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\plain", mods);
-    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\badvt", root);
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\vtmod000", mods);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\plain000", mods);
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\badvt000", root);
     CreateDirectoryA(mods, NULL);
 
     /* Builder refusals: a misplaced or misnamed member. */
-    put_mod(c, "badvt");
-    mt_write(c, "assets\\virtualtextures\\mods\\badvt\\fam.mega2", "MEGA");
+    put_mod(c, "badvt000");
+    mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\fam.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "file type not allowed") != NULL);
-    mt_delete(c, "assets\\virtualtextures\\mods\\badvt\\fam.mega2");
+    mt_delete(c, "assets\\virtualtextures\\mods\\badvt000\\fam.mega2");
     mt_write(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");
-    CHECK(strstr(build_cause(c, cause, sizeof cause), "/mods/badvt/") != NULL);
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "under mods/other/ but it is badvt000") != NULL || (printf("  cause: %s\n", cause), 0));
     mt_delete(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2");
-    mt_write(c, "assets\\virtualtextures\\mods\\badvt\\mods\\badvt\\fam_sq1.mega2", "MEGA");
+    mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested family name */
     mt_remove_tree(c);
 
-    /* vtmod: two families (fam: members 1 and 3; other: member 2). plain: none. */
-    put_mod(a, "vtmod");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq1.mega2", "member one");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq3.mega2", "member three");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\other_sq2.mega2", "other two");
-    put_mod(b, "plain");
-    mt_write(b, "assets\\maps\\mods\\plain\\x.bin", "plain");
+    /* vtmod000: two families (fam: members 1 and 3; other: member 2). plain000: none. */
+    put_mod(a, "vtmod000");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq3.mega2", "member three");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\other_sq2.mega2", "other two");
+    put_mod(b, "plain000");
+    mt_write(b, "assets\\maps\\mods\\plain000\\x.bin", "plain000");
     CHECK(build_folder(a, hash_a));
     CHECK(build_folder(b, NULL));
 
@@ -244,10 +246,10 @@ static void families(void)
     CHECK(g_listener_calls == 1);
     n = sh_modvt_collect(fams, SH_MODVT_MAX);
     CHECK(n == 2);
-    CHECK(n == 2 && !strcmp(fams[0].name, "mods/vtmod/fam") && fams[0].members == 0x5u && fams[0].bytes == 22 &&
-          !strcmp(fams[0].path, "virtualtextures/mods/vtmod/fam.pages") && !strcmp(fams[0].bundle, "vtmod@1.0.0") &&
+    CHECK(n == 2 && !strcmp(fams[0].name, "mods/vtmod000/fam") && fams[0].members == 0x5u && fams[0].bytes == 22 &&
+          !strcmp(fams[0].path, "virtualtextures/mods/vtmod000/fam.pages") && !strcmp(fams[0].bundle, "vtmod000@1.0.0") &&
           !strcmp(fams[0].bundle_hash, hash_a));
-    CHECK(n == 2 && !strcmp(fams[1].name, "mods/vtmod/other") && fams[1].members == 0x2u);
+    CHECK(n == 2 && !strcmp(fams[1].name, "mods/vtmod000/other") && fams[1].members == 0x2u);
     CHECK(sh_modvt_collect(NULL, 0) == 2);
 
     /* Not up yet: nothing is called. */
@@ -260,13 +262,13 @@ static void families(void)
     f.ready = 1;
     g_nlog = 0;
     CHECK(sync_index(&f, "index", &res) == 2 && res.registered == 2 && f.sets == 2);
-    rec_fam = f_find(&f, "mods/vtmod/fam");
-    rec_other = f_find(&f, "mods/vtmod/other");
+    rec_fam = f_find(&f, "mods/vtmod000/fam");
+    rec_other = f_find(&f, "mods/vtmod000/other");
     CHECK(rec_fam == 4 && rec_other == 5);
-    CHECK(!strcmp(f.path[4], "virtualtextures/mods/vtmod/fam.pages") && f.fl[4] == 2);
-    CHECK(sh_modvt_record_owner(4) && !strcmp(sh_modvt_record_owner(4), "mods/vtmod/fam"));
+    CHECK(!strcmp(f.path[4], "virtualtextures/mods/vtmod000/fam.pages") && f.fl[4] == 2);
+    CHECK(sh_modvt_record_owner(4) && !strcmp(sh_modvt_record_owner(4), "mods/vtmod000/fam"));
     CHECK(sh_modvt_record_owner(3) == NULL && sh_modvt_owned_count() == 2);
-    CHECK(log_count("registered family 'mods/vtmod/fam' (vtmod@1.0.0, 2 members, 22 bytes) as record 4") == 1);
+    CHECK(log_count("registered family 'mods/vtmod000/fam' (vtmod000@1.0.0, 2 members, 22 bytes) as record 4") == 1);
 
     /* Rescan: idempotent. */
     CHECK(sh_modserve_index_build(mods) == 2 && g_listener_calls == 2);
@@ -274,11 +276,11 @@ static void families(void)
     CHECK(sync_index(&f, "editor", &res) == 2 && f.sets == 2);
 
     /* A changed build of the same mod, no pass yet: released and registered again. */
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq1.mega2", "member one, rebaked");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one, rebaked");
     CHECK(build_folder(a, hash_a2) && strcmp(hash_a, hash_a2) != 0);
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(sync_index(&f, "index", &res) == 2 && res.released == 2 && res.registered == 2 && f.releases == 2 && f.sets == 4);
-    CHECK(f_find(&f, "mods/vtmod/fam") == 4);
+    CHECK(f_find(&f, "mods/vtmod000/fam") == 4);
 
     /* Removal with no pass since registration: released. */
     mt_remove_tree(a);
@@ -286,12 +288,12 @@ static void families(void)
     CHECK(sh_modvt_collect(NULL, 0) == 0);
     g_nlog = 0;
     CHECK(sync_index(&f, "index", &res) == 0 && res.released == 2 && f.releases == 4);
-    CHECK(f_find(&f, "mods/vtmod/fam") < 0 && f_is_free(&f, 4) && f_is_free(&f, 5));
-    CHECK(log_count("released record 4, family 'mods/vtmod/fam'") == 1);
+    CHECK(f_find(&f, "mods/vtmod000/fam") < 0 && f_is_free(&f, 4) && f_is_free(&f, 5));
+    CHECK(log_count("released record 4, family 'mods/vtmod000/fam'") == 1);
 
     /* Reinstall, a pass runs, then removal: held until exit, logged once. */
-    put_mod(a, "vtmod");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq1.mega2", "member one");
+    put_mod(a, "vtmod000");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(sync_index(&f, "index", &res) == 1 && res.registered == 1);
@@ -305,35 +307,35 @@ static void families(void)
     CHECK(log_count("is kept until DOOM exits") == 1);
 
     /* The engine took the record back: registered again in the same record. */
-    put_mod(a, "vtmod");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq1.mega2", "member one");
+    put_mod(a, "vtmod000");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(sync_index(&f, "index", &res) == 1 && res.kept == 1);
-    k = f_find(&f, "mods/vtmod/fam");
+    k = f_find(&f, "mods/vtmod000/fam");
     CHECK(k == 4);
     f.name[k][0] = 0;
     f.path[k][0] = 0;
     strcpy_s(f.name[6], sizeof f.name[6], "maps/x/y");    /* something else took the next free record */
     strcpy_s(f.path[6], sizeof f.path[6], "virtualtextures/maps/x/y.pages");
-    CHECK(sync_index(&f, "map", &res) == 1 && res.lost == 1 && res.registered == 1 && f_find(&f, "mods/vtmod/fam") == 4);
+    CHECK(sync_index(&f, "map", &res) == 1 && res.lost == 1 && res.registered == 1 && f_find(&f, "mods/vtmod000/fam") == 4);
     f.name[6][0] = f.path[6][0] = 0;
 
     /* A name another record already holds is never taken over or released. */
     sh_modvt_reset();
     fake_init(&f);
-    strcpy_s(f.name[7], sizeof f.name[7], "mods/vtmod/fam");
-    strcpy_s(f.path[7], sizeof f.path[7], "virtualtextures/mods/vtmod/fam.pages");
+    strcpy_s(f.name[7], sizeof f.name[7], "mods/vtmod000/fam");
+    strcpy_s(f.path[7], sizeof f.path[7], "virtualtextures/mods/vtmod000/fam.pages");
     g_nlog = 0;
     CHECK(sync_index(&f, "editor", &res) == 0 && res.refused == 1 && f.sets == 0);
     CHECK(sync_index(&f, "map", &res) == 0 && log_count("already holds that name") == 1);
     mt_remove_tree(a);
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(sync_index(&f, "index", &res) == 0 && f.releases == 0 && f_find(&f, "mods/vtmod/fam") == 7);
+    CHECK(sync_index(&f, "index", &res) == 0 && f.releases == 0 && f_find(&f, "mods/vtmod000/fam") == 7);
 
     /* Records 1..30 full: refused once; no stock record and not record 31 touched. */
-    put_mod(a, "vtmod");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod\\fam_sq1.mega2", "member one");
+    put_mod(a, "vtmod000");
+    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     fake_init(&f);
@@ -347,7 +349,7 @@ static void families(void)
     CHECK(f_is_free(&f, 31));
     /* A slot frees up: the family registers in it. */
     f.name[17][0] = f.path[17][0] = 0;
-    CHECK(sync_index(&f, "map", &res) == 1 && f_find(&f, "mods/vtmod/fam") == 17);
+    CHECK(sync_index(&f, "map", &res) == 1 && f_find(&f, "mods/vtmod000/fam") == 17);
 
     /* OpenGL without sparse page tables: never registered, said once. */
     sh_modvt_reset();
@@ -358,7 +360,7 @@ static void families(void)
     CHECK(sync_index(&f, "map", &res) == 0 && log_count("cannot be served on this renderer") == 1);
     /* OpenGL with them: flavor 4. */
     f.flavor = 4;
-    CHECK(sync_index(&f, "map", &res) == 1 && f.fl[f_find(&f, "mods/vtmod/fam")] == 4);
+    CHECK(sync_index(&f, "map", &res) == 1 && f.fl[f_find(&f, "mods/vtmod000/fam")] == 4);
 
     /* SetSource refused (no member opened): logged once, retried at later syncs. */
     sh_modvt_reset();

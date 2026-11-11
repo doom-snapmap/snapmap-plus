@@ -11,7 +11,7 @@
 int sh_modregistry_choices_set(const char *slot, const char *key)
 {
     if (!sh_modregistry_slot_valid(slot)) return -1;
-    if (key && key[0] && !sh_modmanifest_valid_id(key)) return -1;
+    if (key && key[0] && !sh_modmanifest_valid_salt(key)) return -1;
     return sh_modmanifest_current_choose(slot, key && key[0] ? key : NULL);
 }
 
@@ -31,8 +31,8 @@ int sh_modregistry_choose_command(const char *slot, const char *key, char *out, 
                     "tab name a clash (entitydef/player/coop/edit/handsModelMPUseDoomHands)", slot ? slot : "");
         return -1;
     }
-    if (key && key[0] && !sh_modmanifest_valid_id(key)) {
-        _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: '%s' is not a mod key", key);
+    if (key && key[0] && !sh_modmanifest_valid_salt(key)) {
+        _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: '%s' is not a mod's salt", key);
         return -1;
     }
     r = sh_modregistry_choices_set(slot, key);

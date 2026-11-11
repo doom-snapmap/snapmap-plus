@@ -1,6 +1,6 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
- * extra.strings.en object of every admitted mod bundle (sh_modserve_each_bundle_extra: installed before
- * map-delivered, then id, then version), then baked defaults. Keys are
+ * extra.strings.en object of every admitted mod bundle (sh_modserve_each_bundle_extra: root folders
+ * before maps' places, then salt, then folder), then baked defaults. Keys are
  * case-insensitive and first-writer-wins; two bundles giving one key
  * different text log one REFUSED line naming both. Use the native
  * hash, string pool and list append functions, then re-sort the table.

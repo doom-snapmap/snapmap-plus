@@ -118,7 +118,7 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
     sh_mb_bundle b;
     char cause[SH_MB_CAUSE_MAX];
     int ok = 0;
-    if (!sh_mb_build(folder, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
+    if (!sh_mb_build(folder, NULL, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
     else if (!sh_mb_write(&b, folder, cause, sizeof cause)) strncpy_s(first_cause, n, cause, _TRUNCATE);
     else ok = 1;
     sh_mb_free(&b);
@@ -165,11 +165,11 @@ static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_loa
 
 /* ---- the report ---------------------------------------------------------------------------- */
 
-typedef struct mb_row { char id[80], version[48], hash[65]; int admitted, files, legacy; } mb_row;
+typedef struct mb_row { char id[80], version[48], hash[65]; int admitted, files, place; } mb_row;
 static mb_row g_rows[512];
 static int g_nrows;
 static void each_bundle(void *context, const char *id, const char *version, const char *hash, int admitted,
-                        const char *cause, int files, int legacy)
+                        const char *cause, int files, int place)
 {
     mb_row *r;
     (void)context; (void)cause;
@@ -180,7 +180,7 @@ static void each_bundle(void *context, const char *id, const char *version, cons
     strncpy_s(r->hash, sizeof r->hash, hash ? hash : "", _TRUNCATE);
     r->admitted = admitted;
     r->files = files;
-    r->legacy = legacy;
+    r->place = place;
 }
 
 /* Print every line from `from` that contains all of the needles. */
@@ -326,7 +326,7 @@ int main(void)
         total_withdrawn += withdrawn;
         total_refused += refused;
         printf("    %s%s@%s: %d steps, %d ready, %d blocked; %d stock animWeb shadow(s) withdrawn, %d new animWeb(s) refused\n",
-               g_rows[i].legacy ? "legacy " : "", g_rows[i].id, g_rows[i].version, plan.count, ready, plan.blocked,
+               g_rows[i].place ? "in a place: " : "", g_rows[i].id, g_rows[i].version, plan.count, ready, plan.blocked,
                withdrawn, refused);
         print_lines(at, "shadow WITHDRAWN", NULL, "        ");
         print_lines(at, "NOT READY: it names model", NULL, "        ");

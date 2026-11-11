@@ -583,8 +583,10 @@ static int ms_stock_load(const char *leaf, const char *key, const char *phase)
     return 1;
 }
 
-/* The map pass: every bank the declared bundles need, once per process. */
-static int ms_stock_pass(const char *const *hashes, int n, int resolve)
+/* The map pass: every bank the declared bundles need, once per process. The
+ * hashes are the builds that serve the map's rows (sh_modserve_row_build), so
+ * each names its build as it is. */
+static int ms_stock_pass(const char *const *hashes, int n)
 {
     const sh_modsound_needs *t = g_needs;
     int i, k, loaded = 0;
@@ -594,12 +596,6 @@ static int ms_stock_pass(const char *const *hashes, int n, int resolve)
     for (i = 0; i < n; i++) {
         const sh_modsound_need *need;
         const char *h = hashes[i];
-#ifndef SH_MODSOUND_PURE
-        sh_modserve_bundle_ref ref;
-        if (resolve && h && sh_modserve_bundle_serving(h, NULL, &ref)) h = ref.hash;
-#else
-        (void)resolve;
-#endif
         need = sh_modsound_needs_find(t, h);
         for (k = 0; need && k < need->count; k++) {
             if (sh_mbi_state_get(need->banks[k], NULL, NULL, NULL, 0) != SH_MBI_ST_NONE) continue;
@@ -734,7 +730,7 @@ void sh_modsound_test_bind_stock(sh_modsound_opnew_fn op_new, sh_modsound_cookie
 void sh_modsound_test_log(void (*sink)(const char *line)) { g_test_sink = sink; }
 void sh_modsound_test_bank_callback(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie)
 { ms_bank_cb(bank_id, in_memory, result, pool, cookie); }
-int sh_modsound_test_stock(const char *const *bundle_hashes, int n) { return ms_stock_pass(bundle_hashes, n, 0); }
+int sh_modsound_test_stock(const char *const *bundle_hashes, int n) { return ms_stock_pass(bundle_hashes, n); }
 void sh_modsound_test_stock_reset(void)
 {
     LONG i;
@@ -842,7 +838,7 @@ static void ms_rebuild(void)
 int sh_modsound_stock_before_map(const char *const *bundle_hashes, int n)
 {
     if (!g_live || ms_on_main() != 1) return 0;
-    return ms_stock_pass(bundle_hashes, n, 1);
+    return ms_stock_pass(bundle_hashes, n);
 }
 
 /* The serving index listener: any thread. */
