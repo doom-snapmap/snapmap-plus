@@ -1018,6 +1018,11 @@ static void test_interrupted(const char *fixture, const char *tmp)
     mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.zed\\z.decl", "{\n\tsize = \"4\";\n}\n");
     _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\a copy of zed", mods);
     CHECK(copy_all(path, p2));
+    /* 4b. A "scenes" block the game's builder refuses: converted, its build failed with the same cause. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.scenes", mods);
+    mt_write(path, "mod.json", "{\n  \"id\": \"alex.scenes\",\n  \"name\": \"Scenes\",\n"
+                               "  \"scenes\": {\"mods/alex.scenes/node\": {\"plays\": \"sideways\"}}\n}\n");
+    mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.scenes\\node.decl", "{\n\tsize = \"4\";\n}\n");
     /* 5. A sound bank named for the old key. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bank", mods);
     mt_write(path, "mod.json", "{\n  \"id\": \"alex.bank\",\n  \"name\": \"Bank\",\n  \"soundbank\": \"alex_bank_music\"\n}\n");
@@ -1038,6 +1043,8 @@ static void test_interrupted(const char *fixture, const char *tmp)
         if (fopen_s(&f, bp, "wb") == 0 && f) { fwrite(bnk, 1, sizeof bnk, f); fclose(f); }
     }
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("  mods\\alex.scenes: converted (it was alex.scenes; its salt is now ") &&
+          said("mod.json \"scenes\" is refused: "));
     rec = record_section(mods);
     {
         sh_mb_bundle z;
