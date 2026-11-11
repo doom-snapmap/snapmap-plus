@@ -478,7 +478,7 @@ static void test_generation(void)
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
     CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00, "
                   "krival00; serving khands00 (row order; choose with "
-                  "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<key>\")"));
+                  "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<mod name>\")"));
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "nobody", line, sizeof line) == -1 &&
           !strcmp(line, "MODS: choose: no mod named 'nobody' is used by this map."));
     /* The mod is named as the player names it: here by its folder. */
