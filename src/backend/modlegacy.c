@@ -526,8 +526,19 @@ int sh_modlegacy_normalize_id(const char *text, char *out, size_t cap)
         out[i] = c;
     }
     out[n] = 0;
-    if (!sh_modmanifest_valid_id(out)) { out[0] = 0; return 0; }
+    {
+        char norm[SH_MB_ID_MAX + 1];
+        if (!sh_mb_id_normalize(out, n, norm) || strcmp(norm, out)) { out[0] = 0; return 0; }
+    }
     return 1;
+}
+
+static int lg_is_hex64(const char *s)
+{
+    size_t i;
+    for (i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return s[64] == 0;
 }
 
 /* ==================================================================== */
@@ -1381,9 +1392,13 @@ typedef struct lg_origin {
  * authored descriptor is kept for the builder to preserve under "extra". */
 static int lg_handled_key(const char *key)
 {
-    static const char *const keys[] = { "id", "name", "version", "description", "author", "homepage",
-                                        "requirements", "strings", "hud", "shadows", "legacy", "files",
-                                        "bundle", "format", NULL };
+    /* The converter's own keys, and the keys this version retired (an id, a
+     * key, shadows, stock, scope, player, extends, replaces, legacy,
+     * composes, schema), which the one shape never carries. */
+    static const char *const keys[] = { "id", "key", "name", "version", "description", "author", "homepage",
+                                        "requirements", "strings", "hud", "shadows", "stock", "scope", "player",
+                                        "extends", "replaces", "legacy", "composes", "schema", "files",
+                                        "bundle", "format", SH_MB_BLOCK_KEY, NULL };
     size_t i;
     for (i = 0; keys[i]; i++) if (!strcmp(keys[i], key)) return 1;
     return 0;
@@ -1394,16 +1409,21 @@ static char *lg_descriptor(lg_plan *p, const char *id, const sh_legacy_header *h
                            unsigned *shadows, size_t *out_len)
 {
     sh_json_object d = {0};
-    lg_text list = {0};
     char version[SH_MODMANIFEST_VERSION_CAP], ns[96];
     char *name = lg_text_of(sh_json_object_get(&p->root, "name")), *out = NULL, *text;
     const char *raw;
     size_t i;
+    (void)h;
     *shadows = 0;
+    /* The package's own version, else 1.0.0 (no generated version label). */
+    text = lg_text_of(sh_json_object_get(&p->root, "version"));
     if (origin && origin->version) strncpy_s(version, sizeof version, origin->version, _TRUNCATE);
-    else _snprintf_s(version, sizeof version, _TRUNCATE, "legacy-%s", h->digest);
+    else if (text && text[0] && strlen(text) < sizeof version && !strpbrk(text, " \t\r\n\"\\"))
+        strcpy_s(version, sizeof version, text);
+    else strcpy_s(version, sizeof version, "1.0.0");
+    free(text);
     _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", id);
-    if (!lg_set_text(&d, "id", id) || !lg_set_text(&d, "version", version)) goto done;
+    if (!lg_set_text(&d, "version", version)) goto done;
     if (name) lg_clip_codepoints(name, SH_MB_NAME_MAX);
     {
         char *trimmed = name;
@@ -1460,54 +1480,25 @@ static char *lg_descriptor(lg_plan *p, const char *id, const sh_legacy_header *h
         }
         sh_json_object_free(&hud);
     }
-    /* First-generation packages never used a mods/<id>/ namespace, so every
-     * name they carry is admitted as a shadow (section 11) and reported. */
-    lg_put(&list, "[", 1);
+    /* First-generation packages never used a mods/<id>/ namespace: the names
+     * they carry outside it are game names (counted; the builder classifies
+     * each under the current rules) or new names it refuses. The author
+     * part is all the converter writes: the salt and the build are the
+     * product's (sh_ms_assign_salt, the builder). */
     for (i = 0; i < p->count; i++) {
         char request[LG_PATH_MAX + 32];
-        char *q;
         lg_request(p->files[i].target, request, sizeof request);
-        if (strstr(request, ns)) continue;
-        q = lg_quote(request);
-        if (!q) { list.failed = 1; break; }
-        if (*shadows) lg_put(&list, ",", 1);
-        lg_puts(&list, q);
-        free(q);
-        (*shadows)++;
-    }
-    lg_put(&list, "]", 1);
-    if (list.failed) goto done;
-    {
-        /* The package's own keys are the author block; what the converter
-         * adds (the legacy record and the grandfathered shadows) is the
-         * product's, so it seeds mod.json's product block, which the builder
-         * reads as input and completes. */
-        sh_json_object legacy = {0}, block = {0};
-        int ok = lg_set_text(&legacy, "key", h->key) && lg_set_text(&legacy, "digest16", h->digest) &&
-                 lg_set_text(&legacy, "keyForm", h->key_form == SH_LEGACY_KEY_DELIVERY ? "delivery"
-                                               : h->key_form == SH_LEGACY_KEY_DESCRIPTOR ? "descriptor"
-                                               : h->key_form == SH_LEGACY_KEY_OVERRIDES ? "overrides" /* retired package folder */ : "folder") &&
-                 lg_set_text(&legacy, "layout", p->legacy_descriptor ? "B" : "C");
-        if (ok && origin) {
-            if (origin->source) ok = lg_set_text(&legacy, "source", origin->source);
-            if (ok && origin->folder) ok = lg_set_text(&legacy, "folder", origin->folder);
-            if (ok && origin->tree) ok = lg_set_text(&legacy, "tree", origin->tree);
-        }
-        ok = ok && lg_set_text(&block, "origin", origin && origin->source && !strcmp(origin->source, "overrides") /* the retired package folder */
-                                                ? SH_MB_ORIGIN_MIGRATION : SH_MB_ORIGIN_DELIVERY) &&
-             lg_set_object(&block, "legacy", &legacy) && sh_json_object_set(&block, "shadows", list.p, 4) &&
-             lg_set_object(&d, SH_MB_BLOCK_KEY, &block);
-        sh_json_object_free(&legacy);
-        sh_json_object_free(&block);
-        if (!ok) goto done;
+        if (!strstr(request, ns)) (*shadows)++;
     }
     out = sh_json_serialize_object(&d, 0, out_len);
 done:
     free(name);
-    free(list.p);
     sh_json_object_free(&d);
     return out;
 }
+
+static sh_modlegacy_salt_fn g_lg_salter;
+void sh_modlegacy_set_salter(sh_modlegacy_salt_fn fn) { g_lg_salter = fn; }
 
 /* ==================================================================== */
 /* conversion                                                            */
@@ -1524,104 +1515,12 @@ static int lg_take_bundle(const char *folder, sh_modlegacy_verdict *v, sh_modman
     ok = sh_modmanifest_read_mod_json(text, length, info, err, sizeof err);
     free(text);
     if (!ok) { LG_ERR(v->reason, sizeof v->reason, "mod.json does not read: %s", err); return 0; }
-    strcpy_s(v->id, sizeof v->id, info->id);
+    strcpy_s(v->salt, sizeof v->salt, info->salt);
     strcpy_s(v->version, sizeof v->version, info->version);
-    strcpy_s(v->bundle, sizeof v->bundle, info->bundle);
+    strcpy_s(v->build, sizeof v->build, info->build);
     v->size = info->size;
     strncpy_s(v->folder, sizeof v->folder, folder, _TRUNCATE);
     return 1;
-}
-
-/* The legacy record of a mod folder's mod.json (the product block's, else
- * the author block's): its key and digest16, and whether it is built. */
-static int lg_folder_record(const char *folder, char *key, size_t kcap, char *digest, size_t dcap)
-{
-    size_t length = 0;
-    char *text = lg_read_small_file(folder, "mod.json", &length), *value;
-    sh_json_object root = {0}, block = {0}, legacy = {0};
-    int built = 0;
-    key[0] = digest[0] = 0;
-    if (!text) return 0;
-    if (sh_json_parse_object(text, length, 24, &root)) {
-        if (lg_section(&root, SH_MB_BLOCK_KEY, &block)) built = sh_json_object_get(&block, "bundle") != NULL;
-        if (lg_section(&block, "legacy", &legacy) || lg_section(&root, "legacy", &legacy)) {
-            if ((value = lg_text_of(sh_json_object_get(&legacy, "key"))) != NULL) { strncpy_s(key, kcap, value, _TRUNCATE); free(value); }
-            if ((value = lg_text_of(sh_json_object_get(&legacy, "digest16"))) != NULL) { strncpy_s(digest, dcap, value, _TRUNCATE); free(value); }
-        }
-    }
-    sh_json_object_free(&legacy);
-    sh_json_object_free(&block);
-    sh_json_object_free(&root);
-    free(text);
-    return built;
-}
-
-/* A built mod folder whose legacy record names this carrier: the ZIP digest
- * (a carrier converted before), or the key (a delivery converted from a map
- * under its ZIP digest, or migrated from overrides\ under its tree). */
-static int lg_find_keyed(const char *mods, const char *key, const char *digest, char *folder, size_t cap)
-{
-    char name[LG_PATH], found_key[SH_LEGACY_KEY_CAP], found_digest[32];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    int hit = 0;
-    h = lg_find_first(mods, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.' ||
-            !_stricmp(name, "blobs") || !_stricmp(name, "legacy")) continue;
-        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, name);
-        if (!lg_folder_record(folder, found_key, sizeof found_key, found_digest, sizeof found_digest)) continue;
-        if ((digest && digest[0] && !strcmp(found_digest, digest)) || (key && key[0] && !strcmp(found_key, key))) {
-            hit = 1;
-            break;
-        }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return hit;
-}
-
-/* The bundle the overrides\ migration built from the same tree, as its
- * record (mods\snapmap-plus.json "migration", "trees": {"<64 hex>": "<folder
- * under mods\>"}) lists it. */
-static int lg_find_migrated(const char *root, const char *tree, char *folder, size_t cap)
-{
-    char mods[LG_PATH];
-    char *text = NULL, *relative = NULL;
-    sh_json_object record = {0}, trees = {0};
-    int hit = 0;
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    if (sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
-    if (sh_json_parse_object(text, strlen(text), 24, &record) && lg_section(&record, "trees", &trees) &&
-        (relative = lg_text_of(sh_json_object_get(&trees, tree))) != NULL &&
-        sh_modlegacy_safe_path(relative)) {
-        size_t i;
-        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, relative);
-        for (i = strlen(mods); folder[i]; i++) if (folder[i] == '/') folder[i] = '\\';
-        hit = lg_file_exists(folder, "mod.json");
-    }
-    free(relative);
-    sh_json_object_free(&trees);
-    sh_json_object_free(&record);
-    free(text);
-    return hit;
-}
-
-static int lg_is_hex64(const char *s)
-{
-    size_t i;
-    for (i = 0; i < 64; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
-    return s[64] == 0;
-}
-
-/* Every place an earlier conversion of this carrier can be on disk. */
-static int lg_find_converted(const char *root, const char *mods, const char *key, const char *digest,
-                             char *folder, size_t cap)
-{
-    int delivery = !strncmp(key, "delivery.", 9) && lg_is_hex64(key + 9);
-    if (lg_find_keyed(mods, delivery ? key : NULL, digest, folder, cap)) return 1;
-    return delivery && lg_find_migrated(root, key + 9, folder, cap);
 }
 
 /* Remove a folder tree this conversion created (a \\?\ path). */
@@ -1660,82 +1559,69 @@ static void lg_rmtree(const char *dir)
     free(w);
 }
 
-/* An installed mod that already serves what the folder just built serves:
- * the same bundle hash, or the same id and content (sh_mb_content_key). For
- * a package a map delivered, also an installed mod that was not itself
- * delivered and has its id (whatever the content), or provides every path it
- * provides under another id (sh_ms_delivered_counterpart's rules). A
- * delivered copy is then not stored twice: the new folder goes and the
- * installed one answers the carrier. Returns 1 with that folder. */
+/* An installed root mod whose carried files are exactly what the folder
+ * just built carries (the same request paths with the same bytes): a package
+ * converted before, or a mod that already serves it. The new folder is then
+ * not kept and that mod answers the carrier. Returns 1 with its folder. */
+static int lg_same_files(const sh_mb_bundle *a, const sh_mb_bundle *b)
+{
+    size_t i, j, na = 0, nb = 0;
+    for (i = 0; i < a->file_count; i++) if (!a->files[i].stock) na++;
+    for (i = 0; i < b->file_count; i++) if (!b->files[i].stock) nb++;
+    if (!na || na != nb) return 0;
+    for (i = 0; i < a->file_count; i++) {
+        int hit = 0;
+        if (a->files[i].stock) continue;
+        for (j = 0; j < b->file_count && !hit; j++)
+            hit = !b->files[j].stock && !strcmp(a->files[i].request, b->files[j].request) &&
+                  !strcmp(a->files[i].blob, b->files[j].blob);
+        if (!hit) return 0;
+    }
+    return 1;
+}
+
 static int lg_installed_copy(const char *mods, const char *built, char *out, size_t cap)
 {
-    char name[LG_PATH], other[LG_PATH], key[SH_MB_HASH_HEX + 1], okey[SH_MB_HASH_HEX + 1];
+    char name[LG_PATH], other[LG_PATH];
     WIN32_FIND_DATAW fd;
     HANDLE h;
     sh_mb_bundle b;
-    char cover[LG_PATH] = "";
-    size_t cover_files = 0;
-    int hit = 0, delivered;
+    int hit = 0;
     if (!sh_mb_load_folder(built, &b)) { sh_mb_free(&b); return 0; }
-    sh_mb_content_key(&b, key);
-    delivered = sh_mb_is_delivered(&b);
     h = lg_find_first(mods, &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
             sh_mb_bundle o;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.')
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.' ||
+                !_stricmp(name, "maps"))
                 continue;
             _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\%s", mods, name);
             if (!_stricmp(other, built)) continue;
-            if (sh_mb_load_folder(other, &o) && o.validated) {
-                if (!strcmp(o.hash, b.hash) || (!strcmp(o.id, b.id) && (sh_mb_content_key(&o, okey), !strcmp(okey, key)))) {
-                    strncpy_s(out, cap, other, _TRUNCATE);
-                    hit = 1;
-                } else if (delivered && !sh_mb_is_delivered(&o)) {
-                    /* The same id is the installed mod; another id that
-                     * provides every path is a copy of it (fewest files). */
-                    if (!strcmp(o.id, b.id)) {
-                        strncpy_s(out, cap, other, _TRUNCATE);
-                        hit = 1;
-                    } else if (sh_mb_requests_cover(&o, &b) && (!cover_files || o.file_count < cover_files)) {
-                        strncpy_s(cover, sizeof cover, other, _TRUNCATE);
-                        cover_files = o.file_count;
-                    }
-                }
+            if (sh_mb_load_folder(other, &o) && o.validated && (!strcmp(o.hash, b.hash) || lg_same_files(&o, &b))) {
+                strncpy_s(out, cap, other, _TRUNCATE);
+                hit = 1;
             }
             sh_mb_free(&o);
         } while (!hit && FindNextFileW(h, &fd));
         FindClose(h);
     }
-    if (!hit && cover[0]) {
-        strncpy_s(out, cap, cover, _TRUNCATE);
-        hit = 1;
-    }
     sh_mb_free(&b);
     return hit;
 }
 
-/* A free folder for a converted package: <id>, else <id>@<version>, else
- * <id>@<version>-<digest16>. A generated version (sh_mb_version_generated)
- * never names a folder: <id>, else <id>-<digest16>. */
-static int lg_pick_folder(const char *mods, const char *id, const char *version, const char *digest,
-                          char *out, size_t cap)
+/* A free folder for a converted package: <id>, else "<id> (2)" ... "(9)".
+ * The folder name is the author's; identity is the salt. */
+static int lg_pick_folder(const char *mods, const char *id, char *out, size_t cap)
 {
-    int round, generated = sh_mb_version_generated(version);
-    for (round = 0; round < 3; round++) {
-        DWORD a;
-        if (round == 0) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", mods, id);
-        else if (generated) {
-            if (round == 1) continue;
-            _snprintf_s(out, cap, _TRUNCATE, "%s\\%s-%s", mods, id, digest);
-        }
-        else if (round == 1) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s", mods, id, version);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s-%s", mods, id, version, digest);
-        a = lg_attr(out);
-        if (a == INVALID_FILE_ATTRIBUTES) return 1;
+    int round;
+    for (round = 1; round <= 9; round++) {
+        if (round == 1) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", mods, id);
+        else _snprintf_s(out, cap, _TRUNCATE, "%s\\%s (%d)", mods, id, round);
+        if (lg_attr(out) == INVALID_FILE_ATTRIBUTES) return 1;
     }
     return 0;
 }
+
 
 /* Plan a tree, write mod.json and assets\ into a fresh `tmp` folder and move
  * it to `folder`. `written` keeps what was created for the undo. Returns 1. */
@@ -1824,16 +1710,16 @@ static void lg_log_unpacked(const lg_plan *plan, const char *folder, ULONGLONG s
     backend_log(line);
 }
 
-/* Convert an opened tree into <data>\mods\<id> (else <id>@<version>), build
- * it and take its bundle. The caller has already looked for an earlier
- * conversion. A copy whose content an installed mod already serves is not
- * kept: the installed mod answers. */
+/* Convert an opened tree into <data>\mods\<id> (else "<id> (2)", ...), salt
+ * it from the package id, build it and take its bundle. A copy whose files
+ * an installed mod already serves is not kept: the installed mod answers. A
+ * conversion that fails leaves no folder. */
 static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *h, const lg_origin *origin,
                            const char *fallback_id, sh_modlegacy_verdict *v, sh_modmanifest_row *info)
 {
     lg_plan plan;
     char root[LG_PATH], mods[LG_PATH], folder[LG_PATH], tmp[LG_PATH], kept[LG_PATH];
-    char err[200] = "", cause[SH_MB_CAUSE_MAX] = "", id[SH_MODMANIFEST_ID_CAP], version[SH_MODMANIFEST_VERSION_CAP];
+    char err[200] = "", cause[SH_MB_CAUSE_MAX] = "", id[SH_MODLEGACY_ID_CAP], salt[SH_MODMANIFEST_SALT_CAP] = "";
     char *descriptor = NULL;
     size_t descriptor_len = 0;
     unsigned shadows = 0;
@@ -1849,9 +1735,8 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     }
     v->layout = lg_layout(&plan, zip);
     lg_pick_id(&plan, h, fallback_id, id, sizeof id);
-    if (origin && origin->version) strncpy_s(version, sizeof version, origin->version, _TRUNCATE);
-    else _snprintf_s(version, sizeof version, _TRUNCATE, "legacy-%s", h->digest);
-    if (!lg_pick_folder(mods, id, version, h->digest, folder, sizeof folder)) {
+    strcpy_s(v->id, sizeof v->id, id);
+    if (!lg_pick_folder(mods, id, folder, sizeof folder)) {
         LG_ERR(v->reason, sizeof v->reason, "no free folder for %s under %s", id, mods); goto done;
     }
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s\\.tmp-%s-%lu-%llu", mods, h->digest,
@@ -1867,10 +1752,16 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     if (!lg_unpack(zip, &plan, descriptor, descriptor_len, tmp, folder, v)) goto done;
     unpacked = 1;
 
+    if (!g_lg_salter || g_lg_salter(folder, id, salt, cause, sizeof cause) < 0) {
+        LG_ERR(v->reason, sizeof v->reason, "%s could not take a salt: %s", folder,
+               g_lg_salter ? (cause[0] ? cause : "no cause given") : "no salting is set");
+        lg_rmtree(folder);
+        goto done;
+    }
     if (!((origin && origin->build) ? origin->build : modbundle_build_folder)(folder, cause, sizeof cause)) {
-        LG_ERR(v->reason, sizeof v->reason, "the bundle builder refused %s: %s", folder,
+        LG_ERR(v->reason, sizeof v->reason, "the bundle builder refused it under the current rules: %s",
                cause[0] ? cause : "no cause given");
-        strncpy_s(v->folder, sizeof v->folder, folder, _TRUNCATE);
+        lg_rmtree(folder);
         goto done;
     }
     if (lg_installed_copy(mods, folder, kept, sizeof kept)) {
@@ -1882,6 +1773,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
         unpacked = 0;
     }
     ok = lg_take_bundle(folder, v, info);
+    if (!ok && unpacked) lg_rmtree(folder);
     if (ok) {
         v->files = (unsigned)plan.count;
         v->shadows = shadows;
@@ -1896,17 +1788,41 @@ done:
     return ok;
 }
 
+/* The folder the overrides\ migration made from the same tree, as its record
+ * (mods\snapmap-plus.json "migration", "trees": {"<64 hex>": "<folder under
+ * mods\>"}) lists it: a carrier "delivery.<tree>" is answered by it. */
+static int lg_find_migrated(const char *root, const char *tree, char *folder, size_t cap)
+{
+    char mods[LG_PATH];
+    char *text = NULL, *relative = NULL;
+    sh_json_object record = {0}, trees = {0};
+    int hit = 0;
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    if (sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
+    if (sh_json_parse_object(text, strlen(text), 24, &record) && lg_section(&record, "trees", &trees) &&
+        (relative = lg_text_of(sh_json_object_get(&trees, tree))) != NULL && sh_modlegacy_safe_path(relative)) {
+        size_t i;
+        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, relative);
+        for (i = strlen(mods); folder[i]; i++) if (folder[i] == '/') folder[i] = '\\';
+        hit = lg_file_exists(folder, "mod.json");
+    }
+    free(relative);
+    sh_json_object_free(&trees);
+    sh_json_object_free(&record);
+    free(text);
+    return hit;
+}
+
 static int lg_convert(const unsigned char *zipbytes, size_t length, const sh_legacy_header *h,
                       sh_modlegacy_verdict *v, sh_modmanifest_row *info)
 {
     sh_modlegacy_zip zip;
-    char root[LG_PATH], mods[LG_PATH], folder[LG_PATH], err[200] = "";
+    char err[200] = "", root[LG_PATH], folder[LG_PATH];
     int ok;
 
     memset(&zip, 0, sizeof zip);
-    if (!lg_data_root(root, sizeof root)) { LG_ERR(v->reason, sizeof v->reason, "no data folder"); return 0; }
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    if (lg_find_converted(root, mods, h->key, h->digest, folder, sizeof folder)) {
+    if (!strncmp(h->key, "delivery.", 9) && lg_is_hex64(h->key + 9) && lg_data_root(root, sizeof root) &&
+        lg_find_migrated(root, h->key + 9, folder, sizeof folder)) {
         ok = lg_take_bundle(folder, v, info);
         if (ok) LG_ERR(v->reason, sizeof v->reason, "%s", "");
         return ok;
@@ -1937,7 +1853,6 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
     sh_legacy_header h;
     sh_modmanifest_row info;
     lg_origin o;
-    char root[LG_PATH], mods[LG_PATH], folder[LG_PATH];
     int ok;
     if (!v) return 0;
     memset(v, 0, sizeof *v);
@@ -1952,16 +1867,22 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
     strcpy_s(v->digest, sizeof v->digest, h.digest);
     v->key_form = h.key_form;
     memset(&info, 0, sizeof info);
-    if (!lg_data_root(root, sizeof root)) { LG_ERR(v->reason, sizeof v->reason, "no data folder"); return 0; }
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    /* Only the mod folders answer here: the migration record is what this pass writes. */
-    if (lg_find_keyed(mods, h.key, h.digest, folder, sizeof folder)) {
-        ok = lg_take_bundle(folder, v, &info);
-    } else {
-        lg_origin_of(origin, &o);
-        if (!o.tree) o.tree = tree_hex;
-        ok = lg_convert_tree(zip, &h, &o, origin ? origin->fallback_id : NULL, v, &info);
+    /* The folder an earlier pass made of this tree answers (the migration
+     * record's trees), else an installed mod with the same files does
+     * (lg_installed_copy). */
+    {
+        char root[LG_PATH], folder[LG_PATH];
+        if (lg_data_root(root, sizeof root) && lg_find_migrated(root, tree_hex, folder, sizeof folder)) {
+            ok = lg_take_bundle(folder, v, &info);
+            v->verdict = ok ? SH_MODLEGACY_CONVERT : SH_MODLEGACY_CLEAN;
+            sh_modmanifest_row_free(&info);
+            if (ok) return 1;
+            memset(&info, 0, sizeof info);
+        }
     }
+    lg_origin_of(origin, &o);
+    if (!o.tree) o.tree = tree_hex;
+    ok = lg_convert_tree(zip, &h, &o, origin ? origin->fallback_id : NULL, v, &info);
     v->verdict = ok ? SH_MODLEGACY_CONVERT : SH_MODLEGACY_CLEAN;
     sh_modmanifest_row_free(&info);
     return ok;
@@ -1973,7 +1894,7 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     sh_legacy_header h;
     lg_plan plan;
     lg_origin o;
-    char err[200] = "", id[SH_MODMANIFEST_ID_CAP], tmp[LG_PATH];
+    char err[200] = "", id[SH_MODLEGACY_ID_CAP], tmp[LG_PATH];
     char *descriptor = NULL;
     size_t descriptor_len = 0;
     unsigned shadows = 0;
@@ -2122,10 +2043,10 @@ static void lg_log_verdict(const sh_modlegacy_verdict *v, int memo)
     char line[1024];
     if (v->verdict == SH_MODLEGACY_CONVERT)
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CONVERT -> %s as %s@%s, bundle %.16s, "
-            "layout era %c, %u file(s), %u shadow name(s)%s",
+            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CONVERT -> %s, package %s, salt %s, version %s, "
+            "build %.16s, layout era %c, %u file(s), %u name(s) outside mods/<salt>/%s",
             v->key, v->digest, v->present, v->total, sh_map_legacy_key_form_name(v->key_form),
-            v->folder, v->id, v->version, v->bundle, v->layout ? v->layout : '?', v->files, v->shadows,
+            v->folder, v->id, v->salt, v->version, v->build, v->layout ? v->layout : '?', v->files, v->shadows,
             memo ? " [converted earlier this session]" : "");
     else
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -2200,25 +2121,26 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
             /* A bundle converted now (or installed after boot) is not in the
              * serving index yet; the activation that follows in this parse
              * reads the index. */
-            if (sh_modserve_bundle_state(v->bundle, NULL, 0) != 1) unindexed++;
+            if (sh_modserve_bundle_state(v->build, NULL, 0) != 1) unindexed++;
             if (!placed_ready) {
                 nplaced = sh_modmanifest_placed_names(json, length, &placed, &placed_failed);
                 placed_ready = 1;
             }
             memset(&row, 0, sizeof row);
-            strcpy_s(row.id, sizeof row.id, v->id);
+            strcpy_s(row.salt, sizeof row.salt, v->salt);
             strcpy_s(row.version, sizeof row.version, v->version);
-            strcpy_s(row.bundle, sizeof row.bundle, v->bundle);
+            strcpy_s(row.build, sizeof row.build, v->build);
+            strncpy_s(row.name, sizeof row.name, info.name[0] ? info.name : v->id, _TRUNCATE);
             row.size = v->size;
             for (k = 0; k < info.name_count && nplaced; k++) {
                 const char *key = info.names[k];
                 if (bsearch(&key, placed, nplaced, sizeof *placed, lg_stricmp_ptr))
                     sh_modmanifest_row_add_name(&row, key);
             }
-            if (!rows.count || strcmp(rows.rows[rows.count - 1].bundle, row.bundle)) {
+            if (!rows.count || strcmp(rows.rows[rows.count - 1].build, row.build)) {
                 size_t r;
                 int dup = 0;
-                for (r = 0; r < rows.count; r++) if (!strcmp(rows.rows[r].bundle, row.bundle)) dup = 1;
+                for (r = 0; r < rows.count; r++) if (!strcmp(rows.rows[r].build, row.build)) dup = 1;
                 if (!dup) sh_modmanifest_list_add(&rows, &row);
             }
             sh_modmanifest_row_free(&row);
@@ -2255,7 +2177,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
         sh_modmanifest_read(stripped, stripped_len, &merged, NULL);
         for (r = 0; r < rows.count; r++) {
             size_t m, dup = 0;
-            for (m = 0; m < merged.count; m++) if (!strcmp(merged.rows[m].bundle, rows.rows[r].bundle)) dup = 1;
+            for (m = 0; m < merged.count; m++) if (!strcmp(merged.rows[m].build, rows.rows[r].build)) dup = 1;
             if (!dup) sh_modmanifest_list_add(&merged, &rows.rows[r]);
         }
         final = sh_modmanifest_write(stripped, stripped_len, &merged, &final_len, err, sizeof err);

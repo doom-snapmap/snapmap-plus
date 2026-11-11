@@ -21,6 +21,7 @@
 
 #include "modstore.h"
 #include "modstore_upgrade.h"
+#include "modbundle_old.h"
 #include "mod_test_util.h"
 
 static int failures;
@@ -346,6 +347,83 @@ static void test_fresh_folder_salted(const char *tmp)
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
         CHECK(entry_of("cyberprobe", NULL, NULL, &usable) && usable);
     }
+}
+
+/* DECISIONS 6: a new folder's plain strings keys gain the salt's prefix at
+ * its first scan, and its #str_ references follow; a copy's keys follow its
+ * new salt; after the first scan a key without the prefix is refused. */
+static void test_fresh_folder_strings(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH], copy[MAX_PATH], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1], rel[MAX_PATH];
+    char want[256], *t;
+    sh_ms_sync_stats ss;
+    int usable = 0;
+    printf("-- salt: a new folder's strings keys gain <salt>_ and its #str_ references follow; a copy's follow its salt\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\strings\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\talker", root);
+    fb_make(dir, "talker");
+    mt_write(dir, "mod.json",
+             "{\r\n  \"name\": \"Talker\",\r\n  \"version\": \"1.0.0\",\r\n  \"strings\": {\r\n    \"en\": {\r\n"
+             "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\"\r\n    }\r\n  }\r\n}\r\n");
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "talker");
+    mt_write(dir, rel, "{\r\n\tinherit = \"mods/talker/probe_base\";\r\n\tdisplayName = \"#str_probe_name\";\r\n"
+                       "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n}");
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 0);
+    if (ss.failed || !ss.salted) log_dump("strings");
+    CHECK(log_has("2 strings key(s) named "));
+    CHECK(entry_of("talker", salt, NULL, &usable) && usable && sh_salt_valid(salt, strlen(salt)));
+    t = slurp(dir, "mod.json", NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_probe_name\": \"Probe\"", salt);
+    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "Says #str_%s_probe_name.", salt);
+    CHECK(t && strstr(t, want) && !strstr(t, "\"probe_desc\""));
+    free(t);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
+    t = slurp(dir, rel, NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "displayName = \"#str_%s_probe_name\"", salt);
+    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "description = \"#str_%s_probe_desc\"", salt);
+    CHECK(t && strstr(t, want));
+    CHECK(t && strstr(t, "other = \"#str_probe_names\""));   /* not one of its keys: a name boundary */
+    free(t);
+    /* A copy: its keys and references follow its new salt. */
+    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\talker - Copy", root);
+    CHECK(mt_copy_tree(dir, copy));
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1 && ss.failed == 0);
+    CHECK(entry_of("talker - Copy", s2, NULL, &usable) && usable && strcmp(s2, salt));
+    t = slurp(copy, "mod.json", NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_probe_name\"", s2);
+    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "%s_", salt);
+    CHECK(t && !strstr(t, want));
+    free(t);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, s2);
+    t = slurp(copy, rel, NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "#str_%s_probe_desc", s2);
+    CHECK(t && strstr(t, want));
+    free(t);
+    /* After the first scan a key without the prefix is refused, naming it. */
+    t = slurp(dir, "mod.json", NULL);
+    if (t) {
+        char *at = strstr(t, "\"en\": {");
+        if (at) {
+            size_t n = strlen(t) + 64;
+            char *edited = (char *)malloc(n);
+            if (edited) {
+                _snprintf_s(edited, n, _TRUNCATE, "%.*s\"en\": {\r\n      \"late_key\": \"Late\",%s", (int)(at - t), t, at + 7);
+                mt_write(dir, "mod.json", edited);
+                free(edited);
+            }
+        }
+        free(t);
+    }
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    t = slurp(dir, "mod.json", NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "strings key late_key is not named %s_<name>", salt);
+    CHECK(t && strstr(t, want));
+    free(t);
 }
 
 static void test_fresh_folder_refusals(const char *tmp)
@@ -1160,14 +1238,23 @@ static void test_upgrade_steps(const char *tmp)
     CHECK(sh_mb_record_get(root, "layout", &rec) == 1 && rec && !strcmp(rec, "2"));
     free(rec);
     CHECK(sh_ms_upgrade(&us) == 0);   /* once */
-    /* Contract 2: a bundle.json this release cannot read is left as it was;
-     * the product files still fold into the record. */
+    /* Contract 2: a bundle.json becomes a format-1 mod.json, the shape the
+     * store tool's conversion to the one shape reads next; one without an id
+     * is left as it was; the product files still fold into the record. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2@1.0.0+1", root);
     mt_write(path, "bundle.json", "{\"format\":1,\"id\":\"alex.c2\",\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+    {
+        char bad[MAX_PATH];
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\noid@1.0.0+1", root);
+        mt_write(bad, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+    }
     mt_write(root, "claims.json", "{\"claims\":{\"x\":{\"ref\":\"1\"}}}");
     g_logged = 0;
     CHECK(sh_ms_upgrade(&us) == 1 && us.ran && us.failed == 1 && us.records == 1);
-    CHECK(log_has("alex.c2@1.0.0+1: left as it was") && mt_has(path, "bundle.json") && !mt_has(root, "claims.json"));
+    CHECK(log_has("noid@1.0.0+1: left as it was") && !mt_has(root, "claims.json"));
+    CHECK(log_has("alex.c2@1.0.0+1: mod.json written for alex.c2@1.0.0+1"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2", root);
+    CHECK(mt_has(path, "mod.json") && !mt_has(path, "bundle.json") && sh_mb_old_is_old(path));
     rec = NULL;
     CHECK(sh_mb_record_get(root, "claims", &rec) == 1 && rec && strstr(rec, "\"ref\""));
     free(rec);
@@ -1181,6 +1268,7 @@ int main(int argc, char **argv)
     CHECK(sh_ms_set_root(NULL) && sh_ms_root(got, sizeof got) && strstr(got, "\\snapmap-plus\\mods"));
     test_install(fixture, tmp);
     test_fresh_folder_salted(tmp);
+    test_fresh_folder_strings(tmp);
     test_fresh_folder_refusals(tmp);
     test_copy_gets_new_salt(tmp);
     test_earlier_shapes(tmp);

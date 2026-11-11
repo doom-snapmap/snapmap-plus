@@ -1181,6 +1181,10 @@ static int ms_new_salt(char out[SH_SALT_LEN + 1], const char *also)
     return ok;
 }
 
+/* sh_ms_assign_salt_as: the salt the next salting takes instead of a new one
+ * (under the store lock). */
+static char g_ms_fixed_salt[SH_SALT_LEN + 1];
+
 /* The salting's plan (sh_ms_assign_salt): every file of the folder read and
  * rewritten in memory first, mods/<from>/ to mods/<salt>/ in texts and in the
  * folder segments of paths under assets/; a binary file naming mods/<from>/
@@ -1200,7 +1204,9 @@ typedef struct ms_rk {
     ms_rk_file *f;
     size_t n, cap;
     const char *leaf, *key;      /* from, and the new salt */
-    unsigned refs, rewritten, moved;
+    const sh_mb_strkey *skeys;   /* the strings keys renamed "<salt>_<key>" (DECISIONS 6) */
+    size_t nskeys;
+    unsigned refs, rewritten, moved, srefs;
     int failed;
     char cause[SH_MB_CAUSE_MAX];
 } ms_rk;
@@ -1321,17 +1327,28 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
             if (size <= MS_RK_TEXT_MAX && !t) {
                 ms_rk_fail(r, "cannot read %s (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
             } else if (t && !memchr(t, 0, len)) {
-                /* A text: decl text and anything else without a NUL byte. */
-                char *out = NULL;
-                size_t out_len = 0, c = sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len);
-                if (c == (size_t)-1) ms_rk_fail(r, "out of memory");
-                else if (c) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
+                /* A text: decl text and anything else without a NUL byte.
+                 * mods/<from>/ first, then the #str_ references of the
+                 * renamed strings keys. */
+                char *out = NULL, *out2 = NULL;
+                size_t out_len = 0, out2_len = 0, s = 0, c = sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len);
+                if (c != (size_t)-1 && r->nskeys)
+                    s = sh_mb_restr_text(c ? out : t, c ? out_len : len, r->skeys, r->nskeys, &out2, &out2_len);
+                if (c == (size_t)-1 || s == (size_t)-1) { free(out); ms_rk_fail(r, "out of memory"); }
+                else {
+                    if (s) { free(out); out = out2; out_len = out2_len; r->srefs += (unsigned)s; }
+                    if (c || s) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
+                }
             } else {
                 int hit = t ? (sh_mb_rekey_text(t, len, r->leaf, r->key, NULL, NULL) > 0) : ms_rk_binary_names(path, r->leaf);
+                int shit = t && r->nskeys && sh_mb_restr_text(t, len, r->skeys, r->nskeys, NULL, NULL) > 0;
                 if (hit < 0) ms_rk_fail(r, "cannot read %s (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
                 else if (hit)
                     ms_rk_fail(r, SH_MB_SHAPE "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rewrite; "
                                "the folder is unchanged", child, r->leaf);
+                else if (shit)
+                    ms_rk_fail(r, SH_MB_SHAPE "%s names one of its strings (#str_) inside a binary file, which Snapmap+ "
+                               "cannot rewrite; the folder is unchanged", child);
             }
             free(t);
         }
@@ -1374,35 +1391,61 @@ static int ms_rk_stage(ms_rk *r, const wchar_t *src, const wchar_t *staging, int
 }
 
 /* The salting of `folder` (rule 1): in memory first, then staged beside it
- * and swapped in under the same name. `copy` 0: a new mod (no block; `from`
- * its folder name or the package id it was converted from); 1: a copy of a
- * root salt, `from` the salt it carried. Returns 1 with the salt, -1 with the
- * cause (the folder untouched). The caller holds the store lock. */
-static int ms_assign(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+ * and swapped in under the same name. `from` is the folder name, the package
+ * id it was converted from, or the salt a copy carried. The folder's own
+ * mod.json is read unless `given` (a fresh author text) replaces it. With
+ * `dest` the salted folder is written there instead (it must not exist) and
+ * `folder` is left as it is. Returns 1 with the salt, -1 with the cause (the
+ * folder untouched). The caller holds the store lock. */
+static int ms_assign_to(const char *folder, const char *given, size_t given_len, const char *from, const char *dest,
+                        char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
 {
     ms_rk r;
     char salt[SH_SALT_LEN + 1];
     wchar_t *src = NULL, *staging = NULL, *old = NULL, *mj, *parent = NULL, *slash;
-    char *author = NULL, *modjson = NULL;
-    size_t alen = 0, mlen = 0, i, drefs;
+    char *author = NULL, *modjson = NULL, *keyed = NULL;
+    sh_mb_strkey *skeys = NULL;
+    size_t alen = 0, mlen = 0, i, drefs, nskeys = 0, srefs = 0;
     int ok = -1;
     memset(&r, 0, sizeof r);
     if (salt_out) salt_out[0] = 0;
     src = sh_mb_wpath(folder);
     if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, ccap, "out of memory"); goto done; }
     parent[slash - src] = 0;
-    if (!ms_new_salt(salt, from)) { ms_cause(cause, ccap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
+    if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
+    else if (!ms_new_salt(salt, from)) { ms_cause(cause, ccap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
     r.leaf = from;
     r.key = salt;
     /* Read and rewrite everything in memory first. */
-    mj = ms_wjoin(src, L"mod.json");
-    author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX * 16, &alen);
-    free(mj);
+    if (given) {
+        author = (char *)malloc(given_len + 1);
+        if (author) { memcpy(author, given, given_len); author[given_len] = 0; alen = given_len; }
+        else { ms_cause(cause, ccap, "out of memory"); goto done; }
+    } else {
+        mj = ms_wjoin(src, L"mod.json");
+        author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX * 16, &alen);
+        free(mj);
+    }
     if (!author) { ms_cause(cause, ccap, "cannot read mod.json (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
     drefs = sh_mb_rekey_text(author, alen, from, salt, NULL, NULL);
     if (drefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
     modjson = sh_mb_salt_modjson(author, alen, from, salt, &mlen);
     if (!modjson) { ms_cause(cause, ccap, SH_MB_SHAPE "its mod.json is not a JSON object"); goto done; }
+    /* Its strings keys gain the salt's prefix, and every #str_ reference
+     * to them in its own text files (mod.json among them) follows. */
+    keyed = sh_mb_salt_strings(modjson, mlen, from, salt, &skeys, &nskeys, &i);
+    if (!keyed) { ms_cause(cause, ccap, SH_MB_SHAPE "its mod.json does not read as JSON"); goto done; }
+    free(modjson);
+    modjson = keyed;
+    mlen = i;
+    keyed = NULL;
+    if (nskeys) {
+        srefs = sh_mb_restr_text(modjson, mlen, skeys, nskeys, &keyed, &i);
+        if (srefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
+        if (srefs) { free(modjson); modjson = keyed; mlen = i; keyed = NULL; }
+    }
+    r.skeys = skeys;
+    r.nskeys = nskeys;
     r.refs = (unsigned)drefs;
     ms_rk_walk(&r, src, "", 0);
     if (!r.failed && r.n > 1) {
@@ -1435,6 +1478,27 @@ static int ms_assign(const char *folder, const char *from, char salt_out[SH_SALT
                        "under mods/%s/ and Refresh", foreign, files, other, first, from, from);
     }
     if (r.failed) { ms_cause(cause, ccap, "%s", r.cause); goto done; }
+    if (dest) {
+        /* Written to `dest`; the folder itself is not touched. */
+        wchar_t *to = sh_mb_wpath(dest);
+        if (!to || ms_exists(to)) {
+            ms_cause(cause, ccap, to ? "the work folder %s already exists" : "out of memory", dest);
+            free(to);
+            goto done;
+        }
+        if (!ms_rk_stage(&r, src, to, 1, modjson, mlen)) {
+            wchar_t *tp = _wcsdup(to), *ts = tp ? wcsrchr(tp, L'\\') : NULL;
+            if (ts) { *ts = 0; ms_rmtree(to, tp); }
+            free(tp);
+            free(to);
+            ms_cause(cause, ccap, "%s", r.cause);
+            goto done;
+        }
+        free(to);
+        if (salt_out) strcpy_s(salt_out, SH_SALT_LEN + 1, salt);
+        ok = 1;
+        goto done;
+    }
     {
         size_t n = wcslen(src) + 32;
         staging = (wchar_t *)malloc(sizeof(wchar_t) * n);
@@ -1477,12 +1541,15 @@ static int ms_assign(const char *folder, const char *from, char salt_out[SH_SALT
                    "a mod (its name ends in .old-)", ms_rel(folder), old);
     }
     ms_log("MODS: store: mods\\%s is a new mod: salt %s; %u reference(s) to mods/%s/ rewritten in %u file(s)%s, %u file(s) "
-           "moved under mods/%s/", ms_rel(folder), salt, r.refs, from, r.rewritten + (drefs ? 1u : 0u),
-           drefs ? " (mod.json among them)" : "", r.moved, salt);
+           "moved under mods/%s/; %zu strings key(s) named %s_<key>, %u #str_ reference(s) to them rewritten",
+           ms_rel(folder), salt, r.refs, from, r.rewritten + (drefs ? 1u : 0u), drefs ? " (mod.json among them)" : "", r.moved,
+           salt, nskeys, salt, r.srefs + (unsigned)srefs);
     if (salt_out) strcpy_s(salt_out, SH_SALT_LEN + 1, salt);
     ok = 1;
 done:
     ms_rk_free(&r);
+    sh_mb_strkeys_free(skeys, nskeys);
+    free(keyed);
     free(author);
     free(modjson);
     free(src);
@@ -1490,6 +1557,11 @@ done:
     free(staging);
     free(old);
     return ok;
+}
+
+static int ms_assign(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+{
+    return ms_assign_to(folder, NULL, 0, from, NULL, salt_out, cause, ccap);
 }
 
 /* Whether `folder` lies in a place of the store (mods\maps\<segment>\...). */
@@ -1527,10 +1599,37 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
         ms_cause(cause, ccap, SH_MB_SHAPE "it was not built by the mod store");
         r = -1;
     } else {
-        r = ms_assign(folder, from, salt_out, cause, ccap);
+        r = ms_assign_to(folder, NULL, 0, from, NULL, salt_out, cause, ccap);
     }
     if (r < 0) ms_note_cause(folder, cause);
     else if (r > 0) ms_note_cause(folder, NULL);
+    modstore_unlock();
+    return r;
+}
+
+int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char *cause, size_t ccap)
+{
+    char got[SH_SALT_LEN + 1];
+    int r;
+    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, ccap, "no salt given") - 1;
+    modstore_lock();
+    strcpy_s(g_ms_fixed_salt, sizeof g_ms_fixed_salt, salt);
+    r = sh_ms_assign_salt(folder, from, got, cause, ccap);
+    g_ms_fixed_salt[0] = 0;
+    modstore_unlock();
+    return r;
+}
+
+int sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
+                    char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+{
+    int r;
+    if (salt_out) salt_out[0] = 0;
+    if (cause && ccap) cause[0] = 0;
+    if (!folder || !folder[0] || !from || !from[0] || !dest || !dest[0] || !modjson)
+        return ms_cause(cause, ccap, "no folder named") - 1;
+    modstore_lock();
+    r = ms_assign_to(folder, modjson, modjson_len, from, dest, salt_out, cause, ccap);
     modstore_unlock();
     return r;
 }

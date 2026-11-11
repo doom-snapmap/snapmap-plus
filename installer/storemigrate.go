@@ -12,7 +12,9 @@ import (
 )
 
 // The store migration tool, snapmap-plus-store.exe (src/store), converts a mods folder of earlier
-// releases, retires removed-mods\ and moves overrides\ into mods\. It ships in the bundle beside
+// releases, retires removed-mods\, moves overrides\ into mods\, and converts once every mod folder
+// and saved map of an earlier shape (My Maps, rawmap.json, prefabs) to the one the game reads. It
+// ships in the bundle beside
 // MANIFEST.sha256 but not in it: every installer installs each manifest-listed file into DOOM, and
 // the tool belongs next to snapmap-plus.exe in %LOCALAPPDATA%\snapmap-plus. Its digest is in
 // TOOLS.sha256 instead.

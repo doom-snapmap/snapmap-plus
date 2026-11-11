@@ -299,25 +299,190 @@ static int ms_up_files(ms_up_ctx *c, const wchar_t *dir, const sh_mb_bundle *b, 
     return 1;
 }
 
-/* Convert one folder of the retired layout in place: mod.json written and read
- * back with the bundle's hash, then the old files removed. A folder already
- * converted is loaded. Returns 1 converted or loaded, 0 not a built folder,
- * -1 left as it was (logged). */
+/* Write a file whole through a temporary beside it. */
+static int ms_up_write(const wchar_t *path, const char *text, size_t n)
+{
+    size_t pl = wcslen(path) + 16;
+    wchar_t *tmp = (wchar_t *)malloc(sizeof(wchar_t) * pl);
+    HANDLE h;
+    DWORD done = 0;
+    int ok = 0;
+    if (!tmp) return 0;
+    _snwprintf_s(tmp, pl, _TRUNCATE, L"%s.tmp-up", path);
+    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        ok = WriteFile(h, text, (DWORD)n, &done, NULL) && done == n && FlushFileBuffers(h);
+        CloseHandle(h);
+        ok = ok && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!ok) DeleteFileW(tmp);
+    }
+    free(tmp);
+    return ok;
+}
+
+static char *ms_up_strdup_body(const mpj *v)
+{
+    return v && v->type == MPJ_STR ? _strdup(v->text) : NULL;
+}
+
+/* The fields the upgrade needs from a Contract 2 bundle.json (a canonical
+ * manifest of format 1: id, version, name, files with blob and size, stock
+ * pointers): b->id the old id, b->hash its bundle hash, b->files their path,
+ * request, blob, size and stock flag. 1 when it reads. */
+static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *cause, size_t cap)
+{
+    mpj *j = mpj_parse(text, len);
+    const mpj *v, *files;
+    int i, ok = 0;
+    memset(b, 0, sizeof *b);
+    if (!j || j->type != MPJ_OBJ) { ms_cause(cause, cap, "it is not a JSON object"); goto out; }
+    v = mpj_get(j, "id");
+    if (!v || v->type != MPJ_STR || !sh_mb_id_normalize(v->text, strlen(v->text), b->id)) {
+        ms_cause(cause, cap, "it names no id");
+        goto out;
+    }
+    v = mpj_get(j, "version");
+    strncpy_s(b->version, sizeof b->version, v && v->type == MPJ_STR ? v->text : "0.0.0", _TRUNCATE);
+    b->name = ms_up_strdup_body(mpj_get(j, "name"));
+    v = mpj_get(j, "bundle");
+    if (v && v->type == MPJ_STR && ms_is_hash(v->text)) strcpy_s(b->hash, sizeof b->hash, v->text);
+    else {
+        /* Earlier canonical manifests omit the hash: it is the canonical text's. */
+        sh_mb_sha256_hex((const unsigned char *)text, len, b->hash);
+    }
+    files = mpj_get(j, "files");
+    if (files && files->type == MPJ_ARR && files->n > 0) {
+        b->files = (sh_mb_file *)calloc((size_t)files->n, sizeof *b->files);
+        if (!b->files) { ms_cause(cause, cap, "out of memory"); goto out; }
+        for (i = 0; i < files->n; i++) {
+            const mpj *f = files->items[i], *p = mpj_get(f, "path"), *bl = mpj_get(f, "blob"), *st = mpj_get(f, "stock");
+            sh_mb_file *o = &b->files[b->file_count];
+            size_t k;
+            if (!p || p->type != MPJ_STR || _strnicmp(p->text, "assets/", 7)) continue;
+            o->path = _strdup(p->text);
+            o->request = _strdup(p->text + 7);
+            if (!o->path || !o->request) { ms_cause(cause, cap, "out of memory"); goto out; }
+            for (k = 0; o->request[k]; k++) if (o->request[k] >= 'A' && o->request[k] <= 'Z') o->request[k] = (char)(o->request[k] + 32);
+            if (st && st->type == MPJ_OBJ) {
+                const mpj *sh = mpj_get(st, "sha256");
+                o->stock = 1;
+                if (sh && sh->type == MPJ_STR) strncpy_s(o->blob, sizeof o->blob, sh->text, _TRUNCATE);
+            } else {
+                v = mpj_get(f, "size");
+                if (bl && bl->type == MPJ_STR) strncpy_s(o->blob, sizeof o->blob, bl->text, _TRUNCATE);
+                o->size = v && mpj_is_num(v) ? (unsigned long long)mpj_int(v) : 0;
+                b->total_size += o->size;
+            }
+            b->file_count++;
+        }
+    }
+    ok = 1;
+out:
+    mpj_free(j);
+    return ok;
+}
+
+/* The mod.json a Contract 2 folder becomes: its author part (id, name,
+ * version, author, homepage, requirements and the preserved keys of its
+ * manifest's "extra") and a format-1 product block naming its key and build,
+ * the shape the store tool's conversion to the one shape reads next
+ * (store_convert.h). */
+static char *ms_up_c2_modjson(const char *text, size_t len, const sh_mb_bundle *b, size_t *out_len)
+{
+    mpj *j = mpj_parse(text, len), *o = mpj_new(MPJ_OBJ), *blk = mpj_new(MPJ_OBJ);
+    const mpj *v;
+    char *out = NULL;
+    static const char *const author[] = { "id", "name", "version", "author", "homepage", "requirements", NULL };
+    int i;
+    if (!j || !o || !blk) goto out;
+    for (i = 0; author[i]; i++)
+        if ((v = mpj_get(j, author[i])) != NULL) mpj_set(o, author[i], mpj_clone(v));
+    v = mpj_get(j, "extra");
+    if (v && v->type == MPJ_OBJ) {
+        for (i = 0; i < v->n; i++)
+            if (!mpj_get(o, v->keys[i])) mpj_set(o, v->keys[i], mpj_clone(v->items[i]));
+    }
+    mpj_set(blk, "format", mpj_new_int(1));
+    mpj_set(blk, "key", mpj_new_str(b->id));
+    mpj_set(blk, "bundle", mpj_new_str(b->hash));
+    if (b->built) mpj_set(blk, "built", mpj_new_int(b->built));
+    {
+        mpj *val = mpj_new(MPJ_BOOL);
+        if (val) val->b = b->validated;
+        mpj_set(blk, "validated", val);
+    }
+    if (!b->validated && b->state_cause[0]) {
+        char esc[SH_MB_CAUSE_MAX * 2];
+        size_t w = 0, k;
+        for (k = 0; b->state_cause[k] && w + 3 < sizeof esc; k++) {
+            char c = b->state_cause[k];
+            if (c == '"' || c == '\\') esc[w++] = '\\';
+            esc[w++] = (unsigned char)c < 0x20 ? ' ' : c;
+        }
+        esc[w] = 0;
+        mpj_set(blk, "cause", mpj_new_str(esc));
+    }
+    mpj_set(o, SH_MB_BLOCK_KEY, blk);
+    blk = NULL;
+    out = mpj_dump(o, out_len);
+out:
+    mpj_free(j);
+    mpj_free(o);
+    mpj_free(blk);
+    return out;
+}
+
+/* A folder this upgrade wrote before (an interrupted pass): its format-1
+ * mod.json read back for the steps after. 1 when it reads. */
+static int ms_up_read_old(const char *dir, sh_mb_bundle *b)
+{
+    sh_mb_old old;
+    size_t i;
+    int ok = 0;
+    memset(b, 0, sizeof *b);
+    if (!sh_mb_old_load(dir, &old) || old.block_format != 1 || !old.key[0]) { sh_mb_old_free(&old); return 0; }
+    strcpy_s(b->id, sizeof b->id, old.key);
+    if (old.version && old.version[0] == '"') {
+        size_t n = strlen(old.version);
+        _snprintf_s(b->version, sizeof b->version, _TRUNCATE, "%.*s", (int)(n > 2 ? n - 2 : 0), old.version + 1);
+    } else strcpy_s(b->version, sizeof b->version, "0.0.0");
+    strcpy_s(b->hash, sizeof b->hash, old.bundle);
+    b->files = old.file_count ? (sh_mb_file *)calloc(old.file_count, sizeof *b->files) : NULL;
+    for (i = 0; b->files && i < old.file_count; i++) {
+        sh_mb_file *o = &b->files[b->file_count];
+        if (!old.files[i].path || _strnicmp(old.files[i].path, "assets/", 7)) continue;
+        o->path = _strdup(old.files[i].path);
+        o->request = _strdup(old.files[i].path + 7);
+        strcpy_s(o->blob, sizeof o->blob, old.files[i].sha256);
+        o->size = old.files[i].size;
+        o->stock = old.files[i].pointer;
+        b->file_count++;
+    }
+    ok = b->hash[0] != 0;
+    sh_mb_old_free(&old);
+    return ok;
+}
+
+/* Convert one folder of the retired layout in place: mod.json written in the
+ * format-1 shape the conversion to the one shape reads (store_convert.h) and
+ * read back with the bundle's hash, then the old files removed. A folder
+ * already converted is read back. Returns 1 converted or read, 0 not a built
+ * folder, -1 left as it was (logged). */
 static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
 {
-    wchar_t *bj = ms_wjoin(it->dir, L"bundle.json");
-    char *dir = sh_mb_utf8(it->dir), *text = NULL, cause[SH_MB_CAUSE_MAX];
-    size_t len = 0;
+    wchar_t *bj = ms_wjoin(it->dir, L"bundle.json"), *mj = ms_wjoin(it->dir, L"mod.json");
+    char *dir = sh_mb_utf8(it->dir), *text = NULL, *modjson = NULL, cause[SH_MB_CAUSE_MAX];
+    size_t len = 0, mlen = 0;
     unsigned unlinked = 0, restored = 0;
-    int r = -1, author = 0;
+    int r = -1;
     sh_mb_bundle chk;
     memset(&chk, 0, sizeof chk);
     cause[0] = 0;
-    if (!bj || !dir) goto out;
+    if (!bj || !dir || !mj) goto out;
     if (!ms_exists(bj)) {
         /* Converted already (an interrupted pass: the leftovers go now), or
          * not a built folder. */
-        r = sh_mb_load_folder(dir, &it->b) ? 1 : 0;
+        r = ms_up_read_old(dir, &it->b) ? 1 : 0;
         if (!r) { sh_mb_free(&it->b); memset(&it->b, 0, sizeof it->b); }
         else {
             wchar_t *p = ms_wjoin(it->dir, L"bundle.canonical.json");
@@ -336,10 +501,13 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         it->build = v && mpj_is_num(v) ? (unsigned long long)mpj_int(v) : 0;
         mpj_free(j);
     }
-    if (!text || !sh_mb_load_manifest_text(text, len, &it->b)) {
-        _snprintf_s(cause, sizeof cause, _TRUNCATE, "bundle.json does not read: %s", it->b.first_cause);
+    if (!text || !ms_up_read_c2(text, len, &it->b, cause, sizeof cause)) {
+        char why[SH_MB_CAUSE_MAX];
+        strcpy_s(why, sizeof why, cause[0] ? cause : "it cannot be read");
+        _snprintf_s(cause, sizeof cause, _TRUNCATE, "bundle.json does not read: %s", why);
         goto out;
     }
+    it->b.validated = 1;
     {
         /* .state.json carries the verification result and the install time. */
         wchar_t *sp = ms_wjoin(it->dir, L".state.json");
@@ -356,17 +524,14 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         free(sp);
     }
     if (!ms_up_files(c, it->dir, &it->b, &unlinked, &restored, cause, sizeof cause)) goto out;
-    author = ms_has_file(it->dir, L"mod.json") || ms_has_file(it->dir, L"package.json");
-    if (!sh_mb_write(&it->b, dir, cause, sizeof cause)) goto out;
-    if (!sh_mb_load_folder(dir, &chk) || strcmp(chk.hash, it->b.hash) != 0) {
-        /* A hand-made folder whose author block was edited after its last
-         * build no longer hashes to it; its block still records that build,
-         * and the next rescan builds it again. Anything else stops here. */
-        if (!(author && strstr(chk.first_cause, "changed since it was built"))) {
-            _snprintf_s(cause, sizeof cause, _TRUNCATE, "the written mod.json does not read back as bundle %.16s: %s",
-                        it->b.hash, chk.first_cause[0] ? chk.first_cause : chk.hash);
-            goto out;
-        }
+    modjson = ms_up_c2_modjson(text, len, &it->b, &mlen);
+    if (!modjson || !ms_up_write(mj, modjson, mlen)) {
+        ms_cause(cause, sizeof cause, "mod.json could not be written (%s)", ms_why(GetLastError(), "mod.json", 1, 0));
+        goto out;
+    }
+    if (!ms_up_read_old(dir, &chk) || strcmp(chk.hash, it->b.hash) != 0) {
+        _snprintf_s(cause, sizeof cause, _TRUNCATE, "the written mod.json does not read back as bundle %.16s", it->b.hash);
+        goto out;
     }
     {
         static const wchar_t *const gone[] = { L"bundle.json", L"bundle.canonical.json", L".state.json", NULL };
@@ -384,9 +549,9 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         if (unlinked || restored)
             _snprintf_s(extra, sizeof extra, _TRUNCATE, "; %u hard link(s) replaced by copies, %u file(s) restored from blobs\\",
                         unlinked, restored);
-        ms_log("MODS: store: %s: mod.json written for %s@%s+%llu (bundle %.16s, %zu file(s), %u stock pointer(s)); "
-               "bundle.json, bundle.canonical.json and .state.json removed%s",
-               it->from, it->b.id, it->b.version, it->build, it->b.hash, it->b.file_count, it->b.stock_count, extra);
+        ms_log("MODS: store: %s: mod.json written for %s@%s+%llu (bundle %.16s, %zu file(s)); bundle.json, "
+               "bundle.canonical.json and .state.json removed%s",
+               it->from, it->b.id, it->b.version, it->build, it->b.hash, it->b.file_count, extra);
     }
     r = 1;
 out:
@@ -396,8 +561,10 @@ out:
     }
     sh_mb_free(&chk);
     free(text);
+    free(modjson);
     free(dir);
     free(bj);
+    free(mj);
     return r;
 }
 

@@ -32,6 +32,7 @@
 /* A folder big enough that the worker is still busy while the test installs. */
 #define MG_TEST_LARGE ((16ull << 20) + 4096)
 #include "../src/backend/map_shards.h"
+#include "../src/backend/map_old.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -263,34 +264,34 @@ static const char ERA_C_DESC[] =
 static const char ERA_B_DESC[] =
     "{\"schema\": \"snapmap-plus.override-package.v1\", \"name\": \"Old pack\", \"version\": \"1.0.0\", "
     "\"description\": \"an era B pack\"}";
-static const char DECL_A[] = "{\r\n\tinherit = \"monster/imp\";\r\n}";
-static const char DECL_B[] = "{\r\n\tinherit = \"monster/imp\";\r\n\tedit = {\r\n\t\thealth = 50;\r\n\t}\r\n}";
+static const char DECL_A[] = "{\r\n\tsize = \"1\";\r\n}";
+static const char DECL_B[] = "{\r\n\tsize = \"2\";\r\n}";
 
 static void make_tree(const char *ov)
 {
     put_file(ov, "pack-c/package.json", ERA_C_DESC);
-    put_file(ov, "pack-c/assets/generated/decls/entitydef/alex/door.decl", DECL_A);
+    put_file(ov, "pack-c/assets/generated/decls/entitydef/mods/alex.door/door.decl", DECL_A);
     put_file(ov, "pack-c/assets/cooked/model/models/door.materials.txt", "textures/door\n");
     put_file(ov, "Old Pack/package.json", ERA_B_DESC);
-    put_file(ov, "Old Pack/decls/entitydef/old/thing.decl", DECL_A);
+    put_file(ov, "Old Pack/decls/entitydef/mods/old-pack/thing.decl", DECL_A);
     put_file(ov, "Old Pack/readme.txt", "not an input");
     put_file(ov, "dupe-a/package.json", "{\"id\": \"local.dupe\", \"name\": \"Dupe\"}");
-    put_file(ov, "dupe-a/assets/generated/decls/entitydef/dupe/one.decl", DECL_A);
+    put_file(ov, "dupe-a/assets/generated/decls/entitydef/mods/local.dupe/one.decl", DECL_A);
     put_file(ov, "dupe-b/package.json", "{\"id\": \"local.dupe\", \"name\": \"Dupe boss\"}");
-    put_file(ov, "dupe-b/assets/generated/decls/entitydef/dupe/one.decl", DECL_B);
+    put_file(ov, "dupe-b/assets/generated/decls/entitydef/mods/local.dupe/one.decl", DECL_B);
     put_file(ov, "map-0123456789abcdef/doors/package.json", "{\"id\": \"doors\", \"name\": \"SP doors\"}");
-    put_file(ov, "map-0123456789abcdef/doors/assets/generated/decls/entitydef/doors/d.decl", DECL_A);
+    put_file(ov, "map-0123456789abcdef/doors/assets/generated/decls/entitydef/mods/doors/d.decl", DECL_A);
     put_file(ov, "stray.zip", "PK\x05\x06 not really");
     put_file(ov, "nodesc/inner/package.json", "{\"id\": \"inner\", \"name\": \"Inner\"}");
-    put_file(ov, "nodesc/inner/assets/generated/decls/entitydef/inner/i.decl", DECL_A);
+    put_file(ov, "nodesc/inner/assets/generated/decls/entitydef/mods/inner/i.decl", DECL_A);
     put_file(ov, "twodesc/one/package.json", "{\"id\": \"two.one\", \"name\": \"One\"}");
-    put_file(ov, "twodesc/one/assets/generated/decls/entitydef/two/one.decl", DECL_A);
+    put_file(ov, "twodesc/one/assets/generated/decls/entitydef/mods/two.one/one.decl", DECL_A);
     put_file(ov, "twodesc/two/package.json", "{\"id\": \"two.two\", \"name\": \"Two\"}");
-    put_file(ov, "twodesc/two/assets/generated/decls/entitydef/two/two.decl", DECL_A);
+    put_file(ov, "twodesc/two/assets/generated/decls/entitydef/mods/two.two/two.decl", DECL_A);
     put_file(ov, "huge/package.json", "{\"id\": \"huge\", \"name\": \"Huge\"}");
-    put_sparse(ov, "huge\\assets\\generated\\image\\huge\\sky.bimage", (600ull << 20));
+    put_sparse(ov, "huge\\assets\\generated\\image\\mods\\huge\\sky.bimage", (600ull << 20));
     put_file(ov, "big/package.json", "{\"id\": \"big\", \"name\": \"Big\"}");
-    put_sparse(ov, "big\\assets\\generated\\image\\big\\sky.bimage", (300ull << 20));
+    put_sparse(ov, "big\\assets\\generated\\image\\mods\\big\\sky.bimage", (300ull << 20));
 }
 
 /* A store folder's mod.json. */
@@ -424,34 +425,44 @@ static void full_pass(const char *root)
     if (before.text && after.text && strcmp(before.text, after.text))
         fprintf(stderr, "before:\n%s\nafter:\n%s\n", before.text, after.text);
 
-    /* The era C pack: in mods\<its folder>, requirements filtered, strings and
-     * composes kept, the sidecar left out, package.json now its mod.json. */
+    /* The era C pack: in mods\<its folder>, salted from its id, requirements
+     * filtered, strings named under the salt, the retired composes and the
+     * sidecar left out, package.json now its mod.json in the one shape. */
     CHECK(bundle_of(mods, "pack-c", &b) == 1);
-    CHECK(!strcmp(b.origin, "migration") && !b.delivered);
-    CHECK(b.legacy && b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useResourceBlackList\":\"0\"}}"));
-    CHECK(b.extra && strstr(b.extra, "\"composes\":{\"hands\":[\"alex/door\"]}") && strstr(b.extra, "\"strings\"") &&
-          strstr(b.extra, "\"source\":\"overrides\"") && strstr(b.extra, "\"folder\":\"pack-c\""));
-    CHECK(b.file_count == 1 && has_file(&b, "generated/decls/entitydef/alex/door.decl"));
+    CHECK(sh_salt_valid(b.id, strlen(b.id)));
+    CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useResourceBlackList\":\"0\"}}"));
+    CHECK(b.extra && strstr(b.extra, "\"strings\"") && !strstr(b.extra, "composes") && !strstr(b.extra, "\"legacy\""));
+    {
+        char req[160], key[64];
+        _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/entitydef/mods/%s/door.decl", b.id);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "\"%s__str_door\":\"Door\"", b.id);
+        CHECK(b.file_count == 1 && has_file(&b, req) && strstr(b.extra, key));
+    }
     hash_c = _strdup(b.hash);
     sh_mb_free(&b);
-    /* The era B pack: named by its folder, its version kept, its layout migrated. */
-    CHECK(bundle_of(mods, "Old Pack", &b) == 1 && !strcmp(b.id, "old-pack") && !strcmp(b.version, "1.0.0"));
-    CHECK(b.file_count == 1 && has_file(&b, "generated/decls/entitydef/old/thing.decl") &&
-          b.extra && strstr(b.extra, "\"schema\":\"snapmap-plus.override-package.v1\"") && strstr(b.extra, "\"layout\":\"B\""));
+    /* The era B pack: named by its folder, its version kept, its layout migrated, no era B schema. */
+    CHECK(bundle_of(mods, "Old Pack", &b) == 1 && sh_salt_valid(b.id, strlen(b.id)) && !strcmp(b.version, "1.0.0"));
+    {
+        char req[160];
+        _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/entitydef/mods/%s/thing.decl", b.id);
+        CHECK(b.file_count == 1 && has_file(&b, req) && !(b.extra && strstr(b.extra, "schema")));
+    }
     sh_mb_free(&b);
-    /* The duplicate pair: both built, each in its own folder, one id. */
-    CHECK(bundle_of(mods, "dupe-a", &b) == 1 && !strcmp(b.id, "local.dupe"));
-    sh_mb_free(&b);
-    CHECK(bundle_of(mods, dupe_b_key, &b) == 1 && !strcmp(b.id, "local.dupe") && !strcmp(b.version, "0.0.0"));
-    sh_mb_free(&b);
+    /* The duplicate pair: both built, each in its own folder, each its own salt. */
+    {
+        char sa[16] = "";
+        CHECK(bundle_of(mods, "dupe-a", &b) == 1 && sh_salt_valid(b.id, strlen(b.id)));
+        strcpy_s(sa, sizeof sa, b.id);
+        sh_mb_free(&b);
+        CHECK(bundle_of(mods, dupe_b_key, &b) == 1 && sh_salt_valid(b.id, strlen(b.id)) && strcmp(b.id, sa));
+        sh_mb_free(&b);
+    }
     memset(&list, 0, sizeof list);
     CHECK(sh_ms_enumerate(&list) == 1);
-    /* The delivered package: an ordinary folder named by its id, keyed by its tree. */
+    /* The delivered package: an ordinary salted folder named by its id. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\map-0123456789abcdef\\doors", ov);
     CHECK(tree_of(path, tree_d) == 1);
-    CHECK(bundle_of(mods, "doors", &b) == 1);
-    CHECK(b.legacy && b.delivered && b.extra && strstr(b.extra, "\"source\":\"delivered\"") && strstr(b.extra, tree_d));
-    CHECK(!strcmp(b.origin, "delivery"));
+    CHECK(bundle_of(mods, "doors", &b) == 1 && sh_salt_valid(b.id, strlen(b.id)) && !(b.extra && strstr(b.extra, "legacy")));
     sh_mb_free(&b);
     sh_ms_list_free(&list);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\legacy", mods);
@@ -503,7 +514,7 @@ static void full_pass(const char *root)
         CHECK(map != NULL);
         out = map ? sh_modlegacy_process(map, mn, &on) : NULL;
         CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
-              strstr(v[0].folder, "\\mods\\doors") && !strcmp(v[0].id, "doors"));
+              strstr(v[0].folder, "\\mods\\doors") && sh_salt_valid(v[0].salt, strlen(v[0].salt)));
         if (out) HeapFree(GetProcessHeap(), 0, out);
         if (map) HeapFree(GetProcessHeap(), 0, map);
         /* ... and the same authored tree through the record's "trees". */
@@ -513,8 +524,12 @@ static void full_pass(const char *root)
         map = carrier_map(key, &mn);
         out = map ? sh_modlegacy_process(map, mn, &on) : NULL;
         CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
-              !strcmp(v[0].id, "alex.door") && hash_c && !strcmp(v[0].bundle, hash_c) && !strstr(out, "smpmod1.") &&
-              strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.door\""));
+              hash_c && !strcmp(v[0].build, hash_c) && !strstr(out, "smpmod1.") && !strstr(out, "smpkg."));
+        {
+            char row[80];
+            _snprintf_s(row, sizeof row, _TRUNCATE, "{\"mod\":\"%s@", v[0].salt);
+            CHECK(out && strstr(out, row));
+        }
         if (out) HeapFree(GetProcessHeap(), 0, out);
         if (map) HeapFree(GetProcessHeap(), 0, map);
     }
@@ -559,7 +574,7 @@ static void kept_backups(const char *root)
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
-    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "tiny/assets/generated/decls/entitydef/mods/tiny/t.decl", DECL_A);
     put_file(root, "override-backups/migration-1/original/x.decl", DECL_A);
     configure(root);
     g_log[0] = 0;
@@ -578,9 +593,9 @@ static void worker_pass(const char *root)
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "small/package.json", "{\"id\": \"small\", \"name\": \"Small\"}");
-    put_file(ov, "small/assets/generated/decls/entitydef/small/s.decl", DECL_A);
+    put_file(ov, "small/assets/generated/decls/entitydef/mods/small/s.decl", DECL_A);
     put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
-    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
+    put_bytes(ov, "large/assets/generated/image/mods/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
     configure(root);
     g_log[0] = 0;
     rescans = g_mod_stub_rescans;
@@ -609,7 +624,7 @@ static void incomplete_record(const char *root)
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
-    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "tiny/assets/generated/decls/entitydef/mods/tiny/t.decl", DECL_A);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
     CHECK(sh_mb_record_put(path, "migration", "{\"format\":1,\"complete\":false}"));
     configure(root);
@@ -645,7 +660,7 @@ static void pending_entries(const char *root)
     configure(root);
     CHECK(sh_modmigrate_pending(&entries) == 0 && entries == 0);   /* no overrides folder */
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
-    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "tiny/assets/generated/decls/entitydef/mods/tiny/t.decl", DECL_A);
     put_file(ov, "packed.zip", "PK");
     CHECK(sh_modmigrate_pending(&entries) == 2 && entries == 2);   /* no record yet */
     CHECK(sh_modmigrate_run(0, &st) == 1 && st.built == 1 && st.skipped == 1);
@@ -655,7 +670,7 @@ static void pending_entries(const char *root)
      * was created or written after the pass. */
     Sleep(1100);
     put_file(ov, "later/package.json", "{\"id\": \"later\", \"name\": \"Later\"}");
-    put_file(ov, "later/assets/generated/decls/entitydef/later/t.decl", DECL_A);
+    put_file(ov, "later/assets/generated/decls/entitydef/mods/later/t.decl", DECL_A);
     CHECK(sh_modmigrate_pending(&entries) == 1 && entries == 3);   /* a folder added after the pass */
     {
         /* The skipped ZIP written after the record: the player replaced it. */
@@ -696,11 +711,11 @@ static void store_lock_contention(const char *root)
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
-    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "tiny/assets/generated/decls/entitydef/mods/tiny/t.decl", DECL_A);
     put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
-    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
+    put_bytes(ov, "large/assets/generated/image/mods/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
     _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s\\authoring\\test.lockmod", root);
-    put_file(mod, "mod.json", "{\"id\": \"test.lockmod\", \"version\": \"1.0.0\", \"name\": \"Lock\", \"author\": \"tester\"}");
+    put_file(mod, "mod.json", "{\"version\": \"1.0.0\", \"name\": \"Lock\", \"author\": \"tester\"}");
     put_file(mod, "assets/generated/image/mods/test.lockmod/a.bimage", "bytes for the lock test");
     configure(root);
     /* Another thread holds the lock (an install or a download): the pass waits, then runs. */

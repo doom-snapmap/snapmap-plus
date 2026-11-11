@@ -907,10 +907,13 @@ static void test_closure_store_path(const char *tmp)
     _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\other", store);
     _snprintf_s(surf, sizeof surf, _TRUNCATE, "%s\\surf", store);
     CHECK(sh_ms_set_root(store));
-    /* An installed mod that already points at the door's model. */
-    mt_write(other, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tother06\"},\"name\":\"Other\",\"stock\":{"
-             "\"" M6_MD6 "\":{\"source\":\"" M6_MD6 "\"},\"" M6_MESH "\":{\"source\":\"" M6_MESH "\"},"
-             "\"" M6_SKL "\":{\"source\":\"" M6_SKL "\"},\"" M6_DEF "\":{\"source\":\"" M6_DEF "\"}}}");
+    /* An installed mod that already points at the door's model: it carries
+     * the game's own files, which its build turns into pointers. */
+    mt_write(other, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tother06\"},\"name\":\"Other\"}");
+    put_rel(other, "assets\\" M6_MD6, M6_MD6_TEXT, sizeof M6_MD6_TEXT - 1);
+    put_rel(other, "assets\\" M6_MESH, M6_MESH_B, sizeof M6_MESH_B);
+    put_rel(other, "assets\\" M6_SKL, M6_SKL_B, sizeof M6_SKL_B);
+    put_rel(other, "assets\\" M6_DEF, M6_DEF_B, sizeof M6_DEF_B);
     put_rel(other, "assets/generated/image/mods/tother06/own.bimage", S6_SKL_B, 8);
     CHECK(sh_ms_install_from_folder(other, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
@@ -1378,7 +1381,7 @@ static void test_shader_closure(const char *tmp)
 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade1", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
-    r7_write_lf(dir, "generated/decls/material/mods/shade1/water.decl", "{\nstageprogram\ttw\n}\n", "");
+    r7_write_lf(dir, "generated/decls/material/mods/tident07/water.decl", "{\nstageprogram\ttw\n}\n", "");
     CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  shader closure: %s\n", b.first_cause);
     CHECK(b.file_count == 9 && b.stock_count == 8);
@@ -1403,10 +1406,10 @@ static void test_shader_closure(const char *tmp)
     /* SnapMap's own program: the name is a need, nothing is added. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade2", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
-    r7_write_lf(dir, "generated/decls/material/mods/shade2/glass.decl", "{\nstageprogram\tsw\n}\n", "");
+    r7_write_lf(dir, "generated/decls/material/mods/tident07/glass.decl", "{\nstageprogram\tsw\n}\n", "");
     CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
           b.needs.stock == 1);
-    f = find(&b, "generated/decls/material/mods/shade2/glass.decl");
+    f = find(&b, "generated/decls/material/mods/tident07/glass.decl");
     CHECK(f && f->need_count == 1 && has_need(f, "renderProg", "sw"));
     CHECK(!has_note(&b, "borrowed for completeness"));
     sh_mb_free(&b);
@@ -1415,7 +1418,7 @@ static void test_shader_closure(const char *tmp)
      * naming it, so a partial program is never served. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade3", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
-    r7_write_lf(dir, "generated/decls/material/mods/shade3/broken.decl", "{\nstageprogram\ttp\n}\n", "");
+    r7_write_lf(dir, "generated/decls/material/mods/tident07/broken.decl", "{\nstageprogram\ttp\n}\n", "");
     CHECK(!sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 1);
     CHECK_CAUSE(b, "uses the campaign render program tp, but no archive holds its "
                    "generated/renderprogs/permutations/tp_0000000000000001_pc_vulkan.bin");

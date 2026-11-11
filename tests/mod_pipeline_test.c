@@ -2,10 +2,8 @@
  * backend links them: a folder built by the bundle builder (modbundle.c) is
  * admitted by the serving index (modserve.c); a save writes one smpmod1 row
  * through the serving layer's closure (modmanifest.c); the next load strips
- * the row and activates exactly that bundle's gameplay decls; a legacy-form
- * bundle (a "legacy" block, non-stock shadows) builds, is admitted, and its
- * new names are registered while its stock shadows are left to the provider;
- * and, when SH_MODLEGACY_FIXTURES names the folder holding the campaign's
+ * the row and activates exactly that bundle's gameplay decls; and, when
+ * SH_MODLEGACY_FIXTURES names the folder holding the campaign's
  * carrier maps, each real conversion (modlegacy.c) builds with the real
  * builder, rescans the index and is activated in the same parse.
  *
@@ -27,6 +25,7 @@
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modlegacy.h"
+#include "../src/backend/modstore.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -80,7 +79,7 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
     char cause[SH_MB_CAUSE_MAX];
     int ok = 0;
     g_builds++;
-    if (!sh_mb_build(folder, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
+    if (!sh_mb_build(folder, NULL, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
     else if (!sh_mb_write(&b, folder, cause, sizeof cause)) strncpy_s(first_cause, n, cause, _TRUNCATE);
     else ok = 1;
     if (!ok) printf("    builder refused %s: %s\n", folder, first_cause);
@@ -265,7 +264,7 @@ static void on_visit(void *ctx, const char *id, const char *version, const char 
     "\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\",\"~type\":\"snapVarString_t\"}"
 
 static const char MAP[] =
-    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alex.r2-imp/imp_copy\","
+    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alexrimp/imp_copy\","
     "\"name\":\"\",\"state\":{}}},"
     "{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/visblockers/industrial/cap_01\","
     "\"name\":\"\",\"state\":{}}}],"
@@ -281,7 +280,7 @@ static void fresh_mod(const char *fixture, const char *root)
     sh_modserve_hit hit;
     sh_modserve_plan plan;
     visit_rec v;
-    const char *names[2] = { "mods/alex.r2-imp/imp_copy", "snapmaps/visblockers/industrial/cap_01" };
+    const char *names[2] = { "mods/alexrimp/imp_copy", "snapmaps/visblockers/industrial/cap_01" };
     char *saved, *loaded;
     size_t saved_len = 0, loaded_len = 0;
     sh_modmanifest_list rows = {0};
@@ -302,7 +301,7 @@ static void fresh_mod(const char *fixture, const char *root)
     CHECK(sh_modserve_bundle_state(b.hash, NULL, 0) == 1);
     for (i = 0; i < (int)b.file_count; i++) {
         CHECK(sh_modserve_lookup(b.files[i].request, &hit) == 1);
-        if (strstr(b.files[i].request, "alex.r2_imp")) CHECK(hit.size == b.files[i].size);
+        if (strstr(b.files[i].request, "alexrimp")) CHECK(hit.size == b.files[i].size);
     }
 
     /* Editor rows: both sedefs, after the decls they need. */
@@ -318,7 +317,7 @@ static void fresh_mod(const char *fixture, const char *root)
     /* The closure in the manifest's form: one named visit, the bundle's size. */
     memset(&v, 0, sizeof v);
     CHECK(modserve_bundles_for_names_visit(names, 2, on_visit, &v) == 1);
-    CHECK(v.calls == 1 && v.named == 1 && !strcmp(v.hash, b.hash) && !strcmp(v.id, "alex.r2-imp") &&
+    CHECK(v.calls == 1 && v.named == 1 && !strcmp(v.hash, b.hash) && !strcmp(v.id, "alexrimp") &&
           v.size == b.total_size);
 
     /* Save: one row naming the bundle, in the map's snapmap-plus member. */
@@ -327,8 +326,8 @@ static void fresh_mod(const char *fixture, const char *root)
     if (saved) {
         CHECK(!strstr(saved, "smpmod1.") && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[") != NULL);
         CHECK(sh_modmanifest_read(saved, saved_len, &rows, NULL) == 1 && rows.count == 1 &&
-              !strcmp(rows.rows[0].bundle, b.hash) && rows.rows[0].size == b.total_size &&
-              rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alex.r2-imp/imp_copy"));
+              !strcmp(rows.rows[0].build, b.hash) && !strcmp(rows.rows[0].salt, "alexrimp") && rows.rows[0].size == b.total_size &&
+              rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alexrimp/imp_copy"));
         sh_modmanifest_list_free(&rows);
         /* Load: the row is read (the member itself is stripped last, by the
          * parse detour, so this step removes nothing) and exactly that bundle's gameplay decls
@@ -341,10 +340,10 @@ static void fresh_mod(const char *fixture, const char *root)
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
         CHECK(loaded == NULL);
         CHECK(g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
-        CHECK(registered("mods/alex.r2-imp/imp_copy") && registered("mods/alex.r2-imp/imp_copy.md6") &&
-              registered("mods/alex.r2-imp/imp_copy_b.md6"));
-        CHECK(!registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy") &&
-              !registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy_b"));
+        CHECK(registered("mods/alexrimp/imp_copy") && registered("mods/alexrimp/imp_copy.md6") &&
+              registered("mods/alexrimp/imp_copy_b.md6"));
+        CHECK(!registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy") &&
+              !registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy_b"));
         CHECK(g_last_sync_r == 0 && g_last_sync.rows == 2 && g_last_sync.missing == 0 && g_rebuilds == 0);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
@@ -359,7 +358,7 @@ static void fresh_mod(const char *fixture, const char *root)
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
         CHECK(loaded == NULL && g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
               g_last_sync.registered == 0 && g_rebuilds == 1);
-        CHECK(!registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy"));
+        CHECK(!registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy"));
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
         CHECK(loaded == NULL && g_last_sync_r == 1 && g_rebuilds == 2);
@@ -375,9 +374,9 @@ static void fresh_mod(const char *fixture, const char *root)
         CHECK(g_last_sync_r == 1 && g_rebuilds == 1 && g_last_sync.rebuild == 1);
         CHECK(g_last_sync.rows == 2 && g_last_sync.missing == 2 && g_last_sync.registered == 2 &&
               g_last_sync.admitted == 2 && g_last_sync.rows_after == g_last_sync.rows_before + 2);
-        CHECK(registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy") &&
-              registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy_b"));
-        CHECK(pal_has(NULL, "mods/alex.r2-imp/imp_copy") && pal_has(NULL, "mods/alex.r2-imp/imp_copy_b"));
+        CHECK(registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy") &&
+              registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy_b"));
+        CHECK(pal_has(NULL, "mods/alexrimp/imp_copy") && pal_has(NULL, "mods/alexrimp/imp_copy_b"));
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
         /* The palette already holds them: nothing is requested. */
@@ -404,90 +403,19 @@ static void fresh_mod(const char *fixture, const char *root)
     sh_mb_free(&b);
 }
 
-/* ---- 2: a legacy-form bundle ---------------------------------------------------------------- */
-
-static const char LEGACY_DESC[] =
-    "{\"id\":\"local.thing\",\"version\":\"legacy-0123456789abcdef\",\"name\":\"Thing\","
-    "\"shadows\":[\"generated/decls/entitydef/custom/thing.decl\",\"generated/decls/entitydef/monster/imp.decl\"],"
-    "\"legacy\":{\"digest16\":\"0123456789abcdef\",\"key\":\"local.thing\",\"keyForm\":\"descriptor\",\"layout\":\"C\"}}";
-static const char NO_LEGACY_DESC[] =
-    "{\"id\":\"local.thing\",\"version\":\"legacy-0123456789abcdef\",\"name\":\"Thing\","
-    "\"shadows\":[\"generated/decls/entitydef/custom/thing.decl\",\"generated/decls/entitydef/monster/imp.decl\"]}";
-
-static void legacy_form(const char *root)
-{
-    char legacy[MAX_PATH], folder[MAX_PATH], cause[SH_MB_CAUSE_MAX], mods[MAX_PATH];
-    sh_mb_bundle b;
-    sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
-    sh_modserve_plan plan;
-    const char *hashes[1];
-    char *desc_path;
-    int unknown = 0, ready, i, custom_loaded = 0;
-
-    printf("-- a legacy bundle: non-stock shadows build, new names register, stock shadows stay served\n");
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    /* A delivered package is an ordinary folder of the store. */
-    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s", mods);
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\local.thing@0123456789abcdef", legacy);
-    CreateDirectoryA(folder, NULL);
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\custom\\thing.decl",
-             "{\r\n\tinherit = \"monster/imp\";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"custom/missing.md6\";\r\n\t\t}\r\n\t}\r\n}");
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}");
-
-    /* Without the legacy block the same descriptor is refused: its shadows
-     * are ignored, and custom/thing is neither under the key nor a game name. */
-    mt_write(folder, "mod.json", NO_LEGACY_DESC);
-    CHECK(sh_mb_build(folder, &r, &b) == 0 && strstr(b.first_cause, "the game has no file of that name"));
-    sh_mb_free(&b);
-    /* With it: built, the unresolved heuristic need only warns. */
-    mt_write(folder, "mod.json", LEGACY_DESC);
-    CHECK(sh_mb_build(folder, &r, &b) == 1 && b.legacy == 1 && b.errors == 0 && b.warnings >= 1);
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
-    hashes[0] = b.hash;
-    desc_path = cause;
-    _snprintf_s(desc_path, sizeof cause, _TRUNCATE, "%s\\mod.json", folder);
-    {
-        sh_mb_bundle back;
-        CHECK(sh_mb_load(desc_path, &back) == 1 && back.legacy == 1);
-        sh_mb_free(&back);
-    }
-
-    /* Admitted; both files are shadows; the gameplay plan holds both, and
-     * only the new name is registered and loaded. */
-    CHECK(sh_modserve_index_build(mods) >= 1);
-    CHECK(sh_modserve_bundle_state(b.hash, NULL, 0) == 1);
-    {
-        sh_modserve_hit hit;
-        CHECK(sh_modserve_lookup("generated/decls/entitydef/monster/imp.decl", &hit) == 1 && hit.is_shadow);
-        CHECK(sh_modserve_lookup("generated/decls/entitydef/custom/thing.decl", &hit) == 1 && hit.is_shadow);
-    }
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &plan, &unknown) == 2 && unknown == 0 && plan.blocked == 0);
-    g_nregistered = 0;
-    g_loads = 0;
-    ready = sh_modserve_plan_run(&plan, &OPS, "map");
-    CHECK(ready == 2);
-    for (i = 0; i < plan.count; i++)
-        if (!strcmp(plan.steps[i].name, "custom/thing")) custom_loaded = plan.steps[i].ready == 1;
-    CHECK(custom_loaded && registered("custom/thing") && !registered("monster/imp") && g_loads == 1);
-    sh_modserve_plan_free(&plan);
-    sh_mb_free(&b);
-}
-
-/* ---- 3: skins and the '_' spelling of the id ------------------------------------------------- */
-
 static void skins_namespace(const char *root)
 {
     char folder[MAX_PATH], mods[MAX_PATH];
     sh_mb_bundle b;
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
-    printf("-- a skins decl passes by its mesh path's namespace, in either spelling of the id\n");
+    printf("-- a skins decl passes by its mesh path's namespace, the salt\n");
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\skinmods", root);
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\alex.skin-test", mods);
     CreateDirectoryA(mods, NULL);
     CreateDirectoryA(folder, NULL);
-    mt_write(folder, "mod.json", "{\"id\":\"alex.skin-test\",\"name\":\"Skin test\"}");
-    mt_write(folder, "assets\\generated\\decls\\skins\\md6\\mods\\alex.skin_test\\imp.md6mesh.decl", "{\r\n}");
-    CHECK(sh_mb_build(folder, &r, &b) == 1);
+    mt_write(folder, "mod.json", "{\"name\":\"Skin test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexskin\"}}");
+    mt_write(folder, "assets\\generated\\decls\\skins\\md6\\mods\\alexskin\\imp.md6mesh.decl", "{\r\n}");
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 1);
     if (b.errors) printf("    %s\n", b.first_cause);
     {
         char cause[SH_MB_CAUSE_MAX];
@@ -497,7 +425,7 @@ static void skins_namespace(const char *root)
     CHECK(sh_modserve_index_build(mods) == 1);
     /* A skins decl outside the namespace is still refused. */
     mt_write(folder, "assets\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
-    CHECK(sh_mb_build(folder, &r, &b) == 0 && strstr(b.first_cause, "skins decl"));
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(b.first_cause, "skins decl"));
     sh_mb_free(&b);
 }
 
@@ -521,6 +449,7 @@ static void carrier_conversion(const char *root)
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
     CHECK(sh_modserve_index_build(mods) >= 0);   /* the index the boot would have built */
     sh_modlegacy_set_data_root(root);
+    sh_modlegacy_set_salter(sh_ms_assign_salt);
     sh_modlegacy_reset();
     /* The editor palette exists (a mid-session open): a converted package's
      * editor rows are registered by one rebuild in the same parse. */
@@ -544,7 +473,7 @@ static void carrier_conversion(const char *root)
             if (v[k].verdict == SH_MODLEGACY_CONVERT) converted++;
             else printf("    %s: CLEAN -- %s\n", maps[i].file, v[k].reason);
             /* The rescan the conversion asked for made each bundle visible. */
-            if (v[k].verdict == SH_MODLEGACY_CONVERT && sh_modserve_bundle_state(v[k].bundle, NULL, 0) == 1) indexed++;
+            if (v[k].verdict == SH_MODLEGACY_CONVERT && sh_modserve_bundle_state(v[k].build, NULL, 0) == 1) indexed++;
         }
         CHECK(out != NULL && verdicts == maps[i].carriers && converted == maps[i].carriers && indexed == converted);
         /* The manifest step of the same parse activates what was converted. */
@@ -636,6 +565,7 @@ static void beta19_conversion(const char *root)
     CreateDirectoryA(data, NULL);
     CHECK(sh_modserve_index_build(mods) >= 0);
     sh_modlegacy_set_data_root(data);
+    sh_modlegacy_set_salter(sh_ms_assign_salt);
     sh_modlegacy_reset();
     nplaced = sh_modmanifest_placed_names(text, n, &placed, &failed);
     CHECK(!failed && nplaced > 0);
@@ -659,7 +589,7 @@ static void beta19_conversion(const char *root)
                "");
         if (v[k].verdict != SH_MODLEGACY_CONVERT) continue;
         converted++;
-        CHECK(sh_modserve_bundle_state(v[k].bundle, NULL, 0) == 1);
+        CHECK(sh_modserve_bundle_state(v[k].build, NULL, 0) == 1);
         _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\mod.json", v[k].folder);
         memset(&b, 0, sizeof b);
         CHECK(sh_mb_load(bj, &b) == 1);
@@ -672,7 +602,7 @@ static void beta19_conversion(const char *root)
         }
         printf("    %s@%s layout %c, %u file(s), %llu byte(s), %u shadow name(s), bundle %.16s; provides %u editor row(s), "
                "%u entityDef(s), %u other decl(s), %u raw asset(s); requirements %s\n",
-               v[k].id, v[k].version, v[k].layout ? v[k].layout : '?', v[k].files, v[k].size, v[k].shadows, v[k].bundle,
+               v[k].id, v[k].version, v[k].layout ? v[k].layout : '?', v[k].files, v[k].size, v[k].shadows, v[k].build,
                sedef, edef, decls, raw, b.requirements ? b.requirements : "none");
         for (p = 0; p < nplaced; p++) {
             for (i = 0; i < b.file_count; i++) if (pt_provides(&b.files[i], placed[p])) break;
@@ -724,10 +654,9 @@ static void beta19_conversion(const char *root)
 /* ---- 5: a cut-content bundle's requirements ----------------------------------------------------- */
 
 static const char CUT_DESC[] =
-    "{\"id\":\"local.cut\",\"version\":\"legacy-00000000000000aa\",\"name\":\"Cut\","
-    "\"shadows\":[\"generated/decls/entitydef/custom/cut.decl\"],"
+    "{\"version\":\"1.0.0\",\"name\":\"Cut\","
     "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":\"0\",\"g_useImageBlackList\":\"0\"}},"
-    "\"legacy\":{\"digest16\":\"00000000000000aa\",\"key\":\"local.cut\",\"keyForm\":\"descriptor\",\"layout\":\"C\"}}";
+    "\"snapmap-plus\":{\"format\":2,\"salt\":\"localcut\"}}";
 
 static void cut_content(const char *root)
 {
@@ -737,15 +666,15 @@ static void cut_content(const char *root)
     const char *hashes[1];
     printf("-- a bundle requiring both blacklist gates: collected at index time, applied before its registration\n");
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\cutmods", root);
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\local.cut@00000000000000aa", mods);
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\custom\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\cut", mods);
+    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\localcut\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
     mt_write(folder, "mod.json", CUT_DESC);
-    CHECK(sh_mb_build(folder, &r, &b) == 1 && b.requirements != NULL);
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 1 && b.requirements != NULL);
     CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
     g_log[0] = 0;
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for local.cut@legacy-00000000000000aa") &&
-          strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for local.cut@legacy-00000000000000aa"));
+    CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for localcut@1.0.0") &&
+          strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for localcut@1.0.0"));
     CHECK(sh_modserve_requirements() == 2);
     g_gate[0] = g_gate[1] = 1;
     g_gate_sets = 0;
@@ -755,7 +684,7 @@ static void cut_content(const char *root)
     CHECK(modserve_activate_bundles(hashes, 1) == 1);
     /* Both gates were set before the first DeclRegisterFile, and are 0. */
     CHECK(g_gate_sets == 2 && g_registered_at_first_set == 0 && g_gate[0] == 0 && g_gate[1] == 0);
-    CHECK(registered("custom/cut"));
+    CHECK(registered("mods/localcut/cut"));
     CHECK(strstr(g_log, "MODS: map: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
                         "(set directly, live immediately)") != NULL);
     sh_mb_free(&b);
@@ -767,7 +696,6 @@ int main(int argc, char **argv)
     if (argc < 2) { fprintf(stderr, "usage: mod_pipeline_test <fixture folder>\n"); return 2; }
     if (!mt_temp_dir("mod_pipeline", root, sizeof root)) { fprintf(stderr, "no temp folder\n"); return 2; }
     fresh_mod(argv[1], root);
-    legacy_form(root);
     skins_namespace(root);
     /* No bundle so far needs a requirement: the gates were never read or set. */
     CHECK(g_gate_reads == 0 && g_gate_sets == 0);

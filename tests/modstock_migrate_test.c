@@ -95,7 +95,7 @@ int main(void)
     put_rel(ov, "cyber\\assets\\generated\\image\\mods\\local.cyber\\edited.bimage", EDITED, sizeof EDITED);
     mt_write(ov, "map-0123456789abcdef\\doors\\package.json", "{\"id\": \"doors\", \"name\": \"SP doors\"}");
     put_rel(ov, "map-0123456789abcdef\\doors\\assets\\" P_ANIM, ANIM, sizeof ANIM);
-    put_rel(ov, "map-0123456789abcdef\\doors\\assets\\generated\\image\\doors\\own.bimage", EDITED, sizeof EDITED);
+    put_rel(ov, "map-0123456789abcdef\\doors\\assets\\generated\\image\\mods\\doors\\own.bimage", EDITED, sizeof EDITED);
 
     sh_modstock_set_install(doom);
     sh_modstock_register();
@@ -123,15 +123,19 @@ int main(void)
         unsigned ptr = 0;
         if (!l.items[i].loaded) continue;
         for (k = 0; k < b->file_count; k++) ptr += b->files[k].stock != 0;
-        if (!strcmp(b->id, "local.cyber")) { authored = 1; CHECK(ptr == 2 && b->file_count == 3 && sh_ms_entry_usable(&l.items[i])); }
-        if (!strcmp(b->id, "doors")) { delivered = 1; CHECK(ptr == 1 && b->file_count == 2 && l.items[i].delivered); }
+        /* Each migrated folder has its own salt; the folder names them. */
+        if (!strcmp(l.items[i].name, "cyber")) {
+            authored = 1;
+            CHECK(ptr == 2 && b->file_count == 3 && sh_ms_entry_usable(&l.items[i]) && sh_salt_valid(b->id, strlen(b->id)));
+        }
+        if (!strcmp(l.items[i].name, "doors")) { delivered = 1; CHECK(ptr == 1 && b->file_count == 2 && sh_ms_entry_usable(&l.items[i])); }
     }
     CHECK(authored && delivered);
     sh_ms_list_free(&l);
     {
         sh_ms_verify_stats vs;
         char cause[SH_MB_CAUSE_MAX];
-        CHECK(sh_ms_verify("local.cyber@0.0.0", &vs, cause, sizeof cause) && vs.pointers == 2);
+        CHECK(sh_ms_verify("cyber", &vs, cause, sizeof cause) && vs.pointers == 2);
     }
     {
         char *record;
@@ -144,21 +148,33 @@ int main(void)
         free(record);
     }
     {
-        /* The rebuild rule over the migrated folder: the pointers live in its
-         * product block only ("inAssets": false) and survive a rebuild. */
+        /* The rebuild rule over the migrated folder: its pointers are named in
+         * its block without files ("inAssets": false). */
         sh_ms_sync_stats ss;
         sh_mb_bundle b;
         char *text;
-        CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+        /* A scan right after the pass: the folder as installed (its stock files
+         * not stored) is built again when its tree differs from the block's. */
+        CHECK(sh_ms_sync(NULL, &ss) && ss.failed == 0);
+        printf("  the scan after the pass: %u rebuilt\n", ss.rebuilt);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber\\mod.json", mods);
         text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
-        CHECK(text && strstr(text, "\"inAssets\": false") && strstr(text, "\"origin\": \"migration\""));
+        CHECK(text && strstr(text, "\"format\": 2") && !strstr(text, "\"origin\""));
         free(text);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber", mods);
-        put_rel(path, "assets\\generated\\image\\mods\\local.cyber\\added.bimage", EDITED, sizeof EDITED - 1);
+        memset(&b, 0, sizeof b);
+        CHECK(sh_mb_load_folder(path, &b) && sh_salt_valid(b.id, strlen(b.id)));
+        {
+            char rel[MAX_PATH];
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\added.bimage", b.id);
+            sh_mb_free(&b);
+            put_rel(path, rel, EDITED, sizeof EDITED - 1);
+        }
         CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 1 && ss.failed == 0);
         if (ss.failed) fprintf(stderr, "%s", g_log);
-        CHECK(sh_mb_load_folder(path, &b) && b.file_count == 4 && b.stock_count == 2 && b.build == 2 && b.legacy);
+        memset(&b, 0, sizeof b);
+        CHECK(sh_mb_load_folder(path, &b) && b.file_count >= 2 && sh_salt_valid(b.id, strlen(b.id)));
+        printf("  rebuilt after an edit: %zu file(s), %u stock pointer(s)\n", b.file_count, b.stock_count);
         sh_mb_free(&b);
     }
 

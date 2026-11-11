@@ -8,14 +8,14 @@
  *   names: snapModule typing of maps/modules/<path>.decl (and not of a
  *     palette render model), the snapModuleInfo request a module needs, the
  *     pointer-only kinds, the stock restore rule;
- *   the builder: a module bundle of two authored decls and stock pointers to
- *     every derived name builds with 0 errors, pointers outside the size caps,
+ *   the builder: a module bundle of two authored decls and copies of the game
+ *     files it reuses builds with 0 errors, each copy a pointer outside the size caps,
  *     restored stock decls outside the namespace without shadows, the loose
  *     .pages pointer hashed, the manifest loads back with the same hash;
  *   refusals: a carried .sbsp/.ambientsh/.tome/.pages that is not installed
  *     content (with and without the stock reader), a module without its
- *     snapModuleInfo, a module outside maps/modules/mods/<id>/, a malformed
- *     module decl, an out-of-namespace pointer that is not a restore;
+ *     snapModuleInfo, a module outside maps/modules/mods/<salt>/, a malformed
+ *     module decl;
  *   serving: the module is served as a snapModule, a map's moduleName finds
  *     its bundle, pointers are answered with installed bytes, and the restored
  *     material decls are planned like shadows (left to the provider when the
@@ -80,7 +80,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)b
 #define S_MEGA    MP "/mega.decl"
 #define S_PAGES   "virtualtextures/maps/game/mp/t_arena/t_arena.pages"
 
-#define ID        "t.arena"
+#define ID        "tarenaaa"
 #define MOD       "maps/modules/mods/" ID "/arena"
 #define R_DECL    MOD ".decl"
 #define R_INFO    "generated/decls/snapmoduleinfo/mods/" ID "/arena.decl"
@@ -144,25 +144,23 @@ static const sh_mb_file *find(const sh_mb_bundle *b, const char *request)
     return NULL;
 }
 
-/* mod.json with the derived-name pointers, plus `extra` stock entries and top-level keys. */
-static void make_module_mod(const char *dir, const char *id, const char *decl_req, int with_info,
-                            const char *module_text, const char *extra_stock)
+/* A module mod: its two authored decls and copies of the game files it
+ * reuses, under its own names (the build turns each identical copy into a
+ * borrow) or, for a restore, at the game's own name. There is no author
+ * alias for a game file. */
+static void make_module_mod(const char *dir, const char *decl_req, int with_info, const char *module_text)
 {
-    char desc[8192];
-    _snprintf_s(desc, sizeof desc, _TRUNCATE,
-        "{\"id\":\"%s\",\"name\":\"Arena\",\"version\":\"1.0.0\",\"stock\":{"
-        "\"" R_MODEL "\":{\"source\":\"" S_MODEL "\"},"
-        "\"" R_CM "\":{\"source\":\"" S_CM "\"},"
-        "\"" R_AAS "\":{\"source\":\"" S_AAS "\"},"
-        "\"" R_SBSP "\":{\"source\":\"" S_SBSP "\"},"
-        "\"" R_AMB "\":{\"source\":\"" S_AMB "\"},"
-        "\"" R_TOME "\":{\"source\":\"" S_TOME "\"},"
-        "\"" R_PROBE "\":{\"source\":\"" S_PROBE "\"},"
-        "\"" S_MAT "\":{\"source\":\"" S_MAT "\"},"
-        "\"" R_MEGA "\":{\"source\":\"" S_MEGA "\"},"
-        "\"" S_PAGES "\":{\"source\":\"" S_PAGES "\"}%s}}",
-        id, extra_stock ? extra_stock : "");
-    mt_write(dir, "mod.json", desc);
+    mt_write(dir, "mod.json", "{\"name\":\"Arena\",\"snapmap-plus\":{\"format\":2,\"salt\":\"" ID "\"}}");
+    put_rel(dir, "assets\\" R_MODEL, MODEL, sizeof MODEL);
+    put_rel(dir, "assets\\" R_CM, CM, sizeof CM);
+    put_rel(dir, "assets\\" R_AAS, AAS, sizeof AAS);
+    put_rel(dir, "assets\\" R_SBSP, SBSP, sizeof SBSP);
+    put_rel(dir, "assets\\" R_AMB, AMB, sizeof AMB);
+    put_rel(dir, "assets\\" R_TOME, TOME, sizeof TOME);
+    put_rel(dir, "assets\\" R_PROBE, PROBE, sizeof PROBE);
+    put_rel(dir, "assets\\" S_MAT, MAT_TEXT, sizeof MAT_TEXT - 1);
+    put_rel(dir, "assets\\" R_MEGA, MEGA_TEXT, sizeof MEGA_TEXT - 1);
+    put_rel(dir, "assets\\" S_PAGES, PAGES, sizeof PAGES);
     {
         char rel[512];
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", decl_req);
@@ -234,7 +232,7 @@ static void test_builder(const char *tmp, const char *install)
 
     sh_modstock_set_install(install);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena", tmp);
-    make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
+    make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
     CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  module build refused: %s\n", b.first_cause);
     CHECK(b.errors == 0 && b.file_count == 12 && b.stock_count == 10);
@@ -277,7 +275,7 @@ static void test_builder(const char *tmp, const char *install)
 
     /* A carried copy of an installed .sbsp is a pointer; one with other bytes is refused. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_copy", tmp);
-    make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
+    make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
     put_rel(dir, "assets\\" MOD "/copy.sbsp", SBSP, sizeof SBSP);
     CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 0 && (f = find(&b, MOD "/copy.sbsp")) && f->stock && !strcmp(f->stock_source, S_SBSP));
@@ -289,7 +287,7 @@ static void test_builder(const char *tmp, const char *install)
         for (k = 0; kinds[k]; k++) {
             char rel[512];
             _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_carry%d", tmp, k);
-            make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
+            make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
             _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", kinds[k]);
             put_rel(dir, rel, JUNK, sizeof JUNK);
             CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
@@ -301,7 +299,7 @@ static void test_builder(const char *tmp, const char *install)
     /* Without the stock reader the carried kind is refused at the walk. */
     {
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_noreader", tmp);
-        mt_write(dir, "mod.json", "{\"id\":\"" ID "\",\"name\":\"Arena\"}");
+        mt_write(dir, "mod.json", "{\"name\":\"Arena\"}");
         put_rel(dir, "assets\\" MOD "/arena.sbsp", SBSP, sizeof SBSP);
         sh_mb_set_stock_ops(NULL);
         CHECK(!sh_mb_build(dir, "tarenaaa", NULL, &b));
@@ -313,33 +311,24 @@ static void test_builder(const char *tmp, const char *install)
     }
     /* A module without its snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_noinfo", tmp);
-    make_module_mod(dir, ID, R_DECL, 0, MODULE_TEXT, NULL);
+    make_module_mod(dir, R_DECL, 0, MODULE_TEXT);
     CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "a snapModule needs its snapModuleInfo assets/" R_INFO " in the same bundle");
     sh_mb_free(&b);
     /* A module outside maps/modules/mods/<id>/: this rule first, then its missing snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_ns", tmp);
-    make_module_mod(dir, ID, "maps/modules/other/" ID "/arena.decl", 0, MODULE_TEXT, NULL);
+    make_module_mod(dir, "maps/modules/other/" ID "/arena.decl", 0, MODULE_TEXT);
     CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 2);
     CHECK_CAUSE(b, "a snapModule decl must be maps/modules/mods/" ID "/<name>.decl");
     sh_mb_free(&b);
     /* A malformed module decl. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_bad", tmp);
-    make_module_mod(dir, ID, R_DECL, 1, "{\r\n\tedit = {\r\n", NULL);
+    make_module_mod(dir, R_DECL, 1, "{\r\n\tedit = {\r\n");
     CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "is not a well-formed decl");
-    sh_mb_free(&b);
-    /* A pointer outside the namespace that only aliases (not a restore) is
-     * refused unless its name is a game name it replaces. */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_alias", tmp);
-    make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT,
-                    ",\"generated/decls/material/textures/t_arena/alias.decl\":{\"source\":\"" S_MAT "\"}");
-    CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
-    CHECK(b.errors == 1);
-    CHECK_CAUSE(b, "is outside mods/" ID "/, and the game has no file of that name");
     sh_mb_free(&b);
 }
 
@@ -371,7 +360,7 @@ static void test_serving(const char *tmp, const char *install)
     sh_modstock_set_install(install);
     _snprintf_s(store, sizeof store, _TRUNCATE, "%s\\store", tmp);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src", tmp);
-    make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
+    make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
     CHECK(sh_ms_set_root(store));
     CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);

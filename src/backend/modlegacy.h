@@ -1,30 +1,30 @@
-/* Legacy first-generation carriers (beta.6 through beta.19) under the
- * DESIGN.md section 11 policy.
+/* Legacy first-generation carriers (beta.6 through beta.19), for the store
+ * tool only (src\store\build.ps1; never linked into the game DLL, which
+ * refuses such a map: map_carrier.h).
  *
  * A complete "smpkg." set whose ZIP decodes and whose package.json parses is
- * CONVERTED: its tree is written to an ordinary mod folder <data>\mods\<id>\
- * (else <id>@<version>) with the era B layout migrated to assets/ (decls/ ->
- * assets/generated/decls, images/ -> assets/generated/image,
- * shaders/generated/{spirv,renderprogs}/ -> assets/generated/..., manifests,
- * requirements, strings and hud/weapons.json folded into the author block of
- * mod.json, the legacy record and the grandfathered shadows into its product
- * block), the bundle builder completes mod.json, and one manifest row per
- * converted bundle is written into the text (the member's "mods" part,
- * map_carrier.h). A conversion whose content an
- * installed mod already serves (the same bundle hash, or the same id and
- * content) is not kept; that mod answers the carrier. Anything else is
- * CLEANED: stripped, with the key, digest and reason logged and kept for the
- * load gate. smpbind./smpref. rows (never released) are stripped silently.
- * Every carrier gets one "LEGACY:" log line. A published map by another
- * author takes the same path; the bundle stays local and nothing re-saves.
+ * CONVERTED into the one shape: its tree is written to a new mod folder
+ * <data>\mods\<id>\ (else "<id> (2)", ...) with the era B layout migrated to
+ * assets/ (decls/ -> assets/generated/decls, images/ ->
+ * assets/generated/image, shaders/generated/{spirv,renderprogs}/ ->
+ * assets/generated/..., manifests, requirements, strings and
+ * hud/weapons.json folded into mod.json's author part, which keeps name,
+ * version, description, author, homepage, requirements, strings, hud and the
+ * package's other keys except the retired ones: no id, no product block, no
+ * legacy record), the folder takes a salt (sh_ms_assign_salt, from the
+ * package id), the bundle builder builds it under the current rules, and one
+ * manifest row "<salt>@<build>" per converted bundle is written into the
+ * text (the member's "mods" part, map_carrier.h). A conversion whose files
+ * an installed mod already serves is not kept; that mod answers the
+ * carrier. Anything else (also a package the current rules refuse) is
+ * CLEANED: stripped, with the key, digest and reason logged. smpbind. and
+ * smpref. rows (never released) are stripped silently. Every carrier gets
+ * one "LEGACY:" log line.
  *
  * A file under assets/ that a bundle cannot carry (a type outside the
  * Contract 1 whitelist, an empty file, a request path the builder refuses)
  * is left out and counted rather than refusing the package; so is a cvar
- * requirement other than the supported blacklist gates. A delivery key
- * ("delivery.<tree>") memoises its conversion across ZIP encodings: a mod
- * folder whose mod.json records the key, or the bundle the overrides
- * migration (modmigrate.c) built from the same tree, answers the carrier.
+ * requirement other than the supported blacklist gates.
  */
 #ifndef SNAPMAP_PLUS_MODLEGACY_H
 #define SNAPMAP_PLUS_MODLEGACY_H
@@ -50,6 +50,9 @@
 
 enum { SH_MODLEGACY_CONVERT = 1, SH_MODLEGACY_CLEAN = 2 };
 
+/* A first-generation package id: 1 to 64 characters. */
+#define SH_MODLEGACY_ID_CAP 65
+
 typedef struct sh_modlegacy_verdict {
     char key[SH_LEGACY_KEY_CAP];
     char digest[17];
@@ -58,9 +61,10 @@ typedef struct sh_modlegacy_verdict {
     int verdict;                       /* SH_MODLEGACY_CONVERT or SH_MODLEGACY_CLEAN */
     char reason[256];                  /* why it was cleaned; empty for a conversion */
     char layout;                       /* 'B' or 'C' once the ZIP was read, else 0 */
-    char id[SH_MODMANIFEST_ID_CAP];
+    char id[SH_MODLEGACY_ID_CAP];      /* the package's id (its old key) */
+    char salt[SH_MODMANIFEST_SALT_CAP];   /* the converted folder's salt */
     char version[SH_MODMANIFEST_VERSION_CAP];
-    char bundle[SH_MODMANIFEST_HASH_CAP];
+    char build[SH_MODMANIFEST_HASH_CAP];  /* its build hash */
     unsigned long long size;
     unsigned files, shadows;
     unsigned skipped;                  /* files under assets/ a bundle cannot carry, left out */
@@ -173,8 +177,8 @@ unsigned long long sh_modlegacy_zip_carried_bytes(const sh_modlegacy_zip *zip, u
 
 /* Where a converted folder came from (the migration of overrides\). */
 typedef struct sh_modlegacy_origin {
-    const char *version;               /* bundle version label; NULL: "legacy-<digest16>" */
-    const char *source;                /* the migration source, written under legacy */
+    const char *version;               /* bundle version label; NULL: the package's own, else "1.0.0" */
+    const char *source;                /* the migration source (logged) */
     const char *folder;                /* overrides-relative folder, '/'-separated */
     const char *tree;                  /* 64 hex tree fingerprint, or NULL */
     const char *fallback_id;           /* the id when the descriptor names none (era B) */
@@ -183,20 +187,19 @@ typedef struct sh_modlegacy_origin {
 } sh_modlegacy_origin;
 
 /* Convert a delivered beta.16-19 package folder, read with
- * sh_modlegacy_zip_from_folder, into <data>\mods\<id>\ as a legacy bundle
- * whose key is "delivery.<tree>", the key a map carrier of the
- * same tree has. An existing conversion of that key (from a map or an earlier
- * migration) is reused. Fills `verdict`; returns 1 for CONVERT. */
+ * sh_modlegacy_zip_from_folder, into a new salted and built mod folder
+ * <data>\mods\<id>\ (as for a carrier). An installed mod that already serves
+ * the same files answers instead. Fills `verdict`; returns 1 for CONVERT. */
 int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_hex,
                                 const sh_modlegacy_origin *origin, sh_modlegacy_verdict *verdict);
 
 /* Write an authored first-generation folder, read with
- * sh_modlegacy_zip_from_folder, as an unbuilt mod folder at `dest` (which
- * must not exist): mod.json (the descriptor migrated as for a carrier, every
- * other key kept, a product block seeded with the "legacy" record naming the
- * source and the grandfathered shadows) and assets/ in the era C
- * layout. The bundle builder is not run. Fills verdict->id, version, files,
- * shadows and skipped; returns 1 on success, 0 with verdict->reason. */
+ * sh_modlegacy_zip_from_folder, as a new mod folder at `dest` (which must
+ * not exist): mod.json (the descriptor migrated as for a carrier: the
+ * author's part only, no id and no retired key) and assets/ in the era C
+ * layout. Neither salted nor built. Fills verdict->id (the package id, from
+ * which its salting rewrites mods/<id>/), version, files and skipped;
+ * returns 1 on success, 0 with verdict->reason. */
 int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_origin *origin,
                               const char *dest, sh_modlegacy_verdict *verdict);
 
@@ -209,6 +212,12 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length);
 /* The verdicts of the last processed map, for the load gate. Copies at most
  * `cap` and returns the total. */
 size_t sh_modlegacy_last_report(sh_modlegacy_verdict *out, size_t cap);
+
+/* How a converted folder takes its salt: sh_ms_assign_salt's signature
+ * (the store tool and the overrides migration set modstore.c's). Without
+ * one every conversion is cleaned with "no salting is set". */
+typedef int (*sh_modlegacy_salt_fn)(const char *folder, const char *from, char salt_out[9], char *cause, size_t cause_cap);
+void sh_modlegacy_set_salter(sh_modlegacy_salt_fn fn);
 
 /* The data root (default %LOCALAPPDATA%\snapmap-plus); NULL restores the
  * default. Paths are UTF-8, as the store spells them (sh_mb_user_root). */
