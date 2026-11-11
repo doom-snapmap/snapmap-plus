@@ -7,8 +7,9 @@
  * frontend's think loop, which is the UI thread.
  *
  * OPENING A RAWMAP. LoadMap takes a saved-map id, and the reload passes one off disk. Inside that
- * one LoadMap call the load detour gives the editor's parse the rawmap's checked text instead of
- * the borrowed map's (rawmap.c), so the id only has to name something loadable. A request records
+ * one LoadMap call the borrowed map's files are never read (sh_editor_frame_carrier_install) and
+ * the load detour gives the editor's parse the rawmap's checked text (rawmap.c), so the id only
+ * names a slot the engine has listed. A request records
  * the map that was open and the load generation, and is dropped on the frame if either changed: a
  * reload never outlives the map it was asked for.
  *
@@ -30,6 +31,13 @@
  *   `module_base`      = host image base, for resolving the editor singleton. */
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
                             const uint8_t *module_base);
+
+/* Detour ReadLocalSavedMapText so the reload never reads the saved map whose id it borrows:
+ * inside that one LoadMap call, a read of that id gets a placeholder text (the load detour then
+ * parses the rawmap instead) and the slot's files are never opened. Without it a borrowed map the
+ * savegame manager failed to read was marked unreadable, and the My Maps scan deleted it, so
+ * opening a rawmap is refused unless this is installed. `assign_cstr_fn` is IdStrAssignCStr. */
+int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *assign_cstr_fn);
 
 /* The editor Think entry as resolved, or NULL before install ran or on a build that could not
  * resolve it. Valid whether or not the hook went in, and it is the PRE-hook entry: the install

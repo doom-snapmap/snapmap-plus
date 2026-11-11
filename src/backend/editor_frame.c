@@ -26,6 +26,7 @@
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "rawmap.h"       /* the rawmap the reload opens, and the save it writes */
+#include "../fault_shield/recovery.h"   /* a failed reload's dialogs are the product's */
 #include "../common/text.h"
 
 /* EditorFrame prologue steal window. The signature's own 33 bytes, every one of them whole and
@@ -58,6 +59,16 @@ static void           *g_frame_entry = NULL;
  * global, exactly as iface_engine.c documents. So this address IS the `this` LoadMap wants; there is
  * no dereference step, and adding one would read the object's first field as a pointer. */
 static uintptr_t       g_editor_obj  = 0;
+
+/* ReadLocalSavedMapText(localId, idStr *text, ...) and IdStrAssignCStr(idStr *, const char *). */
+typedef int  (*ef_read_text_fn)(const char *id, void *text, void *a3, void *a4);
+typedef void (*ef_assign_cstr_fn)(void *idstr, const char *text);
+static ef_read_text_fn   g_read_text_orig = NULL;
+static ef_assign_cstr_fn g_assign_cstr    = NULL;
+/* The id LoadMap borrows, set on the main thread for exactly the duration of that call. */
+static const char *g_borrowed_id = NULL;
+static DWORD       g_borrow_thread = 0;
+#define EF_READ_TEXT_STOLEN 17
 
 /* A LoadMap fault turns off the reload only: a later call would meet the same engine state. */
 static volatile LONG  g_reload_faulted = 0;
@@ -314,14 +325,21 @@ static void ef_service_reload(void *editor)
     s.data = request.id;
     s.len  = (int)strlen(request.id);
 
+    g_borrow_thread = GetCurrentThreadId();
+    g_borrowed_id = request.id;
     __try {
         rc = g_load_map(editor, &s);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_borrowed_id = NULL;
         InterlockedExchange(&g_reload_faulted, 1);
         backend_log("EF: reload FAULTED -- opening rawmaps is off for the session");
+        shield_note_refused_load();
         sh_rawmap_reload_done(0, 1);
         return;
     }
+    g_borrowed_id = NULL;
+    /* The borrowed map is sound: whatever failed, the engine's notices about it are not true. */
+    if (rc != 0) shield_note_refused_load();
     /* LoadMap returns 0 on the success path (it returns 9 when the editor asked to deactivate
      * mid-load, and passes its inner loader's code through otherwise). */
     sh_rawmap_reload_done(rc, 0);
@@ -336,6 +354,8 @@ static const char *ef_reload_blocker(void)
         return "Opening rawmaps is unavailable on this game build";
     if (InterlockedCompareExchange(&g_reload_faulted, 0, 0) != 0)
         return "Opening rawmaps stopped working this session after an engine error; restart DOOM";
+    if (g_read_text_orig == NULL)
+        return "Opening rawmaps is unavailable on this game build";
     if (InterlockedCompareExchange(&g_reload_pending, 0, 0) != 0)
         return "A rawmap is already opening";
     if (!ef_live_map((void *)g_editor_obj)) return EF_OPEN_A_MAP;
@@ -436,6 +456,44 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
     return 1;
 }
 
+/* The read the reload's LoadMap makes of the borrowed id gets a placeholder: the slot's files are
+ * never opened, so nothing about them can fail and mark the slot unreadable. Every other read is
+ * the engine's own. */
+static int ef_read_text_detour(const char *id, void *text, void *a3, void *a4)
+{
+    const char *borrowed = g_borrowed_id;
+    if (borrowed && GetCurrentThreadId() == g_borrow_thread && id && strcmp(id, borrowed) == 0) {
+        g_assign_cstr(text, "{}");   /* the load detour parses the rawmap's text in its place */
+        return 0;
+    }
+    return g_read_text_orig(id, text, a3, a4);
+}
+
+int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *assign_cstr_fn)
+{
+    void *tramp;
+    if (g_read_text_orig != NULL) return 1;
+    if (read_text_fn == NULL || !status_ok || assign_cstr_fn == NULL) {
+        backend_log("EF: saved-map read detour SKIPPED -- ReadLocalSavedMapText or IdStrAssignCStr unresolved; "
+                    "opening rawmaps is off");
+        return 0;
+    }
+    g_assign_cstr = (ef_assign_cstr_fn)assign_cstr_fn;
+    tramp = hook_prepare(read_text_fn, (void *)ef_read_text_detour, EF_READ_TEXT_STOLEN);
+    if (tramp == NULL) {
+        backend_log("EF: saved-map read detour FAIL -- trampoline preparation failed; opening rawmaps is off");
+        return 0;
+    }
+    g_read_text_orig = (ef_read_text_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_read_text_orig = NULL;
+        backend_log("EF: saved-map read detour commit failed; opening rawmaps is off");
+        return 0;
+    }
+    backend_log("EF: saved-map read detour installed -- a rawmap reload never reads the map it borrows");
+    return 1;
+}
+
 void *sh_editor_frame_target(void)
 {
     return g_frame_entry;
@@ -514,9 +572,9 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
         return 0;
     }
 
-    /* WHICH map is borrowed does not matter: the branch answer stops the slot being WRITTEN, and
-     * identity was always the damage, never content. The newest save is used only because it is
-     * certain to be loadable. */
+    /* WHICH map is borrowed does not matter: its files are never read (ef_read_text_detour), and
+     * the branch answer stops the slot being WRITTEN. The newest complete save is taken because
+     * the engine has certainly listed it. */
     if (!newest_saved_map_id(request.id, sizeof request.id)) {
         backend_log("EF: no saved map found under <Saved Games>\\id Software\\DOOM\\base\\savegame.user");
         if (out_msg && msg_capacity > 0)
