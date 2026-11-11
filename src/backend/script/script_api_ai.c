@@ -631,22 +631,6 @@ static int l_can_see(lua_State *L)
     return 1;
 }
 
-/* ai:distance(target) -> inches between origins */
-static int l_distance(lua_State *L)
-{
-    float at[3], to[3];
-    void *ai;
-    int ok;
-    check_target(L, 2, "distance");
-    ai = self_ai(L, "distance", NULL);
-    if (!ai) { lua_pushnil(L); return 1; }
-    ok = target_point(L, 2, "distance", to, NULL);
-    if (!ok || !g_engine->origin(ai, at)) { lua_pushnil(L); return 1; }
-    lua_pushnumber(L, sqrt((double)(to[0] - at[0]) * (to[0] - at[0]) + (double)(to[1] - at[1]) * (to[1] - at[1]) +
-                           (double)(to[2] - at[2]) * (to[2] - at[2])));
-    return 1;
-}
-
 /* ai:angle_to(target) -> degrees from the demon's facing, -180..180, + to its left */
 static int l_angle_to(lua_State *L)
 {
@@ -905,51 +889,24 @@ static int l_focus_tag(lua_State *L)
     return 0;
 }
 
-static const char *check_node(lua_State *L, int idx, const char *call)
+int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms)
 {
-    size_t n = 0;
-    const char *s = lua_type(L, idx) == LUA_TSTRING ? lua_tolstring(L, idx, &n) : NULL;
-    if (!s || !n || n > 200 || strlen(s) != n)
-        sh_script_refuse(L, "\"%s\" needs the name of an animWeb node, as \"melee\" or \"attacks/melee\"", call);
-    return s;
-}
-
-/* ai:anim_state(node, [via]) asks the demon's animWeb for `node` (through `via`). */
-static int l_anim_state(lua_State *L)
-{
-    sh_script_handle h = 0;
-    const char *node = check_node(L, 2, "anim_state");
-    const char *via = lua_isnoneornil(L, 3) ? NULL : check_node(L, 3, "anim_state");
-    void *ai = self_ai(L, "anim_state", &h);
     sh_ai_arg a[4];
-    if (!ai || !park(ai, h)) { lua_pushboolean(L, 0); return 1; }
-    a[0] = arg_i(SH_AI_ANIMWEB_BODY); a[1] = arg_s('1', node);
-    if (via) {
-        a[2] = arg_s('1', via); a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-        lua_pushboolean(L, run(ai, SH_AI_EV_CHANGE_ANIM_STATE_VIA, a, 4, NULL));
-    } else {
-        a[2] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-        lua_pushboolean(L, run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL));
+    if (!g_engine || !ai || !dest || !park(ai, h)) return 0;
+    a[0] = arg_i(SH_AI_ANIMWEB_BODY);
+    a[1] = arg_s('1', dest);
+    if (force) {
+        a[2] = arg_i(blend_ms);
+        a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
+        return run(ai, SH_AI_EV_FORCE_ANIM_STATE, a, 4, NULL);
     }
-    return 1;
-}
-
-/* ai:anim_force(node, [blend_ms]) jumps straight to `node`. */
-static int l_anim_force(lua_State *L)
-{
-    sh_script_handle h = 0;
-    const char *node = check_node(L, 2, "anim_force");
-    lua_Integer blend = 0;
-    void *ai;
-    sh_ai_arg a[4];
-    if (!lua_isnoneornil(L, 3) && (!lua_isinteger(L, 3) || (blend = lua_tointeger(L, 3)) < 0 || blend > 10000))
-        sh_script_refuse(L, "\"anim_force\" needs a blend time from 0 to 10000 milliseconds");
-    ai = self_ai(L, "anim_force", &h);
-    if (!ai || !park(ai, h)) { lua_pushboolean(L, 0); return 1; }
-    a[0] = arg_i(SH_AI_ANIMWEB_BODY); a[1] = arg_s('1', node); a[2] = arg_i((int)blend);
-    a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-    lua_pushboolean(L, run(ai, SH_AI_EV_FORCE_ANIM_STATE, a, 4, NULL));
-    return 1;
+    if (via) {
+        a[2] = arg_s('1', via);
+        a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
+        return run(ai, SH_AI_EV_CHANGE_ANIM_STATE_VIA, a, 4, NULL);
+    }
+    a[2] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
+    return run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL);
 }
 
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
@@ -957,14 +914,13 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "stop", l_stop },                 { "move_done", l_move_done },
     { "face", l_face },                 { "aim_at", l_aim_at },
     { "set_enemy", l_set_enemy },       { "enemy", l_enemy },
-    { "can_see", l_can_see },           { "distance", l_distance },
+    { "can_see", l_can_see },
     { "angle_to", l_angle_to },         { "aware", l_aware },
     { "awareness", l_awareness },       { "path_length", l_path_length },
     { "can_reach", l_can_reach },       { "find_position", l_find_position },
     { "trigger", l_trigger },           { "trigger_pulled", l_trigger_pulled },
     { "equip", l_equip },               { "laser", l_laser },
     { "laser_sweep", l_laser_sweep },   { "focus_tag", l_focus_tag },
-    { "anim_state", l_anim_state },     { "anim_force", l_anim_force },
     { "turn_done", l_turn_done },       { "laser_state", l_laser_state },
 };
 
@@ -988,31 +944,13 @@ int sh_script_ai_register(void)
 #include "../hook.h"
 #include "../typeinfo.h"
 #include "script_hooks.h"
+#include "script_api_common.h"
 
-/* The event system (the same calls modaction.c uses; lane P22, SCR):
- * ProcessEventArgs(obj, ret[0x18], eventDef, n, idEventArg *a0..a7), the
- * argument clear and the entity-argument builder; FindByName through the
- * decl manager's event interface (+0x90, then +0x10). Format at record
- * +0x08, argument count at +0x2C. */
-#define AI_PROCESS_EVENT_ARGS_RVA SH_RVA(0xB47350u, 0xB46940u)
-#define AI_EVENTARG_CLEAR_RVA     SH_RVA(0xB44640u, 0xB43A50u)
-#define AI_EVENTARG_ENTITY_RVA    SH_RVA(0xB44300u, 0xB438F0u)
-#define AI_EVMGR_VSLOT            0x90u
-#define AI_EV_FIND_VSLOT          0x10u
-#define AI_REC_FORMAT_OFF         0x08u
-#define AI_REC_NUMARGS_OFF        0x2Cu
 /* idAI2's idTypeInfo (the address its GetType returns: VK vtable
  * 0x142035B30 slot 0 = 0x140391970, GL 0x14204F900 slot 0 = 0x140391240). */
 #define AI_IDAI2_TYPEINFO_RVA     SH_RVA(0x5CF7A90u, 0x45FD110u)
 
-typedef struct { char type; char pad[7]; uint64_t value; uint64_t extra; } ai_event_arg;
-typedef void *(*ai_process_fn)(void *obj, void *ret, void *evdef, int n, ai_event_arg *a0, ai_event_arg *a1,
-                               ai_event_arg *a2, ai_event_arg *a3, ai_event_arg *a4, ai_event_arg *a5,
-                               ai_event_arg *a6, ai_event_arg *a7);
-typedef void (*ai_clear_fn)(void *arg);
-typedef void *(*ai_arg_entity_fn)(void *arg, void *entity);
 typedef void *(*ai_vfn0)(void *self);
-typedef void *(*ai_vfn_name)(void *self, const char *name);
 typedef void *(*ai_vfn_int)(void *self, int i);
 typedef uint64_t (*ai_irs_fn)(void *ai);
 typedef int (*ai_awareness_fn)(void *perception, void *entity);
@@ -1022,9 +960,6 @@ typedef int (*ai_path_query_fn)(void *move_fsm, void *query, const float *goal, 
                                 float *out_reachable, float *out_length, uint8_t flag);
 
 static uint8_t          *g_base;
-static ai_process_fn     g_process;
-static ai_clear_fn       g_clear;
-static ai_arg_entity_fn  g_arg_entity;
 static ai_irs_fn         g_irs_target;
 static ai_irs_fn         g_irs_orig;
 static ai_awareness_fn   g_get_awareness;
@@ -1034,11 +969,6 @@ static ai_path_query_fn  g_path_query;
 static const uint64_t   *g_path_global;
 static const uint8_t    *g_ai2_type;
 static int               g_detour_failed;
-
-/* Catalogue records: looked up at first use (the registry is built after
- * the DLL loads); -1 when the name is missing or its format differs. */
-static void *g_evrec[SH_AI_EV_COUNT];
-static int   g_evstate[SH_AI_EV_COUNT];      /* 0 not looked up, 1 ok, -1 unusable */
 
 static int av_only(DWORD code)
 {
@@ -1065,79 +995,32 @@ static void *vfn(void *self, size_t slot)
     } __except (av_only(GetExceptionCode())) { return NULL; }
 }
 
-static void *event_record(int ev)
-{
-    if (g_evstate[ev] == 0) {
-        void *declmgr = sh_typeinfo_get_declmgr(), *evmgr = NULL, *rec = NULL;
-        ai_vfn0 acc = (ai_vfn0)vfn(declmgr, AI_EVMGR_VSLOT);
-        char fmt[16] = { 0 };
-        int numargs = -1;
-        __try {
-            evmgr = acc ? acc(declmgr) : NULL;
-            if (evmgr) {
-                ai_vfn_name find = (ai_vfn_name)vfn(evmgr, AI_EV_FIND_VSLOT);
-                rec = find ? find(evmgr, SH_AI_EVENTS[ev].name) : NULL;
-            }
-            if (rec) {
-                const char *f = *(const char * const *)((uint8_t *)rec + AI_REC_FORMAT_OFF);
-                size_t i;
-                numargs = *(const int *)((uint8_t *)rec + AI_REC_NUMARGS_OFF);
-                for (i = 0; f && f[i] && i + 1 < sizeof fmt; i++) fmt[i] = f[i];
-            }
-        } __except (av_only(GetExceptionCode())) { rec = NULL; }
-        if (!evmgr) return NULL;   /* the registry is not up yet: ask again later */
-        if (rec && numargs == (int)strlen(fmt) && sh_ai_event_format_ok(ev, fmt)) {
-            g_evrec[ev] = rec;
-            g_evstate[ev] = 1;
-        } else {
-            g_evstate[ev] = -1;
-            ai_log("Mod scripts: the game's AI command \"%s\" is not the expected one%s%s%s, so script calls "
-                   "that need it do nothing in this session.", SH_AI_EVENTS[ev].name, rec ? " (it takes \"" : "",
-                   rec ? fmt : "", rec ? "\")" : "");
-        }
-    }
-    return g_evstate[ev] == 1 ? g_evrec[ev] : NULL;
-}
-
+/* A catalogue event through the shared event helper (script_api_common.h),
+ * which finds it by name and checks its arguments against the game's. */
 static int e_event(void *ent, int ev, const sh_ai_arg *args, int n, double *ret)
 {
-    ai_event_arg a[8];
-    ai_event_arg *p[8];
-    uint8_t r[0x18];
-    void *rec;
-    int i, ok = 0;
-    if (ev < 0 || ev >= SH_AI_EV_COUNT || n > 8 || !g_process || !g_clear || !g_arg_entity) return 0;
-    rec = event_record(ev);
-    if (!rec || !ent) return 0;
-    memset(a, 0, sizeof a);
-    memset(r, 0, sizeof r);
-    for (i = 0; i < 8; i++) p[i] = &a[i];
-    __try {
-        for (i = 0; i < n; i++) {
-            const sh_ai_arg *s = &args[i];
-            switch (s->type) {
-            case 'i': case 'b': a[i].type = 'i'; a[i].value = (uint64_t)(uint32_t)s->i; break;
-            case 'f': { uint32_t bits; memcpy(&bits, &s->f, 4); a[i].type = 'f'; a[i].value = bits; break; }
-            case 'v': a[i].type = 'v'; memcpy(&a[i].value, s->v, 12); break;
-            case 's': a[i].type = 's'; a[i].value = (uint64_t)(uintptr_t)s->s; break;
-            case '1': a[i].type = '1'; a[i].value = (uint64_t)(uintptr_t)s->s; break;
-            case '4': a[i].type = '4'; a[i].value = 0; break;
-            case 'e': g_arg_entity(&a[i], s->ent); break;
-            default: return 0;
-            }
+    sh_script_earg a[SH_SCRIPT_EVENT_ARGS], r;
+    int i;
+    if (ev < 0 || ev >= SH_AI_EV_COUNT || n > SH_SCRIPT_EVENT_ARGS || !ent) return 0;
+    for (i = 0; i < n; i++) {
+        const sh_ai_arg *s = &args[i];
+        switch (s->type) {
+        case 'i': case 'b': a[i] = sh_script_earg_int(s->i); break;   /* the engine copies a bool as 'i' */
+        case 'f': a[i] = sh_script_earg_float(s->f); break;
+        case 'v': a[i] = sh_script_earg_vec(s->v); break;
+        case 's': case '1': a[i] = sh_script_earg_text(s->type, s->s); break;
+        case '4': a[i] = sh_script_earg_no_anim(); break;
+        case 'e': a[i] = sh_script_earg_entity(s->ent); break;
+        default: return 0;
         }
-        g_process(ent, r, rec, n, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-        if (ret) {
-            switch (r[0]) {
-            case 'f': { float f; memcpy(&f, r + 8, 4); *ret = f; break; }
-            case 'b': *ret = r[8] != 0; break;
-            default: { int v; memcpy(&v, r + 8, 4); *ret = v; break; }
-            }
-        }
-        g_clear(r);
-        ok = 1;
-    } __except (av_only(GetExceptionCode())) { ok = 0; }
-    return ok;
+    }
+    if (!sh_script_api_event(ent, SH_AI_EVENTS[ev].name, a, n, ret ? &r : NULL)) return 0;
+    if (ret) {
+        if (r.type == 'f') *ret = r.f;
+        else if (r.type == 'b') *ret = (r.i & 0xff) != 0;
+        else *ret = r.i;
+    }
+    return 1;
 }
 
 static void *e_entity(sh_script_handle h) { return sh_script_handle_entity(h); }
@@ -1375,11 +1258,8 @@ int sh_script_ai_install(const uint8_t *module_base)
                                        rel32_at(site + SH_AI_PATH_SITE_GLOBAL_LOAD + 3));
     g_path_query = (ai_path_query_fn)(site + SH_AI_PATH_SITE_QUERY_CALL + 5 +
                                       rel32_at(site + SH_AI_PATH_SITE_QUERY_CALL + 1));
-    g_process = (ai_process_fn)(AI_PROCESS_EVENT_ARGS_RVA ? module_base + AI_PROCESS_EVENT_ARGS_RVA : NULL);
-    g_clear = (ai_clear_fn)(AI_EVENTARG_CLEAR_RVA ? module_base + AI_EVENTARG_CLEAR_RVA : NULL);
-    g_arg_entity = (ai_arg_entity_fn)(AI_EVENTARG_ENTITY_RVA ? module_base + AI_EVENTARG_ENTITY_RVA : NULL);
     g_ai2_type = AI_IDAI2_TYPEINFO_RVA ? module_base + AI_IDAI2_TYPEINFO_RVA : NULL;
-    if (!g_process || !g_clear || !g_arg_entity || !g_ai2_type) {
+    if (!g_ai2_type || !sh_script_api_engine()) {
         ai_log("Mod scripts cannot drive demons in this session: this is not the game build Snapmap+ supports.");
         return 0;
     }

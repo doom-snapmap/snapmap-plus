@@ -344,9 +344,9 @@ static void test_commands(void)
         "    self:move_to({30, 40, 0}, 24, { run = true })\n"
         "    self:face(ent(2))\n"
         "    self:face({x = 0, y = 50, z = 0})\n"
-        "    self:anim_state('melee')\n"
-        "    self:anim_state('attacks/throw', 'attacks/throw_into')\n"
-        "    self:anim_force('idle', 200)\n"
+        "    ai_anim(self, 'melee')\n"
+        "    ai_anim(self, 'attacks/throw', 'attacks/throw_into')\n"
+        "    ai_anim(self, 'idle', nil, 200)\n"
         "    self:set_enemy()\n"
         "    self:set_enemy(ent(2))\n"
         "    self:aim_at(ent(2))\n"
@@ -449,7 +449,7 @@ static void test_queries(void)
         "    print('same ' .. tostring(e == ent(2)))\n"
         "    print('see ' .. tostring(self:can_see(e)))\n"
         "    print('aware ' .. tostring(self:aware()) .. ' ' .. self:awareness() .. ' ' .. self:awareness(ent(4)))\n"
-        "    print(string.format('dist %.1f angle %.1f', self:distance(e), self:angle_to(e)))\n"
+        "    print(string.format('angle %.1f', self:angle_to(e)))\n"
         "    print('path ' .. tostring(self:path_length({x = 30, y = 40, z = 0})) .. ' ' .. tostring(self:can_reach(e)))\n"
         "    print('path2 ' .. tostring(self:path_length(e)))\n"
         "    local p, why = self:find_position({ min = 100, max = 300, ideal = 200, count = 4 })\n"
@@ -463,7 +463,7 @@ static void test_queries(void)
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "enemy nil\naware false nil\n") != NULL);
     CHECK(strstr(log, "same true\nsee true\naware true confirmed confirmed\n") != NULL);
-    CHECK(strstr(log, "dist 141.4 angle 45.0\n") != NULL);
+    CHECK(strstr(log, "angle 45.0\n") != NULL);
     CHECK(strstr(log, "path nil true\n") != NULL);       /* searching on the first ask, found on the second */
     CHECK(strstr(log, "path2 200.0\n") != NULL);
     CHECK(strstr(log, "pos ") != NULL && strstr(log, "pos none") == NULL && strstr(log, "pos searching") == NULL);
@@ -509,7 +509,6 @@ static void test_refusals(void)
     expect_stop("self:move_to({x = 1, y = 2, z = 3}, 5, { fly = true })",
                 "\"move_to\" knows the options run, strafe and aim_while_moving, not \"fly\"");
     expect_stop("self:face(42)", "\"face\" needs a position");
-    expect_stop("self:anim_state(7)", "\"anim_state\" needs the name of an animWeb node");
     expect_stop("self:equip(-1)", "\"equip\" needs an inventory index from 0 to 63");
     expect_stop("self:laser('a b', true)", "\"laser\": \"a b\" is not a usable name");
     expect_stop("self:find_position({ min = 10, max = 5 })", "\"find_position\": max must not be less than min");
@@ -561,10 +560,24 @@ static void test_removed_and_unavailable(void)
     sh_script_ai_set_engine(&g_fake);
 }
 
+/* test only: ai_anim(self, node, [via], [blend_ms]) is what the entity calls
+ * anim_state and anim_force do for a demon (sh_script_ai_anim). */
+static int t_ai_anim(lua_State *L)
+{
+    uint64_t h = sh_script_check_entity(L, 1, "ai_anim");
+    const char *node = luaL_checkstring(L, 2);
+    const char *via = lua_isnoneornil(L, 3) ? NULL : luaL_checkstring(L, 3);
+    int force = !lua_isnoneornil(L, 4);
+    lua_pushboolean(L, sh_script_ai_anim(g_fake.entity((sh_script_handle)h), (sh_script_handle)h, node, via, force,
+                                         force ? (int)luaL_checkinteger(L, 4) : 0));
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
-    CHECK(sh_script_ai_register() == 26);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
+    CHECK(sh_script_ai_register() == 23);
     sh_script_ai_set_engine(&g_fake);
     sh_script_handles_set_resolver(fake_resolve);
 

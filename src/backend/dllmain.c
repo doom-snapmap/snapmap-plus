@@ -372,6 +372,12 @@ static void install_features(const sig_result *results, size_t db)
     else need(sh_script_node_install(results, db, g_doom_base),
               "the game's Relay, output or variable functions are not the expected ones", SH_FEATURE_SCRIPT_NODES,
               NULL, NULL);
+    /* Scripts driving their own demons (script/script_api_ai.h): the calls run
+     * through the entity calls' event helper; the demon park (a detour of the
+     * engine's IsRunningScript) is committed at the first command. */
+    if (sh_feature_is_off(SH_FEATURE_MOD_SCRIPTS)) sh_feature_off(SH_FEATURE_SCRIPT_DEMONS, "mod scripts are off");
+    else need(sh_script_ai_install(g_doom_base),
+              "the game's AI functions are not the expected ones", SH_FEATURE_SCRIPT_DEMONS, NULL, NULL);
 
     /* Decode virtual-texture previews from installed files through the signed
      * engine page decoder; no renderer or GPU calls are needed. */

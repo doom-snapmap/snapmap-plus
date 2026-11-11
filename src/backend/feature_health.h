@@ -40,6 +40,7 @@
 #define SH_FEATURE_MOD_SCENES      "mod scenes"
 #define SH_FEATURE_MOD_SCRIPTS     "mod scripts"
 #define SH_FEATURE_SCRIPT_NODES    "Script nodes"
+#define SH_FEATURE_SCRIPT_DEMONS   "demons driven by scripts"
 #define SH_FEATURE_CONSOLE         "Snapmap+ console commands"
 #define SH_FEATURE_FLY_TO          "fly to"
 #define SH_FEATURE_LARGE_MAPS      "saving large maps"

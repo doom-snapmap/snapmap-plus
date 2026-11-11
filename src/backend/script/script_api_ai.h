@@ -186,8 +186,17 @@ typedef struct sh_script_ai_engine {
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine);
 
 /* Add the AI calls to every script state opened after this. Returns the
- * number of calls added. */
+ * number of calls added. distance, anim_state and anim_force are the entity
+ * calls' (script_api_entity.c), which work on any entity; on a demon
+ * anim_state and anim_force come here. */
 int sh_script_ai_register(void);
+
+/* Park the mod's own demon `ai` (handle h) and ask its body animWeb for
+ * `dest` now: ssaction_ChangeAnimState, ..Via through `via`, or with force
+ * ssaction_ForceAnimState blending blend_ms milliseconds. 1 when the engine
+ * ran it; 0 when the demon cannot be parked or the AI calls are unavailable
+ * this session. Game thread, inside the script tick. */
+int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms);
 
 /* Forget every per-demon record (a new map). The parked table is the
  * engine side's and is checked by spawn id, so a stale entry never parks
@@ -196,11 +205,13 @@ void sh_script_ai_reset(void);
 
 #ifndef SH_SCRIPT_PURE
 #include "../signatures.h"
-/* Boot: resolve the signatures (script_ai_sigs.c), look up each catalogue
- * event and compare its format, prepare the IsRunningScript detour (it is
- * committed at the first park, on the game thread), and register the calls
- * with the engine seam. Returns 1 when the AI calls are usable; 0 with one
- * plain log line otherwise (AI calls then refuse with "not available"). */
+/* Boot, after the entity calls' engine side (sh_script_api_install, whose
+ * shared event helper runs every command and checks its arguments against
+ * the game's event by name): resolve the signatures (script_ai_sigs.c),
+ * prepare the IsRunningScript detour (it is committed at the first park, on
+ * the game thread), and register the calls with the engine seam. Returns 1
+ * when the AI calls are usable; 0 with one plain log line otherwise (AI
+ * calls then refuse with "not available"). */
 int sh_script_ai_install(const uint8_t *module_base);
 #endif
 
