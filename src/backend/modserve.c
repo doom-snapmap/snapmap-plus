@@ -3657,6 +3657,8 @@ int sh_modserve_place_set(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) return -1;
+    /* The map of a place is being played: the start-up cleanup keeps it. */
+    if (norm[0]) (void)sh_ms_place_played(norm);
     return ms_place_apply(norm, 0);
 }
 
@@ -3664,6 +3666,7 @@ int sh_modserve_place_load(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) norm[0] = 0;
+    if (norm[0]) (void)sh_ms_place_played(norm);
     return ms_place_apply(norm, 1);
 }
 

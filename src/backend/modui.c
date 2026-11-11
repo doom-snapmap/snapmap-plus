@@ -12,6 +12,7 @@
 #include "modbundle.h"
 #include "modstore.h"
 #include "modserve.h"
+#include "map_carrier.h"
 #include "modmanifest.h"
 #include "modregistry.h"
 #include "decl_tree.h"
@@ -3105,16 +3106,17 @@ static char *mu_saved_map_text(const char *path, size_t *len)
     return out;
 }
 
-/* How many local saves (My Maps) carry a manifest row of `salt`: every
- * savegame.user\<profile>\SNAPMAPS<id>\map.decl. -1 when the saves folder
- * cannot be read. */
-static int mu_saved_maps_using(const char *salt)
+/* Every local save (My Maps): `fn` gets each readable
+ * savegame.user\<profile>\SNAPMAPS<id>\map.decl text. -1 when the saves
+ * folder cannot be read, else the number of maps read. */
+typedef void (*mu_saved_fn)(void *ctx, const char *text, size_t len);
+static int mu_saved_maps_each(mu_saved_fn fn, void *ctx)
 {
     char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 16], sub[MAX_PATH * 4 + 300], path[MAX_PATH * 4 + 340];
     WIN32_FIND_DATAW fd, sd;
     HANDLE h, hs;
     int count = 0;
-    if (!salt || !salt[0] || !mu_saves_root(root, sizeof root)) return -1;
+    if (!mu_saves_root(root, sizeof root)) return -1;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
     h = mu_find_first(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -3127,27 +3129,126 @@ static int mu_saved_maps_using(const char *salt)
         if (hs == INVALID_HANDLE_VALUE) { free(profile); continue; }
         do {
             char *text, *map;
-            size_t len = 0, i;
-            sh_modmanifest_list rows;
-            int uses = 0;
+            size_t len = 0;
             if (!(sd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if ((map = sh_mb_utf8(sd.cFileName)) == NULL) continue;
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s\\map.decl", root, profile, map);
             free(map);
             text = mu_saved_map_text(path, &len);
             if (!text) continue;
-            memset(&rows, 0, sizeof rows);
-            if (sh_modmanifest_read(text, len, &rows, NULL))
-                for (i = 0; i < rows.count && !uses; i++) uses = !_stricmp(rows.rows[i].salt, salt);
-            sh_modmanifest_list_free(&rows);
+            fn(ctx, text, len);
             free(text);
-            count += uses;
+            count++;
         } while (FindNextFileW(hs, &sd));
         FindClose(hs);
         free(profile);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return count;
+}
+
+typedef struct mu_salt_use { const char *salt; int count; } mu_salt_use;
+
+static void mu_salt_use_one(void *ctx, const char *text, size_t len)
+{
+    mu_salt_use *u = (mu_salt_use *)ctx;
+    sh_modmanifest_list rows;
+    size_t i;
+    int uses = 0;
+    memset(&rows, 0, sizeof rows);
+    if (sh_modmanifest_read(text, len, &rows, NULL))
+        for (i = 0; i < rows.count && !uses; i++) uses = !_stricmp(rows.rows[i].salt, u->salt);
+    sh_modmanifest_list_free(&rows);
+    u->count += uses;
+}
+
+/* How many local saves carry a manifest row of `salt`; -1 when the saves
+ * folder cannot be read. */
+static int mu_saved_maps_using(const char *salt)
+{
+    mu_salt_use u;
+    if (!salt || !salt[0]) return -1;
+    u.salt = salt;
+    u.count = 0;
+    return mu_saved_maps_each(mu_salt_use_one, &u) < 0 ? -1 : u.count;
+}
+
+/* ---- the places cleanup (DECISIONS 22): mods\maps\ is a cache of other
+ * people's maps. A place no saved map of the player records, whose map was
+ * not played for the given days, goes at start; playing it downloads it
+ * again. */
+
+#define MU_PLACES_SEEN_MAX 512
+typedef struct mu_places_seen { char dirs[MU_PLACES_SEEN_MAX][SH_MS_NAME_MAX + 1]; int n; } mu_places_seen;
+
+/* The place a saved map records, as "maps\<segment>"; 0 when it has none. */
+static int mu_saved_place(const char *text, size_t len, char *dir, size_t cap)
+{
+    char segment[SH_CARRIER_PLACE_CAP];
+    return sh_carrier_place(text, len, segment, sizeof segment) == 1 && segment[0] &&
+           sh_modserve_place_norm(segment, dir, cap) && dir[0];
+}
+
+static void mu_place_seen_one(void *ctx, const char *text, size_t len)
+{
+    mu_places_seen *seen = (mu_places_seen *)ctx;
+    char dir[SH_MS_NAME_MAX + 1];
+    int i;
+    if (!mu_saved_place(text, len, dir, sizeof dir)) return;
+    for (i = 0; i < seen->n; i++) if (!_stricmp(seen->dirs[i], dir)) return;
+    if (seen->n < MU_PLACES_SEEN_MAX) strcpy_s(seen->dirs[seen->n++], sizeof seen->dirs[0], dir);
+}
+
+typedef struct mu_place_count { const char *dir; int count; } mu_place_count;
+
+static void mu_place_count_one(void *ctx, const char *text, size_t len)
+{
+    mu_place_count *c = (mu_place_count *)ctx;
+    char dir[SH_MS_NAME_MAX + 1];
+    if (mu_saved_place(text, len, dir, sizeof dir) && !_stricmp(dir, c->dir)) c->count++;
+}
+
+int sh_ms_place_saved_maps(const char *place)
+{
+    mu_place_count c;
+    char dir[SH_MS_NAME_MAX + 1];
+    if (!place || !sh_modserve_place_norm(place, dir, sizeof dir) || !dir[0]) return -1;
+    c.dir = dir;
+    c.count = 0;
+    return mu_saved_maps_each(mu_place_count_one, &c) < 0 ? -1 : c.count;
+}
+
+int sh_ms_places_prune(unsigned days)
+{
+    mu_places_seen *seen = (mu_places_seen *)calloc(1, sizeof *seen);
+    sh_ms_list l;
+    long long now = (long long)_time64(NULL), keep_for = (long long)days * 86400LL;
+    size_t i;
+    int removed = 0, j;
+    if (!seen) return -1;
+    /* Saves that cannot be read keep every place: nothing can be told. */
+    if (mu_saved_maps_each(mu_place_seen_one, seen) < 0 || seen->n == MU_PLACES_SEEN_MAX || !sh_ms_enumerate(&l)) {
+        free(seen);
+        return -1;
+    }
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        char cause[SH_MB_CAUSE_MAX];
+        long long at;
+        int recorded = 0;
+        if (!e->place[0] || !e->folder) continue;
+        for (j = 0; j < seen->n && !recorded; j++) recorded = !_stricmp(seen->dirs[j], e->place);
+        if (recorded) continue;
+        at = sh_ms_place_played_at(e->place);
+        if (at && now - at < keep_for) continue;
+        if (sh_ms_delete_mod_folder(e->folder, cause, sizeof cause)) {
+            removed++;
+            mu_log("places: mods\\%s went: no saved map uses %s and it was not played for %u days", e->name, e->place, days);
+        } else mu_log("places: mods\\%s could not be removed: %s", e->name, cause);
+    }
+    sh_ms_list_free(&l);
+    free(seen);
+    return removed;
 }
 
 /* ---- map scope (modserve.h): what the open map lists */

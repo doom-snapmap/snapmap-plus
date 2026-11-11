@@ -322,23 +322,22 @@ void sh_modui_note_changed(void);
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
-/* ---- For integration: what this file needs from the store and serving side.
- * Each is declared here with the exact signature the window calls; where a
- * thin implementation lives in modui.c until the owning side provides it, the
- * owner's definition replaces it at integration. */
-/* How many of the player's saved maps record `place` ("maps\<segment>") as
- * where they find their mods (the saved map's record), or -1 when it cannot be
- * told. The Mods tab's short view of a downloaded map's mods says whether the
- * start-up cleanup keeps them. Serving or store side; no implementation here:
- * until it lands the short view states the cleanup rule without a count. */
-int sh_ms_place_saved_maps(const char *place);
-
-/* The start-up cleanup: every place under mods\maps\ that no
- * saved map of the player records and whose map was not played for `days`
- * days is removed (playing the map again downloads it again). Returns how
- * many places went, -1 when the store cannot be read. Store side, called at
- * boot; the window only describes it. */
-int sh_ms_places_prune(unsigned days);
+/* ---- the places cleanup (DECISIONS 22). mods\maps\ is a cache of other
+ * people's maps; the saved maps that record a place are read here, where the
+ * window reads the player's saves.
+ *
+ * sh_ms_place_saved_maps: how many of the player's saved maps record `place`
+ *   ("maps\<segment>", or the bare segment) as where they find their mods;
+ *   -1 when the saves cannot be read.
+ * sh_ms_places_prune: at start, every mod folder of a place that no saved map
+ *   records and whose map was not played for `days` days
+ *   (sh_ms_place_played_at) is removed as the short view's Remove removes
+ *   one (sh_ms_delete_mod_folder; an emptied place goes with its record
+ *   entry). Playing the map again downloads it again. Returns how many mod
+ *   folders went; -1, removing nothing, when the saves or the store cannot be
+ *   read. */
+int  sh_ms_place_saved_maps(const char *place);
+int  sh_ms_places_prune(unsigned days);
 
 /* Scripts from downloaded maps (design: the one download approval and the
  * player's setting). The download gate needs to know, before it asks,

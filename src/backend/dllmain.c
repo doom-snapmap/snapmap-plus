@@ -35,6 +35,7 @@
 #include "modhud_scene.h"
 #include "modscene_place.h"
 #include "modstore.h"
+#include "modui.h"         /* sh_ms_places_prune: the start-up cleanup of mods\maps */
 #include "modstock.h"
 #include "modpublished.h"
 #include "modpublish.h"
@@ -183,11 +184,14 @@ static void install_features(const sig_result *results, size_t db)
     /* A mod's "scenes" and "hud" blocks are checked when it is built. */
     sh_mb_set_extra_check(sh_modcontent_check);
 
-    /* No store migration runs here: the installer runs snapmap-plus-store,
-     * which upgrades the retired layout (modstore.h, modmigrate.h). A folder a
-     * crash took away mid-replacement is put back first, so it serves on
-     * this boot, and the work folders a crash left are removed. */
+    /* No store migration runs here: the installer's store tool converts
+     * earlier shapes. A folder a crash took away mid-replacement is put back
+     * first, so it serves on this boot, and the work folders a crash left are
+     * removed. */
     (void)sh_ms_recover_work();
+    /* Other people's maps no saved map uses and that were not played for 30
+     * days leave mods\maps\ (DECISIONS 22). */
+    (void)sh_ms_places_prune(30);
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
     (void)sh_modserve_index_boot();
