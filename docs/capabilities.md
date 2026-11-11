@@ -138,7 +138,9 @@ A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding `mod.json` and 
 already-cooked idTech 6 files at the paths the game asks for. Converting assets from other games is
 Doomforge's job, not this product's. Each mod has a salt, eight letters and digits it is given once,
 the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, and every `strings` key
-starts with `mods/<salt>/`. The folder's name is yours and you can rename it at any time. A stock file
+is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl as `#str_<salt>_<name>`.
+A folder made by hand has no salt until its first scan, so give it strings after that scan has
+written the salt into `mod.json`. The folder's name is yours and you can rename it at any time. A stock file
 the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.

@@ -515,7 +515,8 @@ typedef struct strids_bundle_pass {
 } strids_bundle_pass;
 
 /* One admitted bundle: extra.strings.en is a flat object of key -> text, keys
- * without the #str_ prefix. Other languages
+ * without the #str_ prefix (a mod's keys are <salt>_<name>; the builder
+ * refuses any other, so a decl references #str_<salt>_<name>). Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
 static void inject_bundle(void *context, const char *id, const char *version, int place, const char *extra)

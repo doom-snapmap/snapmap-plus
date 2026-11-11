@@ -472,7 +472,9 @@ These backend files share the work:
   given once, recorded in the builder block, never read from the folder's
   name, which is the author's to change at any time. New names live under
   `mods/<salt>/` (a salt has one spelling in decl text and cooked paths), and
-  every strings key starts with `mods/<salt>/`. Every file is classified from
+  every strings key is `<salt>_<name>` (letters, digits and `_`; no `/`, since
+  the engine's string ids were only ever exercised with `[a-z0-9_]`), which a
+  decl references as `#str_<salt>_<name>`. Every file is classified from
   its path and bytes: an addition or a borrow (a stock pointer) under the salt,
   editor-only types included (a Toybox row travels with its mod), an editor
   tweak (an editor-only type outside the salt), a surface (the game's own bytes
@@ -877,7 +879,9 @@ action and there are no aliases: a row names a salt and a build, and
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
 example crate at `mods/<salt>/example_crate` and its Toybox row, and the row's
-strings under `mods/<salt>/` in `mod.json`; the scan that follows builds it.
+strings in `mod.json` keyed `<salt>_category`, `<salt>_example_crate_name` and
+`<salt>_example_crate_desc` (referenced `#str_<salt>_...`); the scan that
+follows builds it.
 
 The asset rule. A map, rawmap or prefab names the builds its manifest rows
 pin by salt and build hash. `sh_modserve_row_build(row, ref)` (`modserve.c`)
@@ -1181,10 +1185,11 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 
 Display text reaches the engine's `#str_` table through `strids.c`, which reads
 two layers and keeps the first writer of each key (case-insensitive): the
-`strings.en` object of every admitted bundle's author block (installed mods
-before bundles a map delivered, then by id case-insensitively, then version,
-through `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
-`#str_` prefix decls use, and only `en` is read. When two bundles give one key
+`strings.en` object of every admitted bundle's author block (root folders
+before maps' places, then by salt, then folder, through
+`sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
+`#str_` prefix decls use (a mod's keys are `<salt>_<name>`, which the builder
+enforces), and only `en` is read. When two bundles give one key
 different text the first stands and one `B1: strids REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
 (bundles B, baked D)`. The player's own document of earlier releases,

@@ -468,31 +468,32 @@ static void test_bundle_layer(void)
     CHECK(g_dictionary.count == before);
 }
 
-/* Keys under each mod's key (DESIGN-additive 2.4): six packs each carry
- * mods/<key>/ci_tab with the same text. Identical text under different keys
- * is two rows and no conflict; one key with two texts is still one. */
+/* Keys under each mod's salt (DECISIONS 5: <salt>_<name>, no '/'): three
+ * packs each carry <salt>_ci_tab with the same text. Identical text under
+ * different keys is two rows and no conflict; one key with two texts is
+ * still one. */
 static void test_namespaced_keys(void)
 {
     static const fake_bundle packs[] = {
-        { "campaign-interactables", "0.1.0", 0, 1,
-          "{\"strings\":{\"en\":{\"mods/campaign-interactables/ci_tab\":\"Campaign Interactables\"}}}" },
-        { "campaign-interactables-2", "0.1.0", 0, 1,
-          "{\"strings\":{\"en\":{\"mods/campaign-interactables-2/ci_tab\":\"Campaign Interactables\"}}}" },
-        { "campaign-interactables-doors", "0.1.0", 0, 1,
-          "{\"strings\":{\"en\":{\"mods/campaign-interactables-doors/ci_tab\":\"Campaign Interactables\"}}}" },
+        { "ciaaaaaa", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"ciaaaaaa_ci_tab\":\"Campaign Interactables\"}}}" },
+        { "cibbbbbb", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"cibbbbbb_ci_tab\":\"Campaign Interactables\"}}}" },
+        { "cicccccc", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"cicccccc_ci_tab\":\"Campaign Interactables\"}}}" },
     };
     CHECK(user_doc("{}"));
     set_bundles(packs, (int)(sizeof packs / sizeof packs[0]));
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
-    CHECK(count_key("mods/campaign-interactables/ci_tab") == 1 && count_key("mods/campaign-interactables-2/ci_tab") == 1 &&
-          count_key("mods/campaign-interactables-doors/ci_tab") == 1);
-    CHECK(value_for("mods/campaign-interactables-2/ci_tab") &&
-          !strcmp(value_for("mods/campaign-interactables-2/ci_tab"), "Campaign Interactables"));
+    CHECK(count_key("ciaaaaaa_ci_tab") == 1 && count_key("cibbbbbb_ci_tab") == 1 &&
+          count_key("cicccccc_ci_tab") == 1);
+    CHECK(value_for("cibbbbbb_ci_tab") &&
+          !strcmp(value_for("cibbbbbb_ci_tab"), "Campaign Interactables"));
     CHECK(strstr(g_log, "REFUSED") == NULL);
     set_bundles(NULL, 0);
     CHECK(rearm_strings() == 1);
-    CHECK(count_key("mods/campaign-interactables-2/ci_tab") == 0);
+    CHECK(count_key("cibbbbbb_ci_tab") == 0);
 }
 
 
