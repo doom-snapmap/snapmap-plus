@@ -216,31 +216,49 @@ static void keep_throw_gate_open(void)
 
 /* The damaged-save guard.
  *
- * When a save file is damaged the engine offers to delete it. The guard
- * dismisses that offer through the shell's own ClearDialog (no button action
- * runs, so nothing is deleted) and then tells the player, in the engine's own
- * dialog, why the map did not open. */
-static int is_corrupt_save_gdm(int gdm)
+ * GDM 0x1D offers to delete a save the engine could not load: the guard
+ * dismisses it through the shell's own ClearDialog (no button action runs, so
+ * nothing is deleted) and then says why the map did not open. After a load
+ * Snapmap+ itself refused, the engine's "damaged" notice (0x34) and its offer to
+ * replace the map with its published version (0xB0) are dismissed the same
+ * way: the map is sound, Snapmap+ has already said why it did not open, and the
+ * published version must not overwrite it. The browser's scan that deletes
+ * unreadable slots is replaced elsewhere (saved_map_guard.c). */
+/* A refusal applies to the dialogs the same failed load raises: the load
+ * returns, the editor exits and the browser reacts within a few frames. */
+#define REFUSAL_FRAMES 600
+static volatile LONG g_refusal_frames;
+
+void shield_note_refused_load(void)
 {
-    /* CORRUPT_CONTINUE acknowledges a failed load; it does not resume loading. */
-    return gdm == GDM_LOAD_DAMAGED_FILE || gdm == GDM_CORRUPT_CONTINUE
-        || gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT;
+    InterlockedExchange(&g_refusal_frames, REFUSAL_FRAMES);
 }
 
-const char *shield_damaged_save_text(int gdm)
+static int is_guarded_gdm(int gdm, int refused)
 {
-    if (gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT)
-        return "A saved map could not be read because its save file is damaged. "
-               "Snapmap+ kept the file instead of letting the game delete it.";
-    return "This map could not be opened because its save file is damaged. "
-           "Snapmap+ kept the file instead of letting the game delete it.";
+    if (gdm == GDM_LOAD_DAMAGED_FILE) return 1;
+    return refused && (gdm == GDM_CORRUPT_CONTINUE || gdm == GDM_SNAP_REVERT_TO_PREVIOUS);
 }
 
-/* The reason waits until the dismissed dialog has left the queue. */
+const char SHIELD_DAMAGED_SAVE_TEXT[] =
+    "This map could not be opened because DOOM could not read its save file; "
+    "Snapmap+ did not let the game delete it.";
+
+/* A sentence waits until the engine can show a dialog (the dismissed one has
+ * left the queue and no widget is active). */
 #define DAMAGED_NOTICE_WAIT_FRAMES 600
+static char        g_tell_text[2048];
 static const char *g_damaged_text;
 static int         g_damaged_wait;
 static int         g_damaged_ticket;
+
+void shield_tell(const char *text)
+{
+    if (!text || !text[0]) return;
+    strncpy_s(g_tell_text, sizeof g_tell_text, text, _TRUNCATE);
+    g_damaged_text = g_tell_text;
+    g_damaged_wait = DAMAGED_NOTICE_WAIT_FRAMES;
+}
 
 static void damaged_notice_tick(void)
 {
@@ -256,15 +274,20 @@ static void damaged_notice_tick(void)
         g_damaged_ticket = sh_engine_dialog_ask(NOTICE_GDM_ID, NOTICE_BUTTONSET, g_damaged_text);
         if (g_damaged_ticket) { g_damaged_text = NULL; return; }
     }
-    if (--g_damaged_wait <= 0) {
-        shield_fault f = { "save", -1, "save-guard: the damaged-save notice could not be shown", 0, 0 };
+    /* A sentence is never dropped: it waits for the queue, and the log says so once. */
+    if (g_damaged_wait > 0 && --g_damaged_wait == 0) {
+        shield_fault f = { "save", -1, "save-guard: the notice is waiting for the dialog queue", 0, 0 };
         shield_emit(&f);
-        g_damaged_text = NULL;
     }
 }
 
 static void save_guard_tick(void)
 {
+    int refused = 0;
+    if (InterlockedCompareExchange(&g_refusal_frames, 0, 0) > 0) {
+        refused = 1;
+        InterlockedDecrement(&g_refusal_frames);
+    }
     /* An unresolved shell slot disables the guard. */
     if (g_doom_base == NULL || g_shell_slot_at == NULL || !g_clear_dialog) return;
     __try {
@@ -277,8 +300,7 @@ static void save_guard_tick(void)
         if (arr == NULL) return;
         {
             int cnt = *(volatile int *)(dlg + DLGQ_COUNT_OFF);
-            int i, dismissed = 0;
-            int first_gdm = 0;
+            int i, offered_delete = 0;
             int pending_ids[4], pending_count = 0;
             if (cnt < 0 || cnt > 4) return;
             for (i = 0; i < cnt; i++) {
@@ -286,33 +308,28 @@ static void save_guard_tick(void)
                 int gdm;
                 if (*(volatile uint8_t *)(d + DESC_CLEARFLAG_OFF) != 0) continue;   /* already cleared */
                 gdm = *(volatile int *)(d + DESC_GDMID_OFF);
-                if (is_corrupt_save_gdm(gdm)) pending_ids[pending_count++] = gdm;
+                if (is_guarded_gdm(gdm, refused)) pending_ids[pending_count++] = gdm;
             }
             /* Snapshot IDs before calling the engine; no descriptor pointer is
              * retained across native teardown or possible menu reentry. */
             for (i = 0; i < pending_count; i++) {
                 uint32_t params[0x100 / sizeof(uint32_t)] = {0};
                 const char *source = "snapmap-plus save guard";
+                char msg[128];
                 params[0] = (uint32_t)pending_ids[i];
                 memcpy(&params[0x26], &source, sizeof source);
                 params[0x28] = __LINE__;
                 g_clear_dialog(S, params);
-                if (!dismissed) first_gdm = pending_ids[i];
-                dismissed++;
-            }
-            if (dismissed) {
-                char msg[128];
-                _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                            "save-guard: dismissed the engine's delete offer (gdm=0x%x); save kept", first_gdm);
+                if (pending_ids[i] == GDM_LOAD_DAMAGED_FILE) offered_delete = 1;
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, pending_ids[i] == GDM_LOAD_DAMAGED_FILE
+                            ? "save-guard: dismissed the engine's delete offer (gdm=0x%x)"
+                            : "save-guard: dismissed gdm=0x%x after a load Snapmap+ refused", pending_ids[i]);
                 {
                     shield_fault f = { "save", -1, msg, 0, 0 };
                     shield_emit(&f);
                 }
-                if (!g_damaged_ticket) {
-                    g_damaged_text = shield_damaged_save_text(first_gdm);
-                    g_damaged_wait = DAMAGED_NOTICE_WAIT_FRAMES;
-                }
             }
+            if (offered_delete && !g_damaged_ticket) shield_tell(SHIELD_DAMAGED_SAVE_TEXT);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* shell not mapped -> skip this frame */ }
 }

@@ -500,6 +500,23 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       0x11F4E80u, 0x11F40A0u },
 
 
+    { "ReadLocalSavedMapText",
+      /* (localId, idStr *text, ...): reads the slot's map.decl through the savegame manager and
+       * inflates it into *text; 4 when the manager's read fails or the text does not inflate.
+       * Detoured by editor_frame.c, steal 17 (the pushes and `lea rbp,[rsp-0x60]`), so a rawmap
+       * reload never reads the saved map whose id it borrows. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 A0 48 81 EC 60 01 00 00 48 C7 45 10 FE FF FF FF "
+      "48 89 9C 24 B0 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 50 4C 8B E2 4C 8B F9 E8",
+      0x11CBCD0u, 0x11CB0A0u },
+    { "DeleteBadSaveSlots",
+      /* idSnapBrowserHelper::DeleteBadSaveSlots(helper, idList<idStr> *names): deletes every save
+       * slot the savegame manager could not read while My Maps was listed, then queues GDM 0x8D.
+       * Replaced by the fault shield's saved_map_guard.c, steal 19, so no slot is deleted. */
+      "48 8B C4 55 41 56 41 57 48 8D 68 A1 48 81 EC F0 00 00 00 48 C7 44 24 28 FE FF FF FF "
+      "48 89 58 08 48 89 70 18 48 89 78 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 37 4C 8B F2 8B 72 08 "
+      "40 32 FF 48 8D 4C 24 20 E8",
+      0xFCEE30u, 0xFCE320u },
+
     { "WriteLocalSavedMapText",
       /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530).
        * (localId, const idLocalSavedMapModel *, text): serializes the model as the

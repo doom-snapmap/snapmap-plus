@@ -3645,8 +3645,16 @@ text it read, with a `.zip` already imported, is what the parse then uses. That
 reload is the only way a rawmap opens: the `DeserializeFromJson` detour replaces
 the text of the editor's parse inside that one `LoadMap` call and of no other
 parse, so a published map, a lobby map or a map opened from My Maps always loads
-as itself. A reload request records the open map and the load generation and is
-dropped on the frame if either changed; nothing is kept for a later map.
+as itself. `LoadMap` names a saved map, and the reload borrows the id of the
+player's newest complete save; the `ReadLocalSavedMapText` detour
+(`editor_frame.c`) answers the read of that id inside that one call with a
+placeholder, so the borrowed map's files are never opened. Before it, a borrowed
+map the savegame manager failed to read was marked unreadable and the next My
+Maps listing deleted it; without the detour, opening a rawmap is refused. A
+reload that fails anyway marks the dialogs the engine raises about the borrowed
+map as untrue (`shield_note_refused_load`). A reload request records the open
+map and the load generation and is dropped on the frame if either changed;
+nothing is kept for a later map.
 
 The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) runs the
 denial gate first, as every hold does (see Published maps and missing mods).
@@ -4244,11 +4252,31 @@ and the crash record carries it; the fault's code and address go to
 drives the editor's own exit to the map browser and answers its exit prompt Yes,
 which is what the sentence says.
 
-The damaged-save guard dismisses the engine's offer to delete a save it cannot
-read (the shell's own ClearDialog, so no button action runs and nothing is
-deleted) and then, once that dialog has left the queue, raises one engine dialog
-of its own saying why the map did not open and that the file was kept
-(`shield_damaged_save_text`).
+DOOM never deletes a saved map it cannot read. Each time My Maps is listed the
+savegame manager reports the slots it could not read (a failed `.verify`
+signature, a file it could not open or inflate), and
+`idSnapBrowserHelper::DeleteBadSaveSlots` (VK 0xFCEE30, GL 0xFCE320) deletes
+every one before it queues GDM 0x8D, "removed corrupt data". The fault shield
+replaces that function (`saved_map_guard.c`): the slot stays in the saved games
+folder untouched, its files are copied to
+`%LOCALAPPDATA%\snapmap-plus\kept-maps\SNAPMAPS<id>\` (a copy holding other
+bytes is never overwritten; the next goes to `SNAPMAPS<id>-2`) and each copy is
+compared byte for byte. The player reads one sentence, once per slot per
+session, naming the map and either the verified copy or, when no copy could be
+made, the folder its files are still in. The player's own Delete in My Maps is
+another engine path and still deletes. Without the signature the guard is off
+and the shield log says DOOM deletes saved maps it cannot read.
+
+The damaged-save guard dismisses the engine's offer to delete a save it could
+not load (GDM 0x1D, through the shell's own ClearDialog, so no button action
+runs and nothing is deleted) and then, once that dialog has left the queue,
+raises one engine dialog of its own, `SHIELD_DAMAGED_SAVE_TEXT`: the map could
+not be opened because DOOM could not read its save file, and Snapmap+ did not
+let the game delete it. After a load Snapmap+ itself refused (a map in a shape
+this build does not read, a map whose mods are missing, a failed rawmap reload),
+the engine's "damaged" notice (0x34) and its offer to replace the map with its
+published version (0xB0) are dismissed the same way for the next 600 frames:
+the map is sound and Snapmap+ has already said why it did not open.
 
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves

@@ -107,6 +107,7 @@ static void reset(void)
     g_editor_at = g_load_state_at = g_last_err_at = g_suppr_a_at = NULL;
     g_armed = 0;
     g_damaged_text = NULL; g_damaged_wait = 0; g_damaged_ticket = 0;
+    g_refusal_frames = 0;
     dialog_asks = dialog_can_ask = main_frames = 0;
     dialog_text = NULL;
     memset(&g_eng, 0, sizeof g_eng);
@@ -120,7 +121,7 @@ static void test_mixed_queue_retirement(void)
 {
     reset();
     *(int *)(manager + DLGQ_COUNT_OFF) = 2;
-    *(int *)queue = GDM_CORRUPT_CONTINUE;
+    *(int *)queue = GDM_LOAD_DAMAGED_FILE;
     *(int *)(queue + DLG_DESC_STRIDE) = 0x29; /* package consent remains queued */
     manager[DLGMGR_ACTIVE_OFF] = 1;
     widget_visible = callback_alive = 1;
@@ -146,8 +147,10 @@ static void test_guard_refusals_and_selection(void)
 {
     reset();
     *(int *)(manager + DLGQ_COUNT_OFF) = 4;
-    const int ids[] = {GDM_LOAD_DAMAGED_FILE, GDM_CORRUPT_CONTINUE,
-                      GDM_SNAPMAP_DETECTED_CORRUPT, GDM_SNAPMAP_REMOVED_CORRUPT};
+    /* The browser scan's "removed corrupt data" notice (0x8D) is never the guard's:
+     * the scan itself is replaced (saved_map_guard.c), and the notice says what the
+     * engine did. */
+    const int ids[] = {GDM_LOAD_DAMAGED_FILE, GDM_CORRUPT_CONTINUE, GDM_SNAP_REVERT_TO_PREVIOUS, 0x8d};
     for (int i = 0; i < 4; i++) *(int *)(queue + (size_t)i * DLG_DESC_STRIDE) = ids[i];
     g_clear_dialog = NULL;
     save_guard_tick();
@@ -156,17 +159,34 @@ static void test_guard_refusals_and_selection(void)
     *(int *)(manager + DLGQ_COUNT_OFF) = 5;
     save_guard_tick();
     CHECK(!clears && !queue[DESC_CLEARFLAG_OFF]);
+    /* Without a refusal of Snapmap+'s, only the offer to delete is dismissed. */
     *(int *)(manager + DLGQ_COUNT_OFF) = 4;
     save_guard_tick();
-    CHECK(clears == 4);
-    for (int i = 0; i < 4; i++) CHECK(queue[(size_t)i * DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF] == 1);
+    CHECK(clears == 1 && queue[DESC_CLEARFLAG_OFF] == 1);
+    CHECK(!queue[DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF] && !queue[2 * DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF]);
+    /* After Snapmap+ refused the load, the "damaged" notice and the offer to
+     * replace the map with its published version go too. */
+    shield_note_refused_load();
     save_guard_tick();
-    CHECK(clears == 4);
+    CHECK(clears == 3);
+    CHECK(queue[DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF] == 1 && queue[2 * DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF] == 1);
+    CHECK(!queue[3 * DLG_DESC_STRIDE + DESC_CLEARFLAG_OFF]);
+    save_guard_tick();
+    CHECK(clears == 3);
+    /* The refusal lasts a bounded number of frames. */
+    reset();
+    *(int *)(manager + DLGQ_COUNT_OFF) = 1;
+    *(int *)queue = GDM_CORRUPT_CONTINUE;
+    shield_note_refused_load();
+    for (int i = 0; i < REFUSAL_FRAMES; i++) { if (i == 0) *(int *)(manager + DLGQ_COUNT_OFF) = 0; save_guard_tick(); }
+    *(int *)(manager + DLGQ_COUNT_OFF) = 1;
+    save_guard_tick();
+    CHECK(!clears);
 
     reset();
     *(int *)(manager + DLGQ_COUNT_OFF) = 2;
     *(int *)queue = 0x29;
-    *(int *)(queue + DLG_DESC_STRIDE) = GDM_CORRUPT_CONTINUE;
+    *(int *)(queue + DLG_DESC_STRIDE) = GDM_LOAD_DAMAGED_FILE;
     manager[DLGMGR_ACTIVE_OFF] = 1;
     widget_visible = callback_alive = 1;
     save_guard_tick();
@@ -231,10 +251,27 @@ static void test_damaged_notice(void)
     CHECK(clears == 1 && !dialog_asks);           /* the dialog is still leaving the queue */
     dialog_can_ask = 1;
     CHECK(frame_detour(shell) == 123);
-    CHECK(dialog_asks == 1 && dialog_text && strstr(dialog_text, "kept the file"));
+    CHECK(dialog_asks == 1 && dialog_text && strstr(dialog_text, "did not let the game delete it"));
+    CHECK(!strstr(dialog_text, "kept"));   /* nothing the dismissal cannot guarantee */
     CHECK(frame_detour(shell) == 123);
     CHECK(dialog_asks == 1);                       /* one notice per dismissal */
     CHECK(main_frames == 3);                       /* the console registration tick runs every frame */
+}
+
+/* After a refusal the dismissed notices are not replaced: Snapmap+ already
+ * said why. A sentence handed to shield_tell is shown once. */
+static void test_refusal_is_quiet_and_tell_shows(void)
+{
+    reset();
+    *(int *)(manager + DLGQ_COUNT_OFF) = 1;
+    *(int *)queue = GDM_CORRUPT_CONTINUE;
+    dialog_can_ask = 1;
+    shield_note_refused_load();
+    CHECK(frame_detour(shell) == 123 && frame_detour(shell) == 123);
+    CHECK(clears == 1 && !dialog_asks);
+    shield_tell("one sentence");
+    CHECK(frame_detour(shell) == 123);
+    CHECK(dialog_asks == 1 && !strcmp(dialog_text, "one sentence"));
 }
 
 int main(void)
@@ -244,6 +281,7 @@ int main(void)
     test_frame_route();
     test_install();
     test_damaged_notice();
+    test_refusal_is_quiet_and_tell_shows();
     if (failed) return 1;
     puts("recovery dialog lifetime, damaged-save notice and Frame route tests passed");
     return 0;

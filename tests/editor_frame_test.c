@@ -38,13 +38,25 @@ int sh_rawmap_set_save_target(const char *path)
 int sh_rawmap_write_from_live(void *map, const char *path, char *msg, int cap,
                               unsigned long long *bytes)
 { (void)map; (void)msg; (void)cap; (void)bytes; ++writes; strcpy_s(written, sizeof written, path); return 1; }
+static int refusals, disk_reads, load_rc;
+static char placeholder[16];
+void shield_note_refused_load(void) { ++refusals; }
 static void original_frame(void *ed, void *arg) { (void)ed; (void)arg; }
+/* The engine's ReadLocalSavedMapText: reading a slot off disk. */
+static int disk_read(const char *id, void *text, void *a3, void *a4)
+{ (void)id; (void)text; (void)a3; (void)a4; ++disk_reads; return 4; }
+static void assign_cstr(void *idstr, const char *text) { (void)idstr; strcpy_s(placeholder, sizeof placeholder, text); }
+/* LoadMap reads the slot it is named, as the engine does. */
 static int load_map(void *ed, void *id)
 {
-    (void)ed; (void)id;
+    const char *name = ((const ef_idstr *)id)->data;
+    int got;
+    (void)ed;
     ++loads;
     if (fault_load) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
-    return 0;
+    got = ef_read_text_detour(name, NULL, NULL, NULL);
+    if (got != 0) return got;
+    return load_rc;
 }
 static void queue_reload(void *map)
 {
@@ -63,6 +75,11 @@ static void reset(void)
     g_editor_obj = (uintptr_t)editor;
     g_frame_orig = original_frame;
     g_load_map = load_map;
+    g_read_text_orig = disk_read;
+    g_assign_cstr = assign_cstr;
+    g_borrowed_id = NULL;
+    refusals = disk_reads = load_rc = 0;
+    placeholder[0] = '\0';
     g_save_pending = g_reload_pending = g_reload_faulted = 0;
     generation = 0;
     writes = choices = ticks = loads = tells = fault_load = 0;
@@ -113,11 +130,31 @@ int main(void)
     CHECK(!writes);
     CHECK(tells == 1);   /* the cancelled save is told */
 
-    /* A reload opens through the map it was asked for. */
+    /* A reload opens through the map it was asked for, and never reads the
+     * saved map whose id it borrows: that read gets a placeholder. */
     reset();
     queue_reload(&map_a);
     sh_editor_frame_detour(editor, NULL);
     CHECK(loads == 1 && done_rc == 0 && done_faulted == 0 && !g_reload_pending);
+    CHECK(!disk_reads && !strcmp(placeholder, "{}") && !g_borrowed_id && !refusals);
+    /* Outside the reload, and for any other id, the read is the engine's own. */
+    CHECK(ef_read_text_detour("0123456789abcdef0123", NULL, NULL, NULL) == 4 && disk_reads == 1);
+    g_borrowed_id = "0123456789abcdef0123";
+    g_borrow_thread = GetCurrentThreadId();
+    CHECK(ef_read_text_detour("FFFFFFFFFFFFFFFFFFFF", NULL, NULL, NULL) == 4 && disk_reads == 2);
+    g_borrowed_id = NULL;
+
+    /* A reload that fails anyway marks the engine's notices about the borrowed map untrue. */
+    reset();
+    load_rc = 4;
+    queue_reload(&map_a);
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(done_rc == 4 && refusals == 1 && !disk_reads);
+
+    /* Without the read detour a rawmap is never opened. */
+    reset();
+    g_read_text_orig = NULL;
+    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "unavailable"));
 
     /* A reload request does not outlive its map: another map, or the same
      * allocation reused by a newer load, cancels it and says so. */
@@ -148,7 +185,7 @@ int main(void)
     fault_load = 1;
     queue_reload(&map_a);
     sh_editor_frame_detour(editor, NULL);
-    CHECK(loads == 1 && done_faulted == 1 && g_reload_faulted);
+    CHECK(loads == 1 && done_faulted == 1 && g_reload_faulted && refusals == 1 && !g_borrowed_id);
     ticks = 0;
     sh_editor_frame_detour(editor, NULL);
     CHECK(ticks == 1);

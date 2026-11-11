@@ -70,9 +70,8 @@
  * clear-flag write can release callbacks while their widget remains visible.
  * The wrapper performs native teardown without invoking a deletion action. */
 #define GDM_LOAD_DAMAGED_FILE          0x1d   /* single-map LOAD reject (Delete/Cancel prompt) */
-#define GDM_CORRUPT_CONTINUE           0x34   /* corrupt-continue */
-#define GDM_SNAPMAP_DETECTED_CORRUPT   0x83   /* browser bad-slot scan: detected-corrupt */
-#define GDM_SNAPMAP_REMOVED_CORRUPT    0x8d   /* browser bad-slot scan: removed-corrupt */
+#define GDM_CORRUPT_CONTINUE           0x34   /* "the save file appears to be damaged" (one button) */
+#define GDM_SNAP_REVERT_TO_PREVIOUS    0xb0   /* offer to replace a saved map with its published version */
 
 /* The error dispatcher copies formatted Error/FatalError text to a 0x800-byte
  * buffer ("last_error_msg") immediately before throwing. Raw hardware faults do

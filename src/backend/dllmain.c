@@ -144,6 +144,11 @@ static void install_features(const sig_result *results, size_t db)
         void *ed_frame = sig_fn(results, db, "EditorFrame", &clean);
         need(sh_editor_frame_install(ed_frame, clean, sig_fn(results, db, "EditorLoadMap", NULL), g_doom_base),
              "the editor frame hook is not installed", SH_FEATURE_RAWMAPS, NULL, NULL);
+        {
+            void *read_text = sig_fn(results, db, "ReadLocalSavedMapText", &clean);
+            need(sh_editor_frame_carrier_install(read_text, clean, sig_fn(results, db, "IdStrAssignCStr", NULL)),
+                 "a rawmap cannot be opened without reading one of your saved maps", SH_FEATURE_RAWMAPS, NULL, NULL);
+        }
         /* Save Rawmap serializes the open map, not the newest save on disk. The tag
          * function also derives the engine's idStr ctor/dtor. */
         sh_rawmap_set_live_serialize(sig_fn(results, db, "SnapMapToJson", NULL),
