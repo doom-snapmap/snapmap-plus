@@ -507,7 +507,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
     CHECK(said("  strings\\strids.json: it is not a JSON object of \"id\": \"text\" pairs; fix it"));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_PARTIAL);
-    CHECK(said("overrides\\packed.zip: skipped -- a ZIP archive"));
+    CHECK(said("overrides\\packed.zip: skipped -- it is a ZIP archive"));
     CHECK(said("migration: strings\\strids.json left as it is: it is not a JSON object"));
     CHECK(said("migration: the loose files of overrides\\ moved into mods\\my-overrides\\"));
     CHECK(said("migration: overrides\\ kept: 1 entry is not moved into mods\\ (first: packed.zip)"));

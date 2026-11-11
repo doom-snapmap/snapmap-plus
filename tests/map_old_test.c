@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/backend/map_old.h"
+#include "../src/store/map_old.h"
 #include "../src/backend/map_carrier.h"
 #include "../src/backend/modmanifest.h"
 

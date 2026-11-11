@@ -18,15 +18,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/backend/modlegacy.h"
+#include "../src/store/modlegacy.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modbundle.h"
 
 /* mod_seam_stub.c: the serving layer's stand-ins. */
-extern int g_mod_stub_rescans;
-#include "../src/backend/map_legacy_payload.h"
+
+#include "../src/store/map_legacy_payload.h"
 #include "../src/backend/map_shards.h"
-#include "../src/backend/map_old.h"
+#include "../src/store/map_old.h"
 #include "../src/backend/map_carrier.h"
 #include "../src/backend/config_json.h"
 
@@ -716,7 +716,6 @@ static void convert_era_c(void)
     char *map, *out, folder[MAX_PATH], digest[17];
     sh_modlegacy_verdict v[4];
     unsigned count = 0;
-    int rescans;
     printf("-- era C package converts\n");
     sh_modlegacy_reset();
     reset_counts();
@@ -725,12 +724,8 @@ static void convert_era_c(void)
     map = carrier_map(BASE_MAP, "delivery.c6918a65f2ddbf6b25ebff1564fcf3bc26de6ade3bfc89ba2a472a6790a547ed",
                       zip, zn, 8192, -1, -1, NULL, &mn);
     g_build_calls = 0;
-    rescans = g_mod_stub_rescans;
     out = sh_modlegacy_process(map, mn, &on);
     CHECK(out != NULL && g_legacy_lines == 1 && g_convert_lines == 1 && g_build_calls == 1);
-    /* The converted bundle is not indexed yet: the serving index is rebuilt
-     * once so the activation later in the same parse can see it. */
-    CHECK(g_mod_stub_rescans == rescans + 1);
     CHECK(sh_modlegacy_last_report(v, 4) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT && v[0].layout == 'C');
     CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") &&
           v[0].key_form == SH_LEGACY_KEY_DELIVERY && v[0].files == 3 && v[0].salt[0] == 't');

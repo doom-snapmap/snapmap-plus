@@ -12,7 +12,6 @@
 #include "modbundle.h"
 #include "modstore.h"
 #include "modstore_upgrade.h"
-#include "modserve.h"
 #include "config_json.h"
 #include "backend_log.h"
 
@@ -60,9 +59,6 @@ typedef struct mg_ctx {
 
 static SRWLOCK g_mg_lock = SRWLOCK_INIT;
 static char g_mg_root[MAX_PATH * 4];
-static volatile LONG g_mg_busy;
-static HANDLE g_mg_thread;
-static sh_modmigrate_stats g_mg_last;
 
 static void mg_log(const char *fmt, ...)
 {
@@ -310,9 +306,9 @@ static void mg_measure_item(mg_item *it, const wchar_t *path)
 {
     mg_measure(path, &it->files, &it->bytes, 0);
     if (it->files > SH_MODMIGRATE_MAX_FILES || it->bytes > SH_MODMIGRATE_MAX_BYTES)
-        mg_skip(it, "over the migration cap of %u files or %llu MiB (at least %u file(s), %llu MiB); install it "
-                    "yourself in parts with sh_mods install", SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES >> 20,
-                it->files, it->bytes >> 20);
+        mg_skip(it, "it holds at least %u file(s) and %llu MiB, more than the %u files or %llu MiB one folder can move; "
+                    "split it into smaller mod folders and put each in the mods folder yourself",
+                it->files, it->bytes >> 20, SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES >> 20);
 }
 
 /* The retired loose-file layer (SnapHak and early releases served
@@ -373,8 +369,8 @@ static int mg_scan(mg_ctx *c)
             /* Every other loose file is the loose step's. */
             it = mg_add(c, name, MG_ZIP);
             if (it)
-                mg_skip(it, "a ZIP archive; unpack it into its own folder (package.json at the top) and run "
-                            "sh_mods migrate --again");
+                mg_skip(it, "it is a ZIP archive; unpack it into a folder of its own with package.json at the top, then "
+                            "close DOOM and run: snapmap-plus migrate");
         } else if (mg_is_group(name)) {
             /* beta.16-19 delivered packages: overrides\map-<16 hex>\<package>. */
             WIN32_FIND_DATAW gd;
@@ -442,9 +438,9 @@ static int mg_scan(mg_ctx *c)
             }
             it = mg_add(c, name, MG_UNMARKED);   /* none one level down is the loose layer */
             if (it)
-                mg_skip(it, "no package.json or mod.json at its top; it holds %u package folders one level down "
-                            "(first: %s\\%s); move each directly under " MG_OVERRIDES " and run sh_mods migrate --again",
-                        nested, name, first);
+                mg_skip(it, "it has no package.json or mod.json at its top but holds %u package folders one level down "
+                            "(the first is %s\\%s); move each directly into " MG_OVERRIDES ", then close DOOM and run: "
+                            "snapmap-plus migrate", nested, name, first);
         }
         free(name);
         free(path);
@@ -731,8 +727,6 @@ static void mg_log_item(const mg_item *it)
         mg_log("MODS: migration: " MG_OVERRIDES "\\%s: skipped -- %s", shown, it->reason);
         break;
     default:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: waiting for the background pass (%u file(s), %llu MiB)",
-               shown, it->files, it->bytes >> 20);
         break;
     }
 }
@@ -767,8 +761,8 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         unsigned long long carried = sh_modlegacy_zip_carried_bytes(&zip, &carried_files);
         if (carried > SH_MB_MAX_TOTAL || carried_files > SH_MB_MAX_FILES) {
             it->outcome = SH_MODMIGRATE_REFUSED;
-            mg_cause(it->reason, sizeof it->reason, "a bundle of it would hold at least %u file(s), %llu MiB, over the "
-                     "bundle caps of %u files and %llu MiB; split it into smaller mods", carried_files, carried >> 20,
+            mg_cause(it->reason, sizeof it->reason, "it would hold at least %u file(s) and %llu MiB, more than one mod can "
+                     "hold (%u files, %llu MiB); split it into smaller mods", carried_files, carried >> 20,
                      SH_MB_MAX_FILES, SH_MB_MAX_TOTAL >> 20);
             goto out;
         }
@@ -986,7 +980,7 @@ static int mg_write_record(mg_ctx *c, int complete)
     mg_stats(c, &s);
     GetSystemTimeAsFileTime(&ft);
     now = ((((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ull) / 10000000ull;
-    /* A completed pass keeps what idempotence and the Migrate button need:
+    /* A completed pass keeps what idempotence and the store tool's check need:
      * complete, migratedAt, source, the rows of folders not done (skipped or
      * refused) and the trees (which resolve maps published before Contract 5).
      * A pass in progress writes everything. */
@@ -1119,14 +1113,6 @@ static mg_ctx *mg_prepare(int again, int *why)
     return c;
 }
 
-static void mg_publish_stats(const mg_ctx *c)
-{
-    sh_modmigrate_stats s;
-    mg_stats(c, &s);
-    AcquireSRWLockExclusive(&g_mg_lock);
-    g_mg_last = s;
-    ReleaseSRWLockExclusive(&g_mg_lock);
-}
 
 static void mg_finish(mg_ctx *c)
 {
@@ -1138,39 +1124,6 @@ static void mg_finish(mg_ctx *c)
            "stock pointers, %llu KiB not stored; record %s; the " MG_OVERRIDES " folder is unchanged",
            s.entries, s.entries == 1 ? "y" : "ies", s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates,
            s.bytes >> 20, s.ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\snapmap-plus.json (migration)" : "NOT written");
-    mg_publish_stats(c);
-}
-
-static DWORD WINAPI mg_worker(void *param)
-{
-    mg_ctx *c = (mg_ctx *)param;
-    size_t i;
-    int any = 0;
-    for (i = 0; i < c->count; i++)
-        if (c->items[i].outcome == SH_MODMIGRATE_PENDING) {
-            mg_do_item(c, &c->items[i], i);
-            mg_publish_stats(c);
-            any = 1;
-        }
-    mg_finish(c);
-    if (any) {
-        int n = sh_modserve_index_rescan();
-        mg_log("MODS: migration: serving index rebuilt after the background pass (%d bundle(s) active); new editor rows "
-               "need 'sh_mods palette rebuild' if the editor palette was already built", n);
-    }
-    mg_ctx_free(c);
-    InterlockedExchange(&g_mg_busy, 0);
-    return 0;
-}
-
-static int mg_spawn(mg_ctx *c)
-{
-    HANDLE t;
-    if (g_mg_thread) { WaitForSingleObject(g_mg_thread, 0); CloseHandle(g_mg_thread); g_mg_thread = NULL; }
-    t = CreateThread(NULL, 0, mg_worker, c, 0, NULL);
-    if (!t) return 0;
-    g_mg_thread = t;
-    return 1;
 }
 
 int sh_modmigrate_run(int again, sh_modmigrate_stats *stats)
@@ -1179,12 +1132,10 @@ int sh_modmigrate_run(int again, sh_modmigrate_stats *stats)
     int why;
     size_t i;
     if (stats) memset(stats, 0, sizeof *stats);
-    if (InterlockedCompareExchange(&g_mg_busy, 1, 0) != 0) return -1;
     c = mg_prepare(again, &why);
     if (!c) {
-        InterlockedExchange(&g_mg_busy, 0);
-        if (why == 0) mg_log("MODS: migration: nothing to do (no overrides folder, or the record says it is done; "
-                             "'sh_mods migrate --again' repeats it)");
+        if (why == 0) mg_log("MODS: migration: nothing to do (there is no overrides folder, or everything in it was moved "
+                             "already)");
         return why;
     }
     for (i = 0; i < c->count; i++) {
@@ -1194,51 +1145,7 @@ int sh_modmigrate_run(int again, sh_modmigrate_stats *stats)
     mg_finish(c);
     if (stats) mg_stats(c, stats);
     mg_ctx_free(c);
-    InterlockedExchange(&g_mg_busy, 0);
     return 1;
-}
-
-int sh_modmigrate_start(int again)
-{
-    mg_ctx *c;
-    int why;
-    size_t i;
-    if (InterlockedCompareExchange(&g_mg_busy, 1, 0) != 0) return -1;
-    c = mg_prepare(again, &why);
-    if (!c) {
-        InterlockedExchange(&g_mg_busy, 0);
-        if (why == 0) mg_log("MODS: migration: nothing to do (no overrides folder, or the record says it is done; "
-                             "'sh_mods migrate --again' repeats it)");
-        return why;
-    }
-    for (i = 0; i < c->count; i++) if (c->items[i].outcome != SH_MODMIGRATE_PENDING) mg_log_item(&c->items[i]);
-    if (!mg_spawn(c)) {
-        mg_ctx_free(c);
-        InterlockedExchange(&g_mg_busy, 0);
-        mg_log("MODS: migration: the background thread could not start");
-        return -1;
-    }
-    return 1;
-}
-
-int sh_modmigrate_busy(void) { return InterlockedCompareExchange(&g_mg_busy, 0, 0) != 0; }
-
-int sh_modmigrate_wait(unsigned ms)
-{
-    ULONGLONG until = GetTickCount64() + ms;
-    while (sh_modmigrate_busy()) {
-        if (GetTickCount64() >= until) return 0;
-        Sleep(10);
-    }
-    return 1;
-}
-
-void sh_modmigrate_last(sh_modmigrate_stats *out)
-{
-    if (!out) return;
-    AcquireSRWLockShared(&g_mg_lock);
-    *out = g_mg_last;
-    ReleaseSRWLockShared(&g_mg_lock);
 }
 
 /* --------------------------------------------------------------- pending ---- */
@@ -1298,8 +1205,8 @@ static unsigned long long mg_changed_at(const wchar_t *path, const WIN32_FIND_DA
 {
     unsigned long long at = mg_unix_time(&fd->ftLastWriteTime), made = mg_unix_time(&fd->ftCreationTime);
     static const wchar_t *const desc[] = { L"package.json", L"mod.json" };
-    if (made > at) at = made;   /* a copied entry keeps its source's write time, not its creation time */
     size_t i;
+    if (made > at) at = made;   /* a copied entry keeps its source's write time, not its creation time */
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return at;
     for (i = 0; i < 2; i++) {
         WIN32_FILE_ATTRIBUTE_DATA a;

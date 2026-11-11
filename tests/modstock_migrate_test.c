@@ -19,8 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/backend/modmigrate.h"
-#include "../src/backend/modlegacy.h"
+#include "../src/store/modmigrate.h"
+#include "../src/store/modlegacy.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modstock.h"

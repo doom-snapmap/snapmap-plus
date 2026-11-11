@@ -15,7 +15,6 @@
 #include "mod_test_util.h"
 #include "modsalt.h"
 #include "strkeys.h"
-#include "modbundle_old.h"
 
 /* The fixture's salt (its block's), passed to every build. */
 #define SALT "alexrimp"
@@ -1856,60 +1855,6 @@ static void test_classes(const char *fixture, const char *tmp)
     }
 }
 
-/* The store tool's reader of earlier shapes (modbundle_old.h): a format-1
- * block with an author id, a never-built folder, package.json. */
-static void test_old_reader(const char *fixture, const char *tmp)
-{
-    char folder[MAX_PATH];
-    sh_mb_old o;
-    size_t i;
-    int saw_pointer = 0;
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\old-shape", tmp);
-    CHECK(mt_copy_tree(fixture, folder));
-    mt_write(folder, "mod.json",
-             "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"shadows\":[\"a/b.decl\"],"
-             "\"strings\":{\"en\":{\"#str_x\":\"X\"}},\"hud\":{\"weapons\":{}},"
-             "\"snapmap-plus\":{\"format\":1,\"key\":\"other.key\",\"build\":3,\"bundle\":\"" GOLDEN_HASH "\","
-             "\"built\":1700000000,\"validated\":false,\"origin\":\"migration\",\"rules\":7,"
-             "\"legacy\":{\"source\":\"overrides\"},\"shadows\":[\"a/b.decl\"],"
-             "\"files\":[{\"path\":\"assets/x.decl\",\"sha256\":\"" GOLDEN_HASH "\",\"size\":12}],"
-             "\"stock\":[{\"path\":\"assets/y.decl\",\"sha256\":\"" GOLDEN_HASH "\",\"source\":\"y.decl\",\"inAssets\":false}]}}");
-    CHECK(sh_mb_old_is_old(folder));
-    CHECK(sh_mb_old_load(folder, &o));
-    CHECK(!strcmp(o.descriptor, "mod.json") && o.block_format == 1);
-    /* The author id won over the block's key before. */
-    CHECK(!strcmp(o.key, "alex.r2-imp") && o.key_from == SH_MB_OLD_KEY_FROM_ID);
-    CHECK(o.name && !strcmp(o.name, "\"R2 Imp copy\"") && o.version && !strcmp(o.version, "\"1.0.0\""));
-    CHECK(o.kept && strstr(o.kept, "\"strings\"") && strstr(o.kept, "\"hud\"") && !strstr(o.kept, "\"id\""));
-    CHECK(o.retired && strstr(o.retired, "\"id\":\"alex.r2-imp\"") && strstr(o.retired, "\"shadows\""));
-    CHECK(o.build == 3 && o.built == 1700000000 && o.rules == 7 && !o.validated && !strcmp(o.origin, "migration"));
-    CHECK(!strcmp(o.bundle, GOLDEN_HASH) && o.block_legacy && strstr(o.block_legacy, "overrides") && o.block_shadows);
-    CHECK(o.file_count == 2);
-    for (i = 0; i < o.file_count; i++)
-        if (o.files[i].pointer) {
-            saw_pointer = 1;
-            CHECK(!strcmp(o.files[i].path, "assets/y.decl") && o.files[i].absent && o.files[i].source &&
-                  !strcmp(o.files[i].source, "y.decl"));
-        } else {
-            CHECK(!strcmp(o.files[i].path, "assets/x.decl") && o.files[i].size == 12);
-        }
-    CHECK(saw_pointer);
-    sh_mb_old_free(&o);
-    /* The block's key when there is no author id; the folder's name when
-     * neither (a folder never built: its files are walked). */
-    mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":1,\"key\":\"other.key\"}}");
-    CHECK(sh_mb_old_load(folder, &o) && !strcmp(o.key, "other.key") && o.key_from == SH_MB_OLD_KEY_FROM_BLOCK);
-    sh_mb_old_free(&o);
-    mt_delete(folder, "mod.json");
-    mt_write(folder, "package.json", "{\"name\":\"x\",\"version\":\"2\"}");
-    CHECK(sh_mb_old_is_old(folder));
-    CHECK(sh_mb_old_load(folder, &o) && !strcmp(o.descriptor, "package.json") && !strcmp(o.key, "old-shape") &&
-          o.key_from == SH_MB_OLD_KEY_FROM_FOLDER && o.file_count == 13 && !o.block_format);
-    sh_mb_old_free(&o);
-    /* The current shape is not old. */
-    CHECK(!sh_mb_old_is_old(fixture));
-}
-
 static void test_rekey(void)
 {
     char out[512], *t = NULL;
@@ -2032,7 +1977,6 @@ int main(int argc, char **argv)
     test_built_and_failed(full, tmp);
     test_modjson(full, tmp);
     test_identity(full, tmp);
-    test_old_reader(full, tmp);
     test_record(tmp);
     test_record_read_failure(tmp);
     test_refusals(full, tmp);

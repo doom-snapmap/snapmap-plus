@@ -1,10 +1,8 @@
 /* store_seam.c -- what the store tool links in place of the game's serving
- * layer (modserve.c, modserve_engine.c) and the builder entry with the game's
- * resource reader (modcmd.c). The tool serves nothing: no bundle is active,
- * nothing is indexed, and a rescan has nothing to rebuild. The builder entry
- * builds a package a map carried (modlegacy.c, while the tool converts that
- * map) with the real builder over the store's installed bundles and the
- * game's archives read from disk (modstock.h), its replacements kept. */
+ * layer (modserve.c), which modmanifest.c calls, and the builder entry
+ * modlegacy.c builds a package a map carried with: the real builder over
+ * the store's installed mods and the game's archives read from disk
+ * (modstock.h), its replacements kept. The tool serves nothing. */
 #include <stddef.h>
 #include <string.h>
 
@@ -31,13 +29,6 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, 
     return 0;
 }
 
-int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap)
-{
-    (void)bundle_hash;
-    if (cause && cause_cap) cause[0] = 0;
-    return 0;
-}
-
 int sh_modserve_active(void) { return 0; }
 
 /* The manifest's activation asks which build serves a row: none here. */
@@ -48,7 +39,6 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     return 0;
 }
 
-int sh_modserve_index_rescan(void) { return 0; }
 
 static int ss_stock(void *context, const char *request)
 {

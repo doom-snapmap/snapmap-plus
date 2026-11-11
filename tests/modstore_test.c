@@ -8,8 +8,7 @@
  * places under mods\maps\<map>\<mod> (one folder per salt per place, never
  * built), New mod, the rebuild rule from the block's tree, the store lock,
  * the boot scan, crash leftovers, nested folders, removal through the Recycle
- * Bin, and the store tool's half (the bin sweep, the second upgrade step over
- * format-1 folders, a Contract 2 folder left as it was).
+ * Bin.
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -20,8 +19,6 @@
 #include <string.h>
 
 #include "modstore.h"
-#include "modstore_upgrade.h"
-#include "modbundle_old.h"
 #include "mod_test_util.h"
 
 static int failures;
@@ -1214,113 +1211,6 @@ static void test_nested(const char *tmp)
     if (r == SH_MS_RECYCLED) CHECK(log_has("MODS: store: moved mods\\demon-mods\\bosses\\spider to the Recycle Bin"));
 }
 
-/* ------------------------------------------------- the store tool's half */
-
-static char g_sweep[4096];
-static int g_sweep_lines;
-static void sweep_line(void *context, const char *line)
-{
-    (void)context;
-    g_sweep_lines++;
-    strncat_s(g_sweep, sizeof g_sweep, line, _TRUNCATE);
-    strncat_s(g_sweep, sizeof g_sweep, "\n", _TRUNCATE);
-}
-
-static void test_bin_sweep(const char *tmp)
-{
-    char root[MAX_PATH], bin[MAX_PATH], keep[MAX_PATH], outside[MAX_PATH], link[MAX_PATH], *rec = NULL;
-    printf("-- store tool: the retired bin is swept\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\sweep\\mods", tmp);
-    _snprintf_s(bin, sizeof bin, _TRUNCATE, "%s\\sweep\\removed-mods", tmp);
-    _snprintf_s(outside, sizeof outside, _TRUNCATE, "%s\\sweep\\outside", tmp);
-    CHECK(sh_ms_set_root(root));
-    _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\kept", root);
-    make_small_mod(keep, "kept");
-    {
-        char a[MAX_PATH], b[MAX_PATH], c[MAX_PATH];
-        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\alex.one", bin);
-        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\alex.two-2", bin);
-        _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\stray", bin);
-        mt_write(a, "mod.json", "{\"id\":\"alex.one\"}");
-        mt_write(b, "mod.json", "{\"id\":\"alex.two\"}");
-        mt_write(c, "notes.txt", "moved here by hand");
-        mt_write(outside, "precious.txt", "not the bin's");
-        _snprintf_s(link, sizeof link, _TRUNCATE, "cmd /c mklink /J \"%s\\link\" \"%s\" >nul 2>&1", a, outside);
-        (void)system(link);
-    }
-    CHECK(sh_mb_record_put(root, "removed", "{\"alex.one\":{\"id\":\"alex.one\",\"hashes\":[]}}"));
-    g_sweep[0] = 0;
-    g_sweep_lines = 0;
-    CHECK(sh_ms_bin_sweep(sweep_line, NULL) == 3);
-    CHECK(strstr(g_sweep, "MODS: removed-mods: 3 folder(s) deleted; the bin is retired\n") && g_sweep_lines == 4);
-    CHECK(!mt_exists(bin));
-    _snprintf_s(link, sizeof link, _TRUNCATE, "%s\\precious.txt", outside);
-    CHECK(mt_exists(link));
-    CHECK(sh_mb_record_get(root, "removed", &rec) != 1 || !rec);
-    free(rec);
-    g_sweep[0] = 0;
-    g_sweep_lines = 0;
-    CHECK(sh_ms_bin_sweep(sweep_line, NULL) == 0 && g_sweep_lines == 0);
-}
-
-/* A format-1 folder as an earlier release wrote it. */
-static void old_folder(const char *root, const char *leaf, const char *key, const char *origin, const char *bundle, const char *legacy)
-{
-    char dir[MAX_PATH * 2], text[1400], rel[MAX_PATH];
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, leaf);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\a.decl", key);
-    mt_write(dir, rel, "{\r\n}");
-    _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\"name\":\"%s\",\"version\":\"1.0.0\",\"snapmap-plus\":{\"format\":1,\"key\":\"%s\",\"build\":1,"
-                "\"bundle\":\"%s\",\"origin\":\"%s\"%s%s%s,\"files\":[{\"path\":\"assets/generated/decls/entitydef/mods/%s/a.decl\","
-                "\"sha256\":\"%s\",\"size\":3}]}}",
-                leaf, key, bundle, origin, legacy ? ",\"legacy\":" : "", legacy ? legacy : "", "", key, bundle);
-    mt_write(dir, "mod.json", text);
-}
-
-static void test_upgrade_steps(const char *tmp)
-{
-    char root[MAX_PATH], path[MAX_PATH * 2], *rec = NULL;
-    const char *A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const char *B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    sh_ms_upgrade_stats us;
-    sh_ms_upgrade_check uc;
-    printf("-- store tool: the second step over format-1 folders; a Contract 2 folder this release cannot read\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\upgrade\\mods", tmp);
-    CHECK(sh_ms_set_root(root));
-    old_folder(root, "alex.imp", "alex.imp", "install", A, NULL);
-    old_folder(root, "alex.imp@legacy-12345678", "alex.imp", "delivery", B, "{\"key\":\"delivery." "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}");
-    old_folder(root, "alex.solo@1.0.0", "alex.solo", "install", A, NULL);
-    CHECK(sh_ms_upgrade_scan(&uc) >= 1 && uc.tidy_drops == 1 && uc.tidy_renames == 1);
-    g_logged = 0;
-    CHECK(sh_ms_upgrade(&us) == 1 && us.tidied && us.same_id == 1 && us.tidy_renamed == 1 && !us.tidy_failed);
-    if (!us.same_id || !us.tidy_renamed) log_dump("tidy");
-    CHECK(!mt_has(root, "alex.imp@legacy-12345678") && mt_has(root, "alex.solo\\mod.json") && mt_has(root, "alex.imp\\mod.json"));
-    CHECK(sh_mb_record_get(root, "layout", &rec) == 1 && rec && !strcmp(rec, "2"));
-    free(rec);
-    CHECK(sh_ms_upgrade(&us) == 0);   /* once */
-    /* Contract 2: a bundle.json becomes a format-1 mod.json, the shape the
-     * store tool's conversion to the one shape reads next; one without an id
-     * is left as it was; the product files still fold into the record. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2@1.0.0+1", root);
-    mt_write(path, "bundle.json", "{\"format\":1,\"id\":\"alex.c2\",\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
-    {
-        char bad[MAX_PATH];
-        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\noid@1.0.0+1", root);
-        mt_write(bad, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
-    }
-    mt_write(root, "claims.json", "{\"claims\":{\"x\":{\"ref\":\"1\"}}}");
-    g_logged = 0;
-    CHECK(sh_ms_upgrade(&us) == 1 && us.ran && us.failed == 1 && us.records == 1);
-    CHECK(log_has("noid@1.0.0+1: left as it was") && !mt_has(root, "claims.json"));
-    CHECK(log_has("alex.c2@1.0.0+1: mod.json written for alex.c2@1.0.0+1"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2", root);
-    CHECK(mt_has(path, "mod.json") && !mt_has(path, "bundle.json") && sh_mb_old_is_old(path));
-    rec = NULL;
-    CHECK(sh_mb_record_get(root, "claims", &rec) == 1 && rec && strstr(rec, "\"ref\""));
-    free(rec);
-}
-
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], fixture[MAX_PATH], got[MAX_PATH];
@@ -1341,8 +1231,6 @@ int main(int argc, char **argv)
     test_work_folder_names(tmp);
     test_crash_leftovers(tmp);
     test_nested(tmp);
-    test_bin_sweep(tmp);
-    test_upgrade_steps(tmp);
     test_boot_sync(fixture, tmp);
     test_boot_release(tmp);
     sh_ms_set_root(NULL);

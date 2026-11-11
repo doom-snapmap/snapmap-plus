@@ -1,4 +1,4 @@
-/* Legacy carrier conversion and cleaning (DESIGN.md section 11). */
+/* modlegacy.c -- see modlegacy.h. Store tool only. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlobj.h>
@@ -12,7 +12,6 @@
 #include "modlegacy.h"
 #include "modmanifest.h"
 #include "modbundle.h"
-#include "modserve.h"
 #include "map_legacy_payload.h"
 #include "map_shards.h"
 #include "map_old.h"
@@ -1986,8 +1985,7 @@ static unsigned long long lg_chars(const sh_modlegacy_carrier *c)
     return n;
 }
 
-/* Main thread only, like the detour that calls it; the memo is not locked
- * against a second converting thread. */
+/* One converting thread (the store tool's); the memo is not locked. */
 static lg_memo *lg_memo_find(const sh_modlegacy_carrier *c)
 {
     size_t i;
@@ -2040,8 +2038,7 @@ static void lg_log_verdict(const sh_modlegacy_verdict *v, int memo)
             memo ? " [converted earlier this session]" : "");
     else
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CLEAN -- %s; its rows are removed and the "
-            "map loads without it",
+            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CLEAN -- %s; its rows are removed from the map",
             v->key, v->digest, v->present, v->total, sh_map_legacy_key_form_name(v->key_form),
             v->reason[0] ? v->reason : "unknown");
     backend_log(line);
@@ -2054,7 +2051,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
     sh_modmanifest_list rows = {0};
     char **placed = NULL;
     size_t ncarriers, nplaced = 0, i, stripped_len = 0, final_len = 0;
-    unsigned converted = 0, cleaned = 0, package_rows = 0, unreleased = 0, unindexed = 0;
+    unsigned converted = 0, cleaned = 0, package_rows = 0, unreleased = 0;
     int placed_ready = 0, placed_failed = 0, doc_failed = 0;
     char *stripped = NULL, *final = NULL;
     char line[512];
@@ -2108,10 +2105,6 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
             sh_modmanifest_row row;
             size_t k;
             converted++;
-            /* A bundle converted now (or installed after boot) is not in the
-             * serving index yet; the activation that follows in this parse
-             * reads the index. */
-            if (sh_modserve_bundle_state(v->build, NULL, 0) != 1) unindexed++;
             if (!placed_ready) {
                 nplaced = sh_modmanifest_placed_names(json, length, &placed, &placed_failed);
                 placed_ready = 1;
@@ -2138,20 +2131,11 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
     }
     sh_modlegacy_carriers_free(carriers, ncarriers);
     sh_modmanifest_names_free(placed, nplaced);
-    if (unindexed) {
-        int active = sh_modserve_index_rescan();
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "LEGACY: %u converted bundle(s) not in the serving index; rescan %s (%d bundle(s) active)",
-            unindexed, active < 0 ? "refused" : "done", active < 0 ? 0 : active);
-        backend_log(line);
-    }
 
     stripped = sh_map_legacy_payload_strip_all(json, length, &stripped_len, &package_rows, &unreleased,
                                                &doc_failed);
     if (!stripped) {
-        if (doc_failed)
-            backend_log("LEGACY: the legacy rows could not be removed (the map's JSON did not read "
-                        "cleanly); the map loads with them as inert string variables");
+        if (doc_failed) backend_log("LEGACY: the package rows could not be removed: the map's text does not read cleanly");
         sh_modmanifest_list_free(&rows);
         lg_set_report(report, report ? ncarriers : 0);
         return NULL;
@@ -2174,8 +2158,8 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
         if (final) HeapFree(GetProcessHeap(), 0, stripped);
         else {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "LEGACY: the converted manifest rows could not be written (%s); the converted bundles are "
-                "installed but this load does not activate them", err[0] ? err : "unknown");
+                "LEGACY: the rows of the converted mods could not be written into the map (%s); the mods are in the "
+                "mods folder", err[0] ? err : "unknown");
             backend_log(line);
             final = stripped;
             final_len = stripped_len;
@@ -2183,12 +2167,9 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
     }
     if (ncarriers) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "LEGACY: %zu carrier(s): %u converted, %u cleaned; %u package row(s)%s removed before parse, "
-            "%zu -> %zu bytes%s",
+            "LEGACY: %zu carrier(s): %u converted, %u cleaned; %u package row(s)%s removed, %zu -> %zu bytes",
             ncarriers, converted, cleaned, package_rows, unreleased ? " and unreleased v2 rows" : "",
-            length, final_len,
-            converted ? "; the map is modified in memory only and the next save persists the "
-                        "conversion as manifest rows" : "");
+            length, final_len);
         backend_log(line);
     }
     sh_modmanifest_list_free(&rows);

@@ -7,7 +7,7 @@
  * packages a map delivered (overrides\map-<16 hex>\<package>). The store
  * tool (snapmap-plus-store migrate, which the installer runs) does this once,
  * after the store upgrade, with the game's archives as the stock bridge's
- * install; the game runs it only by hand (`sh_mods migrate [--again]`):
+ * install. Linked only into the store tool:
  *
  *   - every direct child folder with a descriptor is built by the normal
  *     builder into mods\<folder>\ (the overrides folder's own name; with the
@@ -15,14 +15,12 @@
  *     assets\ (modstore.c). The author block is the package's descriptor: its
  *     era B or C layout is migrated to assets/ (modlegacy.c), its requirements,
  *     strings and hud are carried, every other key (composes, an era B schema)
- *     is kept, and the product block's "legacy" record grandfathers its
- *     non-namespaced names; package.json is not carried as a file;
+ *     is kept; package.json is not carried as a file;
  *   - every map-<16 hex>\<package> folder is built as an ordinary mod folder
- *     mods\<id>\, its legacy record keyed by the beta.16-19 tree fingerprint
- *     that is also the "smpkg.delivery.<tree>" key a map carries for it, so a
- *     later load of a map carrying the same delivery reuses it instead of
- *     converting again; a delivery an installed mod already serves is not
- *     stored twice;
+ *     mods\<id>\, listed in the record's "trees" under the beta.16-19 tree
+ *     fingerprint that is also the "smpkg.delivery.<tree>" key a map carries
+ *     for it, so the conversion of a map carrying the same delivery reuses it;
+ *     a delivery an installed mod already serves is not stored twice;
  *   - a folder without a descriptor whose one package is a direct child
  *     folder has that child migrated under the child's id (beta.19 read such
  *     folders as groups); with several, it is skipped, and a ZIP is listed as
@@ -47,9 +45,7 @@
  * mods\snapmap-plus.json (modbundle.h) and to one "MODS:
  * migration:" log line per folder plus a summary line. The record is written
  * with "complete": false while a pass runs, and an incomplete record makes the
- * next pass run again (every step is idempotent). The store tool runs the pass
- * on its own thread (sh_modmigrate_run); `sh_mods migrate [--again]` runs it on
- * the game's worker, which rebuilds the serving index when it finishes.
+ * next pass run again (every step is idempotent).
  *
  * File work only; no engine calls. Stock names are not checked during the
  * migration (it runs without the game's resource reader): a legacy bundle's
@@ -71,7 +67,7 @@ enum {
     SH_MODMIGRATE_REUSED,        /* a delivered package already converted (from a map or earlier) */
     SH_MODMIGRATE_SKIPPED,       /* not a package, or over the cap: nothing built */
     SH_MODMIGRATE_REFUSED,       /* a package the builder refused: the first cause is recorded */
-    SH_MODMIGRATE_PENDING        /* waiting for the worker */
+    SH_MODMIGRATE_PENDING        /* not done yet in this pass */
 };
 
 typedef struct sh_modmigrate_stats {
@@ -91,20 +87,10 @@ typedef struct sh_modmigrate_stats {
  * (sh_ms_set_root, "<root>\mods") at one scratch folder. */
 void sh_modmigrate_set_data_root(const char *root_utf8);
 
-/* The whole pass on the calling thread (the store tool, tests). `again` runs
- * it even when the record says it is complete. Returns 1 when a pass ran, 0 when
- * there was nothing to do, -1 when the worker is busy or the pass failed. */
+/* The whole pass on the calling thread. `again` runs it even when the record
+ * says it is complete. Returns 1 when a pass ran, 0 when there was nothing to
+ * do, -1 when the pass failed. */
 int sh_modmigrate_run(int again, sh_modmigrate_stats *stats);
-
-/* The whole pass on the worker thread (`sh_mods migrate [--again]`). Returns
- * 1 when started, 0 when there is nothing to do, -1 when busy. */
-int sh_modmigrate_start(int again);
-
-/* 1 while the worker runs. */
-int sh_modmigrate_busy(void);
-
-/* Wait up to `ms` for the worker; 1 when it is idle. */
-int sh_modmigrate_wait(unsigned ms);
 
 /* Entries of overrides\ that a pass would still pick up: not in the record,
  * listed as pending, or skipped or refused and changed (the entry or its
@@ -114,17 +100,14 @@ int sh_modmigrate_wait(unsigned ms);
  * the data folder cannot be resolved. File reads only. */
 int sh_modmigrate_pending(unsigned *entries);
 
-/* The statistics of the last pass (or the running one). */
-void sh_modmigrate_last(sh_modmigrate_stats *out);
-
 /* The loose step. The retired loose-file layer of overrides\ and the strings
  * document of earlier releases (<data>\strings\strids.json, a flat object of
  * "id": "text" pairs that strids.c no longer reads) become one mod,
  * mods\my-overrides\: the loose files under assets\ at their paths below
  * overrides\, converted as a package is (files a mod cannot carry left out;
  * copies of installed content become stock pointers), and the document's keys
- * as the author block's strings.en, with the id "my-overrides", the name "My
- * overrides" and the migration's origin and legacy record. When
+ * as the author part's strings.en, with the name "My overrides" (the salting
+ * prefixes the keys with the salt). When
  * mods\my-overrides\ already exists, only the files and keys it lacks are
  * added: one "kept my-overrides' <path or key>" line for each it has with
  * other bytes or text, nothing for an identical one; its tree changes, so the
