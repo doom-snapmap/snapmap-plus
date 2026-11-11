@@ -196,6 +196,7 @@ $tests += @{ name = "script_hooks_test"; src = 'script_hooks_test.c ..\src\backe
 $tests += @{ name = "script_sigs_test"; src = 'script_sigs_test.c ..\src\backend\script\script_sigs.c ..\src\backend\x64_len.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Mod scenes blocks: the grammar and where a scene plays; with images, the two
 # spawn signatures, the game's vtable slots that hold them and the show-post stub.
+$tests += @{ name = "modcontent_test"; src = 'modcontent_test.c ..\src\backend\modcontent.c ..\src\backend\modscene_decl.c ..\src\backend\mp_json.c ..\src\backend\config_json.c'; arg = "" }
 $tests += @{ name = "modscene_decl_test"; src = 'modscene_decl_test.c ..\src\backend\modscene_decl.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Mod scripts: the Lua sandbox, bounds, stop lines, registration and dispatch, timers,
 # teardown and the loader fed malformed text (no game; lstrlib.c through script_lstrlib.c).

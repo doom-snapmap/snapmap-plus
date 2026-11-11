@@ -561,6 +561,14 @@ typedef int (*sh_mb_script_check_fn)(const char *file, int entry, const char *te
                                      char *what, size_t what_cap, char *todo, size_t todo_cap);
 void sh_mb_set_script_check(sh_mb_script_check_fn fn);
 
+/* The check of the author's content blocks the game reads later ("scenes",
+ * "hud"; modcontent.h sh_modcontent_check): `extra` is the build's preserved
+ * author keys. 0 with one sentence in `cause` fails the build with it. NULL
+ * (the default) checks nothing. */
+typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char *cause, size_t cause_cap);
+void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
+
+
 /* The static registration pass: every literal call of the registration API in
  * one script's text, without running it. Lua comments and strings are
  * skipped; a call is recognised where the code spells it:

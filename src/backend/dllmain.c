@@ -79,6 +79,7 @@
 #include "feature_health.h"
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
+#include "modcontent.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -177,6 +178,9 @@ static void install_features(const sig_result *results, size_t db)
     sh_mb_set_bank_need(sh_mbi_bundle_need);
     /* Mod scripts are compiled (never run) by every build that carries one. */
     sh_mb_set_script_check(sh_script_compile_check);
+    /* A mod's "scenes" and "hud" blocks are checked when it is built. */
+    sh_mb_set_extra_check(sh_modcontent_check);
+
     /* No store migration runs here: the installer runs snapmap-plus-store,
      * which upgrades the retired layout (modstore.h, modmigrate.h). A folder a
      * crash took away mid-replacement is put back first, so it serves on

@@ -937,6 +937,16 @@ static void m_both(const char *f) { mt_write(f, "package.json", DESC("")); }
 static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
 static void m_bad_ext(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\notes.txt", "x"); }
 static void m_outside(const char *f) { mt_write(f, "readme.md", "x"); }
+static void m_scenes_x(const char *f) { mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alexrimp/n\":{}}")); }
+static int extra_refuses(const char *salt, const char *extra, size_t len, char *cause, size_t cap)
+{
+    (void)len;
+    if (!strcmp(salt, SALT) && strstr(extra, "\"scenes\"")) {
+        strcpy_s(cause, cap, "mod.json \"scenes\" is refused: test");
+        return 0;
+    }
+    return 1;
+}
 static void m_empty(const char *f) { mt_write(f, "assets\\generated\\image\\mods\\alexrimp\\empty.bimage", ""); }
 static void m_unns_decl(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
 static void m_unns_raw(const char *f) { mt_write(f, "assets\\generated\\image\\other\\x.bimage", "bytes"); }
@@ -1152,6 +1162,12 @@ static void test_refusals(const char *fixture, const char *tmp)
          * (DECISIONS 16), package.json among them. */
         sh_mb_bundle ok;
         size_t k;
+        /* The registered content check's sentence is the build's cause. */
+        sh_mb_set_extra_check(extra_refuses);
+        refused(fixture, tmp, m_scenes_x, &RESOLVER, "mod.json \"scenes\" is refused: test");
+        sh_mb_set_extra_check(NULL);
+        accepted(fixture, tmp, m_scenes_x, &ok);
+        sh_mb_free(&ok);
         accepted(fixture, tmp, m_outside, &ok);
         for (k = 0; k < ok.file_count; k++) CHECK(strncmp(ok.files[k].path, "assets/", 7) == 0);
         sh_mb_free(&ok);

@@ -1011,6 +1011,13 @@ void sh_mb_set_script_check(sh_mb_script_check_fn fn)
     g_mb_script_check = fn;
 }
 
+static sh_mb_extra_check_fn g_mb_extra_check;
+
+void sh_mb_set_extra_check(sh_mb_extra_check_fn fn)
+{
+    g_mb_extra_check = fn;
+}
+
 int sh_mb_sliceable(const sh_mb_bundle *b)
 {
     size_t i;
@@ -2246,8 +2253,9 @@ static void mb_companion_needs(sh_mb_bundle *b)
 /* What a scene node's "scenes" entry spawns (modscene_decl.h, kept in extra)
  * is a need of the node's own entityDef, like a companion: the serving closure
  * registers it with the node and the validator checks that it resolves. The
- * block's grammar is checked when the game reads it; here only well-formed
- * spawn names count. */
+ * block's grammar is the registered extra check's (sh_mb_set_extra_check);
+ * here only well-formed spawn names count. */
+
 static void mb_scene_needs(sh_mb_bundle *b)
 {
     mpj *root, *block;
@@ -6462,7 +6470,14 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
         names.file_count = out->file_count;
         if (!sh_mb_salt_paths_check(&names, cause, sizeof cause)) mb_error(out, "%s", cause);
     }
+    if (!out->errors && out->extra && g_mb_extra_check) {
+        /* The content blocks the game reads later ("scenes", "hud"),
+         * checked now so a mistake is the build's cause. */
+        char cause[SH_MB_CAUSE_MAX];
+        if (!g_mb_extra_check(out->id, out->extra, strlen(out->extra), cause, sizeof cause)) mb_error(out, "%s", cause);
+    }
     if (!out->errors) mb_check_files(out, root, resolver);
+
     if (!out->errors) mb_derive_requirements(out, 1);
     mb_finish(out);
     out->validated = out->errors == 0;
