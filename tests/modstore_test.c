@@ -1330,8 +1330,16 @@ static void test_rehome(const char *tmp)
     CHECK(MoveFileA(dir, renamed));
     mt_write(renamed, "assets\\generated\\image\\mods\\beast\\c.bimage", "third image");
     write_bank(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk", 12345);
+    mt_write(renamed, "assets\\generated\\decls\\sound\\mods\\beast\\m.decl",
+             "{\n\tbank = \"beast_music\";\n\tother = \"beast_musical\";\n}\n");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 0);
     if (ss.failed) log_dump("rehome");
+    /* The decl naming the bank follows its new name; a longer word does not. */
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\sound\\mods\\%s\\m.decl", salt);
+    t = slurp(renamed, rel, NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s_music\";", salt);
+    CHECK(t && strstr(t, want) && strstr(t, "\"beast_musical\"") && !strstr(t, "\"beast_music\""));
+    free(t);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\c.bimage", salt);
     CHECK(mt_has(renamed, rel));
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);

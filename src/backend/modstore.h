@@ -203,6 +203,17 @@ int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt
 int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
                      char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
 
+/* A renamed sound bank's stem, old and new. */
+typedef struct sh_ms_bank_rename { char from[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + 1]; } sh_ms_bank_rename;
+
+/* `text` with every bank stem `names[k].from` that stands as a whole word
+ * (letters, digits and '_' around it do not) replaced by its `to`, ignoring
+ * case. Returns the count with the result in *out (malloc'd) when it is not
+ * 0, or (size_t)-1 out of memory. A renamed bank takes every text of its mod
+ * that names it along: decls, scripts and mod.json. */
+size_t sh_ms_rebank_text(const char *text, size_t len, const sh_ms_bank_rename *names, size_t count, char **out,
+                         size_t *out_len);
+
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* files copied into the store (the game files the folder holds too) */
     int in_place;               /* the source folder was inside the store */

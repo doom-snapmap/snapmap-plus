@@ -1324,6 +1324,103 @@ static void ms_rk_bank(ms_rk *r, ms_rk_file *f, const wchar_t *path, const char 
     r->banks++;
 }
 
+static int ms_word(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+size_t sh_ms_rebank_text(const char *t, size_t n, const sh_ms_bank_rename *names, size_t count, char **out,
+                         size_t *out_len)
+{
+    size_t i, k, w = 0, hits = 0, grow = 0;
+    char *o;
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    /* Each stem is at most SH_MB_BANK_STEM_MAX: a hit grows the text by at most that. */
+    for (i = 0; i < n; i++) {
+        if (i && ms_word(t[i - 1])) continue;
+        for (k = 0; k < count; k++) {
+            size_t fl = strlen(names[k].from);
+            if (fl && i + fl <= n && !_strnicmp(t + i, names[k].from, fl) && (i + fl == n || !ms_word(t[i + fl]))) {
+                hits++;
+                grow += strlen(names[k].to);
+                break;
+            }
+        }
+    }
+    if (!hits || !out) return hits;
+    if (!(o = (char *)malloc(n + grow + 1))) return (size_t)-1;
+    for (i = 0; i < n;) {
+        int hit = 0;
+        if (!i || !ms_word(t[i - 1]))
+            for (k = 0; k < count && !hit; k++) {
+                size_t fl = strlen(names[k].from), tl = strlen(names[k].to);
+                if (fl && i + fl <= n && !_strnicmp(t + i, names[k].from, fl) && (i + fl == n || !ms_word(t[i + fl]))) {
+                    memcpy(o + w, names[k].to, tl);
+                    w += tl;
+                    i += fl;
+                    hit = 1;
+                }
+            }
+        if (!hit) o[w++] = t[i++];
+    }
+    o[w] = 0;
+    *out = o;
+    if (out_len) *out_len = w;
+    return hits;
+}
+
+/* The banks the plan renames, followed by every text of the folder that
+ * names them (mod.json in *modjson among them): Wwise finds a bank by its
+ * file name, so a decl or a script still naming the old stem would lose its
+ * sound. Texts already rewritten are rewritten again; other texts are read. */
+static void ms_rk_rebank(ms_rk *r, const wchar_t *src, char **modjson, size_t *mlen)
+{
+    sh_ms_bank_rename *names = NULL;
+    size_t i, count = 0;
+    for (i = 0; i < r->n; i++) {
+        const ms_rk_file *f = &r->f[i];
+        char a[SH_MB_BANK_STEM_MAX + 1], b[SH_MB_BANK_STEM_MAX + 1];
+        if (f->dir || _strnicmp(f->rel, "assets/", 7) || !sh_mb_bank_stem(f->rel + 7, a, sizeof a) ||
+            !sh_mb_bank_stem(f->new_rel + 7, b, sizeof b) || !strcmp(a, b))
+            continue;
+        if (!count || !(count & (count - 1))) {
+            sh_ms_bank_rename *grown = (sh_ms_bank_rename *)realloc(names, (count ? count * 2 : 4) * sizeof *names);
+            if (!grown) { ms_rk_fail(r, "out of memory"); free(names); return; }
+            names = grown;
+        }
+        strcpy_s(names[count].from, sizeof names[count].from, a);
+        strcpy_s(names[count].to, sizeof names[count].to, b);
+        count++;
+    }
+    if (!count) return;
+    for (i = 0; i < r->n && !r->failed; i++) {
+        ms_rk_file *f = &r->f[i];
+        char *t = f->text, *o = NULL, *a = NULL;
+        size_t len = f->text_len, ol = 0, c;
+        if (f->dir || _strnicmp(f->rel, "assets/", 7) || sh_mb_bank_stem(f->rel + 7, NULL, 0)) continue;
+        if (!t) {
+            wchar_t *p = ms_wjoin_utf8(src, f->rel);
+            t = a = p ? ms_read_text(p, MS_RK_TEXT_MAX, &len) : NULL;
+            free(p);
+            if (!t || memchr(t, 0, len)) { free(a); continue; }   /* a binary, or too large to be a text */
+        }
+        c = sh_ms_rebank_text(t, len, names, count, &o, &ol);
+        if (c == (size_t)-1) ms_rk_fail(r, "out of memory");
+        else if (c) {
+            if (!f->text) r->rewritten++;
+            free(f->text);
+            f->text = o;
+            f->text_len = ol;
+        }
+        free(a);
+    }
+    if (!r->failed) {
+        char *o = NULL;
+        size_t ol = 0, c = sh_ms_rebank_text(*modjson, *mlen, names, count, &o, &ol);
+        if (c == (size_t)-1) ms_rk_fail(r, "out of memory");
+        else if (c) { free(*modjson); *modjson = o; *mlen = ol; }
+    }
+    free(names);
+}
+
 /* Read the tree below `dir` (rel "" at the folder itself) into the plan. */
 
 static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
@@ -1588,6 +1685,7 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
                 ms_rk_fail(&r, "%s and %s would both become %s once moved under the salt; rename one of them and press "
                            "Refresh (the folder is unchanged)", r.f[i - 1].rel, r.f[i].rel, r.f[i].new_rel);
     }
+    if (!r.failed) ms_rk_rebank(&r, src, &modjson, &mlen);
     if (keep && !r.failed && !drefs && !nskeys && !r.moved && !r.rewritten && !r.banks) {
         ok = 0;   /* nothing of the author's waits under the folder's name */
         goto done;

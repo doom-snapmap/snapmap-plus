@@ -1029,9 +1029,7 @@ static int cv_link_top(const char *folder, const char *dest, int mod)
  * "<salt>_<stem>" (an earlier mod's "<old key>_" prefix replaced), and its
  * BKHD bank id follows the new name when it followed the old one. */
 #define CV_BANKS_MAX 64
-typedef struct cv_bank_name { char from[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + 16]; } cv_bank_name;
-
-static int cv_word(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+typedef sh_ms_bank_rename cv_bank_name;
 
 /* Every text file under `dir` (a file without a NUL byte, sound banks
  * aside) has each bank name `from` that stands as a whole word replaced by
@@ -1056,27 +1054,10 @@ static void cv_rebank_texts(const char *dir, const cv_bank_name *names, size_t c
         if (path && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
             if (depth < 64) cv_rebank_texts(path, names, count, depth + 1);
         } else if (path && !(ln > 4 && !_stricmp(leaf + ln - 4, ".bnk"))) {
-            size_t n = 0, i, k, wpos = 0;
+            size_t n = 0, on = 0;
             char *t = (char *)cv_read(path, CV_DESC_MAX, &n), *o = NULL;
-            int changed = 0;
-            if (t && !memchr(t, 0, n) && (o = (char *)malloc(n * 2 + 64)) != NULL) {
-                for (i = 0; i < n;) {
-                    int hit = 0;
-                    if (!i || !cv_word(t[i - 1]))
-                        for (k = 0; k < count && !hit; k++) {
-                            size_t fl = strlen(names[k].from), tl = strlen(names[k].to);
-                            if (i + fl <= n && !_strnicmp(t + i, names[k].from, fl) && (i + fl == n || !cv_word(t[i + fl])) &&
-                                wpos + tl + (n - i) < n * 2 + 64) {
-                                memcpy(o + wpos, names[k].to, tl);
-                                wpos += tl;
-                                i += fl;
-                                hit = changed = 1;
-                            }
-                        }
-                    if (!hit) o[wpos++] = t[i++];
-                }
-                if (changed) cv_write(path, o, wpos);
-            }
+            size_t c = t && !memchr(t, 0, n) ? sh_ms_rebank_text(t, n, names, count, &o, &on) : 0;
+            if (c && c != (size_t)-1) cv_write(path, o, on);
             free(o);
             free(t);
         }
@@ -1118,8 +1099,11 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
         if (_strnicmp(stem, salt, SH_SALT_LEN) || stem[SH_SALT_LEN] != '_') {
             const char *rest = !_strnicmp(stem, prefix, pn) && stem[pn] ? stem + pn : stem;
             _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s_%s.bnk", salt, rest);
-            from = cv_join(dir, leaf);
-            to = cv_join(dir, fresh);
+            /* A name past the stem limit stays as it is: the build names the length rule. */
+            if (strlen(fresh) - 4 <= SH_MB_BANK_STEM_MAX) {
+                from = cv_join(dir, leaf);
+                to = cv_join(dir, fresh);
+            }
             if (from && to) {
                 size_t n = 0;
                 unsigned char *bytes = cv_read(from, (size_t)256 << 20, &n);
