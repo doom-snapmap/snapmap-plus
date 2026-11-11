@@ -1684,7 +1684,7 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
                 dt_line(report, "%s: set by %s; the map chose %s, which does not set it; serving %s (row order)", op->slot,
                         list, ch->key, src[serving].who);
             else
-                dt_line(report, "%s: set by %s; serving %s (row order; choose with sh_mods choose \"%s\" \"<key>\")", op->slot,
+                dt_line(report, "%s: set by %s; serving %s (row order; choose with sh_mods choose \"%s\" \"<mod name>\")", op->slot,
                         list, src[serving].who, op->slot);
             if (report->clash) report->clash(report->context, op->slot, who, nwho, serving, by_choice);
         }

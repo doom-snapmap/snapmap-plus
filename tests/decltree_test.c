@@ -259,7 +259,7 @@ static void test_apply(void)
     t1 = apply_copies("generated/decls/entitydef/player/coop.decl", P, copies, 3, NULL, 0, &rep);
     CHECK(t1 && strstr(t1, "hands = \"k.a/hands\";") && strstr(t1, "body = \"k.b/body\";") && rep.clashes == 1);
     CHECK(strstr(g_lines, "entitydef/player/coop/edit/hands: set by k.a, k.b, k.c; serving k.a (row order; choose with "
-                          "sh_mods choose \"entitydef/player/coop/edit/hands\" \"<key>\")") != NULL);
+                          "sh_mods choose \"entitydef/player/coop/edit/hands\" \"<mod name>\")") != NULL);
     if (!strstr(g_lines, "serving k.a (row order")) fprintf(stderr, "%s", g_lines);
     free(t1);
     ch.slot = "entitydef/player/coop/edit/hands";
