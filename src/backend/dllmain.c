@@ -79,6 +79,7 @@
 #include "feature_health.h"
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
+#include "script/script_api_ai.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -363,6 +364,9 @@ static void install_features(const sig_result *results, size_t db)
      * fails records mod scripts off with its reason (feature_health.h). */
     if (overrides_installed) (void)sh_script_hooks_install(results, db, g_doom_base);
     else sh_feature_off(SH_FEATURE_MOD_SCRIPTS, "mods are not served");
+    /* Mod scripts' AI calls (script/script_api_ai.h); the demon park hook is
+     * committed at the first command. */
+    if (overrides_installed) (void)sh_script_ai_install(g_doom_base);
 
     /* Decode virtual-texture previews from installed files through the signed
      * engine page decoder; no renderer or GPU calls are needed. */
