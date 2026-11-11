@@ -570,7 +570,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var eventItems = [];       // the full 1611-event catalog: [{name, args:[{name,type}]}, ...]
   var eventCatalogByName = {};   // name -> {name, args} -- O(1) schema lookup while rendering/editing args
   var eventDocsRequested = false;
-  var eventDocsByName = {};  // name -> {summary, confidence, source, args: {argName: desc}} -- the EXPLAIN box's data
+  var eventDocsByName = {};  // name -> {summary, args: {argName: desc}} -- the EXPLAIN box's data
   var tlDescOpen = {};       // "<tabIdx>:<evIdx>" -> bool, survives the wholesale event-row rebuild on add/delete/tab-switch
   var tlEntityComboActive = -1;   // #tlRunsOn's keyboard-highlighted option index, -1 = none (reset on type/(re)open)
   var tlEntityComboItems = [];    // the SAME {id,label} list tlRenderEntityCombo just rendered, for Enter-to-accept
@@ -1315,26 +1315,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (type === 'int' || type === 'float') return 'a number';
     return null;
   }
-  // Render the event summary and argument descriptions, preserving confidence labels.
-  // Without documentation, show the signature and available role hints.
+  // The event's description and its parameters'. Without one, the name and its parameters.
   function tlEventDescHtml(eventDef) {
     var def = eventCatalogByName[eventDef];
-    if (!def) return '<span class="muted">Unrecognized event -- no description available.</span>';
+    if (!def) return '<b>' + esc(eventDef || '') + '</b>';
     var doc = eventDocsByName[eventDef];
     var s = '<b>' + esc(eventDef) + '</b>';
-    if (doc && doc.source === 'handler') s += ' <span style="color:#6aa84f">&#10003;</span>';
     if (doc && doc.summary) {
       s += ' &mdash; ' + esc(doc.summary);
-      if (doc.confidence === 'low') s += ' <span class="muted">(inferred)</span>';
       for (var j = 0; j < def.args.length; j++) {
         var an = (def.args[j].name && def.args[j].name.length) ? def.args[j].name : def.args[j].type;
         var ad = (doc.args && doc.args[def.args[j].name]) || tlArgRole(def.args[j].name || '', def.args[j].type || '');
         s += '<br>&nbsp;&nbsp;<b>' + esc(an) + '</b>' + (ad ? (' &mdash; ' + esc(ad)) : '');
       }
     } else {
-      var isAnim = eventDef.indexOf('ae_') === 0;
-      s += ' &mdash; ' + (isAnim ? 'animation-frame event' : 'timeline event');
-      if (def.args.length === 0) s += ', no parameters.';
+      if (def.args.length === 0) s += ' &mdash; takes no parameters.';
       else {
         var parts = [];
         for (var k = 0; k < def.args.length; k++) {
@@ -2081,17 +2076,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function requestDesc() {
     post({cmd:'lookupDesc', inherit: document.getElementById('fInherit').value, classname: document.getElementById('fClassname').value});
   }
+  // An inherit or class with a description gets a block; one without gets nothing, and with
+  // neither the panel is hidden.
   function descBlock(title, name, d) {
-    if (!name) return '';
-    var h = '<div class="desc-block"><div class="desc-block-title">' + title + esc(name) + '</div>'
-          + (d ? '<div class="desc-tier">' + esc(d.source) + ' evidence, ' + esc(d.confidence) + ' confidence</div>' : '');
-    h += d ? '<div class="desc-summary">' + esc(d.summary) + '</div>'
-           : '<div class="desc-summary muted">No reverse-engineered description on file for this ' + (title === 'INHERIT ' ? 'inherit' : 'class') + '.</div>';
-    return h + '</div>';
+    if (!name || !d || !d.summary) return '';
+    return '<div class="desc-block"><div class="desc-block-title">' + title + esc(name) + '</div>'
+         + '<div class="desc-summary">' + esc(d.summary) + '</div></div>';
   }
   function renderDesc(d) {
     var inh = document.getElementById('fInherit').value, cls = document.getElementById('fClassname').value;
-    document.getElementById('descBody').innerHTML = descBlock('INHERIT ', inh, d.inherit) + descBlock('CLASS ', cls, d.class);
+    var html = descBlock('INHERIT ', inh, d.inherit) + descBlock('CLASS ', cls, d.class);
+    document.getElementById('descBody').innerHTML = html;
+    document.getElementById('descPanel').style.display = html ? '' : 'none';
   }
   function curState() {
     return { decl:document.getElementById('declText').value, inherit:document.getElementById('fInherit').value,
@@ -2344,7 +2340,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var argMap = {};
         var itArgs = it.args || [];
         for (var eda = 0; eda < itArgs.length; eda++) argMap[itArgs[eda].name] = itArgs[eda].desc;
-        eventDocsByName[it.name] = { summary: it.summary, confidence: it.confidence, source: it.source, args: argMap };
+        eventDocsByName[it.name] = { summary: it.summary, args: argMap };
       }
       if (tlModel) renderTlBody();
     } else if (d.kind === 'argResclass') {

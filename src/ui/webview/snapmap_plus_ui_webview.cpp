@@ -40,6 +40,7 @@
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "webview_profile.h" /* the WebView2 profile folder under cache\ */
 #include "folder_watch.h"   /* the debounce behind the prefabs folder watcher */
+#include "player_text.h"    /* the description text a player sees from the generated tables */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -1798,12 +1799,12 @@ static const ShEntDesc *poc_lookup_desc(const std::string &name)
     auto it = idx->find(name);
     return it == idx->end() ? nullptr : it->second;
 }
+/* {"summary":...}, or null when the entry has no description a player should see. */
 static void poc_json_desc_obj(std::wstring &json, const ShEntDesc *d)
 {
-    if (!d) { json += L"null"; return; }
-    json += L"{\"summary\":\"";    json += sh_webview_json::escape_wide(d->summary);    json += L"\"";
-    json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d->confidence); json += L"\"";
-    json += L",\"source\":\"";     json += sh_webview_json::escape_wide(d->source);     json += L"\"}";
+    std::string text = d ? sh_player_text::summary(d->summary) : std::string();
+    if (text.empty()) { json += L"null"; return; }
+    json += L"{\"summary\":\""; json += sh_webview_json::escape_wide(text.c_str()); json += L"\"}";
 }
 static void poc_send_desc(const char *inherit, const char *classname)
 {
@@ -2382,15 +2383,13 @@ static void poc_send_event_docs()
         if (i) json += L",";
         const ShEvtDoc &d = SH_EVENT_DOCS[i];
         json += L"{\"name\":\""; json += sh_webview_json::escape_wide(d.name ? d.name : ""); json += L"\"";
-        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(d.summary ? d.summary : ""); json += L"\"";
-        json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d.confidence ? d.confidence : ""); json += L"\"";
-        json += L",\"source\":\""; json += sh_webview_json::escape_wide(d.source ? d.source : ""); json += L"\"";
+        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(d.summary).c_str()); json += L"\"";
         json += L",\"args\":[";
         for (int a = 0; a < d.nArgs; a++) {
             if (a) json += L",";
             const ShEvtArgDoc &ad = d.args[a];
             json += L"{\"name\":\""; json += sh_webview_json::escape_wide(ad.name ? ad.name : ""); json += L"\"";
-            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(ad.desc ? ad.desc : ""); json += L"\"}";
+            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(ad.desc).c_str()); json += L"\"}";
         }
         json += L"]}";
     }

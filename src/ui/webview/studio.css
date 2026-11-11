@@ -328,7 +328,6 @@
   .desc-panel.open .desc-body { display: block; }
   .desc-block + .desc-block { margin-top: 9px; }
   .desc-block-title { color: var(--text); font-weight: 600; }
-  .desc-tier { color: var(--muted); font-weight: 400; font-style: italic; }
   .desc-summary { color: var(--text); white-space: pre-wrap; cursor: text; }   /* text stays selectable even though the panel around it collapses on click */
   .desc-summary.muted { color: var(--muted); font-style: italic; }
 

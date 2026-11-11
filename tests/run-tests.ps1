@@ -118,6 +118,7 @@ $tests = @(
     @{ name = "growing_text_buffer_test"; src = 'growing_text_buffer_test.cpp'; cxx = $true; arg = "" }
     @{ name = "rawmap_picker_test"; src = 'rawmap_picker_test.cpp'; cxx = $true; arg = "" }
     @{ name = "prefab_host_test"; src = 'prefab_host_test.cpp ..\src\backend\prefab_block.c'; cxx = $true; arg = "" }
+    @{ name = "player_text_test"; src = 'player_text_test.cpp'; cxx = $true; arg = "" }
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
