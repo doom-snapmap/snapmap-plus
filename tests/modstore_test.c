@@ -593,7 +593,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     fb_make(a, "guards");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1);
     CHECK(entry_of("guards", sa, ha, &usable) && usable);
-    /* Copied in Explorer: same block, same built, same files; ties by path. */
+    /* Copied in Explorer: same block, same built, same files. */
     _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\guards - Copy", root);
     CHECK(mt_copy_tree(a, b));
     CHECK(sh_ms_enumerate(&list));
@@ -618,22 +618,36 @@ static void test_copy_gets_new_salt(const char *tmp)
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/probe_base", sb);
     CHECK(t && strstr(t, rel));
     free(t);
-    /* The earlier "built" keeps the salt whatever the path order. */
-    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\a copy built later", root);
+    /* A copy whose name sorts first, with the same "built": the folder the
+     * record names keeps the salt (DECISIONS 15). */
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\a copy", root);
     CHECK(mt_copy_tree(a, c));
-    {
-        char *text = slurp(c, "mod.json", NULL), *at = text ? strstr(text, "\"built\": ") : NULL;
-        if (at) { at += 9; while (*at >= '0' && *at <= '9') { *at = '9'; at++; } }
-        if (text) mt_write(c, "mod.json", text);
-        free(text);
-    }
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "a copy built later");
+    e = find_entry(&list, "a copy");
     CHECK(e && e->refused && strstr(e->cause, "is a copy of mods\\guards"));
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(entry_of("guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
-    CHECK(entry_of("a copy built later", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    CHECK(entry_of("a copy", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    /* Renamed and copied before a scan, so the record names neither: the
+     * folder created first keeps the salt. */
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\zz guards", root);
+    CHECK(MoveFileA(a, b));
+    Sleep(20);
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\aa guards", root);
+    CHECK(mt_copy_tree(b, c));
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
+    CHECK(entry_of("zz guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
+    CHECK(entry_of("aa guards", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    /* The record decides before the creation time: the folder at the path
+     * that held the salt keeps it even when it was created later. */
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\older elsewhere", root);
+    CHECK(MoveFileA(b, c));
+    Sleep(20);
+    CHECK(mt_copy_tree(c, b));
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
+    CHECK(entry_of("zz guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
+    CHECK(entry_of("older elsewhere", sc, NULL, &usable) && usable && strcmp(sc, sa));
 }
 
 static void test_earlier_shapes(const char *tmp)

@@ -23,15 +23,26 @@
  * The scan (sh_ms_sync: boot, Refresh, and after an install, a download or
  * New mod; no folder watcher, rule 3). Under the store lock:
  *   1. a root folder with no builder block is a new mod: it gets its salt
- *      (sh_ms_assign_salt, its own references to mods/<folder name>/
- *      rewritten to mods/<salt>/) and keeps its folder name;
- *   2. two root folders carrying one salt (a copied folder): the one built
- *      first ("built" in the block; ties by folder path) keeps it, every
- *      other one gets a new salt with its own references rewritten;
+ *      (sh_ms_assign_salt) and keeps its folder name;
+ *   2. two root folders carrying one salt (a copied folder): the folder the
+ *      record's "salts" section names (the one that held it at the last
+ *      scan) keeps it, else the one created first; every other one gets a
+ *      new salt with its own references rewritten. The scan then records
+ *      each salt's folder;
  *   3. a root folder whose tree hash (sh_mb_tree_hash) or builder rules
  *      differ from its block's, or whose last build failed, is built again;
  *      a failed build records its cause in the block and the folder serves
  *      nothing until fixed (rule 2: no snapshots, no last good build).
+ * Before a root folder is built (1 and 3), what the author wrote under its
+ * folder name moves under the salt (DECISIONS 20): files under
+ * assets\...\mods\<folder name>\, references to mods/<folder name>/ in
+ * mod.json and every text under assets\ (scripts among them), strings keys
+ * without the "<salt>_" prefix that are not string edits with their #str_
+ * references, and a sound bank "<folder name>_x.bnk" (renamed
+ * "<salt>_x.bnk", its id following the name). A folder name equal to a salt
+ * of the store names that mod and is never moved. Renaming a folder changes
+ * nothing already moved. Files beside mod.json and assets\ are left alone.
+
  * A folder in an earlier shape is listed with its plain reason and nothing in
  * it is written. Enumeration only reads.
  *

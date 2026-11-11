@@ -954,13 +954,14 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
                   _TRUNCATE);
 }
 
-/* The copy rule's order: the first successful build of the salt in its folder
- * ("built"), a folder never built last; ties by folder path. */
-static int ms_older(const sh_ms_entry *a, const sh_ms_entry *b)
+static mpj *ms_salts_record(void);
+static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, const char *a_folder, const char *b_name,
+                         const char *b_folder);
+
+/* The copy rule's order (DECISIONS 15, ms_keeps_salt): 1 when a keeps the salt over b. */
+static int ms_older(const mpj *rec, const sh_ms_entry *a, const sh_ms_entry *b)
 {
-    long long x = a->installed_at > 0 ? a->installed_at : LLONG_MAX, y = b->installed_at > 0 ? b->installed_at : LLONG_MAX;
-    if (x != y) return x < y;
-    return _stricmp(a->name, b->name) < 0;
+    return ms_keeps_salt(a->place[0] ? NULL : rec, a->salt, a->name, a->folder, b->name, b->folder);
 }
 
 /* Two folders of one salt in one area: at the root the older keeps the salt
@@ -969,7 +970,9 @@ static int ms_older(const sh_ms_entry *a, const sh_ms_entry *b)
 static void ms_mark_duplicates(sh_ms_list *l)
 {
     size_t i, k, *keeper;
+    mpj *rec;
     if (l->count < 2 || !(keeper = (size_t *)malloc(l->count * sizeof *keeper))) return;
+    rec = ms_salts_record();
     for (i = 0; i < l->count; i++) {
         const sh_ms_entry *e = &l->items[i];
         keeper[i] = (size_t)-1;
@@ -977,9 +980,10 @@ static void ms_mark_duplicates(sh_ms_list *l)
         for (k = 0; k < l->count; k++) {
             const sh_ms_entry *o = &l->items[k];
             if (k == i || o->refused || !o->salt[0] || _stricmp(o->salt, e->salt) || _stricmp(o->place, e->place)) continue;
-            if (ms_older(o, e) && (keeper[i] == (size_t)-1 || ms_older(o, &l->items[keeper[i]]))) keeper[i] = k;
+            if (ms_older(rec, o, e) && (keeper[i] == (size_t)-1 || ms_older(rec, o, &l->items[keeper[i]]))) keeper[i] = k;
         }
     }
+    mpj_free(rec);
     for (i = 0; i < l->count; i++) {
         sh_ms_entry *e = &l->items[i];
         if (keeper[i] == (size_t)-1) continue;
@@ -2163,6 +2167,85 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
     sh_mb_record_unlock();
 }
 
+/* ------------------------------------------ which folder keeps a salt ---- */
+
+/* DECISIONS 15. The record's "salts" section names, for every salt at the
+ * root, the folder (its name under mods\) that held it at the last scan.
+ * Of two folders with one salt, the one the record names keeps it; when the
+ * record names neither (no scan saw them yet, or the holder was renamed and
+ * copied before one), the folder created first keeps it. The build time
+ * never decides: an Explorer copy carries the same mod.json. */
+#define MS_SALTS_SECTION "salts"
+
+static mpj *ms_salts_record(void)
+{
+    char rootu[MAX_PATH * 4], *text = NULL;
+    mpj *doc = NULL;
+    if (!sh_ms_root(rootu, sizeof rootu)) return NULL;
+    if (sh_mb_record_get(rootu, MS_SALTS_SECTION, &text) == 1 && text) doc = mpj_parse(text, strlen(text));
+    free(text);
+    if (doc && doc->type != MPJ_OBJ) { mpj_free(doc); doc = NULL; }
+    return doc;
+}
+
+static int ms_salt_recorded_at(const mpj *rec, const char *salt, const char *name)
+{
+    const mpj *v = rec && salt && salt[0] ? mpj_get(rec, salt) : NULL;
+    char held[SH_MS_NAME_MAX + 1];
+    return v && v->type == MPJ_STR && v->text && ms_pl_decode(v->text, held, sizeof held) && !_stricmp(held, name);
+}
+
+static unsigned long long ms_created(const char *folder)
+{
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    wchar_t *w = folder ? sh_mb_wpath(folder) : NULL;
+    unsigned long long t = ULLONG_MAX;
+    if (w && GetFileAttributesExW(w, GetFileExInfoStandard, &d))
+        t = ((unsigned long long)d.ftCreationTime.dwHighDateTime << 32) | d.ftCreationTime.dwLowDateTime;
+    free(w);
+    return t;
+}
+
+static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, const char *a_folder, const char *b_name,
+                  const char *b_folder)
+{
+    int ra = ms_salt_recorded_at(rec, salt, a_name), rb = ms_salt_recorded_at(rec, salt, b_name);
+    unsigned long long ca, cb;
+    if (ra != rb) return ra;
+    ca = ms_created(a_folder);
+    cb = ms_created(b_folder);
+    if (ca != cb) return ca < cb;
+    return _stricmp(a_name, b_name) < 0;
+}
+
+/* Record the folder of each salt at the root after a scan: `salts[i]` held
+ * by `names[i]`. Written only when it changed. */
+static void ms_salts_note(const char *const *salts, const char *const *names, size_t n)
+{
+    char rootu[MAX_PATH * 4];
+    mpj *doc = mpj_new(MPJ_OBJ), *was;
+    char *a = NULL, *b = NULL;
+    size_t i, al = 0, bl = 0;
+    if (!doc || !sh_ms_root(rootu, sizeof rootu)) { mpj_free(doc); return; }
+    for (i = 0; i < n; i++) {
+        char *e = ms_pl_escape(names[i]);
+        if (!e || !mpj_set(doc, salts[i], mpj_new_str(e))) { free(e); mpj_free(doc); return; }
+        free(e);
+    }
+    sh_mb_record_lock(rootu);
+    was = ms_salts_record();
+    a = mpj_dump(doc, &al);
+    b = was ? mpj_dump(was, &bl) : NULL;
+    if (a && (!b || al != bl || memcmp(a, b, al)))
+        if (!sh_mb_record_put(rootu, MS_SALTS_SECTION, doc->n ? a : NULL))
+            ms_log("MODS: record: which folder holds each salt could not be noted");
+    sh_mb_record_unlock();
+    free(a);
+    free(b);
+    mpj_free(was);
+    mpj_free(doc);
+}
+
 /* ---------------------------------------------------------- new mod ---- */
 
 /* New mod's example: a crate that places and plays
@@ -2991,21 +3074,17 @@ static void ms_sf_free(ms_sf *v, size_t n)
     free(v);
 }
 
-static int ms_sf_older(const ms_sf *a, const ms_sf *b)
-{
-    long long x = a->built > 0 ? a->built : LLONG_MAX, y = b->built > 0 ? b->built : LLONG_MAX;
-    if (x != y) return x < y;
-    return _stricmp(a->name, b->name) < 0;
-}
-
-/* The folder of v[i]'s salt that keeps it (the oldest), or (size_t)-1 when v[i] is that one. */
-static size_t ms_sf_keeper(const ms_sf *v, size_t n, size_t i)
+/* The folder of v[i]'s salt that keeps it (ms_keeps_salt), or (size_t)-1 when v[i] is that one. */
+static size_t ms_sf_keeper(const mpj *rec, const ms_sf *v, size_t n, size_t i)
 {
     size_t k, keep = (size_t)-1;
     if (!v[i].salt[0]) return keep;
     for (k = 0; k < n; k++) {
-        if (k == i || !v[k].salt[0] || _stricmp(v[k].salt, v[i].salt) || !ms_sf_older(&v[k], &v[i])) continue;
-        if (keep == (size_t)-1 || ms_sf_older(&v[k], &v[keep])) keep = k;
+        if (k == i || !v[k].salt[0] || _stricmp(v[k].salt, v[i].salt) ||
+            !ms_keeps_salt(rec, v[i].salt, v[k].name, v[k].folder, v[i].name, v[i].folder))
+            continue;
+        if (keep == (size_t)-1 || ms_keeps_salt(rec, v[i].salt, v[k].name, v[k].folder, v[keep].name, v[keep].folder))
+            keep = k;
     }
     return keep;
 }
@@ -3045,11 +3124,14 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         v[i].built = 0;
         v[i].current = 0;
     }
-    /* 2. A salt in two root folders: the one built first keeps it. Keepers
-     * are settled before anything changes, so three copies resolve at once. */
+    /* 2. A salt in two root folders: the folder the record names keeps it,
+     * else the one created first (DECISIONS 15). Keepers are settled before
+     * anything changes, so three copies resolve at once. */
     {
         size_t *keep = n ? (size_t *)malloc(n * sizeof *keep) : NULL;
-        for (i = 0; keep && i < n; i++) keep[i] = v[i].state == SH_MB_DESC_BUILT ? ms_sf_keeper(v, n, i) : (size_t)-1;
+        mpj *rec = ms_salts_record();
+        for (i = 0; keep && i < n; i++) keep[i] = v[i].state == SH_MB_DESC_BUILT ? ms_sf_keeper(rec, v, n, i) : (size_t)-1;
+        mpj_free(rec);
         for (i = 0; keep && i < n; i++) {
             char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1], cause[SH_MB_CAUSE_MAX];
             if (keep[i] == (size_t)-1) continue;
@@ -3068,6 +3150,16 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
             v[i].current = 0;
         }
         free(keep);
+    }
+    /* Each salt's folder, for the next scan's copy rule. */
+    {
+        const char **salts = n ? (const char **)malloc(n * sizeof *salts) : NULL, **names = n ? (const char **)malloc(n * sizeof *names) : NULL;
+        size_t k = 0;
+        for (i = 0; salts && names && i < n; i++)
+            if (v[i].state == SH_MB_DESC_BUILT && v[i].salt[0]) { salts[k] = v[i].salt; names[k] = v[i].name; k++; }
+        if (salts && names) ms_salts_note(salts, names, k);
+        free(salts);
+        free(names);
     }
     /* 3. The rebuild rule: a root folder not built from its current tree under
      * these rules is built again; one whose last build failed too. */
@@ -3116,6 +3208,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st) { return ms
 
 int sh_ms_sync_pending(void)
 {
+    mpj *rec;
     wchar_t *root;
     ms_sf *v = NULL;
     size_t n, i;
@@ -3125,10 +3218,12 @@ int sh_ms_sync_pending(void)
     if (!ms_exists(root)) { free(root); return 0; }
     modstore_lock();
     n = ms_sync_scan(root, &v);
+    rec = ms_salts_record();
     for (i = 0; i < n; i++) {
         if (v[i].state == SH_MB_DESC_FRESH) pending++;
-        else if (v[i].state == SH_MB_DESC_BUILT && (!v[i].current || ms_sf_keeper(v, n, i) != (size_t)-1)) pending++;
+        else if (v[i].state == SH_MB_DESC_BUILT && (!v[i].current || ms_sf_keeper(rec, v, n, i) != (size_t)-1)) pending++;
     }
+    mpj_free(rec);
     ms_sf_free(v, n);
     modstore_unlock();
     free(root);
