@@ -1405,7 +1405,12 @@ that grows the table allocates its new array from the current heap (the
 list's resize asks for heap -1, VK 0x140280ED0), and the editor's or a map's
 own heap is freed with it, after which the game's string lookups (VK
 0x140281360) read freed memory. A thread where the process heap cannot be
-selected runs no pass and leaves the refresh pending. The player's own document of earlier releases,
+selected runs no pass and leaves the refresh pending.
+The engine rebuilds its table when it loads a language (as the editor or a
+map starts) and sorts it through the hooked sort; that drops the injected
+rows, so every later top-level sort the engine makes re-adds them (in the
+process heap) before it orders the table, and decls parsed and Toybox rows
+read after a rebuild find a mod's names. The player's own document of earlier releases,
 `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
 tool's loose step moves its keys into the mod My overrides (see [Migration of
 the retired overrides folder](#migration-of-the-retired-overrides-folder)), so
