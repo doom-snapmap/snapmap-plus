@@ -490,11 +490,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         (void)sh_modscene_place_install(results, db, g_doom_base);
 
         /* Expose live entity reads so navigation sees marks edited since map load. */
-        sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
-                                    sh_apply_engine_entity_valid,
+        sh_nav_bake_set_live_editor(sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json,
                                     sh_apply_engine_entity_transform, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
+        /* A changed mod table can change which module files a bake reads. */
+        sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
         sh_nav_menu_install(results, db);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
@@ -552,7 +553,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
         sh_megapreview_install(results, db, g_doom_base);
-        (void)sh_vt_harness_install(results, db, g_doom_base);   /* sh_vt decode */
         /* Load installed-resource indexes for file-based image previews and catalogs. */
         sh_imgpreview_install();
         /* Start bounded prefab geometry previews using the installed-resource index. */

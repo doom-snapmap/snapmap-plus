@@ -195,7 +195,7 @@ static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hi
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
 #define MS_LISTENERS 4
-static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c */
+static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c, nav_bake.c */
 
 /* ------------------------------------------------------------------ logging */
 

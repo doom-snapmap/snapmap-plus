@@ -1632,6 +1632,11 @@ static void h_sh_navmesh(idCmdArgs *a)
                   hooked ? "watched" : "NOT watched -- the edit hook did not install");
         return;
     }
+    if (verb && _stricmp(verb, "detail") == 0) {
+        sh_nav_bake_report_detail(sh_printf);
+        return;
+    }
+#ifdef SH_DIAG
     if (verb && _stricmp(verb, "marks") == 0) {
         const char *howmany = cmd_argv(a, 2);
         int n = howmany ? atoi(howmany) : 4;
@@ -1647,6 +1652,7 @@ static void h_sh_navmesh(idCmdArgs *a)
                       "navigation.\n");
         return;
     }
+#endif
     sh_navmesh_report(sh_printf);
     sh_printf("navigation: the last Play read its boxes from %s.\n",
               sh_apply_engine_nav_build_source());
@@ -1756,7 +1762,9 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
     { SH_MODCMD_NAME,        (void *)h_sh_mods,     SH_MODCMD_HELP },
+#ifdef SH_DIAG
     { SH_VT_CMD_NAME,        (void *)h_sh_vt,       SH_VT_CMD_HELP },
+#endif
     { SH_PREFAB_CMD_NAME,    (void *)h_sh_prefab,   SH_PREFAB_CMD_HELP },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
@@ -1773,7 +1781,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
-      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh marks [count]' marks boxes red like a refused bake; 'sh_navmesh marks 0' clears them. 'sh_navmesh reads' counts what the editor has cost it." },
+      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh detail' adds the developer detail; 'sh_navmesh reads' counts what the editor has cost it." },
 
     { "sh_gridsize",         (void *)h_sh_gridsize,
       "sh_gridsize [instance] prints the selected Grid Room's size; 'sh_gridsize templates' lists the module entity templates of the stock modern room and each resized variant; 'sh_gridsize <x> <y> <z> [instance]' resizes it through the same path as the room's properties and prints the result or the reason it was limited or refused." },
