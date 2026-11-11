@@ -231,10 +231,8 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
 int   sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *name_out, size_t name_cap,
                             char *msg, size_t cap);
 
-/* 1 when `name` can be a prefab file name: 1-120 characters, none of
- * \ / : * ? " < > | or a control character, no leading or trailing space or
- * dot, not a device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without
- * an extension) and not ending in ".meta". */
+/* 1 when `name` can be a prefab file name: the one rule the Prefabs tab
+ * uses too (prefab_block.h, sh_prefab_block_valid_name). */
 int   sh_prefab_mods_valid_name(const char *name);
 
 /* ------------------------------------------------------------ engine */

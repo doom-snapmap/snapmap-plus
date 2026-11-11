@@ -73,26 +73,11 @@ inline const char *kind_of_type(const std::string &type)
     return "";
 }
 
-/* A prefab or folder name (UTF-8) Windows can hold as one path component:
- * not empty, at most 200 bytes, no control character, none of < > : " / \ | ? *,
- * not ending in a dot or a space, no "..", and not a device name (CON, PRN, AUX,
- * NUL, COM0-9, LPT0-9), alone or before an extension, in any case. */
+/* A prefab or folder name (UTF-8): the one rule the backend uses too
+ * (prefab_block.h, sh_prefab_block_valid_name). */
 inline bool valid_name(const std::string &n)
 {
-    if (n.empty() || n.size() > 200) return false;
-    if (n.find("..") != std::string::npos) return false;
-    for (unsigned char c : n)
-        if (c < 0x20 || c == 0x7f || strchr("<>:\"/\\|?*", (char)c)) return false;
-    if (n.back() == '.' || n.back() == ' ') return false;
-    std::string base = n.substr(0, n.find('.'));
-    while (!base.empty() && base.back() == ' ') base.pop_back();
-    for (char &c : base) if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    static const char *const devices[] = { "CON", "PRN", "AUX", "NUL" };
-    for (const char *d : devices) if (base == d) return false;
-    if (base.size() == 4 && (base.compare(0, 3, "COM") == 0 || base.compare(0, 3, "LPT") == 0) &&
-        base[3] >= '0' && base[3] <= '9')
-        return false;
-    return true;
+    return n.find('\0') == std::string::npos && sh_prefab_block_valid_name(n.c_str()) == 1;
 }
 
 /* The live usage gate. */

@@ -20,7 +20,7 @@
 
 #define PM_MSG_CAP  600
 #define PM_LINE_CAP 1200
-#define PM_NAME_MAX 120
+#define PM_NAME_MAX SH_PREFAB_NAME_MAX
 #define PM_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + 4)   /* the mod's name */
 
 static sh_prefab_mods_ops g_ops;
@@ -884,29 +884,7 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
 /* export, import                                                        */
 /* ==================================================================== */
 
-int sh_prefab_mods_valid_name(const char *name)
-{
-    static const char *const DEVICES[] = { "con", "prn", "aux", "nul", NULL };
-    size_t n, i, stem;
-    char low[8];
-    if (!name) return 0;
-    n = strlen(name);
-    if (!n || n > PM_NAME_MAX) return 0;
-    if (name[0] == ' ' || name[0] == '.' || name[n - 1] == ' ' || name[n - 1] == '.') return 0;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if (c < 0x20 || strchr("\\/:*?\"<>|", c)) return 0;
-    }
-    if (n >= 5 && !_stricmp(name + n - 5, ".meta")) return 0;
-    for (stem = 0; stem < n && name[stem] != '.'; stem++) {}
-    if (stem == 3 || stem == 4) {
-        for (i = 0; i < stem; i++) low[i] = (char)((name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i]);
-        low[stem] = 0;
-        for (i = 0; DEVICES[i]; i++) if (stem == 3 && !strcmp(low, DEVICES[i])) return 0;
-        if (stem == 4 && (!strncmp(low, "com", 3) || !strncmp(low, "lpt", 3)) && low[3] >= '1' && low[3] <= '9') return 0;
-    }
-    return 1;
-}
+int sh_prefab_mods_valid_name(const char *name) { return sh_prefab_block_valid_name(name); }
 
 static int pm_acp_to_utf8(const char *acp, char *out, size_t cap)
 {

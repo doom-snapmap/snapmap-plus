@@ -293,7 +293,23 @@ static void names(void)
     CHECK(sh_prefab_mods_valid_name("Door (2)"));
     CHECK(sh_prefab_mods_valid_name("console"));
     CHECK(!sh_prefab_mods_valid_name("con") && !sh_prefab_mods_valid_name("NUL") && !sh_prefab_mods_valid_name("aux.json"));
-    CHECK(!sh_prefab_mods_valid_name("COM1") && !sh_prefab_mods_valid_name("lpt9.zip") && sh_prefab_mods_valid_name("com0"));
+    CHECK(!sh_prefab_mods_valid_name("COM1") && !sh_prefab_mods_valid_name("lpt9.zip"));
+    /* One rule with the Prefabs tab: COM0 and LPT0 are device names too, ".."
+     * is refused anywhere, a device name before spaces and an extension too,
+     * and the length is the tab's, in bytes. */
+    CHECK(!sh_prefab_mods_valid_name("com0") && !sh_prefab_mods_valid_name("LPT0") && !sh_prefab_mods_valid_name("a..b"));
+    CHECK(!sh_prefab_mods_valid_name("nul .txt") && sh_prefab_mods_valid_name("con2") && sh_prefab_mods_valid_name("v1.2"));
+    {
+        char longest[SH_PREFAB_NAME_MAX + 2];
+        memset(longest, 'a', SH_PREFAB_NAME_MAX);
+        longest[SH_PREFAB_NAME_MAX] = 0;
+        CHECK(sh_prefab_mods_valid_name(longest));
+        longest[SH_PREFAB_NAME_MAX] = 'a';
+        longest[SH_PREFAB_NAME_MAX + 1] = 0;
+        CHECK(!sh_prefab_mods_valid_name(longest));
+    }
+    CHECK(sh_prefab_mods_valid_name("J\xc3\xb6rg's crates"));
+
     CHECK(!sh_prefab_mods_valid_name("a/b") && !sh_prefab_mods_valid_name("a\\b") && !sh_prefab_mods_valid_name("a:b"));
     CHECK(!sh_prefab_mods_valid_name(" x") && !sh_prefab_mods_valid_name("x.") && !sh_prefab_mods_valid_name(""));
     CHECK(!sh_prefab_mods_valid_name("door.meta") && !sh_prefab_mods_valid_name(".."));
