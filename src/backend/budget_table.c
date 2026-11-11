@@ -395,6 +395,11 @@ typedef struct bt_row_models { bt_row_model *row; int count, cap, with_model; } 
 static bt_row_models g_rows;
 
 static volatile LONG g_dirty = 1;
+/* When the editor frame last read the usage block. The frame stops when the
+ * player leaves the editor, so a reading older than BT_USAGE_FRESH_MS belongs
+ * to a map that is no longer open and is not reported. */
+#define BT_USAGE_FRESH_MS 1000u
+static volatile LONG64 g_usage_at;
 static void *g_built_editor;
 static const void *g_built_entries, *g_built_pool;
 static int g_built_count = -1, g_built_pool_count = -1;
@@ -679,6 +684,7 @@ void sh_budget_table_tick(void *editor)
         g_reached = reached;
         g_usage_ok = 1;
         ReleaseSRWLockExclusive(&g_lock);
+        InterlockedExchange64(&g_usage_at, (LONG64)GetTickCount64());
     }
     __try { if (ed[ED_INIT_OFF] != 1) return; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     if (!InterlockedCompareExchange(&g_dirty, 0, 0) && ed == g_built_editor && !bt_palette_moved(ed)) return;
@@ -747,18 +753,19 @@ int sh_budget_table_row_model(const char *inherit, char *sedef, size_t sedef_cap
 
 int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)
 {
-    int r = 0;
+    int r = 0, fresh;
     (void)self;
     if (!call) return 0;
     call->needed = 0;
+    fresh = (ULONGLONG)GetTickCount64() - (ULONGLONG)InterlockedCompareExchange64(&g_usage_at, 0, 0) <= BT_USAGE_FRESH_MS;
     AcquireSRWLockShared(&g_lock);
     call->generation = g_generation;
-    call->reached = g_reached;
+    call->reached = fresh ? g_reached : 0;
     if (call->op == SH_BUDGET_TABLE && g_table) {
         call->needed = (int)g_table_len;
         if (!call->out || call->out_cap <= (int)g_table_len) r = -1;
         else { memcpy(call->out, g_table, g_table_len + 1); r = 1; }
-    } else if (call->op == SH_BUDGET_USAGE && g_usage_ok) {
+    } else if (call->op == SH_BUDGET_USAGE && g_usage_ok && fresh) {
         int n = sh_bt_usage_json(NULL, 0, g_limits, g_usage, g_reached, g_generation);
         call->needed = n < 0 ? 0 : n;
         if (n < 0) r = 0;
