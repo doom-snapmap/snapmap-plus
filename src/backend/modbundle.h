@@ -587,7 +587,8 @@ void sh_mb_set_script_check(sh_mb_script_check_fn fn);
 /* The static registration pass: every literal call of the registration API in
  * one script's text, without running it. Lua comments and strings are
  * skipped; a call is recognised where the code spells it:
- *   on.<event>("<name>", ...)    event spawn, think, remove, damage, death, anim  -> SH_MB_SCRIPT_BIND
+ *   on.<event>("<name>", ...)    event spawn, think, remove, damage, death, anim,
+ *                                pain, projectile, frame_event                  -> SH_MB_SCRIPT_BIND
  *   on.input("<node name>", ...)                                                   -> SH_MB_SCRIPT_INPUT
  *   node("<node name>")                                                            -> SH_MB_SCRIPT_OUTPUT
  *   require("<module>") or require "<module>"                                      -> SH_MB_SCRIPT_REQUIRE
