@@ -18,14 +18,6 @@
 
 #define MSY_PLACES "maps"   /* mods\maps\<map title>\<mod name>\: the places (ONE-SHAPE rule 4) */
 
-/* The places of modstore.h (lane D of the one-shape plan): the folder under
- * mods\ that `place` gives the mod `salt` (1 a free name for `name`, 2 the
- * place's folder that holds the salt already, 0 none), and the record's note
- * that the folder serves the place's map. Declared here until modstore.h
- * carries them. */
-int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap);
-int sh_ms_place_note(const sh_ms_place *place, const char *folder);
-
 /* ------------------------------------------------------------ lock ------ */
 
 /* The store lock lives in modstore.c (modstore_lock); these are its older

@@ -16,6 +16,8 @@ func TestEnterDefault(t *testing.T) {
 		{"installed, newer available -> update", true, "v0.2.0-beta.4", "v0.2.0-beta.5", "update"},
 		{"installed, up to date -> nothing", true, "v0.2.0-beta.5", "v0.2.0-beta.5", ""},
 		{"installed, check failed -> nothing (no false notice)", true, "v0.2.0-beta.5", "", ""},
+		{"installed, latest is older -> nothing (never a downgrade)", true, "v1.1.0-beta.1", "v1.0.0", ""},
+		{"installed beta, stable is newer -> update", true, "v1.0.0-beta.26", "v1.0.0", "update"},
 	}
 	for _, c := range cases {
 		if got := enterDefault(c.installed, c.installedVersion, c.latestTag); got != c.want {

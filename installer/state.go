@@ -83,9 +83,27 @@ func loadStateAt(dir string) (*installRecord, error) {
 	}
 	var rec installRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, fmt.Errorf("%s is not readable (%v)", statePath(dir), err)
+		return setAsideUnreadable(dir, err)
 	}
 	return &rec, nil
+}
+
+// unreadableSuffix names the copy of an install.json that could not be read.
+const unreadableSuffix = ".unreadable"
+
+// setAsideUnreadable renames an install.json that is not valid JSON to install.json.unreadable and
+// starts an empty record, so the next install or update can run; files in DOOM are then recognised
+// by their contents.
+func setAsideUnreadable(dir string, cause error) (*installRecord, error) {
+	p := statePath(dir)
+	aside := p + unreadableSuffix
+	os.Remove(aside)
+	if err := os.Rename(p, aside); err != nil {
+		return nil, fmt.Errorf("%s could not be read (%v) and could not be renamed (%v) -- delete it, then run: snapmap-plus update", p, cause, err)
+	}
+	ui.Warn("%s could not be read (%v), so it was renamed to %s and a new record is started. "+
+		"If Snapmap+ is installed, run: snapmap-plus update", p, cause, filepath.Base(aside))
+	return &installRecord{}, nil
 }
 
 // saveStateAt replaces dir's install.json atomically.
@@ -176,15 +194,6 @@ func loadRecord() (*installRecord, error) {
 		return nil, errNotInstalled
 	}
 	return rec, nil
-}
-
-// saveRecord replaces install.json with rec.
-func saveRecord(rec *installRecord) error {
-	p, err := recordPath()
-	if err != nil {
-		return err
-	}
-	return saveStateAt(filepath.Dir(p), rec)
 }
 
 // noteReleaseChecked records the release the installer last resolved for its own update. It writes

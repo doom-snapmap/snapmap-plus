@@ -46,7 +46,7 @@ You need 64-bit **Windows 10 or 11** and the tools below. Install them in this o
 |---|---|---|---|
 | 1 | **Git** | any recent | <https://git-scm.com/download/win> |
 | 2 | **Visual Studio 2022 Build Tools** | 2022 (v17) | <https://aka.ms/vs/17/release/vs_BuildTools.exe> |
-| 3 | **Go** | 1.21+ | <https://go.dev/dl/> |
+| 3 | **Go** | 1.26+ | <https://go.dev/dl/> |
 | 4 | **DOOM 2016** | Steam (app 379720) | required to actually run/test the mod |
 
 The frontend renders in the Microsoft Edge **WebView2 runtime**, preinstalled on Windows 11 and on most
@@ -108,10 +108,14 @@ PDB is removed before each link). To force a clean build, delete `build/obj/`.
 powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
 ```
 
-This assembles the deployable **2-file overlay** into **`dist/`**: the two clone DLLs (the frontend
-renders in the system-installed WebView2 runtime), laid out exactly as they drop into a DOOM install,
-alongside a `MANIFEST.sha256`. `dist/` is gitignored. The manifest records both DLLs;
-no game assets or per-user data are bundled.
+This assembles the bundle into **`dist/`**: the **2-file overlay** (the two clone DLLs, laid out exactly
+as they drop into a DOOM install; the frontend renders in the system-installed WebView2 runtime) with its
+`MANIFEST.sha256`, and beside it the store tool `snapmap-plus-store.exe` with its own `TOOLS.sha256` (the
+installer places it in the data folder, not in DOOM). `dist/` is gitignored. No game assets or per-user
+data are bundled. `tools/bundle_guard.ps1` checks that layout; CI and the release run it.
+
+A release build stamps its tag into the DLLs: `build.ps1 -Version v1.2.3` passes it to every compile as
+`SNAPMAP_PLUS_VERSION` (a local build is `dev`), the version the DLLs put on reports.
 
 ## 6. Deploy and test in DOOM
 
@@ -292,8 +296,8 @@ that are merged but not yet tagged do not appear.
    preference. Do not add agent/tool attribution or generated-by trailers.
 7. **Push** to your fork and open a **pull request against `main`**.
 8. The **CI gate** runs automatically, as three parallel jobs: a security scan (no-new-binaries ·
-   capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, a bundle guard that
-   asserts the overlay stays the lean 2-file set, XInput ordinal parity, `tests/run-tests.ps1` and the
+   capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, `tools/bundle_guard.ps1`,
+   which asserts the bundle is the 2-file overlay plus the store tool, XInput ordinal parity, `tests/run-tests.ps1` and the
    Worker runtime suite); and the installer's `gofmt` / `vet` / `test` / `build`. CI calls the same
    scripts as a local build and caches fetched dependencies (the WebView2 SDK, miniflare and the Go
    caches) and `build/obj/`, whose content keys decide what a run recompiles. It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
@@ -378,14 +382,14 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    behaviour change updates the docs in the SAME pull request matters here: those docs are what the drafter
    is grounded on, and a release whose docs were not updated gives it nothing to be right from.
 3. Merge it.
-4. `git tag v0.2.2-beta.1 && git push origin v0.2.2-beta.1` -- **do this immediately after merging.** Merging
-   redeploys the site, so between the merge and the tag the changelog page lists a release that cannot yet be
-   downloaded.
-5. `release.yml` refuses to build a tag with no entry, so step 4 cannot silently ship notes-free.
+4. Tag the merged commit on `main`: `git tag v0.2.2-beta.1 && git push origin v0.2.2-beta.1`. The website's
+   changelog reads published releases only, so the entry appears there when `release.yml` publishes it.
+5. `release.yml` refuses a tag with no entry, a `NEEDS WRITING` entry or a commit off `main`, so step 4
+   cannot silently ship notes-free.
 
 If drafting fails -- an outage, a rate limit, a declined request -- the pull request still opens, carrying the
-raw commit list marked `NEEDS WRITING`. Rewrite it by hand and merge as usual. A drafting failure never blocks
-a release.
+raw commit list marked `NEEDS WRITING`. Rewrite it by hand on the branch; the pull-request lint refuses to
+merge it until then. A drafting failure never blocks a release.
 
 If the pull request itself cannot be opened -- "Allow GitHub Actions to create and approve pull requests" is
 off, possibly locked by an organisation policy -- the draft is still pushed to `changelog/<version>` and the
@@ -396,8 +400,20 @@ Correcting a past entry: edit it in `CHANGELOG.md`, then run
 Release. Without that, `CHANGELOG.md` is the source of truth only for releases cut after it existed. The tool
 is a dry run by default and saves the current bodies before changing anything.
 
-The first stable release is a special case: there is no earlier stable tag to compare against, so the drafter
-would receive the entire history. Write that entry by hand.
+The first stable release is a special case: there is no earlier stable tag to compare against, and the
+workflow refuses to draft from the entire history. Pass the last beta as the base:
+`gh workflow run prepare-release.yml -f version=v1.0.0 -f base=v0.2.1-beta.26` (any tag can be given as
+`base` when the default comparison is not the one wanted).
+
+`release.yml` checks the tag before building: it must be `vMAJOR.MINOR.PATCH` or
+`vMAJOR.MINOR.PATCH-beta.N`, point at a commit on `main`, and have a written changelog entry (the
+`NEEDS WRITING` draft is refused here and by the pull-request lint). The whole CI gate then runs on the
+tag. The release is created as a draft, every asset is uploaded and read back unchanged, and only then is
+it published, so the newest release never lacks its downloads.
+
+Release binaries are not code-signed yet. `release.yml` holds a disabled signing step after compilation and
+before packaging, hashing and attestation, naming the repository variables and secrets it needs; enabling
+it is a change to that step's condition once a signing account exists (see [services](services.md)).
 
 Before merging, the maintainer reads the complete pull request: its description, every commit message, the
 full diff, review discussion, linked issues, and reported validation. Coherent commits are rebased and

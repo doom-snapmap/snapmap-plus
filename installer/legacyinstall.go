@@ -100,7 +100,7 @@ func installLegacyRelease(f flags, doom string) error {
 	if runErr != nil {
 		var exit *exec.ExitError
 		if errors.As(runErr, &exit) {
-			return fmt.Errorf("the %s installer failed (exit %d)", legacyReleaseTag, exit.ExitCode())
+			return fmt.Errorf("the %s installer for the 2018 build failed (exit %d); its lines above say why -- run: snapmap-plus update to try again", legacyReleaseTag, exit.ExitCode())
 		}
 		return fmt.Errorf("couldn't run the %s installer (%v)", legacyReleaseTag, runErr)
 	}

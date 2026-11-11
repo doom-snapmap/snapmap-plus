@@ -947,7 +947,9 @@ static void m_no_id(const char *f) { mt_write(f, "mod.json", "{\"name\":\"x\"}")
 static void m_no_name(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1.0.0\"}"); }
 static void m_bad_json(const char *f) { mt_write(f, "mod.json", "{\"name\":\"x\",\"name\":\"y\"}"); }
 static void m_strings_outside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/other/t\":\"x\"}}")); }
-static void m_strings_inside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/alexrimp/t\":\"x\"}}")); }
+static void m_strings_inside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_t\":\"x\"}}")); }
+static void m_strings_slash(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/alexrimp/t\":\"x\"}}")); }
+static void m_strings_bare(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_\":\"x\"}}")); }
 static void m_bad_version(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1/2\",\"name\":\"x\"}"); }
 static void m_reserved(const char *f) { mt_write(f, "mod.json", DESC(",\"files\":[]")); }
 static void m_float(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":1.5e1}")); }
@@ -1151,10 +1153,12 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_no_id, &b);
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
     sh_mb_free(&b);
-    /* Every strings key is under the salt. */
-    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t is outside mods/alexrimp/");
+    /* Every strings key is <salt>_<name> (DECISIONS 5: no '/'). */
+    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t is not named alexrimp_<name>");
+    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t is not named alexrimp_<name>");
+    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ is not named alexrimp_<name>");
     accepted(fixture, tmp, m_strings_inside, &b);
-    CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"strings\":[\"mods/alexrimp/t\"]"));
+    CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"strings\":[\"alexrimp_t\"]"));
     sh_mb_free(&b);
     refused(fixture, tmp, m_no_name, &RESOLVER, "missing its required name");
     refused(fixture, tmp, m_bad_json, &RESOLVER, "invalid JSON");

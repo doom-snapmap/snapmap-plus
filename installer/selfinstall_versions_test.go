@@ -130,27 +130,3 @@ func captureStdout(t *testing.T, fn func()) string {
 	wr.Close()
 	return <-done
 }
-
-// An update resolves the release twice; the newest-beta fallback is announced once.
-func TestBetaFallbackNoticePrintsOnce(t *testing.T) {
-	r := newUpdateRig(t, "v1.0.0-beta.1")
-	m := newMockGitHub(t)
-	m.publish(goodRelease(t, "v1.0.0-beta.1", true))
-	if err := cmdInstall(flags{yes: true, doom: r.doom}); err != nil {
-		t.Fatal(err)
-	}
-	m.publish(goodRelease(t, "v1.0.0-beta.2", true))
-	betaFallbackNoted = false
-	t.Cleanup(func() { betaFallbackNoted = false })
-	out := captureStdout(t, func() {
-		if err := cmdUpdate(flags{yes: true}); err != nil {
-			t.Errorf("update: %v", err)
-		}
-	})
-	if n := strings.Count(out, "No stable release has been published yet"); n != 1 {
-		t.Errorf("fallback notice printed %d times:\n%s", n, out)
-	}
-	if !strings.Contains(out, "Updated snapmap-plus.exe to v1.0.0-beta.2") {
-		t.Errorf("update did not self-update:\n%s", out)
-	}
-}

@@ -17,6 +17,7 @@
 #include "map_legacy_payload.h"
 #include "modmanifest.h"
 #include "modbundle.h"
+#include "modsalt.h"
 #include "navmesh.h"
 #include "config_json.h"
 
@@ -1501,7 +1502,7 @@ char *sh_map_old_write(const char *json, size_t len, const sh_map_old *old,
         return NULL;
     }
     for (i = 0; i < map_count; i++)
-        if (!mo_valid_key(map[i].key) || !sh_modmanifest_valid_salt(map[i].salt) ||
+        if (!mo_valid_key(map[i].key) || !sh_salt_valid(map[i].salt, strlen(map[i].salt)) ||
             !sh_modmanifest_valid_hash(map[i].build, strlen(map[i].build))) {
             MO_ERR("the salt recorded for '%s' is not a salt and a build", map[i].key);
             return NULL;

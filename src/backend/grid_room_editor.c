@@ -214,9 +214,11 @@ static void grid_changed(void *panel,void *inspector,int action)
     sh_grid_size current,next;sh_grid_warp check;
     float dims[3],requested[3];unsigned i;int instance,adjusted=0,outside=0;void *map;
     /* The null guard at the original entry precedes our detour. Other native
-     * IDs always reach their original dispatcher with unchanged arguments. */
+     * IDs always reach their original dispatcher with unchanged arguments.
+     * The hook serves the settings tab whether or not the Grid Room
+     * inspector installed; without it the size row never exists. */
     if(g_property_handler&&g_property_handler(panel,inspector,action))return;
-    if(*(const int*)(v+0x40)!=GRID_PROPERTY_SIZE){g_change(panel,inspector,action);return;}
+    if(!g_populate||*(const int*)(v+0x40)!=GRID_PROPERTY_SIZE){g_change(panel,inspector,action);return;}
     if(InterlockedCompareExchange(&g_failed,0,0)){
         backend_log("GRID: room size edit ignored; the properties adapter was disabled by an earlier engine exception");return;}
     __try {
@@ -292,22 +294,40 @@ static const sig_result *clean(const sig_result *results,size_t count,const char
         results[i].status==SIG_OK)return &results[i];return NULL;
 }
 
+int sh_native_property_hook_install(const sig_result *results,size_t count)
+{
+    const sig_result *change;
+    if(g_change)return hook_is_installed((void*)g_change);
+    change=clean(results,count,"GridPropertyChanged");
+    if(!change)return 0;
+    /* Change's entry has a null branch, so hook its non-null body at +9 and
+     * steal 17 position-independent bytes. The branch itself and its
+     * destination remain untouched. */
+    g_change=(change_fn)hook_prepare((void*)(change->addr+9),(void*)grid_changed,17);
+    if(!g_change)return 0;
+    if(hook_commit((void*)g_change)!=B2_PATCH_OK){
+        if(hook_unpatch((void*)g_change))g_change=NULL;
+        return 0;
+    }
+    return 1;
+}
+
 int sh_grid_editor_install(const sig_result *results,size_t count,
                             sh_grid_editor_read_fn read,sh_grid_editor_apply_fn apply)
 {
-    const sig_result *populate,*change,*add,*set,*hash,*update,*help,*pressed,*blocked,*state,*action_help;
+    const sig_result *populate,*add,*set,*hash,*update,*help,*pressed,*blocked,*state,*action_help;
     if(!read||!apply)return 0;
-    if(g_populate&&g_change&&g_add_vec&&g_blueprint_update&&g_blueprint_help&&
-        hook_is_installed((void*)g_populate)&&hook_is_installed((void*)g_change)&&
-        hook_is_installed((void*)g_add_vec)&&
+    if(g_populate&&g_add_vec&&g_blueprint_update&&g_blueprint_help&&
+        hook_is_installed((void*)g_populate)&&hook_is_installed((void*)g_add_vec)&&
        hook_is_installed((void*)g_blueprint_update)&&hook_is_installed((void*)g_blueprint_help))return 1;
-    if(g_populate||g_change||g_add_vec||g_blueprint_update||g_blueprint_help)return 0;
-    populate=clean(results,count,"GridModuleProperties");change=clean(results,count,"GridPropertyChanged");
+    if(g_populate||g_add_vec||g_blueprint_update||g_blueprint_help)return 0;
+    if(!sh_native_property_hook_install(results,count))return 0;
+    populate=clean(results,count,"GridModuleProperties");
     add=clean(results,count,"GridAddVec3");set=clean(results,count,"GridSetVec3");hash=clean(results,count,"StridsHash");
     update=clean(results,count,"GridBlueprintUpdate");help=clean(results,count,"GridBlueprintHelp");
     pressed=clean(results,count,"GridInputPressed");blocked=clean(results,count,"GridPropertiesBlocked");
     state=clean(results,count,"GridSetEditorState");action_help=clean(results,count,"GridAddActionHelp");
-    if(!populate||!change||!add||!set||!hash||!update||!help||!pressed||!blocked||!state||!action_help)return 0;
+    if(!populate||!add||!set||!hash||!update||!help||!pressed||!blocked||!state||!action_help)return 0;
     g_read=read;g_apply=apply;g_set_vec=(set_vec_fn)set->addr;g_hash=(hash_fn)hash->addr;
     g_pressed=(pressed_fn)pressed->addr;g_blocked=(blocked_fn)blocked->addr;
     g_set_state=(set_state_fn)state->addr;g_action_help=(action_help_fn)action_help->addr;
@@ -319,10 +339,8 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
         g_screen_by_index=(screen_by_index_fn)screen->addr;g_widget_resolve=(widget_resolve_fn)resolve->addr;
         g_list_redraw=(list_redraw_fn)redraw->addr;
      } else backend_log("GRID: sub-editor redraw unavailable (signatures not resolved); after an outside size change, reopen the X/Y/Z editor to see the current size");}
-    /* Populate steals 16 register/stack-only bytes. Change's entry has a null
-     * branch, so hook its non-null body at +9 and steal 17 position-independent
-     * bytes. The branch itself and its destination remain untouched. */
-    g_change=(change_fn)hook_prepare((void*)(change->addr+9),(void*)grid_changed,17);
+    /* Populate steals 16 register/stack-only bytes. The change hook is shared
+     * with the settings tab and stays installed whatever happens below. */
     g_populate=(populate_fn)hook_prepare((void*)populate->addr,(void*)grid_populate,16);
     /* AddVec3's first 18 bytes only save registers and establish its frame. */
     g_add_vec=(add_vec_fn)hook_prepare((void*)add->addr,(void*)grid_add_vec,18);
@@ -330,8 +348,8 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
      * without relative operands, independently checked in both renderers. */
     g_blueprint_update=(blueprint_update_fn)hook_prepare((void*)update->addr,(void*)grid_blueprint_update,15);
     g_blueprint_help=(blueprint_help_fn)hook_prepare((void*)help->addr,(void*)grid_blueprint_help,15);
-    if(g_change&&g_populate&&g_add_vec&&g_blueprint_update&&g_blueprint_help&&
-        hook_commit((void*)g_change)==B2_PATCH_OK&&hook_commit((void*)g_populate)==B2_PATCH_OK&&
+    if(g_populate&&g_add_vec&&g_blueprint_update&&g_blueprint_help&&
+        hook_commit((void*)g_populate)==B2_PATCH_OK&&
         hook_commit((void*)g_add_vec)==B2_PATCH_OK&&
         hook_commit((void*)g_blueprint_update)==B2_PATCH_OK&&hook_commit((void*)g_blueprint_help)==B2_PATCH_OK){
         backend_log("GRID: native module dimension inspector and Blueprint X shortcut installed");return 1;}
@@ -339,6 +357,5 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
     if(g_blueprint_update&&hook_unpatch((void*)g_blueprint_update))g_blueprint_update=NULL;
     if(g_add_vec&&hook_unpatch((void*)g_add_vec))g_add_vec=NULL;
     if(g_populate&&hook_unpatch((void*)g_populate))g_populate=NULL;
-    if(g_change&&hook_unpatch((void*)g_change))g_change=NULL;
     return 0;
 }

@@ -35,6 +35,13 @@ int main()
     char *noise[] = { a0, other, a1, nullptr };
     assert(sh_game_identity::from_argv(3, noise) == kGame);
 
+    // The backend's version rides the same block.
+    char v[] = "--version=v1.0.0";
+    char *withVersion[] = { a0, a1, v, nullptr };
+    assert(sh_game_identity::backend_version(3, withVersion) == "v1.0.0");
+    assert(sh_game_identity::from_argv(3, withVersion) == kGame);
+    assert(sh_game_identity::backend_version(2, both).empty());
+
     std::puts("game_identity_arg_test: PASS");
     return 0;
 }

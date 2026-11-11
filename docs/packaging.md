@@ -16,8 +16,8 @@ This is the artifact an end user installs; `dist/` is gitignored (binaries are n
 **The bundle carries the April 2024 pair only.** The bundles of earlier releases from v0.2.1-beta.20 on also carried
 v0.2.1-beta.19's `XINPUT1_3.dll` and `snapmap-plus\snapmap-plus-ui.dll`, so that an update by an installer
 without build detection would leave a 2018 install's files in place; that left the other build's files in
-every April 2024 folder. `package.ps1` no longer packages them, and `ci.yml` and `release.yml` refuse a
-`dist/` that holds either. The installer installs only the pair for the detected build from any bundle,
+every April 2024 folder. `package.ps1` no longer packages them, and `tools/bundle_guard.ps1`, which
+`ci.yml` and `release.yml` run, refuses a `dist/` that holds either. The installer installs only the pair for the detected build from any bundle,
 the bundle of an earlier release included, so an old bundle cannot put them back, and it removes the
 other build's pair wherever it finds it (see [The installed file contract](#the-installed-file-contract)).
 An installer of v0.2.1-beta.19 or earlier that updates a 2018 install from a current bundle removes its
@@ -31,6 +31,10 @@ places and runs the tool, so earlier installers never see it. **Nothing else shi
 frontend renders in the **system-installed WebView2 runtime** (preinstalled on Windows 11; the evergreen
 runtime on most Windows 10), so there is no UI-toolkit runtime to bundle. The two DLLs' exact sizes shift per build
 (MSVC embeds a build timestamp), so equivalence is judged on the export/ordinal surface, not byte size.
+
+**The version.** `build.ps1 -Version <tag>` (release.yml passes the tag) defines `SNAPMAP_PLUS_VERSION`
+for every compile through `tools/cbuild.ps1`; a local build is `dev`. The DLLs report that string as their
+version, so a report names the build that is running rather than what `install.json` last recorded.
 
 Persistent settings do not add a payload file. The backend creates
 `%LOCALAPPDATA%\snapmap-plus\config.json` at runtime when Snapmap+ first starts, so the deployable
@@ -56,7 +60,10 @@ After any install, update or migration the DOOM folder holds exactly the pair fo
 else of Snapmap+'s: `XINPUT1_4.dll` and `snapmap-plus\snapmap-plus-ui-13954591.dll` on the April 2024
 build, `XINPUT1_3.dll` and `snapmap-plus\snapmap-plus-ui.dll` on the 2018 build. The installer removes the
 other build's pair, files earlier releases placed, and the `.snapmap-plus-bak` copies earlier installers
-kept of our own DLLs; it leaves files that are not ours and lists them. It never backs up a file of ours:
+kept of our own DLLs; it leaves files that are not ours and lists them. The pair goes in as one change:
+both files are written beside their targets under temporary names and checked against the manifest, then
+swapped in, and a failed swap puts back what it replaced, so the folder never holds one release's backend
+beside another's frontend. It never backs up a file of ours:
 neither XInput name exists in vanilla DOOM, so uninstall restores vanilla by deleting the pair. A file that
 is not ours and is replaced is kept in `%LOCALAPPDATA%\snapmap-plus\cache\installer\backup\`, never in
 DOOM, and uninstall puts it back. The data folder holds `snapmap-plus.exe`, `snapmap-plus-store.exe`,
@@ -101,9 +108,11 @@ nothing at startup. On install and update, after the DLLs are in place, the inst
 `snapmap-plus-store check` on `%LOCALAPPDATA%\snapmap-plus`; when that finds work it runs
 `snapmap-plus-store migrate <folder> --doom <the DOOM folder it installed into>`. The tool converts a
 `mods\` folder of earlier releases in place to one folder per mod with a `mod.json`, sends the retired
-`removed-mods\` to the Windows Recycle Bin, and moves the packages in the retired `overrides\` folder into `mods\` (a package added there after an
-earlier move included), changing nothing in `overrides\` and removing only an empty `override-backups\`;
-everything it deletes goes to the Recycle Bin. No `package-cache` or `package-staging` folder is
+`removed-mods\` to the Windows Recycle Bin, moves the packages in the retired `overrides\` folder into `mods\` (a package added there after an
+earlier move included) and its loose files and `strings\strids.json` into the mod `mods\my-overrides`, and
+sends `overrides\` and `strings\` to the Recycle Bin once everything in them is in `mods\`. It never
+deletes for good: an item the Recycle Bin cannot take (turned off, too small, or not a local disk) stays
+where it is and the tool reports it, with `snapmap-plus migrate` as the next step. No `package-cache` or `package-staging` folder is
 created, and apart from removing an empty `override-backups\`, `package-cache\` or `package-staging\`
 the installer itself never creates, changes or removes `mods\` or the retired package folders. A missing or failing tool is a warning, never a failed install. See
 [Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.

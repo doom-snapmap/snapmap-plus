@@ -145,7 +145,7 @@ check(posts.length === 2, 'a timeout reply did not release the request');
 api.applyDeleteResult({status: codes.SH_DELETE_BUSY, busy: codes.SH_DELETE_BUSY_PHASE});
 
 /* The context menu only requests; it no longer edits selection or toasts itself. */
-const menu = slice(page, "    addCtx('Delete'", "    addCtx('Push to stack 0'");
+const menu = slice(page, "    addCtx('Delete'", "    addCtx('Add to SnapStack (stack 0)'");
 check(/requestDelete\(ids\)/.test(menu), 'context-menu Delete does not use requestDelete');
 check(!/toast\(/.test(menu) && !/delete selectedEids/.test(menu),
   'context-menu Delete still edits selection or announces success');
@@ -153,13 +153,13 @@ check(/d\.kind === 'deleteResult'\) \{\s*applyDeleteResult\(d\);/.test(page),
   'page does not route deleteResult messages');
 
 /* Host: one guarded batch call, never the per-ID slot, and a result after the main-thread call. */
-const apply = slice(host, 'static void poc_apply_deletes()', '\n}\n');
+const apply = slice(host, 'static void ui_apply_deletes()', '\n}\n');
 check(/SH_IFACE_HAS_SLOT\(g_iface, delete_entities\)/.test(apply), 'host calls ext 29 without the vtable size guard');
 check(!/selection_guard/.test(apply), 'host still deletes through the per-ID slot');
 check(/kind\\":\\"deleteResult\\"/.test(host), 'host never posts deleteResult');
-const loop = slice(host, 'static void poc_think_loop()', 'extern "C" __declspec(dllexport)');
-const call = loop.indexOf('poc_on_main(poc_main_edits');
-const result = loop.indexOf('poc_post_delete_result(');
+const loop = slice(host, 'static void ui_think_loop()', 'extern "C" __declspec(dllexport)');
+const call = loop.indexOf('ui_on_main(ui_main_edits');
+const result = loop.indexOf('ui_post_delete_result(');
 check(call >= 0 && result > call, 'deleteResult is not posted after the main-thread call returns');
 
 if (failures) { console.error('delete_result_test: ' + failures + ' failure(s)'); process.exit(1); }

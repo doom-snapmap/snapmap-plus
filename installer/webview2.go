@@ -106,7 +106,7 @@ func downloadTo(url, path string) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "snapmap-plus-installer")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ const page = fs.readFileSync(path.join(__dirname, '../src/ui/webview/mockup.html
 const sent = [];
 let confirm;
 const context = vm.createContext({
-  RAWMAP_LOAD_PATH: 'C:\\maps\\staged.json', RAWMAP_SAVE_PATH: 'C:\\maps\\previous-map.json',
+  RAWMAP_LOAD_PATH: 'C:\\maps\\opened.json', RAWMAP_SAVE_PATH: 'C:\\maps\\previous-map.json',
   post: message => sent.push(message), closeMenus() {},
   rawmapBaseName: value => value.split('\\').pop(),
   showConfirm: (message, accept) => { confirm = {message, accept}; },
@@ -20,8 +20,8 @@ function click(id) {
   vm.runInContext(body, context);
 }
 click('menuRawmapReload');
-assert.equal(sent.length, 0, 'opening a staged rawmap waits for confirmation');
-assert.match(confirm.message, /staged\.json/);
+assert.equal(sent.length, 0, 'opening a rawmap again waits for confirmation');
+assert.match(confirm.message, /opened\.json/);
 assert.match(confirm.message, /unsaved edits/);
 confirm.accept();
 assert.equal(sent.pop().cmd, 'rawmapLoadNow');
@@ -47,7 +47,7 @@ const statusContext = vm.createContext({
     createTextNode: text => ({textContent: text}),
   },
 });
-const start = page.indexOf('  var RAWMAP_ARMED = false;');
+const start = page.indexOf('  var RAWMAP_KEEP_HERE = false;');
 const end = page.indexOf("  document.getElementById('menuRawmapLoad')");
 assert.ok(start > 0 && end > start);
 vm.runInContext(page.slice(start, end), statusContext);
@@ -56,7 +56,7 @@ function readout(status) {
   vm.runInContext('renderRawmapStatus(' + JSON.stringify(status) + ')', statusContext);
   return ids.menuRawmapPaths.children.map(row => row.textContent).join('\n');
 }
-const base = {load: 'C:\\maps\\rawmap.json', save: 'C:\\maps\\rawmap.json', armed: 0, saveTarget: ''};
+const base = {load: 'C:\\maps\\rawmap.json', save: 'C:\\maps\\rawmap.json', saveTarget: ''};
 assert.doesNotMatch(readout(base), /share/i, 'a map without a saved export says nothing about sharing');
 assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', lastZipBytes: 900, lastMods: 2})),
              /To share this map, send rawmap\.zip: it carries the map and its 2 mods\. The \.json alone will not load for others\./);
@@ -65,4 +65,10 @@ assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', l
 assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', lastZipBytes: 0, lastMods: 1,
                                               lastZipError: 'a mod is not installed'})),
              /This map uses 1 mod, but rawmap\.zip was not written: a mod is not installed\./);
+/* Open Again is live only once a rawmap has been opened, and names it. */
+readout(Object.assign({}, base, {loads: 0}));
+assert.equal(ids.menuRawmapReload.disabled, true, 'nothing opened yet: Open Again waits');
+readout(Object.assign({}, base, {loads: 1}));
+assert.equal(ids.menuRawmapReload.disabled, false, 'a rawmap was opened: Open Again is live');
+assert.ok(!/RAWMAP_ARMED|willFire|loadPending|menuRawmapArm|keeps it staged/.test(page), 'the every-load switch and staging are gone');
 console.log('rawmap_menu_test: OK');

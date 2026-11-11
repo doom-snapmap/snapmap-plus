@@ -1,6 +1,6 @@
 /* Snapmap+ tab of the native Settings / Properties panel.
  *
- * Build 13954591 evidence (snaphak-re editor-fixes-13954591 R-004):
+ * Build 13954591 evidence:
  *  - Populate(panel, category) VK 0x1282db0 builds category 0 (editor
  *    settings) or 1 (object states). Any other value adds no native rows and
  *    falls through to the shared tail, which divides by the row count
@@ -21,15 +21,15 @@
  *    title list (+0x228); rows (RenderAddFloat, VK 0x127dbe0) are placed by
  *    the same count. Native Populate adds exactly one title before any row,
  *    which is the category header. A title added after rows is drawn over a
- *    row and a second title before rows over the header (R-006, R-007), so the
+ *    row and a second title before rows over the header, so the
  *    tab adds one header title and its groups add rows only.
  *  - The float step (idMenuPropertySliderInput VK 0x12a4370) adds the small
  *    or large step to the value at +0x120 and, past a limit, goes to the
  *    other limit when the row's wrap flag (+0x10c, RenderAddFloat's last
  *    argument) is set, else stops at the limit. Native rows pass 1; the tab
- *    passes 0 so a step can never land on the opposite end (R-009), unless
+ *    passes 0 so a step can never land on the opposite end, unless
  *    the row sets sh_settings_float.wrap (no current row does; the former
- *    numeric Map View Distance row used it, R-021).
+ *    numeric Map View Distance row used it).
  *  - Toggle rows: RenderAddToggle (VK 0x12808f0, GL 0x127fea0) creates an
  *    idMenuPropertyToggle whose value is the byte at +0xd0; its vtable +0x20
  *    stores the property id at +0x40 and +0x28 sets the value and redraws the
@@ -182,7 +182,7 @@ static void refresh_values(void)
         } else if(*(float*)(v+0x120)!=*g_rows[i].draft) {
             /* vtable +0xb8 (VK 0x12a7860): store +0x120 and reformat the
              * row text. A bare +0x120 write left the old text on screen, so a
-             * clamped or snapped draft was shown as the native value (R-009). */
+             * clamped or snapped draft was shown as the native value. */
             (*(float_set_fn*)(*(uintptr_t*)v+0xb8))(v,*g_rows[i].draft);
         }
         v[0xc8]=(unsigned char)row_changed(&g_rows[i]);
@@ -507,7 +507,9 @@ int sh_settings_tab_install(const sig_result *results,size_t count)
         *originals[i]=hook_prepare((void*)address,handlers[i],stolen[i]);if(!*originals[i])goto fail;
     }
     for(i=0;i<6;i++)if(hook_commit(*originals[i])!=B2_PATCH_OK)goto fail;
-    if(!sh_grid_editor_set_property_handler(changed))goto fail;
+    /* The property-change detour is shared with the Grid Room inspector and
+     * installs on its own, so the tab does not depend on that inspector. */
+    if(!sh_native_property_hook_install(results,count)||!sh_grid_editor_set_property_handler(changed))goto fail;
     /* Without the third category the rows go to the end of category 0: rows
      * injected before its native title would push that title over them. */
     g_mode=SH_SETTINGS_TAB_GROUP_END;

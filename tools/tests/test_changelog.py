@@ -105,6 +105,13 @@ class TestLint(unittest.TestCase):
         dupe = VALID + "\n## v0.2.1 -- 2026-09-11 (stable)\n\n**Again**\n"
         self.assertTrue(any("duplicate" in p.lower() for p in changelog.lint(dupe)))
 
+    def test_refuses_the_unwritten_skeleton(self):
+        skeleton = ("## v1.0.0 -- 2026-11-10 (stable)\n\n**NEEDS WRITING**\n\n"
+                    "Automatic drafting did not run.\n")
+        problems = changelog.lint(skeleton + VALID)
+        self.assertTrue(any("NEEDS WRITING" in p for p in problems), problems)
+        self.assertEqual(changelog.lint(skeleton + VALID, allow_unwritten=True), [])
+
 
 class TestCli(unittest.TestCase):
     def _run(self, *args, fixture="valid.md"):
@@ -130,6 +137,17 @@ class TestCli(unittest.TestCase):
     def test_has_exit_codes(self):
         self.assertEqual(self._run("--has", "v0.2.1").returncode, 0)
         self.assertEqual(self._run("--has", "v9.9.9").returncode, 1)
+
+    def test_section_refuses_the_unwritten_skeleton(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = pathlib.Path(d) / "CHANGELOG.md"
+            src.write_text("## v1.0.0 -- 2026-11-10 (stable)\n\n**NEEDS WRITING**\n", encoding="utf-8")
+            out = pathlib.Path(d) / "notes.md"
+            r = subprocess.run([sys.executable, str(SCRIPT), "--file", str(src), "--section", "v1.0.0",
+                                "--out", str(out)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("NEEDS WRITING", r.stderr)
+            self.assertFalse(out.exists())
 
     def test_lint_exit_codes(self):
         self.assertEqual(self._run("--lint").returncode, 0)

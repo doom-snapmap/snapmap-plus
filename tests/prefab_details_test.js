@@ -65,11 +65,7 @@ function between(begin, end) {
   check(res.includes("d.result === 4) toast('The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again'"),
         'a hovered entity that is not selected is reported as such, not as an empty selection');
   check(res.includes('d.result === 5)'), 'the copy check refusing a real selection has its own message');
-  const create = host.slice(host.indexOf('static void poc_apply_create_prefab()'), host.indexOf('static bool poc_prefab_dir('));
-  check(create.includes('sh_prefab_host::create_precheck(sel, count, hovered, have_hover)') &&
-        create.indexOf('create_precheck') < create.indexOf('poc_serialize_selection_raw('),
-        'the host tells an empty selection from an unselected hover before it serializes');
-  check(create.includes('g_create_result = 5;'), 'a serialize that returns nothing after the precheck is result 5');
+  /* The host's precheck itself is a behaviour test: tests/prefab_host_test.cpp. */
 }
 
 /* ---- Load / Place says what is true ---- */
@@ -89,7 +85,7 @@ function between(begin, end) {
   check(/was sent to the editor; if it is not in hand, press Ctrl\+V/.test(t.text), 'no decision in time: says only what is known');
   check(api.toast({result: -1, name: 'X'}).level === 'err' && api.toast({result: 0, name: 'X'}).level === 'err', 'failures stay errors');
   check(!html.includes("staged -- press Ctrl+V in the 3D view to place it'"), 'the old always-Ctrl+V toast is gone');
-  check(host.includes('static void poc_poll_place_outcome()') && host.includes('poc_poll_place_outcome();') &&
+  check(host.includes('static void ui_poll_place_outcome()') && host.includes('ui_poll_place_outcome();') &&
         host.includes('&& !g_place_wait) {'),
         'the host posts an object placement once the game thread has decided it');
 }
@@ -111,8 +107,8 @@ function between(begin, end) {
         'Prefab Details decides the kind and the footprint counts through them');
   check(host.includes('json += modules ? L",\\"prefabKind\\":\\"modules\\"" : L",\\"prefabKind\\":\\"objects\\"";'),
         'the host always sends the kind it read');
-  const ls = host.indexOf('static void poc_send_prefabs()\n{'), list = host.slice(ls, host.indexOf('\n}\n', ls));
-  check(list.includes('sh_prefab_host::kind_of_type(poc_file_top_type(path))'), 'the list classifies by ~type too');
+  const ls = host.indexOf('static void ui_send_prefabs()\n{'), list = host.slice(ls, host.indexOf('\n}\n', ls));
+  check(list.includes('sh_prefab_host::kind_of_type(ui_file_top_type(path))'), 'the list classifies by ~type too');
 }
 
 /* ---- Live Limits, with and without a held prefab ---- */
@@ -144,9 +140,9 @@ function between(begin, end) {
   check(render.includes('var held = pfBudgetIsHeld(pfBudgetHeld, pfBudgetSel);') &&
         render.includes('prefabBudget.meters(s.block, live.usage, live.limits, held)'), 'the rows use the held rule');
   check(lift('pfLimitsBar').includes('!v.held'), 'a held prefab draws no extra sliver past the bar');
-  check(host.includes('poc_budget_usage_poll();') && host.includes('g_usage_gate.changed(body, sh_webview_json::to_utf8(held))'),
+  check(host.includes('ui_budget_usage_poll();') && host.includes('g_usage_gate.changed(body, sh_webview_json::to_utf8(held))'),
         'the host re-posts usage from the think loop only when it or the held prefab changed');
-  check(!/SetTimer|setInterval/.test(host.slice(host.indexOf('static void poc_budget_usage_poll()'), host.indexOf('static void poc_budget_usage_poll()') + 600)),
+  check(!/SetTimer|setInterval/.test(host.slice(host.indexOf('static void ui_budget_usage_poll()'), host.indexOf('static void ui_budget_usage_poll()') + 600)),
         'no fixed timer posts unchanged values');
 }
 

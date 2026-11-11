@@ -142,13 +142,14 @@ static void make_small_mod(const char *dir, const char *leaf)
 #define FB_ROW  "assets\\generated\\decls\\entitydef\\mods\\%s\\probe.decl"
 
 /* A new mod named `leaf`: two decls under mods/<leaf>/, one inheriting the
- * other, and a string named under mods/<leaf>/. */
+ * other, and a mod.json value naming mods/<leaf>/. (Its strings cannot be
+ * keyed before it has a salt: a key is <salt>_<name>, DECISIONS 5.) */
 static void fb_make(const char *dir, const char *leaf)
 {
     char rel[MAX_PATH], text[600];
     _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\r\n  \"name\": \"Cyber probe\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"A probe.\",\r\n"
-                "  \"strings\": { \"en\": { \"mods/%s/probe_name\": \"Probe\" } }\r\n}\r\n", leaf);
+                "{\r\n  \"name\": \"Cyber probe\",\r\n  \"version\": \"1.0.0\",\r\n"
+                "  \"description\": \"A probe (mods/%s/probe).\"\r\n}\r\n", leaf);
     mt_write(dir, "mod.json", text);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, leaf);
     mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
@@ -295,7 +296,7 @@ static void test_fresh_folder_salted(const char *tmp)
     CHECK(log_has("mods\\cyberprobe is a new mod: salt "));
     CHECK(entry_of("cyberprobe", salt, hash, &usable) && sh_salt_valid(salt, strlen(salt)) && usable);
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "\"mods/%s/probe_name\"", salt);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "(mods/%s/probe)", salt);
     CHECK(t && strstr(t, rel) && !strstr(t, "mods/cyberprobe/") && strstr(t, "\"salt\""));
     free(t);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
@@ -663,11 +664,11 @@ static void test_new_mod(const char *tmp)
     _snprintf_s(want, sizeof want, _TRUNCATE, "assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", salt);
     CHECK(!strcmp(example, want));
     t = slurp(folder, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"mods/%s/category\": \"Hell Guards\"", salt);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_category\": \"Hell Guards\"", salt);
     CHECK(t && strstr(t, want) && strstr(t, "\"format\": 2") && strstr(t, salt));
     free(t);
     t = slurp(folder, example, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "categoryNameTag = \"#str_mods/%s/category\"", salt);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "categoryNameTag = \"#str_%s_category\"", salt);
     CHECK(t && strstr(t, want));
     free(t);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);

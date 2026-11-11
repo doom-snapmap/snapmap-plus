@@ -165,40 +165,12 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define APPLY_MAX_ITEMS        4096         /* sanity cap on a scheduled batch */
 
 /* Optional reflection serialization diagnostics. */
-#define AE_SER_DIAG_ON  0   /* per-serialize trace (tid/clone/StructSerialize/idStr); flip to 1 to debug */
-#if AE_SER_DIAG_ON
-#define AE_SER_DIAG(...) do { char _ld[256]; \
-    _snprintf_s(_ld, sizeof _ld, _TRUNCATE, __VA_ARGS__); backend_log(_ld); } while (0)
-#else
-#define AE_SER_DIAG(...) do { } while (0)
-#endif
 
 /* Optional lexer/deserialization diagnostics. */
-#define AE_DESER_DIAG_ON  0
-#if AE_DESER_DIAG_ON
-#define AE_DESER_DIAG(...) do { char _ld[256]; \
-    _snprintf_s(_ld, sizeof _ld, _TRUNCATE, __VA_ARGS__); backend_log(_ld); } while (0)
-#else
-#define AE_DESER_DIAG(...) do { } while (0)
-#endif
 
 /* Optional staging list and heap-scope diagnostics. */
-#define AE_STAGE_DIAG_ON  0
-#if AE_STAGE_DIAG_ON
-#define AE_STAGE_DIAG(...) do { char _ls[256]; \
-    _snprintf_s(_ls, sizeof _ls, _TRUNCATE, __VA_ARGS__); backend_log(_ls); } while (0)
-#else
-#define AE_STAGE_DIAG(...) do { } while (0)
-#endif
 
 /* Optional decl commit and allocation diagnostics. */
-#define AE_APPLY_DIAG_ON  0
-#if AE_APPLY_DIAG_ON
-#define AE_APPLY_DIAG(...) do { char _la[512]; \
-    _snprintf_s(_la, sizeof _la, _TRUNCATE, __VA_ARGS__); backend_log(_la); } while (0)
-#else
-#define AE_APPLY_DIAG(...) do { } while (0)
-#endif
 
 /* Engine call signatures. */
 typedef void  (*entity_clone_fn)(void *cloneBase, void *tmpDef, int one);
@@ -224,8 +196,6 @@ typedef void  (*add_command_fn)(void *cmdSys, const char *name, void *cb, void *
 typedef void  (*prefab_ctor_fn)(void *self);
 typedef char  (*prefab_populate_fn)(void *self, void *editor, int *outStatus);
 typedef void  (*prefab_dtor_fn)(void *self);
-typedef void  (*paste_instantiate_fn)(void *prefab, void *editor);
-typedef void  (*enter_prefab_grab_fn)(void *mode);
 
 /* Resolved engine state. */
 static const uint8_t      *g_doom_base   = NULL;
@@ -252,9 +222,6 @@ static add_command_fn      g_add_command = NULL;
 static prefab_ctor_fn      g_prefab_ctor     = NULL;
 static prefab_populate_fn  g_prefab_populate = NULL;
 static prefab_dtor_fn      g_prefab_dtor     = NULL;
-/* Native paste functions are retained for diagnostics; action injection does not call them. */
-static paste_instantiate_fn g_paste_instantiate = NULL;
-static enter_prefab_grab_fn g_enter_prefab_grab = NULL;
 /* Load-state transitions drive the staged-prefab lifetime check. */
 #define LOAD_STATE_RUNNING    3
 
@@ -266,18 +233,16 @@ static volatile LONG        g_last_load_state = -1;
  * native clipboard replacement cannot be distinguished by this check. */
 static volatile LONG        g_we_staged      = 0;
 static volatile LONG        g_we_staged_count = 0;
-/* Most recent kind-2 staging/action result. */
-static volatile LONG        g_last_place_result = 0;
 /* Load / Place's paste as the Prefabs tab sees it (sh_apply_engine_place_watch).
  * The game thread writes each decision's reason and result, then bumps the
  * sequence. A queued paste is watched until EntityMode +0x1AC reads 4, the
- * grab (1 idle, 2 selection; R-012), and then until it leaves 4 (Space or Esc). */
+ * grab (1 idle, 2 selection), and then until it leaves 4 (Space or Esc). */
 #define AE_MODE_STATE_OFF     0x1ac
 #define AE_MODE_STATE_HELD    4
 #define AE_PASTE_HOLD_WAIT_MS 3000ULL
 static volatile LONG        g_place_seq;
 static volatile LONG        g_place_decided;
-static char                 g_place_reason[96];
+static char                 g_place_reason[160];
 static const char          *g_place_why;          /* game thread: the staged-only cause */
 static volatile LONG        g_paste_watch;        /* 0 none, 1 queued, 2 held */
 static volatile ULONGLONG   g_paste_queued_at;
@@ -431,78 +396,10 @@ static int ae_push_heap_global_why(int *why)
 
 static int ae_push_heap_global(void) { int why = 0; return ae_push_heap_global_why(&why); }
 
-#if AE_STAGE_DIAG_ON
-/* Inspect scope depth and heap selection for diagnostics. */
-static void ae_log_memlocal_state(const char *when)
-{
-    const unsigned char *self = (const unsigned char *)ae_memlocal();
-    if (!self) { backend_log("MEMLOCAL: instance unavailable (MemLocalGet unresolved)"); return; }
-    void *vt = NULL, *h0 = NULL, *h1 = NULL, *h2 = NULL;
-    int depth = -1;
-    int gotVt = ae_read_ptr(self, &vt);
-    (void)ae_read_u32_safe(self + MEMLOCAL_SCOPE_DEPTH, &depth);
-    int g0 = ae_read_ptr(self + 0xc8, &h0);
-    int g1 = ae_read_ptr(self + 0xd0, &h1);
-    int g2 = ae_read_ptr(self + 0xd8, &h2);
-    char l[360];
-    _snprintf_s(l, sizeof l, _TRUNCATE,
-                "MEMLOCAL %s: obj=%p vt=%s%p inModule=%d depth=%d | heap[0]=%s%p heap[1]=%s%p "
-                "heap[2]=%s%p | GetProcessHeap()=%p",
-                when, (const void *)self, gotVt ? "" : "(unreadable)", vt,
-                ae_in_doom_module(vt), depth,
-                g0 ? "" : "(unreadable)", h0, g1 ? "" : "(unreadable)", h1,
-                g2 ? "" : "(unreadable)", h2, (void *)GetProcessHeap());
-    backend_log(l);
-}
-#endif /* AE_STAGE_DIAG_ON */
 
 /* Optional paste outcome snapshots, taken after entering manipulation state.
  * The recent-action marker attributes our queued paste; ordinary grabs can
  * also enter this state, so unmarked samples are only a diagnostic control. */
-#define AE_PASTE_DIAG_ON  0
-#if AE_PASTE_DIAG_ON
-#define AE_PASTE_DIAG(...) do { char _ld[320]; \
-    _snprintf_s(_ld, sizeof _ld, _TRUNCATE, __VA_ARGS__); backend_log(_ld); } while (0)
-#define AE_PASTE_DIAG_MAX_ENTS 8    /* Bound selection probing. */
-
-/* Short attribution window for a queued paste. */
-static LONG g_armed_paste_ticks = 0;
-
-/* Log the guarded allocator header when it is valid. */
-static void ae_log_ptr_alloc(const void *p, const char *label, int idx, int id)
-{
-    if (!p) { AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=NULL", label, idx, id); return; }
-    const unsigned char *b = (const unsigned char *)p;
-    unsigned tag = 0, flags = 0, lo = 0, hi = 0; int cookie = 0; void *sizeRaw = NULL;
-    if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
-        !ae_read_u8_safe(b - 0x0e, &lo)  || !ae_read_u8_safe(b - 0x0d, &hi) ||
-        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw)) {
-        AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p header UNREADABLE", label, idx, id, p);
-        return;
-    }
-    unsigned long long size = (unsigned long long)sizeRaw;
-    unsigned long long x = size ^ (unsigned long long)(b - 0x10);
-    unsigned expect = ((((unsigned)((lo | (hi << 8)) & 0xffff) << 8) | (tag & 0xff)) << 8) | (flags & 0xff);
-    expect ^= (unsigned)(x >> 32) ^ (unsigned)x;
-
-    /* Validate the cookie before interpreting a header: pool/interior pointers
- * need not have a guarded-allocation header at p - 0x10. */
-    if ((unsigned)cookie != expect) {
-        AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p NOT AN ALLOCATOR BLOCK START "
-                      "(cookie mismatch -- heap/size unknowable from here)", label, idx, id, p);
-        return;
-    }
-    const char *heap = (flags & 3) ? "NOT-A-HEAP-BLOCK"
-                     : (flags & 4) ? "MAP"
-                     : (flags & 8) ? "PERSIST" : "process";
-    AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p tag=0x%02x flags=0x%02x size=%llu heap=%s cookie=VALID",
-                  label, idx, id, p, tag & 0xff, flags & 0xff, size, heap);
-}
-
-
-#else
-#define AE_PASTE_DIAG(...) do { } while (0)
-#endif
 
 /* LOAD-BEARING (pairs with ae_push_heap_global) -- must never be inside a diagnostic gate. */
 static void ae_pop_heap(void)
@@ -679,58 +576,6 @@ static void *ae_entity_ptr(void *array, uint32_t count, int id)
     return e;
 }
 
-#if AE_PASTE_DIAG_ON
-/* Probe selection storage and representative entity allocations. */
-static void ae_probe_paste_outcome(const uint8_t *ed, const char *label)
-{
-    void *sel = NULL;
-    int count = 0;
-    if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return;
-    if (!ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return;
-
-    void *array = NULL; uint32_t arrCount = 0;
-    int haveArray = ae_entity_array(&array, &arrCount);
-    AE_PASTE_DIAG("PASTE-DIAG %s: selection count=%d (entity array %s)", label, count,
-                  haveArray ? "ok" : "UNAVAILABLE");
-    if (!haveArray) return;
-
-    void *idArray = NULL;
-    if (!ae_read_ptr((const uint8_t *)sel + SEL_ID_ARRAY_PTR_OFF, &idArray) || !idArray) {
-        AE_PASTE_DIAG("PASTE-DIAG %s: selection id-array pointer unreadable/NULL", label);
-        return;
-    }
-
-    int n = count > AE_PASTE_DIAG_MAX_ENTS ? AE_PASTE_DIAG_MAX_ENTS : count;
-    for (int i = 0; i < n; i++) {
-        int id = -1;
-        if (!ae_read_u32_safe((const uint8_t *)idArray + (size_t)i * 4, &id)) continue;
-        ae_log_ptr_alloc(ae_entity_ptr(array, arrCount, id), label, i, id);
-    }
-
-    /* Entities may be pool/interior allocations without guarded headers.
- * Compare editor state as well as any validated heap classifications. */
-    const uint8_t *mode = ed + ED_MODE_OBJ_OFF;
-    const uint8_t *sub  = mode + MODE_IDLE_SUBSTATE_OFF;
-    int  edState = -1, modeState = -1, armWord = -1, actionId = -1, hovered = -1, stagedNum = -1, stagedCap = -1;
-    unsigned flags1 = 0, flags2 = 0;
-    (void)ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &edState);
-    (void)ae_read_u32_safe(mode + 0x1ac, &modeState);
-    (void)ae_read_u32_safe(mode + MODE_ACTION_ARM_OFF, &armWord);
-    (void)ae_read_u32_safe(mode + MODE_ACTION_ID_OFF, &actionId);
-    (void)ae_read_u8_safe(sub + SUBSTATE_FLAGS1_OFF, &flags1);
-    (void)ae_read_u8_safe(sub + SUBSTATE_FLAGS2_OFF, &flags2);
-    (void)ae_read_u32_safe((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered);
-    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &stagedNum);
-    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCAP_OFF, &stagedCap);
-    AE_PASTE_DIAG("PASTE-DIAG %s: STATE edState=%d mode+0x1ac=%d arm(+0x420)=%d action(+0x424)=0x%X "
-                  "flags1(+0x41)=0x%02x pasteAvail=%d flags2(+0x42)=0x%02x dirty=%d hovered=%d "
-                  "staged num=%d cap=%d",
-                  label, edState, modeState, armWord, (unsigned)actionId,
-                  flags1 & 0xff, (flags1 & SUBSTATE_PASTE_AVAIL_BIT) ? 1 : 0,
-                  flags2 & 0xff, (flags2 & SUBSTATE_RECOMPUTE_BIT) ? 1 : 0,
-                  hovered, stagedNum, stagedCap);
-}
-#endif
 
 
 static void *ae_get_reflect(void)
@@ -792,18 +637,13 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
 {
     if (cap > 0) out_json[0] = '\0';
     if (!ae_serialize_bound() || !cloneBase) {
-        AE_SER_DIAG("ser[%s]: bail early -- bound=%d cloneBase=%p",
-                    typeName ? typeName : "?", ae_serialize_bound(), cloneBase);
         return 0;
     }
 
     void *reflect = ae_get_reflect();
     if (!reflect) {
-        AE_SER_DIAG("ser[%s]: reflect NULL (declMgr/vtable+0x80 unresolved)", typeName ? typeName : "?");
         return 0;
     }
-    AE_SER_DIAG("ser[%s]: tid=%lu cloneBase=%p reflect=%p", typeName ? typeName : "?",
-                GetCurrentThreadId(), cloneBase, reflect);
 
     /* Clear scratch fields not initialized by the engine constructors. */
     uint8_t tmpDef[TEMP_DEF_SIZE];
@@ -829,8 +669,6 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
             void *defsub = NULL;
             int got = ae_read_ptr(tmpDef + 0x150, &defsub);
             (void)got;
-            AE_SER_DIAG("ser[%s]: cloned -- tmp+0x150 defsub=%s%p",
-                        typeName ? typeName : "?", got ? "" : "(read-fault)", defsub);
         }
 
         /* Serialization tag header occupies 8 bytes; its parse node starts at +8. */
@@ -843,17 +681,13 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
 
 
         char ok = g_ser(reflect, typeName, tmpDef, outTree, arg5, NULL);
-        AE_SER_DIAG("ser[%s]: StructSerialize ret=%d", typeName ? typeName : "?", (int)(ok & 0xff));
         if (ok & 0xff) {
             g_render(outTree, jsStr);
             int rlen = 0; ae_read_u32_safe(jsStr + IDSTR_LEN_OFF, &rlen);
             written = ae_read_idstr(jsStr, out_json, cap);
-            AE_SER_DIAG("ser[%s]: rendered idStr len=%d written=%d first=\"%.32s\"",
-                        typeName ? typeName : "?", rlen, written, written > 0 ? out_json : "");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         written = 0;
-        AE_SER_DIAG("ser[%s]: SEH fault in serialize body", typeName ? typeName : "?");
     }
 
     /* Destroy rendered string, output tree, tag node, then the temporary entity. */
@@ -870,16 +704,12 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
 static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typeName)
 {
     if (!ae_deserialize_bound() || !text || !dstObj) {
-        AE_DESER_DIAG("deser[%s]: bail early -- bound=%d text=%p dstObj=%p",
-                      typeName ? typeName : "?", ae_deserialize_bound(), (void *)text, dstObj);
         return 0;
     }
     void *reflect = ae_get_reflect();
     if (!reflect) {
-        AE_DESER_DIAG("deser[%s]: reflect NULL (declMgr/vtable+0x80 unresolved)", typeName ? typeName : "?");
         return 0;
     }
-    AE_DESER_DIAG("deser[%s]: start, text len=%zu", typeName ? typeName : "?", strlen(text));
 
     uint8_t node7[PARSE_NODE_SIZE];
     uint8_t lexer[LEXER_SIZE];
@@ -902,9 +732,7 @@ static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typ
         g_idstr_ctor(srcStr, text);     src_ctored = 1;
 
 
-        AE_DESER_DIAG("deser[%s]: about to call Lexer", typeName ? typeName : "?");
         char lexed = g_lexer(lexer, srcStr, parseNode, 1);
-        AE_DESER_DIAG("deser[%s]: Lexer returned %d", typeName ? typeName : "?", (int)(lexed & 0xff));
         if (lexed & 0xff) {
             /* Deserialize uses the same 8-byte tag header and node-at-+8 layout as serialize. */
             uint8_t arg5[8 + PARSE_NODE_SIZE];
@@ -912,16 +740,12 @@ static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typ
             *(uint16_t *)(arg5) = 1;
             memcpy(arg5 + 8, node7, PARSE_NODE_SIZE);
 
-            AE_DESER_DIAG("deser[%s]: about to call StructDeserialize dstObj=%p", typeName ? typeName : "?", dstObj);
             g_deser(reflect, typeName, dstObj, parseNode, arg5, NULL);
-            AE_DESER_DIAG("deser[%s]: StructDeserialize returned (no crash)", typeName ? typeName : "?");
             ok = 1;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ok = 0;
-        AE_DESER_DIAG("deser[%s]: SEH fault in deserialize body", typeName ? typeName : "?");
     }
-    AE_DESER_DIAG("deser[%s]: ok=%d", typeName ? typeName : "?", ok);
 
     /* idStr destruction respects the heap-owned flag and leaves inline buffers alone. */
     if (src_ctored)   { __try { g_idstr_dtor(srcStr); }                 __except (EXCEPTION_EXECUTE_HANDLER) {} }
@@ -1018,19 +842,6 @@ static int ae_commit_entity_text(int id, void *defsub, const char *text)
             void *srcPtr = *(void * const *)(tmpDef + TDEF_SOURCE_OFF);
             void *clsPtr = *(void * const *)(tmpDef + TDEF_CLASS_OFF);
             void *inhPtr = *(void * const *)(tmpDef + TDEF_INHERIT_OFF);
-#if AE_APPLY_DIAG_ON
-            {
-                int slen = -1, clen = -1, ilen = -1;
-                __try { slen = srcPtr ? (int)strlen((const char *)srcPtr) : -1; } __except (EXCEPTION_EXECUTE_HANDLER) { slen = -2; }
-                __try { clen = clsPtr ? (int)strlen((const char *)clsPtr) : -1; } __except (EXCEPTION_EXECUTE_HANDLER) { clen = -2; }
-                __try { ilen = inhPtr ? (int)strlen((const char *)inhPtr) : -1; } __except (EXCEPTION_EXECUTE_HANDLER) { ilen = -2; }
-                AE_APPLY_DIAG("apply id=%d: textlen=%d srcPtr=%p slen=%d clsPtr=%p clen=%d cls='%.48s' inhPtr=%p ilen=%d inh='%.48s'",
-                              id, (int)strlen(text), srcPtr, slen, clsPtr, clen,
-                              (clen >= 0 ? (const char *)clsPtr : "?"), inhPtr, ilen, (ilen >= 0 ? (const char *)inhPtr : "?"));
-                if (slen >= 0) AE_APPLY_DIAG("apply id=%d: src head='%.220s'", id, (const char *)srcPtr);
-                if (slen >= 0 && slen > 200) AE_APPLY_DIAG("apply id=%d: src tail='%.120s'", id, (const char *)srcPtr + slen - 120);
-            }
-#endif
             /* Keep source rebuild and string assignments in process-heap scope.
  * The main-thread allocator otherwise inherits map lifetime. Balance the
  * push in __finally; off-main scope calls do not change heap selection. */
@@ -1038,13 +849,10 @@ static int ae_commit_entity_text(int id, void *defsub, const char *text)
             __try {
 
             g_decl_rebuild(defsub, (const char *)srcPtr, 1);
-            AE_APPLY_DIAG("apply id=%d: decl_rebuild returned", id);
             /* Do not blank class/inherit when deserialization supplied empty strings.
  * The source may already have been committed by this point. */
             if (clsPtr && *(const char *)clsPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, (const char *)clsPtr);
-            AE_APPLY_DIAG("apply id=%d: class assign done", id);
             if (inhPtr && *(const char *)inhPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, (const char *)inhPtr);
-            AE_APPLY_DIAG("apply id=%d: inherit assign done -- commit complete", id);
             } __finally {
                 if (commit_pushed) ae_pop_heap();
             }
@@ -1209,7 +1017,7 @@ static int ae_apply_one(int id, const char *patched_text)
             if (original && (got <= 0 || got >= APPLY_TEXT_CAP - 1)) {   /* unreadable or truncated */
                 free(original); original = NULL;
             }
-            if (!original) backend_log("C2 apply: Static off applied without the limits guard (entity text unreadable)");
+            if (!original) backend_log("APPLY apply: Static off applied without the limits guard (entity text unreadable)");
         }
     } else {
         want_static = -1;
@@ -1224,7 +1032,7 @@ static int ae_apply_one(int id, const char *patched_text)
             (void)ae_budget_reached(ae_editor_session());
             char l[160];
             _snprintf_s(l, sizeof l, _TRUNCATE,
-                        "C2 apply: id=%d Static off refused over the editor limits; text %s", id,
+                        "APPLY apply: id=%d Static off refused over the editor limits; text %s", id,
                         back ? "restored" : "could not be restored");
             backend_log(l);
             ae_static_refusal_toast();
@@ -1244,7 +1052,7 @@ static int ae_apply_one(int id, const char *patched_text)
             (void)ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob);
             char l[220];
             _snprintf_s(l, sizeof l, _TRUNCATE,
-                        "C2 commit: thread=%s (tid=%lu) decl-source blob=%p heap=%s",
+                        "APPLY commit: thread=%s (tid=%lu) decl-source blob=%p heap=%s",
                         onmain == 1 ? "DOOM-main" : onmain == 0 ? "UI(off-main)" : "UNKNOWN",
                         GetCurrentThreadId(), blob, ae_block_heap_name(blob));
             backend_log(l);
@@ -1335,7 +1143,11 @@ static int ae_apply_target_write(int source_id, int target_id)
     const char *r = ie_resolve_id_string(target_id, ref, (int)sizeof ref);
     if (!r || !ref[0]) return 0;
     if (strstr(ref, "(no module)")) {
-        backend_log("wire-target: target not in a module yet -- drag the timeline into a module first (skipped)");
+        sh_iface *iface = sh_ui_get_iface();
+        backend_log("wire-target: target is outside every module (skipped)");
+        if (iface && iface->vtbl && iface->vtbl->toast)
+            iface->vtbl->toast(iface, "Entity edit",
+                               "That target is outside every module; move it into a room, then wire it again.");
         return 0;
     }
     void *array = NULL; uint32_t count = 0;
@@ -1343,22 +1155,30 @@ static int ae_apply_target_write(int source_id, int target_id)
     void *ent = ae_entity_ptr(array, count, source_id);
     if (!ent) return 0;
     void *cloneBase = (uint8_t *)ent + ENT_VALID_OFF;
-    static char srcjson[64 * 1024];
-    static char patched[64 * 1024 + 512];
-    if (!ae_serialize_to_json("idSnapEntity", cloneBase, srcjson, (int)sizeof srcjson)) return 0;
-
+    /* Sized as every other apply text: an entity's JSON can pass 64 KB. */
+    char *srcjson = (char *)malloc(APPLY_TEXT_CAP);
+    char *patched = (char *)malloc(APPLY_TEXT_CAP + 512);
+    int ok = 0;
+    if (!srcjson || !patched) goto done;
+    {
+        int got = ae_serialize_to_json("idSnapEntity", cloneBase, srcjson, APPLY_TEXT_CAP);
+        if (got <= 0 || got >= APPLY_TEXT_CAP - 1) goto done;   /* unreadable or truncated */
+    }
     {
         char quoted[264];
         _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", ref);
-        if (strstr(srcjson, quoted)) { backend_log("wire-target: target already in source.targets -- skipped (idempotent)"); return 1; }
+        if (strstr(srcjson, quoted)) { backend_log("wire-target: target already in source.targets -- skipped (idempotent)"); ok = 1; goto done; }
     }
-    if (!ae_splice_targets(srcjson, ref, patched, (int)sizeof patched)) return 0;
-    int ok = ae_apply_one(source_id, patched);
+    if (!ae_splice_targets(srcjson, ref, patched, APPLY_TEXT_CAP + 512)) goto done;
+    ok = ae_apply_one(source_id, patched);
     if (ok) {
         char m[200];
         _snprintf_s(m, sizeof m, _TRUNCATE, "wire-target: source %d -> state.edit.targets += \"%s\" (applied)", source_id, ref);
         backend_log(m);
     }
+done:
+    free(srcjson);
+    free(patched);
     return ok;
 }
 
@@ -1369,25 +1189,25 @@ static int ae_mkcmd_one(const char *prefab_text)
     if (!ed || !prefab_text) return 0;
     void *staging = (void *)(ed + PASTE_STAGING_OFF);
     /* Reconstruct reused staging before deserializing: stale nested strings can
- * fault during compare/assign. The constructor replaces fields without
- * freeing prior allocations, so this intentionally leaks the previous slot. */
+     * fault during compare/assign. The constructor replaces fields without
+     * freeing them, so contents whose entity block is a live process or
+     * persistent allocation (a previous Load / Place's) are destroyed first;
+     * anything else is map-heap storage the next teardown releases, or state
+     * not safe to free. */
+    {
+        void *blobs = NULL;
+        if (g_prefab_ctor && g_prefab_dtor && ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobs) && blobs &&
+            ae_block_survives_map(blobs)) {
+            __try { g_prefab_dtor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {
+                backend_log("APPLY stage: releasing the previous staged prefab faulted; it is left allocated");
+            }
+        }
+    }
     /* Allocate staged contents under process-heap scope so they survive Play.
- * Always balance a successful push, including exception paths. */
-#if AE_STAGE_DIAG_ON
-    /* Compare scope depth to detect ignored or ineffective pushes. */
-    int myTid = (int)GetCurrentThreadId(), depth0 = -1, depth1 = -1, depth2 = -1;
-    const void *memlocal = ae_memlocal();
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth0);
-    ae_log_memlocal_state("at-stage");
-#endif
-
+     * Always balance a successful push, including exception paths. */
     int pushWhy = 0;
     int pushed = ae_push_heap_global_why(&pushWhy);
     (void)pushWhy;
-
-#if AE_STAGE_DIAG_ON
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth1);
-#endif
 
     int ok = 0;
     __try {
@@ -1397,28 +1217,11 @@ static int ae_mkcmd_one(const char *prefab_text)
         if (pushed) ae_pop_heap();
     }
 
-#if AE_STAGE_DIAG_ON
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth2);
-    AE_STAGE_DIAG("STAGE-DIAG: tid=%d | pushCall=%d why=%s "
-                  "scopeDepth %d -> %d -> %d (%s)",
-                  myTid, pushed,
-                  pushWhy == 0 ? "pushed" : pushWhy == 1 ? "no-instance" :
-                  pushWhy == 2 ? "pushfn-unresolved" : pushWhy == 3 ? "pushfn-outside-module" : "FAULTED",
-                  depth0, depth1, depth2,
-                  (depth1 == depth0 + 1) ? "push TOOK EFFECT"
-                                         : (depth1 == depth0 ? "push DID NOTHING" : "unexpected"));
-#endif
     /* Track our staged count for the allocation-lifetime watchdog. */
     if (ok) {
         int n = 0;
         const uint8_t *ed2 = ae_editor_session();
         if (ed2 && ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCOUNT_OFF, &n)) {
-            int cap = 0;
-            if (ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCAP_OFF, &cap))
-                AE_STAGE_DIAG("stage: entities num=%d capacity=%d%s", n, cap,
-                              (n != cap) ? "  <-- CAPACITY TAIL" : "");
-            else
-                AE_STAGE_DIAG("stage: entities num=%d capacity=<unreadable>", n);
             InterlockedExchange(&g_we_staged_count, n);
             InterlockedExchange(&g_we_staged, 1);
         }
@@ -1438,38 +1241,38 @@ static int ae_mkcmd_one(const char *prefab_text)
 
 static int ae_mkcmd_instantiate(const char *prefab_text)
 {
-    g_place_why = "the editor could not read the prefab";
+    g_place_why = "the editor could not read the prefab file (re-save it or pick another)";
     if (!ae_mkcmd_one(prefab_text)) return AE_PASTE_FAILED;
 
     /* Resolved paste worker/grab addresses are diagnostic only. Dispatch by action
  * so the engine performs the required state transitions itself. */
     const uint8_t *ed = ae_editor_session();
     g_place_why = "no editor is open";
-    if (!ed) { backend_log("C2 place: no editor session -> staged only"); return AE_PASTE_STAGED; }
+    if (!ed) { backend_log("APPLY place: no editor session -> staged only"); return AE_PASTE_STAGED; }
 
     /* The mode subobject is active only in EntityMode (state 2). */
     int editor_state = 0;
     g_place_why = "the editor is not in Object mode";
     if (!ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &editor_state) || editor_state != 2) {
-        backend_log("C2 place: not EntityMode -> staged only");
+        backend_log("APPLY place: not EntityMode -> staged only");
         return AE_PASTE_STAGED;
     }
 
-    g_place_why = "the editor's copy and paste is unavailable";
+    g_place_why = "copy and paste is turned off (snapEdit_enableCopyPaste is 0)";
     if (!sh_iface_engine_copy_paste_enabled()) {
-        backend_log("C2 place: native copy/paste is disabled or unavailable -> staged only");
+        backend_log("APPLY place: native copy/paste is disabled or unavailable -> staged only");
         return AE_PASTE_STAGED;
     }
     /* Staging +0x209E0/+0x209E4, the paste bit (+0x41, 0x40) and action 0x5C at
-     * mode +0x424 were confirmed live on build 13954591 (snaphak-re R-012). */
+     * mode +0x424 were confirmed live on build 13954591. */
 
     /* Native paste requires a nonempty, bounded staged entity list. */
     int ent_count = 0;
-    g_place_why = "the editor could not stage its entities";
+    g_place_why = "the prefab is empty or too large to paste";
     if (!ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count) ||
         ent_count < 1 || ent_count > PREFAB_MAX_ENTITIES) {
         char l[128];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: staged entity count %d out of range -> staged only", ent_count);
+        _snprintf_s(l, sizeof l, _TRUNCATE, "APPLY place: staged entity count %d out of range -> staged only", ent_count);
         backend_log(l);
         return AE_PASTE_STAGED;
     }
@@ -1483,7 +1286,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         (mode_state != 1 && mode_state != 2)) {
         char l[128];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 place: mode busy (mode+0x1ac=%d, likely already holding) -> staged only", mode_state);
+                    "APPLY place: mode busy (mode+0x1ac=%d, likely already holding) -> staged only", mode_state);
         backend_log(l);
         return AE_PASTE_STAGED;
     }
@@ -1495,12 +1298,12 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
     void *sel = NULL;
     int   sel_count = -1;
-    g_place_why = "the editor kept its selection";
+    g_place_why = "the editor would not clear the selection (deselect everything first)";
     if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel ||
         !ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &sel_count) || sel_count != 0) {
         char l[128];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 place: selection not empty (count=%d) -> staged only (placing would mis-wire)", sel_count);
+                    "APPLY place: selection not empty (count=%d) -> staged only (placing would mis-wire)", sel_count);
         backend_log(l);
         return AE_PASTE_STAGED;
     }
@@ -1509,7 +1312,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
     int hovered = 0;
     g_place_why = "the cursor was over an entity, where the editor does not paste";
     if (!ae_read_u32_safe((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered) || hovered != -1) {
-        backend_log("C2 place: hovering an entity (engine refuses paste there) -> staged only");
+        backend_log("APPLY place: hovering an entity (engine refuses paste there) -> staged only");
         return AE_PASTE_STAGED;
     }
 
@@ -1519,7 +1322,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
                                               MODE_IDLE_SUBSTATE_OFF + SUBSTATE_FLAGS1_OFF);
     /* Write the action ID before the arming word. */
     int armed = 0;
-    g_place_why = "the paste could not be requested";
+    g_place_why = "the editor did not take the paste request";
     __try {
         *(volatile unsigned char *)flags1 = (unsigned char)(*(volatile unsigned char *)flags1 |
                                                             SUBSTATE_PASTE_AVAIL_BIT);
@@ -1528,18 +1331,14 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         *(volatile int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_ACTION_ARM_OFF) = MODE_ACTION_ARMED;
         armed = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("C2 place: arming the action slot faulted -> staged only");
+        backend_log("APPLY place: arming the action slot faulted -> staged only");
         armed = 0;
     }
     if (!armed) return AE_PASTE_STAGED;
 
-#if AE_PASTE_DIAG_ON
-    /* Attribute later diagnostic snapshots to this queued action. */
-    InterlockedExchange(&g_armed_paste_ticks, 8);
-#endif
 
     char l[128];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: native paste queued for %d staged entities", ent_count);
+    _snprintf_s(l, sizeof l, _TRUNCATE, "APPLY place: native paste queued for %d staged entities", ent_count);
     backend_log(l);
     return AE_PASTE_ARMED;
 }
@@ -1547,29 +1346,47 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
 
 /* Command-drain execution and result reporting. */
+/* The one result line for an apply, titled by the surface that asked for it. */
+static int ae_op_is(const char *op, const char *const *names)
+{
+    for (; *names; names++) if (strcmp(op, *names) == 0) return 1;
+    return 0;
+}
 static void ae_toast_result(const char *op, int applied, int total)
 {
-
+    static const char *const quiet_ops[] = { "load-prefab", "tl-inherit-portable", "accl", "acctargets", "fly-to", NULL };
+    static const char *const stack_ops[] = { "bss", "bsi", "bsf", "bsb", "bse", NULL };
     sh_iface *iface = sh_ui_get_iface();
-    char text[160];
-    _snprintf_s(text, sizeof text, _TRUNCATE, "%s: applied %d/%d (engine round-trip)",
-                op[0] ? op : "apply", applied, total);
-
-    /* These callers own their toast or perform silent maintenance. */
-    int quiet = (strcmp(op, "load-prefab") == 0) || (strcmp(op, "tl-inherit-portable") == 0) ||
-                (strcmp(op, "accl") == 0)         || (strcmp(op, "acctargets") == 0) ||
-                (strcmp(op, "fly-to") == 0);
-    /* Load/Place reports the stage/action result through sh_apply_last_place_result. */
-    if (iface && iface->vtbl && iface->vtbl->toast && !quiet)
-        iface->vtbl->toast(iface, "SnapStack", text);
-    /* Log even when no engine toast is available. */
+    const char *title;
+    char text[192];
     char line[200];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "C2 apply: %s applied %d/%d", op[0] ? op : "apply", applied, total);
+
+    /* Log even when no engine toast is available. */
+    _snprintf_s(line, sizeof line, _TRUNCATE, "APPLY: %s applied %d/%d", op[0] ? op : "apply", applied, total);
     backend_log(line);
+    /* These callers own their toast (Load / Place says where the prefab went;
+     * accl names its receiver) or are silent maintenance. */
+    if (ae_op_is(op, quiet_ops) || !iface || !iface->vtbl || !iface->vtbl->toast) return;
+
+    if (strcmp(op, "mkcmd") == 0) {
+        iface->vtbl->toast(iface, "SnapStack", applied
+                           ? "Command entity ready: press Ctrl+V in the 3D view to place it."
+                           : "The command entity could not be made; nothing was changed.");
+        return;
+    }
+    title = ae_op_is(op, stack_ops) ? "SnapStack" : strcmp(op, "save-timeline") == 0 ? "Timeline" : "Entity edit";
+    if (total == 1)
+        strcpy_s(text, sizeof text, applied ? "The change was applied." : "The change was not applied.");
+    else if (applied == total)
+        _snprintf_s(text, sizeof text, _TRUNCATE, "Changed %d of %d entities.", applied, total);
+    else
+        _snprintf_s(text, sizeof text, _TRUNCATE, "Changed %d of %d entities; %d could not be changed.",
+                    applied, total, total - applied);
+    iface->vtbl->toast(iface, title, text);
 }
 
 /* Shared item dispatcher. A staged-only kind-2 item counts as applied;
- * g_last_place_result distinguishes it from an armed native paste action. */
+ * the place watch distinguishes it from an armed native paste action. */
 #ifdef SH_APPLY_ENGINE_TESTING
 static int (*g_apply_test_executor)(int, int, const char *);
 #endif
@@ -1581,7 +1398,6 @@ static int ae_run_item(int kind, int id, const char *text)
     if (!text) return 0;
     if (kind == 2) {
         int pr = ae_mkcmd_instantiate(text);
-        g_last_place_result = pr;
         strncpy_s(g_place_reason, sizeof g_place_reason,
                   pr == AE_PASTE_ARMED ? "" : (g_place_why ? g_place_why : ""), _TRUNCATE);
         InterlockedExchange(&g_place_decided, pr);
@@ -1687,7 +1503,7 @@ static int ae_ensure_command(void)
         return 0;
     }
     InterlockedExchange(&g_cmd_registered, 2);
-    backend_log("C2: clone_bss_apply engine command registered (command-buffer apply routing live)");
+    backend_log("APPLY: clone_bss_apply engine command registered (command-buffer apply routing live)");
     return 1;
 }
 
@@ -1709,7 +1525,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
         /* Never run a competing request inline when the slot is occupied. */
         LeaveCriticalSection(&g_pending_lock);
         if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
-        backend_log("C2 sync-marshal: request slot busy -> declined");
+        backend_log("APPLY sync-marshal: request slot busy -> declined");
         return AE_MARSHAL_UNAVAILABLE;
     }
     ResetEvent(g_sync_ev);
@@ -1741,7 +1557,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
         g_sync_req.state = AE_SYNC_EMPTY;
         LeaveCriticalSection(&g_pending_lock);
         if (mine) { for (int i = 0; i < n; i++) free(mine[i].text); free(mine); }
-        backend_log("C2 sync-marshal: engine never drained the request -> withdrawn, 0 applied");
+        backend_log("APPLY sync-marshal: engine never drained the request -> withdrawn, 0 applied");
         return AE_MARSHAL_NOT_RUN;
     }
     /* Already running: allow a grace period, then report an unknown outcome.
@@ -1758,7 +1574,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
     }
     g_sync_req.state = AE_SYNC_ABANDONED;   /* The drain resets the abandoned request when it finishes. */
     LeaveCriticalSection(&g_pending_lock);
-    backend_log("C2 sync-marshal: request picked up but not completed in time -- outcome unknown "
+    backend_log("APPLY sync-marshal: request picked up but not completed in time -- outcome unknown "
                 "(the drain's own toast/log has the truth if it lands)");
     return AE_MARSHAL_LOST;
 }
@@ -2194,8 +2010,11 @@ static void ae_nav_preview(const uint8_t *ed)
     if (!sh_config_get_bool("navmesh.preview",&enabled,NULL) || !enabled) {
         sh_nav_preview_clear(); return;
     }
-    vt=*(void ***)ed;
-    world=((get_object_fn)vt[0x128/8])(ed);
+    world=NULL;
+    __try {
+        vt=*(void ***)ed;
+        world=((get_object_fn)vt[0x128/8])(ed);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { world=NULL; }
     if (!world) { sh_nav_preview_clear(); return; }
     revision = sh_nav_bake_geometry_revision();
     if (revision == g_preview_built_revision && sh_nav_preview_published(world)) return;
@@ -3199,7 +3018,12 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
 {
     (void)self;
     if (!items || count <= 0 || count > APPLY_MAX_ITEMS) return 0;
-    if (!ae_editor_session()) return 0;
+    if (!ae_editor_session()) {
+        sh_iface *iface = sh_ui_get_iface();
+        if (iface && iface->vtbl && iface->vtbl->toast)
+            iface->vtbl->toast(iface, "Entity edit", "Open the map in the editor first; nothing was changed.");
+        return 0;
+    }
     const char *op = op_label ? op_label : "apply";
 
     int on_main = ae_on_main_thread();
@@ -3244,12 +3068,6 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
     if (serialize_selection) *serialize_selection = slot_serialize_selection;
 }
 
-/* Most recent kind-2 result: failed, staged-only, or native paste action armed. */
-int sh_apply_last_place_result(void)
-{
-    return (int)g_last_place_result;
-}
-
 int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reason_cap)
 {
     LONG w = InterlockedCompareExchange(&g_paste_watch, 0, 0);
@@ -3275,220 +3093,10 @@ int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reas
  * current staging requests process lifetime and the watchdog validates it.
  * With protection enabled, post-Play samples may show the reset slot rather
  * than the original failure. Compare with a native clipboard as a control. */
-#define AE_PLAY_DIAG_ON  0
 /* Diagnostic only: holding an unsafe slot skips protection and can cause a
  * fatal guarded-free error on later copy/paste. Keep disabled in normal builds. */
 
-#define AE_PLAY_DIAG_HOLD_SLOT  0
 
-#if AE_PLAY_DIAG_ON
-#define AE_PLAY_DIAG(...) do { char _lp[320]; \
-    _snprintf_s(_lp, sizeof _lp, _TRUNCATE, __VA_ARGS__); backend_log(_lp); } while (0)
-
-#define AE_PLAY_DIAG_MAX_BLOBS 3
-
-typedef struct {
-    int   ok;        /* Fields were readable. */
-    int   len;       /* idStr +0x08 */
-    void *data;      /* idStr +0x10 */
-    int   flags;     /* idStr +0x18 */
-    int   selfOwned; /* Data points to this idStr's inline buffer. */
-    char  head[20];  /* Bounded, NUL-terminated text sample. */
-    int   declOk;    /* blob+0x00 was readable */
-    void *decl;      /* Blob +0x00, also visited by teardown. */
-} ae_namestr_probe;
-
-/* Snapshot complete blobs to compare fields beyond the string probes. */
-#define AE_PLAY_DIAG_RAW_BLOBS  2
-#define AE_PLAY_DIAG_MAX_DIFFS  24
-
-typedef struct {
-    int   valid;     /* a snapshot was taken on the way out */
-    void *listPtr;
-    int   num, cap;
-    int   probed;
-    ae_namestr_probe s[AE_PLAY_DIAG_MAX_BLOBS];
-    int   rawOk[AE_PLAY_DIAG_RAW_BLOBS];                      /* the blob was fully readable */
-    unsigned char raw[AE_PLAY_DIAG_RAW_BLOBS][PREFAB_BLOB_STRIDE];
-} ae_play_snap;
-
-static ae_play_snap g_play_snap;
-
-/* Guarded allocation header, relative to returned pointer:
- * -0x10 tag; -0x0F flags (bit 2 map, bit 3 persistent, neither process;
- * bits 0/1 indicate other allocation kinds); -0x0E raw-base distance;
- * -0x0C address-dependent cookie; -0x08 requested size.
- * Validate the cookie before using flags to infer map lifetime. */
-static void ae_log_alloc_heap(const void *p, const char *label)
-{
-    if (!p) { AE_PLAY_DIAG("PLAY-DIAG HEAP %s: ptr=NULL", label); return; }
-    const unsigned char *b = (const unsigned char *)p;
-    unsigned tag = 0, flags = 0; int hdrBack = 0, cookie = 0; void *sizeRaw = NULL;
-    if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
-        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw)) {
-        AE_PLAY_DIAG("PLAY-DIAG HEAP %s: header behind %p UNREADABLE", label, p);
-        return;
-    }
-    { unsigned lo = 0, hi = 0;
-      (void)ae_read_u8_safe(b - 0x0e, &lo); (void)ae_read_u8_safe(b - 0x0d, &hi);
-      hdrBack = (int)(lo | (hi << 8)); }
-
-    const char *heap = (flags & 1) || (flags & 2) ? "NOT-A-HEAP-BLOCK"
-                     : (flags & 4)                ? "MAP heap  <-- dies at map teardown"
-                     : (flags & 8)                ? "PERSIST heap"
-                                                  : "process heap";
-    /* Recompute Mem_Free's cookie: x = size ^ (ptr-0x10);
-     * c = (((u16 hdrBack << 8 | tag) << 8) | flags) ^ (u32)(x >> 32) ^ (u32)x   */
-    unsigned long long size = (unsigned long long)sizeRaw;
-    unsigned long long x = size ^ (unsigned long long)(b - 0x10);
-    unsigned expect = ((((unsigned)(hdrBack & 0xffff) << 8) | (tag & 0xff)) << 8) | (flags & 0xff);
-    expect ^= (unsigned)(x >> 32) ^ (unsigned)x;
-    AE_PLAY_DIAG("PLAY-DIAG HEAP %s: ptr=%p tag=0x%02x flags=0x%02x size=%llu -> %s | cookie %s",
-                 label, p, tag & 0xff, flags & 0xff, size, heap,
-                 ((unsigned)cookie == expect) ? "VALID (live block)" : "MISMATCH (not a live block)");
-}
-
-/* Probe list and teardown fields under SEH; post-Play storage may be unmapped. */
-static void ae_play_probe(const uint8_t *ed, ae_play_snap *out)
-{
-    memset(out, 0, sizeof *out);
-    if (!ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &out->listPtr)) return;
-    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &out->num);
-    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCAP_OFF,   &out->cap);
-    out->valid = 1;
-    if (!out->listPtr) return;
-
-    int n = out->cap;
-    if (n > AE_PLAY_DIAG_MAX_BLOBS) n = AE_PLAY_DIAG_MAX_BLOBS;
-    if (n < 0) n = 0;
-    for (int i = 0; i < n; i++) {
-        const uint8_t *blob = (const uint8_t *)out->listPtr + (size_t)i * PREFAB_BLOB_STRIDE;
-        const uint8_t *str  = blob + PREFAB_BLOB_NAMESTR_OFF;
-        ae_namestr_probe *p = &out->s[i];
-        int gotLen = ae_read_u32_safe(str + IDSTR_LEN_OFF, &p->len);
-        int gotPtr = ae_read_ptr(str + IDSTR_DATA_OFF, &p->data);
-        int gotFlg = ae_read_u32_safe(str + IDSTR_FLAGS_OFF, &p->flags);
-        p->ok = (gotLen && gotPtr && gotFlg);
-        p->selfOwned = (p->ok && p->data == (void *)(str + IDSTR_SSO_OFF));
-        p->declOk = ae_read_ptr(blob, &p->decl);
-        /* Capture a bounded text prefix when readable. */
-        p->head[0] = '\0';
-        if (p->ok && p->len > 0 && p->data) {
-            int k = p->len < (int)sizeof p->head - 1 ? p->len : (int)sizeof p->head - 1;
-            __try {
-                for (int j = 0; j < k; j++) {
-                    char c = ((const char *)p->data)[j];
-                    p->head[j] = (c >= 32 && c < 127) ? c : '?';
-                }
-                p->head[k] = '\0';
-            } __except (EXCEPTION_EXECUTE_HANDLER) { p->head[0] = '\0'; }
-        }
-        out->probed = i + 1;
-    }
-
-    /* Preserve any readable prefix, but rawOk requires a complete blob. */
-    int nr = out->cap;
-    if (nr > AE_PLAY_DIAG_RAW_BLOBS) nr = AE_PLAY_DIAG_RAW_BLOBS;
-    if (nr < 0) nr = 0;
-    for (int i = 0; i < nr; i++) {
-        const unsigned char *src = (const unsigned char *)out->listPtr + (size_t)i * PREFAB_BLOB_STRIDE;
-        int got = 0;
-        __try {
-            for (; got < PREFAB_BLOB_STRIDE; got++) out->raw[i][got] = src[got];
-        } __except (EXCEPTION_EXECUTE_HANDLER) { }
-        out->rawOk[i] = (got == PREFAB_BLOB_STRIDE);
-        if (got < PREFAB_BLOB_STRIDE)
-            AE_PLAY_DIAG("PLAY-DIAG: blob[%d] raw read stopped at +0x%x (unmapped beyond that)", i, got);
-    }
-}
-
-/* Report changed 8-byte words by blob offset. */
-static void ae_play_diff_raw(const ae_play_snap *before, const ae_play_snap *after)
-{
-    int shown = 0;
-    for (int i = 0; i < AE_PLAY_DIAG_RAW_BLOBS; i++) {
-        if (!before->rawOk[i]) continue;
-        if (!after->rawOk[i]) {
-            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] was fully readable before Play and is NOT now "
-                         "(buffer released or unmapped)", i);
-            continue;
-        }
-        int changedWords = 0;
-        for (int off = 0; off + 8 <= PREFAB_BLOB_STRIDE; off += 8) {
-            unsigned long long b, a;
-            memcpy(&b, before->raw[i] + off, 8);
-            memcpy(&a, after->raw[i] + off, 8);
-            if (b == a) continue;
-            changedWords++;
-            if (shown < AE_PLAY_DIAG_MAX_DIFFS) {
-                AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d]+0x%03x  %016llx -> %016llx", i, off, b, a);
-                shown++;
-            }
-        }
-        if (changedWords == 0)
-            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] IDENTICAL across Play (all 0x%x bytes) -- the blob itself "
-                         "is untouched, so look at what it POINTS AT", i, PREFAB_BLOB_STRIDE);
-        else
-            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] %d of %d 8-byte words changed%s", i, changedWords,
-                         PREFAB_BLOB_STRIDE / 8,
-                         (shown >= AE_PLAY_DIAG_MAX_DIFFS) ? " (report truncated)" : "");
-    }
-}
-
-static void ae_play_log(const char *when, const ae_play_snap *s)
-{
-    AE_PLAY_DIAG("PLAY-DIAG %s: entities ptr=%p num=%d capacity=%d%s",
-                 when, s->listPtr, s->num, s->cap, (s->num != s->cap) ? "  <-- num!=cap" : "");
-    for (int i = 0; i < s->probed; i++) {
-        const ae_namestr_probe *p = &s->s[i];
-        if (!p->ok) { AE_PLAY_DIAG("PLAY-DIAG %s:   blob[%d] +0x168 UNREADABLE (faulted)", when, i); continue; }
-        AE_PLAY_DIAG("PLAY-DIAG %s:   blob[%d] +0x00 decl=%s%p | +0x168 len=%d data=%p flags=%08x "
-                     "alloced=%d dyn=%d owned=%d%s str=\"%s\"",
-                     when, i, p->declOk ? "" : "(unreadable)", p->decl,
-                     p->len, p->data, (unsigned)p->flags,
-                     p->flags & 0x3FFFFFFF, (p->flags < 0) ? 1 : 0, (p->flags >> 30) & 1,
-                     p->selfOwned ? " SELF-OWNED(SSO)" : (p->data ? "" : " data=NULL"),
-                     p->head);
-    }
-}
-
-/* Compare teardown-relevant fields across Play. */
-static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *after)
-{
-    if (before->listPtr != after->listPtr)
-        AE_PLAY_DIAG("PLAY-DIAG DIFF: entities ptr CHANGED %p -> %p", before->listPtr, after->listPtr);
-    if (before->num != after->num || before->cap != after->cap)
-        AE_PLAY_DIAG("PLAY-DIAG DIFF: header CHANGED num %d->%d capacity %d->%d",
-                     before->num, after->num, before->cap, after->cap);
-    int nb = before->probed < after->probed ? before->probed : after->probed;
-    for (int i = 0; i < nb; i++) {
-        const ae_namestr_probe *b = &before->s[i], *a = &after->s[i];
-        if (b->ok && !a->ok) { AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x168 became UNREADABLE", i); continue; }
-        if (!b->ok || !a->ok) continue;
-        if (b->len != a->len || b->data != a->data || b->flags != a->flags)
-            AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x168 len %d->%d data %p->%p flags %08x->%08x%s",
-                         i, b->len, a->len, b->data, a->data,
-                         (unsigned)b->flags, (unsigned)a->flags,
-                         (b->selfOwned && !a->selfOwned) ? "  <-- WAS self-owned, NOW IS NOT" : "");
-        if (b->decl != a->decl)
-            AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x00 decl CHANGED %p -> %p  <-- teardown destructs this",
-                         i, b->decl, a->decl);
-    }
-    if (before->listPtr == after->listPtr && before->num == after->num && before->cap == after->cap)
-        AE_PLAY_DIAG("PLAY-DIAG DIFF: idList header IDENTICAL across Play "
-                     "(so any damage is INSIDE the blobs, not in the header)");
-    /* Only meaningful when the buffer did not move -- otherwise we would be diffing two different blobs. */
-    if (before->listPtr == after->listPtr && before->listPtr != NULL)
-        ae_play_diff_raw(before, after);
-    else if (after->listPtr == NULL)
-        AE_PLAY_DIAG("PLAY-DIAG RAW: skipped (slot was cleared; with HOLD_SLOT off that is the re-ctor)");
-    else
-        AE_PLAY_DIAG("PLAY-DIAG RAW: skipped (buffer moved %p -> %p, so a byte diff would be meaningless)",
-                     before->listPtr, after->listPtr);
-}
-#else
-#define AE_PLAY_DIAG(...) do { } while (0)
-#endif
 
 /* Poll nav maintenance after a successful native Frame on the main thread.
  * On leaving RUNNING, preserve verified process/persistent allocations; reset
@@ -3509,29 +3117,6 @@ void sh_apply_prefab_poll_play(void)
     if (sh_modui_poll_due()) (void)ae_main_call_invoke(sh_modui_poll_main, NULL);
     if (!g_doom_base) return;
 
-#if AE_PASTE_DIAG_ON
-    /* Probe on entry to manipulation state, after the native paste sequence.
- * Selection count alone changes during instantiation and samples too early. */
-    {
-        static int s_prev_mode_state = -1;
-        const uint8_t *edp = ae_editor_session();
-        if (edp) {
-            int ms = -1, selc = -1;
-            void *selp = NULL;
-            if (ae_read_u32_safe(edp + ED_MODE_OBJ_OFF + 0x1ac, &ms)) {
-                if (s_prev_mode_state != 4 && ms == 4 &&
-                    ae_read_ptr(edp + ED_SEL_OBJ_OFF, &selp) && selp &&
-                    ae_read_u32_safe((const uint8_t *)selp + SEL_COUNT_OFF, &selc) && selc > 0) {
-                    LONG mine = InterlockedCompareExchange(&g_armed_paste_ticks, 0, 0);
-                    ae_probe_paste_outcome(edp, mine > 0 ? "OURS (injected)" : "MANUAL (engine Ctrl+V)");
-                }
-                s_prev_mode_state = ms;
-            }
-        }
-        LONG t = InterlockedCompareExchange(&g_armed_paste_ticks, 0, 0);
-        if (t > 0) InterlockedDecrement(&g_armed_paste_ticks);
-    }
-#endif
 
     int cur = 0;
     /* Without the load-state word, skip the staging lifetime watchdog. */
@@ -3539,23 +3124,6 @@ void sh_apply_prefab_poll_play(void)
     if (!ae_read_u32_safe(g_load_state_at, &cur)) return;
     LONG prev = InterlockedExchange(&g_last_load_state, (LONG)cur);
 
-#if AE_PLAY_DIAG_ON
-    /* Compare after loading. With protection enabled, this may measure a reset slot. */
-    if (prev != LOAD_STATE_RUNNING && cur == LOAD_STATE_RUNNING && g_play_snap.valid) {
-        const uint8_t *edb = ae_editor_session();
-        if (edb) {
-            ae_play_snap after;
-            ae_play_probe(edb, &after);
-            ae_play_log("after-Play", &after);
-            ae_play_log_diff(&g_play_snap, &after);
-#if !AE_PLAY_DIAG_HOLD_SLOT
-            AE_PLAY_DIAG("PLAY-DIAG note: HOLD_SLOT is off, so the slot was re-ctor'd on the way out -- "
-                         "the reading above reflects that reset, NOT what Play did to our prefab");
-#endif
-        }
-        g_play_snap.valid = 0;
-    }
-#endif
 
     /* Check on leaving RUNNING, before map teardown can invalidate staged storage. */
     if (prev != LOAD_STATE_RUNNING || cur == LOAD_STATE_RUNNING) return;
@@ -3566,16 +3134,6 @@ void sh_apply_prefab_poll_play(void)
     int ent_count = 0;
     (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count);
 
-#if AE_PLAY_DIAG_ON
-    /* Snapshot before protection; native clipboards provide a lifetime control. */
-    if (ent_count != 0) {
-        const char *whose = g_we_staged ? "before-Play (OURS)" : "before-Play (engine clipboard)";
-        ae_play_probe(ed, &g_play_snap);
-        ae_play_log(whose, &g_play_snap);
-
-        ae_log_alloc_heap(g_play_snap.listPtr, whose);
-    }
-#endif
 
     /* Touch only the slot matching our staging marker/count heuristic. */
     /* Process/persistent allocations can survive Play. Validate the header instead
@@ -3591,33 +3149,26 @@ void sh_apply_prefab_poll_play(void)
         InterlockedExchange(&g_we_staged, 1);
         char l[220];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 stage: our %d-entity prefab is in a heap that survives a map teardown "
+                    "APPLY stage: our %d-entity prefab is in a heap that survives a map teardown "
                     "(process/persist, cookie verified) -> left staged across Play; Ctrl+V should work",
                     ent_count);
         backend_log(l);
     }
     else if (mine && ent_count != 0 && ent_count == (int)g_we_staged_count && g_prefab_ctor) {
-#if AE_PLAY_DIAG_HOLD_SLOT
-        /* Diagnostic hold deliberately skips protection for an unsafe allocation. */
-        AE_PLAY_DIAG("PLAY-DIAG: HOLDING our %d-entity slot -- protective re-ctor SKIPPED. "
-                     "The next Ctrl+C may hard-crash (fatal 'Memory corruption before block!'). "
-                     "Diagnostic build only.", ent_count);
-#else
         __try {
             g_prefab_ctor((void *)(ed + PASTE_STAGING_OFF));
             char l[200];
             _snprintf_s(l, sizeof l, _TRUNCATE,
-                        "C2 stage: our %d-entity prefab did not survive Play -> slot re-initialised "
+                        "APPLY stage: our %d-entity prefab did not survive Play -> slot re-initialised "
                         "(prevents the double-free a later Ctrl+C would hit); re-press Load/Place", ent_count);
             backend_log(l);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            backend_log("C2 stage: slot re-init faulted (left as-is)");
+            backend_log("APPLY stage: slot re-init faulted (left as-is)");
         }
-#endif
     } else if (ent_count != 0) {
         char l[200];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 stage: staging slot holds %d entities that are NOT ours (engine clipboard) "
+                    "APPLY stage: staging slot holds %d entities that are NOT ours (engine clipboard) "
                     "-> left strictly intact", ent_count);
         backend_log(l);
     }
@@ -3635,29 +3186,29 @@ static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *
     char l[192];
 
     if (s && r && s == r) {
-        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=%p rva=%p MATCH", label, (void *)s, (void *)r);
+        _snprintf_s(l, sizeof l, _TRUNCATE, "APPLY sig: %s sig=%p rva=%p MATCH", label, (void *)s, (void *)r);
         backend_log(l);
         return (void *)s;
     }
     if (s && r) {
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 sig: %s sig=%p rva=%p MISMATCH -> TRUSTING SIGNATURE (recorded rva is stale "
+                    "APPLY sig: %s sig=%p rva=%p MISMATCH -> TRUSTING SIGNATURE (recorded rva is stale "
                     "for this build; re-derive it)", label, (void *)s, (void *)r);
         backend_log(l);
         return (void *)s;
     }
     if (s) {
-        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=%p (no rva to cross-check)", label, (void *)s);
+        _snprintf_s(l, sizeof l, _TRUNCATE, "APPLY sig: %s sig=%p (no rva to cross-check)", label, (void *)s);
         backend_log(l);
         return (void *)s;
     }
     if (r) {
-        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=MISS -> using rva=%p (build-locked)", label, (void *)r);
+        _snprintf_s(l, sizeof l, _TRUNCATE, "APPLY sig: %s sig=MISS -> using rva=%p (build-locked)", label, (void *)r);
         backend_log(l);
         return (void *)r;
     }
     _snprintf_s(l, sizeof l, _TRUNCATE,
-                "C2 sig: %s sig=MISS and this is not the pinned extraction build -> DECLINED "
+                "APPLY sig: %s sig=MISS and this is not the pinned extraction build -> DECLINED "
                 "(pinned rva 0x%x names a different function here)", label, (unsigned)fallback_rva);
     backend_log(l);
     return NULL;
@@ -3676,12 +3227,12 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
         g_load_state_at  = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
         g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
         _snprintf_s(gl, sizeof gl, _TRUNCATE,
-            "C2 globals: editor=%p (status=%d, pinned 0x%x) load_state=%p main_thread=%p",
+            "APPLY globals: editor=%p (status=%d, pinned 0x%x) load_state=%p main_thread=%p",
             (const void *)g_editor, (int)gst, (unsigned)EDITOR_SINGLETON_PINNED_RVA,
             (const void *)g_load_state_at, (const void *)g_main_thread_at);
         backend_log(gl);
         if (!g_editor)
-            backend_log("C2 globals: the editor singleton did not resolve -- the apply chain will "
+            backend_log("APPLY globals: the editor singleton did not resolve -- the apply chain will "
                         "refuse every edit rather than write through a pinned address");
     }
     g_cmdsys = cmdsys;
@@ -3711,8 +3262,6 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* Guards an entity edit that turns Static off; without it the edit applies unguarded. */
     g_budget_update = (budget_update_fn)  sig_addr_by_name(results, n, "EditorBudgetUpdate");
     /* Diagnostic addresses only; kind 2 injects an action without calling either. */
-    g_paste_instantiate = (paste_instantiate_fn)sig_addr_by_name(results, n, "PasteInstantiate");
-    g_enter_prefab_grab = (enter_prefab_grab_fn)sig_addr_by_name(results, n, "EnterAddPrefabGrab");
 
     /* Resolve prefab helpers through signature-first, exact-build fallbacks. */
     if (module_base) {
@@ -3736,11 +3285,10 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
 
     char line[256];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "C2 wave B: apply-engine install -- ser=%d deser=%d commit=%d cmdsys=%p buf_cmd=%p add_cmd=%p "
-        "paste=%p grab=%p",
+        "APPLY: apply-engine install -- ser=%d deser=%d commit=%d cmdsys=%p buf_cmd=%p add_cmd=%p "
+        "",
         ae_serialize_bound(), ae_deserialize_bound(), ae_commit_bound(),
-        g_cmdsys, (void *)g_buffer_cmd, (void *)g_add_command,
-        (void *)g_paste_instantiate, (void *)g_enter_prefab_grab);
+        g_cmdsys, (void *)g_buffer_cmd, (void *)g_add_command);
     backend_log(line);
     return ae_serialize_bound() && ae_deserialize_bound() && ae_commit_bound();
 }

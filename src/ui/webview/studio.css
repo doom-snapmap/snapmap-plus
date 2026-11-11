@@ -57,12 +57,10 @@
   .rz-br { bottom: 0; right: 0; width: 9px; height: 9px; cursor: nwse-resize; }
 
   .tabstrip { display: flex; align-items: center; min-width: 0; background: var(--chrome); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 6px; gap: 2px; }
-  .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: none; font: inherit; }
+  .tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
-  .mat-result { font-weight: 600; }
-  .mat-result.ok  { color: #2e7d46; }
-  .mat-result.err { color: var(--danger); }
 
   /* Asset browser: type rail, catalog, and inspector. Shared by the tab and entity modal. */
   .ab-grid { display: flex; gap: 8px; align-items: stretch; flex: 1; min-height: 0; }
@@ -328,7 +326,6 @@
   .desc-panel.open .desc-body { display: block; }
   .desc-block + .desc-block { margin-top: 9px; }
   .desc-block-title { color: var(--text); font-weight: 600; }
-  .desc-tier { color: var(--muted); font-weight: 400; font-style: italic; }
   .desc-summary { color: var(--text); white-space: pre-wrap; cursor: text; }   /* text stays selectable even though the panel around it collapses on click */
   .desc-summary.muted { color: var(--muted); font-style: italic; }
 
@@ -343,8 +340,8 @@
   .combo-opt { padding: 3px 7px; border-radius: 4px; cursor: default; white-space: nowrap; }
   .combo-opt:hover, .combo-opt.active { background: var(--sel); color: var(--selText); }
   .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
-  /* blank / not-in-the-enumerated-list Inherit or Classname -- same red as .toast.err, so it reads as the same "this will be refused" signal */
-  .combo.invalid input, .combo.invalid .combo-arrow { border-color: #a3352f; }
+  /* blank / not-in-the-enumerated-list Inherit or Classname -- the danger colour, the same "this will be refused" signal as an error toast */
+  .combo.invalid input, .combo.invalid .combo-arrow { border-color: var(--danger); }
 
   .tl-head { color: var(--muted); flex-shrink: 0; padding-bottom: 6px; }
   .tl-head b { color: var(--text); }
@@ -356,7 +353,7 @@
   .tl-inner-tab.tl-add .ui-icon { width: 13px; height: 13px; }
   .tl-tab-del { width: 15px; height: 15px; border: 0; background: transparent; border-radius: 3px; color: var(--muted); cursor: pointer; flex-shrink: 0; }
   .tl-tab-del .ui-icon { width: 11px; height: 11px; }
-  .tl-tab-del:hover { background: #a3352f; color: #fff; }
+  .tl-tab-del:hover { background: var(--danger); color: #ffffff; }
   .tl-inner-body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; padding-top: 2px; }
   .event-list { display: flex; flex-direction: column; gap: 6px; }
   /* Stack parameter widgets below the time/event/delete row. */
@@ -377,7 +374,7 @@
   .ev-arg-row .combo.ev-arg-combo { flex: 1; min-width: 0; }   /* decl/enum -- fills the row same as the plain-text arg inputs */
   .ev-del { width: 22px; height: 22px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 5px; flex-shrink: 0; }
   .ev-del .ui-icon { width: 13px; height: 13px; }
-  .ev-del:hover { background: #a3352f; color: #fff; }
+  .ev-del:hover { background: var(--danger); color: #ffffff; }
 
   /* Entity picker shared by Runs on and entity arguments. */
   .entity-picker { display: flex; flex-direction: column; gap: 5px; }
@@ -423,7 +420,7 @@
   .pf-folder-del { width: 20px; height: 20px; margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
   .pf-folder-del .ui-icon { width: 12px; height: 12px; }
   .pf-folder-head:hover .pf-folder-del { opacity: 1; }
-  .pf-folder-del:hover { color: #a3352f; }
+  .pf-folder-del:hover { color: var(--dangerText); }
   .pf-folder-name { width: 130px; padding: 1px 5px; }
   .pf-item-name { width: 100%; padding: 1px 4px; }
   .prefab-card { flex: 1; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
@@ -521,6 +518,9 @@
   }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }
+  /* A window paired with another release's backend shows only this notice. */
+  .install-mismatch { position: fixed; inset: 0; z-index: 5000; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; background: var(--bg); color: var(--text); font-size: 13px; text-align: center; }
+  .install-mismatch[hidden] { display: none; }
   .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; width: 340px; display: flex; flex-direction: column; gap: 5px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
   .modal-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
   .modal label { color: var(--muted); margin-top: 4px; }
@@ -552,8 +552,8 @@
   .crash-attach input { width: auto; margin-top: 2px; flex-shrink: 0; }
 
   .ctxmenu { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 2px 4px 12px rgba(0,0,0,0.22); min-width: 140px; padding: 4px; display: none; }
-  .ctxmenu div { padding: 5px 12px; border-radius: 4px; cursor: default; }
-  .ctxmenu div:hover { background: var(--sel); color: var(--selText); }
+  .ctxmenu [role="menuitem"] { display: block; width: 100%; padding: 5px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
+  .ctxmenu [role="menuitem"]:hover, .ctxmenu [role="menuitem"]:focus-visible { background: var(--sel); color: var(--selText); outline: 0; }
 
   .statusbar { flex-shrink: 0; display: flex; align-items: center; min-width: 0; max-width: 100%; overflow: hidden; background: var(--panel2); border-top: 1px solid var(--border); color: var(--muted); padding: 6px 10px; font-size: 11px; }
   .status-group { display: flex; align-items: center; gap: 14px; white-space: nowrap; }
@@ -570,8 +570,7 @@
   .status-camera .cam-lock input { flex: none; margin: 0; }
   .status-right { margin-left: auto; gap: 10px; padding-left: 22px; }
   .statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 5px; }
-  .statusbar .dot.ok { background: #2e9e5b; }
-  .statusbar .dot.no { background: #c9483d; }
+  .statusbar .dot.ok { background: var(--ok); }
   .statusbar b { color: var(--text); }
   .statusbar .muted { color: var(--muted); }
 
@@ -607,11 +606,15 @@
   }
 
   #toastHost { position: fixed; top: 40px; right: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 4000; pointer-events: none; }
-  .toast { min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 6px; font-size: 11px; box-shadow: 0 4px 14px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
+  .toast { display: flex; align-items: flex-start; gap: 8px; min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 6px; font-size: 11px; box-shadow: 0 4px 14px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
   .toast.show { opacity: 1; transform: translateX(0); }
   .toast.ok   { background: #2e7d46; }
   .toast.warn { background: #9a6a1a; }
-  .toast.err  { background: #a3352f; }
+  .toast.err  { background: var(--danger); pointer-events: auto; }
+  .toast span { flex: 1; }
+  .toast-close { flex: none; width: 16px; height: 16px; margin: -1px -4px 0 0; border: 0; border-radius: 3px; background: transparent; color: inherit; cursor: pointer; }
+  .toast-close .ui-icon { width: 12px; height: 12px; }
+  .toast-close:hover, .toast-close:focus-visible { background: rgba(255,255,255,.18); outline: 0; }
 
 /* File menu: disabled items stay readable, the arm toggle shares the tick
    gutter with the theme radios, and the staged-path readout sizes the popup. */
@@ -685,6 +688,14 @@
   .mods-link:hover { text-decoration: underline; }
   .mods-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .mods-note { margin: 3px 0 2px; color: var(--muted); line-height: 1.45; }
+  /* Your mods and each downloaded map: a group header in the section-label style, above the folders. */
+  .mods-area + .mods-area { margin-top: 6px; }
+  .mods-area-head { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .mods-area-head .pf-fcount { letter-spacing: 0; text-transform: none; }
+  /* The same-files hint: a note in the warning colours, as in the Prefabs tab's needs line. */
+  .mods-same { margin-top: -6px; padding: 5px 8px; border-radius: 4px; background: var(--warnBg); color: var(--warnText); }
+  /* Copy mod id: a small link under the About fields. */
+  .mods-copy-id { align-self: flex-start; margin-top: 4px; font-size: 10px; }
   .mods-side .muted { color: var(--muted); }
   .mods-paths summary { margin-top: 2px; }
   .mods-paths-list { max-height: 260px; overflow: auto; padding: 3px 0 0 12px; font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }

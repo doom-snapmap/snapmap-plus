@@ -1,7 +1,8 @@
-/* Rawmap load substitution and save mirroring. The load detour can replace
- * engine JSON with rawmap.json, then calls the native deserializer. Removal of
- * retired package payloads and navigation preparation apply to both normal and
- * substituted loads.
+/* Rawmaps: map JSON files outside DOOM's saves. File > Load Rawmap opens one
+ * at once through the editor reload (editor_frame.c), and the load detour
+ * gives only that reload's parse the rawmap's text; Save Rawmap writes the
+ * open map. Every map parse is prepared here (navigation, settings, mods).
+ * Paths are UTF-8; file calls are the wide Windows ones.
  */
 #ifndef BACKEND_RAWMAP_H
 #define BACKEND_RAWMAP_H
@@ -16,43 +17,34 @@
  * Returns 1 when installed, otherwise logs the refusal and returns 0.
  */
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
-/* Set the shared load/save arm state; default off. Returns the new state. A
- * sibling arm.flag also arms both paths for testing and follows the
- * configured source directory.
- */
-int sh_rawmap_swap_arm(int on);
 
-/* Read the explicit arm state only; the test flag is reported separately. */
-int sh_rawmap_swap_is_armed(void);
+/* UTF-8 <-> wide path conversion for the wide Windows file calls. Return 1 on
+ * success; an empty or unconvertible path gives 0 and an empty `out`. */
+int sh_rawmap_path_wide(const char *utf8, wchar_t *out, size_t cap);
+int sh_rawmap_path_utf8(const wchar_t *wide, char *out, size_t cap);
 
-/* Read the effective arm predicate: explicit state OR arm.flag. Check before
- * engine-direct deserialization; source availability is checked later.
- */
-int sh_rawmap_swap_will_fire(void);
-
-/* Set the file-backed load source. NULL restores the default rawmap.json
- * path. Returns 1 if accepted.
- */
+/* Set the load path, the rawmap that opens. NULL restores the default
+ * rawmap.json path. Returns 1 if accepted. */
 int sh_rawmap_swap_set_source(const char *path);
 
-/* How many times the swap has fired (substituted our bytes into a load). */
+/* Open a rawmap in the editor now: `path` (UTF-8) becomes the load path when
+ * given, else the current load path opens. Refused, with the reason in
+ * `out_msg`, when the file is not a rawmap or the editor cannot open it now;
+ * nothing is kept for a later map. 1 = the reload was queued for the next
+ * editor frame. */
+int sh_rawmap_open_now(const char *path, char *out_msg, int msg_capacity);
+
+/* How many rawmaps have been opened this session. */
 unsigned long sh_rawmap_swap_count(void);
 
 /* Changes on every map parse, even when the engine reuses the same map pointer. */
 unsigned long sh_rawmap_load_generation(void);
 
-/* A substitution requires installed overwrite protection unless explicitly disabled. */
+/* Opening a rawmap requires installed overwrite protection unless explicitly disabled. */
 int sh_rawmap_load_is_safe(void);
 
-/* How many substituted DeserializeFromJson calls have RETURNED. Exported by name and at ordinal 101
- * so the test harness can distinguish a completed in-place load even when the engine reuses the
- * idSnapMap pointer and emits no completion line. */
-unsigned long sh_rawmap_swap_complete_count(void);
-
 /* Save processing calls native SerializeToJson, preserves its bool return,
- * embeds navigation payloads into the output, then optionally mirrors
- * JSON to disk. Mirroring uses the same arm predicate as loading.
- * sh_pretty_on changes only the mirror's layout.
+ * and embeds navigation and the map's Snapmap+ data into the output.
  */
 /* Install the SerializeToJson detour only for a clean SIG_OK resolution.
  * Returns 1 when installed, otherwise logs the refusal and returns 0.
@@ -69,12 +61,6 @@ void sh_rawmap_set_save_observer(sh_rawmap_save_observer observer);
  */
 void sh_rawmap_embed_install(const void *module_base);
 
-/* Arm the LOAD swap for exactly one map parse. Additive to the shared gate. */
-int sh_rawmap_load_arm_once(void);
-
-/* 1 = a one-shot load arm is still waiting. Does not consume it. */
-int sh_rawmap_load_oneshot_pending(void);
-
 /* Serialize the LIVE map rather than reading the newest save off disk, so unsaved
  * edits and never-saved maps export correctly. `map_to_json` is the resolved
  * SnapMapToJson, NOT SerializeToJson. `add_branch_tag_fn` is used only to derive
@@ -84,27 +70,23 @@ int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn);
 /* 1 = both functions resolved and the live path has not faulted this session. */
 int sh_rawmap_live_serialize_ready(void);
 
-/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY: it
+/* Serialize `map` and write it to `destination` (UTF-8). MAIN THREAD ONLY: it
  * reads engine state and allocates through the engine's allocator, so it must be
- * entered from the editor-frame hook. */
+ * entered from the editor-frame hook. `out_msg` receives one sentence for the
+ * player: where the map was saved, or why it was not. sh_pretty_on changes only
+ * the file's layout. */
 int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg, int msg_capacity,
                               unsigned long long *out_bytes);
 
 /* The open edit map as JSON, copied into the process heap (free with HeapFree). No
- * navigation embedding, no mirror, no save side effects. MAIN THREAD ONLY. */
+ * navigation embedding, no file write, no save side effects. MAIN THREAD ONLY. */
 int sh_rawmap_serialize_live_copy(void *edit_map, char **out, size_t *out_len);
 
 /* Native DeserializeFromJson without the load swap or the map-open side effects
  * (`native` is used when the detour is not installed). MAIN THREAD ONLY. */
 int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map);
 
-/* Set the mirror destination. NULL restores the default
- * %LOCALAPPDATA%/snapmap-plus/rawmap.json. The default matches the load
- * source; explicit overrides are independent. Returns 1 if accepted.
- */
-int sh_rawmap_save_set_dest(const char *path);
-
-/* Count successful save mirrors for diagnostics. */
+/* Count successful rawmap saves for the File menu's status. */
 unsigned long sh_rawmap_save_count(void);
 
 /* ---------------------------------------------------------------- a rawmap that names mods ------
@@ -137,7 +119,7 @@ int sh_rawmap_companion_zip_path(const char *json_path, char *out, size_t cap);
  * rows it was opened with. Any thread. */
 int sh_rawmap_open_map_mods(void);
 
-/* 1 while the open map is a rawmap the swap opened and no save has named it
+/* 1 while the open map is a rawmap opened by the reload and no save has named it
  * yet, with the rawmap's file name in `name` ("" otherwise). Its edit still
  * holds the id of the saved map the reload borrowed, so this is the open
  * map's identity until the first save. */
@@ -154,43 +136,41 @@ void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn);
  * the game console (iface_engine.c binds both). Either may be NULL. */
 void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), void (*print)(const char *line));
 
+/* Tell the player one sentence (toast and console line) on the next main tick. Any thread. */
+void sh_rawmap_tell(const char *text);
+
 /* Main-thread tick: show the last save's sentence (toast and console line)
  * once. Idle cost: one read. */
 void sh_rawmap_poll_main(void);
 
 /* The editor reload's own check, on its frame and before LoadMap (MAIN
- * THREAD): read the staged source once (a .zip imports its mods here), count
+ * THREAD): read the load path once (a .zip imports its mods here), count
  * the mods it names that are not installed and, when there are any, hand them
  * to the rawmap hold (modpublished.h) and refuse with the reason in `why`.
- * On 1 the text is kept for the parse; call sh_rawmap_reload_done after
- * LoadMap returns, on every path. */
+ * On 1 the text is kept for the parse; call sh_rawmap_reload_done with
+ * LoadMap's result after it returns, on every path (`faulted` when it
+ * faulted); a failure is told to the player there. */
 int  sh_rawmap_prepare_reload(char *why, int cap);
-void sh_rawmap_reload_done(void);
+void sh_rawmap_reload_done(int rc, int faulted);
 
-/* The rawmap hold's resume: the mods are installed, so open the staged rawmap
- * again (a reload now when the editor can take one; it stays staged for the
- * next map open either way). `note` receives a sentence for the player when
- * no reload was possible. Returns 1. */
+/* The rawmap hold's resume: the mods are installed, so open the rawmap again
+ * now when the editor can take it. `note` receives a sentence for the player
+ * when it could not. Returns 1. */
 int sh_rawmap_reopen_after_mods(char *note, size_t cap);
 
-/* Bytes in the most recent successful mirror, or 0 before any write. */
+/* Bytes in the most recent successful rawmap save, or 0 before any write. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
 /* ---------------------------------------------------------------- the File-menu file surface -------
- * The two setters above (set_source / set_dest) were written for the test harness and, until these
- * slot bodies, had no caller a PERSON could reach. These expose them to the frontend's File menu.
- *
- * Expose the +0x328/+0x330 vtable-slot bodies, the way apply_engine hands its slots to iface_engine
- * so every engine-touch slot binds in one call. Neither body touches the engine -- they are file and
- * gate state only -- so they are safe from any thread and need no signature resolution. */
+ * The +0x328/+0x330/+0x338 vtable-slot bodies, handed to iface_engine so every slot binds in one
+ * call. None touches the engine: opening and saving queue onto the editor frame. */
 void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure,
                          sh_rawmap_load_now_fn *load_now);
 
-/* Would this file be accepted as a load source? Checks readable / non-empty / within the swap's own
- * 64 MB ceiling / starts like JSON after whitespace. `out_msg` gets a short human-readable reason.
- * Split out of the configure body so the same verdict can be unit-tested without a live interface.
- * Returns 1 = acceptable. A pass here is NOT a promise the map is valid -- see rawmap_check() in
- * doom-re's save-load campaign for why full structural validation needs its own pure-C checks. */
+/* Would this file be accepted as a rawmap to open? Checks readable / non-empty / under 2 GB /
+ * starts like JSON after whitespace. `out_msg` gets the reason as a lower-case clause that reads
+ * after "The rawmap was not loaded: ". Returns 1 = acceptable. A pass is not a promise the map is
+ * valid; the engine's own parse decides that. */
 int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity);
 
 /* 1 = this file is a rawmap, by the top-level "~type":"idSnapMap" the engine's serializer writes.
@@ -200,21 +180,13 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
  * maps. Reads the last 8 KB. */
 int sh_rawmap_looks_like_rawmap(const char *path);
 
-/* The same verdict about the file the swap would actually read (the staged source, or the default).
- * Ask this instead of sh_rawmap_swap_will_fire before driving a reload: "the staged bytes will be
- * accepted" is the property that makes a reload safe, and the arm is not. Returns 1 = acceptable. */
-/* Both EFFECTIVE paths: what the load swap would read, and where a save gets mirrored. Either
- * pointer may be NULL. These are the paths actually in force, defaults included -- not only what was
- * explicitly set -- so a caller can state them without knowing whether anything overrode them. */
+/* Both EFFECTIVE paths: the rawmap that opens, and where Save Rawmap writes. Either pointer may be
+ * NULL. These are the paths actually in force, defaults included. */
 void sh_rawmap_get_paths(char *load_out, int load_cap, char *save_out, int save_cap);
 
 /* The DEFAULT paths, regardless of what is set. Pair with sh_rawmap_get_paths to tell "the usual
  * file" from "the file currently in force". */
 void sh_rawmap_get_default_paths(char *load_out, int load_cap, char *save_out, int save_cap);
-
-/* 1 = both effective paths are the built-in defaults. Compared by VALUE: the installers
- * materialize the defaults into their own variables, so "nothing was set" is not testable. */
-int sh_rawmap_paths_are_default(void);
 
 /* WHERE SAVES GO. One path, belonging to the map that is open. "" or NULL means the
  * default rawmap.json. "Save Rawmap As" and `sh_rawmaps savepath <path>` set it, so a
@@ -255,6 +227,7 @@ int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capac
  * so a full disk or a lock still fails later; it never opens the target. */
 int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacity);
 
+/* The same verdict about the load path, plus whether opening rawmaps is safe on this build. */
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
 
 /* Main-thread read-only serialization, bypassing save side effects. The caller
@@ -272,8 +245,8 @@ int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_ids
 
 #ifdef SH_RAWMAP_TESTING
 /* Test-only: write bytes through the real destination resolver, so a test can check WHERE a save
- * lands and that a one-off destination is spent by it, and what the save mirror reports after it
- * (the export beside a map with mods). Not present in shipping builds. */
+ * lands and what Save Rawmap reports after it (the export beside a map with mods). Not present in
+ * shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len);
 
 #endif

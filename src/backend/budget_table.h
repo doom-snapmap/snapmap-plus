@@ -12,8 +12,7 @@
  * per palette build, on the game thread, and keeps the result as JSON for the
  * frontend, which adds up a prefab's contribution without touching the game.
  *
- * Engine surface (build 13954591, snaphak-re editor-budget-accounting R-001,
- * R-003, R-006; same offsets on both renderers):
+ * Engine surface (build 13954591; same offsets on both renderers):
  *   editor   +0x8 init byte, +0x20660 entity palette (entries +0x10, count
  *            +0x18, stride 0x6f0), +0x206c0 module palette (wrapper pool
  *            +0x68, count +0x70, stride 0x98), +0x23670 limits, +0x236a0

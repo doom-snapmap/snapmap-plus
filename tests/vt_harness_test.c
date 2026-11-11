@@ -85,7 +85,7 @@ static void fixture(const char *src)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\rctest", mods);
     CreateDirectoryA(mods, NULL);
     CHECK(mt_copy_tree(src, folder));
-    CHECK(sh_mb_build(folder, &r, &b) == 1);
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 1);   /* the folder must carry its salt (format 2) */
     printf("    build: %u error(s) %s; %u warning(s) %s; %zu files, %llu bytes; needs %u (bundle %u, game %u, unresolved %u)\n",
            b.errors, b.errors ? b.first_cause : "", b.warnings, b.warnings ? b.first_warning : "", b.file_count,
            b.total_size, b.needs.total, b.needs.local, b.needs.stock, b.needs.unresolved);
