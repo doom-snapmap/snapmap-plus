@@ -894,6 +894,10 @@ Beyond the manifest entries above, the backend `XINPUT1_4.dll` also bundles **cv
 working, connected or not), and the resident **fault-shield**. See [`README.md`](../README.md)
 and [`fidelity.md`](fidelity.md).
 
+The backend also carries the **mod script runtime**: Lua 5.4 in one sandboxed state per scripted mod per
+map, with a memory cap, step budgets and a plain stop line naming the file and line. It is not wired
+into the game yet, so no map runs scripts; see [Mod scripts](architecture.md#mod-scripts).
+
 ## Not user-facing
 
 A few internals are present for parity but are not features you drive directly:

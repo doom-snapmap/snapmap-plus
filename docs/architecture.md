@@ -1367,6 +1367,86 @@ private to `companion_sigs.c` and checked on both executables by
 `companion_test`. The capability name `snapmap.owner_companions` is reserved
 for the engine-capability facility once it carries hook rows.
 
+### Mod scripts
+
+A mod may carry Lua scripts: `assets/mods/<salt>/scripts/*.lua` (entry files)
+and `scripts/lib/*.lua` (loaded only by `require`). The runtime is
+`src/backend/script/` on the vendored Lua 5.4.9 core (`src/third_party/lua`,
+its README records the version, hashes and the one local change).
+
+- **States.** One `lua_State` per scripted mod per map, created by
+  `sh_script_map_start` (the mods the map serves, a file source, the map seed)
+  and closed by `sh_script_map_end`. Nothing crosses states. The file source
+  (`sh_script_source`) is the serving layer's: it lists the files the serving
+  build of a salt carries under `mods/<salt>/scripts/` and reads them through
+  the serving index. A mod with no entry file gets no state.
+- **Loading.** Entry files run once at map start in byte-wise name order, then
+  the `on.map_start` handlers. Each entry file must start with `api = 1`
+  (comments and a byte order mark may precede it); a missing or newer version
+  is refused before the file runs. Chunks load with mode `"t"`: compiled Lua
+  is refused. At most 256 KB per file, 1 MB and 64 files per mod.
+- **Sandbox.** Base, string, table, math, utf8 and coroutine only; no `io`,
+  `os`, `debug`, `package`, `load`, `loadfile`, `dofile`, `string.dump` or
+  `math.randomseed` (`math.random` is seeded from the map seed);
+  `collectgarbage` answers only `"count"`; `print` and `warn` write the mod's
+  script log; `setmetatable` refuses a `__gc` field (Lua runs finalizers with
+  hooks off). `require(name)` loads `scripts/lib/<name>.lua` of the same mod
+  once. The registration table `on` and the runtime's own objects cannot be
+  edited.
+- **Bounds.** Memory: 32 MB per mod through the state's allocator. Steps: the
+  count hook adds 1,000 per 1,000 VM instructions; every 256 bytes allocated
+  inside a call, sorting, moving or shifting table elements and scanning UTF-8
+  add steps too, because that work never reaches the hook. A call (one handler,
+  one timer, one coroutine resume) may take 2 million steps and one mod's frame
+  5 million. Pattern functions refuse a subject or pattern over 4,096 bytes,
+  and every matching step is counted (`l_matchstep` in `lstrlib.c`); one call
+  may take 1 million. A call still running after 1 second of wall time (long
+  string comparisons are one instruction each) is stopped as well. `pcall`,
+  `xpcall`, `coroutine.resume` and `coroutine.close` cannot catch a stop, and
+  an `xpcall` handler is not run after one (Lua calls it from inside the hook,
+  with hooks off).
+- **Errors.** Every call into Lua is a protected call of a C job, so a failing
+  allocation while arguments are built is an ordinary error and Lua's panic is
+  never reached. Any error stops that mod's scripts for the rest of the map: its
+  state is closed, its bindings withdrawn, its queue refused, and one line is
+  written: `Script stopped: <mod>, scripts\<file>.lua line <n>: <what>. <what
+  to do>.` `script_reason.c` rewrites Lua's wording by one table (nothing says
+  "attempt to index a nil value"; an author's own `error("...")` text is kept).
+  The mod's log (prints, warnings, the stop line; 200 lines a map) stays
+  readable after the map until the mod's next map start:
+  `sh_script_log_read`, `sh_script_stop_line`, `sh_script_status`,
+  `sh_script_mods`.
+- **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
+  `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
+  map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
+  `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
+  refused (`sh_script_check_name` applies the same rule to every API call).
+  Names, notify strings and node names compare without case.
+- **Queue and tick.** Hooks on any thread call `sh_script_enqueue` (1,024
+  records per mod; overflow is counted and logged once). `sh_script_binds`
+  answers which running mod binds a full entityDef name and
+  `sh_script_entity_owner` which mod a spawned entity belongs to, both from any
+  thread. Lua runs only inside `sh_script_tick` (and map start and end), one
+  caller at a time: queued records, then `think(self, dt)` for every bound
+  live entity (an entity the engine reports gone gets `remove(self)` once and
+  its object answers nothing), then due timers and coroutines, then what those
+  raised, up to 4 queue passes a frame. A map end requested while Lua runs
+  waits until it returns.
+- **Time.** `now()`, `after(s, fn)`, `every(s, fn)`, `run(fn)` with `wait(s)`
+  inside it, each returning a handle with `cancel()`; game time, per mod,
+  dropped at map end. A coroutine resume is one call.
+- **API seam.** Other modules add globals and entity methods to every new
+  state with `sh_script_api_add`, push entity objects with
+  `sh_script_push_entity` (one object per handle per map, with its own
+  `e.state` table), check them with `sh_script_check_entity` and
+  `sh_script_owns_entity`, and refuse a call with `sh_script_refuse` (one
+  plain sentence at the calling line) before touching the engine.
+
+Not wired into the game yet: the tick detour, the engine hooks, the entity, AI
+and logic API, the builder's script checks and the serving layer's file source
+come with the scripting work that follows. `tests/script_sandbox_test.c` covers
+the runtime without the game.
+
 ### Mod modules
 
 A bundle module is `maps/modules/mods/<id>/<leaf>.decl` (provides `snapModule`,
