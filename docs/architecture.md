@@ -1851,6 +1851,10 @@ no path of its own and never reads a private family's `.vmtr` rows, so
 SetSource's mega2 loader opens the served `_sq1` to `_sq16` members through the
 provider; no `.pages` file is needed, and materials carry an explicit
 `virtualmapping` instead of rows.
+The families are read from the build each path is served from for the loaded
+map (`sh_modserve_each_served_here`): a map that brought its own copy of a
+salt pages that copy's members, never the root folder's; with no map open the
+root folder's build serves.
 
 - Thread and time: DOOM's main thread, inside process heap 0, once the VT
   system has built record 1 (`_vmtr`). The serving index calls a listener after

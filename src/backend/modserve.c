@@ -7211,6 +7211,23 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
     }
 }
 
+/* Each path's file as the open map serves it (sh_modserve_each_served_here). */
+void sh_modserve_each_served_here(sh_modserve_file_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i, s;
+    if (!x || !fn) return;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f;
+        const ms_bundle *b;
+        if (!x->files[i].served || x->files[i].withdrawn || !x->bundles[x->files[i].bundle].admitted) continue;
+        if ((s = ms_scoped(x, i)) < 0) continue;   /* nothing serves the path in this scope */
+        f = &x->files[s];
+        b = &x->bundles[f->bundle];
+        fn(context, f->request, f->size, b->id ? b->id : b->folder, b->hash ? b->hash : "");
+    }
+}
+
 int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *context)
 {
     const ms_index *x = g_index;

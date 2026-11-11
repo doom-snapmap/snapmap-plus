@@ -970,6 +970,11 @@ int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *conte
 typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t size, const char *bundle_id,
                                     const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
+/* The same for the open map: per path, the file of the build that serves it
+ * now (a map's own copy of a salt, not the root folder's), and no path that
+ * nothing serves in this scope. With no map open, the root folder's builds.
+ * Used by modvt.c for the families a map's textures page from. */
+void sh_modserve_each_served_here(sh_modserve_file_fn fn, void *context);
 
 /* Mod scripts (modbundle.h sh_mb_script_request): every script of `salt` that
  * the index serves now, from the build that serves it (the map scope's choice:
