@@ -485,7 +485,7 @@ static void full_pass(const char *root)
     CHECK(entry_has(record, "big", "\"outcome\":\"refused\"", NULL));
     CHECK(bundle_of(mods, "inner", &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: built mods\\inner,") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: moved into mods\\inner,") != NULL &&
           strstr(g_log, "the one package folder inside overrides\\nodesc, which has no descriptor of its own, "
                         "migrated under its own id") != NULL);
     CHECK(record && strstr(record, tree_d));
@@ -493,12 +493,12 @@ static void full_pass(const char *root)
     CHECK(strstr(g_log, "MODS: migration: overrides\\huge: skipped -- it holds at least") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\big: refused -- it would hold at least 1 file(s) and 300 MiB, "
                         "more than one mod can hold") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: built mods\\dupe-b,") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: moved into mods\\dupe-b,") != NULL &&
           strstr(g_log, "duplicate id local.dupe (also overrides\\dupe-a), both kept") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: delivered package converted to "
+    CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: a package a map delivered, moved into "
                         "mods\\doors,") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: built mods\\pack-c,") != NULL &&
-          strstr(g_log, "1 file(s) a bundle cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: moved into mods\\pack-c,") != NULL &&
+          strstr(g_log, "1 file(s) a mod cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
     CHECK(strstr(g_log, "MODS: migration: 10 entries in overrides: 5 built, 1 delivered converted") != NULL);
     free(record);
 
@@ -546,7 +546,7 @@ static void full_pass(const char *root)
     sh_mb_free(&b);
     CHECK(bundle_of(mods, dupe_b_key, &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "delivered package already converted as mods\\doors ") != NULL);
+    CHECK(strstr(g_log, "a package a map delivered, already in mods\\doors") != NULL);
     {
         unsigned bundles = 0;
         memset(&list, 0, sizeof list);

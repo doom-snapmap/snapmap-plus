@@ -108,8 +108,8 @@ int main(void)
     CHECK(st.built == 1 && st.converted == 1 && st.refused == 0);
     CHECK(st.pointers == 3 && st.pointer_bytes == sizeof IMG + 2 * sizeof ANIM);
     if (st.refused || st.pointers != 3) fprintf(stderr, "%s", g_log);
-    CHECK(strstr(g_log, "3 file(s), 2 of them stock pointer(s) to installed content, 0 KiB not stored") != NULL);
-    CHECK(strstr(g_log, "2 file(s), 1 of them stock pointer(s) to installed content, 0 KiB not stored") != NULL);
+    CHECK(strstr(g_log, "3 file(s), 2 of them unchanged game file(s) read from your game (0 KiB)") != NULL);
+    CHECK(strstr(g_log, "2 file(s), 1 of them unchanged game file(s) read from your game (0 KiB)") != NULL);
     CHECK(strstr(g_log, "3 file(s) became stock pointers, 0 KiB not stored") != NULL);
 
     /* The authored pack's store folder keeps every file it had (DECISIONS 10). */

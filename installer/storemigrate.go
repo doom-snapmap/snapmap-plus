@@ -53,8 +53,8 @@ func migrateStore(bundleRoot, doom string) {
 func placeStoreTool(bundleRoot, dir string) (string, string) {
 	src := filepath.Join(bundleRoot, storeToolName)
 	if _, err := os.Stat(src); err != nil {
-		return "", "this Snapmap+ bundle has no " + storeToolName + ", so your mods were not checked for files of " +
-			"earlier releases; Snapmap+ itself is installed."
+		return "", "this download of Snapmap+ is missing " + storeToolName + ", so your mods were not checked for files " +
+			"of earlier releases; Snapmap+ itself is installed, and running snapmap-plus update fetches it again."
 	}
 	want, err := storeToolDigest(bundleRoot)
 	if err == nil {
@@ -64,8 +64,9 @@ func placeStoreTool(bundleRoot, dir string) (string, string) {
 		}
 	}
 	if err != nil {
-		return "", fmt.Sprintf("the bundle's %s was not run (%v), so your mods were not checked for files of "+
-			"earlier releases; Snapmap+ itself is installed. To download it again, run: snapmap-plus update", storeToolName, err)
+		return "", fmt.Sprintf("%s in this download of Snapmap+ was not run (%v), so your mods were not checked for "+
+			"files of earlier releases; Snapmap+ itself is installed, and running snapmap-plus update fetches it again",
+			storeToolName, err)
 	}
 	dst := filepath.Join(dir, storeToolName)
 	if err := os.MkdirAll(dir, 0o755); err == nil {
@@ -81,7 +82,7 @@ func placeStoreTool(bundleRoot, dir string) (string, string) {
 func storeToolDigest(bundleRoot string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(bundleRoot, storeToolManifest))
 	if err != nil {
-		return "", fmt.Errorf("the bundle has no %s", storeToolManifest)
+		return "", fmt.Errorf("this download is missing %s", storeToolManifest)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)

@@ -700,7 +700,8 @@ static int cv_prefab_old(const char *text, size_t n)
     if (sh_prefab_block_find(text, n, &sp) != 1) return 0;
     v = text + sp.value_at;
     e = v + sp.value_len;
-    for (; v + 5 < e; v++) if (!memcmp(v, "\"id\":", 5) || !memcmp(v, "\"bundle\":", 9)) return 1;
+    for (; v + 5 <= e; v++)
+        if (!memcmp(v, "\"id\":", 5) || (v + 9 <= e && !memcmp(v, "\"bundle\":", 9))) return 1;
     return 0;
 }
 

@@ -34,9 +34,9 @@ var playerData = map[string]string{
 	"config.json": "player data", "prefabs": "player data", "strings": "player data", "mods": "player data",
 	"rawmap.json": "player data", "test-maps": "player data", "cache": "regenerable cache", "token": "player data",
 	"pinned.json": "player data",
-	// The store tool moves the packages of the retired overrides\ folder into mods\ once and leaves
-	// overrides\ as it was: the player's to delete.
-	"overrides": "player data (retired package folder; the store tool leaves it unchanged)",
+	// The store tool moves the packages of the retired overrides\ folder into mods\ and then sends
+	// overrides\ to the Recycle Bin; a folder it could not empty stays.
+	"overrides": "player data (retired package folder; the store tool empties and retires it)",
 }
 
 var installerFiles = map[string]bool{"snapmap-plus.exe": true, "snapmap-plus-store.exe": true, "install.json": true}

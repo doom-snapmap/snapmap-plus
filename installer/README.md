@@ -321,8 +321,10 @@ everything in `overrides\` is in `mods\` that folder goes to the Recycle Bin, an
 A package added to `overrides\` after that first move is moved by the next check
 and migrate, so running `update` again (or `migrate`) picks it up.
 
-The same run converts, once, everything an earlier release left in an earlier
-shape, because the game reads only the current one:
+The same run converts everything an earlier release left in an earlier shape,
+because the game reads only the current one. Every run looks again, so a mod
+folder or map of an earlier release copied in later is converted the next time
+the installer (or `migrate`) runs:
 
 - every mod folder in `mods\` (outside `mods\maps\`) with a mod.json of an
   earlier release (a format-1 block, an author `id`, `shadows`, `stock` or
@@ -331,10 +333,14 @@ shape, because the game reads only the current one:
   become `<salt>_<key>` with every `#str_` reference to them, the block is
   written in the current format and the folder is built under the current
   rules. The folder keeps its name; the folder as it was goes to the Recycle
-  Bin. A folder that cannot be converted (a binary file naming its old key, a
-  build the current rules refuse) is left exactly as it was, with a line
-  saying why, and is not tried again until it changes;
-- second builds of one mod that Snapmap+ made (`<key>@<hash16>` folders and
+  Bin; files beside `mod.json` and `assets\` stay as they are. A folder that
+  does not build under the current rules (a binary file naming its old key, a
+  new name outside its namespace) is still converted, with its build marked
+  failed and the plain cause, which the Mods tab shows until the author fixes
+  it. A run stopped part way loses nothing: the next run puts back a folder it
+  had set aside and finishes a saved map whose signature it had not yet put in
+  place;
+- extra copies of one mod that Snapmap+ made (`<key>@<hash16>` folders and
   those under `downloads\` or `imports\`) go to the Recycle Bin once the
   player's own folder is converted, and so does `mods\.builds\`;
 - every saved map in My Maps (both renderers share
@@ -352,15 +358,15 @@ the record's retired sections (`cache`, `aliases`, `snapshots`, `renamed`,
 `downloads`) are removed. Building needs the DOOM folder, as `overrides\` does.
 Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
 check or migrate that does not finish is a warning, never a failed install; the
-warning gives the command to run by hand with DOOM closed,
-`"%LOCALAPPDATA%\snapmap-plus\snapmap-plus-store.exe" migrate "%LOCALAPPDATA%\snapmap-plus" --doom "<DOOM folder>"`.
+warning gives the command to run by hand with DOOM closed, `snapmap-plus migrate`.
+The tool holds the mods folder's named lock for its whole run
+(`src/common/store_lock.h`).
 `snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) runs the same check and
 migrate with the tool the last install or update kept in `%LOCALAPPDATA%\snapmap-plus`,
 without downloading or reinstalling anything; without the tool it points at `update`.
 Apart from removing empty retired folders, the installer itself never creates,
 changes or removes `mods\` or the retired package folders (see
-[Mods](../docs/capabilities.md#mods)). In the game, `sh_mods migrate` repeats the
-move of `overrides\`.
+[Mods](../docs/capabilities.md#mods)).
 
 ## Simulation harness
 

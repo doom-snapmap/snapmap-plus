@@ -689,7 +689,7 @@ static void mg_log_item(const mg_item *it)
     char ptr[128];
     /* Files byte-identical to installed game content became stock pointers:
      * the bundle names them and the store keeps (and uploads) nothing. */
-    _snprintf_s(ptr, sizeof ptr, _TRUNCATE, ", %u of them stock pointer(s) to installed content, %llu KiB not stored",
+    _snprintf_s(ptr, sizeof ptr, _TRUNCATE, ", %u of them unchanged game file(s) read from your game (%llu KiB)",
                 it->pointers, it->pointer_bytes >> 10);
     mg_display(it->name, shown, sizeof shown);
     mg_display(it->store, store, sizeof store);
@@ -698,7 +698,7 @@ static void mg_log_item(const mg_item *it)
         mg_display(it->duplicate_of, first, sizeof first);
         _snprintf_s(dup, sizeof dup, _TRUNCATE, "; duplicate id %s (also " MG_OVERRIDES "\\%s), both kept", it->id, first);
     }
-    if (it->left_out) _snprintf_s(left, sizeof left, _TRUNCATE, "; %u file(s) a bundle cannot carry left out (%u of them .bswf movies), first: %s",
+    if (it->left_out) _snprintf_s(left, sizeof left, _TRUNCATE, "; %u file(s) a mod cannot carry left out (%u of them .bswf movies), first: %s",
                                   it->left_out, it->movies, it->reason);
     if (it->nested) {
         char parent[MG_NAME_MAX], *slash;
@@ -710,20 +710,18 @@ static void mg_log_item(const mg_item *it)
     }
     switch (it->outcome) {
     case SH_MODMIGRATE_BUILT:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: built mods\\%s, bundle %.16s, %u file(s)%s, %llu KiB, %u warning(s)%s%s, %llu ms (read %llu, stage %llu, store %llu)",
-               shown, store, it->bundle, it->bundle_files, ptr, it->bytes >> 10, it->warnings, left, dup, it->ms, it->ms_read, it->ms_stage, it->ms_store);
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: moved into mods\\%s, %u file(s)%s, %llu KiB, %u warning(s)%s%s",
+               shown, store, it->bundle_files, ptr, it->bytes >> 10, it->warnings, left, dup);
         break;
     case SH_MODMIGRATE_CONVERTED:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: delivered package converted to mods\\%s, bundle %.16s, %u file(s)%s, "
-               "%llu KiB, key delivery.%.16s...%s%s, %llu ms (read %llu, convert %llu)",
-               shown, store, it->bundle, it->bundle_files, ptr, it->bytes >> 10, it->tree, left, dup, it->ms, it->ms_read, it->ms_stage);
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: a package a map delivered, moved into mods\\%s, %u file(s)%s, "
+               "%llu KiB%s%s", shown, store, it->bundle_files, ptr, it->bytes >> 10, left, dup);
         break;
     case SH_MODMIGRATE_REUSED:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: delivered package already converted as mods\\%s (key delivery.%.16s...), "
-               "reused%s, %llu ms", shown, store, it->tree, dup, it->ms);
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: a package a map delivered, already in mods\\%s%s", shown, store, dup);
         break;
     case SH_MODMIGRATE_REFUSED:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: refused -- %s (%llu ms)", shown, it->reason, it->ms);
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: refused -- %s", shown, it->reason);
         break;
     case SH_MODMIGRATE_SKIPPED:
         mg_log("MODS: migration: " MG_OVERRIDES "\\%s: skipped -- %s", shown, it->reason);
@@ -1893,10 +1891,10 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
                 st->files_added = (unsigned)b.file_count;
                 st->pointers = ist.stock_files;
                 st->strings_added = with_strings ? (unsigned)l.pairs.count : 0;
-                mg_log("MODS: migration: %s%s%s moved into mods\\%s\\ (the mod My overrides), bundle %.16s, %u file(s), %u of "
-                       "them stock pointer(s) to installed content, %u string(s)",
+                mg_log("MODS: migration: %s%s%s moved into mods\\%s\\ (the mod My overrides): %u file(s), %u of them unchanged "
+                       "game files read from your game, %u string(s)",
                        loose_files ? "the loose files of " MG_OVERRIDES "\\" : "", loose_files && with_strings ? " and " : "",
-                       with_strings ? MG_STRINGS "\\" MG_STRINGS_DOC : "", key, b.hash, st->files_added, st->pointers,
+                       with_strings ? MG_STRINGS "\\" MG_STRINGS_DOC : "", key, st->files_added, st->pointers,
                        st->strings_added);
             }
             sh_mb_free(&b);

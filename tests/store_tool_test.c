@@ -226,7 +226,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
 
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
     CHECK(said("Checking "));
-    CHECK(said("  mods\\: 1 folder(s) in the retired layout"));
+    CHECK(said("  mods\\: 1 folder(s) in the folder layout of an earlier release"));
     CHECK(said("  mods\\blobs\\: 1 file(s), 1 KiB, shared with the mod folders by hard links"));
     CHECK(said("  mods\\: old record file(s) claims.json"));
     CHECK(said("  removed-mods\\: 1 entry of the retired recycle bin"));
@@ -276,12 +276,12 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  overrides\\: 1 entry not yet moved into mods\\") && said("2 kind(s) of work to do."));
     /* The upgraded folder is beta.26's shape (a format-1 block): the conversion to the one shape is due. */
     CHECK(said("  mods\\: 1 mod folder(s) of an earlier release to convert to this version's shape"));
-    CHECK(!said("retired layout") && !said("blobs") && !said("removed-mods"));
+    CHECK(!said("folder layout of an earlier release") && !said("blobs") && !said("removed-mods"));
 
     /* With the game folder: overrides moved, the unchanged game file a pointer. */
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("  overrides\\: moving into mods\\, reading game files from "));
-    CHECK(said("2 file(s), 1 of them stock pointer(s) to installed content"));
+    CHECK(said("2 file(s), 1 of them unchanged game file(s) read from your game"));
     CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused), "
                "1 retired folder(s) moved to the stand-in bin, 1 mod folder(s) converted (0 of them do not build yet), 0 "
                "left as they were"));
@@ -434,7 +434,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("migration: the loose files of overrides\\ and strings\\strids.json moved into mods\\my-overrides\\ (the mod "
                "My overrides)"));
-    CHECK(said("1 of them stock pointer(s) to installed content, 2 string(s)"));
+    CHECK(said("1 of them unchanged game files read from your game, 2 string(s)"));
     CHECK(said("1 loose file(s) a mod cannot carry were left out") && said("notes.txt"));
     CHECK(said("migration: overrides\\ moved to the stand-in bin: every entry of it is in mods\\"));
     CHECK(said("migration: strings\\ moved to the stand-in bin: its strings are in mods\\my-overrides\\"));
@@ -568,7 +568,7 @@ static void test_link_failures(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" TINY "\\bundle.json", data);
     CHECK(mt_exists(path));
     CHECK(mt_exists(blob));
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 folder(s) in the retired layout"));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 folder(s) in the folder layout of an earlier release"));
 
     /* 2. Retiring the set-aside original fails: the copy goes, the original returns. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" TINY "\\" A_DECL, data);

@@ -152,8 +152,8 @@ func TestMigrateStoreWarnsWithoutTheTool(t *testing.T) {
 	if len(calls) != 0 || tool != "" {
 		t.Fatalf("a missing tool ran: %q %q", calls, tool)
 	}
-	if !strings.Contains(printed, "this Snapmap+ bundle has no snapmap-plus-store.exe") ||
-		!strings.Contains(printed, "Snapmap+ itself is installed.") {
+	if !strings.Contains(printed, "this download of Snapmap+ is missing snapmap-plus-store.exe") ||
+		!strings.Contains(printed, "Snapmap+ itself is installed, and running snapmap-plus update fetches it again.") {
 		t.Errorf("printed %q", printed)
 	}
 }
@@ -192,7 +192,7 @@ func TestMigrateStoreRefusesAnAlteredTool(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("an altered tool ran: %q", calls)
 	}
-	if !strings.Contains(printed, "the bundle's snapmap-plus-store.exe was not run (its SHA-256 does not match TOOLS.sha256)") {
+	if !strings.Contains(printed, "snapmap-plus-store.exe in this download of Snapmap+ was not run (its SHA-256 does not match TOOLS.sha256)") {
 		t.Errorf("printed %q", printed)
 	}
 	if exists(filepath.Join(appDataDir(), storeToolName)) {

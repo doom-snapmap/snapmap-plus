@@ -314,7 +314,7 @@ static void st_list(const st_scan *sc)
     const sh_ms_upgrade_check *u = &sc->uc;
     char size[32];
     if (u->layout_folders)
-        st_say(0, "  mods\\: %u folder(s) in the retired layout (bundle.json and .state.json beside assets\\)", u->layout_folders);
+        st_say(0, "  mods\\: %u folder(s) in the folder layout of an earlier release", u->layout_folders);
     if (u->blobs_present) {
         st_size(u->blob_bytes, size, sizeof size);
         st_say(0, "  mods\\blobs\\: %u file(s), %s, shared with the mod folders by hard links", u->blob_files, size);
