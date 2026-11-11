@@ -252,6 +252,39 @@ struct PocCollectPerf {
 };
 static PocCollectPerf g_collect_perf = {};
 
+/* Paths are UTF-8 between the page, this host and the backend; every file call
+ * here is the wide one, so a profile or prefab name outside the ANSI code page works. */
+static std::wstring poc_wpath(const char *utf8)
+{
+    std::wstring w;
+    if (!utf8 || !*utf8) return w;
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (n > 1) { w.resize((size_t)n - 1); MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], n); }
+    return w;
+}
+static int poc_fopen(FILE **f, const char *path, const char *mode)
+{
+    std::wstring wm = poc_wpath(mode);
+    *f = nullptr;
+    return _wfopen_s(f, poc_wpath(path).c_str(), wm.c_str());
+}
+static BOOL poc_move(const char *from, const char *to) { return MoveFileW(poc_wpath(from).c_str(), poc_wpath(to).c_str()); }
+static BOOL poc_move_ex(const char *from, const char *to, DWORD flags)
+{ return MoveFileExW(poc_wpath(from).c_str(), poc_wpath(to).c_str(), flags); }
+static BOOL poc_delete(const char *path) { return DeleteFileW(poc_wpath(path).c_str()); }
+static BOOL poc_mkdir(const char *path, LPSECURITY_ATTRIBUTES sa) { return CreateDirectoryW(poc_wpath(path).c_str(), sa); }
+static BOOL poc_rmdir(const char *path) { return RemoveDirectoryW(poc_wpath(path).c_str()); }
+static DWORD poc_attrs(const char *path) { return GetFileAttributesW(poc_wpath(path).c_str()); }
+/* %LOCALAPPDATA%\snapmap-plus as UTF-8, created when missing; "" when the folder is unknown. */
+static std::string poc_data_dir()
+{
+    wchar_t base[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, base))) return std::string();
+    std::wstring dir = std::wstring(base) + L"\\snapmap-plus";
+    CreateDirectoryW(dir.c_str(), nullptr);   /* no-op when it already exists */
+    return sh_webview_json::to_utf8(dir);
+}
+
 /* File logging. */
 /* Keep the log name recognizable beside the backend log. */
 static const char *kUiLogPath = "snapmap-plus\\logs\\snapmap-plus-ui.log";
@@ -259,16 +292,16 @@ static const char *kUiLogPath = "snapmap-plus\\logs\\snapmap-plus-ui.log";
 static void poc_log(const char *msg)
 {
     static bool rolled = false;
-    CreateDirectoryA("snapmap-plus", nullptr);   /* one level at a time; both idempotent */
-    CreateDirectoryA("snapmap-plus\\logs", nullptr);
+    poc_mkdir("snapmap-plus", nullptr);   /* one level at a time; both idempotent */
+    poc_mkdir("snapmap-plus\\logs", nullptr);
     FILE *f = nullptr;
     if (!rolled) {
         rolled = true;
         log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES);
         /* Remove the obsolete log filename after the rename. */
-        DeleteFileA("snapmap-plus\\logs\\webview_poc.log");
+        poc_delete("snapmap-plus\\logs\\webview_poc.log");
     }
-    if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
+    if (poc_fopen(&f, kUiLogPath, "a") == 0 && f) {
         SYSTEMTIME t; GetLocalTime(&t);
         fprintf(f, "[%02d:%02d:%02d.%03d] %s\n",
                 t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg);
@@ -380,11 +413,8 @@ static bool poc_valid_name(const std::string &n)
  * opaque bytes; the page owns parsing, validation, and the empty-list fallback. */
 static std::string poc_pins_path()
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return std::string();
-    std::string dir = std::string(la) + "\\snapmap-plus";
-    free(la);
-    SHCreateDirectoryExA(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
+    std::string dir = poc_data_dir();
+    if (dir.empty()) return std::string();
     return dir + "\\pinned.json";
 }
 
@@ -394,7 +424,7 @@ static void poc_send_pins()
     std::string path = poc_pins_path();
     if (!path.empty()) {
         FILE *f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") == 0 && f) {
+        if (poc_fopen(&f, path.c_str(), "rb") == 0 && f) {
             char buf[4096]; size_t r;
             while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
             fclose(f);
@@ -414,24 +444,23 @@ static void poc_save_pins(const std::string &doc)
     if (path.empty()) return;
     std::string tmp = path + ".tmp";
     FILE *f = nullptr;
-    if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
+    if (poc_fopen(&f, tmp.c_str(), "wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
     size_t w = doc.empty() ? 0 : fwrite(doc.data(), 1, doc.size(), f);
     fclose(f);
-    if (w != doc.size()) { DeleteFileA(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
-    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileA(tmp.c_str());
+    if (w != doc.size()) { poc_delete(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
+    if (!poc_move_ex(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        poc_delete(tmp.c_str());
         poc_log("pins: could not replace pinned.json");
     }
 }
 
 static void poc_read_version()
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return;
-    std::string path = std::string(la) + "\\snapmap-plus\\install.json";
-    free(la);
+    std::string dir = poc_data_dir();
+    if (dir.empty()) return;
+    std::string path = dir + "\\install.json";
     FILE *f = nullptr;
-    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
+    if (poc_fopen(&f, path.c_str(), "rb") != 0 || !f) return;
     std::string data; char buf[4096]; size_t r;
     while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
     fclose(f);
@@ -963,7 +992,7 @@ static void poc_apply_create_prefab()
         poc_log(l);
     }
     FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
+    if (poc_fopen(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
     fwrite(buf, 1, (size_t)n, fp);
     fclose(fp);
     poc_log("create-prefab: WROTE file ok");
@@ -1027,7 +1056,7 @@ static void poc_apply_create_module_prefab()
         poc_log("create-module-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+    if (poc_attrs(path) != INVALID_FILE_ATTRIBUTES) {
         g_create_module_result = 0;
         poc_log("create-module-prefab: REFUSED (a prefab with that name exists)");
         return;
@@ -1106,20 +1135,20 @@ static void poc_strip_trailing_sep(char *s)
 /* list the *.json stems directly inside a resolved directory (non-recursive), sorted. */
 static void poc_list_json_dir(const std::string &dirPath, std::vector<std::string> &names)
 {
-    std::string pattern = dirPath + "*.json";
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    std::wstring pattern = poc_wpath((dirPath + "*.json").c_str());
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::string fn = fd.cFileName;
+        std::string fn = sh_webview_json::to_utf8(fd.cFileName);
         if (fn.size() > 5 && fn.compare(fn.size() - 5, 5, ".json") == 0) {
             std::string stem = fn.substr(0, fn.size() - 5);
             /* "<name>.meta.json" is a metadata sidecar, not a prefab -- never list it as one */
             if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".meta") == 0) continue;
             names.push_back(stem);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     std::sort(names.begin(), names.end());
 }
@@ -1130,7 +1159,7 @@ static void poc_list_json_dir(const std::string &dirPath, std::vector<std::strin
 static int poc_recycle_file(const char *path)
 {
     wchar_t wide[1024], full[1024 + 2];
-    int n = MultiByteToWideChar(CP_ACP, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0]));
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0]));
     if (n > 0) {
         DWORD len = GetFullPathNameW(wide, 1024, full, NULL);
         if (len > 0 && len < 1024) {
@@ -1145,7 +1174,7 @@ static int poc_recycle_file(const char *path)
         }
     }
     poc_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
-    return DeleteFileA(path) ? 1 : 0;
+    return poc_delete(path) ? 1 : 0;
 }
 
 /* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed, -1 = path refused. */
@@ -1157,7 +1186,7 @@ static int poc_delete_one_prefab(const std::string &folder, const std::string &n
     int result = poc_recycle_file(path);
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
         char mp[1024];
-        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES)
+        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && poc_attrs(mp) != INVALID_FILE_ATTRIBUTES)
             poc_recycle_file(mp);
     }
     return result;
@@ -1183,12 +1212,12 @@ static void poc_apply_rename_prefab()
     char oldp[1024], newp[1024];
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
-    g_rename_result = MoveFileA(oldp, newp) ? 1 : 0;
+    g_rename_result = poc_move(oldp, newp) ? 1 : 0;
     if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
 }
 /* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
@@ -1393,7 +1422,7 @@ static void poc_apply_load_prefab()
         return;
     }
     FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
+    if (poc_fopen(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     std::string body;
     if (sz > 0) { body.resize((size_t)sz); size_t got = fread(&body[0], 1, (size_t)sz, fp); body.resize(got); }
@@ -1490,7 +1519,7 @@ static void poc_apply_save_timeline()
     char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
     poc_log(l);
 }
-/* Move a prefab from one folder to another (drag-and-drop target): MoveFileA across the two resolved
+/* Move a prefab from one folder to another (drag-and-drop target): MoveFileW across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
 static int poc_move_one_prefab(const std::string &from, const std::string &name, const std::string &to)
 {
@@ -1498,12 +1527,12 @@ static int poc_move_one_prefab(const std::string &from, const std::string &name,
     char oldp[1024], newp[1024];
     if (!poc_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
     if (!poc_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
-    int result = MoveFileA(oldp, newp) ? 1 : 0;
+    int result = poc_move(oldp, newp) ? 1 : 0;
     if (result == 1) {   /* the sidecar follows the move; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path(to, name, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
     return result;
 }
@@ -1528,10 +1557,10 @@ static void poc_apply_create_folder()
     char dir[1024];
     if (!poc_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
     poc_strip_trailing_sep(dir);
-    if (CreateDirectoryA(dir, nullptr)) { g_create_folder_result = 1; return; }
+    if (poc_mkdir(dir, nullptr)) { g_create_folder_result = 1; return; }
     g_create_folder_result = (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
 }
-/* Rename a folder: MoveFileA also renames directories. result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
+/* Rename a folder: MoveFileW also renames directories. result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
 static void poc_apply_rename_folder()
 {
     g_rename_folder_result = -1;
@@ -1540,7 +1569,7 @@ static void poc_apply_rename_folder()
     if (!poc_prefab_dir(g_rename_folder_old, oldd, (int)sizeof oldd)) return;
     if (!poc_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
     poc_strip_trailing_sep(oldd); poc_strip_trailing_sep(newd);
-    g_rename_folder_result = MoveFileA(oldd, newd) ? 1 : 0;
+    g_rename_folder_result = poc_move(oldd, newd) ? 1 : 0;
 }
 /* Move contents to the prefab root before removing a folder. A name collision
  * leaves the source file in place and removal fails without overwriting data. */
@@ -1556,14 +1585,14 @@ static void poc_apply_delete_folder()
     for (size_t i = 0; i < items.size(); i++) {
         std::string src = std::string(dir) + items[i] + ".json";
         std::string dst = std::string(rootDir) + items[i] + ".json";
-        if (!MoveFileA(src.c_str(), dst.c_str())) continue;
+        if (!poc_move(src.c_str(), dst.c_str())) continue;
         char oldm[1024], newm[1024];   /* the sidecar follows its prefab; absent is fine */
         if (poc_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path("", items[i], newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
     poc_strip_trailing_sep(dir);
-    g_delete_folder_result = RemoveDirectoryA(dir) ? 1 : 0;
+    g_delete_folder_result = poc_rmdir(dir) ? 1 : 0;
 }
 /* Run enum_inherits (+0x278) or enum_valid_classes (+0x270) into buf; returns 1 + *pcount packed strings
  * (consecutive NUL-terminated, double-NUL end). SEH-guarded, no C++ objects. */
@@ -2512,7 +2541,7 @@ static int poc_count_prefab_entities(const std::string &body)
 static bool poc_read_small_file(const char *path, std::string &body)
 {
     FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    if (poc_fopen(&fp, path, "rb") != 0 || !fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     bool ok = false;
     /* A module prefab's sidecar lists every module, so allow more than tags need. */
@@ -2554,7 +2583,7 @@ static int poc_meta_int(const std::string &body, const char *key)
 static std::string poc_file_top_type(const char *path)
 {
     FILE *fp = nullptr;
-    if (!path || fopen_s(&fp, path, "rb") != 0 || !fp) return std::string();
+    if (!path || poc_fopen(&fp, path, "rb") != 0 || !fp) return std::string();
     fseek(fp, 0, SEEK_END); long sz = ftell(fp);
     long take = sz < 256 * 1024 ? sz : 256 * 1024;
     std::string tail;
@@ -2583,7 +2612,7 @@ static bool poc_read_prefab_scene(const char *path, std::string &body)
     FILE *fp = nullptr;
     bool ok = false;
     body.clear();
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    if (poc_fopen(&fp, path, "rb") != 0 || !fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     if (sz > 0 && sz <= 8 * 1024 * 1024) {
         body.resize((size_t)sz);
@@ -2606,7 +2635,7 @@ static std::string poc_prefab_view(const char *path, const char *meta_path, cons
     bool is_tail = false;
     if (!text) {
         FILE *fp = nullptr;
-        if (path && fopen_s(&fp, path, "rb") == 0 && fp) {
+        if (path && poc_fopen(&fp, path, "rb") == 0 && fp) {
             fseek(fp, 0, SEEK_END); long sz = ftell(fp);
             long take = sz < 1024 * 1024 ? sz : 1024 * 1024;
             if (take > 0) {
@@ -2680,7 +2709,7 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     std::wstring sig;
     char path[1024] = "", mp[1024] = "";
     if (!name.empty() && poc_prefab_file_path(folder, name, path, (int)sizeof path) &&
-        GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+        poc_attrs(path) != INVALID_FILE_ATTRIBUTES) {
         if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
         /* The scene is sent only for the selected prefab, without the product's block. */
         bool whole = poc_read_prefab_scene(path, fileBody);
@@ -3428,16 +3457,16 @@ static void poc_send_prefabs()
         poc_list_json_dir(rootDir, rootNames);
 
         std::vector<std::string> subdirs;
-        std::string pattern = std::string(rootDir) + "*";
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+        std::wstring pattern = poc_wpath((std::string(rootDir) + "*").c_str());
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                std::string dn = fd.cFileName;
+                std::string dn = sh_webview_json::to_utf8(fd.cFileName);
                 if (dn == "." || dn == "..") continue;
                 subdirs.push_back(dn);
-            } while (FindNextFileA(h, &fd));
+            } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
         std::sort(subdirs.begin(), subdirs.end());
@@ -3657,7 +3686,7 @@ static int crash_scan(std::vector<std::string> &names)
     /* Bound retained diagnostics even when notices need no dismissal or submission. */
     if ((int)names.size() > CRASH_RECORDS_KEEP) {
         for (size_t i = CRASH_RECORDS_KEEP; i < names.size(); i++)
-            DeleteFileA((std::string(kCrashDir) + "\\" + names[i]).c_str());
+            poc_delete((std::string(kCrashDir) + "\\" + names[i]).c_str());
         names.resize(CRASH_RECORDS_KEEP);
     }
     return (int)names.size();
@@ -3683,7 +3712,7 @@ static std::string crash_read_record(const std::string &name)
 {
     std::string path = std::string(kCrashDir) + "\\" + name, data;
     FILE *f = nullptr;
-    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return data;
+    if (poc_fopen(&f, path.c_str(), "rb") != 0 || !f) return data;
     char buf[4096]; size_t r;
     while (data.size() < CRASH_RECORD_READ_CAP && (r = fread(buf, 1, sizeof buf, f)) > 0)
         data.append(buf, r);
@@ -3701,7 +3730,7 @@ static void crash_clear_pending()
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::string path = std::string(kCrashDir) + "\\" + fd.cFileName;
-        DeleteFileA(path.c_str());
+        poc_delete(path.c_str());
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
@@ -3725,7 +3754,7 @@ static std::string crash_collect_logs()
     for (const char *fn : files) {
         std::string path = std::string("snapmap-plus\\logs\\") + fn;
         FILE *f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
+        if (poc_fopen(&f, path.c_str(), "rb") != 0 || !f) continue;
         _fseeki64(f, 0, SEEK_END);
         long long size = _ftelli64(f);
         long long start = size > (long long)raw.size() ? size - (long long)raw.size() : 0;
