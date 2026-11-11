@@ -50,7 +50,7 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
 /* ext 35: the Prefabs tab's editor watch (module selection, held prefab, paste decision). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x388);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x390);
 SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);

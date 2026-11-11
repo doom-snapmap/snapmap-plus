@@ -175,8 +175,7 @@ in the engine-globals table** — they are the only thing that checks a recorded
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\DOOMx64vk.exe
-#   sig_test     -- every engine signature resolves to its recorded RVA for this renderer
-#   hooktol_test -- the resolver's hook-tolerant fallback (prologue-clobbered functions)
+#   sig_test     -- every engine signature matches exactly once, at its recorded RVA for this renderer
 #   globals_test -- every engine data global resolves, and its layout invariants hold
 ```
 
@@ -229,25 +228,19 @@ site. There is no single offset that converts between them: a
 different build is a cluster-wise re-link, so different functions move by different — and sometimes
 opposite-signed — amounts.
 
-Normal resolution scans function bytes or decodes a global's RIP-relative code
-anchor. Raw-RVA fallbacks require an exact SHA-256 match of the process's backing
-executable against `SH_KNOWN_BUILDS` in `host_image.c`, and use that renderer's
-column, without depending on code bytes that installed hooks have changed. The hook-tolerant fallback also requires a
-recognized detour and at least six matching fixed tail bytes. Portable scans
-remain available on other supported images; an unverified file cannot authorize
-a raw-RVA fallback.
+At run time a signature resolves only at its recorded RVA, in the column for the renderer whose SHA-256
+matches `SH_KNOWN_BUILDS` in `host_image.c`, and only when its whole pattern holds there. A function
+resolves through a global's RIP-relative code anchor the same way only after that anchor is found. An
+unverified file cannot authorize any RVA.
 
-The trap is that a wrong address is **invisible in normal use**. Byte signatures are build-portable, so the
-scanner still finds the function and your feature works exactly as intended on either build. The only thing
-that breaks is the hook-tolerant fallback, which just quietly stops covering that function. `sig_test` is
-what catches it — hence "required" above.
+So a wrong recorded RVA is not invisible: the feature that needs the function is off for every player.
+`sig_test` catches it before that, by scanning each image for the pattern and comparing the one match
+with the recorded RVA -- hence "required" above.
 
 If you deliberately want to record an address from another build or the other executable (useful — we do
 it), label it as such in the comment rather than putting it in a field that means "the pinned image".
 
-An entry with `known_rva=0` explicitly has no pinned-build fallback. It must
-still resolve uniquely in both images; the tests skip only its nonexistent
-pinned-address comparison, not signature resolution.
+An entry with a zero RVA in one column does not exist on that renderer and never resolves there.
 
 A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInput ordinal invariant — it loads
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the

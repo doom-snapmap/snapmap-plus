@@ -140,6 +140,7 @@ $tests = @(
     @{ name = "vt_harness_test"; src = 'vt_harness_test.c ..\src\backend\vt_harness.c ..\src\backend\modvt.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\modserve.c ..\src\backend\modstore.c ..\src\backend\modregistry.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c'; defs = '/DSH_VT_HARNESS_PURE /DSH_MODVT_PURE /DSH_MODSERVE_PURE'; libs = 'shell32.lib ole32.lib'; arg = $(if ($env:SH_VT_RCTEST) { $env:SH_VT_RCTEST } else { "" }) }
     # The mod store client, upload and download, and the rawmap ZIP export, against a loopback stub of the store.
     @{ name = "plain_reason_test"; src = 'plain_reason_test.c'; arg = "" }
+    @{ name = "feature_health_test"; src = 'feature_health_test.c ..\src\backend\feature_health.c'; defs = '/DSH_FEATURE_HEALTH_TESTING'; arg = "" }
     @{ name = "modnet_test"; src = 'modnet_test.c ..\src\backend\modnet.c ..\src\backend\modzip.c ..\src\backend\raw_deflate.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modstock_test"; src = 'modstock_test.c ..\src\backend\modstock.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\raw_deflate.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modmodule_test"; src = 'modmodule_test.c ..\src\backend\module_prefab_map.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\modstock.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\raw_deflate.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
@@ -153,15 +154,14 @@ $tests = @(
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }
     $da = (Resolve-Path $Doom).Path
-    $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
-    $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
+    $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
     $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
 }
 # The other renderer's executable gets the same checks against its own RVAs.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
-    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $alt }
+    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $alt }
     $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $alt }
 }
 

@@ -226,7 +226,7 @@ size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap
         results[i].addr = 0; results[i].rva = 0;
         for (j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
             if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, k_names[i])) {
-                if (sig_match_recorded(base, &BACKEND_ENGINE_SIGNATURES[j], &results[i]) == SIG_OK) ok++;
+                if (sig_resolve_one(base, &BACKEND_ENGINE_SIGNATURES[j], &results[i]) == SIG_OK) ok++;
                 break;
             }
     }

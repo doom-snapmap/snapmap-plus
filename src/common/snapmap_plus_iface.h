@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x378, making the current vtable 0x380 bytes. The backend records that
+ * at +0x388, making the current vtable 0x390 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -535,6 +535,12 @@ typedef struct sh_prefab_watch {
 } sh_prefab_watch;
 typedef int (*sh_prefab_watch_fn)(struct sh_iface *self, sh_prefab_watch *out); /* +0x380 (ext 35) */
 
+/* +0x388 (ext 36): the features that are off this session, as the one line the
+ * Snapmap+ window shows ("These features are unavailable in this session:
+ * ..."), or an empty string when every feature is available. Returns the
+ * length written; any thread. */
+typedef size_t (*sh_features_off_fn)(struct sh_iface *self, char *out, size_t cap);
+
 /* +0x320 (ext 23): the preview model and renderModelInfo.scale for an entityDef inherit, as
  * SH_PREFAB_DEFAULT_* bits. When the def chain names no .lwo/.bmodel/.md6, the model is the one the
  * editor draws for the inherit's palette row (SH_PREFAB_DEFAULT_EDITOR). With out_scale_count >= 6,
@@ -754,6 +760,7 @@ typedef struct sh_iface_vtbl {
     sh_budget_fn               budget;               /* +0x370 (ext 33) editor budget table */
     sh_mods_fn                 mods;                 /* +0x378 (ext 34) Mods tab */
     sh_prefab_watch_fn         prefab_watch;         /* +0x380 (ext 35) Prefabs tab editor watch */
+    sh_features_off_fn         features_off;         /* +0x388 (ext 36) features off this session */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -783,7 +790,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x388);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, features_off) == 0x388);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x390);
 SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);

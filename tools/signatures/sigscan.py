@@ -12,8 +12,11 @@ the 2018 executables -- is scanned as an optional cross-check: uniqueness is
 reported, but it does not affect the exit status.
 
 Covered: every BACKEND_ENGINE_SIGNATURES row, the OpenGL-only helper, the
-fault-shield table, the standalone pattern constants, and every global anchor in
-engine_globals_table.gen.h.
+fault-shield table, the companion and scene-spawn tables, the standalone pattern
+constants, and every global anchor in engine_globals_table.gen.h. The rawmap
+branch answer's candidates are found by rawmap.c itself and are not covered.
+At run time the backend checks each function pattern only at its recorded RVA;
+this scan is what proves that RVA is the pattern's one match.
 
     python sigscan.py <image> [<image> ...] [--src <product root>] [--json <out.json>]
 
@@ -119,7 +122,7 @@ def parse_known_builds(path):
     src = open(path, encoding='utf-8', errors='replace').read()
     table = src.split('SH_KNOWN_BUILDS[] = {', 1)[1].split('\n};', 1)[0]
     builds = {}
-    for m in re.finditer(r'\{\{([0-9a-fx,\s]+)\},\s*(\d),\s*"([^"]+)"\}', table):
+    for m in re.finditer(r'\{\{([0-9a-fx,\s]+)\},\s*(\d),\s*"([^"]+)"', table):
         digest = bytes(int(b, 16) for b in m.group(1).split(','))
         builds[digest.hex()] = (int(m.group(2)), m.group(3))
     if not builds:
@@ -252,10 +255,12 @@ def load_sources(root):
                                                         'NAV_RENDER_TARGET_GL_SIGNATURE'))
     sig_rows += [('shield',) + r for r in parse_table(os.path.join(shield, 'shield_sigs.c'),
                                                      'SHIELD_ENGINE_SIGNATURES')]
+    sig_rows += [('companion',) + r for r in parse_table(os.path.join(backend, 'companion_sigs.c'),
+                                                        'SH_COMPANION_SIGNATURES')]
+    sig_rows += [('scene',) + r for r in parse_table(os.path.join(backend, 'modscene_sigs.c'),
+                                                    'SH_MODSCENE_SPAWN_SIGNATURES')]
     sig_rows.append(('constant',) + parse_string_constant(os.path.join(backend, 'cvar_unlock.c'),
                                                           'CVU_CMDSYS_LEA_SIG'))
-    sig_rows.append(('constant',) + parse_string_constant(os.path.join(backend, 'decl_visibility.c'),
-                                                          'DV_PROBE_SIGNATURE'))
     globals_rows = parse_globals(os.path.join(backend, 'engine_globals_table.gen.h'))
     builds = parse_known_builds(os.path.join(backend, 'host_image.c'))
     return sig_rows, globals_rows, builds

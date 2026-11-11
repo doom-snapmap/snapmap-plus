@@ -71,8 +71,8 @@ void sh_boot_pacing_get_stats(sh_boot_pacing_stats *out);
 #ifndef SH_BOOT_PACING_PURE
 /* Number of boot signatures, and their names in BACKEND_ENGINE_SIGNATURES. */
 #define SH_BOOT_PACING_SIGS 3
-/* Match the boot signatures at their recorded RVAs (sig_match_recorded) into
- * results[0..SH_BOOT_PACING_SIGS). Returns the number matched. */
+/* Resolve the boot signatures (sig_resolve_one) into
+ * results[0..SH_BOOT_PACING_SIGS). Returns the number resolved. */
 size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap);
 /* Boot thread, before the other features. Installs the parts in mask whose
  * sites check out; logs each part and leaves the engine untouched for the

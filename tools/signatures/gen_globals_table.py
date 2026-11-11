@@ -37,14 +37,13 @@ PREAMBLE = (
     '#define BACKEND_ENGINE_GLOBALS_TABLE_GEN_H\n\n'
     '#include "engine_globals.h"\n\n')
 
-# Accepts both the current row form and the earlier 2018 form (pinned_rva plus a
-# derivation comment), so a header written by either generator can be the base.
+# One committed row of engine_globals_table.gen.h.
 ROW = re.compile(
     r'    \{ \.name = "(?P<name>[^"]+)",\n'
     r'      /\* (?P<note>[^\n]*?)\.\n(?:       \*[^\n]*\n)*?'
     r'      \.anchor = "(?P<pattern>[^"]*)",\n'
     r'      \.disp_slot = (?P<slot>\d+), \.disp_tail = (?P<tail>\d+), \.delta = (?P<delta>-?\d+), '
-    r'(?:\.pinned_rva = 0x[0-9A-Fa-f]+u|\.rva_vk = 0x(?P<vk>[0-9A-Fa-f]+)u, \.rva_gl = 0x(?P<gl>[0-9A-Fa-f]+)u) \},\n')
+    r'\.rva_vk = 0x(?P<vk>[0-9A-Fa-f]+)u, \.rva_gl = 0x(?P<gl>[0-9A-Fa-f]+)u \},\n')
 
 
 def parse_int(value):
@@ -57,8 +56,7 @@ def rows_from_header(path):
     for m in ROW.finditer(text):
         rows.append(dict(name=m['name'], note=m['note'], pattern=m['pattern'],
                          slot=int(m['slot']), tail=int(m['tail']), delta=int(m['delta']),
-                         vk=int(m['vk'], 16) if m['vk'] else None,
-                         gl=int(m['gl'], 16) if m['gl'] else None))
+                         vk=int(m['vk'], 16), gl=int(m['gl'], 16)))
     declared = len(re.findall(r'^    \{ \.name = "', text, re.M))
     if not rows or len(rows) != declared:
         raise SystemExit('%s: parsed %d of %d entries; refusing a partial table' % (path, len(rows), declared))

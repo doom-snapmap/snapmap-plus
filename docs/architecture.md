@@ -42,9 +42,6 @@ Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
 recognized executable, for its own renderer, so no address can reach another image.
-A feature whose engine offsets are not yet verified for this build stays off and
-logs which values it waits for (`SH_PENDING_*` in `engine_build.h`); starting DOOM with
-the environment variable `SNAPMAP_PLUS_LIVE_VERIFY=1` runs those features for live verification.
 
 The installer routes by build before downloading anything: it hashes
 `DOOMx64vk.exe` and `DOOMx64.exe`, installs the current release on build 13954591,
@@ -54,9 +51,23 @@ See [packaging](packaging.md#supported-build-and-the-final-2018-release).
 
 ## Engine resolution and patching
 
-Function signatures identify engine code. Generated anchors derive global
-addresses from code references. Vulkan and OpenGL share these portable resolution
-paths; field layouts still need explicit verification when porting.
+The game build is pinned by the executable's hash, so every engine function is
+where the signature table records it. At run time `sig_resolve_one` checks each
+signature at its recorded RVA for the host's renderer and accepts it only when the
+whole masked pattern holds there; nothing is scanned and nothing is guessed. A
+function whose bytes differ there (`SIG_CHANGED`: another program has changed the
+game's code, typically an overlay or another mod's detour) is not resolved, and the
+features that need it are recorded off (see "Features off this session" below).
+Checking the whole table takes well under a millisecond; the whole-image scan it
+replaced took about five seconds (nine seconds over a mapped file, `sig_test`).
+
+The scan, `sig_scan_one`, is the developer tool that derives and audits the table:
+`sig_test` (and `tools/signatures/sigscan.py`) prove that every pattern matches
+exactly once in each executable, at the recorded RVA. Contributor changes to
+signatures or anchors require that two-image test gate in
+[contributing](contributing.md#7-run-the-tests). Generated anchors in the globals
+table still locate their code site by scanning, because the RVAs that table records
+are those of the globals themselves.
 
 A pattern that matches more than once is not an identification. Where two
 functions share a body, the caller must confirm its target by something the
@@ -64,19 +75,9 @@ pattern cannot carry: the rawmap branch answer follows the call its candidate
 makes and reads the literal that callee names, because the sibling it must not
 patch differs only there.
 
-A raw-RVA fallback requires an exact fingerprint of a supported
-executable. The hook-tolerant fallback additionally checks the detour and remaining
-signature bytes. A filename or a readable address is not sufficient evidence.
-Contributor changes to signatures or anchors require the two-image test gate in
-[contributing](contributing.md#7-run-the-tests).
-
-The bootstrap scans the whole database once, which takes about five seconds;
-later installs reuse those results instead of scanning again. The boot pacing
-sites (`boot_pacing.c`) cannot wait for that scan: the engine's resource preload
-starts about two seconds after launch. Right after the build check they are
-matched at their recorded RVAs only (`sig_match_recorded`), checked byte by byte,
-and patched about 0.1 s after process creation. The offline signature tests
-prove each of those recorded RVAs is the pattern's only match.
+The boot pacing sites (`boot_pacing.c`) are resolved and patched right after the
+build check, about 0.1 s after process creation, ahead of the engine's resource
+preload, which starts about two seconds after launch.
 
 Every code write -- a detour's prologue, a call's operand, a single byte -- goes
 through `code_patch` (`patch.c`), which suspends the process's other threads,
@@ -101,6 +102,18 @@ RIP-relative LEA, `hook_prepare_rip_load` a 64-bit RIP-relative load and
 `hook_prepare_relative_call` an E8 call. Callers still verify every other stolen
 instruction. Original target bytes
 remain separate from relocated code for commit validation and restoration.
+
+### Features off this session
+
+`feature_health.c` keeps the one list of features that could not install this
+session, each by the name the player knows it by, and logs each once with why.
+The patch self-test and a scratch detour run before any engine code is touched; if
+either fails, nothing is patched and the list holds a single entry for every editor
+feature. The Snapmap+ window reads the list through the interface slot
+`features_off` and shows one line ("These features are unavailable in this
+session: ..."); a feature the player invokes from the window refuses with
+`sh_feature_refusal` instead of doing nothing. Background guards stay in the log
+only.
 
 ## The map carrier
 
