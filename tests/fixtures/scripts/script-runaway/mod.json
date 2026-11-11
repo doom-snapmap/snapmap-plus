@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
   "name": "Script Runaway",
   "author": "Snapmap+",
+  "strings": {"en": {"scrunaw1_block": "Runaway Block"}},
 
   "snapmap-plus": {
     "format": 2,

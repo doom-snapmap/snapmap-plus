@@ -1,0 +1,7 @@
+{
+	inherit = "logic/relay";
+	edit = {
+		displayNameTag = "#str_scprobe1_marker";
+		entityDef = "mods/scprobe1/probe/marker";
+	}
+}
