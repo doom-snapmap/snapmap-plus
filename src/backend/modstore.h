@@ -1,52 +1,52 @@
 /* modstore.h -- the local mod store, %LOCALAPPDATA%\snapmap-plus\mods\.
  *
- *   <folder>\mod.json            the author block and the product block (modbundle.h)
+ *   <folder>\mod.json            the author's part and the builder block (modbundle.h)
  *   <folder>\assets\...          the mod's files, real files only (no links, no blob store)
+ *   maps\<map title>\<mod name>\ a mod a map brought (a download, or an import of a
+ *                                rawmap or prefab ZIP): a "place" (below)
  *   snapmap-plus.json            the product record (modbundle.h): claims, links,
- *                                the migration record, the build cache, aliases,
- *                                the last good build snapshots
- *   .builds\<key>@<hash16>\      a folder's last good build (below): never a mod folder
+ *                                the migration record, the places
  *
- * A folder is a mod when it holds mod.json (or, before its first build,
- * package.json). Folder names are the author's for a folder dropped in by
- * hand and, for one the product creates (an install, an import, a download),
- * rule 1 of DESIGN-additive 4 (sh_ms_build_folder_name): "<key>" for the
- * first build of a key, "<key>@<hash16>" for every later one, beside it.
- * Identity is the bundle hash: two folders declaring one key are two builds,
- * both kept and both listed, and a map serves the one it pins. Stock pointers (modbundle.h) are never
- * stored: they are resolved against the installed game at install and on
- * verification, and a pointer the game lacks (or holds with other bytes)
- * fails the bundle with that first cause.
+ * Identity is the salt (modsalt.h, ONE-SHAPE rule 1): eight characters in the
+ * builder block, given once. A folder name is the author's and never carries
+ * identity, so any folder may be renamed at any time and the next scan reads
+ * the same salt. A folder is a mod when it holds mod.json (package.json is an
+ * earlier shape and is refused with its reason).
  *
- * Rebuild rule (sh_ms_sync): a folder is built again when its tree hash
- * (sh_mb_tree_hash: the author block and the size and time of every file
- * under assets\) is not the key of the record's cache entry for its bundle.
- * Building needs the game's resource reader, so it runs on a rescan (the Mods
- * tab, sh_mods rescan, install, build), never at boot; boot reads the product
- * blocks and checks sizes only. The game runs no store migration at boot: the
- * upgrade of the retired layout and the bin sweep below are run by the store
- * tool (src/store, snapmap-plus-store.exe), which the installer runs.
+ * Areas (rule 4). The root is everything under mods\ except mods\maps\:
+ * the player's own mods, with organizing folders to SH_MS_NEST_MAX levels.
+ * One salt has one folder at the root. A place, mods\maps\<segment>\, holds
+ * the builds one map pins, one folder per salt, named after its mod; a place
+ * folder is a received build and is never built again here. "maps" is a
+ * reserved name at the top of mods\.
  *
- * Installing a folder from elsewhere builds it in memory (the source folder
- * is not written) and installs by hash: a usable folder that already holds
- * the bundle is the install (nothing is copied); otherwise its mod.json
- * author text and its carried files are copied into a new folder by rule 1,
- * beside any other build of its key, never over one, the copy is verified
- * and recorded. Nothing is refused for "same version, other files". Verification (rehash every file) runs at install
- * and on request, never at boot.
+ * The scan (sh_ms_sync: boot, Refresh, and after an install, a download or
+ * New mod; no folder watcher, rule 3). Under the store lock:
+ *   1. a root folder with no builder block is a new mod: it gets its salt
+ *      (sh_ms_assign_salt, its own references to mods/<folder name>/
+ *      rewritten to mods/<salt>/) and keeps its folder name;
+ *   2. two root folders carrying one salt (a copied folder): the one built
+ *      first ("built" in the block; ties by folder path) keeps it, every
+ *      other one gets a new salt with its own references rewritten;
+ *   3. a root folder whose tree hash (sh_mb_tree_hash) or builder rules
+ *      differ from its block's, or whose last build failed, is built again;
+ *      a failed build records its cause in the block and the folder serves
+ *      nothing until fixed (rule 2: no snapshots, no last good build).
+ * A folder in an earlier shape is listed with its plain reason and nothing in
+ * it is written. Enumeration only reads.
  *
  * File work only, on the calling thread; no engine calls. Every writer of the
- * store serialises on modstore_lock: the install, verification, sync and
- * upgrade below take it themselves, and longer steps (one migration folder, a
- * download install, `sh_mods install` and `sh_mods migrate`, an export) hold
- * it around their whole step. A second writer waits for the first, it never
- * fails because of it; the wait is one step long.
+ * store serialises on modstore_lock: the install, verification and sync take
+ * it themselves, and longer steps (a download install, `sh_mods install`, an
+ * export) hold it around their whole step. A second writer waits for the
+ * first, it never fails because of it.
  */
 #ifndef SNAPMAP_PLUS_MODSTORE_H
 #define SNAPMAP_PLUS_MODSTORE_H
 
 #include <stddef.h>
 #include "modbundle.h"
+#include "modsalt.h"
 
 /* The store lock (recursive). modsync_store_lock and modsync_store_unlock
  * (modsync.h) are the same lock under their older names. A thread that finds
@@ -60,11 +60,13 @@ unsigned modstore_lock_waits(void);
  * released so far, so a change tells that a hold ended since the last look. */
 int      modstore_lock_busy(unsigned *generation);
 
-/* id@version+build; version may hold up to 4 UTF-8 bytes per code point. */
+/* A label buffer of an entry (sh_ms_entry.key). */
 #define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)
 /* A folder name under mods\. */
 #define SH_MS_NAME_MAX 1023   /* a nested folder's path under mods\ */
 #define SH_MS_NEST_MAX 8      /* organizing folders are entered this many levels below mods\ */
+/* The top folder of the places: mods\maps\<segment>\<mod>. */
+#define SH_MS_PLACES "maps"
 
 /* The store root. NULL or "" restores the default (%LOCALAPPDATA%\snapmap-plus\mods).
  * Tests point it at a temporary folder. Returns 1 when the root is set. */
@@ -74,165 +76,142 @@ int  sh_ms_root(char *out, size_t cap);
 
 typedef struct sh_ms_entry {
     char *folder;               /* absolute UTF-8 folder of the mod */
-    char  name[SH_MS_NAME_MAX + 1];   /* the folder's path under mods\ ("x", or "group\x" when nested) */
-    char  key[SH_MS_KEY_MAX + 1];     /* id@version+build from mod.json, or the folder name when unbuilt */
-    int   delivered;            /* a package a map delivered (its product block's legacy object) */
+    char  name[SH_MS_NAME_MAX + 1];   /* the folder's path under mods\ ("x", "group\x", "maps\<map>\x") */
+    char  key[SH_MS_KEY_MAX + 1];     /* a label: the salt, or the folder name while it has none */
+    char  salt[SH_SALT_LEN + 1];      /* the block's salt; "" when it has none */
+    char  place[SH_MS_NAME_MAX + 1];  /* "" at the root; "maps\<segment>" for a folder in a map's place */
+    int   state;                /* sh_mb_descriptor_state: SH_MB_DESC_* */
+    int   refused;              /* listed with its cause and serves nothing: an earlier shape, files under
+                                   another salt, a copy waiting for its new salt, a second folder of one
+                                   salt in a place, a new folder in a place */
     int   loaded;               /* mod.json read and its hash matched */
     int   sizes_ok;             /* every carried file present with its recorded size */
-    int   validated;            /* the product block's "validated" */
-    long long installed_at;     /* the product block's "built" */
+    int   validated;            /* the block records no "cause" */
+    long long installed_at;     /* the block's "built" */
     char  cause[SH_MB_CAUSE_MAX];   /* why the entry is unusable, or the block's cause */
-    /* A loaded entry whose latest rebuild in this process was refused: its
-     * cause. The bundle above, the last good build, keeps serving
-     * (DESIGN-additive 2.8); "" when the latest build succeeded or none ran. */
-    char  build_failed[SH_MB_CAUSE_MAX];
-    /* The snapshot of the bundle above (sh_ms_snapshot_of), absolute UTF-8,
-     * when one is complete; else NULL. While build_failed is set, the folder's
-     * own files may hold other bytes: the last good bytes are read from here
-     * (bundle.json and assets\ at each file's path), and sizes_ok was checked
-     * against it. */
-    char *snapshot;
     sh_mb_bundle bundle;
 } sh_ms_entry;
-
-/* One alias of the record: a bundle hash a map may pin that answers as `to`. */
-typedef struct sh_ms_alias {
-    char from[SH_MB_HASH_HEX + 1];
-    char to[SH_MB_HASH_HEX + 1];
-} sh_ms_alias;
 
 typedef struct sh_ms_list {
     sh_ms_entry *items;
     size_t count, cap;
-    sh_ms_alias *aliases;       /* the record's aliases when the list was read */
-    size_t alias_count;
 } sh_ms_list;
 
-/* An entry's bundle may serve names: loaded, sizes match, and validated. */
+/* An entry's bundle may serve names: loaded, sizes match, validated, not refused. */
 int  sh_ms_entry_usable(const sh_ms_entry *entry);
 
-/* A loaded entry that is a package a map delivered (sh_mb_is_delivered). */
-int  sh_ms_entry_delivered(const sh_ms_entry *entry);
-
-/* The installed mod a delivered package `d` is a copy of, or NULL: a loaded
- * folder that was not itself delivered, declaring d's id (rule 1, whatever
- * the content: one whose paths cover d's first, then a usable one), else
- * one under another id providing every path d provides (rule 2, the one with
- * the fewest files). *rule receives 1 or 2. */
-const sh_ms_entry *sh_ms_delivered_counterpart(const sh_ms_list *list, const sh_mb_bundle *d, int *rule);
-
-/* Whether `spec` names the entry: its folder name, id@version+build,
- * id@version (every build of it) or id (every folder declaring it),
- * case-insensitively. */
+/* Whether `spec` names the entry: its folder name under mods\ (either slash),
+ * a nested folder's own name, or its salt, case-insensitively. */
 int  sh_ms_entry_matches(const sh_ms_entry *entry, const char *spec);
 
-/* List every mod folder under the root, and the record's aliases. Folders
- * with a descriptor but no built product block are listed unloaded with the
- * cause. Returns 1 when the root could be read (an absent root is an empty
- * list). */
+/* List every mod folder of the store, root and places, sorted by name. A
+ * folder not built yet, or refused, is listed unloaded with its cause; a copy
+ * of a root salt (before the scan gives it its own) and a second folder of one
+ * salt in a place are listed refused. Returns 1 when the root could be read
+ * (an absent root is an empty list). */
 int  sh_ms_enumerate(sh_ms_list *out);
 void sh_ms_list_free(sh_ms_list *list);
+
+/* The walk every reader of the store shares (enumeration, the scan, the
+ * serving index), so they agree on what is a mod: below the root, a folder
+ * holding mod.json or package.json is a mod and is not entered; one without is
+ * an organizing folder and is entered to SH_MS_NEST_MAX levels; dot folders,
+ * reparse points and "<name>.staging-<pid>" / "<name>.old-<pid>" work folders
+ * are skipped; mods\maps\ is entered as the places. `fn` receives the absolute
+ * folder (UTF-8, long-path form), its name under mods\ and its place ("" at
+ * the root, else "maps\<segment>"); a nonzero return stops the walk. Returns
+ * 1 when the root could be read (an absent root walks nothing). */
+typedef int (*sh_ms_walk_fn)(void *context, const char *folder, const char *name, const char *place);
+int  sh_ms_walk(sh_ms_walk_fn fn, void *context);
 
 /* Whether `folder` holds mod.json or package.json (a mod folder). */
 int  sh_ms_folder_is_mod(const char *folder);
 
-/* Every mod folder under `dir`, at any depth, the way the store walks its own
- * root: a folder with a descriptor is a mod and is not entered, one without is
- * entered to SH_MS_NEST_MAX levels; hidden and staging folders are skipped.
- * `dir` itself is not listed. Absolute UTF-8 paths in *out, freed with
- * sh_ms_find_free. Returns 1 when `dir` could be read. */
+/* Every mod folder under `dir`, at any depth, as the walk above finds them
+ * (the places rule applies when `dir` is the store root). `dir` itself is not
+ * listed. Absolute UTF-8 paths in *out, freed with sh_ms_find_free. Returns 1
+ * when `dir` could be read. */
 int  sh_ms_find_mods(const char *dir, char ***out, size_t *count);
 void sh_ms_find_free(char **folders, size_t count);
 
-/* Aliases (the record's "aliases" section, hash -> hash) keep a map that pins
- * an earlier bundle hash loading: a delivered copy or a download whose content
- * an installed mod already serves, and every earlier build of a folder that
- * was built again (a rebuild on rescan, sh_mods build, an install replacing
- * the folder of the same id and version). The section is flat: every target
- * is a bundle hash, never another alias, so one hop always resolves.
- *
- * sh_ms_resolve finds the entry serving `hash`: an entry whose bundle hash is
- * `hash` (a usable one first), else the entry the alias of `hash` names.
- * Every lookup of a map's pinned hash goes through it. NULL when neither. */
+/* The entry whose build hash is `hash`, a usable one first; NULL when none. */
 const sh_ms_entry *sh_ms_resolve(const sh_ms_list *list, const char *hash);
 
-/* Record that `old_hash` now answers as `new_hash`: aliases naming old_hash
- * are re-pointed at new_hash, old_hash -> new_hash is added, and an alias
- * from new_hash (a build returning to earlier content) is dropped. Returns
- * the number of aliases now naming new_hash, 0 when nothing was recorded. */
-int  sh_ms_alias_note(const char *old_hash, const char *new_hash);
+/* The entry of `salt` in an area: `place` NULL for the root, "*" for any
+ * place, else that place ("maps\<segment>"); `hash` NULL for any build, else
+ * that build only. A usable entry first; refused entries never. NULL when none. */
+const sh_ms_entry *sh_ms_find_salt(const sh_ms_list *list, const char *salt, const char *place, const char *hash);
 
-/* After a folder of `id` serving `hash` was removed: when no folder of the
- * store serves `hash` and none declares `id`, the aliases naming `hash` are
- * dropped (they could resolve nothing). Otherwise they stay. Returns the
- * number dropped. */
-int  sh_ms_alias_forget(const char *id, const char *hash);
-
-/* Drop every alias whose target hash no folder of the store builds to any
- * more (a folder deleted by hand, or replaced by one with other bytes).
- * Returns the number dropped. sh_ms_sync runs it after each pass. */
-int  sh_ms_alias_prune(void);
-
-/* A folder of the store was built and its mod.json written: the build cache
- * notes it (sh_ms_cache_note) and, when the product block named another
- * bundle before (b->prev_hash), that hash becomes an alias of the new one.
- * Returns 1 when the cache note was written. */
+/* A folder of the store was built and its mod.json written: no earlier
+ * failure of it stands. Returns 1. */
 int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
+
+/* Identity (rule 1). A folder whose mod.json has the author's part only (no
+ * builder block) is a new mod: it gets a new salt (sh_salt_generate, never one
+ * a folder of the store holds), every reference to mods/<from>/ in its own
+ * files becomes mods/<salt>/ (decl text and any other text, the folder
+ * segments of paths under assets/, both spellings, sh_mb_rekey_text and
+ * sh_mb_rekey_path), and its block becomes {"format": 2, "salt": <salt>}
+ * (sh_mb_salt_modjson). `from` is normally the folder's own name; the store
+ * tool passes a converted package's id. The folder keeps its name: the result
+ * is staged beside it ("<name>.staging-<pid>", unchanged files hard-linked)
+ * and swapped in with two renames, the second undone on failure; the old
+ * folder goes to the Recycle Bin. A file that cannot be read, a binary file
+ * naming mods/<from>/, files under another mod's mods/<x>/, two files landing
+ * on one path, or a refused rename leaves the folder exactly as it was.
+ * Works on any folder (the store tool salts a staged folder outside the
+ * store); a new folder in a map's place is refused (a place holds received
+ * builds only). Takes the store lock.
+ *
+ * Returns 1 with the new salt in salt_out; 0 when the folder already has its
+ * salt (salt_out receives it); -1 with the plain reason in `cause`, the
+ * folder untouched (also an earlier shape, or a mod.json that is not a JSON
+ * object). A refusal of a store folder is also recorded as its build cause. */
+int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
 
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* carried files copied into the store */
     int in_place;               /* the source folder was inside the store */
-    int replaced;               /* the named target (as_name), or a damaged copy of this bundle, was replaced */
-    int present;                /* a usable folder already holds this bundle: nothing was copied */
+    int replaced;               /* the named target (as_name), or the place's folder of the salt, was replaced */
+    int present;                /* a usable folder already holds this build: nothing was copied */
+    int resalted;               /* a copy of a root mod: it was given a new salt */
     unsigned stock_files;       /* stock pointers: nothing stored for them */
     unsigned long long stock_bytes;   /* their installed size */
 } sh_ms_install_stats;
 
-/* Build `folder`: in place when it is a folder of the store (its mod.json
- * product block is written), else by hash: when a usable folder already
- * holds the built bundle, that folder is the result (stats->present, nothing
- * copied); else into a new store folder named `as_name` when given (a folder
- * of that name with the same id and version is replaced: a migration's
- * target), else by sh_ms_build_folder_name, beside every other build of the
- * key; verify the result and record it in the build cache. `resolver` may be NULL; the store's installed bundles are
- * consulted in addition to it. On success name_out holds the folder name.
- * bundle_out (optional) receives the built bundle; release it with
- * sh_mb_free. Returns 1 on success, else 0 with the first cause. */
+/* Install `folder` at the root. A folder of the store (at the root) is built
+ * in place. From elsewhere (the source is only read):
+ *   - a new mod (no builder block) is copied whole to mods\<its name> (" (2)"
+ *     when taken), salted with its references to mods/<its name>/ rewritten,
+ *     and built; a refused build leaves nothing installed;
+ *   - a built mod is built in memory; when the root folder of its salt holds
+ *     this very build, that folder is the install (stats->present); else its
+ *     carried files and mod.json are copied to mods\<its name> (" (2)" ...),
+ *     verified, and, when the root already holds the salt, the arriving copy
+ *     gets a new salt (stats->resalted) and is built under it.
+ * `as_name` (sh_ms_install_as: the store tool's target) names the folder under
+ * mods\ instead; a folder of that name is replaced. `resolver` may be NULL;
+ * the store's installed bundles are consulted in addition to it. On success
+ * name_out holds the folder name under mods\. bundle_out (optional) receives
+ * the bundle as installed; release it with sh_mb_free. Returns 1, else 0 with
+ * the first cause. */
 int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
                                char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                                sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 int  sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
                       char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                       sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
-/* The same, recording `origin` (SH_MB_ORIGIN_*, SH_MS_ORIGIN_IMPORTED; NULL:
- * "install") in the new folder's product block. */
-#define SH_MS_ORIGIN_IMPORTED "imported"   /* carried by a rawmap or prefab ZIP */
-int  sh_ms_install_with(const char *folder, const char *as_name, const char *origin, const sh_mb_resolver *resolver,
-                        char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                        sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 
-/* Rule 1 (DESIGN-additive 4): the folder name under `mods_root` (UTF-8) for
- * the build of `key` at `hash`. With no folder of the key installed
- * (`key_installed` 0) the key itself when that name is free; else, and for
- * every later build, "<key>@<first 16 hex of hash>", then "<key>@<hash16>-2"
- * and so on. Returns 1 with a free name, 2 with the name of a folder that
- * already holds a build at `hash` (placed again when it is damaged), 0 when
- * no name is free. */
-int  sh_ms_build_folder_name(const char *mods_root, const char *key, const char *hash, int key_installed,
-                             char *out, size_t cap);
-
-/* Where a build the product received for a map is placed (DESIGN-additive
- * A.4, owner 2026-11-10): never as <key>@<hash16> beside the player's own
- * folders, but under an organizing folder of its own, "<group>\<title>\<key>":
- * the group "downloads" for a build the mod store sent for a map (title the
- * map's), "imports" for a build a rawmap or prefab ZIP carried (title the
- * ZIP's name). No hash ever names a visible folder. */
-#define SH_MS_GROUP_DOWNLOADS "downloads"
-#define SH_MS_GROUP_IMPORTS   "imports"
+/* ------------------------------------------------------------ places ---- */
+/* A place is mods\maps\<segment>\: the segment sh_ms_title_segment of the
+ * map's title (a rawmap's file name, a prefab ZIP's name), followed by
+ * " (<map id>)" only when the record already gives that segment to another map.
+ * The record's "places" section maps each map to its place:
+ *   {"<published item id> | zip:<file name> | title:<segment>":
+ *    {"title": "<the map's title>", "folder": "maps\\<segment>"}} */
 typedef struct sh_ms_place {
-    const char *group;     /* SH_MS_GROUP_* */
-    const char *title;     /* the map's (or ZIP's) title; NULL or "": straight under the group */
-    const char *map_id;    /* the published item, when known: tells two maps of one title apart */
+    const char *title;     /* the map's title, a rawmap's file name or a prefab ZIP's name */
+    const char *map_id;    /* the published item id, or "zip:<file name>"; NULL or "": "title:<segment>" */
 } sh_ms_place;
 
 /* `title` made a folder name (UTF-8): the characters Windows refuses in a
@@ -243,29 +222,38 @@ typedef struct sh_ms_place {
  * character boundary. 1 with the segment, 0 when nothing is left. */
 int  sh_ms_title_segment(const char *title, char *out, size_t cap);
 
-/* The folder name under `mods_root` for the build of `key` at `hash` placed
- * by `place`: "<group>\<title segment>\<key>", the title segment followed by
- * " (<map id>)" when the record's "downloads" section already gives that
- * title folder to another map, then "<key>-2", "<key>-3" ... when the name is
- * taken by another build. Returns 1 with a free name, 2 with the name of a
- * folder there that already holds a build at `hash`, 0 when none is free
- * (also when the group or title folder is itself a mod folder). */
-int  sh_ms_placed_folder_name(const char *mods_root, const sh_ms_place *place, const char *key, const char *hash,
-                              char *out, size_t cap);
+/* The place of `place` under mods\ ("maps\<segment>"): the record's when the
+ * map is noted, else a free one. 1 with it, 0 when none can be made. */
+int  sh_ms_place_dir(const sh_ms_place *place, char *out, size_t cap);
 
-/* The record's "downloads" section: {"<map id, or title:<segment>>":
- * {"title": "<the map's title>", "folders": ["<folder under mods\>", ...]}}.
- * A download notes the folder that serves the map, a new one or one already
- * present anywhere in the store, so the Mods tab says which map a downloaded
- * build was fetched for. Returns 1 when written. */
-int  sh_ms_downloads_note(const char *map_id, const char *title, const char *folder);
-/* The title of the first map the section notes for `folder` (its name under
- * mods\, either slash): 1 with it, else 0. */
-int  sh_ms_downloaded_for(const char *folder, char *title, size_t cap);
+/* The folder under mods\ for the build of `salt` (mod display name `name`) in
+ * `place`: 2 with the place's folder that already holds the salt (one build
+ * per salt per place: it is replaced), 1 with a free name
+ * "maps\<segment>\<sh_ms_title_segment(name), else mod>" (" (2)", " (3)" ...
+ * when another mod of the place has the name), 0 when none is free. */
+int  sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap);
 
-/* sh_ms_install_with, a folder from elsewhere placed by `place` (NULL: by
- * rule 1, sh_ms_build_folder_name) instead of beside the builds of its key. */
-int  sh_ms_install_placed(const char *folder, const char *origin, const sh_ms_place *place,
+/* Record that `place`'s map is served from `folder` (under mods\: the place
+ * "maps\<segment>" or a mod's folder in it, either slash; NULL: its
+ * sh_ms_place_dir). Returns 1 when written. */
+int  sh_ms_place_note(const sh_ms_place *place, const char *folder);
+
+/* The place the record gives the map `key` (an item id, "zip:<name>" or
+ * "title:<segment>"): 1 with "maps\<segment>" in `dir` and its title (either
+ * may be NULL), 0 when none. */
+int  sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size_t title_cap);
+
+/* The title of the map whose place holds `folder` (its name under mods\,
+ * either slash, or absolute): 1 with it, else 0 (a root folder, or a place no
+ * map of the record names). */
+int  sh_ms_place_title(const char *folder, char *title, size_t cap);
+
+/* sh_ms_install_from_folder into `place`: the source must be built (a
+ * received build); the place's folder of its salt is replaced (the old one to
+ * the Recycle Bin), else a free name is taken (sh_ms_place_folder), and the
+ * map is noted (sh_ms_place_note). A place folder is never built again by the
+ * scan. */
+int  sh_ms_install_placed(const char *folder, const sh_ms_place *place,
                           const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                           sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 
@@ -275,56 +263,52 @@ typedef struct sh_ms_verify_stats {
 } sh_ms_verify_stats;
 
 /* Rehash every file of the entries `spec` names (sh_ms_entry_matches)
- * against their product blocks and record the result there ("validated",
- * "cause"). Returns 1 when every matching entry passes. */
+ * against their builder blocks and record the result there ("cause").
+ * Returns 1 when every matching entry passes. */
 int  sh_ms_verify(const char *spec, sh_ms_verify_stats *stats, char *cause, size_t cause_cap);
 
 typedef struct sh_ms_sync_stats {
     unsigned folders;           /* folders looked at */
-    unsigned rebuilt;           /* built again: new, or their tree hash changed */
-    unsigned failed;            /* refused by the builder (the cause stays on the entry) */
+    unsigned salted;            /* new mods given their salt */
+    unsigned resalted;          /* copies given a new salt */
+    unsigned rebuilt;           /* built again: new, or their tree or the builder rules changed */
+    unsigned failed;            /* refused (the cause stays on the entry) */
     unsigned long long ms;
 } sh_ms_sync_stats;
 
-/* The rebuild rule over every folder of the store, then the cache section of
- * the record rewritten to the current folders. Logs one "MODS: store:" line
- * per rebuilt or refused folder. Returns 1 when the store could be read. */
+/* The scan (steps 1 to 3 above) over the root. Logs one "MODS: store:" line
+ * per salted, re-salted, built or refused folder. Returns 1 when the store
+ * could be read. */
 int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
 
-/* The folders sh_ms_sync would build now (no product block, or a tree its
- * cache does not hold as built), from the tree hashes alone (file sizes and
- * times: no file is read). -1 when the store cannot be read. */
+/* The root folders sh_ms_sync would change now: new mods, copies, and built
+ * folders whose block's tree or rules differ (file sizes and times: no file
+ * is read) or whose last build failed. -1 when the store cannot be read. */
 int  sh_ms_sync_pending(void);
 
-/* The boot's rebuild rule (DESIGN-additive 2.8): a store whose folders are
- * not built yet (a first boot after a conversion or an install by hand) is
- * built as a rescan builds it, so a fresh folder serves on its first boot.
- * With folders pending, sh_ms_sync runs and then `rescan` (the serving index;
- * its listeners pass the new table to the game). background 1 does the check
- * and the build on a thread of its own (a first build of the 15 converted
- * folders takes about 10 s) and returns 1 when it started; background 0 runs
- * them here and returns the folders that were pending (0: nothing built, no
- * rescan). -1 when the store cannot be read or the thread cannot start. The
- * resolver is copied. */
+/* The boot scan: with root folders pending (a fresh folder dropped in while
+ * the game was closed, an edit), sh_ms_sync runs and then `rescan` (the
+ * serving index; its listeners pass the new table to the game). background 1
+ * does the check and the scan on a thread of its own and returns 1 when it
+ * started; background 0 runs them here and returns the folders that were
+ * pending (0: nothing built, no rescan). -1 when the store cannot be read or
+ * the thread cannot start. The resolver is copied. */
 typedef int (*sh_ms_rescan_fn)(void);
 int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background);
 
 /* The work folders an earlier session left when it ended mid-install, mid-
- * download or mid-rename ("<name>.staging-<pid>", "<name>.old-<pid>" beside
- * their target, and the snapshots' staging under .builds\), whose process is
- * no longer running. A ".old-" folder whose target is missing is the folder a
- * crash took away between the two renames: it is put back. Every other one is
- * removed. One "MODS: store:" line per action. Run at boot before the serving
- * index is read. Returns the folders put back, or -1 when the store cannot be
- * read. */
+ * download or mid-salting ("<name>.staging-<pid>", "<name>.old-<pid>" beside
+ * their target), whose process is no longer running. A ".old-" folder whose
+ * target is missing is the folder a crash took away between the two renames:
+ * it is put back. Every other one is removed. One "MODS: store:" line per
+ * action. Run at boot before the serving index is read. Returns the folders
+ * put back, or -1 when the store cannot be read. */
 int  sh_ms_recover_work(void);
 
-/* The startup install is done with the store: the background boot build,
- * which waits for this (up to two minutes), may start. The install takes the
- * store itself (the publish launch reads the upload queue and the claims), so
- * the build starts after it and never holds it up; while the build runs it
- * hands the store to any operation that waits for it, between two folders.
- * Any thread; idempotent. sh_ms_boot_released: 1 once called. */
+/* The startup install is done with the store: the background boot scan,
+ * which waits for this (up to two minutes), may start. While it runs it hands
+ * the store to any operation that waits for it, between two folders. Any
+ * thread; idempotent. sh_ms_boot_released: 1 once called. */
 void sh_ms_boot_release(void);
 int  sh_ms_boot_released(void);
 #ifdef SH_MODSTORE_TESTING
@@ -332,185 +316,35 @@ void sh_ms_test_boot_rearm(void);                            /* the next boot bu
 extern void (*sh_ms_test_between_folders)(unsigned built);   /* the boot build, between two folders */
 #endif
 
-/* The first cause of the last refused build of `folder` in this process, or
- * "" (sh_ms_sync and installs record it; enumeration reports it, with the
- * snapshot that serves meanwhile in sh_ms_entry.snapshot). */
+/* The first cause of the last refused build or salting of `folder` in this
+ * process, or "" (sh_ms_sync and installs record it; enumeration reports it). */
 void sh_ms_build_cause(const char *folder, char *out, size_t cap);
 
 /* 1 when `folder` (absolute UTF-8) has a mod.json that is not a JSON object,
  * with the parse error and the next step in `out`; 0 otherwise (no mod.json,
- * or one that parses). sh_ms_sync records it as the folder's refused build,
- * so its last good build keeps serving until the file is fixed. */
+ * or one that parses). */
 int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap);
 
 /* Record a refused build of `folder` (absolute) that a caller ran itself
- * (`sh_mods build`): the same per-folder state sh_ms_sync records. The
- * folder's mod.json is not touched, so a previous build keeps serving. A
- * later successful build (sh_ms_note_build) clears it. */
+ * (`sh_mods build`): the same per-folder state sh_ms_sync records. A later
+ * successful build (sh_ms_note_build) clears it. */
 void sh_ms_note_build_failure(const char *folder, const char *cause);
 
-/* New mod (DESIGN-additive 2.2, 4): a folder under the store root named by a
- * key generated from `name` (sh_mb_key_generate), holding a descriptor (name,
- * version "0.1.0", empty description and author, an empty "player" intent)
- * whose product block records the key and origin "by-hand", and an empty
- * assets\mods\<key>\. The folder is built at the next rescan. Returns 1 with
- * the key and the absolute folder; 0 with the cause. */
-int  sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+/* New mod: a folder mods\<sh_ms_title_segment(name), else "mod"> (" (2)" ...
+ * when taken) holding a mod.json of name, version "0.1.0", empty description
+ * and author, and the block {"format": 2, "salt": <a new salt>}, and an
+ * empty assets\. The caller's scan builds it. Returns 1 with the salt and the
+ * absolute folder; 0 with the cause. */
+int  sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                    char *cause, size_t cause_cap);
 /* New mod from the Mods tab: as sh_ms_new_mod, plus an example that places
- * and plays untouched: an entityDef at mods/<key>/example_crate (the game's
+ * and plays untouched: an entityDef at mods/<salt>/example_crate (the game's
  * SnapMap crate01 model), its Toybox row (snapEditorEntityDef) and the row's
- * strings in mod.json's author block (a category named after the mod, the
- * row's name and description). Nothing binary. `example_out` receives the
- * row's path below the folder, with '/'. */
-int  sh_ms_new_mod_example(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+ * strings in mod.json's author part (mods/<salt>/category named after the
+ * mod, mods/<salt>/example_crate_name and _desc). Nothing binary.
+ * `example_out` receives the row's path below the folder, with '/'. */
+int  sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                            char *example_out, size_t example_cap, char *cause, size_t cause_cap);
-
-/* A hand-made folder's first build (DESIGN-additive 2.2): when `folder` is a
- * mod folder of the store whose descriptor has neither an author "id" nor a
- * product-block "key", it is renamed to a key generated from its name
- * (sh_mb_key_for_folder), the author's references to mods/<folder>/ are
- * rewritten to mods/<key>/ (decl text, mod.json, the folder segments of the
- * paths under assets/, in the written and the cooked '_' spelling), and its
- * product block records the key with origin "by-hand", as New mod writes it.
- * Organizing folders above it are left alone. Takes the store lock. Returns
- * 1 with the new folder (absolute, plain) in `out`; 0 when there is nothing
- * to do (an id, a key, not a store folder); -1 with the cause, the folder
- * untouched (a file that cannot be read, a binary file naming the folder,
- * two files landing on one path, a rename Windows refuses), which is also
- * recorded as the folder's build cause. Every build of a store folder in
- * place runs it first (rescan, install, sh_mods build and rebuild, the Mods
- * tab's Rebuild). An install from elsewhere of such a folder copies it in
- * under a generated key the same way; the source is only read. */
-int  sh_ms_first_key(const char *folder, char *out, size_t cap, char *cause, size_t cause_cap);
-
-/* What a first build renamed `folder` (absolute) from: 1 with the old folder
- * name and the count of references rewritten, from the record's "renamed"
- * section; 0 for any other folder. */
-int  sh_ms_renamed_from(const char *folder, char *from, size_t cap, unsigned *references);
-
-/* Record `folder` (absolute) as built from its current tree: cache[tree] =
- * bundle hash. Returns 1 on success. */
-int  sh_ms_cache_note(const char *folder, const char *bundle_hash);
-
-/* Last good build (DESIGN-additive 2.8). Every successful build of a store
- * folder (sh_ms_note_build, an install, a sync that finds a current folder
- * without one) keeps a snapshot of its carried files, never its stock
- * pointers, each copy checked against the build:
- *
- *   mods\.builds\<key>@<first 16 hex of the bundle hash>\bundle.json
- *       the folder's mod.json as that build wrote it (author and product
- *       block; sh_mb_load_text gives the same bundle hash)
- *   mods\.builds\<key>@<hash16>\assets\...
- *       every carried file at its "path" from the product block
- *
- * The record's "snapshots" section maps each folder's name under mods\ to
- * its one snapshot name. The next successful build replaces it, removing
- * the previous one unless another folder's row names it; uninstall
- * (sh_ms_delete_mod_folder, sh_ms_remove_folder) removes it; a sync removes
- * rows of folders that are gone and snapshots no row names. ".builds" starts
- * with '.', so no scan of the store enters it.
- *
- * sh_ms_snapshot_of: 1 with the absolute folder of `folder`'s complete
- * snapshot (it holds bundle.json), else 0. sh_ms_entry.snapshot is the same
- * path when the snapshot is of the entry's own bundle. */
-#define SH_MS_BUILDS_DIR ".builds"
-int  sh_ms_snapshot_of(const char *folder, char *out, size_t cap);
-
-typedef struct sh_ms_upgrade_stats {
-    int ran;                    /* the retired layout was found */
-    unsigned folders;           /* built folders converted to mod.json */
-    unsigned renamed;           /* of them, moved to <id> or <id>@<version> */
-    unsigned delivered;         /* legacy\ folders moved into mods\ */
-    unsigned dropped;           /* legacy\ folders dropped: an installed mod serves the same content */
-    unsigned failed;            /* folders left as they were (logged) */
-    unsigned unlinked;          /* hard-linked files replaced by real copies */
-    unsigned restored;          /* files restored from blobs\ */
-    int blobs_removed;          /* blobs\ was deleted */
-    unsigned long long blob_bytes;
-    unsigned records;           /* product files folded into snapmap-plus.json */
-    unsigned long long ms;
-    /* The second step (record "layout" 2): */
-    int tidied;                 /* it ran */
-    unsigned same_id;           /* delivered packages dropped: an installed mod has their id */
-    unsigned covered;           /* delivered packages dropped: an installed mod under another id provides every path */
-    unsigned tidy_renamed;      /* folders renamed to <id> (or away from a generated version) */
-    unsigned tidy_failed;       /* folders that could not be removed or renamed */
-    int migration_collapsed;    /* the completed migration record lost its finished folder rows */
-    unsigned long long tidy_ms;
-} sh_ms_upgrade_stats;
-
-/* Convert the retired layout (<id>@<version>+<build>\ with bundle.json,
- * bundle.canonical.json and .state.json, hard links into blobs\, legacy\,
- * claims.json, publish-links.json, pending-uploads.json, .migrated.json) to
- * Contract 5, logging one "MODS: store:" line per folder and a summary.
- * Idempotent and safe to interrupt: each folder's mod.json is written (and
- * read back with the same bundle hash) before the old files go, and a record
- * file is folded before it is retired. A hard-linked file is renamed aside,
- * copied back to its name and verified against the bundle before the renamed
- * original is retired; on any failure the original is put back (and an
- * original an interrupted run left aside is put back at the next run).
- * Everything retired goes through sh_ms_set_discard's function when one is
- * set.
- *
- * Then, once per store (until the record's "layout" section is 2), the
- * second step: every package a map delivered that copies an installed mod
- * (sh_ms_delivered_counterpart) is removed and its bundle hash becomes an
- * alias of that mod's; a product folder left alone with its id under
- * "<id>@<version>" is renamed "<id>", and no folder keeps a generated version
- * in its name; a completed migration record keeps only "complete",
- * "migratedAt", "source", "trees" (the folder each converted tree became,
- * which resolves maps published before Contract 5; folder names follow the
- * drops and renames) and the rows of folders not yet done. One "MODS: store:"
- * line per dropped or renamed folder and a summary.
- *
- * Returns 1 when either step ran, 0 when there was nothing to do, -1 when the
- * store could not be read. */
-int  sh_ms_upgrade(sh_ms_upgrade_stats *stats);
-
-/* What sh_ms_upgrade and sh_ms_bin_sweep would do (sh_ms_upgrade_scan, read only). */
-typedef struct sh_ms_upgrade_check {
-    unsigned layout_folders;    /* folders with bundle.json, bundle.canonical.json or .state.json */
-    int blobs_present;          /* blobs\ */
-    unsigned blob_files;
-    unsigned long long blob_bytes;
-    int legacy_present;         /* legacy\ */
-    unsigned legacy_folders;
-    unsigned record_files;      /* claims.json, publish-links.json, pending-uploads.json, .migrated.json */
-    char record_names[96];      /* their names, ", " between */
-    unsigned tidy_drops;        /* the second step: delivered copies of an installed mod */
-    unsigned tidy_renames;      /* the second step: product folders to rename */
-    int tidy_migration;         /* the second step: a completed migration record to collapse */
-    int bin_present;            /* removed-mods\ beside mods\ */
-    unsigned bin_entries;
-    int bin_section;            /* the record's "removed" section */
-} sh_ms_upgrade_check;
-
-/* Fill *out. Returns the number of kinds of work found (0: nothing to do),
- * -1 when the store folder cannot be resolved. */
-int  sh_ms_upgrade_scan(sh_ms_upgrade_check *out);
-
-/* How the upgrade and the bin sweep retire files and folders. NULL (the
- * default) deletes outright, links removed and never followed. `fn` receives
- * an absolute long-form path that exists and returns 1 when it is gone; `verb`
- * ("moved to the Recycle Bin") replaces "deleted" in the sweep's lines. Not
- * thread-safe: set it before the first call. */
-typedef int (*sh_ms_discard_fn)(void *context, const wchar_t *path);
-void sh_ms_set_discard(sh_ms_discard_fn fn, void *context, const char *verb);
-
-/* Retire `leaf`, a folder beside the store root in the data folder (the
- * retired overrides\ and strings\ of earlier releases), through the discard
- * set with sh_ms_set_discard. Without one it is left where it is: the game
- * never deletes a player's folder outright. 1 when it is gone (or was never
- * there), 0 when it could not be retired, -1 when no discard is set. */
-int  sh_ms_retire_sibling(const wchar_t *leaf);
-/* The discard's verb ("moved to the Recycle Bin"; "deleted" without one). */
-const char *sh_ms_discard_verb(void);
-
-#ifdef SH_MODSTORE_TESTING
-/* > 0: that many hard-link copies of the upgrade fail after the copy (tests). */
-extern int sh_ms_test_fail_unlink_copy;
-#endif
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };
 
@@ -546,14 +380,14 @@ int  sh_ms_copy_file(const wchar_t *from, const wchar_t *to);
  * Bin (SHFileOperationW, FOF_ALLOWUNDO, no UI, reparse points moved as
  * themselves), else deleted outright with links removed and never followed.
  * One "MODS: store:" line says which. Refuses anything outside the root and
- * the root itself. SH_MS_RECYCLED, SH_MS_DELETED, or 0. */
+ * the root itself. An emptied place folder goes with its record entry.
+ * SH_MS_RECYCLED, SH_MS_DELETED, or 0. */
 int  sh_ms_remove_folder(const char *folder);
 
-/* Uninstall's removal: `folder` (absolute) must be a direct child of the
- * store root that exists; it goes as sh_ms_remove_folder's does.
- * SH_MS_RECYCLED; SH_MS_DELETED with why the bin could not take it in
- * `cause`; else 0 with the first cause. The record's aliases are the caller's
- * (sh_ms_alias_forget) and the build cache follows at the next sync. */
+/* Uninstall's removal: `folder` (absolute) must be a mod folder of the store
+ * that exists; it goes as sh_ms_remove_folder's does. SH_MS_RECYCLED;
+ * SH_MS_DELETED with why the bin could not take it in `cause`; else 0 with
+ * the first cause. */
 int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
 
 #if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
@@ -561,17 +395,5 @@ int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
  * as when the shell refuses. */
 void sh_ms_recycle_refuse_for_test(int refuse);
 #endif
-
-/* The retired recycle bin. Retires every entry of removed-mods\ (the store
- * root's sibling) through the discard (sh_ms_set_discard), then removes the
- * empty folder and the record's "removed" section, under the store lock. One
- * "MODS: removed-mods: <name> deleted" line per entry ("moved to the Recycle
- * Bin" with the store tool's discard) and, when anything was there, the
- * summary "MODS: removed-mods: N folder(s) deleted; the bin is retired", each
- * to the backend log and to `line` when given. Idempotent: a later run finds
- * nothing. The store tool runs it. Returns the entries removed, or -1 when one
- * could not be removed (it is tried again at the next run). */
-typedef void (*sh_ms_sweep_line_fn)(void *context, const char *line);
-int  sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context);
 
 #endif /* SNAPMAP_PLUS_MODSTORE_H */
