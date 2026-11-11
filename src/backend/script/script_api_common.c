@@ -709,8 +709,8 @@ static int build_args(const sh_script_earg *args, int n, eng_arg *a)
         switch (args[i].type) {
         case 'i': a[i].type = 'i'; a[i].value = (uint64_t)(uint32_t)args[i].i; break;
         case 'f': { uint32_t bits; memcpy(&bits, &args[i].f, 4); a[i].type = 'f'; a[i].value = bits; break; }
-        case 'v': a[i].type = 'v'; memcpy(&a[i].value, args[i].v, 3 * sizeof(float)); break;
-        case 's': case '1': a[i].type = args[i].type; a[i].value = (uint64_t)(uintptr_t)args[i].s; break;
+        case 'v': case 'a': a[i].type = args[i].type; memcpy(&a[i].value, args[i].v, 3 * sizeof(float)); break;
+        case 's': case '1': case '2': a[i].type = args[i].type; a[i].value = (uint64_t)(uintptr_t)args[i].s; break;
         case 'd': a[i].type = 'd'; a[i].value = (uint64_t)(uintptr_t)args[i].p; break;
         case '4': a[i].type = '4'; a[i].value = 0; break;
         case 'e': {

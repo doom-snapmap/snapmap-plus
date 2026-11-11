@@ -31,12 +31,20 @@ extern "C" {
  * them each tick (script_handles.h). */
 typedef enum sh_script_event_kind {
     SH_SCRIPT_EV_NONE = 0,
-    SH_SCRIPT_EV_DAMAGE,    /* self took `amount`; other = attacker, third = inflictor; text = damage decl, text2 = location */
-    SH_SCRIPT_EV_DEATH,     /* self died; other = attacker (0 when none), third = inflictor */
+    SH_SCRIPT_EV_DAMAGE,    /* self took `amount`; other = attacker, third = inflictor; text = damage decl, text2 = location,
+                               vec = direction (SH_SCRIPT_EVF_VEC) */
+    SH_SCRIPT_EV_DEATH,     /* self died; other = attacker (0 when none), third = inflictor; text = damage decl */
     SH_SCRIPT_EV_ANIM,      /* self's animation reached `ae_notify "<text>"` */
     SH_SCRIPT_EV_INPUT,     /* Script node self was activated by other; text = the node's name */
+    SH_SCRIPT_EV_PAIN,      /* self's pain reaction started; other = attacker of its last hit, text = the reaction
+                               (PAIN_FALTER ...), text2 = that hit's damage decl */
+    SH_SCRIPT_EV_PROJECTILE,/* self launched projectile other; text = the projectile decl, vec = origin then
+                               direction (SH_SCRIPT_EVF_VEC) */
     SH_SCRIPT_EV_KINDS
 } sh_script_event_kind;
+
+/* sh_script_event.flags */
+#define SH_SCRIPT_EVF_VEC 0x0001u   /* vec holds a position (and, for a projectile, a direction) */
 
 typedef struct sh_script_event {
     uint32_t seq;                       /* order of arrival in this mod's queue, from 1 per map */
@@ -44,6 +52,7 @@ typedef struct sh_script_event {
     uint16_t flags;                     /* hook-defined, 0 by default */
     sh_script_handle self, other, third;
     float amount;
+    float vec[6];                       /* damage: direction; projectile: origin, direction */
     char text[SH_SCRIPT_EVENT_TEXT];
     char text2[SH_SCRIPT_EVENT_TEXT];
 } sh_script_event;

@@ -1618,6 +1618,64 @@ Not built yet: the combat calls (`fire`, `hitscan`, `radius_damage`,
 `tests/modscript_test.c` the builder's checks, the static pass, the serving
 index (scripts and the Script node row), the archives and the fixture mods.
 
+### Mod scripts: combat calls and the events of damage, death, pain and animation
+
+`script_api_combat.{c,h}` adds the combat calls; the hooks that deliver what
+happens to a mod's entities are in `script_hooks.c` (below). Every decl a call
+names is the mod's own (`sh_script_check_name`), looked up by type; a name the
+mod does not have is refused with one plain sentence. An attacker is one of the
+mod's own entities; without one the damage comes from the world entity, as a
+trigger's does.
+
+- **Calls.** `damage(e, damage, [attacker], [from])` and `e:damage(...)` (the
+  entity's own `damage` event: decl, direction angles, activator);
+  `hitscan(from, dir, damage, [range], [attacker])` (the game trace, then the
+  damage event on what it hits; answers `{pos, normal, entity}` or nil);
+  `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the
+  decl's own radius, which queues the deferred radius damage the game applies
+  that frame); `explode(pos, damage, [effect], [attacker])` (radius damage and
+  an effect entity); `fx(e, condition)` / `fx_stop(e, condition)`
+  (`ae_startFX_Networked` / `ae_stopFX_Networked`: a condition of the entity's
+  own fx decl, started on every machine); `fx(effect, pos, [dir])`,
+  `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
+  through `spawn` and its caps, removed by `fx_stop`); `sound(e, sound,
+  [channel])` (`startSoundShader`); `e:tag(joint)` (the joint's world position
+  and forward direction from the base dispatcher's getJoint events);
+  `e:pain()` (the pain reaction an idAI2 is in, idAI2 `+0x5060`, nil once the
+  engine's pain state clears it); `ai:fire(projectile, joint, target)`
+  (`ae_launchProjectileAtTarget` run at once with no animation; answers the
+  projectile, caught by the launch hook; a position target is reached by
+  steering); `ai:can_see_from(other, joint)`; `p:steer(target, [speed])`
+  (`setLinearVelocity`, at the projectile's speed unless one is given) and
+  `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
+  a projectile one of the mod's entities launched.
+- **Events.** `on.damage(name, fn(self, hit))` with `hit.amount` (what the
+  engine applied), `hit.attacker`, `hit.inflictor`, `hit.damage` (the decl),
+  `hit.location` (the damage zone of the first hit) and `hit.direction`;
+  `on.death(name, fn(self, hit))` once per entity; `on.pain(name, fn(self,
+  reaction, damage, attacker))` when the engine starts a pain reaction
+  (`PAIN_FALTER`, `PAIN_STAGGER`, ...), with the decl and attacker of the
+  entity's last hit; `on.anim(name, notify, fn(self))` for an md6 row
+  `ae_notify "<notify>"`; `on.frame_event(name, command, fn(self, args))` for a
+  row `ae_notify "<command>:<a>:<b>"` (args `{a, b}`, numbers as numbers);
+  `on.projectile(name, fn(self, p, decl, origin, dir))` for every projectile
+  the entity launches.
+- **Hooks.** Six detours, resolved at boot from `script_sigs.c` and
+  `script_combat_sigs.c` (both checked on both executables by
+  `tests/script_sigs_test.c` and `tests/script_combat_sigs_test.c`), committed
+  with the frame hook at the first Play with scripts and never unhooked: the
+  OnDamage dispatcher (every entity class's damage, with the applied amount),
+  idAI2 Damage_Apply (a per-thread context so OnDamage can read the damage
+  record: decl `+0x628`, direction `+0x634`, zone per hit `+0x1920`), idAI2
+  Killed, SetPainReaction, the OnAnimNotify dispatcher and idProjectile Launch.
+  Each calls the engine's function and posts one record to the owning mod's
+  queue; they may run on job threads and run no Lua. The combat module keeps
+  what the hooks saw (each entity's last hit, the deaths reported, the
+  projectiles each mod's entities launched) for the calls and the pain event;
+  the Play gate clears it.
+- **Tests.** `tests/script_api_combat_test.c` runs every call, refusal and
+  event against a fake engine.
+
 ### Mod scripts: the engine side
 
 `src/backend/script/script_hooks.c` connects mod scripts to the engine; the

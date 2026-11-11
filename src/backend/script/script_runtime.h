@@ -178,8 +178,15 @@ int sh_script_started(void);
  * engine hooks with handles from the handle table:
  *   SH_SCRIPT_EV_DAMAGE  self, other = attacker, third = inflictor, amount, text = damage decl, text2 = location
  *   SH_SCRIPT_EV_DEATH   self, other = attacker, third = inflictor, text = damage decl
- *   SH_SCRIPT_EV_ANIM    self, text = the ae_notify string
+ *   SH_SCRIPT_EV_ANIM    self, text = the ae_notify string; on.anim handlers get it whole, and a text
+ *                        "<command>:<a>:<b>" also reaches on.frame_event(name, command, fn(self, args))
+ *                        with args = { a, b } (a piece that reads as a number is a number)
  *   SH_SCRIPT_EV_INPUT   self = the Script node, other = activator, text = the node's name
+ *   SH_SCRIPT_EV_PAIN    self, other = attacker, text = the pain reaction, text2 = damage decl:
+ *                        on.pain(name, fn(self, reaction, damage, attacker))
+ *   SH_SCRIPT_EV_PROJECTILE self, other = the projectile, text = its decl, vec = origin and direction:
+ *                        on.projectile(name, fn(self, p, decl, origin, dir))
+ * A damage record's vec is the hit direction (hit.direction).
  * A record for an entity the mod's scripts do not drive is dropped at
  * delivery. Spawns and removals are the handle table's (sh_script_handles_sweep).
  * Names, notify strings and node names are at most SH_SCRIPT_EVENT_TEXT - 1
@@ -194,6 +201,9 @@ int sh_script_started(void);
 #define SH_SCRIPT_BIND_DAMAGE 0x08u
 #define SH_SCRIPT_BIND_DEATH  0x10u
 #define SH_SCRIPT_BIND_ANIM   0x20u
+#define SH_SCRIPT_BIND_PAIN   0x40u
+#define SH_SCRIPT_BIND_PROJECTILE 0x80u
+#define SH_SCRIPT_BIND_FRAME  0x100u
 int sh_script_binds(const char *full_name, char *salt_out, size_t cap, unsigned *kinds);
 
 /* 1 when `handle` is an entity of a running mod (placed from its entityDefs
