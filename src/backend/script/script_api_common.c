@@ -505,7 +505,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
 
 /* The first API_SIG_COUNT are required; the difficulty is optional. */
 enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRACE, API_SIG_COUNT,
-       API_SIG_DIFFICULTY = API_SIG_COUNT };
+       API_SIG_DIFFICULTY = API_SIG_COUNT, API_SIG_TAG_FIND, API_SIG_TAG_WORLD, API_SIG_ALL };
 
 /* idGameLocal */
 #define GAME_TIME_SLOT      0x220u
@@ -736,6 +736,38 @@ static int e_place(void *ent, const float *origin, const float *axis)
         update(ent);
         ok = 1;
     } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
+/* md6Def tags: the demon's animator (+0x3DB0), its model decl (+0xE90) and
+ * that decl's prop list (+0x210), whose "_info" prop holds the tags; the
+ * row's parent joint is a short at +0x1C (-1: no such tag). Both renderers. */
+#define ENT_ANIMATOR    0x3DB0u
+#define ANIMATOR_MODEL  0xE90u
+#define MODEL_PROPS     0x210u
+#define TAG_ROW_JOINT   0x1Cu
+typedef const uint8_t *(*tag_find_fn)(const void *props, const char *prop, const char *tag);
+typedef uint64_t (*tag_world_fn)(void *animator, int mode, const void *row, float *pos, float *axis);
+static tag_find_fn  g_tag_find;
+static tag_world_fn g_tag_world;
+
+static int e_tag(void *ent, const char *name, float pos[3], float axis[9])
+{
+    float p[3], m[9];
+    int ok = -1;
+    if (!g_tag_find || !g_tag_world || !ent || !name) return -1;
+    if (e_kind(ent) != SH_SCRIPT_KIND_AI) return 0;
+    __try {
+        uint8_t *animator = *(uint8_t * const *)((const uint8_t *)ent + ENT_ANIMATOR);
+        const uint8_t *model = animator ? *(const uint8_t * const *)(animator + ANIMATOR_MODEL) : NULL;
+        const uint8_t *row = model ? g_tag_find(model + MODEL_PROPS, "_info", name) : NULL;
+        if (!row || *(const int16_t *)(row + TAG_ROW_JOINT) == -1) ok = 0;
+        else ok = (g_tag_world(animator, 1, row, p, m) & 0xFF) ? 1 : -1;
+    } __except (av_only(GetExceptionCode())) { ok = -1; }
+    if (ok == 1) {
+        memcpy(pos, p, sizeof p);
+        if (axis) memcpy(axis, m, sizeof m);
+    }
     return ok;
 }
 
@@ -1054,9 +1086,9 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty
+        e_difficulty, e_tag
     };
-    sig_result own[API_SIG_COUNT + 1], lookup;
+    sig_result own[API_SIG_ALL], lookup;
     int i;
     if (!module_base) return 0;
     g_base = module_base;
@@ -1089,6 +1121,13 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
         g_difficulty = (difficulty_fn)own[API_SIG_DIFFICULTY].addr;
     else
         api_log("Mod scripts: the game's difficulty was not found in this executable, so difficulty() answers nil.");
+    if (sig_resolve_one(module_base, &SH_SCRIPT_API_SIGNATURES[API_SIG_TAG_FIND], &own[API_SIG_TAG_FIND]) == SIG_OK &&
+        sig_resolve_one(module_base, &SH_SCRIPT_API_SIGNATURES[API_SIG_TAG_WORLD], &own[API_SIG_TAG_WORLD]) == SIG_OK) {
+        g_tag_find = (tag_find_fn)own[API_SIG_TAG_FIND].addr;
+        g_tag_world = (tag_world_fn)own[API_SIG_TAG_WORLD].addr;
+    } else
+        api_log("Mod scripts: the game's md6Def tag lookup was not found in this executable, so calls that take a "
+                "tag name find joints only.");
     g_lookup = (void *)lookup.addr;
     /* spawning: the idTarget_Spawn create and finish calls and the decl registry */
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");

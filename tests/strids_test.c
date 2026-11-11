@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include "../src/backend/strids.h"
+#include "../src/backend/process_heap_scope.h"
 #include "../src/backend/hook.h"
 #include "../src/backend/modserve.h"
 
@@ -174,9 +175,30 @@ static unsigned int fake_hash(const char *s)
     return h;
 }
 
+/* The engine's heap selection (process_heap_scope.h): a stack of heap ids at
+ * +0x44 and its depth at +0xC4. The map's heap (7) is selected unless a
+ * scope pushed the process heap (0); g_push_ignored plays a push from the
+ * wrong thread, which the engine ignores. */
+static unsigned char g_heap_self[0x100];
+static int g_push_ignored;
+static int g_insert_heap = -2;   /* the heap selected at the last append */
+static int heap_depth(void) { return *(int *)(g_heap_self + 0xC4); }
+static int heap_top(void) { return heap_depth() ? *(int *)(g_heap_self + 0x44 + (heap_depth() - 1) * 4) : 7; }
+static void *fake_heap_get(void) { return g_heap_self; }
+static void fake_heap_push(void *self, int heap)
+{
+    int d = *(int *)((unsigned char *)self + 0xC4);
+    if (g_push_ignored) return;
+    *(int *)((unsigned char *)self + 0x44 + d * 4) = heap;
+    *(int *)((unsigned char *)self + 0xC4) = d + 1;
+}
+static void fake_heap_pop(void *self) { *(int *)((unsigned char *)self + 0xC4) -= 1; }
+static const sh_process_heap_api g_heap_api = { fake_heap_get, fake_heap_push, fake_heap_pop };
+
 static int fake_insert(void *table_desc, void *record32)
 {
     (void)table_desc;
+    g_insert_heap = heap_top();
     if (g_insert_refused) return -1;
     CHECK(g_dictionary.count < g_dictionary.capacity);
     if (g_dictionary.count >= g_dictionary.capacity) return -1;
@@ -724,6 +746,23 @@ static void test_sort_hook_recovery(void)
     CHECK(strstr(g_log, "STRINGS: injected ") != NULL && strstr(g_log, "(bundles 2, baked ") != NULL);
     CHECK(rearm_strings() == 1);
     CHECK(count_key("hook_recovery_key") == 1);
+    /* The engine rebuilds its table (a language load as the editor or a map
+     * starts) and sorts it: a mod's names are back before that sort orders
+     * it, so nothing parsed after the rebuild misses them. */
+    g_dictionary.count = 0;
+    g_log[0] = '\0';
+    invoke_sort_hook();
+    CHECK(count_key("hook_recovery_key") == 1 && count_key("boot_name") == 1);
+    CHECK(strstr(g_log, "the game rebuilt its string table") != NULL);
+    for (unsigned int i = 1; i < g_dictionary.count; i++)
+        CHECK(*(unsigned int *)g_records[i-1] <= *(unsigned int *)g_records[i]);
+    /* where the process heap cannot be selected, the next main-thread pass re-adds them */
+    g_dictionary.count = 0;
+    g_push_ignored = 1;
+    invoke_sort_hook();
+    CHECK(count_key("boot_name") == 0);
+    g_push_ignored = 0;
+    CHECK(sh_strids_refresh_pending() == 1 && count_key("boot_name") == 1);
     /* After it, a published index asks for one refresh, which rearms once. */
     {
         static const fake_bundle later[] = {
@@ -749,6 +788,32 @@ static void test_sort_hook_recovery(void)
     CHECK(g_hook_prepares == prepares);
 }
 
+
+/* A runtime pass grows the game's table in the process heap, never in the
+ * map's heap the game frees with the map, and puts the map's heap back; a
+ * thread where the process heap cannot be selected runs no pass and keeps
+ * the refresh for the next one. */
+static void test_runtime_pass_heap(void)
+{
+    CHECK(user_doc("{\"heap_key\":\"in the process heap\"}"));
+    g_insert_heap = -2;
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("heap_key") == 1 && g_insert_heap == 0);
+    CHECK(heap_depth() == 0 && heap_top() == 7);
+    CHECK(user_doc("{\"heap_key\":\"in the process heap\",\"later_key\":\"next pass\"}"));
+    g_push_ignored = 1;
+    g_insert_heap = -2;
+    g_log[0] = 0;
+    CHECK(rearm_strings() == 0);
+    CHECK(count_key("later_key") == 0 && g_insert_heap == -2);
+    CHECK(strstr(g_log, "runtime refresh waits") != NULL);
+    g_push_ignored = 0;
+    CHECK(rearm_strings() == 1);   /* the next pass on the main thread */
+    CHECK(count_key("later_key") == 1 && g_insert_heap == 0);
+    sh_strids_set_process_heap(NULL);
+    CHECK(rearm_strings() == 0);
+    sh_strids_set_process_heap(&g_heap_api);
+}
 
 int main(void)
 {
@@ -805,6 +870,7 @@ int main(void)
     CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\"}"));
     run_inject();
     sh_strids_test_set_sort((void *)fake_sort);
+    sh_strids_set_process_heap(&g_heap_api);
     CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\",\"runtime_key\":\"First value\"}"));
     CHECK(rearm_strings() == 1);
     CHECK(count_key("runtime_key") == 1 && !strcmp(value_for("runtime_key"), "First value"));
@@ -827,6 +893,7 @@ int main(void)
     g_insert_refused = 0;
     CHECK(rearm_strings() == 1);
     CHECK(count_key("append_refusal") == 1);
+    test_runtime_pass_heap();
     CHECK(user_doc("{}"));
     CHECK(rearm_strings() == 1);
     test_bundle_layer();

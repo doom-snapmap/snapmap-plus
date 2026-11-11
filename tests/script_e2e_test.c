@@ -520,7 +520,7 @@ static int ba_park(void *e) { if (!((bent *)e)->parked) b_cat("park;"); ((bent *
 static void *ba_enemy(void *e) { (void)e; return g_b_enemy ? b_find(g_b_enemy) : NULL; }
 static int ba_awareness(void *ai, void *tgt) { (void)ai; (void)tgt; return SH_AI_AWARE_CONFIRMED; }
 static int ba_move_status(void *e) { (void)e; return 0; }
-static int ba_trigger(void *e) { (void)e; return -1; }
+static int ba_trigger(void *e, int hand) { (void)e; (void)hand; return -1; }
 static int ba_path(void *ai, const float goal[3], int key, float *len) { (void)ai; (void)goal; (void)key; *len = 0; return 0; }
 static uint32_t ba_frame(void) { return (uint32_t)g_ms; }
 static int ba_eye(void *e, float out[3]) { b_origin(e, out); out[2] += 64; return 1; }

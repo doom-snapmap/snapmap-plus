@@ -19,6 +19,7 @@
 #include "config_json.h"
 #include "modserve.h"   /* sh_modserve_each_bundle_extra: the bundle string layer */
 #include "strkeys.h"    /* string edits: keys the game or the product defines (DECISIONS 9) */
+#include "process_heap_scope.h"   /* a runtime pass grows the table in the process heap */
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
  *   48 89 5C 24 18        mov [rsp+0x18],rbx        (5)
@@ -818,15 +819,52 @@ static long inject_and_resort_once(void)
     return n;
 }
 
-/* Fallback sort detour. Installation normally injects first; later and
- * recursive sorts pass through without adding rows.
+static const sh_process_heap_api *g_heap_api;
+
+/* The engine sorts its table when it builds it: at load and whenever it
+ * rebuilds it (a language load as the editor or a map starts), and the
+ * rebuild drops every row this injector added. Re-adding them only at the
+ * next pass left a window in which decls parsed and Toybox rows were read
+ * without a mod's names ("Attempted to get unknown string ID"). So a later
+ * top-level sort the engine makes re-adds them before it orders the table,
+ * in the process heap where the table lives (when that cannot be selected on
+ * this thread, the next main-thread pass does it). */
+static void reinject_in_sort(void **arr, uint32_t *count)
+{
+    sh_process_heap_scope heap;
+    if (!hook_is_installed((void *)g_sort_orig) || !g_table_desc || !g_insert || !g_hash || !g_idstr_ctor) return;
+    if (InterlockedCompareExchange(&g_refresh_busy, 1, 0)) return;   /* our own pass is sorting */
+    if (!g_heap_api || !sh_process_heap_enter(g_heap_api, &heap)) {
+        InterlockedExchange(&g_refresh_busy, 0);
+        sh_strids_request_refresh();
+        return;
+    }
+    __try {
+        __try { (void)do_inject(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; }
+        __try {
+            uint32_t live = *(uint32_t *)((uint8_t *)g_table_desc + 8);
+            void *live_arr = *(void **)g_table_desc;
+            if (live_arr) *arr = live_arr;
+            if (live) *count = live;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* keep the engine's arguments */ }
+    } __finally {
+        if (!sh_process_heap_leave(&heap)) backend_log("STRINGS: the game's heap selection could not be restored");
+        InterlockedExchange(&g_refresh_busy, 0);
+    }
+}
+
+/* Sort detour. Installation normally injects first; a later top-level sort
+ * re-adds this injector's rows (reinject_in_sort); recursive sorts pass
+ * through.
  */
 static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
 {
     if (g_sort_orig == NULL) return;   /* defensive: never happens once installed */
 
     LONG depth = InterlockedIncrement(&g_in_sort);
-    if (depth == 1 && InterlockedCompareExchange(&g_injected, 1, 0) == 0) {
+    if (depth == 1 && InterlockedCompareExchange(&g_injected, 0, 0) != 0 && ctx == g_table_desc)
+        reinject_in_sort(&arr, &count);
+    else if (depth == 1 && InterlockedCompareExchange(&g_injected, 1, 0) == 0) {
         /* If this top-level sort wins the latch, append now and let this
          * native sort order the enlarged table. Do not start a nested resort.
          */
@@ -921,13 +959,31 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
     return 1;
 }
 
+void sh_strids_set_process_heap(const sh_process_heap_api *api)
+{
+    g_heap_api = api;
+}
+
 int sh_strids_rearm(void)
 {
     char summary[128], line[192];
     int ok;
+    sh_process_heap_scope heap;
     if (!g_sort_orig || !hook_is_installed((void *)g_sort_orig) ||
         !g_table_desc || !g_insert || !g_hash || !g_idstr_ctor ||
         InterlockedCompareExchange(&g_refresh_busy, 1, 0)) return 0;
+    /* An append that grows the table allocates its new array from the main
+     * thread's current heap (the list's resize asks for heap -1). During a
+     * map or the editor that is the map's own heap, which the game frees when
+     * the map goes, leaving the game's string lookups reading freed memory.
+     * The game's table lives in the process heap; so does every runtime pass,
+     * or none runs. */
+    if (!g_heap_api || !sh_process_heap_enter(g_heap_api, &heap)) {
+        InterlockedExchange(&g_refresh_busy, 0);
+        sh_strids_request_refresh();   /* the next pass on the main thread runs it */
+        backend_log("STRINGS: runtime refresh waits: the game's process heap could not be selected on this thread");
+        return 0;
+    }
     g_pass_failed = 0;
     __try {
         __try { do_inject(); }
@@ -937,6 +993,10 @@ int sh_strids_rearm(void)
         if (g_table_changed) resort_table();
         ok = !g_pass_failed;
     } __finally {
+        if (!sh_process_heap_leave(&heap)) {
+            ok = 0;
+            backend_log("STRINGS: runtime refresh could not restore the game's heap selection");
+        }
         InterlockedExchange(&g_refresh_busy, 0);
     }
     layer_summary(summary, sizeof summary);

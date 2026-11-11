@@ -232,9 +232,22 @@ static int f_trace(const float a[3], const float b[3], uint32_t ignore, sh_scrip
 
 static int f_time(int *ms) { *ms = g_ms; return 1; }
 
+/* md6Def tags: every demon's model has "laser_source_1", 20 inches ahead of
+ * its origin and 80 up, pointing straight up (its own axis, unlike the
+ * parent joint's); "muzzle" is a joint, not a tag. */
+static int f_tag(void *ent, const char *name, float pos[3], float axis[9])
+{
+    fent *e = (fent *)ent;
+    static const float up[9] = { 0, 0, 1, 0, 1, 0, -1, 0, 0 };
+    if (e->kind != SH_SCRIPT_KIND_AI || strcmp(name, "laser_source_1")) return 0;
+    pos[0] = e->pos[0] + 20; pos[1] = e->pos[1]; pos[2] = e->pos[2] + 80;
+    if (axis) memcpy(axis, up, sizeof up);
+    return 1;
+}
+
 static const sh_script_engine k_engine = {
     f_resolve, f_spawn_id, f_slots, f_slot_spawn_id, f_kind, f_origin, f_axis, f_place, f_def_name, f_event,
-    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time
+    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time, NULL, NULL, f_tag
 };
 
 /* the combat engine */
@@ -476,6 +489,31 @@ static void test_tag_pain_sight(void)
     CHECK(has(log_now(), "painnow\tPAIN_FALTER\tPAIN_STAGGER"));
 }
 
+/* A tag is its own point and axis; every call that takes a joint takes one. */
+static void test_tags(void)
+{
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local o, f = self:tag('laser_source_1')\n"
+        "  print('tag', o.x, o.z, f.x, f.z)\n"
+        "  local j, g = self:tag('muzzle')\n"
+        "  print('joint', j.x, j.z, math.floor(g.y * 100 + 0.5))\n"
+        "  print('prop', ent(3):tag('laser_source_1'))\n"
+        "  print('sight', self:can_see_from(ent(2), 'laser_source_1'))\n"
+        "  local p = self:fire('rocket', 'laser_source_1', ent(2))\n"
+        "  local v = p:velocity()\n"
+        "  print('from tag', p:pos().x, p:pos().z, math.floor(v.y + 0.5), math.floor(v.z + 0.5))\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "tag\t20.0\t80.0\t0.0\t1.0"));
+    CHECK(has(g_log, "joint\t10.0\t50.0\t100"));      /* the joint form still answers */
+    CHECK(has(g_log, "prop\tnil"));                       /* a prop is no demon: no tags, no such joint */
+    CHECK(has(g_log, "sight\ttrue"));
+    /* launched by the engine's event, then placed on the tag and sent to the player at (0, 200, 0) */
+    CHECK(has(g_events, "ae_launchProjectileAtTarget@mods/" SALT "/ai/brute(NULL,d:mods/" SALT "/rocket,'laser_source_1','ent2',0);"));
+    CHECK(has(g_log, "from tag\t20.0\t80.0\t555\t-222"));
+}
+
 static void test_fire(void)
 {
     run("api = 1\n"
@@ -546,7 +584,7 @@ static void test_refusals(void)
     refused("api = 1\non.spawn('ai/brute', function(self)\n  local p = self:fire('rocket', 'muzzle', ent(2))\n  p:steer(ent(2), -5)\nend)\n",
             "4", "\"steer\" needs a speed above 0, got -5");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:tag(5)\nend)\n",
-            "3", "\"tag\" needs the joint name as text, got a number");
+            "3", "\"tag\" needs the tag or joint name as text, got a number");
     refused("api = 1\non.frame_event('ai/brute', 'a:b', function(self, args) end)\n",
             "2", "\"on.frame_event\" needs a command name without \":\" or spaces");
 }
@@ -750,6 +788,7 @@ int main(void)
     test_hitscan_radius();
     test_effects_sound();
     test_tag_pain_sight();
+    test_tags();
     test_fire();
     test_refusals();
     test_hook_records();

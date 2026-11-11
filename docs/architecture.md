@@ -1399,7 +1399,18 @@ apply in this machine's editor and a map-declared mod's in the maps that use it;
 strings (each editor pass and map activation). When two bundles give one key
 different text the first stands and one `STRINGS: REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
-(bundles B, baked D)`. The player's own document of earlier releases,
+(bundles B, baked D)`. A runtime pass (a rescan, an install, an editor or
+map pass) runs on the main thread inside the game's process heap: an append
+that grows the table allocates its new array from the current heap (the
+list's resize asks for heap -1, VK 0x140280ED0), and the editor's or a map's
+own heap is freed with it, after which the game's string lookups (VK
+0x140281360) read freed memory. A thread where the process heap cannot be
+selected runs no pass and leaves the refresh pending.
+The engine rebuilds its table when it loads a language (as the editor or a
+map starts) and sorts it through the hooked sort; that drops the injected
+rows, so every later top-level sort the engine makes re-adds them (in the
+process heap) before it orders the table, and decls parsed and Toybox rows
+read after a rebuild find a mod's names. The player's own document of earlier releases,
 `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
 tool's loose step moves its keys into the mod My overrides (see [Migration of
 the retired overrides folder](#migration-of-the-retired-overrides-folder)), so
@@ -1981,13 +1992,31 @@ is touched, and a removed demon answers nil.
   aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
   entity's position, given again when it has moved 32 inches; the engine's
   move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
-  (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
+  (`setFocus`), `face(pos, [{ travel = inches }])` (a zero-length
+  `ssaction_MoveToPoint` with align; its tolerance is the arrival radius of
+  the engine's turn-clip query, which for a turn in place rejects a clip whose
+  root ends farther than 1.0-1.3 x max(1, radius) from its start, flag
+  `ANIMQUERY_REJECT_OVERSHOOT`, VK 0x141AD9E90 / GL 0x141AF40E0; the default
+  0.1 picks clips that turn in place, `travel` admits a demon's own stepping
+  turns; with `travel` an entity target turns toward where it stands),
   `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
-  `setPlayerEnemy` closest), `trigger(on)` (`pull/releaseTriggerRight`),
-  `equip(index)` (`equipInventoryItemByIndex`), `laser(tag, on)`
+  `setPlayerEnemy` closest), `trigger(on, [hand])`
+  (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
+  name, as the entityDef's startingInventory names it, or its index;
+  `equipInventoryItemByIndex`; answers `"left"` or `"right"`), `laser(tag, on)`
   (`setLaserState`), `laser_state(tag, on)` (`ae_setLaserState`),
   `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
   (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
+- **The weapon's hand.** The game fires a demon's weapons from its fire
+  control (VK 0x1404456E0), which the AI think (VK 0x1403E0D40) runs only
+  while the hand the aibehavior decl names in `weaponSlot` (vtable +0xB20,
+  decl +0x134, the right hand unless set) holds a weapon (vtable +0xB28); it
+  then fires the weapon of each hand. `equip` puts an item in the hand its
+  own decl's `equipSlot` names (+0x1B4). `trigger`, `trigger_pulled([hand])`
+  and `weapon_ready([hand])` act on the weapon in the hand named, else in
+  the weapon hand, read through the engine's own per-hand read (VK
+  0x14074AB30 / GL 0x14074A440); `equip` by name reads the inventory (vtable
+  +0x660, item VK 0x140EEDC50 / GL 0x140EED200).
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
@@ -2089,13 +2118,19 @@ trigger's does.
   own fx decl, started on every machine); `fx(effect, pos, [dir])`,
   `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
   through `spawn` and its caps, removed by `fx_stop`); `sound(e, sound,
-  [channel])` (`startSoundShader`); `e:tag(joint)` (the joint's world position
-  and forward direction from the base dispatcher's getJoint events);
+  [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
+  a named point with a parent joint and its own offset and rotation, found
+  as the engine finds aim and focus tags: the model decl's `_info` prop row,
+  VK 0x1416CE1E0 / GL 0x1416CEE90, placed in world space by VK 0x1415EFAA0 /
+  GL 0x1415F0CA0; otherwise a joint, from the base dispatcher's getJoint
+  events; the position and forward direction);
   `e:pain()` (the pain reaction an idAI2 is in, idAI2 `+0x5060`, nil once the
-  engine's pain state clears it); `ai:fire(projectile, joint, target)`
+  engine's pain state clears it); `ai:fire(projectile, tag or joint, target)`
   (`ae_launchProjectileAtTarget` run at once with no animation; answers the
   projectile, caught by the launch hook; a position target is reached by
-  steering); `ai:can_see_from(other, joint)`; `p:steer(target, [speed])`
+  steering; from a tag the projectile is placed on the tag and steered at the
+  target); `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
+  name that is not a tag, since the engine aims only at tags; `p:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
   `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
   a projectile one of the mod's entities launched. A script may hold `p` for
@@ -2113,7 +2148,15 @@ trigger's does.
   `ae_notify "<notify>"`; `on.frame_event(name, command, fn(self, args))` for a
   row `ae_notify "<command>:<a>:<b>"` (args `{a, b}`, numbers as numbers);
   `on.projectile(name, fn(self, p, decl, origin, dir))` for every projectile
-  the entity launches.
+  the entity launches. Every launch the engine makes for a demon passes
+  through `idProjectile::Launch` (VK 0x140F3A380) with the demon as owner:
+  its weapons (fire control VK 0x1404456E0, `TestFireWeapon` VK 0x1403E01E0,
+  `InitForFire` VK 0x140F18530 taking the demon as the fire owner,
+  `FinishLaunchProjectile` VK 0x140EE3730), the `ae_launchProjectile*` rows
+  and `ai:fire`. A weapon fires only while the demon's weapon hand
+  (`weaponSlot`) holds one, so `equip` writes one line to the mod's log when
+  it puts a weapon in the other hand: until the decl names that hand, the
+  demon launches nothing and `on.projectile` has nothing to report.
 - **Hooks.** Six detours, resolved at boot from `script_sigs.c` and
   `script_combat_sigs.c` (both checked on both executables by
   `tests/script_sigs_test.c` and `tests/script_combat_sigs_test.c`; one not

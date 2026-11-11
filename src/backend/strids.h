@@ -33,9 +33,17 @@
 int sh_strids_install(void *sort_body_fn, int sort_status_ok,
                       void *table_lea_fn, void *insert_fn, void *hash_fn, void *idstr_ctor_fn);
 
-/* Re-read the layers and re-sort on the engine main thread. Returns 0 if
- * reading, native mutation, or sorting failed. */
+/* Re-read the layers and re-sort on the engine main thread, inside the
+ * game's process heap (the table's own heap: an append that grows it
+ * allocates from the current heap, and a map's heap is freed with the map).
+ * Returns 0 if the process heap could not be selected (the refresh stays
+ * pending), or reading, native mutation, or sorting failed. */
 int sh_strids_rearm(void);
+
+/* The engine's heap-scope functions (process_heap_scope.h), bound by the
+ * serving engine at install; a rearm without them does not run. */
+struct sh_process_heap_api;
+void sh_strids_set_process_heap(const struct sh_process_heap_api *api);
 
 /* Any thread: a serving index was published (boot, rescan, install, migrate),
  * so the bundle layer may have changed. Only marks the refresh pending. */
