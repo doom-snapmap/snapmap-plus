@@ -157,6 +157,8 @@ static const char *ms_label(const ms_bundle *b)
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
 #define MS_PATH_MAX 1024                  /* a UTF-8 store path (ms_wide) */
+/* A cause naming a damaged builder block: %s is the file, or "its file list". */
+#define MS_DAMAGED "The part of mod.json Snapmap+ writes is damaged (%s). Press Refresh to build the mod again."
 
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
@@ -579,9 +581,9 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     double size = -1;
     int need_first = x->nneeds, need_count = 0;
     ms_file *f;
-    if (!ms_jenter(c, '{')) { ms_fail(b, "a files[] entry is not an object"); return; }
+    if (!ms_jenter(c, '{')) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
     while (ms_jnext(c, '}')) {
-        if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, "malformed files[] entry"); return; }
+        if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
         if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, 511);
         else if (!strcmp(key, "sha256")) blob = ms_jstr(x, v, ve, 64);
         else if (pointer && !strcmp(key, "source")) stock = ms_jstr(x, v, ve, 511);
@@ -633,12 +635,12 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
     }
     if (pointer && !stock) stock = "";
-    if (!path || !ms_valid_rel(path)) { ms_fail(b, "files[] path '%s' is not a plain assets/ path", path ? path : "?"); return; }
+    if (!path || !ms_valid_rel(path)) { ms_fail(b, MS_DAMAGED, path ? path : "its file list"); return; }
     if (stock) {
         if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
         size = 0;
     } else if (size < 0 || size > (double)SH_MODSERVE_MAX_FILE || size != (double)(uint64_t)size) {
-        ms_fail(b, "'%s' has no valid size", path);
+        ms_fail(b, MS_DAMAGED, path);
         return;
     }
     {
@@ -647,7 +649,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         ms_lower(derived);
         if (request) {
             ms_lower(request);
-            if (strcmp(request, derived)) { ms_fail(b, "'%s' declares request '%s'", path, request); return; }
+            if (strcmp(request, derived)) { ms_fail(b, MS_DAMAGED, path); return; }
         }
         request = derived;
     }
@@ -669,7 +671,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         const char *rest = request + 16, *slash = strchr(rest, '/');
         size_t n = strlen(rest);
         if (!slash || slash == rest || n < 6 || strcmp(rest + n - 5, ".decl") || (size_t)(slash - rest) + 6 > n) {
-            ms_fail(b, "'%s' is not generated/decls/<type>/<name>.decl", request);
+            ms_fail(b, MS_DAMAGED, request);
             return;
         }
         {
@@ -678,7 +680,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             if (pname) {
                 ms_lower(pname);
                 if (strcmp(pname, derived_name)) {
-                    ms_fail(b, "'%s' provides '%s', not the name its path gives", request, pname);
+                    ms_fail(b, MS_DAMAGED, request);
                     return;
                 }
             }
@@ -686,7 +688,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
         if (!ptype) ptype = ms_strndup(x, rest, (size_t)(slash - rest));
         else if (_strnicmp(ptype, rest, (size_t)(slash - rest)) || ptype[slash - rest]) {
-            ms_fail(b, "'%s' provides type '%s', not its folder", request, ptype);
+            ms_fail(b, MS_DAMAGED, request);
             return;
         }
         f->is_decl = 1;
@@ -893,9 +895,13 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     if (!text) {
         char pkg[MS_PATH_MAX];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
-        if (ms_file_size(path) >= 0) ms_fail(b, "mod.json unreadable or over %u MiB", SH_MODSERVE_MAX_JSON >> 20);
-        else if (ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
-        else ms_fail(b, "no mod.json");
+        if (ms_file_size(path) >= 0)
+            ms_fail(b, "mod.json could not be read (it may be open in another program, or larger than %u MB). Close it "
+                    "and press Refresh.", SH_MODSERVE_MAX_JSON >> 20);
+        else if (ms_file_size(pkg) >= 0)
+            ms_fail(b, SH_MB_SHAPE "its descriptor is package.json, which this version does not read. Run the Snapmap+ "
+                    "installer again to convert it.");
+        else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
         return;
     }
     if (!sh_json_validate_ex((const char *)text, len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT) {
@@ -904,8 +910,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
         if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
         if (last[0]) ms_fail(b, "not built: %s", last);
-        else ms_fail(b, "mod.json is not a valid JSON object (%s at byte %zu)", err.reason ? err.reason : "not an object",
-                     err.offset);
+        else ms_fail(b, "mod.json has a mistake near character %zu (%s). Fix it and press Refresh.", err.offset,
+                     err.reason ? err.reason : "it is not an object");
         HeapFree(GetProcessHeap(), 0, text);
         return;
     }
@@ -952,7 +958,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 else if (!strcmp(key, "cause")) {
                     /* Any cause stops the build serving, even one too long to show whole. */
                     state_cause = ms_jstr(x, v, ve, 4 * SH_MB_CAUSE_MAX);
-                    if (!state_cause) state_cause = (char *)"its mod.json records a cause that cannot be read";
+                    if (!state_cause)
+                        state_cause = (char *)"The part of mod.json Snapmap+ writes is damaged. Press Refresh to build "
+                                              "the mod again.";
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
                 else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
@@ -975,10 +983,14 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
      * sh_mb_descriptor_state_why words it. */
     if (block_v && (!block_object || format != (double)SH_MB_FORMAT))
-        ms_fail(b, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
-    else if (retired) ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read", retired);
+        ms_fail(b, SH_MB_SHAPE "it was built by an earlier version of Snapmap+. Run the Snapmap+ installer again to "
+                "convert it.");
+    else if (retired)
+        ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read. Remove \"%s\" from mod.json and "
+                "press Refresh.", retired, retired);
     else if (block_v && (!salt || !sh_salt_valid(salt, strlen(salt))))
-        ms_fail(b, SH_MB_SHAPE "its \"" SH_MB_BLOCK_KEY "\" block has no valid salt");
+        ms_fail(b, "The part of mod.json Snapmap+ writes is damaged. Delete the \"" SH_MB_BLOCK_KEY "\" block and press "
+                "Refresh to build the mod again.");
     else if (!block_v) {
         /* A fresh folder: the store's scan salts and builds a root folder; a
          * map's place holds only builds the product received. */
@@ -1021,7 +1033,10 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
                 ms_json one = { a.p, ms_jskip(a.p, a.e) };
                 a.p = one.e;
-                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u files", SH_MODSERVE_MAX_FILES); break; }
+                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) {
+                    ms_fail(b, "This mod has more than %u files; split it into two mods.", SH_MODSERVE_MAX_FILES);
+                    break;
+                }
                 ms_parse_file(x, b, &one, shadows, nshadows, pass);
             }
         }
@@ -1045,7 +1060,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         if (f->stock) continue;   /* resolved against the installed game at install, read when served */
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
-        if (got < 0) ms_fail(b, "'%s' is missing", f->request);
+        if (got < 0)
+            ms_fail(b, "assets/%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
+                    f->request);
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
@@ -1183,7 +1200,7 @@ static void ms_one_per_area(ms_index *x)
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
             if (b->place)
-                ms_fail(b, SH_MB_SHAPE "another folder of this map has the same mod: %s", o->folder);
+                ms_fail(b, "This map's folder holds this mod twice (also in %s). Delete one of the two folders.", o->folder);
             else
                 ms_fail(b, "it is a copy of mods\\%s (the same salt %s); Refresh in the Mods tab makes it a new mod",
                         o->folder, b->id);
@@ -1934,7 +1951,8 @@ static int ms_resolve(ms_index *x)
             for (k = i + 1; k < j; ++k)
                 if (x->files[keys[k].file].bundle == x->files[keys[k - 1].file].bundle) {
                     ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                    ms_fail(b, "'%s' is listed twice", keys[k].key);
+                    ms_fail(b, "The part of mod.json Snapmap+ writes is damaged (a file is listed twice). Press Refresh "
+                            "to build the mod again.");
                     b->admitted = 0;
                     ms_log("bundle '%s' skipped: %s", b->folder, b->cause);
                 }
@@ -2516,11 +2534,11 @@ static void ms_scope_place(char *out, size_t cap, int *own)
 #define MS_WHY_SURFACE   9   /* not declared: a surface (the game's own bytes), served outside Play */
 #define MS_WHY_REGISTRY  10  /* a registry the product generates from the serving bundles' intent */
 static const char *const g_why_text[] = {
-    "the only provider", "identical bytes", "its needs resolve against the declared bundles",
-    "most declared providers carry these bytes", "the first of the map's rows", "composed from the declared providers",
-    "not declared; offered for the Toybox", "editor-time content, served in every map", "no declared bundle provides it",
+    "the only provider", "identical bytes", "its needs resolve against the mods the map uses",
+    "most of the mods the map uses carry these bytes", "the first of the map's rows", "composed from the mods the map uses",
+    "not declared; offered for the Toybox", "editor-time content, served in every map", "no mod the map uses provides it",
     "not declared; a surface (the game's own bytes)",
-    "generated by the product from the serving bundles (a registry)",
+    "generated by Snapmap+ from the mods in use (a registry)",
 };
 
 /* Editor-time content: a bundle whose shadows include the editor's own decls
@@ -3622,7 +3640,7 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
                 at += (size_t)w;
             }
             _snprintf_s(tail, sizeof tail, _TRUNCATE, "%s%s%s%s", mt ? "; with the entries of: " : "", merged,
-                        at ? "; not served: " : "", others);
+                        at ? "; not used: " : "", others);
             if (p >= 0) {
                 const ms_bundle *b = &x->bundles[x->files[p].bundle];
                 const char *text = why < 0 ? "map scope is off" :
@@ -3635,7 +3653,7 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
                 else
                     _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s%s", f->request, who, text, tail);
             } else
-                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not served: %s", f->request,
+                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not used: %s", f->request,
                             g_why_text[MS_WHY_NONE], others);
         }
         fn(context, line);
@@ -3643,19 +3661,19 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
         shown++;
     }
     if (multi > shown) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several bundles provide with different bytes",
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several mods provide with different bytes",
                     multi - shown);
         fn(context, line);
         lines++;
     }
     if (same) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several bundles carry with the same bytes; one copy "
-                    "serves when any provider may", same);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several mods carry with the same bytes; one copy "
+                    "is used when any of them may be", same);
         fn(context, line);
         lines++;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "serving: %d path(s) from bundles the open map declares, %d from undeclared bundles (Toybox names, "
+                "serving: %d path(s) from mods the open map uses, %d from mods it does not use (Toybox names, "
                 "surfaces, editor-time content), %d left to the game", declared, editor, game);
     fn(context, line);
     return lines + 1;
@@ -3680,8 +3698,8 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: mod %s: %d builds installed (the root folder and maps' places); "
-                        "each map serves the build it declares, and with no map open the root folder's", ms_label(b), builds);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s is installed %d times: your own copy and the copies downloaded maps "
+                        "brought. Each map uses its own copy.", ms_label(b), builds);
             fn(context, line);
             lines++;
         }
@@ -3691,7 +3709,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
                     si.requirements ? ", requirements" : "");
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
-        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its salt");
+        else if (si.inert) strcpy_s(state, sizeof state, "not used here: this map uses its own copy of this mod");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
                         "the rest only in maps that declare it", si.editor_path);
@@ -4895,7 +4913,8 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     bundle = x->bundles[f->bundle].id;
     InterlockedExchange(&f->withdrawn, 1);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: %s '%s' not loaded: %s", bundle, type ? type : "decl", name ? name : request, why ? why : "");
+    ms_console("%s: assets/%s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+               ms_label(&x->bundles[f->bundle]), f->request, why ? why : "the game could not use it");
     return 1;
 }
 
@@ -5954,16 +5973,18 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
-                    ms_console("%s: animWeb '%s' not applied: it names model '%s', which SnapMap cannot load; the "
-                               "game's own animWeb is used", s->bundle_id, s->name, model);
+                    ms_console("%s: its animation file assets/%s names the model %s, which SnapMap cannot load, so "
+                               "the game's own animation is used. Name a model SnapMap has, then press Refresh.",
+                               ms_label(&x->bundles[f->bundle]), f->request, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: animWeb '%s' not loaded: it names model '%s', which SnapMap cannot load "
-                               "(campaign-only or missing)", s->bundle_id, s->name, model);
+                    ms_console("%s: assets/%s was not loaded because it names the model %s, which SnapMap cannot "
+                               "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
+                               ms_label(&x->bundles[f->bundle]), f->request, model);
                 }
                 continue;
             }
@@ -6059,8 +6080,12 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             InterlockedExchange(&f->withdrawn, 1);
             ms_log("%s: %s '%s' (%s) NOT READY: the engine refused its parse%s%s; withdrawn, not loaded again", phase,
                    s->type, s->name, s->bundle_id, why[0] ? ": " : "", why);
-            ms_console("%s: %s '%s' not loaded: the game refused it%s%s", s->bundle_id, s->type, s->name,
-                       why[0] ? ": " : "", why);
+            {
+                char *nl = strpbrk(why, "\r\n");
+                if (nl) *nl = 0;
+                ms_console("%s: the game could not read assets/%s%s%s. Fix the file and press Refresh.",
+                           ms_label(&x->bundles[f->bundle]), f->request, why[0] ? ": " : "", why);
+            }
         } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);
             s->ready = 1;
@@ -6918,7 +6943,8 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
         const char *n;
         for (i = 0; !b && x && i < x->nbundles; ++i)   /* another build of the salt names it */
             if (x->bundles[i].id && !strcmp(x->bundles[i].id, salt) && x->bundles[i].name && x->bundles[i].name[0]) b = &x->bundles[i];
-        n = b && b->name && b->name[0] ? b->name : row->name[0] ? row->name : salt;
+        /* Never the salt: a player who only plays maps never sees one. */
+        n = b && b->name && b->name[0] ? b->name : row->name[0] ? row->name : "";
         strncpy_s(title, sizeof title, n, _TRUNCATE);
     }
     if (declared < 0) {
@@ -6926,7 +6952,8 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
             if (skipped >= 0)
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
-            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
+            else if (title[0]) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
+            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses a mod that is not installed.", what);
         }
         return SH_MODSERVE_ROW_MISSING;
     }
@@ -7723,4 +7750,23 @@ int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *
     if (salt && salt_cap) strncpy_s(salt, salt_cap, x->bundles[found].id, _TRUNCATE);
     if (label && label_cap) strncpy_s(label, label_cap, ms_label(&x->bundles[found]), _TRUNCATE);
     return 1;
+}
+
+/* A bundle as a status line names it: "<name> (mods\<folder>)". */
+int sh_modserve_bundle_label(const char *bundle_hash, char *out, size_t cap)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
+        if (b->name && b->name[0] && b->folder && b->folder[0])
+            _snprintf_s(out, cap, _TRUNCATE, "%s (mods\\%s)", b->name, b->folder);
+        else _snprintf_s(out, cap, _TRUNCATE, "mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
+        return 1;
+    }
+    strncpy_s(out, cap, "a mod", _TRUNCATE);
+    return 0;
 }

@@ -211,8 +211,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   name a mod no longer carries stays registered until the game restarts, since the engine cannot
   unregister a name, but nothing serves it. Two builds
   of one mod played in one session each get their own animations, models, images and decls at
-  their map load, with no restart. `sh_mods held` lists what the game was served under each name
-  this session and which of those names it holds for the session. A shadow a newly installed mod adds for a decl, model or image the game already holds is
+  their map load, with no restart. A shadow a newly installed mod adds for a decl, model or image the game already holds is
   treated like a changed one and takes effect the same way. Toybox rows a rescan adds or changes
   keep what their editor previews name (a private md6Def and its poses, an `fxInfo` FX, an
   attachment's model) for the rest of the session, as rows present at startup do, so Play and the

@@ -943,6 +943,9 @@ typedef void (*sh_modserve_bundle_fn)(void *context, const char *id,
                                       const char *hash, int admitted, const char *cause,
                                       int files, int place);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
+/* The bundle at `bundle_hash` as a status line names it: its name and folder
+ * ("<name> (mods\<folder>)"), else its folder. 1 found, 0 ("a mod") not. */
+int sh_modserve_bundle_label(const char *bundle_hash, char *out, size_t cap);
 
 /* Visit every admitted bundle whose mod.json author block carries keys the
  * product does not read itself (the manifest's "extra", such as "strings" and

@@ -1306,8 +1306,8 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
          * its parse empty (its nodes freed first, nothing rebuilt): the
          * game's own web stays. */
         if (!_stricmp(type, "animWeb") && sh_modserve_animweb_check(request, &g_ops, model, sizeof model) == 1) {
-            _snprintf_s(why, sizeof why, _TRUNCATE, "it names model '%s', which SnapMap cannot load; the game's own "
-                        "animWeb is kept", model);
+            _snprintf_s(why, sizeof why, _TRUNCATE, "it names the model %s, which SnapMap cannot load, so the game's "
+                        "own animation is used", model);
             (void)sh_modserve_withdraw(request, type, name, why);
             r->skipped++;
             return 1;
@@ -1329,8 +1329,14 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
                        bundle_id, state, refused ? ": " : "", refused ? g_refusal : "");
                 /* The bundle's bytes stop being served and the engine parses
                  * its own again, so the decl is whole. */
-                _snprintf_s(why, sizeof why, _TRUNCATE, "the game refused its bytes%s%s; the game's own decl is restored",
-                            refused ? ": " : "", refused ? g_refusal : "");
+                {
+                    char first[ERROR_TEXT_MAX], *nl;
+                    strcpy_s(first, sizeof first, refused ? g_refusal : "");
+                    nl = strpbrk(first, "\r\n");
+                    if (nl) *nl = 0;
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "the game could not read it%s%s, so the game's own version "
+                                "is used", first[0] ? ": " : "", first);
+                }
                 if (sh_modserve_withdraw(request, type, name, why)) {
                     me_load_in_place(d, "restore", type, name);
                     r->restored++;
@@ -1898,7 +1904,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
     if (rows) InterlockedExchange(&g_palette_wanted, 1);
     if (!d.changed && !d.gone && !d.added_decls && !d.pending && !d.changed_scripts) {
-        strncpy_s(r.note, sizeof r.note, "no served file changed", _TRUNCATE);
+        strncpy_s(r.note, sizeof r.note, "nothing changed", _TRUNCATE);
         me_rlog("refresh: no served file changed");
         if (out) *out = r;
         return 0;
@@ -1921,19 +1927,21 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     if (!why && r.palette < 0 && g_bound) {
         /* The editor refused the palette rebuild for now: retried when it is free. */
         me_refresh_watch();
-        me_refresh_note(&r, "the editor palette is rebuilt when the editor is free");
+        me_refresh_note(&r, "the Toybox updates when you let go of the object you are holding");
     }
     if (why && r.pending) {
         if (play == 1 && g_bound) me_refresh_watch();
         me_rlog("refresh: deferred: %d change(s) wait for the return to the editor or the next map load (%s)", r.pending,
                 why);
-        me_refresh_note(&r, "%d change(s) apply on returning to the editor or at the next map load (%s)", r.pending, why);
+        if (!g_bound) me_refresh_note(&r, "Snapmap+ cannot load mod changes on this copy of DOOM");
+        else me_refresh_note(&r, "%d changes apply when you return to the editor", r.pending);
     } else {
-        me_refresh_note(&r, "%d decl(s) re-parsed, %d model(s) and image(s) reloaded%s", r.reparsed, r.reloaded,
-                        r.failed ? " (some failed; see the log)" : "");
-        if (r.registered) me_refresh_note(&r, "%d new decl(s) registered", r.registered);
-        if (r.palette > 0) me_refresh_note(&r, "editor palette rebuilt (%d row change(s))", rows);
-        if (d.pending) me_refresh_note(&r, "%d wait for the bundles' requirements (next editor pass)", d.pending);
+        if (r.reparsed + r.reloaded || r.failed)
+            me_refresh_note(&r, "%d changed files are in use now%s", r.reparsed + r.reloaded,
+                            r.failed ? " (some could not be loaded; the log names them)" : "");
+        if (r.registered) me_refresh_note(&r, "%d new files are in use now", r.registered);
+        if (r.palette > 0) me_refresh_note(&r, "the Toybox shows the changed objects");
+        if (d.pending) me_refresh_note(&r, "%d changes apply when a map that uses the mod opens", d.pending);
     }
     if (later)
         me_rlog("refresh: %d new decl name(s) of mods no map has used this session register when a map that uses the "
@@ -1942,25 +1950,24 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         me_rlog("refresh: needs a map reload: %d changed movie(s), %d changed anim(s) (reloaded in place at the next map "
                 "load)%s", d.changed_map, d.changed_anims,
                 r.palette < 0 ? ", and the editor rows until the palette is rebuilt" : "");
-        me_refresh_note(&r, "%d change(s) need a map reload%s", r.needs_map_reload,
-                        r.palette < 0 ? " ('sh_mods palette rebuild' applies the editor rows)" : "");
+        me_refresh_note(&r, "%d changes apply the next time you open the map%s", r.needs_map_reload,
+                        r.palette < 0 ? "; the Toybox updates after you reopen the editor" : "");
     }
     if (r.needs_restart) {
         me_rlog("refresh: needs a restart: %d changed file(s) nothing reloads in this process%s%s", d.changed_restart,
                 d.restart_first[0] ? ": " : "", d.restart_first);
-        me_refresh_note(&r, "%d change(s) need a restart", r.needs_restart);
+        me_refresh_note(&r, "%d changes (sound banks or skeletons) apply after you restart DOOM", r.needs_restart);
     }
     if (d.changed_scripts) {
         /* A Play reads its scripts when it starts (script_source.c): a change
          * during Play runs at the next one, with no restart. */
         me_rlog("refresh: %d changed mod script file(s) run from the next Play", d.changed_scripts);
-        me_refresh_note(&r, "%d script change(s) run from the next Play", d.changed_scripts);
+        me_refresh_note(&r, "%d script changes run from the next Play", d.changed_scripts);
     }
     if (d.gone_names) {
         me_rlog("refresh: %d removed decl name(s) stay registered until the game restarts; nothing serves them",
                 d.gone_names);
-        me_refresh_note(&r, "%d removed name(s) stay registered until the game restarts; nothing serves them",
-                        d.gone_names);
+        me_refresh_note(&r, "%d removed files stay loaded until you restart DOOM", d.gone_names);
     }
     me_rlog("refresh: summary: %d changed, %d new, %d gone, %d inheriting decl(s) follow their parents; %d "
             "re-parsed, %d reloaded, %d registered, palette %s, %d need a map reload, %d need a restart, %d removed "
@@ -2358,6 +2365,7 @@ static int me_count_mod_rows(void *palette, int *rows)
     return mods;
 }
 
+#ifdef SH_DIAG   /* developer diagnostics: the diagnostic build only */
 /* 'sh_mods palette check': where each palette row's owned strings live. The
  * Play build sorts the palette in place and copies every row through the
  * row copy constructor, so a row string outside the process heap is read
@@ -2478,6 +2486,7 @@ static void me_palette_check(void)
     sh_printf("sh_mods %s\n", line);
     me_log("%s", line);
 }
+#endif
 
 void sh_modserve_palette_after_build(void *palette)
 {
@@ -2738,14 +2747,18 @@ static void me_print_bundle(void *context, const char *id, const char *hash, int
                             int files, int place)
 {
     (void)context;
-    sh_printf("  %s%s  %.12s  %s%s%s  %d files\n", place ? "in a map's place: " : "", id, hash,
-              admitted ? "active" : "SKIPPED", admitted ? "" : ": ", admitted ? "" : cause, files);
+    char name[300];
+    (void)id;
+    sh_modserve_bundle_label(hash, name, sizeof name);
+    sh_printf("  %s%s: %s%s  %d files\n", name, place ? " (a map's own copy)" : "",
+              admitted ? "in use" : "cannot be used: ", admitted ? "" : cause, files);
 }
 
 static void me_print_line(void *context, const char *line) { (void)context; sh_printf("  %s\n", line); }
 
 static int me_rebuild_main(void *context) { (void)context; return modserve_palette_rebuild_requested(); }
 
+#ifdef SH_DIAG   /* developer diagnostics: the diagnostic build only */
 /* `sh_mods held [filter]`: the census of level-4 resources whose names the
  * product served this session, by type (an open question: whether
  * a mod skeleton ever reaches level 4), then the ledger itself. */
@@ -2834,6 +2847,7 @@ static void me_print_held(const char *filter)
     }
     me_held_free(&held);
 }
+#endif
 
 int sh_modserve_command(void *args, const char *verb)
 {
@@ -2842,13 +2856,13 @@ int sh_modserve_command(void *args, const char *verb)
     if (!verb || !_stricmp(verb, "status")) {
         sh_modserve_stats st;
         sh_modserve_get_stats(&st);
-        sh_printf("sh_mods: %d of %d bundles active, %d files (%d paths), %d shadows, %d conflicts (%d composed); index %.1f ms\n",
-                  st.bundles_admitted, st.bundles_seen, st.files, st.keys, st.shadows, st.conflicts,
-                  st.conflicts_composed, st.build_ms);
-        sh_printf("sh_mods: served %lu opens (%lu cache hits, %lu read failures), %lu probe answers; "
-                  "editor rows %d ready, %d failed; registry %s, probe %s\n",
-                  st.opens_served, st.cache_hits, st.open_failures, st.probe_claims, st.editor_rows_registered,
-                  st.editor_rows_failed, g_bound ? "bound" : "unavailable", g_probe_orig ? "hooked" : "not hooked");
+        sh_printf("sh_mods: %d of %d mods in use, %d files; %d game files replaced; %d files several mods provide\n",
+                  st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts);
+        me_log("status: %d paths, %d composed; index %.1f ms; served %lu opens (%lu cache hits, %lu read failures), "
+               "%lu probe answers; editor rows %d ready, %d failed; registry %s, probe %s",
+               st.keys, st.conflicts_composed, st.build_ms, st.opens_served, st.cache_hits, st.open_failures,
+               st.probe_claims, st.editor_rows_registered, st.editor_rows_failed, g_bound ? "bound" : "unavailable",
+               g_probe_orig ? "hooked" : "not hooked");
         sh_modserve_each_bundle(me_print_bundle, NULL);
         (void)sh_modserve_scope_report(me_print_line, NULL);
         (void)sh_modserve_requirements_report(me_print_line, NULL);
@@ -2864,17 +2878,19 @@ int sh_modserve_command(void *args, const char *verb)
         sh_modsound_print_status();
         return 1;
     }
+#ifdef SH_DIAG
     if (!_stricmp(verb, "held")) {
         me_print_held(arg);
         return 1;
     }
+#endif
     if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) {
         sh_modserve_refresh r;
         int n = sh_modserve_index_rescan();
         me_ensure_probe();
         if (me_on_main() == 1) (void)sh_companions_ensure("rescan");
-        sh_printf("sh_mods: rescan %s (%d bundles active)\n",
-                  n < 0 ? "refused" : "done", n < 0 ? 0 : n);
+        if (n < 0) sh_printf("sh_mods: the mods folder could not be read; try again.\n");
+        else sh_printf("sh_mods: mods folder read again: %d mods in use.\n", n);
         if (n >= 0) {
             g_refresh_echo = 1;
             (void)sh_modserve_refresh_after_rescan(&r);
@@ -2886,17 +2902,21 @@ int sh_modserve_command(void *args, const char *verb)
     if (!_stricmp(verb, "palette")) {
         sh_run_on_main_fn run = NULL;
         int result = 0;
+#ifdef SH_DIAG
         if (arg && !_stricmp(arg, "check")) { me_palette_check(); return 1; }
-        if (!arg || _stricmp(arg, "rebuild")) { sh_printf("usage: sh_mods palette rebuild | check\n"); return 1; }
+#endif
+        if (!arg || _stricmp(arg, "rebuild")) { sh_printf("usage: sh_mods palette rebuild\n"); return 1; }
         if (me_on_main() == 1) result = modserve_palette_rebuild_requested();
         else {
             sh_apply_engine_get_run_on_main(&run);
             if (!run || run(NULL, me_rebuild_main, NULL, 3000, &result) != 1) {
-                sh_printf("sh_mods: palette rebuild did not start on the main thread\n");
+                sh_printf("sh_mods: the Toybox could not be rebuilt now; try again.\n");
                 return 1;
             }
         }
-        sh_printf("sh_mods: palette rebuild %s (see the MODS: line in the log)\n", result ? "done" : "refused");
+        if (result) sh_printf("sh_mods: the Toybox was rebuilt.\n");
+        else sh_printf("sh_mods: the Toybox could not be rebuilt now (let go of the object you are holding and try "
+                       "again).\n");
         return 1;
     }
     return 0;

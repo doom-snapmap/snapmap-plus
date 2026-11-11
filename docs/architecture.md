@@ -737,7 +737,7 @@ These backend files share the work:
   engine the tree itself and the engine may still hold it.
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
-  decision and `sh_mods held`.
+  decision and `sh_mods held` (the diagnostic build, `build.ps1 -Diag`).
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
   carrier). A row is `{"mod":"<salt>@<build hash>","name","size",
@@ -2378,7 +2378,8 @@ longer than its old one; a row grown by the second sort kept a map-heap
 string, the return to the editor freed it, and the next Play's first sort
 read it (the review's A-D3 fault at DOOM+0x339c40, a row's clipModelName).
 The Timeline tile's sort detour (`tl_palette_sort`) runs every sort inside
-a verified process-heap scope; `sh_mods palette check` reports where each
+a verified process-heap scope; `sh_mods palette check` (the diagnostic build)
+reports where each
 row's strings live and how many sorts ran. What stays reported
 rather than applied: new names of a mod no map has used this session (they
 register when a map that names the mod loads), a changed movie (read at the
@@ -2415,7 +2416,7 @@ for its parent's change, not its own), keep the marks alone. At each map pass
 the ledger is also swept: a held name the provider served whose bytes differ
 from what the declared builds serve, which the marks left, is refreshed by its
 type's route (`MODS: map: ledger: ...`), and a held skeleton or other raw type
-is reported as a restart. `sh_mods held [filter]` prints the ledger (request,
+is reported as a restart. `sh_mods held [filter]` (the diagnostic build) prints the ledger (request,
 bundle, file identity, serves, whether and at which level the engine holds the
 name) and the census of level-4 names the product served, by type, ending with
 the count of mod skeletons held at level 4.

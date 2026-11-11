@@ -3055,9 +3055,12 @@ static void test_refusals(void)
     /* Never loaded: the two whose models SnapMap cannot load. */
     CHECK(!strstr(g_calls, "mods/dzpack00/med_station") && !strstr(g_calls, "mods/dzpack00/turret"));
     CHECK(g_rf_loads == 2);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/med_station' not loaded: it names model "
-                                 "'zion/objects/props_set/kiosks/wallhealthstation.md6', which SnapMap cannot load (campaign-only or missing)\n") != NULL);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/throws' not loaded: the game refused it: ") != NULL);
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: assets/generated/decls/animweb/mods/dzpack00/med_station.decl was "
+                                 "not loaded because it names the model zion/objects/props_set/kiosks/wallhealthstation.md6, "
+                                 "which SnapMap cannot load (it is campaign-only or missing). Name a model SnapMap has, then "
+                                 "press Refresh.\n") != NULL);
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: the game could not read assets/generated/decls/animweb/mods/dzpack00/"
+                                 "throws.decl: ") != NULL);
     CHECK(!strstr(g_console_seen, "mods/dzpack00/fine"));
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/med_station.decl", NULL));
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/throws.decl", NULL));
@@ -3081,7 +3084,9 @@ static void test_refusals(void)
     CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine",
                                "the game refused its bytes; the game's own decl is restored") == 1);
     CHECK(log_has("MODS: withdrawn: animWeb 'mods/dzpack00/fine' (dzpack00): the game refused its bytes"));
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: animWeb 'mods/dzpack00/fine' not loaded: the game refused its bytes") != NULL);
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: assets/generated/decls/animweb/mods/dzpack00/fine.decl was not "
+                                 "loaded: the game refused its bytes; the game's own decl is restored. Fix the file and press "
+                                 "Refresh in the Mods tab.") != NULL);
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/fine.decl", NULL));
     CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine", "again") == 0);
     sh_modserve_set_console(NULL);
@@ -3625,7 +3630,7 @@ static void test_scope(void)
     CHECK(strstr(g_report, "scope: rrows000 (1 name, 1 shadow, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not; its "
                            "requirements stay live because it adds Toybox rows\n") != NULL);
-    CHECK(strstr(g_report, "serving: 0 path(s) from bundles the open map declares, ") != NULL);
+    CHECK(strstr(g_report, "serving: 0 path(s) from mods the open map uses, ") != NULL);
 
     /* A map that declares nothing, in the editor: the same layers. */
     CHECK(sh_modserve_scope_set(NULL, 0, 1) == 0);
@@ -3801,8 +3806,8 @@ static void test_scope_providers(void)
     CHECK(strstr(g_report, "scope: breq0000 (0 names, 1 shadow, 0 surfaces, requirements): declared by the "
                            "open map (row 1): serves everything it carries\n") != NULL);
     CHECK(!strstr(g_report, "serving: " SC_COOP ": ") &&
-          strstr(g_report, "serving: 1 path(s) several bundles carry with the same bytes; one copy serves when any provider may\n"));
-    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no declared bundle provides it); not served: xone0000, "
+          strstr(g_report, "serving: 1 path(s) several mods carry with the same bytes; one copy is used when any of them may be\n"));
+    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no mod the map uses provides it); not used: xone0000, "
                            "ytwo0000\n") != NULL);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[1], "1"));
     g_report[0] = 0;
@@ -4018,8 +4023,8 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: mod Fork: 2 builds installed (the root folder and maps' places); each map serves the build "
-                           "it declares, and with no map open the root folder's\n") != NULL);
+    CHECK(strstr(g_report, "scope: Fork is installed 2 times: your own copy and the copies downloaded maps brought. "
+                           "Each map uses its own copy.\n") != NULL);
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): a build in maps\\Fork map; it serves only for that map\n") != NULL);
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
@@ -4039,10 +4044,10 @@ static void test_additive_same_key(void)
     CHECK(modserve_bundles_for_names(placed, 1, out, 4) == 1 && !strcmp(out[0], h1));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
-                           "another build of its salt\n") != NULL);
+    CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not used here: this map "
+                           "uses its own copy of this mod\n") != NULL);
     CHECK(strstr(g_report, "serving: " AD_THING ": Fork, declared (row 1): the only provider; not "
-                           "served: Fork\n") != NULL);
+                           "used: Fork\n") != NULL);
     /* The registration plan of the map's bundle names its own paths. */
     list[0] = h1;
     CHECK(sh_modserve_plan_bundles(list, 1, &plan, NULL) >= 2);
@@ -4477,13 +4482,14 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_index_build(root) == 3);
     CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of mods\\My doors (work) (the same salt kown0000); Refresh "
                   "in the Mods tab makes it a new mod"));
-    CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: " SH_MB_SHAPE "another folder of this map has the same mod: "
-                  "maps\\Doors\\Doors Pack"));
+    CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: This map's folder holds this mod twice (also in "
+                  "maps\\Doors\\Doors Pack). Delete one of the two folders."));
     CHECK(log_has("bundle 'format-one' skipped: " SH_MB_SHAPE "it was built by an earlier version of Snapmap+"));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_SHAPE "mod.json uses \"id\", which this version does not read"));
     CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_SHAPE "mod.json uses \"hud.schema\", which this version does not read"));
     CHECK(log_has("bundle 'package-only' skipped: " SH_MB_SHAPE "its descriptor is package.json, which this version does not read"));
-    CHECK(log_has("bundle 'bad-salt' skipped: " SH_MB_SHAPE "its \"snapmap-plus\" block has no valid salt"));
+    CHECK(log_has("bundle 'bad-salt' skipped: The part of mod.json Snapmap+ writes is damaged. Delete the \"snapmap-plus\" "
+                  "block and press Refresh to build the mod again."));
     CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
@@ -4654,9 +4660,9 @@ static void test_row_served(void)
     /* No folder of the salt: missing. */
     CHECK(sh_modserve_index_build(root) >= 0);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses localhel, which is not installed."));
+    CHECK(!strcmp(cause, "This map uses a mod that is not installed."));
     CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
-          !strcmp(cause, "This prefab uses localhel, which is not installed."));
+          !strcmp(cause, "This prefab uses a mod that is not installed."));
 
     /* The folder at the row's hash: served. */
     g_bundle_name = "Hell Guards";
