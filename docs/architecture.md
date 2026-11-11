@@ -809,17 +809,23 @@ These backend files share the work:
 - `modzip.c` is the product's ZIP form, shared by those exports and the mod
   store's build archives: the writer stores every entry (method 0) with its
   CRC-32 and a fixed 1980-01-01 time, so the same content is byte-identical;
-  the reader trusts no field of an archive: at open it checks the end record,
-  the directory's bounds and, for every entry, the method (stored or deflate
-  only), the encryption flag, ZIP64 size markers, a stored entry's equal
-  sizes, a local record and data lying before the directory, a name without
+  it writes ZIP64 records exactly where a value does not fit a classic field
+  (an entry of 4 GiB or more, an offset past 4 GiB, 65,535 entries or more),
+  so an archive has no size or file-count bound and one that fits is the
+  ordinary ZIP it was; the reader reads both and trusts no field of an
+  archive: at open it checks the end record, the ZIP64 locator and end record
+  when the classic fields point to them, the directory's bounds and, for every
+  entry, the method (stored or deflate only), the encryption flag, the ZIP64
+  extra field a marker needs (holding exactly the values the markers ask
+  for), a stored entry's equal sizes, a local record and data lying before the directory, a name without
   NUL that is safe (no absolute path, `..` step, backslash, colon or control
   character) and no two names that differ only in case; anything else
   refuses the whole archive in one sentence ending "Ask whoever shared it to
   export it again". A read bounds its allocation by the caller's limit and
   checks the CRC-32. It can stand over a plain folder (a prefab file and its
-  `mods\` beside it). At most 65535 entries and 4 GiB. `modzip_test` fuzzes
-  it with every truncation and one-byte change of an archive.
+  `mods\` beside it). `modzip_test` fuzzes it with every truncation and
+  one-byte change of an ordinary and of a ZIP64 archive, writes 70,000
+  entries, and (with `SH_ZIP_LARGE=1`) an archive past 4 GiB.
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
   inserts and strips it, and removes the serializer's comments so the file is
@@ -1466,7 +1472,14 @@ BKHD bank id rewritten to that stem's FNV-1, and rewrites every quoted
 texts to match; the rewritten bytes are written once under `mods\.served\`
 (a dot folder the scanners skip), keyed by their own hash
 (`banks\<stem>.<sha16>.bnk`, `files\<sha16>.<extension>`; no folder is named
-by a build), and served from there, with their own size and hash. A changed
+by a build), and served from there, with their own size and hash. Each
+rebuild of the index removes the files there that no build serves any more,
+unless another game instance serves the same mods folder: each instance holds
+the mark `Local\snapmap-plus-served-<16 hex>`, named for the mods folder as its
+store lock is (`store_lock.h`), so a game on another folder, or a test on its
+own, never holds the cleanup back. Playing a map with a place notes the time
+in the record of the folder the index serves from (`sh_ms_place_played(root,
+place)`), never through the store's default root. A changed
 bank is therefore a new bank to Wwise, two builds that carry one bank's bytes
 (the root and a map's place) share it and Wwise loads it once, and the ledger
 and the refresh see a new name. `sh_mods status` lists each bank and whether it was
@@ -1703,7 +1716,12 @@ feature.
   the one question the gate knows. The question then ends "These mods include
   scripts (N files). Scripts run only inside this map and cannot read or
   change your files. Download and install now?"; with the setting off the map
-  is not downloaded or played and the player reads `SH_MODUI_SCRIPTS_OFF`. A
+  is not downloaded or played and the player reads `SH_MODUI_SCRIPTS_OFF`.
+  The same check runs at every launch the gate decides (`pub_refuse_scripts`):
+  a map with a place whose serving builds carry scripts (the `served_scripts`
+  op reads each serving folder's `mod.json`, only while the setting is off)
+  is refused with the same sentence though it was downloaded while scripts
+  were on; the player's own maps have no place and are never refused. A
   rawmap or prefab ZIP import whose carried mods have scripts is refused with
   the same sentence while the setting is off and installs nothing
   (`modexport.c` me_install).
@@ -3869,7 +3887,7 @@ worker logs the counts.
 ### The mod store transport
 
 The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
-(`modzip.c`, method 0, no ZIP64) named by the build hash at
+(`modzip.c`, method 0, ZIP64 where a value needs it) named by the build hash at
 `/mods/build/<hash>`, holding the folder's `mod.json`, the whole file, and
 `assets/<request>` for every carried file its block lists. Stock pointers are
 never in it: their bytes are the player's own game. `modnet.c` speaks the
@@ -3897,8 +3915,8 @@ one-request upload before it serves it (the answer waits up to 15 minutes
 for that read). A part the store holds is never sent again: a failed part
 starts the upload again (up to four starts in one call) and the store's
 answer names what it holds, and a later publish resumes the same way. The
-only bound left is the archive form's: no ZIP64, so at most 65,535 entries
-and 4 GiB.
+store's per-address hourly limits (abuse protection, not a mod limit) count a
+publish in parts as one upload when it starts.
 
 Upload (`modsync_upload_builds`) takes the map's rows as `<salt>@<hash>`. Each
 build is found in the mods folder (a root folder at that hash first, else a
@@ -3909,16 +3927,20 @@ does not have". HEAD asks whether the store holds it; only when it does not is
 the archive written to a temporary file (`modsync_write_archive`: every file
 read and checked against the block, "<name>: <file> changed since the mod was
 built; open the Mods tab and Refresh" otherwise) and sent, in one request or
-in parts. A mod the archive form cannot hold is refused before anything is
-sent: "<name>: this mod is too large to publish (N MB in F files); a published
-mod's archive holds at most 4 GB and 65,535 files". Then one claim names every
-build, however many the map names.
+in parts. Then one claim names every build, however many the map names.
 
 Download (`modsync_fetch_build_for(row, place)`): when the root holds the
 row's salt at the row's hash, or the map's place holds it, nothing is
-fetched. Otherwise the archive is streamed to a temporary file (the hold
-prints "Downloading <mod> (i of n): x of y MB, p%." on the console every two
-seconds) and `modsync_install_archive` installs it: its `mod.json` must load and name the
+fetched. Otherwise the archive is streamed to a temporary file and
+`modsync_install_archive` installs it. While the hold downloads, every two
+seconds the game's own dialog (the question's) shows "Downloading <mod> (i of
+n): x of y MB, p%. Keep downloading? No cancels it and installs nothing
+more." and the console the same line; Yes keeps waiting, No sets the job's
+cancel flag, the download stops at its next chunk, its temporary file is
+deleted, no further mod is installed, and the map is not loaded ("The
+download was cancelled. The map was not loaded."). An install itself is
+atomic (staging folder, then one rename), so nothing is ever half installed.
+The archive's checks are: its `mod.json` must load and name the
 row's salt and build hash, every carried file must be an entry with the size
 and SHA-256 the block records, no other entry may be present, and every stock
 pointer must resolve against the installed game (`MODNET_E_GAME` otherwise).

@@ -325,11 +325,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
 - Publishing a map that uses mods uploads those mods to the mod store first, so other players can
   download them: one archive per build, sent only when the store does not hold it already, of any
   size: an archive larger than one request (95 MB) goes in parts, and a publish that was cut off
-  sends only the parts the store does not hold yet. A map may use any number of mods. The one bound
-  is the archive's own form: a mod over 4 GB or 65,535 files is refused before anything is sent
-  ("<name>: this mod is too large to publish (N MB in F files); a published mod's archive holds at
-  most 4 GB and 65,535 files"). A download streams to disk, of any size, and says how far it is on
-  the console every two seconds ("Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%."); it is
+  sends only the parts the store does not hold yet. A map may use any number of mods, and a mod may
+  have any number of files of any size (past 4 GB or 65,535 files the archive is ZIP64). A download
+  streams to disk, of any size, and shows how far it is in the game's own dialog every two seconds
+  ("Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%. Keep downloading? No cancels it and installs
+  nothing more."); No cancels it, nothing is installed half way, and the map is not loaded. It is
   unpacked into the map's own folder,
   `mods\maps\<map title>\<mod name>\`, and only after every file matches the map's record of the
   build. The first time, the game asks once (the `mods.upload_confirmed` setting records
@@ -385,6 +385,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   cannot read or change your files.". With "Play maps whose mods include scripts" turned off in the
   Mods tab, such a map is neither downloaded nor played: "This map's mods include scripts, which you
   turned off in the Mods tab; turn on "Play maps whose mods include scripts" there to play it." A
+  map that was downloaded with its scripts while the setting was on does not play either once it is
+  off, with the same sentence; your own maps always play. A
   rawmap or prefab ZIP whose mods include scripts is refused at import with the same sentence while
   the setting is off, and nothing is installed. Yes downloads only what you approve in the dialog,
   verified by hash, installs it beside what you have, and starts the map, with no word about
