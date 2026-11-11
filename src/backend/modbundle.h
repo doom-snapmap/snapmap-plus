@@ -399,18 +399,20 @@ int  sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part);
 /* ------------------------------------------------- the product record ---- */
 /* <mods_root>\snapmap-plus.json, the product's one file under mods\:
  *   {"format": 1, "claims": {...}, "links": {...}, "pending": {...},
- *    "migration": {...}, "cache": {"<tree hash>": "<bundle hash>"},
- *    "aliases": {"<bundle hash>": "<bundle hash>"}}
+ *    "places": {...}, "salts": {...}, ...}
  * Each section is owned by one module and read and written whole. Writes are
- * a read, a replace of that section and a write-through rename, under one
- * recursive lock (sh_mb_record_lock) that a caller may also hold around its
- * own read-modify-write. A file another program holds is waited for, up to a
- * second. A file that is not JSON is moved aside when a section is written,
- * logged with the aside file's name, and a new one started. A file that
- * cannot be read is never replaced. */
+ * a read, a replace of that section and a write-through rename, under the
+ * mods folder's named record lock (sh_mb_record_lock, modlock.h), shared with
+ * every other process on the folder, that a caller may also hold around its
+ * own read-modify-write (store lock first when it needs both). A file another
+ * program holds is waited for, up to a second. A file that is not JSON is
+ * moved aside when a section is written, logged with the aside file's name,
+ * and a new one started. A file that cannot be read is never replaced. */
 #define SH_MB_RECORD_FILE "snapmap-plus.json"
-void sh_mb_record_lock(void);
+/* Recursive per thread; sh_mb_record_unlock releases this thread's hold. */
+void sh_mb_record_lock(const char *mods_root);
 void sh_mb_record_unlock(void);
+
 /* 1 with the section's JSON text (malloc'd, compact), 0 when absent, -1 when
  * the record cannot be read (a "MODS: record:" line names the file when it
  * could not be opened or read; that section is then not written until a get

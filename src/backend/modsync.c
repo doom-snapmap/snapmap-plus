@@ -20,8 +20,8 @@
 
 /* ------------------------------------------------------------ lock ------ */
 
-/* The store lock lives in modstore.c (modstore_lock); these are its older
- * names, kept for the callers that already use them. */
+/* The store lock (modstore_lock, the mods folder's named lock) under the
+ * names the mod commands and publishing call. */
 void modsync_store_lock(void)
 {
     modstore_lock();

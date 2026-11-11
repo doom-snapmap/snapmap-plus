@@ -17,46 +17,69 @@
 #include "plain_reason.h"
 
 #include "modstore_internal.h"
+#include "modlock.h"
 /* ------------------------------------------------------------ lock ----- */
 
-/* The store lock: one critical section for every writer of mods\ (installs,
- * downloads, the migration, exports, claims). It is recursive on purpose: the
- * install and verification below take it themselves, and their callers (the
- * migration pass, a download) already hold it around a larger step. */
-static INIT_ONCE        g_ms_lock_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_ms_lock;
+/* The store lock: the named store lock of the mods folder (modlock.h), so
+ * every writer of mods\ in this process and in any other (a second game, the
+ * store tool) takes turns: installs, downloads, scans, builds, exports. It is
+ * recursive on purpose: the install and verification below take it
+ * themselves, and their callers (a download) already hold it around a larger
+ * step. The counts below are this process's. */
 static volatile LONG    g_ms_lock_waits;
-static volatile LONG    g_ms_lock_depth;   /* nested holds of the owner; read from any thread */
+static volatile LONG    g_ms_lock_depth;   /* nested holds of this process's owner; read from any thread */
 static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
 static volatile LONG    g_ms_lock_waiting; /* threads waiting for it now (the boot build yields to them) */
-
-static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
-{
-    (void)once; (void)p; (void)ctx;
-    InitializeCriticalSection(&g_ms_lock);
-    return TRUE;
-}
+static __declspec(thread) HANDLE t_ms_held;   /* the mutex this thread holds */
+static __declspec(thread) LONG   t_ms_depth;  /* this thread's nested holds */
 
 void modstore_lock(void)
 {
-    InitOnceExecuteOnce(&g_ms_lock_once, ms_lock_init, NULL, NULL);
-    if (!TryEnterCriticalSection(&g_ms_lock)) {
-        /* Held by another thread: wait for it rather than fail. The waiting
-         * count is raised before the wait count, so a holder that sees a new
-         * wait always finds the waiter and yields to it (ms_lock_yield). */
+    char root[MAX_PATH * 4];
+    HANDLE h;
+    DWORD w;
+    if (t_ms_depth > 0) {
+        t_ms_depth++;
+        InterlockedIncrement(&g_ms_lock_depth);
+        return;
+    }
+    if (!sh_ms_root(root, sizeof root)) root[0] = 0;
+    h = sh_modlock_open(SH_MODLOCK_STORE, root);
+    if (!h) {
+        /* Windows is out of handles: nothing in the store can be written safely. */
+        backend_log("MODS: store: the mods folder's lock could not be created; the store operation goes ahead unguarded");
+        t_ms_depth = 1;
+        InterlockedIncrement(&g_ms_lock_depth);
+        return;
+    }
+    w = WaitForSingleObject(h, 0);
+    if (w == WAIT_TIMEOUT) {
+        /* Held by another thread or process: wait for it rather than fail.
+         * The waiting count is raised before the wait count, so a holder that
+         * sees a new wait always finds the waiter and yields to it
+         * (ms_lock_yield). */
         InterlockedIncrement(&g_ms_lock_waiting);
         InterlockedIncrement(&g_ms_lock_waits);
         backend_log("MODS: store: waiting for another store operation to finish (an install, a download or a build)");
-        EnterCriticalSection(&g_ms_lock);
+        w = WaitForSingleObject(h, INFINITE);
         InterlockedDecrement(&g_ms_lock_waiting);
     }
+    if (w == WAIT_ABANDONED)
+        backend_log("MODS: store: another Snapmap+ process ended while it was changing the mods folder; continuing");
+    t_ms_held = h;
+    t_ms_depth = 1;
     InterlockedIncrement(&g_ms_lock_depth);
 }
 
 void modstore_unlock(void)
 {
+    if (t_ms_depth <= 0) return;
     if (InterlockedDecrement(&g_ms_lock_depth) == 0) InterlockedIncrement(&g_ms_lock_gen);
-    LeaveCriticalSection(&g_ms_lock);
+    if (--t_ms_depth == 0 && t_ms_held) {
+        HANDLE h = t_ms_held;
+        t_ms_held = NULL;
+        ReleaseMutex(h);
+    }
 }
 
 int modstore_lock_busy(unsigned *generation)
@@ -1796,7 +1819,7 @@ int sh_ms_place_dir(const sh_ms_place *place, char *out, size_t cap)
     if (!place || !out || !cap || !sh_ms_root(rootu, sizeof rootu) || !ms_pl_key(place, key, sizeof key)) return 0;
     if (!place->title || !sh_ms_title_segment(place->title, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "map");
     if (!(ek = ms_pl_escape(key))) return 0;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     entry = doc ? mpj_get(doc, ek) : NULL;
     if (entry && entry->type == MPJ_OBJ) {
@@ -1886,7 +1909,7 @@ int sh_ms_place_note(const sh_ms_place *place, const char *dir_in)
     et = ms_pl_escape(place->title ? place->title : "");
     ef = ms_pl_escape(dir);
     if (!ek || !et || !ef) goto out;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     entry = doc ? mpj_new(MPJ_OBJ) : NULL;
     if (entry) {
@@ -1912,7 +1935,7 @@ int sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size
     if (dir && dir_cap) dir[0] = 0;
     if (title && title_cap) title[0] = 0;
     if (!key || !key[0] || !sh_ms_root(rootu, sizeof rootu) || !(ek = ms_pl_escape(key))) return 0;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
     for (i = 0; doc && i < doc->n && !found; i++) {
@@ -1945,7 +1968,7 @@ int sh_ms_place_title(const char *folder, char *title, size_t cap)
         if (_strnicmp(name, SH_MS_PLACES "\\", pl + 1) || !name[pl + 1] || strchr(name + pl + 1, '\\')) return 0;
         strcpy_s(place, sizeof place, name);
     }
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
     for (i = 0; doc && i < doc->n && !found; i++) {
@@ -1977,7 +2000,7 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
     }
     free(copy);
     if (!sh_ms_root(rootu, sizeof rootu)) return;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     for (i = 0; doc && i < doc->n; i++) {
         char f[SH_MS_NAME_MAX + 1], full[MAX_PATH * 4];

@@ -48,9 +48,12 @@
 #include "modbundle.h"
 #include "modsalt.h"
 
-/* The store lock (recursive). modsync_store_lock and modsync_store_unlock
- * (modsync.h) are the same lock under their older names. A thread that finds
- * it held logs one "MODS: store: waiting" line and waits. */
+/* The store lock (recursive per thread): the mods folder's named store lock
+ * (modlock.h), shared with every other process on the folder (a second game,
+ * the store tool). modsync_store_lock and modsync_store_unlock (modsync.h)
+ * take the same lock. A thread that finds it held logs one "MODS: store:
+ * waiting" line and waits. The counts below are this process's. */
+
 void modstore_lock(void);
 void modstore_unlock(void);
 /* How many lock calls had to wait so far (tests, diagnostics). */

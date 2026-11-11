@@ -23,6 +23,7 @@
 #include "modstore_upgrade.h"
 #include "modbundle_old.h"
 #include "mod_test_util.h"
+#include "modlock.h"
 
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -859,6 +860,78 @@ static DWORD WINAPI hold_thread(void *p)
     return 0;
 }
 
+/* Stands for another process: takes a named lock through a handle of its
+ * own, opened by name (modlock.h), and lets go once `waits` moved (the store
+ * code is waiting for it) or, with no wait count to watch, after `ms`. */
+typedef struct named_job {
+    wchar_t name[SH_MODLOCK_NAME_MAX];
+    unsigned waits;
+    DWORD ms;
+    volatile LONG held;
+    ULONGLONG released_at;
+} named_job;
+
+static DWORD WINAPI named_holder(void *p)
+{
+    named_job *j = (named_job *)p;
+    HANDLE h = CreateMutexW(NULL, FALSE, j->name);
+    int i;
+    if (!h || WaitForSingleObject(h, 10000) != WAIT_OBJECT_0) { InterlockedExchange(&j->held, -1); return 0; }
+    InterlockedExchange(&j->held, 1);
+    if (j->ms) Sleep(j->ms);
+    else for (i = 0; i < 60000 && modstore_lock_waits() == j->waits; i++) Sleep(1);
+    j->released_at = GetTickCount64();
+    ReleaseMutex(h);
+    CloseHandle(h);
+    return 0;
+}
+
+static void test_named_locks(const char *tmp)
+{
+    char root[MAX_PATH], *text = NULL;
+    wchar_t a[SH_MODLOCK_NAME_MAX], b[SH_MODLOCK_NAME_MAX];
+    named_job j;
+    HANDLE th;
+    ULONGLONG got;
+    printf("-- lock: the store and the record are named locks another process shares\n");
+    /* One name for one folder however it is spelled; the record has its own. */
+    sh_modlock_name(SH_MODLOCK_STORE, "C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods", a);
+    sh_modlock_name(SH_MODLOCK_STORE, "\\\\?\\c:/users/a/appdata/local/snapmap-plus/mods\\", b);
+    CHECK(!wcscmp(a, b) && !wcsncmp(a, L"Local\\snapmap-plus-store-", 25) && wcslen(a) == 25 + 16);
+    sh_modlock_name(SH_MODLOCK_RECORD, "C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods", b);
+    CHECK(wcscmp(a, b) != 0);
+    sh_modlock_name(SH_MODLOCK_STORE, "C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods2", b);
+    CHECK(wcscmp(a, b) != 0);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\named\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    /* The store lock held through another handle: modstore_lock waits for it. */
+    memset(&j, 0, sizeof j);
+    sh_modlock_name(SH_MODLOCK_STORE, root, j.name);
+    j.waits = modstore_lock_waits();
+    th = CreateThread(NULL, 0, named_holder, &j, 0, NULL);
+    CHECK(th != NULL);
+    while (th && !InterlockedCompareExchange(&j.held, 0, 0)) Sleep(1);
+    CHECK(j.held == 1);
+    modstore_lock();
+    got = GetTickCount64();
+    modstore_unlock();
+    CHECK(modstore_lock_waits() > j.waits && got >= j.released_at);
+    if (th) { WaitForSingleObject(th, 60000); CloseHandle(th); }
+    /* The record lock likewise: a section is read only after the holder let go. */
+    memset(&j, 0, sizeof j);
+    sh_modlock_name(SH_MODLOCK_RECORD, root, j.name);
+    j.ms = 300;
+    th = CreateThread(NULL, 0, named_holder, &j, 0, NULL);
+    CHECK(th != NULL);
+    while (th && !InterlockedCompareExchange(&j.held, 0, 0)) Sleep(1);
+    CHECK(j.held == 1);
+    (void)sh_mb_record_get(root, "places", &text);
+    got = GetTickCount64();
+    free(text);
+    CHECK(got >= j.released_at && j.released_at != 0);
+    if (th) { WaitForSingleObject(th, 60000); CloseHandle(th); }
+}
+
 static void test_lock(const char *tmp)
 {
     char root[MAX_PATH], cause[600];
@@ -1342,6 +1415,7 @@ int main(int argc, char **argv)
     test_place_folders(fixture, tmp);
     test_new_mod(tmp);
     test_lock(tmp);
+    test_named_locks(tmp);
     test_recycle(tmp);
     test_work_folder_names(tmp);
     test_crash_leftovers(tmp);

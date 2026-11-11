@@ -21,6 +21,7 @@
 #include "decl_tree.h"
 #include "json_pretty.h"
 #include "backend_log.h"
+#include "modlock.h"
 
 #define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
 
@@ -6776,25 +6777,30 @@ int sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part)
 
 /* ---------------------------------------------------- product record ---- */
 
-static INIT_ONCE        g_rec_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_rec_lock;
+/* The record lock: the named record lock of the mods folder (modlock.h),
+ * shared with every other process on it; recursive per thread. */
+static __declspec(thread) HANDLE t_rec_held;
+static __declspec(thread) LONG   t_rec_depth;
 
-static BOOL CALLBACK mb_rec_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+void sh_mb_record_lock(const char *mods_root)
 {
-    (void)once; (void)p; (void)ctx;
-    InitializeCriticalSection(&g_rec_lock);
-    return TRUE;
-}
-
-void sh_mb_record_lock(void)
-{
-    InitOnceExecuteOnce(&g_rec_once, mb_rec_init, NULL, NULL);
-    EnterCriticalSection(&g_rec_lock);
+    HANDLE h;
+    if (t_rec_depth > 0) { t_rec_depth++; return; }
+    h = sh_modlock_open(SH_MODLOCK_RECORD, mods_root);
+    if (h && WaitForSingleObject(h, INFINITE) == WAIT_FAILED) h = NULL;
+    if (!h) backend_log("MODS: record: the record's lock could not be taken; the record is read and written unguarded");
+    t_rec_held = h;
+    t_rec_depth = 1;
 }
 
 void sh_mb_record_unlock(void)
 {
-    LeaveCriticalSection(&g_rec_lock);
+    if (t_rec_depth <= 0) return;
+    if (--t_rec_depth == 0 && t_rec_held) {
+        HANDLE h = t_rec_held;
+        t_rec_held = NULL;
+        ReleaseMutex(h);
+    }
 }
 
 static wchar_t *mb_record_path(const char *mods_root)
@@ -6918,7 +6924,7 @@ int sh_mb_record_get(const char *mods_root, const char *section, char **json_out
     if (json_out) *json_out = NULL;
     if (!path || !section) { free(path); return -1; }
     key = mb_rec_key(mods_root, section);
-    sh_mb_record_lock();
+    sh_mb_record_lock(mods_root);
     root = mb_record_read(path, &state, why, sizeof why);
     at = mb_rec_failed_at(key);
     if (state == -1) {
@@ -6953,7 +6959,7 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     char why[96], name[MAX_PATH * 4];
     if (!path || !section || !section[0] || !strcmp(section, "format")) { free(path); return 0; }
     if (json && !(value = mbj_parse(json, strlen(json), NULL, 0))) { free(path); return 0; }
-    sh_mb_record_lock();
+    sh_mb_record_lock(mods_root);
     mb_record_name(path, name, sizeof name);
     if (mb_rec_failed_at(mb_rec_key(mods_root, section)) >= 0) {
         /* The caller's text was built from a failed read: writing it would
