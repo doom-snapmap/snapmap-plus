@@ -76,9 +76,17 @@ sites (`boot_pacing.c`) cannot wait for that scan: the engine's resource preload
 starts about two seconds after launch. Right after the build check they are
 matched at their recorded RVAs only (`sig_match_recorded`), checked byte by byte,
 and patched about 0.1 s after process creation. The offline signature tests
-prove each of those recorded RVAs is the pattern's only match. A patch that would
-land more than three seconds after process creation is not made, because the
-preload's threads could then be executing the redirected instructions.
+prove each of those recorded RVAs is the pattern's only match.
+
+Every code write -- a detour's prologue, a call's operand, a single byte -- goes
+through `code_patch` (`patch.c`), which suspends the process's other threads,
+checks that none is executing inside the bytes being changed or about to return
+into them (a thread in the callee of a call the window covers), writes, and
+resumes them. A thread found inside makes the attempt repeat a moment later; one
+that stays inside for every attempt fails the patch with nothing written. No
+thread can run a partly written instruction, at boot or for a patch made later
+from the main thread. `tests/patch_test.c` proves the suspension, both refusals
+and a stress run that commits and removes a detour under a thread calling it.
 
 Hook callers prepare a trampoline, publish it as their original callback, then
 commit the detour. Preparation does not write the target. Callers own the
@@ -88,8 +96,10 @@ can still use them. Failed rollback remains a recoverable state, not a successfu
 uninstall. The patch and hook headers define the supported installation and
 restoration sequence. Stolen instructions must be complete and independently
 executable. The ordinary hook helper performs no relocation; its explicit
-`hook_prepare_rip_lea` variant expands one verified 64-bit RIP-relative LEA.
-Callers still verify every other stolen instruction. Original target bytes
+variants relocate one verified instruction: `hook_prepare_rip_lea` a 64-bit
+RIP-relative LEA, `hook_prepare_rip_load` a 64-bit RIP-relative load and
+`hook_prepare_relative_call` an E8 call. Callers still verify every other stolen
+instruction. Original target bytes
 remain separate from relocated code for commit validation and restoration.
 
 ## The map carrier

@@ -26,13 +26,16 @@ typedef struct patch_record {
     sh_patch_handle patch;    /* Includes partial writes and pending protection restoration. */
 } patch_record;
 
+/* The table is shared by the bootstrap and the main thread (runtime installs);
+ * every public entry point holds g_hook_lock. */
+static SRWLOCK      g_hook_lock = SRWLOCK_INIT;
 static patch_record g_patches[MAX_PATCHES];
 static int          g_patch_count = 0;   /* high-water count of slots ever used */
 static const char  *g_last_failure = "none";
 
 const char *hook_last_failure(void) { return g_last_failure; }
 
-static void *prepare(void *target, void *detour, size_t stolen, size_t offset, int relocation)
+static void *prepare_locked(void *target, void *detour, size_t stolen, size_t offset, int relocation)
 {
     uint8_t original[48];
     size_t emitted = stolen;
@@ -138,6 +141,15 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
     return tramp;
 }
 
+static void *prepare(void *target, void *detour, size_t stolen, size_t offset, int relocation)
+{
+    void *tramp;
+    AcquireSRWLockExclusive(&g_hook_lock);
+    tramp = prepare_locked(target, detour, stolen, offset, relocation);
+    ReleaseSRWLockExclusive(&g_hook_lock);
+    return tramp;
+}
+
 void *hook_prepare(void *target, void *detour, size_t stolen)
 {
     return prepare(target, detour, stolen, 0, 0);
@@ -170,23 +182,34 @@ static patch_record *find_record(void *tramp)
 
 sh_patch_status hook_commit(void *tramp)
 {
-    patch_record *rec = find_record(tramp);
-    if (!rec) return B2_PATCH_REFUSED_BADARG;
-    if (rec->installed) return B2_PATCH_OK;
-    if (rec->patch.live) return B2_PATCH_FAIL_ROLLBACK;
+    sh_patch_status result;
     uint8_t patch[48];
-    write_absjmp(patch, rec->detour);
-    if (rec->stolen > 14) memset(patch + 14, 0x90, rec->stolen - 14);
-    MemoryBarrier(); /* The caller's original callback and detour dependencies precede target writes. */
-    sh_patch_status result = code_patch(rec->target, rec->original, patch, rec->stolen, &rec->patch);
-    if (result == B2_PATCH_OK) rec->installed = 1;
+    patch_record *rec;
+    AcquireSRWLockExclusive(&g_hook_lock);
+    rec = find_record(tramp);
+    if (!rec) result = B2_PATCH_REFUSED_BADARG;
+    else if (rec->installed) result = B2_PATCH_OK;
+    else if (rec->patch.live) result = B2_PATCH_FAIL_ROLLBACK;
+    else {
+        write_absjmp(patch, rec->detour);
+        if (rec->stolen > 14) memset(patch + 14, 0x90, rec->stolen - 14);
+        MemoryBarrier(); /* The caller's original callback and detour dependencies precede target writes. */
+        result = code_patch(rec->target, rec->original, patch, rec->stolen, &rec->patch);
+        if (result == B2_PATCH_OK) rec->installed = 1;
+    }
+    ReleaseSRWLockExclusive(&g_hook_lock);
     return result;
 }
 
 int hook_is_installed(void *tramp)
 {
-    patch_record *rec = find_record(tramp);
-    return rec && rec->installed;
+    patch_record *rec;
+    int installed;
+    AcquireSRWLockShared(&g_hook_lock);
+    rec = find_record(tramp);
+    installed = rec && rec->installed;
+    ReleaseSRWLockShared(&g_hook_lock);
+    return installed;
 }
 
 static int revert_record(patch_record *rec)
@@ -201,31 +224,44 @@ static int revert_record(patch_record *rec)
 
 int hook_unpatch(void *tramp)
 {
+    int reverted = 0;
+    AcquireSRWLockExclusive(&g_hook_lock);
     for (int i = 0; i < g_patch_count; i++) {
-        if (g_patches[i].tramp && g_patches[i].tramp == tramp)
-            return revert_record(&g_patches[i]);
+        if (g_patches[i].tramp && g_patches[i].tramp == tramp) {
+            reverted = revert_record(&g_patches[i]);
+            break;
+        }
     }
-    return 0;
-}
-
-int hook_unpatch_all(void)
-{
-    int n = 0;
-    for (int i = g_patch_count - 1; i >= 0; i--)   /* Walk records in reverse slot order. */
-        if (g_patches[i].tramp) n += revert_record(&g_patches[i]);
-    return n;
+    ReleaseSRWLockExclusive(&g_hook_lock);
+    return reverted;
 }
 
 int hook_installed_count(void)
 {
     int n = 0;
+    AcquireSRWLockShared(&g_hook_lock);
     for (int i = 0; i < g_patch_count; i++) if (g_patches[i].installed) n++;
+    ReleaseSRWLockShared(&g_hook_lock);
+    return n;
+}
+
+#ifdef SH_PATCH_TESTING
+int hook_unpatch_all(void)
+{
+    int n = 0;
+    AcquireSRWLockExclusive(&g_hook_lock);
+    for (int i = g_patch_count - 1; i >= 0; i--)   /* Walk records in reverse slot order. */
+        if (g_patches[i].tramp) n += revert_record(&g_patches[i]);
+    ReleaseSRWLockExclusive(&g_hook_lock);
     return n;
 }
 
 int hook_owned_count(void)
 {
     int n = 0;
+    AcquireSRWLockShared(&g_hook_lock);
     for (int i = 0; i < g_patch_count; i++) if (g_patches[i].tramp) n++;
+    ReleaseSRWLockShared(&g_hook_lock);
     return n;
 }
+#endif
