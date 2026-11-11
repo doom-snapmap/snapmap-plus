@@ -688,6 +688,14 @@
   .mods-link:hover { text-decoration: underline; }
   .mods-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .mods-note { margin: 3px 0 2px; color: var(--muted); line-height: 1.45; }
+  /* Your mods and each downloaded map: a group header in the section-label style, above the folders. */
+  .mods-area + .mods-area { margin-top: 6px; }
+  .mods-area-head { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .mods-area-head .pf-fcount { letter-spacing: 0; text-transform: none; }
+  /* The same-files hint: a note in the warning colours, as in the Prefabs tab's needs line. */
+  .mods-same { margin-top: -6px; padding: 5px 8px; border-radius: 4px; background: var(--warnBg); color: var(--warnText); }
+  /* Copy mod id: a small link under the About fields. */
+  .mods-copy-id { align-self: flex-start; margin-top: 4px; font-size: 10px; }
   .mods-side .muted { color: var(--muted); }
   .mods-paths summary { margin-top: 2px; }
   .mods-paths-list { max-height: 260px; overflow: auto; padding: 3px 0 0 12px; font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }

@@ -2907,15 +2907,13 @@ static void ui_budget_poll()
  * think loop posts them (ui_mods_finish), the same handoff as the rawmap picker. Each job ends
  * with a fresh document, so the list follows every action without being asked. */
 #define UI_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
-#define UI_MODS_MIGRATE_MS (15 * 60 * 1000)   /* how long a Migrate job follows the migration */
 #define UI_MODS_DOC_MAX    (64 * 1024 * 1024)
 
 struct UiModsJob {
     int         action;    /* SH_MODS_ACT_*, or 0 for the document only */
     bool        pick;      /* ask for the folder first (install) */
     std::string arg;
-    int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled,
-                              -4 a migration still running when the job stopped following it */
+    int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled */
     int         list_rc;
     unsigned    list_gen;  /* the backend's generation when the document was built */
     bool        pushed;    /* a document the page did not ask for (ui_mods_push_tick) */
@@ -3060,23 +3058,6 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         m.call.arg = job.arg.c_str();
         if (!ui_mods_on_main(&m)) job.run_rc = -1;
         else job.run_rc = (m.rc == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
-        /* Migrate starts the backend's migration worker; follow it here, off both the game's and
-         * this window's threads, so the list that ends the job shows what it built. WAIT runs on
-         * any thread and answers 0 after waiting out_cap ms while it runs; an older backend
-         * answers 0 to the unknown op at once, which ends the wait. */
-        if (job.action == SH_MODS_ACT_MIGRATE && job.run_rc == 1) {
-            ULONGLONG until = GetTickCount64() + UI_MODS_MIGRATE_MS;
-            for (;;) {
-                sh_mods_call wait;
-                memset(&wait, 0, sizeof wait);
-                wait.op = SH_MODS_WAIT;
-                wait.out_cap = 1000;
-                ULONGLONG asked = GetTickCount64();
-                int r = ui_mods_slot(&wait);
-                if (r == 1 || (r == 0 && GetTickCount64() - asked < 500)) break;
-                if (r != 0 || GetTickCount64() >= until) { job.run_rc = -4; break; }
-            }
-        }
     }
     if (!ui_mods_read_only(job.action)) {
         UiModsMain m;
@@ -3094,13 +3075,11 @@ static const wchar_t *ui_mods_action_name(int action)
 {
     switch (action) {
     case SH_MODS_ACT_INSTALL:     return L"install";
-    case SH_MODS_ACT_VERIFY:      return L"verify";
     case SH_MODS_ACT_RESCAN:      return L"rescan";
     case SH_MODS_ACT_PALETTE:     return L"palette";
     case SH_MODS_ACT_PRUNE_LIST:  return L"pruneList";
     case SH_MODS_ACT_PRUNE_APPLY: return L"pruneApply";
     case SH_MODS_ACT_REMOVE:      return L"remove";
-    case SH_MODS_ACT_MIGRATE:     return L"migrate";
     case SH_MODS_ACT_REBUILD:     return L"rebuild";
     case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
@@ -3125,13 +3104,11 @@ static bool ui_mods_read_only(int action)
 static int ui_mods_action_code(const std::wstring &name)
 {
     if (name == L"install")    return SH_MODS_ACT_INSTALL;
-    if (name == L"verify")     return SH_MODS_ACT_VERIFY;
     if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
     if (name == L"palette")    return SH_MODS_ACT_PALETTE;
     if (name == L"pruneList")  return SH_MODS_ACT_PRUNE_LIST;
     if (name == L"pruneApply") return SH_MODS_ACT_PRUNE_APPLY;
     if (name == L"remove")     return SH_MODS_ACT_REMOVE;
-    if (name == L"migrate")    return SH_MODS_ACT_MIGRATE;
     if (name == L"rebuild")    return SH_MODS_ACT_REBUILD;
     if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
     if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
@@ -3219,10 +3196,8 @@ static void ui_mods_finish()
             ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
         else if (job.run_rc == -1)
             ui_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
-        else if (job.run_rc == -4)
-            ui_mods_post_result(name, false, L"The migration is still running. Open the Mods tab again when it finishes.", nullptr);
         else
-            ui_mods_post_result(name, false, L"The backend refused the request.", nullptr);
+            ui_mods_post_result(name, false, L"The mods store refused this action. Refresh the tab and try again; if it keeps failing, use Send feedback.", nullptr);
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
         ui_log(l);
