@@ -1,8 +1,9 @@
 /* modhud_test.c -- bundle-declared weapon ammo displays (modhud.c).
  *
  * Offline: the hud object grammar, conflicts across bundles, the tree read
- * (installed and legacy bundle folders, admitted bundles only, using the
- * owner's sp-pistol descriptor shape), and the call-site relay against an
+ * (mod folders at the root, in organizing folders and in a map's place,
+ * admitted builds only, using the owner's sp-pistol descriptor shape), and
+ * the call-site relay against an
  * owned synthetic caller. With build 13954591 executables as arguments: the
  * call site and predicate resolve uniquely at their recorded RVAs, the call
  * decodes to the predicate, its rel32 is 4-byte aligned, and the widget
@@ -43,7 +44,8 @@ static void test_grammar(void)
     CHECK(sh_modhud_select(NULL, 1) == 1);
     CHECK(parse_one("{\"weapons\": {\"weapon/a\": {\"ammo_display\": \"engine\"}}}", "x") && sh_modhud_count() == 1);
     CHECK(sh_modhud_select("weapon/a", 1) == 1);
-    CHECK(parse_one("{\"schema\": \"snapmap-plus.weapon-hud.v1\", \"weapons\": {\"weapon/a\": {\"ammo_display\": \"weapon\"}}}", "x"));
+    /* The beta.13 form with a "schema" is not read. */
+    CHECK(!parse_one("{\"schema\": \"snapmap-plus.weapon-hud.v1\", \"weapons\": {\"weapon/a\": {\"ammo_display\": \"weapon\"}}}", "x"));
     CHECK(parse_one("{}", "x") && sh_modhud_count() == 0);
     /* Refusals clear the live table. */
     CHECK(parse_one(sp, "a") && sh_modhud_count() == 2);
@@ -100,15 +102,15 @@ static void put(const char *rel, const char *text)
     fclose(f);
 }
 
-/* A built mod folder: the author block (with `author` keys such as "hud")
- * and the product block naming the bundle hash. */
-static void bundle(const char *rel, const char *id, const char *hash, const char *author)
+/* A built mod folder: the author's part (with keys such as "hud") and the
+ * builder block naming the salt and the build hash. */
+static void bundle(const char *rel, const char *salt, const char *hash, const char *author)
 {
     char text[2048];
     _snprintf_s(text, sizeof text, _TRUNCATE,
-        "{\"id\": \"%s\", \"name\": \"%s\", \"version\": \"1\", %s\n\n"
-        "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\", \"files\": []}}",
-        id, id, author, hash);
+        "{\"name\": \"%s\", \"version\": \"1\", %s\n\n"
+        "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"build\": \"%s\", \"files\": []}}",
+        salt, author, salt, hash);
     put(rel, text);
 }
 
@@ -121,34 +123,39 @@ static void test_tree(const char *top)
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%s%s_%lu\\mods", tmp, top, GetCurrentProcessId());
     /* The owner's converted sp-pistol, as the migration wrote it: a delivered
      * package is an ordinary folder now. */
-    bundle("local.sp-pistol\\mod.json", "local.sp-pistol", H_PISTOL,
+    bundle("local.sp-pistol\\mod.json", "pistolsp", H_PISTOL,
            "\"description\": \"Enable campaign pistol firing\", \"hud\": {\"weapons\": "
            "{\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"weapon\"}, "
            "\"weapon/zion/player/sp/pistol_secondary_charge_shot\": {\"ammo_display\": \"weapon\"}}},");
-    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "");
+    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "");
     /* Not admitted: its conflicting rule is ignored. */
-    bundle("alex.gone\\mod.json", "alex.gone", H_GONE,
+    bundle("alex.gone\\mod.json", "gonealex", H_GONE,
            "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
     /* A folder without mod.json is not a mod. */
     put("notes\\readme.txt", "x");
     CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
     CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 0);
     /* An admitted bundle with a different rule for the pistol refuses the table. */
-    bundle("alex.other\\mod.json", "alex.other", H_OTHER,
+    bundle("alex.other\\mod.json", "otheralx", H_OTHER,
            "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
     CHECK(sh_modhud_load_tree(g_root, admitted) == -1 && sh_modhud_count() == 0);
     CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 1);
     /* A malformed hud object refuses too. */
-    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "\"hud\": {\"weapons\": 3},");
+    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "\"hud\": {\"weapons\": 3},");
     CHECK(sh_modhud_load_tree(g_root, admitted) == -1);
-    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "");
+    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "");
     CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
+    /* A map's place (mods\maps\<map>\<mod>) and an organizing folder are read too. */
+    bundle("maps\\Map One\\shotgun\\mod.json", "shotgunm", H_OTHER,
+           "\"hud\": {\"weapons\": {\"weapon/zion/player/mp/shotgun\": {\"ammo_display\": \"weapon\"}}},");
+    CHECK(sh_modhud_load_tree(g_root, admitted) == 3);
     /* A missing folder is an empty table. */
     CHECK(sh_modhud_load_tree("C:\\nonexistent\\sh_modhud\\mods", admitted) == 0);
     {
         static const char *const files[] = { "local.sp-pistol\\mod.json",
-            "alex.other\\mod.json", "alex.gone\\mod.json", "notes\\readme.txt", NULL };
-        static const char *const dirs[] = { "local.sp-pistol", "alex.other", "alex.gone", "notes", NULL };
+            "alex.other\\mod.json", "alex.gone\\mod.json", "notes\\readme.txt", "maps\\Map One\\shotgun\\mod.json", NULL };
+        static const char *const dirs[] = { "local.sp-pistol", "alex.other", "alex.gone", "notes", "maps\\Map One\\shotgun",
+                                            "maps\\Map One", "maps", NULL };
         char path[MAX_PATH * 4];
         wchar_t w[MAX_PATH];
         for (int i = 0; files[i]; i++) {

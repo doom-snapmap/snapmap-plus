@@ -216,7 +216,7 @@ static void test_builder(void)
 {
     static const sh_mb_resolver resolver = { NULL, NULL, stock, NULL };
     static const char *const movies[] = {
-        "assets/generated/swf/mods/alex.screens/panel.bswf", "assets/generated/swf/mods/alex.screens/panel.bimage",
+        "assets/generated/swf/mods/screensx/panel.bswf", "assets/generated/swf/mods/screensx/panel.bimage",
         "assets/generated/swf/screens_tech/vega_flat.bswf", "assets/generated/swf/screens_tech/vega_flat.bimage", NULL };
     char tmp[MAX_PATH];
     sh_mb_bundle b;
@@ -229,7 +229,7 @@ static void test_builder(void)
     CHECK(!sh_mb_extension_allowed("generated/swf/a.swf"));
     CHECK(sh_mb_extension_allowed("generated/swf/screens_tech/vega_flat.bimage"));
     logical("generated/swf/screens_tech/vega_flat.bswf", "swf", "swf/screens_tech/vega_flat.swf");
-    logical("generated/swf/mods/alex.screens/panel.bswf", "swf", "swf/mods/alex.screens/panel.swf");
+    logical("generated/swf/mods/screensx/panel.bswf", "swf", "swf/mods/screensx/panel.swf");
     logical("generated/swf/x.bswf", "swf", "swf/x.swf");
     logical("generated/swf/screens_tech/vega_flat.bimage", "file", "generated/swf/screens_tech/vega_flat.bimage");
 
@@ -238,34 +238,34 @@ static void test_builder(void)
      * 2.4); content the product received keeps it as a replacement. */
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modswf_test_%lu\\alex.screens", tmp, GetCurrentProcessId());
-    put("mod.json", "{\"id\": \"alex.screens\", \"version\": \"1.0.0\", \"name\": \"Screens\", "
-                    "\"replaces\": [\"generated/swf/screens_tech/vega_flat.bswf\"]}");
+    put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Screens\", "
+                    "\"snapmap-plus\": {\"format\": 2, \"salt\": \"screensx\"}}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
-    CHECK(!sh_mb_build(g_dir, &resolver, &b) &&
+    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) &&
           strstr(b.first_cause, "assets/generated/swf/screens_tech/") &&
           strstr(b.first_cause, ": the game ships this file and a mod cannot replace it with other bytes; delete your "
-                                "copy and the mod borrows the game's, or put your version under mods/alex.screens/"));
+                                "copy and the mod borrows the game's, or put your version under mods/screensx/"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
     if (b.errors) printf("  build: %s\n", b.first_cause);
     for (i = 0; i < b.file_count; i++) if (!strcmp(b.files[i].ptype, "swf")) swf++;
     CHECK(b.file_count == 4 && swf == 2 && b.shadow_count == 2 && b.classes.replaces == 2);
     sh_mb_free(&b);
     /* A .bswf outside generated/swf/ is not a carried type. */
-    put("assets/generated/image/mods/alex.screens/stray.bswf", "x");
-    CHECK(!sh_mb_build(g_dir, &resolver, &b) && strstr(b.first_cause, "file type not allowed"));
+    put("assets/generated/image/mods/screensx/stray.bswf", "x");
+    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(b.first_cause, "file type not allowed"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
 
-    drop("assets/generated/image/mods/alex.screens/stray.bswf");
+    drop("assets/generated/image/mods/screensx/stray.bswf");
     for (i = 0; movies[i]; i++) drop(movies[i]);
     drop("mod.json");
     drop("bundle.json");
     drop("bundle.canonical.json");
     {
-        static const char *const dirs[] = { "assets\\generated\\image\\mods\\alex.screens", "assets\\generated\\image\\mods",
-            "assets\\generated\\image", "assets\\generated\\swf\\mods\\alex.screens", "assets\\generated\\swf\\mods",
+        static const char *const dirs[] = { "assets\\generated\\image\\mods\\screensx", "assets\\generated\\image\\mods",
+            "assets\\generated\\image", "assets\\generated\\swf\\mods\\screensx", "assets\\generated\\swf\\mods",
             "assets\\generated\\swf\\screens_tech", "assets\\generated\\swf", "assets\\generated", "assets", "", NULL };
         char path[MAX_PATH];
         for (i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_dir, dirs[i]); RemoveDirectoryA(path); }

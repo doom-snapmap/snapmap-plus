@@ -80,19 +80,12 @@ int sh_modhud_parse(const char *json, size_t length, const char *owner)
 {
     sh_json_object root = {0}, weapons = {0};
     const char *raw;
-    char schema[64];
     int ok = 0;
-    size_t keys = 1;
     if (g_pending.refused) return 0;
     if (!json || length > SH_MODHUD_FILE_CAP || !sh_json_parse_object(json, length, 5, &root)) goto done;
     if (!root.count) { ok = 1; goto done; }
-    /* The beta.13 file form also named its schema. */
-    raw = sh_json_object_get(&root, "schema");
-    if (raw) {
-        if (!hud_string(raw, schema, sizeof schema) || strcmp(schema, "snapmap-plus.weapon-hud.v1")) goto done;
-        keys = 2;
-    }
-    if (root.count != keys) goto done;
+    /* Exactly {"weapons": {...}}. */
+    if (root.count != 1) goto done;
     raw = sh_json_object_get(&root, "weapons");
     if (!raw || !sh_json_parse_object(raw, strlen(raw), 3, &weapons)) goto done;
     for (size_t i = 0; i < weapons.count; i++) {
@@ -175,9 +168,11 @@ static char *hud_read(const char *path, size_t cap, size_t *len)
     return buf;
 }
 
-/* One mod folder: 1 parsed (or no hud), 0 refused. Unadmitted bundles and
+/* One mod folder: 1 parsed (or no hud), 0 refused, -1 no mod.json (an
+ * organizing folder, or a map's place under maps\). Unadmitted bundles and
  * unreadable mod.json files are skipped (the index logs those). The rules are
- * the author block's "hud" key; the bundle hash is the product block's. */
+ * the author's "hud" key; the build hash and the salt are the builder
+ * block's. */
 static int hud_bundle(const char *dir, int (*admitted)(const char *))
 {
     char path[MAX_PATH * 4], hash[80], id[HUD_OWNER_CAP];
@@ -188,14 +183,14 @@ static int hud_bundle(const char *dir, int (*admitted)(const char *))
     int ok = 1;
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
     text = hud_read(path, HUD_BUNDLE_CAP, &len);
-    if (!text) return 1;
+    if (!text) return -1;
     if (!sh_json_parse_object(text, len, HUD_JSON_DEPTH, &root)) goto done;
     raw = sh_json_object_get(&root, "snapmap-plus");
     if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), HUD_JSON_DEPTH, &block)) goto done;
-    if (!hud_string(sh_json_object_get(&block, "bundle"), hash, sizeof hash) || !admitted || !admitted(hash)) goto done;
+    if (!hud_string(sh_json_object_get(&block, "build"), hash, sizeof hash) || !admitted || !admitted(hash)) goto done;
     raw = sh_json_object_get(&root, "hud");
     if (!raw) goto done;
-    if (!hud_string(sh_json_object_get(&root, "id"), id, sizeof id)) strcpy_s(id, sizeof id, "?");
+    if (!hud_string(sh_json_object_get(&block, "salt"), id, sizeof id)) strcpy_s(id, sizeof id, "?");
     ok = sh_modhud_parse(raw, strlen(raw), id);
     if (!ok) hud_log("weapon-hud REFUSED: the hud object of %s is not a valid weapon ammo-display table", id);
 done:
@@ -205,7 +200,10 @@ done:
     return ok;
 }
 
-static int hud_scan(const char *folder, int (*admitted)(const char *))
+/* Mod folders under `folder`, through organizing folders and the maps\
+ * places (mods\maps\<map>\<mod>), to the store's nesting depth. */
+#define HUD_NEST_MAX 4
+static int hud_scan(const char *folder, int (*admitted)(const char *), int depth)
 {
     char pattern[MAX_PATH * 4], sub[MAX_PATH * 4];
     wchar_t *wpattern;
@@ -219,12 +217,15 @@ static int hud_scan(const char *folder, int (*admitted)(const char *))
     if (h == INVALID_HANDLE_VALUE) return 1;
     do {
         char *name;
+        int r;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            fd.cFileName[0] == L'.' || !_wcsicmp(fd.cFileName, L"blobs") || !_wcsicmp(fd.cFileName, L"legacy")) continue;
+            fd.cFileName[0] == L'.' || !_wcsicmp(fd.cFileName, L"blobs")) continue;
         if ((name = sh_mb_utf8(fd.cFileName)) == NULL) continue;
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", folder, name);
         free(name);
-        if (!hud_bundle(sub, admitted)) ok = 0;
+        r = hud_bundle(sub, admitted);
+        if (r < 0 && depth + 1 < HUD_NEST_MAX) r = hud_scan(sub, admitted, depth + 1);
+        if (r == 0) ok = 0;
     } while (ok && FindNextFileW(h, &fd));
     FindClose(h);
     return ok;
@@ -234,7 +235,7 @@ int sh_modhud_load_tree(const char *mods_root, int (*admitted)(const char *bundl
 {
     int ok;
     sh_modhud_begin();
-    ok = mods_root && hud_scan(mods_root, admitted);
+    ok = mods_root && hud_scan(mods_root, admitted, 0);
     sh_modhud_publish(ok);
     hud_log("weapon-hud %s: %zu rules", ok ? "compiled" : "REFUSED", sh_modhud_count());
     return ok ? (int)sh_modhud_count() : -1;

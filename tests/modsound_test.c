@@ -543,17 +543,18 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
     return 0;
 }
 
-#define BANK "assets/sound/soundbanks/pc/p6probe_sfx.bnk"
-#define SND  "assets/generated/decls/sound/mods/p6probe/p6probe_far.decl"
-#define SNDSP "assets/generated/decls/sound/mods/p6probe/wpn_sp_plasma_flyby_lp.decl"
-#define ENT  "assets/generated/decls/entitydef/mods/p6probe/speaker_far.decl"
-#define DESC "{\"id\": \"p6probe\", \"version\": \"1.0.0\", \"name\": \"Sound probe\"}"
+#define BANK "assets/sound/soundbanks/pc/p6probes_sfx.bnk"
+#define SND  "assets/generated/decls/sound/mods/p6probes/p6probes_far.decl"
+#define SNDSP "assets/generated/decls/sound/mods/p6probes/wpn_sp_plasma_flyby_lp.decl"
+#define ENT  "assets/generated/decls/entitydef/mods/p6probes/speaker_far.decl"
+#define DESC "{\"version\": \"1.0.0\", \"name\": \"Sound probe\"}"
+#define SALT "p6probes"   /* the salt every build here is given */
 
 static void build_expect(int ok, const char *cause_part)
 {
     static const sh_mb_resolver resolver = { NULL, NULL, NULL, NULL };
     sh_mb_bundle b;
-    int r = sh_mb_build(g_dir, &resolver, &b);
+    int r = sh_mb_build(g_dir, SALT, &resolver, &b);
     CHECK(r == ok);
     if (!ok) {
         CHECK(strstr(b.first_cause, cause_part) != NULL);
@@ -575,24 +576,24 @@ static void test_builder(void)
     CHECK(sh_mb_fnv1_lower("DOOM_UI", 7) == 3132051923u);
     CHECK(sh_mb_fnv1_lower("p6probe_sfx", 11) == 3604064235u);
 
-    CHECK(sh_mb_extension_allowed("sound/soundbanks/pc/p6probe_sfx.bnk"));
-    CHECK(sh_mb_logical_name("sound/soundbanks/pc/p6probe_sfx.bnk", t, sizeof t, n, sizeof n) &&
-          !strcmp(t, "soundBank") && !strcmp(n, "sound/soundbanks/pc/p6probe_sfx.bnk"));
-    CHECK(sh_mb_logical_name("generated/decls/sound/mods/p6probe/p6probe_far.decl", t, sizeof t, n, sizeof n) &&
-          !strcmp(t, "sound") && !strcmp(n, "mods/p6probe/p6probe_far"));
+    CHECK(sh_mb_extension_allowed("sound/soundbanks/pc/p6probes_sfx.bnk"));
+    CHECK(sh_mb_logical_name("sound/soundbanks/pc/p6probes_sfx.bnk", t, sizeof t, n, sizeof n) &&
+          !strcmp(t, "soundBank") && !strcmp(n, "sound/soundbanks/pc/p6probes_sfx.bnk"));
+    CHECK(sh_mb_logical_name("generated/decls/sound/mods/p6probes/p6probes_far.decl", t, sizeof t, n, sizeof n) &&
+          !strcmp(t, "sound") && !strcmp(n, "mods/p6probes/p6probes_far"));
 
-    CHECK(sh_mb_bank_rule("sound/soundbanks/pc/p6probe_sfx.bnk", "p6probe", cause, sizeof cause));
+    CHECK(sh_mb_bank_rule("sound/soundbanks/pc/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
     CHECK(sh_mb_bank_rule("sound/soundbanks/pc/alex_pink_imp_growls.bnk", "alex.pink-imp", cause, sizeof cause));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/alex.pink-imp_growls.bnk", "alex.pink-imp", cause, sizeof cause) &&
           strstr(cause, "letters, digits"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probe", cause, sizeof cause) && strstr(cause, "p6probe_"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probe_.bnk", "p6probe", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probe_spider.bnk", "p6probe", cause, sizeof cause) && strstr(cause, "_sp"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probe_x_snapmaps.bnk", "p6probe", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probe_initial.bnk", "p6probe", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/english(us)/p6probe_vo.bnk", "p6probe", cause, sizeof cause) &&
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "p6probes_"));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_.bnk", "p6probes", cause, sizeof cause));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_spider.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "_sp"));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_x_snapmaps.bnk", "p6probes", cause, sizeof cause));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_initial.bnk", "p6probes", cause, sizeof cause));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/english(us)/p6probes_vo.bnk", "p6probes", cause, sizeof cause) &&
           strstr(cause, "sound/soundbanks/pc/<stem>.bnk"));
-    CHECK(!sh_mb_bank_rule("sound/mods/p6probe/p6probe_sfx.bnk", "p6probe", cause, sizeof cause));
+    CHECK(!sh_mb_bank_rule("sound/mods/p6probes/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
 
     memcpy(head, "BKHD", 4);
     { uint32_t v = 16; memcpy(head + 4, &v, 4); v = 0x71; memcpy(head + 8, &v, 4); v = 3604064235u; memcpy(head + 12, &v, 4); }
@@ -610,20 +611,20 @@ static void test_builder(void)
     }
 
     GetTempPathA(sizeof tmp, tmp);
-    _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modsound_test_%lu\\p6probe", tmp, GetCurrentProcessId());
+    _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modsound_test_%lu\\p6probes", tmp, GetCurrentProcessId());
     put("mod.json", DESC);
-    put_bank(BANK, "p6probe_sfx", 0x71, 0);
+    put_bank(BANK, "p6probes_sfx", 0x71, 0);
     put(SND, "{\n\tinherit = \"default\";\n}\n");
-    put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"mods/p6probe/p6probe_far\";\n"
+    put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"mods/p6probes/p6probes_far\";\n"
              "\t\twaitForTrigger = false;\n\t}\n}\n");
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
     if (b.errors) printf("  build: %s\n", b.first_cause);
-    f = find_file(&b, "sound/soundbanks/pc/p6probe_sfx.bnk");
+    f = find_file(&b, "sound/soundbanks/pc/p6probes_sfx.bnk");
     CHECK(f && !strcmp(f->ptype, "soundBank") && f->size == 24 && !f->stock);
-    f = find_file(&b, "generated/decls/sound/mods/p6probe/p6probe_far.decl");
-    CHECK(f && !strcmp(f->ptype, "sound") && !strcmp(f->pname, "mods/p6probe/p6probe_far"));
-    f = find_file(&b, "generated/decls/entitydef/mods/p6probe/speaker_far.decl");
-    CHECK(f && has_need(f, "sound", "mods/p6probe/p6probe_far"));
+    f = find_file(&b, "generated/decls/sound/mods/p6probes/p6probes_far.decl");
+    CHECK(f && !strcmp(f->ptype, "sound") && !strcmp(f->pname, "mods/p6probes/p6probes_far"));
+    f = find_file(&b, "generated/decls/entitydef/mods/p6probes/speaker_far.decl");
+    CHECK(f && has_need(f, "sound", "mods/p6probes/p6probes_far"));
     CHECK(b.registries && !strstr(b.registries, "\"banks\""));
     sh_mb_free(&b);
 
@@ -633,7 +634,7 @@ static void test_builder(void)
     CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
     sh_mb_set_bank_need(sh_mbi_bundle_need);
     put(SNDSP, "{\n\tinherit = \"default\";\n}\n");
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
     if (b.errors) printf("  build: %s\n", b.first_cause);
     CHECK(b.registries && !strncmp(b.registries, "{\"banks\":[\"doom_weapon_sp.bnk\"]", 31));
     if (b.registries) printf("  registries: %s\n", b.registries);
@@ -648,7 +649,7 @@ static void test_builder(void)
     /* A build made without the seam (before L8, or by the store tool) lists
      * no "banks"; its served sound decls still give the need (ADD-V5 B1:
      * the doctor and the Mods tab read it this way). */
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
     CHECK(b.registries && !strstr(b.registries, "\"banks\""));
     {
         char served[4][SH_MBI_LEAF_MAX];
@@ -658,7 +659,7 @@ static void test_builder(void)
     sh_mb_free(&b);
     drop(SNDSP);
     /* Without the _sp sound decl, nothing. */
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
     {
         char served[4][SH_MBI_LEAF_MAX];
         CHECK(sh_mbi_served_banks(&b, served, 4) == 0);
@@ -667,44 +668,43 @@ static void test_builder(void)
 
     /* A stock sound name is not a need; a mods/ one nobody provides is an error. */
     put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"play_arcade_ui_17\";\n\t}\n}\n");
-    CHECK(sh_mb_build(g_dir, &resolver, &b));
-    f = find_file(&b, "generated/decls/entitydef/mods/p6probe/speaker_far.decl");
+    CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
+    f = find_file(&b, "generated/decls/entitydef/mods/p6probes/speaker_far.decl");
     CHECK(f && f->need_count == 0);
     sh_mb_free(&b);
-    put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"mods/p6probe/missing\";\n\t}\n}\n");
-    build_expect(0, "mods/p6probe/missing");
+    put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"mods/p6probes/missing\";\n\t}\n}\n");
+    build_expect(0, "mods/p6probes/missing");
     put(ENT, "{\n\tinherit = \"speaker\";\n}\n");
 
     /* Bank refusals. */
-    put_bank(BANK, "p6probe_sfx", 0x71, 1);
+    put_bank(BANK, "p6probes_sfx", 0x71, 1);
     build_expect(0, "FNV-1");
-    put_bank(BANK, "p6probe_sfx", 0x78, 0);
+    put_bank(BANK, "p6probes_sfx", 0x78, 0);
     build_expect(0, "version 120");
-    put_bank(BANK, "p6probe_sfx", 0x71, 0);
-    put_bank("assets/sound/soundbanks/pc/p6probe_spider.bnk", "p6probe_spider", 0x71, 0);
+    put_bank(BANK, "p6probes_sfx", 0x71, 0);
+    put_bank("assets/sound/soundbanks/pc/p6probes_spider.bnk", "p6probes_spider", 0x71, 0);
     build_expect(0, "'_sp'");
-    drop("assets/sound/soundbanks/pc/p6probe_spider.bnk");
+    drop("assets/sound/soundbanks/pc/p6probes_spider.bnk");
     put_bank("assets/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
-    build_expect(0, "must start with 'p6probe_'");
+    build_expect(0, "must start with 'p6probes_'");
     drop("assets/sound/soundbanks/pc/other_sfx.bnk");
-    put_bank("assets/sound/mods/p6probe/p6probe_x.bnk", "p6probe_x", 0x71, 0);
+    put_bank("assets/sound/mods/p6probes/p6probes_x.bnk", "p6probes_x", 0x71, 0);
     build_expect(0, "sound/soundbanks/pc/<stem>.bnk");
-    drop("assets/sound/mods/p6probe/p6probe_x.bnk");
-    /* Additive mods: the old "shadows" key is ignored, so listing the mod's
-     * own bank changes nothing (a stock bank's refusal: modbundle_test). */
-    put("mod.json", "{\"id\": \"p6probe\", \"version\": \"1.0.0\", \"name\": \"Sound probe\", "
-                    "\"shadows\": [\"sound/soundbanks/pc/p6probe_sfx.bnk\"]}");
-    build_expect(1, "");
+    drop("assets/sound/mods/p6probes/p6probes_x.bnk");
+    /* The retired "shadows" key refuses the folder (a stock bank's refusal: modbundle_test). */
+    put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Sound probe\", "
+                    "\"shadows\": [\"sound/soundbanks/pc/p6probes_sfx.bnk\"]}");
+    build_expect(0, "mod.json uses \"shadows\", which this version does not read");
     put("mod.json", DESC);
     build_expect(1, "");
 
-    drop(BANK); drop(SND); drop(ENT); drop("mod.json"); drop("bundle.json"); drop("bundle.canonical.json");
+    drop(BANK); drop(SND); drop(ENT); drop("mod.json");
     {
         static const char *const dirs[] = {
-            "assets\\sound\\soundbanks\\pc", "assets\\sound\\soundbanks", "assets\\sound\\mods\\p6probe",
+            "assets\\sound\\soundbanks\\pc", "assets\\sound\\soundbanks", "assets\\sound\\mods\\p6probes",
             "assets\\sound\\mods", "assets\\sound",
-            "assets\\generated\\decls\\sound\\mods\\p6probe", "assets\\generated\\decls\\sound\\mods",
-            "assets\\generated\\decls\\sound", "assets\\generated\\decls\\entitydef\\mods\\p6probe",
+            "assets\\generated\\decls\\sound\\mods\\p6probes", "assets\\generated\\decls\\sound\\mods",
+            "assets\\generated\\decls\\sound", "assets\\generated\\decls\\entitydef\\mods\\p6probes",
             "assets\\generated\\decls\\entitydef\\mods", "assets\\generated\\decls\\entitydef",
             "assets\\generated\\decls", "assets\\generated", "assets", "", NULL };
         char path[MAX_PATH];
@@ -724,7 +724,7 @@ static void test_fixture(const char *folder)
     static const sh_mb_resolver resolver = { NULL, NULL, any_stock, NULL };
     sh_mb_bundle b;
     size_t i, k, banks = 0, sounds = 0;
-    int ok = sh_mb_build(folder, &resolver, &b);
+    int ok = sh_mb_build(folder, NULL, &resolver, &b);
     CHECK(ok);
     if (!ok) printf("  fixture: %s\n", b.first_cause);
     for (i = 0; i < b.file_count; i++) {

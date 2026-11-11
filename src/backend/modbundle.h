@@ -1,73 +1,64 @@
 /* modbundle.h -- build, validate and read mod bundles (mod.json).
  *
- * A mod is a folder holding mod.json (or, before its first build, a
- * package.json) and an assets/ tree at exact engine request paths. Building it
- * hashes every file, names what each file provides, scans decl text for what
- * it needs, checks the namespace and structural rules, and produces the
- * canonical manifest whose SHA-256 is the bundle hash.
+ * A mod is a folder holding mod.json and an assets/ tree at exact engine
+ * request paths. Building it hashes every file, names what each file
+ * provides, scans decl text for what it needs, checks the namespace and
+ * structural rules, and produces the canonical manifest whose SHA-256 is the
+ * build hash.
  *
- * mod.json (Contract 5) has two blocks in one JSON object. The author block is
- * every top-level key except "snapmap-plus": id, name, version, author,
- * homepage, requirements, shadows, stock (pointers the author declares), and
- * any other key (description, strings, hud, ...), which is kept and becomes
- * the manifest's "extra". The product block, the member "snapmap-plus", is the
- * whole built manifest and is written only by the product:
+ * mod.json, format 2, is one JSON object with two parts. The author's part is
+ * every top-level key except "snapmap-plus": name (required), version,
+ * description, author, homepage, requirements, strings, hud, companions and
+ * any other key, which is kept and becomes the manifest's "extra". The
+ * builder's part, the member "snapmap-plus", is written only by the product:
  *
  *   "snapmap-plus": {
- *     "format": 1, "key": "<the mod's key>", "build": 3, "bundle": "<sha256>", "built": <unix seconds>,
- *     "validated": true, "cause": "<first cause when not validated>",
- *     "origin": "install" | "download" | "migration" | "delivery" | "by-hand",
- *     "legacy": {...},                 converted first-generation packages only
+ *     "format": 2, "salt": "<8 characters>", "rules": 8, "built": <unix seconds>,
+ *     "tree": "<sha256>",              the rebuild rule's tree hash (sh_mb_tree_hash)
+ *     "build": "<sha256>",             the build hash; absent while the build fails
+ *     "cause": "<first cause>",        only while the build fails (or a verification found one)
+ *     "warnings": [...],               the first SH_MB_WARNINGS_KEPT warnings, when any
  *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"banks": ["<stock bank>", ...], "conductor": ["<encounter decl>", ...],
- *                    "strings": ["<key>", ...]},
- *     "edits": [{"file": "<request>", "stock": "<digest>", "counts": {...}, "ops": [...]}, ...],
- *                                      derived edits of decls at game names (decl_tree.h)
+ *     "registries": {"banks": [...], "conductor": [...], "strings": [...]},
+ *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
- *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false, "closure": true}]
+ *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
  *   }
  *
- * Additive mods (phase 1). The builder classifies every file from its path
- * and bytes (SH_MB_CLASS_*); "shadows" is derived from the classification
- * (every replacement and every editor tweak at a game name), and the
- * author keys "shadows", "stock" and "scope" are accepted and ignored with
- * one report line each, so the canonical manifest of an existing mod keeps
- * its text and hash. An author "stock" entry without a file under assets/
- * still builds a pointer ("inAssets": false) and is reported. The key is the
- * author "id" when present (deprecated), else the product block "key", else
- * the folder's own name (a folder of the store never reaches that: its first
- * build gives it a generated key, sh_ms_first_key); the canonical "id" is the key. "key", "classes",
- * "editor", "registries" and "edits" are derived facts outside the canonical text.
- * "origin" "by-hand" is "" in memory (a folder the author made). A grandfathered
- * bundle (a "legacy" record) keeps its declared shadows and every rule of
- * before; it is classified for reporting only.
+ * Identity is the salt (modsalt.h), nothing else: the namespace mods/<salt>/,
+ * the canonical "id", the prefix of every strings key. A folder's name is the
+ * author's and never read. A folder in an earlier shape (package.json, a block
+ * without a salt, an author id, key, shadows, stock, scope, player, extends,
+ * replaces, legacy, composes or schema key, a hud schema) is refused with
+ * SH_MB_SHAPE and a cause about the thing itself (sh_mb_descriptor_state).
  *
- * Writing the block never touches the author block: the file is spliced. The
+ * Additive mods. The builder classifies every file from its path and bytes
+ * (SH_MB_CLASS_*); "shadows" is derived from the classification (every
+ * replacement and every editor tweak at a game name). "classes", "editor",
+ * "registries" and "edits" are derived facts outside the canonical text. A
+ * stock pointer is derived from a carried file whose bytes are the game's,
+ * or ("closure": true) by the campaign-only closure, which every build
+ * derives again; a closure pointer has no file under assets/.
+ *
+ * Writing the block never touches the author's part: the file is spliced. The
  * old block member is cut out (from the end of the member before it to the
  * end of its value), and the new one is inserted after the last author member
  * as ",\n\n  \"snapmap-plus\": {...}" (CRLF when the file uses CRLF). Cutting
  * the block out of any written file therefore gives back the author's bytes
- * exactly (sh_mb_author_bytes). A file without an author text (a download, a
- * store upgrade of a laid-out folder) gets a synthesized author block. A
- * "legacy" object and its grandfathered "shadows" in the product block are
- * build inputs as if the author had written them (a converted package keeps
- * its own author keys). A stock pointer with "inAssets": false has no file
- * under assets/ (product-created folders never hold pointer bytes); a rebuild
- * keeps it from the block, except one marked "closure": true, which the
- * campaign-only closure derived and every build derives again.
+ * exactly (sh_mb_author_bytes). A file without an author text (a manifest
+ * written out) gets a synthesized author part.
  *
  * The canonical manifest (below) is derived in memory, never stored: it is
- * the text uploaded to the store and the input of the bundle hash, unchanged
- * from Contract 1.
+ * the input of the build hash.
  *
  * Canonical manifest: UTF-8 JSON, object keys sorted by their UTF-8 bytes, no
- * whitespace, files sorted by path, "bundle" omitted. Strings escape only '"',
+ * whitespace, files sorted by path, "bundle" omitted. "format" is 2 and "id"
+ * the salt. Strings escape only '"',
  * '\\' and control characters (\b \f \n \r \t, others \u00xx lowercase), so the
  * text equals JSON.stringify of the parsed value with sorted keys. Numbers are
- * plain integers. "build" is the product's content counter for the folder
- * (see sh_mb_build) and is part of the canonical text. Optional top-level keys (author, homepage, requirements,
+ * plain integers. Optional top-level keys (author, homepage, requirements,
  * shadows, extra) are omitted when absent or empty. A carried file has exactly
  * blob, needs (possibly []), path, provides, request and size.
  *
@@ -77,10 +68,7 @@
  * archive entry of gameresources or snap_gameresources, .patch or .resources,
  * or a loose file under the install's base\ or root), lower-cased with '/';
  * "sha256" is the SHA-256 of the installed bytes (64 lowercase hex). The
- * builder emits one when a file's bytes equal an installed entry, and an author
- * writes one in the descriptor's "stock" object:
- *   "stock": {"<request path>": {"source": "<installed path>", "sha256": "<hex, optional>"}}
- * Pointers are not counted in the size caps and the extension whitelist does
+ * builder emits one when a file's bytes equal an installed entry. Pointers are not counted in the size caps and the extension whitelist does
  * not apply to them; the store never receives their bytes, and a client whose
  * game lacks the entry with that hash refuses the bundle with the first cause.
  * Some kinds are admitted only as pointers (sh_mb_pointer_only_kind): the
@@ -109,13 +97,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SH_MB_FORMAT          1
-/* The builder's rules, written into the product block as "rules". A folder
- * whose block carries another number (or none: built by an earlier product)
- * is built again once by the rebuild rule, so a product update reclassifies
- * every installed folder; aliases keep the maps pinned to its earlier hash
- * working. Raise it when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           7
+#define SH_MB_FORMAT          2
+/* The builder's rules, written into the builder block as "rules". A root
+ * folder whose block carries another number is built again once by the
+ * rebuild rule, so a product update reclassifies every own folder. Raise it
+ * when a build's classification, edits or manifest change. */
+#define SH_MB_RULES           8
+/* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
+#define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
 #define SH_MB_ID_MAX          64u
 #define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */
@@ -137,15 +126,7 @@
 #define SH_MB_REQ_VALUE_MAX    64u     /* bytes of a cvar value */
 #define SH_MB_REQ_COMMANDS_MAX 16u     /* lines in each of activate and deactivate */
 #define SH_MB_REQ_LINE_MAX     256u    /* bytes of one console line */
-#define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's product block */
-/* Product block "origin": the product created the folder (a download that
- * lands later may replace it). A folder without one is the author's (a
- * download of its id sits beside it under <id>@<version>). Uninstall and
- * Remove delete either kind. */
-#define SH_MB_ORIGIN_INSTALL   "install"        /* copied in by Install folder or sh_mods install */
-#define SH_MB_ORIGIN_DOWNLOAD  "download"       /* fetched from the mod store */
-#define SH_MB_ORIGIN_MIGRATION "migration"      /* converted from the retired overrides folder */
-#define SH_MB_ORIGIN_DELIVERY  "delivery"       /* converted from a package a map delivered */
+#define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's builder block */
 
 typedef struct sh_mb_need {
     char *type;            /* engine spelling: md6Def, baseModel, anim, material, ... */
@@ -167,8 +148,7 @@ typedef struct sh_mb_file {
     int stock;             /* a stock pointer: blob is the installed bytes' SHA-256, nothing is carried */
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
-    int declared;          /* builder: named by the descriptor's stock object */
-    int absent;            /* a stock pointer with no file under assets/ ("inAssets": false) */
+    int absent;            /* a stock pointer with no file under assets/ (a closure pointer, or a received build's) */
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
@@ -189,8 +169,8 @@ typedef struct sh_mb_file {
  *            builder records its structural diff against the game's text
  *            (sh_mb_bundle.edits) and the product generates the game file
  *            per map; the copy itself is never served. A binary is refused
- *            (put it under mods/<key>/), except in a folder the product
- *            received (sh_mb_keep_replacements_here). */
+ *            (put it under mods/<salt>/), except in a build the product
+ *            runs on content it received (sh_mb_keep_replacements_here). */
 #define SH_MB_CLASS_NONE    0
 #define SH_MB_CLASS_ADD     1
 #define SH_MB_CLASS_BORROW  2
@@ -204,34 +184,17 @@ typedef struct sh_mb_classes {
     unsigned adds, borrows, replaces, editor, surfaces, edits;
 } sh_mb_classes;
 
-/* Where a bundle's key came from (sh_mb_bundle.key_source). */
-#define SH_MB_KEY_FROM_ID     1   /* the author block's "id" (deprecated, kept as the key) */
-#define SH_MB_KEY_FROM_BLOCK  2   /* the product block's "key" */
-#define SH_MB_KEY_FROM_FOLDER 3   /* the folder's own name, at its first build */
-#define SH_MB_KEY_SUFFIX      4u  /* random characters a generated key ends with */
-/* "origin" the builder writes for a folder the author made ("" in memory). */
-#define SH_MB_ORIGIN_BY_HAND  "by-hand"
-
-/* A pointer an author wrote in the descriptor's "stock" object. */
-typedef struct sh_mb_stock_decl {
-    char *request;         /* lower-cased request path */
-    char *source;          /* lower-cased installed path */
-    char  sha256[SH_MB_HASH_HEX + 1];   /* "" when the author left it to the builder */
-    int   carried;         /* carried forward from the product block ("inAssets": false), not the author's */
-} sh_mb_stock_decl;
-
 /* Where each need of a build was found. */
 typedef struct sh_mb_need_stats {
     unsigned total, local, installed, stock, unresolved;
 } sh_mb_need_stats;
 
 typedef struct sh_mb_bundle {
-    char  id[SH_MB_ID_MAX + 1];
+    char  id[SH_MB_ID_MAX + 1];             /* the salt (modsalt.h): the namespace and the canonical "id" */
     char  version[SH_MB_VERSION_MAX + 1];   /* the author's label, "0.0.0" when absent */
-    unsigned long long build;               /* content counter, >= 1 */
     char *name, *author, *homepage;
     char *requirements;    /* canonical JSON object text, or NULL */
-    char *extra;           /* canonical JSON object of preserved descriptor keys, or NULL */
+    char *extra;           /* canonical JSON object of preserved author keys, or NULL */
     char **shadows;        /* sorted, unique, lower-cased request paths */
     size_t shadow_count;
     sh_mb_file *files;     /* sorted by path */
@@ -239,50 +202,35 @@ typedef struct sh_mb_bundle {
     unsigned long long total_size;   /* carried bytes: stock pointers are not counted */
     unsigned stock_count;  /* files that are stock pointers */
     unsigned long long stock_bytes;  /* their installed size (known when built, 0 when loaded) */
-    sh_mb_stock_decl *stock_decls;   /* the descriptor's stock object */
-    size_t stock_decl_count;
     char *canonical;       /* canonical manifest text (NUL-terminated) */
     size_t canonical_len;
-    char  hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of canonical */
-    char  prev_hash[SH_MB_HASH_HEX + 1];   /* sh_mb_build: the bundle hash the folder's product
-                                              block named before this build, "" when none */
-    char  descriptor[16];  /* "mod.json", "package.json" or "bundle.json" (a manifest text) */
-    int   legacy;          /* the descriptor (or the manifest's extra) carries a "legacy" object:
-                              shadows need not be stock and unresolved needs only warn */
-    int   block_legacy;    /* that object came from mod.json's product block, not the author block */
-    int   delivered;       /* "legacy" without "source": "overrides" (the retired package folder): delivered by a map */
-    long long built;       /* product block "built": when this bundle was first written in its folder */
-    int   validated;       /* product block "validated" (1 after a build without errors) */
-    int   rules;           /* product block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */
-    char  state_cause[SH_MB_CAUSE_MAX];   /* product block "cause" when not validated */
-    char  origin[16];      /* product block "origin": SH_MB_ORIGIN_*, "" for a folder the author made */
+    char  hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of canonical: the build hash */
+    char  prev_hash[SH_MB_HASH_HEX + 1];   /* sh_mb_build: the build hash the folder's block named before this
+                                              build, "" when none */
+    char  tree[SH_MB_HASH_HEX + 1];   /* block "tree": the folder's tree hash when built, "" when absent */
+    long long built;       /* block "built": the first successful build of this salt in this folder, 0 when none */
+    int   validated;       /* 1 when the block records no "cause" (a build without errors) */
+    int   rules;           /* block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */
+    char  state_cause[SH_MB_CAUSE_MAX];   /* block "cause" */
     sh_mb_need_stats needs;
     unsigned errors, warnings;
     char  first_cause[SH_MB_CAUSE_MAX];
     char  first_warning[SH_MB_CAUSE_MAX];
     /* Every warning in order, the first SH_MB_WARNINGS_KEPT of them
      * (`warnings` counts them all). A built mod.json read back derives its
-     * descriptor's warnings again (the mod store's rules for keys, name and
+     * author part's warnings again (the mod store's rules for keys, name and
      * author), so a rescan and the doctor see them; the rest belong to the
      * build's own report. */
     char **warning_list;
     size_t warning_list_count;
-    /* Additive mods, phase 1. `id` above is the key: the namespace and the
-     * canonical "id". */
-    int   key_source;      /* SH_MB_KEY_FROM_*, 0 when unknown (a manifest) */
     sh_mb_classes classes; /* counts of the files' classes */
-    char *registries;      /* compact JSON of the product block's "registries" object, or NULL */
-    /* Derived edits (DESIGN-additive 2.4): the product block's "edits", a
-     * JSON array with one element per decl the mod carries at a game name
-     * with other bytes (decl_tree.h), or NULL; edit_files elements. */
+    char *registries;      /* compact JSON of the block's "registries" object, or NULL */
+    /* Derived edits (DESIGN-additive 2.4): the block's "edits", a JSON array
+     * with one element per decl the mod carries at a game name with other
+     * bytes (decl_tree.h), or NULL; edit_files elements. */
     char *edits;
     unsigned edit_files;
-    /* A descriptor's retired intent keys (extends, player.bodyEvents): the
-     * partial decls they name and the game file each stood for, so a build
-     * refuses the partial with what to put instead. */
-    char **old_partials, **old_targets;
-    size_t old_partial_count;
-    char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
+    char **notes;          /* builder: report lines (replacements, closure, edits) */
     size_t note_count, note_cap;
 } sh_mb_bundle;
 
@@ -339,7 +287,7 @@ typedef struct sh_mb_stock_ops {
 } sh_mb_stock_ops;
 
 /* Register the installed-content reader (copied; NULL clears). Without one the
- * builder emits no pointers, a descriptor's stock object is refused, and stock
+ * builder emits no pointers, and stock
  * files cannot be verified or served. */
 void sh_mb_set_stock_ops(const sh_mb_stock_ops *ops);
 /* 1 when a reader is registered. */
@@ -370,38 +318,38 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
 /* Build the bundle for `folder` (UTF-8 path). Returns 1 when the bundle has no
  * errors, 0 otherwise; out->first_cause and out->errors describe the refusal.
  * out is always initialised and must be released with sh_mb_free. Nothing is
- * written to disk. The build number comes from the folder's previous product
- * block: kept when the content (without build and bundle) is unchanged,
- * previous + 1 when it changed, 1 when there is none; "built" is kept while
- * the bundle hash is unchanged. Every file is classified (out->files[].cls,
- * out->classes); a file outside the namespace that is not a surface must be
- * a game name (resolver->stock), and is then a shadow: an editor tweak, or a
- * replacement: a decl's derived edits are recorded (out->edits), a binary
- * is refused. The key is resolved (out->key_source), out->registries
- * filled, and out->notes holds the
- * report lines the build log prints. */
-int  sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out);
+ * written to disk. The salt is the block's; `salt` (NULL to read it) gives
+ * one to a folder whose block has none yet, and must equal the block's when
+ * both are present. A folder in an earlier shape, or one without a salt, is
+ * refused with SH_MB_SHAPE. "built" is the block's when it has one, else the
+ * time of this build when it succeeds; out->tree is the folder's tree hash and
+ * out->prev_hash the build hash its block recorded. Every file is classified
+ * (out->files[].cls, out->classes); a file outside the namespace that is not a
+ * surface must be a game name (resolver->stock), and is then a shadow: an
+ * editor tweak, or a replacement: a decl's derived edits are recorded
+ * (out->edits), a binary is refused. out->registries is filled, and
+ * out->notes holds the report lines the build log prints. */
+int  sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
-/* Write `<folder>\mod.json`: the author block (the folder's mod.json without
- * its product block, else its package.json, which is then deleted, else a
- * synthesized one) and the product block from `bundle`, including its
- * validated, cause and built fields. A pointer whose file is absent from
- * `<folder>\assets\` is written "inAssets": false, and one the
- * campaign-only closure derived "closure": true. Write-through temporary
- * and rename. Refuses a bundle with errors. Returns 1 on success. */
+/* Write `<folder>\mod.json`: the author's part (the folder's mod.json without
+ * its block, else a synthesized one) and the builder block from `bundle`,
+ * including its cause when not validated. Write-through temporary and rename.
+ * Refuses a bundle with errors. Returns 1 on success. */
 int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char *cause, size_t cause_cap);
 
-/* Give a built bundle another build number and recompute its canonical text
- * and hash (an install continuing the counter of the copy it replaces). */
-void sh_mb_renumber(sh_mb_bundle *bundle, unsigned long long build);
+/* Write the block of a failed build into `<folder>\mod.json`: format, salt,
+ * rules, built (when it had one), tree and cause (bundle->first_cause) only,
+ * so the folder serves nothing until fixed. bundle->id must be a salt.
+ * Returns 1 on success. */
+int  sh_mb_write_failed(const sh_mb_bundle *bundle, const char *folder, char *why, size_t why_cap);
 
-/* Record a verification result in `<folder>\mod.json`'s product block
- * (validated, cause) without changing anything else. Returns 1 on success. */
+/* Record a verification result in `<folder>\mod.json`'s block (a cause, or
+ * none) without changing anything else. Returns 1 on success. */
 int  sh_mb_set_state(const char *folder, int validated, const char *cause, char *why, size_t why_cap);
 
-/* The complete mod.json text for `bundle` (malloc'd), splicing the product
- * block into `author_text` (a mod.json or package.json text, its own block
- * ignored) or, when author_text is NULL, into a synthesized author block. */
+/* The complete mod.json text for `bundle` (malloc'd), splicing the builder
+ * block into `author_text` (a mod.json text, its own block ignored) or, when
+ * author_text is NULL, into a synthesized author part. */
 char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, size_t author_len, size_t *out_len);
 
 /* The author's bytes of a mod.json text: the text without its "snapmap-plus"
@@ -409,15 +357,13 @@ char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, si
  * NULL when the text is not a JSON object. */
 char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
 
-/* The bundle.json form (pretty-printed, with "bundle"), as the retired
- * layout and earlier exports stored it (malloc'd, NUL-terminated), or NULL.
- * Exports now carry mod.json itself (modexport.h). */
-char *sh_mb_bundle_json(const sh_mb_bundle *bundle, size_t *out_len);
-
-/* Read and check a built mod.json: the author block, the product block,
- * structure, id, version, paths, logical names and the bundle hash recomputed
- * from the canonical form. Files on disk are not read. Returns 1 when valid;
- * a mod.json without a product block fails with "not built yet". */
+/* Read and check a built mod.json: the author's part, the builder block,
+ * structure, salt, version, paths, logical names and the build hash
+ * recomputed from the canonical form. Files on disk are not read. Returns 1
+ * when valid. A block without "build" fails with "not built: <cause>" (or
+ * "not built yet"), after filling id, built, rules, tree and state_cause; an
+ * earlier shape fails with SH_MB_SHAPE. A block with a "cause" beside its
+ * "build" loads with validated 0. */
 int  sh_mb_load(const char *mod_json_path, sh_mb_bundle *out);
 int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
 /* A built mod.json that fails sh_mb_load_text's check only because an earlier
@@ -428,39 +374,21 @@ int  sh_mb_load_text_earlier_rules(const char *text, size_t len, sh_mb_bundle *o
 /* `<folder>\mod.json`. */
 int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
 
-/* Read and check a manifest in the bundle.json form (Contract 1, with
- * "bundle"): a download, a folder of the retired layout. */
+/* Read and check a manifest (the canonical form with "bundle", format 2,
+ * "id" the salt). */
 int  sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out);
 
-/* Tree hash of a mod folder, the rebuild rule's key: SHA-256 over the
- * author's bytes of mod.json (else package.json), then every file under
+/* Tree hash of a mod folder, the rebuild rule's key (the block's "tree"):
+ * SHA-256 over the author's bytes of mod.json, then every file under
  * assets/ sorted by path with its size and last-write time. Cheap: no file is
  * read. Returns 1 and the hex. */
 int  sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1]);
 
 /* What a bundle serves, independent of its label: SHA-256 over id,
- * requirements, shadows, extra without "legacy", and every file's request,
+ * requirements, shadows, extra, and every file's request,
  * kind, hash and size. Two bundles with one key serve the same bytes under
  * the same names. */
 void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1]);
-
-/* A folder name under `mods_root` for a product-created folder of this
- * bundle: "<id>", else "<id>@<version>", else "<id>@<version>-<hash 8>", else
- * "<id>@<version>-<hash 16>". A generated version (sh_mb_version_generated)
- * never appears in a name: "<id>", else "<id>-<hash 8>", else "<id>-<hash 16>".
- * Returns 1 with a free name, 2 when that folder already holds this bundle
- * hash, 0 when none is available. */
-int  sh_mb_folder_name(const char *mods_root, const char *id, const char *version, const char *hash,
-                       char *out, size_t cap);
-
-/* A version the converter generated for a package a map delivered without
- * one ("legacy-<digest16>"): part of the manifest and its hash, never shown
- * and never part of a folder name. */
-int  sh_mb_version_generated(const char *version);
-
-/* Whether the bundle is a package a map delivered: its legacy record has no
- * overrides source, or its product block's origin is "delivery". */
-int  sh_mb_is_delivered(const sh_mb_bundle *bundle);
 
 /* Whether every request path of `part` (at least one) is one of `big`'s. */
 int  sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part);
@@ -499,67 +427,62 @@ int  sh_mb_record_why(char *out, size_t cap);
 void sh_mb_free(sh_mb_bundle *bundle);
 
 /* Build `folder` in place with the game-backed resolver (installed bundles,
- * then the player's game archives) and write its bundle.json: the entry the
- * legacy converter (modlegacy.c) calls for a converted package. Returns 1 on
- * success; 0 with the first cause in `first_cause` (NUL-terminated, at most
- * n bytes). Defined in modcmd.c, which owns the resolver; logs MODS: lines. */
+ * then the player's game archives) and write its mod.json: the entry the
+ * store tool's conversions call. Returns 1 on success; 0 with the first cause
+ * in `first_cause` (NUL-terminated, at most n bytes). Defined in modcmd.c,
+ * which owns the resolver; logs MODS: lines. */
 int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 
 /* ----------------------------------------------------------- helpers ---- */
 
-/* A key for a new mod named `name`: a slug of the name (lower-case letters
- * and digits, other runs as one '_', at most 59 characters, "mod" when
- * nothing is left) plus '_' and SH_MB_KEY_SUFFIX random characters of
- * [a-z0-9] ("hell_guards_7f3k"). Never '-': a bare decl word ends at '-', and
- * '_' is the engine's cooked spelling, so the key reads the same in decl
- * text and binary paths. Returns 1 with a valid id in out. */
-int  sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1]);
+/* Identity (ONE-SHAPE rule 1). The state of a folder's descriptor:
+ *   FRESH        mod.json with the author's part only (no block, no retired key)
+ *   BUILT        a format-2 block with a valid salt (built, failed, or salted only)
+ *   EARLIER      package.json, or a block of an earlier format
+ *   RETIRED_KEY  an author key this version does not read (mb_retired_key)
+ *   UNREADABLE   no mod.json, not a JSON object, or a format-2 block without a salt */
+#define SH_MB_DESC_FRESH       1
+#define SH_MB_DESC_BUILT       2
+#define SH_MB_DESC_EARLIER     3
+#define SH_MB_DESC_RETIRED_KEY 4
+#define SH_MB_DESC_UNREADABLE  5
+int  sh_mb_descriptor_state(const char *folder);
+/* The same, with the refusal sentence (SH_MB_SHAPE + cause) for EARLIER,
+ * RETIRED_KEY and UNREADABLE; "" for FRESH and BUILT. */
+int  sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cause_cap);
 
-/* Hand-made folders (DESIGN-additive 2.2, OWNER-QUESTIONS 6 (b)). The first
- * build of a store folder whose descriptor has neither an author "id" nor a
- * product-block "key" gives it a generated key, renames the folder to it and
- * rewrites the author's own references once (sh_ms_first_key, modstore.c);
- * these are the pure parts. */
+/* Every carried file and provided name under some mods/<x>/ has x equal to
+ * the bundle's salt (any case; a salt has one spelling). 1 when so; else 0
+ * with SH_MB_SHAPE "its files are under mods/<x>/ but it is <salt>". */
+int  sh_mb_salt_paths_check(const sh_mb_bundle *bundle, char *cause, size_t cause_cap);
 
-/* The key for a folder named `leaf`: sh_mb_key_generate of the leaf, after
- * dropping a trailing salt when the leaf already has a generated key's shape
- * ("probe_7f3k" or "probe-7f3k", the tail not all digits), so a copied key
- * gets a new salt instead of a second one. */
-int  sh_mb_key_for_folder(const char *leaf, char out[SH_MB_ID_MAX + 1]);
-
-/* SH_MB_KEY_FROM_ID when the descriptor (mod.json, else package.json) has an
- * author "id", SH_MB_KEY_FROM_BLOCK when its product block has a "key" (or
- * the block is not an object, which the build refuses), 0 when it has
- * neither, -1 when there is no readable JSON-object descriptor with a string
- * "name" (a damaged descriptor is refused by the build, never renamed). */
-int  sh_mb_descriptor_key_state(const char *folder);
-
-/* Every reference to mods/<folder> in `text` (n bytes), as written or in the
+/* Every reference to mods/<from> in `text` (n bytes), as written or in the
  * engine's cooked spelling (mb_binary_name), in any case, not inside a longer
- * name, rewritten to mods/<key>. Returns the count; with `out`, the rewritten
- * text (malloc'd, NUL-terminated, NULL when the count is 0) and its length;
- * (size_t)-1 when out of memory. Without `out` it only counts. */
-size_t sh_mb_rekey_text(const char *text, size_t n, const char *folder, const char *key, char **out, size_t *out_len);
+ * name, rewritten to mods/<to>. `from` is a namespace segment: a fresh
+ * folder's leaf, or a copy's old salt. Returns the count; with `out`, the
+ * rewritten text (malloc'd, NUL-terminated, NULL when the count is 0) and its
+ * length; (size_t)-1 when out of memory. Without `out` it only counts. */
+size_t sh_mb_rekey_text(const char *text, size_t n, const char *from, const char *to, char **out, size_t *out_len);
 
 /* `rel` ('/'-separated) with every folder segment right after a "mods"
- * segment that is `folder` (as written or cooked, any case) replaced by
- * `key`. 1 when changed, 0 when not, -1 when out is too small. */
-int  sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char *out, size_t cap);
+ * segment that is `from` (as written or cooked, any case) replaced by `to`.
+ * 1 when changed, 0 when not, -1 when out is too small. */
+int  sh_mb_rekey_path(const char *rel, const char *from, const char *to, char *out, size_t cap);
 
-/* A mod.json text (or package.json) with its product block replaced by the
- * one New mod writes: {"format": 1, "key": <key>, "origin": <origin, NULL
- * for "by-hand">}. The author's bytes are kept exactly. malloc'd, or NULL
- * when not a JSON object. */
-char *sh_mb_rekey_modjson(const char *text, size_t n, const char *key, const char *origin, size_t *out_len);
+/* A mod.json text with its builder block replaced by {"format": 2, "salt":
+ * <salt>} and every reference to mods/<from>/ in the author's part (strings
+ * keys, hud decl names, any value) rewritten to mods/<salt>/ (from NULL: no
+ * rewrite). The author's other bytes are kept exactly. malloc'd, or NULL when
+ * not a JSON object or salt is not a salt. */
+char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const char *salt, size_t *out_len);
 
 /* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
 /* For the calling thread only: 1 accepts a binary at a game name in the
  * builds it runs (an install of content the product received, such as a
- * rawmap or prefab import, is never refused on its files); 0 ends it. A
- * folder whose product block origin is download, delivery or migration is
- * accepted the same way. Every other build refuses such a file
+ * rawmap or prefab import or a store-tool conversion, is never refused on its
+ * files); 0 ends it. Every other build refuses such a file
  * (DESIGN-additive 2.4). Thread-local, so a worker's import never changes a
  * rescan's rule. */
 void sh_mb_keep_replacements_here(int on);
@@ -693,7 +616,7 @@ const char *sh_mb_decl_type(const char *folder, size_t folder_len);
 int  sh_mb_need_requests(const char *type, const char *name,
                          char out[][SH_MB_REQUEST_MAX + 1], int max);
 
-/* The path or name with its first "mods/<key>/" segment removed (at the
+/* The path or name with its first "mods/<salt>/" segment removed (at the
  * start or after a '/', key any non-empty segment, so both spellings of a key,
  * '-' in decl names and '_' in md6 paths, are cut): the installed name a
  * renamed copy most likely came from. Returns 1 and fills out (lower-cased)
