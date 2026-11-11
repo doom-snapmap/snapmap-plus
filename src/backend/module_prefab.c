@@ -747,7 +747,12 @@ static int mp_save(sh_module_prefab_call *call)
     }
     if (!sh_mp_cut(c->json, c->len, c->sel, c->nsel, &frag, &flen, &sum, err, (int)sizeof err)) {
         mp_logf("MODPREFAB: save refused: %s", err);
-        mp_out(call, err);
+        /* A selection the map no longer holds is chosen again; anything else is the map's own data. */
+        mp_out(call, strstr(err, "is not in this map") || strstr(err, "was chosen twice") || strstr(err, "nothing to cut") ||
+                     strstr(err, "too many modules")
+                     ? "Select the modules again and press Create."
+                     : "This selection could not be saved as a prefab: the map's data is inconsistent. Save the map, "
+                       "reload it and try again.");
         goto done;
     }
     if (c->have_bounds) {
@@ -835,7 +840,7 @@ static int mp_place(sh_module_prefab_call *call)
     if (!sh_mp_merge(c->json, c->len, engine, elen, at, &merged, &mlen, &first, &added, err, (int)sizeof err)) {
         free(engine);
         mp_logf("MODPREFAB: merge refused: %s", err);
-        mp_out(call, err);
+        mp_out(call, "This prefab could not be placed: its file is damaged. Ask its author to export it again.");
         HeapFree(GetProcessHeap(), 0, c->json);
         free(c);
         return -1;

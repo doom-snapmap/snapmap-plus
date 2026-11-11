@@ -429,7 +429,8 @@ static void test_module_guard(void)
                         "this room is not in your palette (DLC or a mod you do not have)"));
     sh_mp_missing_toast(&c, toast, sizeof toast);
     CHECK(!strcmp(toast, "Not placed: this prefab needs module ind_dlc/ind_totally_blank_room_4x, "
-                         "which is not in your palette (DLC or a mod you do not have)"));
+                         "which is not in your palette (DLC or a mod you do not have). Install the DLC or the mod that "
+                         "adds it."));
     sh_mp_missing_status(&c, status, sizeof status);
     CHECK(!strcmp(status, "Cannot be placed here: needs module ind_dlc/ind_totally_blank_room_4x "
                           "(not in your palette: DLC or a mod you do not have)"));
@@ -453,7 +454,7 @@ static void test_module_guard(void)
     CHECK(strstr(line, "maps/modules/m8.decl, ...; these rooms are not in your palette (DLC or a mod you do not have)") != NULL);
     sh_mp_missing_toast(&c, toast, sizeof toast);
     CHECK(STARTS(toast, "Not placed: this prefab needs 11 modules that are not in your palette "
-                        "(DLC or a mod you do not have): m1, m2, m3"));
+                        "(DLC or a mod you do not have); install the DLC or the mods that add them: m1, m2, m3"));
     CHECK(strstr(toast, "m8, ...") != NULL);
 
     /* the empty name is listed as such */

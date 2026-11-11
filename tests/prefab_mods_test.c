@@ -768,7 +768,7 @@ static void resolving(const sh_modmanifest_row *door)
         r = sh_prefab_mods_resolve_main(DLC, sizeof DLC - 1, &rows, "Rooms", &seq, msg, sizeof msg);
         CHECK(r == SH_PREFAB_MODS_NEEDS_MODULE && F.asks == 0 && !sh_modpublished_holding());
         CHECK(!strcmp(msg, "Not placed: this prefab needs module ind_dlc/dlc_room, which is not in your palette "
-                           "(DLC or a mod you do not have)"));
+                           "(DLC or a mod you do not have). Install the DLC or the mod that adds it."));
         CHECK(!strcmp(F.last_print, "Module prefab: needs module maps/modules/ind_dlc/dlc_room.decl; this room is not in "
                                     "your palette (DLC or a mod you do not have)"));
         {
