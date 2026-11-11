@@ -761,14 +761,17 @@ static void test_record(const char *tmp)
     }
 }
 
-/* Another program holds the record open without read sharing. */
-typedef struct rec_hold { const char *path; DWORD ms; HANDLE taken; } rec_hold;
+/* Another program holds the record open without read sharing: for `ms`, or,
+ * with INFINITE, until the test releases it (rec_hold_release), so a long hold
+ * outlasts every step that must meet it however slowly the machine runs. */
+typedef struct rec_hold { const char *path; DWORD ms; HANDLE taken, release; } rec_hold;
 static DWORD WINAPI rec_hold_thread(LPVOID p)
 {
     rec_hold *r = (rec_hold *)p;
     HANDLE h = CreateFileA(r->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
     SetEvent(r->taken);
-    Sleep(r->ms);
+    if (r->ms == INFINITE) WaitForSingleObject(r->release, INFINITE);
+    else Sleep(r->ms);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     return 0;
 }
@@ -778,10 +781,18 @@ static HANDLE rec_hold_start(rec_hold *r, const char *path, DWORD ms)
     r->path = path;
     r->ms = ms;
     r->taken = CreateEventA(NULL, TRUE, FALSE, NULL);
+    r->release = CreateEventA(NULL, TRUE, FALSE, NULL);
     t = CreateThread(NULL, 0, rec_hold_thread, r, 0, NULL);
     WaitForSingleObject(r->taken, 5000);
     CloseHandle(r->taken);
     return t;
+}
+static void rec_hold_release(rec_hold *r, HANDLE t)
+{
+    SetEvent(r->release);
+    WaitForSingleObject(t, 5000);
+    CloseHandle(t);
+    CloseHandle(r->release);
 }
 
 /* A read that fails is never followed by a write of what it could not read
@@ -802,10 +813,9 @@ static void test_record_read_failure(const char *tmp)
     CHECK(sh_mb_record_get(root, "claims", &text) == 1 && text && strstr(text, "item-2"));
     free(text);
     text = NULL;
-    WaitForSingleObject(t, 5000);
-    CloseHandle(t);
+    rec_hold_release(&r, t);
     /* A long hold: the read fails and says so; no write follows it. */
-    t = rec_hold_start(&r, path, 4000);
+    t = rec_hold_start(&r, path, INFINITE);
     g_logged = 0;
     CHECK(sh_mb_record_get(root, "claims", &text) == -1 && !text);
     CHECK(log_has("MODS: record: cannot read ") && log_has("recordheld\\snapmap-plus.json (another program has it open); "
@@ -821,8 +831,7 @@ static void test_record_read_failure(const char *tmp)
     g_logged = 0;
     CHECK(!sh_mb_record_put(root, "cache", "{\"aa\":\"bb\"}"));
     CHECK(log_has("the \"cache\" section of ") && log_has("was not written: the record cannot be read (another program"));
-    WaitForSingleObject(t, 5000);
-    CloseHandle(t);
+    rec_hold_release(&r, t);
     /* Released: the read-modify-write that read nothing is still refused. */
     g_logged = 0;
     CHECK(!sh_mb_record_put(root, "claims", "{\"item-3\":{\"claim\":\"c3\"}}"));
