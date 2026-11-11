@@ -31,11 +31,9 @@ void backend_log(const char *message);
 static const char *const NAV_CLASSES[] = { "monster48", "monster96", "monster128" };
 #define NAV_CLASS_COUNT ((int)(sizeof NAV_CLASSES / sizeof NAV_CLASSES[0]))
 
-/* Room for counts and all diagnostic notes without truncating common reports.
-
- */
+/* Room for counts and all diagnostic notes without truncating common reports. */
 #define BAKE_REASON_CAP 1024
-#define BAKE_BRIEF_CAP  80
+#define BAKE_BRIEF_CAP  96
 /* Floor climbs per box face, for sh_navmesh and the log. */
 #define BAKE_FACES_CAP  768
 
@@ -100,8 +98,10 @@ static void bake_plan_locked(void);
 static void bake_cache_clear(void);
 static void bake_cache_begin_pass(void);
 
+/* The short reason for a refusal the player cannot fix. */
+#define BAKE_BRIEF_INTERNAL "this room keeps its original navigation (internal error); report it with the log"
+
 /* The live-editor surface, registered once at startup. */
-static sh_nav_bake_entity_count g_live_count;
 static sh_navr_entity_valid     g_live_valid;
 static sh_navr_entity_json      g_live_json;
 static sh_navr_entity_transform g_live_transform;
@@ -255,15 +255,11 @@ static void bake_invalidate_sources_locked(void)
     if (g_have_map && !g_live_refused) bake_plan_locked();
 }
 
-void sh_nav_bake_source_update_begin(void) { AcquireSRWLockExclusive(&g_bake_lock); }
-void sh_nav_bake_source_update_end(int committed)
-{
-    if (committed) bake_invalidate_sources_locked();
-    ReleaseSRWLockExclusive(&g_bake_lock);
-}
 void sh_nav_bake_invalidate_sources(void)
 {
-    sh_nav_bake_source_update_begin(); sh_nav_bake_source_update_end(1);
+    AcquireSRWLockExclusive(&g_bake_lock);
+    bake_invalidate_sources_locked();
+    ReleaseSRWLockExclusive(&g_bake_lock);
 }
 
 void sh_nav_bake_build_begin(void)
@@ -289,14 +285,12 @@ void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx)
     ReleaseSRWLockExclusive(&g_bake_lock);
 }
 
-void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
-                                 sh_navr_entity_valid valid,
+void sh_nav_bake_set_live_editor(sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
                                  sh_navr_entity_transform get_transform,
                                  void *ctx)
 {
     AcquireSRWLockExclusive(&g_bake_lock);
-    g_live_count = count;
     g_live_valid = valid;
     g_live_json = get_json;
     g_live_transform = get_transform;
@@ -304,40 +298,6 @@ void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
     ReleaseSRWLockExclusive(&g_bake_lock);
 }
 
-/* Legacy per-entity refresh, called with g_bake_lock held. A refusal
- * preserves the previously attributed map; complete snapshots use a separate
- * path.
- */
-static void bake_refresh_live_locked(void)
-{
-    int n, marked, before, after;
-    char line[192];
-
-    if (!g_live_count || !g_live_json || !g_have_map) return;
-    n = g_live_count(g_live_ctx);
-    g_live_scanned = n;
-    g_live_marked = 0;
-    g_live_refused = 0;
-    if (n <= 0) return;
-    before = g_module_count;
-    marked = sh_nav_regions_refresh_live(&g_map, n, g_live_valid, g_live_json, g_live_ctx);
-    if (marked < 0) {   /* map untouched; keep what the load gave us */
-        g_live_refused = 1;
-        g_read_reason = "the editor's boxes could not be read one by one";
-        return;
-    }
-    g_live_marked = marked;
-    bake_plan_locked();
-    after = g_module_count;
-
-    /* Report lost modules so a failed or mistimed live read is visible. */
-    if (after < before) {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "NAV: the live editor read dropped %d module(s) -- scanned %d entity id(s), "
-                    "found %d marked volume(s)", before - after, n, marked);
-        backend_log(line);
-    }
-}
 
 /* Count resource opens for all modules, including unmarked ones. */
 typedef struct bake_open_census {
@@ -727,7 +687,7 @@ static void bake_refresh_live(int accept_unmeasured)
         }
         if (candidate) sh_nav_map_free(candidate);
         free(candidate);
-    } else if (g_have_map) bake_refresh_live_locked();
+    }
     } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
 }
 
@@ -770,10 +730,18 @@ int sh_nav_bake_instance_name(int instance,const char *name,char *out,size_t cap
     ReleaseSRWLockShared(&g_bake_lock);return ok;
 }
 
+/* What a faulted map read had allocated, freed if its tables can still be
+ * walked; a second fault leaves them rather than risk the free. */
+static void bake_free_map_after_fault(void)
+{
+    __try { sh_nav_map_free(&g_map); } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    memset(&g_map, 0, sizeof g_map);
+}
+
 void sh_nav_bake_set_map(const char *json, size_t len)
 {
     int ok;
-    int i, total = 0, refused = 0;
+    int i, total = 0, refused = 0, modules;
     char line[256];
 
     AcquireSRWLockExclusive(&g_bake_lock);
@@ -802,10 +770,11 @@ void sh_nav_bake_set_map(const char *json, size_t len)
             } else {
                 g_live_refused = 1;
                 g_read_reason = !ok ? "the map text could not be parsed"
-                                    : "its room table (instanceEntities) is malformed";
+                              : g_map.invalid_geometry ? "its room table (instanceEntities) is malformed"
+                              : "some boxes' sizes could not be read from the map";
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            memset(&g_map, 0, sizeof g_map);
+            bake_free_map_after_fault();
             g_module_count = 0;
             g_have_map = 0;
             InterlockedExchange(&g_faulted, 1);
@@ -815,13 +784,14 @@ void sh_nav_bake_set_map(const char *json, size_t len)
         total += g_modules[i].regions;
         if (!g_modules[i].ok) refused++;
     }
+    modules = g_module_count;
     ReleaseSRWLockExclusive(&g_bake_lock);
 
-    if (g_module_count == 0) return;    /* No report for an unmarked map. */
+    if (modules == 0) return;    /* No report for an unmarked map. */
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: this map marks %d volume(s) for AI navigation across %d module(s)"
-                "%s%s", total, g_module_count,
+                "%s%s", total, modules,
                 refused ? "; " : "", refused ? "some were refused, see sh_navmesh" : "");
     backend_log(line);
 }
@@ -1053,13 +1023,22 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         else
             _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
                         "no marked volume also blocks demons, so none is a floor");
-        strcpy_s(o->brief, sizeof o->brief, "no marked box blocks demons");
+        strcpy_s(o->brief, sizeof o->brief, "turn on Block Demons for the marked boxes");
         return;
     }
     if (!shipped) {
         _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
                     "the module's own navigation could not be read back");
-        strcpy_s(o->brief, sizeof o->brief, "its own navigation could not be read");
+        strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
+        return;
+    }
+    /* A module's own file comes from the game or from a mod. One whose records do not hold
+     * together is refused before the bake reads them. */
+    err[0] = 0;
+    if (!sh_navmesh_validate_aas(shipped, shipped_len, err, sizeof err)) {
+        _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
+                    "the module's own navigation file is damaged (%s)", err);
+        strcpy_s(o->brief, sizeof o->brief, "this module's own navigation file is damaged");
         return;
     }
     /* Floors come first in the offered boxes, walls that only block after. */
@@ -1077,7 +1056,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         if (!model) {
             _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
                         "the module's navigation did not parse: %s", err);
-            strcpy_s(o->brief, sizeof o->brief, "its own navigation did not parse");
+            strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
             if (subset) HeapFree(GetProcessHeap(), 0, subset);
             return;
         }
@@ -1117,7 +1096,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         "%u; this copy has %d box(es), spread or merge some of them",
                         tries ? (unsigned)depth_first : rep.depth_after,
                         (unsigned)SH_AAS_MAX_DEPTH, in_count);
-            strcpy_s(o->brief, sizeof o->brief, "navigation tree deeper than 128");
+            strcpy_s(o->brief, sizeof o->brief, "too many boxes overlap in this room; spread or merge some");
         } else if (augmented) {
             size_t size = sh_aas_serialized_size(model);
             if (routes_engine < 0) routes_engine = rep.routes_dropped;
@@ -1155,8 +1134,8 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                             "served per room; with every long route and all but one floor "
                             "left out it was still %.1f MiB",
                             size_first / 1048576.0, cap / 1048576.0, size_last / 1048576.0);
-                _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "navigation file over %.0f MiB", cap / 1048576.0);
+                strcpy_s(o->brief, sizeof o->brief,
+                         "this room has too many boxes for one navigation file; remove some");
             } else {
                 o->bytes = sh_aas_write(model, &o->length);
                 if (size_keep >= 0) {
@@ -1176,7 +1155,8 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                             "the module's own navigation already has %u routes out of area "
                             "%d, the engine's limit, so nothing generated can join it there",
                             SH_AAS_MAX_AREA_REACHABILITIES, rep.reach_limit_area);
-                strcpy_s(o->brief, sizeof o->brief, "its own routes already fill one area");
+                strcpy_s(o->brief, sizeof o->brief,
+                         "this module's own navigation is already full near the red boxes; move them");
                 for (i = 0; i < rep.blamed_count; i++)
                     bake_mark(o->refused, &o->refused_count, plats, plat_count, rep.blamed[i]);
             } else if (rep.links_truncated) {
@@ -1185,14 +1165,14 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
             } else if (rep.pieces_truncated) {
                 strcpy_s(o->reason, sizeof o->reason,
                          "a marked box's geometry could not be cut into walkable pieces");
-                strcpy_s(o->brief, sizeof o->brief, "a box's geometry could not be cut");
+                strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
             } else if (rep.segments_failed) {
                 strcpy_s(o->reason, sizeof o->reason,
                          "an edge could not be measured against the module's navigation");
-                strcpy_s(o->brief, sizeof o->brief, "an edge could not be measured");
+                strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
             } else {
                 strcpy_s(o->reason, sizeof o->reason, "the bake did not produce a payload");
-                strcpy_s(o->brief, sizeof o->brief, "the bake produced nothing");
+                strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
             }
         }
         bake_log_refusal(name, o, plats, plat_count, &rep);
@@ -1208,7 +1188,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         o->bytes = NULL; o->length = 0;
         _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
                     "the bake did not pass validation: %s", err);
-        strcpy_s(o->brief, sizeof o->brief, "the result failed validation");
+        strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
         bake_log_refusal(name, o, plats, plat_count, &rep);
         sh_aug_report_free(&rep);
         if (subset) HeapFree(GetProcessHeap(), 0, subset);
@@ -1261,7 +1241,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         "engine's %u (it would have been %d deep)", depth_cut,
                         (unsigned)SH_AAS_MAX_DEPTH, depth_first);
             _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                        "%d box(es) left out at the 128 tree-depth limit", depth_cut);
+                        "%d boxes left out (too many overlap); spread or merge them", depth_cut);
             for (i = size_keep >= 0 ? size_keep : keep;
                  i < floors && o->partial_count < BAKE_MAX_REFUSED; i++)
                 bake_mark(o->partial, &o->partial_count, in_plats, in_count, i);
@@ -1290,12 +1270,11 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         "%.1f MiB)", cap / 1048576.0, size_first / 1048576.0);
             if (!o->brief[0] && size_cut)
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "%d route(s), %d box(es) left out at the %.0f MiB file limit",
-                            thinned, size_cut, cap / 1048576.0);
+                            "%d long routes and %d boxes left out (too many boxes in this room)",
+                            thinned, size_cut);
             else if (!o->brief[0])
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "%d route(s) left out at the %.0f MiB file limit",
-                            thinned, cap / 1048576.0);
+                            "%d long routes left out (too many boxes in this room)", thinned);
             for (i = keep; i < (size_keep >= 0 ? size_keep : keep) &&
                            o->partial_count < BAKE_MAX_REFUSED; i++)
                 bake_mark(o->partial, &o->partial_count, in_plats, in_count, i);
@@ -1317,7 +1296,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                             rep.routes_dropped, rep.route_areas, SH_AAS_MAX_AREA_REACHABILITIES);
             if (!o->brief[0])
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "%d route(s) left out at the 256-per-area limit", rep.routes_dropped);
+                            "%d climbs or jumps left out (too many from one spot)", rep.routes_dropped);
             for (i = 0; i < rep.dropped_count; i++)
                 bake_mark(o->partial, &o->partial_count, plats, plat_count, rep.dropped[i].source);
             o->state = SH_NAV_CLASS_PARTIAL;
@@ -1328,8 +1307,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         rep.sources_dropped, SH_AUG_MAX_PLATFORMS);
             if (!o->brief[0])
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "%d box(es) left out at the %d-piece limit",
-                            rep.sources_dropped, SH_AUG_MAX_PLATFORMS);
+                            "%d boxes lost a face (too many pieces in this room)", rep.sources_dropped);
             for (i = 0; i < rep.dropped_source_count; i++)
                 bake_mark(o->partial, &o->partial_count, plats, plat_count, rep.dropped_sources[i]);
             o->state = SH_NAV_CLASS_PARTIAL;
@@ -1340,14 +1318,15 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         SH_AUG_MAX_PLATFORMS);
             if (!o->brief[0])
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
-                            "%d box(es) past %d per room left out", left_out,
+                            "%d boxes past %d in this room left out; remove some", left_out,
                             SH_AUG_MAX_PLATFORMS);
             o->state = SH_NAV_CLASS_PARTIAL;
         }
         if (rep.file_full) {
             bake_append(o->reason, sizeof o->reason,
                         "; the module's navigation file filled, later pieces left out");
-            if (!o->brief[0]) strcpy_s(o->brief, sizeof o->brief, "navigation file full");
+            if (!o->brief[0])
+                strcpy_s(o->brief, sizeof o->brief, "this room's navigation file filled; remove some boxes");
             o->state = SH_NAV_CLASS_PARTIAL;
         }
         if (rep.edges_skipped)
@@ -1835,12 +1814,13 @@ static void preview_overlays(preview_task *t)
     }
 }
 
-static void preview_batch_run(preview_batch *b)
+/* One copy's bakes. The worker runs them guarded: inputs are validated before
+ * baking, so a fault is a bug, and that copy keeps its own navigation instead
+ * of taking the process down. */
+static int preview_task_bake(preview_task *t)
 {
-    int i, ci;
-    SH_PERF_BEGIN(t0);
-    for (i = 0; i < b->count; i++) {
-        preview_task *t = &b->t[i];
+    int ci;
+    __try {
         if (!t->cached)
             bake_run(t->name, t->plats, t->plat_count, t->shipped, t->shipped_len,
                      t->left_out, t->not_floor, &t->out);
@@ -1849,6 +1829,43 @@ static void preview_batch_run(preview_batch *b)
                 bake_run(t->cls_name[ci], t->plats, t->plat_count, t->cls_shipped[ci],
                          t->cls_shipped_len[ci], t->left_out, t->not_floor, &t->cls_out[ci]);
         preview_overlays(t);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+static void bake_outcome_faulted(bake_outcome *o)
+{
+    if (o->bytes) HeapFree(GetProcessHeap(), 0, o->bytes);
+    memset(o, 0, sizeof *o);
+    o->state = SH_NAV_CLASS_REFUSED;
+    strcpy_s(o->reason, sizeof o->reason,
+             "the bake stopped on an internal error; this room keeps its original navigation");
+    strcpy_s(o->brief, sizeof o->brief, BAKE_BRIEF_INTERNAL);
+}
+
+static void preview_batch_run(preview_batch *b)
+{
+    int i, ci;
+    SH_PERF_BEGIN(t0);
+    for (i = 0; i < b->count; i++) {
+        preview_task *t = &b->t[i];
+        if (preview_task_bake(t)) continue;
+        bake_outcome_faulted(&t->out);
+        for (ci = 1; ci < NAV_CLASS_COUNT; ci++) {
+            if (t->cls_shipped[ci] && !t->cls_cached[ci]) bake_outcome_faulted(&t->cls_out[ci]);
+            if (t->overlay[ci]) { HeapFree(GetProcessHeap(), 0, t->overlay[ci]); t->overlay[ci] = NULL; }
+            t->overlay_len[ci] = 0;
+        }
+        if (t->overlay[0]) { HeapFree(GetProcessHeap(), 0, t->overlay[0]); t->overlay[0] = NULL; }
+        t->overlay_len[0] = 0;
+        {
+            char line[SH_SMNAV_RESNAME_CAP + 96];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "NAV: the preview bake of '%s' faulted; that copy keeps its own navigation", t->name);
+            backend_log(line);
+        }
     }
     SH_PERF_END(SH_PERF_PREVIEW_BAKE, t0);
 }
@@ -1887,6 +1904,7 @@ static int preview_worker_ready(void)
     return g_pv_thread != NULL;
 }
 
+#ifdef SH_DIAG
 int sh_nav_bake_show_marks(int count)
 {
     int i, marked = 0;
@@ -1924,6 +1942,7 @@ int sh_nav_bake_show_marks(int count)
     ReleaseSRWLockExclusive(&g_bake_lock);
     return marked;
 }
+#endif
 
 int sh_nav_bake_preview_pending(void)
 {
@@ -2527,7 +2546,8 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                 _snprintf_s(why, sizeof why, _TRUNCATE, "the bake faulted; navigation is off for this session");
                 k->state = SH_NAV_CLASS_REFUSED; k->revision = g_geometry_revision;
                 strncpy_s(k->reason, sizeof k->reason, why, _TRUNCATE);
-                strcpy_s(k->brief, sizeof k->brief, "the bake faulted");
+                strcpy_s(k->brief, sizeof k->brief,
+                         "navigation turned itself off after an error; restart DOOM to use it again");
             }
             if (o) { if (o->bytes) HeapFree(GetProcessHeap(), 0, o->bytes); HeapFree(GetProcessHeap(), 0, o); }
         }
@@ -2603,7 +2623,7 @@ void sh_nav_bake_summary_get(sh_nav_bake_summary *s)
             _snprintf_s(s->first, sizeof s->first, _TRUNCATE, "%s (copy %d): %s",
                         bake_leaf(g_modules[i].module), g_modules[i].instance,
                         g_modules[i].cls[0].brief[0] ? g_modules[i].cls[0].brief
-                                                    : "see sh_navmesh");
+                                                    : "it keeps its original navigation");
         else if (g_map.dropped_kept > 0)
             _snprintf_s(s->first, sizeof s->first, _TRUNCATE, "box %u: %s",
                         g_map.dropped[0].entity,
@@ -2638,11 +2658,11 @@ void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
     if (!finished || !s || !s->have_map) {
         strcpy_s(title, title_cap, "Navmesh Build Failed");
         if (s && !s->have_map && s->read_reason[0])
-            bake_compose(body, cap, "This map could not be read for navigation: ",
-                         s->read_reason, ". Run sh_navmesh for details.");
+            bake_compose(body, cap, "This map's boxes could not be read for navigation (",
+                         s->read_reason, "). Fix that box, then choose Build Navmesh again.");
         else
-            strcpy_s(body, cap, "The navmesh could not be completed. Check the navigation "
-                                "settings and marked geometry, then try again.");
+            strcpy_s(body, cap, "The build stopped before it finished (the editor changed mode, "
+                                "or AI Navigation is off in Settings). Choose Build Navmesh again.");
         return;
     }
     if (!s->refused && !s->partial && !s->boxes_left_out) {
@@ -2654,16 +2674,13 @@ void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
         strcpy_s(title, title_cap, "Navmesh Build Failed");
         strcpy_s(head, sizeof head, s->rooms ? "No room could be built. "
                                              : "No marked box could be used. ");
+        strcpy_s(tail, sizeof tail, ". The boxes drawn red are the ones to move.");
     } else {
         strcpy_s(title, title_cap, "Navmesh Partly Built");
-        _snprintf_s(head, sizeof head, _TRUNCATE, "%d of %d rooms built%s. ",
-                    s->built + s->partial, s->rooms,
-                    s->partial ? (s->refused ? ", some partly" : ", partly") : "");
+        _snprintf_s(head, sizeof head, _TRUNCATE, "%d of %d rooms built. ",
+                    s->built + s->partial, s->rooms);
+        strcpy_s(tail, sizeof tail, ". Boxes drawn red or amber are the ones left out.");
     }
-    if (s->boxes_left_out)
-        _snprintf_s(tail, sizeof tail, _TRUNCATE, ". %d box%s left out. See sh_navmesh.",
-                    s->boxes_left_out, s->boxes_left_out == 1 ? "" : "es");
-    else strcpy_s(tail, sizeof tail, ". See sh_navmesh.");
     bake_compose(body, cap, head, s->first[0] ? s->first : "some rooms kept their own navmesh",
                  tail);
 }
@@ -2816,7 +2833,8 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
     char line[256];
     if (!out) return;
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0)
-        out("navigation: baking is OFF for this session after a fault.\n");
+        out("navigation: custom navigation turned itself off after an error this session; "
+            "restart DOOM to use it again.\n");
     AcquireSRWLockShared(&g_bake_lock);
     if (g_module_count == 0 && !g_live_refused) {
         out("navigation: no volume in this map is marked for AI navigation.\n");
@@ -2858,15 +2876,22 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
     }
     if (g_live_refused) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "current editor geometry could not be read (%s); custom navigation is "
-                    "unavailable until a complete snapshot succeeds.",
-                    g_read_reason[0] ? g_read_reason : "no reason recorded");
+                    "The editor's boxes could not be read (%s); navigation updates again after "
+                    "your next edit.", g_read_reason[0] ? g_read_reason : "no reason recorded");
         bake_out_wrapped(out, "  ", line, strlen(line));
     } else if (g_live_scanned < 0) {
-        out("  using the loaded map; a complete editor snapshot is pending.\n");
+        out("  using the loaded map; the editor's boxes are read again after your next edit.\n");
     } else {
-        out("  the current editor snapshot contains %d marked volume(s).\n",g_live_marked);
+        out("  the editor's boxes include %d marked for AI navigation.\n", g_live_marked);
     }
+    ReleaseSRWLockShared(&g_bake_lock);
+}
+
+void sh_nav_bake_report_detail(void (*out)(const char *fmt, ...))
+{
+    int i;
+    if (!out) return;
+    AcquireSRWLockShared(&g_bake_lock);
     out("  editor geometry revision %lu; green preview: monster48, %d lines%s.\n",
         g_geometry_revision,g_preview_lines,g_preview_lines>=8192?" (display limit reached)":"");
     out("  map tables: %d room(s), %d floor(s), %d wall(s), %lu KB\n",

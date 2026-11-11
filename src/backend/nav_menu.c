@@ -14,6 +14,7 @@ void backend_log(const char *message);
 #define NAV_ACTION 9
 #define STOCK_ROWS 7
 #define MENU_ROWS 8
+#define NAV_BUILD_CEILING_MS 60000u   /* the longest the Building Navmesh modal waits */
 #define ED_SCREEN 0x21088
 #define ED_MAP 0x204c8
 #define ED_STATE 0x23618
@@ -460,7 +461,19 @@ static void busy_tick(unsigned char *editor)
             sh_apply_engine_nav_request_update();g_requested=1;return;
         }
         status=sh_apply_engine_nav_update_status();
-        if (status==SH_NAV_UPDATE_REQUESTED || status==SH_NAV_UPDATE_BUILDING) return;
+        if (status==SH_NAV_UPDATE_REQUESTED || status==SH_NAV_UPDATE_BUILDING) {
+            /* A 600-box room bakes in about a second; a build still running
+             * after a minute has stalled, and the editor must not stay locked
+             * behind the modal waiting for it. */
+            if (GetTickCount64()-g_busy_since<NAV_BUILD_CEILING_MS) return;
+            release_busy();
+            *(unsigned*)(screen+SCREEN_SHOWN)|=0xc0;
+            message(g_toast,screen,"Navmesh Build Failed",
+                    "The build did not finish within a minute and was stopped waiting. "
+                    "Choose Build Navmesh again.");
+            backend_log("NAV menu: the navmesh build did not finish within a minute; the modal was closed");
+            return;
+        }
         /* Small maps finish in a few frames. Keep the native progress message
          * readable without delaying the worker or blocking the engine thread. */
         if (GetTickCount64()-g_busy_since<600) return;

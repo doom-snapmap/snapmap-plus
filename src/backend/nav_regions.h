@@ -186,22 +186,14 @@ int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
 /* Read edit.clipModelInfo.size from a bounded, inheritance-resolved native
  * declaration. Requires all components and a box type; never supplies sizes. */
 int sh_nav_regions_decl_size(const char *text, size_t len, float size[3]);
-/* One level of an unresolved entityDef file: the clipModelInfo.size members it
- * spells (bit i of *have for axis i), its clip type (1 box, -1 other, 0 not
- * given) and its inherit name. The text may carry the file's outer braces.
- * Returns 0 for text that does not tokenize. */
-int sh_nav_regions_decl_level(const char *text, size_t len, float size[3],
-                              unsigned *have, int *type, char *inherit, size_t cap);
 
 #ifdef SH_NAVR_TESTING
 /* Lower the ceilings so a test can reach them; 0 restores the defaults. */
 void sh_nav_regions_test_limits(int regions, int instances);
 #endif
 
-/* Legacy per-entity refresh for callers without a complete-map snapshot.
- * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes
- * ownership and the instance table together with geometry, including new IDs.
- */
+/* The per-box surface: a complete-map snapshot (sh_nav_bake_set_snapshot)
+ * reads ownership and geometry; these callbacks let one box be re-read. */
 
 /* Serialize live entity id with engine reflection. Returns bytes written, or
  * <= 0 on failure.
@@ -224,13 +216,6 @@ typedef int (*sh_navr_entity_transform)(int id, float origin[3], float m[3][3],
 int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
                             const float size[3], sh_nav_region *r);
 
-/* Legacy refresh of markers and geometry using the existing instance
- * attribution. Returns the marked-volume count, or -1 without changing m if
- * the live surface cannot be read. highest_id bounds probes through valid.
- */
-int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
-                                sh_navr_entity_valid valid,
-                                sh_navr_entity_json get_json, void *ctx);
 
 /* Refresh all cached Blocking Boxes by their live uniqueIds, including
  * unmarked obstacles. Preserve map-array indices and instance ownership.
