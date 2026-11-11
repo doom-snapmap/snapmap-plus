@@ -13,17 +13,12 @@ const selfExeAsset = "snapmap-plus.exe"
 // executablePath locates the running image; tests point it at a stand-in so the test binary is never replaced.
 var executablePath = os.Executable
 
-// shouldSelfUpdate decides whether the running snapmap-plus.exe should replace itself with the resolved release's
-// exe. It stays put for a dev/local build (version "dev" -- never clobber a hand-built binary) or when the
-// running version already matches the release tag.
+// shouldSelfUpdate decides whether the running snapmap-plus.exe should replace itself with the
+// resolved release's exe: only when that release is a newer version. A dev or local build (no
+// release version) never replaces itself, and the installer never moves to an older version.
 func shouldSelfUpdate(runningVersion, releaseTag string) bool {
-	if runningVersion == "" || runningVersion == "dev" {
-		return false
-	}
-	if releaseTag == "" || releaseTag == runningVersion {
-		return false
-	}
-	return true
+	c, ok := compareVersions(releaseTag, runningVersion)
+	return ok && c > 0
 }
 
 // assetMatchesFile reports whether the file on disk already has the release asset's exact bytes, via the
@@ -96,7 +91,7 @@ func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 		}
 	}
 	if err := replaceExe(exe, newExe); err != nil {
-		ui.Warn("couldn't replace snapmap-plus.exe (%v) -- you can grab the new snapmap-plus.exe from the release if needed", err)
+		ui.Warn("couldn't replace snapmap-plus.exe (%v). Close any other snapmap-plus window and run: snapmap-plus update", err)
 		return exe, false
 	}
 	if sum, err := fileSHA256(exe); err == nil {
@@ -145,10 +140,10 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 		return err
 	}
 	if err := ops.copyFile(newExe, stagedPath); err != nil {
-		return fmt.Errorf("stage new executable: %w", err)
+		return fmt.Errorf("could not write the new snapmap-plus.exe beside the old one: %w", err)
 	}
 	if !identicalFiles(newExe, stagedPath) {
-		return fmt.Errorf("staged executable does not match the download")
+		return fmt.Errorf("the new snapmap-plus.exe was damaged while it was written")
 	}
 	sum, _ := fileSHA256(path)
 	defer tidyInstallerCache()
@@ -162,16 +157,16 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 		}
 		if installErr := ops.rename(stagedPath, path); installErr != nil {
 			if rollbackErr := ops.rename(old, path); rollbackErr != nil {
-				return fmt.Errorf("install new executable: %v; rollback failed: %v; recover the original from %s", installErr, rollbackErr, old)
+				return fmt.Errorf("the new snapmap-plus.exe could not be put in place (%v), and the old one could not be put back (%v): it is at %s -- rename it to %s", installErr, rollbackErr, old, filepath.Base(path))
 			}
-			return fmt.Errorf("install new executable (original restored): %w", installErr)
+			return fmt.Errorf("the new snapmap-plus.exe could not be put in place; the old one is still there: %w", installErr)
 		}
 		if ops.remove(old) != nil {
 			if recErr := recordSetAside(old, sum, path); recErr != nil {
-				ui.Warn("kept the prior installer at %s; could not record it for removal: %v", old, recErr)
+				ui.Warn("the previous snapmap-plus.exe is still at %s (%v); delete it once nothing is running it", old, recErr)
 			}
 		}
 		return nil
 	}
-	return fmt.Errorf("could not reserve an executable backup path: %v", err)
+	return fmt.Errorf("the old snapmap-plus.exe could not be moved aside (%v)", err)
 }
