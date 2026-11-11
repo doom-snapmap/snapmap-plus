@@ -340,10 +340,58 @@ static int fake_preload(const char *why)
     return 0;
 }
 
+/* Mod scripts: the builder's compile check (script_compile.c in the product)
+ * fails a text holding BROKEN at line 4 as Lua would say it; the runtime's
+ * state, log and the sound banks a restart brings in are the test's. */
+static int fake_script_check(const char *file, int entry, const char *text, size_t len, int *line, char *what,
+                             size_t what_cap, char *todo, size_t todo_cap)
+{
+    (void)file; (void)entry; (void)len;
+    if (!strstr(text, "BROKEN")) return 1;
+    *line = 4;
+    strncpy_s(what, what_cap, "\"end\" expected to close \"function\" on line 2", _TRUNCATE);
+    strncpy_s(todo, todo_cap, "correct it, then press Refresh", _TRUNCATE);
+    return 0;
+}
+static int g_script_on;                 /* the runtime knows g_script_salt */
+static char g_script_salt[16];
+static sh_modui_script_info g_script;
+static int fake_script_info(const char *salt, sh_modui_script_info *out)
+{
+    if (!g_script_on || _stricmp(salt, g_script_salt)) return 0;
+    *out = g_script;
+    return 1;
+}
+static int fake_script_log(const char *salt, sh_modui_line_fn fn, void *context)
+{
+    if (!g_script_on || _stricmp(salt, g_script_salt)) return 0;
+    fn(context, "door: switch 1 of 3");
+    fn(context, "a line with \"quotes\" and a \\ backslash");
+    if (g_script.stop[0]) fn(context, g_script.stop);
+    return g_script.stop[0] ? 3 : 2;
+}
+static int fake_script_mods(sh_modui_name_fn fn, void *context)
+{
+    if (!g_script_on) return 0;
+    fn(context, g_script_salt);
+    return 1;
+}
+static char g_bank[64], g_bank_owner[16];
+static int fake_restart_banks(void (*fn)(void *context, const char *bank, const char *owner), void *context)
+{
+    if (!g_bank[0]) return 0;
+    if (fn) fn(context, g_bank, g_bank_owner);
+    return 1;
+}
+
 static void bind_fakes(void)
 {
     sh_modui_engine e;
     memset(&e, 0, sizeof e);
+    e.script_info = fake_script_info;
+    e.script_log = fake_script_log;
+    e.script_mods = fake_script_mods;
+    e.restart_banks = fake_restart_banks;
     e.map_json = fake_map_json;
     e.map_info = fake_map_info;
     e.delete_entities = fake_delete;
@@ -852,6 +900,7 @@ int main(int argc, char **argv)
     CHECK(mt_copy_tree(fixture, src));
     CHECK(sh_ms_set_root(g_root));
     bind_fakes();
+    sh_mb_set_script_check(fake_script_check);
     note_salt("alexrimp");
 
     printf("-- an empty store: payload v4, every section present and empty, no migration state\n");
@@ -1539,6 +1588,165 @@ int main(int argc, char **argv)
     }
     CHECK(has(dr, "MODS: doctor: verify: "));
     CHECK(lines_prose_ok(dr));
+
+    printf("-- mod scripts: what they drive in the row, their text and errors in the Files view, their log and state\n");
+    {
+        char sm[MAX_PATH * 2], s[16] = "", lua[400], *p;
+        static const char DOOR[] =
+            "api = 1\r\nlocal on_count = 0\r\non.input(\"switch_used\", function(switch_node, activator)\r\n"
+            "  on_count = on_count + 1\r\n  if on_count == 3 then node(\"open_door\"):fire(activator) end\r\nend)\r\n"
+            "on.think(\"pickups/spin\", function(self, dt) self:set_yaw(self:yaw() + 90 * dt) end)\r\n"
+            "on.spawn(\"pickups/spin\", function(self) end)\r\n"
+            "local which = \"pickups/spin\"\r\non.damage(which, function(self, hit) end)\r\n";   /* a name set while running */
+        _snprintf_s(sm, sizeof sm, _TRUNCATE, "%s\\doorlogic", g_root);
+        put_fresh_mod(sm, "Door Logic", "doorlogic", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tdoor = 1;\r\n}\r\n");
+        mt_write(sm, "assets\\generated\\decls\\entitydef\\mods\\doorlogic\\pickups\\spin.decl",
+                 "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tspin = 1;\r\n}\r\n");
+        mt_write(sm, "assets\\mods\\doorlogic\\scripts\\door.lua", DOOR);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        doc = list_doc();
+        row_salt(doc, "doorlogic", s, sizeof s);
+        note_salt(s);
+        if (!row_has(doc, "doorlogic", "\"scripts\":{")) printf("    %s\n", doc ? doc : "(null)");
+        /* the block's member as built: the static pass's names, no salt */
+        CHECK(row_has(doc, "doorlogic", "\"state\":\"ready\""));
+        CHECK(row_has(doc, "doorlogic", "\"scripts\":{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],"
+                                        "\"name\":\"pickups/spin\"}],\"files\":1,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
+        CHECK(!row_has(doc, "doorlogic", "\"scriptRun\""));   /* no Play has run them */
+        CHECK(!row_has(doc, "doorlogic", "\"restartBanks\":[\""));
+        CHECK(doc_prose_ok(doc));
+        free(doc);
+
+        /* The Files view: the script is text, its path under the salt; its text reads. */
+        doc = run_doc(SH_MODS_ACT_FILES, "doorlogic");
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"assets/mods/%s/scripts/door.lua\",", s);
+        p = doc ? strstr(doc, lua) : NULL;
+        CHECK(p != NULL);
+        CHECK(p && !strncmp(strstr(p, "\"kind\":"), "\"kind\":\"text\"", 13));
+        free(doc);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tassets/mods/%s/scripts/door.lua", s);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, lua);
+        CHECK(has(doc, "\"ok\":true") && has(doc, "on.input(\\\"switch_used\\\"") && has(doc, "\"cause\":\"\""));
+        free(doc);
+
+        /* A syntax error: the row's cause is the script's own sentence with file and line, and the
+         * Files view puts it on that file. */
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", s);
+        mt_write(sm, lua, "api = 1\r\non.input(\"switch_used\", function()\r\n  BROKEN\r\n");
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        doc = list_doc();
+        if (!row_has(doc, "doorlogic", "\"cause\":\"scripts\\\\door.lua line 4:")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(row_has(doc, "doorlogic", "\"state\":\"attention\",\"cause\":\"scripts\\\\door.lua line 4: \\\"end\\\" expected to "
+                                        "close \\\"function\\\" on line 2. Correct it, then press Refresh.\""));
+        CHECK(doc_prose_ok(doc));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "doorlogic");
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"assets/mods/%s/scripts/door.lua\",", s);
+        p = doc ? strstr(doc, lua) : NULL;
+        CHECK(p && strstr(p, "\"cause\":\"scripts\\\\door.lua line 4: ") && strstr(p, "\"cause\":\"scripts") < strstr(p, "}"));
+        free(doc);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tassets/mods/%s/scripts/door.lua", s);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, lua);
+        CHECK(has(doc, "\"cause\":\"scripts\\\\door.lua line 4: "));
+        free(doc);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", s);
+        mt_write(sm, lua, DOOR);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+
+        /* A Play stopped the scripts: the row carries the stop line until the next Play. */
+        g_script_on = 1;
+        strcpy_s(g_script_salt, sizeof g_script_salt, s);
+        memset(&g_script, 0, sizeof g_script);
+        g_script.status = SH_MODUI_SCRIPT_STOPPED;
+        g_script.lines = 3;
+        strcpy_s(g_script.stop, sizeof g_script.stop, "Script stopped: Door Logic, scripts\\door.lua line 5: \"open_door\" is "
+                 "nothing here. Check the name you pass.");
+        doc = list_doc();
+        CHECK(row_has(doc, "doorlogic", "\"scriptRun\":{\"status\":\"stopped\",\"stop\":\"Script stopped: Door Logic, "
+                                        "scripts\\\\door.lua line 5: \\\"open_door\\\" is nothing here. Check the name you pass.\","
+                                        "\"lines\":3}"));
+        CHECK(row_has(doc, "doorlogic", "\"state\":\"ready\""));   /* still usable: the stop is the Play's */
+        CHECK(doc_prose_ok(doc));
+        union_add(doc);
+        free(doc);
+        g_script.status = SH_MODUI_SCRIPT_RUNNING;
+        doc = list_doc();
+        CHECK(row_has(doc, "doorlogic", "\"scriptRun\":{\"status\":\"running\",\"stop\":\"\",\"lines\":3}"));
+        free(doc);
+
+        /* The script log op: any thread, its own buffer, a size query first. */
+        {
+            sh_mods_call call;
+            char *out;
+            g_script.status = SH_MODUI_SCRIPT_STOPPED;
+            g_main = 0;
+            memset(&call, 0, sizeof call);
+            call.op = SH_MODS_SCRIPTS;
+            call.arg = s;
+            CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);
+            out = (char *)malloc((size_t)call.needed + 1);
+            call.out = out;
+            call.out_cap = call.needed + 1;
+            CHECK(out && sh_modui_slot(NULL, &call) == 1);
+            _snprintf_s(lua, sizeof lua, _TRUNCATE, "{\"mods\":[{\"salt\":\"%s\",\"status\":\"stopped\",\"stop\":\"Script stopped: Door "
+                        "Logic, scripts\\\\door.lua line 5:", s);
+            CHECK(out && !strncmp(out, lua, strlen(lua)));
+            CHECK(has(out, "\"log\":[\"door: switch 1 of 3\",\"a line with \\\"quotes\\\" and a \\\\ backslash\","
+                           "\"Script stopped: Door Logic,"));
+            free(out);
+            /* no salt: every mod's state, no log; a salt the runtime does not know: an empty log */
+            memset(&call, 0, sizeof call);
+            call.op = SH_MODS_SCRIPTS;
+            call.arg = "";
+            CHECK(sh_modui_slot(NULL, &call) == -1);
+            out = (char *)malloc((size_t)call.needed + 1);
+            call.out = out;
+            call.out_cap = call.needed + 1;
+            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"log\":[]}"));
+            free(out);
+            g_script_on = 0;
+            {
+                char tiny[256];
+                memset(&call, 0, sizeof call);
+                call.op = SH_MODS_SCRIPTS;
+                call.arg = s;
+                call.out = tiny;
+                call.out_cap = (int)sizeof tiny;
+                CHECK(sh_modui_slot(NULL, &call) == 1 && has(tiny, "{\"mods\":[],") && has(tiny, "\"log\":[]}"));
+            }
+            g_main = 1;
+        }
+        doc = list_doc();
+        CHECK(!row_has(doc, "doorlogic", "\"scriptRun\""));
+        free(doc);
+
+        /* A sound bank the game loaded before a change: the row says it, and the Refresh that brought
+         * the change says it once. */
+        strcpy_s(g_bank, sizeof g_bank, "doorlogic_sfx.bnk");
+        strcpy_s(g_bank_owner, sizeof g_bank_owner, s);
+        doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+        CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"Restart DOOM to hear the new doorlogic_sfx.bnk.\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+        CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"\""));   /* already said */
+        free(doc);
+        doc = list_doc();
+        CHECK(row_has(doc, "doorlogic", "\"restartBanks\":[\"doorlogic_sfx.bnk\"]"));
+        CHECK(row_has(doc, "gates", "\"restartBanks\":[]"));   /* another mod's bank is not its line */
+        union_add(doc);
+        free(doc);
+        g_bank[0] = 0;
+
+        /* The download approval's sentence for scripted mods. */
+        sh_modui_scripts_approval(2, lua, sizeof lua);
+        CHECK(!strcmp(lua, "These mods include scripts (2 files). Scripts run only inside this map and cannot read or change "
+                           "your files."));
+        sh_modui_scripts_approval(1, lua, sizeof lua);
+        CHECK(has(lua, "(1 file)."));
+        CHECK(prose_ok(SH_MODUI_SCRIPTS_OFF));
+        mt_remove_tree(sm);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+    }
 
     printf("-- the page's fixture keys are the backend's\n");
     keys_match_fixture(payload, g_union ? g_union : "");

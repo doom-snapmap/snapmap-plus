@@ -182,6 +182,13 @@ int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, con
 int sh_modsound_needs_add_served(sh_modsound_needs *t, const char *hash, const char *key, const char *request);
 const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash);
 
+/* The banks whose file changed after the game loaded them this session:
+ * Wwise keeps the bytes it loaded first under a name until DOOM restarts.
+ * fn(context, the bank's file name, the salt of the mod serving the new
+ * bytes) once per bank; returns the count. The Mods tab says "Restart DOOM to
+ * hear the new <bank>" from it. Any thread. */
+int  sh_modsound_restart_banks(void (*fn)(void *context, const char *bank, const char *owner), void *context);
+
 #ifndef SH_MODSOUND_PURE
 #include "signatures.h"
 /* Resolve the four signatures (SIG_OK only), decode the hardware pointer,

@@ -322,8 +322,8 @@ action that reads the folder again and builds what changed (there is no Rebuild 
 watcher). Every action is answered with `modsActionResult` and then a fresh `mods` document (the
 Files view's two reads, `modFiles` and `modFileText`, with the result alone), one job at a time.
 When the backend's generation moves without the page asking (a console verb, a map opened or left
-in the editor, an owed row drop or undo clear), the host pushes a fresh document; the page itself
-never polls. An author's edit shows after the next Refresh, which the empty state, How mods work
+in the editor, an owed row drop or undo clear), the host pushes a fresh document; the page never
+polls the document (the one repeating request is the script log's, below). An author's edit shows after the next Refresh, which the empty state, How mods work
 and New mod's result say ("After you change a mod's files, press Refresh to see the change.").
 The page renders only from the last document and the last dry run, never from its own
 bookkeeping. Every folder's state, conflicts, replaced game files and verification stay in
@@ -338,7 +338,65 @@ index and the refresh run on the main thread (`SH_MODS_ACT_APPLY`). If the game 
 part, the result is posted with `applyPending` and the page adds "The game has not taken the change
 yet; press Refresh to bring it in." A Refresh says nothing when nothing is left to do, and always
 shows the one sentence a change still needs: "Some of the changes take effect only after you
-restart DOOM.", "... when you next open the map." or "... when you are back in the editor."
+restart DOOM.", "... when you next open the map." or "... when you are back in the editor." When
+the change replaced a sound bank the game had already loaded (Wwise keeps the bytes it loaded first
+under a name until DOOM restarts; `modsound.h` `sh_modsound_restart_banks`), the sentence is
+"Restart DOOM to hear the new <bank>." (once per bank), and the mod's details keep that line
+(`restartBanks`) until the restart.
+
+**Scripts.** A mod whose build carries scripts (the builder block's `scripts` member, read without
+running them) says so on its row ("3.6 MB, runs scripts") and in a Scripts section: Files (a link
+that opens the Files view on its `scripts\` folder), then one plain line per thing they drive
+("Drives props/door_switch when it spawns and every frame.", the events spawn, think, damage,
+death, anim and remove said as "when it spawns", "every frame", "when it takes damage", "when it
+dies", "on its animation events", "when it is removed"), "Answers the Script node named
+"switch_used": a wire into one runs the script.", "Fires the Script node named "open_door"; wire
+what should happen to its On Fired.", and, when a name is built while running, "Some names are set
+while the map runs, so they are not listed here." A Script log section shows the state of its
+scripts in the current or last Play ("Running in this Play.", "They start when the Play begins.",
+"They ran in the last Play.", "They run when you play a map that uses this mod.", or the stop line),
+the log's lines (the scripts' `print` and `warn`, and the line saying why they stopped, at most 200,
+cleared when the next Play starts), Copy log ("Copied N lines of the script log.") and the note "The
+log keeps the last 200 lines of the current or last Play: the scripts' print and warn lines, and the
+line that says why they stopped. The next Play starts it again." While a script is stopped, its stop
+line ("Script stopped: <mod>, scripts\<file>.lua line <n>: <what went wrong>. <what to do>.") is the
+row's state (a red glyph, the line as the hover and the details sentence) until the next Play; the
+mod stays usable, so it is not "needs attention". A build that fails on a script shows the script's
+own sentence as the row's cause ("scripts\door.lua line 4: "end" expected to close "function" on
+line 2. Correct it, then press Refresh."), and the Files view puts it on that file. The window hides
+during Play, so while a Play runs the log is read with `sh_scripts log` on the console; the tab shows
+the last Play's lines when the editor is back.
+
+The page asks for the script states and the selected mod's log with `modsScripts {salt}` each second
+while the Mods tab shows and any mod has scripts (`modsTab.show` and `hide`; the timer is the page's,
+passed as `every` and `cancel`). The host answers at once on its own thread from the read-only
+`SH_MODS_SCRIPTS` op (`modui.h` `sh_modui_scripts`: the script runtime's state, never the shared
+document, so it runs beside a job) with `{"kind": "modsScripts", "data": {"mods": [{salt, status,
+stop, lines}], salt, log: [...]}}`; the page updates the rows' states and the log in place and draws
+the details again only when the selected mod's state changed.
+
+A downloaded map's mod that carries scripts says so in its short view: "Scripts: Runs scripts (N
+files). Scripts run only inside this map and cannot read or change your files." The one download
+approval adds the design's sentence ("These mods include scripts (N files). Scripts run only inside
+this map and cannot read or change your files.", `sh_modui_scripts_approval`) once the download gate
+knows, before it asks, that the map's mods carry scripts.
+
+**The setting for scripts from downloaded maps.** Under the list: a checkbox "Play maps whose mods
+include scripts" (on by default, `mods.scripted_maps`) with its sentence, "When this is off,
+Snapmap+ refuses a map whose mods include scripts before it downloads anything." The refusal is the
+download gate's ("This map's mods include scripts, which you turned off in the Mods tab; turn on
+"Play maps whose mods include scripts" there to play it.", `SH_MODUI_SCRIPTS_OFF`), read through
+`sh_modui_scripted_maps_allowed`.
+
+**The Entities tab.** For a selected entity of a mod with scripts the editor shows one line under its
+fields (`#fScriptNote`, from `modsTab` `scriptInfo`): a Script node (entityDef `mods/<salt>/script`)
+reads "Script node: runs "switch_used" in Doors." for a name its mod's scripts handle, "Script node:
+the scripts of Doors fire it as "open_door"; wire its On Fired." for a name they fire, and "No script in
+Doors uses the name "opne_door"; pick a name its scripts use." otherwise (plus "Names its scripts
+set while running are not listed." when some are); its Displayname offers those names as choices
+(`#fScriptNames`), and Save renames the node. An object whose entityDef a script binds by name reads
+"Driven by a script in <mod>." With no mods document yet, the page asks for one (`modsList`, no
+rescan).
 
 **Vocabulary.** Nothing a player reads names a salt, a hash, a build number, "bundle", "key",
 "pointer", "surface", "legacy" or "migrate". Each cause, warning and result is one plain sentence
@@ -516,6 +574,9 @@ Per entry of `mods`:
 | `"warnings"` | string[] | The builder's warnings, in plain words. |
 | `"publishedMaps"` | number | How many of the player's published maps record its build; absent when unknown. |
 | `"sameFilesAs"` | object | `{name, folder, count}` when another of the player's mods carries at least half of its files at equal bytes; absent otherwise. |
+| `"scripts"` | object | For a built mod that carries scripts: the builder block's member as built, `{dynamic?, entities: [{events, name}], files, inputs, node?, outputs}` (names mod-relative; `dynamic` counts names set while running); absent otherwise. |
+| `"scriptRun"` | object | `{status, stop, lines}` of its scripts in the current or last Play (`status` none, running, stopped, ended or waiting; `stop` the stop line while stopped); absent when no Play has run them. |
+| `"restartBanks"` | string[] | Its sound banks whose new bytes the game plays only after a restart. |
 
 `map` keeps `entities` (-1 when no map is open), `names`, `rows` (`{salt, name, build, size,
 state, cause, key, nameCount, names, attached}`: `state` active, incomplete, skipped or missing,
@@ -546,7 +607,8 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `newMod` | `arg` is a display name: `mods\<name>\` with `mod.json`, a new salt and a working example (an entityDef and its Toybox row), built at once; `data` is `{key, file}`. |
 
 An action the host does not know is answered "Unknown mods action."; an action number the
-backend does not know is answered "Unknown action.".
+backend does not know is answered "Unknown action.". `modsScripts {salt}` is not an action: it never
+touches the busy state or the job, and is answered with `modsScripts` (above).
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` for `uninstallPreview`.
 `map` is null when the open map does not use the mod, else `{name, entities, entityCount,
@@ -627,7 +689,9 @@ held prefab changed.
 Entity state and selection are sampled roughly every 330 ms: the backend exposes no
 generation for entity or declaration edits, so the host copies the shown entity's
 declaration and compares a hash (the budget table and the Mods tab already follow the
-backend's generations). Timeline scanning
+backend's generations). While the Mods tab shows a mod with scripts, the page asks for the script
+log once a second (`modsScripts`, answered on the UI thread from the script runtime's own lock).
+Timeline scanning
 is change-gated. Prefab rendering redraws when scene data, input, theme or
 viewport dimensions change.
 

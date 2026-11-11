@@ -78,7 +78,8 @@ class FakeNode {
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
              'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
-             'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
+             'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate',
+             'modsScriptedMaps', 'modsScriptedMapsLabel', 'modsScriptedMapsNote'];
 const GONE = ['modsRebuildBtn', 'modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsMigrateBtn', 'modsVerifyBtn'];
 const str = v => typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v));
@@ -300,9 +301,10 @@ function harness(opts) {
   let ui = null;
   ui = modsTab.create({
     document: doc, byId: id => nodes[id] || null, saveCollapsed: list => saved.push(list),
-    post: m => { sent.push(m); if (opts.store) opts.store(m).forEach(r => ui.onMessage(r)); },
+    post: m => { sent.push(m); if (opts.store && m.cmd !== 'modsScripts') opts.store(m).forEach(r => ui.onMessage(r)); },
     toast: (t, k) => toasts.push({text: t, kind: k}),
-    tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items}), copy: opts.copy
+    tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items}), copy: opts.copy,
+    every: opts.every, cancel: opts.cancel, saveSetting: opts.saveSetting, changed: opts.changed
   });
   ui.bind();
   return {ui, nodes, sent, toasts, saved, menus, doc};
@@ -597,8 +599,10 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   const d = h.nodes.modsDetail;
   assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
   assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Came with the map Hell Guard Arena; only that map uses it.');
-  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about'], 'nothing written for authors');
-  assert.equal(section(h, 'about').textContent, 'About Came with Hell Guard Arena ' + modsTab.PLACE_CLEANUP_TEXT);
+  /* its scripts are said, and their log kept for the Play that ran them; nothing written for authors */
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'scriptLog'], 'nothing written for authors');
+  assert.equal(section(h, 'about').textContent, 'About Came with Hell Guard Arena Scripts ' + modsTab.scriptsShortText(3) + ' ' +
+                                                modsTab.PLACE_CLEANUP_TEXT);
   assert.equal(h.nodes.modsFilesBtn.style.display, 'none');
   assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
   assert.equal(h.nodes.modsUninstallBtn.disabled, false);
@@ -608,7 +612,7 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   assert.equal(add.disabled, false);
   assert.equal(add.title, modsTab.ADD_MINE_TITLE);
   add.click();
-  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'addToMine', arg: 'maps\\Hell Guard Arena\\Hell Guards'});
+  assert.deepEqual(h.sent.filter(m => m.cmd === 'modsAction').slice(-1)[0], {cmd: 'modsAction', action: 'addToMine', arg: 'maps\\Hell Guard Arena\\Hell Guards'});
   assert.match(h.toasts.pop().text, /^Added Hell Guards to your mods, in mods\\Hell Guards; your own maps can use it now\.$/);
   assert.equal(h.ui.state().selectedKey, 'Hell Guards', 'your new copy is selected');
   assert.equal(h.nodes.modsUseBtn.textContent, 'Use in this map');
@@ -934,6 +938,206 @@ test('the header fits at the minimum pane width', () => {
   assert.equal(buttons, 6, 'attention, This map, Refresh, Open folder, New mod, Install');
   assert.ok(2 * inset + headGap + buttons * button + (buttons - 1) * gap <= min, 'six buttons fit in a ' + min + ' px pane');
 });
+/* ---- mod scripts ------------------------------------------------------------------------------ */
+const DOORS = 'campaign-interactables\\doors', HELL = 'maps\\Hell Guard Arena\\Hell Guards';
+const STOP_LINE = 'Script stopped: Doors, scripts\\door.lua line 5: "open_door" is nothing here. Check the name you pass.';
+function timers() {
+  const t = {live: [], every: (fn, ms) => { const h = {fn, ms}; t.live.push(h); return h; },
+             cancel: h => { t.live = t.live.filter(x => x !== h); }, tick: () => t.live.slice().forEach(h => h.fn())};
+  return t;
+}
+test('scripts in words: what they drive and when, the Script nodes they answer and fire, names set while running', () => {
+  const m = modsTab.normalize(v4);
+  const doors = m.mods.find(b => b.key === DOORS), hell = m.mods.find(b => b.key === HELL);
+  assert.deepEqual(modsTab.scriptLines(doors.scripts).map(l => l.text), [
+    'Drives props/door_switch when it spawns and every frame.',
+    'Answers the Script node named "switch_used": a wire into one runs the script.',
+    'Fires the Script node named "open_door"; wire what should happen to its On Fired.']);
+  assert.deepEqual(modsTab.scriptLines(hell.scripts).map(l => l.text), [
+    'Drives ai/hell_guard every frame, when it takes damage and when it dies.', modsTab.SCRIPT_DYNAMIC_TEXT]);
+  assert.deepEqual(modsTab.scriptLines({files: 1, entities: [], inputs: ['a', 'b', 'c'], outputs: [], dynamic: 0}).map(l => l.text),
+                   ['Answers the Script nodes named "a", "b" and "c": a wire into one runs the script.']);
+  assert.match(modsTab.scriptLines({files: 1, entities: [], inputs: [], outputs: [], dynamic: 0})[0].text, /run when the map starts/);
+  assert.equal(m.mods.find(b => b.key === 'alex.r2-imp').scripts, null, 'a mod without scripts has none');
+  assert.equal(modsTab.subText(doors), '3.6 MB, runs scripts');
+  assert.equal(modsTab.scriptRunText(doors.scriptRun), 'They ran in the last Play.');
+  assert.equal(modsTab.scriptRunText(null), modsTab.SCRIPT_RUN_TEXT.none);
+  assert.equal(modsTab.scriptRunText({status: 'stopped', stop: STOP_LINE}), STOP_LINE);
+  assert.equal(modsTab.scriptsShortText(3), 'Runs scripts (3 files). Scripts run only inside this map and cannot read or change your files.');
+});
+test('a stopped script is the row\'s state until the next Play; it is not attention', () => {
+  const data = clone(v4);
+  data.mods.find(b => b.key === DOORS).scriptRun = {status: 'stopped', stop: STOP_LINE, lines: 3};
+  const h = live(data);
+  const row = rowOf(h, DOORS);
+  assert.equal(iconOf(row), 'stop');
+  assert.equal(row.title, STOP_LINE + ' The open map uses this mod.', 'the stop line, then that the map uses it');
+  assert.match(row.textContent, /runs scripts/);
+  h.ui.select(DOORS);
+  assert.equal(h.nodes.modsDetail.all('mods-detail-sentence')[0].textContent, STOP_LINE);
+  assert.equal(h.nodes.modsUseBtn.disabled, false, 'a mod whose script stopped can still be used in a map');
+  assert.equal(modsTab.statusInfo(modsTab.normalize(data).mods.find(b => b.key === DOORS)).tone, 'stop');
+  h.ui.setAttentionOnly(true);
+  assert.ok(!keys(h).includes(DOORS), 'the attention filter keeps the mods that cannot be used');
+});
+test('details: the Scripts section and the script log, its Copy and its note', () => {
+  const t = timers(), copied = [];
+  const h = harness({store: standIn(v4), every: t.every, cancel: t.cancel, copy: x => copied.push(x)});
+  h.ui.show();
+  h.ui.select(DOORS);
+  const sc = section(h, 'scripts');
+  assert.ok(sc, 'a Scripts section');
+  assert.match(sc.textContent, /Files 2 files/);
+  assert.match(sc.textContent, /Drives props\/door_switch when it spawns and every frame\./);
+  assert.match(sc.textContent, /Answers the Script node named "switch_used"/);
+  const log = section(h, 'scriptLog');
+  assert.match(log.textContent, /They ran in the last Play\./);
+  assert.match(log.textContent, /Reading the log\.\.\./);
+  assert.ok(log.textContent.indexOf(modsTab.SCRIPT_LOG_NOTE) >= 0);
+  const ask = h.sent.filter(m => m.cmd === 'modsScripts');
+  assert.ok(ask.length >= 1 && ask[ask.length - 1].salt === 'doorsx8q', 'the selected mod\'s log is asked for');
+  /* the answer: the log in place, and the state */
+  h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 2}], salt: 'doorsx8q',
+                                             log: ['door: switch 1 of 3', 'door: switch 2 of 3']}});
+  const log2 = section(h, 'scriptLog');
+  assert.match(log2.textContent, /door: switch 1 of 3 door: switch 2 of 3/);
+  assert.match(log2.textContent, /Running in this Play\./);
+  log2.tags('button').find(b => b.textContent === 'Copy log').click();
+  assert.deepEqual(copied, ['door: switch 1 of 3\ndoor: switch 2 of 3\n']);
+  assert.equal(h.toasts[h.toasts.length - 1].text, 'Copied 2 lines of the script log.');
+  /* the script stops: the row and the details show the stop line, the log its last line */
+  h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'stopped', stop: STOP_LINE, lines: 3}], salt: 'doorsx8q',
+                                             log: ['door: switch 1 of 3', 'door: switch 2 of 3', STOP_LINE]}});
+  assert.equal(iconOf(rowOf(h, DOORS)), 'stop');
+  assert.equal(h.nodes.modsDetail.all('mods-detail-sentence')[0].textContent, STOP_LINE);
+  assert.equal(section(h, 'scriptLog').all('mods-log-stop')[0].textContent, STOP_LINE);
+  /* the next Play: the runtime knows it again as running, the stop is gone */
+  h.ui.onMessage({kind: 'modsScripts', data: {mods: [{salt: 'doorsx8q', status: 'running', stop: '', lines: 0}], salt: 'doorsx8q', log: []}});
+  assert.equal(iconOf(rowOf(h, DOORS)), 'map', 'back to the in-this-map glyph');
+  assert.match(section(h, 'scriptLog').textContent, new RegExp(modsTab.SCRIPT_LOG_EMPTY.replace('.', '\\.')));
+  assert.equal(section(h, 'scriptLog').tags('button').find(b => b.textContent === 'Copy log').disabled, true);
+  /* Files: the Files view opens on the mod's scripts folder */
+  sc.tags('button')[0].click();
+  assert.equal(h.ui.state().files.open, true);
+  assert.equal(h.ui.state().files.want, 'assets/mods/doorsx8q/scripts/');
+  /* a mod without scripts has neither section */
+  h.ui.closeFiles();
+  h.ui.select('alex.r2-imp');
+  assert.equal(section(h, 'scripts'), undefined);
+  assert.equal(section(h, 'scriptLog'), undefined);
+});
+test('the script log is asked for each second only while the tab shows a mod with scripts', () => {
+  const t = timers();
+  const h = harness({store: standIn(v4), every: t.every, cancel: t.cancel});
+  assert.equal(t.live.length, 0, 'nothing before the tab shows');
+  h.ui.show();
+  assert.equal(t.live.length, 1);
+  assert.equal(t.live[0].ms, modsTab.SCRIPT_POLL_MS);
+  h.sent.length = 0;
+  t.tick();
+  assert.deepEqual(h.sent, [{cmd: 'modsScripts', salt: ''}], 'no mod with scripts selected: the states only');
+  h.ui.select(HELL);
+  h.sent.length = 0;
+  t.tick();
+  assert.deepEqual(h.sent, [{cmd: 'modsScripts', salt: 'hellgd3k'}]);
+  h.ui.hide();
+  assert.equal(t.live.length, 0, 'leaving the tab stops it');
+  h.ui.show();
+  assert.equal(t.live.length, 1);
+  /* no mod with scripts: nothing is asked */
+  const none = clone(v4);
+  none.mods.forEach(b => { delete b.scripts; delete b.scriptRun; });
+  h.ui.onMessage({kind: 'mods', data: none});
+  assert.equal(t.live.length, 0);
+});
+test('a downloaded map\'s mod says it runs scripts in the short view', () => {
+  const h = live();
+  h.ui.select(HELL);
+  const about = section(h, 'about');
+  assert.match(about.textContent, /Scripts Runs scripts \(3 files\)\. Scripts run only inside this map and cannot read or change your files\./);
+  assert.ok(section(h, 'scriptLog'), 'its log is there for the Play that ran it');
+  assert.equal(section(h, 'scripts'), undefined, 'the author\'s Scripts section is not the short view\'s');
+});
+test('a sound bank the game loaded before a change: Restart DOOM to hear the new one', () => {
+  const data = clone(v4);
+  data.mods.find(b => b.key === DOORS).restartBanks = ['doors_sfx.bnk'];
+  const h = live(data);
+  h.ui.select(DOORS);
+  assert.ok(h.nodes.modsDetail.textContent.indexOf('Restart DOOM to hear the new doors_sfx.bnk.') >= 0);
+});
+test('the Files view: a script is named as one, its text read with Lua colours', () => {
+  const f = modsTab.normFiles({files: [{path: 'assets/mods/doorsx8q/scripts/door.lua', kind: 'text', 'class': 'add', size: 9},
+                                       {path: 'assets/generated/decls/entitydef/mods/doorsx8q/x.decl', kind: 'text', 'class': 'add', size: 9}]});
+  assert.equal(f.files[1].cls, 'script');
+  assert.equal(modsTab.fileMeta(f.files[1])[0], modsTab.FILE_CLASSES.script);
+  assert.equal(f.files[0].cls, 'add');
+  const toks = modsTab.luaTokens('api = 1 -- note\nlocal s = "a\\"b" .. [[long]]\nif x then return nil end --[[ c\n]] 0x1F');
+  const kinds = toks.map(t => t.type + (t.isKey ? ':key' : '') + (t.isBool ? ':bool' : ''));
+  assert.deepEqual(kinds, ['ident', 'punc', 'num', 'cmt', 'ident:key', 'ident', 'punc', 'str', 'punc', 'punc', 'str', 'ident:key', 'ident',
+                           'ident:key', 'ident:key', 'ident:bool', 'ident:key', 'cmt', 'num']);
+  const text = 'api = 1 -- note\nlocal s = "a\\"b" .. [[long]]\nif x then return nil end --[[ c\n]] 0x1F';
+  assert.equal(text.slice(toks[3].start, toks[3].end), '-- note');
+  assert.equal(text.slice(toks[17].start, toks[17].end), '--[[ c\n]]');
+  /* the view uses them for a .lua, the decl tokens for everything else */
+  let declAsked = 0;
+  const folders = {};
+  folders[DOORS] = {files: [{path: 'assets/mods/doorsx8q/scripts/door.lua', size: 20, kind: 'text', 'class': 'add', game: false,
+                             container: '', inFolder: true, cause: ''}],
+                    texts: {'assets/mods/doorsx8q/scripts/door.lua': 'api = 1\n-- a comment\n'}};
+  const h = harness({store: standIn(v4, folders), tokens: t => { declAsked++; return []; }});
+  h.ui.show();
+  h.ui.openFiles(DOORS, 'assets/mods/doorsx8q/scripts/');
+  assert.equal(h.ui.state().files.selected, 'assets/mods/doorsx8q/scripts/door.lua');
+  assert.equal(declAsked, 0, 'a script is not read as a decl');
+  const code = h.nodes.modsFilesHost.all('tk-cmt');
+  assert.equal(code.length, 1);
+  assert.equal(code[0].textContent, '-- a comment');
+  assert.ok(h.nodes.modsFilesHost.tags('button').some(b => b.textContent === 'Open in editor'), 'Open in editor on a .lua');
+});
+test('the Entities tab: a Script node offers its mod\'s names and says when no script uses its name', () => {
+  const mods = modsTab.normalize(v4).mods;
+  let i = modsTab.scriptEntityInfo(mods, 'mods/doorsx8q/script', 'switch_used');
+  assert.equal(i.kind, 'node');
+  assert.equal(i.text, 'Script node: runs "switch_used" in Doors.');
+  assert.deepEqual(i.choices.map(c => c.name), ['switch_used', 'open_door']);
+  i = modsTab.scriptEntityInfo(mods, 'mods/doorsx8q/script', 'open_door');
+  assert.equal(i.text, 'Script node: the scripts of Doors fire it as "open_door"; wire its On Fired.');
+  i = modsTab.scriptEntityInfo(mods, 'mods/doorsx8q/script', 'opne_door');
+  assert.equal(i.used, false);
+  assert.equal(i.text, 'No script in Doors uses the name "opne_door"; pick a name its scripts use.');
+  i = modsTab.scriptEntityInfo(mods, 'mods/doorsx8q/script', '');
+  assert.equal(i.text, 'Script node of Doors: give it the name of something its scripts handle or fire.');
+  i = modsTab.scriptEntityInfo(mods, 'mods/HELLGD3K/ai/hell_guard', 'Guard 1');
+  assert.deepEqual([i.kind, i.text], ['driven', 'Driven by a script in Hell Guards.']);
+  assert.equal(modsTab.scriptEntityInfo(mods, 'mods/hellgd3k/ai/other', ''), null, 'an entity no script binds');
+  assert.equal(modsTab.scriptEntityInfo(mods, 'ai/demon/imp_coop', ''), null, 'a game entity');
+  assert.equal(modsTab.scriptEntityInfo(mods, 'mods/alexrimp/script', 'x'), null, 'a mod without scripts');
+  /* a name only set while running is not listed: the node says so */
+  i = modsTab.scriptEntityInfo([{salt: 'dyn12345', key: 'dyn', name: 'Dyn', folder: 'dyn', place: '',
+                                 scripts: {files: 1, entities: [], inputs: ['a'], outputs: [], dynamic: 2}}], 'mods/dyn12345/script', 'b');
+  assert.match(i.text, /Names its scripts set while running are not listed\.$/);
+  /* through the tab: the last document; asked for once when none came */
+  const h = harness();
+  assert.equal(h.ui.scriptInfo('mods/doorsx8q/script', 'x'), null);
+  assert.equal(h.ui.ensureLoaded(), true);
+  assert.deepEqual(h.sent[h.sent.length - 1], {cmd: 'modsList'});
+  assert.equal(h.ui.ensureLoaded(), false, 'asked once');
+  h.ui.onMessage({kind: 'mods', data: v4});
+  assert.equal(h.ui.scriptInfo('mods/doorsx8q/script', 'switch_used').text, 'Script node: runs "switch_used" in Doors.');
+});
+test('the setting: Play maps whose mods include scripts, its one sentence, saved when changed', () => {
+  const saved = [];
+  const h = harness({saveSetting: (k, v) => saved.push([k, v])});
+  assert.equal(h.nodes.modsScriptedMapsLabel.textContent, 'Play maps whose mods include scripts');
+  assert.equal(h.nodes.modsScriptedMapsNote.textContent, modsTab.SCRIPTED_MAPS_NOTE);
+  assert.equal(h.nodes.modsScriptedMaps.checked, true, 'on by default');
+  h.ui.setScriptedMaps(false);
+  assert.equal(h.nodes.modsScriptedMaps.checked, false);
+  h.nodes.modsScriptedMaps.checked = true;
+  h.nodes.modsScriptedMaps.dispatch('change');
+  assert.deepEqual(saved, [['mods.scripted_maps', true]]);
+});
+
 test('page contract', () => {
   assert.ok(html.includes('<button type="button" class="tab" role="tab" id="tab-mods" data-tab="mods" aria-controls="panel-mods" aria-selected="false" tabindex="-1">Mods</button>'));
   IDS.forEach(id => assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id));
@@ -961,14 +1165,22 @@ test('page contract', () => {
   const pf = standin.match(/\nvar PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
   assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
   assert.ok(JSON.parse(pf[1])['alex.r2-imp'].files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
-  assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
+  /* The one repeating request (the script log) goes through the page's timer, never the browser's. */
+  assert.ok(!/(^|[^.\w])(setInterval|setTimeout|requestAnimationFrame)\s*\(/.test(source), 'the tab owns no timer of its own');
+  assert.ok(html.includes('every: function(fn, ms){ return window.setInterval(fn, ms); }'), 'the page gives the tab its timer');
+  assert.ok(html.includes('else modsUi.hide();'), 'leaving the tab stops the script log requests');
+  for (const id of ['modsScriptedMaps', 'modsScriptedMapsLabel', 'modsScriptedMapsNote', 'fScriptNote', 'fScriptNames'])
+    assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id);
+  assert.ok(html.includes('list="fScriptNames"'), 'the Displayname offers the Script node names');
+  assert.ok(html.includes('configGet(modsTab.SCRIPTED_MAPS_KEY);'), 'the page reads the scripts setting');
   assert.ok(!/innerHTML/.test(source), 'all text goes through textContent');
   assert.ok(!/[^\x00-\x7f]/.test(source), 'ASCII only');
   assert.ok(!/migrat/i.test(source), 'the Migrate code is gone');
   /* the payload spec */
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
-                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile'])
+                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile',
+                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {
@@ -981,6 +1193,10 @@ test('host and interface contract', () => {
   assert.ok(host.includes('ui_mods_relative_file(rel)'), 'openFile takes a path below the mod folder');
   assert.ok(host.includes('ui_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.ok(host.includes('ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
+  assert.ok(host.includes('} else if (cmd == L"modsScripts") {'), 'the script log request reaches the host');
+  assert.ok(host.includes('call.op = SH_MODS_SCRIPTS;') && host.includes('ui_mods_post(L"{\\"kind\\":\\"modsScripts\\",\\"data\\":", doc, L"}");'),
+            'it is answered from the read-only op, as modsScripts');
+  assert.ok(/#define SH_MODS_SCRIPTS 7/.test(iface), 'the interface names the op');
 });
 
 console.log('mods_tab_test: OK (' + passed + ' tests)');

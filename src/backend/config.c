@@ -165,6 +165,16 @@ static const config_descriptor g_registry[] = {
         NULL,
         normalize_bool
     },
+    {
+        /* The player plays maps whose mods include scripts (the Mods tab's
+         * setting). Off, the download gate refuses such a map before any
+         * download (modui.h sh_modui_scripted_maps_allowed).
+         */
+        "mods.scripted_maps", SH_JSON_BOOL, "true",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        normalize_bool
+    },
     /* The folder each file dialog opens in: the last one the player used for
      * that dialog, "" until then (the WebView host picks the default). */
     { "dialogs.prefab_export", SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL },

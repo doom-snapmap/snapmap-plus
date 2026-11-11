@@ -2917,7 +2917,8 @@ static void ui_budget_poll()
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
  * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
- * mockup), and for an action (modsAction); nothing polls. Each job runs on a short-lived worker
+ * mockup), and for an action (modsAction); the document is never polled (the script log's
+ * modsScripts is, by the page, and answered at once: ui_mods_send_scripts). Each job runs on a short-lived worker
  * thread rather than this one. Install, New mod and Refresh do their file work (copies, salts,
  * builds, which can take minutes) on that worker, off DOOM's main thread, with no time limit; only
  * their game part (APPLY) and every other operation run on DOOM's main thread through
@@ -3229,6 +3230,29 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
         ui_log(l);
     }
     return true;
+}
+
+/* The mod scripts' state and one mod's script log (SH_MODS_SCRIPTS), on the UI thread: the op
+ * reads the script runtime on any thread and never touches the job's shared document, so the
+ * page may ask while a job runs and while a Play is on. The page asks while the Mods tab shows
+ * a mod with scripts. */
+static void ui_mods_send_scripts(const std::string &salt)
+{
+    std::string doc;
+    if (salt.size() <= 64) {
+        for (int attempt = 0; attempt < 3 && doc.empty(); attempt++) {
+            sh_mods_call call;
+            memset(&call, 0, sizeof call);
+            call.op = SH_MODS_SCRIPTS;
+            call.arg = salt.c_str();
+            if (ui_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > UI_MODS_DOC_MAX) break;
+            std::vector<char> buf((size_t)call.needed + 1);
+            call.out = buf.data();
+            call.out_cap = (int)buf.size();
+            if (ui_mods_slot(&call) == 1) doc.assign(buf.data());   /* -1: the log grew; ask again */
+        }
+    }
+    ui_mods_post(L"{\"kind\":\"modsScripts\",\"data\":", doc, L"}");
 }
 
 /* A finished job, on the UI thread. */
@@ -4010,6 +4034,10 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"modsList") {
                 g_mods_page_seen = true;
                 ui_mods_begin(0, false, std::string());
+            } else if (cmd == L"modsScripts") {
+                std::wstring salt;
+                sh_webview_json::get_string(json, L"salt", salt);
+                ui_mods_send_scripts(sh_webview_json::to_utf8(salt));
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its folders or ZIPs here, in the native picker: the page

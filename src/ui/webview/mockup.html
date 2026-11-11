@@ -178,8 +178,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="fields">
           <div class="field grow"><label>Inherit</label><div class="combo grow" id="cInherit"><input type="text" id="fInherit" autocomplete="off"><button type="button" class="combo-arrow icon-button" aria-label="Show inherit options"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-chevron-down"></use></svg></button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Classname</label><div class="combo grow" id="cClassname"><input type="text" id="fClassname" autocomplete="off"><button type="button" class="combo-arrow icon-button" aria-label="Show classname options"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-chevron-down"></use></svg></button><div class="combo-list"></div></div></div>
-          <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
+          <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname" list="fScriptNames"><datalist id="fScriptNames"></datalist></div>
         </div>
+        <div class="script-note" id="fScriptNote" role="note" hidden></div>
         <div class="section-label"><span>Declaration</span>
           <span class="prob-count" id="probCount"></span>
           <div class="focus-head" id="focusHead"></div>
@@ -357,6 +358,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-body list mods-list" id="modsList" role="listbox" tabindex="0" aria-label="Mods"><div class="list-empty">Open this tab to list your mods.</div></div>
       <div class="mods-foot">
         <div class="mods-status" id="modsStatus" role="status" aria-live="polite"></div>
+        <label class="mods-setting"><input type="checkbox" id="modsScriptedMaps" checked aria-describedby="modsScriptedMapsNote"><span id="modsScriptedMapsLabel">Play maps whose mods include scripts</span></label>
+        <div class="mods-setting-note" id="modsScriptedMapsNote"></div>
         <div class="mods-root" id="modsRoot"></div>
       </div>
     </div>
@@ -2096,6 +2099,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('fClassname').value = d.classname || '';
     document.getElementById('fDisplayname').value = d.displayname || '';
     loaded = { decl:decl, inherit:d.inherit||'', classname:d.classname||'', displayname:d.displayname||'' };
+    scriptNoteRefresh();   // a Script node, or an object a mod's script drives, says so
     refreshDecl();   // programmatic .value writes fire no 'input' event -- re-tokenize/lint/paint explicitly
     updateDirty();
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
@@ -2265,6 +2269,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         receivePrefabOpenFolders(d);
       } else if (d.key === TIMELINE_OPEN_FOLDERS_KEY) {
         receiveTimelineOpenFolders(d);
+      } else if (d.key === modsTab.SCRIPTED_MAPS_KEY) {
+        var scripted = true;
+        if (d.result === 1) { try { scripted = JSON.parse(d.valueJson) !== false; } catch (e) {} }
+        modsUi.setScriptedMaps(scripted);
       } else {
         receiveEntitySetting(d);
       }
@@ -2273,7 +2281,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         d.key === ENTITY_SHOW_HIDDEN_KEY ||
         d.key === ENTITY_SELECTION_MODE_KEY ||
         d.key === PREFAB_OPEN_FOLDERS_KEY ||
-        d.key === TIMELINE_OPEN_FOLDERS_KEY;
+        d.key === TIMELINE_OPEN_FOLDERS_KEY ||
+        d.key === modsTab.SCRIPTED_MAPS_KEY;
       if (knownSetting && d.result !== 1)
         toast("Setting changed for this session, but couldn't be saved.", 'warn');
     } else if (d.kind === 'configStatus') {
@@ -3833,9 +3842,47 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       ctx.innerHTML = '';
       items.forEach(function(it){ addCtx(it.label, it.run); });
       openCtx(x, y);
-    }
+    },
+    // The script log's Copy log, and the setting for scripts from downloaded maps.
+    copy: copyText,
+    saveSetting: configSet,
+    // The script log is asked for each second while the tab shows a mod with scripts.
+    every: function(fn, ms){ return window.setInterval(fn, ms); },
+    cancel: function(t){ window.clearInterval(t); },
+    // A fresh mods document: the Entities tab's script label follows it.
+    changed: function(){ scriptNoteRefresh(); }
   });
   modsUi.bind();
+  configGet(modsTab.SCRIPTED_MAPS_KEY);
+
+  // The Entities tab's script label (mods_tab.js scriptEntityInfo): a Script node says which
+  // script its name runs, offers the names its mod's scripts handle and fire as the Displayname's
+  // choices, and says so when no script uses its name; an object a script drives says that.
+  function scriptNoteRefresh() {
+    var note = document.getElementById('fScriptNote'), list = document.getElementById('fScriptNames');
+    if (!note || !list) return;
+    var inherit = document.getElementById('fInherit').value, name = document.getElementById('fDisplayname').value;
+    var own = /^mods\//i.test(inherit);
+    var info = own ? modsUi.scriptInfo(inherit, name) : null;
+    list.innerHTML = '';
+    if (!info) {
+      note.hidden = true;
+      note.textContent = '';
+      // The mods list has not come yet: ask for it once, then this runs again.
+      if (own) modsUi.ensureLoaded();
+      return;
+    }
+    info.choices.forEach(function(c){
+      var o = document.createElement('option');
+      o.value = c.name;
+      o.label = c.what;
+      list.appendChild(o);
+    });
+    note.textContent = info.text;
+    note.className = 'script-note' + (info.kind === 'node' && !info.used ? ' warn' : '');
+    note.hidden = false;
+  }
+  document.getElementById('fDisplayname').addEventListener('input', scriptNoteRefresh);
 
   // top-level tab switching (Entities / Prefabs / Timelines / Assets / Mods)
   var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabstrip .tab'));
@@ -3868,6 +3915,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
       if (which === 'timelines') tlMaybeAutoRefresh();
       if (which === 'mods') modsUi.show();   // rescan on demand: tab open, Refresh, and after each action
+      else modsUi.hide();                     // the script log is asked for only while the tab shows
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
       else if (typeof abTabMount !== 'undefined') {

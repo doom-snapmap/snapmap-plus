@@ -661,6 +661,16 @@
   .mods-status-icon.warn { color: var(--sqWarn); }
   .mods-status-icon.map { color: var(--accent); }
   .mods-row.selected .mods-status-icon.map { color: var(--selText); }
+  .mods-status-icon.stop { color: var(--danger); }
+  .mods-detail-sentence.stop, .mods-script-run.stop, .mods-log-stop { color: var(--danger); }
+  .mods-log { max-height: 220px; overflow: auto; margin: 4px 0; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel2); font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  .mods-log:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .mods-log-copy { align-self: flex-start; }
+  .mods-setting { display: flex; align-items: center; gap: 6px; color: var(--text); }
+  .mods-setting-note { color: var(--muted); font-size: 10px; line-height: 1.4; }
+  .script-note { margin: 4px 0 2px; padding: 4px 8px; border-radius: 4px; background: var(--panel2); color: var(--text); line-height: 1.45; }
+  .script-note.warn { background: var(--warnBg); color: var(--warnText); }
+  .script-note[hidden] { display: none; }
   .mods-foot { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 5px var(--pane-inline, 10px) 6px; border-top: 1px solid var(--border); }
   .mods-status { color: var(--muted); overflow-wrap: anywhere; }
   .mods-status:empty { display: none; }
