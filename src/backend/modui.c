@@ -2178,7 +2178,6 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
     case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
-    case SH_MODS_ACT_WATCH_RESCAN: return "watchRescan";
     case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
     case SH_MODS_ACT_FILES: return "modFiles";
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
@@ -4803,29 +4802,12 @@ int sh_modui_run(int action, const char *arg)
         return mu_install(arg);
     case SH_MODS_ACT_VERIFY:
         return mu_verify(arg);
-    case SH_MODS_ACT_WATCH_RESCAN:
     case SH_MODS_ACT_RESCAN: {
         int n;
         char msg[520];
         sh_modserve_refresh rf;
         mu_buf b;
         note[0] = 0;
-        if (action == SH_MODS_ACT_WATCH_RESCAN) {
-            /* The folder watcher's request: Play, a load and a store write in
-             * progress defer it; the host asks again once they end. */
-            char cause[200];
-            const char *why = NULL;
-            if (mu_busy(cause, sizeof cause)) why = cause;
-            else if (modstore_lock_busy(NULL)) why = "a store write is in progress";
-            if (why) {
-                memset(&b, 0, sizeof b);
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Deferred: %s.", why);
-                mu_result_head(&b, action, 0, msg);
-                mu_kbool(&b, "deferred", 1, 0);
-                return mu_result_tail(&b);
-            }
-            mu_log("rescan: the mods folder changed on disk");
-        }
         n = mu_rescan_refresh(note, sizeof note, &rf);
         mu_log("rescan: %s", note);
         if (n >= 0 && rf.state > 0)

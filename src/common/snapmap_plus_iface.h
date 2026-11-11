@@ -487,8 +487,8 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_REMOVED_EMPTY      14    /* retired with the recycle bin: answers a refusal */
 #define SH_MODS_ACT_REMOVED_RESTORE    15    /* retired with the recycle bin: answers a refusal */
 #define SH_MODS_ACT_MAP_ADD            16    /* arg: key (or an installed id): attach the mod to the open map (a map-level row) */
-#define SH_MODS_ACT_WATCH_RESCAN       17    /* the folder watcher's rescan: as RESCAN, or "deferred":true while Play runs,
-                                                a map loads or a store write holds the lock */
+/* 17 is retired (the mods folder watcher's rescan: the store is scanned at boot, on Refresh, and
+   after an install, a download or New mod). */
 #define SH_MODS_ACT_CHOOSE             18    /* arg: "<slot>\t<key>": the open map's registry choice (an empty key clears) */
 /* 19 is retired (the map upgrade action: an own map follows its folder at load and save). */
 #define SH_MODS_ACT_FILES              20    /* arg: key: the mod folder's files (read-only; no fresh list follows) */

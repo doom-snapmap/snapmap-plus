@@ -299,11 +299,8 @@ markup when the field closes (`tests/prefab_rename_test.js`).
 Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
 answered with `modsActionResult` and then a fresh `mods` document (the Files view's two reads,
 `modFiles` and `modFileText`, with the result alone), one job at a time, and nothing
-polls. The host's folder watcher also asks for the rescan by itself 1500 ms after the mods folder
-goes quiet (`SH_MODS_ACT_WATCH_RESCAN`, deferred by the backend while Play runs, a map loads or a
-store write holds the lock, and asked again two seconds later); it posts only the fresh `mods`
-document, never a `modsActionResult`, and changes seen while the product's own store lock is held,
-or within a second after, are ignored (`SH_MODS_STORE`). The page renders only from the last document and the last dry run, never from its own
+polls. The mods folder is not watched: an author's edit in a folder shows after the next Refresh.
+The page renders only from the last document and the last dry run, never from its own
 bookkeeping, so counts, manifest rows and the published state are always what the backend just
 read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods doctor [verify]`.
 
@@ -650,9 +647,9 @@ identity or transport refuses the operation. A timed-out operation already runni
 returns an in-progress status, so the page must not report completion or retry it
 automatically. See [architecture](architecture.md#threads-and-edit-results).
 
-The folder watchers run on their own thread (`ReadDirectoryChangesW`) and only note changes; the
-think loop decides when the Prefabs list or the Mods tab refreshes (`folder_watch.h`, tested by
-`tests/folder_watch_test.c`) and logs one `watch:` line per refresh or rescan.
+The prefabs folder watcher runs on its own thread (`ReadDirectoryChangesW`) and only notes
+changes; the think loop decides when the Prefabs list refreshes (`folder_watch.h`, tested by
+`tests/folder_watch_test.c`) and logs one `watch:` line per refresh.
 
 Camera polling runs at the loop cadence and posts only changed coordinates.
 The prefab list never reads a prefab scene: previews, and the Limits section,

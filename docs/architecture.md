@@ -952,8 +952,8 @@ result text ("Its folder was deleted because the Recycle Bin could not take it
 (<why>).") say so; otherwise the line reads "moved mods\<folder> to the Recycle
 Bin". The product never brings a folder back: a map that still needs it
 refuses to open with the asset rule's sentence until the player restores the
-folder from the Recycle Bin by hand (the folder watcher's rescan builds it
-again) or the download offer of a published map, a rawmap or a prefab installs
+folder from the Recycle Bin by hand (the next Refresh builds it again) or the
+download offer of a published map, a rawmap or a prefab installs
 it again. Uninstall also clears the open map's undo history (see [The Mods
 tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
 used the mod.
@@ -1007,29 +1007,19 @@ back ("put <folder> back from <work folder>: an earlier session ended while it
 was being replaced"); every other one is removed ("removed <work folder>, a work
 folder an earlier session left when it ended mid-install").
 
-The folder watchers. The lists follow the disk. The window's host
-(`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
-`%LOCALAPPDATA%\snapmap-plus\prefabs\` and `mods\` with
-`ReadDirectoryChangesW` (subtree; file and folder names, last write, size). A
-change in the prefabs folder refreshes the Prefabs list 300 ms after the last
-change of a burst (the page keeps its selection while that prefab exists and
-clears Prefab Details otherwise). A change in `mods\` asks for the ordinary
-rescan (the Refresh button's, as `SH_MODS_ACT_WATCH_RESCAN`) after 1500 ms of
-quiet, on the main thread through `run_on_main`; the backend defers it while
-Play runs, a map loads or a store write holds the lock, and the host asks again
-two seconds later. The Mods tab re-renders from the document that follows. The
-product's own writes fire the watcher too: a change seen while the store lock
-is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
-hold ended, is dropped, so an install or export in progress never triggers a
-rescan mid-write. An author's edit during a long hold looks the same, so when
-that second ends with a change dropped, one rescan follows (`sh_fw_store`), unless the
-window's own rescan already read the folder after it: a New mod, an install, a rebuild or a
-Refresh that succeeded, and the watcher's own rescan, end with the backend's rescan, so the
-changes dropped before it owe nothing more (`sh_fw_covered`, `poc_mods_rescanned`) and one
-rescan follows a New mod. A change dropped after that rescan still owes one. A rescan of
-unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
-UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
-opened again every five seconds.
+The prefabs folder watcher. The Prefabs list follows the disk. The window's
+host (`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that
+watches `%LOCALAPPDATA%\snapmap-plus\prefabs\` with `ReadDirectoryChangesW`
+(subtree; file and folder names, last write, size). A change refreshes the
+Prefabs list 300 ms after the last change of a burst (the page keeps its
+selection while that prefab exists and clears Prefab Details otherwise), and
+logs one UI-log line (`watch: ...`). A folder that does not exist yet is opened
+again every five seconds.
+
+The mods folder is not watched, and nothing scans it in the background. The
+store is scanned at boot, on Refresh (the Mods tab's button, `sh_mods rescan`),
+and at the end of an install, a download and New mod; an author's edit in a
+folder shows after the next Refresh.
 
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the

@@ -38,7 +38,7 @@
 #include "prefab_block.h"   /* a prefab file's snapmapPlus block: stripped before the engine sees the text */
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "webview_profile.h" /* the WebView2 profile folder under cache\ */
-#include "folder_watch.h"   /* the debounce behind the prefabs and mods folder watchers */
+#include "folder_watch.h"   /* the debounce behind the prefabs folder watcher */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -3056,7 +3056,6 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return L"mapRemoveModPreview";
     case SH_MODS_ACT_REMOVED_EMPTY:      return L"removedEmpty";
     case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
-    case SH_MODS_ACT_WATCH_RESCAN:       return L"watchRescan";
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
     case SH_MODS_ACT_FILES:              return L"modFiles";
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
@@ -3161,33 +3160,12 @@ static bool poc_mods_begin(int action, bool pick, const std::string &arg)
     return true;
 }
 
-static void poc_watch_mods_finished(bool deferred);   /* fwd: the folder watchers, below */
-static void poc_watch_mods_covered();                 /* fwd: the folder watchers, below */
-
-/* The actions whose success ends with the backend's rescan of the whole mods folder
- * (modui.c: New mod, an install that installed something, a rebuild that built, Refresh). */
-static bool poc_mods_rescanned(const PocModsJob &job)
-{
-    switch (job.action) {
-    case SH_MODS_ACT_NEW_MOD: case SH_MODS_ACT_INSTALL: case SH_MODS_ACT_REBUILD: case SH_MODS_ACT_RESCAN:
-        return job.run_rc == 1 && job.run_doc.find("\"ok\":true") != std::string::npos;
-    default:
-        return false;
-    }
-}
-
 /* A finished job, on the UI thread. */
 static void poc_mods_finish()
 {
     PocModsJob &job = g_mods_job;
     const wchar_t *name = poc_mods_action_name(job.action);
-    if (job.action == SH_MODS_ACT_WATCH_RESCAN) {
-        /* The folder watcher's rescan: no result for the page, only the fresh document. A
-         * deferral (Play, a load, a store write) or a game that did not answer is asked again. */
-        bool deferred = job.run_rc != 1 || job.run_doc.find("\"deferred\":true") != std::string::npos;
-        poc_watch_mods_finished(deferred);
-    } else if (job.action) {
-        if (poc_mods_rescanned(job)) poc_watch_mods_covered();
+    if (job.action) {
         if (job.run_rc == -3)
             poc_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
         else if (job.run_rc == 1)
@@ -3220,57 +3198,31 @@ static void poc_mods_finish()
     InterlockedExchange(&g_mods_busy, 0);
 }
 
-/* The folder watchers (folder_watch.h). One thread watches the prefabs folder and the mods
- * folder (ReadDirectoryChangesW, subtree: names, writes, sizes) and notes each change in its
- * debounce; the think loop refreshes the Prefabs list 300 ms after the last change, and asks the
- * backend for the ordinary rescan 1500 ms after the last change in mods\ (the Refresh button's
- * rescan, run as SH_MODS_ACT_WATCH_RESCAN so Play, a map load and a store write defer it). A
- * change seen while the product's store lock is held, or within its grace, is the product's own
- * write and is dropped. A folder that is not there yet is opened again every few seconds. */
+/* The prefabs folder watcher (folder_watch.h). One thread watches the prefabs folder
+ * (ReadDirectoryChangesW, subtree: names, writes, sizes) and notes each change in its debounce;
+ * the think loop refreshes the Prefabs list 300 ms after the last change. A folder that is not
+ * there yet is opened again every few seconds. The mods folder is not watched: the store is
+ * scanned at boot, on Refresh, and after an install, a download or New mod. */
 #define POC_WATCH_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
                           FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE)
 #define POC_WATCH_REOPEN_MS 5000
 
 struct PocWatch {
-    const char  *what;          /* "prefabs" or "mods", for the log */
-    bool         mods;
     HANDLE       dir = INVALID_HANDLE_VALUE;
     OVERLAPPED   ov;
     DWORD        buf[4096];     /* DWORD-aligned, as ReadDirectoryChangesW requires */
     ULONGLONG    retry_at = 0;
 };
-static PocWatch          g_watch[2];
+static PocWatch          g_watch;
 static CRITICAL_SECTION  g_watch_lock;
-static sh_fw_debounce    g_fw_prefabs, g_fw_mods;
+static sh_fw_debounce    g_fw_prefabs;
 static volatile LONG     g_watch_started = 0;
-static bool              g_watch_mods_running = false;
 
-/* The store lock's state (SH_MODS_STORE, any thread): 1 held, 0 free, -1 unknown. */
-static int poc_store_state(unsigned *gen)
-{
-    sh_mods_call call;
-    memset(&call, 0, sizeof call);
-    call.op = SH_MODS_STORE;
-    if (gen) *gen = 0;
-    if (poc_mods_slot(&call) != 1) return -1;
-    if (gen) *gen = call.generation;
-    return call.needed ? 1 : 0;
-}
-
-static bool poc_watch_dir(PocWatch &w, std::wstring &out)
+static bool poc_watch_dir(std::wstring &out)
 {
     char path[MAX_PATH * 4];
     out.clear();
-    if (!w.mods) {
-        if (!poc_prefab_dir("", path, (int)sizeof path)) return false;
-    } else {
-        sh_mods_call call;
-        memset(&call, 0, sizeof call);
-        call.op = SH_MODS_ROOT;
-        call.out = path;
-        call.out_cap = (int)sizeof path;
-        if (poc_mods_slot(&call) != 1) return false;
-    }
+    if (!poc_prefab_dir("", path, (int)sizeof path)) return false;
     int wl = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
     if (wl <= 1) return false;
     out.assign((size_t)wl, L'\0');
@@ -3297,39 +3249,30 @@ static void poc_watch_open(PocWatch &w)
 {
     std::wstring dir;
     if (w.dir != INVALID_HANDLE_VALUE || GetTickCount64() < w.retry_at) return;
-    if (!poc_watch_dir(w, dir)) { w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS; return; }
+    if (!poc_watch_dir(dir)) { w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS; return; }
     w.dir = CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
     if (w.dir == INVALID_HANDLE_VALUE) { w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS; return; }
     if (!poc_watch_arm(w)) { poc_watch_close(w); return; }
-    char l[160];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "watch: following the %s folder", w.what);
-    poc_log(l);
+    poc_log("watch: following the prefabs folder");
 }
 
 static DWORD WINAPI poc_watch_thread(LPVOID)
 {
+    PocWatch &w = g_watch;
     for (;;) {
-        HANDLE events[2];
-        PocWatch *who[2];
-        DWORD n = 0;
-        for (int i = 0; i < 2; i++) {
-            poc_watch_open(g_watch[i]);
-            if (g_watch[i].dir != INVALID_HANDLE_VALUE) { events[n] = g_watch[i].ov.hEvent; who[n] = &g_watch[i]; n++; }
-        }
-        if (!n) { Sleep(POC_WATCH_REOPEN_MS); continue; }
-        DWORD r = WaitForMultipleObjects(n, events, FALSE, POC_WATCH_REOPEN_MS);
+        poc_watch_open(w);
+        if (w.dir == INVALID_HANDLE_VALUE) { Sleep(POC_WATCH_REOPEN_MS); continue; }
+        DWORD r = WaitForSingleObject(w.ov.hEvent, POC_WATCH_REOPEN_MS);
         if (r == WAIT_TIMEOUT) continue;
-        if (r >= WAIT_OBJECT_0 + n) { Sleep(1000); continue; }
-        PocWatch &w = *who[r - WAIT_OBJECT_0];
+        if (r != WAIT_OBJECT_0) { Sleep(1000); continue; }
         DWORD bytes = 0;
         if (!GetOverlappedResult(w.dir, &w.ov, &bytes, FALSE)) { poc_watch_close(w); continue; }
         /* bytes 0: the buffer overflowed; something changed all the same. */
         {
             ULONGLONG now = GetTickCount64();
-            int busy = w.mods ? poc_store_state(nullptr) : 0;
             EnterCriticalSection(&g_watch_lock);
-            (void)sh_fw_note(w.mods ? &g_fw_mods : &g_fw_prefabs, now, busy > 0);
+            sh_fw_note(&g_fw_prefabs, now);
             LeaveCriticalSection(&g_watch_lock);
         }
         if (!poc_watch_arm(w)) poc_watch_close(w);
@@ -3341,16 +3284,11 @@ static void poc_watch_start()
     if (InterlockedCompareExchange(&g_watch_started, 1, 0) != 0) return;
     InitializeCriticalSection(&g_watch_lock);
     sh_fw_init(&g_fw_prefabs, SH_FW_PREFABS_QUIET_MS);
-    sh_fw_init(&g_fw_mods, SH_FW_MODS_QUIET_MS);
-    g_watch[0].what = "prefabs"; g_watch[0].mods = false;
-    g_watch[1].what = "mods";    g_watch[1].mods = true;
-    for (int i = 0; i < 2; i++) {
-        memset(&g_watch[i].ov, 0, sizeof g_watch[i].ov);
-        g_watch[i].ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    }
+    memset(&g_watch.ov, 0, sizeof g_watch.ov);
+    g_watch.ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE h = CreateThread(nullptr, 0, poc_watch_thread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
-    else poc_log("watch: the folder watcher could not start; the lists refresh only when asked");
+    else poc_log("watch: the prefabs folder watcher could not start; the list refreshes only when asked");
 }
 
 /* The pushed refresh (g_mods_doc_gen above), on the UI thread: a document only, as the page's
@@ -3360,7 +3298,7 @@ static void poc_mods_push_tick()
     ULONGLONG now = GetTickCount64();
     if (!g_mods_page_seen || !g_mods_doc_gen || now < g_mods_push_next) return;
     g_mods_push_next = now + POC_MODS_PUSH_MS;
-    if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0 || g_watch_mods_running) return;
+    if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0) return;
     sh_mods_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_FETCH;   /* out NULL: the size query, which sets the generation */
@@ -3382,16 +3320,10 @@ static void poc_watch_tick()
         return;
     }
     ULONGLONG now = GetTickCount64();
-    bool prefabs = false, mods = false;
-    unsigned covered = 0, gen = 0;
-    int busy = poc_store_state(&gen);
+    bool prefabs = false;
+    unsigned covered = 0;
     EnterCriticalSection(&g_watch_lock);
-    if (busy >= 0) sh_fw_store(&g_fw_mods, now, busy, gen);
     if (sh_fw_due(&g_fw_prefabs, now)) { covered = sh_fw_done(&g_fw_prefabs); prefabs = true; }
-    if (!g_watch_mods_running && sh_fw_due(&g_fw_mods, now)) {
-        if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0) sh_fw_retry(&g_fw_mods, now, 500);
-        else mods = true;
-    }
     LeaveCriticalSection(&g_watch_lock);
     if (prefabs) {
         char l[160];
@@ -3399,45 +3331,6 @@ static void poc_watch_tick()
         poc_log(l);
         poc_send_prefabs();
     }
-    if (mods) {
-        unsigned n;
-        EnterCriticalSection(&g_watch_lock);
-        n = g_fw_mods.events;
-        LeaveCriticalSection(&g_watch_lock);
-        if (poc_mods_begin(SH_MODS_ACT_WATCH_RESCAN, false, std::string())) {
-            char l[160];
-            _snprintf_s(l, sizeof l, _TRUNCATE, "watch: the mods folder changed (%u change(s)); rescan requested", n);
-            poc_log(l);
-            g_watch_mods_running = true;
-        } else {
-            EnterCriticalSection(&g_watch_lock);
-            sh_fw_retry(&g_fw_mods, now, SH_FW_RETRY_MS);
-            LeaveCriticalSection(&g_watch_lock);
-        }
-    }
-}
-
-/* The watcher's rescan job ended (poc_mods_finish). */
-static void poc_watch_mods_finished(bool deferred)
-{
-    ULONGLONG now = GetTickCount64();
-    g_watch_mods_running = false;
-    EnterCriticalSection(&g_watch_lock);
-    if (deferred) sh_fw_retry(&g_fw_mods, now, SH_FW_RETRY_MS);
-    else { (void)sh_fw_done(&g_fw_mods); sh_fw_covered(&g_fw_mods); }
-    LeaveCriticalSection(&g_watch_lock);
-    poc_log(deferred ? "watch: the mods rescan was deferred (Play, a map load or a store write); asking again"
-                     : "watch: the mods rescan ran");
-}
-
-/* A rescan of the window's own action ran (poc_mods_finish): the store writes before it, its
- * own included, owe no second rescan (folder_watch.h sh_fw_covered). */
-static void poc_watch_mods_covered()
-{
-    if (!g_watch_started) return;
-    EnterCriticalSection(&g_watch_lock);
-    sh_fw_covered(&g_fw_mods);
-    LeaveCriticalSection(&g_watch_lock);
 }
 
 /* A mod folder's own name under mods\: no separators, no drive, not "." or "..". */
@@ -4610,7 +4503,7 @@ static void poc_think_loop()
         if (g_pending_resolve_entity) { g_resolve_json_len = poc_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
         if (g_pending_save_timeline) { poc_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
         LeaveCriticalSection(&g_loop->mtx);
-        /* The folder watchers: the Prefabs list and the Mods tab follow the disk. */
+        /* The prefabs folder watcher: the Prefabs list follows the disk. */
         poc_watch_tick();
         poc_mods_push_tick();
 
