@@ -294,7 +294,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   mod store has the missing builds the game asks, as for a My Maps map, and downloads them and opens
   the map; otherwise it is denied with the cause, as below.
 - Publishing a map that uses mods uploads those mods to the mod store first, so other players can
-  download them; the first time, the game asks once (the `mods.upload_confirmed` setting records
+  download them: one archive per build, sent only when the store does not hold it already. A mod
+  whose archive would pass 96 MB is refused before anything is sent ("<name>: this mod is too
+  large to publish (N MB; the limit is 96 MB)"). A download is unpacked into the map's own folder,
+  `mods\maps\<map title>\<mod name>\`, and only after every file matches the map's record of the
+  build. The first time, the game asks once (the `mods.upload_confirmed` setting records
   the answer), and No leaves the map unpublished. A map over the map service's 10 MB limit,
   its Snapmap+ data counted, is refused before anything is sent (any map that carries Snapmap+
   data: mods, settings or navigation). A published map that uses mods carries the search tag `mods`,

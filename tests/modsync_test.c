@@ -1,20 +1,27 @@
-/* modsync_test -- upload, download, claims and the retry queue between a
- * temporary local store (modstore.c) and a loopback stub of the mod store
- * (mod_store_stub.h):
- *   missing negotiation (a blob two bundles share is sent once), blob
- *   upload idempotence, the exact canonical manifest as the bundle body, a
- *   409 at the manifest renegotiated, claim and re-claim with the secret
- *   kept in the claims section of mods\snapmap-plus.json, release, a 503
- *   queued in its pending section and retried, a 422 not queued, a cancelled
- *   push queued, a map pinning an earlier build of a folder rebuilt in place
- *   uploading its current build, claims named by hash, the gate's probe
- *   (found, 404, 451, 503, nothing listening, a borrow the game lacks), a
- *   second build of an installed key downloaded beside it as <key>@<hash16>,
- *   and downloads into empty stores: installed as mods\<id> with
- *   mod.json, verified and in the serving index, the same bundle again
- *   fetched from nowhere, a file an installed mod already holds copied
- *   instead of fetched, and a blob or manifest whose bytes do not match its
- *   hash refused with nothing installed.
+/* modsync_test -- one archive per build between a temporary local store and
+ * a loopback stub of the mod store (mod_store_stub.h), ONE-SHAPE rule 5:
+ *   upload: HEAD first, an archive written and PUT only for a build the
+ *   store lacks (mod.json whole, assets/<request> per carried file, stock
+ *   pointers left out), one claim per ref kept in the claims section and
+ *   re-claimed with its secret, a mod the machine lacks or rebuilt since the
+ *   map was saved refused with the next step, a file changed since its build
+ *   refused, the 96 MiB cap refused before any request with the plain
+ *   sentence, a 503 queued in the pending section and retried, a 422 not
+ *   queued, a cancelled push queued, a release that deletes what no claim
+ *   holds, a release queued on a 503 and retried after the next success;
+ *   the gate's probe (found with size, 404, 451, 503, nothing listening);
+ *   download into a map's place: the archive unpacked to
+ *   mods\maps\<title>\<mod name>\ with mod.json byte-identical, the place
+ *   noted and the serving index rescanned, nothing fetched again, the root at
+ *   the row's hash serving it with nothing fetched, the root at another hash
+ *   not, a republish replacing the place's build of the salt, two maps
+ *   unpacking their own copies, and refusals with nothing placed: an archive
+ *   of another build or salt, a corrupted transfer, an extra entry, and a
+ *   borrow the game lacks (MODNET_E_GAME); an editor-only build recorded,
+ *   not installed.
+ *
+ * The local store and the serving index are stubbed below (the walk, the
+ * places, the rescan) so the suite tests this lane's code alone.
  */
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
@@ -22,6 +29,7 @@
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
+#include "../src/backend/modsalt.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -35,99 +43,144 @@ static int g_failed, g_checks;
 
 static char g_log[256 * 1024];
 static size_t g_log_n;
-static int g_echo;
 void backend_log(const char *line)
 {
     size_t n = line ? strlen(line) : 0;
-    if (g_echo && line) printf("    %s\n", line);
     if (n && g_log_n + n + 2 < sizeof g_log) { memcpy(g_log + g_log_n, line, n); g_log_n += n; g_log[g_log_n++] = '\n'; g_log[g_log_n] = 0; }
 }
 
-/* A mod folder with raw image files (no needs, so no stock resolver). */
-static void make_mod(const char *dir, const char *id, const char *extra_json, const char *const *files, const char *const *bytes)
+/* ------------------------------------------------ the local store, stubbed */
+
+static char g_root[MAX_PATH * 2];
+static CRITICAL_SECTION g_store_cs;
+static int g_rescans, g_notes;
+static char g_note_folder[512], g_note_title[256];
+
+void modstore_lock(void) { EnterCriticalSection(&g_store_cs); }
+void modstore_unlock(void) { LeaveCriticalSection(&g_store_cs); }
+int sh_ms_root(char *out, size_t cap) { strncpy_s(out, cap, g_root, _TRUNCATE); return g_root[0] != 0; }
+int sh_modserve_index_rescan(void) { g_rescans++; return 0; }
+int sh_ms_entry_usable(const sh_ms_entry *e) { return e && e->loaded && e->bundle.validated; }
+
+void sh_ms_list_free(sh_ms_list *l)
 {
-    char text[512];
-    int i;
-    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"tester\"%s}",
-                id, id, extra_json ? extra_json : "");
-    mt_write(dir, "mod.json", text);
-    for (i = 0; files[i]; i++) {
-        char rel[MAX_PATH];
-        char *c;
-        strcpy_s(rel, sizeof rel, files[i]);
-        for (c = rel; *c; c++) if (*c == '/') *c = '\\';
-        mt_write(dir, rel, bytes[i]);
+    size_t i;
+    for (i = 0; i < l->count; i++) { free(l->items[i].folder); sh_mb_free(&l->items[i].bundle); }
+    free(l->items);
+    memset(l, 0, sizeof *l);
+}
+
+static void st_add(sh_ms_list *l, const char *folder, const char *name)
+{
+    sh_ms_entry *e;
+    if (l->count == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 16;
+        l->items = (sh_ms_entry *)realloc(l->items, sizeof *l->items * l->cap);
     }
+    e = &l->items[l->count++];
+    memset(e, 0, sizeof *e);
+    e->folder = _strdup(folder);
+    strncpy_s(e->name, sizeof e->name, name, _TRUNCATE);
+    e->loaded = sh_mb_load_folder(folder, &e->bundle);
 }
 
-static int install(const char *folder, char key[SH_MS_KEY_MAX + 1], char hash[65])
-{
-    sh_ms_install_stats st;
-    sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
-    int ok = sh_ms_install_from_folder(folder, NULL, key, SH_MS_KEY_MAX + 1, &st, &b, cause, sizeof cause);
-    if (!ok) fprintf(stderr, "install %s: %s\n", folder, cause);
-    if (ok) strcpy_s(hash, 65, b.hash);
-    sh_mb_free(&b);
-    return ok;
-}
-
-static unsigned count_files(const char *dir)
+/* The walk: root folders, then mods\maps\<place>\<mod>. */
+static void st_walk(sh_ms_list *l, const char *dir, const char *prefix, int places)
 {
     WIN32_FIND_DATAA fd;
     char pattern[MAX_PATH * 2];
     HANDLE h;
-    unsigned n = 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
     h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (h == INVALID_HANDLE_VALUE) return;
     do {
-        char sub[MAX_PATH * 2];
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { n++; continue; }
+        char sub[MAX_PATH * 2], name[512], mj[MAX_PATH * 2];
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        if (strstr(fd.cFileName, ".staging-") || strstr(fd.cFileName, ".old-")) continue;
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-        n += count_files(sub);   /* files below, recursively */
+        _snprintf_s(name, sizeof name, _TRUNCATE, "%s%s", prefix, fd.cFileName);
+        if (!prefix[0] && !_stricmp(fd.cFileName, "maps")) {
+            WIN32_FIND_DATAA pd;
+            char pp[MAX_PATH * 2];
+            HANDLE ph;
+            _snprintf_s(pp, sizeof pp, _TRUNCATE, "%s\\*", sub);
+            ph = FindFirstFileA(pp, &pd);
+            if (ph == INVALID_HANDLE_VALUE) continue;
+            do {
+                char place[MAX_PATH * 2], pre[512];
+                if (!(pd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || pd.cFileName[0] == '.') continue;
+                _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\%s", sub, pd.cFileName);
+                _snprintf_s(pre, sizeof pre, _TRUNCATE, "maps\\%s\\", pd.cFileName);
+                st_walk(l, place, pre, 1);
+            } while (FindNextFileA(ph, &pd));
+            FindClose(ph);
+            continue;
+        }
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", sub);
+        if (mt_exists(mj)) st_add(l, sub, name);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    return n;
+    (void)places;
 }
 
-static int file_contains(const char *path, const char *needle)
+int sh_ms_enumerate(sh_ms_list *out)
 {
-    size_t len = 0;
-    unsigned char *t = sh_mb_read_file(path, 1 << 20, &len);
-    int hit = t && strstr((const char *)t, needle) != NULL;
-    free(t);
-    return hit;
+    memset(out, 0, sizeof *out);
+    st_walk(out, g_root, "", 0);
+    return 1;
 }
 
-static const char *const A_FILES[] = { "assets/generated/image/mods/test.alpha/a.bimage", "assets/generated/image/mods/test.alpha/shared.bimage", NULL };
-static const char *const A_BYTES[] = { "alpha only bytes", "bytes both bundles carry", NULL };
-static const char *const B_FILES[] = { "assets/generated/image/mods/test.beta/shared.bimage", "assets/generated/image/mods/test.beta/b.bimage", NULL };
-static const char *const B_BYTES[] = { "bytes both bundles carry", "beta only bytes", NULL };
-static const char *const G_FILES[] = { "assets/generated/image/mods/test.gamma/g.bimage", NULL };
-static const char *const G_BYTES[] = { "gamma bytes", NULL };
-static const char *const D_FILES[] = { "assets/generated/image/mods/test.delta/d.bimage", NULL };
-static const char *const D_BYTES[] = { "delta bytes", NULL };
-static const char *const D2_BYTES[] = { "delta bytes, edited", NULL };
-static const char *const X_FILES[] = { "assets/generated/image/mods/test.extra/x.bimage", NULL };
-static const char *const X_BYTES[] = { "extra bytes", NULL };
-static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
-static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
+/* A place: mods\maps\<title>\, its folder of the salt, else <name> free. */
+int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap)
+{
+    sh_ms_list l;
+    char pre[512];
+    size_t i, n;
+    int k;
+    _snprintf_s(pre, sizeof pre, _TRUNCATE, "maps\\%s\\", place->title);
+    n = strlen(pre);
+    sh_ms_enumerate(&l);
+    for (i = 0; i < l.count; i++)
+        if (!_strnicmp(l.items[i].name, pre, n) && l.items[i].loaded && !strcmp(l.items[i].bundle.id, salt)) {
+            strncpy_s(out, cap, l.items[i].name, _TRUNCATE);
+            sh_ms_list_free(&l);
+            return 2;
+        }
+    sh_ms_list_free(&l);
+    for (k = 1; k < 10; k++) {
+        char full[MAX_PATH * 2];
+        if (k == 1) _snprintf_s(out, cap, _TRUNCATE, "%s%s", pre, name);
+        else _snprintf_s(out, cap, _TRUNCATE, "%s%s (%d)", pre, name, k);
+        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", g_root, out);
+        if (!mt_exists(full)) {
+            char parent[MAX_PATH * 2];
+            _snprintf_s(parent, sizeof parent, _TRUNCATE, "%s\\maps\\%s\\x", g_root, place->title);
+            mt_mkdirs_for(parent);
+            return 1;
+        }
+    }
+    return 0;
+}
 
-static const char *const G2_BYTES[] = { "gamma bytes, second build", NULL };
-static const char *const R_FILES[] = { "assets/generated/image/mods/test.borrow/rock.bimage", "assets/generated/image/mods/test.borrow/own.bimage", NULL };
-static const char *const R_BYTES[] = { "ROCK-GAME-BYTES-0123456789", "borrow's own bytes", NULL };
+int sh_ms_place_note(const sh_ms_place *place, const char *folder)
+{
+    g_notes++;
+    strncpy_s(g_note_folder, sizeof g_note_folder, folder, _TRUNCATE);
+    strncpy_s(g_note_title, sizeof g_note_title, place && place->title ? place->title : "", _TRUNCATE);
+    return 1;
+}
+
+/* ------------------------------------------------------------ fixtures -- */
+
 #define ROCK_SOURCE "generated/image/stock/rock.bimage"
-
-/* A fake installed game holding one file (ROCK_SOURCE) with R_BYTES[0], and
- * one of another revision that holds other bytes there. */
+static const char ROCK[] = "ROCK-GAME-BYTES-0123456789";
 static int g_game_lacks;
+
 static int rock_same(unsigned long long size, const char *sha)
 {
     char h[65];
-    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), h);
-    return size == strlen(R_BYTES[0]) && !strcmp(h, sha);
+    sh_mb_sha256_hex(ROCK, strlen(ROCK), h);
+    return size == strlen(ROCK) && !strcmp(h, sha);
 }
 static int rock_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
 {
@@ -140,8 +193,8 @@ static int rock_identify(void *ctx, const char *source, char sha[65], unsigned l
 {
     (void)ctx;
     if (g_game_lacks || strcmp(source, ROCK_SOURCE)) return SH_MB_STOCK_ABSENT;
-    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), sha);
-    *size = strlen(R_BYTES[0]);
+    sh_mb_sha256_hex(ROCK, strlen(ROCK), sha);
+    *size = strlen(ROCK);
     return SH_MB_STOCK_OK;
 }
 static int rock_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
@@ -150,9 +203,9 @@ static int rock_verify(void *ctx, const char *source, const char *sha, unsigned 
     (void)ctx;
     if (strcmp(source, ROCK_SOURCE)) return SH_MB_STOCK_ABSENT;
     if (g_game_lacks) return SH_MB_STOCK_MISMATCH;
-    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), h);
+    sh_mb_sha256_hex(ROCK, strlen(ROCK), h);
     if (strcmp(h, sha)) return SH_MB_STOCK_MISMATCH;
-    if (size) *size = strlen(R_BYTES[0]);
+    if (size) *size = strlen(ROCK);
     return SH_MB_STOCK_OK;
 }
 static int rock_read(void *ctx, const char *source, const char *sha, unsigned char **bytes, size_t *len)
@@ -162,507 +215,497 @@ static int rock_read(void *ctx, const char *source, const char *sha, unsigned ch
     if (r != SH_MB_STOCK_OK) return r;
     *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
     if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
-    memcpy(*bytes, R_BYTES[0], (size_t)size);
+    memcpy(*bytes, ROCK, (size_t)size);
     *len = (size_t)size;
     return SH_MB_STOCK_OK;
 }
-static int rock_has_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
-{ g_game_lacks = 0; return rock_verify(ctx, source, sha, size); }
-static int rock_lacks_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
-{ g_game_lacks = 1; return rock_verify(ctx, source, sha, size); }
-static int rock_has_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
-{ g_game_lacks = 0; return rock_match(ctx, request, size, sha, source, cap); }
-static const sh_mb_stock_ops GAME_HAS_ROCK = { NULL, rock_has_match, rock_identify, rock_has_verify, rock_read };
-static const sh_mb_stock_ops GAME_LACKS_ROCK = { NULL, rock_match, rock_identify, rock_lacks_verify, rock_read };
+static const sh_mb_stock_ops GAME = { NULL, rock_match, rock_identify, rock_verify, rock_read };
 
-/* The builder's stock resolver: every shadow names a stock resource. */
 static int stock_yes(void *context, const char *request) { (void)context; (void)request; return 1; }
 
-/* Another program holds the record open without read sharing for `ms`. */
-typedef struct sync_hold { char path[MAX_PATH * 2]; DWORD ms; HANDLE taken; } sync_hold;
-static DWORD WINAPI sync_hold_thread(LPVOID p)
+/* A mod folder: mod.json's author part, files under assets\ (relative paths
+ * with '/'), built with `salt` and written. Returns 1 with the build hash. */
+static int make_mod(const char *dir, const char *salt, const char *name, const char *const *files,
+                    const char *const *bytes, const sh_mb_resolver *resolver, char hash[65])
 {
-    sync_hold *r = (sync_hold *)p;
-    HANDLE h = CreateFileA(r->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-    SetEvent(r->taken);
-    Sleep(r->ms);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    free(r);
-    return 0;
-}
-static HANDLE sync_hold_record(const char *path, DWORD ms)
-{
-    sync_hold *r = (sync_hold *)calloc(1, sizeof *r);
-    HANDLE t, taken;
-    if (!r) return NULL;
-    strncpy_s(r->path, sizeof r->path, path, _TRUNCATE);
-    r->ms = ms;
-    r->taken = taken = CreateEventA(NULL, TRUE, FALSE, NULL);
-    t = CreateThread(NULL, 0, sync_hold_thread, r, 0, NULL);
-    WaitForSingleObject(taken, 5000);
-    CloseHandle(taken);
-    return t;
+    char text[512], cause[SH_MB_CAUSE_MAX];
+    sh_mb_bundle b;
+    int i, ok;
+    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"version\":\"1.0.0\",\"author\":\"tester\"}", name);
+    mt_write(dir, "mod.json", text);
+    for (i = 0; files[i]; i++) {
+        char rel[MAX_PATH], *c;
+        strcpy_s(rel, sizeof rel, files[i]);
+        for (c = rel; *c; c++) if (*c == '/') *c = '\\';
+        mt_write(dir, rel, bytes[i]);
+    }
+    memset(&b, 0, sizeof b);
+    ok = sh_mb_build(dir, salt, resolver, &b) && sh_mb_write(&b, dir, cause, sizeof cause);
+    if (!ok) fprintf(stderr, "build %s: %s %s\n", dir, b.first_cause, cause);
+    if (ok) strcpy_s(hash, 65, b.hash);
+    sh_mb_free(&b);
+    return ok;
 }
 
-int main(int argc, char **argv)
+static void mod_of(char *out, const char *salt, const char *hash) { _snprintf_s(out, MODSYNC_MOD_MAX + 1, _TRUNCATE, "%s@%s", salt, hash); }
+
+static void row_of(sh_modmanifest_row *row, const char *salt, const char *hash)
 {
-    char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], storeB[MAX_PATH * 2], storeC[MAX_PATH * 2], dir[MAX_PATH * 2];
-    char url[64], keyA[SH_MS_KEY_MAX + 1], keyB[SH_MS_KEY_MAX + 1], keyG[SH_MS_KEY_MAX + 1], keyX[SH_MS_KEY_MAX + 1];
-    char keyE[SH_MS_KEY_MAX + 1], keyG2[SH_MS_KEY_MAX + 1], keyR[SH_MS_KEY_MAX + 1], hG2[65], hR[65];
-    char hA[65], hB[65], hG[65], hX[65], hE[65], claim1[33], secret1[65], claim_again[33], path[MAX_PATH * 2];
+    memset(row, 0, sizeof *row);
+    strcpy_s(row->salt, sizeof row->salt, salt);
+    strcpy_s(row->build, sizeof row->build, hash);
+    row->size = 64;
+}
+
+static sh_ms_place place_of(const char *title, const char *map_id)
+{
+    sh_ms_place p;
+    memset(&p, 0, sizeof p);
+    p.title = title;
+    p.map_id = map_id;
+    return p;
+}
+
+static void use_root(const char *root) { strcpy_s(g_root, sizeof g_root, root); }
+
+static int file_has(const char *path, const char *needle)
+{
+    size_t len = 0;
+    unsigned char *t = sh_mb_read_file(path, 1 << 20, &len);
+    int hit = t && strstr((const char *)t, needle) != NULL;
+    free(t);
+    return hit;
+}
+
+static int same_file(const char *a, const char *b)
+{
+    size_t al = 0, bl = 0;
+    unsigned char *x = sh_mb_read_file(a, 1 << 20, &al), *y = sh_mb_read_file(b, 1 << 20, &bl);
+    int same = x && y && al == bl && !memcmp(x, y, al);
+    free(x);
+    free(y);
+    return same;
+}
+
+static unsigned count_dirs(const char *dir)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2];
+    HANDLE h;
+    unsigned n = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') n++;
+    while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* The stub's stored archive for hash: its entry count, and whether `name` is one. */
+static int stored_entries(const char *hash, const char *name, int *has)
+{
+    char path[MAX_PATH * 2], cause[200];
+    sh_zip_reader zr;
+    stub_obj *o;
+    int n = -1;
+    FILE *f;
+    *has = 0;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\peek.zip", g_root);
+    EnterCriticalSection(&g_stub.cs);
+    o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
+    if (o && !fopen_s(&f, path, "wb") && f) { fwrite(o->bytes, 1, o->len, f); fclose(f); } else o = NULL;
+    LeaveCriticalSection(&g_stub.cs);
+    if (o && sh_zip_reader_open(&zr, path, cause, sizeof cause)) {
+        n = (int)zr.n;
+        *has = sh_zip_reader_find(&zr, name) >= 0;
+        sh_zip_reader_close(&zr);
+    }
+    DeleteFileA(path);
+    return n;
+}
+
+/* The stub's archive bytes for hash (malloc'd). */
+static unsigned char *stored_copy(const char *hash, size_t *len)
+{
+    stub_obj *o;
+    unsigned char *out = NULL;
+    EnterCriticalSection(&g_stub.cs);
+    o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
+    if (o) { out = (unsigned char *)malloc(o->len); memcpy(out, o->bytes, o->len); *len = o->len; }
+    LeaveCriticalSection(&g_stub.cs);
+    return out;
+}
+
+static const char *const A_FILES[] = { "assets/generated/image/mods/alpha001/a.bimage", "assets/generated/image/mods/alpha001/b.bimage", NULL };
+static const char *const A_BYTES[] = { "alpha bytes", "alpha second file", NULL };
+static const char *const A2_BYTES[] = { "alpha bytes, republished", "alpha second file", NULL };
+static const char *const B_FILES[] = { "assets/generated/image/mods/betab002/b.bimage", NULL };
+static const char *const B_BYTES[] = { "beta bytes", NULL };
+static const char *const R_FILES[] = { "assets/generated/image/mods/rocks003/rock.bimage", "assets/generated/image/mods/rocks003/own.bimage", NULL };
+static const char *const R_BYTES[] = { ROCK, "the rock mod's own bytes", NULL };
+static const char *const C_FILES[] = { "assets/generated/image/mods/gamma004/c.bimage", NULL };
+static const char *const C_BYTES[] = { "gamma bytes", NULL };
+static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
+static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
+
+int main(void)
+{
+    char url[64], tmp[MAX_PATH], r1[MAX_PATH * 2], r2[MAX_PATH * 2], dir[MAX_PATH * 2], path[MAX_PATH * 2];
+    char ha[65], ha2[65], hb[65], hr[65], hc[65], he[65], ma[80], mb[80], mr[80], mc[80], me[80], cause[1024];
+    const char *list[4];
     modsync_stats st;
-    int puts_before;
-    g_echo = argc > 1 && !strcmp(argv[1], "-v");
+    modnet_result r;
+    sh_mb_resolver stock = { NULL, NULL, stock_yes, NULL };
+    int before, n;
+    unsigned done = 0, dropped = 0;
 
+    InitializeCriticalSection(&g_store_cs);
+    sh_mb_set_stock_ops(&GAME);
     CHECK(stub_start() > 0);
     stub_url(url, sizeof url);
     CHECK(modnet_set_base_url(url));
     CHECK(mt_temp_dir("modsync", tmp, sizeof tmp));
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src", tmp);
-    _snprintf_s(storeA, sizeof storeA, _TRUNCATE, "%s\\storeA", tmp);
-    _snprintf_s(storeB, sizeof storeB, _TRUNCATE, "%s\\storeB", tmp);
-    _snprintf_s(storeC, sizeof storeC, _TRUNCATE, "%s\\storeC", tmp);
-    CreateDirectoryA(src, NULL);
+    _snprintf_s(r1, sizeof r1, _TRUNCATE, "%s\\author\\mods", tmp);
+    _snprintf_s(r2, sizeof r2, _TRUNCATE, "%s\\player\\mods", tmp);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\x", r2);
+    mt_mkdirs_for(path);
+    use_root(r1);
 
-    /* ---- the author's store ---- */
-    CHECK(sh_ms_set_root(storeA));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha", src); make_mod(dir, "test.alpha", NULL, A_FILES, A_BYTES);
-    CHECK(install(dir, keyA, hA));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\beta", src); make_mod(dir, "test.beta", NULL, B_FILES, B_BYTES);
-    CHECK(install(dir, keyB, hB));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", src); make_mod(dir, "test.gamma", NULL, G_FILES, G_BYTES);
-    CHECK(install(dir, keyG, hG));
-    /* A descriptor key the store's manifest grammar does not know ("extra"). */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\extra", src);
-    make_mod(dir, "test.extra", ",\"strings\":{\"english\":{\"#str_x\":\"X\"}}", X_FILES, X_BYTES);
-    CHECK(install(dir, keyX, hX));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Alpha Pack", r1);
+    CHECK(make_mod(dir, "alpha001", "Alpha", A_FILES, A_BYTES, NULL, ha));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\beta", r1);
+    CHECK(make_mod(dir, "betab002", "Beta", B_FILES, B_BYTES, NULL, hb));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\rocks", r1);
+    CHECK(make_mod(dir, "rocks003", "Rocks", R_FILES, R_BYTES, NULL, hr));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\editor", r1);
+    CHECK(make_mod(dir, "edito005", "Editor tweaks", E_FILES, E_BYTES, &stock, he));
+    mod_of(ma, "alpha001", ha);
+    mod_of(mb, "betab002", hb);
+    mod_of(mr, "rocks003", hr);
+    mod_of(me, "edito005", he);
+    CHECK(modsync_parse_mod(ma, NULL, NULL) && !modsync_parse_mod(ha, NULL, NULL) && !modsync_parse_mod("Alpha001@x", NULL, NULL));
+
+    /* ---- upload: HEAD, archive, PUT, one claim ---- */
+    list[0] = ma; list[1] = mb; list[2] = ma;   /* a build named twice is sent once */
+    CHECK(modsync_upload_builds(list, 3, "item-1", NULL, &st));
+    CHECK(st.code == MODNET_OK && st.builds == 2 && st.builds_present == 0 && st.builds_sent == 2 && st.builds_created == 2);
+    CHECK(g_stub.head_calls == 2 && g_stub.build_puts == 2 && g_stub.claim_calls == 1 && stub_has_build(ha) && stub_has_build(hb));
+    CHECK(stub_claim_builds("item-1", NULL) == 2 && strlen(st.claim) == 32 && !st.reclaimed);
+    CHECK(modsync_claim_lookup("item-1", NULL, NULL) && modsync_claim_names(ha) && modsync_claim_names(hb));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", r1);
+    CHECK(file_has(path, "\"builds\"") && !file_has(path, "\"bundles\""));
     {
-        /* An author's editor overrides: one shadow of an editor-time decl,
-         * nothing that plays. */
-        sh_mb_resolver res;
-        sh_ms_install_stats ist;
-        sh_mb_bundle eb;
-        char cause[SH_MB_CAUSE_MAX];
-        memset(&res, 0, sizeof res);
-        res.stock = stock_yes;
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\editor", src);
-        make_mod(dir, "test.editor", ",\"shadows\":[\"generated/decls/snapeditorentitydef/func/rotate.decl\"]", E_FILES, E_BYTES);
-        if (!sh_ms_install_from_folder(dir, &res, keyE, sizeof keyE, &ist, &eb, cause, sizeof cause)) {
-            fprintf(stderr, "install %s: %s\n", dir, cause);
-            CHECK(0);
+        int has = 0;
+        CHECK(stored_entries(ha, "assets/generated/image/mods/alpha001/b.bimage", &has) == 3 && has);
+        CHECK(stored_entries(ha, "mod.json", &has) == 3 && has);
+    }
+    /* Again: the store holds both; nothing is written or sent; the secret re-claims. */
+    before = g_stub.build_puts;
+    CHECK(modsync_upload_builds(list, 2, "item-1", NULL, &st));
+    CHECK(st.builds_present == 2 && st.builds_sent == 0 && g_stub.build_puts == before && st.reclaimed && g_stub.claim_with_secret == 1);
+
+    /* Stock pointers never upload. */
+    list[0] = mr;
+    CHECK(modsync_upload_builds(list, 1, "item-rocks", NULL, &st));
+    CHECK(st.stock_files == 1 && st.builds_sent == 1);
+    {
+        int has = 1;
+        CHECK(stored_entries(hr, "assets/generated/image/mods/rocks003/rock.bimage", &has) == 2 && !has);
+    }
+
+    /* ---- upload refusals with the next step ---- */
+    {
+        char unknown[80], h[65];
+        sh_mb_sha256_hex("unknown", 7, h);
+        mod_of(unknown, "zzzzzzz9", h);
+        list[0] = unknown;
+        before = g_stub.requests;
+        CHECK(!modsync_upload_builds(list, 1, "item-2", NULL, &st));
+        CHECK(st.code == MODNET_E_ARG && strstr(st.cause, "this machine does not have") && !st.queued && g_stub.requests == before);
+    }
+    /* Alpha built again: the map's row names the earlier build. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Alpha Pack", r1);
+    CHECK(make_mod(dir, "alpha001", "Alpha", A_FILES, A2_BYTES, NULL, ha2));
+    CHECK(strcmp(ha, ha2) != 0);
+    list[0] = ma;
+    CHECK(!modsync_upload_builds(list, 1, "item-3", NULL, &st));
+    CHECK(strstr(st.cause, "Alpha was built again since the map was saved; save the map again") && !st.queued);
+    /* A file changed since the build. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", r1);
+    CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
+    mod_of(mc, "gamma004", hc);
+    mt_write(dir, "assets\\generated\\image\\mods\\gamma004\\c.bimage", "gamma bytes, edited by hand");
+    list[0] = mc;
+    before = g_stub.build_puts;
+    CHECK(!modsync_upload_builds(list, 1, "item-4", NULL, &st));
+    CHECK(strstr(st.cause, "changed since the mod was built; open the Mods tab and Refresh") && g_stub.build_puts == before && !st.queued);
+    CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
+    /* Over 96 MiB: the plain refusal, before any request. */
+    {
+        static const char *const BIG_FILES[] = { "assets/generated/image/mods/hugee006/one.bimage",
+                                                 "assets/generated/image/mods/hugee006/two.bimage", NULL };
+        static const char *const BIG_TEXT[] = { "x", "y", NULL };
+        char hbig[65], mbig[80], full[MAX_PATH * 2];
+        size_t sz = 49u * 1024u * 1024u, k;
+        unsigned char *fill = (unsigned char *)malloc(sz);
+        FILE *f;
+        int i;
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\huge", r1);
+        mt_write(dir, "mod.json", "{\"name\":\"Huge\",\"version\":\"1.0.0\"}");
+        for (i = 0; BIG_FILES[i] && fill; i++) {
+            for (k = 0; k < sz; k++) fill[k] = (unsigned char)(k * 31 + i);
+            _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, BIG_FILES[i]);
+            { char *c; for (c = full; *c; c++) if (*c == '/') *c = '\\'; }
+            mt_mkdirs_for(full);
+            if (!fopen_s(&f, full, "wb") && f) { fwrite(fill, 1, sz, f); fclose(f); }
         }
-        strcpy_s(hE, sizeof hE, eb.hash);
-        sh_mb_free(&eb);
+        free(fill);
+        (void)BIG_TEXT;
+        {
+            sh_mb_bundle b;
+            char why[SH_MB_CAUSE_MAX];
+            memset(&b, 0, sizeof b);
+            CHECK(sh_mb_build(dir, "hugee006", NULL, &b) && sh_mb_write(&b, dir, why, sizeof why));
+            strcpy_s(hbig, sizeof hbig, b.hash);
+            sh_mb_free(&b);
+        }
+        mod_of(mbig, "hugee006", hbig);
+        list[0] = mbig;
+        before = g_stub.build_puts;
+        CHECK(!modsync_upload_builds(list, 1, "item-huge", NULL, &st));
+        CHECK(st.code == MODNET_E_TOO_LARGE && !st.queued && g_stub.build_puts == before);
+        CHECK(strstr(st.cause, "Huge: this mod is too large to publish (99 MB; the limit is 96 MB)") != NULL);
+        mt_remove_tree(dir);
     }
 
-    /* ---- upload: negotiation, blobs, the canonical manifest, a new claim ---- */
+    /* ---- transient failures are queued and retried; refusals are not ---- */
+    list[0] = mc;
+    stub_fail_next("PUT /mods/build/", 503);
+    CHECK(!modsync_upload_builds(list, 1, "item-5", NULL, &st));
+    CHECK(st.code == MODNET_E_UNAVAILABLE && st.queued && modsync_pending_count() == 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", r1);
+    CHECK(file_has(path, "\"gamma004@"));
+    n = modsync_retry_pending(NULL, &done, &dropped, &st);
+    CHECK(n == 0 && done == 1 && dropped == 0 && stub_has_build(hc) && stub_claim_builds("item-5", NULL) == 1);
+    stub_fail_next("PUT /mods/build/", 422);
+    list[0] = ma;   /* the row of the earlier Alpha is no longer anywhere: use the current one */
     {
-        const char *one[] = { hA };
-        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st));
-        CHECK(st.code == MODNET_OK && st.bundles == 1 && st.blobs_total == 2 && st.blobs_missing == 2 && st.blobs_transferred == 2);
-        CHECK(st.bundles_created == 1 && !st.reclaimed && strlen(st.claim) == 32 && st.bytes_up > 0);
-        CHECK(stub_has_bundle(hA) && g_stub.blob_created == 2);
-        CHECK(modsync_claim_lookup("map-1", claim1, secret1) && strcmp(claim1, st.claim) == 0 && modnet_valid_hash(secret1));
-        CHECK(stub_claim_bundles("map-1", claim_again) == 1 && strcmp(claim_again, claim1) == 0);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
-        CHECK(file_contains(path, "\"map-1\"") && file_contains(path, secret1) && file_contains(path, hA));
-        /* The secret never reaches the log. */
-        CHECK(strstr(g_log, secret1) == NULL);
-    }
-    {
-        /* beta shares one file with alpha: only its own blob is sent. */
-        const char *one[] = { hB };
-        puts_before = g_stub.blob_puts;
-        CHECK(modsync_upload_bundles(one, 1, "map-2", NULL, &st));
-        CHECK(st.blobs_total == 2 && st.blobs_missing == 1 && st.blobs_transferred == 1);
-        CHECK(g_stub.blob_puts == puts_before + 1 && g_stub.blob_created == 3);
-    }
-    {
-        /* Publishing map-1 again: nothing to send, the stored secret re-claims. */
-        const char *one[] = { hA };
-        int with_secret = g_stub.claim_with_secret;
-        puts_before = g_stub.blob_puts;
-        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st));
-        CHECK(st.blobs_missing == 0 && st.blobs_transferred == 0 && st.bundles_created == 0);
-        CHECK(st.reclaimed && strcmp(st.claim, claim1) == 0 && g_stub.claim_with_secret == with_secret + 1);
-        CHECK(g_stub.blob_puts == puts_before);
-    }
-    {
-        /* The re-claim replaces the set the store keeps for the ref. */
-        const char *two[] = { hA, hB };
-        CHECK(modsync_upload_bundles(two, 2, "map-1", NULL, &st));
-        CHECK(st.reclaimed && stub_claim_bundles("map-1", NULL) == 2);
-    }
-    {
-        /* A blob the store loses between negotiation and the manifest (409). */
-        const char *one[] = { hB };
-        char blob_b[65];
-        sh_mb_sha256_hex("beta only bytes", strlen("beta only bytes"), blob_b);
-        strcpy_s(g_stub.drop_blob_before_bundle, sizeof g_stub.drop_blob_before_bundle, blob_b);
-        CHECK(modsync_upload_bundles(one, 1, "map-2", NULL, &st));
-        CHECK(st.blobs_transferred == 1 && stub_has_blob(blob_b));
-        CHECK(strstr(g_log, "sending them again") != NULL);
-    }
-
-    /* ---- refusals and the retry queue ---- */
-    {
-        /* The store refuses the manifest at /mods/missing, before any blob
-         * and without a bundle PUT, in the bundle PUT's wording. */
-        const char *one[] = { hX };
-        int blobs = g_stub.blob_puts, bundles = g_stub.bundle_puts, checked = g_stub.missing_manifests;
-        CHECK(!modsync_upload_bundles(one, 1, "map-x", NULL, &st));
-        CHECK(st.code == MODNET_E_REFUSED && strstr(st.cause, "unknown manifest key extra") != NULL && !st.queued);
-        CHECK(strstr(st.cause, "bundle: HTTP 422") != NULL);
-        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_puts == bundles && g_stub.missing_manifests == checked + 1);
-        CHECK(modsync_pending_count() == 0);
-    }
-    {
-        /* A 422 at missing (the Worker's namespace rule, say) stops the
-         * publish with its message: no blob PUT, nothing queued. */
-        const char *one[] = { hG };
-        int blobs = g_stub.blob_puts, bundles = g_stub.bundle_puts;
-        strcpy_s(g_stub.refuse_manifest, sizeof g_stub.refuse_manifest,
-                 "outside the mods/test.gamma/ namespace and not a declared shadow: cooked/x.bmodel");
-        CHECK(!modsync_upload_bundles(one, 1, "map-s", NULL, &st));
-        g_stub.refuse_manifest[0] = 0;
-        CHECK(st.code == MODNET_E_REFUSED && !st.queued && st.blobs_transferred == 0 && st.manifests_checked == 0);
-        CHECK(strstr(st.cause, "bundle: HTTP 422: outside the mods/test.gamma/ namespace and not a declared shadow") != NULL);
-        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_puts == bundles && !stub_has_bundle(hG));
-        CHECK(modsync_pending_count() == 0 && !modsync_claim_lookup("map-s", NULL, NULL));
-    }
-    {
-        /* A store that checked the manifest names it back; an older one
-         * answers the blob list alone and the bundle PUT checks. */
-        const char *one[] = { hA };
-        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st) && st.manifests_checked == 1);
-        g_stub.missing_ignores_manifest = 1;
-        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st) && st.manifests_checked == 0);
-        g_stub.missing_ignores_manifest = 0;
-    }
-    {
-        const char *one[] = { hG };
-        stub_fail_next("PUT /mods/bundle/", 503);
-        CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st));
-        CHECK(st.code == MODNET_E_UNAVAILABLE && st.queued && strstr(st.cause, "503") != NULL);
-        CHECK(modsync_pending_count() == 1);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
-        CHECK(file_contains(path, "\"map-3\"") && file_contains(path, hG) && file_contains(path, "\"attempts\": 1"));
-        /* A second failure counts the attempt. */
-        stub_fail_next("POST /mods/missing", 503);
-        CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st) && st.queued);
-        CHECK(file_contains(path, "\"attempts\": 2") && modsync_pending_count() == 1);
-    }
-    {
-        /* A cancelled push is queued too; it never reached the store. */
-        const char *one[] = { hG };
-        volatile long cancel = 1;
-        modnet_io io = { &cancel, NULL, NULL };
-        int before = g_stub.requests;
-        CHECK(!modsync_upload_bundles(one, 1, "map-4", &io, &st));
-        CHECK(st.code == MODNET_E_CANCELLED && st.queued && g_stub.requests == before);
-        CHECK(modsync_pending_count() == 2);
-    }
-    {
-        unsigned done = 0, dropped = 0;
-        modsync_stats last;
-        int left = modsync_retry_pending(NULL, &done, &dropped, &last);
-        CHECK(left == 0 && done == 2 && dropped == 0);
-        CHECK(stub_has_bundle(hG) && stub_claim_bundles("map-3", NULL) == 1 && stub_claim_bundles("map-4", NULL) == 1);
-        CHECK(modsync_claim_lookup("map-3", NULL, NULL) && modsync_claim_lookup("map-4", NULL, NULL));
-    }
-    {
-        /* A bundle that is not installed is refused without a request. */
-        const char *one[] = { "0000000000000000000000000000000000000000000000000000000000000000" };
-        int before = g_stub.requests;
-        CHECK(!modsync_upload_bundles(one, 1, "map-5", NULL, &st) && st.code == MODNET_E_ARG && !st.queued);
-        CHECK(g_stub.requests == before);
-        CHECK(!modsync_upload_bundles(one, 1, "", NULL, &st) && st.code == MODNET_E_ARG);
-    }
-
-    {
-        /* The record held by another program: the publish's claim is not saved,
-         * and the cause the publish dialog shows names the file and what to do. */
-        const char *one[] = { hA };
-        char rec[MAX_PATH * 2];
-        HANDLE t;
-        _snprintf_s(rec, sizeof rec, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
-        t = sync_hold_record(rec, 6000);
-        CHECK(!modsync_upload_bundles(one, 1, "map-held", NULL, &st));
-        if (!strstr(st.cause, "close the program holding it")) fprintf(stderr, "held-record cause: %s\n", st.cause);
-        CHECK(strstr(st.cause, "snapmap-plus.json could not be used (another program has it open); close the program "
-                               "holding it (a backup, sync or antivirus tool, or an editor) and try again") != NULL);
-        WaitForSingleObject(t, 10000);
-        CloseHandle(t);
-        CHECK(!modsync_claim_lookup("map-held", NULL, NULL));
-    }
-
-    /* ---- a map pinning an earlier build: the current build is uploaded ---- */
-    {
-        char keyD[SH_MS_KEY_MAX + 1], hD1[65], hD2[65], folder[MAX_PATH * 4];
-        const char *old[] = { hD1 }, *both[] = { hD1, hD2 };
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\delta", src);
-        make_mod(dir, "test.delta", NULL, D_FILES, D_BYTES);
-        CHECK(install(dir, keyD, hD1));
-        /* The author edits the installed folder in place: build 2 in the same
-         * folder, the earlier hash an alias of it. (An install from elsewhere
-         * would land beside it by hash instead.) */
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\test.delta", storeA);
-        mt_write(dir, "assets\\generated\\image\\mods\\test.delta\\d.bimage", D2_BYTES[0]);
-        CHECK(install(dir, keyD, hD2) && strcmp(hD1, hD2));   /* the same folder, build 2 */
-        CHECK(modsync_find_installed(hD1, folder, sizeof folder) && strstr(folder, "test.delta"));
-        CHECK(modsync_upload_bundles(old, 1, "map-6", NULL, &st));
-        CHECK(st.bundles == 1 && stub_has_bundle(hD2) && !stub_has_bundle(hD1));
-        CHECK(strstr(g_log, "was built again; uploading its current build test.delta@1.0.0+2") != NULL);
-        /* Both hashes name one bundle: it is sent and claimed once. */
-        CHECK(modsync_upload_bundles(both, 2, "map-6", NULL, &st) && st.bundles == 1 && stub_claim_bundles("map-6", NULL) == 1);
+        char ma2[80];
+        mod_of(ma2, "alpha001", ha2);
+        list[0] = ma2;
+        CHECK(!modsync_upload_builds(list, 1, "item-6", NULL, &st));
+        CHECK(st.code == MODNET_E_REFUSED && !st.queued && modsync_pending_count() == 0);
+        {
+            volatile long cancel = 1;
+            modnet_io io = { &cancel, NULL, NULL };
+            CHECK(!modsync_upload_builds(list, 1, "item-7", &io, &st));
+            CHECK(st.code == MODNET_E_CANCELLED && st.queued && modsync_pending_count() == 1);
+            modsync_pending_drop("item-7");
+            CHECK(modsync_pending_count() == 0);
+        }
+        CHECK(modsync_upload_builds(list, 1, "item-6", NULL, &st) && stub_has_build(ha2));
     }
 
     /* ---- release ---- */
-    CHECK(modsync_release("map-1", NULL, &st));
-    CHECK(strcmp(st.claim, claim1) == 0 && stub_claim_bundles("map-1", NULL) == -1);
-    CHECK(!modsync_claim_lookup("map-1", NULL, NULL));
-    CHECK(!modsync_release("map-1", NULL, &st) && st.code == MODNET_E_NOT_FOUND);
     {
-        /* A claim the store no longer knows is forgotten locally. */
-        char c4[33], s4[65];
-        CHECK(modsync_claim_lookup("map-4", c4, s4));
-        CHECK(modnet_release(c4, s4, NULL, NULL) == MODNET_OK);
-        CHECK(modsync_release("map-4", NULL, &st) && strstr(st.cause, "no longer knew") != NULL);
-        CHECK(!modsync_claim_lookup("map-4", NULL, NULL));
-    }
-
-    {
-        /* A release the store does not take is queued, not forgotten, and
-         * sent after the next store call that succeeds. */
-        const char *one[] = { hG };
-        int releases = g_stub.release_calls;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
-        CHECK(modsync_pending_count() == 0);
+        list[0] = mb;
+        CHECK(modsync_upload_builds(list, 1, "item-8", NULL, &st));   /* a second claim on Beta */
+        CHECK(modsync_release("item-1", NULL, &st));
+        CHECK(!modsync_claim_lookup("item-1", NULL, NULL) && !modsync_claim_names(ha));
+        CHECK(!stub_has_build(ha) && stub_has_build(hb));   /* Beta is still claimed by item-8 */
         stub_fail_next("POST /mods/release", 503);
-        CHECK(!modsync_release("map-6", NULL, &st) && st.code == MODNET_E_UNAVAILABLE && st.queued);
-        CHECK(modsync_claim_lookup("map-6", NULL, NULL) && stub_claim_bundles("map-6", NULL) == 1);
-        CHECK(modsync_pending_count() == 1 && file_contains(path, "\"kind\": \"release\""));
-        CHECK(modsync_upload_bundles(one, 1, "map-3", NULL, &st));
-        CHECK(g_stub.release_calls == releases + 1 && stub_claim_bundles("map-6", NULL) == -1);
-        CHECK(!modsync_claim_lookup("map-6", NULL, NULL) && modsync_pending_count() == 0);
-        CHECK(strstr(g_log, "MODS: retry map-6: released the queued claim") != NULL);
-        /* The launch retry sends a queued release too, and a release replaces
-         * a queued upload of the same ref. */
-        stub_fail_next("POST /mods/missing", 503);
-        CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st) && st.queued && modsync_pending_count() == 1);
-        stub_fail_next("POST /mods/release", 503);
-        CHECK(!modsync_release("map-3", NULL, &st) && st.queued && modsync_pending_count() == 1);
-        CHECK(file_contains(path, "\"kind\": \"release\""));
-        {
-            unsigned done = 0, dropped = 0;
-            CHECK(modsync_retry_pending(NULL, &done, &dropped, NULL) == 0 && done == 1 && dropped == 0);
-        }
-        CHECK(stub_claim_bundles("map-3", NULL) == -1 && !modsync_claim_lookup("map-3", NULL, NULL));
-    }
-    {
-        /* The editor overrides go up like any bundle an author's map names. */
-        const char *one[] = { hE };
-        CHECK(modsync_upload_bundles(one, 1, "map-e", NULL, &st) && stub_has_bundle(hE));
-    }
-    /* The denial gate asks whether this machine published a bundle: a claim
-     * it holds names it (map-2 claims beta); a released claim does not. */
-    CHECK(modsync_claim_names(hB) == 1 && modsync_claim_names(hE) == 1);
-    CHECK(modsync_claim_names("1111111111111111111111111111111111111111111111111111111111111111") == 0);
-
-    /* ---- a second build of gamma and a mod that borrows a game file ---- */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma2", src); make_mod(dir, "test.gamma", NULL, G_FILES, G2_BYTES);
-    CHECK(install(dir, keyG2, hG2) && strcmp(hG2, hG) && strncmp(keyG2, "test.gamma@", 11) == 0);
-    {
-        const char *one[] = { hG2 };
-        CHECK(modsync_upload_bundles(one, 1, "map-g2", NULL, &st) && stub_has_bundle(hG2));
-    }
-    sh_mb_set_stock_ops(&GAME_HAS_ROCK);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\borrow", src); make_mod(dir, "test.borrow", NULL, R_FILES, R_BYTES);
-    CHECK(install(dir, keyR, hR));
-    {
-        const char *one[] = { hR };
-        int blobs = g_stub.blob_puts;
-        CHECK(modsync_upload_bundles(one, 1, "map-r", NULL, &st) && stub_has_bundle(hR));
-        CHECK(g_stub.blob_puts == blobs + 1);   /* the borrow's bytes never leave the machine */
-    }
-    sh_mb_set_stock_ops(NULL);
-
-    /* ---- download into an empty store ---- */
-    CHECK(sh_ms_set_root(storeB));
-    CHECK(sh_modserve_index_build(storeB) == 0);
-    CHECK(sh_modserve_bundle_state(hB, NULL, 0) == 0);
-    /* A download for a map lands under mods\\downloads\\<map title>\\<key>
-     * (owner 2026-11-10): never as <key>@<hash16> beside the player's own. */
-    CHECK(modsync_fetch_bundle_for(hB, "Hell: Gate?", "item-1", NULL, &st));
-    CHECK(st.code == MODNET_OK && !st.already_installed && st.blobs_transferred == 2 && st.bytes_down > 0);
-    CHECK(strcmp(st.key, "downloads\\Hell Gate\\test.beta") == 0);
-    {
-        sh_ms_verify_stats vs;
-        char cause[SH_MB_CAUSE_MAX], title[128];
-        CHECK(sh_ms_verify(st.key, &vs, cause, sizeof cause) && vs.files == 2);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.canonical.json", storeB, st.key);
-        CHECK(!mt_exists(path));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeB, st.key);
-        CHECK(mt_exists(path) && file_contains(path, "\"origin\": \"download\""));
-        CHECK(sh_ms_downloaded_for(st.key, title, sizeof title) && !strcmp(title, "Hell: Gate?"));
-        CHECK(sh_ms_downloaded_for("downloads/Hell Gate/test.beta", title, sizeof title));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", storeB, st.key);
-        CHECK(count_files(path) == 2);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", storeB);
-        CHECK(!mt_exists(path));
-    }
-    CHECK(sh_modserve_bundle_state(hB, NULL, 0) == 1);   /* the serving index was rebuilt */
-    {
-        int gets = g_stub.blob_gets + g_stub.bundle_gets;
-        CHECK(modsync_fetch_bundle(hB, NULL, &st) && st.already_installed);
-        CHECK(g_stub.blob_gets + g_stub.bundle_gets == gets);
-    }
-    {
-        /* alpha shares a file with the installed beta: that one is copied from
-         * beta's folder, one blob fetched. The stored body carries "bundle", as
-         * the Worker may keep it. */
-        g_stub.serve_bundle_member = 1;
-        CHECK(modsync_fetch_bundle(hA, NULL, &st));
-        g_stub.serve_bundle_member = 0;
-        CHECK(st.blobs_transferred == 1 && sh_modserve_bundle_state(hA, NULL, 0) == 1);
-    }
-    {
-        /* A bundle of editor-time content only: its manifest is read, no blob
-         * is fetched, nothing is installed, and the record's editorOnly
-         * section serves its row from now on. */
-        int blob_gets = g_stub.blob_gets;
-        sh_modmanifest_row row;
-        char cause[400];
-        unsigned files_before;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s", storeB);
-        files_before = count_files(path);
-        CHECK(modsync_fetch_bundle(hE, NULL, &st));
-        CHECK(st.editor_only && st.code == MODNET_OK && !st.bundles_created && !st.already_installed);
-        CHECK(g_stub.blob_gets == blob_gets);
-        CHECK(sh_modserve_bundle_state(hE, NULL, 0) == 0);
-        CHECK(count_files(path) == files_before);   /* only snapmap-plus.json changed */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeB);
-        CHECK(file_contains(path, "\"editorOnly\"") && file_contains(path, hE) && file_contains(path, "\"test.editor\""));
-        CHECK(sh_modserve_editor_only_recorded(hE));
-        memset(&row, 0, sizeof row);
-        strcpy_s(row.id, sizeof row.id, "test.editor");
-        strcpy_s(row.bundle, sizeof row.bundle, hE);
-        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
-        CHECK(strstr(g_log, "changes only the editor (1 file(s), no requirements); not installed") != NULL);
-        /* Asked again: the same answer, still nothing fetched. */
-        CHECK(modsync_fetch_bundle(hE, NULL, &st) && st.editor_only && g_stub.blob_gets == blob_gets);
+        CHECK(!modsync_release("item-8", NULL, &st) && st.queued && modsync_pending_count() == 1);
+        /* The next store call that succeeds retries the queued release. */
+        list[0] = mr;
+        CHECK(modsync_upload_builds(list, 1, "item-rocks", NULL, &st));
+        CHECK(modsync_pending_count() == 0 && !modsync_claim_lookup("item-8", NULL, NULL) && !stub_has_build(hb));
+        CHECK(!modsync_release("never-claimed", NULL, &st) && st.code == MODNET_E_NOT_FOUND);
     }
 
-    /* ---- refusals on download ---- */
-    CHECK(sh_ms_set_root(storeC));
-    CHECK(sh_modserve_index_build(storeC) == 0);
-    g_stub.corrupt_blob_gets = 1;
-    CHECK(!modsync_fetch_bundle(hG, NULL, &st));
-    g_stub.corrupt_blob_gets = 0;
-    CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "hash") != NULL);
+    /* ---- the gate's probe ---- */
     {
-        sh_ms_list l;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.gamma", storeC);
-        CHECK(!mt_exists(path));
-        CHECK(sh_ms_enumerate(&l) && l.count == 0);
-        sh_ms_list_free(&l);
-    }
-    strcpy_s(g_stub.corrupt_bundle, sizeof g_stub.corrupt_bundle, hG);
-    CHECK(!modsync_fetch_bundle(hG, NULL, &st) && st.code == MODNET_E_HASH);
-    g_stub.corrupt_bundle[0] = 0;
-    CHECK(!modsync_fetch_bundle("1111111111111111111111111111111111111111111111111111111111111111", NULL, &st) &&
-          st.code == MODNET_E_NOT_FOUND);
-    CHECK(modsync_fetch_bundle(hG, NULL, &st) && sh_modserve_bundle_state(hG, NULL, 0) == 1);
-
-    /* ---- install by hash: another build of an installed key lands beside it ---- */
-    {
-        char want[SH_MS_KEY_MAX + 1];
-        sh_ms_list l;
-        /* A second build of one key fetched with no map: mods\\downloads\\<key>-2,
-         * no hash in any visible name. */
-        CHECK(modsync_fetch_bundle(hG2, NULL, &st) && !st.already_installed && st.bundles_created == 1);
-        strcpy_s(want, sizeof want, "downloads\\test.gamma-2");
-        CHECK(!strcmp(st.key, want));
-        CHECK(sh_modserve_bundle_state(hG, NULL, 0) == 1 && sh_modserve_bundle_state(hG2, NULL, 0) == 1);
-        CHECK(sh_ms_enumerate(&l) && l.count == 2);
-        sh_ms_list_free(&l);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeC, want);
-        CHECK(file_contains(path, "\"origin\": \"download\""));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\downloads\\test.gamma\\mod.json", storeC);
-        CHECK(mt_exists(path));   /* the first build keeps its folder and name */
-        /* Fetched again: present, nothing replaced. */
-        CHECK(modsync_fetch_bundle(hG2, NULL, &st) && st.already_installed);
-    }
-    {
-        /* Two maps of one title: the second map's folder carries its id.
-         * A build already present anywhere is not stored again: the record
-         * notes the map's link to that folder. Uninstalling a downloaded
-         * build forgets it and removes the emptied organizing folders. */
-        char title[128], cause[SH_MB_CAUSE_MAX], full[MAX_PATH * 2];
-        sh_ms_list l;
-        CHECK(sh_ms_set_root(storeC));
-        CHECK(modsync_fetch_bundle_for(hB, "Arena", "item-a", NULL, &st) && !st.already_installed);
-        CHECK(!strcmp(st.key, "downloads\\Arena\\test.beta"));
-        CHECK(modsync_fetch_bundle_for(hA, "Arena", "item-b", NULL, &st) && !st.already_installed);
-        CHECK(!strcmp(st.key, "downloads\\Arena (item-b)\\test.alpha"));
-        CHECK(modsync_fetch_bundle_for(hB, "Third Map", "item-c", NULL, &st) && st.already_installed);
-        CHECK(!strcmp(st.key, "downloads\\Arena\\test.beta"));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeC);
-        CHECK(file_contains(path, "\"item-c\"") && file_contains(path, "\"Third Map\""));
-        CHECK(sh_ms_downloaded_for("downloads\\Arena\\test.beta", title, sizeof title) && !strcmp(title, "Arena"));
-        /* The same map again: its own title folder, never "(id)". */
-        CHECK(sh_ms_placed_folder_name(storeC, &(sh_ms_place){ SH_MS_GROUP_DOWNLOADS, "Arena", "item-a" }, "test.new", hA,
-                                       title, sizeof title) == 1 && !strcmp(title, "downloads\\Arena\\test.new"));
-        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\downloads\\Arena (item-b)\\test.alpha", storeC);
-        CHECK(sh_ms_delete_mod_folder(full, cause, sizeof cause) != 0);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\downloads\\Arena (item-b)", storeC);
-        CHECK(!mt_exists(path));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeC);
-        CHECK(!file_contains(path, "item-b"));
-        CHECK(sh_ms_enumerate(&l));
-        sh_ms_list_free(&l);
-    }
-
-    /* ---- the gate's probe against the loopback store ---- */
-    {
-        modsync_probe pr;
-        int found = modsync_probe_bundle(hG2, NULL, &pr);
-        CHECK(found == 1 && pr.found == 1 && !pr.game_lacks && !strcmp(pr.id, "test.gamma") && !strcmp(pr.name, "test.gamma"));
-        CHECK(pr.size == strlen(G2_BYTES[0]));
-        /* Never on the store (404): absent. */
-        CHECK(modsync_probe_bundle("2222222222222222222222222222222222222222222222222222222222222222", NULL, &pr) == 0 &&
-              pr.code == MODNET_E_NOT_FOUND);
-        /* On the takedown list (451): as absent as 404 for the player. */
-        stub_fail_next("GET /mods/bundle/", 451);
-        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == 0 && pr.code == MODNET_E_BLOCKED);
-        /* A 503: the store did not answer. */
-        stub_fail_next("GET /mods/bundle/", 503);
-        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == -1 && pr.code == MODNET_E_UNAVAILABLE);
-        /* Nothing listening: unreachable. */
+        modsync_probe p;
+        CHECK(modsync_probe_build(hr, NULL, &p) == 1 && p.size > 0);
+        CHECK(modsync_probe_build(ha, NULL, &p) == 0 && p.code == MODNET_E_NOT_FOUND);
+        stub_fail_next("HEAD /mods/build/", 451);
+        CHECK(modsync_probe_build(hr, NULL, &p) == 0 && p.code == MODNET_E_BLOCKED);
+        stub_fail_next("HEAD /mods/build/", 503);
+        CHECK(modsync_probe_build(hr, NULL, &p) == -1 && p.code == MODNET_E_UNAVAILABLE);
         CHECK(modnet_set_base_url("http://127.0.0.1:1"));
-        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == -1 && pr.found == -1 && modnet_unreachable(pr.code));
+        CHECK(modsync_probe_build(hr, NULL, &p) == -1 && modnet_unreachable(p.code));
         CHECK(modnet_set_base_url(url));
-        /* Held, but its borrow names a game file this game lacks (another
-         * revision): the probe names the source, and the download refuses it
-         * before any blob is fetched. */
-        sh_mb_set_stock_ops(&GAME_LACKS_ROCK);
-        CHECK(modsync_probe_bundle(hR, NULL, &pr) == 1 && pr.game_lacks && !strcmp(pr.source, ROCK_SOURCE));
-        {
-            int blobs = g_stub.blob_gets;
-            CHECK(!modsync_fetch_bundle(hR, NULL, &st) && st.code == MODNET_E_GAME && st.game_lacks &&
-                  !strcmp(st.game_source, ROCK_SOURCE) && g_stub.blob_gets == blobs);
-            CHECK(sh_modserve_bundle_state(hR, NULL, 0) == 0);
-        }
-        /* The same bundle where the game holds the file: installs. */
-        sh_mb_set_stock_ops(&GAME_HAS_ROCK);
-        CHECK(modsync_probe_bundle(hR, NULL, &pr) == 1 && !pr.game_lacks);
-        CHECK(modsync_fetch_bundle(hR, NULL, &st) && sh_modserve_bundle_state(hR, NULL, 0) == 1);
-        sh_mb_set_stock_ops(NULL);
     }
 
+    /* ---- download into a map's place ---- */
+    list[0] = me;
+    CHECK(modsync_upload_builds(list, 1, "item-editor", NULL, &st));
+    {
+        char ma2[80];
+        mod_of(ma2, "alpha001", ha2);
+        list[0] = ma2; list[1] = mr;
+        CHECK(modsync_upload_builds(list, 2, "item-9", NULL, &st));
+    }
+    use_root(r2);
+    {
+        sh_modmanifest_row row;
+        sh_ms_place red = place_of("Red Keep", "item-9"), blue = place_of("Blue Keep", "item-10");
+        char got[MAX_PATH * 2], want[MAX_PATH * 2];
+        int gets, rescans = g_rescans, notes = g_notes;
+        row_of(&row, "alpha001", ha2);
+        CHECK(modsync_fetch_build_for(&row, &red, NULL, &st));
+        CHECK(st.code == MODNET_OK && st.builds_created == 1 && !st.already_installed && !strcmp(st.folder, "maps\\Red Keep\\Alpha"));
+        _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\mod.json", r2);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\Alpha Pack\\mod.json", r1);
+        CHECK(same_file(got, want));
+        _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\assets\\generated\\image\\mods\\alpha001\\a.bimage", r2);
+        CHECK(file_has(got, "alpha bytes, republished"));
+        CHECK(g_rescans == rescans + 1 && g_notes == notes + 1 && !strcmp(g_note_folder, "maps\\Red Keep\\Alpha") &&
+              !strcmp(g_note_title, "Red Keep"));
+        CHECK(modsync_find_installed("alpha001", ha2, &red, NULL, 0) && !modsync_find_installed("alpha001", ha2, &blue, NULL, 0));
+        /* Again: present in the place; nothing fetched. */
+        gets = g_stub.build_gets;
+        CHECK(modsync_fetch_build_for(&row, &red, NULL, &st) && st.already_installed && g_stub.build_gets == gets);
+        /* Another map naming the same build unpacks its own copy. */
+        CHECK(modsync_fetch_build_for(&row, &blue, NULL, &st) && !st.already_installed && g_stub.build_gets == gets + 1);
+        CHECK(!strcmp(st.folder, "maps\\Blue Keep\\Alpha"));
+
+        /* The root at the row's hash serves it: nothing fetched. */
+        _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\My Alpha", r2);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\Alpha Pack", r1);
+        CHECK(mt_copy_tree(want, got));
+        {
+            sh_ms_place green = place_of("Green Keep", NULL);
+            gets = g_stub.build_gets;
+            CHECK(modsync_fetch_build_for(&row, &green, NULL, &st) && st.already_installed && g_stub.build_gets == gets);
+            CHECK(!strcmp(st.folder, "My Alpha"));
+            /* At another hash it does not: the pinned build comes into the place. */
+            mt_write(got, "assets\\generated\\image\\mods\\alpha001\\a.bimage", "the player's own alpha");
+            {
+                sh_mb_bundle b;
+                char why[SH_MB_CAUSE_MAX];
+                memset(&b, 0, sizeof b);
+                CHECK(sh_mb_build(got, NULL, NULL, &b) && sh_mb_write(&b, got, why, sizeof why) && strcmp(b.hash, ha2));
+                sh_mb_free(&b);
+            }
+            CHECK(modsync_fetch_build_for(&row, &green, NULL, &st) && !st.already_installed && g_stub.build_gets == gets + 1);
+            CHECK(!strcmp(st.folder, "maps\\Green Keep\\Alpha"));
+        }
+
+        /* A republish replaces the place's build of the salt: one folder per salt. */
+        {
+            char ha3[65], ma3[80];
+            use_root(r1);
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Alpha Pack", r1);
+            CHECK(make_mod(dir, "alpha001", "Alpha", A_FILES, A_BYTES, NULL, ha3));
+            mod_of(ma3, "alpha001", ha3);
+            list[0] = ma3;
+            CHECK(modsync_upload_builds(list, 1, "item-9", NULL, &st));
+            use_root(r2);
+            row_of(&row, "alpha001", ha3);
+            CHECK(modsync_fetch_build_for(&row, &red, NULL, &st) && !strcmp(st.folder, "maps\\Red Keep\\Alpha"));
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep", r2);
+            CHECK(count_dirs(got) == 1);
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\mod.json", r2);
+            CHECK(file_has(got, ha3) && !file_has(got, ha2));
+            strcpy_s(ha2, sizeof ha2, ha3);
+        }
+
+        /* ---- refusals: nothing placed ---- */
+        {
+            sh_ms_place grey = place_of("Grey Keep", NULL);
+            char hx[65], placedir[MAX_PATH * 2];
+            unsigned char *copy;
+            size_t len = 0;
+            _snprintf_s(placedir, sizeof placedir, _TRUNCATE, "%s\\maps\\Grey Keep", r2);
+            /* An archive of another build under this hash. */
+            sh_mb_sha256_hex("forged", 6, hx);
+            copy = stored_copy(hr, &len);
+            CHECK(copy != NULL);
+            if (copy) stub_put_raw(hx, copy, len);
+            free(copy);
+            row_of(&row, "rocks003", hx);
+            CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
+            CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "the mod store sent a build that does not match the map"));
+            CHECK(count_dirs(placedir) == 0);
+            /* The right build of another salt. */
+            row_of(&row, "zzzzzzz9", hr);
+            CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st) && st.code == MODNET_E_HASH && count_dirs(placedir) == 0);
+            /* A transfer damaged on the way. */
+            g_stub.corrupt_build_gets = 1;
+            row_of(&row, "rocks003", hr);
+            CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st) && st.code == MODNET_E_HASH && count_dirs(placedir) == 0);
+            g_stub.corrupt_build_gets = 0;
+            /* An entry its mod.json does not list. */
+            {
+                char zp[MAX_PATH * 2], mj[MAX_PATH * 2], hy[65];
+                unsigned char *text;
+                size_t tl = 0;
+                sh_zip_writer w;
+                wchar_t *wz;
+                _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\gamma\\mod.json", r1);
+                _snprintf_s(zp, sizeof zp, _TRUNCATE, "%s\\extra.zip", tmp);
+                text = sh_mb_read_file(mj, 1 << 20, &tl);
+                memset(&w, 0, sizeof w);
+                wz = sh_mb_wpath(zp);
+                CHECK(text && wz && sh_zip_writer_open(&w, wz) && sh_zip_writer_add(&w, "mod.json", text, tl) &&
+                      sh_zip_writer_add(&w, "assets/generated/image/mods/gamma004/c.bimage", C_BYTES[0], strlen(C_BYTES[0])) &&
+                      sh_zip_writer_add(&w, "assets/generated/image/mods/gamma004/extra.bimage", "x", 1) &&
+                      sh_zip_writer_finish(&w));
+                sh_zip_writer_free(&w);
+                free(wz);
+                free(text);
+                strcpy_s(hy, sizeof hy, hc);
+                copy = sh_mb_read_file(zp, 1 << 20, &len);
+                if (copy) stub_put_raw(hy, copy, len);
+                free(copy);
+                row_of(&row, "gamma004", hy);
+                CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
+                CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "holds files its mod.json does not list") && count_dirs(placedir) == 0);
+            }
+            /* A borrow this game lacks. */
+            g_game_lacks = 1;
+            row_of(&row, "rocks003", hr);
+            CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
+            CHECK(st.code == MODNET_E_GAME && st.game_lacks && !strcmp(st.game_source, ROCK_SOURCE) && count_dirs(placedir) == 0);
+            g_game_lacks = 0;
+            CHECK(modsync_fetch_build_for(&row, &grey, NULL, &st) && !strcmp(st.folder, "maps\\Grey Keep\\Rocks"));
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Grey Keep\\Rocks\\assets\\generated\\image\\mods\\rocks003", r2);
+            {
+                char f1[MAX_PATH * 2], f2[MAX_PATH * 2];
+                _snprintf_s(f1, sizeof f1, _TRUNCATE, "%s\\own.bimage", got);
+                _snprintf_s(f2, sizeof f2, _TRUNCATE, "%s\\rock.bimage", got);
+                CHECK(mt_exists(f1) && !mt_exists(f2));   /* the pointer stays the game's */
+            }
+            /* Missing from the store. */
+            row_of(&row, "betab002", hb);
+            CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st) && st.code == MODNET_E_NOT_FOUND);
+            /* A row without a place, or not a row. */
+            CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_ARG);
+        }
+
+        /* ---- an editor-only build: recorded, not installed ---- */
+        {
+            sh_ms_place ed = place_of("Editor Map", NULL);
+            row_of(&row, "edito005", he);
+            CHECK(modsync_fetch_build_for(&row, &ed, NULL, &st) && st.editor_only);
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Editor Map", r2);
+            CHECK(count_dirs(got) == 0);
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\snapmap-plus.json", r2);
+            CHECK(file_has(got, "\"editorOnly\"") && file_has(got, he));
+        }
+    }
+
+    /* No secret reaches the log. */
+    {
+        char secret[65];
+        use_root(r1);
+        CHECK(modsync_claim_lookup("item-9", NULL, secret) && !strstr(g_log, secret));
+    }
+    (void)cause;
+    (void)r;
     modnet_shutdown();
     stub_stop();
-    sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     printf("modsync_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
