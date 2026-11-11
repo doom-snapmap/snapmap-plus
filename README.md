@@ -19,9 +19,11 @@ SnapHak binary content; game assets are read from the player's installation.
 | [docs/](docs/README.md) | Contributor guides and cross-component contracts. |
 | [tests/](tests/README.md) | Native and JavaScript regression tests. |
 | [tools/](tools/README.md) | Release-note tooling and signature derivation. |
-| [site/](site/README.md) | Public website and player guide. |
 | [feedback/](feedback/README.md) | In-app feedback relay. |
 | [.github/](.github/AUTOMATION.md) | CI, releases, publishing and repository policy. |
+
+The website and player guide live in the separate
+[snapmap-web](https://github.com/doom-snapmap/snapmap-web) repository.
 | `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
 
 ## Working here
@@ -49,19 +51,25 @@ snapmap-plus status
 snapmap-plus uninstall
 ```
 
+Release binaries are not code-signed yet, so Windows SmartScreen may say
+"Windows protected your PC" for `snapmap-plus.exe`; choose **More info**, check
+that the file came from this repository's Releases page, then **Run anyway**.
+`gh attestation verify snapmap-plus.exe --repo doom-snapmap/snapmap-plus` proves
+the file was built here from source.
+
 Close DOOM before installing or updating. Launch it afterward and enter SnapMap;
 run `sh` in the game console if the companion window does not open. See the
 [player guide](https://www.snapmapplus.com/snapmap-plus-guide.html).
 
 The installer and player data live under `%LOCALAPPDATA%\snapmap-plus`.
-Uninstall restores recorded backups and preserves settings, overrides, prefabs
+Uninstall restores recorded backups and preserves settings, mods, prefabs
 and rawmaps. Original SnapHak user data is copied forward during migration;
 see the [installer README](installer/README.md).
 
 ## Build and test
 
 The DLL build requires MSVC 2022 Build Tools with the C++ desktop workload.
-Building the installer also requires Go 1.21 or later. The frontend build
+Building the installer also requires Go 1.26 or later. The frontend build
 fetches its WebView2 SDK; the running application uses the system WebView2
 runtime. Full setup instructions are in [contributing](docs/contributing.md).
 
@@ -88,8 +96,10 @@ release-tool checks as well.
 
 The Git tag is the version. Each release contains both the DLL bundle and the
 installer. Plain `vX.Y.Z` tags are stable; `vX.Y.Z-beta.N` tags are prereleases.
-Use `--beta` for the newest beta or `--release <tag>` for a specific version.
-Without a stable release, the installer reports its fallback to the newest beta.
+The installer takes the newest stable release by version; `--beta` takes the
+newest release of either kind, and `--release <tag>` a specific version.
+Install, update and the installer's own update never move to an older version
+unless `--release` names it.
 
 [CHANGELOG.md](CHANGELOG.md) is the release-note source. Maintainers prepare and
 review its entry before pushing a tag; follow [Cutting a release](docs/contributing.md#cutting-a-release-maintainer).
@@ -108,11 +118,13 @@ only what you approve in the dialog, verified by hash. A map saved or published 
 earlier release has a complete package converted into a local mod on load; any
 other package is removed. Nothing is loaded from
 `%LOCALAPPDATA%\snapmap-plus\overrides\`: on install and update the installer
-runs `snapmap-plus-store.exe`, which converts a mods folder of earlier releases
-and moves the packages in `overrides\` into `mods\` (packages you add there later
-included), leaving `overrides\` as it was for you to keep or delete; whatever it
-deletes goes to the Recycle Bin. `snapmap-plus migrate` runs that conversion by
-itself, without reinstalling. See
+runs `snapmap-plus-store.exe`, which converts a mods folder of earlier releases,
+moves the packages in `overrides\` into `mods\` (packages you add there later
+included) and its loose files and `strings\strids.json` into the mod
+`mods\my-overrides`, then sends `overrides\` and `strings\` to the Recycle Bin
+once everything in them is in `mods\`. Nothing is deleted for good: an item the
+Recycle Bin cannot take stays where it is, and the tool says so.
+`snapmap-plus migrate` runs that conversion by itself, without reinstalling. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits

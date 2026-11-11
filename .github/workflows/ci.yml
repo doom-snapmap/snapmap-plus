@@ -1,4 +1,5 @@
-# Build and test pull requests and main without repository secrets.
+# Build and test pull requests and main without repository secrets. release.yml runs these same
+# jobs on a tag before it builds anything.
 # Keep pull_request rather than pull_request_target for untrusted fork code.
 # Pin third-party actions to commit SHAs with readable version comments.
 name: CI
@@ -9,6 +10,8 @@ on:
     branches: [main]
   # Allow maintainers to rerun validation without another commit.
   workflow_dispatch:
+  # The release gate.
+  workflow_call:
 
 permissions:
   contents: read
@@ -76,10 +79,15 @@ jobs:
           python3 tools/changelog.py --lint
           python3 -m unittest discover -s tools/tests -t tools -v
       - name: Secret scan (gitleaks)
-        # Use the pinned standalone gitleaks binary; fail the job when it finds a leak.
+        # Use the pinned standalone gitleaks binary, checked against the SHA-256 GitHub records
+        # for that release asset; fail the job when it finds a leak.
         run: |
+          set -euo pipefail
           VER=8.30.1
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
+          SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks detect --no-git --source . --redact --no-banner --exit-code 1
 
   build:
@@ -87,9 +95,6 @@ jobs:
     # Build both DLLs and run the native, JavaScript and Worker checks. The scripts are the
     # local ones (build.ps1, run-tests.ps1); this job adds only caches and the guards.
     runs-on: windows-latest
-    env:
-      # Keep in step with tests/README.md.
-      MINIFLARE_VERSION: '4.20260730.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Node
@@ -125,30 +130,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           .\package.ps1
-      - name: Clean-room bundle guard (layout + genuinely Qt-free)
+      - name: Bundle guard (the April 2024 pair, Qt-free)
         shell: pwsh
-        run: |
-          # Require both DLLs and reject accidental Qt dependencies.
-          $ErrorActionPreference = 'Stop'
-          $dist = "dist"
-          # The bundle carries the April 2024 pair only; the 2018 release's pair is never packaged.
-          $must = @("XINPUT1_4.dll", "snapmap-plus\snapmap-plus-ui-13954591.dll", "MANIFEST.sha256", "snapmap-plus-store.exe", "TOOLS.sha256")
-          foreach ($f in $must) {
-            if (-not (Test-Path (Join-Path $dist $f))) { throw "bundle guard: missing $f in dist\" }
-          }
-          $mustNot = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")
-          foreach ($f in $mustNot) {
-            if (Test-Path (Join-Path $dist $f)) { throw "bundle guard: dist\$f is the 2018 release's file and must not be packaged" }
-          }
-          if (Test-Path (Join-Path $dist "platforms")) {
-            throw "bundle guard: dist\platforms\ must not exist -- the bundle ships no Qt platform plugin"
-          }
-          $present = @(Get-ChildItem -Recurse -File $dist | ForEach-Object { $_.Name.ToLower() })
-          $qtish = $present | Where-Object { $_ -match '^qt5|^qwindows\.dll$' }
-          if ($qtish) {
-            throw "bundle guard: Qt-shaped file(s) found in dist\ ($($qtish -join ', ')) -- the bundle must stay Qt-free"
-          }
-          Write-Host "bundle guard OK: lean overlay, no Qt runtime present"
+        run: ./tools/bundle_guard.ps1
       - name: XInput ordinal parity (must match System32)
         shell: pwsh
         run: |
@@ -169,12 +153,15 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/worker-tests
-          key: miniflare-${{ runner.os }}-${{ env.MINIFLARE_VERSION }}
+          key: miniflare-${{ runner.os }}-${{ hashFiles('tools/worker-tests/package-lock.json') }}
       - name: Install the Worker test dependency
+        # npm ci installs exactly the lockfile's versions and checks each package's integrity hash.
         if: steps.miniflare.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock "miniflare@$env:MINIFLARE_VERSION"
+          New-Item -ItemType Directory -Force build/worker-tests | Out-Null
+          Copy-Item tools/worker-tests/package.json, tools/worker-tests/package-lock.json build/worker-tests
+          npm ci --prefix build/worker-tests --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw "Worker test dependency installation failed" }
       - name: Worker runtime tests
         shell: pwsh
@@ -191,7 +178,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.21'
+          go-version: '1.26'
           # The installer has no go.sum (stdlib only); the step below caches by go.mod and sources.
           cache: false
       - name: Cache the Go build and module caches
@@ -200,9 +187,9 @@ jobs:
           path: |
             ~/AppData/Local/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-1.21-${{ hashFiles('installer/go.mod', 'installer/go.sum', 'installer/**/*.go') }}
+          key: go-${{ runner.os }}-1.26-${{ hashFiles('installer/go.mod', 'installer/go.sum', 'installer/**/*.go') }}
           restore-keys: |
-            go-${{ runner.os }}-1.21-
+            go-${{ runner.os }}-1.26-
       - name: Installer -- gofmt + vet + test + build
         shell: pwsh
         working-directory: installer

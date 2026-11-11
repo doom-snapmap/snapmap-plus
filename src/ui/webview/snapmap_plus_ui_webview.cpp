@@ -4,6 +4,7 @@
  * drains UI requests at about 30 Hz, and polls change-gated editor state.
  * Engine mutations use backend interface slots declared in snapmap_plus_iface.h. */
 #include <windows.h>
+#include <lmcons.h>
 #include <dwmapi.h>
 #include <shlobj.h>
 #include <winhttp.h>
@@ -39,6 +40,7 @@
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "webview_profile.h" /* the WebView2 profile folder under cache\ */
 #include "folder_watch.h"   /* the debounce behind the prefabs folder watcher */
+#include "player_text.h"    /* the description text a player sees from the generated tables */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -58,14 +60,21 @@ static ComPtr<ICoreWebView2Environment12> g_webview_environment12;
 static ComPtr<ICoreWebView2_17>            g_webview17;
 static bool                     g_webview_ready = false;
 static std::wstring             g_html;
-static std::string              g_version = "dev";
+/* The release this window was built as (root build.ps1 -Version); "dev" for a local build. */
+#ifndef SNAPMAP_PLUS_VERSION
+#define SNAPMAP_PLUS_VERSION "dev"
+#endif
+static const std::string        g_version = SNAPMAP_PLUS_VERSION;
 /* Game identity from the backend ("" = backend not attached to a supported build). */
 static std::string              g_game;
 static unsigned int             g_config_status_flags = 0;
 static bool                     g_config_status_posted = false;
+/* The backend's interface table is not this window's (an install with files of two releases):
+ * the window shows one refusal and touches nothing else. */
+static bool                     g_pair_mismatch = false;
 
-#define POC_CONFIG_KEY_CAP 128u
-#define POC_CONFIG_VALUE_CAP (64u * 1024u)
+#define UI_CONFIG_KEY_CAP 128u
+#define UI_CONFIG_VALUE_CAP (64u * 1024u)
 
 static bool          g_sync_on       = false;   /* "Synchronize with editor" checkbox */
 static int           g_displayed_eid = -1;      /* entity the state panel is showing */
@@ -76,8 +85,8 @@ static uint64_t      g_last_sel_sig   = 0;       /* forward-sync: last editor-se
 
 /* Retain a growing read buffer for large declarations. At the 32 MiB cap,
  * report truncation instead of exposing partial JSON as editable text. */
-#define POC_DECL_INITIAL_CAP (64u * 1024u)
-#define POC_DECL_MAX_CAP     (32u * 1024u * 1024u)
+#define UI_DECL_INITIAL_CAP (64u * 1024u)
+#define UI_DECL_MAX_CAP     (32u * 1024u * 1024u)
 static std::vector<char> g_state_decl;
 
 static volatile bool g_pending_save = false;
@@ -89,8 +98,8 @@ static volatile bool g_pending_delete = false;
 static std::vector<int> g_delete_eids;
 /* The page announces nothing until it receives this result. NOT_RUN means the
  * main-thread call never started, so the engine was not touched. */
-#define POC_DELETE_NOT_RUN (-1000)
-static int              g_entity_delete_status = POC_DELETE_NOT_RUN;
+#define UI_DELETE_NOT_RUN (-1000)
+static int              g_entity_delete_status = UI_DELETE_NOT_RUN;
 static sh_delete_result g_entity_delete_result;
 
 static volatile bool g_pending_select = false;   /* list -> editor selection push ("Select in editor") */
@@ -109,12 +118,12 @@ static volatile bool g_cam_read_published = false;  /* force one readout after e
 static volatile bool g_pending_create_prefab = false;
 static std::string   g_create_prefab_name;
 static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; 2 not hovering an entity in selection; 3 no usable grab frame; -1 resolve/serialize/write failure */
-static bool          g_create_grab_corrected = false; /* Create rebuilt a missed grab frame from the hovered box */
 static int           g_last_selcount = -1;       /* last broadcast editor-selection count (Create-button gating) */
 
 static volatile bool g_pending_delete_prefab = false;
 static std::string   g_delete_prefab_name, g_delete_prefab_folder;   /* folder="" -> root (prefabs/) */
-static int           g_delete_result = 0;        /* 1 ok; 0 DeleteFile failed (missing/locked); -1 resolve failed */
+static int           g_delete_result = 0;        /* 1 ok; 0 the file operation failed (g_delete_reason); -1 path refused */
+static const wchar_t *g_delete_reason = L"";
 
 static volatile bool g_pending_rename_prefab = false;
 /* Timelines tree: one batch of display-name writes (folder moves and renames are
@@ -124,7 +133,8 @@ static std::vector<int>         g_set_names_eids;
 static std::vector<std::string> g_set_names_names;
 static int           g_set_names_applied = 0, g_set_names_failed = 0;
 static std::string   g_rename_prefab_old, g_rename_prefab_new, g_rename_prefab_folder;
-static int           g_rename_result = 0;        /* 1 ok; 0 MoveFile failed (dest exists/missing/locked); -1 resolve failed */
+static int           g_rename_result = 0;        /* 1 ok; 0 the move failed (g_rename_reason); -1 path refused */
+static const wchar_t *g_rename_reason = L"";
 
 static volatile bool g_pending_load_prefab = false;
 static std::string   g_load_prefab_name, g_load_prefab_folder;
@@ -189,11 +199,13 @@ static std::wstring  g_pick_folder;
  * folder="" always means the root prefabs\ dir. The folder/file IS the truth -- no separate manifest. */
 static volatile bool g_pending_create_folder = false;
 static std::string   g_create_folder_name;
-static int           g_create_folder_result = 0;   /* 1 ok; 0 already exists / empty name; -1 CreateDirectory failed */
+static int           g_create_folder_result = 0;   /* 1 ok; 0 not created (g_create_folder_reason); -1 name refused */
+static const wchar_t *g_create_folder_reason = L"";
 
 static volatile bool g_pending_rename_folder = false;
 static std::string   g_rename_folder_old, g_rename_folder_new;
-static int           g_rename_folder_result = 0;   /* 1 ok; 0 MoveFile failed (dest exists/locked); -1 resolve failed */
+static int           g_rename_folder_result = 0;   /* 1 ok; 0 the move failed (g_rename_folder_reason); -1 name refused */
+static const wchar_t *g_rename_folder_reason = L"";
 
 static volatile bool g_pending_delete_folder = false;
 static std::string   g_delete_folder_name;
@@ -202,15 +214,18 @@ static int           g_delete_folder_result = 0;   /* 1 ok (removed, any content
 
 static volatile bool g_pending_move_prefab = false;
 static std::string   g_move_prefab_name, g_move_prefab_from, g_move_prefab_to;
-static int           g_move_prefab_result = 0;      /* 1 ok; 0 MoveFile failed (dest name collision); -1 resolve failed */
+static int           g_move_prefab_result = 0;      /* 1 ok; 0 the move failed (g_move_prefab_reason); -1 path refused */
+static const wchar_t *g_move_prefab_reason = L"";
 /* A multi-selection drop: every move in one UI tick, one result, one refresh. */
 static volatile bool g_pending_move_prefabs = false;
 static std::vector<std::string> g_move_prefabs_names, g_move_prefabs_from, g_move_prefabs_moved;
 static std::string   g_move_prefabs_to;
 static int           g_move_prefabs_failed = 0;
+static const wchar_t *g_move_prefabs_reason = L"";   /* the first failure's */
 static volatile bool g_pending_delete_prefabs = false;
 static std::vector<std::string> g_delete_prefabs_names, g_delete_prefabs_folders;
 static int           g_delete_prefabs_deleted = 0, g_delete_prefabs_failed = 0;
+static const wchar_t *g_delete_prefabs_reason = L"";   /* the first failure's */
 
 /* Defer timeline serialization to the UI drain, then send its JSON to the page. */
 static volatile bool g_pending_open_timeline = false;
@@ -229,20 +244,20 @@ static int           g_save_timeline_eid = -1;
 static std::string   g_save_timeline_json;          /* UTF-8; the page's JSON.stringify output, already fully patched */
 static int           g_save_timeline_result = 0;     /* 1 ok, 0 apply_edit refused/failed */
 
-#define POC_MAX_ENTS 8192
-#define POC_ID_CAP   384
-#define POC_NAME_CAP 192
-struct PocEnt { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; int hidden; };
-static PocEnt *g_ents = nullptr;
+#define UI_MAX_ENTS 8192
+#define UI_ID_CAP   384
+#define UI_NAME_CAP 192
+struct UiEnt { int eid; char id[UI_ID_CAP]; char name[UI_NAME_CAP]; int hidden; };
+static UiEnt *g_ents = nullptr;
 
 /* Rebuild the Timeline and Encounter Manager list when the entity signature changes. */
-#define POC_MAX_TLS 2048
-struct PocTl { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; };
-static PocTl *g_tls = nullptr;
+#define UI_MAX_TLS 2048
+struct UiTl { int eid; char id[UI_ID_CAP]; char name[UI_NAME_CAP]; };
+static UiTl *g_tls = nullptr;
 static int    g_tl_count = 0;
 static unsigned long g_list_seq = 0;
 
-struct PocCollectPerf {
+struct UiCollectPerf {
     unsigned calls, state_calls;
     unsigned long long collect_total_us, collect_max_us;
     unsigned long long poll_total_us, poll_max_us;
@@ -250,13 +265,13 @@ struct PocCollectPerf {
     unsigned long long state_total_us, state_max_us;
     int min_entities, max_entities, max_selection_count;
 };
-static PocCollectPerf g_collect_perf = {};
+static UiCollectPerf g_collect_perf = {};
 
 /* File logging. */
 /* Keep the log name recognizable beside the backend log. */
 static const char *kUiLogPath = "snapmap-plus\\logs\\snapmap-plus-ui.log";
 
-static void poc_log(const char *msg)
+static void ui_log(const char *msg)
 {
     static bool rolled = false;
     CreateDirectoryA("snapmap-plus", nullptr);   /* one level at a time; both idempotent */
@@ -265,8 +280,6 @@ static void poc_log(const char *msg)
     if (!rolled) {
         rolled = true;
         log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES);
-        /* Remove the obsolete log filename after the rename. */
-        DeleteFileA("snapmap-plus\\logs\\webview_poc.log");
     }
     if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
         SYSTEMTIME t; GetLocalTime(&t);
@@ -275,9 +288,9 @@ static void poc_log(const char *msg)
         fclose(f);
     }
 }
-static void poc_logf(const char *fmt, unsigned long a) { char l[256]; _snprintf_s(l, sizeof l, _TRUNCATE, fmt, a); poc_log(l); }
+static void ui_logf(const char *fmt, unsigned long a) { char l[256]; _snprintf_s(l, sizeof l, _TRUNCATE, fmt, a); ui_log(l); }
 
-static unsigned long long poc_perf_now_us()
+static unsigned long long ui_perf_now_us()
 {
     static LARGE_INTEGER freq = []() { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
@@ -287,7 +300,7 @@ static unsigned long long poc_perf_now_us()
     return (ticks / hz) * 1000000ull + ((ticks % hz) * 1000000ull) / hz;
 }
 
-static void poc_perf_flush_collect(const char *reason)
+static void ui_perf_flush_collect(const char *reason)
 {
     if (g_collect_perf.calls == 0) return;
     char l[512];
@@ -302,18 +315,18 @@ static void poc_perf_flush_collect(const char *reason)
                 g_collect_perf.state_calls,
                 g_collect_perf.state_calls ? g_collect_perf.state_total_us / g_collect_perf.state_calls : 0,
                 g_collect_perf.state_max_us);
-    poc_log(l);
+    ui_log(l);
     g_collect_perf = {};
 }
 
-static void poc_perf_note_collect(unsigned long long us, int entities, const char *reason)
+static void ui_perf_note_collect(unsigned long long us, int entities, const char *reason)
 {
     if (!reason || strcmp(reason, "poll") != 0) {
         char l[192];
         _snprintf_s(l, sizeof l, _TRUNCATE,
                     "perf collect: reason=%s entities=%d duration_us=%llu",
                     reason ? reason : "unknown", entities, us);
-        poc_log(l);
+        ui_log(l);
         return;
     }
 
@@ -331,11 +344,11 @@ static void poc_perf_note_collect(unsigned long long us, int entities, const cha
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE,
                     "perf collect-slow: entities=%d duration_us=%llu", entities, us);
-        poc_log(l);
+        ui_log(l);
     }
 }
 
-static void poc_perf_note_poll(unsigned long long total_us, unsigned long long collect_us,
+static void ui_perf_note_poll(unsigned long long total_us, unsigned long long collect_us,
                                unsigned long long selection_us, unsigned long long state_us,
                                bool state_called, int entities, int selection_count)
 {
@@ -356,45 +369,82 @@ static void poc_perf_note_poll(unsigned long long total_us, unsigned long long c
                     "perf poll-slow: entities=%d selected=%d total_us=%llu collect_us=%llu selection_us=%llu state_us=%llu",
                     entities, selection_count, total_us, collect_us, selection_us,
                     state_called ? state_us : 0);
-        poc_log(l);
+        ui_log(l);
     }
-    if (g_collect_perf.calls >= 90) poc_perf_flush_collect("30-second-window");
+    if (g_collect_perf.calls >= 90) ui_perf_flush_collect("30-second-window");
 }
 
 /* Change signatures. */
 static uint64_t hstr(uint64_t h, const char *s) { while (*s) { h = (h ^ (unsigned char)*s) * 1099511628211ull; s++; } return h; }
 static uint64_t hint(uint64_t h, int v) { for (int i = 0; i < 4; i++) { h = (h ^ (unsigned char)(v & 0xff)) * 1099511628211ull; v >>= 8; } return h; }
 
-/* Validate each name component before resolve_prefab_path concatenates it.
- * Reject separators and traversal here as well as in the page. */
-static bool poc_valid_name(const std::string &n)
+/* Validate each name component before resolve_prefab_path concatenates it
+ * (prefab_host.h): a name Windows can hold, with no separator or traversal. */
+static bool ui_valid_name(const std::string &n) { return sh_prefab_host::valid_name(n); }
+
+/* Paths are UTF-8 inside the window and across the backend interface, and wide at
+ * every Windows call, so any user, folder or prefab name opens. */
+static std::wstring ui_widen(const char *utf8)
 {
-    if (n.empty() || n.size() > 200) return false;
-    if (n.find("..") != std::string::npos) return false;
-    if (n.find('/') != std::string::npos || n.find('\\') != std::string::npos) return false;
-    if (n.find(':') != std::string::npos) return false;
-    return true;
+    std::wstring w;
+    if (!utf8) return w;
+    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
+    return w;
+}
+static FILE *ui_open(const char *utf8_path, const wchar_t *mode)
+{
+    FILE *f = nullptr;
+    if (!utf8_path || _wfopen_s(&f, ui_widen(utf8_path).c_str(), mode) != 0) return nullptr;
+    return f;
+}
+static bool ui_exists(const char *utf8_path) { return GetFileAttributesW(ui_widen(utf8_path).c_str()) != INVALID_FILE_ATTRIBUTES; }
+static bool ui_move(const char *from, const char *to) { return MoveFileW(ui_widen(from).c_str(), ui_widen(to).c_str()) != 0; }
+/* Why the file operation just made failed, as the page names it: "exists" (the name is taken),
+ * "inUse" (another program holds the file), "missing" (it is gone), "notEmpty" (a folder kept a
+ * file), or "" (another Windows error, logged with its code). Call right after the failure. */
+static const wchar_t *ui_fs_reason()
+{
+    DWORD e = GetLastError();
+    switch (e) {
+    case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return L"exists";
+    case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION: case ERROR_ACCESS_DENIED: return L"inUse";
+    case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: return L"missing";
+    case ERROR_DIR_NOT_EMPTY: return L"notEmpty";
+    default: {
+        char l[96];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "file operation failed: Windows error %lu", (unsigned long)e);
+        ui_log(l);
+        return L"";
+    }
+    }
+}
+/* %LOCALAPPDATA%\snapmap-plus, created when missing; "" when Windows cannot say. */
+static std::wstring ui_data_dir()
+{
+    PWSTR la = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la)) && la) dir = std::wstring(la) + L"\\snapmap-plus";
+    if (la) CoTaskMemFree(la);
+    if (!dir.empty()) SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
+    return dir;
 }
 /* Keep the user's asset pins in pinned.json, separate from validated settings.
  * A damaged pin list must not reset unrelated preferences. The host transports
  * opaque bytes; the page owns parsing, validation, and the empty-list fallback. */
-static std::string poc_pins_path()
+static std::wstring ui_pins_path()
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return std::string();
-    std::string dir = std::string(la) + "\\snapmap-plus";
-    free(la);
-    SHCreateDirectoryExA(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
-    return dir + "\\pinned.json";
+    std::wstring dir = ui_data_dir();
+    return dir.empty() ? dir : dir + L"\\pinned.json";
 }
 
-static void poc_send_pins()
+static void ui_send_pins()
 {
     std::string data;
-    std::string path = poc_pins_path();
+    std::wstring path = ui_pins_path();
     if (!path.empty()) {
         FILE *f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") == 0 && f) {
+        if (_wfopen_s(&f, path.c_str(), L"rb") == 0 && f) {
             char buf[4096]; size_t r;
             while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
             fclose(f);
@@ -408,42 +458,35 @@ static void poc_send_pins()
 }
 
 /* Replace the full pin document via a temporary file and atomic move. */
-static void poc_save_pins(const std::string &doc)
+static void ui_save_pins(const std::string &doc)
 {
-    std::string path = poc_pins_path();
+    std::wstring path = ui_pins_path();
     if (path.empty()) return;
-    std::string tmp = path + ".tmp";
+    std::wstring tmp = path + L".tmp";
     FILE *f = nullptr;
-    if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
+    if (_wfopen_s(&f, tmp.c_str(), L"wb") != 0 || !f) { ui_log("pins: could not open the temp file"); return; }
     size_t w = doc.empty() ? 0 : fwrite(doc.data(), 1, doc.size(), f);
-    fclose(f);
-    if (w != doc.size()) { DeleteFileA(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
-    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileA(tmp.c_str());
-        poc_log("pins: could not replace pinned.json");
+    if (fclose(f) != 0) w = 0;
+    if (w != doc.size()) { DeleteFileW(tmp.c_str()); ui_log("pins: short write, kept the previous file"); return; }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        ui_log("pins: could not replace pinned.json");
     }
 }
 
-static void poc_read_version()
+
+/* Engine reads and edits run on DOOM's main thread while this thread waits. */
+#define UI_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
+#define UI_MAIN_CAM_WAIT_MS   100   /* a held camera writes again next pass */
+static bool ui_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return;
-    std::string path = std::string(la) + "\\snapmap-plus\\install.json";
-    free(la);
-    FILE *f = nullptr;
-    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
-    std::string data; char buf[4096]; size_t r;
-    while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
-    fclose(f);
-    size_t k = data.find("\"version\""); if (k == std::string::npos) return;
-    k = data.find(':', k); if (k == std::string::npos) return;
-    k = data.find('"', k);  if (k == std::string::npos) return; k++;
-    size_t e = data.find('"', k); if (e == std::string::npos) return;
-    g_version = data.substr(k, e - k);
+    int r = 0;
+    return g_iface && g_iface->vtbl && g_iface->vtbl->run_on_main &&
+           g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
 }
 
 /* Guarded engine access. */
-static int poc_editor_ready()
+static int ui_editor_ready()
 {
     int r = 0;
     __try {
@@ -454,82 +497,82 @@ static int poc_editor_ready()
     } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; }
     return r;
 }
-static int poc_collect(int *out_ready)
+static int ui_collect(int *out_ready)
 {
     int n = 0; *out_ready = 0;
     __try {
         if (!g_iface || !g_iface->vtbl) return 0;
         if (g_iface->vtbl->editor_ready_poll) *out_ready = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
         int count = g_iface->vtbl->entity_count ? g_iface->vtbl->entity_count(g_iface) : 0;
-        for (int id = 0; id < count && n < POC_MAX_ENTS; id++) {
+        for (int id = 0; id < count && n < UI_MAX_ENTS; id++) {
             if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) continue;
-            char idbuf[POC_ID_CAP]; idbuf[0] = 0; const char *s = idbuf;
+            char idbuf[UI_ID_CAP]; idbuf[0] = 0; const char *s = idbuf;
             if (g_iface->vtbl->id_to_string) { const char *r = g_iface->vtbl->id_to_string(g_iface, id, idbuf, sizeof idbuf); if (r) s = r; }
             if (!s || s[0] == 0) continue;
             if (s[0]=='N' && s[1]=='U' && s[2]=='L' && s[3]=='L' && s[4]=='_') continue;
-            char nmbuf[POC_NAME_CAP]; nmbuf[0] = 0; const char *nm = nmbuf;
+            char nmbuf[UI_NAME_CAP]; nmbuf[0] = 0; const char *nm = nmbuf;
             if (g_iface->vtbl->get_displayname) { const char *r = g_iface->vtbl->get_displayname(g_iface, id, nmbuf, sizeof nmbuf); if (r) nm = r; }
             int hidden = 0;
             if (g_iface->vtbl->id_dev_layer_hidden) hidden = g_iface->vtbl->id_dev_layer_hidden(g_iface, id) ? 1 : 0;
             g_ents[n].eid = id;
-            strncpy_s(g_ents[n].id, POC_ID_CAP, s, _TRUNCATE);
-            strncpy_s(g_ents[n].name, POC_NAME_CAP, nm ? nm : "", _TRUNCATE);
+            strncpy_s(g_ents[n].id, UI_ID_CAP, s, _TRUNCATE);
+            strncpy_s(g_ents[n].name, UI_NAME_CAP, nm ? nm : "", _TRUNCATE);
             g_ents[n].hidden = hidden;
             n++;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
     return n;
 }
-static int poc_collect_timed(int *out_ready, const char *reason,
+static int ui_collect_timed(int *out_ready, const char *reason,
                              unsigned long long *elapsed_us = nullptr)
 {
-    unsigned long long started = poc_perf_now_us();
-    int n = poc_collect(out_ready);
-    unsigned long long finished = poc_perf_now_us();
+    unsigned long long started = ui_perf_now_us();
+    int n = ui_collect(out_ready);
+    unsigned long long finished = ui_perf_now_us();
     unsigned long long elapsed = finished >= started ? finished - started : 0;
     if (elapsed_us) *elapsed_us = elapsed;
-    poc_perf_note_collect(elapsed, n, reason);
+    ui_perf_note_collect(elapsed, n, reason);
     return n;
 }
 /* Rebuild timeline entries only when the entity signature changes. Check every
  * visible entity's class so Encounter Managers are included alongside Timelines.
  * Guard each class read so one bad entity cannot abort the rescan. */
-static void poc_rescan_timelines(int n)
+static void ui_rescan_timelines(int n)
 {
     int tn = 0;
     if (!g_tls || !g_iface || !g_iface->vtbl || !g_iface->vtbl->get_classname_copy) { g_tl_count = 0; return; }
-    for (int i = 0; i < n && tn < POC_MAX_TLS; i++) {
-        if (g_ents[i].hidden) continue;   /* dev-layer hidden -> excluded from BOTH lists, matching the OG quirk */
+    for (int i = 0; i < n && tn < UI_MAX_TLS; i++) {
+        if (g_ents[i].hidden) continue;   /* dev-layer hidden -> excluded from both lists, as the editor hides it */
         char clsbuf[128]; clsbuf[0] = 0;
         const char *c = NULL;
         __try {
             c = g_iface->vtbl->get_classname_copy(g_iface, g_ents[i].eid, clsbuf, sizeof clsbuf);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             c = NULL;
-            poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
+            ui_logf("ui_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
         }
         if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
             g_tls[tn].eid = g_ents[i].eid;
-            strncpy_s(g_tls[tn].id, POC_ID_CAP, g_ents[i].id, _TRUNCATE);
-            strncpy_s(g_tls[tn].name, POC_NAME_CAP, g_ents[i].name, _TRUNCATE);
+            strncpy_s(g_tls[tn].id, UI_ID_CAP, g_ents[i].id, _TRUNCATE);
+            strncpy_s(g_tls[tn].name, UI_NAME_CAP, g_ents[i].name, _TRUNCATE);
             tn++;
         }
     }
     g_tl_count = tn;
 }
-static void poc_rescan_timelines_timed(int n, const char *reason)
+static void ui_rescan_timelines_timed(int n, const char *reason)
 {
-    unsigned long long started = poc_perf_now_us();
-    poc_rescan_timelines(n);
-    unsigned long long finished = poc_perf_now_us();
+    unsigned long long started = ui_perf_now_us();
+    ui_rescan_timelines(n);
+    unsigned long long finished = ui_perf_now_us();
     char l[224];
     _snprintf_s(l, sizeof l, _TRUNCATE,
                 "perf timeline-rescan: reason=%s entities=%d timelines=%d duration_us=%llu",
                 reason ? reason : "unknown", n, g_tl_count,
                 finished >= started ? finished - started : 0);
-    poc_log(l);
+    ui_log(l);
 }
-static bool poc_collect_state(int id, char *decl, int dcap, char *cls, int ccap, char *inh, int icap, char *dnm, int ncap)
+static bool ui_collect_state(int id, char *decl, int dcap, char *cls, int ccap, char *inh, int icap, char *dnm, int ncap)
 {
     bool ok = false; decl[0] = cls[0] = inh[0] = dnm[0] = 0;
     __try {
@@ -543,21 +586,21 @@ static bool poc_collect_state(int id, char *decl, int dcap, char *cls, int ccap,
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
     return ok;
 }
-static bool poc_collect_state_growing(int id, char *cls, int ccap, char *inh, int icap,
+static bool ui_collect_state_growing(int id, char *cls, int ccap, char *inh, int icap,
                                       char *dnm, int ncap, bool *truncated)
 {
     return sh_read_growing_text(
-        g_state_decl, POC_DECL_INITIAL_CAP, POC_DECL_MAX_CAP,
+        g_state_decl, UI_DECL_INITIAL_CAP, UI_DECL_MAX_CAP,
         [&](char *decl, int dcap) {
-            return poc_collect_state(id, decl, dcap, cls, ccap, inh, icap, dnm, ncap);
+            return ui_collect_state(id, decl, dcap, cls, ccap, inh, icap, dnm, ncap);
         },
         truncated);
 }
-static void poc_post_json(const wchar_t *json);   /* fwd */
+static void ui_post_json(const wchar_t *json);   /* fwd */
 
 /* Camera Origin: write path (+0x00). Used every frame while Lock position is enabled and once per
  * committed camSet edit. SEH-guarded. */
-static void poc_cam_write()
+static void ui_cam_write()
 {
     __try {
         if (g_iface && g_iface->vtbl && g_iface->vtbl->set_editor_vec3)
@@ -565,7 +608,7 @@ static void poc_cam_write()
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 /* Camera Origin: read the live vec3 (+0x08); if it moved, cache + push it to the footer. SEH-guarded. */
-static void poc_cam_read_send()
+static void ui_cam_read_send()
 {
     float cam[3] = {0.0f, 0.0f, 0.0f};
     int ok = 0;
@@ -580,11 +623,11 @@ static void poc_cam_read_send()
     g_cam_xyz[0] = cam[0]; g_cam_xyz[1] = cam[1]; g_cam_xyz[2] = cam[2];
     wchar_t m[192];
     _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"camera\",\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}", cam[0], cam[1], cam[2]);
-    poc_post_json(m);
+    ui_post_json(m);
     g_cam_read_published = true;
 }
 
-static int poc_get_selection(int *out, int max)
+static int ui_get_selection(int *out, int max)
 {
     int n = 0;
     __try {
@@ -596,7 +639,7 @@ static int poc_get_selection(int *out, int max)
     } __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
 }
-static void poc_apply_save()
+static void ui_apply_save()
 {
     g_save_result = -2;
     __try {
@@ -628,8 +671,8 @@ static void poc_apply_save()
 /* Window deletion runs DOOM's own Delete Selection through one backend call
  * (ext 29). A backend without that slot refuses rather than falling back to
  * the old per-ID path, which skipped the engine's hover, selection, undo and
- * eligibility handling. Runs on the main thread inside poc_main_edits. */
-static void poc_apply_deletes()
+ * eligibility handling. Runs on the main thread inside ui_main_edits. */
+static void ui_apply_deletes()
 {
     memset(&g_entity_delete_result, 0, sizeof g_entity_delete_result);
     g_entity_delete_status = SH_DELETE_UNAVAILABLE;
@@ -644,7 +687,7 @@ static void poc_apply_deletes()
  * requests use separate buffers so requests in one drain cannot overwrite each other. */
 /* A clean zero can mean insufficient capacity. An exception is a terminal
  * failure, so keep its negative result distinct and do not retry it as a size issue. */
-static int poc_serialize_entity_into(int id, char *buf, int cap)
+static int ui_serialize_entity_into(int id, char *buf, int cap)
 {
     int n = 0;
     if (cap > 0) buf[0] = 0;
@@ -660,53 +703,72 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
 }
 /* Retry zero or cap-filling results with a larger retained buffer. The engine
  * does not report required size; an exact fit needs one extra read to confirm it. */
-#define POC_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* initial capacity; grows for larger timelines */
-#define POC_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* transport safety cap */
+#define UI_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* initial capacity; grows for larger timelines */
+#define UI_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* transport safety cap */
 
-static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
+static int ui_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
 {
     char l[256];
     int n = sh_serialize_growing_buffer(
-        buf, POC_SERIALIZE_INITIAL_CAP, POC_SERIALIZE_MAX_CAP,
-        [&](char *out, int cap) { return poc_serialize_entity_into(id, out, cap); },
+        buf, UI_SERIALIZE_INITIAL_CAP, UI_SERIALIZE_MAX_CAP,
+        [&](char *out, int cap) { return ui_serialize_entity_into(id, out, cap); },
         [&](size_t cap, int result, bool terminal) {
         /* Negative results are terminal failures, not capacity problems. */
         if (result == SH_SERIALIZE_UNAVAILABLE) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id",
                         what, id);
-            poc_log(l);
+            ui_log(l);
             return;
         }
         if (result == SH_SERIALIZE_THREW) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d RAISED inside serialize_entity at %lu bytes -- "
                         "engine fault, not a buffer size", what, id, (unsigned long)cap);
-            poc_log(l);
+            ui_log(l);
             return;
         }
         /* Log each retry to distinguish persistent zero results from truncating writes. */
         _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d attempt at %lu bytes returned %d",
                     what, id, (unsigned long)cap, result);
-        poc_log(l);
+        ui_log(l);
         if (terminal) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d does not fit in %lu bytes (last result %d); refusing",
                         what, id, (unsigned long)cap, result);
-            poc_log(l);
+            ui_log(l);
         }
     });
-    if (n > 0 && buf.size() > POC_SERIALIZE_INITIAL_CAP) {
+    if (n > 0 && buf.size() > UI_SERIALIZE_INITIAL_CAP) {
         _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d serialized %d bytes (buffer grown to %lu)",
                     what, id, n, (unsigned long)buf.size());
-        poc_log(l);
+        ui_log(l);
     }
     return n > 0 ? n : 0;
 }
-/* Serialize the timeline with reusable storage that can grow for generated content. */
+/* Serialize an entity on DOOM's main thread into reusable storage that can grow for
+ * generated content. 0 when it failed or the game did not run the request. */
+struct UiSerializeMain { int id; std::vector<char> *buf; const char *what; int n; };
+static int ui_serialize_entity_main(void *ctx)
+{
+    UiSerializeMain *m = (UiSerializeMain *)ctx;
+    m->n = ui_serialize_entity_grow(m->id, *m->buf, m->what);
+    return 1;
+}
+static int ui_serialize_entity_on_main(int id, std::vector<char> &buf, const char *what)
+{
+    UiSerializeMain m = { id, &buf, what, 0 };
+    if (!ui_on_main(ui_serialize_entity_main, &m, UI_MAIN_WAIT_MS)) {
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d not read -- the game did not run the request within the wait", what, id);
+        ui_log(l);
+        return 0;
+    }
+    return m.n;
+}
 static std::vector<char> g_tl_json;
-static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_grow(id, g_tl_json, "timeline-open"); }
+static int ui_serialize_entity_raw(int id) { return ui_serialize_entity_on_main(id, g_tl_json, "timeline-open"); }
 /* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
  * `json` and walks entityDef.state.edit.componentTimeLine / encounterComponent itself (the engine's
  * serialized entity is valid JSON). */
-static void poc_emit_timeline_data(int eid, int json_len)
+static void ui_emit_timeline_data(int eid, int json_len)
 {
     if (!g_webview) return;
     bool ok = json_len > 0;
@@ -718,8 +780,8 @@ static void poc_emit_timeline_data(int eid, int json_len)
 /* Serialize the event's target entity into its own buffer. The page reads
  * entityDef.inherit to select the appropriate model/animation choices. */
 static std::vector<char> g_resolve_json;
-static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_grow(id, g_resolve_json, "entity-resolve"); }
-static void poc_emit_entity_inherit(int eid, int json_len)
+static int ui_serialize_entity_resolve(int id) { return ui_serialize_entity_on_main(id, g_resolve_json, "entity-resolve"); }
+static void ui_emit_entity_inherit(int eid, int json_len)
 {
     if (!g_webview) return;
     bool ok = json_len > 0;
@@ -729,9 +791,9 @@ static void poc_emit_entity_inherit(int eid, int json_len)
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Replace editor selection from the list. Log each call to locate a stalled slot. */
-static void poc_apply_select_in_editor()
+static void ui_apply_select_in_editor()
 {
-    poc_logf("select-in-editor: apply start ids=%lu", (unsigned long)g_select_eids.size());
+    ui_logf("select-in-editor: apply start ids=%lu", (unsigned long)g_select_eids.size());
     /* Manipulation snapshots index the selection positionally, and a native
      * Delete owns the selection until it commits. The backend enforces this
      * gate too; its value says which one refused. */
@@ -739,45 +801,36 @@ static void poc_apply_select_in_editor()
     if (g_iface && g_iface->vtbl && g_iface->vtbl->manipulation_in_progress)
         busy = g_iface->vtbl->manipulation_in_progress(g_iface);
     if (busy) {
-        poc_log(busy == 2 ? "select-in-editor: REFUSED -- a native editor action is finishing"
+        ui_log(busy == 2 ? "select-in-editor: REFUSED -- a native editor action is finishing"
                           : "select-in-editor: REFUSED -- editor is mid-manipulation (grab/hold)");
         g_select_refused = busy;
         return;
     }
     __try {
         if (g_iface && g_iface->vtbl) {
-            if (g_iface->vtbl->clear_selection) { poc_log("select-in-editor: clear"); g_iface->vtbl->clear_selection(g_iface); }
+            if (g_iface->vtbl->clear_selection) { ui_log("select-in-editor: clear"); g_iface->vtbl->clear_selection(g_iface); }
             if (g_iface->vtbl->add_to_selection)
                 for (size_t i = 0; i < g_select_eids.size(); i++) {
                     int id = g_select_eids[i];
                     if (id < 0) continue;
-                    if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) { poc_logf("select-in-editor: skip invalid id=%lu", (unsigned long)id); continue; }
-                    poc_logf("select-in-editor: add id=%lu", (unsigned long)id);
+                    if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) { ui_logf("select-in-editor: skip invalid id=%lu", (unsigned long)id); continue; }
+                    ui_logf("select-in-editor: add id=%lu", (unsigned long)id);
                     g_iface->vtbl->add_to_selection(g_iface, id);
                 }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("select-in-editor: SEH in apply"); }
-    poc_log("select-in-editor: apply done");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ui_log("select-in-editor: SEH in apply"); }
+    ui_log("select-in-editor: apply done");
 }
 /* Mirror a page blank-space click by clearing the editor selection. */
-static void poc_apply_deselect()
+static void ui_apply_deselect()
 {
     __try {
         if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) g_iface->vtbl->clear_selection(g_iface);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("deselect: SEH in apply"); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ui_log("deselect: SEH in apply"); }
 }
-/* Engine edits run on DOOM's main thread while this thread waits. */
-#define POC_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
-#define POC_MAIN_CAM_WAIT_MS   100   /* a held camera writes again next pass */
-static bool poc_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
-{
-    int r = 0;
-    return g_iface && g_iface->vtbl && g_iface->vtbl->run_on_main &&
-           g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
-}
-struct PocMainEdits { bool save, del, select, deselect, cam, names; };
+struct UiMainEdits { bool save, del, select, deselect, cam, names; };
 /* Write each display name through the setter slot. PODs only in scope (SEH). */
-static int poc_set_one_name_seh(int id, const char *name)
+static int ui_set_one_name_seh(int id, const char *name)
 {
     __try {
         if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->set_entity_0x170) return 0;
@@ -786,25 +839,25 @@ static int poc_set_one_name_seh(int id, const char *name)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-static void poc_apply_set_display_names()
+static void ui_apply_set_display_names()
 {
     g_set_names_applied = 0; g_set_names_failed = 0;
     for (size_t i = 0; i < g_set_names_eids.size() && i < g_set_names_names.size(); i++) {
-        if (poc_set_one_name_seh(g_set_names_eids[i], g_set_names_names[i].c_str())) g_set_names_applied++;
+        if (ui_set_one_name_seh(g_set_names_eids[i], g_set_names_names[i].c_str())) g_set_names_applied++;
         else g_set_names_failed++;
     }
 }
 /* Report the backend's delete result. The page changes its selection and
  * announces success only from this message; "timeout" means the request never
  * reached the game thread, so nothing was attempted. */
-static void poc_post_delete_result()
+static void ui_post_delete_result()
 {
     const sh_delete_result &r = g_entity_delete_result;
     wchar_t m[320];
     char l[256];
-    if (g_entity_delete_status == POC_DELETE_NOT_RUN) {
-        poc_post_json(L"{\"kind\":\"deleteResult\",\"status\":\"timeout\"}");
-        poc_log("delete: the game did not run the request within the wait; nothing was deleted");
+    if (g_entity_delete_status == UI_DELETE_NOT_RUN) {
+        ui_post_json(L"{\"kind\":\"deleteResult\",\"status\":\"timeout\"}");
+        ui_log("delete: the game did not run the request within the wait; nothing was deleted");
         return;
     }
     _snwprintf_s(m, _countof(m), _TRUNCATE,
@@ -812,42 +865,42 @@ static void poc_post_delete_result()
                  L"\"released\":%d,\"firstId\":%d,\"deselected\":%d,\"rolledBack\":%d}",
                  g_entity_delete_status, r.busy, r.requested, r.targets, r.released, r.first_id,
                  r.deselected, r.rolled_back);
-    poc_post_json(m);
+    ui_post_json(m);
     _snprintf_s(l, sizeof l, _TRUNCATE,
                 "delete: status=%d busy=%d requested=%d targets=%d released=%d first=%d "
                 "deselected=%d hover_cleared=%d wire_cleared=%d rolled_back=%d",
                 g_entity_delete_status, r.busy, r.requested, r.targets, r.released, r.first_id,
                 r.deselected, r.hover_cleared, r.wire_cleared, r.rolled_back);
-    poc_log(l);
+    ui_log(l);
 }
-static int poc_main_edits(void *ctx)
+static int ui_main_edits(void *ctx)
 {
-    const PocMainEdits *e = (const PocMainEdits *)ctx;
-    if (e->save)     poc_apply_save();
-    if (e->del)      poc_apply_deletes();
-    if (e->select)   poc_apply_select_in_editor();
-    if (e->deselect) poc_apply_deselect();
-    if (e->names)    poc_apply_set_display_names();
-    if (e->cam)      poc_cam_write();
+    const UiMainEdits *e = (const UiMainEdits *)ctx;
+    if (e->save)     ui_apply_save();
+    if (e->del)      ui_apply_deletes();
+    if (e->select)   ui_apply_select_in_editor();
+    if (e->deselect) ui_apply_deselect();
+    if (e->names)    ui_apply_set_display_names();
+    if (e->cam)      ui_cam_write();
     return 1;
 }
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- this leaf has only
  * PODs in scope, so the SEH guard around the engine call is safe here. */
-static int poc_serialize_selection_raw(char *buf, int cap)
+static int ui_serialize_selection_raw(char *buf, int cap)
 {
     int n = 0;
     __try { n = g_iface->vtbl->serialize_selection(g_iface, buf, cap); }
     __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
 }
-static int poc_hovered_id_seh()
+static int ui_hovered_id_seh()
 {
     __try { return g_iface->vtbl->hovered_id(g_iface); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 /* The Prefabs tab's watch (+0x380): the Blueprint module selection, what is held and the last
  * paste decision. An older backend reads as unknown (modules_selected -1, nothing held). */
-static int poc_prefab_watch(sh_prefab_watch *w)
+static int ui_prefab_watch(sh_prefab_watch *w)
 {
     memset(w, 0, sizeof *w);
     w->modules_selected = -1;
@@ -857,7 +910,7 @@ static int poc_prefab_watch(sh_prefab_watch *w)
 }
 /* The backend's grab-frame guard verdict on the serialize just made, or
  * UNCHECKED when this backend has no guard. */
-static int poc_prefab_grab_status(sh_prefab_grab_info *info)
+static int ui_prefab_grab_status(sh_prefab_grab_info *info)
 {
     memset(info, 0, sizeof *info);
     info->outside = -1.0f;
@@ -871,63 +924,84 @@ static int poc_prefab_grab_status(sh_prefab_grab_info *info)
  * that line misses the hovered entity the backend rebuilds the frame from it
  * (reported as corrected). Without that guard, a file whose frame missed is
  * refused rather than written with collapsed positions.
+ * The selection, hover and serialize run together on DOOM's main thread; the
+ * file is written here.
  * Results: 1 = saved, 0 = empty, 2 = nothing hovered, 3 = no usable grab frame,
  * 4 = the hovered entity is not selected, 5 = the copy check refused a selection
- * it was otherwise given, -1 = resolve/serialize/write failure. */
-static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
-static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
-static void poc_apply_create_prefab()
+ * it was otherwise given, 6 = the file could not be written whole, 7 = the game
+ * did not run the request, -1 = the name or its path was refused. */
+static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
+static int ui_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
+struct UiCreateMain {
+    char *buf; int cap;
+    int  count, hovered, pre, n, grab_status;
+    sh_prefab_grab_info grab;
+};
+/* Runs on DOOM's main thread inside run_on_main. */
+static int ui_create_prefab_main(void *ctx)
+{
+    UiCreateMain *c = (UiCreateMain *)ctx;
+    /* DOOM's copy check refuses an empty selection and a hovered entity that is not
+     * selected alike; tell the page which (prefab_host.h). */
+    static int sel[UI_MAX_ENTS];
+    c->count = ui_get_selection(sel, UI_MAX_ENTS);
+    bool have_hover = g_iface->vtbl->hovered_id != nullptr;
+    c->hovered = have_hover ? ui_hovered_id_seh() : -1;
+    c->pre = sh_prefab_host::create_precheck(sel, c->count, c->hovered, have_hover);
+    if (c->pre != sh_prefab_host::CREATE_GO) return 1;
+    c->n = ui_serialize_selection_raw(c->buf, c->cap);
+    c->grab_status = ui_prefab_grab_status(&c->grab);
+    return 1;
+}
+static void ui_apply_create_prefab()
 {
     g_create_result = -1;
-    g_create_grab_corrected = false;
-    { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); poc_log(l); }
+    { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); ui_log(l); }
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
-        poc_log("create-prefab: ABORT (iface/slot/name missing)");
+        ui_log("create-prefab: ABORT (iface/slot/name missing)");
         return;
     }
-    {
-        /* DOOM's copy check refuses an empty selection and a hovered entity that is not
-         * selected alike; tell the page which (prefab_host.h). */
-        static int sel[POC_MAX_ENTS];
-        int count = poc_get_selection(sel, POC_MAX_ENTS);
-        bool have_hover = g_iface->vtbl->hovered_id != nullptr;
-        int hovered = have_hover ? poc_hovered_id_seh() : -1;
-        int pre = sh_prefab_host::create_precheck(sel, count, hovered, have_hover);
-        if (pre != sh_prefab_host::CREATE_GO) {
-            char l[200];
-            _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
-                        pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
-                        : pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
-                        : "hovering an entity that is not selected", count, hovered);
-            poc_log(l);
-            g_create_result = pre;
-            return;
-        }
-    }
-    if (!poc_valid_name(g_create_prefab_name)) {
-        poc_log("create-prefab: ABORT (name rejected -- '..' or path separator)");
+    if (!ui_valid_name(g_create_prefab_name)) {
+        ui_log("create-prefab: ABORT (the name is not one Windows can hold)");
         return;
     }
     char path[1024]; path[0] = '\0';
     std::string fname = g_create_prefab_name + ".json";
     if (!g_iface->vtbl->resolve_prefab_path(g_iface, "prefabs/", fname.c_str(), path, (int)sizeof path) || !path[0]) {
-        poc_log("create-prefab: ABORT (resolve_prefab_path failed)");
+        ui_log("create-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    { char l[1200]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: path='%s' -- about to serialize_selection (+0xb0)", path); poc_log(l); }
     static char buf[4 * 1024 * 1024];
-    int n = poc_serialize_selection_raw(buf, (int)sizeof buf);
-    poc_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
-    sh_prefab_grab_info grab;
-    int grab_status = poc_prefab_grab_status(&grab);
+    UiCreateMain cm;
+    memset(&cm, 0, sizeof cm);
+    cm.buf = buf; cm.cap = (int)sizeof buf; cm.pre = sh_prefab_host::CREATE_GO;
+    if (!ui_on_main(ui_create_prefab_main, &cm, UI_MAIN_WAIT_MS)) {
+        ui_log("create-prefab: ABORT (the game did not run the request within the wait)");
+        g_create_result = 7;
+        return;
+    }
+    if (cm.pre != sh_prefab_host::CREATE_GO) {
+        char l[200];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
+                    cm.pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
+                    : cm.pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
+                    : "hovering an entity that is not selected", cm.count, cm.hovered);
+        ui_log(l);
+        g_create_result = cm.pre;
+        return;
+    }
+    int n = cm.n;
+    int grab_status = cm.grab_status;
+    const sh_prefab_grab_info &grab = cm.grab;
+    ui_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
     if (n <= 0) {
         if (grab_status == SH_PREFAB_GRAB_REFUSED) {
-            poc_log("create-prefab: ABORT (no finite grab frame could be built from the hovered entity)");
+            ui_log("create-prefab: ABORT (no finite grab frame could be built from the hovered entity)");
             g_create_result = 3;
         } else {
             /* A selection and a selected hover: the copy check refused for its other causes
              * (a wired or referenced entity left out, or one the editor does not copy). */
-            poc_log("create-prefab: ABORT (the editor's copy check refused the selection)");
+            ui_log("create-prefab: ABORT (the editor's copy check refused the selection)");
             g_create_result = 5;
         }
         return;
@@ -938,8 +1012,7 @@ static void poc_apply_create_prefab()
                     "create-prefab: grab point corrected -- the view-centre line missed the hovered entity "
                     "(native grabDistance=%g, %g units outside it); saved grabDistance=%g from its centre",
                     (double)grab.native_distance, (double)grab.outside, (double)grab.distance);
-        poc_log(l);
-        g_create_grab_corrected = true;
+        ui_log(l);
     } else if (grab_status == SH_PREFAB_GRAB_UNCHECKED) {
         double d = 0.0;
         if (sh_prefab_grab_json_check(buf, (size_t)n, &d) == 0) {
@@ -947,7 +1020,7 @@ static void poc_apply_create_prefab()
             _snprintf_s(l, sizeof l, _TRUNCATE,
                         "create-prefab: ABORT (grabDistance=%g: the view-centre line missed the hovered entity and "
                         "this backend cannot rebuild the frame)", d);
-            poc_log(l);
+            ui_log(l);
             g_create_result = 3;
             return;
         }
@@ -960,13 +1033,19 @@ static void poc_apply_create_prefab()
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: comments removed, %lu byte(s) -> %lu",
                     (unsigned long)before, (unsigned long)n);
-        poc_log(l);
+        ui_log(l);
     }
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
-    fwrite(buf, 1, (size_t)n, fp);
-    fclose(fp);
-    poc_log("create-prefab: WROTE file ok");
+    FILE *fp = ui_open(path, L"wb");
+    if (!fp) { ui_log("create-prefab: ABORT (the file could not be opened for writing)"); return; }
+    size_t wrote = fwrite(buf, 1, (size_t)n, fp);
+    if (fclose(fp) != 0 || wrote != (size_t)n) {
+        /* A short write leaves a damaged prefab: remove it and report the failure. */
+        DeleteFileW(ui_widen(path).c_str());
+        ui_logf("create-prefab: ABORT (short write: %lu byte(s) written); the partial file was removed", (unsigned long)wrote);
+        g_create_result = 6;
+        return;
+    }
+    ui_log("create-prefab: WROTE file ok");
     g_create_result = 1;
     /* One file: the backend writes the prefab's snapmapPlus block into it, with the mods
      * its entities need, found as a map's save finds them. The engine never re-saves it. */
@@ -977,25 +1056,25 @@ static void poc_apply_create_prefab()
         call.text = buf;
         call.text_len = (size_t)n;
         call.path = path;
-        int r = poc_module_prefab_call(&call);
-        poc_logf("create-prefab: mods recorded in the file's block=%lu", (unsigned long)(r > 0 ? r : 0));
+        int r = ui_module_prefab_call(&call);
+        ui_logf("create-prefab: mods recorded in the file's block=%lu", (unsigned long)(r > 0 ? r : 0));
     }
 }
 /* folder="" -> the root prefabs\ dir; else prefabs\<folder>\ (one real level, no nesting). Shared by every
  * prefab/folder file op below so they all agree on where a folder actually lives on disk. */
-static bool poc_prefab_dir(const std::string &folder, char *out, int cap)
+static bool ui_prefab_dir(const std::string &folder, char *out, int cap)
 {
     if (cap) out[0] = '\0';
-    if (!folder.empty() && !poc_valid_name(folder)) return false;
+    if (!folder.empty() && !ui_valid_name(folder)) return false;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path) return false;
     std::string prefix = folder.empty() ? "prefabs/" : ("prefabs/" + folder + "/");
     return g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), "", out, cap) && out[0] != '\0';
 }
-static bool poc_prefab_file_path(const std::string &folder, const std::string &name, char *out, int cap)
+static bool ui_prefab_file_path(const std::string &folder, const std::string &name, char *out, int cap)
 {
     if (cap) out[0] = '\0';
-    if (!folder.empty() && !poc_valid_name(folder)) return false;
-    if (!poc_valid_name(name)) return false;
+    if (!folder.empty() && !ui_valid_name(folder)) return false;
+    if (!ui_valid_name(name)) return false;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path) return false;
     std::string prefix = folder.empty() ? "prefabs/" : ("prefabs/" + folder + "/");
     std::string fname = name + ".json";
@@ -1005,31 +1084,31 @@ static bool poc_prefab_file_path(const std::string &folder, const std::string &n
  * block (backend/prefab_block.h). <name>.meta.json is only the read-only fallback of a
  * prefab saved before the block; it is never written, and it follows its prefab when the
  * prefab is moved, renamed or deleted. The validated path helper handles both filenames. */
-static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap)
+static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap)
 {
-    return poc_prefab_file_path(folder, name + ".meta", out, cap);
+    return ui_prefab_file_path(folder, name + ".meta", out, cap);
 }
-static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
-static bool poc_read_small_file(const char *path, std::string &body);   /* fwd */
+static int ui_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
+static bool ui_read_small_file(const char *path, std::string &body);   /* fwd */
 /* Save the selected Blueprint modules, with every entity inside them, as a module
  * prefab at the prefab root. The backend writes the file, its summary and mods in its block.
  * Results: 1 saved, 0 the name exists, -1 failed, -2 not in Blueprint, -3 no module selected. */
-static void poc_apply_create_module_prefab()
+static void ui_apply_create_module_prefab()
 {
     g_create_module_result = -1;
     g_create_module_summary.clear();
-    if (g_create_module_name.empty() || !poc_valid_name(g_create_module_name)) {
-        poc_log("create-module-prefab: ABORT (name rejected)");
+    if (g_create_module_name.empty() || !ui_valid_name(g_create_module_name)) {
+        ui_log("create-module-prefab: ABORT (name rejected)");
         return;
     }
     char path[1024];
-    if (!poc_prefab_file_path("", g_create_module_name, path, (int)sizeof path)) {
-        poc_log("create-module-prefab: ABORT (resolve_prefab_path failed)");
+    if (!ui_prefab_file_path("", g_create_module_name, path, (int)sizeof path)) {
+        ui_log("create-module-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+    if (ui_exists(path)) {
         g_create_module_result = 0;
-        poc_log("create-module-prefab: REFUSED (a prefab with that name exists)");
+        ui_log("create-module-prefab: REFUSED (a prefab with that name exists)");
         return;
     }
     static char out[1024 * 1024];
@@ -1040,16 +1119,16 @@ static void poc_apply_create_module_prefab()
     call.path = path;
     call.out = out;
     call.out_cap = (int)sizeof out;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     g_create_module_result = (r == 1 || r == -2 || r == -3) ? r : -1;
     if (r == 1) g_create_module_summary = out;
     char l[512];
     _snprintf_s(l, sizeof l, _TRUNCATE, "create-module-prefab: name='%s' result=%d %s", g_create_module_name.c_str(), r,
                 r == 1 ? "" : out);
-    poc_log(l);
+    ui_log(l);
 }
 /* Post the module-prefab placement result once the backend has it. */
-static void poc_poll_module_place()
+static void ui_poll_module_place()
 {
     if (!g_module_place_seq) return;
     char msg[256] = "";
@@ -1059,23 +1138,23 @@ static void poc_poll_module_place()
     call.seq = g_module_place_seq;
     call.out = msg;
     call.out_cap = (int)sizeof msg;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     bool late = GetTickCount64() > g_module_place_deadline;
     if (r == 2 && !late) return;
     if (r == 2) r = 0;
     std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(r);
     m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_module_place_name.c_str());
     m += L"\",\"prefabKind\":\"modules\",\"message\":\""; m += sh_webview_json::escape_wide(msg); m += L"\"}";
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
     char l[400];
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: module placement %d finished %d (%s)", g_module_place_seq, r, msg);
-    poc_log(l);
+    ui_log(l);
     g_module_place_seq = 0;
 }
 /* Tell the page which editor mode is up: Object Mode gates object prefabs, Blueprint
  * gates module prefabs, and in Blueprint the modules selected gate Create (-1 when
  * this backend cannot say). Posts on a change, or always when forced. */
-static void poc_post_editor_mode(bool force)
+static void ui_post_editor_mode(bool force)
 {
     int entity = 0, blueprint = 0, map_open = 0;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->is_entity_mode) {
@@ -1084,10 +1163,10 @@ static void poc_post_editor_mode(bool force)
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_STATE;
-    if (poc_module_prefab_call(&call) == 1) { blueprint = call.blueprint ? 1 : 0; map_open = call.map_open ? 1 : 0; }
+    if (ui_module_prefab_call(&call) == 1) { blueprint = call.blueprint ? 1 : 0; map_open = call.map_open ? 1 : 0; }
     /* The modules selected in Blueprint gate Create there; the entity count rides selCount. */
     sh_prefab_watch watch;
-    poc_prefab_watch(&watch);
+    ui_prefab_watch(&watch);
     int modules = blueprint ? watch.modules_selected : 0;
     int now = entity | (blueprint << 1) | (map_open << 2);
     if (!force && now == g_editor_mode_last && modules == g_editor_modules_last) return;
@@ -1096,30 +1175,30 @@ static void poc_post_editor_mode(bool force)
     wchar_t m[128];
     _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d,\"mapOpen\":%d}",
                  entity, blueprint, modules, map_open);
-    poc_post_json(m);
+    ui_post_json(m);
 }
-static void poc_strip_trailing_sep(char *s)
+static void ui_strip_trailing_sep(char *s)
 {
     size_t n = strlen(s);
     if (n && (s[n - 1] == '\\' || s[n - 1] == '/')) s[n - 1] = '\0';
 }
 /* list the *.json stems directly inside a resolved directory (non-recursive), sorted. */
-static void poc_list_json_dir(const std::string &dirPath, std::vector<std::string> &names)
+static void ui_list_json_dir(const std::string &dirPath, std::vector<std::string> &names)
 {
-    std::string pattern = dirPath + "*.json";
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    std::wstring pattern = ui_widen(dirPath.c_str()) + L"*.json";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::string fn = fd.cFileName;
+        std::string fn = sh_webview_json::to_utf8(fd.cFileName);
         if (fn.size() > 5 && fn.compare(fn.size() - 5, 5, ".json") == 0) {
             std::string stem = fn.substr(0, fn.size() - 5);
             /* "<name>.meta.json" is a metadata sidecar, not a prefab -- never list it as one */
             if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".meta") == 0) continue;
             names.push_back(stem);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     std::sort(names.begin(), names.end());
 }
@@ -1127,12 +1206,12 @@ static void poc_list_json_dir(const std::string &dirPath, std::vector<std::strin
 /* Move a file to the Windows Recycle Bin (SHFileOperationW with FOF_ALLOWUNDO,
  * no dialogs). Falls back to an outright delete when the shell refuses, so a
  * file is always gone afterwards when this returns 1. 0 = still there. */
-static int poc_recycle_file(const char *path)
+static int ui_recycle_file(const char *path)
 {
-    wchar_t wide[1024], full[1024 + 2];
-    int n = MultiByteToWideChar(CP_ACP, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0]));
-    if (n > 0) {
-        DWORD len = GetFullPathNameW(wide, 1024, full, NULL);
+    wchar_t full[1024 + 2];
+    std::wstring wide = ui_widen(path);
+    if (!wide.empty()) {
+        DWORD len = GetFullPathNameW(wide.c_str(), 1024, full, NULL);
         if (len > 0 && len < 1024) {
             full[len + 1] = 0;   /* double NUL: one path */
             SHFILEOPSTRUCTW op;
@@ -1144,75 +1223,80 @@ static int poc_recycle_file(const char *path)
                 GetFileAttributesW(full) == INVALID_FILE_ATTRIBUTES) return 1;
         }
     }
-    poc_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
-    return DeleteFileA(path) ? 1 : 0;
+    ui_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
+    return DeleteFileW(wide.c_str()) ? 1 : 0;
 }
 
-/* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed, -1 = path refused. */
-static int poc_delete_one_prefab(const std::string &folder, const std::string &name)
+/* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed (*reason), -1 = path refused. */
+static int ui_delete_one_prefab(const std::string &folder, const std::string &name, const wchar_t **reason)
 {
+    *reason = L"";
     if (name.empty()) return -1;
     char path[1024];
-    if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return -1;
-    int result = poc_recycle_file(path);
+    if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return -1;
+    int result = ui_recycle_file(path);
+    if (result != 1) *reason = ui_fs_reason();
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
         char mp[1024];
-        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES)
-            poc_recycle_file(mp);
+        if (ui_prefab_meta_path(folder, name, mp, (int)sizeof mp) && ui_exists(mp))
+            ui_recycle_file(mp);
     }
     return result;
 }
-static void poc_apply_delete_prefab()
+static void ui_apply_delete_prefab()
 {
-    g_delete_result = poc_delete_one_prefab(g_delete_prefab_folder, g_delete_prefab_name);
+    g_delete_result = ui_delete_one_prefab(g_delete_prefab_folder, g_delete_prefab_name, &g_delete_reason);
 }
-static void poc_apply_delete_prefabs()
+static void ui_apply_delete_prefabs()
 {
-    g_delete_prefabs_deleted = 0; g_delete_prefabs_failed = 0;
+    g_delete_prefabs_deleted = 0; g_delete_prefabs_failed = 0; g_delete_prefabs_reason = L"";
     for (size_t i = 0; i < g_delete_prefabs_names.size(); i++) {
         const std::string &folder = i < g_delete_prefabs_folders.size() ? g_delete_prefabs_folders[i] : std::string();
-        if (poc_delete_one_prefab(folder, g_delete_prefabs_names[i]) == 1) g_delete_prefabs_deleted++; else g_delete_prefabs_failed++;
+        const wchar_t *why = L"";
+        if (ui_delete_one_prefab(folder, g_delete_prefabs_names[i], &why) == 1) g_delete_prefabs_deleted++;
+        else { if (!g_delete_prefabs_failed) g_delete_prefabs_reason = why; g_delete_prefabs_failed++; }
     }
 }
 /* Rename within the folder without overwriting an existing destination.
  * Results: 1 = moved, 0 = file operation failed, -1 = path refused. */
-static void poc_apply_rename_prefab()
+static void ui_apply_rename_prefab()
 {
     g_rename_result = -1;
     if (g_rename_prefab_old.empty() || g_rename_prefab_new.empty()) return;
     char oldp[1024], newp[1024];
-    if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
-    if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
-    g_rename_result = MoveFileA(oldp, newp) ? 1 : 0;
+    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
+    if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
+    g_rename_result = ui_move(oldp, newp) ? 1 : 0;
+    g_rename_reason = g_rename_result == 1 ? L"" : ui_fs_reason();
     if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
         char oldm[1024], newm[1024];
-        if (poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
-            poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+        if (ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
+            ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm, (int)sizeof newm))
+            ui_move(oldm, newm);
     }
 }
 /* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
  * Placement depends on backend editor gates; queue acceptance alone is not placement. */
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- these leaves have
  * only PODs in scope, so the SEH guards around the engine calls are safe here. */
-static int poc_clear_selection_main(void *)
+static int ui_clear_selection_main(void *)
 {
     if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) {
         __try { g_iface->vtbl->clear_selection(g_iface); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return 1;
 }
-static void poc_clear_selection_seh()
+static void ui_clear_selection_seh()
 {
-    poc_on_main(poc_clear_selection_main, nullptr, POC_MAIN_WAIT_MS);
+    ui_on_main(ui_clear_selection_main, nullptr, UI_MAIN_WAIT_MS);
 }
-static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op)
+static int ui_apply_edit_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 /* Preserve an in-progress result so the UI cannot mistake it for a failed save. */
-static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
+static int ui_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try {
         if (g_iface->vtbl->apply_sync) {
@@ -1224,50 +1308,50 @@ static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-static void poc_apply_new_entity()
+static void ui_apply_new_entity()
 {
     g_new_entity_result = -1;
     if (g_new_entity_json.empty()) return;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) {
-        poc_log("new-entity: ABORT (iface/slot missing)");
+        ui_log("new-entity: ABORT (iface/slot missing)");
         return;
     }
     /* Native paste requires no hovered entity and an empty selection. Refuse here
      * so the page can explain the gate instead of reporting a queued but unplaced
      * entity. Pasting over a selection can miswire the old-to-new ID mapping. */
     if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) >= 0) {
-        poc_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
+        ui_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
         g_new_entity_result = -2;
         return;
     }
-    static int ne_selids[POC_MAX_ENTS];
-    if (poc_get_selection(ne_selids, POC_MAX_ENTS) > 0) {
-        poc_log("new-entity: REFUSED (editor selection is not empty)");
+    static int ne_selids[UI_MAX_ENTS];
+    if (ui_get_selection(ne_selids, UI_MAX_ENTS) > 0) {
+        ui_log("new-entity: REFUSED (editor selection is not empty)");
         g_new_entity_result = -3;
         return;
     }
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = g_new_entity_json.c_str();
-    g_new_entity_result = poc_apply_edit_seh(&it, 1, "new-entity");
+    g_new_entity_result = ui_apply_edit_seh(&it, 1, "new-entity");
     char l[320];
     _snprintf_s(l, sizeof l, _TRUNCATE, "new-entity: '%s' staged=%d (kind=2: stage + auto pick-up), %zu bytes",
                 g_new_entity_label.c_str(), g_new_entity_result, g_new_entity_json.size());
-    poc_log(l);
+    ui_log(l);
 }
 
 /* Sound names are validated by the backend catalog before live playback. */
 /* Establish the preview session before draining its first play request. */
-static void poc_apply_sound_session()
+static void ui_apply_sound_session()
 {
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->sound_session) return;
     __try { g_iface->vtbl->sound_session(g_iface, g_sound_session_on); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-static void poc_apply_sound_preview()
+static void ui_apply_sound_preview()
 {
     g_sound_preview_result = 0;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->sound_preview) {
-        poc_log("sound-preview: ABORT (iface/slot missing -- backend too old?)");
+        ui_log("sound-preview: ABORT (iface/slot missing -- backend too old?)");
         return;
     }
     const char *n = g_sound_preview_name.empty() ? nullptr : g_sound_preview_name.c_str();
@@ -1276,7 +1360,7 @@ static void poc_apply_sound_preview()
 }
 
 /* The module-prefab slot, SEH-guarded (PODs only in scope). 0 when this backend has no slot. */
-static int poc_module_prefab_call(sh_module_prefab_call *call)
+static int ui_module_prefab_call(sh_module_prefab_call *call)
 {
     if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return 0;
     __try { return g_iface->vtbl->module_prefab(g_iface, call); }
@@ -1284,7 +1368,7 @@ static int poc_module_prefab_call(sh_module_prefab_call *call)
 }
 /* Stage a module prefab placement. The result is posted by the think loop once the
  * backend reports it (placed and grabbed, refused, or over budget). */
-static void poc_apply_place_module_prefab(const std::string &body)
+static void ui_apply_place_module_prefab(const std::string &body)
 {
     char msg[256] = "";
     sh_module_prefab_call call;
@@ -1294,11 +1378,11 @@ static void poc_apply_place_module_prefab(const std::string &body)
     call.text_len = body.size();
     call.out = msg;
     call.out_cap = (int)sizeof msg;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     char l[400];
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: module prefab '%s' place=%d seq=%d (%s)",
                 g_load_prefab_name.c_str(), r, call.seq, msg);
-    poc_log(l);
+    ui_log(l);
     if (r == -6) {                  /* needs a module the editor cannot build; nothing was placed */
         g_load_result = -6;
         g_load_message = msg;
@@ -1316,15 +1400,15 @@ static void poc_apply_place_module_prefab(const std::string &body)
 }
 /* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
  * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
- * g_load_result is 3 (held while the mod store is asked, followed by poc_poll_prefab_mods),
+ * g_load_result is 3 (held while the mod store is asked, followed by ui_poll_prefab_mods),
  * -6 (a module the player cannot get) or -7 (refused), with the message in g_load_message.
  * The rows are the file's block's, else (a prefab saved before the block) its sidecar's; a
  * prefab naming none goes on as before, and the backend answers that without the game. */
-static bool poc_resolve_prefab_mods(const std::string &body)
+static bool ui_resolve_prefab_mods(const std::string &body)
 {
     char meta[1024], msg[700] = "";
     if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return true;   /* a backend that records no mods */
-    if (!poc_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta, (int)sizeof meta)) meta[0] = '\0';
+    if (!ui_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta, (int)sizeof meta)) meta[0] = '\0';
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
@@ -1334,11 +1418,11 @@ static bool poc_resolve_prefab_mods(const std::string &body)
     call.name = g_load_prefab_name.c_str();
     call.out = msg;
     call.out_cap = (int)sizeof msg;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     char l[900];
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' resolve=%d seq=%d (%s)", g_load_prefab_name.c_str(), r,
                 call.seq, msg);
-    poc_log(l);
+    ui_log(l);
     if (r == 1) return true;                       /* every mod installed and in the open map */
     if (r == 2 && call.seq > 0) {                  /* the mod store is asked; Yes downloads, then it is placed */
         g_mods_wait_seq = call.seq;
@@ -1354,19 +1438,19 @@ static bool poc_resolve_prefab_mods(const std::string &body)
 }
 /* Follow a held placement: once its mods are installed, place it again; a refusal (the game
  * showed why) is told to the page. */
-static void poc_poll_prefab_mods()
+static void ui_poll_prefab_mods()
 {
     if (!g_mods_wait_seq) return;
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_POLL;
     call.seq = g_mods_wait_seq;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     if (r == 2) return;
     char l[400];
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' (placement %d) finished %d", g_mods_wait_name.c_str(),
                 g_mods_wait_seq, r);
-    poc_log(l);
+    ui_log(l);
     g_mods_wait_seq = 0;
     if (r == 1) {
         /* Placed through the ordinary Load/Place, which now finds every mod installed. */
@@ -1378,27 +1462,27 @@ static void poc_poll_prefab_mods()
     std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":-7,\"name\":\"";
     m += sh_webview_json::escape_wide(g_mods_wait_name.c_str());
     m += L"\",\"message\":\"\"}";
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
 }
-static void poc_apply_load_prefab()
+static void ui_apply_load_prefab()
 {
     g_load_result = -1;
     g_load_message.clear();
     g_place_wait = false;   /* a newer Load / Place answers for itself */
     if (g_load_prefab_name.empty()) return;
-    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { poc_log("load-prefab: ABORT (iface/slot missing)"); return; }
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { ui_log("load-prefab: ABORT (iface/slot missing)"); return; }
     char path[1024];
-    if (!poc_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path, (int)sizeof path)) {
-        poc_log("load-prefab: ABORT (resolve_prefab_path failed)");
+    if (!ui_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path, (int)sizeof path)) {
+        ui_log("load-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
+    FILE *fp = ui_open(path, L"rb");
+    if (!fp) { ui_log("load-prefab: ABORT (the file could not be opened)"); return; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     std::string body;
     if (sz > 0) { body.resize((size_t)sz); size_t got = fread(&body[0], 1, (size_t)sz, fp); body.resize(got); }
     fclose(fp);
-    if (body.empty()) { poc_log("load-prefab: ABORT (empty file)"); return; }
+    if (body.empty()) { ui_log("load-prefab: ABORT (empty file)"); return; }
 
     /* A module prefab (an idSnapMap) places only in Blueprint, through the backend's
      * merge and install; an object prefab goes to the native paste below. */
@@ -1409,19 +1493,18 @@ static void poc_apply_load_prefab()
         g_load_message = "Another prefab is waiting for its mods. Answer that first, then place this one.";
         return;
     }
-    if (!poc_resolve_prefab_mods(body)) return;
+    if (!ui_resolve_prefab_mods(body)) return;
     /* The engine and the module merge see the engine's own members only: the product's
      * block is cut out here, so placement never depends on the parser skipping it. */
     body.resize(sh_prefab_block_strip(&body[0], body.size()));
     if (g_load_prefab_modules) {
-        g_load_prefab_modules = true;
-        poc_apply_place_module_prefab(body);
+        ui_apply_place_module_prefab(body);
         return;
     }
 
     /* Paste uses selection as its old-to-new ID map. Clear it first; the backend
      * rechecks before placement because a pending manipulation may refuse clearing. */
-    poc_clear_selection_seh();
+    ui_clear_selection_seh();
 
     /* kind=2 stages and requests the engine's native paste action on its main thread.
      * Missing editor prerequisites can leave the prefab staged for manual paste. */
@@ -1430,13 +1513,13 @@ static void poc_apply_load_prefab()
      * invoking PasteInstantiate or synthesizing operating-system keystrokes. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     sh_prefab_watch watch;
-    bool watched = poc_prefab_watch(&watch) >= 0;
-    g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
+    bool watched = ui_prefab_watch(&watch) >= 0;
+    g_load_result = ui_apply_edit_seh(&it, 1, "load-prefab");
     char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
-    poc_log(l);
+    ui_log(l);
     /* The game thread decides on its next frame whether the paste was queued (the prefab arrives
-     * in hand) or only staged; the page is told once it has (poc_poll_place_outcome). */
+     * in hand) or only staged; the page is told once it has (ui_poll_place_outcome). */
     if (g_load_result == 1 && watched) {
         g_place_wait = true;
         g_place_wait_seq = watch.place_seq;
@@ -1448,11 +1531,11 @@ static void poc_apply_load_prefab()
 /* Post an object Load / Place's outcome once the game thread has decided it: "queued" (in hand,
  * Space places it), "staged" (Ctrl+V places it; reason says why it was not queued) or "unknown"
  * when no decision came in time. A queued paste becomes the held prefab the Limits rule names. */
-static void poc_poll_place_outcome()
+static void ui_poll_place_outcome()
 {
     if (!g_place_wait) return;
     sh_prefab_watch watch;
-    poc_prefab_watch(&watch);
+    ui_prefab_watch(&watch);
     bool decided = watch.place_seq != g_place_wait_seq;
     if (!decided && GetTickCount64() < g_place_wait_deadline) return;
     g_place_wait = false;
@@ -1470,104 +1553,111 @@ static void poc_poll_place_outcome()
     m += L"\",\"placed\":\""; m += sh_webview_json::escape_wide(placed);
     m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(decided ? watch.place_reason : "");
     m += L"\"}";
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
     char l[300];
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: '%s' %s%s%s", g_place_wait_name.c_str(), placed,
                 decided && watch.place_reason[0] ? ": " : "", decided ? watch.place_reason : "");
-    poc_log(l);
+    ui_log(l);
 }
 /* Commit the page's refreshed, patched entity JSON with kind=0. Prefer the
- * synchronous applied result; see poc_apply_sync_seh for the older-backend fallback. */
-static void poc_apply_save_timeline()
+ * synchronous applied result; see ui_apply_sync_seh for the older-backend fallback. */
+static void ui_apply_save_timeline()
 {
     g_save_timeline_result = 0;
     if (g_save_timeline_eid < 0 || g_save_timeline_json.empty()) return;
     if (!g_iface || !g_iface->vtbl || (!g_iface->vtbl->apply_sync && !g_iface->vtbl->apply_edit)) {
-        poc_log("save-timeline: ABORT (iface/slot missing)"); return;
+        ui_log("save-timeline: ABORT (iface/slot missing)"); return;
     }
     sh_apply_item it; it.kind = 0; it.id = g_save_timeline_eid; it.text = g_save_timeline_json.c_str();
-    g_save_timeline_result = poc_apply_sync_seh(&it, 1, "save-timeline");
+    g_save_timeline_result = ui_apply_sync_seh(&it, 1, "save-timeline");
     char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
-    poc_log(l);
+    ui_log(l);
 }
-/* Move a prefab from one folder to another (drag-and-drop target): MoveFileA across the two resolved
+/* Move a prefab from one folder to another (drag-and-drop target): a move across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
-static int poc_move_one_prefab(const std::string &from, const std::string &name, const std::string &to)
+static int ui_move_one_prefab(const std::string &from, const std::string &name, const std::string &to,
+                               const wchar_t **reason)
 {
+    *reason = L"";
     if (name.empty()) return -1;
     char oldp[1024], newp[1024];
-    if (!poc_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
-    if (!poc_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
-    int result = MoveFileA(oldp, newp) ? 1 : 0;
+    if (!ui_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
+    if (!ui_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
+    int result = ui_move(oldp, newp) ? 1 : 0;
+    if (result != 1) *reason = ui_fs_reason();
     if (result == 1) {   /* the sidecar follows the move; absent is fine */
         char oldm[1024], newm[1024];
-        if (poc_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
-            poc_prefab_meta_path(to, name, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+        if (ui_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
+            ui_prefab_meta_path(to, name, newm, (int)sizeof newm))
+            ui_move(oldm, newm);
     }
     return result;
 }
-static void poc_apply_move_prefab()
+static void ui_apply_move_prefab()
 {
-    g_move_prefab_result = poc_move_one_prefab(g_move_prefab_from, g_move_prefab_name, g_move_prefab_to);
+    g_move_prefab_result = ui_move_one_prefab(g_move_prefab_from, g_move_prefab_name, g_move_prefab_to, &g_move_prefab_reason);
 }
-static void poc_apply_move_prefabs()
+static void ui_apply_move_prefabs()
 {
-    g_move_prefabs_moved.clear(); g_move_prefabs_failed = 0;
+    g_move_prefabs_moved.clear(); g_move_prefabs_failed = 0; g_move_prefabs_reason = L"";
     for (size_t i = 0; i < g_move_prefabs_names.size(); i++) {
         const std::string &from = i < g_move_prefabs_from.size() ? g_move_prefabs_from[i] : std::string();
-        if (poc_move_one_prefab(from, g_move_prefabs_names[i], g_move_prefabs_to) == 1) g_move_prefabs_moved.push_back(g_move_prefabs_names[i]);
-        else g_move_prefabs_failed++;
+        const wchar_t *why = L"";
+        if (ui_move_one_prefab(from, g_move_prefabs_names[i], g_move_prefabs_to, &why) == 1) g_move_prefabs_moved.push_back(g_move_prefabs_names[i]);
+        else { if (!g_move_prefabs_failed) g_move_prefabs_reason = why; g_move_prefabs_failed++; }
     }
 }
 /* Create a real subdirectory under prefabs\. result: 1 created, 0 empty name / already exists, -1 failed. */
-static void poc_apply_create_folder()
+static void ui_apply_create_folder()
 {
     g_create_folder_result = -1;
-    if (g_create_folder_name.empty()) { g_create_folder_result = 0; return; }
+    g_create_folder_reason = L"";
+    if (g_create_folder_name.empty()) return;
     char dir[1024];
-    if (!poc_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
-    poc_strip_trailing_sep(dir);
-    if (CreateDirectoryA(dir, nullptr)) { g_create_folder_result = 1; return; }
-    g_create_folder_result = (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
+    if (!ui_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
+    ui_strip_trailing_sep(dir);
+    if (CreateDirectoryW(ui_widen(dir).c_str(), nullptr)) { g_create_folder_result = 1; return; }
+    g_create_folder_reason = ui_fs_reason();
+    g_create_folder_result = 0;
 }
-/* Rename a folder: MoveFileA also renames directories. result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
-static void poc_apply_rename_folder()
+/* Rename a folder (a move renames a directory too). result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
+static void ui_apply_rename_folder()
 {
     g_rename_folder_result = -1;
     if (g_rename_folder_old.empty() || g_rename_folder_new.empty()) return;
     char oldd[1024], newd[1024];
-    if (!poc_prefab_dir(g_rename_folder_old, oldd, (int)sizeof oldd)) return;
-    if (!poc_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
-    poc_strip_trailing_sep(oldd); poc_strip_trailing_sep(newd);
-    g_rename_folder_result = MoveFileA(oldd, newd) ? 1 : 0;
+    if (!ui_prefab_dir(g_rename_folder_old, oldd, (int)sizeof oldd)) return;
+    if (!ui_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
+    ui_strip_trailing_sep(oldd); ui_strip_trailing_sep(newd);
+    g_rename_folder_result = ui_move(oldd, newd) ? 1 : 0;
+    g_rename_folder_reason = g_rename_folder_result == 1 ? L"" : ui_fs_reason();
 }
 /* Move contents to the prefab root before removing a folder. A name collision
  * leaves the source file in place and removal fails without overwriting data. */
-static void poc_apply_delete_folder()
+static void ui_apply_delete_folder()
 {
     g_delete_folder_result = -1;
     if (g_delete_folder_name.empty()) return;
     char dir[1024], rootDir[1024];
-    if (!poc_prefab_dir(g_delete_folder_name, dir, (int)sizeof dir)) return;
-    if (!poc_prefab_dir("", rootDir, (int)sizeof rootDir)) return;
+    if (!ui_prefab_dir(g_delete_folder_name, dir, (int)sizeof dir)) return;
+    if (!ui_prefab_dir("", rootDir, (int)sizeof rootDir)) return;
     std::vector<std::string> items;
-    poc_list_json_dir(dir, items);
+    ui_list_json_dir(dir, items);
     for (size_t i = 0; i < items.size(); i++) {
         std::string src = std::string(dir) + items[i] + ".json";
         std::string dst = std::string(rootDir) + items[i] + ".json";
-        if (!MoveFileA(src.c_str(), dst.c_str())) continue;
+        if (!ui_move(src.c_str(), dst.c_str())) continue;
         char oldm[1024], newm[1024];   /* the sidecar follows its prefab; absent is fine */
-        if (poc_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
-            poc_prefab_meta_path("", items[i], newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+        if (ui_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
+            ui_prefab_meta_path("", items[i], newm, (int)sizeof newm))
+            ui_move(oldm, newm);
     }
-    poc_strip_trailing_sep(dir);
-    g_delete_folder_result = RemoveDirectoryA(dir) ? 1 : 0;
+    ui_strip_trailing_sep(dir);
+    g_delete_folder_result = RemoveDirectoryW(ui_widen(dir).c_str()) ? 1 : 0;
 }
 /* Run enum_inherits (+0x278) or enum_valid_classes (+0x270) into buf; returns 1 + *pcount packed strings
  * (consecutive NUL-terminated, double-NUL end). SEH-guarded, no C++ objects. */
-static int poc_run_enum(int classes, const char *inherit, char *buf, int cap, int *pcount)
+static int ui_run_enum(int classes, const char *inherit, char *buf, int cap, int *pcount)
 {
     int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
     __try {
@@ -1580,16 +1670,16 @@ static int poc_run_enum(int classes, const char *inherit, char *buf, int cap, in
 }
 
 /* Messages to the page. */
-static uint64_t poc_list_sig(int n)
+static uint64_t ui_list_sig(int n)
 {
     uint64_t h = 1469598103934665603ull;
     for (int i = 0; i < n; i++) { h = hint(h, g_ents[i].eid); h = hstr(h, g_ents[i].id); h = hstr(h, g_ents[i].name); h = hint(h, g_ents[i].hidden); }
     return h ^ (uint64_t)n;
 }
-static void poc_emit_list(int n, int ready, const char *reason)
+static void ui_emit_list(int n, int ready, const char *reason)
 {
     if (!g_webview || !g_ents) return;
-    unsigned long long started = poc_perf_now_us();
+    unsigned long long started = ui_perf_now_us();
     unsigned long seq = ++g_list_seq;
     std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
     json += L"{\"kind\":\"list\",\"seq\":"; json += std::to_wstring(seq);
@@ -1616,34 +1706,34 @@ static void poc_emit_list(int n, int ready, const char *reason)
         json += L"{\"eid\":"; json += std::to_wstring(g_tls[i].eid);
         json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_tls[i].id);
         json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_tls[i].name);
-        json += L"\"}";   /* close the "name" string BEFORE the object brace (the missing \" was the empty-list bug) */
+        json += L"\"}";   /* close the "name" string before the object brace */
     }
     json += L"]}";
-    unsigned long long built = poc_perf_now_us();
+    unsigned long long built = ui_perf_now_us();
     HRESULT hr = g_webview->PostWebMessageAsJson(json.c_str());
-    unsigned long long posted = poc_perf_now_us();
+    unsigned long long posted = ui_perf_now_us();
     char l[320];
     _snprintf_s(l, sizeof l, _TRUNCATE,
                 "perf list-emit: seq=%lu reason=%s entities=%d timelines=%d json_chars=%llu build_us=%llu post_us=%llu hr=0x%08lx",
                 seq, reason ? reason : "unknown", n, g_tl_count,
                 (unsigned long long)json.size(), built >= started ? built - started : 0,
                 posted >= built ? posted - built : 0, (unsigned long)hr);
-    poc_log(l);
+    ui_log(l);
 }
-static void poc_send_list(const char *reason)
+static void ui_send_list(const char *reason)
 {
-    int ready = 0; int n = poc_collect_timed(&ready, reason);
-    uint64_t sig = poc_list_sig(n);
+    int ready = 0; int n = ui_collect_timed(&ready, reason);
+    uint64_t sig = ui_list_sig(n);
     /* Rebuild Timelines only when the entity signature changes. */
-    if (sig != g_last_list_sig) poc_rescan_timelines_timed(n, reason);
+    if (sig != g_last_list_sig) ui_rescan_timelines_timed(n, reason);
     g_last_list_sig = sig;
-    poc_emit_list(n, ready, reason);
+    ui_emit_list(n, ready, reason);
 }
-static void poc_send_state(int id, bool autoflag)
+static void ui_send_state(int id, bool autoflag)
 {
     if (!g_webview) return;
     char cls[512], inh[512], dnm[512]; bool truncated = false;
-    bool ok = poc_collect_state_growing(id, cls, sizeof cls, inh, sizeof inh, dnm, sizeof dnm, &truncated);
+    bool ok = ui_collect_state_growing(id, cls, sizeof cls, inh, sizeof inh, dnm, sizeof dnm, &truncated);
     const char *decl = g_state_decl.empty() ? "" : g_state_decl.data();
     uint64_t sig = hstr(hstr(hstr(hstr(1469598103934665603ull, decl), cls), inh), dnm) ^ (uint64_t)id;
     if (autoflag && sig == g_last_state_sig) return;   /* nothing changed -> skip the auto push */
@@ -1659,11 +1749,11 @@ static void poc_send_state(int id, bool autoflag)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* Build + send the valid-values list for a datalist: {kind:"inherits"|"classes", inherit?, items:[...]}. */
-static void poc_send_enum(int classes, const char *inherit)
+static void ui_send_enum(int classes, const char *inherit)
 {
     if (!g_webview) return;
     int count = 0;
-    poc_run_enum(classes, inherit, g_enumbuf, (int)sizeof g_enumbuf, &count);
+    ui_run_enum(classes, inherit, g_enumbuf, (int)sizeof g_enumbuf, &count);
     if (count < 0) count = 0;
     std::wstring json = classes ? L"{\"kind\":\"classes\",\"inherit\":\"" : L"{\"kind\":\"inherits\"";
     if (classes) { json += sh_webview_json::escape_wide(inherit ? inherit : ""); json += L"\""; }
@@ -1686,7 +1776,7 @@ static void poc_send_enum(int classes, const char *inherit)
 }
 /* Keep SEH in a POD-only helper: MSVC forbids __try alongside C++ locals
  * that require unwinding. */
-static int poc_run_arg_resclass(const char *resClass, char *buf, int cap, int *pcount)
+static int ui_run_arg_resclass(const char *resClass, char *buf, int cap, int *pcount)
 {
     int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
     __try {
@@ -1697,11 +1787,11 @@ static int poc_run_arg_resclass(const char *resClass, char *buf, int cap, int *p
 }
 /* Query declaration classes by short name and enum types by catalog name.
  * Empty results leave the page with an editable text field. */
-static void poc_send_arg_resclass(const char *resClass)
+static void ui_send_arg_resclass(const char *resClass)
 {
     if (!g_webview) return;
     int count = 0;
-    poc_run_arg_resclass(resClass, g_enumbuf, (int)sizeof g_enumbuf, &count);
+    ui_run_arg_resclass(resClass, g_enumbuf, (int)sizeof g_enumbuf, &count);
     if (count < 0) count = 0;
     std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += sh_webview_json::escape_wide(resClass ? resClass : ""); json += L"\",\"items\":[";
     const char *p = g_enumbuf;
@@ -1721,7 +1811,7 @@ static void poc_send_arg_resclass(const char *resClass)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* Look up entity descriptions in the generated table. */
-static const ShEntDesc *poc_lookup_desc(const std::string &name)
+static const ShEntDesc *ui_lookup_desc(const std::string &name)
 {
     static std::map<std::string, const ShEntDesc *> *idx = nullptr;
     if (!idx) {
@@ -1732,45 +1822,31 @@ static const ShEntDesc *poc_lookup_desc(const std::string &name)
     auto it = idx->find(name);
     return it == idx->end() ? nullptr : it->second;
 }
-static void poc_json_desc_obj(std::wstring &json, const ShEntDesc *d)
+/* {"summary":...}, or null when the entry has no description a player should see. */
+static void ui_json_desc_obj(std::wstring &json, const ShEntDesc *d)
 {
-    if (!d) { json += L"null"; return; }
-    json += L"{\"summary\":\"";    json += sh_webview_json::escape_wide(d->summary);    json += L"\"";
-    json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d->confidence); json += L"\"";
-    json += L",\"source\":\"";     json += sh_webview_json::escape_wide(d->source);     json += L"\"}";
+    std::string text = d ? sh_player_text::summary(d->summary) : std::string();
+    if (text.empty()) { json += L"null"; return; }
+    json += L"{\"summary\":\""; json += sh_webview_json::escape_wide(text.c_str()); json += L"\"}";
 }
-static void poc_send_desc(const char *inherit, const char *classname)
+static void ui_send_desc(const char *inherit, const char *classname)
 {
     if (!g_webview) return;
     std::wstring json = L"{\"kind\":\"desc\",\"inherit\":";
-    poc_json_desc_obj(json, poc_lookup_desc(inherit ? inherit : ""));
+    ui_json_desc_obj(json, ui_lookup_desc(inherit ? inherit : ""));
     json += L",\"class\":";
-    poc_json_desc_obj(json, poc_lookup_desc(classname ? classname : ""));
+    ui_json_desc_obj(json, ui_lookup_desc(classname ? classname : ""));
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Resolve a material and return the metadata supplied by the backend. */
-static void poc_send_material_result(const char *name)
-{
-    if (!g_webview) return;
-    char info[256] = "";
-    int found = 0;
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->find_material && name && name[0]) {
-        found = g_iface->vtbl->find_material(g_iface, name, info, (int)sizeof info);
-    }
-    std::wstring json = L"{\"kind\":\"materialResult\",\"name\":\"";
-    json += sh_webview_json::escape_wide(name ? name : "");
-    json += L"\",\"found\":"; json += found ? L"true" : L"false";
-    json += L",\"info\":\""; json += sh_webview_json::escape_wide(info); json += L"\"}";
-    g_webview->PostWebMessageAsJson(json.c_str());
-}
 /* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
- * the +0x328/+0x330 slots. Load STAGES a file -- the swap substitutes it into the
- * engine's next map-load parse -- so every string below says "staged", not "loaded".
+ * the +0x328/+0x330 slots. Load opens the picked file in the editor at once, after
+ * the page's confirm; nothing is kept for a later map. Paths cross to the backend
+ * as UTF-8.
  *
  * The picker runs on its own thread. This handler is dispatched from DispatchMessageW
- * inside poc_think_loop, so a modal Show() here would stop editor polling, selection
+ * inside ui_think_loop, so a modal Show() here would stop editor polling, selection
  * sync and the queued-work drain for as long as the dialog is open. The result comes
  * back through the same pending-flag handoff every other deferred action uses, so
  * every backend call still happens on the UI thread. */
@@ -1778,7 +1854,7 @@ static void poc_send_material_result(const char *name)
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
  * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
  * Call from the picker thread, never from the message handler. */
-static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path,
+static bool ui_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path,
                                  bool prefab = false, const wchar_t *file_name = nullptr)
 {
     out_path.clear();
@@ -1826,18 +1902,14 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
 
         /* Open on the rawmap folder rather than wherever the shell last was.
          *
-         * SetFolder, NOT SetDefaultFolder -- and this is a correction of the line that used to be
-         * here. SetDefaultFolder applies only when the dialog has NO remembered location, and it had
-         * one, so the dialog kept opening in Quick Access instead. That was two reported problems
-         * with one cause: the folder we set looked ignored, and the dialog was slow to appear,
-         * because Quick Access is the slowest possible starting point -- it enumerates cloud
-         * providers and network places, and on a machine whose Documents is OneDrive-redirected that
-         * is a network round trip before anything gets drawn.
+         * SetFolder, not only SetDefaultFolder: SetDefaultFolder applies only when the dialog has no
+         * remembered location, and otherwise it opens in Quick Access, the slowest starting point
+         * (it enumerates cloud providers and network places).
          *
          * SetDefaultFolder is kept too, for the first-ever open and for a path that does not exist
          * yet; SetFolder wins when both are set. Overriding a remembered location is the intent:
          * the folder is the one this dialog kind last used, else its default (rawmap_picker.h),
-         * chosen by poc_pick_start_folder on the UI thread. */
+         * chosen by ui_pick_start_folder on the UI thread. */
         if (!g_pick_folder.empty()) {
             IShellItem *folder = nullptr;
             if (SUCCEEDED(SHCreateItemFromParsingName(g_pick_folder.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
@@ -1866,29 +1938,18 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
     return !out_path.empty();
 }
 
-/* Report the staged paths + arm state. The backend hands back a JSON fragment (paths are escaped
- * there -- a Windows path is full of backslashes), so this forwards it whole rather than re-encoding
- * field by field. An absent slot means an older backend: report it instead of guessing.
+/* Report the rawmap paths. The backend hands back a UTF-8 JSON fragment (paths are escaped there --
+ * a Windows path is full of backslashes), so this forwards it whole rather than re-encoding field
+ * by field.
  *
- * `confirm_file`, when set, asks the page to put the "load it now, or save your work first?" question
- * up before anything opens. It rides on the status message because the file has ALREADY been staged
- * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
- * Open Rawmap as New Map, so there is nothing to hold on to native-side while the person decides. It must
- * arrive already JSON-escaped (escape_wide), like every other path that crosses this boundary. */
-/* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
- * forwarded verbatim. */
-static std::wstring poc_widen(const char *utf8)
-{
-    std::wstring w;
-    if (!utf8) return w;
-    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
-    return w;
-}
+ * `confirm_file`, when set, asks the page to put the "open it now? unsaved edits are discarded"
+ * question up before anything opens. The backend has checked the file and the editor; yes opens it,
+ * and no opens nothing. It must arrive already JSON-escaped (escape_wide), like every other path
+ * that crosses this boundary. */
 
 /* Tell the page where the navigation view stands. Sent when the View menu opens
  * and again after an update is asked for. */
-static void poc_send_navmesh_state()
+static void ui_send_navmesh_state()
 {
     if (!g_webview) return;
     char state[512] = "";
@@ -1900,13 +1961,14 @@ static void poc_send_navmesh_state()
     json += have ? L"true" : L"false";
     if (have) {
         json += L",\"state\":";
-        json += poc_widen(state);   /* already a JSON object -- forward it */
+        json += ui_widen(state);   /* already a JSON object -- forward it */
     }
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
+/* `error` marks the note as a refusal: the page shows it as an error toast. */
+static void ui_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr, bool error = false)
 {
     if (!g_webview) return;
 
@@ -1920,11 +1982,12 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
     json += have ? L"true" : L"false";
     if (have) {
         json += L",\"status\":";
-        json += poc_widen(status);   /* already a JSON object -- forward it, do not escape it */
+        json += ui_widen(status);   /* already a JSON object -- forward it, do not escape it */
     }
     json += L",\"note\":\"";
     json += note ? note : L"";
     json += L"\"";
+    if (error) json += L",\"error\":true";
     if (confirm_file && *confirm_file) {
         json += L",\"confirmLoad\":\"";
         json += confirm_file;
@@ -1934,17 +1997,12 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Ask the backend to point a side at a chosen file. `load_path`/`save_path` NULL = leave alone,
- * "" = restore that side's default. `arm` is 1/0/-1 as the slot documents. */
-static void poc_rawmap_configure(const char *load_path, const char *save_path, int arm,
+/* Ask the backend to point a side at a chosen file. `load_path`/`save_path` (UTF-8) NULL = leave
+ * alone, "" = restore that side's default. `arm` is the verb code the slot documents. */
+static void ui_rawmap_configure(const char *load_path, const char *save_path, int arm,
                                  const wchar_t *ok_note)
 {
-    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_configure) {
-        poc_send_rawmap_status(L"This build's backend has no rawmap file surface.");
-        return;
-    }
-
-    char msg[192] = "";
+    char msg[1024] = "";
     int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm,
                                              msg, (int)sizeof msg);
     /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
@@ -1953,26 +2011,26 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
      * the backend's own: only the backend knows whether it wrote the file there and then or is
      * waiting for an editor save, and how many bytes went out. */
     std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg))
-                           : (L"Refused: " + sh_webview_json::escape_wide(msg));
+                           : sh_webview_json::escape_wide(msg);
 
-    /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
+    /* ui_logf carries exactly one unsigned long, so compose the detail line first. The paths are
      * what makes this log worth having when someone reports "it did not load my file". */
     {
-        char line[640];
+        char line[2048];
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "rawmap configure: ok=%d arm=%d load=%s save=%s msg=%s",
                     ok, arm,
                     load_path ? load_path : "(unchanged)",
                     save_path ? save_path : "(unchanged)", msg);
-        poc_log(line);
+        ui_log(line);
     }
-    poc_send_rawmap_status(note.c_str());
+    ui_send_rawmap_status(note.c_str(), nullptr, !ok);
 }
 
 /* The picker thread. Its ONLY job is the modal dialog: it touches no backend slot and posts nothing
  * to the page, because both of those belong on the UI thread. It hands back a path and lets the think
  * loop do the rest. Its own apartment, since a fresh thread has none. */
-static DWORD WINAPI poc_pick_thread(LPVOID param)
+static DWORD WINAPI ui_pick_thread(LPVOID param)
 {
     const int kind = (int)(intptr_t)param;
     std::wstring picked;
@@ -1980,10 +2038,10 @@ static DWORD WINAPI poc_pick_thread(LPVOID param)
 
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (kind >= 2)
-        ok = poc_pick_rawmap_file(kind == 2, 0, kind == 2 ? L"Export Prefab" : L"Import Prefab", picked, true,
+        ok = ui_pick_rawmap_file(kind == 2, 0, kind == 2 ? L"Export Prefab" : L"Import Prefab", picked, true,
                                   kind == 2 && !g_pick_file_name.empty() ? g_pick_file_name.c_str() : nullptr);
     else
-        ok = poc_pick_rawmap_file(kind == 1, (int)InterlockedCompareExchange(&g_pick_mods, 0, 0),
+        ok = ui_pick_rawmap_file(kind == 1, (int)InterlockedCompareExchange(&g_pick_mods, 0, 0),
                                   kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
     if (SUCCEEDED(init)) CoUninitialize();
 
@@ -1994,28 +2052,28 @@ static DWORD WINAPI poc_pick_thread(LPVOID param)
     return 0;
 }
 
-static int poc_config_get_json(const std::string &key, std::string &value, unsigned int *out_flags);   /* fwd */
-static bool poc_is_dir(const std::wstring &path)
+static int ui_config_get_json(const std::string &key, std::string &value, unsigned int *out_flags);   /* fwd */
+static bool ui_is_dir(const std::wstring &path)
 {
     DWORD a = path.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 /* The folder a dialog of `kind` opens in: the one kept for it in config.json when it still exists,
  * else Downloads for the prefab dialogs and the rawmaps folder for the rawmap ones. UI thread. */
-static std::wstring poc_pick_start_folder(int kind)
+static std::wstring ui_pick_start_folder(int kind)
 {
     const char *key = sh_rawmap_picker::folder_config_key(kind);
     std::string json;
     std::wstring kept;
-    if (key && poc_config_get_json(key, json, nullptr) > 0 &&
-        sh_rawmap_picker::folder_from_config(json.c_str(), kept) && poc_is_dir(kept))
+    if (key && ui_config_get_json(key, json, nullptr) > 0 &&
+        sh_rawmap_picker::folder_from_config(json.c_str(), kept) && ui_is_dir(kept))
         return kept;
     if (sh_rawmap_picker::default_folder(kind) == sh_rawmap_picker::FOLDER_DOWNLOADS) {
         PWSTR p = nullptr;
         std::wstring dl;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p)) && p) dl = p;
         if (p) CoTaskMemFree(p);
-        if (poc_is_dir(dl)) return dl;
+        if (ui_is_dir(dl)) return dl;
     }
     wchar_t dir[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
@@ -2026,7 +2084,7 @@ static std::wstring poc_pick_start_folder(int kind)
     return std::wstring();
 }
 /* Keep the folder of a file the player picked, for that dialog kind's next open. UI thread. */
-static void poc_pick_keep_folder(int kind, const std::wstring &picked)
+static void ui_pick_keep_folder(int kind, const std::wstring &picked)
 {
     const char *key = sh_rawmap_picker::folder_config_key(kind);
     std::wstring folder = sh_rawmap_picker::folder_of(picked);
@@ -2036,21 +2094,21 @@ static void poc_pick_keep_folder(int kind, const std::wstring &picked)
     if (r == SH_CONFIG_SET_REJECTED) {
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "dialogs: could not keep the folder for %s", key);
-        poc_log(l);
+        ui_log(l);
     }
 }
 /* Open a picker, unless one is already open. Returns with the dialog still to come -- the caller has
  * nothing to report yet, which is the point: the message handler returns immediately and the think
  * loop keeps turning. */
-static void poc_begin_pick(int kind)
+static void ui_begin_pick(int kind)
 {
     HANDLE h;
 
     if (InterlockedExchange(&g_pick_busy, 1) != 0) {
         if (kind >= 2)
-            poc_post_json(kind == 2 ? L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"A file dialog is already open.\"}"
+            ui_post_json(kind == 2 ? L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"A file dialog is already open.\"}"
                                     : L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"A file dialog is already open.\"}");
-        else poc_send_rawmap_status(L"A file dialog is already open.");
+        else ui_send_rawmap_status(L"A file dialog is already open. Finish it first.", nullptr, true);
         return;
     }
     /* Asked here, on the UI thread: the picker thread touches no backend slot. */
@@ -2062,26 +2120,26 @@ static void poc_begin_pick(int kind)
             mods = sh_rawmap_picker::map_mods_from_status(status);
         InterlockedExchange(&g_pick_mods, mods);
     }
-    g_pick_folder = poc_pick_start_folder(kind);   /* read by the dialog's thread, which starts below */
-    h = CreateThread(nullptr, 0, poc_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
+    g_pick_folder = ui_pick_start_folder(kind);   /* read by the dialog's thread, which starts below */
+    h = CreateThread(nullptr, 0, ui_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
     if (h == nullptr) {
         InterlockedExchange(&g_pick_busy, 0);
-        poc_send_rawmap_status(L"Could not open the file dialog.");
+        ui_send_rawmap_status(L"Windows could not open the file dialog. Try again.", nullptr, true);
         return;
     }
     CloseHandle(h);
 }
 
-static void poc_send_prefabs();   /* fwd */
+static void ui_send_prefabs();   /* fwd */
 /* Export Prefab (kind 2) and Import Prefab (kind 3), once the dialog has a file: the backend writes
  * the ZIP, or reads a ZIP or the .json of an extracted export folder (backend/prefab_mods.c), and
  * the page gets one prefabFileResult. UI thread. */
-static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip8)
+static void ui_finish_prefab_pick(int kind, bool picked, const std::string &zip8)
 {
     const wchar_t *op = kind == 2 ? L"export" : L"import";
     if (!picked) {
         std::wstring m = L"{\"kind\":\"prefabFileResult\",\"op\":\""; m += op; m += L"\",\"cancelled\":true}";
-        poc_post_json(m.c_str());
+        ui_post_json(m.c_str());
         return;
     }
     static char out[4096];
@@ -2094,36 +2152,36 @@ static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip
     char path[1024] = "", meta[1024] = "";
     int r;
     if (kind == 2) {
-        if (!poc_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path, (int)sizeof path) ||
-            !poc_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta, (int)sizeof meta)) {
-            poc_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"That prefab cannot be found.\"}");
+        if (!ui_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path, (int)sizeof path) ||
+            !ui_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta, (int)sizeof meta)) {
+            ui_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"That prefab cannot be found.\"}");
             return;
         }
         call.op = SH_MODULE_PREFAB_EXPORT;
         call.path = path;
         call.meta_path = meta;
         call.name = g_pick_prefab_name.c_str();
-        r = poc_module_prefab_call(&call);
+        r = ui_module_prefab_call(&call);
     } else {
-        if (!poc_prefab_dir("", path, (int)sizeof path)) {
-            poc_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"The prefabs folder cannot be found.\"}");
+        if (!ui_prefab_dir("", path, (int)sizeof path)) {
+            ui_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"The prefabs folder cannot be found.\"}");
             return;
         }
         call.op = SH_MODULE_PREFAB_IMPORT;
         call.path = path;
-        r = poc_module_prefab_call(&call);
+        r = ui_module_prefab_call(&call);
     }
     {
         char l[1400];
         _snprintf_s(l, sizeof l, _TRUNCATE, "prefab %s: result=%d zip='%s' %s", kind == 2 ? "export" : "import", r,
                     zip8.c_str(), out);
-        poc_log(l);
+        ui_log(l);
     }
     std::wstring m = L"{\"kind\":\"prefabFileResult\",\"op\":\""; m += op;
     m += L"\",\"ok\":"; m += r >= 0 && (kind == 3 || r == 1) ? L"true" : L"false";
     m += L",\"result\":"; m += std::to_wstring(r);
     if (kind == 2) {
-        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "This backend cannot export prefabs."); m += L"\"";
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "The prefab could not be exported. Try again."); m += L"\"";
     } else {
         /* the backend's {"ok","added","name","message"}: only its message and name are forwarded */
         std::string text = out, message, name;
@@ -2137,16 +2195,16 @@ static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip
             size_t i = at + 8;
             while (i < text.size() && text[i] != '"') { if (text[i] == '\\' && i + 1 < text.size()) i++; name += text[i]; i++; }
         }
-        m += L",\"message\":\""; m += sh_webview_json::escape_wide(message.empty() ? "This backend cannot import prefabs." : message.c_str());
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(message.empty() ? "The prefab could not be imported. Try again." : message.c_str());
         m += L"\",\"name\":\""; m += sh_webview_json::escape_wide(name.c_str()); m += L"\"";
     }
     m += L"}";
-    poc_post_json(m.c_str());
-    if (kind == 3 && r == 1) poc_send_prefabs();
+    ui_post_json(m.c_str());
+    if (kind == 3 && r == 1) ui_send_prefabs();
 }
 /* Act on a finished picker. Runs on the UI thread from the think loop, so every backend call below
  * is where it has always been. */
-static void poc_finish_pick()
+static void ui_finish_pick()
 {
     const int  kind   = g_pick_kind;
     const bool picked = g_pick_ok;
@@ -2158,7 +2216,7 @@ static void poc_finish_pick()
     if (picked) {
         size_t cut = g_pick_path.find_last_of(L"\\/");
         base = (cut == std::wstring::npos) ? g_pick_path : g_pick_path.substr(cut + 1);
-        poc_pick_keep_folder(kind, g_pick_path);   /* this dialog opens there next time */
+        ui_pick_keep_folder(kind, g_pick_path);   /* this dialog opens there next time */
     }
 
     g_pick_path.clear();
@@ -2166,11 +2224,11 @@ static void poc_finish_pick()
     InterlockedExchange(&g_pick_busy, 0);
 
     if (kind >= 2) {
-        poc_finish_prefab_pick(kind, picked, p8);
+        ui_finish_prefab_pick(kind, picked, p8);
         return;
     }
     if (!picked) {
-        poc_send_rawmap_status(L"");   /* cancelled -- refresh the readout, say nothing */
+        ui_send_rawmap_status(L"");   /* cancelled -- refresh the readout, say nothing */
         return;
     }
 
@@ -2178,41 +2236,38 @@ static void poc_finish_pick()
         /* Naming a destination IS the request to write it -- the configure slot writes the file there
          * and then from the map's own save on disk, and only falls back to arming one editor save when
          * the map has never been saved. No note of our own: only the backend knows which happened. */
-        poc_rawmap_configure(nullptr, p8.c_str(), -1, nullptr);
+        ui_rawmap_configure(nullptr, p8.c_str(), -1, nullptr);
         return;
     }
 
-    /* STAGE + ARM ONE LOAD (arm = 2). Not the shared gate: setting that left every later map load
-     * substituted as well, and the save shadow rides the same gate, so picking a file to LOAD also
-     * redirected the next save. A one-shot is what the click actually means -- apply this file to
-     * the map I am about to open, and then stop. It spends itself on the substitution, so a load
-     * that cannot read the staged file leaves the arm intact rather than silently eating it. */
+    /* arm = 2: the picked file is the one to open now. The backend checks the file and that the
+     * editor can open it, and refuses at once otherwise; nothing waits for a later map. */
     {
-        char msg[192] = "";
-        int staged = 0;
+        char msg[1024] = "";
+        int accepted = 0;
         if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure) {
-            staged = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
-                                                     msg, (int)sizeof msg);
+            accepted = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
+                                                       msg, (int)sizeof msg);
         }
-        if (!staged) {
+        if (!accepted) {
             /* The backend logs the refusal and prints it to the console (rawmap.c); this is the UI
              * log's line, as the prefab Import's refusal has one. */
             char l[1400];
             _snprintf_s(l, sizeof l, _TRUNCATE, "rawmap load: refused '%s': %s", p8.c_str(), msg);
-            poc_log(l);
-            poc_send_rawmap_status((L"Refused: " + sh_webview_json::escape_wide(msg)).c_str());
+            ui_log(l);
+            ui_send_rawmap_status(sh_webview_json::escape_wide(msg).c_str(), nullptr, true);
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
-             * offers no "has unsaved changes" query. Answering no leaves the file staged. The
-             * page owns this dialog on purpose -- a native modal here stalls the think loop. */
-            poc_send_rawmap_status(L"", base.c_str());
+             * offers no "has unsaved changes" query. Answering no opens nothing. The page owns
+             * this dialog on purpose -- a native modal here stalls the think loop. */
+            ui_send_rawmap_status(L"", base.c_str());
         }
     }
 }
 
 /* Fetch the latest worker-published PNG data URI. Probe its size before copying;
  * no rendering or engine access occurs here. */
-static void poc_send_preview(const char *name)
+static void ui_send_preview(const char *name)
 {
     if (!g_webview) return;
     std::string uri;
@@ -2240,7 +2295,7 @@ static void poc_send_preview(const char *name)
 }
 
 /* Queue preview decoding on the backend worker. The page polls for publication. */
-static void poc_request_preview(const char *name, int asset_kind)
+static void ui_request_preview(const char *name, int asset_kind)
 {
     if (!g_webview) return;
     int ok = 0;
@@ -2263,7 +2318,7 @@ static void poc_request_preview(const char *name, int asset_kind)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-static void poc_cancel_preview()
+static void ui_cancel_preview()
 {
     if (g_iface && g_iface->vtbl && g_iface->vtbl->request_preview)
         g_iface->vtbl->request_preview(g_iface, "");
@@ -2271,7 +2326,7 @@ static void poc_cancel_preview()
 
 /* Collect catalog pages into one response for the page's bounded cache.
  * Older backends can still supply materials through list_materials. */
-static void poc_send_asset_list(int kind)
+static void ui_send_asset_list(int kind)
 {
     if (!g_webview) return;
     std::string all;
@@ -2300,7 +2355,7 @@ static void poc_send_asset_list(int kind)
 }
 
 /* Send the static event catalog and argument schemas for client-side filtering. */
-static void poc_send_events()
+static void ui_send_events()
 {
     if (!g_webview) return;
     std::wstring json; json.reserve((size_t)SH_EVENT_CATALOG_N * 96 + 32);
@@ -2322,7 +2377,7 @@ static void poc_send_events()
 }
 /* Send generated event and argument descriptions lazily when requested. The
  * page caches this larger payload separately from the event catalog. */
-static void poc_send_event_docs()
+static void ui_send_event_docs()
 {
     if (!g_webview) return;
     std::wstring json; json.reserve((size_t)SH_EVENT_DOCS_N * 192 + 32);
@@ -2331,22 +2386,20 @@ static void poc_send_event_docs()
         if (i) json += L",";
         const ShEvtDoc &d = SH_EVENT_DOCS[i];
         json += L"{\"name\":\""; json += sh_webview_json::escape_wide(d.name ? d.name : ""); json += L"\"";
-        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(d.summary ? d.summary : ""); json += L"\"";
-        json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d.confidence ? d.confidence : ""); json += L"\"";
-        json += L",\"source\":\""; json += sh_webview_json::escape_wide(d.source ? d.source : ""); json += L"\"";
+        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(d.summary).c_str()); json += L"\"";
         json += L",\"args\":[";
         for (int a = 0; a < d.nArgs; a++) {
             if (a) json += L",";
             const ShEvtArgDoc &ad = d.args[a];
             json += L"{\"name\":\""; json += sh_webview_json::escape_wide(ad.name ? ad.name : ""); json += L"\"";
-            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(ad.desc ? ad.desc : ""); json += L"\"}";
+            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(ad.desc).c_str()); json += L"\"}";
         }
         json += L"]}";
     }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-static void poc_json_asset_items(std::wstring &json, const ShAssetItem *items, int n)
+static void ui_json_asset_items(std::wstring &json, const ShAssetItem *items, int n)
 {
     json += L"[";
     for (int i = 0; i < n; i++) {
@@ -2358,7 +2411,7 @@ static void poc_json_asset_items(std::wstring &json, const ShAssetItem *items, i
 }
 /* Send generated per-class asset choices. Resolving an event target's inherit
  * uses the separate entity-serialization request. */
-static void poc_send_entity_assets()
+static void ui_send_entity_assets()
 {
     if (!g_webview) return;
     std::wstring json; json.reserve((size_t)SH_ENTITY_ASSETS_N * 512 + 32);
@@ -2367,22 +2420,22 @@ static void poc_send_entity_assets()
         if (i) json += L",";
         const ShEntityAssets &ea = SH_ENTITY_ASSETS[i];
         json += L"{\"slug\":\""; json += sh_webview_json::escape_wide(ea.slug ? ea.slug : ""); json += L"\"";
-        json += L",\"models\":";    poc_json_asset_items(json, ea.models,    ea.nModels);
-        json += L",\"animWeb\":";   poc_json_asset_items(json, ea.animWeb,   ea.nAnimWeb);
-        json += L",\"md6Anim\":";   poc_json_asset_items(json, ea.md6Anim,   ea.nMd6Anim);
-        json += L",\"animAlias\":"; poc_json_asset_items(json, ea.animAlias, ea.nAnimAlias);
-        json += L",\"tagName\":";   poc_json_asset_items(json, ea.tagName,   ea.nTagName);
+        json += L",\"models\":";    ui_json_asset_items(json, ea.models,    ea.nModels);
+        json += L",\"animWeb\":";   ui_json_asset_items(json, ea.animWeb,   ea.nAnimWeb);
+        json += L",\"md6Anim\":";   ui_json_asset_items(json, ea.md6Anim,   ea.nMd6Anim);
+        json += L",\"animAlias\":"; ui_json_asset_items(json, ea.animAlias, ea.nAnimAlias);
+        json += L",\"tagName\":";   ui_json_asset_items(json, ea.tagName,   ea.nTagName);
         json += L"}";
     }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-static void poc_post_json(const wchar_t *json) { if (g_webview) g_webview->PostWebMessageAsJson(json); }
+static void ui_post_json(const wchar_t *json) { if (g_webview) g_webview->PostWebMessageAsJson(json); }
 
 /* Move at most one decoded prefab mesh per UI tick. WebView2 shared buffers avoid base64's extra copy
  * and 4/3 expansion; JavaScript uploads from the ArrayBuffer and releases it immediately. If an older
  * runtime lacks the shared-buffer interfaces, consume the result and keep the honest procedural proxy. */
-static void poc_send_prefab_mesh_completion()
+static void ui_send_prefab_mesh_completion()
 {
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->get_prefab_mesh) return;
     int query = g_iface->vtbl->get_prefab_mesh(g_iface, nullptr, 0);
@@ -2393,7 +2446,7 @@ static void poc_send_prefab_mesh_completion()
     if (!g_webview_environment12 || !g_webview17) {
         std::vector<unsigned char> discard((size_t)needed);
         g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
-        poc_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
+        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
         return;
     }
 
@@ -2401,18 +2454,18 @@ static void poc_send_prefab_mesh_completion()
     if (FAILED(g_webview_environment12->CreateSharedBuffer((UINT64)needed, shared.GetAddressOf())) || !shared) {
         std::vector<unsigned char> discard((size_t)needed);
         g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
-        poc_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
+        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
         return;
     }
     BYTE *dst = nullptr;
     if (FAILED(shared->get_Buffer(&dst)) || !dst) {
         std::vector<unsigned char> discard((size_t)needed);
         g_iface->vtbl->get_prefab_mesh(g_iface, discard.data(), needed);
-        poc_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
+        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
         return;
     }
     if (g_iface->vtbl->get_prefab_mesh(g_iface, dst, needed) != needed) {
-        poc_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
+        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
         return;
     }
 
@@ -2421,33 +2474,33 @@ static void poc_send_prefab_mesh_completion()
     if (FAILED(g_webview17->PostSharedBufferToScript(shared.Get(),
                                                      COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY,
                                                      meta.c_str())))
-        poc_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
+        ui_post_json(L"{\"kind\":\"prefabMeshTransportUnavailable\"}");
 }
 
-static void poc_post_window_state(HWND hwnd)
+static void ui_post_window_state(HWND hwnd)
 {
     if (!hwnd) return;
-    poc_post_json(IsZoomed(hwnd)
+    ui_post_json(IsZoomed(hwnd)
         ? L"{\"kind\":\"windowState\",\"maximized\":true}"
         : L"{\"kind\":\"windowState\",\"maximized\":false}");
 }
 
 /* The two append-only config slots transport canonical JSON fragments. The getter is deliberately
  * retried because another process can replace config.json between its size query and copy call. */
-static int poc_config_get_json(const std::string &key, std::string &value,
+static int ui_config_get_json(const std::string &key, std::string &value,
                                unsigned int *out_flags)
 {
     unsigned int flags = 0;
     value.clear();
     if (out_flags) *out_flags = 0;
-    if (key.empty() || key.size() > POC_CONFIG_KEY_CAP ||
+    if (key.empty() || key.size() > UI_CONFIG_KEY_CAP ||
         !g_iface || !g_iface->vtbl || !g_iface->vtbl->config_get_json)
         return -1;
     for (int attempt = 0; attempt < 3; attempt++) {
         int needed = g_iface->vtbl->config_get_json(
             g_iface, key.c_str(), nullptr, 0, &flags);
         if (out_flags) *out_flags = flags;
-        if (needed < 0 || (unsigned int)needed > POC_CONFIG_VALUE_CAP)
+        if (needed < 0 || (unsigned int)needed > UI_CONFIG_VALUE_CAP)
             return -1;
         std::vector<char> buffer((size_t)needed + 1u, 0);
         int got = g_iface->vtbl->config_get_json(
@@ -2457,17 +2510,17 @@ static int poc_config_get_json(const std::string &key, std::string &value,
             value.assign(buffer.data(), (size_t)got);
             return got;
         }
-        if (got < 0 || (unsigned int)got > POC_CONFIG_VALUE_CAP)
+        if (got < 0 || (unsigned int)got > UI_CONFIG_VALUE_CAP)
             return -1;
     }
     return -1;
 }
 
-static void poc_post_config_value(const std::string &key)
+static void ui_post_config_value(const std::string &key)
 {
     std::string value;
     unsigned int flags = 0;
-    int got = poc_config_get_json(key, value, &flags);
+    int got = ui_config_get_json(key, value, &flags);
     g_config_status_flags |= flags;
     std::wstring message = L"{\"kind\":\"configValue\",\"key\":\"";
     message += sh_webview_json::escape_wide(key.c_str());
@@ -2475,31 +2528,31 @@ static void poc_post_config_value(const std::string &key)
     if (got >= 0) message += sh_webview_json::escape_wide(value.c_str());
     message += L"\",\"result\":";
     message += got >= 0 ? L"1}" : L"0}";
-    poc_post_json(message.c_str());
+    ui_post_json(message.c_str());
 }
 
-static void poc_post_config_set_result(const std::string &key, int result)
+static void ui_post_config_set_result(const std::string &key, int result)
 {
     std::wstring message = L"{\"kind\":\"configSetResult\",\"key\":\"";
     message += sh_webview_json::escape_wide(key.c_str());
     message += L"\",\"result\":";
     message += std::to_wstring(result);
     message += L"}";
-    poc_post_json(message.c_str());
+    ui_post_json(message.c_str());
 }
 
-static void poc_post_config_status()
+static void ui_post_config_status()
 {
     if (g_config_status_posted) return;
     std::wstring message = L"{\"kind\":\"configStatus\",\"flags\":";
     message += std::to_wstring(g_config_status_flags);
     message += L"}";
-    poc_post_json(message.c_str());
+    ui_post_json(message.c_str());
     g_config_status_posted = true;
 }
 
 /* Count exact idSnapEntity keys without counting the idSnapEntityPrefab root. */
-static int poc_count_prefab_entities(const std::string &body)
+static int ui_count_prefab_entities(const std::string &body)
 {
     int entityCount = 0;
     size_t pos = 0;
@@ -2512,10 +2565,10 @@ static int poc_count_prefab_entities(const std::string &body)
 /* Read a single prefab file (resolved via +0xc0) and push its scene plus aggregate entity count.
  * folder="" selects the prefab root. */
 /* Read a bounded auxiliary file; return false for missing, oversized, or unreadable data. */
-static bool poc_read_small_file(const char *path, std::string &body)
+static bool ui_read_small_file(const char *path, std::string &body)
 {
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    FILE *fp = ui_open(path, L"rb");
+    if (!fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     bool ok = false;
     /* A module prefab's sidecar lists every module, so allow more than tags need. */
@@ -2529,7 +2582,7 @@ static bool poc_read_small_file(const char *path, std::string &body)
     return ok;
 }
 /* A view's top-level "kind" string, or "" (object prefabs have none). */
-static std::string poc_meta_kind_of(const std::string &body)
+static std::string ui_meta_kind_of(const std::string &body)
 {
     size_t k = body.find("\"kind\"");
     if (k == std::string::npos) return "";
@@ -2543,7 +2596,7 @@ static std::string poc_meta_kind_of(const std::string &body)
     return body.substr(q1 + 1, q2 - q1 - 1);
 }
 /* The "entityCount" number in a module prefab's view, or -1. */
-static int poc_meta_int(const std::string &body, const char *key)
+static int ui_meta_int(const std::string &body, const char *key)
 {
     std::string k = std::string("\"") + key + "\"";
     size_t at = body.find(k);
@@ -2554,10 +2607,10 @@ static int poc_meta_int(const std::string &body, const char *key)
 }
 /* The top-level "~type" of a prefab file from its last 256 KB, the block left out
  * (prefab_host.h); "" when that tail names none. */
-static std::string poc_file_top_type(const char *path)
+static std::string ui_file_top_type(const char *path)
 {
-    FILE *fp = nullptr;
-    if (!path || fopen_s(&fp, path, "rb") != 0 || !fp) return std::string();
+    FILE *fp = ui_open(path, L"rb");
+    if (!fp) return std::string();
     fseek(fp, 0, SEEK_END); long sz = ftell(fp);
     long take = sz < 256 * 1024 ? sz : 256 * 1024;
     std::string tail;
@@ -2571,22 +2624,22 @@ static std::string poc_file_top_type(const char *path)
 }
 /* The prefab file's size and write time, the content signature the page's
  * Limits cache keys on. */
-static std::wstring poc_prefab_signature(const char *path)
+static std::wstring ui_prefab_signature(const char *path)
 {
     WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return L"";
+    if (!GetFileAttributesExW(ui_widen(path).c_str(), GetFileExInfoStandard, &fa)) return L"";
     unsigned long long size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
     unsigned long long mtime = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
     return std::to_wstring(size) + L":" + std::to_wstring(mtime);
 }
 /* The selected prefab's file text, capped so a hand-dropped giant file cannot
  * force a huge WebMessage allocation. */
-static bool poc_read_prefab_scene(const char *path, std::string &body)
+static bool ui_read_prefab_scene(const char *path, std::string &body)
 {
-    FILE *fp = nullptr;
+    FILE *fp = ui_open(path, L"rb");
     bool ok = false;
     body.clear();
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    if (!fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     if (sz > 0 && sz <= 8 * 1024 * 1024) {
         body.resize((size_t)sz);
@@ -2602,14 +2655,14 @@ static bool poc_read_prefab_scene(const char *path, std::string &body)
  * file's snapmapPlus block, else (a prefab saved before the block) its sidecar. `text` is
  * the whole file when the caller has read it; otherwise at most the last 1 MB is read,
  * where the block sits. Empty when there are none or this backend cannot answer. */
-static std::string poc_prefab_view(const char *path, const char *meta_path, const std::string *text)
+static std::string ui_prefab_view(const char *path, const char *meta_path, const std::string *text)
 {
     static char out[256 * 1024];
     std::string tail;
     bool is_tail = false;
     if (!text) {
-        FILE *fp = nullptr;
-        if (path && fopen_s(&fp, path, "rb") == 0 && fp) {
+        FILE *fp = ui_open(path, L"rb");
+        if (fp) {
             fseek(fp, 0, SEEK_END); long sz = ftell(fp);
             long take = sz < 1024 * 1024 ? sz : 1024 * 1024;
             if (take > 0) {
@@ -2632,14 +2685,14 @@ static std::string poc_prefab_view(const char *path, const char *meta_path, cons
     call.meta_path = meta_path;
     call.out = out;
     call.out_cap = (int)sizeof out;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     if (r <= 0 || !out[0]) return std::string();
     return std::string(out);
 }
 /* The backend's module check for a module prefab's text (SH_MODULE_PREFAB_CHECK):
  * its JSON, or empty when this backend or editor cannot answer. The text is the
  * whole file; the backend leaves its block out and reads its mod rows from it. */
-static std::string poc_module_prefab_check(const std::string &scene, const char *meta_path)
+static std::string ui_module_prefab_check(const std::string &scene, const char *meta_path)
 {
     static char out[16 * 1024];
     sh_module_prefab_call call;
@@ -2652,13 +2705,13 @@ static std::string poc_module_prefab_check(const std::string &scene, const char 
     call.meta_path = meta_path;   /* a module one of its mods provides is listed under Mods instead */
     call.out = out;
     call.out_cap = (int)sizeof out;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     if (r < 0 || !out[0]) return std::string();
     return std::string(out);
 }
 /* The mods a view records, with whether each is installed (SH_MODULE_PREFAB_MODS_STATUS):
  * its JSON, or empty when the view records none or this backend cannot answer. */
-static std::string poc_prefab_mods_status(const std::string &meta)
+static std::string ui_prefab_mods_status(const std::string &meta)
 {
     static char out[64 * 1024];
     if (meta.empty() || meta.find("\"mods\"") == std::string::npos) return std::string();
@@ -2670,11 +2723,11 @@ static std::string poc_prefab_mods_status(const std::string &meta)
     call.text_len = meta.size();
     call.out = out;
     call.out_cap = (int)sizeof out;
-    int r = poc_module_prefab_call(&call);
+    int r = ui_module_prefab_call(&call);
     if (r < 0 || !out[0]) return std::string();
     return std::string(out);
 }
-static void poc_send_prefab_detail(const std::string &name, const std::string &folder)
+static void ui_send_prefab_detail(const std::string &name, const std::string &folder)
 {
     if (!g_webview) return;
     int entityCount = 0;
@@ -2682,27 +2735,26 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     std::string metaBody, sceneBody, fileBody;
     std::wstring sig;
     char path[1024] = "", mp[1024] = "";
-    if (!name.empty() && poc_prefab_file_path(folder, name, path, (int)sizeof path) &&
-        GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
-        if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
+    if (!name.empty() && ui_prefab_file_path(folder, name, path, (int)sizeof path) && ui_exists(path)) {
+        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
         /* The scene is sent only for the selected prefab, without the product's block. */
-        bool whole = poc_read_prefab_scene(path, fileBody);
+        bool whole = ui_read_prefab_scene(path, fileBody);
         /* the view ships as an ESCAPED STRING (the page JSON.parses it with a try/catch), never
          * spliced raw -- a hand-edited/truncated sidecar must not be able to invalidate this whole
          * message (PostWebMessageAsJson silently drops a malformed payload). */
-        metaBody = poc_prefab_view(path, mp, whole ? &fileBody : nullptr);
+        metaBody = ui_prefab_view(path, mp, whole ? &fileBody : nullptr);
         if (whole) {
             sceneBody = fileBody;
             sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));
         }
         /* The file's ~type decides the kind, with or without a block (prefab_host.h). */
         std::string kind = sh_prefab_host::kind_of_type(whole ? sh_webview_json::top_level_type(sceneBody)
-                                                              : poc_file_top_type(path));
-        modules = kind.empty() ? poc_meta_kind_of(metaBody) == "modules" : kind == "modules";
-        sig = poc_prefab_signature(path);
+                                                              : ui_file_top_type(path));
+        modules = kind.empty() ? ui_meta_kind_of(metaBody) == "modules" : kind == "modules";
+        sig = ui_prefab_signature(path);
         ok = whole || modules;
-        entityCount = modules ? poc_meta_int(metaBody, "entityCount") : poc_count_prefab_entities(sceneBody);
-        if (entityCount < 0 && modules) entityCount = poc_count_prefab_entities(sceneBody);   /* no summary */
+        entityCount = modules ? ui_meta_int(metaBody, "entityCount") : ui_count_prefab_entities(sceneBody);
+        if (entityCount < 0 && modules) entityCount = ui_count_prefab_entities(sceneBody);   /* no summary */
         if (entityCount < 0) entityCount = 0;
     }
     std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += sh_webview_json::escape_wide(name.c_str());
@@ -2717,10 +2769,10 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
     if (modules) {
         /* an escaped string, parsed by the page under try/catch like the view */
-        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(poc_module_prefab_check(fileBody, mp).c_str());
+        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(ui_module_prefab_check(fileBody, mp).c_str());
         json += L"\"";
     }
-    json += L",\"modsStatus\":\""; json += sh_webview_json::escape_wide(poc_prefab_mods_status(metaBody).c_str());
+    json += L",\"modsStatus\":\""; json += sh_webview_json::escape_wide(ui_prefab_mods_status(metaBody).c_str());
     json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -2733,7 +2785,7 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
 static bool     g_budget_wanted = false;   /* the page has asked for the table */
 static unsigned g_budget_sent_gen = 0;     /* table generation last posted */
 
-static int poc_budget_call(sh_budget_call *call)
+static int ui_budget_call(sh_budget_call *call)
 {
     if (!SH_IFACE_HAS_SLOT(g_iface, budget)) return 0;
     __try { return g_iface->vtbl->budget(g_iface, call); }
@@ -2742,7 +2794,7 @@ static int poc_budget_call(sh_budget_call *call)
 
 /* Post {"kind":kind,"data":<backend JSON>} or {"kind":kind,"data":null}. The
  * backend writes the JSON itself (escaped names, integers), so it is spliced. */
-static void poc_post_budget(const wchar_t *kind, const std::string &body, const std::wstring &extra = std::wstring())
+static void ui_post_budget(const wchar_t *kind, const std::string &body, const std::wstring &extra = std::wstring())
 {
     std::wstring m = L"{\"kind\":\""; m += kind; m += L"\",\"data\":";
     if (body.empty()) m += L"null";
@@ -2757,43 +2809,43 @@ static void poc_post_budget(const wchar_t *kind, const std::string &body, const 
     }
     m += extra;
     m += L"}";
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
 }
 
 /* Copy one budget op's JSON. Returns the generation, or 0 when there is none. */
-static unsigned poc_budget_read(int op, std::string &out)
+static unsigned ui_budget_read(int op, std::string &out)
 {
     sh_budget_call call;
     out.clear();
     memset(&call, 0, sizeof call);
     call.op = op;
-    int r = poc_budget_call(&call);
+    int r = ui_budget_call(&call);
     if (r == -1 && call.needed > 0 && call.needed < 64 * 1024 * 1024) {
         std::vector<char> buf((size_t)call.needed + 1);
         call.out = buf.data(); call.out_cap = (int)buf.size();
-        r = poc_budget_call(&call);
+        r = ui_budget_call(&call);
         if (r == 1) out.assign(buf.data());
     }
     return r == 1 ? call.generation : 0;
 }
 
-static void poc_send_budget_table()
+static void ui_send_budget_table()
 {
     std::string body;
-    unsigned gen = poc_budget_read(SH_BUDGET_TABLE, body);
+    unsigned gen = ui_budget_read(SH_BUDGET_TABLE, body);
     g_budget_wanted = true;
-    if (!gen) { poc_post_budget(L"budgetTable", ""); return; }
+    if (!gen) { ui_post_budget(L"budgetTable", ""); return; }
     g_budget_sent_gen = gen;
-    poc_post_budget(L"budgetTable", body);
+    ui_post_budget(L"budgetTable", body);
 }
 
 /* The prefab held in the 3D view as the page's ",\"held\":{...}" member, or ",\"held\":null".
- * The editor budget already counts what is held (snaphak-re R-006: usage held and after Space
- * are identical for object and module prefabs), so the page must not add it a second time. */
-static std::wstring poc_held_json()
+ * The editor budget already counts what is held (usage held and after Space are identical for
+ * object and module prefabs), so the page must not add it a second time. */
+static std::wstring ui_held_json()
 {
     sh_prefab_watch watch;
-    poc_prefab_watch(&watch);
+    ui_prefab_watch(&watch);
     const std::string *name = nullptr, *folder = nullptr;
     const wchar_t *kind = L"";
     /* A held paste is this prefab only while it is the last one decided: Create New Timeline and
@@ -2812,37 +2864,37 @@ static std::wstring poc_held_json()
 
 static sh_prefab_host::usage_gate g_usage_gate;
 
-static void poc_send_budget_usage()
+static void ui_send_budget_usage()
 {
     std::string body;
-    poc_budget_read(SH_BUDGET_USAGE, body);
-    std::wstring held = poc_held_json();
+    ui_budget_read(SH_BUDGET_USAGE, body);
+    std::wstring held = ui_held_json();
     g_usage_wanted = true;
     g_usage_gate.changed(body, sh_webview_json::to_utf8(held));   /* what the page now has */
-    poc_post_budget(L"budgetUsage", body, held);
+    ui_post_budget(L"budgetUsage", body, held);
 }
 
 /* UI cadence, once the page has asked: post the map's usage again whenever it or the held prefab
  * changed (an edit, a paste picked up, Space or Esc), never an unchanged value on a timer. */
-static void poc_budget_usage_poll()
+static void ui_budget_usage_poll()
 {
     if (!g_usage_wanted) return;
     std::string body;
-    poc_budget_read(SH_BUDGET_USAGE, body);
-    std::wstring held = poc_held_json();
+    ui_budget_read(SH_BUDGET_USAGE, body);
+    std::wstring held = ui_held_json();
     if (!g_usage_gate.changed(body, sh_webview_json::to_utf8(held))) return;
-    poc_post_budget(L"budgetUsage", body, held);
+    ui_post_budget(L"budgetUsage", body, held);
 }
 
 /* UI cadence: re-send the table after a palette rebuild, only once asked. */
-static void poc_budget_poll()
+static void ui_budget_poll()
 {
     if (!g_budget_wanted) return;
     sh_budget_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_BUDGET_TABLE;
-    if (poc_budget_call(&call) == 0 && !call.generation) return;
-    if (call.generation && call.generation != g_budget_sent_gen) poc_send_budget_table();
+    if (ui_budget_call(&call) == 0 && !call.generation) return;
+    if (call.generation && call.generation != g_budget_sent_gen) ui_send_budget_table();
 }
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
@@ -2852,40 +2904,38 @@ static void poc_budget_poll()
  * rehashes every file and can take seconds, and the window must keep painting meanwhile. While it
  * runs, run_on_main is occupied, so other edits from this window are refused as when the game is
  * busy. The worker touches no page state; it hands its documents back through g_mods_done and the
- * think loop posts them (poc_mods_finish), the same handoff as the rawmap picker. Each job ends
+ * think loop posts them (ui_mods_finish), the same handoff as the rawmap picker. Each job ends
  * with a fresh document, so the list follows every action without being asked. */
-#define POC_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
-#define POC_MODS_MIGRATE_MS (15 * 60 * 1000)   /* how long a Migrate job follows the migration */
-#define POC_MODS_DOC_MAX    (64 * 1024 * 1024)
+#define UI_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
+#define UI_MODS_DOC_MAX    (64 * 1024 * 1024)
 
-struct PocModsJob {
+struct UiModsJob {
     int         action;    /* SH_MODS_ACT_*, or 0 for the document only */
     bool        pick;      /* ask for the folder first (install) */
     std::string arg;
-    int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled,
-                              -4 a migration still running when the job stopped following it */
+    int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled */
     int         list_rc;
     unsigned    list_gen;  /* the backend's generation when the document was built */
-    bool        pushed;    /* a document the page did not ask for (poc_mods_push_tick) */
+    bool        pushed;    /* a document the page did not ask for (ui_mods_push_tick) */
     std::string run_doc, list_doc;
 };
-static PocModsJob    g_mods_job;
+static UiModsJob    g_mods_job;
 static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
 /* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
- * is all the shipped page sends; ADD-V7b R4b), a change the window did not make
+ * is all the shipped page sends), a change the window did not make
  * (a console verb, `sh_mods map add` or `uninstall`, the undo clear an Uninstall owes) moves the
  * backend's generation past the one of the last document posted, and the think loop posts a fresh
  * one, as each of the page's own actions ends with one. FETCH's size query (any thread, no main-
- * thread call) reads the generation every POC_MODS_PUSH_MS. */
-#define POC_MODS_PUSH_MS 500
+ * thread call) reads the generation every UI_MODS_PUSH_MS. */
+#define UI_MODS_PUSH_MS 500
 static bool          g_mods_page_seen = false;
 static unsigned      g_mods_doc_gen = 0;
 static ULONGLONG     g_mods_push_next = 0;
 
-struct PocModsMain { sh_mods_call call; int rc; };
+struct UiModsMain { sh_mods_call call; int rc; };
 
-static int poc_mods_slot(sh_mods_call *call)
+static int ui_mods_slot(sh_mods_call *call)
 {
     if (!SH_IFACE_HAS_SLOT(g_iface, mods)) return 0;
     __try { return g_iface->vtbl->mods(g_iface, call); }
@@ -2893,39 +2943,39 @@ static int poc_mods_slot(sh_mods_call *call)
 }
 
 /* Runs on DOOM's main thread inside run_on_main. */
-static int poc_mods_main_call(void *ctx)
+static int ui_mods_main_call(void *ctx)
 {
-    PocModsMain *m = (PocModsMain *)ctx;
-    m->rc = poc_mods_slot(&m->call);
+    UiModsMain *m = (UiModsMain *)ctx;
+    m->rc = ui_mods_slot(&m->call);
     return m->rc;
 }
 
 /* run_on_main holds one call at a time and refuses another at once, so retry until the game has
  * started this one or the start budget is spent. Once started, run_on_main waits it out. */
-static bool poc_mods_on_main(PocModsMain *m)
+static bool ui_mods_on_main(UiModsMain *m)
 {
-    ULONGLONG until = GetTickCount64() + POC_MODS_START_MS;
+    ULONGLONG until = GetTickCount64() + UI_MODS_START_MS;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->run_on_main) return false;
     for (;;) {
         int r = 0;
-        if (g_iface->vtbl->run_on_main(g_iface, poc_mods_main_call, m, 1000, &r) == 1) return true;
+        if (g_iface->vtbl->run_on_main(g_iface, ui_mods_main_call, m, 1000, &r) == 1) return true;
         if (GetTickCount64() >= until) return false;
         Sleep(40);
     }
 }
 
 /* Copy the backend's current document (FETCH runs on any thread). */
-static bool poc_mods_fetch(std::string &out)
+static bool ui_mods_fetch(std::string &out)
 {
     sh_mods_call call;
     out.clear();
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_FETCH;
-    if (poc_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > POC_MODS_DOC_MAX) return false;
+    if (ui_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > UI_MODS_DOC_MAX) return false;
     std::vector<char> buf((size_t)call.needed + 1);
     call.out = buf.data();
     call.out_cap = (int)buf.size();
-    if (poc_mods_slot(&call) != 1) return false;
+    if (ui_mods_slot(&call) != 1) return false;
     out.assign(buf.data());
     return true;
 }
@@ -2933,7 +2983,7 @@ static bool poc_mods_fetch(std::string &out)
 /* The folder dialog for Install, on the worker thread (its own apartment). Several folders may be
  * picked; they are joined with newlines, which no path contains, and the backend takes each one as
  * a mod folder or as a folder of mods. */
-static bool poc_pick_mod_folder(std::wstring &out)
+static bool ui_pick_mod_folder(std::wstring &out)
 {
     IFileOpenDialog *dlg = nullptr;
     bool ok = false;
@@ -2985,70 +3035,51 @@ static bool poc_pick_mod_folder(std::wstring &out)
     return ok;
 }
 
-static bool poc_mods_read_only(int action);   /* fwd: below the action names */
+static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 
-static DWORD WINAPI poc_mods_thread(LPVOID)
+static DWORD WINAPI ui_mods_thread(LPVOID)
 {
-    PocModsJob &job = g_mods_job;
+    UiModsJob &job = g_mods_job;
     job.run_rc = 0;
     job.list_rc = 0;
     if (job.pick) {
         std::wstring picked;
         HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        bool ok = poc_pick_mod_folder(picked);
+        bool ok = ui_pick_mod_folder(picked);
         if (SUCCEEDED(init)) CoUninitialize();
         if (ok) job.arg = sh_webview_json::to_utf8(picked);
         else job.run_rc = -3;
     }
     if (job.action && job.run_rc != -3) {
-        PocModsMain m;
+        UiModsMain m;
         memset(&m, 0, sizeof m);
         m.call.op = SH_MODS_RUN;
         m.call.action = job.action;
         m.call.arg = job.arg.c_str();
-        if (!poc_mods_on_main(&m)) job.run_rc = -1;
-        else job.run_rc = (m.rc == 1 && poc_mods_fetch(job.run_doc)) ? 1 : 0;
-        /* Migrate starts the backend's migration worker; follow it here, off both the game's and
-         * this window's threads, so the list that ends the job shows what it built. WAIT runs on
-         * any thread and answers 0 after waiting out_cap ms while it runs; an older backend
-         * answers 0 to the unknown op at once, which ends the wait. */
-        if (job.action == SH_MODS_ACT_MIGRATE && job.run_rc == 1) {
-            ULONGLONG until = GetTickCount64() + POC_MODS_MIGRATE_MS;
-            for (;;) {
-                sh_mods_call wait;
-                memset(&wait, 0, sizeof wait);
-                wait.op = SH_MODS_WAIT;
-                wait.out_cap = 1000;
-                ULONGLONG asked = GetTickCount64();
-                int r = poc_mods_slot(&wait);
-                if (r == 1 || (r == 0 && GetTickCount64() - asked < 500)) break;
-                if (r != 0 || GetTickCount64() >= until) { job.run_rc = -4; break; }
-            }
-        }
+        if (!ui_mods_on_main(&m)) job.run_rc = -1;
+        else job.run_rc = (m.rc == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
     }
-    if (!poc_mods_read_only(job.action)) {
-        PocModsMain m;
+    if (!ui_mods_read_only(job.action)) {
+        UiModsMain m;
         memset(&m, 0, sizeof m);
         m.call.op = SH_MODS_LIST;
-        if (!poc_mods_on_main(&m)) job.list_rc = -1;
-        else job.list_rc = (m.rc == 1 && poc_mods_fetch(job.list_doc)) ? 1 : 0;
+        if (!ui_mods_on_main(&m)) job.list_rc = -1;
+        else job.list_rc = (m.rc == 1 && ui_mods_fetch(job.list_doc)) ? 1 : 0;
         job.list_gen = m.call.generation;
     }
     InterlockedExchange(&g_mods_done, 1);   /* last: publishes the job above */
     return 0;
 }
 
-static const wchar_t *poc_mods_action_name(int action)
+static const wchar_t *ui_mods_action_name(int action)
 {
     switch (action) {
     case SH_MODS_ACT_INSTALL:     return L"install";
-    case SH_MODS_ACT_VERIFY:      return L"verify";
     case SH_MODS_ACT_RESCAN:      return L"rescan";
     case SH_MODS_ACT_PALETTE:     return L"palette";
     case SH_MODS_ACT_PRUNE_LIST:  return L"pruneList";
     case SH_MODS_ACT_PRUNE_APPLY: return L"pruneApply";
     case SH_MODS_ACT_REMOVE:      return L"remove";
-    case SH_MODS_ACT_MIGRATE:     return L"migrate";
     case SH_MODS_ACT_REBUILD:     return L"rebuild";
     case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
@@ -3065,21 +3096,19 @@ static const wchar_t *poc_mods_action_name(int action)
 }
 
 /* The Files view's reads change nothing, so no fresh document follows them. */
-static bool poc_mods_read_only(int action)
+static bool ui_mods_read_only(int action)
 {
     return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT;
 }
 
-static int poc_mods_action_code(const std::wstring &name)
+static int ui_mods_action_code(const std::wstring &name)
 {
     if (name == L"install")    return SH_MODS_ACT_INSTALL;
-    if (name == L"verify")     return SH_MODS_ACT_VERIFY;
     if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
     if (name == L"palette")    return SH_MODS_ACT_PALETTE;
     if (name == L"pruneList")  return SH_MODS_ACT_PRUNE_LIST;
     if (name == L"pruneApply") return SH_MODS_ACT_PRUNE_APPLY;
     if (name == L"remove")     return SH_MODS_ACT_REMOVE;
-    if (name == L"migrate")    return SH_MODS_ACT_MIGRATE;
     if (name == L"rebuild")    return SH_MODS_ACT_REBUILD;
     if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
     if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
@@ -3095,7 +3124,7 @@ static int poc_mods_action_code(const std::wstring &name)
 }
 
 /* Splice backend JSON (UTF-8) into an envelope. */
-static void poc_mods_post(const std::wstring &head, const std::string &body, const wchar_t *tail)
+static void ui_mods_post(const std::wstring &head, const std::string &body, const wchar_t *tail)
 {
     std::wstring m = head;
     int wl = body.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body.c_str(), (int)body.size(), nullptr, 0);
@@ -3106,10 +3135,10 @@ static void poc_mods_post(const std::wstring &head, const std::string &body, con
         m += wb;
     }
     m += tail;
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
 }
 
-static void poc_mods_post_result(const wchar_t *action, bool ok, const wchar_t *message, const wchar_t *data)
+static void ui_mods_post_result(const wchar_t *action, bool ok, const wchar_t *message, const wchar_t *data)
 {
     std::wstring m = L"{\"kind\":\"modsActionResult\",\"action\":\"";
     m += action;
@@ -3120,21 +3149,16 @@ static void poc_mods_post_result(const wchar_t *action, bool ok, const wchar_t *
     m += L"\",\"data\":";
     m += data ? data : L"null";
     m += L"}";
-    poc_post_json(m.c_str());
+    ui_post_json(m.c_str());
 }
 
 /* Start a job unless one is running. Returns false (and says so) when busy. */
-static bool poc_mods_begin(int action, bool pick, const std::string &arg)
+static bool ui_mods_begin(int action, bool pick, const std::string &arg)
 {
-    const wchar_t *name = poc_mods_action_name(action);
-    if (!SH_IFACE_HAS_SLOT(g_iface, mods)) {
-        if (action) poc_mods_post_result(name, false, L"This build's backend has no Mods tab.", nullptr);
-        else poc_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"This build's backend has no Mods tab.\"}");
-        return false;
-    }
+    const wchar_t *name = ui_mods_action_name(action);
     if (InterlockedCompareExchange(&g_mods_busy, 1, 0) != 0) {
         /* A running job always ends with a fresh document, so a list request is already answered. */
-        if (action) poc_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
+        if (action) ui_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
         return false;
     }
     g_mods_job.action = action;
@@ -3144,52 +3168,50 @@ static bool poc_mods_begin(int action, bool pick, const std::string &arg)
     g_mods_job.list_gen = 0;
     g_mods_job.run_doc.clear();
     g_mods_job.list_doc.clear();
-    HANDLE h = CreateThread(nullptr, 0, poc_mods_thread, nullptr, 0, nullptr);
+    HANDLE h = CreateThread(nullptr, 0, ui_mods_thread, nullptr, 0, nullptr);
     if (!h) {
         InterlockedExchange(&g_mods_busy, 0);
-        if (action) poc_mods_post_result(name, false, L"Could not start the mods action.", nullptr);
-        else poc_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"Could not read the mods list.\"}");
+        if (action) ui_mods_post_result(name, false, L"Could not start the mods action.", nullptr);
+        else ui_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"Could not read the mods list.\"}");
         return false;
     }
     CloseHandle(h);
     if (action) {
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls started", name);
-        poc_log(l);
+        ui_log(l);
     }
     return true;
 }
 
 /* A finished job, on the UI thread. */
-static void poc_mods_finish()
+static void ui_mods_finish()
 {
-    PocModsJob &job = g_mods_job;
-    const wchar_t *name = poc_mods_action_name(job.action);
+    UiModsJob &job = g_mods_job;
+    const wchar_t *name = ui_mods_action_name(job.action);
     if (job.action) {
         if (job.run_rc == -3)
-            poc_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
+            ui_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
         else if (job.run_rc == 1)
-            poc_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
+            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
         else if (job.run_rc == -1)
-            poc_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
-        else if (job.run_rc == -4)
-            poc_mods_post_result(name, false, L"The migration is still running. Open the Mods tab again when it finishes.", nullptr);
+            ui_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
         else
-            poc_mods_post_result(name, false, L"The backend refused the request.", nullptr);
+            ui_mods_post_result(name, false, L"The mods store refused this action. Refresh the tab and try again; if it keeps failing, use Send feedback.", nullptr);
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
-        poc_log(l);
+        ui_log(l);
     }
     if (job.list_rc == 1) {
         g_mods_doc_gen = job.list_gen;
-        poc_mods_post(job.pushed ? L"{\"kind\":\"mods\",\"pushed\":true,\"data\":" : L"{\"kind\":\"mods\",\"data\":",
+        ui_mods_post(job.pushed ? L"{\"kind\":\"mods\",\"pushed\":true,\"data\":" : L"{\"kind\":\"mods\",\"data\":",
                       job.list_doc, L"}");
     } else if (job.pushed) {
         /* A pushed refresh the game did not answer: the page keeps its document; asked again later. */
         g_mods_push_next = GetTickCount64() + 2000;
-    } else if (poc_mods_read_only(job.action)) {
+    } else if (ui_mods_read_only(job.action)) {
         /* A Files read: the page keeps its document. */
-    } else poc_post_json(job.list_rc == -1
+    } else ui_post_json(job.list_rc == -1
         ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
         : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
     job.run_doc.clear();
@@ -3203,71 +3225,67 @@ static void poc_mods_finish()
  * the think loop refreshes the Prefabs list 300 ms after the last change. A folder that is not
  * there yet is opened again every few seconds. The mods folder is not watched: the store is
  * scanned at boot, on Refresh, and after an install, a download or New mod. */
-#define POC_WATCH_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
+#define UI_WATCH_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
                           FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE)
-#define POC_WATCH_REOPEN_MS 5000
+#define UI_WATCH_REOPEN_MS 5000
 
-struct PocWatch {
+struct UiWatch {
     HANDLE       dir = INVALID_HANDLE_VALUE;
     OVERLAPPED   ov;
     DWORD        buf[4096];     /* DWORD-aligned, as ReadDirectoryChangesW requires */
     ULONGLONG    retry_at = 0;
 };
-static PocWatch          g_watch;
+static UiWatch          g_watch;
 static CRITICAL_SECTION  g_watch_lock;
 static sh_fw_debounce    g_fw_prefabs;
 static volatile LONG     g_watch_started = 0;
 
-static bool poc_watch_dir(std::wstring &out)
+static bool ui_watch_dir(std::wstring &out)
 {
     char path[MAX_PATH * 4];
     out.clear();
-    if (!poc_prefab_dir("", path, (int)sizeof path)) return false;
-    int wl = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (wl <= 1) return false;
-    out.assign((size_t)wl, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, &out[0], wl);
-    out.resize(wcslen(out.c_str()));
+    if (!ui_prefab_dir("", path, (int)sizeof path)) return false;
+    out = ui_widen(path);
     while (!out.empty() && (out.back() == L'\\' || out.back() == L'/')) out.pop_back();
     return !out.empty();
 }
 
-static bool poc_watch_arm(PocWatch &w)
+static bool ui_watch_arm(UiWatch &w)
 {
     ResetEvent(w.ov.hEvent);
-    return ReadDirectoryChangesW(w.dir, w.buf, (DWORD)sizeof w.buf, TRUE, POC_WATCH_FILTER, nullptr, &w.ov, nullptr) != 0;
+    return ReadDirectoryChangesW(w.dir, w.buf, (DWORD)sizeof w.buf, TRUE, UI_WATCH_FILTER, nullptr, &w.ov, nullptr) != 0;
 }
 
-static void poc_watch_close(PocWatch &w)
+static void ui_watch_close(UiWatch &w)
 {
     if (w.dir != INVALID_HANDLE_VALUE) { CancelIo(w.dir); CloseHandle(w.dir); }
     w.dir = INVALID_HANDLE_VALUE;
-    w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS;
+    w.retry_at = GetTickCount64() + UI_WATCH_REOPEN_MS;
 }
 
-static void poc_watch_open(PocWatch &w)
+static void ui_watch_open(UiWatch &w)
 {
     std::wstring dir;
     if (w.dir != INVALID_HANDLE_VALUE || GetTickCount64() < w.retry_at) return;
-    if (!poc_watch_dir(dir)) { w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS; return; }
+    if (!ui_watch_dir(dir)) { w.retry_at = GetTickCount64() + UI_WATCH_REOPEN_MS; return; }
     w.dir = CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
-    if (w.dir == INVALID_HANDLE_VALUE) { w.retry_at = GetTickCount64() + POC_WATCH_REOPEN_MS; return; }
-    if (!poc_watch_arm(w)) { poc_watch_close(w); return; }
-    poc_log("watch: following the prefabs folder");
+    if (w.dir == INVALID_HANDLE_VALUE) { w.retry_at = GetTickCount64() + UI_WATCH_REOPEN_MS; return; }
+    if (!ui_watch_arm(w)) { ui_watch_close(w); return; }
+    ui_log("watch: following the prefabs folder");
 }
 
-static DWORD WINAPI poc_watch_thread(LPVOID)
+static DWORD WINAPI ui_watch_thread(LPVOID)
 {
-    PocWatch &w = g_watch;
+    UiWatch &w = g_watch;
     for (;;) {
-        poc_watch_open(w);
-        if (w.dir == INVALID_HANDLE_VALUE) { Sleep(POC_WATCH_REOPEN_MS); continue; }
-        DWORD r = WaitForSingleObject(w.ov.hEvent, POC_WATCH_REOPEN_MS);
+        ui_watch_open(w);
+        if (w.dir == INVALID_HANDLE_VALUE) { Sleep(UI_WATCH_REOPEN_MS); continue; }
+        DWORD r = WaitForSingleObject(w.ov.hEvent, UI_WATCH_REOPEN_MS);
         if (r == WAIT_TIMEOUT) continue;
         if (r != WAIT_OBJECT_0) { Sleep(1000); continue; }
         DWORD bytes = 0;
-        if (!GetOverlappedResult(w.dir, &w.ov, &bytes, FALSE)) { poc_watch_close(w); continue; }
+        if (!GetOverlappedResult(w.dir, &w.ov, &bytes, FALSE)) { ui_watch_close(w); continue; }
         /* bytes 0: the buffer overflowed; something changed all the same. */
         {
             ULONGLONG now = GetTickCount64();
@@ -3275,48 +3293,48 @@ static DWORD WINAPI poc_watch_thread(LPVOID)
             sh_fw_note(&g_fw_prefabs, now);
             LeaveCriticalSection(&g_watch_lock);
         }
-        if (!poc_watch_arm(w)) poc_watch_close(w);
+        if (!ui_watch_arm(w)) ui_watch_close(w);
     }
 }
 
-static void poc_watch_start()
+static void ui_watch_start()
 {
     if (InterlockedCompareExchange(&g_watch_started, 1, 0) != 0) return;
     InitializeCriticalSection(&g_watch_lock);
     sh_fw_init(&g_fw_prefabs, SH_FW_PREFABS_QUIET_MS);
     memset(&g_watch.ov, 0, sizeof g_watch.ov);
     g_watch.ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    HANDLE h = CreateThread(nullptr, 0, poc_watch_thread, nullptr, 0, nullptr);
+    HANDLE h = CreateThread(nullptr, 0, ui_watch_thread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
-    else poc_log("watch: the prefabs folder watcher could not start; the list refreshes only when asked");
+    else ui_log("watch: the prefabs folder watcher could not start; the list refreshes only when asked");
 }
 
 /* The pushed refresh (g_mods_doc_gen above), on the UI thread: a document only, as the page's
  * Refresh asks for, while no job of the window runs. */
-static void poc_mods_push_tick()
+static void ui_mods_push_tick()
 {
     ULONGLONG now = GetTickCount64();
     if (!g_mods_page_seen || !g_mods_doc_gen || now < g_mods_push_next) return;
-    g_mods_push_next = now + POC_MODS_PUSH_MS;
+    g_mods_push_next = now + UI_MODS_PUSH_MS;
     if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0) return;
     sh_mods_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_FETCH;   /* out NULL: the size query, which sets the generation */
-    if (poc_mods_slot(&call) == 0 && !call.generation) return;
+    if (ui_mods_slot(&call) == 0 && !call.generation) return;
     if (!call.generation || call.generation == g_mods_doc_gen) return;
-    if (!poc_mods_begin(0, false, std::string())) return;
+    if (!ui_mods_begin(0, false, std::string())) return;
     g_mods_job.pushed = true;   /* the worker reads only action, pick and arg; finish reads this */
     char l[160];
     _snprintf_s(l, sizeof l, _TRUNCATE, "mods: the backend changed outside the window (generation %u, page has %u); "
                 "pushing a fresh document", call.generation, g_mods_doc_gen);
-    poc_log(l);
+    ui_log(l);
 }
 
 /* The think loop's part, on the UI thread. */
-static void poc_watch_tick()
+static void ui_watch_tick()
 {
     if (!g_watch_started) {
-        if (g_iface && g_webview_ready) poc_watch_start();
+        if (g_iface && g_webview_ready) ui_watch_start();
         return;
     }
     ULONGLONG now = GetTickCount64();
@@ -3328,13 +3346,13 @@ static void poc_watch_tick()
     if (prefabs) {
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "watch: the prefabs folder changed (%u change(s)); list refreshed", covered);
-        poc_log(l);
-        poc_send_prefabs();
+        ui_log(l);
+        ui_send_prefabs();
     }
 }
 
 /* A mod folder's own name under mods\: no separators, no drive, not "." or "..". */
-static bool poc_mods_plain_folder(const std::wstring &name)
+static bool ui_mods_plain_folder(const std::wstring &name)
 {
     if (name.empty() || name.size() > 200 || name == L"." || name == L"..") return false;
     for (wchar_t c : name)
@@ -3345,13 +3363,13 @@ static bool poc_mods_plain_folder(const std::wstring &name)
 
 /* A mod folder's path under mods\: its organizing folders and its own folder joined with '\', each
  * part a plain folder name (the page sends the row's group and folder). */
-static bool poc_mods_relative_folder(const std::wstring &path)
+static bool ui_mods_relative_folder(const std::wstring &path)
 {
     if (path.size() > 400) return false;
     size_t at = 0;
     for (;;) {
         size_t cut = path.find(L'\\', at);
-        if (!poc_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
+        if (!ui_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
         if (cut == std::wstring::npos) return true;
         at = cut + 1;
     }
@@ -3359,20 +3377,20 @@ static bool poc_mods_relative_folder(const std::wstring &path)
 
 /* Open the store folder in Explorer, creating it when it is not there yet; with `folder`, that mod
  * folder inside it instead (it must exist), named by its path under mods\. */
-static void poc_mods_open_folder(const std::wstring &folder)
+static void ui_mods_open_folder(const std::wstring &folder)
 {
     sh_mods_call call;
     char root[MAX_PATH * 4];
     bool ok = false;
-    if (!folder.empty() && !poc_mods_relative_folder(folder)) {
-        poc_mods_post_result(L"openFolder", false, L"That folder is not a mod folder.", nullptr);
+    if (!folder.empty() && !ui_mods_relative_folder(folder)) {
+        ui_mods_post_result(L"openFolder", false, L"That folder is not a mod folder.", nullptr);
         return;
     }
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_ROOT;
     call.out = root;
     call.out_cap = (int)sizeof root;
-    if (poc_mods_slot(&call) == 1) {
+    if (ui_mods_slot(&call) == 1) {
         int wl = MultiByteToWideChar(CP_UTF8, 0, root, -1, nullptr, 0);
         if (wl > 0) {
             std::wstring w((size_t)wl, L'\0');
@@ -3384,7 +3402,7 @@ static void poc_mods_open_folder(const std::wstring &folder)
                 w += folder;
                 DWORD at = GetFileAttributesW(w.c_str());
                 if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) {
-                    poc_mods_post_result(L"openFolder", false, L"That mod folder is no longer there.", nullptr);
+                    ui_mods_post_result(L"openFolder", false, L"That mod folder is no longer there.", nullptr);
                     return;
                 }
             }
@@ -3395,12 +3413,12 @@ static void poc_mods_open_folder(const std::wstring &folder)
             }
         }
     }
-    poc_mods_post_result(L"openFolder", ok, ok ? L"" : L"The mods folder could not be opened.", nullptr);
+    ui_mods_post_result(L"openFolder", ok, ok ? L"" : L"The mods folder could not be opened.", nullptr);
 }
 
 /* Extract a view's flat tags and re-escape each value. Never splice view
  * bytes into an outgoing JSON envelope. */
-static bool poc_view_tags(const std::string &body, std::vector<std::string> &tags)
+static bool ui_view_tags(const std::string &body, std::vector<std::string> &tags)
 {
     size_t k = body.find("\"tags\"");
     if (k == std::string::npos) return false;
@@ -3421,32 +3439,32 @@ static bool poc_view_tags(const std::string &body, std::vector<std::string> &tag
 /* Enumerate root prefabs and one level of folders. Each prefab's view (its block, read
  * from the end of its file, else its sidecar) gives the list its tags, kinds and mods, so
  * filtering needs no per-prefab reads from the page. The list never sends a scene. */
-static void poc_send_prefabs()
+static void ui_send_prefabs()
 {
     if (!g_webview) return;
     std::vector<std::string> rootNames;
     std::vector<std::pair<std::string, std::vector<std::string>>> folders;
     char rootDir[1024];
-    if (poc_prefab_dir("", rootDir, (int)sizeof rootDir)) {
-        poc_list_json_dir(rootDir, rootNames);
+    if (ui_prefab_dir("", rootDir, (int)sizeof rootDir)) {
+        ui_list_json_dir(rootDir, rootNames);
 
         std::vector<std::string> subdirs;
-        std::string pattern = std::string(rootDir) + "*";
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+        std::wstring pattern = ui_widen(rootDir) + L"*";
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                std::string dn = fd.cFileName;
+                std::string dn = sh_webview_json::to_utf8(fd.cFileName);
                 if (dn == "." || dn == "..") continue;
                 subdirs.push_back(dn);
-            } while (FindNextFileA(h, &fd));
+            } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
         std::sort(subdirs.begin(), subdirs.end());
         for (size_t i = 0; i < subdirs.size(); i++) {
             std::vector<std::string> items;
-            poc_list_json_dir(std::string(rootDir) + subdirs[i] + "\\", items);
+            ui_list_json_dir(std::string(rootDir) + subdirs[i] + "\\", items);
             folders.push_back(std::make_pair(subdirs[i], items));
         }
     }
@@ -3454,9 +3472,9 @@ static void poc_send_prefabs()
     std::vector<std::pair<std::string, std::string>> views;
     auto readView = [&](const std::string &folder, const std::string &name) {
         char path[1024], mp[1024];
-        if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return;
-        if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
-        std::string view = poc_prefab_view(path, mp, nullptr);
+        if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return;
+        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
+        std::string view = ui_prefab_view(path, mp, nullptr);
         if (view.empty()) return;
         views.push_back(std::make_pair(folder.empty() ? name : (folder + "/" + name), view));
     };
@@ -3484,7 +3502,7 @@ static void poc_send_prefabs()
     bool firstMeta = true;
     for (size_t v = 0; v < views.size(); v++) {
         std::vector<std::string> tags;
-        if (!poc_view_tags(views[v].second, tags) || tags.empty()) continue;
+        if (!ui_view_tags(views[v].second, tags) || tags.empty()) continue;
         if (!firstMeta) json += L","; firstMeta = false;
         json += L"\""; json += sh_webview_json::escape_wide(views[v].first.c_str()); json += L"\":[";
         for (size_t t = 0; t < tags.size(); t++) {
@@ -3499,12 +3517,12 @@ static void poc_send_prefabs()
     bool firstKind = true;
     auto kindOf = [&](const std::string &folder, const std::string &name) {
         char path[1024];
-        if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return;
+        if (!ui_prefab_file_path(folder, name, path, (int)sizeof path)) return;
         std::string key = folder.empty() ? name : (folder + "/" + name);
-        std::string kind = sh_prefab_host::kind_of_type(poc_file_top_type(path));
+        std::string kind = sh_prefab_host::kind_of_type(ui_file_top_type(path));
         if (kind.empty())
             for (size_t v = 0; v < views.size(); v++)
-                if (views[v].first == key && poc_meta_kind_of(views[v].second) == "modules") kind = "modules";
+                if (views[v].first == key && ui_meta_kind_of(views[v].second) == "modules") kind = "modules";
         if (kind != "modules") return;
         if (!firstKind) json += L","; firstKind = false;
         json += L"\""; json += sh_webview_json::escape_wide(key.c_str()); json += L"\":\"modules\"";
@@ -3516,7 +3534,7 @@ static void poc_send_prefabs()
     json += L"},\"mods\":{";
     bool firstMods = true;
     for (size_t v = 0; v < views.size(); v++) {
-        std::string status = poc_prefab_mods_status(views[v].second);
+        std::string status = ui_prefab_mods_status(views[v].second);
         if (status.empty()) continue;
         if (!firstMods) json += L","; firstMods = false;
         json += L"\""; json += sh_webview_json::escape_wide(views[v].first.c_str()); json += L"\":\"";
@@ -3524,7 +3542,7 @@ static void poc_send_prefabs()
     }
     json += L"}}";
     g_webview->PostWebMessageAsJson(json.c_str());
-    poc_post_editor_mode(true);
+    ui_post_editor_mode(true);
 }
 
 /* Write a prefab's description and tags into its file's snapmapPlus block (the backend
@@ -3532,12 +3550,12 @@ static void poc_send_prefabs()
  * sidecar is left as it was). Runs directly in the message callback like selectPrefab --
  * file I/O only, no engine touch. Posts savePrefabMetaResult, then a fresh prefabs list
  * (the tag map feeds the list filter). */
-static void poc_apply_save_prefab_meta(const std::string &name, const std::string &folder, const std::string &body)
+static void ui_apply_save_prefab_meta(const std::string &name, const std::string &folder, const std::string &body)
 {
     int result = -1;
     char path[1024], mp[1024];
-    if (!name.empty() && poc_prefab_file_path(folder, name, path, (int)sizeof path)) {
-        if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
+    if (!name.empty() && ui_prefab_file_path(folder, name, path, (int)sizeof path)) {
+        if (!ui_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
         sh_module_prefab_call call;
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_META_WRITE;
@@ -3545,14 +3563,14 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
         call.text_len = body.size();
         call.path = path;
         call.meta_path = mp;
-        int w = poc_module_prefab_call(&call);
+        int w = ui_module_prefab_call(&call);
         result = w == 1 ? 1 : -1;   /* 0: this backend cannot write details */
     }
     if (!g_webview) return;
     std::wstring m = L"{\"kind\":\"savePrefabMetaResult\",\"result\":"; m += std::to_wstring(result);
     m += L",\"name\":\""; m += sh_webview_json::escape_wide(name.c_str()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
-    if (result == 1) poc_send_prefabs();
+    if (result == 1) ui_send_prefabs();
 }
 
 /* Feedback submission. */
@@ -3619,7 +3637,7 @@ static DWORD WINAPI report_thread(LPVOID)
     if (req) WinHttpCloseHandle(req);
     if (con) WinHttpCloseHandle(con);
     if (ses) WinHttpCloseHandle(ses);
-    poc_logf(ok ? "report: sent ok (http %lu)" : "report: send FAILED (http %lu)", (unsigned long)status);
+    ui_logf(ok ? "report: sent ok (http %lu)" : "report: send FAILED (http %lu)", (unsigned long)status);
     g_report_ok = ok; g_report_number = number;
     strcpy_s(g_report_mode, sizeof g_report_mode, mode[0] ? mode : "created");
     g_report_done = true;   /* the think loop posts reportResult to the page */
@@ -3632,7 +3650,7 @@ static DWORD WINAPI report_thread(LPVOID)
  * observed during this session. These kinds describe handling, not proof of survival.
  * Reports share the feedback relay and may attach scrubbed log tails. Dismissal
  * or successful submission clears pending records; full logs and dumps stay local. */
-static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (poc_log's convention) */
+static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (ui_log's convention) */
 static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORD_READ_CAP  16384                      /* a record is ~2 KB; cap the read anyway */
 #define CRASH_LOG_TAIL_KEEP    (15 * 1024)                /* per-log tail budget (3 logs ~= 45 KB) */
@@ -3710,21 +3728,25 @@ static void crash_clear_pending()
 }
 
 /* Read bounded log tails, then scrub account, profile-folder, and machine names
- * before attachment. This targets those identifiers, not arbitrary personal data. */
+ * before attachment, in every encoding a log can carry them in (report_scrub.h).
+ * This targets those identifiers, not arbitrary personal data. */
 static std::string crash_collect_logs()
 {
     static const char *files[] = { "shield_faults.log", "sh_backend.log", "snapmap-plus-ui.log" };
-    char user[64] = "", comp[64] = "", prof[MAX_PATH] = "";
-    const char *profleaf = "";
-    DWORD un = sizeof user, cn = sizeof comp;
-    GetUserNameA(user, &un);
-    GetComputerNameA(comp, &cn);
-    if (GetEnvironmentVariableA("USERPROFILE", prof, MAX_PATH)) {
-        const char *s = strrchr(prof, '\\');
-        if (s) profleaf = s + 1;
+    static rs_forms names;
+    memset(&names, 0, sizeof names);
+    {
+        wchar_t user[UNLEN + 1] = L"", comp[MAX_COMPUTERNAME_LENGTH + 1] = L"", prof[MAX_PATH] = L"", shortp[MAX_PATH] = L"";
+        DWORD un = UNLEN + 1, cn = MAX_COMPUTERNAME_LENGTH + 1;
+        if (GetUserNameW(user, &un)) rs_add_name(&names, user, "<user>");
+        if (GetEnvironmentVariableW(L"USERPROFILE", prof, MAX_PATH)) {
+            rs_add_path_leaf(&names, prof, "<user>");
+            if (GetShortPathNameW(prof, shortp, MAX_PATH)) rs_add_path_leaf(&names, shortp, "<user>");
+        }
+        if (GetComputerNameW(comp, &cn)) rs_add_name(&names, comp, "<machine>");
     }
     std::string out;
-    std::vector<char> raw(CRASH_LOG_TAIL_KEEP + 4096), scrub(2 * (CRASH_LOG_TAIL_KEEP + 4096));
+    std::vector<char> raw(CRASH_LOG_TAIL_KEEP + 4096), scrub(4 * (CRASH_LOG_TAIL_KEEP + 4096));
     for (const char *fn : files) {
         std::string path = std::string("snapmap-plus\\logs\\") + fn;
         FILE *f = nullptr;
@@ -3737,16 +3759,7 @@ static std::string crash_collect_logs()
         fclose(f);
         if (got == 0) continue;
         size_t off = rs_tail_offset(raw.data(), got, CRASH_LOG_TAIL_KEEP);
-        std::string chunk(raw.data() + off, got - off);
-        /* scrub passes: account name, profile-folder leaf (when different), machine name. */
-        rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), user, "<user>");
-        chunk = scrub.data();
-        if (profleaf[0] && _stricmp(profleaf, user) != 0) {
-            rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), profleaf, "<user>");
-            chunk = scrub.data();
-        }
-        rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), comp, "<machine>");
-        chunk = scrub.data();
+        std::string chunk(scrub.data(), rs_scrub_forms(scrub.data(), scrub.size(), raw.data() + off, got - off, &names));
         out += "==== ";
         out += fn;
         out += (start > 0) ? " (tail) ====\n" : " ====\n";
@@ -3758,14 +3771,19 @@ static std::string crash_collect_logs()
 }
 
 /* Native window and WebView2 lifecycle. */
-static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK UiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE:
         if (g_controller) { RECT rc; GetClientRect(hwnd, &rc); g_controller->put_Bounds(rc); }
-        poc_post_window_state(hwnd);
+        ui_post_window_state(hwnd);
         return 0;
-    case WM_CLOSE: return 0;   /* inert: don't let the user close the UI while in the editor (would need a map reload) */
+    case WM_CLOSE: {
+        /* The window lives with the editor; Alt+F4 says so once instead of doing nothing. */
+        static bool told = false;
+        if (!told && g_webview_ready) { told = true; ui_post_json(L"{\"kind\":\"closeRefused\"}"); }
+        return 0;
+    }
     case WM_NCCALCSIZE:
         /* frameless: consume the non-client area so the client (WebView2) fills the window and the native
          * title bar is gone. WS_THICKFRAME stays so Aero Snap + maximize work; the default maximize sizing
@@ -3785,10 +3803,10 @@ static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     return DefWindowProcW(hwnd, msg, wp, lp);   /* MUST be W: ANSI DefWindowProcA truncates the wide caption to "S" */
 }
-static void poc_create_window()
+static void ui_create_window()
 {
     WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof(wc); wc.lpfnWndProc = PocWndProc; wc.hInstance = GetModuleHandleW(nullptr);
+    wc.cbSize = sizeof(wc); wc.lpfnWndProc = UiWndProc; wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.lpszClassName = L"SnapmapPlusStudioWebView";
     wc.style = CS_NOCLOSE;   /* remove the native close (X) button -- can't close the UI from the editor */
     RegisterClassExW(&wc);
@@ -3800,20 +3818,20 @@ static void poc_create_window()
     if (g_hwnd) {
         MARGINS shadow = {1, 1, 1, 1};
         HRESULT hr = DwmExtendFrameIntoClientArea(g_hwnd, &shadow);
-        if (FAILED(hr)) poc_logf("DwmExtendFrameIntoClientArea failed hr=0x%08lx", (unsigned long)hr);
+        if (FAILED(hr)) ui_logf("DwmExtendFrameIntoClientArea failed hr=0x%08lx", (unsigned long)hr);
     }
     /* Recalculate before showing so the native caption does not linger until resize. */
     if (g_hwnd)
         SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    poc_logf("window created (hwnd=%lu)", (unsigned long)(uintptr_t)g_hwnd);
+    ui_logf("window created (hwnd=%lu)", (unsigned long)(uintptr_t)g_hwnd);
 }
 static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args)
 {
     LPWSTR jp = nullptr;
     if (SUCCEEDED(args->get_WebMessageAsJson(&jp)) && jp) {
         sh_config_message config_message = sh_extract_config_message(
-            jp, POC_CONFIG_KEY_CAP, POC_CONFIG_VALUE_CAP);
+            jp, UI_CONFIG_KEY_CAP, UI_CONFIG_VALUE_CAP);
         if (config_message.kind != SH_CONFIG_MESSAGE_OTHER) {
             CoTaskMemFree(jp);
             std::string key, value;
@@ -3823,18 +3841,18 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (config_message.kind == SH_CONFIG_MESSAGE_SET)
                     value = sh_webview_json::to_utf8(config_message.value_json);
                 fields_valid =
-                    !key.empty() && key.size() <= POC_CONFIG_KEY_CAP &&
+                    !key.empty() && key.size() <= UI_CONFIG_KEY_CAP &&
                     key.find('\0') == std::string::npos;
                 if (config_message.kind == SH_CONFIG_MESSAGE_SET)
                     fields_valid =
                         fields_valid &&
-                        value.size() <= POC_CONFIG_VALUE_CAP &&
+                        value.size() <= UI_CONFIG_VALUE_CAP &&
                         value.find('\0') == std::string::npos;
             }
 
             if (config_message.kind == SH_CONFIG_MESSAGE_GET) {
                 if (!fields_valid) key.clear();
-                poc_post_config_value(key);
+                ui_post_config_value(key);
             } else {
                 int result = SH_CONFIG_SET_REJECTED;
                 if (fields_valid && g_iface && g_iface->vtbl &&
@@ -3843,17 +3861,16 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                         g_iface, key.c_str(), value.c_str());
                 }
                 if (!fields_valid) key.clear();
-                poc_post_config_set_result(key, result);
+                ui_post_config_set_result(key, result);
             }
             return S_OK;
         }
 
         std::wstring json(jp); CoTaskMemFree(jp);
+        if (g_pair_mismatch) return S_OK;   /* the window only shows the reinstall notice */
         std::wstring cmd;
         if (sh_webview_json::get_string(json, L"cmd", cmd)) {
-            if (cmd == L"refresh") {
-                poc_send_list("manual-refresh");
-            } else if (cmd == L"perfList") {
+            if (cmd == L"perfList") {
                 int seq = 0, entities = 0, matched = 0, mounted = 0;
                 double render_ms = 0.0, handler_ms = 0.0;
                 if (sh_webview_json::get_int(json, L"seq", &seq) &&
@@ -3862,7 +3879,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     sh_webview_json::get_int(json, L"mounted", &mounted) &&
                     sh_webview_json::get_double(json, L"renderMs", &render_ms) &&
                     sh_webview_json::get_double(json, L"handlerMs", &handler_ms) &&
-                    seq >= 0 && entities >= 0 && entities <= POC_MAX_ENTS &&
+                    seq >= 0 && entities >= 0 && entities <= UI_MAX_ENTS &&
                     matched >= 0 && matched <= entities && mounted >= 0 && mounted <= matched &&
                     std::isfinite(render_ms) && std::isfinite(handler_ms) &&
                     render_ms >= 0.0 && render_ms <= 600000.0 &&
@@ -3871,20 +3888,20 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     _snprintf_s(l, sizeof l, _TRUNCATE,
                                 "perf ui-list: seq=%d entities=%d matched=%d mounted=%d render_ms=%.3f handler_ms=%.3f",
                                 seq, entities, matched, mounted, render_ms, handler_ms);
-                    poc_log(l);
+                    ui_log(l);
                 }
             } else if (cmd == L"listPrefabs") {
-                poc_send_prefabs();
+                ui_send_prefabs();
             } else if (cmd == L"selectPrefab") {
                 std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
-                poc_send_prefab_detail(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo));
+                ui_send_prefab_detail(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo));
             } else if (cmd == L"budgetTable") {
-                poc_send_budget_table();
+                ui_send_budget_table();
             } else if (cmd == L"budgetUsage") {
-                poc_send_budget_usage();
+                ui_send_budget_usage();
             } else if (cmd == L"modsList") {
                 g_mods_page_seen = true;
-                poc_mods_begin(0, false, std::string());
+                ui_mods_begin(0, false, std::string());
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its folder here, in the native picker: the page never
@@ -3892,12 +3909,12 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring act, arg;
                 sh_webview_json::get_string(json, L"action", act);
                 sh_webview_json::get_string(json, L"arg", arg);
-                if (act == L"openFolder") poc_mods_open_folder(arg);
+                if (act == L"openFolder") ui_mods_open_folder(arg);
                 else {
-                    int code = poc_mods_action_code(act);
-                    if (!code) poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);
-                    else if (code == SH_MODS_ACT_INSTALL) poc_mods_begin(code, true, std::string());
-                    else poc_mods_begin(code, false, sh_webview_json::to_utf8(arg));
+                    int code = ui_mods_action_code(act);
+                    if (!code) ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);
+                    else if (code == SH_MODS_ACT_INSTALL) ui_mods_begin(code, true, std::string());
+                    else ui_mods_begin(code, false, sh_webview_json::to_utf8(arg));
                 }
             } else if (cmd == L"resolvePrefabModel") {
                 int generation = 0; std::wstring inherit;
@@ -3939,7 +3956,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     m += std::to_wstring(scale[5]); m += L"]";
                 } else m += L"null";
                 m += L"}";
-                poc_post_json(m.c_str());
+                ui_post_json(m.c_str());
             } else if (cmd == L"requestPrefabMesh") {
                 int generation = 0; std::wstring model;
                 sh_webview_json::get_int(json, L"generation", &generation);
@@ -3955,11 +3972,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     std::wstring m = L"{\"kind\":\"prefabMeshUnavailable\",\"generation\":";
                     m += std::to_wstring(generation);
                     m += L",\"model\":\""; m += sh_webview_json::escape_wide(model8.c_str()); m += L"\"}";
-                    poc_post_json(m.c_str());
+                    ui_post_json(m.c_str());
                 }
             } else if (cmd == L"savePrefabMeta") {
                 std::wstring nm, fo, body; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo); sh_webview_json::get_string(json, L"body", body);
-                poc_apply_save_prefab_meta(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo), sh_webview_json::to_utf8(body));
+                ui_apply_save_prefab_meta(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo), sh_webview_json::to_utf8(body));
             } else if (cmd == L"createPrefab") {
                 std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
                 g_create_prefab_name = sh_webview_json::to_utf8(nm);
@@ -4020,7 +4037,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 g_pending_delete_prefabs = true;
             } else if (cmd == L"select") {
                 int eid = -1;
-                if (sh_webview_json::get_int(json, L"eid", &eid)) { g_displayed_eid = eid; poc_send_state(eid, false); }
+                if (sh_webview_json::get_int(json, L"eid", &eid)) { g_displayed_eid = eid; ui_send_state(eid, false); }
             } else if (cmd == L"openTimeline") {
                 int eid = -1;
                 if (sh_webview_json::get_int(json, L"eid", &eid) && eid >= 0) { g_open_timeline_eid = eid; g_pending_open_timeline = true; }
@@ -4043,42 +4060,37 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"deselect") {
                 g_pending_deselect = true;
             } else if (cmd == L"enumInherits") {
-                poc_send_enum(0, nullptr);
+                ui_send_enum(0, nullptr);
             } else if (cmd == L"enumClasses") {
                 std::wstring inh; sh_webview_json::get_string(json, L"inherit", inh);
                 std::string i8 = sh_webview_json::to_utf8(inh);
-                poc_send_enum(1, i8.c_str());
+                ui_send_enum(1, i8.c_str());
             } else if (cmd == L"enumEvents") {
-                poc_send_events();
+                ui_send_events();
             } else if (cmd == L"enumEventDocs") {
-                poc_send_event_docs();
+                ui_send_event_docs();
             } else if (cmd == L"enumEntityAssets") {
-                poc_send_entity_assets();
+                ui_send_entity_assets();
             } else if (cmd == L"enumArgResclass") {
                 std::wstring rc; sh_webview_json::get_string(json, L"resClass", rc);
                 std::string rc8 = sh_webview_json::to_utf8(rc);
-                poc_send_arg_resclass(rc8.c_str());
+                ui_send_arg_resclass(rc8.c_str());
             } else if (cmd == L"lookupDesc") {
                 std::wstring inh, cls; sh_webview_json::get_string(json, L"inherit", inh); sh_webview_json::get_string(json, L"classname", cls);
                 std::string i8 = sh_webview_json::to_utf8(inh), c8 = sh_webview_json::to_utf8(cls);
-                poc_send_desc(i8.c_str(), c8.c_str());
-            } else if (cmd == L"findMaterial") {
-                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
-                std::string n8 = sh_webview_json::to_utf8(nm);
-                poc_send_material_result(n8.c_str());
+                ui_send_desc(i8.c_str(), c8.c_str());
             } else if (cmd == L"rawmapStatus") {
-                poc_send_rawmap_status(L"");
+                ui_send_rawmap_status(L"");
             } else if (cmd == L"rawmapLoadPick") {
                 /* Both pickers return immediately -- the dialog runs on its own thread and the think
-                 * loop acts on the result (poc_finish_pick). Running Show() here stalled that loop for
-                 * as long as the dialog was open, which is the lag this fixed. */
-                poc_begin_pick(0);
+                 * loop acts on the result (ui_finish_pick); Show() here would stall that loop. */
+                ui_begin_pick(0);
             } else if (cmd == L"rawmapSaveNow") {
                 /* Resolve the current destination in the backend; the page's last
                  * status may belong to a map that has since closed. */
-                poc_rawmap_configure(nullptr, nullptr, 5, nullptr);
+                ui_rawmap_configure(nullptr, nullptr, 5, nullptr);
             } else if (cmd == L"rawmapSavePick") {
-                poc_begin_pick(1);
+                ui_begin_pick(1);
             } else if (cmd == L"exportPrefab") {
                 /* the prefab with its mods, as one ZIP: the Windows Save dialog first */
                 std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
@@ -4087,46 +4099,35 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     g_pick_prefab_folder = sh_webview_json::to_utf8(fo);
                     g_pick_file_name = nm + L".zip";
                 }
-                poc_begin_pick(2);
+                ui_begin_pick(2);
             } else if (cmd == L"importPrefab") {
-                poc_begin_pick(3);
+                ui_begin_pick(3);
             } else if (cmd == L"navmeshState") {
-                poc_send_navmesh_state();
+                ui_send_navmesh_state();
             } else if (cmd == L"navmeshUpdate") {
                 if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view) {
                     char state[512] = "";
                     g_iface->vtbl->navmesh_view(g_iface, 1, state, (int)sizeof state);
                 }
-                poc_send_navmesh_state();
+                ui_send_navmesh_state();
             } else if (cmd == L"rawmapLoadNow") {
-                /* Ask the backend's editor-frame hook to reload the map, so the staged file opens
-                 * without a trip to the SnapMap menu. The reply is a REQUEST result, not a
-                 * completion -- the reload lands a frame later, and the status refresh that follows
-                 * is what shows whether the swap actually fired. */
-                if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_load_now) {
-                    poc_send_rawmap_status(L"This build's backend cannot reload the map.");
-                } else {
-                    char msg[192] = "";
+                /* Open the load path now through the backend's editor-frame hook. The reply is a
+                 * REQUEST result; the reload lands a frame later, and a failure there is told by the
+                 * backend's own toast and console line. */
+                {
+                    char msg[1024] = "";
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
-                    poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
-                    poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
-                                              : (L"Cannot open: " + sh_webview_json::escape_wide(msg)).c_str());
+                    ui_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
+                    ui_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
+                                              : sh_webview_json::escape_wide(msg).c_str(), nullptr, !ok);
                 }
-            } else if (cmd == L"rawmapArm") {
-                int on = 0; sh_webview_json::get_int(json, L"on", &on);
-                /* Say what it does to the person's maps, not what it does to the detour -- and make
-                 * the OFF message say the menu still works, because the tick's whole hazard is
-                 * reading as the feature's master switch when it is only its scope. */
-                poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
-                                     on ? L"Rawmaps now apply to every map load and save."
-                                        : L"Rawmaps apply to the File menu's own actions only.");
             } else if (cmd == L"rawmapKeepHere") {
                 /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
                  * DLLs must match slot for slot, and `arm` was already a verb code. Neither
                  * value writes anything -- 3 pins the path the readout is already showing,
                  * 4 releases it, so the line under the tick is true either way. */
                 int on = 0; sh_webview_json::get_int(json, L"on", &on);
-                poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
+                ui_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
                                      on ? L"Saves keep going to this file until you open another map."
                                         : L"Saves go back to the default rawmap file.");
             } else if (cmd == L"newEntity") {
@@ -4158,23 +4159,23 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
             } else if (cmd == L"listAssets") {
                 int akind = SH_ASSET_MATERIAL; sh_webview_json::get_int(json, L"assetKind", &akind);
-                poc_send_asset_list(akind);
+                ui_send_asset_list(akind);
             } else if (cmd == L"pinsLoad") {
-                poc_send_pins();
+                ui_send_pins();
             } else if (cmd == L"pinsSave") {
                 std::wstring doc; sh_webview_json::get_string(json, L"doc", doc);
-                poc_save_pins(sh_webview_json::to_utf8(doc));
+                ui_save_pins(sh_webview_json::to_utf8(doc));
             } else if (cmd == L"getPreview") {
                 std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
                 std::string n8 = sh_webview_json::to_utf8(nm);
-                poc_send_preview(n8.c_str());
+                ui_send_preview(n8.c_str());
             } else if (cmd == L"requestPreview") {
                 std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
                 int asset_kind = -1; sh_webview_json::get_int(json, L"assetKind", &asset_kind);
                 std::string n8 = sh_webview_json::to_utf8(nm);
-                poc_request_preview(n8.c_str(), asset_kind);
+                ui_request_preview(n8.c_str(), asset_kind);
             } else if (cmd == L"cancelPreview") {
-                poc_cancel_preview();
+                ui_cancel_preview();
             /* Camera footer controls: a lock captures its supplied target; an edit queues one write. */
             } else if (cmd == L"camLock") {
                 int on = 0; sh_webview_json::get_int(json, L"on", &on);
@@ -4204,9 +4205,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                         if (h) CloseHandle(h);
                         else {
                             g_report_inflight = false;
-                            poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                            ui_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
                         }
-                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                    } else ui_post_json(L"{\"kind\":\"reportResult\",\"ok\":false,\"reason\":\"tooLarge\"}");
                 }
             } else if (cmd == L"crashSubmit") {
                 /* Compose crash reports here to add optional local log tails, then use the
@@ -4237,7 +4238,14 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     p += "\",\"game\":\"";                         p += sh_webview_json::escape_utf8(
                         game.empty() ? g_game : sh_webview_json::to_utf8(game));
                     p += "\",\"website\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(hp));
-                    p += "\",\"logs\":\"";                         p += sh_webview_json::escape_utf8(logs);
+                    p += "\",\"logs\":\"";
+                    /* The logs give way first: their oldest lines go until the report fits the cap. */
+                    {
+                        size_t room = REPORT_PAYLOAD_CAP > p.size() + 2 ? REPORT_PAYLOAD_CAP - p.size() - 2 : 0;
+                        size_t cut = rs_fit_escaped_tail(logs.data(), logs.size(), room);
+                        if (cut) ui_logf("crash report: logs trimmed by %lu byte(s) to fit the report", (unsigned long)cut);
+                        p += sh_webview_json::escape_utf8(logs.substr(cut));
+                    }
                     p += "\"}";
                     if (p.size() <= REPORT_PAYLOAD_CAP) {
                         g_report_payload.swap(p);
@@ -4247,9 +4255,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                         if (h) CloseHandle(h);
                         else {
                             g_report_inflight = false; g_report_is_crash = false;
-                            poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                            ui_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
                         }
-                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                    } else ui_post_json(L"{\"kind\":\"reportResult\",\"ok\":false,\"reason\":\"tooLarge\"}");
                 }
             } else if (cmd == L"crashDismiss") {
                 /* dismiss = handled: clear the pending records so the dialog never nags twice. The
@@ -4259,9 +4267,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 ShowWindow(g_hwnd, SW_MINIMIZE);
             } else if (cmd == L"winMax") {
                 ShowWindow(g_hwnd, IsZoomed(g_hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-                poc_post_window_state(g_hwnd);
+                ui_post_window_state(g_hwnd);
             } else if (cmd == L"winState") {
-                poc_post_window_state(g_hwnd);
+                ui_post_window_state(g_hwnd);
             } else if (cmd == L"winDrag") {
                 ReleaseCapture();
                 SendMessageW(g_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);   /* start the native move loop */
@@ -4276,12 +4284,12 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"tlUseSelection") {
                 /* Fetch current selection on demand, using the full entity capacity so the
                  * reported count is not truncated. */
-                static int uselids[POC_MAX_ENTS];
-                int un = poc_get_selection(uselids, POC_MAX_ENTS);
+                static int uselids[UI_MAX_ENTS];
+                int un = ui_get_selection(uselids, UI_MAX_ENTS);
                 wchar_t m[96];
                 if (un == 1) _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":true,\"eid\":%d}", uselids[0]);
                 else _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":false,\"count\":%d}", un);
-                poc_post_json(m);
+                ui_post_json(m);
             } else if (cmd == L"flyTo") {
                 /* Fly the editor camera to one entity (apply kind 4, serviced by the editor
                  * frames). A held Lock position would rewrite the eye every frame, so it is released. */
@@ -4290,11 +4298,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (ok) {
                     g_cam_lock = false;
                     sh_apply_item it; it.kind = 4; it.id = eid; it.text = "";
-                    ok = poc_apply_edit_seh(&it, 1, "fly-to") != 0;
+                    ok = ui_apply_edit_seh(&it, 1, "fly-to") != 0;
                 }
                 wchar_t m[96];
                 _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"flyToResult\",\"result\":%d,\"eid\":%d}", ok ? 1 : 0, eid);
-                poc_post_json(m);
+                ui_post_json(m);
             } else if (cmd == L"pushStack") {
                 std::vector<int> ids; sh_webview_json::get_int_array(json, L"eids", ids);
                 bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->push_to_stack && !ids.empty();
@@ -4302,14 +4310,14 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 wchar_t m[160];
                 _snwprintf_s(m, _countof(m), _TRUNCATE,
                     L"{\"kind\":\"pushStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, (int)ids.size());
-                poc_post_json(m);
+                ui_post_json(m);
             } else if (cmd == L"clearStack") {
                 bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->clear_stack;
                 int had = ok ? g_iface->vtbl->clear_stack(g_iface, 0) : 0;
                 wchar_t m[128];
                 _snwprintf_s(m, _countof(m), _TRUNCATE,
                     L"{\"kind\":\"clearStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, had);
-                poc_post_json(m);
+                ui_post_json(m);
             } else if (cmd == L"save") {
                 int eid = -1; sh_webview_json::get_int(json, L"eid", &eid);
                 std::wstring decl, cls, inh, dnm;
@@ -4331,7 +4339,7 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
         COREWEBVIEW2_WEB_ERROR_STATUS status =
             COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
         if (args) args->get_WebErrorStatus(&status);
-        poc_logf("NavigationCompleted FAILED status=%lu",
+        ui_logf("NavigationCompleted FAILED status=%lu",
                  (unsigned long)status);
         return S_OK;
     }
@@ -4344,16 +4352,20 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
     g_cam_read_published = false;
     g_page_loaded = true;
     g_webview_ready = true;
-    poc_post_config_status();
-    poc_send_list("navigation-completed");
+    if (g_pair_mismatch) {
+        ui_post_json(L"{\"kind\":\"installMismatch\"}");
+        return S_OK;
+    }
+    ui_post_config_status();
+    ui_send_list("navigation-completed");
     return S_OK;
 }
 static HRESULT on_controller_created(HRESULT result, ICoreWebView2Controller *controller)
 {
-    if (FAILED(result) || !controller) { poc_logf("controller creation FAILED hr=0x%08lx", (unsigned long)result); return result; }
+    if (FAILED(result) || !controller) { ui_logf("controller creation FAILED hr=0x%08lx", (unsigned long)result); return result; }
     g_controller = controller; g_controller->AddRef();
     g_controller->get_CoreWebView2(&g_webview);
-    if (!g_webview) { poc_log("get_CoreWebView2 null"); return E_FAIL; }
+    if (!g_webview) { ui_log("get_CoreWebView2 null"); return E_FAIL; }
     g_webview17.Reset();
     g_webview->QueryInterface(__uuidof(ICoreWebView2_17),
                               reinterpret_cast<void **>(g_webview17.GetAddressOf()));
@@ -4371,16 +4383,16 @@ static HRESULT on_controller_created(HRESULT result, ICoreWebView2Controller *co
     HRESULT navigate = g_webview->NavigateToString(g_html.c_str());
     g_controller->put_IsVisible(TRUE);
     if (FAILED(navigate)) {
-        poc_logf("NavigateToString FAILED hr=0x%08lx",
+        ui_logf("NavigateToString FAILED hr=0x%08lx",
                  (unsigned long)navigate);
         return navigate;
     }
-    poc_log("controller ready: navigated to embedded HTML");
+    ui_log("controller ready: navigated to embedded HTML");
     return S_OK;
 }
 static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *env)
 {
-    if (FAILED(result) || !env) { poc_logf("environment creation FAILED hr=0x%08lx", (unsigned long)result); return result; }
+    if (FAILED(result) || !env) { ui_logf("environment creation FAILED hr=0x%08lx", (unsigned long)result); return result; }
     g_webview_environment12.Reset();
     env->QueryInterface(__uuidof(ICoreWebView2Environment12),
                         reinterpret_cast<void **>(g_webview_environment12.GetAddressOf()));
@@ -4389,7 +4401,7 @@ static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *
 /* Development aid: a file `%LOCALAPPDATA%\\snapmap-plus\\devtools-port` holding one port number
  * (1024..65535) opens Chromium's remote debugging on 127.0.0.1 at that port for this window, so a
  * test driver can inspect and drive the page. Absent or malformed, nothing is opened. */
-static int poc_devtools_port(const wchar_t *local)
+static int ui_devtools_port(const wchar_t *local)
 {
     if (!local || !*local) return 0;
     std::wstring path = std::wstring(local) + L"\\snapmap-plus\\devtools-port";
@@ -4408,7 +4420,7 @@ static int poc_devtools_port(const wchar_t *local)
     }
     return (digits && port >= 1024 && port <= 65535) ? (int)port : 0;
 }
-static void poc_start_webview()
+static void ui_start_webview()
 {
     wchar_t local[MAX_PATH] = {}; std::wstring udf = L".";
     bool have_local = SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local));
@@ -4417,29 +4429,38 @@ static void poc_start_webview()
          * cache\ once (webview_profile.h). */
         int how = sh_webview_profile::created; DWORD error = 0;
         udf = sh_webview_profile::choose(local, &how, &error);
-        if (how == sh_webview_profile::moved) poc_log("webview2 profile moved into cache\\webview2");
+        if (how == sh_webview_profile::moved) ui_log("webview2 profile moved into cache\\webview2");
         else if (how == sh_webview_profile::kept_old)
-            poc_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
+            ui_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
     }
     ComPtr<ICoreWebView2EnvironmentOptions> options;
-    int devtools_port = have_local ? poc_devtools_port(local) : 0;
+    int devtools_port = have_local ? ui_devtools_port(local) : 0;
     if (devtools_port) {
         auto opts = Make<CoreWebView2EnvironmentOptions>();
         wchar_t args[64]; _snwprintf_s(args, _countof(args), _TRUNCATE, L"--remote-debugging-port=%d", devtools_port);
-        if (opts && SUCCEEDED(opts->put_AdditionalBrowserArguments(args))) { options = opts; poc_logf("devtools: remote debugging on 127.0.0.1:%d (devtools-port file)", devtools_port); }
+        if (opts && SUCCEEDED(opts->put_AdditionalBrowserArguments(args))) { options = opts; ui_logf("devtools: remote debugging on 127.0.0.1:%d (devtools-port file)", devtools_port); }
     }
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(on_environment_created).Get());
-    if (FAILED(hr)) poc_logf("Create env FAILED hr=0x%08lx", (unsigned long)hr);
+    if (FAILED(hr)) ui_logf("Create env FAILED hr=0x%08lx", (unsigned long)hr);
 }
 
 /* UI request drain and polling loop, about 30 Hz. */
-static void poc_think_loop()
+static void ui_think_loop()
 {
     bool was_visible = false;
     unsigned frame = 0;
     for (;;) {
         frame++;
+        if (g_pair_mismatch) {
+            /* Shown with the editor like the working window, holding only the notice. */
+            bool ready = g_webview_ready && ui_editor_ready() != 0;
+            if (ready != was_visible) { ShowWindow(g_hwnd, ready ? SW_SHOW : SW_HIDE); was_visible = ready; }
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+            Sleep(0x21);
+            continue;
+        }
         bool did_save = false, did_delete = false, did_create_prefab = false, did_select_refused = false;
         int  select_refused_reason = 0;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
@@ -4451,15 +4472,15 @@ static void poc_think_loop()
         EnterCriticalSection(&g_loop->mtx);
         if (g_iface && g_iface->vtbl && g_iface->vtbl->drain_work_queue) g_iface->vtbl->drain_work_queue(g_iface);
         {
-            PocMainEdits edits = { g_pending_save, g_pending_delete, g_pending_select, g_pending_deselect,
+            UiMainEdits edits = { g_pending_save, g_pending_delete, g_pending_select, g_pending_deselect,
                                    g_cam_lock || g_cam_write_once, g_pending_set_names };
             bool user = edits.save || edits.del || edits.select || edits.deselect || edits.names || g_cam_write_once;
             if (edits.names) { g_set_names_applied = 0; g_set_names_failed = (int)g_set_names_eids.size(); }
             if (edits.save) g_save_result = -2;
-            if (edits.del) g_entity_delete_status = POC_DELETE_NOT_RUN;
+            if (edits.del) g_entity_delete_status = UI_DELETE_NOT_RUN;
             if ((user || edits.cam) &&
-                !poc_on_main(poc_main_edits, &edits, user ? POC_MAIN_WAIT_MS : POC_MAIN_CAM_WAIT_MS) && user)
-                poc_log("engine edits: the game did not take them within the wait; dropped");
+                !ui_on_main(ui_main_edits, &edits, user ? UI_MAIN_WAIT_MS : UI_MAIN_CAM_WAIT_MS) && user)
+                ui_log("engine edits: the game did not take them within the wait; dropped");
             g_cam_write_once = false;
         }
         if (g_pending_save)   { g_pending_save = false;   did_save = true; }
@@ -4477,79 +4498,80 @@ static void poc_think_loop()
         }
         if (g_select_refused) { select_refused_reason = g_select_refused; g_select_refused = 0; did_select_refused = true; }
         if (g_pending_create_prefab) {
-            poc_apply_create_prefab();
+            ui_apply_create_prefab();
             g_pending_create_prefab = false;
             did_create_prefab = true;
         }
-        if (g_pending_delete_prefab) { poc_apply_delete_prefab(); g_pending_delete_prefab = false; did_delete_prefab = true; }
-        if (g_pending_rename_prefab) { poc_apply_rename_prefab(); g_pending_rename_prefab = false; did_rename_prefab = true; }
-        if (g_pending_create_module) { poc_apply_create_module_prefab(); g_pending_create_module = false; did_create_module = true; }
-        if (g_pending_load_prefab)   { poc_apply_load_prefab();   g_pending_load_prefab = false;   did_load_prefab = true; }
-        if (g_pending_new_entity)    { poc_apply_new_entity();    g_pending_new_entity = false;    did_new_entity = true; }
+        if (g_pending_delete_prefab) { ui_apply_delete_prefab(); g_pending_delete_prefab = false; did_delete_prefab = true; }
+        if (g_pending_rename_prefab) { ui_apply_rename_prefab(); g_pending_rename_prefab = false; did_rename_prefab = true; }
+        if (g_pending_create_module) { ui_apply_create_module_prefab(); g_pending_create_module = false; did_create_module = true; }
+        if (g_pending_load_prefab)   { ui_apply_load_prefab();   g_pending_load_prefab = false;   did_load_prefab = true; }
+        if (g_pending_new_entity)    { ui_apply_new_entity();    g_pending_new_entity = false;    did_new_entity = true; }
         /* A finished file picker. Its thread only carried the dialog; everything that touches the
          * backend happens here, on the UI thread, like every other deferred action above. */
-        if (InterlockedCompareExchange(&g_pick_done, 0, 0) != 0) poc_finish_pick();
+        if (InterlockedCompareExchange(&g_pick_done, 0, 0) != 0) ui_finish_pick();
         /* A finished Mods tab job: post its documents from this thread. */
-        if (InterlockedCompareExchange(&g_mods_done, 0, 0) != 0) poc_mods_finish();
-        if (g_pending_sound_session) { poc_apply_sound_session(); g_pending_sound_session = false; }
-        if (g_pending_sound_preview) { poc_apply_sound_preview(); g_pending_sound_preview = false; did_sound_preview = true; }
-        if (g_pending_create_folder) { poc_apply_create_folder(); g_pending_create_folder = false; did_create_folder = true; }
-        if (g_pending_rename_folder) { poc_apply_rename_folder(); g_pending_rename_folder = false; did_rename_folder = true; }
-        if (g_pending_delete_folder) { poc_apply_delete_folder(); g_pending_delete_folder = false; did_delete_folder = true; }
-        if (g_pending_move_prefab)   { poc_apply_move_prefab();   g_pending_move_prefab = false;   did_move_prefab = true; }
-        if (g_pending_move_prefabs)  { poc_apply_move_prefabs();  g_pending_move_prefabs = false;  did_move_prefabs = true; }
-        if (g_pending_delete_prefabs) { poc_apply_delete_prefabs(); g_pending_delete_prefabs = false; did_delete_prefabs = true; }
-        if (g_pending_open_timeline) { g_tl_json_len = poc_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
-        if (g_pending_resolve_entity) { g_resolve_json_len = poc_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
-        if (g_pending_save_timeline) { poc_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
+        if (InterlockedCompareExchange(&g_mods_done, 0, 0) != 0) ui_mods_finish();
+        if (g_pending_sound_session) { ui_apply_sound_session(); g_pending_sound_session = false; }
+        if (g_pending_sound_preview) { ui_apply_sound_preview(); g_pending_sound_preview = false; did_sound_preview = true; }
+        if (g_pending_create_folder) { ui_apply_create_folder(); g_pending_create_folder = false; did_create_folder = true; }
+        if (g_pending_rename_folder) { ui_apply_rename_folder(); g_pending_rename_folder = false; did_rename_folder = true; }
+        if (g_pending_delete_folder) { ui_apply_delete_folder(); g_pending_delete_folder = false; did_delete_folder = true; }
+        if (g_pending_move_prefab)   { ui_apply_move_prefab();   g_pending_move_prefab = false;   did_move_prefab = true; }
+        if (g_pending_move_prefabs)  { ui_apply_move_prefabs();  g_pending_move_prefabs = false;  did_move_prefabs = true; }
+        if (g_pending_delete_prefabs) { ui_apply_delete_prefabs(); g_pending_delete_prefabs = false; did_delete_prefabs = true; }
+        if (g_pending_open_timeline) { g_tl_json_len = ui_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
+        if (g_pending_resolve_entity) { g_resolve_json_len = ui_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
+        if (g_pending_save_timeline) { ui_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
         LeaveCriticalSection(&g_loop->mtx);
         /* The prefabs folder watcher: the Prefabs list follows the disk. */
-        poc_watch_tick();
-        poc_mods_push_tick();
+        ui_watch_tick();
+        ui_mods_push_tick();
 
         if (did_save) {
             wchar_t m[80]; _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"saveResult\",\"result\":%d}", g_save_result);
-            poc_post_json(m);
-            poc_send_list("save");
-            if (g_save_eid >= 0) poc_send_state(g_save_eid, false);
+            ui_post_json(m);
+            ui_send_list("save");
+            if (g_save_eid >= 0) ui_send_state(g_save_eid, false);
         }
-        if (did_delete) { poc_post_delete_result(); poc_send_list("delete"); }
+        if (did_delete) { ui_post_delete_result(); ui_send_list("delete"); }
         if (did_set_names) {
             wchar_t m[128];
             _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"setDisplayNamesResult\",\"applied\":%d,\"failed\":%d}",
                          g_set_names_applied, g_set_names_failed);
-            poc_post_json(m);
+            ui_post_json(m);
             char l[160];
             _snprintf_s(l, sizeof l, _TRUNCATE, "set-display-names: applied=%d failed=%d", g_set_names_applied, g_set_names_failed);
-            poc_log(l);
+            ui_log(l);
             g_set_names_eids.clear(); g_set_names_names.clear();
             g_last_list_sig = 0;            /* names changed: rebuild the Timelines list */
-            poc_send_list("set-names");
-            if (g_displayed_eid >= 0) poc_send_state(g_displayed_eid, false);
+            ui_send_list("set-names");
+            if (g_displayed_eid >= 0) ui_send_state(g_displayed_eid, false);
         }
         if (did_select_refused)
-            poc_post_json(select_refused_reason == 2 ? L"{\"kind\":\"selectRefused\",\"reason\":\"native\"}"
+            ui_post_json(select_refused_reason == 2 ? L"{\"kind\":\"selectRefused\",\"reason\":\"native\"}"
                                                      : L"{\"kind\":\"selectRefused\",\"reason\":\"hold\"}");
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"";
-            if (g_create_result == 1 && g_create_grab_corrected) m += L",\"grab\":\"corrected\"";
             m += L"}";
-            poc_post_json(m.c_str());
-            if (g_create_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_create_result == 1) ui_send_prefabs();
         }
         if (did_delete_prefab) {
             std::wstring m = L"{\"kind\":\"deletePrefabResult\",\"result\":"; m += std::to_wstring(g_delete_result);
+            m += L",\"reason\":\""; m += g_delete_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_delete_prefab_name.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_delete_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_delete_result == 1) ui_send_prefabs();
         }
         if (did_rename_prefab) {
             std::wstring m = L"{\"kind\":\"renamePrefabResult\",\"result\":"; m += std::to_wstring(g_rename_result);
+            m += L",\"reason\":\""; m += g_rename_reason; m += L"\"";
             m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_old.c_str());
             m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_new.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_rename_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_rename_result == 1) ui_send_prefabs();
         }
         if (did_create_module) {
             std::wstring m = L"{\"kind\":\"createModulePrefabResult\",\"result\":"; m += std::to_wstring(g_create_module_result);
@@ -4560,11 +4582,11 @@ static void poc_think_loop()
                 m += w;
             } else m += L"{}";
             m += L"}";
-            poc_post_json(m.c_str());
-            if (g_create_module_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_create_module_result == 1) ui_send_prefabs();
         }
-        /* a module placement posts when the backend has its outcome (poc_poll_module_place), an
-         * object paste once the game thread has queued or staged it (poc_poll_place_outcome) */
+        /* a module placement posts when the backend has its outcome (ui_poll_module_place), an
+         * object paste once the game thread has queued or staged it (ui_poll_place_outcome) */
         if (did_load_prefab && !(g_load_prefab_modules && g_load_result == 2) && !g_place_wait) {
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_load_prefab_name.c_str()); m += L"\"";
@@ -4573,75 +4595,80 @@ static void poc_think_loop()
                 m += L",\"message\":\""; m += sh_webview_json::escape_wide(g_load_message.c_str()); m += L"\"";
             }
             m += L"}";
-            poc_post_json(m.c_str());
+            ui_post_json(m.c_str());
         }
-        poc_poll_module_place();
-        poc_poll_place_outcome();
-        poc_poll_prefab_mods();
+        ui_poll_module_place();
+        ui_poll_place_outcome();
+        ui_poll_prefab_mods();
         if (did_sound_preview) {
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
             m += (g_sound_preview_result ? L"true" : L"false");
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_sound_preview_name.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
+            ui_post_json(m.c_str());
         }
         if (did_new_entity) {
             std::wstring m = L"{\"kind\":\"newEntityResult\",\"result\":"; m += std::to_wstring(g_new_entity_result);
             m += L",\"label\":\""; m += sh_webview_json::escape_wide(g_new_entity_label.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
+            ui_post_json(m.c_str());
         }
-        if (did_open_timeline) poc_emit_timeline_data(g_open_timeline_eid, g_tl_json_len);
-        if (did_resolve_entity) poc_emit_entity_inherit(g_resolve_entity_eid, g_resolve_json_len);
+        if (did_open_timeline) ui_emit_timeline_data(g_open_timeline_eid, g_tl_json_len);
+        if (did_resolve_entity) ui_emit_entity_inherit(g_resolve_entity_eid, g_resolve_json_len);
         if (did_save_timeline) {
             std::wstring m = L"{\"kind\":\"saveTimelineResult\",\"eid\":"; m += std::to_wstring(g_save_timeline_eid);
             m += L",\"result\":"; m += std::to_wstring(g_save_timeline_result); m += L"}";
-            poc_post_json(m.c_str());
+            ui_post_json(m.c_str());
         }
         if (did_create_folder) {
             std::wstring m = L"{\"kind\":\"createFolderResult\",\"result\":"; m += std::to_wstring(g_create_folder_result);
+            m += L",\"reason\":\""; m += g_create_folder_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_folder_name.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_create_folder_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_create_folder_result == 1) ui_send_prefabs();
         }
         if (did_rename_folder) {
             std::wstring m = L"{\"kind\":\"renameFolderResult\",\"result\":"; m += std::to_wstring(g_rename_folder_result);
+            m += L",\"reason\":\""; m += g_rename_folder_reason; m += L"\"";
             m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_old.c_str());
             m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_new.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_rename_folder_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_rename_folder_result == 1) ui_send_prefabs();
         }
         if (did_delete_folder) {
             std::wstring m = L"{\"kind\":\"deleteFolderResult\",\"result\":"; m += std::to_wstring(g_delete_folder_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_delete_folder_name.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_delete_folder_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_delete_folder_result == 1) ui_send_prefabs();
         }
         if (did_move_prefab) {
             std::wstring m = L"{\"kind\":\"movePrefabResult\",\"result\":"; m += std::to_wstring(g_move_prefab_result);
+            m += L",\"reason\":\""; m += g_move_prefab_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_move_prefab_name.c_str());
             m += L"\",\"toFolder\":\""; m += sh_webview_json::escape_wide(g_move_prefab_to.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (g_move_prefab_result == 1) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (g_move_prefab_result == 1) ui_send_prefabs();
         }
         if (did_move_prefabs) {
             std::wstring m = L"{\"kind\":\"movePrefabsResult\",\"moved\":[";
             for (size_t i = 0; i < g_move_prefabs_moved.size(); i++) { if (i) m += L","; m += L"\""; m += sh_webview_json::escape_wide(g_move_prefabs_moved[i].c_str()); m += L"\""; }
             m += L"],\"failed\":"; m += std::to_wstring(g_move_prefabs_failed);
+            m += L",\"reason\":\""; m += g_move_prefabs_reason; m += L"\"";
             m += L",\"toFolder\":\""; m += sh_webview_json::escape_wide(g_move_prefabs_to.c_str()); m += L"\"}";
-            poc_post_json(m.c_str());
-            if (!g_move_prefabs_moved.empty()) poc_send_prefabs();
+            ui_post_json(m.c_str());
+            if (!g_move_prefabs_moved.empty()) ui_send_prefabs();
         }
         if (did_delete_prefabs) {
             std::wstring m = L"{\"kind\":\"deletePrefabsResult\",\"deleted\":"; m += std::to_wstring(g_delete_prefabs_deleted);
-            m += L",\"failed\":"; m += std::to_wstring(g_delete_prefabs_failed); m += L"}";
-            poc_post_json(m.c_str());
-            if (g_delete_prefabs_deleted) poc_send_prefabs();
+            m += L",\"failed\":"; m += std::to_wstring(g_delete_prefabs_failed);
+            m += L",\"reason\":\""; m += g_delete_prefabs_reason; m += L"\"}";
+            ui_post_json(m.c_str());
+            if (g_delete_prefabs_deleted) ui_send_prefabs();
         }
         if (g_report_done) {   /* feedback/crash POST finished on its worker thread -- relay the result */
             g_report_done = false;
             std::wstring m = L"{\"kind\":\"reportResult\",\"ok\":"; m += g_report_ok ? L"true" : L"false";
             m += L",\"mode\":\""; m += sh_webview_json::escape_wide(g_report_mode);
             m += L"\",\"number\":"; m += std::to_wstring(g_report_number); m += L"}";
-            poc_post_json(m.c_str());
+            ui_post_json(m.c_str());
             if (g_report_is_crash) {
                 /* a successfully-sent crash report is handled -- clear the pending records (same as
                  * Dismiss); a failed send keeps them, so the dialog can retry / reappear next launch. */
@@ -4684,79 +4711,79 @@ static void poc_think_loop()
                     if (wl > 0) {
                         std::wstring wm; wm.resize(wl - 1);
                         if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, &wm[0], wl);
-                        poc_post_json(wm.c_str());
+                        ui_post_json(wm.c_str());
                         char l[160];
                         _snprintf_s(l, sizeof l, _TRUNCATE,
                                     "crash: terminal record announced (terminal=%d, survived=%d)",
                                     terminal, survived);
-                        poc_log(l);
+                        ui_log(l);
                     }
                 } else if (survived > 0 && terminal == 0 && !startup) {
                     /* nonterminal record observed this session: notice only */
                     std::wstring m = L"{\"kind\":\"faultRecovered\",\"count\":";
                     m += std::to_wstring(survived); m += L"}";
-                    poc_post_json(m.c_str());
-                    poc_logf("crash: %lu recovered fault record(s) -- toast only, no dialog",
+                    ui_post_json(m.c_str());
+                    ui_logf("crash: %lu recovered fault record(s) -- toast only, no dialog",
                              (unsigned long)survived);
                 }
             }
         }
 
         if (g_webview_ready) {
-            bool ready = poc_editor_ready() != 0;
+            bool ready = ui_editor_ready() != 0;
             if (ready && !was_visible) {
                 char l[128];
                 _snprintf_s(l, sizeof l, _TRUNCATE,
                             "perf lifecycle: editor-visible frame=%u", frame);
-                poc_log(l);
+                ui_log(l);
                 ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
-                poc_send_list("editor-visible");
+                ui_send_list("editor-visible");
                 /* The DOM survives Play and map reloads. Close any open timeline when the
                  * editor returns so subsequent edits begin with fresh serialized state. */
-                poc_post_json(L"{\"kind\":\"editorReopened\"}");
+                ui_post_json(L"{\"kind\":\"editorReopened\"}");
                 was_visible = true;
             }
             else if (!ready && was_visible) {
-                poc_perf_flush_collect("editor-hidden");
-                poc_log("perf lifecycle: editor-hidden");
+                ui_perf_flush_collect("editor-hidden");
+                ui_log("perf lifecycle: editor-hidden");
                 /* The editor has let go of its map: the mode poll stops while the window is
                  * hidden, so tell the page now (the Mods tab drops its "In this map" pills) and
                  * make the next visible poll post the real state again. */
-                poc_post_json(L"{\"kind\":\"editorMode\",\"entityMode\":0,\"blueprint\":0,\"modules\":0,\"mapOpen\":0}");
+                ui_post_json(L"{\"kind\":\"editorMode\",\"entityMode\":0,\"blueprint\":0,\"modules\":0,\"mapOpen\":0}");
                 g_editor_mode_last = -1;
                 g_editor_modules_last = -2;
                 ShowWindow(g_hwnd, SW_HIDE); was_visible = false;
             }
 
             /* Sample camera coordinates at UI cadence; change gating avoids idle messages. */
-            if (was_visible && !g_cam_lock) poc_cam_read_send();
+            if (was_visible && !g_cam_lock) ui_cam_read_send();
 
             /* periodic auto tasks (~ every 10 frames = ~330 ms): list change poll, editor-selection sync,
              * displayed-state change poll. All emit only on an actual change. */
             if (was_visible && (frame % 10 == 0)) {
-                unsigned long long poll_started = poc_perf_now_us(), collect_us = 0;
-                int rdy = 0; int n = poc_collect_timed(&rdy, "poll", &collect_us);
-                uint64_t sig = poc_list_sig(n);
+                unsigned long long poll_started = ui_perf_now_us(), collect_us = 0;
+                int rdy = 0; int n = ui_collect_timed(&rdy, "poll", &collect_us);
+                uint64_t sig = ui_list_sig(n);
                 if (sig != g_last_list_sig) {
-                    poc_rescan_timelines_timed(n, "entity-change");   /* change-gated, not a fixed timer */
+                    ui_rescan_timelines_timed(n, "entity-change");   /* change-gated, not a fixed timer */
                     g_last_list_sig = sig;
-                    poc_emit_list(n, rdy, "entity-change");
+                    ui_emit_list(n, rdy, "entity-change");
                 }
 
                 /* Publish selection count regardless of sync direction for prefab creation. */
-                unsigned long long selection_started = poc_perf_now_us();
-                static int selids[POC_MAX_ENTS];
-                int sn = poc_get_selection(selids, POC_MAX_ENTS);
+                unsigned long long selection_started = ui_perf_now_us();
+                static int selids[UI_MAX_ENTS];
+                int sn = ui_get_selection(selids, UI_MAX_ENTS);
                 if (sn != g_last_selcount) {
                     g_last_selcount = sn;
                     wchar_t m[64]; _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"selCount\",\"count\":%d}", sn);
-                    poc_post_json(m);
+                    ui_post_json(m);
                 }
                 /* Object Mode / Blueprint, for the Prefabs tab's Load and Create gates */
-                poc_post_editor_mode(false);
+                ui_post_editor_mode(false);
                 /* The Limits section's table, after a palette rebuild, and its live usage. */
-                poc_budget_poll();
-                poc_budget_usage_poll();
+                ui_budget_poll();
+                ui_budget_usage_poll();
                 if (g_sync_on) {
                     /* mirror the WHOLE editor selection (any N) into the list, only when it changes. */
                     std::sort(selids, selids + sn);
@@ -4768,17 +4795,17 @@ static void poc_think_loop()
                         std::wstring m = L"{\"kind\":\"editorSelect\",\"eids\":[";
                         for (int a = 0; a < sn; a++) { if (a) m += L","; m += std::to_wstring(selids[a]); }
                         m += L"]}";
-                        poc_post_json(m.c_str());
+                        ui_post_json(m.c_str());
                         if (sn == 1) g_displayed_eid = selids[0];
                     }
                 }
-                unsigned long long selection_finished = poc_perf_now_us();
+                unsigned long long selection_finished = ui_perf_now_us();
                 bool state_called = g_displayed_eid >= 0;
                 unsigned long long state_started = selection_finished;
-                if (state_called) poc_send_state(g_displayed_eid, true);
-                unsigned long long state_finished = poc_perf_now_us();
-                unsigned long long poll_finished = poc_perf_now_us();
-                poc_perf_note_poll(poll_finished >= poll_started ? poll_finished - poll_started : 0,
+                if (state_called) ui_send_state(g_displayed_eid, true);
+                unsigned long long state_finished = ui_perf_now_us();
+                unsigned long long poll_finished = ui_perf_now_us();
+                ui_perf_note_poll(poll_finished >= poll_started ? poll_finished - poll_started : 0,
                                    collect_us,
                                    selection_finished >= selection_started ? selection_finished - selection_started : 0,
                                    state_finished >= state_started ? state_finished - state_started : 0,
@@ -4786,7 +4813,7 @@ static void poc_think_loop()
             }
         }
 
-        if (g_webview_ready) poc_send_prefab_mesh_completion();
+        if (g_webview_ready) ui_send_prefab_mesh_completion();
 
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
@@ -4801,21 +4828,33 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     InitializeCriticalSection(&g_loop->mtx); g_loop->flags = 0;
     if (args && args->out_slot) *reinterpret_cast<void **>(args->out_slot) = g_loop;
     g_iface = args ? args->iface : nullptr;
-    g_ents = (PocEnt *)malloc(sizeof(PocEnt) * POC_MAX_ENTS);
-    g_tls  = (PocTl  *)malloc(sizeof(PocTl)  * POC_MAX_TLS);
+    /* The window and the backend are built together: their interface tables must be the
+     * same size, or every slot past the shorter one is unknown, and a backend that names its
+     * release must name this window's. A mismatched pair runs the window only to say so. */
+    std::string backend_version = args ? sh_game_identity::backend_version(args->argc, args->argv) : std::string();
+    g_pair_mismatch = g_iface && (sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl) ||
+                                  (!backend_version.empty() && backend_version != g_version));
+    g_ents = (UiEnt *)malloc(sizeof(UiEnt) * UI_MAX_ENTS);
+    g_tls  = (UiTl  *)malloc(sizeof(UiTl)  * UI_MAX_TLS);
     if (!g_ents || !g_tls) {
-        poc_log("sh_ui_init: FATAL -- malloc failed for g_ents/g_tls, aborting init");
+        ui_log("sh_ui_init: FATAL -- malloc failed for g_ents/g_tls, aborting init");
         free(g_ents); g_ents = nullptr;
         free(g_tls);  g_tls  = nullptr;
         return 1;
     }
-    poc_read_version();
     g_game = args ? sh_game_identity::from_argv(args->argc, args->argv) : std::string();
 
-    poc_log("=== sh_ui_init (WebView2 POC, entities-deep) entered ===");
-    poc_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
-    { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "installed version: %s", g_version.c_str()); poc_log(v); }
-    { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); poc_log(v); }
+    ui_log("=== sh_ui_init: the Snapmap+ window is starting ===");
+    ui_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
+    if (g_pair_mismatch) {
+        char v[320];
+        _snprintf_s(v, sizeof v, _TRUNCATE, "install mismatch: the backend is %s with a %u-byte interface, this window "
+                    "%s with %u; showing the reinstall notice only", backend_version.empty() ? "(unnamed)" : backend_version.c_str(),
+                    (unsigned)sh_iface_vtbl_bytes(g_iface), g_version.c_str(), (unsigned)sizeof(sh_iface_vtbl));
+        ui_log(v);
+    }
+    { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "window version: %s", g_version.c_str()); ui_log(v); }
+    { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); ui_log(v); }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int n = MultiByteToWideChar(CP_UTF8, 0, kMockupHtml, -1, nullptr, 0);
@@ -4823,17 +4862,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, kMockupHtml, -1, &g_html[0], n);
     {
         std::string theme_json;
-        int got = poc_config_get_json("theme", theme_json,
+        int got = ui_config_get_json("theme", theme_json,
                                       &g_config_status_flags);
         const char *seed_value = got >= 0 ? theme_json.c_str() : "\"light\"";
         if (got < 0)
-            poc_log("config: theme unavailable; using light for this session");
+            ui_log("config: theme unavailable; using light for this session");
         if (!sh_theme_seed_html(g_html, seed_value))
-            poc_log("config: embedded HTML theme marker missing or duplicated");
+            ui_log("config: embedded HTML theme marker missing or duplicated");
     }
 
-    poc_create_window();
-    poc_start_webview();
-    poc_think_loop();
+    ui_create_window();
+    ui_start_webview();
+    ui_think_loop();
     return 0;
 }

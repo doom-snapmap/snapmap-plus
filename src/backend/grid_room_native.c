@@ -98,12 +98,23 @@ static tree_free_fn g_tree_free;
 static sh_process_heap_api g_heap;
 static sh_grid_module_served_fn g_module_served;
 
+static int grid_containing_module_tall(void *collision,const float *point,int result);
 static int grid_containing_module(void *collision,const float *point)
 {
-    int result=g_containing_module(collision,point),i,n,k;unsigned j;
+    int result=g_containing_module(collision,point);
+    if(result!=-1||!g_editor||collision!=g_editor+0x20550)return result;
+    /* Every read below is of engine state that can be mid-change; a fault
+     * keeps the native answer. */
+    __try {return grid_containing_module_tall(collision,point,result);}
+    __except(EXCEPTION_EXECUTE_HANDLER){return result;}
+}
+/* A tall admitted variant the native fixed-length rays cannot see. */
+static int grid_containing_module_tall(void *collision,const float *point,int result)
+{
+    int i,n,k;unsigned j;
     unsigned char *map,*records,*record,*wrapper,*module;
     float bounds[6],end[3],reach;grid_ray_hit up={0},down={0};
-    if(result!=-1||!g_editor||collision!=g_editor+0x20550||!g_editor[8])return result;
+    if(!g_editor[8])return result;
     for(k=0;k<3;++k)if(!isfinite(point[k]))return result;
     map=*(unsigned char**)(g_editor+0x204c8);if(!map)return result;
     n=*(int*)(map+0x758);records=*(unsigned char**)(map+0x750);
@@ -137,11 +148,13 @@ static unsigned char grid_build_collision(void *collision,void *map,int instance
 {
     unsigned char *m=map,*wrapper=NULL,result;unsigned i;int own=0;
     sh_process_heap_scope heap={0};
-    if(instance>=0&&instance<*(int*)(m+0x758)){
-        wrapper=*(unsigned char**)(*(unsigned char**)(m+0x750)+(size_t)instance*0x98);
-        for(i=0;i<g_count;++i)if(g_entries[i].state==2&&
-            *(void**)g_entries[i].record==wrapper){own=1;break;}
-    }
+    __try {
+        if(m&&instance>=0&&instance<*(int*)(m+0x758)){
+            wrapper=*(unsigned char**)(*(unsigned char**)(m+0x750)+(size_t)instance*0x98);
+            for(i=0;i<g_count;++i)if(g_entries[i].state==2&&
+                *(void**)g_entries[i].record==wrapper){own=1;break;}
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER){own=0;}
     if(!own)return g_build_collision(collision,map,instance);
     /* These two resources are cached by a process-lifetime private palette.
      * Build their native allocations on that same heap and retain only this
@@ -634,7 +647,7 @@ static int apply_light(void *edit_data,grid_light_change *light,int restore)
         if((light->target.has_radius&&fabsf(*(float*)(body+0xa0+4*k)-light->target.radius[k])>.01f)||
            fabsf(*(float*)(body+0xac+4*k)-light->target.center[k])>.01f){
             char message[200];
-            /* The probe and dynamic point readback layout is verified (R-012).
+            /* The probe and dynamic point readback layout is verified.
              * Other built-in light kinds are committed through the same tree;
              * a readback difference there is reported, not treated as fatal. */
             if(strcmp(light->target.inherit,"light/probe")&&
@@ -1117,12 +1130,78 @@ int sh_grid_native_refresh_placement(void)
     return result;
 }
 static char g_last[1024];
+/* A log line's text without its "GRID: " prefix. */
+static const char *grid_bare(const char *m)
+{
+    return strncmp(m,"GRID: ",6)?m:m+6;
+}
+/* What the player reads for an edit's log line: a success says the size, a
+ * refusal says "Room size not changed:" and why in plain words. */
+static void grid_plain(const char *m,char *out,size_t cap)
+{
+    static const struct {const char *has,*say;} plain[]={
+        {"native editor functions are not bound","room sizes cannot be changed on this game build"},
+        {"outside the room format","that size is outside what a Grid Room can be"},
+        {"earlier recovery failure","room size edits are off after an earlier error; restart DOOM"},
+        {"further dimension edits disabled","room size edits are off after an earlier error; restart DOOM"},
+        {"another dimension edit is in progress","another room size change is still running; try again"},
+        {"not on the engine thread","the editor was busy; try again"},
+        {"is not the active editor map","open the map in the editor first"},
+        {"no active editor map","open the map in the editor first"},
+        {"the editor map changed during the edit","the map changed during the edit; try again"},
+        {"doorway tables are inconsistent","this room's doorways could not be read"},
+        {"invalid portal entity ownership","this room's doors could not be read"},
+        {"invalid connected module layout","the rooms connected to this one could not be read"},
+        {"out of memory","not enough memory"},
+        {"requested size is not finite","those are not sizes"},
+    };
+    const char *bare=grid_bare(m);size_t i;
+    if(!strncmp(bare,"selected room dimensions",24)){
+        unsigned x=0,y=0,z=0;
+        if(sscanf_s(bare,"selected room dimensions updated to %u x %u x %u",&x,&y,&z)==3)
+            _snprintf_s(out,cap,_TRUNCATE,"Room size set to %u x %u x %u.",x,y,z);
+        else if(sscanf_s(bare,"selected room dimensions unchanged at %u x %u x %u",&x,&y,&z)==3)
+            _snprintf_s(out,cap,_TRUNCATE,"Room size unchanged at %u x %u x %u.",x,y,z);
+        else strncpy_s(out,cap,bare,_TRUNCATE);
+        return;
+    }
+    if(strstr(bare,"variant could not be constructed")&&g_step&&!strcmp(g_step,"variant cache full")){
+        _snprintf_s(out,cap,_TRUNCATE,"Room size not changed: Snapmap+ has made %d room sizes this session, "
+                    "the most it can; restart DOOM to make more.",GRID_NATIVE_CAP);
+        return;
+    }
+    for(i=0;i<sizeof plain/sizeof plain[0];++i)if(strstr(bare,plain[i].has)){
+        _snprintf_s(out,cap,_TRUNCATE,"Room size not changed: %s.",plain[i].say);return;}
+    {
+        /* The rest already read as a reason; drop the engine words around it. */
+        char text[320];char *cut;
+        strncpy_s(text,sizeof text,bare,_TRUNCATE);
+        if(!strncmp(text,"dimension edit refused; ",24))memmove(text,text+24,strlen(text+24)+1);
+        if((cut=strstr(text,"; dimensions unchanged"))!=NULL)*cut=0;
+        if((cut=strstr(text,"; restoring the previous"))!=NULL)*cut=0;
+        _snprintf_s(out,cap,_TRUNCATE,"Room size not changed: %s.",text);
+    }
+}
+static void (*g_toast)(const char *title,const char *text);
+void sh_grid_native_set_toast(void (*toast)(const char *title,const char *text)){g_toast=toast;}
 static void finish(const char *message)
 {
+    char notes[sizeof g_note];size_t at=0,k;
+    int limited=g_note[0]!=0;
     backend_log(message);
-    strncpy_s(g_last,sizeof g_last,message,_TRUNCATE);
-    if(g_note[0]){strncat_s(g_last,sizeof g_last," (",_TRUNCATE);strncat_s(g_last,sizeof g_last,g_note,_TRUNCATE);
-        strncat_s(g_last,sizeof g_last,")",_TRUNCATE);g_note[0]=0;}
+    grid_plain(message,g_last,sizeof g_last);
+    if(g_note[0]){
+        /* The limits that shaped the size, without their log prefixes. */
+        for(k=0;g_note[k]&&at+1<sizeof notes;){
+            if(!strncmp(g_note+k,"GRID: ",6)){k+=6;continue;}
+            notes[at++]=g_note[k++];
+        }
+        notes[at]=0;
+        strncat_s(g_last,sizeof g_last," Limits: ",_TRUNCATE);strncat_s(g_last,sizeof g_last,notes,_TRUNCATE);
+        strncat_s(g_last,sizeof g_last,".",_TRUNCATE);g_note[0]=0;
+    }
+    /* A refusal or a limited size is said where the player is looking. */
+    if(g_toast&&(limited||!strncmp(g_last,"Room size not changed",21)))g_toast("Grid Room",g_last);
 }
 const char *sh_grid_native_last_message(void){return g_last;}
 int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
@@ -1324,7 +1403,7 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
         /* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
          * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
          * delete only when its two leading calls reach the resolved getter and applier.
-         * Its live destroy/free check stays open: R-012 could not reach it before the stream-slot fix. */
+         * Its live destroy/free check stays open: no live check has reached it yet. */
         if(p&&g_entity_tree&&g_apply_tree&&p[0x17]==0xe8&&p[0x25]==0xe8&&p[0x38]==0xe8&&p[0x45]==0xe8&&
            !memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8)){
             memcpy(&displacement,p+0x18,4);

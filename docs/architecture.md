@@ -30,7 +30,7 @@ can call the wrong interface slot. See [packaging](packaging.md).
 Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
-set (named and unnamed) and nothing else. The proxy loads the system `XInput1_4.dll`
+set (named and unnamed) and exports nothing else. The proxy loads the system `XInput1_4.dll`
 from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
@@ -303,7 +303,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x380`; the current table occupies `0x388`
+retained, with extensions through `+0x388`; the current table occupies `0x390`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -316,7 +316,9 @@ section, built on the game thread after each palette build by
 `modui.c`, run on the game thread through `run_on_main`) and `prefab_watch`
 (`+0x380`, the Prefabs tab's guarded reads: the Blueprint module selection that
 gates Create, the Load / Place held in the 3D view, and the game thread's last
-paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`). The retired
+paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`), then
+`features_off` (`+0x388`, the one line naming the features that are off this session,
+from `feature_health.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -721,24 +723,36 @@ These backend files share the work:
   salt and build; a row naming an `id` or a `bundle` does not parse (the parse
   detour has already refused such a map). The display name of a placed mod's
   row comes from the build that serves it at the save (the row resolver).
-- `modui.c` is the WebView Mods tab's backend. It lists one row per mod
-  folder (two folders declaring one id both flagged, a package a map delivered
-  listed like any other) with what each carries, marks each installed or
-  needing attention with its cause, reports whether `overrides\` still holds
-  entries to migrate, describes the open map and the mods it uses, and runs
-  Install, Verify, Rebuild, Uninstall, Remove from map, their dry runs, Migrate
-  and rescan on the main thread, as in
-  [The Mods tab's map scope](#the-mods-tabs-map-scope). What the tab does not show, every bundle's state with legacy ones,
-  conflicts with their winners, shadows and verification, it prints as
-  `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
-  Each row names its organizing folder (`group`). Its Files view reads only:
+- `modui.c` is the WebView Mods tab's backend (payload v4). It lists one row
+  per mod folder, the player's own at the root (with their organizing folder,
+  `group`) and each downloaded map's in that map's place (`place`,
+  `placeTitle`), with what each adds, changes and borrows from the game, marks
+  each ready or needing attention with one plain sentence saying what is wrong
+  and what to do (`mu_plain_cause`: the builder's shape and build causes and
+  the store's are rewritten for the page, and `mu_plain` keeps salts, hashes
+  and the internal words out of every sentence a player reads), says when
+  another of the player's mods carries at least half of a mod's files at
+  equal bytes (`sameFilesAs`, informational: two mods stay two mods),
+  describes the open map and the mods it uses, and runs Install, Rebuild (the
+  player's own folders only), Uninstall, Use in this map, Remove from map,
+  their dry runs, the registry choice and Refresh on the main thread, as in
+  [The Mods tab's map scope](#the-mods-tabs-map-scope). There is no Migrate,
+  no folder watcher and no build list. What the tab does not show, every
+  folder's state, conflicts with their winners, the game files mods replace
+  and verification, it prints as `sh_mods doctor [verify]` (see
+  [WebView UI](webview-ui.md#mods-tab)). Its Files view reads only:
   `modFiles` lists a folder's files (walked on disk, dot folders skipped) and
-  the pointers its last good build reads from the install, each with its class
+  the game files its build reads from the install, each with its class
   (`f->cls`), whether it is the game's own bytes and their archive, and the
-  mod's standing cause when that names the file; `modFileText` answers one
-  text file of at most 1 MiB of UTF-8 inside the folder (`mod.json` without its
-  product block). Neither is followed by a fresh document. New mod is
-  `newMod`.
+  plain cause when the folder's cause names the file; `modFileText` answers
+  one text file of at most 1 MiB of UTF-8 inside the folder (`mod.json`
+  without the part Snapmap+ writes). Neither is followed by a fresh document.
+  New mod is `newMod`, whose result says Refresh picks up the author's edits.
+  The rows a map save writes are resolved through `sh_modserve_row_build`
+  (the resolver modui.c binds), and the listing's undeclared names take the
+  build `sh_modserve_row_build` names in the open map's context;
+  `sh_modui_scope_launch_at` sets that context (place, own) for a hub launch,
+  and the editor's exit returns it to no place, own.
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
@@ -2480,10 +2494,11 @@ Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
 is read again from the editor, so the confirmation lists exactly what the dry
 run computed and the modal redraws from what the backend found afterwards.
-The console verbs `sh_mods map`, `sh_mods map add "<id>"`, `sh_mods map remove
-"<id>" [--yes]` and `sh_mods uninstall "<id>" [--yes]` share the dry runs and
-the actions; the console's uninstall of a key removes every installed build of
-it (`mu_uninstall_targets`), `"<id>@<hash16>"` one build, where the tab names
+The console verbs `sh_mods map`, `sh_mods map add "<mod folder>"`, `sh_mods map
+remove "<mod folder>" [--yes]` and `sh_mods uninstall "<mod folder>" [--yes]`
+share the dry runs and the actions and name mods by their names and folders;
+the console's uninstall removes every folder of the mod it names (the player's
+own and the copies maps brought, `mu_uninstall_targets`), where the tab names
 one folder. Adding a mod to the map changes the current manifest only; the
 next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
@@ -2663,20 +2678,20 @@ Loading. `sh_modpub_rawmap_missing` reads the rows and counts those the asset
 rule does not find served (missing or incomplete). The editor reload, which
 both **File > Load Rawmap...** and `sh_rawmaps load` use, checks on its own
 frame before `LoadMap` (`sh_rawmap_prepare_reload` in `ef_service_reload`); the
-text it read, with a `.zip` already imported, is what the parse then uses. Any
-other substitution (a staged file and the next map the player opens, or rawmaps
-on for every load) is checked in the `DeserializeFromJson` detour: a map that
-misses mods is not substituted, the map being opened loads as itself, and the
-hold starts after that parse. Inside a reload window a failed check parses
-nothing rather than the borrowed saved map.
+text it read, with a `.zip` already imported, is what the parse then uses. That
+reload is the only way a rawmap opens: the `DeserializeFromJson` detour replaces
+the text of the editor's parse inside that one `LoadMap` call and of no other
+parse, so a published map, a lobby map or a map opened from My Maps always loads
+as itself. A reload request records the open map and the load generation and is
+dropped on the frame if either changed; nothing is kept for a later map.
 
 The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) runs the
 denial gate first, as every hold does (see Published maps and missing mods).
 When every missing bundle is obtainable, the player gets the question a My Maps
 launch asks, and Yes fetches and installs them; the resume does not activate
 anything (the rawmap's own parse does) but opens the rawmap again, through a
-reload when the editor can take one and otherwise staged for the next map open,
-with a notice saying so. That reopened load parses the text the hold checked
+reload when the editor can take one; otherwise a notice says to load it again
+from File > Load Rawmap once a map is open in the editor. That reopened load parses the text the hold checked
 (`held_take` in `rawmap.c`), so a `.zip` is imported once, at the hold; any other
 read of the source drops it and reads the file again. Otherwise the load is denied with the gate's
 sentences; the asset rule's sentence for each row comes first on the console.
@@ -2685,8 +2700,7 @@ build where they did not install, nothing is counted missing and rawmaps load as
 before.
 
 Saving. After every rawmap write of a map with at least one row (the File menu's
-Save Rawmap and Save Rawmap As, `sh_rawmaps save`, and the mirror when rawmaps
-are on), the export is written beside the JSON at the same path with `.zip`
+Save Rawmap and Save Rawmap As, and `sh_rawmaps save`), the export is written beside the JSON at the same path with `.zip`
 (`rawmap.json` becomes `rawmap.zip`), through `modexport_write_text_report`. The
 next main tick (`sh_rawmap_poll_main`) shows one toast and one console line:
 "This map uses N mod(s); share <name>.zip, the .json alone will not load for
@@ -2965,9 +2979,8 @@ name or author) are mirrored as build warnings in one table,
 rather than at publish. They are derived again whenever a built `mod.json` is
 read, so they also reach `sh_mods doctor` (one "warning i of n" line per
 bundle), each rescan (one line per mod with warnings), the Rebuild result
-(`warnings`, `firstWarning`) and each mod of the Mods tab's v3 payload
-(`warnings`: the first `SH_MB_WARNINGS_KEPT` as strings, `warningCount`,
-`firstWarning`). The builder's other warnings are its build report's. A publish whose save
+(`warnings`, `firstWarning`) and each mod of the Mods tab's payload
+(`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the

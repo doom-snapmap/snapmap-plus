@@ -137,7 +137,8 @@ check(iface.indexOf('strstr(inherit_name, "spawner")') < iface.indexOf('sh_typei
 check(iface.includes('slots.resolve_prefab_defaults = slot_resolve_prefab_defaults') &&
       common.includes('offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320'),
       'model-and-scale resolution is append-only at interface extension 23');
-check(html.includes("model:'',scale:[1,1,1]"),'browser preview completes model-and-scale requests');
+check(fs.readFileSync(path.join(root,'src','ui','webview','preview_standin.js'),'utf8').includes("model:'',scale:[1,1,1]"),
+      'browser preview completes model-and-scale requests');
 check(js.includes('var frame = grabFrame(doc);') && js.includes('entityFromJson(list[i], frame)') &&
       js.includes('applyFrame(vec3(edit.spawnPosition,[0,0,0]), orientationAxes(edit.spawnOrientation)'),
       'the preview places stored transforms through the prefab grabAxis, as the paste does');
@@ -149,9 +150,8 @@ check(html.includes('prefabTransform.countNavigationBoxes(doc)') && html.include
       'Prefab Details counts AI Navigation boxes beside the entity count');
 check(js.includes("if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true)"),
       'an unresolved blocking decl keeps its 16/128/64 default instead of 1-unit slabs');
-check(html.includes("d.grab === 'corrected'") && html.includes('d.result === 3') &&
-      host.includes('sh_prefab_grab_json_check(buf') && host.includes('L",\\"grab\\":\\"corrected\\""'),
-      'Create reports a corrected grab point and refuses only an unusable frame');
+check(html.includes('d.result === 3') && host.includes('sh_prefab_grab_json_check(buf'),
+      'Create refuses only an unusable frame');
 
 /* Demons and player starts: role, model source and status text, run against the real viewport code
    with no DOM (no canvas, so no GL; the pure helpers are exported as `testing`). */

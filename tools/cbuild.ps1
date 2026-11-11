@@ -114,6 +114,12 @@ function Invoke-CbCompile {
     param([string]$WorkDir, [string[]]$Sources, [string]$Flags, [string]$ObjDir, [string]$ObjDirArg,
           [string[]]$IncludeDirs, [string]$Log)
     New-Item -ItemType Directory -Force $ObjDir | Out-Null
+    # The release version root build.ps1 stamps into every compile as SNAPMAP_PLUS_VERSION. It is
+    # part of the flags, so a new version recompiles what it reaches.
+    if ($env:SNAPMAP_PLUS_VERSION) {
+        if ($env:SNAPMAP_PLUS_VERSION -notmatch '^[0-9A-Za-z.\-]+$') { throw "SNAPMAP_PLUS_VERSION '$env:SNAPMAP_PLUS_VERSION' is not a version" }
+        $Flags = $Flags + ' /DSNAPMAP_PLUS_VERSION=\"' + $env:SNAPMAP_PLUS_VERSION + '\"'
+    }
     $objs = @(); $stale = @(); $keys = @{}; $names = @{}
     foreach ($s in $Sources) {
         $s = $s.Trim()

@@ -110,7 +110,7 @@ func TestContractFromSnapHak(t *testing.T) {
 			t.Fatalf("install: %v", err)
 		}
 	})
-	for _, want := range []string{"Found:            the original SnapHak", "Removing the original SnapHak", "Not ours, left in place:", "dinput8.dll.doomforge.rollback"} {
+	for _, want := range []string{"Found:            the original SnapHak", "Removing the original SnapHak", "Other programs' files (left in place):", "dinput8.dll.doomforge.rollback"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -159,7 +159,7 @@ func TestContractFromBeta19Layout(t *testing.T) {
 					t.Fatalf("update: %v", err)
 				}
 			})
-			for _, want := range []string{"with the other DOOM build's files", "Removed files of ours:", legacyProxy, legacyUIDll} {
+			for _, want := range []string{"with the other DOOM build's files", "Removed Snapmap+ files:", legacyProxy, legacyUIDll} {
 				if !strings.Contains(out, want) {
 					t.Errorf("output lacks %q:\n%s", want, out)
 				}
@@ -217,8 +217,8 @@ func TestContractFromBeta20Layout(t *testing.T) {
 		}
 	})
 	for _, want := range []string{"with both DOOM builds' files, backups in the DOOM folder and retired installer records", "Tidying the data folder",
-		"installer-files.json (folded into install.json)", "snapmap-plus.exe.old", "Backups of files that were not ours",
-		"Not ours, left in place:", "dinput8.dll.doomforge.rollback", `override-backups\ (an empty folder of an earlier release)`} {
+		"installer-files.json (folded into install.json)", "snapmap-plus.exe.old", "Other programs' files Snapmap+ had replaced",
+		"Other programs' files (left in place):", "dinput8.dll.doomforge.rollback", `override-backups\ (an empty folder of an earlier release)`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -266,7 +266,7 @@ func TestContractPlainUpdateAndRecordShape(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "Found:            Snapmap+ v1.0.0-beta.1") || !strings.Contains(out, "A plain update") {
+	if !strings.Contains(out, "Found:            Snapmap+ v1.0.0-beta.1") || !strings.Contains(out, "An update: Snapmap+'s two files are replaced") {
 		t.Errorf("output:\n%s", out)
 	}
 	wantDoom(t, "plain update", r.doom, "XINPUT1_4.dll", currentUIDll)
@@ -333,7 +333,7 @@ func TestContractLeavesForeignFilesAtOurNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, want := range []string{"Not ours, left in place:", legacyProxy, `snapmap-plus\notes.txt`} {
+	for _, want := range []string{"Other programs' files (left in place):", legacyProxy, `snapmap-plus\notes.txt`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

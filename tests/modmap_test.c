@@ -25,8 +25,8 @@ int sh_modserve_scope_set_choices(const char *const *slots, const char *const *k
 { (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
 
 int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)bundle_hashes; (void)n; return 0; }
-int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
-{ (void)bundle_hash; (void)id; if (out) memset(out, 0, sizeof *out); return 0; }
+int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+{ (void)row; if (out) memset(out, 0, sizeof *out); return 0; }
 int sh_modserve_active(void) { return 0; }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context)
 {
@@ -157,9 +157,10 @@ int main(void)
         memset(&rows, 0, sizeof rows);
         memset(&back, 0, sizeof back);
         memset(&row, 0, sizeof row);
-        strcpy_s(row.id, sizeof row.id, "alex.bare-hands");
+        strcpy_s(row.salt, sizeof row.salt, "barehand");
+        strcpy_s(row.name, sizeof row.name, "Bare hands");
         strcpy_s(row.version, sizeof row.version, "1.0.0");
-        memset(row.bundle, 'c', 64);
+        memset(row.build, 'c', 64);
         row.size = 77;
         row.attached = 1;
         CHECK(sh_modmanifest_list_add(&rows, &row));

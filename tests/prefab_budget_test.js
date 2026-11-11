@@ -178,7 +178,7 @@ check(nearly.meters.network.after === 504 / 672 && nearly.meters.network.level =
 
 /* Formatting and the bounded memo. */
 check(budget.formatPercent(30 / 672) === '4.5%' && budget.formatPercent(0) === '0.0%' &&
-      budget.formatPercent(1 / 8192) === '<0.1%' && budget.formatPercent(Infinity) === 'over', 'percent format');
+      budget.formatPercent(1 / 8192) === '<0.1%' && budget.formatPercent(Infinity) === 'over 100%', 'percent format');
 check(budget.rawText('objects', obj.block) === '4 entities, 1560 KB memory', 'raw tooltip text');
 const cache = budget.createCache(2);
 cache.set('a', 1); cache.set('b', 2); cache.get('a'); cache.set('c', 3);
@@ -222,7 +222,7 @@ check(html.includes("if (!pfBudgetAsked) { pfBudgetAsked = true; post({cmd:'budg
 check((html.match(/prefabBudget\.sum\(/g) || []).length === 1 &&
       html.indexOf('prefabBudget.sum(') > html.indexOf('function pfRenderLimits()'), 'only the selected prefab is summed');
 check(viewport.includes('function load(sceneText, parsedDoc)'), 'the viewport accepts a parsed scene');
-check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUsage"') && host.includes('poc_budget_poll();'),
+check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUsage"') && host.includes('ui_budget_poll();'),
       'host routes budget requests and re-sends the table after a rebuild');
 check(host.includes('\\"sig\\":\\""'), 'prefabDetail carries a content signature');
 

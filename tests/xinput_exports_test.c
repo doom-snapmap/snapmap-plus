@@ -132,7 +132,7 @@ static int check_proxy(const char *build_dir)
         !find_ordinal(ours, n_ours, 3) || strcmp(find_ordinal(ours, n_ours, 3)->name, "XInputSetState")) {
         printf("BAD ordinals 2/3 are not XInputGetState/XInputSetState\n"); bad++;
     }
-    if (!bad) printf("OK  XINPUT1_4.dll exports the system ordinal set plus the private exports (%d)\n", n_ours);
+    if (!bad) printf("OK  XINPUT1_4.dll exports exactly the system ordinal set (%d)\n", n_ours);
     return bad;
 }
 

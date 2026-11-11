@@ -42,6 +42,10 @@ characters return 413. The UI receives a failed response and retains the draft.
   (`beta` / `stable`, from the version string; dev builds get neither), the renderer (`vulkan` /
   `opengl`), the game build (`build-13954591`, or `build-2642713` for a 2018-build report), and
   `user-report` (identifies relay-filed issues for release retest prompts).
+- **Player text is made safe for a public issue.** An `@name` in the title or details gets a zero-width
+  space after the `@`, so it notifies nobody; the contact is shown as inline code, so it carries no
+  mention, link or markup; a version that is not release-shaped (`v1.2.3`, `v1.2.3-beta.4`, `dev`,
+  `local`) is filed as `unknown`; attached logs are fenced with more backticks than any run inside them.
 
 A filed bug report's metadata block reads, for example:
 
@@ -50,7 +54,7 @@ A filed bug report's metadata block reads, for example:
 - Version: v0.2.2-beta.1 (beta)
 - Renderer: Vulkan
 - Game: DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
-- Contact: someone@example.com
+- Contact: `someone@example.com`
 ```
 
 **Why the game identity:** Snapmap+ supports exactly one DOOM 2016 build, so a report is only
@@ -103,7 +107,9 @@ dump's path appears in the record, but the dump is never uploaded automatically.
 The dialog shows the bounded error and call stack that were recorded, takes an optional "what were
 you doing?" description and optional contact, and offers an **Attach recent logs** checkbox (on by
 default). Attached logs are the *tails* of the local log files, **anonymized before sending** — the
-Windows account name, profile-folder name, and machine name are scrubbed out (`<user>` / `<machine>`).
+Windows account name, profile-folder name (and its 8.3 short form), and machine name are scrubbed out
+(`<user>` / `<machine>`) as UTF-8, ANSI and UTF-16 text, in any letter case. When the report would pass
+the relay's 64 KB cap, the oldest log lines are dropped until it fits.
 Send files it through the relay as `category: crash`; Dismiss (or a successful send) clears the pending
 record so the dialog never nags twice — the full logs and any dump stay on disk untouched.
 
