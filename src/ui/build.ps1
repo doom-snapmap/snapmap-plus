@@ -6,7 +6,10 @@
 param(
     [string]$Out = "snapmap-plus-ui.dll",
 # SNAPMAPPLUS_VCVARS_VER keeps both DLL builds on the same pinned MSVC toolset.
-    [string]$VcVarsVer = $env:SNAPMAPPLUS_VCVARS_VER
+    [string]$VcVarsVer = $env:SNAPMAPPLUS_VCVARS_VER,
+    # Diag (the root build's -Diag) adds SH_DIAG: the page's remote debugging port for the
+    # development daemon. A release build never has it.
+    [switch]$Diag
 )
 $ErrorActionPreference = "Stop"
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path            # src\ui
@@ -98,7 +101,8 @@ New-Item -ItemType Directory -Force (Join-Path $build "webview") | Out-Null
 # PDB and map files are maintainer artifacts; packaging copies only the DLL.
 # Sources compile to build\obj\uiwv (only those changed since the last build), then link.
 $buildLog = Join-Path $build "build-ui.log"
-$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro /DWIN32 /D_WINDOWS $incArgs" `
+$diagDef = if ($Diag) { "/DSH_DIAG" } else { "" }
+$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro /DWIN32 /D_WINDOWS $diagDef $incArgs" `
     -ObjDir $objDir -ObjDirArg "..\..\build\obj\uiwv\" -IncludeDirs @($objDir, $common, $backend) -Log $buildLog
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\uiwv\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro $objArgs /Fe:..\..\build\webview\$Out " +

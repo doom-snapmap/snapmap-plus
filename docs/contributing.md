@@ -90,7 +90,10 @@ sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It als
 `build.ps1` is the one top-level build script (used above, by CI and by the release workflow); build
 the product only through it or the component scripts it calls. Pass `-BackendOnly` to skip the frontend
 when iterating on backend code alone; any extra args (e.g. `-Diag`) forward through to
-`src\backend\build.ps1`. Frontend sources are in `src/ui/webview/`.
+`src\backend\build.ps1`, and `-Diag` also reaches `src\ui\build.ps1`, whose diagnostic page opens
+Chromium's remote debugging port named by `%LOCALAPPDATA%\snapmap-plus\devtools-port` for the development
+daemon (a release page never does, and `tools/bundle_guard.ps1` refuses a package that would). Frontend
+sources are in `src/ui/webview/`.
 
 The build is incremental. Each component script compiles its sources to objects under `build/obj/`
 with `cl /c /MP` (one compiler process per core) and then links them, all through the shared helpers

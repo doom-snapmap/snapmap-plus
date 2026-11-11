@@ -15,4 +15,9 @@ foreach ($f in $forbidden) {
 }
 $qtish = @(Get-ChildItem -Recurse -File $Dist | Where-Object { $_.Name.ToLower() -match '^qt5|^qwindows\.dll$' })
 if ($qtish.Count) { throw "bundle guard: Qt-shaped file(s) in $Dist ($($qtish.Name -join ', '))" }
+# The release page never opens a remote debugging port: only a -Diag build carries it.
+$ui = [System.IO.File]::ReadAllBytes((Join-Path $Dist "snapmap-plus\snapmap-plus-ui-13954591.dll"))
+$needle = [System.Text.Encoding]::Unicode.GetBytes("--remote-debugging-port")
+$text = [System.BitConverter]::ToString($ui)
+if ($text.Contains([System.BitConverter]::ToString($needle))) { throw "bundle guard: the packaged UI DLL is a -Diag build (it opens a remote debugging port)" }
 Write-Host "bundle guard OK: the April 2024 pair, its manifest and the store tool, nothing else"

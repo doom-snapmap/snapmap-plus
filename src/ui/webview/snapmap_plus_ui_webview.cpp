@@ -4535,6 +4535,33 @@ static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *
                         reinterpret_cast<void **>(g_webview_environment12.GetAddressOf()));
     return env->CreateCoreWebView2Controller(g_hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(on_controller_created).Get());
 }
+#ifdef SH_DIAG
+/* Diagnostic build only (never the release page): a file
+ * `%LOCALAPPDATA%\\snapmap-plus\\devtools-port` holding one port number
+ * (1024..65535) opens Chromium's remote debugging on 127.0.0.1 at that port for
+ * this window, so the development daemon's window step can inspect and drive
+ * the page. Absent or malformed, nothing is opened. */
+static int ui_devtools_port(const wchar_t *local)
+{
+    if (!local || !*local) return 0;
+    std::wstring path = std::wstring(local) + L"\\snapmap-plus\\devtools-port";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    char buf[16] = {}; DWORD got = 0;
+    BOOL ok = ReadFile(h, buf, (DWORD)(sizeof buf - 1), &got, nullptr);
+    CloseHandle(h);
+    if (!ok) return 0;
+    long port = 0; int digits = 0;
+    for (DWORD i = 0; i < got; i++) {
+        char c = buf[i];
+        if (c >= '0' && c <= '9') { port = port * 10 + (c - '0'); digits++; if (digits > 5) return 0; }
+        else if (c == ' ' || c == '\r' || c == '\n' || c == '\t') { if (digits) break; }
+        else return 0;
+    }
+    return (digits && port >= 1024 && port <= 65535) ? (int)port : 0;
+}
+#endif
+
 static void ui_start_webview()
 {
     wchar_t local[MAX_PATH] = {}; std::wstring udf = L".";
@@ -4548,7 +4575,19 @@ static void ui_start_webview()
         else if (how == sh_webview_profile::kept_old)
             ui_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
     }
-    HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), nullptr,
+    ComPtr<ICoreWebView2EnvironmentOptions> options;
+#ifdef SH_DIAG
+    int devtools_port = have_local ? ui_devtools_port(local) : 0;
+    if (devtools_port) {
+        auto opts = Make<CoreWebView2EnvironmentOptions>();
+        wchar_t args[64]; _snwprintf_s(args, _countof(args), _TRUNCATE, L"--remote-debugging-port=%d", devtools_port);
+        if (opts && SUCCEEDED(opts->put_AdditionalBrowserArguments(args))) {
+            options = opts;
+            ui_logf("devtools: remote debugging on 127.0.0.1:%d (diagnostic build, devtools-port file)", devtools_port);
+        }
+    }
+#endif
+    HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(on_environment_created).Get());
     if (FAILED(hr)) ui_logf("Create env FAILED hr=0x%08lx", (unsigned long)hr);
 }

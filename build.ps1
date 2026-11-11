@@ -29,7 +29,10 @@ try {
     if ($BackendOnly) {
         Write-Host "built: build/XINPUT1_4.dll + build/snapmap-plus-store.exe (backend only, $Version)"
     } else {
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\ui\build.ps1"
+        # -Diag reaches the frontend too (its remote debugging port); the other arguments are the backend's.
+        $uiArgs = @()
+        if ($Rest -contains "-Diag") { $uiArgs += "-Diag" }
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\ui\build.ps1" @uiArgs
         if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
         Write-Host "built: build/XINPUT1_4.dll + build/webview/snapmap-plus-ui.dll + build/snapmap-plus-store.exe ($Version)"
         Write-Host "package with: package.ps1"
