@@ -271,7 +271,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   movie or material in (decls are parsed again, models and images reloaded), and leaving it for the
   hub, or opening a map that does not use the mod, gives the game's own files back. In the editor, and
   with no map open, a mod the map does not use still offers its Toybox rows and everything under
-  `mods/<key>/` (placing one makes the map use the mod at the next save), never its replacements; in
+  `mods/<salt>/` (what you wrote under `mods/<folder name>/`) (placing one makes the map use the mod at the next save), never its replacements; in
   Play it offers nothing. A mod that adds Toybox rows keeps its requirements in the editor, since its
   rows are offered in every map, but not in the Play of a map that does not use it. `"scope"` in a `mod.json` no longer changes anything. A mod that
   replaces something the editor itself uses (an editor settings, palette or property-inspector decl, or
@@ -296,7 +296,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   author's own), and the next load activates exactly those mods. A map saved by an earlier build
   of Snapmap+ in a shape this one does not read is refused with "This map was saved in a format this
   version does not read." and its file is not changed. A mod can also be used by the whole map without placing
-  anything (the Mods tab's **Use in this map**, `sh_mods map add "<id>"`), for a mod that only replaces
+  anything (the Mods tab's **Use in this map**, `sh_mods map add "<mod folder>"`), for a mod that only replaces
   game files or sets requirements: the map gets a row for it marked as map-level, which stays through
   saves, reloads, Play and undo whatever the map places, publishes and downloads like any other, and
   carries the search tag `mods`. **Remove from map** takes it out again. A client without the product,
@@ -404,15 +404,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folder when it is at that very build; otherwise it is downloaded there, and refused as above
   when that build is gone.
 
-- Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
-  Retired package payloads below): a complete package becomes an ordinary mod folder `mods\<id>\`
-  (unless an installed mod already serves the same content) and the map gets a manifest row for it;
-  anything else is removed. Files a mod cannot carry (for example the
-  `.materials.txt` sidecars beside models, or `.bswf` movies outside `generated/swf/`) are left out
-  of it and counted in the log, so the rest of the package still loads.
+- Maps saved by v0.2.1-beta.6 to beta.19 with packages in them are converted on this machine by
+  the installer's store tool: each complete package becomes an ordinary mod folder (unless an
+  installed mod already serves the same content) and the map gets a mod row for it. A map in such
+  a shape that the installer has not converted is refused on load with "This map was saved in a
+  format this version does not read."
 - A mod can carry cooked Flash movies (`.bswf`, with their `.bimage` atlases) under
   `generated/swf/`: a replacement for a stock movie is listed in `shadows`, a new movie lives under
-  `generated/swf/mods/<id>/`. They load whenever the game asks for the movie, in the editor and in
+  `generated/swf/mods/<folder name>/`. They load whenever the game asks for the movie, in the editor and in
   Play; a replaced movie the game already holds changes at the next map load, and one held since
   startup after a restart.
 - A mod's `requirements` set console variables and run console commands while a map that uses it is
@@ -447,7 +446,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   on a frame the sync no longer plays) is undone when a mod scene node raises On Scene Finished, and
   otherwise at the next Play entry. The log says `scene-hud installed` and, once
   per Play each way, `hidden by a scene` and `shown again`.
-- A mod's scene node (a logic hexagon whose Activate input is the mod's `mods/<id>/actions/scene_play`
+- A mod's scene node (a logic hexagon whose Activate input is the mod's `mods/<folder name>/actions/scene_play`
   row, an `idSnapMapAction_Interaction` with `IA_ACTIVATE`) plays its scene where the activating
   player stands, facing the way they look, instead of at the node: during SnapMap Play the backend
   moves the node to the player's feet with the player's view yaw before the engine starts the sync,
@@ -494,7 +493,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   the listed order when using the tile activates its targets (`activateTargetsOnUse`). Each entry
   names an entityDef and its owner-local `origin` and `axis` (rows); `"activate": false` keeps one
   out of the Use order and `"bind": false` leaves it unbound, so it neither follows nor is removed
-  with the tile. A mod may only list its own tiles (`mods/<id>/...`), at most 16 companions each.
+  with the tile. A mod may only list its own tiles (`mods/<folder name>/...`), at most 16 companions each.
   Each companion entityDef is recorded as a need of its tile, so a map that places the tile also
   registers the companions (they may live in another installed bundle) and the bundle validator
   checks that they resolve. A companion's entityDef must load in SnapMap: one inheriting a
@@ -503,8 +502,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   `-0.7071` (no exponent), kept as written in the bundle's canonical text. Nothing is spawned on a co-op client. A mod with
   companions installed while the game runs gets them at its next map load or Play, with no restart:
 
-      "companions": { "mods/<id>/my_panel": [
-        { "entityDef": "mods/<id>/screen_left", "origin": [-57.4, 80.6, 98.3],
+      "companions": { "mods/<folder name>/my_panel": [
+        { "entityDef": "mods/<folder name>/screen_left", "origin": [-57.4, 80.6, 98.3],
           "axis": [[-0.7071, -0.7071, 0], [0.7071, -0.7071, 0], [0, 0, 1]] } ] }
 - A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<salt>/` plays the Wwise
   event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
@@ -518,7 +517,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   those sounds (`soundShader`). A changed bank takes effect after a restart. Music, switch and
   blend containers and streamed media still need Wwise itself.
 - A mod can serve a SnapMap module, including a multiplayer map's arena: a module decl at
-  `maps/modules/mods/<id>/<name>.decl` with its `snapModuleInfo`, and stock pointers for the render
+  `maps/modules/mods/<folder name>/<name>.decl` with its `snapModuleInfo`, and stock pointers for the render
   model, collision, navigation, sound BSP (`.sbsp`), light grid (`.ambientsh`), occlusion tome,
   light probes and virtual texture (`.pages`) under the names the game derives from the module.
   `.sbsp`, `.ambientsh`, `.tome` and `.pages` files are accepted only as pointers to the installed
@@ -528,8 +527,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   are, and it then moves, saves and plays like a stock module. Saved maps name its mod in their
   Snapmap+ data.
 - A mod can carry its own virtual-texture family (the page format a material streams its
-  diffuse, specular and normal detail from): the members `virtualtextures/mods/<id>/<family>_sq<N>.mega2`
-  (N 1 to 16), and materials naming it with `landpagefile "mods/<id>/<family>"` and an explicit
+  diffuse, specular and normal detail from): the members `virtualtextures/mods/<folder name>/<family>_sq<N>.mega2`
+  (N 1 to 16), and materials naming it with `landpagefile "mods/<folder name>/<family>"` and an explicit
   `virtualmapping`. The family is registered with the game when the mod is installed (or, for mods
   present at startup, when the editor is first opened or a map using it loads), before any of its
   materials is read, with no console command; `sh_mods status` shows it. Each family

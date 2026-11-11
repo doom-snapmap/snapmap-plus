@@ -834,7 +834,7 @@ These backend files share the work:
   stock banks SnapMap skips that a declared mod's sound events need, with
   `modbankinfo.c` reading the game's bank index, as in [Mod sounds](#mod-sounds).
 - `modvt.c` registers each private virtual-texture family a bundle carries
-  (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, the builder's only form of
+  (`virtualtextures/mods/<salt>/<family>_sq<N>.mega2`, the builder's only form of
   `.mega2`) as one page-source record, as in
   [Mod virtual-texture families](#mod-virtual-texture-families).
 - `companion.c` reads the `companions` key of every admitted bundle's author
@@ -956,8 +956,27 @@ each map (its item id, `zip:<the ZIP's path>`, `place:<segment>` for a fetch int
 recorded place, else `title:<segment>`) to its title
 and place (`sh_ms_place_note`, `sh_ms_place_of`, `sh_ms_place_title`), so the
 Mods tab says which map a place serves. A new folder dropped into a place is
-refused ("it was not built by the mod store"); a hand copy inside one place is
-refused as "another folder of this map has the same mod".
+refused (`SH_MODSERVE_PLACE_FRESH`: move it out into your own mods); a hand
+copy inside one place is refused ("This map's folder holds this mod twice").
+
+`mods\maps\` is a cache of other people's maps (DECISIONS 22). Every load of a
+map with a place notes when it was played in the record's entries for that
+place (`sh_ms_place_played`, from `sh_modserve_place_load` and
+`sh_modserve_place_set`). At start, before the boot index, `sh_ms_places_prune(30)`
+(`modui.c`, where the saved maps are read) removes every mod folder of a place
+that no saved map of the player records (`sh_ms_place_saved_maps`: the
+`place` part of each saved map's member) and whose map was not played for 30
+days (`sh_ms_place_played_at`, never earlier than the place folder's
+creation), through `sh_ms_delete_mod_folder` as the Mods tab's Remove does; an
+emptied place goes with its record entry. Saves that cannot be read keep every
+place. Playing the map again downloads its mods again.
+
+Install at the root (`sh_ms_install_to_root`). A built folder of a map's place,
+or a received build unpacked outside the store, is copied to `mods\<its name>`
+keeping its salt and verified; a root folder of the salt at that very build is
+the install, and one at another build refuses it (the player's own folder of a
+mod stays theirs). Add to my mods, a placed prefab whose mod a map's place
+holds, and a download for a map without a place all install through it.
 
 Install (`sh_ms_install_from_folder`). A folder of the store is built in
 place. From elsewhere the source is only read: a new mod is copied whole to
@@ -1288,7 +1307,7 @@ virtual texture). It reads the archives directly rather than through the
 engine provider because SnapMap's provider does not see campaign-only
 content in `gameresources`, which is what the boss packs copy. Identity is
 size first: the builder hashes only entries whose decoded size equals the
-file's, at the file's own path, then at that path with its `mods/<key>/`
+file's, at the file's own path, then at that path with its `mods/<salt>/`
 segment cut (either spelling of the key; where a copy moved under a key came
 from), each time every row of the name in both archives (they hold different
 bytes under some names, and the one whose bytes match is named), then entries
@@ -1354,8 +1373,8 @@ a shadow installed between maps applies at the next map load; a movie resident
 since boot is served only when its bundle is installed at boot. The builder
 admits `.bswf` only under `generated/swf/`, names it as the consumer does
 (`swf/<stem>.swf`), and applies the usual rules: a stock movie is a listed
-shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
-`generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
+shadow, a new one lives under `generated/swf/mods/<salt>/` with its atlas
+`generated/swf/mods/<salt>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
 
 Display text reaches the engine's `#str_` table through `strids.c`, which reads
@@ -1398,7 +1417,7 @@ instead of failing it.
 
 ### Mod sounds
 
-A sound decl a mod carries (`generated/decls/sound/mods/<id>/<stem>.decl`)
+A sound decl a mod carries (`generated/decls/sound/mods/<salt>/<stem>.decl`)
 names the Wwise event `play_<stem>`: the engine computes the event id from the
 decl's own name, so a decl whose stem is a stock event's (an alias) plays that
 stock sound with no bank, and one whose event lives in the mod's own bank
@@ -1480,7 +1499,7 @@ tab's facts show each needed bank and whether it loaded.
 
 ### Render programs
 
-A mod can ship a new render program `mods/<id>/<name>` (no `.` in the last
+A mod can ship a new render program `mods/<salt>/<name>` (no `.` in the last
 component) and a material that names it in quotes; the engine opens every file
 of it through the provider and needs no restart. The builder checks what the
 engine checks (`mb_check_renderprogs`): each `_pc_vulkan.bin` (and an OpenGL
@@ -1509,7 +1528,7 @@ which shows the variant this GPU binds.
 ### Owner-bound companions
 
 A bundle's `companions` key (author block of `mod.json`, kept under `extra`)
-maps owner entityDefs, which must be the bundle's own `mods/<id>/` names, to
+maps owner entityDefs, which must be the bundle's own `mods/<salt>/` names, to
 1..16 companions `{entityDef, origin, axis, activate, bind}` (`companion.h`
 has the grammar and refusals; a refused block adds nothing and is logged
 `COMPANIONS: <id> REFUSED: ...`). Each admitted build that declares companions
@@ -2121,13 +2140,13 @@ FireOutput, variable-changed and Relay sites on both renderers.
 
 ### Mod modules
 
-A bundle module is `maps/modules/mods/<id>/<leaf>.decl` (provides `snapModule`,
+A bundle module is `maps/modules/mods/<salt>/<leaf>.decl` (provides `snapModule`,
 named by that path, the name a map's `moduleName` holds) plus
-`generated/decls/snapmoduleinfo/mods/<id>/<leaf>.decl`, which the builder
+`generated/decls/snapmoduleinfo/mods/<salt>/<leaf>.decl`, which the builder
 requires in the same bundle. Every other file is a name the engine derives: the
-render model `maps/modules/palettes/mega_blessed/mods/<id>/<leaf>.bmodel` (the
+render model `maps/modules/palettes/mega_blessed/mods/<salt>/<leaf>.bmodel` (the
 loader's palette group is the stock palette's, `mega_blessed`), and under
-`maps/modules/mods/<id>/<leaf>/` the collision `_combo/world.bcm` and
+`maps/modules/mods/<salt>/<leaf>/` the collision `_combo/world.bcm` and
 `<leaf>_floor_collision.bcm`, navigation `generated/.../<leaf>.baas_monster48`,
 96 and 128, `<leaf>.sbsp`, `<leaf>.ambientsh`, `_combo/_world.tome` and
 `lightprobes/<entity>_compressed.bimage` (the probe path is built from the
@@ -2171,8 +2190,8 @@ with exactly the material's `landpagefile` name exists when the material is
 parsed; otherwise the engine classifies it as a unique family and it draws
 with default images. The engine creates such a record for a private family on
 no path of its own and never reads a private family's `.vmtr` rows, so
-`modvt.c` calls `idVirtualTexture::SetSource(record, "mods/<id>/<family>",
-"virtualtextures/mods/<id>/<family>.pages", flavor, 2, 0, NULL)` per family.
+`modvt.c` calls `idVirtualTexture::SetSource(record, "mods/<salt>/<family>",
+"virtualtextures/mods/<salt>/<family>.pages", flavor, 2, 0, NULL)` per family.
 SetSource's mega2 loader opens the served `_sq1` to `_sq16` members through the
 provider; no `.pages` file is needed, and materials carry an explicit
 `virtualmapping` instead of rows.
@@ -2993,7 +3012,7 @@ map's choices).
   reader cannot supply; a binary at a game name with other bytes ("<path>: the
   game ships this file and a mod cannot replace it with other bytes; delete
   your copy and the mod borrows the game's, or put your version under
-  mods/<key>/ and point your decls at it"; a binary at a name the game does
+  mods/<salt>/ and point your decls at it"; a binary at a name the game does
   not ship keeps "the game has no file of that name for it to replace"),
   except in a folder the product received (origin `download`, `delivery`,
   `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
