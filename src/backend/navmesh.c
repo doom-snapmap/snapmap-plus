@@ -1114,13 +1114,14 @@ static char *nav_embed_locked(const char *json, size_t len,
     return out;
 }
 
-char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
+char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *failed)
 {
     char *cur;
     size_t cur_len = len, embedded = 0;
     char line[224];
 
     if (out_len) *out_len = 0;
+    if (failed) *failed = 0;
     if (!json || len == 0) return NULL;
     if (nav_held_count() == 0 || !nav_config_on(NAV_CONFIG_EMBED)) {
         /* Nothing held (the feature was off when the map loaded): the member part the map
@@ -1139,7 +1140,10 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
     cur = nav_embed_locked(json, len, &cur_len, &embedded);
     ReleaseSRWLockExclusive(&g_nav_lock);
 
-    if (!cur) return NULL;
+    if (!cur) {
+        if (failed) *failed = 1;
+        return NULL;
+    }
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: the saved map CARRIES its baked navigation again -- %zu module/class "
                 "set(s) in the snapmap-plus member, %zu -> %zu bytes", embedded, len, cur_len);

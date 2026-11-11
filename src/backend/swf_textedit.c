@@ -292,7 +292,7 @@ void sh_swf_textedit_install(const uint8_t *module_base)
 
     /* Decode the interned type pointer before any patch. Without it the type
      * check cannot succeed, so leave the handler untouched. */
-    if (r.status == SIG_OK || r.status == SIG_OK_HOOKED) {
+    if (r.status == SIG_OK) {
         __try {
             const uint8_t *insn = (const uint8_t *)r.addr + TF_STRPTR_INSN_OFF;
             if (memcmp(insn, TF_STRPTR_INSN, sizeof TF_STRPTR_INSN) == 0) {
@@ -320,7 +320,7 @@ void sh_swf_textedit_install(const uint8_t *module_base)
         if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "IdStrAssignFromStr") != 0) continue;
         sig_result ra;
         sig_status st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &ra);
-        if (st == SIG_OK || st == SIG_OK_HOOKED) g_idstr_assign = (idstr_assign_fn)ra.addr;
+        if (st == SIG_OK) g_idstr_assign = (idstr_assign_fn)ra.addr;
         break;
     }
 

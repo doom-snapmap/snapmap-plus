@@ -25,8 +25,6 @@ typedef int (*name_hash_fn)(const char *name);
  * this same list to the console. Resolve the singleton from CmdSystemLea +0x10,
  * then an independent global anchor, then the recorded slot RVA, which is applied
  * only to an executable whose SHA-256 is a supported build's. */
-#define CVARSYS_SLOT_RVA          SH_RVA(0x2F451D0u, 0x2F8D1D0u)   /* recorded slot, per renderer */
-#define CVARSYS_OFF_FROM_CMDSYS   0x10         /* cvarSys .data slot == cmdSystem .data slot + 0x10 (adjacent) */
 #define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
 #define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
 #define CVARSYS_LIST_CAP_OFF      0x14    /* idList capacity (int) -- count==cap => engine grows */
@@ -155,69 +153,19 @@ static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i
     }
 }
 
-/* Resolve and read cvarSys, returning NULL if all address paths fail. */
+/* The cvar system through the globals table (cvar_system_slot, checked at its
+ * recorded code site), or NULL. */
 static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
 {
     char line[160];
-
-    /* Primary: CmdSystemLea decodes the adjacent command-system slot. */
-    if (module_base) {
-        for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
-            if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "CmdSystemLea") != 0) continue;
-            sig_result one;
-            sig_status st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &one);
-            if (st != SIG_OK && st != SIG_OK_HOOKED) break;   /* Try the independent global anchor next. */
-            const uint8_t *cmdsys_slot = sh_decode_rip_slot((const uint8_t *)one.addr);
-            if (!cmdsys_slot) break;
-            const uint8_t *cvarsys_slot = cmdsys_slot + CVARSYS_OFF_FROM_CMDSYS;
-            uint8_t *obj = NULL;
-            if (sh_safe_read(cvarsys_slot, (uint8_t *)&obj, sizeof obj) && obj) {
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "cvars: cvarSys decoded slot=%p (cmdSystem+0x10) -> obj=%p",
-                    (void *)cvarsys_slot, (void *)obj);
-                backend_log(line);
-                return obj;
-            }
-            break;
-        }
-        backend_log("cvars: cvarSys decode failed; trying the signed data-global anchor");
-    }
-
-    /* Independent anchor also works when CmdSystemLea has been detoured. */
-    if (module_base) {
-        glb_status gst = GLB_UNKNOWN_NAME;
-        uintptr_t slot = glb_resolve(module_base, "cvar_system_slot", &gst);
-        if (slot) {
-            uint8_t *obj = NULL;
-            if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&obj, sizeof obj) && obj) {
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "cvars: cvarSys global slot=%p -> obj=%p", (void *)slot, (void *)obj);
-                backend_log(line);
-                return obj;
-            }
-        } else {
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "cvars: cvarSys global anchor unresolved (status=%d)", (int)gst);
-            backend_log(line);
-        }
-    }
-
-    /* Last resort: the recorded slot RVA, applied only to a supported executable (by its hash). */
-    if (module_base && sh_host_is_supported_build()) {
-        uint8_t *obj = NULL;
-        __try {
-            obj = *(uint8_t * volatile *)(module_base + CVARSYS_SLOT_RVA);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            obj = NULL;
-        }
-        if (obj) {
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "cvars: cvarSys from the recorded slot *(base+0x%x)=%p", (unsigned)CVARSYS_SLOT_RVA, (void *)obj);
-            backend_log(line);
-            return obj;
-        }
-    }
-    backend_log("cvars: cvarSys unresolved; the Snapmap+ cvars are registered but not findable by name");
+    glb_status gst = GLB_UNKNOWN_NAME;
+    uintptr_t slot = module_base ? glb_resolve(module_base, "cvar_system_slot", &gst) : 0;
+    uint8_t *obj = NULL;
+    if (slot && sh_safe_read((const uint8_t *)slot, (uint8_t *)&obj, sizeof obj) && obj) return obj;
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "cvars: the cvar system was not found (status %d); the Snapmap+ cvars are registered "
+                "but not findable by name", (int)gst);
+    backend_log(line);
     return NULL;
 }
 
@@ -271,7 +219,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
             sig_result one;
             sig_status st = sig_resolve_one((const uint8_t *)module_base,
                                             &BACKEND_ENGINE_SIGNATURES[i], &one);
-            if (st == SIG_OK || st == SIG_OK_HOOKED)
+            if (st == SIG_OK)
                 hashfn = (name_hash_fn)one.addr;
             break;
         }

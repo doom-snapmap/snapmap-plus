@@ -2,12 +2,12 @@
 # Run: pwsh -File build.ps1 [-Out XINPUT1_4.dll] [-Diag] [-VcVarsVer <version>]
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
-    [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
+    [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "feature_health.c", "engine_globals.c", "hook.c", "smoke.c",
                            "rawmap.c", "modmanifest.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_carrier.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_overlay.c", "nav_preview.c", "engine_dialog.c", "strids.c",
                            "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_areas.c", "world_area_cell.c", "object_entry.c", "place_anywhere.c", "grid_room_snap.c", "grid_room_edit.c", "raw_deflate.c", "decl_text.c", "decl_tree.c",
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
-                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
+                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
                            "iface_engine.c", "editor_delete.c", "editor_undo.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "prefab_mods.c", "prefab_block.c", "timeline_tile.c", "modserve.c", "modregistry.c", "modregistry_choices.c", "modserve_engine.c", "modtypeinfo.c", "modledger.c", "modswf.c", "modsound.c", "modhud.c", "modhud_scene.c", "modscene_place.c", "modscene_decl.c", "modscene_sigs.c", "modpublished.c", "modpublish.c", "modaction.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
@@ -58,14 +58,19 @@ if ($Sources.Count -eq 1 -and $Sources[0] -match ",") { $Sources = $Sources[0].S
 
 # Include the optional logger; DllMain arms it when SH_DIAG is defined.
 $defs = ""
+$def = "xinput1_4.def"
 if ($Diag) {
-    $Sources += "../fault_shield/shield_diag.c"
+    # The cs_dontuse / sh_alginfo math overrides exist only in this build.
+    # The development daemon's status export (diag_status.h), at ordinal 300.
+    $Sources += "../fault_shield/shield_diag.c", "algo.c", "diag_status.c"
     $defs = "/DSH_DIAG"
-    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c /DSH_DIAG"
+    $def = "xinput1_4_diag.def"
+    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c +algo.c +diag_status.c /DSH_DIAG, xinput1_4_diag.def"
 }
 
 # Compile from this directory with relative paths to avoid cmd quoting issues.
-# xinput1_4.def is the sole export source and fixes native XInput ordinals.
+# xinput1_4.def is the sole export source and fixes native XInput ordinals (the
+# diagnostic build uses xinput1_4_diag.def, the same set plus sh_diag_status).
 # DOOM imports by ordinal; automatic alphabetical numbering calls wrong functions.
 $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp files under build/obj/backend.
 # Include the shared interface ABI used by the backend factory and paired UI DLL.
@@ -85,7 +90,7 @@ $objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O
     -ObjDir $objDir -ObjDirArg "..\..\build\obj\backend\" -IncludeDirs @((Join-Path $here "..\common")) -Log $buildLog
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\backend\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $objArgs /Fe:..\..\build\$Out " +
-      "/link /DEF:xinput1_4.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
+      "/link /DEF:$def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
       "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
 Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $outDir $Out) -Log (Join-Path $outDir "link.log") `
     -Remove @((Join-Path $outDir ($Out -replace '\.dll$', '.pdb')))

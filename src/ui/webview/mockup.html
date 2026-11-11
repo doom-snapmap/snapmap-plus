@@ -381,6 +381,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
+  <div class="features-off" id="featuresOff" role="status" hidden></div>
   <div class="statusbar">
     <div class="status-group status-main">
       <span><span class="dot" id="bridgeDot" role="status" aria-label="Connecting" title="Connecting"></span><b id="verText">Snapmap+</b></span>
@@ -2293,6 +2294,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       appRenderer = d.renderer || '';  // 'vulkan' | 'opengl' | '' -- rides along too
       appGame = d.game || '';          // the backend's game identity; '' = not attached
       document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
+      showFeaturesOff(d.featuresOff || '');
       flash('Updated: ' + new Date().toLocaleTimeString());
       allEntities = d.entities || [];
       // drop selections for entities that no longer exist
@@ -5120,11 +5122,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     abRefreshInspectors();
     post({cmd:'soundPreview', name: ''});
   }
+  /* The one line naming the features that are off this session (feature_health.h). */
+  function showFeaturesOff(line) {
+    var bar = document.getElementById('featuresOff');
+    if (!bar || bar.textContent === line) return;
+    bar.textContent = line;
+    bar.hidden = !line;
+  }
+
   function onSoundPreviewResult(d) {
     /* Apply backend results only to the current request; a late refusal must not clear newer playback. */
     if (d.playing) { if (d.name) abSoundPlaying = d.name; }
     else if (d.name && abSoundPlaying === d.name) {
-      toast('That sound could not be played. Open a map in the SnapMap editor and try again.', 'err');
+      toast(d.reason || 'That sound could not be played. Open a map in the SnapMap editor and try again.', 'err');
       abSoundPlaying = null;
     }
     abRefreshInspectors();
@@ -5445,6 +5455,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       abStopPoll(m);
       m.pvUri = d.uri; m.pvNote = null;
       abStatus(m, ''); abApplyImage(m);
+    } else if (d.reason) {
+      /* The decode failed and the backend says why: stop waiting and show it. */
+      abStopPoll(m);
+      m.pvUri = null; m.pvNote = d.reason;
+      abStatus(m, 'no preview'); abApplyImage(m);
     }
     /* An empty answer mid-poll only means the decode has not landed yet -- saying so every 250 ms
      * would be noise. The try budget is what reports a real miss. */

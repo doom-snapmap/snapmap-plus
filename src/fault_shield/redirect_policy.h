@@ -60,4 +60,28 @@ static __inline const char *shield_redirect_decline_reason(shield_redirect_verdi
     }
 }
 
+/* Redirects allowed per incident. An incident starts at its first redirect
+ * and lasts SHIELD_INCIDENT_WINDOW_MS; it may redirect SHIELD_INCIDENT_REDIRECTS
+ * times. A fault past that budget means the recovery itself keeps faulting and
+ * is left to the fatal handlers; a fault after the window starts a new
+ * incident, so a long session survives any number of separate recoveries. */
+#define SHIELD_INCIDENT_REDIRECTS 4
+#define SHIELD_INCIDENT_WINDOW_MS 30000ull
+
+typedef struct shield_incident {
+    unsigned long long start_ms;
+    int count;
+} shield_incident;
+
+static __inline int shield_incident_allow(shield_incident *incident, unsigned long long now_ms)
+{
+    if (incident->count == 0 || now_ms - incident->start_ms >= SHIELD_INCIDENT_WINDOW_MS) {
+        incident->start_ms = now_ms;
+        incident->count = 0;
+    }
+    if (incident->count >= SHIELD_INCIDENT_REDIRECTS) return 0;
+    incident->count++;
+    return 1;
+}
+
 #endif /* SHIELD_REDIRECT_POLICY_H */

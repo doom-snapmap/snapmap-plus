@@ -1,6 +1,7 @@
 /* Native modal dialogs with custom descriptor text. Raise through the shell
- * wrapper so its screen-pending flag and lock are set. Capture the shell from
- * native dialog traffic. The manager queue pointer is at +0x900, its count at
+ * wrapper so its screen-pending flag and lock are set. The shell is read from
+ * its global slot (shell_ptr_slot) at every use, so a rebuilt shell is never
+ * held stale. The manager queue pointer is at +0x900, its count at
  * +0x908, and each descriptor spans 0x1b0 bytes.
  *
  * The queued idStr is already constructed: assign through the native helper
@@ -19,16 +20,16 @@
 #include "backend_log.h"
 #include "engine_dialog.h"
 #include "hook.h"
+#include "engine_globals.h"
 
-/* Build 13954591 keeps every value below. AddDialog (Vulkan 0x102E4E0),
- * AddDialogWrapper (0xFCC6A0), ShowDialog (0x1034180) and the descriptor
- * constructor (0x102DDF0) disassemble to the 2018 instruction streams apart
- * from relocated targets and vtable slots: params +0x98 is still the source
- * file, the GDM switch still has the same eight cases, the text object still
- * sits at +0x18 with its length at +0x20, and DialogAction (0x1031CB0) still
- * sends actions 0x4a and 0x4b to its close-only case. */
+/* Build 13954591 (Vulkan RVAs; the signatures carry both renderers'): AddDialog
+ * 0x102E4E0, AddDialogWrapper 0xFCC6A0, ShowDialog 0x1034180, the descriptor
+ * constructor 0x102DDF0 and DialogAction 0x1031CB0. Params +0x98 is the
+ * source file, the GDM switch has eight cases, the text object sits at +0x18
+ * with its length at +0x20, and DialogAction sends actions 0x4a and 0x4b to
+ * its close-only case. */
 
-/* Descriptor layout (RE: copy ctor 0xE640D0, dtor 0xE63CE0, ShowDialog 0xE6A260). */
+/* Descriptor layout. */
 #define ED_DESC_STRIDE        0x1B0u
 #define ED_DESC_GDM_ID        0x00u   /* int   */
 #define ED_DESC_BUTTON_SET    0x04u   /* int   */
@@ -37,7 +38,7 @@
 #define ED_DESC_TEXT          0x18u   /* idStr, by value                                  */
 #define ED_DESC_TEXT_LENGTH   0x20u   /* int, the field ShowDialog tests                  */
 
-/* Menu-manager layout (RE: AddDialogInternal 0xE65C20, ClearDialog 0xE663C0). */
+/* Menu-manager layout. */
 #define ED_MGR_QUEUE_PTR      0x900u
 #define ED_MGR_QUEUE_COUNT    0x908u
 #define ED_MGR_ACTIVE         0x8F0u
@@ -53,24 +54,14 @@
 #define ED_PARAM_SOURCE_FILE  0x26u   /* int index; a const char * spans 0x26..0x27 */
 #define ED_PARAM_SOURCE_LINE  0x28u   /* int index; log formatting only */
 
-/* Actions 0x4a and 0x4b both reach the native close-only branch (pinned
- * Vulkan 0xE67C55 via the 0xE69F7C jump table). They are unused by the
- * audited AddDialog cases, allowing distinct answers without an extra native
+/* Actions 0x4a and 0x4b both reach DialogAction's close-only branch through
+ * its jump table. They are unused by the audited AddDialog cases, allowing distinct answers without an extra native
  * action. Also check the GDM ID when observing them.
  */
 #define ED_ACTION_ACCEPT      0x4Au
 #define ED_ACTION_DECLINE     0x4Bu
 
-/* ShowDialog prologue steal window (disasm of 0xE6A260):
- *     48 8B C4              mov  rax, rsp          (3)
- *     57                    push rdi               (1)
- *     48 81 EC 80 00 00 00  sub  rsp, 0x80         (7)
- *     48 C7 40 B8 FE FF FF FF  mov qword [rax-0x48], -2   (8)
- * = 19 bytes of whole, register/immediate-only instructions. No RIP-relative
- * operand and no relative branch, so the bytes relocate unchanged. */
-#define ED_SHOWDIALOG_STOLEN  19
-
-/* DialogAction prologue steal window (disasm of 0xE67BF0):
+/* DialogAction prologue steal window:
  *     40 55                 push rbp                        (2)
  *     56                    push rsi                        (1)
  *     57                    push rdi                        (1)
@@ -81,12 +72,6 @@
  * probe whose `call` is rel32, so the window stops exactly before it. */
 #define ED_DIALOGACTION_STOLEN 16
 
-/* AddDialogWrapper prologue steal window (disasm of 0x17363A0):
- *     40 57                       push rdi                 (2)
- *     48 83 EC 30                 sub  rsp, 0x30           (4)
- *     48 C7 44 24 20 FE FF FF FF  mov  qword [rsp+0x20],-2 (9)
- * = 15 bytes, register/rsp-relative only, no RIP-relative operand. */
-#define ED_WRAPPER_STOLEN      15
 
 typedef void (*ed_add_wrapper_fn)(void *shell, void *params);
 typedef void (*ed_assign_cstr_fn)(void *idstr, const char *text);
@@ -98,10 +83,9 @@ typedef void (*ed_action_fn)(void *mgr, void *params, int action, void *parms,
 
 static ed_add_wrapper_fn  g_add_wrapper;      /* the real shell-level raise */
 static ed_add_wrapper_fn  g_clear_wrapper;
-static ed_add_wrapper_fn  g_wrapper_original;  /* trampoline for the capture hook */
 static ed_assign_cstr_fn  g_assign_cstr;
 static ed_action_fn       g_action_original;
-static void * volatile    g_shell;
+static void *const volatile *g_shell_slot;    /* the engine's idMenuShellLocal* slot */
 static int                g_installed;
 
 /* The answer, as the engine reported it. -1 = no button dispatched yet. */
@@ -114,87 +98,11 @@ static volatile LONG g_ticket;
 static volatile LONG g_pending_id = -1;
 static char          g_pending_key[256];
 static volatile LONG g_injected;
-static int           g_trace;   /* live verification: log whole descriptors */
 
 static int ed_read_int(const void *base, unsigned offset, int *out);
 static int ed_read_byte(const void *base, unsigned offset, unsigned char *out);
 
-void sh_engine_dialog_set_trace(int on)
-{
-    g_trace = on != 0;
-}
-
-/* Log one descriptor in full: decoded fields, then all 0x1B0 bytes in hex. */
-static void ed_trace_descriptor(const void *descriptor, const char *when)
-{
-    char line[160];
-    const unsigned char *bytes = (const unsigned char *)descriptor;
-    unsigned off;
-    int id = 0, buttons = 0, text_len = 0;
-    unsigned char cleared = 0, wait_clear = 0;
-    if (!g_trace || !descriptor) return;
-    (void)ed_read_int(descriptor, ED_DESC_GDM_ID, &id);
-    (void)ed_read_int(descriptor, ED_DESC_BUTTON_SET, &buttons);
-    (void)ed_read_int(descriptor, ED_DESC_TEXT_LENGTH, &text_len);
-    (void)ed_read_byte(descriptor, ED_DESC_CLEARED, &cleared);
-    (void)ed_read_byte(descriptor, ED_DESC_WAIT_CLEAR, &wait_clear);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "VERIFY engine-dialog descriptor %p %s: gdm=%d buttons=%d textLen=%d cleared=%u waitClear=%u",
-                descriptor, when, id, buttons, text_len, (unsigned)cleared, (unsigned)wait_clear);
-    backend_log(line);
-    for (off = 0; off < ED_DESC_STRIDE; off += 32) {
-        int n = _snprintf_s(line, sizeof line, _TRUNCATE, "VERIFY engine-dialog   +%03X:", off);
-        unsigned k;
-        __try {
-            for (k = 0; k < 32 && off + k < ED_DESC_STRIDE && n > 0; k++)
-                n += _snprintf_s(line + n, sizeof line - (size_t)n, _TRUNCATE, " %02X", bytes[off + k]);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            backend_log("VERIFY engine-dialog   descriptor became unreadable");
-            return;
-        }
-        backend_log(line);
-    }
-}
-
-/* Log every queued descriptor's id and flags, so a dialog the engine queued
- * in front of or instead of ours is visible. */
 static void *ed_manager(void);
-
-static void ed_trace_queue(const char *when)
-{
-    char line[192];
-    void *mgr;
-    const unsigned char *queue = NULL;
-    int count = 0, active = -1, i;
-    if (!g_trace) return;
-    mgr = ed_manager();
-    if (!mgr) { backend_log("VERIFY engine-dialog queue: no manager"); return; }
-    __try {
-        queue = *(const unsigned char *const *)((const uint8_t *)mgr + ED_MGR_QUEUE_PTR);
-        count = *(const int *)((const uint8_t *)mgr + ED_MGR_QUEUE_COUNT);
-        active = *((const unsigned char *)mgr + ED_MGR_ACTIVE);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("VERIFY engine-dialog queue: unreadable");
-        return;
-    }
-    _snprintf_s(line, sizeof line, _TRUNCATE, "VERIFY engine-dialog queue %s: count=%d active=%d",
-                when, count, active);
-    backend_log(line);
-    if (!queue || count <= 0 || count > 64) return;
-    for (i = 0; i < count; i++) {
-        const void *desc = queue + (size_t)i * ED_DESC_STRIDE;
-        int id = -1, buttons = -1, text_len = -1;
-        unsigned char cleared = 0;
-        (void)ed_read_int(desc, ED_DESC_GDM_ID, &id);
-        (void)ed_read_int(desc, ED_DESC_BUTTON_SET, &buttons);
-        (void)ed_read_int(desc, ED_DESC_TEXT_LENGTH, &text_len);
-        (void)ed_read_byte(desc, ED_DESC_CLEARED, &cleared);
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "VERIFY engine-dialog   [%d] gdm=%d buttons=%d textLen=%d cleared=%u",
-                    i, id, buttons, text_len, (unsigned)cleared);
-        backend_log(line);
-    }
-}
 
 static const sig_result *ed_result(const sig_result *results, size_t count,
                                    const char *name)
@@ -207,16 +115,11 @@ static const sig_result *ed_result(const sig_result *results, size_t count,
     return NULL;
 }
 
-/* Require clean SIG_OK matches for the modeled descriptor and queue ABI.
- * Hook-tolerant fallbacks are refused. Check that the resolved address and
- * RVA describe the same module; documented_rva is only a pinned Vulkan audit
- * reference.
- */
+/* The signature's address, when it resolved at its recorded RVA. */
 static void *ed_clean(const sig_result *results, size_t count, const char *name,
-                      const uint8_t *module_base, uint32_t documented_rva)
+                      const uint8_t *module_base)
 {
     const sig_result *r = ed_result(results, count, name);
-    (void)documented_rva;
     if (!r || r->status != SIG_OK || !r->addr) return NULL;
     if (r->addr != (uintptr_t)module_base + r->rva) return NULL;
     return (void *)r->addr;
@@ -292,11 +195,23 @@ static void ed_action_detour(void *mgr, void *params, int action, void *parms,
     if (g_action_original) g_action_original(mgr, params, action, parms, flag);
 }
 
+/* The shell as it is now, or NULL before the menu shell exists. */
+static void *ed_shell(void)
+{
+    void *const volatile *slot = g_shell_slot;
+    if (!slot) return NULL;
+    __try {
+        return *slot;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+}
+
 /* The dialog manager lives at shell+8; the wrapper reads it there to call
  * AddDialog, and the queue we search for our descriptor belongs to it. */
 static void *ed_manager(void)
 {
-    void *shell = g_shell;
+    void *shell = ed_shell();
     if (!shell) return NULL;
     __try {
         return *(void **)((uint8_t *)shell + 0x08);
@@ -305,22 +220,11 @@ static void *ed_manager(void)
     }
 }
 
-/* Capture the shell from native wrapper calls before raising our own dialog. */
-static void ed_wrapper_detour(void *shell, void *params)
-{
-    if (shell && !g_shell) {
-        g_shell = shell;
-        backend_log("engine-dialog: shell observed; the engine dialog surface is ready");
-    }
-    if (g_wrapper_original) g_wrapper_original(shell, params);
-}
-
 static int ed_remove_hooks(void)
 {
     g_installed = 0;
     if (g_action_original && hook_unpatch((void *)g_action_original)) g_action_original = NULL;
-    if (g_wrapper_original && hook_unpatch((void *)g_wrapper_original)) g_wrapper_original = NULL;
-    if (g_action_original || g_wrapper_original) return 0;
+    if (g_action_original) return 0;
     g_add_wrapper = NULL;
     g_clear_wrapper = NULL;
     g_assign_cstr = NULL;
@@ -330,39 +234,34 @@ static int ed_remove_hooks(void)
 int sh_engine_dialog_install(const sig_result *results, size_t count,
                              const uint8_t *module_base)
 {
-    void *wrapper, *clear, *assign, *action;
+    void *wrapper, *clear, *assign, *action, *shell_slot;
 
-    if (g_installed && hook_is_installed((void *)g_wrapper_original) &&
-        hook_is_installed((void *)g_action_original)) return 1;
+    if (g_installed && hook_is_installed((void *)g_action_original)) return 1;
     if (!ed_remove_hooks()) return 0;
     if (!module_base) return 0;
 
-    /* The trailing literal on each line is that function's RVA on the pinned Vulkan build,
-     * recorded for audit and re-derivation. It does not gate anything -- see ed_clean. */
-    wrapper = ed_clean(results, count, "AddDialogWrapper", module_base, 0x17363A0u);
-    clear   = ed_clean(results, count, "ClearDialogWrapper", module_base, 0x1736450u);
-    assign  = ed_clean(results, count, "IdStrAssignCStr",  module_base, 0x19FD5F0u);
-    action  = ed_clean(results, count, "DialogAction",     module_base, 0xE67BF0u);
-    if (!wrapper || !clear || !assign || !action) {
-        backend_log("engine-dialog REFUSED: AddDialogWrapper/ClearDialogWrapper/DialogAction/IdStrAssignCStr all "
-                    "require a clean unique signature resolve");
+    wrapper = ed_clean(results, count, "AddDialogWrapper", module_base);
+    clear   = ed_clean(results, count, "ClearDialogWrapper", module_base);
+    assign  = ed_clean(results, count, "IdStrAssignCStr", module_base);
+    action  = ed_clean(results, count, "DialogAction", module_base);
+    shell_slot = (void *)glb_resolve(module_base, "shell_ptr_slot", NULL);
+    if (!wrapper || !clear || !assign || !action || !shell_slot) {
+        backend_log("engine-dialog: off -- AddDialogWrapper, ClearDialogWrapper, DialogAction, IdStrAssignCStr "
+                    "and the shell slot must all resolve");
         return 0;
     }
+    g_shell_slot = (void *const volatile *)shell_slot;
 
     g_add_wrapper = (ed_add_wrapper_fn)wrapper;
     g_clear_wrapper = (ed_add_wrapper_fn)clear;
     g_assign_cstr = (ed_assign_cstr_fn)assign;
 
-    /* Watch the wrapper to learn the shell. ShowDialog is deliberately NOT
-     * hooked: the text goes into the queued descriptor right after the raise,
-     * which needs no detour on the engine's own render path. */
-    g_wrapper_original = (ed_add_wrapper_fn)hook_prepare(wrapper, (void *)ed_wrapper_detour,
-                                                       ED_WRAPPER_STOLEN);
+    /* ShowDialog is deliberately NOT hooked: the text goes into the queued
+     * descriptor right after the raise, which needs no detour on the engine's
+     * own render path. */
     g_action_original = (ed_action_fn)hook_prepare(action, (void *)ed_action_detour,
                                                   ED_DIALOGACTION_STOLEN);
-    if (!g_wrapper_original || !g_action_original ||
-        hook_commit((void *)g_wrapper_original) != B2_PATCH_OK ||
-        hook_commit((void *)g_action_original) != B2_PATCH_OK) {
+    if (!g_action_original || hook_commit((void *)g_action_original) != B2_PATCH_OK) {
         backend_log(ed_remove_hooks() ? "engine-dialog REFUSED: detour preparation or commit failed"
                                      : "engine-dialog rollback incomplete; callbacks retained for retry");
         return 0;
@@ -374,7 +273,7 @@ int sh_engine_dialog_install(const sig_result *results, size_t count,
 
 int sh_engine_dialog_ready(void)
 {
-    return g_installed && g_shell != NULL;
+    return g_installed && ed_shell() != NULL;
 }
 
 int sh_engine_dialog_queue_idle(const void *shell)
@@ -404,7 +303,7 @@ int sh_engine_dialog_queue_idle(const void *shell)
 int sh_engine_dialog_can_ask(void)
 {
     const unsigned char *manager;
-    void *shell = g_shell;
+    void *shell = ed_shell();
     if (!g_installed || !g_add_wrapper || !g_clear_wrapper || !g_assign_cstr ||
         !sh_engine_dialog_queue_idle(shell)) return 0;
     __try {
@@ -420,7 +319,7 @@ int sh_engine_dialog_can_ask(void)
 
 int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 {
-    void *shell = g_shell;
+    void *shell = ed_shell();
     uint32_t params[ED_PARAMS_BYTES / sizeof(uint32_t)];
     const char *source = "snapmap-plus";
     char line[256];
@@ -497,8 +396,6 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
                 "engine-dialog: raised gdm %u with buttons %u carrying '%s'",
                 gdm_id, button_set, text);
     backend_log(line);
-    ed_trace_descriptor(desc, "after the raise and text assignment");
-    ed_trace_queue("after the raise");
     return (int)InterlockedIncrement(&g_ticket);
 }
 
@@ -552,7 +449,6 @@ int sh_engine_dialog_poll(int ticket)
      */
     desc = ed_find_descriptor(id);
     if (!desc) {
-        ed_trace_queue("after ours left it");
         InterlockedExchange(&g_pending_id, -1);
         backend_log("engine-dialog: the dialog left the queue with no button dispatched; "
                     "treating that as declined");
@@ -574,7 +470,7 @@ void sh_engine_dialog_dump(void (*printf_fn)(const char *fmt, ...))
     int queue_count = 0, i;
 
     if (!printf_fn) return;
-    if (!mgr) { printf_fn("engine-dialog: no shell observed yet.\n"); return; }
+    if (!mgr) { printf_fn("engine-dialog: the menu shell does not exist yet.\n"); return; }
     __try {
         queue = *(void **)((uint8_t *)mgr + ED_MGR_QUEUE_PTR);
         queue_count = *(const int *)((const uint8_t *)mgr + ED_MGR_QUEUE_COUNT);
@@ -607,32 +503,35 @@ void sh_engine_dialog_release(int ticket)
     const char *source = "dialog cancellation";
     void *descriptor;
     unsigned char cleared;
+    void *shell;
     if (ticket <= 0 || ticket != (int)InterlockedCompareExchange(&g_ticket, 0, 0)) return;
     id = InterlockedExchange(&g_pending_id, -1);
     InterlockedExchange(&g_answer, -1);
     /* Retire the claim before the native clear: a reentrant button action must
      * never authorize the abandoned request. An already-polled answer has no
      * pending ID, so releasing it cannot clear a later native question. */
-    if (id < 0 || !g_clear_wrapper || !g_shell || !(descriptor = ed_find_descriptor((int)id))) return;
+    if (id < 0 || !g_clear_wrapper || !(shell = ed_shell()) || !(descriptor = ed_find_descriptor((int)id))) return;
     if (ed_read_byte(descriptor, ED_DESC_CLEARED, &cleared) && cleared == 1) return;
     params[ED_PARAM_GDM_ID] = (unsigned)id;
     memcpy(&params[ED_PARAM_SOURCE_FILE], &source, sizeof(source));
     params[ED_PARAM_SOURCE_LINE] = __LINE__;
-    __try { g_clear_wrapper(g_shell, params); }
+    __try { g_clear_wrapper(shell, params); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("engine-dialog: abandoned question could not be cleared; physical dialog admission stays closed");
     }
 }
 
 #ifdef SH_ENGINE_DIALOG_TESTING
+static void *g_test_shell_cell;
+
 void sh_engine_dialog_test_reset(void)
 {
-    g_wrapper_original = NULL;
     g_add_wrapper = NULL;
     g_clear_wrapper = NULL;
     g_assign_cstr = NULL;
     g_action_original = NULL;
-    g_shell = NULL;
+    g_shell_slot = NULL;
+    g_test_shell_cell = NULL;
     g_installed = 0;
     g_pending_key[0] = '\0';
     InterlockedExchange(&g_answer, -1);
@@ -648,7 +547,8 @@ void sh_engine_dialog_test_bind(void *shell, void *add_wrapper, void *clear_wrap
     g_clear_wrapper = (ed_add_wrapper_fn)clear_wrapper;
     g_assign_cstr = (ed_assign_cstr_fn)assign_cstr;
     g_installed = 1;
-    g_shell = shell;
+    g_test_shell_cell = shell;
+    g_shell_slot = (void *const volatile *)&g_test_shell_cell;
 }
 
 int sh_engine_dialog_test_inject(void *descriptor)

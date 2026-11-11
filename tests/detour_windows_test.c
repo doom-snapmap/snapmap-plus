@@ -56,7 +56,6 @@ static const site SITES[] = {
     { "commands.c",           "RenderLogStub",              SITE_SIG, 0, 14, STUB_PADDING, 6 },
     { "commands.c",           "AddCommand",                 SITE_SIG, 0, 15, REPLAYS, 0 },
     { "editor_frame.c",       "EditorFrame",                SITE_SIG, 0, 25, REPLAYS, 0 },
-    { "engine_dialog.c",      "AddDialogWrapper",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "engine_dialog.c",      "DialogAction",               SITE_SIG, 0, 16, REPLAYS, 0 },
     { "grid_room_editor.c",   "GridPropertyChanged",        SITE_SIG, 9, 17, REPLAYS, 0 },
     { "grid_room_editor.c",   "GridModuleProperties",       SITE_SIG, 0, 16, REPLAYS, 0 },
@@ -348,7 +347,7 @@ static void check_image(const char *path)
  * hook.c and patch.c hold the definitions; smoke.c detours its own scratch code. */
 static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\algo.c", 1 }, { "backend\\apply_engine.c", 1 }, { "backend\\commands.c", 2 },
-    { "backend\\editor_frame.c", 1 }, { "backend\\engine_dialog.c", 2 },
+    { "backend\\editor_frame.c", 1 }, { "backend\\engine_dialog.c", 1 },
     { "backend\\grid_room_editor.c", 5 }, { "backend\\grid_room_native.c", 4 },
     { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 4 },
     { "backend\\nav_menu.c", 4 },

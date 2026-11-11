@@ -1,8 +1,7 @@
 /* Boot pacing: shorten the engine's synchronous "common" preload.
  *
  * On build 13954591 the preload inside idCommonLocal::Init takes most of the
- * time to the SnapMap hub, and it is paced by waits rather than by the disk
- * (snaphak-re boot-time-13954591 R-001, R-002):
+ * time to the SnapMap hub, and it is paced by waits rather than by the disk:
  *   - the load-screen video draw sleeps 10 ms while it holds the Bink lock,
  *     and the stream thread must take that lock before it services each read;
  *   - the main thread then polls each read's completion byte with Sleep(1).
@@ -10,12 +9,13 @@
  *   - the draw's Sleep(10) releases the lock for the sleep and re-takes it;
  *   - the poll's Sleep(1) spins briefly, yields, and sleeps only as a fallback.
  * Both must be in place before the preload starts, a few seconds after launch,
- * so they are matched at their recorded RVAs right after the build check,
- * ahead of the full signature scan.
+ * so they are installed right after the build check, ahead of the other
+ * features. Each operand is rewritten with the engine's threads quiesced
+ * (patch.h), so a thread running the call never sees a torn displacement.
  *
  * Skipping the load-screen video instead (com_skipIntroVideo set before Init
  * reads it) was measured and rejected: the preload still took 30 s and the
- * Vulkan device was lost right after it (R-002). */
+ * Vulkan device was lost right after it. */
 #ifndef SH_BOOT_PACING_H
 #define SH_BOOT_PACING_H
 #include <stdint.h>
@@ -34,10 +34,6 @@
 #define SH_BOOT_POLL_CALL        0x16
 #define SH_BOOT_POLL_DONE_OFF    0x70   /* the caller's completion byte, [rsp+0x70] */
 #define SH_BOOT_POLL_ABORT_OFF   0x10   /* the stream object's abort byte, [rsi+0x10] */
-
-/* Patches later than this after process creation would race the preload's
- * own threads through the redirected instructions, so they are not made. */
-#define SH_BOOT_PACING_LATE_MS   3000u
 
 /* Poll wait: spin on the completion byte, then yield, then Sleep(1). */
 #define SH_BOOT_POLL_SPIN_US     20u
@@ -75,12 +71,13 @@ void sh_boot_pacing_get_stats(sh_boot_pacing_stats *out);
 #ifndef SH_BOOT_PACING_PURE
 /* Number of boot signatures, and their names in BACKEND_ENGINE_SIGNATURES. */
 #define SH_BOOT_PACING_SIGS 3
-/* Match the boot signatures at their recorded RVAs (sig_match_recorded) into
- * results[0..SH_BOOT_PACING_SIGS). Returns the number matched. */
+/* Resolve the boot signatures (sig_resolve_one) into
+ * results[0..SH_BOOT_PACING_SIGS). Returns the number resolved. */
 size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap);
-/* Boot thread, before the full scan. Installs the parts in mask whose sites
- * check out; logs each part and leaves the engine untouched for the rest.
- * age_ms is the time since process creation. Returns the parts installed. */
+/* Boot thread, before the other features. Installs the parts in mask whose
+ * sites check out; logs each part and leaves the engine untouched for the
+ * rest. age_ms (the time since process creation) is logged. Returns the parts
+ * installed. */
 unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigned mask,
                                 unsigned long age_ms);
 unsigned sh_boot_pacing_live(void);

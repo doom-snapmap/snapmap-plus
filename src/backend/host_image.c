@@ -20,7 +20,6 @@ static size_t         g_size = 0;
 static char           g_name[64] = { 0 };
 static INIT_ONCE      g_resolved = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE      g_fingerprinted = INIT_ONCE_STATIC_INIT;
-static const char * volatile g_renderer = NULL;   /* "vulkan"/"opengl" once definite; NULL until then */
 
 static const wchar_t *basename_of(const wchar_t *path)
 {
@@ -264,29 +263,8 @@ uint32_t sh_host_rva(uint32_t rva_vk, uint32_t rva_gl)
     return id ? (id->vulkan ? rva_vk : rva_gl) : 0;
 }
 
-int sh_host_is_vulkan(void)
-{
-    if (sh_host_image_base() == NULL)
-        return -1;
-    /* Infer the renderer from its loaded library. */
-    if (GetModuleHandleW(L"vulkan-1.dll") != NULL)
-        return 1;
-    if (GetModuleHandleW(L"OPENGL32.dll") != NULL)
-        return 0;
-    return -1;
-}
-
 const char *sh_host_renderer_name(void)
 {
-    const char *cached = (const char *)g_renderer;
-    int vk;
-    if (cached != NULL)
-        return cached;
-    vk = sh_host_is_vulkan();
-    if (vk < 0)
-        return "";          /* Retry until a renderer library is loaded. */
-    cached = vk ? "vulkan" : "opengl";
-    /* Racing callers store the same string literal, so a plain store is enough. */
-    g_renderer = cached;
-    return cached;
+    const sh_build_identity *id = sh_host_identity();
+    return id ? (id->vulkan ? "vulkan" : "opengl") : "";
 }

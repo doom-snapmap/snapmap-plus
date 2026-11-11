@@ -12,8 +12,12 @@ extern "C" {
 #define LOG_ROTATE_CAP_BYTES (4ull * 1024ull * 1024ull)
 
 /* Move path to path.prev at or above cap_bytes, replacing the prior roll.
- * Call before the first log write. Return 1 if moved, otherwise 0; failures
- * are silent because logging is not initialized yet. */
+ * Call once per log at startup, before its first write (one static buffer
+ * serves every call). Return 1 if moved, otherwise 0; failures are silent
+ * because logging is not initialized yet. */
+#include <wchar.h>
+int log_rotate_if_large_w(const wchar_t *path, unsigned long long cap_bytes);
+/* The same for a UTF-8 path. */
 int log_rotate_if_large(const char *path, unsigned long long cap_bytes);
 
 #ifdef __cplusplus

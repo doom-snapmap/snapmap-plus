@@ -168,6 +168,31 @@ int sh_editor_undo_clear(int probe)
     return r > 0 ? 1 : -1;
 }
 
+/* EditorCommitEdit ends with editor vt+0x160(editor, 1), the call that marks
+ * the open map modified (docs: undo snapshots share entity holders). */
+#define EU_VT_MARK_MODIFIED 0x160
+typedef void (*eu_mark_fn)(void *editor, int modified);
+
+int sh_editor_mark_modified_no_undo(void)
+{
+    uint8_t *ed = eu_editor_map_open();
+    void **vt = NULL;
+    eu_mark_fn mark = NULL;
+    if (!ed) return 0;
+    if (InterlockedCompareExchange(&g_mark_faulted, 0, 0)) return -1;
+    __try {
+        vt = *(void ***)ed;
+        mark = vt ? (eu_mark_fn)vt[EU_VT_MARK_MODIFIED / sizeof(void *)] : NULL;
+        if (!mark) return -1;
+        mark(ed, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_mark_faulted, 1);
+        backend_log("editor: marking the map modified faulted; off for this session");
+        return -1;
+    }
+    return 1;
+}
+
 #define EU_IDSTR_BYTES 0x30
 
 int sh_editor_mark_modified(const char *label)

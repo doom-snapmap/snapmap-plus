@@ -34,9 +34,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `config_json_test.c` separates strict UTF-8 documents from native byte strings,
   preserving every high byte and mixed text while rejecting invalid syntax,
   escapes, duplicate keys, raw controls and excess nesting.
-- `sig_test.c`, `globals_test.c` and `hooktol_test.c` use optional local game images.
-- `startup_bindings_test.c` checks early observer binding, delayed code readiness,
-  preserved pre-install addresses and partial startup without repeated hooks.
+- `sig_test.c` and `globals_test.c` use optional local game images; `sig_test` also
+  times the whole-image scan against the recorded-RVA check the backend uses.
+- `feature_health_test.c` checks the features-off list, its one line and the
+  refusal sentence.
 - `serialized_entities_guard_test.c` executes the serialized-list cleanup guard
   with valid and empty handles, checking CPU state and patch rollback ownership.
 - `config_json_test.c` checks rejection reasons and byte offsets as well as

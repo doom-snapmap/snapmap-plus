@@ -32,9 +32,9 @@ void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t lo
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset);
 
 /* Publish the trampoline in the detour's original callback BEFORE committing.
- * Commit never releases ownership. A failed commit must be removed or retried;
- * FAIL_ROLLBACK requires removal before another commit. Callers must quiesce
- * target execution while changing its prologue. */
+ * The prologue is written with every other thread suspended and outside it
+ * (code_patch). Commit never releases ownership. A failed commit must be
+ * removed or retried; FAIL_ROLLBACK requires removal before another commit. */
 sh_patch_status hook_commit(void *tramp);
 
 /* True only after a successful commit and before any attempted removal. */
@@ -45,11 +45,14 @@ int hook_is_installed(void *tramp);
  * retain the caller's trampoline pointer and retry; its record remains owned. */
 int hook_unpatch(void *tramp);
 
+/* Count successfully committed installations. */
+int hook_installed_count(void);
+
+#ifdef SH_PATCH_TESTING
 /* Release all live patches in reverse slot order; return the number released. */
 int hook_unpatch_all(void);
-
-/* Count successfully committed installations, or all owned records. */
-int hook_installed_count(void);
+/* Count every owned record, committed or not. */
 int hook_owned_count(void);
+#endif
 
 #endif /* BACKEND_HOOK_H */

@@ -28,14 +28,20 @@ void sh_printf(const char *fmt, ...);
 int            sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n);
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn);
 
-/* Resolve cmdSystem via the accessor, an independent global anchor, then the
- * Vulkan-name-gated pinned slot. Return NULL when no usable object is found. */
+/* Resolve cmdSystem through the signed CmdSystemLea accessor, or return NULL. */
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base);
 
-/* Register the command table once and cache dependencies. Missing AddCommand,
- * cmdsys, or Printf returns 0; get_decls may be NULL and its handlers then refuse.
- * module_base supports on-demand signature lookups. Return the registered count. */
+/* Cache dependencies and install the AddCommand detour that exposes later
+ * engine commands; returns 1, or 0 when AddCommand, cmdsys or Printf is
+ * missing. get_decls may be NULL and its handlers then refuse. module_base
+ * supports on-demand signature lookups. The command table itself is
+ * registered by sh_commands_main_frame. */
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
                         const uint8_t *module_base);
+
+/* Called from the engine's main frame (the fault shield's Frame hook): the
+ * first call after sh_commands_install registers the command table and
+ * backfills the developer list, since both lists belong to the main thread. */
+void sh_commands_main_frame(void);
 
 #endif /* BACKEND_B2_COMMANDS_H */

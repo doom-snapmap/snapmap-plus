@@ -30,7 +30,12 @@ can call the wrong interface slot. See [packaging](packaging.md).
 Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
-set (named and unnamed) and exports nothing else.
+set (named and unnamed) and exports nothing else. The proxy loads the system `XInput1_4.dll`
+from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
+Only the diagnostic build (`build.ps1 -Diag`) links `xinput1_4_diag.def`, the same set plus
+`sh_diag_status` at ordinal 300: one JSON object with the product version, the interface
+table's size, the features off this session and the last rawmap open (`diag_status.h`), for
+the development daemon. A release has neither the export nor its code.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
@@ -42,9 +47,6 @@ Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
 recognized executable, for its own renderer, so no address can reach another image.
-A feature whose engine offsets are not yet verified for this build stays off and
-logs which values it waits for (`SH_PENDING_*` in `engine_build.h`); starting DOOM with
-the environment variable `SNAPMAP_PLUS_LIVE_VERIFY=1` runs those features for live verification.
 
 The installer routes by build before downloading anything: it hashes
 `DOOMx64vk.exe` and `DOOMx64.exe`, installs the current release on build 13954591,
@@ -54,9 +56,25 @@ See [packaging](packaging.md#supported-build-and-the-final-2018-release).
 
 ## Engine resolution and patching
 
-Function signatures identify engine code. Generated anchors derive global
-addresses from code references. Vulkan and OpenGL share these portable resolution
-paths; field layouts still need explicit verification when porting.
+The game build is pinned by the executable's hash, so every engine function is
+where the signature table records it. At run time `sig_resolve_one` checks each
+signature at its recorded RVA for the host's renderer and accepts it only when the
+whole masked pattern holds there; nothing is scanned and nothing is guessed. A
+function whose bytes differ there (`SIG_CHANGED`: another program has changed the
+game's code, typically an overlay or another mod's detour) is not resolved, and the
+features that need it are recorded off (see "Features off this session" below).
+Checking the whole table takes well under a millisecond; the whole-image scan it
+replaced took about five seconds (nine seconds over a mapped file, `sig_test`).
+
+The scan, `sig_scan_one`, is the developer tool that derives and audits the table:
+`sig_test` (and `tools/signatures/sigscan.py`) prove that every pattern matches
+exactly once in each executable, at the recorded RVA. Contributor changes to
+signatures or anchors require that two-image test gate in
+[contributing](contributing.md#7-run-the-tests). The globals table's anchors are
+checked the same way: each row records the RVA of its anchor's code site on both
+renderers (`site_vk`, `site_gl`), next to the audit RVAs of the global itself, and
+`glb_resolve` decodes the displacement only where the whole anchor holds at that
+site.
 
 A pattern that matches more than once is not an identification. Where two
 functions share a body, the caller must confirm its target by something the
@@ -64,21 +82,19 @@ pattern cannot carry: the rawmap branch answer follows the call its candidate
 makes and reads the literal that callee names, because the sibling it must not
 patch differs only there.
 
-A raw-RVA fallback requires an exact fingerprint of a supported
-executable. The hook-tolerant fallback additionally checks the detour and remaining
-signature bytes. A filename or a readable address is not sufficient evidence.
-Contributor changes to signatures or anchors require the two-image test gate in
-[contributing](contributing.md#7-run-the-tests).
+The boot pacing sites (`boot_pacing.c`) are resolved and patched right after the
+build check, about 0.1 s after process creation, ahead of the engine's resource
+preload, which starts about two seconds after launch.
 
-The bootstrap scans the whole database once, which takes about five seconds;
-later installs reuse those results instead of scanning again. The boot pacing
-sites (`boot_pacing.c`) cannot wait for that scan: the engine's resource preload
-starts about two seconds after launch. Right after the build check they are
-matched at their recorded RVAs only (`sig_match_recorded`), checked byte by byte,
-and patched about 0.1 s after process creation. The offline signature tests
-prove each of those recorded RVAs is the pattern's only match. A patch that would
-land more than three seconds after process creation is not made, because the
-preload's threads could then be executing the redirected instructions.
+Every code write -- a detour's prologue, a call's operand, a single byte -- goes
+through `code_patch` (`patch.c`), which suspends the process's other threads,
+checks that none is executing inside the bytes being changed or about to return
+into them (a thread in the callee of a call the window covers), writes, and
+resumes them. A thread found inside makes the attempt repeat a moment later; one
+that stays inside for every attempt fails the patch with nothing written. No
+thread can run a partly written instruction, at boot or for a patch made later
+from the main thread. `tests/patch_test.c` proves the suspension, both refusals
+and a stress run that commits and removes a detour under a thread calling it.
 
 Hook callers prepare a trampoline, publish it as their original callback, then
 commit the detour. Preparation does not write the target. Callers own the
@@ -88,9 +104,23 @@ can still use them. Failed rollback remains a recoverable state, not a successfu
 uninstall. The patch and hook headers define the supported installation and
 restoration sequence. Stolen instructions must be complete and independently
 executable. The ordinary hook helper performs no relocation; its explicit
-`hook_prepare_rip_lea` variant expands one verified 64-bit RIP-relative LEA.
-Callers still verify every other stolen instruction. Original target bytes
+variants relocate one verified instruction: `hook_prepare_rip_lea` a 64-bit
+RIP-relative LEA, `hook_prepare_rip_load` a 64-bit RIP-relative load and
+`hook_prepare_relative_call` an E8 call. Callers still verify every other stolen
+instruction. Original target bytes
 remain separate from relocated code for commit validation and restoration.
+
+### Features off this session
+
+`feature_health.c` keeps the one list of features that could not install this
+session, each by the name the player knows it by, and logs each once with why.
+The patch self-test and a scratch detour run before any engine code is touched; if
+either fails, nothing is patched and the list holds a single entry for every editor
+feature. The Snapmap+ window reads the list through the interface slot
+`features_off` and shows one line ("These features are unavailable in this
+session: ..."); a feature the player invokes from the window refuses with
+`sh_feature_refusal` instead of doing nothing. Background guards stay in the log
+only.
 
 ## The map carrier
 
@@ -279,7 +309,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x380`; the current table occupies `0x388`
+retained, with extensions through `+0x398`; the current table occupies `0x3A0`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -292,7 +322,11 @@ section, built on the game thread after each palette build by
 `modui.c`, run on the game thread through `run_on_main`) and `prefab_watch`
 (`+0x380`, the Prefabs tab's guarded reads: the Blueprint module selection that
 gates Create, the Load / Place held in the 3D view, and the game thread's last
-paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`). The retired
+paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`), then
+`features_off` (`+0x388`, the one line naming the features that are off this session,
+from `feature_health.c`), `preview_failure` (`+0x390`, why the latest image preview
+failed, `preview.c`) and `sound_refusal` (`+0x398`, why the latest sound audition was
+refused, `soundpreview.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -3227,6 +3261,35 @@ the stolen prologue is verified at startup on both renderers
 (`tests/load_screen_stop_test.c`). Only while that detour is armed does the
 policy redirect a fault with the loading-screen thread running; otherwise it
 declines it as before.
+
+Redirects are bounded per incident, not per session: an incident starts at its
+first redirect and lasts 30 seconds, and may redirect four faults
+(`SHIELD_INCIDENT_REDIRECTS`, `redirect_policy.h`). An incident that keeps
+faulting past that is left to the fatal handlers; a later, separate fault starts
+a new incident, so a long session survives any number of recoveries. An access
+violation is classified first-chance by the vectored handler. Any other hardware
+fault (a divide, a floating-point or misalignment fault, an in-page error) is
+redirected only at second chance, from the unhandled-exception filter
+(`shield_second_chance`), so the engine's own `__except` blocks see it first.
+The shield also changes `FatalError`'s level byte from 7 to 6 at startup
+(through `code_patch`, the byte compared first), so a fatal engine error thrown
+inside Frame takes the same recoverable path; direct dispatcher calls and
+failures outside Frame still exit.
+
+What the player reads after a recovery is one fixed sentence,
+`SHIELD_RECOVERED_TEXT` (`recovery.c`): "Snapmap+ caught a problem in the game and
+returned you to the menu. Unsaved changes to this map were lost." It is the text
+of the `Error(6)` the redirect raises, so the engine's own error dialog shows it,
+and the crash record carries it; the fault's code and address go to
+`shield_faults.log` only. When the fault leaves the editor open, `recovery_tick`
+drives the editor's own exit to the map browser and answers its exit prompt Yes,
+which is what the sentence says.
+
+The damaged-save guard dismisses the engine's offer to delete a save it cannot
+read (the shell's own ClearDialog, so no button action runs and nothing is
+deleted) and then, once that dialog has left the queue, raises one engine dialog
+of its own saying why the map did not open and that the file was kept
+(`shield_damaged_save_text`).
 
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves

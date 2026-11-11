@@ -31,12 +31,18 @@ int main(void)
     CHECK(logs == 1 && strncmp(logged[0], "startup: resolved ", 18) == 0);
     CHECK(strstr(logged[0], "detour") == NULL);   /* a release build runs no scratch detour */
 
+    /* One changed signature is reported with its bytes and does not stop
+     * the other features from installing. */
     logs = 0;
-    r[1].status = SIG_NOT_FOUND;
-    CHECK(sh_smoke_run(image, r, n, 5) == 0);
+    r[1].status = SIG_CHANGED;
+    CHECK(sh_smoke_run(image, r, n, 5) == 1);
     CHECK(logs == 2);
-    CHECK(strstr(logged[0], r[1].name) != NULL && strstr(logged[0], "NOT_FOUND") != NULL);
-    CHECK(strstr(logged[1], "resolved only") != NULL && strstr(logged[1], r[1].name) != NULL);
+    CHECK(strstr(logged[0], r[1].name) != NULL && strstr(logged[0], "CHANGED") != NULL);
+    {
+        char want[64];
+        _snprintf_s(want, sizeof want, _TRUNCATE, "resolved %zu/%zu", n - 1, n);
+        CHECK(strstr(logged[1], want) != NULL);
+    }
     free(r);
     if (failures) { fprintf(stderr, "%d smoke check(s) failed\n", failures); return 1; }
     puts("smoke tests passed");

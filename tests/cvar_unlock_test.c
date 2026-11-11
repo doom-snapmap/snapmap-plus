@@ -6,7 +6,7 @@
 void backend_log(const char *message) { (void)message; }
 const uint8_t *sh_host_image_base(void) { return NULL; }
 int sh_host_is_supported_build(void) { return 0; }
-uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
+uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *st) { (void)base; (void)name; (void)st; return 0; }
 
 enum { NCVARS = 6 };
 static __declspec(align(16)) uint8_t g_sys[0x90];

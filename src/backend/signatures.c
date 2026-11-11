@@ -1,6 +1,9 @@
-/* Resolve masked signatures in mapped executable sections, independent of names.
- * Use the longest fixed run as an anchor, then verify the full pattern.
- * Multiple matches are rejected; unreadable section tails stop that section scan. */
+/* Signature resolution for the one supported build (signatures.h).
+ * A signature resolves at its recorded RVA for the host's renderer, and only
+ * when the whole pattern holds there. sig_scan_one is the masked whole-image
+ * scan that derives and audits those RVAs; it anchors on the longest fixed run,
+ * verifies the full pattern, rejects multiple matches, and stops a section at
+ * an unreadable tail. */
 #include "signatures.h"
 #include "host_image.h"
 #include <string.h>
@@ -120,36 +123,6 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
     return count;
 }
 
-/* A detour can erase a signature prologue while leaving its tail intact. After
- * a scan miss, the recorded RVA may identify that hooked entry on the supported
- * executable (identified by hash) when the jump form and enough fixed tail bytes
- * match. It is not a portable substitute for signature resolution. */
-
-#define HOOK_MAX_STEAL   24   /* widest plausible whole-instruction steal window a detour overwrites */
-#define HOOK_MIN_TAIL     6   /* require at least this many FIXED tail bytes to match (anti-coincidence) */
-
-/* Recognize common x64 detour jumps and return their minimum opcode length.
- * Tail matching, rather than this partial decoder, validates the fallback. */
-static int detour_jmp_len(const uint8_t *p)
-{
-    if (p[0] == 0xE9) return 5;                    /* jmp rel32 */
-    if (p[0] == 0xEB) return 2;                    /* jmp rel8  */
-    if (p[0] == 0xFF) {
-        uint8_t modrm = p[1];
-        uint8_t reg   = (uint8_t)((modrm >> 3) & 7);
-        if (reg == 4) {                            /* FF /4 = jmp r/m64 (incl. FF 25 rip-relative) */
-            if ((modrm & 0xC7) == 0x25) return 6;  /* FF 25 disp32 (the >2GB abs-jmp our hook.c uses) */
-            return 2;                              /* other jmp r/m forms (reg/[reg]); slide finds tail */
-        }
-    }
-    /* REX-prefixed FF /4 (rare for a detour, but be lenient) */
-    if ((p[0] & 0xF0) == 0x40 && p[1] == 0xFF && ((p[2] >> 3) & 7) == 4) {
-        if ((p[2] & 0xC7) == 0x25) return 7;
-        return 3;
-    }
-    return 0;
-}
-
 /* SEH-guarded copy of up to n bytes from src into dst; returns 1 if all read, 0 on access violation. */
 static int sig_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
 {
@@ -161,65 +134,33 @@ static int sig_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
     }
 }
 
-/* Try the recorded-RVA hook-tolerant fallback. Returns 1 (and fills out as SIG_OK_HOOKED) if the
- * live bytes at the renderer's RVA are a detour whose post-prologue tail matches the sig; else 0. */
-static int try_hooked_known_rva(const uint8_t *module_base, const sig_entry *sig,
-                                const uint8_t *pat, const uint8_t *mask, size_t n, sig_result *out)
-{
-    uint32_t known_rva = sh_host_image_rva(module_base, sig->rva_vk, sig->rva_gl);
-    if (known_rva == 0) return 0;      /* unsupported image, or no RVA recorded for this renderer */
-    const uint8_t *site = module_base + known_rva;
-
-    uint8_t live[SIG_MAX_PATTERN];
-    size_t  want = n < SIG_MAX_PATTERN ? n : SIG_MAX_PATTERN;
-    if (!sig_safe_read(site, live, want)) return 0;       /* unreadable -> not a confident hook hit */
-
-    int jlen = detour_jmp_len(live);
-    if (jlen == 0) return 0;                               /* No recognized detour at the recorded location. */
-
-    /* Try plausible stolen-byte windows and require enough unchanged fixed tail. */
-    for (size_t k = (size_t)jlen; k <= HOOK_MAX_STEAL && k < n; k++) {
-        int fixed_tail = 0, ok = 1;
-        for (size_t j = k; j < n; j++) {
-            if (!mask[j]) continue;
-            fixed_tail++;
-            if (live[j] != pat[j]) { ok = 0; break; }
-        }
-        if (ok && fixed_tail >= HOOK_MIN_TAIL) {
-            out->status = SIG_OK_HOOKED;
-            out->addr   = (uintptr_t)site;
-            out->rva    = known_rva;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* Resolution. */
-
-sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
+static void reset(const sig_entry *sig, sig_result *out)
 {
     out->name = sig->name;
     out->status = SIG_NOT_FOUND;
     out->addr = 0;
     out->rva = 0;
+}
 
+/* Scanning (the developer tool that derives and audits recorded RVAs). */
+
+sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
+{
     uint8_t pat[SIG_MAX_PATTERN], mask[SIG_MAX_PATTERN];
-    size_t n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
-    if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
-
     exec_section secs[MAX_SECTIONS];
-    int nsec = collect_exec_sections(module_base, secs, MAX_SECTIONS);
-    if (nsec < 0) { out->status = SIG_BAD_MODULE; return out->status; }
+    size_t n, a_off, a_len;
+    int nsec, hits = 0;
+    uintptr_t found_addr = 0;
+    uint32_t found_rva = 0;
+    reset(sig, out);
 
-    size_t a_off, a_len;
+    n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
+    if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
+    nsec = collect_exec_sections(module_base, secs, MAX_SECTIONS);
+    if (nsec < 0) { out->status = SIG_BAD_MODULE; return out->status; }
     longest_fixed_run(mask, n, &a_off, &a_len);
     if (a_len == 0) { out->status = SIG_BAD_PATTERN; return out->status; }  /* all-wildcard: not a real sig */
     const uint8_t *anchor = pat + a_off;
-
-    uintptr_t found_addr = 0;
-    uint32_t  found_rva = 0;
-    int       hits = 0;
 
     for (int s = 0; s < nsec && hits < 2; s++) {
         const uint8_t *blob = secs[s].base;
@@ -250,17 +191,40 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
         }
     }
 
-    if (hits == 0) {
-        /* A missing prologue may have been replaced by a validated detour. */
-        if (try_hooked_known_rva(module_base, sig, pat, mask, n, out))
-            return out->status;   /* SIG_OK_HOOKED */
-        out->status = SIG_NOT_FOUND;
-        return out->status;
-    }
-    if (hits > 1)  { out->status = SIG_AMBIGUOUS; return out->status; }
+    if (hits == 0) return out->status;
+    if (hits > 1) { out->status = SIG_AMBIGUOUS; return out->status; }
     out->status = SIG_OK;
     out->addr = found_addr;
     out->rva = found_rva;
+    return SIG_OK;
+}
+
+/* Resolution. */
+
+sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
+{
+    uint8_t pat[SIG_MAX_PATTERN], mask[SIG_MAX_PATTERN], live[SIG_MAX_PATTERN];
+    exec_section secs[MAX_SECTIONS];
+    size_t n, i;
+    uint32_t rva;
+    int nsec, s;
+    reset(sig, out);
+
+    n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
+    if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
+    nsec = collect_exec_sections(module_base, secs, MAX_SECTIONS);
+    if (nsec < 0) { out->status = SIG_BAD_MODULE; return out->status; }
+    rva = sh_host_image_rva(module_base, sig->rva_vk, sig->rva_gl);
+    if (rva == 0) return out->status;   /* not the supported build, or none for this renderer */
+    for (s = 0; s < nsec; s++)
+        if (rva >= secs[s].vaddr && rva - secs[s].vaddr <= secs[s].vsize &&
+            n <= secs[s].vsize - (rva - secs[s].vaddr)) break;
+    if (s == nsec || !sig_safe_read(module_base + rva, live, n)) return out->status;
+    out->rva = rva;
+    for (i = 0; i < n; i++)
+        if (mask[i] && live[i] != pat[i]) { out->status = SIG_CHANGED; return out->status; }
+    out->status = SIG_OK;
+    out->addr = (uintptr_t)(module_base + rva);
     return SIG_OK;
 }
 
@@ -274,52 +238,43 @@ size_t sig_db_count(void)
 size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t cap)
 {
     size_t ok = 0;
-    size_t i = 0;
-    for (; BACKEND_ENGINE_SIGNATURES[i].name != NULL && i < cap; i++) {
-        sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &results[i]);
-        /* Both a clean scan hit and a hook-tolerant known_rva hit count as resolved (present+callable). */
-        if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED) ok++;
-    }
+    for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL && i < cap; i++)
+        if (sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &results[i]) == SIG_OK) ok++;
     return ok;
 }
 
-sig_status sig_match_recorded(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
+const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name)
 {
-    uint8_t pat[SIG_MAX_PATTERN], mask[SIG_MAX_PATTERN], live[SIG_MAX_PATTERN];
-    exec_section secs[MAX_SECTIONS];
-    size_t n, i;
-    uint32_t rva;
-    int nsec, s;
-    out->name = sig->name; out->status = SIG_NOT_FOUND; out->addr = 0; out->rva = 0;
-    n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
-    if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
-    nsec = collect_exec_sections(module_base, secs, MAX_SECTIONS);
-    if (nsec < 0) { out->status = SIG_BAD_MODULE; return out->status; }
-    rva = sh_host_image_rva(module_base, sig->rva_vk, sig->rva_gl);
-    if (rva == 0) return out->status;
-    for (s = 0; s < nsec; s++)
-        if (rva >= secs[s].vaddr && rva - secs[s].vaddr <= secs[s].vsize &&
-            n <= secs[s].vsize - (rva - secs[s].vaddr)) break;
-    if (s == nsec || !sig_safe_read(module_base + rva, live, n)) return out->status;
-    for (i = 0; i < n; i++) if (mask[i] && live[i] != pat[i]) return out->status;
-    out->status = SIG_OK; out->addr = (uintptr_t)(module_base + rva); out->rva = rva;
-    return SIG_OK;
+    for (size_t i = 0; i < n; i++)
+        if (results[i].name && strcmp(results[i].name, name) == 0) return &results[i];
+    return NULL;
 }
 
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name)
 {
-    for (size_t i = 0; i < n; i++)
-        if ((results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED) &&
-            results[i].name && strcmp(results[i].name, name) == 0)
-            return results[i].addr;
-    return 0;
+    const sig_result *r = sig_lookup(results, n, name);
+    return r && r->status == SIG_OK ? r->addr : 0;
+}
+
+const char *sig_status_reason(sig_status status)
+{
+    switch (status) {
+    case SIG_OK:          return "found";
+    case SIG_CHANGED:     return "the game's code there has been changed in memory, probably by another program";
+    case SIG_AMBIGUOUS:   return "the pattern matches more than once";
+    case SIG_BAD_PATTERN: return "the signature is malformed";
+    case SIG_BAD_MODULE:  return "the game image is unreadable";
+    default:              return "not found at its recorded address";
+    }
 }
 
 /* Engine signatures for DOOM 2016 build 13954591, with each function's RVA in
  * the Vulkan (SHA256 3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21)
  * and OpenGL (SHA256 1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4421E51E)
  * executables. The two renderers are separate links; no uniform delta is valid.
- * A zero RVA disables fallback. Validate entry changes with
+ * A signature resolves only at its RVA for the host's renderer (a zero RVA: not
+ * on that renderer). sig_test proves each pattern matches exactly once, at that
+ * RVA, on each executable. Validate entry changes with
  * tests/run-tests.ps1 -Doom <13954591 Vulkan> -DoomAlt <13954591 OpenGL>.
  * CI has no game image and cannot verify these identities. */
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
@@ -353,8 +308,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? F3 0F 10 15 ?? ?? ?? ?? 0F 57 DB 44 0F 28 84 24 D0 00 00 00 F3 0F 10 D8 F3 0F 10 05 ?? ?? ?? ?? 0F 28 CA F3 0F 5F CB 0F 2E C1 7A ??", 0x17B8EB5u, 0x17B9F75u },
     { "RenderParmFromOp",
       "0F B7 41 02 B9 3F 09 00 00 66 3B C1 7D ?? 48 8B 0D ?? ?? ?? ?? 0F BF D0 E9 ?? ?? ?? ?? 33 C0 C3 48 83 EC 58 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40", 0x15B8330u, 0x15B91E0u },
-    { "RenderVariablesResize",
-      "48 89 4C 24 08 55 56 57 41 56 41 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 88 00 00 00 8B EA 4C 8B F1 85 D2 7F ?? 0F B6 41 13 33 DB 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 09 48 85 C9 74 ?? 41 8B 56 0C E8 ?? ?? ?? ?? 49 89 1E 41 89 5E 0C 41 89 5E 08 E9 ?? ?? ?? ?? 8B 41 0C 3B E8 0F 84 ?? ?? ?? ?? 0F B6 49 13 80 F9 02 0F 85 ?? ?? ?? ?? 3B E8 0F 8E ?? ?? ?? ?? 41 0F B6 56 12 45 33 C0 8B CD E8 ?? ?? ?? ?? 4C 8B F8 48 89 84 24 80 00 00 00 48 85 C0 75 ?? 32 C0 E9 ?? ?? ?? ?? 41 C6 46 13 00 33 DB 89 5C 24 78 41 39 5E 08 7E ?? 48 63 C3 48 6B F0 68 49 8B 16 48 03 D6 4A 8D 0C 3E E8 ?? ?? ?? ?? 49 8B 3E 48 03 FE 48 8D 4F 38 E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 49 8B 06 48 8D 0C 06 48 89 8C 24 80 00 00 00 48 85 C9", 0x1188980u, 0x1187AE0u },
     { "DeserializeFromJson",
       "40 55 56 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 C7 44 24 68 FE FF FF FF",
       0x12466A0u, 0x1245CD0u },
@@ -492,39 +445,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * pointer slot and dereference lazily; it may be NULL at startup. */
       "48 8B 05 ?? ?? ?? ?? 48 83 B8 A0 54 0A 00 00 0F 94 C0",
       0xD4A710u, 0xD49DC0u },
-    { "MenuThink",
-      "48 8B C4 55 57 41 54 41 56 41 57 48 8D 68 98 48 81 EC 40 01 00 00 48 C7 44 24 38 FE FF FF FF",
-      0xFABAA0u, 0xFAAFD0u },
-    /* ---- the mint-a-new-save chain (campaign rawmap-io-contract T2) ----------------------------
-     * Resolved but NOT YET CALLED. They are here so load-time resolution reports whether they scan
-     * clean on the installed build -- the OpenGL image has never been cross-checked against a live
-     * GL process, and a signature that resolves in a file but not in memory is exactly the failure
-     * this table exists to surface early.
-     *
-     * WHY THIS CHAIN. Opening a rawmap through LoadMap borrows an EXISTING save slot, so the editor
-     * takes that map's identity while the rawmap supplies only content -- and the next save writes
-     * the rawmap over that map. Minting a save first and loading THAT makes the rawmap a genuinely
-     * new map. CreateLocalSavedMapInternal mints a fresh id when its id argument is NULL.
-     *
-     * The chain's third function, idStr::operator=(const char *), is ALREADY in this table as
-     * "IdStrAssignCStr" (0x19FD5F0) -- adding it again under a second name only produced two entries
-     * resolving to one address. Two findings about it that belong with this chain:
-     *
-     *   - Its purpose is DIRECT, not inferred from a name. The body carries its own source paths
-     *     ("...idlib\text\Str.cpp(88) : TAG_STRING", "...idlib\text/Str.h" with the assert
-     *     "a <= ALLOCED_MASK") and works len@+0x08 / data@+0x10 / alloced|flags@+0x18 -- the layout
-     *     this backend already reads. So it is NOT the intern-and-store-pointer function that the
-     *     resolve-address discipline warns about mistaking for an idStr assign.
-     *   - CAUTION for the eventual caller: on a ZEROED idStr it silently does NOTHING. With
-     *     alloced==0 and the heap bit clear it takes the "static buffer too small -> return" path.
-     *     So the record handed to CreateLocalSavedMapInternal cannot be a zeroed buffer; its idStr
-     *     fields have to be engine-constructed first. */
-    { "CreateLocalSavedMapInternal",
-      /* Full prologue, zero wildcards -- no RIP-relative operand and no relative branch in the
-       * window. Unique at 23 bytes: confirmed independently by extract_sig.py (PORTABLE, target
-       * 0x561d70) and by a Ghidra whole-image byte search returning exactly one hit. */
-      "40 55 53 56 57 41 54 41 56 41 57 48 8D 6C 24 E1 48 81 EC B0 00 00 00",
-      0x11BEE20u, 0x11BE1F0u },
     /* idSnapMap::AddTag("map:branch") -- add-if-absent on the map's tag list.
      *
      * WHY THIS FUNCTION MATTERS: the editor's Save command asks the open map whether it carries
@@ -609,7 +529,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * data pointer at +0x10 (a 20-hex uppercase save-directory id); confirmed by
                             * decompile, the body's single use is
                             * `FUN_1405253e0(this, *(void**)(arg+0x10))`. 8 insns / 36 bytes, PORTABLE
-                            * (Vulkan 0x525250, OpenGL 0x524b80). MUST be called from a frame boundary:
+                            * MUST be called from a frame boundary:
                             * called cold from the menu it is a harmless no-op (the editor subsystem is
                             * uninitialised), and called from the command-buffer drain it deadlocks the
                             * main thread. */
@@ -639,18 +559,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0x1272760u, 0x1271D10u },
-    /* Engine dialog text uses the descriptor's nonempty idStr instead of default GDM text. */
-    { "AddDialog",
-      "40 55 57 41 54 41 56 41 57 48 8D AC 24 F0 BC FF FF",
-      0x102E4E0u, 0x102D780u },
     /* Raise through the shell wrapper: it sets screen+0xA8 for input handling.
      * Calling AddDialog directly can display a dialog that ignores keys. */
     { "AddDialogWrapper",
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B DA 48 8B F9 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B D3 48 8B 4F 08 E8 ?? ?? ?? ?? 48 8B 47 18",
       0xFCC6A0u, 0xFCBBE0u },
-    { "ShowDialog",
-      "48 8B C4 57 48 81 EC 80 00 00 00 48 C7 40 B8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 48 8B F2",
-      0x1034180u, 0x1033420u },
     /* Hide the active widget before its descriptor callbacks are released.
      * The shell wrapper holds the native lock and updates input visibility. */
     { "ClearDialogWrapper",
@@ -734,11 +647,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * replaces slot +0xF8 after provider-layout validation. */
       "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B D9 48 8D 05 ?? ?? ?? ?? 48 89 01 33 FF C7 41 18 00 00 ?? 00 48 89 79 08 48 89 79 10 48 83 C1 30",
       0x2A28C0u, 0x2A2A90u },
-    { "IdFileReadString",   /* Native idFile ReadString at +0xE0 (pinned Vulkan 0x267390).
+    { "IdFileReadString",   /* Native idFile ReadString at +0xE0.
                               * Install directly to retain its engine idStr ABI. */
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 01 48 8B DA",
       0x299850u, 0x299AB0u },
-    { "IdFileCompare",      /* Native idFile/idStr comparison at +0xE8 (pinned Vulkan 0x267290).
+    { "IdFileCompare",      /* Native idFile/idStr comparison at +0xE8.
                               * Its calling convention must not be replaced by a guessed wrapper. */
       "40 53 55 56 57 48 81 EC 98 00 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 41 8B E9",
       0x2996D0u, 0x299930u },
@@ -890,7 +803,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * Carries ae_hideHudForContextPrompt (0x123, an empty stub) and
                              * ae_showHudForContextPrompt (0x124, idPlayerHud::RestoreHudState).
                              * First 21 bytes are position-independent; the first RIP operand is
-                             * the security cookie at +0x1d (R306). */
+                             * the security cookie at +0x1d. */
       "40 55 53 56 57 41 56 41 57 48 8D 6C 24 D1 48 81 EC A8 00 00 00 48 C7 45 DF FE FF FF FF "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 49 8B F9 4D 8B F0 48 8B DA 48 8B F1 45 33 FF "
       "44 89 7D DB 4C 8B 11 49 8B D0 41 FF 52 40 84 C0 74 18 4C 8B 16 4C 8B CF 4D 8B C6 48 8B D3 "
@@ -977,50 +890,37 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     /* Portable function identities checked on both renderers. Generic/short leaves
      * such as decl-manager access, list growth, and visibility resolve through
      * signed call sites in engine_globals_table.gen.h instead. */
-    { "RemoveFromSelection", /* void(selection [rcx], entity id [edx]). Despite the historical
-                              * name this DESTROYS one entity (membership, undo record, slot
-                              * release) and never edits the selected-ID array, hover or
-                              * EntityMode. No product path calls it any more; window deletion
-                              * uses SelectionDeleteAction. The `add rcx,0x5e0` to the map's
-                              * entity tables sits in the fixed bytes, which makes it unique.
-                              * Vulkan 0x59FDA0, OpenGL 0x59F510. */
-      "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 8B DA 48 8B 09 48 81 C1 E0 05 00 00",
-      0x11FB8E0u, 0x11FAB80u },
     { "MaterialHeight",     /* uint(material [rcx]) -- the declared image height. Byte-identical to
                              * MaterialWidth except the final stack slot (0x60 vs 0x68), which is
-                             * exactly what separates them; both are file-wide unique.
-                             * Vulkan 0xD75B40, OpenGL 0xD75DB0. */
+                             * exactly what separates them; both are file-wide unique. */
       "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 24 4C 8D 44 24 60",
       0x16C8EA0u, 0x16C9B80u },
-    { "MaterialWidth",      /* uint(material [rcx]) -- see MaterialHeight.
-                             * Vulkan 0xD75D40, OpenGL 0xD75FB0. */
+    { "MaterialWidth",      /* uint(material [rcx]) -- see MaterialHeight. */
       "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 24 4C 8D 44 24 68",
       0x16C90A0u, 0x16C9D80u },
     { "DeclPureFind",       /* the pure decl lookup the typeinfo probes call -- decl *(ctx [rcx],
                              * name [rdx]). Distinct from DeclFind (0x17B36F0), which is the registry
-                             * form. Vulkan 0x18017A0, OpenGL 0x17F40E0. */
+                             * form. */
       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 "
       "48 8B DA 48 8B F1",
       0x1572A80u, 0x1573C10u },
     { "SerializedEntityIndexWrite", /* Swap-removal's moved-entity index write.
-                             * Vulkan 0x350CE1, OpenGL 0x350D31. The following
+                             * The following
                              * count decrement and state reset identify this site. */
       "89 A8 64 0B 00 00 8B 97 70 A0 49 00 FF CA E8 ?? ?? ?? ?? "
       "33 D2 C7 86 64 0B 00 00 FF FF FF FF 48 8B CE E8 ?? ?? ?? ??",
       0x3C9011u, 0x3C89B1u },
-    { "EventLink",          /* Event-link routine guarded by the fault shield.
-                             * Vulkan 0x9C2370, OpenGL 0x9C1B70. */
+    { "EventLink",          /* Event-link routine guarded by the fault shield. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "
       "48 89 74 24 58 48 8B F2 48 8B E9",
       0xB44C20u, 0xB44210u },
     { "InteractableSpawn",  /* Interactable Spawn, reached through a vtable. Its frame setup
-                             * distinguishes the function. Vulkan 0x1232830, OpenGL 0x12247F0. */
+                             * distinguishes the function. */
       "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 98 FE FF FF 48 81 EC 40 02 00 00 "
       "48 C7 45 80 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 "
       "0F 29 78 B8 44 0F 29 40 A8 48 8B 05 ?? ?? ?? ??",
       0x921AC0u, 0x920BD0u },
-    { "DeclResourceProbe",  /* Decl existence probe at vtable +0x78; validate the method by signature.
-                             * Vulkan 0x1806100, OpenGL 0x17F8A40. */
+    { "DeclResourceProbe",  /* Decl existence probe at vtable +0x78; validate the method by signature. */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
       0x1695FE0u, 0x1696E60u },
@@ -1064,19 +964,19 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "GridFindModule",
       "4C 8B DC 49 89 5B 18 49 89 53 10 57 48 83 EC 40 48 63 41 18 4D 8D 4B 08 "
       "4C 8B 51 10 4D 8D 43 10 48 69 F8 98 00 00 00", 0x1212D20u, 0x1212170u },
-    { "GridHasModule", /* VK 5b6f40, GL 5b6630; separate reload membership probe. */
+    { "GridHasModule", /* separate reload membership probe. */
       "48 89 54 24 10 48 83 EC 48 48 8D 05 ?? ?? ?? ?? 48 89 44 24 30 4C 8D 4C 24 50 48 63 41 18", 0x12128E0u, 0x1211D30u },
-    { "GridPortalSnap", /* VK 5a9b70, GL 5a9180. */
+    { "GridPortalSnap",
       "40 55 53 57 41 54 41 55 41 57 48 8D 6C 24 D1 48 81 EC B8 00 00 00 45 33 FF 44 0F 29 4C 24 70 45 0F B6 E1", 0x12055B0u, 0x12049B0u },
-    { "GridPortalAlign", /* VK 5a0b80, GL 5a02f0. */
+    { "GridPortalAlign",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 83 EC 60 4C 8B F9 4D 63 E0 48 8B 09 4C 8B EA", 0x11FC6C0u, 0x11FB960u },
-    { "GridQuantizeOrigin", /* VK 514df0, GL 514610. */
+    { "GridQuantizeOrigin",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 40 0F 29 74 24 30 48 8B EA 0F 29 7C 24 20", 0x1175BB0u, 0x1174B40u },
-    { "GridConfirmOrigins", /* VK 5a1750, GL 5a0ec0; add/move/duplicate release. */
+    { "GridConfirmOrigins", /* add/move/duplicate release. */
       "40 55 56 41 57 48 83 EC 40 45 33 FF 0F 29 74 24 30 0F 28 F1 48 8B F1 41 8B EF 44 39 79 70 0F 8E ?? ?? ?? ?? 48 89 5C 24 60", 0x11FD290u, 0x11FC5A0u },
-    { "GridPortalBounds", /* VK 5547d0, GL 553c80. */
+    { "GridPortalBounds",
       "40 53 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 8B DA 48 8B 11 4C 8B 0A", 0x11B39A0u, 0x11B2D80u },
-    { "GridPortalDirection", /* VK 5548c0, GL 553d70. */
+    { "GridPortalDirection",
       "48 8B 01 4C 8B C9 4C 8B 00 48 63 C2 48 6B D0 1C 49 8B 80 E8 00 00 00", 0x11B3A90u, 0x11B2E70u },
     { "GridLoadModule",
       "40 55 56 57 41 56 41 57 48 81 EC 60 01 00 00 48 C7 44 24 40 FE FF FF FF "
@@ -1104,25 +1004,25 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 48 89 58 18 57 48 81 EC A0 00 00 00 0F 29 70 E8 0F 29 78 D8 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 44 24 70 F2 0F 10 41 0C 49 8B F8 8B 41 14 48 8B DA 44 8B 41 18", 0x11B3EC0u, 0x11B32A0u },
     /* Native Blueprint Grid Room properties entry; both renderers verified. */
-    { "GridBlueprintUpdate", /* VK 0xcebd80, GL 0xceb760. */
+    { "GridBlueprintUpdate",
       "40 53 55 57 48 83 EC 20 F6 41 10 10 49 8B D8 48 8B FA 48 8B E9 75", 0x126D910u, 0x126CF00u },
-    { "GridBlueprintHelp", /* VK 0xceb950, GL 0xceb330. */
+    { "GridBlueprintHelp",
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 20 48 8D BA 90 09 02 00 48 8B EA 48 8B F1 48 8D 9A A8 11 02 00", 0x126D550u, 0x126CB40u },
-    { "GridSetEditorState", /* VK 0x5298a0, GL 0x5291d0. */
+    { "GridSetEditorState",
       "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00 E8 ?? ?? ?? ?? 48 8B D7 48 8B C8 4C 8B 00 41 FF 50 10", 0x1189580u, 0x11886E0u },
-    { "GridInputPressed", /* VK 0x52d190, GL 0x52cac0. */
+    { "GridInputPressed",
       "48 89 5C 24 08 57 48 83 EC 20 48 63 C2 48 8B D9 48 6B F8 38 48 8D 05 ?? ?? ?? ?? 48 03 F8 44 0F B6 4F 02 44 0F B6 47 01 0F B6 17 E8 ?? ?? ?? ?? 84 C0 74 36 48 63 47 04 48 3B 83 80 00 00 00", 0x118CB30u, 0x118BC90u },
-    { "GridAddActionHelp", /* VK 0x551e40, GL 0x551300. */
+    { "GridAddActionHelp",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 80 39 00 48 8D 59 30 41 8B F0 8B FA 74 7B 44 8B 43", 0x11B13B0u, 0x11B0770u },
-    { "GridPropertiesBlocked", /* VK 0x5af830, GL 0x5aeed0. */
+    { "GridPropertiesBlocked",
       "4C 8B 01 44 8B CA 4D 85 C0 74 3C 48 63 49 08 41 8B 40 70 3B C8 75 1D 85 C0 7E 17 8D 41 FF 48 63 C8 49 8B 40 68 48 6B D1 78 44 85 4C 02 08 0F 94 C0 C3 3B C8 7D 11 49 8B 40 68 48 6B C9 78", 0x120B230u, 0x120A630u },
-    { "GridEntityTree", /* VK 0x5404a0, GL 0x53fdc0. */
+    { "GridEntityTree",
       "40 53 48 83 EC 30 4C 8B 81 50 01 00 00 48 8B DA", 0x119FDD0u, 0x119F000u },
     /* Every undoable editor action ends here: it stores the action's label in
      * the map object and pushes the undo snapshot. The one notification that
      * covers placement, move, rotate, resize, duplicate, property edit and
      * delete. */
-    { "EditorCommitEdit", /* VK 0x524070, GL 0x5239b0. */
+    { "EditorCommitEdit",
       "40 53 48 83 EC 20 48 8B D9 48 8B 89 C8 04 02 00 48 83 C1 18 E8 ?? ?? ?? ?? "
       "48 8D 4B 10 48 8B D3 E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB "
       "48 83 C4 20 5B 48 FF A0 60 01 00 00", 0x1183D60u, 0x1182EC0u },
@@ -1130,20 +1030,20 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
      * editor_delete.c to run the native Delete Selection for window requests.
      * The action's hover-clear callee is decoded from its own call site: that
      * helper has a byte-identical twin and is not signable. */
-    { "SelectionDeleteAction", /* VK 0xce3b60, GL 0xce3540. Prologue through the
+    { "SelectionDeleteAction", /* Prologue through the
                                 * capability test movzx eax,[rcx+0x58]; test al,2. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC D0 00 00 00 "
       "48 C7 45 AF FE FF FF FF 48 89 9C 24 28 01 00 00 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 45 17 4D 8B E8 48 89 55 9F 48 89 4D A7 0F B6 41 58 A8 02 "
       "0F 84 ?? ?? ?? ??", 0x12657B0u, 0x1264DA0u },
-    { "SelectionCapabilities", /* VK 0xce5110, GL 0xce4af0. Rebuilds the capability bits over
+    { "SelectionCapabilities", /* Rebuilds the capability bits over
                                 * the selection plus the hovered entity: and byte [rcx+0x59],0xFE;
                                 * and byte [rcx+0x58],0x16; movsxd rsi,[rcx+0x2c]. */
       "40 55 53 48 8B EC 48 83 EC 48 80 61 59 FE 48 8B D9 80 61 58 16 "
       "49 8B 88 D0 04 02 00 48 89 74 24 60 48 89 7C 24 68 49 8B F8 "
       "4C 89 74 24 78 45 32 F6 48 63 71 2C 83 FE FF 0F 84 ?? ?? ?? ?? "
       "4C 89 64 24 70 8B D6 4C 89 7C 24 40", 0x1266D60u, 0x1266350u },
-    { "GridApplyEntityTree", /* VK 0x545120, GL 0x544a40. */
+    { "GridApplyEntityTree",
       "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2", 0x11A49F0u, 0x11A3C10u },
     /* Re-applies an entity's type-info tree: GridEntityTree (call +0x17), GridApplyEntityTree
      * (call +0x25), then the owning tree's destructor (call +0x38) and its sized delete with
@@ -1153,11 +1053,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 8B D9 48 8D 54 24 48 E8 ?? ?? ?? ?? 90 "
       "48 8B 54 24 48 48 8B CB E8 ?? ?? ?? ?? 90 48 8B 5C 24 48 48 85 DB 74 15 48 8B CB E8 ?? ?? ?? ?? "
       "BA 48 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 83 C4 30 5B C3", 0x11A5000u, 0x11A4220u },
-    { "GridReadEntityProperties", /* VK 0x5415d0, GL 0x540ef0. */
+    { "GridReadEntityProperties",
       "48 8B C4 55 57 41 56 48 8D A8 48 FF FF FF 48 81 EC A0 01 00 00 48 C7 45 "
       "C8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 "
       "89 85 90 00 00 00 48 8B FA 48 8B D9 48 8B 01 F6 80 CD 03 00 00 01", 0x11A0ED0u, 0x11A0100u },
-    { "GridTreeSetVec3", /* VK 0x1a66ee0, GL 0x1a593b0. */
+    { "GridTreeSetVec3",
       "40 53 55 56 57 41 54 41 56 41 57 B8 30 80 00 00 E8 ?? ?? ?? ?? 48 2B E0 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 20 80 00 00 40 32 ED 4D 8B E1 "
       "33 DB 4D 8B F8 4C 8B F2 48 8B F1 BF 78 00 00 00 44 8B CF 48 8D 15 ?? ?? "
@@ -1166,52 +1066,51 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "8D 8C 24 20 40 00 00 E8 ?? ?? ?? ?? 4D 8B C4 48 8B D0 48 8B CE E8 ?? ?? "
       "?? ?? 48 85 C0 74 ?? F3 41 0F 10 0C 9F 4C 8D 80 90 00 00 00 48 8B CE E8 "
       "?? ?? ?? ?? 40 B5 01 FF C7 48 FF C3 48 83 FB 03 7C ?? 40 0F B6 C5", 0x3580C0u, 0x357A50u },
-    { "GridTreeSetFloat", /* VK 0x1a66610, GL 0x1a58ae0. */
+    { "GridTreeSetFloat",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 48 8B FA 0F 29 74 24 20 4C "
       "8B C2 49 8B F1 48 8B 11 0F 28 F2 48 8B D9 E8 ?? ?? ?? ?? 48 85 C0 75 ?? "
       "4C 8B C6 48 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? 4C 8D 80 90 00 "
       "00 00 0F 28 CE 48 8B CB E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 40 48 8B 74 24 "
       "48", 0x357800u, 0x357190u },
-    { "StartMenuBind", /* VK 0xd18470, GL 0xd17bd0. */
+    { "StartMenuBind",
       "48 89 5C 24 20 55 48 83 EC 20 48 8B E9 48 89 7C 24 38 48 8B 89 C8 01 00 00 4C 89 74 24 40 4C 8B F2 48 8B 01 FF 50 18 33 DB 41 39 5E 08 7E 29 33 FF", 0x1290560u, 0x128FBB0u },
-    { "StartMenuAction", /* VK 0x534a10, GL 0x534330. */
+    { "StartMenuAction",
       "40 55 56 57 48 8D AC 24 20 FF FF FF 48 81 EC E0 01 00 00 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 10 02 00 00", 0x1194430u, 0x1193660u },
-    { "StartMenuThink", /* VK 0x535020, GL 0x534940. */
+    { "StartMenuThink",
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 79 2D 00 48 8B FA 0F B6 B2 ED 00 00 00 48 8B D9 75 05 40 84 F6 74 09 E8 ?? ?? ?? ?? C6 43 2D 00", 0x1194A40u, 0x1193C70u },
-    { "StartMenuEnd", /* VK 0x535830, GL 0x535150. */
+    { "StartMenuEnd",
       "40 53 48 83 EC 20 48 8B 82 88 10 02 00 48 8B DA 33 D2 C7 80 2C 0A 00 00 00 00 00 00 48 8B 49 08 E8 ?? ?? ?? ?? 48 8B 83 88 10 02 00", 0x1195250u, 0x1194480u },
-    { "StartMenuInit", /* VK 0xd163b0, GL 0xd15b10. */
+    { "StartMenuInit",
       "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 F0 BF FF FF B8 10 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 90 FE FF FF FF", 0x128E4B0u, 0x128DB00u },
-    { "StartMenuRow", /* VK 0xd14790, GL 0xd13ef0. */
+    { "StartMenuRow",
       "48 8B C4 41 56 48 83 EC 60 48 C7 40 D8 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 41 8B D8", 0x128C890u, 0x128BEE0u },
-    { "StartMenuSelect", /* VK 0xd149b0, GL 0xd14110. */
+    { "StartMenuSelect",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 8B 99 BC 01 00 00 8B F2 48 8B F9", 0x128CAB0u, 0x128C100u },
-    { "SwfDuplicateSprite", /* VK 0x2a7240, GL 0x2a6200. */
+    { "SwfDuplicateSprite",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B 79 30 49 8B F0 8B EA 48 8B D9 48 85 FF 75 17 48 8B 51 20 48 8D 0D ?? ?? ?? ??", 0x17469E0u, 0x1747BC0u },
-    { "SwfDisplayEntry", /* VK 0x2a7400, GL 0x2a63c0. */
+    { "SwfDisplayEntry",
       "48 89 5C 24 10 57 44 8B 89 88 00 00 00 45 33 DB 8B FA 48 8B D9 45 8B D3 45 85 C9 7E 3F 48 89 74 24 10 48 8B B1 80 00 00 00 0F 1F 80 00 00 00 00", 0x1746BA0u, 0x1747D80u },
-    { "SwfWidgetChild", /* VK 0xf56780, GL 0xf48040. */
+    { "SwfWidgetChild",
       "85 D2 78 17 3B 91 C0 01 00 00 7D 0F 48 8B 81 B8 01 00 00 48 63 D2 48 8B 04 D0 C3 33 C0 C3", 0x1137FE0u, 0x1137210u },
-    { "SwfWidgetResolve", /* VK 0x171ac20, GL 0x170d8b0. */
+    { "SwfWidgetResolve",
       "40 53 48 83 EC 20 48 8B 41 18 48 8B D9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 8B 53 40 48 8B 48 20 E8 ?? ?? ?? ?? 48 85 C0 48 89 43 08 0F 95 C0", 0xFAE870u, 0xFADD80u },
-    { "SwfNestedValue", /* VK 0x2a8c50, GL 0x2a7be0. */
+    { "SwfNestedValue",
       "40 53 55 56 57 41 56 48 81 EC 80 00 00 00 48 C7 44 24 38 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 49 8B F9 4C 8B F2 48 8B 84 24 D0 00 00 00", 0x1748230u, 0x1749440u },
-    { "SwfTextInstance", /* VK 0x29e700, GL 0x29d860. */
+    { "SwfTextInstance",
       "40 53 48 83 EC 20 83 39 08 75 2B 48 8B 59 08 48 85 DB 74 22 4C 8B 03 48 8B CB 48 8B 15 ?? ?? ?? ?? 41 FF 50 08 84 C0 74 0D 48 8B 83 C0 00 00 00 48 83 C4 20 5B C3 33 C0 48 83 C4 20 5B C3 CC CC 40 53 48 83 EC 20 83 39 08 75 2D", 0x17436D0u, 0x1744490u },
-    { "SwfValueDestroy", /* VK 0x29e610, GL 0x29d770. */
+    { "SwfValueDestroy",
       "40 53 48 83 EC 20 8B 01 48 8B D9 83 F8 02 75 20 48 8B 49 08 83 69 30 01 75 0A 48 8B 01 BA 01 00 00 00 FF 10 C7 03 00 00 00 00 48 83 C4 20 5B C3", 0x17435E0u, 0x17443A0u },
-    { "SwfSetText", /* VK 0x2b7830, GL 0x2b6820. */
+    { "SwfSetText",
       "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D0 48 8D 4B 38 E8 ?? ?? ?? ?? 33 FF C6 83 4C 01 00 00 00 89 BB 50 01 00 00", 0x17548B0u, 0x1755A10u },
-    { "EditorBusyShow", /* VK 0x52a560, GL 0x529e90. */
+    { "EditorBusyShow",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F2 48 8B D9 48 8B 89 88 10 02 00 BA 00 04 00 00 49 8B F8 E8 ?? ?? ?? ?? 48 8B 8B 88 10 02 00", 0x1189F90u, 0x11890F0u },
-    { "EditorBusyClear", /* VK 0x524050, GL 0x523990. */
+    { "EditorBusyClear",
       "48 8B 89 88 10 02 00 BA 00 04 00 00 E9 ?? ?? ?? ??", 0x1183D40u, 0x1182EA0u },
-    { "SwfFrameLabel", /* VK 0x2a7480, GL 0x2a6440. */
+    { "SwfFrameLabel",
       "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B DA 48 8B F9 48 8B CA E8 ?? ?? ?? ??", 0x1746C20u, 0x1747E00u },
-    { "SwfPlayFrame", /* VK 0x2ac0b0, GL 0x2ab040. */
+    { "SwfPlayFrame",
       "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CF 3B DA 0F 4F D3 E8 ?? ?? ?? ?? 48 8B 47 30 48 85 C0 74 0E 90", 0x174B5B0u, 0x174C7C0u },
-    /* Map bounds, Blueprint zoom and the Snapmap+ settings tab (snaphak-re
-     * editor-fixes-13954591 R-004). Every pattern is unique on both build
+    /* Map bounds, Blueprint zoom and the Snapmap+ settings tab. Every pattern is unique on both build
      * 13954591 executables at the recorded RVA. */
     { "CvarSetString", /* idCVar::Set(cvar, text, force); SetFloat formats then calls it. */
       "40 55 56 57 B8 70 40 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 A0 40 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 40 00 00 41 0F B6 D8 48 8B F2 48 8B F9 48 8B", 0x295780u, 0x2959A0u },
@@ -1243,27 +1142,25 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "F3 0F 10 0D ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 41 B0 01 45 88 BE 38 04 00 00 45 88 BE 44 04 00 00 45 88 7E 2C E8", 0x1242FAAu, 0x12425DAu },
     { "BlueprintFarClipB", /* The same r_zfar 33000 write on the in-transition path of that update. */
       "F3 0F 10 0D ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 41 B0 01 E8 ?? ?? ?? ?? 41 8B F7 44 39 BF B8 02 00 00 0F 8E", 0x12430EEu, 0x124271Eu },
-    /* Map bounds toggle, editor environment volume and Blueprint ground plane
-     * (snaphak-re editor-fixes-13954591 R-009). */
+    /* Map bounds toggle, editor environment volume and Blueprint ground plane. */
     { "RenderAddToggle", /* Settings panel on/off row (idMenuPropertyToggle, 0xe0 bytes): (panel, id, name, &label, &help, flag, value, on, off). */
       "48 8B C4 57 41 56 41 57 48 83 EC 70 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 49 8B E8 44 8B FA 48 8B F1 B9 E0 00 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 90 00 00 00 48 85 C0 74 39 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 0F B6 84 24 C0 00 00 00 88 44 24 20", 0x12808F0u, 0x127FEA0u },
     { "EditorFogVolume", /* Editor render-world setup: _unitCube scaled 32768 and the +/-snapEdit_environmentFogBounds environment area. */
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B 01 48 8B DA 41 B0 01 48 8D 15 ?? ?? ?? ?? 48 8B F1 FF 90 90 00 00 00 48 8B C8 48 8B F8 C7 80 F8 00 00 00 00 00 00 47 C7 80 FC 00 00 00 00 00 00 47 C7 80 00 01 00 00 00 00 00 47 48 89 98 18 01 00 00 E8 ?? ?? ?? ?? F3 0F 10 0D", 0x12397B0u, 0x1238C50u },
     { "RenderEntityUpdate", /* Marks a render entity changed (queues it for the next render-world update). */
       "40 53 48 83 EC 20 48 8B 91 C0 00 00 00 48 8B D9 C6 41 30 00 48 85 D2 74 16 48 8B 41 28 8B 48 10 48 C1 E9 08 C6 44 11 08 02 48 83 C4 20 5B C3 48 8B 01 BA 16 00 00 00 FF 50 08", 0x15D8020u, 0x15D92A0u },
-    /* Blueprint module picking length (snaphak-re editor-fixes-13954591 R-011). */
+    /* Blueprint module picking length. */
     { "ModulePickHover", /* Module hover pick: MOVSS xmm2,[snapEdit_modulePickingDistance] for end = origin + dir * value. */
       "F3 0F 10 15 ?? ?? ?? ?? 41 83 CC FF 44 8B B1 58 07 00 00 0F 28 C2 F3 41 0F 59 01", 0x11F45CCu, 0x11F37ECu },
     { "ModulePickFocus", /* Module Mode focus ray: MOVSS xmm0,[snapEdit_modulePickingDistance]. */
       "F3 0F 10 05 ?? ?? ?? ?? 48 8B 86 C8 04 02 00 F3 0F 10 35", 0x1257A58u, 0x1256F58u },
-    /* SnapMap world-area cell size (snaphak-re editor-fixes-13954591 R-018,
-     * R-019): BuildRenderWorld's load of the 512.0 subdivision size, the
+    /* SnapMap world-area cell size: BuildRenderWorld's load of the 512.0 subdivision size, the
      * fifth argument of its one subdivision call. Unique on both build
      * 13954591 executables at the recorded RVAs. */
     { "WorldAreaCellLoad", /* MOVSS xmm0,[rip+disp32 -> 512.0]; MOVSS [rsp+0x20],xmm0; LEA r9; LEA r8; XOR edx,edx. */
       "F3 0F 10 05 ?? ?? ?? ?? F3 0F 11 44 24 20 4C 8D 4C 24 50 4C 8D 85 E0 01 00 00 33 D2 49 8B CF E8", 0x114FF66u, 0x114F166u },
     /* Grid Room Size sub-editor refresh after an outside size change
-     * (snaphak-re editor-fixes-13954591 R-016). Unique on both build 13954591
+     * Unique on both build 13954591
      * executables at the recorded RVAs. */
     { "GridPropertyDirtyRefresh", /* Property row: context lists +0x58 vs +0x70 (context vt+0x70) set or clear the dirty byte +0xc8 and relabel the row. */
       "40 53 48 83 EC 20 48 8B D9 48 8B 89 D8 00 00 00 48 8B 01 FF 50 70 0F B6 8B C8 00 00 00 84 C9 74 1D 84 C0 74 30 84 C9 74 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 00 48 83 C4 20 5B C3 84 C0 75 13 84 C9 75 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 01", 0x12A8E30u, 0x12A8510u },
@@ -1273,28 +1170,26 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B C1 83 FA FF 75 03 33 C0 C3 48 63 C2 48 63 8C 81 50 03 00 00 41 39 88 D8 04 00 00 7E E9 49 8B 80 D0 04 00 00 48 8B 04 C8 C3", 0xF8F9C0u, 0xF8EEF0u },
     { "ContextListRedraw", /* Context-list screen: redraws its six item rows (name, value text, dirty marker) from the bound context +0x1b8. */
       "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 7E FF FF B8 F0 82 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 70 FE FF FF FF 48 89 9C 24 28 83 00 00 48 89 B4 24 30 83 00 00 48 89 BC 24 38 83 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 81 00 00 48 8B D9", 0x127B000u, 0x127A5B0u },
-    /* Object Mode entry drop (snaphak-re editor-fixes-13954591 R-020): the
+    /* Object Mode entry drop: the
      * FPS entry solver's load of its 18364.0 downward trace segment, that
      * constant's only reader. Unique on both build 13954591 executables. */
     { "ObjectEntryDrop", /* MOVSS xmm9,[rip+disp32 -> 18364.0]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32 -> 1.0]; MOVSS [rsp+0x60],xmm2. */
       "F3 44 0F 10 0D ?? ?? ?? ?? 0F 57 FF F3 44 0F 10 05 ?? ?? ?? ?? F3 0F 11 54 24 60", 0x12B3823u, 0x12B2F03u },
-    /* Unrestricted placement (snaphak-re editor-fixes-13954591 R-025): the two
+    /* Unrestricted placement: the two
      * tests that refuse an element with no accepted surface unless its
      * placementFlags allow air. Unique on both build 13954591 executables. */
     { "PlaceGateCommit", /* Place/commit group test: CMP dword [r12+rdx+8],0; JNZ +0x27 past TEST byte [def+0x1d0],0x30; JZ refuse. */
       "41 83 7C 14 08 00 75 27 49 8B 46 28 49 63 0C 14 48 8B 00 48 8B 80 A0 06 00 00 48 8B 0C C8 48 8B 41 08 F6 80 D0 01 00 00 30 0F 84", 0x121951Cu, 0x121896Cu },
     { "PlaceGateElement", /* Per-element ghost test: blocked +0x30, module +4 == -1, then CMP [r8+8],0; JNZ +0x2e past TEST [def+0x1d0],0x30. */
       "40 55 57 48 81 EC D8 00 00 00 41 80 78 30 00 48 8B EA 48 8B F9 75 30 41 83 78 04 FF 74 29 41 83 78 08 00 75 2E 48 8B 41 28 49 63 08 48 8B 00 48 8B 80 A0 06 00 00 48 8B 0C C8 48 8B 41 08 F6 80 D0 01 00 00 30 75 0C 32 C0", 0x12197B0u, 0x1218C00u },
-    /* Boot pacing (snaphak-re boot-time-13954591 R-001, R-002). The bootstrap
-     * matches these at their recorded RVAs before the full scan, so each
-     * pattern must stay unique at that RVA on both executables. */
+    /* Boot pacing (boot_pacing.c), resolved first, before the preload starts. */
     { "BootVideoLock", /* Load-screen video draw: LEA RDI,[bink lock]; enter it; CMP [first video handle],0; JZ. */
       "48 8D 3D ?? ?? ?? ?? 48 89 7C 24 58 B2 01 48 8B CF E8 ?? ?? ?? ?? C6 44 24 60 01 48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 48 8B 0B E8", 0x1901E14u, 0x18FAC93u },
     { "BootVideoSleep", /* The same draw: both handles drawn, then MOV ECX,10; CALL Sleep while the lock is held; CMP [second handle],0. */
       "80 3D ?? ?? ?? ?? 00 74 2A 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? B9 0A 00 00 00 E8 ?? ?? ?? ?? 48 83 3D ?? ?? ?? ?? 00", 0x1901E63u, 0x18FAD41u },
     { "BootReadPoll", /* UncachedBackgroundRead completion poll: done byte [rsp+0x70], abort [rsi+0x10], MOV ECX,1; CALL Sleep. */
       "0F B6 44 24 70 84 C0 75 1B 0F B6 46 10 84 C0 75 13 B9 01 00 00 00 E8 ?? ?? ?? ?? 0F B6 44 24 70 84 C0 74 E5", 0x1938EA8u, 0x192D818u },
-    /* Module prefabs (snaphak-re editor-feature-requests R-002, R-003). Every
+    /* Module prefabs. Every
      * entry verified on both build 13954591 executables. */
     { "SnapMapCtor", /* idSnapMap in-place ctor (0x778 bytes): writes version 0x6f at +0. VK 1245b60, GL 1245190. */
       "4C 8B DC 49 89 4B 08 56 57 41 56 48 83 EC 40 49 C7 43 C8 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B F9 C7 01 6F 00 00 00", 0x1245B60u, 0x1245190u },
@@ -1325,8 +1220,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * idSnapTypeInfoCache::Get. Searches the cache for the entity's pooled
                              * entityDef name (+0x58); a hit hands out a copy of the cached tree with the
                              * instance's text applied, a miss a tree from the instance alone. Detoured
-                             * (17 bytes: seven pushes and mov eax,0x1290; the stack probe call follows).
-                             * VK 0x141244dd0, GL 0x141244400. */
+                             * (17 bytes: seven pushes and mov eax,0x1290; the stack probe call follows). */
       "40 55 56 57 41 54 41 55 41 56 41 57 B8 90 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 50 FE FF FF FF "
       "48 89 9C 24 E8 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 12 00 00 49 8B E8 4C",
       0x1244DD0u, 0x1244400u },
@@ -1339,45 +1233,44 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       0x1245000u, 0x1244630u },
     { "TreeTextCtor",      /* ctx *(ctx [rcx], int): construct the 0x1210-byte text context the game
                              * writes an entity's state into and parses a tree from (state header
-                             * +0, memory writer +0x1018, text +0x1020). VK 0x140342bc0, GL 0x140342810. */
+                             * +0, memory writer +0x1018, text +0x1020). */
       "48 89 5C 24 08 57 48 83 EC 20 33 C0 C7 41 04 01 00 00 00 89 01 8B DA 88 41 12 48 8B F9 C7 41 08 02 00 00 00 "
       "33 D2 C7 41 0C 01 01 00 00 66 C7 41 10 00 01 48 89 81 18 10 00 00 48 81 C1 20 10 00 00 E8 ?? ?? ?? ?? "
       "89 9F 08 12 00 00 48 8B C7", 0x342BC0u, 0x342810u },
     { "TreeTextDefaultState", /* state *(state [rcx], byte, byte): the 0x14-byte default edit state the
                              * builder passes to the game's entity create and copies over the text
-                             * context's header. VK 0x140342c90, GL 0x1403428e0. */
+                             * context's header. */
       "C7 01 00 00 00 00 48 8B C1 C7 41 04 01 00 00 00 C7 41 08 02 00 00 00 88 51 0C 44 88 41 0D C7 41 0E 00 00 00 01 "
       "C6 41 12 00 C3", 0x342C90u, 0x3428E0u },
     { "TreeTextOpenWriter", /* bool(ctx [rcx]): open the context's memory writer on its inline buffer
-                             * before the game writes an entity's state. VK 0x140346560, GL 0x140346140. */
+                             * before the game writes an entity's state. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B F9 48 8B 89 18 10 00 00 33 DB 48 85 C9 74 0F "
       "48 8B 01 8D 53 01 FF 10 48 89 9F 18 10 00 00 48 8D 8F 20 10 00 00 E8 ?? ?? ?? ?? B9 80 01 00 00 E8 ?? ?? ?? ?? "
       "48 89 44 24 40 48 85 C0 74 0B 48 8B C8 E8 ?? ?? ?? ?? 48 8B D8", 0x346560u, 0x346140u },
     { "TreeTextFinish",    /* bool(ctx [rcx]): close the writer and make what it wrote the context's
-                             * text for parsing. VK 0x140345070, GL 0x140344c10. */
+                             * text for parsing. */
       "40 55 48 83 EC 20 48 8B E9 48 8B 89 18 10 00 00 48 85 C9 0F 84 93 00 00 00 48 8B 01 FF 50 08 84 C0 "
       "0F 84 85 00 00 00 48 89 5C 24 30 48 8B 9D 18 10 00 00 48 8B CB 48 89 74 24 38 48 89 7C 24 40 E8 ?? ?? ?? ?? "
       "48 8B 03 48 8B CB 48 8B B3 68 01 00 00 FF 50 28", 0x345070u, 0x344C10u },
-    { "TreeTextDtor",      /* void(ctx [rcx]): release the writer and the text. VK 0x140342cc0, GL 0x140342910. */
+    { "TreeTextDtor",      /* void(ctx [rcx]): release the writer and the text. */
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 8B D9 48 8B 89 18 10 00 00 48 85 C9 74 16 48 8B 01 "
       "BA 01 00 00 00 FF 10 90 48 C7 83 18 10 00 00 00 00 00 00 48 8D 8B 20 10 00 00 E8 ?? ?? ?? ??",
       0x342CC0u, 0x342910u },
     { "GridTreeFromText",  /* void(tree [rcx], ctx [rdx]): free the tree's nodes and parse the context's
-                             * text into it; what Build runs on each cache slot. VK 0x140356770, GL 0x140356100. */
+                             * text into it; what Build runs on each cache slot. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 8B 11 E8 ?? ?? ?? ?? 45 33 C9 48 C7 07 00 00 00 00 "
       "45 33 C0 48 8B D3 48 8B CF E8 ?? ?? ?? ?? 48 8B 5C 24 30 48 89 07 48 83 C4 20 5F C3", 0x356770u, 0x356100u },
     { "GridTreeDestroy",    /* void(tree [rcx]): the property tree destructor the engine runs on every tree
                              * idSnapTypeInfoCache::Get hands out (then frees the 0x48 bytes); frees the
                              * tree's node storage (+0x28, by its state byte +0x3b) and releases the entities
                              * on its list (+0x8, linked at +0x2200) through the game. modtypeinfo.c runs it
-                             * on a product-built tree it drops. VK 0x1403723a0, GL 0x140371d80. */
+                             * on a product-built tree it drops. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 E8 ?? ?? ?? ?? 90 "
       "0F B6 43 3B 33 FF 84 C0 74 06 2C 03 3C 01 77 19 48 8B 4B 28", 0x3723A0u, 0x371D80u },
     { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuild the editor entity palette at
                              * editor+0x20660 from every snapEditorEntityDef decl. Called once, from editor
                              * initialization. The tail anchors on its first writes: selected index +0x08 = 0
-                             * and end pointer +0x28 = +0x10. The first 18 bytes are whole and register-only.
-                             * VK 0x1411aa710, GL 0x1411a9820. */
+                             * and end pointer +0x28 = +0x10. The first 18 bytes are whole and register-only. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
       "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
       "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
@@ -1387,11 +1280,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * GL 0x1411aa1b0), the sort of the palette's rows in place. The sort wrapper's
                              * own bytes are a template shared with other row lists, so it is reached
                              * through this call. timeline_tile.c verifies the target's prologue before
-                             * detouring it. VK 0x1411af0f3, GL 0x1411ae2f3. */
+                             * detouring it. */
       "4C 8B F1 48 8B B2 C8 04 02 00 48 8B BA D0 04 02 00 48 8D 8A 60 06 02 00 E8 ?? ?? ?? ?? "
       "49 8D 8C 24 60 06 02 00 E8 ?? ?? ?? ?? 8B 46 50", 0x11AF0F3u, 0x11AE2F3u },
-    /* Published-map and offline-play gates (modpublished.c; snaphak-re
-     * mod-system-reinstatement lane N1a section 5). Unique on both build
+    /* Published-map and offline-play gates (modpublished.c). Unique on both build
      * 13954591 executables; steal windows audited by detour_windows_test. */
     { "PublishedOnSnapPlayDone",   /* idMenuManager_Shell::OnSnapPlay read completion (manager, request,
                                     * metadata, map): ClearDialog(0x63), progress hide, PushHistorySetCache,
@@ -1452,8 +1344,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 83 05 00 00 "
       "33 F6 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 89 70 05 00 00 48 85 C9 74 ?? 8B 97 7C 05 00 00 E8 ?? ?? ?? ?? "
       "90 48 89 B7 70 05 00 00 89 B7 7C 05 00 00 89 B7 78 05 00 00", 0xF969A0u, 0xF95ED0u },
-    /* Publish-time mod upload, claims and the copy gate (modpublish.c; snaphak-re
-     * mod-system-reinstatement lane N4). Unique on both build 13954591
+    /* Publish-time mod upload, claims and the copy gate (modpublish.c). Unique on both build 13954591
      * executables; steal windows audited by detour_windows_test. */
     { "PublishAfterSave", /* the Save state's publish callback (editorLocal): vtbl+0x160(4), then TryCloudSave; nothing is sent before it. Steal 15. */
       "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 8B F9 48 8B 01 BA 04 00 00 00 FF 90 60 01 00 00"
@@ -1482,8 +1373,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 6C 24 20 57 48 83 EC 40 0F B6 EA 48 8B F9 8B 51 08 48 8B 49 10 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? ?? ?? 83 78 0C "
       "05"
       , 0xFCE5E0u, 0xFCDAE0u },
-    /* Cooked movies and weapon ammo displays (modswf.c, modhud.c; snaphak-re
-     * mod-system-reinstatement lane P3). Unique on both build 13954591
+    /* Cooked movies and weapon ammo displays (modswf.c, modhud.c). Unique on both build 13954591
      * executables. Neither is a detour: modswf swaps the idFileResource
      * vtable slot that holds FileResourceLoad, modhud swaps one call's rel32. */
     { "FileResourceLoad", /* idFileResource Load (vtable +0x40): state < 2 opens through FS +0x148 (named idFile_Memory,
@@ -1518,11 +1408,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * soundSystem+0x140 (the hardware) vtable +0x30. modsound decodes both addresses. */
       "48 83 EC 28 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 83 C4 28 48 FF 60 30",
       0x1689010u, 0x16895F0u },
-    /* Stock banks on demand (modsound.c; snaphak-re mod-system-reinstatement lanes G4 and L8): the
-     * load the per-bank wrapper makes once its listed-bank filter passes, called directly for a stock
-     * bank the filter skips in SnapMap (doom_weapon_sp.bnk). Called, never hooked. Evidence
-     * logs/shared-ghidra/mod-system-l8/ (disassembly jobs VK 0ba0cc09 29b90ccb 6d140627 6b5f9d60, GL
-     * 9b305e70 ddd84912 e72dd784 0826538a). */
+    /* Stock banks on demand (modsound.c): the load the per-bank wrapper makes once its listed-bank
+     * filter passes, called directly for a stock bank the filter skips in SnapMap
+     * (doom_weapon_sp.bnk). Called, never hooked. */
     { "AudioLoadBankAsync", /* AKRESULT AK::SoundEngine::LoadBank(const char *name, AkBankCallbackFunc, void *cookie,
                              * AkMemPoolId, AkBankID *out): GetIDFromString, *out = id, then the bank manager's queue
                              * (+0x18). */
@@ -1554,9 +1442,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 80 B8 41 06 00 00 00 75 30", 0xC73F47u, 0xC739C7u },
     { "WeaponHudGameMode", /* bool(game*): game+0x45338 -> +0x18 == 1; modhud checks the decoded call lands here. */
       "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0x398C50u, 0x398560u },
-    /* Publish search tag and delete-time claim release (modpublish.c; snaphak-re
-     * mod-system-reinstatement lane P4). Unique on both build 13954591
-     * executables; evidence logs/shared-ghidra/mod-system-p4/. */
+    /* Publish search tag and delete-time claim release (modpublish.c). Unique on both build 13954591
+     * executables. */
     { "MapInfoDeleteDone", /* MapInfo screen My Maps delete success (screen, ctx, const idStr &localId, const idStr &cloudItemId), bound by the delete confirm at VK 1090fc0 / GL 10900d0. Its twin MapInfoUnpublishDone differs at +0xF (mov rdi vs rbx). Steal 14. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B F9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? "
       "48 8B D8 48 85 C0 74 3F 8B 97 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 13 48 8B 08 48 85 C9 74 0B 48 8B 01 BA "
@@ -1570,14 +1457,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
       "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"
       , 0x11C4160u, 0x11C3530u },
-    /* smp: commands (modaction.c; snaphak-re mod-system-reinstatement lanes
-     * P22 and P26). Unique on both build 13954591 executables. */
+    /* smp: commands (modaction.c). Unique on both build 13954591 executables. */
     { "StringSetDoAction", /* idSnapMapAction_StringVar_Set::DoAction(this, activator), reached only through its vtable slot (VK 0x24BDA20 / GL 0x24D7770); the value parameter at +0xCA8, the logic manager read at gameMgr+0x298128 -> +0x48. Steal 20. */
       "48 8B C4 57 41 56 41 57 48 83 EC 60 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 44 24 58 48 8B E9 4C 8B 05 ?? ?? ?? ?? 49 8B 80 28 81 29 00 4C 8B 78 48 4D 85 FF 0F 84 ?? ?? ?? ?? 33 "
       "F6 8B 81 F8 03 00 00"
       , 0x9E26C0u, 0x9E19B0u },
-    /* Scene nodes play at the player (modscene_place.c; snaphak-re R313).
+    /* Scene nodes play at the player (modscene_place.c).
      * Unique on both build 13954591 executables. */
     { "SceneInteractionDoAction", /* idSnapMapAction_Interaction::DoAction(this, activator), vtable +0x8E8 (VK vtable 0x142186FD0 / GL 0x1421A0D20): for each target (+0x3F0, count +0x3F8, 0x20-byte references) posts the interaction-action event with the action int at +0xCA8 and the activator, or the target itself when it is NULL. Steal 17. */
       "4C 8B DC 55 57 41 56 48 83 EC 60 8B 81 F8 03 00 00 33 FF 4C 8B F2 48 8B E9 85 C0 0F 8E B5 00 00 00 49 89 5B 10 49 89 73 18 33 F6 3B F8 7D 3D "
@@ -1589,13 +1475,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 5C 24 08 57 48 83 EC 20 48 8D 99 00 52 00 00 48 8B F9 8B 03 48 8D 53 04 3B 02 75 1B 3D FE FF FF 01 74 1C 48 83 7B 08 00 75 15 "
       "48 83 3D ?? ?? ?? ?? 00 74 0B 48 8B D3 48 8B CB E8 ?? ?? ?? ?? 4C 8B 43 08 BA 33 00 00 00 48 8B CF 48 8B 5C 24 30 48 83 C4 20 5F E9"
       , 0x91EA30u, 0x91DB40u },
-    { "InteractionOnActionRequest", /* idInteractionComponent::OnActionRequest(this, owner, const idInteractionAction_t *, requester) -> bool: false when +0x70 is NULL, else loads requester+0x388 (its name) for the debug line before any check, so a NULL requester faults (R312: the interactable's sync-end reset, idInteractable vtable +0xA38, sends action 3 with its stored user). Steal 14. */
+    { "InteractionOnActionRequest", /* idInteractionComponent::OnActionRequest(this, owner, const idInteractionAction_t *, requester) -> bool: false when +0x70 is NULL, else loads requester+0x388 (its name) for the debug line before any check, so a NULL requester faults (the interactable's sync-end reset, idInteractable vtable +0xA38, sends action 3 with its stored user). Steal 14. */
       "48 89 6C 24 18 56 41 56 41 57 48 83 EC 30 48 83 79 70 00 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 75 11 32 C0 48 8B 6C 24 60 48 83 C4 30 41 5F "
       "41 5E 5E C3 0F B6 89 71 09 00 00 4C 8D 05 ?? ?? ?? ?? 48 89 5C 24 50 48 8D 15 ?? ?? ?? ?? 48 89 7C 24 58 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "49 8B BE 88 03 00 00 48 8B 9D 88 03 00 00"
       , 0x6BEE80u, 0x6BE150u },
-    /* Load-time fault recovery (fault_shield/load_screen_stop.c; snaphak-re
-     * campaign-interactables-triage F3b). idCommonLocal::CancelMapChange(common, arg),
+    /* Load-time fault recovery (fault_shield/load_screen_stop.c). idCommonLocal::CancelMapChange(common, arg),
      * common vtable +0x28, reached from idCommonLocal::Frame's idException catch: its
      * 16 KB stack buffer, then the MOV R8B,1 / MOVZX EBP,DL / MOV RDI,RCX setup.
      * The first 15 bytes are the stolen window. */
@@ -1612,5 +1497,28 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "83 3D ?? ?? ?? ?? 00 7E 12 48 8B 03 C6 80 B1 04 00 00 01 48 8B 0B E8 ?? ?? ?? ?? "
       "48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 F0 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 B8 00 00 00"
       , 0x1676770u, 0x16774B0u },
+    /* Fault shield (fault_shield/shield_sigs.c). */
+    /* Recoverable Error(6) wrapper, not the shared dispatcher; the level
+     * immediate distinguishes it from FatalError7. Class-B recovery supplies fmt in RCX. */
+    { "Error6",
+      "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
+      "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 06 00 00 00",
+      0x282B50u, 0x282D40u },
+    /* FatalError7 differs from Error6 at MOV ECX,7 (+0x27); recovery.c patches that
+     * immediate to request the recoverable exception class. */
+    { "FatalError7",
+      "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
+      "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 07 00 00 00",
+      0x282B90u, 0x282D80u },
+    /* idCommonLocal::Frame, the recovery frame-hook target; recovery.c steals its
+     * first 15 bytes (five pushes and MOV EAX,0x11DC0), compared exactly before the detour. */
+    { "Frame",
+      "40 57 41 54 41 55 41 56 41 57 B8 C0 ?? 01 00 E8 ?? ?? ?? ?? 48 2B E0",
+      0x159D930u, 0x159E9A0u },
+    /* Connection resolver entry; start of the Class-A repair range. */
+    { "Resolver",
+      "44 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 53 56 57 "
+      "41 54 41 55 41 56 41 57 48 8D 6C 24 E9 48 81 EC 88 00 00 00",
+      0x123C660u, 0x123BB00u },
     { NULL, NULL, 0 }   /* terminator */
 };

@@ -92,6 +92,7 @@ static const export_row k_xinput14[] = {
     {10, "XInputGetAudioDeviceIds"}, {100, ""}, {101, ""}, {102, ""}, {103, ""}, {104, ""},
     {108, ""}, {109, ""}
 };
+
 static int check_proxy(const char *build_dir)
 {
     char path[MAX_PATH];

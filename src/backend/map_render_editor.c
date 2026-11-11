@@ -50,7 +50,9 @@ static int render_commit(void *user,void *map)
             ok=1;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);}
-    if(ok)(void)sh_editor_mark_modified("Unlock View Distance");
+    /* Undo cannot restore a setting held in the map's text, so the change
+     * asks to be saved without adding an undo step. */
+    if(ok)(void)sh_editor_mark_modified_no_undo();
     return ok;
 }
 static void render_end(void *user){(void)user;g_map=NULL;}

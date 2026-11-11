@@ -1,7 +1,8 @@
 /* XInput proxy exports keep controllers working while the backend loads in DOOM.
  * The backend ships as XINPUT1_4.dll, the name the supported DOOM build imports.
- * Calls resolve the System32 implementation lazily by absolute path, so a
- * forward can never reach this proxy itself.
+ * Calls resolve the system implementation lazily from the system directory
+ * (LOAD_LIBRARY_SEARCH_SYSTEM32: wherever Windows is installed), so a forward
+ * can never reach this proxy itself.
  * Export through xinput1_4.def only; do not add __declspec(dllexport). DOOM imports
  * GetState and SetState by ordinals 2 and 3, so automatic ordinal assignment can
  * dispatch a controller poll to an incompatible function and corrupt memory. */
@@ -9,12 +10,14 @@
 
 #define ERR_DEV_NOT_CONNECTED 1167u   /* ERROR_DEVICE_NOT_CONNECTED -- benign "no controller" fallback */
 
-#define X14 "C:\\Windows\\System32\\XInput1_4.dll"
-
+/* The system DLL, loaded once by name from the system directory only. A
+ * module handle is pointer-sized, so concurrent first calls at worst load it
+ * twice, which only raises its reference count. */
 static HMODULE real_module(void)
 {
-    HMODULE h = GetModuleHandleA(X14);
-    return h ? h : LoadLibraryA(X14);
+    static HMODULE module;
+    if (!module) module = LoadLibraryExW(L"XInput1_4.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return module;
 }
 
 static FARPROC real_proc(const char *name)

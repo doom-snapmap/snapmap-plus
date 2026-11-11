@@ -13,12 +13,15 @@
 #include <shlobj.h>
 #include <dbghelp.h>
 #include "../backend/host_image.h"
+#include "../common/wide_path.h"
 
-#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
+#pragma comment(lib, "shell32.lib")   /* SHGetKnownFolderPath */
+#pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dbghelp.lib")   /* MiniDumpWriteDump */
 
-static char  g_dir[MAX_PATH]      = {0};   /* dir of this DLL (the DOOM root) */
-static char  g_logpath[MAX_PATH]  = {0};   /* <DOOM>\snapmap-plus\logs\sh_diag.log */
+static wchar_t g_dir[SH_WPATH_MAX];       /* dir of this DLL (the DOOM root), long form */
+static char    g_dir_utf8[3 * SH_WPATH_MAX];
+static wchar_t g_logpath[SH_WPATH_MAX];   /* <DOOM>\snapmap-plus\logs\sh_diag.log */
 static volatile LONG g_installed   = 0;
 static volatile LONG g_cxx_logged  = 0;    /* rate-limit first-chance C++-throw logging */
 static volatile LONG g_fc_logged   = 0;    /* rate-limit first-chance crash-class logging */
@@ -48,7 +51,7 @@ static void diag_logv(const char *fmt, va_list ap)
     (void)n;
     OutputDebugStringA(line);
     if (g_logpath[0]) {
-        HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        HANDLE h = CreateFileW(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             DWORD wrote;
@@ -72,7 +75,7 @@ static void diag_raw(const char *prefix, DWORD code, const void *rip, const void
     (void)n;
     OutputDebugStringA(buf);
     if (g_logpath[0]) {
-        HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        HANDLE h = CreateFileW(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h != INVALID_HANDLE_VALUE) { DWORD w; WriteFile(h, buf, (DWORD)strlen(buf), &w, NULL); CloseHandle(h); }
     }
@@ -85,14 +88,14 @@ static void module_for(const void *addr, char *out, size_t cap, uintptr_t *off)
     HMODULE hmod = NULL;
     if (off) *off = 0;
     if (out && cap) out[0] = '\0';
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)addr, &hmod) && hmod) {
-        char path[MAX_PATH];
-        if (GetModuleFileNameA(hmod, path, MAX_PATH)) {
-            const char *base = strrchr(path, '\\');
-            base = base ? base + 1 : path;
-            if (out && cap) strncpy_s(out, cap, base, _TRUNCATE);
+                           (LPCWSTR)addr, &hmod) && hmod) {
+        static wchar_t path[SH_WPATH_MAX];
+        DWORD n = GetModuleFileNameW(hmod, path, SH_WPATH_MAX);
+        if (n && n < SH_WPATH_MAX && out && cap) {
+            const wchar_t *base = wcsrchr(path, L'\\');
+            sh_wpath_utf8(base ? base + 1 : path, out, cap);
         }
         if (off) *off = (uintptr_t)addr - (uintptr_t)hmod;
     } else {
@@ -130,7 +133,8 @@ static int is_crash_class(DWORD code) { return (code & 0xF0000000u) == 0xC000000
 static void dump_modules(void)
 {
     HANDLE snap = INVALID_HANDLE_VALUE;
-    MODULEENTRY32 me;
+    MODULEENTRY32W me;
+    char name[3 * MAX_MODULE_NAME32 + 3];
     int count = 0, tries;
     for (tries = 0; tries < 6; tries++) {                 /* retry ERROR_BAD_LENGTH (loading modules) */
         snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
@@ -141,9 +145,12 @@ static void dump_modules(void)
     if (snap == INVALID_HANDLE_VALUE) { diag_log("modules: snapshot failed (err=%lu)", GetLastError()); return; }
     me.dwSize = sizeof me;
     diag_log("==== LOADED MODULES (name  base  size) ====");
-    if (Module32First(snap, &me)) {
-        do { diag_log("  %-28s %p  %lu KB", me.szModule, me.modBaseAddr, me.modBaseSize / 1024); count++; }
-        while (Module32Next(snap, &me));
+    if (Module32FirstW(snap, &me)) {
+        do {
+            sh_wpath_utf8(me.szModule, name, sizeof name);
+            diag_log("  %-28s %p  %lu KB", name, me.modBaseAddr, me.modBaseSize / 1024);
+            count++;
+        } while (Module32NextW(snap, &me));
     }
     CloseHandle(snap);
     diag_log("==== %d modules ====", count);
@@ -158,37 +165,42 @@ static void dump_modules_once(void)
     }
 }
 
-static void dump_dir(const char *label, const char *dir)
+static wchar_t g_scratch[SH_WPATH_MAX];
+static char    g_name_utf8[3 * MAX_PATH], g_path_utf8[3 * SH_WPATH_MAX];
+
+static void dump_dir(const char *label, const wchar_t *dir)
 {
-    char pat[MAX_PATH];
-    WIN32_FIND_DATAA fd;
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     int n = 0;
-    _snprintf_s(pat, sizeof pat, _TRUNCATE, "%s\\*", dir);
-    h = FindFirstFileA(pat, &fd);
-    diag_log("---- %s: %s ----", label, dir);
+    sh_wpath_utf8(dir, g_path_utf8, sizeof g_path_utf8);
+    diag_log("---- %s: %s ----", label, g_path_utf8);
+    wcscpy_s(g_scratch, SH_WPATH_MAX, dir);
+    if (!sh_wpath_append(g_scratch, SH_WPATH_MAX, L"*")) return;
+    h = FindFirstFileW(g_scratch, &fd);
     if (h == INVALID_HANDLE_VALUE) { diag_log("   (not present / unreadable, err=%lu)", GetLastError()); return; }
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) diag_log("   [dir]  %s", fd.cFileName);
-        else diag_log("   %10llu  %s", ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, fd.cFileName);
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        sh_wpath_utf8(fd.cFileName, g_name_utf8, sizeof g_name_utf8);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) diag_log("   [dir]  %s", g_name_utf8);
+        else diag_log("   %10llu  %s", ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, g_name_utf8);
         n++;
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     diag_log("   (%d entries)", n);
 }
 
 static void dump_env(void)
 {
-    char profile[MAX_PATH], sub[MAX_PATH];
+    static wchar_t sub[SH_WPATH_MAX];
     if (g_dir[0]) {
         dump_dir("DOOM dir", g_dir);
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus", g_dir);
-        dump_dir("DOOM\\snapmap-plus (our bundle)", sub);
+        wcscpy_s(sub, SH_WPATH_MAX, g_dir);
+        if (sh_wpath_append(sub, SH_WPATH_MAX, L"snapmap-plus")) dump_dir("DOOM\\snapmap-plus (our bundle)", sub);
     }
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, profile))) {
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus", profile);          dump_dir("LOCALAPPDATA\\snapmap-plus (user data)", sub);
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus\\prefabs", profile);  dump_dir("LOCALAPPDATA\\snapmap-plus\\prefabs", sub);
+    if (sh_wpath_local_appdata(sub, SH_WPATH_MAX) && sh_wpath_append(sub, SH_WPATH_MAX, L"snapmap-plus")) {
+        dump_dir("LOCALAPPDATA\\snapmap-plus (user data)", sub);
+        if (sh_wpath_append(sub, SH_WPATH_MAX, L"prefabs")) dump_dir("LOCALAPPDATA\\snapmap-plus\\prefabs", sub);
     }
     dump_modules();
 }
@@ -231,12 +243,13 @@ static void stack_walk(const CONTEXT *start, int maxframes)
 
 static void write_minidump(PEXCEPTION_POINTERS ep)
 {
-    char path[MAX_PATH];
+    static wchar_t path[SH_WPATH_MAX];
     HANDLE h;
     MINIDUMP_EXCEPTION_INFORMATION mei;
     if (!g_dir[0]) return;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus\\logs\\sh_crash.dmp", g_dir);
-    h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    wcscpy_s(path, SH_WPATH_MAX, g_dir);
+    if (!sh_wpath_append(path, SH_WPATH_MAX, L"snapmap-plus\\logs\\sh_crash.dmp")) return;
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { diag_log("minidump: CreateFile failed (err=%lu)", GetLastError()); return; }
     mei.ThreadId = GetCurrentThreadId();
     mei.ExceptionPointers = ep;
@@ -244,7 +257,7 @@ static void write_minidump(PEXCEPTION_POINTERS ep)
     if (MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
             (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
             &mei, NULL, NULL))
-        diag_log("minidump: wrote %s", path);
+        diag_log("minidump: wrote snapmap-plus\\logs\\sh_crash.dmp");
     else
         diag_log("minidump: MiniDumpWriteDump failed (err=%lu)", GetLastError());
     CloseHandle(h);
@@ -332,15 +345,13 @@ static LONG WINAPI diag_uef(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Dump the environment outside the loader lock and reassert the filter through
- * startup. Do not replace g_prev_uef with the reassertion's return value. */
+/* Dump the environment outside the loader lock. */
 static DWORD WINAPI env_thread(LPVOID p)
 {
-    int i;
     (void)p;
     diag_log("===================================================================");
     diag_log("SNAPMAP+ DIAGNOSTIC BUILD -- catch-all crash + environment logger");
-    diag_log("  pid=%lu  dir=%s", GetCurrentProcessId(), g_dir);
+    diag_log("  pid=%lu  dir=%s", GetCurrentProcessId(), g_dir_utf8);
     {
         /* The same game identity the reports carry (hashing runs off the loader lock). */
         char game[SH_GAME_IDENTITY_MAX];
@@ -355,19 +366,17 @@ static DWORD WINAPI env_thread(LPVOID p)
     diag_log("======== ENVIRONMENT DUMP #1 (boot) ========");
     dump_env();
 
-    /* Reassert for about 30 seconds without capturing our own filter as previous. */
-    for (i = 0; i < 20; i++) { SetUnhandledExceptionFilter(diag_uef); Sleep(1500); }
 
     diag_log("======== ENVIRONMENT DUMP #2 (editor should be up) ========");
     dump_modules();
-    SetUnhandledExceptionFilter(diag_uef);
 
     /* Opt-in crash test: a diag_selftest_crash file beside the DLL triggers a
      * null write after startup. Remove the sentinel when the test is complete. */
     {
-        char sentinel[MAX_PATH];
-        _snprintf_s(sentinel, sizeof sentinel, _TRUNCATE, "%s\\diag_selftest_crash", g_dir);
-        if (g_dir[0] && GetFileAttributesA(sentinel) != INVALID_FILE_ATTRIBUTES) {
+        static wchar_t sentinel[SH_WPATH_MAX];
+        wcscpy_s(sentinel, SH_WPATH_MAX, g_dir);
+        if (g_dir[0] && sh_wpath_append(sentinel, SH_WPATH_MAX, L"diag_selftest_crash") &&
+            GetFileAttributesW(sentinel) != INVALID_FILE_ATTRIBUTES) {
             diag_log("DIAG SELF-TEST: sentinel present -> deliberately faulting (NULL write) to exercise the crash path");
             Sleep(200);
             *(volatile int *)0 = (int)0xDEAD;   /* NULL write -> AV -> unhandled -> diag_uef + minidump */
@@ -378,38 +387,35 @@ static DWORD WINAPI env_thread(LPVOID p)
 
 void shield_diag_install(HINSTANCE self)
 {
-    char path[MAX_PATH];
-    DWORD len;
     HANDLE h;
     if (InterlockedExchange(&g_installed, 1)) return;
 
-    /* Resolve the DLL directory; the log path is created below. */
-    len = GetModuleFileNameA((HMODULE)self, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) { g_dir[0] = '\0'; strcpy_s(g_logpath, MAX_PATH, "sh_diag.log"); }
-    else {
-        char *slash = strrchr(path, '\\');
-        if (slash) { *slash = '\0'; strncpy_s(g_dir, sizeof g_dir, path, _TRUNCATE); *slash = '\\'; }
-        /* group the diag log + crash dump under <DOOM>\snapmap-plus\logs\ (g_dir stays the DOOM root for the
-         * env dump; parent then child -- CreateDirectory makes one level at a time) */
-        { char ld[MAX_PATH]; _snprintf_s(ld, MAX_PATH, _TRUNCATE, "%s\\snapmap-plus", g_dir); CreateDirectoryA(ld, NULL);
-          _snprintf_s(ld, MAX_PATH, _TRUNCATE, "%s\\snapmap-plus\\logs", g_dir); CreateDirectoryA(ld, NULL); }
-        _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\snapmap-plus\\logs\\sh_diag.log", g_dir);
+    /* The DLL directory (the DOOM root, kept for the environment dump); the
+     * diag log and crash dump go under <DOOM>\snapmap-plus\logs\. */
+    g_logpath[0] = L'\0';
+    if (sh_wpath_module_dir((void *)self, g_dir, SH_WPATH_MAX)) {
+        sh_wpath_utf8(g_dir, g_dir_utf8, sizeof g_dir_utf8);
+        wcscpy_s(g_logpath, SH_WPATH_MAX, g_dir);
+        if (!sh_wpath_append(g_logpath, SH_WPATH_MAX, L"snapmap-plus") || !sh_wpath_ensure_dir(g_logpath) ||
+            !sh_wpath_append(g_logpath, SH_WPATH_MAX, L"logs") || !sh_wpath_ensure_dir(g_logpath) ||
+            !sh_wpath_append(g_logpath, SH_WPATH_MAX, L"sh_diag.log"))
+            g_logpath[0] = L'\0';
     }
 
-    /* Capture the previous filter once; later reassertions must not replace it. */
+    /* Set the filter once; it chains to the filter it replaced. */
     AddVectoredExceptionHandler(1 /* first-in-chain */, diag_veh);
     g_prev_uef = SetUnhandledExceptionFilter(diag_uef);
     if (g_prev_uef == diag_uef) g_prev_uef = NULL;   /* belt: never chain to ourselves */
 
     /* Write an early arming marker before the environment thread starts. */
-    h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    h = CreateFileW(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                     OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         const char *m = "[diag] armed (DllMain); banner + env dump follow on the worker thread\r\n";
         DWORD w; WriteFile(h, m, (DWORD)strlen(m), &w, NULL); CloseHandle(h);
     }
 
-    /* Heavy work (banner I/O, module/folder enum, the re-assert loop) off the loader lock. */
+    /* Heavy work (banner I/O, module and folder listing) off the loader lock. */
     { HANDLE t = CreateThread(NULL, 0, env_thread, NULL, 0, NULL); if (t) CloseHandle(t); }
 }
 

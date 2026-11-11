@@ -61,8 +61,8 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
 void  sh_navmesh_build_from_map(const char *json, size_t len) { (void)json; (void)len; }
 char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
 { (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
-char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
-{ (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
+char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *failed)
+{ (void)json; (void)len; if (out_len) *out_len = 0; if (failed) *failed = 0; return NULL; }
 void  sh_nav_bake_set_map(const char *json, size_t len) { (void)json; (void)len; }
 static int g_maps_opened;
 void  sh_nav_bake_map_opened(void) { g_maps_opened++; }

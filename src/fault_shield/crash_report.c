@@ -9,9 +9,17 @@
 #include "crash_report.h"
 #include "fault_record.h"
 #include "recovery.h"    /* shield_last_engine_msg */
-#include "veh.h"         /* shield_capture_stack */
+#include "veh.h"         /* shield_capture_stack, shield_second_chance */
 #include "engine_layout.h"
 #include "../backend/host_image.h"   /* sh_host_renderer_name -- snapshotted at init, never at fault time */
+#include "../common/wide_path.h"
+
+/* A release build's tag, stamped by build.ps1 -Version; a local build is "dev". */
+#ifndef SNAPMAP_PLUS_VERSION
+#define SNAPMAP_PLUS_VERSION "dev"
+#endif
+
+const char *sh_product_version(void) { return SNAPMAP_PLUS_VERSION; }
 
 extern uint8_t *g_doom_base;
 
@@ -20,9 +28,12 @@ extern uint8_t *g_doom_base;
 typedef BOOL (WINAPI *minidump_write_t)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                         PMINIDUMP_EXCEPTION_INFORMATION, PVOID, PVOID);
 
-static char g_crash_dir[MAX_PATH] = {0};   /* <game>\snapmap-plus\crash */
-static char g_dump_path[MAX_PATH] = {0};   /* <game>\snapmap-plus\logs\sh_crash.dmp */
-static char g_inst_version[48]    = {0};   /* installed version at arm time */
+/* Wide paths of any length, built at init; a record's file name is built into
+ * static storage at fault time. */
+static wchar_t g_crash_dir[SH_WPATH_MAX];    /* <game>\snapmap-plus\crash */
+static wchar_t g_dump_path[SH_WPATH_MAX];    /* <game>\snapmap-plus\logs\sh_crash.dmp */
+static char    g_dump_utf8[3 * SH_WPATH_MAX]; /* the same, as the record names it */
+static wchar_t g_record_path[SH_WPATH_MAX], g_temporary_path[SH_WPATH_MAX];
 static const char *g_renderer     = "";    /* "vulkan"/"opengl" at arm time (see crash_report_init) */
 static char g_game[SH_GAME_IDENTITY_MAX] = {0};   /* game identity at arm time, never at fault time */
 static minidump_write_t g_minidump_write = NULL;
@@ -37,53 +48,27 @@ static char g_rec_stack[2048];
 static char g_rec_text[HARVEST_MSG_MAX];
 static volatile LONG g_record_busy, g_capture_busy, g_dump_busy;
 
+/* <game>\snapmap-plus\crash, and the dump path under <game>\snapmap-plus\logs. */
 static void crash_dirs_from_module(void)
 {
     HMODULE self = NULL;
-    char path[MAX_PATH];
-    char *slash;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+    g_crash_dir[0] = g_dump_path[0] = L'\0';
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCSTR)&crash_dirs_from_module, &self) || !self) return;
-    if (GetModuleFileNameA(self, path, MAX_PATH) == 0) return;
-    slash = strrchr(path, '\\');
-    if (!slash) return;
-    *(slash + 1) = '\0';
-    /* <game>\snapmap-plus\crash (one level at a time; idempotent) + the dump path under logs\ */
-    _snprintf_s(g_crash_dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus", path);
-    CreateDirectoryA(g_crash_dir, NULL);
-    _snprintf_s(g_dump_path, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs", path);
-    CreateDirectoryA(g_dump_path, NULL);
-    _snprintf_s(g_crash_dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\crash", path);
-    CreateDirectoryA(g_crash_dir, NULL);
-    _snprintf_s(g_dump_path, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs\\sh_crash.dmp", path);
-}
-
-/* Read the installer manifest version; leave it empty if unavailable or malformed. */
-static void crash_read_version(void)
-{
-    char la[MAX_PATH], path[MAX_PATH], data[4096];
-    HANDLE h;
-    DWORD got = 0;
-    const char *k;
-    char *p, *q;
-    if (GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH) == 0) return;
-    _snprintf_s(path, MAX_PATH, _TRUNCATE, "%s\\snapmap-plus\\install.json", la);
-    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    ReadFile(h, data, sizeof data - 1, &got, NULL);
-    CloseHandle(h);
-    data[got] = '\0';
-    k = "\"version\"";
-    p = strstr(data, k);
-    if (!p) return;
-    p = strchr(p + strlen(k), ':'); if (!p) return;
-    p = strchr(p, '"');             if (!p) return;
-    p++;
-    q = strchr(p, '"');             if (!q) return;
-    if (q - p >= (ptrdiff_t)sizeof g_inst_version) q = p + sizeof g_inst_version - 1;
-    memcpy(g_inst_version, p, (size_t)(q - p));
-    g_inst_version[q - p] = '\0';
+                            (LPCWSTR)(void *)&crash_dirs_from_module, &self) || !self) return;
+    if (!sh_wpath_module_dir(self, g_crash_dir, SH_WPATH_MAX) ||
+        !sh_wpath_append(g_crash_dir, SH_WPATH_MAX, L"snapmap-plus") || !sh_wpath_ensure_dir(g_crash_dir))
+        goto fail;
+    wcscpy_s(g_dump_path, SH_WPATH_MAX, g_crash_dir);
+    if (!sh_wpath_append(g_dump_path, SH_WPATH_MAX, L"logs") || !sh_wpath_ensure_dir(g_dump_path) ||
+        !sh_wpath_append(g_dump_path, SH_WPATH_MAX, L"sh_crash.dmp") ||
+        !sh_wpath_utf8(g_dump_path, g_dump_utf8, sizeof g_dump_utf8))
+        g_dump_path[0] = L'\0';
+    if (!sh_wpath_append(g_crash_dir, SH_WPATH_MAX, L"crash") || !sh_wpath_ensure_dir(g_crash_dir))
+        goto fail;
+    return;
+fail:
+    g_crash_dir[0] = g_dump_path[0] = L'\0';
 }
 
 static void crash_report_file_locked(const char *kind, unsigned long code, uintptr_t rip_rva,
@@ -92,10 +77,10 @@ static void crash_report_file_locked(const char *kind, unsigned long code, uintp
 {
     crash_record r;
     SYSTEMTIME st;
-    char tbuf[32], fpath[MAX_PATH], temporary[MAX_PATH];
-    int len, tryn;
+    char tbuf[32];
+    int len, named, tryn;
     HANDLE h = INVALID_HANDLE_VALUE;
-    if (g_crash_dir[0] == '\0') return;
+    if (g_crash_dir[0] == L'\0') return;
     if (InterlockedIncrement(&g_records_written) > CRASH_MAX_RECORDS) return;
 
     GetLocalTime(&st);
@@ -104,7 +89,7 @@ static void crash_report_file_locked(const char *kind, unsigned long code, uintp
     r.kind = kind; r.code = code;
     r.rip_rva = (unsigned long long)rip_rva; r.fault_addr = (unsigned long long)fault_addr;
     r.module = module_name; r.stack = stack; r.engine_text = engine_text;
-    r.dump = dump_path; r.version = g_inst_version; r.time = tbuf;
+    r.dump = dump_path; r.version = sh_product_version(); r.time = tbuf;
     r.renderer = g_renderer;
     r.game = g_game;
     len = crash_record_json(g_rec_buf, sizeof g_rec_buf, &r);
@@ -113,14 +98,14 @@ static void crash_report_file_locked(const char *kind, unsigned long code, uintp
     /* CREATE_NEW preserves same-second records; the UI orders collision suffixes numerically. */
     for (tryn = 0; tryn < CRASH_MAX_RECORDS; tryn++) {
         if (tryn == 0)
-            _snprintf_s(fpath, MAX_PATH, _TRUNCATE, "%s\\pending-%04d%02d%02d-%02d%02d%02d.json",
-                        g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            named = _snwprintf_s(g_record_path, SH_WPATH_MAX, _TRUNCATE, L"%s\\pending-%04d%02d%02d-%02d%02d%02d.json",
+                               g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         else
-            _snprintf_s(fpath, MAX_PATH, _TRUNCATE, "%s\\pending-%04d%02d%02d-%02d%02d%02d-%d.json",
-                        g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, tryn);
-        if (_snprintf_s(temporary, sizeof temporary, _TRUNCATE, "%s.tmp", fpath) < 0) return;
-        if (GetFileAttributesA(fpath) != INVALID_FILE_ATTRIBUTES) continue;
-        h = CreateFileA(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+            named = _snwprintf_s(g_record_path, SH_WPATH_MAX, _TRUNCATE, L"%s\\pending-%04d%02d%02d-%02d%02d%02d-%d.json",
+                               g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, tryn);
+        if (named < 0 || _snwprintf_s(g_temporary_path, SH_WPATH_MAX, _TRUNCATE, L"%s.tmp", g_record_path) < 0) return;
+        if (GetFileAttributesW(g_record_path) != INVALID_FILE_ATTRIBUTES) continue;
+        h = CreateFileW(g_temporary_path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h != INVALID_HANDLE_VALUE) break;
         if (GetLastError() != ERROR_FILE_EXISTS) return;
@@ -130,8 +115,8 @@ static void crash_report_file_locked(const char *kind, unsigned long code, uintp
         DWORD wrote = 0;
         BOOL ok = WriteFile(h, g_rec_buf, (DWORD)len, &wrote, NULL) && wrote == (DWORD)len;
         CloseHandle(h);
-        if (!ok || !MoveFileExA(temporary, fpath, MOVEFILE_WRITE_THROUGH)) {
-            DeleteFileA(temporary);
+        if (!ok || !MoveFileExW(g_temporary_path, g_record_path, MOVEFILE_WRITE_THROUGH)) {
+            DeleteFileW(g_temporary_path);
             return;
         }
     }
@@ -159,8 +144,8 @@ static const char *crash_report_write_dump_locked(EXCEPTION_POINTERS *ep)
     HANDLE h;
     MINIDUMP_EXCEPTION_INFORMATION mei;
     BOOL ok = FALSE;
-    if (!g_minidump_write || g_dump_path[0] == '\0') return "";
-    h = CreateFileA(g_dump_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+    if (!g_minidump_write || g_dump_path[0] == L'\0') return "";
+    h = CreateFileW(g_dump_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return "";
     mei.ThreadId = GetCurrentThreadId();
@@ -172,7 +157,7 @@ static const char *crash_report_write_dump_locked(EXCEPTION_POINTERS *ep)
                               ep ? &mei : NULL, NULL, NULL);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
     CloseHandle(h);
-    return ok ? g_dump_path : "";
+    return ok ? g_dump_utf8 : "";
 }
 
 const char *crash_report_write_dump(EXCEPTION_POINTERS *ep)
@@ -199,13 +184,14 @@ static void crash_capture_fatal_locked(EXCEPTION_POINTERS *ep)
     /* module + RVA of the faulting site (loader-lock cost acceptable: the process is dying). */
     {
         HMODULE hm = NULL;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)rip, &hm) && hm) {
-            char path[MAX_PATH];
-            if (GetModuleFileNameA(hm, path, MAX_PATH)) {
-                const char *b = strrchr(path, '\\');
-                _snprintf_s(modbuf, sizeof modbuf, _TRUNCATE, "%s", b ? b + 1 : path);
-                mod = modbuf;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)rip, &hm) && hm) {
+            static wchar_t path[SH_WPATH_MAX];
+            DWORD n = GetModuleFileNameW(hm, path, SH_WPATH_MAX);
+            if (n && n < SH_WPATH_MAX) {
+                const wchar_t *b = wcsrchr(path, L'\\');
+                if (WideCharToMultiByte(CP_UTF8, 0, b ? b + 1 : path, -1, modbuf, sizeof modbuf, NULL, NULL) > 0)
+                    mod = modbuf;
             }
             rva = (uintptr_t)rip - (uintptr_t)hm;
         }
@@ -237,50 +223,44 @@ static LONG CALLBACK crash_fatal_veh(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Record an unhandled fault, then chain to the previous filter without recursion. */
+/* Record an unhandled fault, then hand it to the filter this one replaced. */
 static LONG WINAPI crash_uef(EXCEPTION_POINTERS *ep)
 {
     LPTOP_LEVEL_EXCEPTION_FILTER prev = g_prev_filter;
+    LONG redirected = EXCEPTION_CONTINUE_SEARCH;
+    /* A hardware fault no engine handler took may still be recoverable (veh.h). */
+    __try { redirected = shield_second_chance(ep); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (redirected == EXCEPTION_CONTINUE_EXECUTION) return redirected;
     if (InterlockedIncrement(&g_uef_entered) == 1) {
         __try { crash_capture_fatal(ep); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
-    if (prev && prev != crash_uef) return prev(ep);
+    if (prev) return prev(ep);
     return EXCEPTION_CONTINUE_SEARCH;
-}
-
-/* Reassert through engine startup for about 30 seconds. Keep the original previous
- * filter; capturing this call's return could make the chain recurse into itself. */
-static DWORD WINAPI crash_reassert_thread(LPVOID p)
-{
-    int i;
-    (void)p;
-    for (i = 0; i < 20; i++) { Sleep(1500); SetUnhandledExceptionFilter(crash_uef); }
-    return 0;
 }
 
 void crash_report_init(void)
 {
     HMODULE dh;
     crash_dirs_from_module();
-    crash_read_version();
     /* Snapshot the renderer before faults can occur: its first lookup may take the
      * loader lock. An unresolved renderer stays empty in the record. */
     g_renderer = sh_host_renderer_name();
     /* The game identity hashes the executable once; do it here, never in a handler. */
     sh_host_game_identity(g_game, sizeof g_game);
-    dh = LoadLibraryA("dbghelp.dll");
+    dh = LoadLibraryExW(L"dbghelp.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (dh) g_minidump_write = (minidump_write_t)GetProcAddress(dh, "MiniDumpWriteDump");
 }
 
+/* The filter is set once and chains to the one it replaced. A filter another
+ * component sets later replaces this one, as Windows intends; the fatal VEH
+ * above still records heap corruption and stack-cookie failures. */
 void crash_report_arm_fatal_handlers(void)
 {
-    HANDLE t;
-    if (g_crash_dir[0] == '\0') return;   /* init failed -> stay dark rather than half-armed */
+    LPTOP_LEVEL_EXCEPTION_FILTER prev;
+    if (g_crash_dir[0] == L'\0') return;   /* init failed -> stay dark rather than half-armed */
     AddVectoredExceptionHandler(1 /* first-in-chain */, crash_fatal_veh);
-    g_prev_filter = SetUnhandledExceptionFilter(crash_uef);
-    if (g_prev_filter == crash_uef) g_prev_filter = NULL;   /* belt: never chain to ourselves */
-    t = CreateThread(NULL, 0, crash_reassert_thread, NULL, 0, NULL);
-    if (t) CloseHandle(t);
+    prev = SetUnhandledExceptionFilter(crash_uef);
+    if (prev != crash_uef) g_prev_filter = prev;
     {
         shield_fault f = { "crash-record", -1, "fatal-path crash capture armed", 0, 0 };
         shield_emit(&f);

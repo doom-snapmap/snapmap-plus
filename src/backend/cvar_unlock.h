@@ -1,19 +1,10 @@
-/* Cvar-system layout used by the backend startup unlock worker.
- * Struct offsets describe the supported engine layout. Pinned Vulkan RVAs are
- * fallbacks; runtime resolution normally decodes the CmdSystemLea signature. */
+/* Cvar-system layout used by the backend startup unlock worker. The cvar
+ * system itself is located through the globals table (cvar_system_slot). */
 #ifndef B2_CVAR_UNLOCK_H
 #define B2_CVAR_UNLOCK_H
 
 #include <stdint.h>
 #include "engine_build.h"
-
-/* Pinned Vulkan cvar-system pointer slot. To rederive it, decode CmdSystemLea
- * to the command-system slot and add 0x10. The runtime has the same signature path. */
-#define RVA_CVAR_SYSTEM_PTR  SH_RVA(0x2F451D0u, 0x2F8D1D0u)
-
-/* Pinned Vulkan command-system pointer slot, decoded from CmdSystemLea.
- * Its object exposes getGate/setGate at vtable +0x10/+0x18. */
-#define RVA_CMD_SYSTEM_PTR   SH_RVA(0x2F451C0u, 0x2F8D1C0u)
 
 /* FindCvar uses the full table at gate 0 and the developer table otherwise.
  * Each table combines an embedded idList and idHashIndex. */

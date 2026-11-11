@@ -1,6 +1,7 @@
 /* Locate engine data globals by decoding RIP-relative references in signed code.
- * Generated anchors resolve uniquely on both build 13954591 executables; their
- * recorded RVAs are audit references and never runtime address fallbacks. */
+ * Each anchor is checked only at its recorded code site for the host's
+ * renderer, as a signature is; the global's own recorded RVAs are audit
+ * references and never runtime address fallbacks. */
 #ifndef BACKEND_ENGINE_GLOBALS_H
 #define BACKEND_ENGINE_GLOBALS_H
 
@@ -19,11 +20,13 @@ typedef struct global_entry {
     int32_t     delta;       /* added to the decoded address; for adjacent-slot globals */
     uint32_t    rva_vk;      /* where it resolves in DOOMx64vk.exe 13954591 -- audit only, never used */
     uint32_t    rva_gl;      /* where it resolves in DOOMx64.exe 13954591 -- audit only, never used */
+    uint32_t    site_vk;     /* the anchor's code site in DOOMx64vk.exe 13954591: checked there only */
+    uint32_t    site_gl;     /* the anchor's code site in DOOMx64.exe 13954591: checked there only */
 } global_entry;
 
 typedef enum glb_status {
     GLB_OK = 0,
-    GLB_ANCHOR_NOT_FOUND,   /* the code site did not match -- unknown build, or it was inline-hooked */
+    GLB_ANCHOR_NOT_FOUND,   /* the code site's bytes differ -- another program patched it */
     GLB_ANCHOR_AMBIGUOUS,   /* matched more than once: not an identity, refuse rather than guess */
     GLB_UNKNOWN_NAME,
     GLB_OUT_OF_RANGE,       /* decoded address is outside the host image -- a bad decode, not a global */

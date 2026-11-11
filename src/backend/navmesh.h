@@ -92,8 +92,9 @@ void sh_navmesh_build_from_map(const char *json, size_t len);
 /* THE AUTHOR SIDE. Re-embed every payload the current map is holding, so a
  * load-then-save with no fresh bake preserves the navigation the map arrived
  * with. Returns a new HeapAlloc'd buffer with *out_len set, or NULL for "leave
- * this save alone" (nothing held, disabled, or anything went wrong). */
-char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len);
+ * this save alone"; *failed (may be NULL) is 1 when the map held navigation
+ * that could not be written, 0 when there was nothing to write. */
+char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *failed);
 
 /* THE SERVE PATH, called from the overrides open hook. Returns 1 when `name` is
  * a resource this map's bake replaces, with *out_bytes a HeapAlloc'd COPY the

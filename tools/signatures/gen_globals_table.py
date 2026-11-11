@@ -2,14 +2,15 @@
 
 The table targets DOOM 2016 build 13954591. Its rows are maintained as data: the
 committed header is the base, and an update file replaces anchors and records each
-global's Vulkan/OpenGL RVA. Never hand-edit the generated header.
+global's Vulkan/OpenGL RVA and its code site's. Never hand-edit the generated header.
 
     python gen_globals_table.py [--header HEADER] [--update JSON] [--out OUT]
 
 The update file is {"globals": {"<name>": {...}}}. Each value may carry a new
 "anchor" with "disp_slot", "disp_tail" and "delta" (all four together), the
 "vk_rva" and "gl_rva" the global resolves to on the two build 13954591
-executables, and a one-line "note". A name the header does not have adds a row,
+executables, the "vk_site" and "gl_site" RVAs of the anchor's code site there (the
+only place the anchor is checked at run time), and a one-line "note". A name the header does not have adds a row,
 which must carry an anchor and a note. Every row must end with both RVAs; a row that
 cannot be resolved on this build is an error, not a silent omission.
 """
@@ -32,19 +33,21 @@ PREAMBLE = (
     ' * displacement from the live image. Every anchor matches exactly once on both\n'
     ' * DOOM 2016 build 13954591 executables (DOOMx64vk.exe and DOOMx64.exe); rva_vk and\n'
     ' * rva_gl are where it resolves on each, for audit only -- never a runtime fallback.\n'
+    ' * site_vk and site_gl are the RVAs of the code site: the anchor is checked there,\n'
+    ' * and only there.\n'
     ' */\n'
     '#ifndef BACKEND_ENGINE_GLOBALS_TABLE_GEN_H\n'
     '#define BACKEND_ENGINE_GLOBALS_TABLE_GEN_H\n\n'
     '#include "engine_globals.h"\n\n')
 
-# Accepts both the current row form and the earlier 2018 form (pinned_rva plus a
-# derivation comment), so a header written by either generator can be the base.
+# One committed row of engine_globals_table.gen.h.
 ROW = re.compile(
     r'    \{ \.name = "(?P<name>[^"]+)",\n'
     r'      /\* (?P<note>[^\n]*?)\.\n(?:       \*[^\n]*\n)*?'
     r'      \.anchor = "(?P<pattern>[^"]*)",\n'
     r'      \.disp_slot = (?P<slot>\d+), \.disp_tail = (?P<tail>\d+), \.delta = (?P<delta>-?\d+), '
-    r'(?:\.pinned_rva = 0x[0-9A-Fa-f]+u|\.rva_vk = 0x(?P<vk>[0-9A-Fa-f]+)u, \.rva_gl = 0x(?P<gl>[0-9A-Fa-f]+)u) \},\n')
+    r'\.rva_vk = 0x(?P<vk>[0-9A-Fa-f]+)u, \.rva_gl = 0x(?P<gl>[0-9A-Fa-f]+)u,?'
+    r'(?:\n      \.site_vk = 0x(?P<svk>[0-9A-Fa-f]+)u, \.site_gl = 0x(?P<sgl>[0-9A-Fa-f]+)u)? \},\n')
 
 
 def parse_int(value):
@@ -57,8 +60,9 @@ def rows_from_header(path):
     for m in ROW.finditer(text):
         rows.append(dict(name=m['name'], note=m['note'], pattern=m['pattern'],
                          slot=int(m['slot']), tail=int(m['tail']), delta=int(m['delta']),
-                         vk=int(m['vk'], 16) if m['vk'] else None,
-                         gl=int(m['gl'], 16) if m['gl'] else None))
+                         vk=int(m['vk'], 16), gl=int(m['gl'], 16),
+                         svk=int(m['svk'], 16) if m['svk'] else None,
+                         sgl=int(m['sgl'], 16) if m['sgl'] else None))
     declared = len(re.findall(r'^    \{ \.name = "', text, re.M))
     if not rows or len(rows) != declared:
         raise SystemExit('%s: parsed %d of %d entries; refusing a partial table' % (path, len(rows), declared))
@@ -74,7 +78,8 @@ def apply_update(rows, path):
             if 'anchor' not in v or not v.get('note'):
                 raise SystemExit('%s: update for unknown global %r (a new row needs "anchor" and "note")'
                                  % (path, name))
-            r = dict(name=name, note='', pattern='', slot=0, tail=0, delta=0, vk=None, gl=None)
+            r = dict(name=name, note='', pattern='', slot=0, tail=0, delta=0, vk=None, gl=None,
+                     svk=None, sgl=None)
             rows.append(r)
             by_name[name] = r
         r = by_name[name]
@@ -90,12 +95,16 @@ def apply_update(rows, path):
             r['vk'] = parse_int(v['vk_rva'])
         if 'gl_rva' in v:
             r['gl'] = parse_int(v['gl_rva'])
+        if 'vk_site' in v:
+            r['svk'] = parse_int(v['vk_site'])
+        if 'gl_site' in v:
+            r['sgl'] = parse_int(v['gl_site'])
         if v.get('note'):
             r['note'] = v['note'].rstrip('.')
 
 
 def emit(rows, out_path):
-    missing = [r['name'] for r in rows if not r['vk'] or not r['gl']]
+    missing = [r['name'] for r in rows if not r['vk'] or not r['gl'] or not r['svk'] or not r['sgl']]
     if missing:
         raise SystemExit('no build 13954591 RVA for: %s' % ', '.join(missing))
     rows = sorted(rows, key=lambda r: r['name'])
@@ -108,8 +117,9 @@ def emit(rows, out_path):
             f.write('      /* %s.\n' % r['note'].replace('*/', '* /'))
             f.write('       * Build 13954591: Vulkan 0x%X, OpenGL 0x%X. */\n' % (r['vk'], r['gl']))
             f.write('      .anchor = "%s",\n' % r['pattern'])
-            f.write('      .disp_slot = %d, .disp_tail = %d, .delta = %d, .rva_vk = 0x%Xu, .rva_gl = 0x%Xu },\n\n'
+            f.write('      .disp_slot = %d, .disp_tail = %d, .delta = %d, .rva_vk = 0x%Xu, .rva_gl = 0x%Xu,\n'
                     % (r['slot'], r['tail'], r['delta'], r['vk'], r['gl']))
+            f.write('      .site_vk = 0x%Xu, .site_gl = 0x%Xu },\n\n' % (r['svk'], r['sgl']))
         f.write('    { .name = NULL }\n};\n\n'
                 '#endif /* BACKEND_ENGINE_GLOBALS_TABLE_GEN_H */\n')
 

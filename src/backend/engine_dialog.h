@@ -12,21 +12,14 @@
  * time.
  */
 
-/* Resolve dialog functions, including native cancellation, and hook
- * AddDialogWrapper and DialogAction.
- * Install once at startup; returns 1 when armed, 0 on refusal. Raising also
- * requires observing a native dialog to capture the shell.
+/* Resolve dialog functions, including native cancellation, and the shell's
+ * global slot, and hook DialogAction. Install once at startup; returns 1 when
+ * armed, 0 on refusal. The shell is read from its slot at every use.
  */
 int sh_engine_dialog_install(const sig_result *results, size_t count,
                              const uint8_t *module_base);
 
-/* Live verification: when on, every raise logs our whole descriptor (fields
- * and all 0x1B0 bytes) and the queue, and a descriptor that leaves the queue
- * without a button logs what remains in it. */
-void sh_engine_dialog_set_trace(int on);
-
-/* 1 once the menu manager has been observed, i.e. the engine has raised at least
- * one dialog of its own this session. Nothing can be raised before that. */
+/* 1 once installed and the engine's menu shell exists. */
 int sh_engine_dialog_ready(void);
 
 /* Main-thread read: 1 only for a readable queue with no pending descriptors.
