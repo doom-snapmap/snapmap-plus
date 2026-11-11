@@ -119,7 +119,7 @@ static int count_of(const char *hay, const char *needle)
 
 static void test_play(void)
 {
-    char stop[SH_SCRIPT_LINE_CAP];
+    char stop[4096];
     LARGE_INTEGER f, t0, t1;
     double ms;
     int i;
@@ -143,10 +143,15 @@ static void test_play(void)
 
     /* the first frame: files, map_start, the spawns, think; the runaway
      * think is stopped inside this frame */
+    {
+        sh_script_limits lim = { 200 };   /* the wall-clock stop, short for the test (the product's is 5 s) */
+        sh_script_limits_set(&lim);
+    }
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
     sh_script_tick(0.0, 0.0);
     QueryPerformanceCounter(&t1);
+    sh_script_limits_reset();
     ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
     printf("  the runaway frame took %.0f ms\n", ms);
     CHECK(ms < 1000.0);
@@ -159,7 +164,7 @@ static void test_play(void)
         static const char want[] = "Script stopped: Script Runaway, scripts\\runaway.lua line ";
         CHECK(strncmp(stop, want, sizeof want - 1) == 0);
     }
-    CHECK(strstr(stop, "took too long") != NULL && strstr(stop, "Look for a loop that does not end.") != NULL);
+    CHECK(strstr(stop, "without returning") != NULL && strstr(stop, "Look for a loop that does not end") != NULL);
     CHECK(sh_script_status("scprobe1") == SH_SCRIPT_RUNNING);
 
     /* the probe mod keeps running, one line a second of game time */
@@ -413,7 +418,7 @@ static void test_spin_heal(void)
     CHECK(player->health == 75);
     CHECK(sh_script_status("spinheal") == SH_SCRIPT_RUNNING);
     if (sh_script_status("spinheal") != SH_SCRIPT_RUNNING) {
-        char stop[SH_SCRIPT_LINE_CAP];
+        char stop[4096];
         sh_script_stop_line("spinheal", stop, sizeof stop);
         printf("  %s\n", stop);
     }
@@ -614,7 +619,7 @@ static void test_brute(void)
     CHECK(strstr(g_b_log, "ssaction_ChangeAnimState:melee;") != NULL);
     CHECK(sh_script_status("brutemod") == SH_SCRIPT_RUNNING);
     if (sh_script_status("brutemod") != SH_SCRIPT_RUNNING) {
-        char stop[SH_SCRIPT_LINE_CAP];
+        char stop[4096];
         sh_script_stop_line("brutemod", stop, sizeof stop);
         printf("  %s\n", stop);
     }

@@ -28,17 +28,16 @@
  *   view angle        idPlayer: getViewAngles (its aim) and getViewPos; other entities: the axis forward
  *   spawn             idGameLocal +0x448 create, the pose, +0x458 finish, as idTarget_Spawn does */
 #include <math.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include "script_api_common.h"
 #include "script_hooks.h"
 #include "script_api_ai.h"   /* a demon's animation goes through its park (sh_script_ai_anim) */
 
-#define SPAWN_LIVE_MAX     64      /* live entities a mod's scripts spawned */
-#define SPAWN_PER_SECOND   16
 #define PLAYER_SLOTS       64      /* players take the first entity numbers */
-#define REG_SPAWNED        "snapmap-plus.spawned"
-#define PATH_CAP           (SH_SCRIPT_ANIM_NAME_CAP * 2)
+#define PATH_CAP           1024    /* a node name the engine reports (its own names) */
+#define TEXT_ANY           ((size_t)-1 >> 1)
 #define PI                 3.14159265358979323846
 
 /* A call that cannot answer answers nil. */
@@ -256,14 +255,22 @@ static int l_alive(lua_State *L)
 static int l_def(lua_State *L)
 {
     const sh_script_engine *e = eng();
-    char name[SH_SCRIPT_DEFNAME_CAP], own[SH_SCRIPT_SALT_CAP + 8];
+    char own[SH_SCRIPT_SALT_CAP + 8], *name = NULL;
     void *ent = sh_script_api_entity(L, 1, "def", NULL);
-    size_t n;
-    if (!ent || !e || !e->def_name || !e->def_name(ent, name, sizeof name)) return nil1(L);
+    size_t n, cap;
+    if (!ent || !e || !e->def_name) return nil1(L);
+    /* the engine's name whole: read again with twice the room while it fills the buffer */
+    for (cap = 256;; cap *= 2) {
+        char *grown = (char *)realloc(name, cap);
+        if (!grown) { free(name); return luaL_error(L, "not enough memory"); }
+        name = grown;
+        if (!e->def_name(ent, name, cap)) { free(name); return nil1(L); }
+        if (strlen(name) + 1 < cap) break;
+    }
     _snprintf_s(own, sizeof own, _TRUNCATE, "mods/%s/", sh_script_salt(L));
     n = strlen(own);
-    if (!_strnicmp(name, own, n) && name[n]) lua_pushstring(L, name + n);   /* the mod's own name, as the script writes it */
-    else lua_pushstring(L, name);
+    lua_pushstring(L, !_strnicmp(name, own, n) && name[n] ? name + n : name);   /* the mod's own name, as the script writes it */
+    free(name);
     return 1;
 }
 
@@ -327,41 +334,47 @@ static int l_view_angle_to(lua_State *L)
 /* ----------------------------------------------------------- animation */
 
 /* "subweb/state", or the state alone in the AI's current subweb. */
-static void anim_path(void *ent, const char *node, char *out, size_t cap)
+/* The node's full "subweb/state" (malloc'd; NULL without memory). */
+static char *anim_path(void *ent, const char *node)
 {
     const sh_script_engine *e = eng();
     char cur[PATH_CAP];
     const char *slash;
+    char *out;
+    size_t n;
     if (strchr(node, '/') || sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI || !e || !e->anim_node ||
-        !e->anim_node(ent, cur, sizeof cur) || !(slash = strchr(cur, '/'))) {
-        strncpy_s(out, cap, node, _TRUNCATE);
-        return;
-    }
-    _snprintf_s(out, cap, _TRUNCATE, "%.*s/%s", (int)(slash - cur), cur, node);
+        !e->anim_node(ent, cur, sizeof cur) || !(slash = strchr(cur, '/')))
+        return _strdup(node);
+    n = (size_t)(slash - cur) + 1 + strlen(node) + 1;
+    out = (char *)malloc(n);
+    if (out) _snprintf_s(out, n, _TRUNCATE, "%.*s/%s", (int)(slash - cur), cur, node);
+    return out;
 }
 
-/* Split "subweb/state" for the stock entity events (no subweb: ""). */
-static void split_path(const char *path, char *sub, size_t subcap, const char **state)
+/* Split "subweb/state" in place for the stock entity events (no subweb: ""). */
+static void split_path(char *path, const char **sub, const char **state)
 {
-    const char *slash = strrchr(path, '/');
-    sub[0] = 0;
+    char *slash = strrchr(path, '/');
+    *sub = "";
     *state = path;
     if (!slash) return;
-    _snprintf_s(sub, subcap, _TRUNCATE, "%.*s", (int)(slash - path), path);
+    *slash = 0;
+    *sub = path;
     *state = slash + 1;
 }
 
 static int l_anim_state(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "anim_state", "the animWeb node to play", PATH_CAP - 1);
+    const char *node = sh_script_api_check_text(L, 2, "anim_state", "the animWeb node to play", TEXT_ANY);
     const char *via = lua_isnoneornil(L, 3) ? NULL :
-                      sh_script_api_check_text(L, 3, "anim_state", "the node to pass through", PATH_CAP - 1);
+                      sh_script_api_check_text(L, 3, "anim_state", "the node to pass through", TEXT_ANY);
     sh_script_handle h = 0;
     void *ent = sh_script_api_owned(L, 1, "anim_state", "animate", &h);
-    char dest[PATH_CAP], vpath[PATH_CAP];
+    char *dest, *vpath = NULL;
     if (!ent) return 0;
-    anim_path(ent, node, dest, sizeof dest);
-    if (via) anim_path(ent, via, vpath, sizeof vpath);
+    dest = anim_path(ent, node);
+    if (via) vpath = anim_path(ent, via);
+    if (!dest || (via && !vpath)) { free(dest); free(vpath); return luaL_error(L, "not enough memory"); }
     sh_script_api_anim_request(h, dest, via ? vpath : NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
         /* idAI2 ignores the stock animWeb events: the designer commands act
@@ -370,13 +383,12 @@ static int l_anim_state(lua_State *L)
         (void)sh_script_ai_anim(ent, h, dest, via ? vpath : NULL, 0, 0);
     } else {
         sh_script_earg a[4];
-        char sub[PATH_CAP], vsub[PATH_CAP];
-        const char *state, *vstate;
-        split_path(dest, sub, sizeof sub, &state);
+        const char *sub, *state, *vsub, *vstate;
+        split_path(dest, &sub, &state);
         a[0] = sh_script_earg_text('s', sub);
         a[1] = sh_script_earg_text('s', state);
         if (via) {
-            split_path(vpath, vsub, sizeof vsub, &vstate);
+            split_path(vpath, &vsub, &vstate);
             a[2] = sh_script_earg_text('s', vsub);
             a[3] = sh_script_earg_text('s', vstate);
             sh_script_api_post(ent, "changeAnimStateVia", a, 4);
@@ -384,36 +396,39 @@ static int l_anim_state(lua_State *L)
             sh_script_api_post(ent, "changeAnimState", a, 2);
         }
     }
+    free(dest);
+    free(vpath);
     return 0;
 }
 
 static int l_anim_force(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "anim_force", "the animWeb node to play", PATH_CAP - 1);
+    const char *node = sh_script_api_check_text(L, 2, "anim_force", "the animWeb node to play", TEXT_ANY);
     double blend = 0;
     sh_script_handle h = 0;
     void *ent;
-    char dest[PATH_CAP];
+    char *dest;
     sh_script_earg a[4];
     int ms;
-    if (sh_script_api_opt_number(L, 3, "anim_force", "the blend time in seconds", &blend) && (blend < 0 || blend > 10))
-        sh_script_refuse(L, "\"anim_force\" needs a blend time from 0 to 10 seconds, got %g", blend);
+    if (sh_script_api_opt_number(L, 3, "anim_force", "the blend time in seconds", &blend) && !(blend >= 0))
+        sh_script_refuse(L, "\"anim_force\" needs a blend time of 0 seconds or more, got %g", blend);
     ent = sh_script_api_owned(L, 1, "anim_force", "animate", &h);
     if (!ent) return 0;
     ms = (int)(blend * 1000.0 + 0.5);
-    anim_path(ent, node, dest, sizeof dest);
+    dest = anim_path(ent, node);
+    if (!dest) return luaL_error(L, "not enough memory");
     sh_script_api_anim_request(h, dest, NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
         (void)sh_script_ai_anim(ent, h, dest, NULL, 1, ms);   /* ssaction_ForceAnimState, parked */
     } else {
-        char sub[PATH_CAP];
-        const char *state;
-        split_path(dest, sub, sizeof sub, &state);
+        const char *sub, *state;
+        split_path(dest, &sub, &state);
         a[0] = sh_script_earg_text('s', sub);
         a[1] = sh_script_earg_text('s', state);
         a[2] = sh_script_earg_int(ms);
         sh_script_api_post(ent, "forceAnimState", a, 3);
     }
+    free(dest);
     return 0;
 }
 
@@ -438,7 +453,7 @@ static const struct { const char *name; unsigned bit; } k_anim_events[] = {
 
 static int l_anim_event(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 2, "anim_event", "the event name", 64);
+    const char *name = sh_script_api_check_text(L, 2, "anim_event", "the event name", TEXT_ANY);
     const char *bare = _strnicmp(name, "AWCMD_EVENT_", 12) ? name : name + 12;
     sh_script_handle h = 0;
     void *ent;
@@ -470,16 +485,19 @@ static int l_anim_finished(lua_State *L)
     }
     {
         /* other entities: the engine's own answer for the last request */
-        char dest[PATH_CAP], sub[PATH_CAP];
-        const char *state;
+        const char *held = sh_script_api_anim_dest_of(h), *sub, *state;
+        char *dest;
         sh_script_earg a[2], r;
-        int ok = 0;
+        int ok = 0, ran;
         float v;
-        if (!sh_script_api_anim_dest(h, dest, sizeof dest)) { lua_pushboolean(L, 0); return 1; }
-        split_path(dest, sub, sizeof sub, &state);
+        if (!held) { lua_pushboolean(L, 0); return 1; }
+        if (!(dest = _strdup(held))) return luaL_error(L, "not enough memory");
+        split_path(dest, &sub, &state);
         a[0] = sh_script_earg_text('s', sub);
         a[1] = sh_script_earg_text('s', state);
-        if (!sh_script_api_event(ent, "animState_IsFinished", a, 2, &r)) return nil1(L);
+        ran = sh_script_api_event(ent, "animState_IsFinished", a, 2, &r);
+        free(dest);
+        if (!ran) return nil1(L);
         v = earg_number(&r, &ok);
         if (!ok && r.type == 'b') { ok = 1; v = (float)r.i; }
         if (!ok) return nil1(L);
@@ -490,97 +508,32 @@ static int l_anim_finished(lua_State *L)
 
 /* -------------------------------------------------------------- spawn */
 
-/* The live entities this state spawned (registry list of handles). */
-static int spawned_live(lua_State *L)
-{
-    lua_Integer i, n, live = 0, w = 1;
-    if (lua_getfield(L, LUA_REGISTRYINDEX, REG_SPAWNED) != LUA_TTABLE) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-        lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX, REG_SPAWNED);
-    }
-    n = (lua_Integer)lua_rawlen(L, -1);
-    for (i = 1; i <= n; i++) {          /* keep the live ones, packed */
-        sh_script_handle h;
-        lua_rawgeti(L, -1, i);
-        h = (sh_script_handle)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        if (!sh_script_handle_known(h)) continue;
-        lua_pushinteger(L, h);
-        lua_rawseti(L, -2, w++);
-        live++;
-    }
-    for (i = w; i <= n; i++) { lua_pushnil(L); lua_rawseti(L, -2, i); }
-    lua_pop(L, 1);
-    return (int)live;
-}
-
-static void spawned_add(lua_State *L, sh_script_handle h)
-{
-    lua_getfield(L, LUA_REGISTRYINDEX, REG_SPAWNED);
-    lua_pushinteger(L, h);
-    lua_rawseti(L, -2, (lua_Integer)lua_rawlen(L, -2) + 1);
-    lua_pop(L, 1);
-}
-
-/* The game times (ms) of this state's last SPAWN_PER_SECOND spawns, in a
- * ring kept in the registry. 1 when another spawn is allowed now. */
-static int spawn_rate_ok(lua_State *L, int now_ms, int record)
-{
-    int i, oldest = 0x7FFFFFFF, slot = 0, full = 1;
-    if (lua_getfield(L, LUA_REGISTRYINDEX, REG_SPAWNED ".times") != LUA_TTABLE) {
-        lua_pop(L, 1);
-        lua_createtable(L, SPAWN_PER_SECOND, 0);
-        lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX, REG_SPAWNED ".times");
-    }
-    for (i = 1; i <= SPAWN_PER_SECOND; i++) {
-        int t;
-        if (lua_rawgeti(L, -1, i) != LUA_TNUMBER) { full = 0; slot = i; lua_pop(L, 1); break; }
-        t = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        if (t < oldest) { oldest = t; slot = i; }
-    }
-    if (full && now_ms - oldest < 1000) { lua_pop(L, 1); return 0; }
-    if (record) { lua_pushinteger(L, now_ms); lua_rawseti(L, -2, slot); }
-    lua_pop(L, 1);
-    return 1;
-}
-
 static int l_spawn(lua_State *L)
 {
     const sh_script_engine *e = eng();
-    char def[SH_SCRIPT_DEFNAME_CAP];
+    const char *def;
     float pos[3];
     double yaw = 0;
     const char *why = NULL;
     void *ent;
-    int now_ms = 0, mod = -1;
+    int mod = -1;
     sh_script_handle h;
-    sh_script_check_name(L, 1, "spawn", 0, def, sizeof def, NULL);
+    def = sh_script_check_name(L, 1, "spawn", 0, NULL);
     sh_script_api_check_vec(L, 2, "spawn", "where to spawn", pos);
     sh_script_api_opt_number(L, 3, "spawn", "the facing in degrees", &yaw);
-    if (spawned_live(L) >= SPAWN_LIVE_MAX)
-        sh_script_refuse(L, "\"spawn\" can keep at most %d of this mod's entities alive at once; remove some first",
-                         SPAWN_LIVE_MAX);
-    if (!sh_script_api_now_ms(&now_ms) || !spawn_rate_ok(L, now_ms, 0))
-        sh_script_refuse(L, "\"spawn\" can spawn at most %d entities a second; spread the spawns out",
-                         SPAWN_PER_SECOND);
+    sh_script_api_check_room(L, "spawn");
     if (!e || !e->spawn) return nil1(L);
     ent = e->spawn(def, pos, (float)fmod(yaw, 360.0), &why);
     if (!ent) {
         if (why) sh_script_refuse(L, "\"spawn\" could not spawn \"%s\": %s", lua_tostring(L, 1), why);
         return nil1(L);
     }
-    spawn_rate_ok(L, now_ms, 1);
     h = e->spawn_id ? sh_script_handles_find(e->spawn_id(ent), &mod) : 0;
     if (!h || mod != sh_script_hooks_mod_find(sh_script_salt(L))) {
-        /* the spawn hook did not record it for this mod (the entity table is full) */
+        /* the spawn hook could not record it for this mod (no memory) */
         sh_script_api_post(ent, "remove", NULL, 0);
         return nil1(L);
     }
-    spawned_add(L, h);
     sh_script_push_entity(L, h);
     return 1;
 }

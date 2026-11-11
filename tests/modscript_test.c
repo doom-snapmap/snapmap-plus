@@ -3,9 +3,8 @@
  *
  * The builder admits assets/mods/<salt>/scripts/<name>.lua and scripts/lib/
  * <name>.lua as kind script and refuses, with the file (and line), a .lua
- * anywhere else, compiled Lua, a NUL byte, text that is not UTF-8, a file over
- * 256 KB, more than 64 files or 1 MB of scripts in one mod, a syntax error, an
- * entry file without "api = 1", a literal require of a module the mod does
+ * anywhere else, compiled Lua, a NUL byte, text that is not UTF-8, a syntax
+ * error, an entry file without "api = 1", a literal require of a module the mod does
  * not carry (another mod's included), a name in another mod's namespace, and
  * any script when no compile check is registered. The static pass records
  * what the scripts bind in the builder block ("scripts"), which survives a
@@ -256,31 +255,35 @@ static void test_builds(void)
     mt_write(dir, ENTRY, "api = 1\n-- \xff\xfe\n");
     refused(dir, "scripts\\door.lua: the file is not UTF-8 text");
 
+    printf("-- no count or size of the scripts is checked: 150 files, 6 MB, a 2 MB file, a long name\n");
     good_mod(dir, sizeof dir);
-    put_big(dir, ENTRY, SH_MB_SCRIPT_FILE_MAX + 1);
-    refused(dir, "scripts\\door.lua: the file is larger than 256 KB. Split it into smaller files.");
-
-    good_mod(dir, sizeof dir);
-    for (i = 0; i < 64; i++) {
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\" SALT "\\scripts\\lib\\m%02d.lua", i);
+    for (i = 0; i < 148; i++) {
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\" SALT "\\scripts\\lib\\m%03d.lua", i);
         mt_write(dir, rel, "return 1\n");
     }
-    refused(dir, "this mod has 66 script files, more than the 64 one mod may carry; combine some of them");
-
-    good_mod(dir, sizeof dir);
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 3; i++) {
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\" SALT "\\scripts\\lib\\big%d.lua", i);
-        put_big(dir, rel, 250000);
+        put_big(dir, rel, 2u << 20);
     }
-    refused(dir, "this mod's scripts are larger than 1 MB in all; make them smaller");
+    mt_write(dir, "assets\\mods\\" SALT "\\scripts\\lib\\"
+                  "a_module_name_well_past_the_sixty_four_characters_the_builder_once_allowed_for_a_script.lua",
+             "return 1\n");
+    {
+        sh_mb_bundle big;
+        int ok = build(dir, &big);
+        CHECK(ok && big.script_files == 154);
+        if (!ok) fprintf(stderr, "    refused: %s\n", big.first_cause);
+        sh_mb_free(&big);
+    }
 
     good_mod(dir, sizeof dir);
     mt_write(dir, "assets\\mods\\" SALT "\\door.lua", "api = 1\n");
-    refused(dir, "assets/mods/" SALT "/door.lua: a script goes in this mod's scripts folder");
+    refused(dir, "assets/mods/" SALT "/door.lua: a script goes in the scripts folder inside this mod's own folder");
 
     good_mod(dir, sizeof dir);
     mt_write(dir, "assets\\mods\\" SALT "\\scripts\\more\\b.lua", "api = 1\n");
-    refused(dir, "a script goes in this mod's scripts folder, assets\\mods\\<salt>\\scripts\\");
+    refused(dir, "a script goes in the scripts folder inside this mod's own folder: scripts\\ for the files that run, "
+                 "scripts\\lib\\ for the files loaded with require; move it there");
 
     good_mod(dir, sizeof dir);
     mt_write(dir, ENTRY, "-- no api line\nprint(1)\n");

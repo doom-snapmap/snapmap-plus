@@ -361,6 +361,7 @@ static int fake_script_info(const char *salt, sh_modui_script_info *out)
 {
     if (!g_script_on || _stricmp(salt, g_script_salt)) return 0;
     *out = g_script;
+    out->stop = g_script.stop ? _strdup(g_script.stop) : NULL;   /* the reader frees its copy */
     return 1;
 }
 static int fake_script_log(const char *salt, sh_modui_line_fn fn, void *context)
@@ -368,8 +369,8 @@ static int fake_script_log(const char *salt, sh_modui_line_fn fn, void *context)
     if (!g_script_on || _stricmp(salt, g_script_salt)) return 0;
     fn(context, "door: switch 1 of 3");
     fn(context, "a line with \"quotes\" and a \\ backslash");
-    if (g_script.stop[0]) fn(context, g_script.stop);
-    return g_script.stop[0] ? 3 : 2;
+    if (g_script.stop) fn(context, g_script.stop);
+    return g_script.stop ? 3 : 2;
 }
 static int fake_script_mods(sh_modui_name_fn fn, void *context)
 {
@@ -1741,8 +1742,8 @@ int main(int argc, char **argv)
         memset(&g_script, 0, sizeof g_script);
         g_script.status = SH_MODUI_SCRIPT_STOPPED;
         g_script.lines = 3;
-        strcpy_s(g_script.stop, sizeof g_script.stop, "Script stopped: Door Logic, scripts\\door.lua line 5: \"open_door\" is "
-                 "nothing here. Check the name you pass.");
+        g_script.stop = "Script stopped: Door Logic, scripts\\door.lua line 5: \"open_door\" is "
+                        "nothing here. Check the name you pass.";
         doc = list_doc();
         CHECK(row_has(doc, "doorlogic", "\"scriptRun\":{\"status\":\"stopped\",\"stop\":\"Script stopped: Door Logic, "
                                         "scripts\\\\door.lua line 5: \\\"open_door\\\" is nothing here. Check the name you pass.\","
@@ -1784,8 +1785,31 @@ int main(int argc, char **argv)
             out = (char *)malloc((size_t)call.needed + 1);
             call.out = out;
             call.out_cap = call.needed + 1;
-            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"log\":[]}"));
+            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"total\":0,\"full\":false,\"log\":[]}"));
             free(out);
+            /* the tail the window shows, and the whole log Copy log asks for */
+            {
+                char full[64];
+                memset(&call, 0, sizeof call);
+                call.op = SH_MODS_SCRIPTS;
+                call.arg = s;
+                CHECK(sh_modui_slot(NULL, &call) == -1);
+                out = (char *)malloc((size_t)call.needed + 1);
+                call.out = out;
+                call.out_cap = call.needed + 1;
+                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":false,\"log\":["));
+                free(out);
+                _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s", SH_MODS_SCRIPTS_FULL, s);
+                memset(&call, 0, sizeof call);
+                call.op = SH_MODS_SCRIPTS;
+                call.arg = full;
+                CHECK(sh_modui_slot(NULL, &call) == -1);
+                out = (char *)malloc((size_t)call.needed + 1);
+                call.out = out;
+                call.out_cap = call.needed + 1;
+                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":true,\"log\":[\"door: switch 1 of 3\""));
+                free(out);
+            }
             g_script_on = 0;
             {
                 char tiny[256];

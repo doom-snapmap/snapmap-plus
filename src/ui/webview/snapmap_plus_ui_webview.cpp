@@ -3239,7 +3239,7 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
 static void ui_mods_send_scripts(const std::string &salt)
 {
     std::string doc;
-    if (salt.size() <= 64) {
+    if (salt.size() <= 64 + sizeof SH_MODS_SCRIPTS_FULL) {
         for (int attempt = 0; attempt < 3 && doc.empty(); attempt++) {
             sh_mods_call call;
             memset(&call, 0, sizeof call);
@@ -4036,8 +4036,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 ui_mods_begin(0, false, std::string());
             } else if (cmd == L"modsScripts") {
                 std::wstring salt;
+                int full = 0;
                 sh_webview_json::get_string(json, L"salt", salt);
-                ui_mods_send_scripts(sh_webview_json::to_utf8(salt));
+                sh_webview_json::get_int(json, L"full", &full);
+                ui_mods_send_scripts((full ? std::string(SH_MODS_SCRIPTS_FULL) : std::string()) +
+                                     sh_webview_json::to_utf8(salt));
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its folders or ZIPs here, in the native picker: the page

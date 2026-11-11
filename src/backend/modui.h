@@ -73,7 +73,7 @@ typedef void (*sh_modui_name_fn)(void *context, const char *name);
 typedef struct sh_modui_script_info {
     int  status;          /* SH_MODUI_SCRIPT_* */
     int  lines;           /* lines in its log */
-    char stop[512];       /* the stop line while status is STOPPED, else "" */
+    char *stop;           /* the stop line while status is STOPPED (malloc'd, whole; the reader frees it), else NULL */
 } sh_modui_script_info;
 
 /* Engine operations, bound by iface_engine.c in the product and by fakes in
@@ -302,12 +302,16 @@ int  sh_modui_doctor(int verify, sh_modui_line_fn line, void *context);
 int  sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation);
 
 /* The script log op (SH_MODS_SCRIPTS), on any thread, read only: copies into
- * out {"mods":[{"salt","status","stop","lines"}],"salt","log":[...]}: every
- * mod whose scripts ran in the current or last Play with its state ("none",
- * "running", "stopped", "ended", "waiting") and stop line, and the lines of
- * `salt`'s log ("" or NULL: none). Returns 1 copied, -1 when out is NULL or
+ * out {"mods":[{"salt","status","stop","lines"}],"salt","total","full","log":[...]}:
+ * every mod whose scripts ran in the current or last Play with its state
+ * ("none", "running", "stopped", "ended", "waiting") and stop line, and
+ * `salt`'s log ("" or NULL: none): its line count in total, and its last
+ * SH_MODUI_SCRIPT_TAIL lines (the tail the window shows, asked every second),
+ * or every line when the salt is prefixed SH_MODS_SCRIPTS_FULL (Copy log).
+ * The log itself keeps every line. Returns 1 copied, -1 when out is NULL or
  * too small (*needed set), 0 when out of memory. It never touches the shared
  * buffer, so a page may ask while a job runs. */
+#define SH_MODUI_SCRIPT_TAIL  1000
 int  sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed);
 
 /* Bumped by every action that can change the store or the serving index. */

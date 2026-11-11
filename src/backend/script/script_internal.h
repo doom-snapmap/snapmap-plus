@@ -14,6 +14,12 @@
 #define SHS_REG_RUNS     "snapmap-plus.runs"       /* coroutine -> true, weak keys */
 #define SHS_REG_LOADED   "snapmap-plus.loaded"     /* require name -> value */
 #define SHS_REG_METHODS  "snapmap-plus.methods"    /* entity method name -> function */
+#define SHS_REG_NAMES    "snapmap-plus.names"      /* the last names sh_script_check_name resolved */
+#define SHS_NAME_SLOTS   8
+
+/* A script's path as the log names it (scripts, lib, the file name): a
+ * file name is at most 255 characters on Windows file systems. */
+#define SHS_PATH_CAP 512
 
 #define SHS_MT_ENTITY "entity"
 #define SHS_MT_TIMER  "timer"
@@ -25,7 +31,7 @@ typedef struct shs_ent {
 } shs_ent;
 
 typedef struct shs_bind {
-    char     name[SH_SCRIPT_DEFNAME_CAP];
+    char    *name;           /* malloc'd, a full entityDef name of any length */
     unsigned kinds;
 } shs_bind;
 
@@ -50,21 +56,22 @@ typedef struct shs_mod {
     /* bounds */
     size_t    mem;
     int       stop;          /* SH_SCRIPT_STOP_ code once a bound is crossed, else -1 */
-    int       charging;      /* inside a delivery: allocations and C work count as steps */
-    long long call_steps, tick_steps, pattern_steps;
+    int       charging;      /* inside a delivery */
+    long long pattern_steps; /* pattern steps since the clock was last read */
     long long wall_start;    /* QueryPerformanceCounter at the delivery's start */
-    char      last_src[64];  /* the last line the count hook saw, for a memory stop */
+    char      last_src[SHS_PATH_CAP];  /* the last line the clock hook saw, for a stop with no line */
     int       last_line;
-    char      err_file[128]; /* where the current error was raised, by the message handler */
+    char      err_file[SHS_PATH_CAP];  /* where the current error was raised, by the message handler */
     int       err_line;
 
     /* this map: the hooks' slot (its queue and its handles), the entry files */
     int       hook;          /* sh_script_hooks_mod_add slot, -1 when none */
     int       prepared;      /* registered for this map; its state opens at the first tick */
-    char    (*files)[128];   /* entry files, sorted */
+    char    **files;         /* entry files, sorted, malloc'd */
     int       nfiles;
     int       files_found;   /* entry files listed for this map (kept after the list is freed) */
     int       files_run;
+    unsigned  name_slot;     /* the next of the SHS_NAME_SLOTS resolved names to reuse */
     int       handlers;
     uint64_t  seed;
 
@@ -78,14 +85,11 @@ typedef struct shs_mod {
 
     /* load */
     const sh_script_source *source;
-    size_t    text_total;
-    int       files_read;
 
-    /* log: guarded by the runtime's lock */
-    char    (*log)[SH_SCRIPT_LINE_CAP];
-    int       nlog;
-    int       log_full;
-    char      stop_line[SH_SCRIPT_LINE_CAP];
+    /* log: every line of the map, whole; guarded by the runtime's lock */
+    char    **log;
+    int       nlog, clog;
+    char     *stop_line;     /* the stop line, whole (malloc'd), or NULL */
 } shs_mod;
 
 /* The mod of a state or coroutine. */
@@ -93,9 +97,10 @@ shs_mod *shs_mod_of(lua_State *L);
 const sh_script_limits *shs_limits(void);
 double shs_now(void);
 
-/* Count `steps` of work against the delivery and the tick; past a bound the
- * mod is marked stopped and an error is raised at the calling line. */
-void shs_charge(lua_State *L, long long steps);
+/* Read the clock before C work the clock hook cannot see (a sort): past the
+ * wall-clock stop the mod is marked stopped and an error is raised at the
+ * calling line. */
+void shs_check_clock(lua_State *L);
 /* Raise the error of a marked stop (never returns). */
 int  shs_raise_stop(lua_State *L, int level);
 /* One pattern step (script_lstrlib.c). */
@@ -126,8 +131,5 @@ void shs_call_reset(shs_mod *m);
 /* Record the innermost script line on L's stack, from `first` up, as where
  * the current error was raised (unless one is recorded already). */
 void shs_where_from(shs_mod *m, lua_State *L, int first);
-
-/* The library's charge for C work the count hook cannot see. */
-#define SHS_SORT_STEPS(n) ((long long)(n) * 20)
 
 #endif

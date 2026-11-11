@@ -459,29 +459,19 @@ void sh_script_reason(const char *text, char *what, size_t what_cap, char *todo,
 void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_t what_cap,
                            char *todo, size_t todo_cap)
 {
-    char amount[48];
-    if (limit >= 1000000ull && limit % 1000000ull == 0) put(amount, sizeof amount, "%llu million", limit / 1000000ull);
-    else put(amount, sizeof amount, "%llu", limit);
     switch (stop) {
-    case SH_SCRIPT_STOP_STEPS:
-        put(what, what_cap, "took too long (more than %s steps in one call), so this mod's scripts stopped for this map", amount);
-        put(todo, todo_cap, "Look for a loop that does not end");
-        break;
-    case SH_SCRIPT_STOP_TICK:
-        put(what, what_cap, "took too long (more than %s steps in one frame), so this mod's scripts stopped for this map", amount);
-        put(todo, todo_cap, "Do less work in each frame, or spread it over several with after or run");
-        break;
     case SH_SCRIPT_STOP_MEMORY:
-        put(what, what_cap, "used more than %llu MB of memory, so this mod's scripts stopped for this map", limit >> 20);
+        put(what, what_cap, "ran out of memory, so this mod's scripts stopped for this map");
         put(todo, todo_cap, "Look for a table or text that keeps growing");
         break;
-    case SH_SCRIPT_STOP_PATTERN:
-        put(what, what_cap, "a text pattern took too long to match (more than %s steps), so this mod's scripts stopped for this map", amount);
-        put(todo, todo_cap, "Use a simpler pattern or search a shorter text");
-        break;
     case SH_SCRIPT_STOP_WALL:
-        put(what, what_cap, "took too long (more than %llu ms in one call), so this mod's scripts stopped for this map", limit);
-        put(todo, todo_cap, "Look for a loop that does not end or that works on very long texts");
+        if (limit % 1000 == 0)
+            put(what, what_cap, "ran for more than %llu second%s in one call without returning, so this mod's scripts "
+                                "stopped for this map", limit / 1000, limit == 1000 ? "" : "s");
+        else
+            put(what, what_cap, "ran for more than %llu ms in one call without returning, so this mod's scripts "
+                                "stopped for this map", limit);
+        put(todo, todo_cap, "Look for a loop that does not end, or spread long work over several frames with after or run");
         break;
     default:
         put(what, what_cap, "stopped");
@@ -493,7 +483,7 @@ void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_
 void sh_script_stop_text(const char *mod, const char *file, int line, const char *what,
                          const char *todo, char *out, size_t cap)
 {
-    char where[200];
+    char where[600];   /* a script's path: a Windows file name is at most 255 characters */
     if (file && file[0] && line > 0) put(where, sizeof where, ", %s line %d", file, line);
     else if (file && file[0]) put(where, sizeof where, ", %s", file);
     else where[0] = 0;

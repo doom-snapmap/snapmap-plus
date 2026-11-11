@@ -7,13 +7,15 @@
  * queues are drained only by the script tick (script_hooks.h), on the main
  * thread, so no Lua code ever runs inside an engine hook and nothing runs
  * re-entrantly. A record carries values, never pointers: entities travel as
- * handles (script_handles.h) and strings are copied.
+ * handles (script_handles.h) and strings are copied whole, of any length.
  *
- * Each queue holds at most SH_SCRIPT_QUEUE_CAP records. A record that does not
- * fit is dropped and counted; the tick reports the count once per map for that
- * mod in one plain line (sh_script_queue_take_dropped). Enqueue takes a short
- * spin lock per mod and never allocates, so it is safe on any thread. Pure C,
- * no engine calls; tests/script_hooks_test.c covers it. */
+ * A queue grows with what arrives in a frame and has no count of its own;
+ * one per scripted mod, and the queues grow with the map's mods. Only a record
+ * the process has no memory for is dropped and counted; the tick reports that
+ * once per map for the mod in one plain line (sh_script_queue_take_dropped).
+ * Enqueue takes a short spin lock per mod (allocating only when its queue
+ * grows), so it is safe on any thread. Pure C, no engine calls;
+ * tests/script_hooks_test.c covers it. */
 #ifndef SH_SCRIPT_QUEUE_H
 #define SH_SCRIPT_QUEUE_H
 #include <stdint.h>
@@ -23,9 +25,6 @@
 extern "C" {
 #endif
 
-#define SH_SCRIPT_QUEUE_CAP   1024   /* records per mod */
-#define SH_SCRIPT_MODS_MAX    32     /* mods with scripts in one map */
-#define SH_SCRIPT_EVENT_TEXT  128    /* bytes of each copied string, NUL included (a full decl name fits) */
 
 /* What happened. Spawn and removal are not queued: the handle table finds
  * them each tick (script_handles.h). */
@@ -53,13 +52,19 @@ typedef struct sh_script_event {
     sh_script_handle self, other, third;
     float amount;
     float vec[6];                       /* damage: direction; projectile: origin, direction */
-    char text[SH_SCRIPT_EVENT_TEXT];
-    char text2[SH_SCRIPT_EVENT_TEXT];
+    /* The two strings. A hook pushes its own (any length; NULL is ""); the
+     * queue keeps a copy, and a drained record owns its copy until
+     * sh_script_event_release. Never NULL in a drained record. */
+    const char *text;
+    const char *text2;
 } sh_script_event;
 
-/* Open queue `mod` (0 .. SH_SCRIPT_MODS_MAX-1) for a new map: empty, counters
- * reset, accepting records. Allocates once per slot for the session. Returns
- * 1, or 0 when out of memory (the slot then refuses records). Tick thread. */
+/* Free a drained record's strings (text and text2 are then NULL). */
+void sh_script_event_release(sh_script_event *ev);
+
+/* Open queue `mod` (from 0; made when new) for a new map: empty, counters
+ * reset, accepting records. Returns 1, or 0 when out of memory (the slot then
+ * refuses records). Tick thread. */
 int  sh_script_queue_open(int mod);
 
 /* Close queue `mod`: records still queued are discarded and new ones refused.
@@ -70,16 +75,17 @@ void sh_script_queue_close(int mod);
 void sh_script_queue_close_all(void);
 
 /* Put a copy of *ev in mod's queue; ev->seq is assigned here. Any thread.
- * Returns 1 queued, 0 dropped (queue full: counted), -1 refused (no such open
- * queue: a hook raced the map end, nothing to report). */
+ * Returns 1 queued, 0 dropped (no memory to grow: counted), -1 refused (no
+ * such open queue: a hook raced the map end, nothing to report). */
 int  sh_script_queue_push(int mod, const sh_script_event *ev);
 
 /* Convenience for hooks: fill and push one record. Strings may be NULL; they
- * are truncated to SH_SCRIPT_EVENT_TEXT - 1 bytes. */
+ * are copied whole. */
 int  sh_script_queue_post(int mod, sh_script_event_kind kind, sh_script_handle self, sh_script_handle other,
                           sh_script_handle third, float amount, const char *text, const char *text2);
 
-/* Move up to `cap` records, oldest first, into out[]. Tick thread only (the
+/* Move up to `cap` records, oldest first, into out[]; each owns its strings
+ * until sh_script_event_release. Tick thread only (the
  * thread that last called sh_script_queue_set_drain_thread); any other thread
  * gets -1 and nothing moves. Returns the number moved. Records pushed while a
  * handler runs stay queued for the next drain call (the runtime's passes). */

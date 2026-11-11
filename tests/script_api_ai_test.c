@@ -96,6 +96,7 @@ typedef struct fent {
     int   path_calls;      /* path() calls so far; searching until path_ready of them */
     int   path_ready;
     int   path_none;       /* answer "no path" */
+    int   path_long;       /* path_points answers this many points (0: three) */
     /* the calls the brain needs */
     float recoil;
     int   ready;           /* weapon_ready answer (-1 no weapon) */
@@ -221,16 +222,26 @@ static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, in
 {
     return sh_ai_anim_valid_run(&g_fake, ai, node, tests, side, 100, index);
 }
-static int f_path_points(void *ai, const float goal[3], int key, float (*out)[3], int cap, int *n)
+static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[3], int *n)
 {
     fent *f = (fent *)ai;
-    (void)key; (void)cap;
+    float (*out)[3];
+    int k, count = f->path_long ? f->path_long : 3;
+    (void)key;
+    *outp = NULL;
     if (f->path_none) return 2;
     if (++f->path_calls <= f->path_ready) return 1;
-    memcpy(out[0], f->origin, 12);
-    out[1][0] = goal[0]; out[1][1] = f->origin[1]; out[1][2] = 0;
-    memcpy(out[2], goal, 12);
-    *n = 3;
+    out = (float (*)[3])malloc((size_t)count * sizeof *out);   /* as the engine side: the whole path, malloc'd */
+    if (!out) return -1;
+    if (f->path_long) {
+        for (k = 0; k < count; k++) { out[k][0] = (float)k; out[k][1] = 0; out[k][2] = 0; }
+    } else {
+        memcpy(out[0], f->origin, 12);
+        out[1][0] = goal[0]; out[1][1] = f->origin[1]; out[1][2] = 0;
+        memcpy(out[2], goal, 12);
+    }
+    *outp = out;
+    *n = count;
     return 0;
 }
 static int f_firing(void *ai, const sh_ai_position_query *q, float out[3]) { return sh_ai_firing_run(&g_fake, ai, q, 200, out); }
@@ -287,7 +298,7 @@ static const char *log_of(const char *salt)
     sh_script_log_read(salt, log_cat, NULL);
     return g_log;
 }
-static char g_stop[SH_SCRIPT_LINE_CAP];
+static char g_stop[4096];
 static const char *stop_of(const char *salt)
 {
     sh_script_stop_line(salt, g_stop, sizeof g_stop);
@@ -677,9 +688,9 @@ static void test_removed_and_unavailable(void)
 static void test_brain_pure(void)
 {
     char bad[64];
-    float a[3] = { 0, 0, 0 }, b[3] = { 100, 0, 0 }, o[3], pts[8][3];
+    float a[3] = { 0, 0, 0 }, b[3] = { 100, 0, 0 }, o[3], pts[8][3], tt[40], tv[40], many[42][3];
     sh_ai_table tb;
-    int n;
+    int n, k;
     printf("-- the brain's calls: words, names, curves\n");
     CHECK(sh_ai_tests_parse("TF_BOUNDS TF_NAV_ENDPOINT", bad, sizeof bad) == (SH_AI_TF_BOUNDS | SH_AI_TF_NAV_ENDPOINT));
     CHECK(sh_ai_tests_parse("VALIDATE_ANIM_DELTA", bad, sizeof bad) == SH_AI_TF_ANIM_DELTA);
@@ -699,6 +710,7 @@ static void test_brain_pure(void)
     sh_ai_line_offset(a, b, 0.25f, 10, 0, o);           /* roll 0: up */
     CHECK(fabsf(o[0] - 25) < 1e-3f && fabsf(o[2] - 10) < 1e-3f);
     memset(&tb, 0, sizeof tb);
+    tb.t = tt; tb.v = tv;
     tb.n = 3; tb.t[0] = 0.25f; tb.v[0] = 0.2f; tb.t[1] = 0.5f; tb.v[1] = 0.4f; tb.t[2] = 1.0f; tb.v[2] = 0;
     CHECK(fabsf(sh_ai_table_at(&tb, 0.125f) - 0.1f) < 1e-5f);   /* from 0 at the start */
     CHECK(fabsf(sh_ai_table_at(&tb, 0.375f) - 0.3f) < 1e-5f);
@@ -708,6 +720,11 @@ static void test_brain_pure(void)
     CHECK(fabsf(pts[1][0] - 25) < 1e-3f && fabsf(pts[1][1] - 20) < 1e-3f);   /* 0.2 x 100 to the left */
     CHECK(fabsf(pts[2][0] - 50) < 1e-3f && fabsf(pts[2][1] - 40) < 1e-3f);
     CHECK(pts[3][0] == 100 && pts[3][1] == 0);
+    /* 40 knots (the old table held 16): every one is a point of the curve */
+    for (k = 0; k < 40; k++) { tt[k] = (k + 1) / 41.0f; tv[k] = 0.1f; }
+    tb.n = 40;
+    n = sh_ai_spline_points(a, b, &tb, 90, many, tb.n + 2);
+    CHECK(n == 42 && many[41][0] == 100 && fabsf(many[40][1] - 10) < 1e-3f);
 }
 
 /* The compositions over the fake primitives: the demon (1) at the origin
@@ -716,7 +733,7 @@ static void test_compositions(void)
 {
     sh_ai_position_query q;
     sh_ai_spline_query sq;
-    float out[3], pts[20][3];
+    float out[3], pts[20][3], st_t[2], st_v[2];
     int idx = -1, n = 0;
     printf("-- the compositions: anim_valid, firing_position, spline_clear\n");
     world();
@@ -758,6 +775,11 @@ static void test_compositions(void)
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 300);
     q.kind = SH_AI_POS_REPOSITION;
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 600);   /* the far half */
+    q.count = 500;                                        /* the old ring held 16 candidates */
+    g_ent[1].path_calls = 0;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 599.9f);
+    CHECK(g_ent[1].path_calls > 16);                      /* every candidate past the old 16 was asked */
+    q.count = 8;
     g_wall_x = 0;
     g_ent[1].path_none = 1;
     q.kind = SH_AI_POS_NEW;
@@ -768,6 +790,7 @@ static void test_compositions(void)
     memset(&sq, 0, sizeof sq);
     sq.target = &g_ent[2];
     memcpy(sq.to, g_ent[2].origin, 12);
+    sq.table.t = st_t; sq.table.v = st_v;
     sq.table.n = 2; sq.table.t[0] = 0.5f; sq.table.v[0] = 0.25f; sq.table.t[1] = 1.0f; sq.table.v[1] = 0;
     sq.roll = -90; sq.nav_ground = 1;
     CHECK(sh_ai_spline_run(&g_fake, &g_ent[1], &sq, pts, 20, &n) == 1 && n == 3);
@@ -853,6 +876,13 @@ static void test_brain_calls(void)
         "    print('spline2 ' .. tostring(ok2))\n"
         "    local ok3, p3 = self:spline_clear(ent(2), { table = { {t = 0, v = 0}, {t = 0.5, v = 0.25}, {t = 1, v = 0} }, roll = -90 }, 0)\n"
         "    print(string.format('spline3 %s %d %.0f', tostring(ok3), #p3, p3[2].y))\n"
+        "    local knots = {} for i = 1, 60 do knots[i] = {t = i / 61, v = 0.05} end\n"
+        "    local ok4, p4 = self:spline_clear(ent(2), { table = knots, roll = 90 }, 0)\n"
+        "    local ts, vs = {}, {} for i = 1, 30 do ts[i] = i / 31; vs[i] = 0.02 end ts[31] = 1\n"
+        "    local ok5, p5 = self:spline_clear(ent(2), { times = ts, values = vs }, 0)\n"
+        "    print('long splines ' .. tostring(ok4) .. ' ' .. #p4 .. ' ' .. tostring(ok5) .. ' ' .. #p5)\n"
+        "    local many = self:find_position({ target = ent(2), min = 100, max = 70000, ideal = 200, count = 64, visible = false })\n"
+        "    print('many ' .. tostring(many ~= nil))\n"
         "    self:pain_string(nil)\n"
         "    self:aim_point(nil)\n"
         "    print('ready2 ' .. tostring(self:weapon_ready()))\n"
@@ -881,8 +911,30 @@ static void test_brain_calls(void)
     CHECK(strstr(log, "spline3 true 3 ") != NULL);   /* the knot at 0.5 is inside: three points */
     CHECK(strstr(log, "spline true 3 110 100\n") != NULL);                  /* the player one second ahead */
     CHECK(strstr(log, "spline2 true\n") != NULL);
+    CHECK(strstr(log, "long splines true 62 true 32\n") != NULL);   /* never cut: every knot inside is a point */
+    CHECK(strstr(log, "many true\n") != NULL);                      /* 64 candidates, a max past the old 65,536 */
     CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    if (g_fail) printf("brain log:\n%s", log);
+    sh_script_map_end();
+}
+
+/* A long path: path_points answers every point the engine's path has (the old
+ * buffer held 64). */
+static void test_long_path(void)
+{
+    const char *log;
+    printf("-- path_points answers a long path whole\n");
+    CHECK(start("api = 1\n"
+                "on.think('ai/brute', function(self)\n"
+                "  local p = self:path_points({x = 30, y = 40, z = 0})\n"
+                "  print('long path ' .. #p .. ' ' .. p[300].x)\n"
+                "end)\n"));
+    g_ent[1].path_long = 300;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "long path 300 299.0\n") != NULL);
+    g_ent[1].path_long = 0;
     sh_script_map_end();
 }
 
@@ -1041,6 +1093,7 @@ int main(int argc, char **argv)
     test_removed_and_unavailable();
     test_brain_pure();
     test_compositions();
+    test_long_path();
     test_sight_against_a_wall();
     test_brain_calls();
     test_brain_refusals();

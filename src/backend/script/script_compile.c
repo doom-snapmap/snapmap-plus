@@ -10,11 +10,6 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* The builder's limits are the runtime's. */
-typedef char sh_script_compile_file_cap[SH_MB_SCRIPT_FILE_MAX == SH_SCRIPT_FILE_MAX ? 1 : -1];
-typedef char sh_script_compile_mod_cap[SH_MB_SCRIPT_MOD_MAX == SH_SCRIPT_MOD_TEXT_MAX ? 1 : -1];
-typedef char sh_script_compile_files_cap[SH_MB_SCRIPT_FILES_MAX == SH_SCRIPT_MOD_FILES_MAX ? 1 : -1];
-
 static void put(char *out, size_t cap, const char *fmt, ...);
 
 int sh_script_api_declared(const char *t, size_t n, long *version, int *line)
@@ -110,11 +105,6 @@ int sh_script_compile_check(const char *file, int entry, const char *text, size_
     if (len >= 4 && memcmp(text, "\x1bLua", 4) == 0) {
         put(what, what_cap, "the file is compiled Lua, not script text");
         put(todo, todo_cap, "Put the .lua source text in the file");
-        return 0;
-    }
-    if (len > SH_SCRIPT_FILE_MAX) {
-        put(what, what_cap, "the file is larger than 256 KB");
-        put(todo, todo_cap, "Split it into smaller files");
         return 0;
     }
     if (entry) {

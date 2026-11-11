@@ -534,24 +534,18 @@ int  sh_mb_extension_allowed(const char *request);
 /* A script is a carried text file of kind "script" (provides type "script",
  * name its request): assets/mods/<salt>/scripts/<name>.lua, an entry file the
  * runtime runs at map start, or assets/mods/<salt>/scripts/lib/<name>.lua, a
- * module only `require` loads, of the same mod. <name> is [A-Za-z0-9_-], at
- * most 64 characters. The engine never opens a script: it is hashed, carried
+ * module only `require` loads, of the same mod. <name> is [A-Za-z0-9_-]. The
+ * engine never opens a script: it is hashed, carried
  * and indexed like every file, and the runtime reads its built bytes through
  * the serving index (modserve.h sh_modserve_script_files). mod.json's author
  * part declares nothing about scripts.
  *
  * Checked at build: UTF-8 text without NUL, not compiled Lua (a chunk starting
- * "\x1bLua"), at most SH_MB_SCRIPT_FILE_MAX bytes each, at most
- * SH_MB_SCRIPT_FILES_MAX files and SH_MB_SCRIPT_MOD_MAX bytes per mod, and
- * compiled (nothing runs) by the registered check; a literal require of a
- * module the mod does not carry, and a name of another mod's namespace, are
- * refused with the file and line. The builder block records what the scripts
- * bind ("scripts", sh_mb_script_scan). The limits equal the runtime's
- * (script_runtime.h; script_compile.c asserts it). */
-#define SH_MB_SCRIPT_FILE_MAX   (256u << 10)
-#define SH_MB_SCRIPT_MOD_MAX    (1u << 20)
-#define SH_MB_SCRIPT_FILES_MAX  64u
-#define SH_MB_SCRIPT_NAME_MAX   64u
+ * "\x1bLua"), and compiled (nothing runs) by the registered check; a literal
+ * require of a module the mod does not carry, and a name of another mod's
+ * namespace, are refused with the file and line. No count or size of the
+ * scripts is checked: a mod carries as many as it has, of any size. The
+ * builder block records what the scripts bind ("scripts", sh_mb_script_scan). */
 
 /* What `request` (lower-cased, below assets/) is to scripts: SH_MB_SCRIPT_ENTRY
  * or SH_MB_SCRIPT_LIB for a script path (`*name` then points at its <name>,
@@ -566,8 +560,8 @@ int  sh_mb_extension_allowed(const char *request);
     "Snapmap+ makes this mod's Script node at this path, so the file cannot be here; remove it or give it another " \
     "name"
 #define SH_MB_SCRIPT_WHERE \
-    "a script goes in this mod's scripts folder, assets\\mods\\<salt>\\scripts\\ (entry files) or scripts\\lib\\ " \
-    "(files loaded with require); move it there"
+    "a script goes in the scripts folder inside this mod's own folder: scripts\\ for the files that run, " \
+    "scripts\\lib\\ for the files loaded with require; move it there"
 int  sh_mb_script_request(const char *request, const char **name, size_t *name_len);
 
 /* The author's spelling of a script request: "scripts\<name>.lua" or

@@ -473,6 +473,8 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ROOT    4
 #define SH_MODS_STORE   6
 #define SH_MODS_SCRIPTS 7
+/* SH_MODS_SCRIPTS answers a log's tail; an arg of this prefix and the salt asks for the whole log (Copy log). */
+#define SH_MODS_SCRIPTS_FULL "full:"
 /* Op 5 and actions 2, 5 to 9, 14, 15, 17 and 19 are retired; the slot answers them "Unknown action.". */
 #define SH_MODS_ACT_INSTALL     1    /* arg: absolute folders, newline-separated: install them (any thread) */
 #define SH_MODS_ACT_RESCAN      3    /* Refresh: build every changed folder, then bring the changes into the game (any thread) */

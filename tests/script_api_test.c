@@ -68,7 +68,7 @@ typedef struct fent {
     float    view[3];        /* a player's pitch, yaw, roll */
 } fent;
 
-#define ENTS 128
+#define ENTS 1024
 static fent g_ents[ENTS];
 static int g_nents;
 static int g_ms;
@@ -110,8 +110,13 @@ static fent *by_id(uint32_t id)
 
 static void *f_resolve(uint32_t id) { return by_id(id); }
 static uint32_t f_spawn_id(void *ent) { return ent ? ((fent *)ent)->id : SH_SCRIPT_SPAWN_ID_NONE; }
-static int f_slots(void) { return g_nents; }
-static uint32_t f_slot_spawn_id(int n) { return n >= 0 && n < g_nents && g_ents[n].alive ? g_ents[n].id : SH_SCRIPT_SPAWN_ID_NONE; }
+static int g_room_used;   /* entity slots the rest of the game holds, past the fake's own */
+static int f_slots(void) { return g_nents + g_room_used; }
+static uint32_t f_slot_spawn_id(int n)
+{
+    if (n >= g_nents && n < g_nents + g_room_used) return 0x7000000u + (uint32_t)n;   /* the game's own entities */
+    return n >= 0 && n < g_nents && g_ents[n].alive ? g_ents[n].id : SH_SCRIPT_SPAWN_ID_NONE;
+}
 static int f_kind(void *ent) { return ent ? ((fent *)ent)->kind : SH_SCRIPT_KIND_GONE; }
 static int f_origin(void *ent, float out[3]) { memcpy(out, ((fent *)ent)->pos, 12); return 1; }
 static int f_axis(void *ent, float out[9]) { memcpy(out, ((fent *)ent)->ax, 36); return 1; }
@@ -278,7 +283,7 @@ static const char *log_now(void)
     sh_script_log_read(SALT, log_cat, NULL);
     return g_log;
 }
-static char g_stop[SH_SCRIPT_LINE_CAP];
+static char g_stop[4096];
 static const char *stop_now(void)
 {
     g_stop[0] = 0;
@@ -473,20 +478,21 @@ static void test_spawn(void)
             "3", "\"spawn\" can only use this mod's own content; \"mods/othermod/x\" belongs to another mod");
     refused("api = 1\non.map_start(function()\n  spawn('props/missing', {0, 0, 0})\nend)\n",
             "3", "\"spawn\" could not spawn \"props/missing\": it is not an entityDef of this mod's build");
-    /* 16 a second */
-    refused("api = 1\non.map_start(function()\n  for i = 1, 17 do spawn('props/crate', {i, 0, 0}) end\nend)\n",
-            "3", "\"spawn\" can spawn at most 16 entities a second; spread the spawns out");
+    /* no count or rate of its own: 200 in one call, 400 alive */
     run("api = 1\n"
         "local n = 0\n"
-        "every(1.5, function() for i = 1, 16 do if spawn('props/crate', {i, 0, 0}) then n = n + 1 end end; print('n', n) end)\n");
+        "every(1.5, function() for i = 1, 200 do if spawn('props/crate', {i, 0, 0}) then n = n + 1 end end; print('n', n) end)\n");
     frame(1600);
     frame(1600);
-    frame(1600);
-    frame(1600);
-    CHECK(has(log_now(), "n\t64"));
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "n\t400"));
+    /* the game's own entity table is the only bound: it is nearly full */
+    g_room_used = 16382 - 256;
     frame(1600);
     CHECK(sh_script_status(SALT) == SH_SCRIPT_STOPPED);
-    CHECK(has(stop_now(), "\"spawn\" can keep at most 64 of this mod's entities alive at once; remove some first"));
+    CHECK(has(stop_now(), "\"spawn\" cannot add an entity now: the game holds at most 16382 entities at once and nearly "
+                          "all are in use; remove some first"));
+    g_room_used = 0;
 }
 
 static void test_world(void)
@@ -517,7 +523,7 @@ static void test_world(void)
     CHECK(has(g_log, "ignored\tnil"));
     CHECK(has(g_log, "from entity\t100.0"));
     refused("api = 1\non.spawn('ai/brute', function(self)\n  trace(self, self, -1)\nend)\n",
-            "3", "\"trace\" needs a radius from 0 to 512, got -1");
+            "3", "\"trace\" needs a radius of 0 or more, got -1");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  entities_near(self)\nend)\n",
             "3", "\"entities_near\" needs the radius as a number, got nothing");
 }

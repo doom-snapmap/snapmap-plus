@@ -953,8 +953,8 @@ category: a wire into a node runs the script's `on.input` handler for the node's
 `node(name):fire()` raises On Fired on the mod's nodes of that name, and `vars.get` / `vars.set`
 read and write the map's Integer, Number, Boolean and String variables so wired logic reacts; a map
 with a Script node records the mod like any mod row. A script is checked when its mod builds: a
-syntax error, compiled Lua, a file over 256 KB, more than 64 files or 1 MB of scripts, a `require`
-of a file the mod does not carry or a name of another mod refuses the build with the file and line
+syntax error, compiled Lua, a `require` of a file the mod does not carry or a name of another mod
+refuses the build with the file and line (scripts have no count or size limit)
 on the mod's row. Scripts travel with the mod everywhere it goes (publish, download, rawmap and
 prefab exports, installs); a Play runs the scripts as they were built at the last Refresh.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
