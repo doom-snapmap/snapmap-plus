@@ -127,7 +127,7 @@ char *sh_mp_check_json(const sh_mp_module_check *c);
  * not NULL, holds one world-axis box per module (min xyz, max xyz) relative to
  * the anchor; labels (may be NULL) the display names. desc/tags are written
  * empty. Returns malloc-owned text or NULL. */
-char *sh_mp_sidecar_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels);
+char *sh_mp_summary_view_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels);
 
 #ifdef __cplusplus
 }

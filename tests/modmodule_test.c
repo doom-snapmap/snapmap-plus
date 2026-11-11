@@ -21,10 +21,9 @@
  *     material decls are planned like shadows (left to the provider when the
  *     engine knows them).
  *
- * With SH_MODMODULE_SOURCE naming a source mod folder (the acceptance bundle
- * work/laneP8/mods/alex.mp-basin) and SH_MODMODULE_DOOM the install (default
- * D:\SteamLibrary\steamapps\common\DOOM), the folder is built against the real
- * installed game, bundle.json is written into it, and the counts are printed.
+ * With SH_MODMODULE_SOURCE naming a source mod folder and SH_MODMODULE_DOOM
+ * the install, the folder is built against the real installed game, its
+ * mod.json is written, and the counts are printed.
  * SH_MODMODULE_PREFAB may name a module prefab (the acceptance placement file);
  * it is read with the Prefabs tab's own parser and must name the bundle's module.
  */
@@ -523,7 +522,7 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
                 free(ref);
             }
             if (merged) {
-                /* The map names the bundle the way a save does: one smpmod1. row
+                /* The map names the mod the way a save does: one manifest row
                  * holding the module name, so a load activates its decls. */
                 sh_modmanifest_list rows;
                 sh_modmanifest_row row;
@@ -540,7 +539,7 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
                 named = sh_modmanifest_write(merged, olen, &rows, &wlen, werr, sizeof werr);
                 CHECK(named != NULL);
                 if (named && !fopen_s(&g, outp, "wb") && g) { fwrite(named, 1, wlen, g); fclose(g); }
-                printf("modmodule_test: wrote %s with one smpmod1. row (%zu bytes) %s\n", outp, wlen, werr);
+                printf("modmodule_test: wrote %s with one manifest row (%zu bytes) %s\n", outp, wlen, werr);
                 free(named);
                 sh_modmanifest_list_free(&rows);
                 sh_modmanifest_row_free(&row);
@@ -598,11 +597,12 @@ int main(void)
     n = GetEnvironmentVariableA("SH_MODMODULE_SOURCE", source, sizeof source);
     if (n && n < sizeof source) {
         n = GetEnvironmentVariableA("SH_MODMODULE_DOOM", doom, sizeof doom);
-        if (!n || n >= sizeof doom) strcpy_s(doom, sizeof doom, "D:\\SteamLibrary\\steamapps\\common\\DOOM");
+        if (!n || n >= sizeof doom) doom[0] = 0;
         n = GetEnvironmentVariableA("SH_MODMODULE_PREFAB", prefab, sizeof prefab);
         if (!n || n >= sizeof prefab) prefab[0] = 0;
         sh_modstock_register();
-        build_acceptance(source, doom, prefab);
+        if (doom[0]) build_acceptance(source, doom, prefab);
+        else printf("modmodule_test: acceptance skipped (SH_MODMODULE_DOOM must name the install)\n");
         sh_modstock_reset();
     } else {
         printf("modmodule_test: acceptance build skipped (set SH_MODMODULE_SOURCE to a mod folder, SH_MODMODULE_DOOM to the install)\n");

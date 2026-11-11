@@ -886,7 +886,7 @@ int sh_mp_is_module_file(const char *text, size_t len)
     return 0;
 }
 
-/* ------------------------------------------------------------ sidecar */
+/* ------------------------------------------------------------ summary view */
 
 typedef struct mp_buf { char *p; size_t n, cap; int bad; } mp_buf;
 
@@ -938,7 +938,7 @@ static void buf_str(mp_buf *b, const char *s)
     buf_put(b, "\"");
 }
 
-char *sh_mp_sidecar_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels)
+char *sh_mp_summary_view_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels)
 {
     mp_buf b = {0};
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};

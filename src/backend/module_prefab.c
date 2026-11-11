@@ -754,7 +754,7 @@ static int mp_save(sh_module_prefab_call *call)
         rel = (float (*)[6])calloc((size_t)c->nsel, sizeof *rel);
         if (rel) for (i = 0; i < c->nsel; i++) for (k = 0; k < 6; k++) rel[i][k] = c->bounds[i][k] - c->anchor[k % 3];
     }
-    side = sh_mp_sidecar_json(&sum, rel ? (const float (*)[6])rel : NULL, NULL);
+    side = sh_mp_summary_view_json(&sum, rel ? (const float (*)[6])rel : NULL, NULL);
     if (side) {
         /* One file: the summary and the mods its modules and entities need (as
          * a map's save records them) go into its snapmapPlus block. */

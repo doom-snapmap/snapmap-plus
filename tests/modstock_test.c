@@ -8,15 +8,15 @@
  * lacks one entry and holds another with other bytes. Covered:
  *   the bridge: match at the file's own path, a renamed copy, the .patch
  *     store, a loose file; identify, verify (OK, MISMATCH, ABSENT) and read;
- *   the builder: carried copies become pointers (no blob, no size in the
+ *   the builder: carried copies become pointers (no file hash, no size in the
  *     canonical text, not in the size total), a type outside the whitelist
  *     that is installed content becomes a pointer instead of a refusal, the
  *     retired author "stock" object refuses the folder, and the manifest
  *     loads back with the same hash;
- *   the store: no blob and no tree file for a pointer, verification resolves
+ *   the store: no file and no tree entry for a pointer, verification resolves
  *     pointers, and fails with the first cause against D2;
- *   the store client: an upload sends only carried blobs (loopback stub), a
- *     download fetches only carried blobs and is refused before any fetch on
+ *   the store client: an upload sends only carried files (loopback stub), a
+ *     download fetches only carried files and is refused before any fetch on
  *     D2;
  *   the campaign-only closure: a decl naming content only gameresources holds
  *     gains it as a pointer, transitively (animWeb -> md6Def -> mesh and
@@ -1454,8 +1454,8 @@ int main(void)
     n = GetEnvironmentVariableA("SH_MODSTOCK_DATA", data, sizeof data);
     if (n && n < sizeof data) {
         n = GetEnvironmentVariableA("SH_MODSTOCK_DOOM", doom, sizeof doom);
-        if (!n || n >= sizeof doom) strcpy_s(doom, sizeof doom, "D:\\SteamLibrary\\steamapps\\common\\DOOM");
-        measure(data, doom);
+        if (n && n < sizeof doom) measure(data, doom);
+        else printf("modstock_test: measurement skipped (SH_MODSTOCK_DOOM must name the install)\n");
     } else {
         printf("modstock_test: measurement skipped (set SH_MODSTOCK_DATA to a mods store, SH_MODSTOCK_DOOM to the install)\n");
     }

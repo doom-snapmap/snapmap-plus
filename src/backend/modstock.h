@@ -15,8 +15,8 @@
  * Identity is size first: the builder hashes only installed entries whose
  * decoded size equals the file's, at the file's own path first (every row of
  * that name in both archives, which hold different bytes under some names),
- * then at the path with its mods/<key>/ segment removed (where a copy moved
- * under a key came from, sh_mb_strip_key), then entries of the same size and
+ * then at the path with its mods/<salt>/ segment removed (a game file the
+ * author copied under the mod's folder, sh_mb_strip_key), then entries of the same size and
  * extension elsewhere (a renamed copy, until SH_MODSTOCK_RENAMED_BYTES are
  * hashed for the file; no candidate count), so a build hashes about the bytes
  * that become pointers rather than the archives.

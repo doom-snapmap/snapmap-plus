@@ -904,7 +904,7 @@ static DWORD WINAPI pp_worker(void *unused)
 
             char line[760];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B2: prefabpreview -- %s '%s' (%u vertices, %u triangles, %d blob bytes) in %llu ms",
+                        "PREFABS: preview -- %s '%s' (%u vertices, %u triangles, %d blob bytes) in %llu ms",
                         ok ? "decoded" : "proxy fallback for", req.name, vertices, triangles, bytes,
                         (unsigned long long)(GetTickCount64() - started));
             backend_log(line);
@@ -919,8 +919,8 @@ int sh_prefabpreview_install(void)
     g_pp_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (g_pp_event) g_pp_thread = CreateThread(NULL, 0, pp_worker, NULL, 0, NULL);
     g_pp_installed = 1;
-    backend_log(g_pp_thread ? "B2: prefabpreview worker ready"
-                            : "B2: prefabpreview worker unavailable; Prefabs use proxies");
+    backend_log(g_pp_thread ? "PREFABS: preview worker ready"
+                            : "PREFABS: preview worker unavailable; the Prefabs tab draws boxes");
     return g_pp_thread != NULL;
 }
 

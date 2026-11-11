@@ -267,7 +267,7 @@ static void test_cut_and_merge(void)
     {
         float b[2][6] = { { -1024, -1024, 0, 1024, 1024, 256 }, { -1024, -3072, 0, 1024, -1024, 256 } };
         const char *labels[2] = { "Room B", NULL };
-        char *sc = sh_mp_sidecar_json(&sum, (const float (*)[6])b, labels);
+        char *sc = sh_mp_summary_view_json(&sum, (const float (*)[6])b, labels);
         mpj *j = sc ? mpj_parse(sc, strlen(sc)) : NULL;
         CHECK(j != NULL);
         CHECK(mpj_str_is(mpj_get(j, "kind"), "modules"));

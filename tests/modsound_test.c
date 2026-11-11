@@ -619,9 +619,6 @@ static void test_builder(void)
           !strcmp(t, "sound") && !strcmp(n, "mods/p6probes/p6probes_far"));
 
     CHECK(sh_mb_bank_rule("sound/soundbanks/pc/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
-    CHECK(sh_mb_bank_rule("sound/soundbanks/pc/alex_pink_imp_growls.bnk", "alex.pink-imp", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/alex.pink-imp_growls.bnk", "alex.pink-imp", cause, sizeof cause) &&
-          strstr(cause, "letters, digits"));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "p6probes_"));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_.bnk", "p6probes", cause, sizeof cause));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_spider.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "_sp"));

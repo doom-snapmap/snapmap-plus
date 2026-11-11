@@ -589,8 +589,8 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
 /* the map's own module placements                                       */
 /* ==================================================================== */
 
-/* Count module placements for legacy shared-name payloads. Repeated instances
- * cannot receive distinct bytes through this format. Unknown spellings count
+/* Count module placements for payloads served under the module's shared
+ * name. Repeated instances cannot receive distinct bytes through that name. Unknown spellings count
  * as zero; the engine will not request an unplaced module.
  */
 static unsigned nav_count_instances(const char *json, size_t len, const char *module)
@@ -701,7 +701,7 @@ static int nav_collect_one(const nav_hdr *hp, const char *chunk, size_t chunk_le
                                                     (size_t)h.total * sizeof *s->chunks);
             if (!s->chunks) {
                 s->consistent = 0;
-                strcpy_s(s->reason, sizeof s->reason, "there was no memory to collect its shards");
+                strcpy_s(s->reason, sizeof s->reason, "there was no memory to collect its parts");
                 return 1;
             }
         }
@@ -715,17 +715,17 @@ static int nav_collect_one(const nav_hdr *hp, const char *chunk, size_t chunk_le
         }
         if (h.idx >= s->total) {
             s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a shard index is out of range");
+            strcpy_s(s->reason, sizeof s->reason, "a part index is out of range");
             return 1;
         }
         if (!chunk) {
             s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a shard's value could not be read");
+            strcpy_s(s->reason, sizeof s->reason, "a part's value could not be read");
             return 1;
         }
         if (s->chunks[h.idx].filled) {
             s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a shard index appears twice");
+            strcpy_s(s->reason, sizeof s->reason, "a part index appears twice");
             return 1;
         }
         s->chunks[h.idx].p = chunk;
@@ -826,13 +826,13 @@ static void nav_reassemble(void)
 
         if (!s->consistent) {
             if (!s->reason[0])
-                strcpy_s(s->reason, sizeof s->reason, "its shard headers disagree");
+                strcpy_s(s->reason, sizeof s->reason, "its part headers disagree");
             nav_refuse("'%s' (%s) is not served -- %s", s->module, s->cls, s->reason);
             continue;
         }
         if (s->present != s->total) {
             _snprintf_s(s->reason, sizeof s->reason, _TRUNCATE,
-                        "only %u of its %u shards are present", s->present, s->total);
+                        "only %u of its %u parts are present", s->present, s->total);
             nav_refuse("'%s' (%s) is not served -- %s", s->module, s->cls, s->reason);
             continue;
         }
@@ -842,7 +842,7 @@ static void nav_reassemble(void)
             strcpy_s(s->reason, sizeof s->reason,
                      reason == SH_SHARD_B64_TOO_BIG ? "its payload is over the size budget" :
                      reason == SH_SHARD_B64_NOMEM   ? "there was not enough memory to decode it" :
-                                                      "its shards are not valid base64");
+                                                      "its parts are not valid base64");
             nav_refuse("'%s' (%s) is not served -- %s", s->module, s->cls, s->reason);
             continue;
         }
@@ -989,7 +989,7 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     g_last_build_sets = sets;
     ReleaseSRWLockExclusive(&g_nav_lock);
 
-    if (sets == 0) return;   /* No detailed report for a map without navigation shards. */
+    if (sets == 0) return;   /* No detailed report for a map without saved navigation. */
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: this map carries %zu baked module/class set(s); serving %zu of them for "
@@ -1275,7 +1275,7 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
             if (s->served)
                 out("  %s %s: in use (%zu bytes)\n", s->module, s->cls, s->payload_len);
             else
-                out("  %s %s: kept from an older save, not used (%s)\n", s->module, s->cls,
+                out("  %s %s: not used (%s); a save keeps it\n", s->module, s->cls,
                     s->reason[0] ? s->reason : "its module was refused");
         }
     }
