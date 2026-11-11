@@ -3393,13 +3393,6 @@ static int mu_scope_source(int when)
     return mu_listing_live();
 }
 
-int sh_modui_scope_launch_at(const char *why, const char *place, int own)
-{
-    if (!mu_on_main()) return 0;
-    (void)sh_modserve_scope_set_place(place, own);
-    return sh_modui_scope_launch(why);
-}
-
 int sh_modui_scope_launch(const char *why)
 {
     const sh_modui_engine *e = mu_engine();

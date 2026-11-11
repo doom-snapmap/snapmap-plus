@@ -1085,7 +1085,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(sh_ms_set_root(storeB));
         CHECK(sh_modserve_index_build(storeB) >= 0);
         /* The open map: the player's own, no place. Only the downloaded map's place holds the mod. */
-        (void)sh_modserve_scope_set_place(NULL, 1);
+        (void)sh_modserve_place_set(NULL);
         CHECK(sh_modserve_row_served(door, NULL, 0) != SH_MODSERVE_ROW_SERVED);
         memset(&list, 0, sizeof list);
         CHECK(sh_ms_enumerate(&list) && !sh_ms_find_salt(&list, door->salt, NULL, NULL));

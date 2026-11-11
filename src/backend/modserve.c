@@ -3686,12 +3686,6 @@ void sh_modserve_place_get(char *out, size_t cap)
     if (out && cap) ms_scope_place(out, cap);
 }
 
-int sh_modserve_scope_set_place(const char *place, int own)
-{
-    int changed = sh_modserve_place_set(own ? NULL : place);
-    return changed < 0 ? 0 : changed;
-}
-
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
 {
     ms_index *x;

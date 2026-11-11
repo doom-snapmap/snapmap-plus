@@ -4204,7 +4204,7 @@ static void test_serving_build_needs(void)
     sh_modserve_scope_enable(1);
 
     /* The map that brought its own copy is open: its build serves the path. */
-    CHECK(sh_modserve_scope_set_place("maps\\C3 map", 0) >= 0);
+    CHECK(sh_modserve_place_set("maps\\C3 map") >= 0);
     list[0] = hplace;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     body.level = 4; ska.level = 1; skb.level = 1;
@@ -4217,7 +4217,7 @@ static void test_serving_build_needs(void)
     sh_modserve_plan_free(&plan);
 
     /* No map: the root folder's build answers. */
-    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     ska.level = 1; skb.level = 1;
     CHECK(sh_modserve_holds_raise(&head, &h) == 1);
@@ -4583,10 +4583,10 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map uses Doors Pack, which is not installed."));
     /* In a map's place: that place's folder first (the segment alone names it too). */
-    CHECK(sh_modserve_scope_set_place("maps\\Gates", 0) >= 0);
+    CHECK(sh_modserve_place_set("maps\\Gates") >= 0);
     strcpy_s(row.build, sizeof row.build, hd);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Gates") && !strcmp(ref.folder, "maps\\Gates\\Doors Pack"));
-    CHECK(sh_modserve_scope_set_place("Doors", 0) >= 0);
+    CHECK(sh_modserve_place_set("Doors") >= 0);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Doors"));
     strcpy_s(row.build, sizeof row.build, hm);   /* the place does not hold it: the root at that hash */
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0]);
@@ -4598,7 +4598,7 @@ static void test_salt_and_place(void)
     CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { downloaded }"));
     CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Doors\\Doors Pack\\"));
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.inert);
-    CHECK(sh_modserve_scope_set_place("maps\\Gates\\", 0) >= 0);   /* the same build from the other place */
+    CHECK(sh_modserve_place_set("maps\\Gates\\") >= 0);   /* the same build from the other place */
     CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Gates\\Doors Pack\\"));
     /* A map without a place (the player's own) follows the root folder
      * whatever it pins. */
@@ -4609,7 +4609,7 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
     /* A salt whose only folder is skipped: the folder's cause. */
-    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "saltonly");
     strcpy_s(row.build, sizeof row.build, hx);
@@ -5074,9 +5074,9 @@ static void test_store_root_utf8(void)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "usnap000");
         strcpy_s(row.build, sizeof row.build, h8);
-        CHECK(sh_modserve_scope_set_place("maps\\Caf\xc3\xa9", 0) >= 0);
+        CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Caf\xc3\xa9"));
-        CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+        CHECK(sh_modserve_place_set(NULL) >= 0);
     }
     sh_ms_set_root(NULL);
     strcpy_s(path, sizeof path, root);

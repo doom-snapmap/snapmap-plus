@@ -766,9 +766,6 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   back (a parse that failed, a launch that was refused) and returns 1, or
  *   0 when nothing is remembered.
  * sh_modserve_place_get: the loaded map's place.
- * sh_modserve_scope_set_place: the earlier entry, kept for callers outside
- *   the publishing files until they move to sh_modserve_place_set: `own`
- *   nonzero is the root, else `place`.
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
 #define SH_MODSERVE_PLACE_CAP 300
@@ -777,7 +774,6 @@ int  sh_modserve_place_set(const char *place);
 int  sh_modserve_place_load(const char *place);
 int  sh_modserve_place_restore(void);
 void sh_modserve_place_get(char *out, size_t cap);
-int  sh_modserve_scope_set_place(const char *place, int own);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY

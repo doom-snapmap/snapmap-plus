@@ -426,7 +426,7 @@ static void test_store(void)
 
     printf("-- the serving index lists the scripts and serves their built bytes\n");
     CHECK(sh_modserve_index_build(a) > 0 || 1);
-    (void)sh_modserve_scope_set_place("", 1);
+    (void)sh_modserve_place_set(NULL);
     memset(&l, 0, sizeof l);
     CHECK(sh_modserve_script_files(salt, list_cb, &l) == 2 && !strcmp(l.list, "door.lua|lib/fsm.lua|") && l.match == 2);
     if (strcmp(l.list, "door.lua|lib/fsm.lua|")) fprintf(stderr, "  listed %s\n", l.list);
@@ -453,7 +453,7 @@ static void test_store(void)
     CreateDirectoryA(c, NULL);
     CHECK(sh_ms_set_root(c));
     (void)sh_modserve_index_build(c);
-    (void)sh_modserve_scope_set_place("", 1);
+    (void)sh_modserve_place_set(NULL);
     back = modexport_read(zip, &len, &es, cause, sizeof cause);
     if (!back) fprintf(stderr, "  import: %s\n", cause);
     CHECK(back && es.bundles_installed == 1);
@@ -539,7 +539,7 @@ static void test_fixtures(void)
         sh_mb_free(&b);
     }
     CHECK(sh_modserve_index_build(e) == 2);
-    (void)sh_modserve_scope_set_place("", 1);
+    (void)sh_modserve_place_set(NULL);
     memset(&hit, 0, sizeof hit);
     CHECK(sh_modserve_lookup("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &hit) && hit.is_decl);
     CHECK(sh_modserve_open("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &bytes, &len) == 1);

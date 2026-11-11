@@ -276,15 +276,11 @@ int  sh_modui_poll_main(void *context);
  * serving mode is Play. The Play entry then keeps this listing instead of
  * reading the editor, and the tick clears it once that Play has run and is
  * over (launched, loading, playing, running, ended: modui.c). Main thread.
- * Returns the builds whose serving changed. sh_modui_scope_launch keeps the
- * serving context the gate set; sh_modui_scope_launch_at first sets it
- * (sh_modserve_scope_set_place): `place` the launched map's place
- * ("maps\<segment>", NULL for none) and `own` 1 for the player's own map (a
- * My Maps play, a map this machine published), whose rows follow the root
- * folders. Nothing in this file resets the place: where a map finds its mods
- * is a fact of that map, set from its record at every load. */
+ * Returns the builds whose serving changed. It keeps the serving context
+ * the gate set (sh_modserve_place_set). Nothing in this file resets the
+ * place: where a map finds its mods is a fact of that map, set from its
+ * record at every load. */
 int  sh_modui_scope_launch(const char *why);
-int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
 
 /* A hub launch the published-map gate refused (denied, or dropped from its
  * hold): nothing was launched, so its parse's rows are not declared. With
@@ -373,11 +369,6 @@ int sh_ms_places_prune(unsigned days);
     "scripts\" there to play it."
 void sh_modui_scripts_approval(unsigned files, char *out, size_t cap);
 int  sh_modui_scripted_maps_allowed(void);
-
-/* The published-map gate sets the launched map's place through
- * sh_modui_scope_launch_at today. Once the place is a fact of the map, set
- * from its record at every load, the gate sets it and calls
- * sh_modui_scope_launch, and sh_modui_scope_launch_at goes. */
 
 #ifdef SH_MODUI_TESTING
 /* The hub launch state machine (modui.c): "none", "launched", "loading",

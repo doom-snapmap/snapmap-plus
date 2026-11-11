@@ -506,14 +506,14 @@ static void families_follow_the_map(void)
     CHECK(sh_modserve_index_build(mods) == 2);
     n = sh_modvt_collect(fams, SH_MODVT_MAX);
     CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_own) && fams[0].members == 0x1u);
-    CHECK(sh_modserve_scope_set_place("maps\\Vt map", 0) >= 0);
+    CHECK(sh_modserve_place_set("maps\\Vt map") >= 0);
     list[0] = hash_placed;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     n = sh_modvt_collect(fams, SH_MODVT_MAX);
     CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_placed) && fams[0].members == 0x3u &&
           fams[0].bytes == strlen("the map's own one") + strlen("the map's two"));
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
-    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(0);
     mt_remove_tree(root);
 }
