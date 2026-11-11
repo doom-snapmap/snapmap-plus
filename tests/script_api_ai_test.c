@@ -1024,6 +1024,31 @@ static void test_weapon_hands(void)
     sh_script_map_end();
 }
 
+/* face: exact by default; { travel = inches } becomes the move's tolerance,
+ * the radius the engine's turn-clip query lets a clip's root step. */
+static void test_face_travel(void)
+{
+    printf("-- face with turn clips that travel\n");
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  self:face({x = 0, y = 100, z = 0})\n"
+        "  self:face({x = 0, y = 100, z = 0}, { travel = 40 })\n"
+        "  self:face(ent(2), { travel = 30 })\n"
+        "  self:face(ent(2))\n"
+        "  print(pcall(self.face, self, ent(2), { speed = 3 }))\n"
+        "  print(pcall(self.face, self, ent(2), { travel = -1 }))\n"
+        "end)\n"));
+    tick();
+    CHECK(strstr(g_events, "1:ssaction_MoveToPoint(0 0 0,2,0.1,1,0 1 0)\n"
+                           "1:ssaction_MoveToPoint(0 0 0,2,40,1,0 1 0)\n"
+                           "1:ssaction_MoveToPoint(0 0 0,2,30,1,0.707107 0.707107 0)\n"
+                           "1:setFocus(e2,0,1,") != NULL);
+    CHECK(strstr(log_of("aaaaaaaa"), "\"face\" knows the option travel, not \"speed\"") != NULL);
+    CHECK(strstr(g_log, "\"face\" needs travel as a distance in inches, 0 or more") != NULL);
+    sh_script_map_end();
+}
+
 static void test_long_path(void)
 {
     const char *log;
@@ -1198,6 +1223,7 @@ int main(int argc, char **argv)
     test_compositions();
     test_long_path();
     test_weapon_hands();
+    test_face_travel();
     test_sight_against_a_wall();
     test_brain_calls();
     test_brain_refusals();

@@ -569,6 +569,36 @@ static int l_move_done(lua_State *L)
 }
 
 /* ai:face(target): an entity (keep facing it) or a position (turn once). */
+/* face's options: { travel = inches }, how far a turn clip's root may step
+ * from where it starts. 0 when absent. */
+static double face_travel(lua_State *L, int idx)
+{
+    double travel = 0;
+    if (lua_isnoneornil(L, idx)) return 0;
+    if (lua_type(L, idx) != LUA_TTABLE)
+        sh_script_refuse(L, "\"face\" takes its options as a table, such as { travel = 40 }, got %s", luaL_typename(L, idx));
+    lua_pushnil(L);
+    while (lua_next(L, idx)) {
+        const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
+        if (!k || strcmp(k, "travel"))
+            sh_script_refuse(L, "\"face\" knows the option travel, not \"%s\"", k ? k : luaL_typename(L, -2));
+        if (!lua_isnumber(L, -1) || (travel = lua_tonumber(L, -1)) < 0 || travel != travel || travel > 1e6)
+            sh_script_refuse(L, "\"face\" needs travel as a distance in inches, 0 or more");
+        lua_pop(L, 1);
+    }
+    return travel;
+}
+
+/* ai:face(target, [options]). A position turns the demon with a move to its
+ * own origin that aligns with the target, so the engine picks a turn clip;
+ * an entity sets the focus, unless travel is given, which turns toward where
+ * the entity stands now. The move's tolerance is the engine's arrival radius
+ * of the clip query (transitionQueryParms_t +0x6C, VK 0x1404FC0B0 / GL
+ * 0x1404FADE0), and for a turn in place the query rejects a clip whose root
+ * ends farther than 1.0 to 1.3 times max(1, that radius) from its start
+ * (ANIMQUERY_REJECT_OVERSHOOT, VK 0x141AD9E90 / GL 0x141AF40E0). The default
+ * is exact (0.1); { travel = inches } passes the inches as the radius, so a
+ * demon's own stepping turns are chosen. */
 static int l_face(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -576,11 +606,17 @@ static int l_face(lua_State *L)
     void *ai, *ent = NULL;
     ai_rec *r;
     int is_ent = is_entity(L, 2);
+    double travel;
     if (!is_ent) check_vec(L, 2, "face", p);
     else sh_script_check_entity(L, 2, "face");
+    travel = face_travel(L, 3);
     ai = self_ai(L, "face", &h);
     if (!ai) return 0;
     if (is_ent && !(ent = other_entity(L, 2, "face"))) return 0;
+    if (ent && travel > 0) {
+        if (!g_engine->origin(ent, p)) return 0;
+        ent = NULL;
+    }
     if (!(r = park(ai, h))) return 0;
     if (ent) {
         sh_ai_arg a[4];
@@ -598,7 +634,8 @@ static int l_face(lua_State *L)
         len = sqrt((double)dir[0] * dir[0] + (double)dir[1] * dir[1]);
         if (len < 1e-3) return 0;
         dir[0] = (float)(dir[0] / len); dir[1] = (float)(dir[1] / len);
-        a[0] = arg_v(at); a[1] = arg_i(SH_AI_ARRIVAL_STOP); a[2] = arg_f(0.1f); a[3] = arg_b(1); a[4] = arg_v(dir);
+        a[0] = arg_v(at); a[1] = arg_i(SH_AI_ARRIVAL_STOP); a[2] = arg_f(travel > 0.1 ? (float)travel : 0.1f);
+        a[3] = arg_b(1); a[4] = arg_v(dir);
         if (run(ai, SH_AI_EV_MOVE_TO_POINT, a, 5, NULL)) {
             sh_ai_move_issue(&r->move, g_engine->frame());
             r->has_dest = 1;
