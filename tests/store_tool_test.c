@@ -33,6 +33,7 @@
 #include "modstock.h"
 #include "mod_test_util.h"
 #include "mod_stock_fixture.h"
+#include "store_lock.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -897,6 +898,47 @@ static void test_errors(const char *fixture, const char *tmp)
     CHECK(mt_exists(path));
 }
 
+/* The named lock of store_lock.h: one name per mods folder whatever its
+ * spelling, and a holder in another thread keeps every other taker out. */
+typedef struct lk_arg { const wchar_t *mods; HANDLE got; } lk_arg;
+static DWORD WINAPI lk_take(void *p)
+{
+    lk_arg *a = (lk_arg *)p;
+    a->got = sh_store_lock_take(a->mods, 50);
+    sh_store_lock_give(a->got);
+    return 0;
+}
+
+static void test_store_lock(const char *tmp)
+{
+    wchar_t mods[MAX_PATH], other[MAX_PATH], n1[64], n2[64], n3[64], n4[64];
+    lk_arg a;
+    HANDLE held, t;
+    printf("-- the named lock on the mods folder\n");
+    _snwprintf_s(mods, MAX_PATH, _TRUNCATE, L"%hs\\lock\\mods", tmp);
+    _snwprintf_s(other, MAX_PATH, _TRUNCATE, L"%hs\\LOCK\\Mods\\", tmp);
+    CHECK(sh_store_lock_name(mods, n1, 64) && sh_store_lock_name(other, n2, 64) && !wcscmp(n1, n2));
+    CHECK(!wcsncmp(n1, L"Local\\snapmap-plus-store-", 25) && wcslen(n1) == 25 + 16);
+    _snwprintf_s(other, MAX_PATH, _TRUNCATE, L"\\\\?\\%hs\\lock\\mods", tmp);
+    CHECK(sh_store_lock_name(other, n3, 64) && !wcscmp(n1, n3));
+    _snwprintf_s(other, MAX_PATH, _TRUNCATE, L"%hs\\lock\\mods2", tmp);
+    CHECK(sh_store_lock_name(other, n4, 64) && wcscmp(n1, n4));
+    /* The FNV-1a over "c:\a" in UTF-16LE: the contract's arithmetic, fixed. */
+    CHECK(sh_store_lock_name(L"C:\\A", n4, 64) && !wcscmp(n4, L"Local\\snapmap-plus-store-f81f040d530f58f9"));
+    held = sh_store_lock_take(mods, 1000);
+    CHECK(held != NULL);
+    a.mods = mods;
+    a.got = (HANDLE)1;
+    t = CreateThread(NULL, 0, lk_take, &a, 0, NULL);
+    if (t) { WaitForSingleObject(t, 10000); CloseHandle(t); }
+    CHECK(a.got == NULL);   /* held elsewhere: the other taker waits, then gives up */
+    sh_store_lock_give(held);
+    a.got = NULL;
+    t = CreateThread(NULL, 0, lk_take, &a, 0, NULL);
+    if (t) { WaitForSingleObject(t, 10000); CloseHandle(t); }
+    CHECK(a.got != NULL);
+}
+
 static void test_recycle_refusals(void)
 {
     sh_store_recycle_stats st = { 0, 0 };
@@ -924,6 +966,7 @@ int main(int argc, char **argv)
     test_beta26(fixture, tmp);
     test_errors(fixture, tmp);
     test_recycle_refusals();
+    test_store_lock(tmp);
 
     if (g_failed) fprintf(stderr, "last output:\n%s", g_out);
     mt_remove_tree(tmp);

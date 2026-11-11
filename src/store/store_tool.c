@@ -17,6 +17,7 @@
 #include "modstock.h"
 #include "modbundle.h"
 #include "backend_log.h"
+#include "store_lock.h"
 
 #define ST_PATH_MAX (MAX_PATH * 4)
 
@@ -452,7 +453,8 @@ static void st_part(char *out, size_t cap, const char *fmt, ...)
 static int st_migrate(const st_store *s, const wchar_t *doom_arg)
 {
     st_scan before, after;
-    wchar_t *doom = NULL;
+    wchar_t *doom = NULL, *wmods;
+    HANDLE lock;
     char *doom_u8 = NULL, done[1024] = "";
     int need_doom = 0, com, result;
     if (!st_scan_store(s, &before)) { st_say(1, "error: the store folder %s cannot be read", s->u8); return SH_STORE_ERROR; }
@@ -474,6 +476,16 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     }
     if (st_doom_is_running()) {
         st_say(1, "error: DOOM is running; close it and run this again (nothing was changed)");
+        free(doom);
+        return SH_STORE_ERROR;
+    }
+    /* The mods folder's named lock (store_lock.h): no other process writes it while this runs. */
+    wmods = st_join(s->dir, L"mods");
+    lock = wmods ? sh_store_lock_take(wmods, 30000) : NULL;
+    free(wmods);
+    if (!lock) {
+        st_say(1, "error: another program is changing the mods folder; close DOOM and run this again (nothing was "
+               "changed)");
         free(doom);
         return SH_STORE_ERROR;
     }
@@ -582,6 +594,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         memset(&after, 0, sizeof after);
         after.kinds = 1;
     }
+    sh_store_lock_give(lock);
     if (!g_discard) st_part(done, sizeof done, "%u item(s) moved to the Recycle Bin", g_rc.recycled);
     if (!g_discard && g_rc.refused)
         st_say(0, "  %u item(s) were left in place because the Recycle Bin could not take them (it is turned off "
