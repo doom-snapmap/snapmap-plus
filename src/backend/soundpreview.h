@@ -22,9 +22,14 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
 /* Validate the catalog name, queue stopping the current emitter, then start
  * one preview in background-audio mode. Returns 1 when accepted for main-
  * thread execution, not when audio is confirmed; synchronous refusal returns
- * 0.
+ * 0. Either way sh_soundpreview_refusal then says why, if it was refused.
  */
 int sh_soundpreview_play(const char *name);
+
+/* Why the latest audition was refused -- at once, or later on the main thread
+ * ("Sounds play only inside a map.") -- copied into `out`; returns 1, or 0 with
+ * "" when it was accepted. Any thread. */
+int sh_soundpreview_refusal(char *out, size_t cap);
 
 /* Stop the current preview. While a session is open (below) this silences the emitter and nothing
  * else, leaving preview mode up so the next Play is instant; with no session it also drops the mode
@@ -32,8 +37,9 @@ int sh_soundpreview_play(const char *name);
 void sh_soundpreview_stop(void);
 
 /* Hold preview mode while the browser is open (on=1). Closing it (on=0) stops
- * playback and restores normal audio. Keeping the mode between clicks avoids
- * suspending and resuming the whole audio engine. Callable from any thread.
+ * playback and puts back the player's own sound settings, as they were when
+ * the mode began. Keeping the mode between clicks avoids suspending and
+ * resuming the whole audio engine. Callable from any thread.
  */
 void sh_soundpreview_set_session(int on);
 
