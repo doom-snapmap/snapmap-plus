@@ -1663,7 +1663,9 @@ feature.
   hooks off). `require(name)` loads `scripts/lib/<name>.lua` of the same mod
   once. The registration table `on` and the runtime's own objects cannot be
   edited.
-- **Bounds.** The product imposes none of its own (DECISIONS 26): a state's
+- **Bounds.** The product imposes none of its own (DECISIONS 26): event texts
+  (an `ae_notify` row, a damage decl, a Script node's name) and the stop line
+  are kept whole, of any length; a state's
   memory, the work of a call or a frame, timers, log lines, the size of a
   text a pattern searches, entities spawned, projectiles launched, remembered
   or steered, and every table of the script layer grow as far as the process
@@ -1834,7 +1836,8 @@ No script code runs anywhere else.
 - **Queues.** Hooks on any thread (damage, death, pain, animation notify,
   projectile launch, Script node input) post fixed-size records with copied
   strings and a vector into the owning mod's queue (`script_queue.c`, a spin lock per mod, growing with what
-  arrives in a frame; strings of 127 bytes). Only the tick's thread drains; only a record the process has no
+  arrives in a frame; its strings copied whole, of any length, in one block a drained record owns until
+  `sh_script_event_release`). Only the tick's thread drains; only a record the process has no
   memory for is dropped, and the mod's script log then gets one line per map. The queues, the hooks' mod
   table and the runtime's mods grow with the map's scripted mods.
 - **Console.** `sh_scripts` (`script_console.c`) prints each mod's state from
@@ -1995,11 +1998,18 @@ is touched, and a removed demon answers nil.
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
   `path_points(pos)` is the path query's computed path, read by a detour of
   the path length the query calls with it (VK 0x14050EA60 / GL 0x14050D790,
-  14-byte window, segments at +0x90); `firing_position(parms)` (kinds any, new,
+  14-byte window, segments at +0x90), every point of it (the engine's segment
+  count, copied whole); `firing_position(parms)` (kinds any, new,
   superior, reposition) and `spline_clear(target, spline, seconds, [flags])`
   are compositions of the path query, the world trace and the ground under a
   point (`sh_ai_firing_run`, `sh_ai_spline_run`; the spline is a control
-  table and a roll the script passes); `monster_type()` is the
+  table of any number of knots and a roll the script passes, and its curve
+  has a point for every knot inside it, never cut). `find_position` and
+  `firing_position` try as many candidates as `count` asks; each demon's
+  path queries take keys from a span of 16,384 in the engine's path cache, so
+  a query with more candidates than that shares keys in turn (those answer
+  "searching" a little longer). Distances, weights, blend times and the
+  seconds a spline looks ahead have no upper bound; `monster_type()` is the
   `getMonsterType` event named from the executable's aiMonsterType_t table;
   `pain_string(text | nil)` interns the text with the engine's atomic-string
   set and a 14-byte jump at the end of the pain request's painString branch
