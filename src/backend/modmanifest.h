@@ -41,27 +41,20 @@
 
 #define SH_MODMANIFEST_SALT_LEN   8
 #define SH_MODMANIFEST_SALT_CAP   (SH_MODMANIFEST_SALT_LEN + 1)
-/* The author's name, as the builder admits it: at most 80 characters
- * (SH_MB_NAME_MAX code points), so at most 320 bytes of UTF-8, and a NUL. A
- * name is never cut: every row, label and title buffer holds a whole one. */
-#define SH_MODMANIFEST_DISPLAY_CAP (80 * 4 + 1)
-
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
-#define SH_MODMANIFEST_NAME_MAX   512
-/* Registry choices a row carries ("slot\tsalt\n" lines) and per map. */
-#define SH_MODMANIFEST_CHOICES_CAP 768
-#define SH_MODMANIFEST_SLOT_MAX    160
-#define SH_MODMANIFEST_CHOICES_MAX 64
 
+/* A row's text is carried whole: the author's name, every placed name and
+ * every choice slot are heap strings of their own length, and the row
+ * format (JSON) has no field width. */
 typedef struct sh_modmanifest_row {
     char salt[SH_MODMANIFEST_SALT_CAP];          /* the mod */
     char build[SH_MODMANIFEST_HASH_CAP];         /* its canonical manifest's SHA-256 */
-    char name[SH_MODMANIFEST_DISPLAY_CAP];       /* display only */
+    char *name;            /* display only: malloc'd, NULL for none (sh_modmanifest_row_name) */
     unsigned long long size;
     char **names;          /* malloc'd strings; owned by the row */
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
-    char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<salt>\n" per entry, in text order */
+    char *choices;         /* its "choices": "<slot>\t<salt>\n" per entry, in text order; malloc'd, NULL for none */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -71,8 +64,13 @@ typedef struct sh_modmanifest_list {
 } sh_modmanifest_list;
 
 void sh_modmanifest_row_free(sh_modmanifest_row *row);
+/* The row's display name, never NULL ("" for none). */
+const char *sh_modmanifest_row_name(const sh_modmanifest_row *row);
+/* Replace the row's display name with a copy of `name` (NULL or "": none).
+ * Returns 0 when memory runs out, leaving it as it was. */
+int  sh_modmanifest_row_set_name(sh_modmanifest_row *row, const char *name);
 void sh_modmanifest_list_free(sh_modmanifest_list *list);
-/* Append a copy of `row` (names copied). Returns 0 on allocation failure. */
+/* Append a copy of `row` (its strings copied). Returns 0 on allocation failure. */
 int  sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row *row);
 /* Add `name` to the row's list unless an equal name (case-insensitive) is there. */
 int  sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name);
@@ -182,7 +180,7 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * serves in its place for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
- * (why: the gate's sentence, may be empty). `placed` says the map's placed
+ * (*why: the gate's sentence, malloc'd, or NULL). `placed` says the map's placed
  * entities name the row's namespace (`mods/<salt>/`): with nothing to serve
  * them, the engine's validator refuses the map, so the editor cannot open it. Bound by modpublished.c, which
  * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
@@ -194,7 +192,7 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * SUBSTITUTE for the player's own content), and the launched map's listing
  * declares the build this table names; a community map's Play denies. */
 typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap,
-                                            int placed, char *why, size_t why_cap);
+                                            int placed, char **why);
 void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);
 void sh_modmanifest_set_editor_load(int editor);
 /* The cause sentences such a load found for rows nothing serves ("MODS: map:
@@ -206,9 +204,10 @@ void sh_modmanifest_set_editor_load(int editor);
 int  sh_modmanifest_load_notes_flush(int say);
 int  sh_modmanifest_load_notes_pending(void);
 /* Of those notes, the first whose row the map's placed entities name (the
- * editor refuses such a map): its sentence in out (without the "MODS: map:"
- * prefix), returning 1; 0 when there is none. Cleared with the notes. */
-int  sh_modmanifest_load_refusal(char *out, size_t cap);
+ * editor refuses such a map): its sentence in *out (malloc'd; without the
+ * "MODS: map:" prefix) when out is not NULL, returning 1; 0 when there is
+ * none. Cleared with the notes. */
+int  sh_modmanifest_load_refusal(char **out);
 /* Refuse the map being parsed before anything reads it (rawmap.c: a map in an
  * earlier shape, sh_map_old_shape; the engine does not parse it, so the open
  * map's manifest stays): `sentence` replaces the held notes as the load's one
@@ -256,10 +255,11 @@ int    sh_modmanifest_current_restore_previous(void);
 int    sh_modmanifest_current_choose(const char *slot, const char *salt);
 /* 1 with the salt chosen for `slot` in `salt`, 0 when there is none. */
 int    sh_modmanifest_current_choice(const char *slot, char *salt, size_t cap);
-/* The choices as "slot\tsalt\n" lines in `out`. Returns their count. */
-size_t sh_modmanifest_current_choices(char *out, size_t cap);
+/* The choices as "slot\tsalt\n" lines in *out (malloc'd). Returns their count. */
+size_t sh_modmanifest_current_choices(char **out);
 /* The choices a list of rows carries, merged (the first row naming a slot
- * wins), as "slot\tsalt\n" lines. Returns their count. */
-size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap);
+ * wins), as "slot\tsalt\n" lines in *out (malloc'd, NULL for none).
+ * Returns their count. */
+size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char **out);
 
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */

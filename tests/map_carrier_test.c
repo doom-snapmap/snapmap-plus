@@ -5,6 +5,7 @@
  * the map's place (a plain string, after its mods); the earlier-shape
  * detector (sh_map_old_shape). */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -284,14 +285,14 @@ static void old_shapes(void)
 
 static void place_part(void)
 {
-    char err[128], out[SH_CARRIER_PLACE_CAP], *a, *b, *c;
+    char err[128], out[HO_TEXT], *a, *b, *c;
     size_t n = 0;
     printf("-- the place: a plain string after the mods, read back, removed with nothing else\n");
     a = put(ENGINE, "mods", MODS, &n, err, sizeof err);
     b = a ? sh_carrier_put_place(a, n, "Caf\xc3\xa9 arena", &n, err, sizeof err) : NULL;
     CHECK(b && !strcmp(b, ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":\"Caf\xc3\xa9 arena\"") "}"));
-    CHECK(b && sh_carrier_place(b, n, out, sizeof out) == 1 && !strcmp(out, "Caf\xc3\xa9 arena"));
-    CHECK(sh_carrier_place(ENGINE, sizeof ENGINE - 1, out, sizeof out) == 0 && !out[0]);
+    CHECK(b && HO(out, sh_carrier_place(b, n, HO_P(0))) == 1 && !strcmp(out, "Caf\xc3\xa9 arena"));
+    CHECK(HO(out, sh_carrier_place(ENGINE, sizeof ENGINE - 1, HO_P(0))) == 0 && !out[0]);
     /* No place: removed; the mods stay. */
     c = b ? sh_carrier_put_place(b, n, NULL, &n, err, sizeof err) : NULL;
     CHECK(c && !strcmp(c, a));
@@ -303,9 +304,8 @@ static void place_part(void)
     {
         static const char esc[] = ENGINE_HEAD MEMBER(",\"place\":\"..\\\\x\"") "}";
         static const char num[] = ENGINE_HEAD MEMBER(",\"place\":7") "}";
-        CHECK(sh_carrier_place(esc, sizeof esc - 1, out, sizeof out) == -1);
-        CHECK(sh_carrier_place(num, sizeof num - 1, out, sizeof out) == -1);
-        CHECK(sh_carrier_place(esc, sizeof esc - 1, out, 2) == -1);
+        CHECK(HO(out, sh_carrier_place(esc, sizeof esc - 1, HO_P(0))) == -1);
+        CHECK(HO(out, sh_carrier_place(num, sizeof num - 1, HO_P(0))) == -1);
     }
     if (a) HeapFree(GetProcessHeap(), 0, a);
     if (b) HeapFree(GetProcessHeap(), 0, b);

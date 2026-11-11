@@ -10,6 +10,7 @@
  *
  * Without an install the real cases print one line and are skipped. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -293,7 +294,7 @@ static char *stock_text(const char *request, size_t *len)
     char *t;
     *len = 0;
     if (sh_mb_stock_identify(request, sha, &size) != SH_MB_STOCK_OK ||
-        sh_mb_stock_read(request, sha, &bytes, len, request, cause, sizeof cause) != SH_MB_STOCK_OK) return NULL;
+        HO(cause, sh_mb_stock_read(request, sha, &bytes, len, request, HO_P(0))) != SH_MB_STOCK_OK) return NULL;
     t = (char *)malloc(*len + 1);
     if (t) { memcpy(t, bytes, *len); t[*len] = 0; }
     HeapFree(GetProcessHeap(), 0, bytes);

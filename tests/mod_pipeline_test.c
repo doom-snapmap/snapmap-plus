@@ -11,6 +11,7 @@
  * palette (lane M6: rows of a named bundle that the built palette lacks are
  * registered by one rebuild before the map parses). */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,16 +65,17 @@ static int stock_exists(void *ctx, const char *request)
 
 /* ---- builder entry (modcmd.c in the product) ------------------------------------------------ */
 
-int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder, char **first_cause)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     int ok = 0;
-    if (!sh_mb_build(folder, NULL, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
-    else if (!sh_mb_write(&b, folder, cause, sizeof cause)) strncpy_s(first_cause, n, cause, _TRUNCATE);
+    if (!sh_mb_build(folder, NULL, &r, &b)) cause = _strdup(sh_mb_first_cause(&b));
+    else if (!sh_mb_write(&b, folder, &cause)) {}
     else ok = 1;
-    if (!ok) printf("    builder refused %s: %s\n", folder, first_cause);
+    if (!ok) printf("    builder refused %s: %s\n", folder, cause ? cause : "");
+    if (first_cause) *first_cause = cause; else free(cause);
     sh_mb_free(&b);
     return ok;
 }
@@ -128,13 +130,13 @@ static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_loa
 static int g_gate[2] = { 1, 1 };         /* g_useImageBlackList, g_useResourceBlackList */
 static int g_gate_reads, g_gate_sets, g_registered_at_first_set = -1;
 static int gate_slot(const char *cvar) { return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1; }
-static int gate_read(void *c, const char *cvar, char *value, size_t cap)
+static int gate_read(void *c, const char *cvar, char **value)
 {
     int g = gate_slot(cvar);
     (void)c;
     g_gate_reads++;
     if (g < 0) return 0;
-    _snprintf_s(value, cap, _TRUNCATE, "%d", g_gate[g]);
+    ho_setf(value, "%d", g_gate[g]);
     return 1;
 }
 static int gate_set(void *c, const char *cvar, const char *value)
@@ -264,7 +266,7 @@ static const char MAP[] =
 
 static void fresh_mod(const char *fixture, const char *root)
 {
-    char mods[MAX_PATH], folder[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    char mods[MAX_PATH], folder[MAX_PATH], cause[HO_TEXT];
     sh_mb_bundle b;
     sh_modserve_hit hit;
     sh_modserve_plan plan;
@@ -280,14 +282,14 @@ static void fresh_mod(const char *fixture, const char *root)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\alex.r2-imp", mods);
     CreateDirectoryA(mods, NULL);
     CHECK(mt_copy_tree(fixture, folder));
-    CHECK(modbundle_build_folder(folder, cause, sizeof cause) == 1);
+    CHECK(HO(cause, modbundle_build_folder(folder, HO_P(0))) == 1);
     _snprintf_s(cause, sizeof cause, _TRUNCATE, "%s\\mod.json", folder);
     CHECK(sh_mb_load(cause, &b) == 1);
 
     /* The serving index admits what the builder accepted, including raw
      * files under the engine's '_' spelling of the id. */
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(sh_modserve_bundle_state(b.hash, NULL, 0) == 1);
+    CHECK(sh_modserve_bundle_state(b.hash, NULL) == 1);
     for (i = 0; i < (int)b.file_count; i++) {
         CHECK(sh_modserve_lookup(b.files[i].request, &hit) == 1);
         if (strstr(b.files[i].request, "alexrimp")) CHECK(hit.size == b.files[i].size);
@@ -405,16 +407,16 @@ static void skins_namespace(const char *root)
     mt_write(folder, "mod.json", "{\"name\":\"Skin test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexskin\"}}");
     mt_write(folder, "assets\\generated\\decls\\skins\\md6\\mods\\alexskin\\imp.md6mesh.decl", "{\r\n}");
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 1);
-    if (b.errors) printf("    %s\n", b.first_cause);
+    if (b.errors) printf("    %s\n", sh_mb_first_cause(&b));
     {
-        char cause[SH_MB_CAUSE_MAX];
-        CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
+        char cause[HO_TEXT];
+        CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))) == 1);
     }
     sh_mb_free(&b);
     CHECK(sh_modserve_index_build(mods) == 1);
     /* A skins decl outside the namespace is still refused. */
     mt_write(folder, "assets\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
-    CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(b.first_cause, "skins decl"));
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(sh_mb_first_cause(&b), "skins decl"));
     sh_mb_free(&b);
 }
 
@@ -427,7 +429,7 @@ static const char CUT_DESC[] =
 
 static void cut_content(const char *root)
 {
-    char mods[MAX_PATH], folder[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    char mods[MAX_PATH], folder[MAX_PATH], cause[HO_TEXT];
     sh_mb_bundle b;
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     const char *hashes[1];
@@ -437,7 +439,7 @@ static void cut_content(const char *root)
     mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\localcut\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
     mt_write(folder, "mod.json", CUT_DESC);
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 1 && b.requirements != NULL);
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))) == 1);
     g_log[0] = 0;
     CHECK(sh_modserve_index_build(mods) == 1);
     CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for Cut") &&

@@ -15,6 +15,7 @@
  *
  *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload_v4.json>
  */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,14 +345,13 @@ static int fake_preload(const char *why)
 /* Mod scripts: the builder's compile check (script_compile.c in the product)
  * fails a text holding BROKEN at line 4 as Lua would say it; the runtime's
  * state, log and the sound banks a restart brings in are the test's. */
-static int fake_script_check(const char *file, int entry, const char *text, size_t len, int *line, char *what,
-                             size_t what_cap, char *todo, size_t todo_cap)
+static int fake_script_check(const char *file, int entry, const char *text, size_t len, int *line, char **what, char **todo)
 {
     (void)file; (void)entry; (void)len;
     if (!strstr(text, "BROKEN")) return 1;
     *line = 4;
-    strncpy_s(what, what_cap, "\"end\" expected to close \"function\" on line 2", _TRUNCATE);
-    strncpy_s(todo, todo_cap, "correct it, then press Refresh", _TRUNCATE);
+    ho_set(what, "\"end\" expected to close \"function\" on line 2");
+    ho_set(todo, "correct it, then press Refresh");
     return 0;
 }
 static int g_script_on;                 /* the runtime knows g_script_salt */
@@ -432,7 +432,7 @@ static int load_rows(const char *const *salts, const char *const *builds, const 
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, salts[i]);
         strcpy_s(row.build, sizeof row.build, builds[i]);
-        strcpy_s(row.name, sizeof row.name, names[i]);
+        sh_modmanifest_row_set_name(&row, names[i]);
         row.size = 10;
         row.attached = 1;
         if (!sh_modmanifest_list_add(&rows, &row)) return 0;
@@ -704,7 +704,7 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, salt);
     strcpy_s(row.build, sizeof row.build, build);
-    strcpy_s(row.name, sizeof row.name, name);
+    sh_modmanifest_row_set_name(&row, name);
     row.size = 1234;
     CHECK(sh_modmanifest_row_add_name(&row, placed ? placed : "mods/alexrimp/imp_copy"));
     CHECK(sh_modmanifest_list_add(&rows, &row));
@@ -903,22 +903,22 @@ static void age_dir(const char *dir, unsigned days)
     free(w);
 }
 
-static void test_places_prune(const char *tmp)
+static void test_places_stay(const char *tmp)
 {
-    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], *text;
-    static const char *const keeps[] = { "Old Keep", "Kept Keep", "New Keep" };
+    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[HO_TEXT], *doc;
+    static const char *const keeps[] = { "Old Keep", "Other Keep" };
     sh_mb_bundle b;
-    size_t tl = 0, i;
-    printf("-- places: a downloaded map's mods no saved map uses and not played for 30 days go at start\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\prune\\mods", tmp);
+    size_t i;
+    printf("-- places: nothing removes a downloaded map's mods by itself; the short view's Remove removes one folder\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\stay\\mods", tmp);
     CHECK(sh_ms_set_root(root));
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\prune\\built", tmp);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\stay\\built", tmp);
     mt_write(src, "mod.json", "{\"name\":\"Crate\"}");
     mt_write(src, "assets\\generated\\image\\mods\\cratebox\\a.bimage", "crate bytes");
     memset(&b, 0, sizeof b);
-    CHECK(sh_mb_build(src, "cratebox", NULL, &b) && sh_mb_write(&b, src, cause, sizeof cause));
+    CHECK(sh_mb_build(src, "cratebox", NULL, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
     sh_mb_free(&b);
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 2; i++) {
         sh_ms_place pl;
         char note[MAX_PATH];
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate", root, keeps[i]);
@@ -929,49 +929,36 @@ static void test_places_prune(const char *tmp)
         _snprintf_s(note, sizeof note, _TRUNCATE, "maps\\%s", keeps[i]);
         CHECK(sh_ms_place_note(&pl, note));
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s", root, keeps[i]);
-        if (i < 2) age_dir(dir, 40);   /* arrived long ago, never played since */
+        age_dir(dir, 365);   /* arrived a year ago, never played since */
     }
-    /* New Keep arrived long ago too, but its map was played just now. */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep", root);
-    age_dir(dir, 40);
-    CHECK(sh_ms_place_played(NULL, "maps\\New Keep") == 1);
-    /* A saved map of the player records Kept Keep. */
-    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\prune\\saves", tmp);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPS0000000000000000PRUNE", saves);
-    text = sh_carrier_put_place(MAP, sizeof MAP - 1, "Kept Keep", &tl, cause, sizeof cause);
-    CHECK(text != NULL);
-    mt_mkdirs_for(dir);
-    CreateDirectoryA(dir, NULL);
-    if (text) { put_saved_decl(dir, text, tl); HeapFree(GetProcessHeap(), 0, text); }
-    /* Saves that cannot be read keep everything. */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\nowhere", saves);
-    sh_modui_test_set_saves_root(dir);
-    CHECK(sh_ms_places_prune(30) == -1 && sh_ms_place_saved_maps("maps\\Kept Keep") == -1);
+    /* No saved map of the player records either place. */
+    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\stay\\saves", tmp);
+    CreateDirectoryA(saves, NULL);
     sh_modui_test_set_saves_root(saves);
-    CHECK(sh_ms_place_saved_maps("maps\\Kept Keep") == 1 && sh_ms_place_saved_maps("Old Keep") == 0);
-    sh_ms_recycle_refuse_for_test(1);
-    CHECK(sh_ms_places_prune(30) == 1);
-    sh_ms_recycle_refuse_for_test(0);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep", root);
-    CHECK(!mt_exists(dir));   /* the emptied place goes with its folder */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Kept Keep\\Crate\\mod.json", root);
-    CHECK(mt_exists(dir));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep\\Crate\\mod.json", root);
-    CHECK(mt_exists(dir));
-    CHECK(sh_ms_places_prune(30) == 0);
-    /* Any number of saved maps with places: 600 of them are all read. */
-    for (i = 0; i < 600; i++) {
-        char seg[32];
-        _snprintf_s(seg, sizeof seg, _TRUNCATE, "Place %u", (unsigned)i);
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s%c76561198000000000%cSNAPMAPS%024u", saves, 92, 92, (unsigned)i);
-        text = sh_carrier_put_place(MAP, sizeof MAP - 1, seg, &tl, cause, sizeof cause);
-        CHECK(text != NULL);
-        CreateDirectoryA(dir, NULL);
-        if (text) { put_saved_decl(dir, text, tl); HeapFree(GetProcessHeap(), 0, text); }
+    /* What the product does at start: both places are still there. */
+    (void)sh_ms_recover_work();
+    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+    for (i = 0; i < 2; i++) {
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate\\mod.json", root, keeps[i]);
+        CHECK(mt_exists(dir));
     }
-    CHECK(sh_ms_places_prune(30) == 0 && sh_ms_place_saved_maps("maps\\Place 599") == 1);
+    /* The player's Remove of one of them removes exactly that folder. */
+    sh_ms_recycle_refuse_for_test(1);
+    doc = run_doc(SH_MODS_ACT_UNINSTALL, "maps\\Old Keep\\Crate");
+    CHECK(has(doc, "\"ok\":true"));
+    free(doc);
+    sh_ms_recycle_refuse_for_test(0);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep\\Crate", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Other Keep\\Crate\\mod.json", root);
+    CHECK(mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\built\\mod.json", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod.json", src);
+    CHECK(mt_exists(dir));
     sh_modui_test_set_saves_root(NULL);
     CHECK(sh_ms_set_root(g_root));
+    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
 }
 
 int main(int argc, char **argv)
@@ -1271,7 +1258,7 @@ int main(int argc, char **argv)
 
     printf("-- a downloaded map's place: its own group, kept as the map needs it\n");
     {
-        char built[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "";
+        char built[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "";
         sh_ms_install_stats st;
         sh_ms_place place;
         sh_mb_bundle bd;
@@ -1287,7 +1274,7 @@ int main(int argc, char **argv)
             sh_mb_resolver r;
             memset(&r, 0, sizeof r);
             r.stock = stock_cb;
-            CHECK(sh_ms_install_placed(built, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+            CHECK(HO2(name, cause, sh_ms_install_placed(built, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
         }
         if (cause[0]) printf("    placed: %s\n", cause);
         sh_mb_free(&bd);
@@ -1338,7 +1325,7 @@ int main(int argc, char **argv)
 
     printf("-- Add to my mods: a downloaded map's mod copied to the root, off the game's thread\n");
     {
-        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "", key[600], esc[800];
+        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "", key[600], esc[800];
         sh_ms_install_stats st;
         sh_ms_place place;
         sh_mb_bundle bd;
@@ -1356,9 +1343,9 @@ int main(int argc, char **argv)
         r.stock = stock_cb;
         place.title = "Solo Arena";
         place.map_id = "6ae40b378bf5037d3d63bd77";
-        CHECK(sh_ms_install_placed(recv, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+        CHECK(HO2(name, cause, sh_ms_install_placed(recv, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
         sh_mb_free(&bd);
-        CHECK(sh_ms_delete_mod_folder(solo, cause, sizeof cause) != 0);
+        CHECK(HO(cause, sh_ms_delete_mod_folder(solo, HO_P(0))) != 0);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
         esc[w] = 0;
@@ -1451,7 +1438,7 @@ int main(int argc, char **argv)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "alexrimp");
         strcpy_s(row.build, sizeof row.build, hash1);
-        strcpy_s(row.name, sizeof row.name, "R2 Imp copy");
+        sh_modmanifest_row_set_name(&row, "R2 Imp copy");
         CHECK(sh_modmanifest_list_add(&rows, &row));
         text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
         CHECK(text != NULL);
@@ -1865,7 +1852,7 @@ int main(int argc, char **argv)
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     }
 
-    test_places_prune(tmp);
+    test_places_stay(tmp);
 
     printf("-- the page's fixture keys are the backend's\n");
     keys_match_fixture(payload, g_union ? g_union : "");

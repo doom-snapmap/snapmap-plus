@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "map_carrier.h"
@@ -264,31 +265,39 @@ void sh_carrier_describe(const sh_carrier_view *v, char *out, size_t cap)
                 (v->mods.present || v->place.present || v->settings.present || v->nav.present) ? "" : "no parts");
 }
 
-int sh_carrier_place(const char *json, size_t len, char *out, size_t cap)
+int sh_carrier_place(const char *json, size_t len, char **out)
 {
     size_t from = 0, to = 0, n;
     int got = sh_carrier_part(json, len, "place", &from, &to);
-    if (out && cap) out[0] = 0;
+    if (out) *out = NULL;
     if (got <= 0) return got;
     n = to - from - 2;   /* the string's body, between its quotes */
-    /* A place is a folder name: written without escapes, and short. */
-    if (to - from < 2 || !out || n >= cap || memchr(json + from + 1, '\\', n)) return -1;
-    memcpy(out, json + from + 1, n);
-    out[n] = 0;
+    /* A place is a folder name, written without escapes, of any length. */
+    if (to - from < 2 || !out || memchr(json + from + 1, '\\', n)) return -1;
+    if (!(*out = (char *)malloc(n + 1))) return -1;
+    memcpy(*out, json + from + 1, n);
+    (*out)[n] = 0;
     return 1;
 }
 
 char *sh_carrier_put_place(const char *json, size_t len, const char *place, size_t *out_len, char *err, size_t err_cap)
 {
-    char value[SH_CARRIER_PLACE_CAP + 2];
+    char *value = NULL, *out;
     size_t n = place ? strlen(place) : 0;
-    if (n >= SH_CARRIER_PLACE_CAP || (n && (strchr(place, '"') || strchr(place, '\\')))) {
+    if (n && (strchr(place, '"') || strchr(place, '\\'))) {
         if (out_len) *out_len = 0;
         if (err && err_cap) strncpy_s(err, err_cap, "the place is not a folder name", _TRUNCATE);
         return NULL;
     }
-    if (n) _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", place);
-    return sh_carrier_put(json, len, "place", n ? value : NULL, n ? n + 2 : 0, out_len, err, err_cap);
+    if (n && !(value = (char *)malloc(n + 3))) {
+        if (out_len) *out_len = 0;
+        if (err && err_cap) strncpy_s(err, err_cap, "out of memory", _TRUNCATE);
+        return NULL;
+    }
+    if (n) { value[0] = '"'; memcpy(value + 1, place, n); value[n + 1] = '"'; value[n + 2] = 0; }
+    out = sh_carrier_put(json, len, "place", value, n ? n + 2 : 0, out_len, err, err_cap);
+    free(value);
+    return out;
 }
 
 /* ------------------------------------------------------------ strip / put */

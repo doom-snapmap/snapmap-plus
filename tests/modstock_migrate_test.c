@@ -14,6 +14,7 @@
  * Links the real builder, store, legacy converter and bridge; the serving
  * index is the seam stub (mod_seam_stub.c). */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,8 +135,8 @@ int main(void)
     sh_ms_list_free(&l);
     {
         sh_ms_verify_stats vs;
-        char cause[SH_MB_CAUSE_MAX];
-        CHECK(sh_ms_verify("cyber", &vs, cause, sizeof cause) && vs.pointers == 2);
+        char cause[HO_TEXT];
+        CHECK(HO(cause, sh_ms_verify("cyber", &vs, HO_P(0))) && vs.pointers == 2);
     }
     {
         char *record;

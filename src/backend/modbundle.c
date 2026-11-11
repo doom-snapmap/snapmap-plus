@@ -8,7 +8,8 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <shlobj.h>
-#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathW */
+#pragma comment(lib, "shell32.lib")   /* SHGetKnownFolderPath */
+#pragma comment(lib, "ole32.lib")     /* CoTaskMemFree */
 
 #include "modbundle.h"
 #include "modsalt.h"
@@ -24,11 +25,11 @@
 #include "sha256.h"
 #include "script/script_node.h"   /* the Script node row: its reserved paths, which mods get it */
 #include "store_lock.h"
+#include "text.h"
 
 #define MB_ANY_SIZE ((size_t)-1)   /* a read of a whole file, of any size */
 
 #define MB_JSON_DEPTH   32u
-#define MB_WALK_DEPTH   48
 #define MB_SCAN_DEPTH   128
 #define MB_READ_CHUNK   (1u << 20)
 
@@ -209,18 +210,24 @@ wchar_t *sh_mb_wpath(const char *utf8)
     return out;
 }
 
-int sh_mb_user_root(char *out, size_t cap)
+const char *sh_mb_user_root(void)
 {
-    wchar_t base[MAX_PATH];
-    char *u;
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
-    u = sh_mb_utf8(base);
-    if (!u) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus", u);
+    static char *volatile root;
+    PWSTR known = NULL;
+    char *u, *made;
+    if (root) return root;
+    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) {
+        if (known) CoTaskMemFree(known);
+        return NULL;
+    }
+    u = sh_mb_utf8(known);
+    CoTaskMemFree(known);
+    made = u ? sh_textf("%s\\snapmap-plus", u) : NULL;
     free(u);
-    return out[0] != 0 && strlen(out) + 1 < cap;
+    if (!made) return NULL;
+    /* The first thread to resolve it keeps its copy; a later one frees its own. */
+    if (InterlockedCompareExchangePointer((void *volatile *)&root, made, NULL) != NULL) free(made);
+    return root;
 }
 
 static wchar_t *mb_wjoin(const wchar_t *dir, const wchar_t *name)
@@ -533,7 +540,9 @@ fail:
 }
 
 /* Strict validation (UTF-8, duplicate keys, syntax) then the tree. */
-static mbj *mbj_parse(const char *text, size_t len, char *cause, size_t cap)
+static int mb_cause(char **cause, const char *fmt, ...);
+
+static mbj *mbj_parse(const char *text, size_t len, char **cause)
 {
     sh_json_kind kind;
     sh_json_error err = {0};
@@ -542,8 +551,7 @@ static mbj *mbj_parse(const char *text, size_t len, char *cause, size_t cap)
     if (len >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB &&
         (unsigned char)text[2] == 0xBF) { text += 3; len -= 3; }
     if (!sh_json_validate_ex(text, len, MB_JSON_DEPTH, &kind, &err)) {
-        if (cause) _snprintf_s(cause, cap, _TRUNCATE, "invalid JSON at byte %zu: %s", err.offset,
-                               err.reason ? err.reason : "syntax error");
+        mb_cause(cause, "invalid JSON at byte %zu: %s", err.offset, err.reason ? err.reason : "syntax error");
         return NULL;
     }
     ps.p = text; ps.end = text + len; ps.depth = 0; ps.failed = 0;
@@ -551,7 +559,7 @@ static mbj *mbj_parse(const char *text, size_t len, char *cause, size_t cap)
     if (v) mbj_ws(&ps);
     if (!v || ps.p != ps.end) {
         mbj_free(v);
-        if (cause) _snprintf_s(cause, cap, _TRUNCATE, "JSON could not be read (strings must be valid Unicode)");
+        mb_cause(cause, "JSON could not be read (strings must be valid Unicode)");
         return NULL;
     }
     return v;
@@ -607,7 +615,7 @@ static int mb_key_cmp(void *ctx, const void *a, const void *b)
 }
 
 /* Canonical text of a value: sorted keys, no whitespace, integer or fixed-decimal numbers kept verbatim. */
-static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
+static int mbj_canon(const mbj *v, mb_buf *b, char **cause)
 {
     size_t i;
     switch (v->t) {
@@ -616,7 +624,7 @@ static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
     case MBJ_STR: mb_put_jstr(b, v->s, v->n); return 1;
     case MBJ_NUM:
         if (!mb_plain_integer(v->s, v->n) && !mb_plain_decimal(v->s, v->n)) {
-            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "number %.32s is not a plain integer or fixed decimal", v->s);
+            mb_cause(cause, "number %s is not a plain integer or fixed decimal", v->s);
             return 0;
         }
         mb_puts(b, strcmp(v->s, "-0") == 0 ? "0" : v->s);
@@ -625,7 +633,7 @@ static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
         mb_put(b, "[", 1);
         for (i = 0; i < v->count; i++) {
             if (i) mb_put(b, ",", 1);
-            if (!mbj_canon(v->items[i], b, cause, cap)) return 0;
+            if (!mbj_canon(v->items[i], b, cause)) return 0;
         }
         mb_put(b, "]", 1);
         return 1;
@@ -639,7 +647,7 @@ static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
             if (i) mb_put(b, ",", 1);
             mb_put_jstr(b, v->keys[order[i]], v->klen[order[i]]);
             mb_put(b, ":", 1);
-            if (!mbj_canon(v->items[order[i]], b, cause, cap)) { free(order); return 0; }
+            if (!mbj_canon(v->items[order[i]], b, cause)) { free(order); return 0; }
         }
         mb_put(b, "}", 1);
         free(order);
@@ -757,50 +765,56 @@ static int mb_path_char(char c)
            (c && strchr("._-$+@~() ", c) != NULL);
 }
 
-static int mb_cause(char *cause, size_t cap, const char *fmt, ...)
+/* Set *cause (when cause is not NULL) to the formatted sentence, replacing
+ * what it held. Returns 0, the failure the caller returns. */
+static int mb_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
-    if (cause && cap) {
-        va_start(ap, fmt);
-        _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
-        va_end(ap);
-    }
+    char *text;
+    if (!cause) return 0;
+    va_start(ap, fmt);
+    text = sh_vtextf(fmt, ap);
+    va_end(ap);
+    free(*cause);
+    *cause = text ? text : _strdup("out of memory");
     return 0;
 }
 
-int sh_mb_check_request(const char *r, char *cause, size_t cap)
+int sh_mb_check_request(const char *r, char **cause)
 {
     size_t n, i, seg = 0;
-    if (!r || !r[0]) return mb_cause(cause, cap, "empty path");
+    if (!r || !r[0]) return mb_cause(cause, "empty path");
     n = strlen(r);
-    if (n > SH_MB_REQUEST_MAX) return mb_cause(cause, cap, "path longer than %u bytes: %.80s...", SH_MB_REQUEST_MAX, r);
     if (r[0] == '/' || r[0] == '\\' || (n > 1 && r[1] == ':'))
-        return mb_cause(cause, cap, "absolute path: %s", r);
+        return mb_cause(cause, "absolute path: %s", r);
     for (i = 0; i <= n; i++) {
         char c = r[i];
         if (c == '/' || c == 0) {
             size_t len = i - seg;
-            if (len == 0) return mb_cause(cause, cap, "empty path segment: %s", r);
+            if (len == 0) return mb_cause(cause, "empty path segment: %s", r);
             if ((len == 1 && r[seg] == '.') || (len == 2 && r[seg] == '.' && r[seg + 1] == '.'))
-                return mb_cause(cause, cap, "path traversal segment: %s", r);
+                return mb_cause(cause, "path traversal segment: %s", r);
             if (r[i - 1] == '.' || r[i - 1] == ' ')
-                return mb_cause(cause, cap, "path segment ends with '.' or a space: %s", r);
-            if (r[seg] == ' ') return mb_cause(cause, cap, "path segment starts with a space: %s", r);
+                return mb_cause(cause, "path segment ends with '.' or a space: %s", r);
+            if (r[seg] == ' ') return mb_cause(cause, "path segment starts with a space: %s", r);
             seg = i + 1;
             continue;
         }
-        if (c == '\\') return mb_cause(cause, cap, "backslash in path: %s", r);
+        if (c == '\\') return mb_cause(cause, "backslash in path: %s", r);
         if (!mb_path_char(c)) {
             /* The character itself (a UTF-8 sequence decoded), named in plain words. */
             const unsigned char *u = (const unsigned char *)r + i;
             unsigned long cp = u[0];
-            char why[400];
+            char *why;
             if (u[0] >= 0xc2 && u[0] < 0xe0 && (u[1] & 0xc0) == 0x80) cp = ((u[0] & 0x1fu) << 6) | (u[1] & 0x3fu);
             else if (u[0] >= 0xe0 && u[0] < 0xf0 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80)
                 cp = ((u[0] & 0x0fu) << 12) | ((u[1] & 0x3fu) << 6) | (u[2] & 0x3fu);
             else if (u[0] >= 0xf0 && u[0] < 0xf5 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80 && (u[3] & 0xc0) == 0x80)
                 cp = ((u[0] & 0x07ul) << 18) | ((u[1] & 0x3ful) << 12) | ((u[2] & 0x3ful) << 6) | (u[3] & 0x3ful);
-            return mb_cause(cause, cap, "%s", sh_reason(SH_REASON_NAME, (long)cp, r, 0, why, sizeof why));
+            why = sh_reason(SH_REASON_NAME, (long)cp, r, 0);
+            mb_cause(cause, "%s", why ? why : "a file name holds a character the game does not accept; rename it");
+            free(why);
+            return 0;
         }
     }
     return 1;
@@ -821,7 +835,7 @@ int sh_mb_extension_allowed(const char *request)
     /* A script only in the mod's scripts folder (sh_mb_script_request). */
     if (mb_ieq_n(dot, strlen(dot), ".lua")) return sh_mb_script_request(request, NULL, NULL) > 0;
     /* A virtual-texture family member only at a name the engine's loader builds. */
-    if (mb_ieq_n(dot, strlen(dot), ".mega2")) return sh_mb_vt_member(request, NULL, 0, NULL);
+    if (mb_ieq_n(dot, strlen(dot), ".mega2")) return sh_mb_vt_member(request, NULL, NULL);
     /* .baas_<class>, for example .baas_monster48 */
     if (strlen(dot) > 6 && mb_ieq_n(dot, 6, ".baas_")) {
         for (i = 6; dot[i]; i++)
@@ -876,33 +890,31 @@ int sh_mb_script_request(const char *request, const char **name, size_t *name_le
     return kind;
 }
 
-void sh_mb_script_file_name(const char *request, char *out, size_t cap)
+char *sh_mb_script_file_name(const char *request)
 {
     const char *name = NULL;
     size_t len = 0;
     int kind = sh_mb_script_request(request, &name, &len);
-    if (!cap) return;
-    if (kind > 0)
-        _snprintf_s(out, cap, _TRUNCATE, "scripts\\%s%.*s.lua", kind == SH_MB_SCRIPT_LIB ? "lib\\" : "", (int)len, name);
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "%s", request ? request : "");
+    if (kind > 0) return sh_textf("scripts\\%s%.*s.lua", kind == SH_MB_SCRIPT_LIB ? "lib\\" : "", (int)len, name);
+    return sh_text(request ? request : "");
 }
 
-void sh_mb_script_where(const char *child, const char *salt, const char *folder, char *out, size_t cap)
+char *sh_mb_script_where(const char *child, const char *salt, const char *folder)
 {
-    size_t n = salt ? strlen(salt) : 0, len;
-    char *p;
-    if (!out || !cap) return;
+    size_t n = salt ? strlen(salt) : 0;
+    char *where, *out, *p;
     if (!folder || !folder[0]) folder = "<this mod's folder>";
     if (n && child && !_strnicmp(child, "assets/mods/", 12) && !_strnicmp(child + 12, salt, n) && child[12 + n] == '/')
-        _snprintf_s(out, cap, _TRUNCATE, "assets/mods/%s/%s", folder, child + 13 + n);
+        where = sh_textf("assets/mods/%s/%s", folder, child + 13 + n);
     else
-        _snprintf_s(out, cap, _TRUNCATE, "%s", child ? child : "");
-    for (p = out; *p; p++) if (*p == '/') *p = '\\';
-    len = strlen(out);
-    _snprintf_s(out + len, cap - len, _TRUNCATE, ": a script goes in this mod's own scripts folder, "
-                "assets\\mods\\%s\\scripts\\ for the files that run or assets\\mods\\%s\\scripts\\lib\\ for the files "
-                "loaded with require; move it there", folder, folder);
+        where = sh_text(child ? child : "");
+    if (!where) return NULL;
+    for (p = where; *p; p++) if (*p == '/') *p = '\\';
+    out = sh_textf("%s: a script goes in this mod's own scripts folder, assets\\mods\\%s\\scripts\\ for the files that "
+                   "run or assets\\mods\\%s\\scripts\\lib\\ for the files loaded with require; move it there", where,
+                   folder, folder);
+    free(where);
+    return out;
 }
 
 static volatile sh_mb_script_check_fn g_mb_script_check;
@@ -1149,17 +1161,14 @@ static int mb_is_module_request(const char *r)
            mb_iends(r, n, ".decl");
 }
 
-int sh_mb_module_info_request(const char *request, char *out, size_t cap)
+char *sh_mb_module_info_request(const char *request)
 {
-    size_t n;
-    if (!mb_is_module_request(request)) return 0;
-    n = strlen(request);
+    char *out;
+    if (!mb_is_module_request(request)) return NULL;
     /* "maps/modules/" + <path> + ".decl" -> "generated/decls/snapmoduleinfo/" + <path> + ".decl" */
-    if (31 + (n - 13) + 1 > cap) return 0;
-    memcpy(out, "generated/decls/snapmoduleinfo/", 31);
-    memcpy(out + 31, request + 13, n - 13 + 1);
-    mb_lower(out);
-    return 1;
+    out = sh_textf("generated/decls/snapmoduleinfo/%s", request + 13);
+    if (out) mb_lower(out);
+    return out;
 }
 
 /* The mega2 loader opens <path without extension>_sq1..16.mega2 for the path
@@ -1168,7 +1177,7 @@ int sh_mb_module_info_request(const char *request, char *out, size_t cap)
  * and "_sq<N>.mega2". The family must sit in a folder below mods/ and must not
  * contain "_vmtr": a material whose landpagefile contains it binds the stock
  * family instead. */
-int sh_mb_vt_member(const char *request, char *family, size_t cap, int *member)
+int sh_mb_vt_member(const char *request, char **family, int *member)
 {
     const char *leaf, *digits, *end;
     size_t n, fam_len, i;
@@ -1187,20 +1196,8 @@ int sh_mb_vt_member(const char *request, char *family, size_t cap, int *member)
     fam_len = (size_t)(digits - 3 - (request + 16));        /* "mods/<id>/.../<family>" */
     for (i = 16; i + 5 <= 16 + fam_len; ++i)
         if (!_strnicmp(request + i, "_vmtr", 5)) return 0;
-    if (family) {
-        if (fam_len + 1 > cap) return 0;
-        memcpy(family, request + 16, fam_len);
-        family[fam_len] = 0;
-    }
+    if (family && !(*family = sh_textn(request + 16, fam_len))) return 0;
     if (member) *member = num;
-    return 1;
-}
-
-static int mb_copy_out(char *dst, size_t cap, const char *src, size_t n)
-{
-    if (n + 1 > cap) return 0;
-    memcpy(dst, src, n);
-    dst[n] = 0;
     return 1;
 }
 
@@ -1236,13 +1233,14 @@ int sh_mb_bank_stem(const char *request, char *stem, size_t cap)
     return 1;
 }
 
-int sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap)
+int sh_mb_bank_rule(const char *request, const char *id, char **cause)
 {
     char stem[SH_MB_BANK_STEM_MAX + 1], prefix[SH_MB_ID_MAX + 2], low[SH_MB_BANK_STEM_MAX + 1];
     size_t i, n, pn;
     if (!sh_mb_bank_stem(request, stem, sizeof stem))
-        return mb_cause(cause, cap, "%s: a sound bank goes in sound/soundbanks/pc/ with a file name of at most %u "
-                        "characters; move or rename it", request ? request : "", (unsigned)SH_MB_BANK_STEM_MAX);
+        return mb_cause(cause, "%s: a sound bank goes in sound/soundbanks/pc/ itself, with a file name of at most 238 "
+                        "characters (Windows holds a file name of 255, and the game is handed the bank under its "
+                        "name with 17 characters of its hash added); move or rename it", request ? request : "");
     _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s_", id);
     pn = strlen(prefix);
     n = strlen(stem);
@@ -1250,49 +1248,66 @@ int sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap
         char c = stem[i];
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
-            return mb_cause(cause, cap, "%s: a sound bank's file name may hold only letters, digits and _; rename it",
+            return mb_cause(cause, "%s: a sound bank's file name may hold only letters, digits and _; rename it",
                             request);
         low[i] = c;
     }
     low[n] = 0;
     if (n <= pn || strncmp(low, prefix, pn) != 0)
-        return mb_cause(cause, cap, "%s: a sound bank's file name must start with this mod folder's name and _ (for "
+        return mb_cause(cause, "%s: a sound bank's file name must start with this mod folder's name and _ (for "
                         "example <folder name>_music.bnk); rename it and press Refresh", request);
     /* The engine's listed-bank filter skips these in some game mode (doom_*_sp
      * in SnapMap, *_snapmaps outside it, *initial* and Init always), and the
      * product submits banks through that filter. */
     if (strstr(low, "_sp") || strstr(low, "_snapmaps") || strstr(low, "initial") || !strcmp(low, "init"))
-        return mb_cause(cause, cap, "%s: the game skips a sound bank whose file name contains _sp, _snapmaps or "
+        return mb_cause(cause, "%s: the game skips a sound bank whose file name contains _sp, _snapmaps or "
                         "initial; rename it", request);
     return 1;
 }
 
-int sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char *cause, size_t cap)
+int sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char **cause)
 {
     uint32_t size, version, id, want;
     if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) != 0)
-        return mb_cause(cause, cap, "%s.bnk is not a Wwise sound bank; export it from Wwise again", stem);
+        return mb_cause(cause, "%s.bnk is not a Wwise sound bank; export it from Wwise again", stem);
     memcpy(&size, bytes + 4, 4);
     memcpy(&version, bytes + 8, 4);
     memcpy(&id, bytes + 12, 4);
     if (size < 8 || (size_t)size + 8 > len)
-        return mb_cause(cause, cap, "%s.bnk is cut short; export it from Wwise again", stem);
+        return mb_cause(cause, "%s.bnk is cut short; export it from Wwise again", stem);
     if (version != SH_MB_BANK_VERSION)
-        return mb_cause(cause, cap, "%s.bnk is a Wwise bank of version %u, and this game reads only version %u; export "
+        return mb_cause(cause, "%s.bnk is a Wwise bank of version %u, and this game reads only version %u; export "
                         "it with the Wwise version DOOM uses", stem, (unsigned)version, (unsigned)SH_MB_BANK_VERSION);
     want = sh_mb_fnv1_lower(stem, strlen(stem));
     if (id != want)
-        return mb_cause(cause, cap, "%s.bnk carries bank id %u, but the game loads it by its name as id %u; press "
+        return mb_cause(cause, "%s.bnk carries bank id %u, but the game loads it by its name as id %u; press "
                         "Refresh and Snapmap+ corrects the id", stem, (unsigned)id, (unsigned)want);
 
     return 1;
 }
 
+static int mb_copy_out(char *dst, size_t cap, const char *src, size_t n)
+{
+    if (n + 1 > cap) return 0;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+    return 1;
+}
+
+/* *name = the n bytes at s followed by tail (malloc'd). */
+static int mb_name_out(char **name, const char *s, size_t n, const char *tail)
+{
+    *name = sh_textf("%.*s%s", (int)n, s, tail);
+    return *name != NULL;
+}
+
 /* The logical-name table, on a lower-cased request path. */
-int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_t ncap)
+int sh_mb_logical_name(const char *r, char type[SH_MB_TYPE_CAP], char **name)
 {
     size_t n = strlen(r);
     const char *cls = "file";
+    const size_t tcap = SH_MB_TYPE_CAP;
+    *name = NULL;
     if (mb_starts(r, "generated/decls/") && mb_ends(r, ".decl")) {
         const char *rest = r + 16, *slash = strchr(rest, '/');
         const char *spelled;
@@ -1302,39 +1317,21 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
         if (!spelled) return 0;
         nlen = (size_t)((r + n - 5) - (slash + 1));
         if (nlen == 0) return 0;
-        return mb_copy_out(type, tcap, spelled, strlen(spelled)) &&
-               mb_copy_out(name, ncap, slash + 1, nlen);
+        return mb_copy_out(type, tcap, spelled, strlen(spelled)) && mb_name_out(name, slash + 1, nlen, "");
     }
-    if (mb_starts(r, "generated/basemodel/") && mb_ends(r, ".bmd6model") && n > 30) {
-        size_t s = n - 20 - 10;
-        if (!mb_copy_out(type, tcap, "baseModel", 9) || s + 9 > ncap) return 0;
-        memcpy(name, r + 20, s); memcpy(name + s, ".md6mesh", 9);
-        return 1;
-    }
-    if (mb_starts(r, "generated/skeleton/") && mb_ends(r, ".bmd6skl") && n > 27) {
-        size_t s = n - 19 - 8;
-        if (!mb_copy_out(type, tcap, "skeleton", 8) || s + 8 > ncap) return 0;
-        memcpy(name, r + 19, s); memcpy(name + s, ".md6skl", 8);
-        return 1;
-    }
-    if (mb_starts(r, "cooked/anim/") && mb_ends(r, ".bmd6anim") && n > 21) {
-        size_t s = n - 12 - 9;
-        if (!mb_copy_out(type, tcap, "anim", 4) || s + 9 > ncap) return 0;
-        memcpy(name, r + 12, s); memcpy(name + s, ".md6anim", 9);
-        return 1;
-    }
-    if (mb_starts(r, "generated/image/") && mb_ends(r, ".bimage") && n > 23) {
-        return mb_copy_out(type, tcap, "image", 5) && mb_copy_out(name, ncap, r + 16, n - 16 - 7);
-    }
+    if (mb_starts(r, "generated/basemodel/") && mb_ends(r, ".bmd6model") && n > 30)
+        return mb_copy_out(type, tcap, "baseModel", 9) && mb_name_out(name, r + 20, n - 20 - 10, ".md6mesh");
+    if (mb_starts(r, "generated/skeleton/") && mb_ends(r, ".bmd6skl") && n > 27)
+        return mb_copy_out(type, tcap, "skeleton", 8) && mb_name_out(name, r + 19, n - 19 - 8, ".md6skl");
+    if (mb_starts(r, "cooked/anim/") && mb_ends(r, ".bmd6anim") && n > 21)
+        return mb_copy_out(type, tcap, "anim", 4) && mb_name_out(name, r + 12, n - 12 - 9, ".md6anim");
+    if (mb_starts(r, "generated/image/") && mb_ends(r, ".bimage") && n > 23)
+        return mb_copy_out(type, tcap, "image", 5) && mb_name_out(name, r + 16, n - 16 - 7, "");
     /* generated/swf/<stem>.bswf is the movie a consumer names swf/<stem>.swf. */
-    if (mb_starts(r, "generated/swf/") && mb_ends(r, ".bswf") && n > 19) {
-        size_t s = n - 10 - 5;   /* "swf/<stem>" */
-        if (!mb_copy_out(type, tcap, "swf", 3) || s + 5 > ncap) return 0;
-        memcpy(name, r + 10, s); memcpy(name + s, ".swf", 5);
-        return 1;
-    }
+    if (mb_starts(r, "generated/swf/") && mb_ends(r, ".bswf") && n > 19)
+        return mb_copy_out(type, tcap, "swf", 3) && mb_name_out(name, r + 10, n - 10 - 5, ".swf");
     /* A SnapMap module decl is named by its own path, as a map's moduleName holds it. */
-    if (mb_is_module_request(r)) return mb_copy_out(type, tcap, "snapModule", 10) && mb_copy_out(name, ncap, r, n);
+    if (mb_is_module_request(r)) return mb_copy_out(type, tcap, "snapModule", 10) && mb_name_out(name, r, n, "");
     /* A permutation decl (generated/renderprogs/permutations/<program>_<mask>.decl)
      * is named by its request path: that is the string the permutation lookup
      * formats and passes to DeclFind (VK 0x141910010). It is decl text but not
@@ -1353,75 +1350,86 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
     else if (mb_starts(r, "generated/decalatlas/")) cls = "decalatlas";
     else if (mb_starts(r, "generated/lightatlas/")) cls = "lightatlas";
     else if (mb_starts(r, "generated/transsortatlas/")) cls = "transsortatlas";
-    return mb_copy_out(type, tcap, cls, strlen(cls)) && mb_copy_out(name, ncap, r, n);
+    return mb_copy_out(type, tcap, cls, strlen(cls)) && mb_name_out(name, r, n, "");
 }
 
 /* The engine's binary name for an extension-differs load (R1 1i):
  * "<root>/<list type>/<stem>.<ext>", stem = name without extension, cut at '$',
  * then every character outside [A-Za-z0-9$./\\] becomes '_' (':' kept at
  * index 1). The product lower-cases what the hook sees. */
-static int mb_binary_name(const char *root, const char *list, const char *name, const char *ext,
-                          char *out, size_t cap)
+/* The engine's binary name as a heap string, or NULL (no stem, or out of memory). */
+static char *mb_binary_name(const char *root, const char *list, const char *name, const char *ext)
 {
     const char *slash = strrchr(name, '/');
     const char *dot = strrchr(slash ? slash : name, '.');
     const char *dollar = strchr(name, '$');
-    size_t stem = dot ? (size_t)(dot - name) : strlen(name), i, w;
-    char full[SH_MB_REQUEST_MAX + 64];
+    size_t stem = dot ? (size_t)(dot - name) : strlen(name), i;
+    char *out;
     if (dollar && (size_t)(dollar - name) < stem) stem = (size_t)(dollar - name);
-    if (stem == 0) return 0;
-    w = (size_t)_snprintf_s(full, sizeof full, _TRUNCATE, "%s/%s/%.*s.%s", root, list, (int)stem, name, ext);
-    if (w == (size_t)-1 || w + 1 > cap) return 0;
-    for (i = 0; i < w; i++) {
-        char c = full[i];
+    if (stem == 0) return NULL;
+    out = sh_textf("%s/%s/%.*s.%s", root, list, (int)stem, name, ext);
+    if (!out) return NULL;
+    for (i = 0; out[i]; i++) {
+        char c = out[i];
         int keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                    c == '$' || c == '.' || c == '/' || c == '\\' || (c == ':' && i == 1);
         c = keep ? c : '_';
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         out[i] = c;
     }
-    out[w] = 0;
-    return 1;
+    return out;
 }
 
-static int mb_own_name(const char *name, char *out, size_t cap)
+static char *mb_own_name(const char *name)
 {
-    size_t n = strlen(name);
-    if (n + 1 > cap) return 0;
-    memcpy(out, name, n + 1);
-    mb_lower(out);
-    return 1;
+    char *out = mb_strdup(name);
+    if (out) mb_lower(out);
+    return out;
 }
 
-int sh_mb_model_key(const char *name, char *out, size_t cap)
+/* Put a heap request into out[*k] when it is not NULL. */
+static void mb_put_req(char *out[], int *k, int max, char *req)
+{
+    if (!req) return;
+    if (*k < max) out[(*k)++] = req;
+    else free(req);
+}
+
+void sh_mb_requests_free(char *out[], int count)
+{
+    int i;
+    for (i = 0; out && i < count; i++) { free(out[i]); out[i] = NULL; }
+}
+
+char *sh_mb_model_key(const char *name)
 {
     size_t n;
-    if (!name || !out || !cap) return 0;
+    if (!name) return NULL;
     n = strlen(name);
-    if (!n || strchr(name, '"') || strchr(name, ' ')) return 0;
-    if (mb_iends(name, n, ".bmodel")) return mb_own_name(name, out, cap);
+    if (!n || strchr(name, '"') || strchr(name, ' ')) return NULL;
+    if (mb_iends(name, n, ".bmodel")) return mb_own_name(name);
     if (!mb_iends(name, n, ".lwo") && !mb_iends(name, n, ".ase") && !mb_iends(name, n, ".ma") &&
         !mb_iends(name, n, ".obj") && !mb_iends(name, n, ".fbx"))
-        return 0;
-    return mb_binary_name("cooked", "model", name, "bmodel", out, cap);
+        return NULL;
+    return mb_binary_name("cooked", "model", name, "bmodel");
 }
 
-int sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max)
+int sh_mb_model_keys(const char *name, char *out[], int max)
 {
     size_t n;
     int k = 0;
     if (!name || !out || max <= 0) return 0;
     n = strlen(name);
     if (!n || strchr(name, '"') || strchr(name, ' ')) return 0;
-    if (mb_iends(name, n, ".bmodel")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
+    if (mb_iends(name, n, ".bmodel")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
     if (!mb_iends(name, n, ".lwo") && !mb_iends(name, n, ".ase") && !mb_iends(name, n, ".ma") &&
         !mb_iends(name, n, ".obj") && !mb_iends(name, n, ".fbx"))
         return 0;
     /* As sh_mb_need_requests resolves a model need: cooked/model/ for
      * authored models, generated/model/ for the md6 collision models the game
      * ships only there. */
-    if (mb_binary_name("cooked", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
-    if (k < max && mb_binary_name("generated", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+    mb_put_req(out, &k, max, mb_binary_name("cooked", "model", name, "bmodel"));
+    mb_put_req(out, &k, max, mb_binary_name("generated", "model", name, "bmodel"));
     return k;
 }
 
@@ -1447,48 +1455,49 @@ int sh_mb_editor_only(const sh_mb_bundle *bundle)
     return 1;
 }
 
-int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max)
+int sh_mb_need_requests(const char *type, const char *name, char *out[], int max)
 {
     size_t tl, nl;
     int k = 0;
-    if (!type || !name || !name[0] || max <= 0) return 0;
+    if (!type || !name || !name[0] || !out || max <= 0) return 0;
     tl = strlen(type);
     nl = strlen(name);
-    if (name[0] == '_') return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
+    if (name[0] == '_') { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
     if (mb_ieq_n(type, tl, "baseModel")) {
-        if (mb_iends(name, nl, ".bmd6model")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
-        return mb_binary_name("generated", "baseModel", name, "bmd6model", out[0], SH_MB_REQUEST_MAX + 1);
+        mb_put_req(out, &k, max, mb_iends(name, nl, ".bmd6model") ? mb_own_name(name)
+                                                                  : mb_binary_name("generated", "baseModel", name, "bmd6model"));
+        return k;
     }
     if (mb_ieq_n(type, tl, "skeleton")) {
-        if (mb_iends(name, nl, ".bmd6skl")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
-        return mb_binary_name("generated", "skeleton", name, "bmd6skl", out[0], SH_MB_REQUEST_MAX + 1);
+        mb_put_req(out, &k, max, mb_iends(name, nl, ".bmd6skl") ? mb_own_name(name)
+                                                                : mb_binary_name("generated", "skeleton", name, "bmd6skl"));
+        return k;
     }
     if (mb_ieq_n(type, tl, "anim")) {
-        if (mb_iends(name, nl, ".bmd6anim")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
+        if (mb_iends(name, nl, ".bmd6anim")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
         /* cooked/ at load state >= 2, generated/ as the retry form (R1 1i). */
-        if (mb_binary_name("cooked", "anim", name, "bmd6anim", out[k], SH_MB_REQUEST_MAX + 1)) k++;
-        if (k < max && mb_binary_name("generated", "anim", name, "bmd6anim", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        mb_put_req(out, &k, max, mb_binary_name("cooked", "anim", name, "bmd6anim"));
+        mb_put_req(out, &k, max, mb_binary_name("generated", "anim", name, "bmd6anim"));
         return k;
     }
     if (mb_ieq_n(type, tl, "image")) {
-        if (mb_iends(name, nl, ".bimage")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
-        if (mb_binary_name("generated", "image", name, "bimage", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        if (mb_iends(name, nl, ".bimage")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
+        mb_put_req(out, &k, max, mb_binary_name("generated", "image", name, "bimage"));
         /* A mod's own decal image may sit in the decal atlas folder only: when
          * a decal material loads, the engine puts its images into its decal
          * atlas itself (generated/decalatlas/mods/<salt>/...). */
-        if (k && k < max && nl > 5 && !_strnicmp(name, "mods/", 5) &&
-            mb_binary_name("generated", "decalatlas", name, "bimage", out[k], SH_MB_REQUEST_MAX + 1))
-            k++;
+        if (k && nl > 5 && !_strnicmp(name, "mods/", 5))
+            mb_put_req(out, &k, max, mb_binary_name("generated", "decalatlas", name, "bimage"));
         return k;
     }
     if (mb_ieq_n(type, tl, "model")) {
-        if (mb_iends(name, nl, ".bmodel")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
+        if (mb_iends(name, nl, ".bmodel")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
         /* cooked/model/ for authored models; the md6 collision models
          * (md6/.../collision/<x>.lwo, named by the death-collision entities)
          * ship only as generated/model/md6/... beside generated/cm/md6/...,
          * and 13954591 holds no cooked/model/md6/ row at all. */
-        if (mb_binary_name("cooked", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
-        if (k < max && mb_binary_name("generated", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        mb_put_req(out, &k, max, mb_binary_name("cooked", "model", name, "bmodel"));
+        mb_put_req(out, &k, max, mb_binary_name("generated", "model", name, "bmodel"));
         return k;
     }
     if (mb_ieq_n(type, tl, "swf")) {
@@ -1496,30 +1505,30 @@ int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQ
          * the inverse of sh_mb_logical_name (no character is replaced). */
         const char *slash = strrchr(name, '/'), *dot = strrchr(slash ? slash : name, '.');
         size_t stem = dot ? (size_t)(dot - name) : nl;
-        int w;
+        char *req;
         if (stem > 4 && mb_ieq_n(name, 4, "swf/")) { name += 4; stem -= 4; }
-        w = _snprintf_s(out[0], SH_MB_REQUEST_MAX + 1, _TRUNCATE, "generated/swf/%.*s.bswf", (int)stem, name);
-        if (w < 0) return 0;
-        mb_lower(out[0]);
-        return 1;
+        req = sh_textf("generated/swf/%.*s.bswf", (int)stem, name);
+        if (req) mb_lower(req);
+        mb_put_req(out, &k, max, req);
+        return k;
     }
     if (sh_mb_decl_type(type, tl)) {
-        int w = _snprintf_s(out[0], SH_MB_REQUEST_MAX + 1, _TRUNCATE, "generated/decls/%s/%s.decl", type, name);
-        if (w < 0) return 0;
-        mb_lower(out[0]);
-        return 1;
+        char *req = sh_textf("generated/decls/%s/%s.decl", type, name);
+        if (req) mb_lower(req);
+        mb_put_req(out, &k, max, req);
+        return k;
     }
     return 0;
 }
 
-int sh_mb_strip_key(const char *in, char *out, size_t cap)
+char *sh_mb_strip_key(const char *in)
 {
     size_t n, i;
-    if (!in || !out || !cap) return 0;
-    out[0] = 0;
+    if (!in) return NULL;
     n = strlen(in);
     for (i = 0; i + 5 < n; i++) {
         const char *seg, *end;
+        char *out;
         size_t head, tail;
         if (i && in[i - 1] != '/') continue;
         if (_strnicmp(in + i, "mods/", 5) != 0) continue;
@@ -1528,13 +1537,14 @@ int sh_mb_strip_key(const char *in, char *out, size_t cap)
         if (!end || end == seg || !end[1]) continue;
         head = i;
         tail = strlen(end + 1);
-        if (head + tail + 1 > cap) return 0;
+        out = (char *)malloc(head + tail + 1);
+        if (!out) return NULL;
         memcpy(out, in, head);
         memcpy(out + head, end + 1, tail + 1);
         mb_lower(out);
-        return 1;
+        return out;
     }
-    return 0;
+    return NULL;
 }
 
 /* ------------------------------------------------------- decl scanning ---- */
@@ -1808,10 +1818,32 @@ static void mb_error(sh_mb_bundle *b, const char *fmt, ...)
     va_list ap;
     if (b->errors++ == 0) {
         va_start(ap, fmt);
-        _vsnprintf_s(b->first_cause, sizeof b->first_cause, _TRUNCATE, fmt, ap);
+        free(b->first_cause);
+        b->first_cause = sh_vtextf(fmt, ap);
         va_end(ap);
     }
 }
+
+const char *sh_mb_first_cause(const sh_mb_bundle *b)
+{
+    if (b && b->first_cause) return b->first_cause;
+    return b && b->errors ? "out of memory" : "";
+}
+
+const char *sh_mb_first_warning(const sh_mb_bundle *b) { return b && b->first_warning ? b->first_warning : ""; }
+const char *sh_mb_state_cause(const sh_mb_bundle *b) { return b && b->state_cause ? b->state_cause : ""; }
+
+static int mb_set_text(char **dst, const char *text)
+{
+    char *copy = NULL;
+    if (text && !(copy = mb_strdup(text))) return 0;
+    free(*dst);
+    *dst = copy;
+    return 1;
+}
+
+int sh_mb_set_first_cause(sh_mb_bundle *b, const char *text) { return b && mb_set_text(&b->first_cause, text); }
+int sh_mb_set_state_cause(sh_mb_bundle *b, const char *text) { return b && mb_set_text(&b->state_cause, text); }
 
 typedef struct mb_bare_ctx { sh_mb_bundle *b; const sh_mb_file *f; } mb_bare_ctx;
 
@@ -1824,21 +1856,21 @@ static void mb_bare_cb(void *context, int line, const char *name, size_t len)
 
 static void mb_warn(sh_mb_bundle *b, const char *fmt, ...)
 {
-    char line[SH_MB_CAUSE_MAX];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    if (b->warnings++ == 0) strcpy_s(b->first_warning, sizeof b->first_warning, line);
-    if (b->warning_list_count < SH_MB_WARNINGS_KEPT) {
-        char **grown;
-        if (!b->warning_list) {
-            grown = (char **)calloc(SH_MB_WARNINGS_KEPT, sizeof(char *));
-            if (!grown) return;
-            b->warning_list = grown;
-        }
-        if ((b->warning_list[b->warning_list_count] = _strdup(line)) != NULL) b->warning_list_count++;
+    if (b->warnings++ == 0 && line) b->first_warning = mb_strdup(line);
+    if (!line) return;
+    if (b->warning_list_count == b->warning_list_cap) {
+        size_t cap = b->warning_list_cap ? b->warning_list_cap * 2 : 8;
+        char **grown = (char **)realloc(b->warning_list, sizeof(char *) * cap);
+        if (!grown) { free(line); return; }
+        b->warning_list = grown;
+        b->warning_list_cap = cap;
     }
+    b->warning_list[b->warning_list_count++] = line;
 }
 
 static void mb_file_free(sh_mb_file *f)
@@ -1875,27 +1907,29 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->notes);
     for (i = 0; i < b->warning_list_count; i++) free(b->warning_list[i]);
     free(b->warning_list);
+    free(b->first_cause);
+    free(b->first_warning);
+    free(b->state_cause);
     memset(b, 0, sizeof *b);
 }
 
 /* One report line of the build (sh_mb_bundle.notes). */
 static void mb_note(sh_mb_bundle *b, const char *fmt, ...)
 {
-    char line[SH_MB_CAUSE_MAX];
     va_list ap;
     char *copy;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    copy = sh_vtextf(fmt, ap);
     va_end(ap);
+    if (!copy) return;
     if (b->note_count == b->note_cap) {
         size_t cap = b->note_cap ? b->note_cap * 2 : 8;
         char **grown = (char **)realloc(b->notes, sizeof(char *) * cap);
-        if (!grown) return;
+        if (!grown) { free(copy); return; }
         b->notes = grown;
         b->note_cap = cap;
     }
-    copy = _strdup(line);
-    if (copy) b->notes[b->note_count++] = copy;
+    b->notes[b->note_count++] = copy;
 }
 
 
@@ -1914,19 +1948,20 @@ static __declspec(thread) int g_mb_keep_here;
 void sh_mb_keep_replacements_here(int on) { g_mb_keep_here = on ? 1 : 0; }
 
 /* The engine's cooked spelling of a name (mb_binary_name): every character
- * outside [A-Za-z0-9$./\] becomes '_', lower-cased. */
-static void mb_cooked_key(const char *in, char *out, size_t cap)
+ * outside [A-Za-z0-9$./\] becomes '_', lower-cased (malloc'd). */
+static char *mb_cooked_key(const char *in)
 {
+    char *out = mb_strdup(in);
     size_t i;
-    for (i = 0; in[i] && i + 1 < cap; i++) {
-        char c = in[i];
+    for (i = 0; out && out[i]; i++) {
+        char c = out[i];
         int keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '$' || c == '.' ||
                    c == '/' || c == '\\';
         c = keep ? c : '_';
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         out[i] = c;
     }
-    out[i] = 0;
+    return out;
 }
 
 static int mb_name_char(unsigned char c)
@@ -1949,7 +1984,7 @@ static size_t mb_rekey_at(const char *t, size_t n, size_t i, const char *f)
 
 size_t sh_mb_rekey_text(const char *t, size_t n, const char *folder, const char *key, char **out, size_t *out_len)
 {
-    char cooked[SH_MB_ID_MAX * 4 + 1];
+    char *cooked;
     const char *forms[2];
     size_t i, count = 0, kl;
     int nf = 0, k;
@@ -1958,7 +1993,7 @@ size_t sh_mb_rekey_text(const char *t, size_t n, const char *folder, const char 
     if (out_len) *out_len = 0;
     if (!t || !folder || !folder[0] || !key) return 0;
     kl = strlen(key);
-    mb_cooked_key(folder, cooked, sizeof cooked);
+    if (!(cooked = mb_cooked_key(folder))) return (size_t)-1;
     forms[nf++] = folder;
     if (_stricmp(cooked, folder) != 0) forms[nf++] = cooked;
     for (i = 0; i < n;) {
@@ -1973,6 +2008,7 @@ size_t sh_mb_rekey_text(const char *t, size_t n, const char *folder, const char 
         if (out) { mb_put(&o, t + i, 5); mb_put(&o, key, kl); }
         i += m;
     }
+    free(cooked);
     if (!out) return count;
     if (!count) { free(o.p); return 0; }
     mb_put(&o, "", 1);   /* the terminator, not counted in out_len */
@@ -1982,17 +2018,18 @@ size_t sh_mb_rekey_text(const char *t, size_t n, const char *folder, const char 
     return count;
 }
 
-int sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char *out, size_t cap)
+int sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char **out_text)
 {
-    char cooked[SH_MB_ID_MAX * 4 + 1];
+    char *cooked;
     const char *seg = rel, *prev = NULL;
-    size_t prev_len = 0, w = 0, fl, cl;
+    size_t prev_len = 0, fl, cl;
     int changed = 0;
-    if (!rel || !folder || !folder[0] || !key || !out || !cap) return -1;
-    mb_cooked_key(folder, cooked, sizeof cooked);
+    mb_buf o = {0};
+    if (out_text) *out_text = NULL;
+    if (!rel || !folder || !folder[0] || !key || !out_text) return -1;
+    if (!(cooked = mb_cooked_key(folder))) return -1;
     fl = strlen(folder);
     cl = strlen(cooked);
-    out[0] = 0;
     while (*seg) {
         const char *slash = strchr(seg, '/');
         size_t len = slash ? (size_t)(slash - seg) : strlen(seg);
@@ -2005,16 +2042,18 @@ int sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char 
             plen = strlen(key);
             changed = 1;
         }
-        if (w + plen + 2 > cap) return -1;
-        memcpy(out + w, put, plen);
-        w += plen;
-        if (slash) out[w++] = '/';
-        out[w] = 0;
+        mb_put(&o, put, plen);
+        if (slash) mb_put(&o, "/", 1);
         prev = seg;
         prev_len = len;
         seg = slash ? slash + 1 : seg + len;
     }
-    return changed;
+    free(cooked);
+    mb_put(&o, "", 1);
+    if (o.oom) { free(o.p); return -1; }
+    if (!changed) { free(o.p); return 0; }
+    *out_text = o.p;
+    return 1;
 }
 
 /* The retired author keys (ONE-SHAPE rule 6): the first one `root` holds at
@@ -2032,7 +2071,7 @@ static const char *mb_retired_key(const mbj *root)
     return NULL;
 }
 
-int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
+int sh_mb_descriptor_state_why(const char *folder, char **cause)
 {
     wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *p;
     unsigned char *text = NULL;
@@ -2041,8 +2080,7 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     const mbj *block, *fmt, *salt;
     const char *retired;
     int state, pkg = 0;
-    if (cause && cap) cause[0] = 0;
-    if (!root) { mb_cause(cause, cap, "This mod folder could not be found; press Refresh"); return SH_MB_DESC_UNREADABLE; }
+    if (!root) { mb_cause(cause, "This mod folder could not be found; press Refresh"); return SH_MB_DESC_UNREADABLE; }
     p = mb_wjoin(root, L"mod.json");
     if (p) text = mb_read_wfile(p, MB_ANY_SIZE, &len);
     free(p);
@@ -2053,15 +2091,15 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     }
     free(root);
     if (!text && pkg) {
-        mb_cause(cause, cap, SH_MB_EARLIER);
+        mb_cause(cause, SH_MB_EARLIER);
         return SH_MB_DESC_EARLIER;
     }
-    if (!text) { mb_cause(cause, cap, "This mod folder's mod.json is missing or cannot be read; close any program holding it and press Refresh"); return SH_MB_DESC_UNREADABLE; }
-    j = mbj_parse((const char *)text, len, NULL, 0);
+    if (!text) { mb_cause(cause, "This mod folder's mod.json is missing or cannot be read; close any program holding it and press Refresh"); return SH_MB_DESC_UNREADABLE; }
+    j = mbj_parse((const char *)text, len, NULL);
     free(text);
     if (!j || j->t != MBJ_OBJ) {
         mbj_free(j);
-        mb_cause(cause, cap, "mod.json is not valid JSON (one object, { ... }); correct it and press Refresh");
+        mb_cause(cause, "mod.json is not valid JSON (one object, { ... }); correct it and press Refresh");
         return SH_MB_DESC_UNREADABLE;
     }
     block = mbj_get(j, SH_MB_BLOCK_KEY);
@@ -2069,14 +2107,14 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     salt = block && block->t == MBJ_OBJ ? mbj_get(block, "salt") : NULL;
     retired = mb_retired_key(j);
     if (block && (block->t != MBJ_OBJ || !fmt || fmt->t != MBJ_NUM || strcmp(fmt->s, "2") != 0)) {
-        mb_cause(cause, cap, SH_MB_EARLIER);
+        mb_cause(cause, SH_MB_EARLIER);
         state = SH_MB_DESC_EARLIER;
     } else if (retired) {
         (void)retired;
-        mb_cause(cause, cap, SH_MB_EARLIER);
+        mb_cause(cause, SH_MB_EARLIER);
         state = SH_MB_DESC_RETIRED_KEY;
     } else if (block && (!salt || salt->t != MBJ_STR || !sh_salt_valid(salt->s, salt->n))) {
-        mb_cause(cause, cap, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
+        mb_cause(cause, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
         state = SH_MB_DESC_UNREADABLE;
     } else {
         state = block ? SH_MB_DESC_BUILT : SH_MB_DESC_FRESH;
@@ -2087,7 +2125,7 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
 
 int sh_mb_descriptor_state(const char *folder)
 {
-    return sh_mb_descriptor_state_why(folder, NULL, 0);
+    return sh_mb_descriptor_state_why(folder, NULL);
 }
 
 static sh_mb_file *mb_add_file(sh_mb_bundle *b)
@@ -2245,14 +2283,6 @@ static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
     if (!mb_add_need(c->file, type, name, n)) c->oom = 1;
 }
 
-/* Count UTF-8 code points (input already validated as UTF-8). */
-static size_t mb_codepoints(const char *s, size_t n)
-{
-    size_t i, k = 0;
-    for (i = 0; i < n; i++) if (((unsigned char)s[i] & 0xC0) != 0x80) k++;
-    return k;
-}
-
 static char *mb_trimmed_dup(const mbj *v)
 {
     size_t a = 0, z = v->n;
@@ -2293,11 +2323,11 @@ static int mb_req_printable(const char *s, size_t n)
 /* A cvar value as its canonical string: a string as written, an integer as
  * its digits, a boolean as "1" or "0". NULL with a cause otherwise. */
 static const char *mb_req_value(const mbj *v, const char *name, char *num, size_t num_cap, size_t *len,
-                                char *cause, size_t cap)
+                                char **cause)
 {
     if (v->t == MBJ_STR) {
         if (strlen(v->s) != v->n || !mb_req_printable(v->s, v->n)) {
-            mb_cause(cause, cap, "requirements.cvars.%.64s must be printable ASCII", name);
+            mb_cause(cause, "requirements.cvars.%s must be printable ASCII", name);
             return NULL;
         }
         *len = v->n;
@@ -2309,28 +2339,28 @@ static const char *mb_req_value(const mbj *v, const char *name, char *num, size_
         *len = strlen(num);
         return num;
     }
-    mb_cause(cause, cap, "requirements.cvars.%.64s must be a string, an integer or a boolean (write a decimal as a string)",
+    mb_cause(cause, "requirements.cvars.%s must be a string, an integer or a boolean (write a decimal as a string)",
              name);
     return NULL;
 }
 
 /* One commands list: an array of single console lines, trimmed of spaces. */
-static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char *cause, size_t cap)
+static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char **cause)
 {
     size_t i;
-    if (arr->t != MBJ_ARR) { mb_cause(cause, cap, "requirements.commands.%s must be an array of console lines", which); return 0; }
+    if (arr->t != MBJ_ARR) { mb_cause(cause, "requirements.commands.%s must be an array of console lines", which); return 0; }
     for (i = 0; i < arr->count; i++) {
         const mbj *v = arr->items[i];
         size_t a = 0, z;
         if (v->t != MBJ_STR || strlen(v->s) != v->n) {
-            mb_cause(cause, cap, "requirements.commands.%s[%zu] must be a string", which, i);
+            mb_cause(cause, "requirements.commands.%s[%zu] must be a string", which, i);
             return 0;
         }
         z = v->n;
         while (a < z && v->s[a] == ' ') a++;
         while (z > a && v->s[z - 1] == ' ') z--;
         if (a == z || !mb_req_printable(v->s + a, z - a) || memchr(v->s + a, ';', z - a)) {
-            mb_cause(cause, cap, "requirements.commands.%s[%zu] must be one console command: printable ASCII without ';', "
+            mb_cause(cause, "requirements.commands.%s[%zu] must be one console command: printable ASCII without ';', "
                      "not empty", which, i);
             return 0;
         }
@@ -2340,23 +2370,23 @@ static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char *ca
     return 1;
 }
 
-static char *mb_requirements(const mbj *req, char *cause, size_t cap)
+static char *mb_requirements(const mbj *req, char **cause)
 {
     const mbj *cvars, *commands;
     mb_buf out = {0}, act = {0}, deact = {0};
     size_t i, *order = NULL;
-    if (req->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements must be an object"); return NULL; }
+    if (req->t != MBJ_OBJ) { mb_cause(cause, "requirements must be an object"); return NULL; }
     for (i = 0; i < req->count; i++)
         if (!(req->klen[i] == 5 && memcmp(req->keys[i], "cvars", 5) == 0) &&
             !(req->klen[i] == 8 && memcmp(req->keys[i], "commands", 8) == 0)) {
-            mb_cause(cause, cap, "requirements key %.64s is not supported (cvars, commands)", req->keys[i]);
+            mb_cause(cause, "requirements key %s is not supported (cvars, commands)", req->keys[i]);
             return NULL;
         }
     cvars = mbj_get(req, "cvars");
     commands = mbj_get(req, "commands");
-    if (cvars && cvars->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements.cvars must be an object"); return NULL; }
+    if (cvars && cvars->t != MBJ_OBJ) { mb_cause(cause, "requirements.cvars must be an object"); return NULL; }
     if (commands && commands->t != MBJ_OBJ) {
-        mb_cause(cause, cap, "requirements.commands must be an object of activate and deactivate lists");
+        mb_cause(cause, "requirements.commands must be an object of activate and deactivate lists");
         return NULL;
     }
     for (i = 0; commands && i < commands->count; i++) {
@@ -2364,10 +2394,10 @@ static char *mb_requirements(const mbj *req, char *cause, size_t cap)
         size_t n = commands->klen[i];
         int is_act = n == 8 && memcmp(k, "activate", 8) == 0, is_deact = n == 10 && memcmp(k, "deactivate", 10) == 0;
         if (!is_act && !is_deact) {
-            mb_cause(cause, cap, "requirements.commands key %.64s is not supported (activate, deactivate)", k);
+            mb_cause(cause, "requirements.commands key %s is not supported (activate, deactivate)", k);
             goto fail;
         }
-        if (!mb_req_lines(commands->items[i], is_act ? "activate" : "deactivate", is_act ? &act : &deact, cause, cap))
+        if (!mb_req_lines(commands->items[i], is_act ? "activate" : "deactivate", is_act ? &act : &deact, cause))
             goto fail;
     }
     mb_puts(&out, "{");
@@ -2390,16 +2420,16 @@ static char *mb_requirements(const mbj *req, char *cause, size_t cap)
             char num[32];
             const char *value;
             if (!mb_req_cvar_name(name, n) || strlen(name) != n) {
-                mb_cause(cause, cap, "requirements.cvars key %.64s is not a cvar name (a letter or '_', then letters, "
+                mb_cause(cause, "requirements.cvars key %s is not a cvar name (a letter or '_', then letters, "
                          "digits or '_')", name);
                 goto fail;
             }
             for (k = 0; k < i; k++)
                 if (_stricmp(name, cvars->keys[order[k]]) == 0) {
-                    mb_cause(cause, cap, "requirements.cvars names %.64s twice", name);
+                    mb_cause(cause, "requirements.cvars names %s twice", name);
                     goto fail;
                 }
-            value = mb_req_value(cvars->items[order[i]], name, num, sizeof num, &len, cause, cap);
+            value = mb_req_value(cvars->items[order[i]], name, num, sizeof num, &len, cause);
             if (!value) goto fail;
             if (i) mb_put(&out, ",", 1);
             mb_put_jstr(&out, name, n);
@@ -2408,7 +2438,7 @@ static char *mb_requirements(const mbj *req, char *cause, size_t cap)
         }
     }
     mb_puts(&out, "}}");
-    if (out.oom || act.oom || deact.oom) { mb_cause(cause, cap, "out of memory"); goto fail; }
+    if (out.oom || act.oom || deact.oom) { mb_cause(cause, "out of memory"); goto fail; }
     free(order);
     free(act.p);
     free(deact.p);
@@ -2421,15 +2451,14 @@ fail:
     return NULL;
 }
 
-char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, size_t cause_cap)
+char *sh_mb_requirements_canonical(const char *text, size_t len, char **cause)
 {
     mbj *root;
     char *out;
-    if (cause && cause_cap) cause[0] = 0;
     if (!text) return NULL;
-    root = mbj_parse(text, len, cause, cause_cap);
+    root = mbj_parse(text, len, cause);
     if (!root) return NULL;
-    out = mb_requirements(root, cause, cause_cap);
+    out = mb_requirements(root, cause);
     mbj_free(root);
     return out;
 }
@@ -2439,7 +2468,7 @@ char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, si
 static int mb_set_shadows(sh_mb_bundle *b, const mbj *arr)
 {
     size_t i;
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     if (arr->t != MBJ_ARR) { mb_error(b, "shadows must be an array of request paths"); return 0; }
     b->shadows = (char **)calloc(arr->count ? arr->count : 1, sizeof(char *));
     if (!b->shadows) { mb_error(b, "out of memory"); return 0; }
@@ -2454,8 +2483,9 @@ static int mb_set_shadows(sh_mb_bundle *b, const mbj *arr)
             free(s);
             return 0;
         }
-        if (!sh_mb_check_request(s, cause, sizeof cause)) {
+        if (!sh_mb_check_request(s, &cause)) {
             mb_error(b, "shadows entry: %s", cause);
+            free(cause);
             free(s);
             return 0;
         }
@@ -2487,29 +2517,28 @@ static const sh_mb_stock_ops *mb_stock(void)
     return sh_mb_stock_available() ? &g_stock : NULL;
 }
 
-static void mb_stock_cause(int r, const char *source, const char *path, char *cause, size_t cap)
+static void mb_stock_cause(int r, const char *source, const char *path, char **cause)
 {
     const char *who = path && path[0] ? path : source;
-    if (!cause || !cap) return;
     if (r == SH_MB_STOCK_UNAVAILABLE)
-        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, and Snapmap+ could not read the game's files "
-                    "to check it; start DOOM normally and press Refresh", who, source);
+        mb_cause(cause, "%s uses the game's file %s, and Snapmap+ could not read the game's files to check it; start "
+                 "DOOM normally and press Refresh", who, source);
     else if (r == SH_MB_STOCK_MISMATCH)
-        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, which your copy of DOOM holds with other bytes "
-                    "(another game version); verify the game's files in Steam", who, source);
+        mb_cause(cause, "%s uses the game's file %s, which your copy of DOOM holds with other bytes (another game "
+                 "version); verify the game's files in Steam", who, source);
     else
-        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, which your copy of DOOM does not have; verify "
-                    "the game's files in Steam", who, source);
+        mb_cause(cause, "%s uses the game's file %s, which your copy of DOOM does not have; verify the game's files in "
+                 "Steam", who, source);
 }
 
 int sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
-                       const char *path, char *cause, size_t cap)
+                       const char *path, char **cause)
 {
     const sh_mb_stock_ops *ops = mb_stock();
     unsigned long long got = 0;
     int r = ops && ops->verify ? ops->verify(ops->context, source, sha256, &got) : SH_MB_STOCK_UNAVAILABLE;
     if (size) *size = r == SH_MB_STOCK_OK ? got : 0;
-    if (r != SH_MB_STOCK_OK) mb_stock_cause(r, source, path, cause, cap);
+    if (r != SH_MB_STOCK_OK) mb_stock_cause(r, source, path, cause);
     return r;
 }
 
@@ -2523,7 +2552,7 @@ int sh_mb_stock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], un
 }
 
 int sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
-                     const char *path, char *cause, size_t cap)
+                     const char *path, char **cause)
 {
     const sh_mb_stock_ops *ops = mb_stock();
     int r;
@@ -2535,7 +2564,7 @@ int sh_mb_stock_read(const char *source, const char *sha256, unsigned char **byt
         if (*bytes) HeapFree(GetProcessHeap(), 0, *bytes);
         *bytes = NULL;
         *len = 0;
-        mb_stock_cause(r, source, path, cause, cap);
+        mb_stock_cause(r, source, path, cause);
     }
     return r;
 }
@@ -2550,10 +2579,10 @@ int sh_mb_stock_container(const char *source, const char *sha256, char *out, siz
     return 0;
 }
 
-int sh_mb_check_source(const char *source, char *cause, size_t cap)
+int sh_mb_check_source(const char *source, char **cause)
 {
-    if (!source || !source[0]) return mb_cause(cause, cap, "the stock source is empty");
-    return sh_mb_check_request(source, cause, cap);
+    if (!source || !source[0]) return mb_cause(cause, "the stock source is empty");
+    return sh_mb_check_request(source, cause);
 }
 
 /* Lower-case, '/' separators: the spelling a request or a source is kept in. */
@@ -2573,24 +2602,20 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
     const mbj *author = mbj_get(root, "author"), *home = mbj_get(root, "homepage");
     const mbj *req = mbj_get(root, "requirements");
     const char *what = "mod.json";
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
 
     if (!name || name->t != MBJ_STR || strlen(name->s) != name->n) {
         mb_error(b, "%s is missing its required name", what);
         return 0;
     }
+    /* Name, author and homepage are as long as the author writes them. */
     b->name = mb_trimmed_dup(name);
-    if (!b->name || !b->name[0] || mb_codepoints(b->name, strlen(b->name)) > SH_MB_NAME_MAX) {
-        mb_error(b, "%s name must be 1-%u characters", what, SH_MB_NAME_MAX);
-        return 0;
-    }
+    if (!b->name) { mb_error(b, "out of memory"); return 0; }
+    if (!b->name[0]) { mb_error(b, "%s name is empty; give the mod a name and press Refresh", what); return 0; }
     if (author) {
         if (author->t != MBJ_STR || strlen(author->s) != author->n) { mb_error(b, "%s author must be a string", what); return 0; }
         b->author = mb_trimmed_dup(author);
-        if (!b->author || mb_codepoints(b->author, strlen(b->author)) > SH_MB_AUTHOR_MAX) {
-            mb_error(b, "%s author must be at most %u characters", what, SH_MB_AUTHOR_MAX);
-            return 0;
-        }
+        if (!b->author) { mb_error(b, "out of memory"); return 0; }
         if (!b->author[0]) { free(b->author); b->author = NULL; }
     }
     if (home) {
@@ -2598,16 +2623,15 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
         b->homepage = mb_trimmed_dup(home);
         if (!b->homepage) { mb_error(b, "out of memory"); return 0; }
         if (!b->homepage[0]) { free(b->homepage); b->homepage = NULL; }
-        else if (mb_codepoints(b->homepage, strlen(b->homepage)) > SH_MB_HOMEPAGE_MAX ||
-                 !(mb_starts(b->homepage, "https://") || mb_starts(b->homepage, "http://")) ||
+        else if (!(mb_starts(b->homepage, "https://") || mb_starts(b->homepage, "http://")) ||
                  strpbrk(b->homepage, " \t\r\n\"<>")) {
-            mb_error(b, "%s homepage must be an http:// or https:// address of at most %u characters", what, SH_MB_HOMEPAGE_MAX);
+            mb_error(b, "%s homepage must be an http:// or https:// address", what);
             return 0;
         }
     }
     if (req) {
-        b->requirements = mb_requirements(req, cause, sizeof cause);
-        if (!b->requirements) { mb_error(b, "%s %s", what, cause); return 0; }
+        b->requirements = mb_requirements(req, &cause);
+        if (!b->requirements) { mb_error(b, "%s %s", what, cause ? cause : "out of memory"); free(cause); return 0; }
     }
     return 1;
 }
@@ -2619,7 +2643,7 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
  * description, ...). */
 static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block, int building)
 {
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     mb_buf extra = {0};
     size_t i, kept = 0;
     const char *retired;
@@ -2660,8 +2684,9 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
             kept++;
         }
         if (kept) {
-            if (!mbj_canon(&tmp, &extra, cause, sizeof cause)) {
-                mb_error(b, "mod.json: %s", cause);
+            if (!mbj_canon(&tmp, &extra, &cause)) {
+                mb_error(b, "mod.json: %s", cause ? cause : "out of memory");
+                free(cause);
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 free(extra.p);
                 return 0;
@@ -2679,90 +2704,117 @@ typedef struct mb_walk {
     sh_mb_bundle *b;
     wchar_t *root;          /* the mod folder, long form */
     const char *folder;     /* its name, as the author named it (UTF-8) */
-    int stopped;            /* a cap was hit; stop collecting */
     int stock;              /* a stock reader is registered: defer type and size refusals */
 } mb_walk;
 
 static const char *mb_rp_forbidden(const char *request);
 
-static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int depth)
+/* One file found under assets\ at `child` ("assets/..."). */
+static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern = mb_wjoin(dir, L"*");
-    HANDLE h;
-    if (!pattern) { mb_error(w->b, "out of memory"); return; }
-    if (depth > MB_WALK_DEPTH) { mb_error(w->b, "folder nesting deeper than %d: %s", MB_WALK_DEPTH, rel); free(pattern); return; }
-    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) mb_error(w->b, "cannot list %s: %s", rel, sh_reason_win32(GetLastError(), rel, 0));
-        return;
+    char *cause = NULL;
+    const char *request = child + 7;   /* below "assets/" */
+    char *req_lower = mb_strdup(request);
+    sh_mb_file *f;
+    /* With a stock reader a file of a type a bundle cannot carry is refused
+     * only after it is found not to be a copy of installed content. */
+    int defer = w->stock;
+    int deferred = 0;
+    if (!req_lower) { mb_error(w->b, "out of memory"); return; }
+    mb_lower(req_lower);
+    if (!sh_mb_check_request(req_lower, &cause)) {
+        mb_error(w->b, "%s: %s", child, cause);
+    } else if (mb_rp_forbidden(req_lower)) {
+        mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
+    } else if (sh_mb_script_request(req_lower, NULL, NULL) == SH_MB_SCRIPT_MISPLACED) {
+        char *where = sh_mb_script_where(child, w->b->id, w->folder);
+        mb_error(w->b, "%s", where ? where : "out of memory");
+        free(where);
+    } else if (sh_script_node_reserved(w->b->id, req_lower)) {
+        mb_error(w->b, "%s: " SH_MB_SCRIPT_NODE_RESERVED, child);
+    } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
+        if (sh_mb_pointer_only_kind(req_lower))
+            mb_error(w->b, "%s can only be an unchanged copy of the game's own file, and Snapmap+ could not "
+                     "read the game's files to check it; start DOOM normally and press Refresh", child);
+        else mb_error(w->b, "file type not allowed: %s", child);
+    } else if (size == 0) {
+        mb_error(w->b, "empty file: %s", child);
+    } else if ((f = mb_add_file(w->b)) == NULL) {
+        mb_error(w->b, "out of memory");
+    } else {
+        /* DECISIONS 13: the recorded path is the game name, lower
+         * case with '/', whatever the spelling on disk (Windows
+         * opens it either way); archives and installs use it. */
+        f->path = sh_textf("assets/%s", req_lower);
+        f->request = req_lower;
+        req_lower = NULL;
+        f->size = size;
+        f->deferred = deferred;
+        w->b->total_size += size;
+        if (!f->path) mb_error(w->b, "out of memory");
     }
-    do {
-        char *name, child[SH_MB_REQUEST_MAX + 16];
-        int wn;
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        name = sh_mb_utf8(fd.cFileName);
-        if (!name) { mb_error(w->b, "a file name under %s is not valid Unicode", rel); continue; }
-        wn = _snprintf_s(child, sizeof child, _TRUNCATE, "%s/%s", rel, name);
-        if (wn < 0) { mb_error(w->b, "path too long under %s", rel); free(name); continue; }
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-            mb_error(w->b, "symbolic link or junction not allowed: %s", child);
-        } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            wchar_t *sub = mb_wjoin(dir, fd.cFileName);
-            if (!sub) mb_error(w->b, "out of memory");
-            else { mb_walk_dir(w, sub, child, depth + 1); free(sub); }
-        } else if (!w->stopped) {
-            unsigned long long size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-            char cause[SH_MB_CAUSE_MAX];
-            const char *request = child + 7;   /* below "assets/" */
-            char *req_lower = mb_strdup(request);
-            sh_mb_file *f;
-            /* With a stock reader a file of a type a bundle cannot carry, or
-             * over 64 MiB, is refused only after it is found not to be a copy
-             * of installed content; the 256 MiB total is checked on the
-             * carried files after the matching. */
-            int defer = w->stock;
-            int deferred = 0;
-            if (!req_lower) { mb_error(w->b, "out of memory"); free(name); break; }
-            mb_lower(req_lower);
-            if (!sh_mb_check_request(req_lower, cause, sizeof cause)) {
-                mb_error(w->b, "%s: %s", child, cause);
-            } else if (mb_rp_forbidden(req_lower)) {
-                mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
-            } else if (sh_mb_script_request(req_lower, NULL, NULL) == SH_MB_SCRIPT_MISPLACED) {
-                char where[SH_MB_CAUSE_MAX];
-                sh_mb_script_where(child, w->b->id, w->folder, where, sizeof where);
-                mb_error(w->b, "%s", where);
-            } else if (sh_script_node_reserved(w->b->id, req_lower)) {
-                mb_error(w->b, "%s: " SH_MB_SCRIPT_NODE_RESERVED, child);
-            } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
-                if (sh_mb_pointer_only_kind(req_lower))
-                    mb_error(w->b, "%s can only be an unchanged copy of the game's own file, and Snapmap+ could not "
-                             "read the game's files to check it; start DOOM normally and press Refresh", child);
-                else mb_error(w->b, "file type not allowed: %s", child);
-            } else if (size == 0) {
-                mb_error(w->b, "empty file: %s", child);
-            } else if ((f = mb_add_file(w->b)) == NULL) {
-                mb_error(w->b, "out of memory");
-            } else {
-                /* DECISIONS 13: the recorded path is the game name, lower
-                 * case with '/', whatever the spelling on disk (Windows
-                 * opens it either way); archives and installs use it. */
-                f->path = (char *)malloc(strlen(req_lower) + 8);
-                if (f->path) { memcpy(f->path, "assets/", 7); strcpy_s(f->path + 7, strlen(req_lower) + 1, req_lower); }
-                f->request = req_lower;
-                req_lower = NULL;
-                f->size = size;
-                f->deferred = deferred;
-                w->b->total_size += size;
-                if (!f->path) mb_error(w->b, "out of memory");
-            }
-            free(req_lower);
+    free(cause);
+    free(req_lower);
+}
+
+/* Every file below `dir` (rel "assets"), any depth: a folder holds as many
+ * levels as Windows' path length allows, so the walk keeps its pending
+ * folders on the heap rather than recursing. */
+typedef struct mb_walk_dir_item { wchar_t *dir; char *rel; } mb_walk_dir_item;
+
+static void mb_walk_dir(mb_walk *w, const wchar_t *top, const char *top_rel)
+{
+    mb_walk_dir_item *stack = NULL;
+    size_t n = 0, cap = 0;
+    mb_walk_dir_item cur;
+    cur.dir = _wcsdup(top);
+    cur.rel = mb_strdup(top_rel);
+    if (!cur.dir || !cur.rel) { free(cur.dir); free(cur.rel); mb_error(w->b, "out of memory"); return; }
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern = mb_wjoin(cur.dir, L"*");
+        HANDLE h = INVALID_HANDLE_VALUE;
+        if (!pattern) mb_error(w->b, "out of memory");
+        else {
+            h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+            free(pattern);
+            if (h == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_NOT_FOUND)
+                mb_error(w->b, "cannot list %s: %s", cur.rel, sh_reason_win32(GetLastError(), cur.rel, 0));
         }
-        free(name);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        while (h != INVALID_HANDLE_VALUE) {
+            char *name, *child;
+            if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+                name = sh_mb_utf8(fd.cFileName);
+                child = name ? sh_textf("%s/%s", cur.rel, name) : NULL;
+                if (!name) mb_error(w->b, "a file name under %s is not valid Unicode", cur.rel);
+                else if (!child) mb_error(w->b, "out of memory");
+                else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                    mb_error(w->b, "symbolic link or junction not allowed: %s", child);
+                } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    mb_walk_dir_item sub;
+                    sub.dir = mb_wjoin(cur.dir, fd.cFileName);
+                    sub.rel = child;
+                    if (n == cap) {
+                        size_t grow = cap ? cap * 2 : 16;
+                        mb_walk_dir_item *g = (mb_walk_dir_item *)realloc(stack, sizeof *stack * grow);
+                        if (g) { stack = g; cap = grow; }
+                    }
+                    if (!sub.dir || n == cap) { free(sub.dir); mb_error(w->b, "out of memory"); }
+                    else { stack[n++] = sub; child = NULL; }
+                } else {
+                    mb_walk_file(w, child, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+                }
+                free(child);
+                free(name);
+            }
+            if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+        }
+        free(cur.dir);
+        free(cur.rel);
+        if (!n) break;
+        cur = stack[--n];
+    }
+    free(stack);
 }
 
 static void mb_walk_top(mb_walk *w)
@@ -2788,7 +2840,7 @@ static void mb_walk_top(mb_walk *w)
         } else {
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
             have_assets = 1;
-            if (sub) { mb_walk_dir(w, sub, "assets", 1); free(sub); }
+            if (sub) { mb_walk_dir(w, sub, "assets"); free(sub); }
             else mb_error(w->b, "out of memory");
         }
         free(name);
@@ -2818,20 +2870,22 @@ static int mb_is_shadow(const sh_mb_bundle *b, const char *request)
 static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_resolver *r,
                           const sh_mb_need *need)
 {
-    char cand[2][SH_MB_REQUEST_MAX + 1];
-    int n = sh_mb_need_requests(need->type, need->name, cand, 2), i, unknown = 0;
+    char *cand[2];
+    int n = sh_mb_need_requests(need->type, need->name, cand, 2), i, unknown = 0, found = 0;
     if (n <= 0) return 0;
-    for (i = 0; i < n; i++) if (mb_req_has(own, cand[i])) { b->needs.local++; return 1; }
-    if (r && r->installed)
-        for (i = 0; i < n; i++) if (r->installed(r->installed_context, cand[i]) == 1) { b->needs.installed++; return 1; }
-    if (!r || !r->stock) unknown = 1;
+    for (i = 0; i < n && !found; i++) if (mb_req_has(own, cand[i])) { b->needs.local++; found = 1; }
+    if (!found && r && r->installed)
+        for (i = 0; i < n && !found; i++)
+            if (r->installed(r->installed_context, cand[i]) == 1) { b->needs.installed++; found = 1; }
+    if (!found && (!r || !r->stock)) unknown = 1;
     else
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n && !found; i++) {
             int got = r->stock(r->stock_context, cand[i]);
-            if (got == 1) { b->needs.stock++; return 1; }
+            if (got == 1) { b->needs.stock++; found = 1; }
             if (got < 0) unknown = 1;
         }
-    return unknown ? -1 : 0;
+    sh_mb_requests_free(cand, n);
+    return found ? 1 : unknown ? -1 : 0;
 }
 
 /* The installed text a file came from, for needs the game's own text leaves
@@ -2842,7 +2896,7 @@ static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_
 typedef struct mb_twin {
     int state;                          /* 0 not looked up, 1 loaded, -1 none */
     sh_mb_file text;                    /* only needs, need_count used */
-    char source[SH_MB_REQUEST_MAX + 1];
+    char *source;
 } mb_twin;
 
 static void mb_twin_reset(mb_twin *t)
@@ -2850,21 +2904,22 @@ static void mb_twin_reset(mb_twin *t)
     size_t i;
     for (i = 0; i < t->text.need_count; i++) { free(t->text.needs[i].type); free(t->text.needs[i].name); }
     free(t->text.needs);
+    free(t->source);
     memset(t, 0, sizeof *t);
 }
 
 static void mb_twin_load(mb_twin *t, const sh_mb_file *f)
 {
     const sh_mb_stock_ops *ops = mb_stock();
-    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    char sha[SH_MB_HASH_HEX + 1];
     unsigned long long size = 0;
     unsigned char *text = NULL;
     size_t len = 0;
     t->state = -1;
     if (!f->is_decl || !f->ptype || !ops || !ops->identify) return;
-    if (!sh_mb_strip_key(f->request, t->source, sizeof t->source)) return;
+    if (!(t->source = sh_mb_strip_key(f->request))) return;
     if (ops->identify(ops->context, t->source, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX) return;
-    if (sh_mb_stock_read(t->source, sha, &text, &len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
+    if (sh_mb_stock_read(t->source, sha, &text, &len, f->path, NULL) != SH_MB_STOCK_OK) return;
     if (sh_decl_text_well_formed(text, len)) {
         mb_need_ctx nc = { &t->text, 0 };
         sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
@@ -2876,18 +2931,18 @@ static void mb_twin_load(mb_twin *t, const sh_mb_file *f)
 /* The installed decl that names this unresolved need too, or NULL. */
 static const char *mb_stock_names_too(mb_twin *t, const sh_mb_file *f, const sh_mb_need *need)
 {
-    char cut[SH_MB_REQUEST_MAX + 1];
-    int has_cut;
+    char *cut;
     size_t i;
     if (f->stock && f->stock_source) return f->stock_source;
     if (!t->state) mb_twin_load(t, f);
     if (t->state != 1) return NULL;
-    has_cut = sh_mb_strip_key(need->name, cut, sizeof cut);
+    cut = sh_mb_strip_key(need->name);
     for (i = 0; i < t->text.need_count; i++) {
         const sh_mb_need *s = &t->text.needs[i];
         if (strcmp(s->type, need->type) != 0) continue;
-        if (_stricmp(s->name, need->name) == 0 || (has_cut && _stricmp(s->name, cut) == 0)) return t->source;
+        if (_stricmp(s->name, need->name) == 0 || (cut && _stricmp(s->name, cut) == 0)) { free(cut); return t->source; }
     }
+    free(cut);
     return NULL;
 }
 
@@ -3017,33 +3072,30 @@ int sh_mb_rp_stages(const unsigned char *bin, size_t len, size_t off[3], size_t 
 /* The stage loader's file name: "generated/spirv/" + the program's name with
  * its extension replaced, where a basename (extension included) of 38 or more
  * characters is cut into 30-character components. */
-int sh_mb_spirv_request(const char *name, const char *ext, char *out, size_t cap)
+char *sh_mb_spirv_request(const char *name, const char *ext)
 {
-    char stem[SH_MB_REQUEST_MAX + 1];
     const char *slash = strrchr(name, '/'), *base = slash ? slash + 1 : name, *dot = strrchr(base, '.');
     size_t dir_n = (size_t)(base - name), base_n = dot ? (size_t)(dot - base) : strlen(base), ext_n = strlen(ext);
     size_t pos = 0, i;
-    if (dir_n + base_n + ext_n + 1 > sizeof stem) return 0;
-    if (16 + dir_n + base_n + base_n / 30 + ext_n + 1 > cap) return 0;
-    memcpy(stem, name, dir_n + base_n);
-    stem[dir_n + base_n] = 0;
+    char *out = (char *)malloc(16 + dir_n + base_n + base_n / 30 + ext_n + 1);
+    if (!out) return NULL;
     memcpy(out, "generated/spirv/", 16); pos = 16;
-    memcpy(out + pos, stem, dir_n); pos += dir_n;
+    memcpy(out + pos, name, dir_n); pos += dir_n;
     if (base_n + ext_n < 38) {
-        memcpy(out + pos, stem + dir_n, base_n); pos += base_n;
+        memcpy(out + pos, base, base_n); pos += base_n;
     } else {
         for (i = 0; i < base_n; i++) {
             if (i && i % 30 == 0) out[pos++] = '/';
-            out[pos++] = stem[dir_n + i];
+            out[pos++] = base[i];
         }
     }
     memcpy(out + pos, ext, ext_n + 1);
-    return 1;
+    return out;
 }
 
 /* generated/renderprogs/permutations/<program>_<16 hex digits>.decl: the name
  * the permutation lookup formats (VK 0x141910010) and passes to DeclFind. */
-int sh_mb_rp_permutation(const char *request, char *program, size_t cap, char mask[17])
+int sh_mb_rp_permutation(const char *request, char **program, char mask[17])
 {
     static const char prefix[] = "generated/renderprogs/permutations/";
     size_t n = strlen(request), pn = sizeof prefix - 1, i, prog_n;
@@ -3055,9 +3107,8 @@ int sh_mb_rp_permutation(const char *request, char *program, size_t cap, char ma
     for (i = 0; i < 16; i++)
         if (!((m[i] >= '0' && m[i] <= '9') || (m[i] >= 'a' && m[i] <= 'f'))) return 0;
     prog_n = (size_t)(m - 1 - (request + pn));
-    if (prog_n == 0 || prog_n + 1 > cap) return 0;
-    memcpy(program, request + pn, prog_n);
-    program[prog_n] = 0;
+    if (prog_n == 0) return 0;
+    if (program && !(*program = sh_textn(request + pn, prog_n))) return 0;
     if (mask) { memcpy(mask, m, 16); mask[16] = 0; }
     return 1;
 }
@@ -3101,8 +3152,7 @@ static unsigned char *mb_rp_bytes(mb_rp *rp, const sh_mb_file *f, size_t *len, i
     *len = 0;
     if (f->stock) {
         unsigned char *bytes = NULL;
-        char cause[SH_MB_CAUSE_MAX];
-        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) {
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, len, f->path, NULL) != SH_MB_STOCK_OK) {
             mb_error(rp->b, "cannot read %s to check its render program", f->path);
             return NULL;
         }
@@ -3196,32 +3246,37 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
 {
     static const char *const ext[3] = { ".vspv", ".fspv", ".cspv" };
     static const char *const stage_name[3] = { "vertex", "fragment", "compute" };
-    char req[SH_MB_REQUEST_MAX + 32];
+    char *req;
     const sh_mb_file *bin, *gl;
     unsigned char *c;
     size_t blen = 0, off[3], n[3];
     int heap = 0, k, r;
 
-    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc.bin", stem);
+    req = sh_textf("%s_pc.bin", stem);
+    if (!req) { mb_error(rp->b, "out of memory"); return; }
     gl = mb_rp_find(rp, req);
+    free(req);
     if (gl) {
         size_t gl_len = 0;
         int gl_heap = 0;
         mb_rp_release(mb_rp_check_bin(rp, decl, gl, strict, &gl_len, &gl_heap), gl_heap);
     }
-    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc_vulkan.bin", stem);
+    req = sh_textf("%s_pc_vulkan.bin", stem);
+    if (!req) { mb_error(rp->b, "out of memory"); return; }
     bin = mb_rp_find(rp, req);
     if (!bin) {
         MB_RP_ERR(strict, "%s ships no assets/%s: Vulkan needs the cooked program", decl->path, req);
+        free(req);
         return;
     }
+    free(req);
     c = mb_rp_check_bin(rp, decl, bin, strict, &blen, &heap);
     if (!c) return;
     r = sh_mb_rp_stages(c, blen, off, n);
     for (k = 0; k < 3; k++) {
         const sh_mb_file *s;
         if (r == 1 && n[k] == 0) continue;
-        if (!sh_mb_spirv_request(name, ext[k], req, sizeof req)) { mb_error(rp->b, "%s: name too long", decl->path); break; }
+        if (!(req = sh_mb_spirv_request(name, ext[k]))) { mb_error(rp->b, "out of memory"); break; }
         s = mb_rp_find(rp, req);
         if (!s) {
             /* With the stage texts unknown, only the two stages every
@@ -3229,8 +3284,10 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
             if (r == 1 || k < 2)
                 MB_RP_ERR(strict, "%s needs assets/%s (its %s stage): the engine stops with \"not found\" when it binds",
                           decl->path, req, stage_name[k]);
+            free(req);
             continue;
         }
+        free(req);
         mb_rp_check_spirv(rp, s, r == 1 ? c + off[k] : NULL, r == 1 ? n[k] : 0, strict);
     }
     if (r != 1)
@@ -3308,7 +3365,7 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
 {
     mb_rp ctx, *rp = &ctx;
     size_t i, j, any = 0;
-    char program[SH_MB_REQUEST_MAX + 1], mask[17], stem[SH_MB_REQUEST_MAX + 64];
+    char *program, mask[17], *stem;
     ctx.b = b;
     ctx.root = root;
     ctx.used = (unsigned char *)calloc(b->file_count ? b->file_count : 1, 1);
@@ -3338,18 +3395,23 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
                       f->path, f->pname);
             continue;
         }
-        _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/%s", f->pname);
+        if (!(stem = sh_textf("generated/renderprogs/%s", f->pname))) { mb_error(b, "out of memory"); break; }
         mb_rp_unit(rp, f, stem, f->pname, strict);
+        free(stem);
         for (j = 0; j < b->file_count; j++) {
             const sh_mb_file *p = &b->files[j];
-            size_t sn;
-            if (!sh_mb_rp_permutation(p->request, program, sizeof program, mask) || strcmp(program, f->pname) != 0) continue;
+            int same;
+            program = NULL;
+            same = sh_mb_rp_permutation(p->request, &program, mask) && strcmp(program, f->pname) == 0;
+            free(program);
+            if (!same) continue;
             ctx.used[j] = 1;
             perms++;
             if (!mb_rp_decl_ok(rp, p, strict)) continue;
-            sn = strlen(p->request) - 5;   /* the stem is the request without ".decl" */
-            _snprintf_s(stem, sizeof stem, _TRUNCATE, "%.*s", (int)sn, p->request);
+            /* the stem is the request without ".decl" */
+            if (!(stem = sh_textn(p->request, strlen(p->request) - 5))) { mb_error(b, "out of memory"); break; }
             mb_rp_unit(rp, p, stem, p->request, strict);
+            free(stem);
         }
         if (!perms)
             MB_RP_ERR(strict, "%s ships no permutation decl (generated/renderprogs/permutations/%s_<16 hex digits>.decl): "
@@ -3363,10 +3425,12 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
         const char *r = f->request;
         if (ctx.used[i] || !f->ptype) continue;
         if (mb_starts(r, "generated/renderprogs/permutations/") && mb_ends(r, ".decl")) {
-            if (sh_mb_rp_permutation(r, program, sizeof program, mask))
+            program = NULL;
+            if (sh_mb_rp_permutation(r, &program, mask))
                 MB_RP_ERR(1, "%s is a permutation of %s, which this mod does not include; add the program's decl or delete the permutation", f->path, program);
-            else
+            else if (!program)
                 MB_RP_ERR(1, "%s: a permutation decl is named <program>_<16 hex digits>.decl", f->path);
+            free(program);
         } else if (mb_starts(r, "generated/renderprogs/") && mb_ends(r, ".bin")) {
             MB_RP_ERR(1, "%s: no render program of this mod reads it; add its decl or delete the file", f->path);
         } else if (mb_starts(r, "generated/spirv/")) {
@@ -3408,8 +3472,7 @@ int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, s
  * identity is its text and a copy at a game name is never a binary. */
 static int mb_decl_text(const sh_mb_file *f)
 {
-    char program[SH_MB_REQUEST_MAX + 1];
-    return f->is_decl || f->is_module || sh_mb_rp_permutation(f->request, program, sizeof program, NULL);
+    return f->is_decl || f->is_module || sh_mb_rp_permutation(f->request, NULL, NULL);
 }
 
 /* A decl-grammar copy at a game name whose text is the game's but for line
@@ -3419,13 +3482,13 @@ static int mb_decl_text(const sh_mb_file *f)
 static wchar_t *mb_file_wpath(const wchar_t *root, const char *path);
 static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
 {
-    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    char sha[SH_MB_HASH_HEX + 1];
     unsigned long long size = 0;
     unsigned char *game = NULL, *copy;
     size_t glen = 0, clen = 0;
     wchar_t *full;
     if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK) return;
-    if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
+    if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, NULL) != SH_MB_STOCK_OK) return;
     full = mb_file_wpath(root, f->path);
     copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
     free(full);
@@ -3449,45 +3512,47 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
  * path, either containing /mods/<salt>/ or the engine's '_' spelling of it; a
  * module lives in maps/modules/mods/<salt>/; a bank's stem starts with the
  * key. Pure: the sub-rules of a name under it are the caller's. */
-static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char *why, size_t cap)
+static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char **why)
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
-    char slashed[SH_MB_REQUEST_MAX + 18];
-    if (why && cap) why[0] = 0;
+    char *slashed;
+    int under;
     _snprintf_s(ns_decl, sizeof ns_decl, _TRUNCATE, "mods/%s/", b->id);
     _snprintf_s(ns_raw, sizeof ns_raw, _TRUNCATE, "/mods/%s/", b->id);
     if (f->is_module) {
         char mod_ns[SH_MB_ID_MAX + 32];
         _snprintf_s(mod_ns, sizeof mod_ns, _TRUNCATE, "maps/modules/mods/%s/", b->id);
         if (mb_starts(f->request, mod_ns)) return 1;
-        return mb_cause(why, cap, "a snapModule decl must be maps/modules/mods/%s/<name>.decl", b->id);
+        return mb_cause(why, "a snapModule decl must be maps/modules/mods/%s/<name>.decl", b->id);
     }
     if (f->is_decl && f->ptype && _stricmp(f->ptype, "skins") == 0) {
         char *p;
-        _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->pname ? f->pname : "");
+        if (!(slashed = sh_textf("/%s", f->pname ? f->pname : ""))) return mb_cause(why, "out of memory");
         for (p = slashed; *p; p++) *p = (char)tolower((unsigned char)*p);
-        if (strstr(slashed, ns_raw)) return 1;
-        return mb_cause(why, cap, "skins decl %s does not name a mesh under /mods/%s/", f->pname ? f->pname : "", b->id);
+        under = strstr(slashed, ns_raw) != NULL;
+        free(slashed);
+        if (under) return 1;
+        return mb_cause(why, "skins decl %s does not name a mesh under /mods/%s/", f->pname ? f->pname : "", b->id);
     }
     if (f->is_decl) {
         if (f->pname && mb_starts(f->pname, ns_decl)) return 1;
-        return mb_cause(why, cap, "decl %s %s is outside mods/%s/", f->ptype ? f->ptype : "", f->pname ? f->pname : "", b->id);
+        return mb_cause(why, "decl %s %s is outside mods/%s/", f->ptype ? f->ptype : "", f->pname ? f->pname : "", b->id);
     }
     if (mb_ends(f->request, ".bnk")) {
-        char cause[SH_MB_CAUSE_MAX];
-        if (sh_mb_bank_rule(f->request, b->id, cause, sizeof cause)) return 1;
-        return mb_cause(why, cap, "%s", cause);
+        return sh_mb_bank_rule(f->request, b->id, why);
     }
-    _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
-    if (strstr(slashed, ns_raw)) return 1;
-    return mb_cause(why, cap, "it is not under a mods folder named like this mod folder");
+    if (!(slashed = sh_textf("/%s", f->request))) return mb_cause(why, "out of memory");
+    under = strstr(slashed, ns_raw) != NULL;
+    free(slashed);
+    if (under) return 1;
+    return mb_cause(why, "it is not under a mods folder named like this mod folder");
 }
 
 /* SH_MB_CLASS_* of one file of a built or loaded bundle. */
 static int mb_class_of(const sh_mb_bundle *b, const sh_mb_file *f)
 {
     int restore = f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source);
-    int in_ns = !restore && mb_ns_test(b, f, NULL, 0);
+    int in_ns = !restore && mb_ns_test(b, f, NULL);
     /* An editor type outside the key is a local tweak; under the key it is a
      * Toybox row the mod adds and travels with it */
     if (sh_mb_editor_time(f->request) && !in_ns) return SH_MB_CLASS_EDITOR;
@@ -3613,7 +3678,7 @@ static void mb_registries(sh_mb_bundle *b)
         any = 1;
     }
     if (any) { mb_put(&o, "]", 1); first = 0; }
-    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     strings = extra ? mbj_get(extra, "strings") : NULL;
     en = strings && strings->t == MBJ_OBJ ? mbj_get(strings, "en") : NULL;
     if (en && en->t == MBJ_OBJ && en->count) {
@@ -3723,7 +3788,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         unsigned char *copy = NULL, *stock = NULL;
         size_t clen = 0, slen = 0;
         unsigned long long size = 0;
-        char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+        char sha[SH_MB_HASH_HEX + 1], cause[SH_DT_CAUSE_CAP];
         wchar_t *full;
         sh_dt_counts counts;
         char *json;
@@ -3746,7 +3811,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         free(full);
         if (!copy) { mb_error(b, "cannot read %s", f->path); continue; }
         if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK ||
-            sh_mb_stock_read(f->request, sha, &stock, &slen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) {
+            sh_mb_stock_read(f->request, sha, &stock, &slen, f->path, NULL) != SH_MB_STOCK_OK) {
             if (received)
                 mb_note(b, "replaces %s: the game's text cannot be read here, so a folder the product received keeps it "
                         "as a replacement", f->request);
@@ -3928,8 +3993,7 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
     mb_tok t;
     if (!f->ptype || (strcmp(f->ptype, "material") && strcmp(f->ptype, "material2")) || !f->pname) return 0;
     if (f->stock) {
-        char cause[SH_MB_CAUSE_MAX];
-        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &text, &len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK)
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &text, &len, f->path, NULL) != SH_MB_STOCK_OK)
             return 0;
         heap = 1;
     } else {
@@ -4032,18 +4096,20 @@ static unsigned char *mb_read_prefix(const wchar_t *root, const char *path, size
 }
 
 /* The skeleton name a cooked mesh carries, or 0. */
-static int mb_mesh_skeleton(const unsigned char *d, size_t len, char *out, size_t cap)
+static char *mb_mesh_skeleton(const unsigned char *d, size_t len)
 {
     uint32_t n, i;
-    if (len < 16 || d[2] != 'M' || d[3] != 'M') return 0;
+    char *out;
+    if (len < 16 || d[2] != 'M' || d[3] != 'M') return NULL;
     n = (uint32_t)d[12] | ((uint32_t)d[13] << 8) | ((uint32_t)d[14] << 16) | ((uint32_t)d[15] << 24);
-    if (n < 8 || n >= cap || n > len - 16) return 0;
+    if (n < 8 || n > len - 16) return NULL;
     for (i = 0; i < n; i++)
-        if (d[16 + i] < 0x21 || d[16 + i] > 0x7e) return 0;
-    memcpy(out, d + 16, n);
-    out[n] = 0;
+        if (d[16 + i] < 0x21 || d[16 + i] > 0x7e) return NULL;
+    if (!(out = sh_textn((const char *)d + 16, n))) return NULL;
     mb_lower(out);
-    return mb_ends(out, ".md6skl");
+    if (mb_ends(out, ".md6skl")) return out;
+    free(out);
+    return NULL;
 }
 
 static const sh_mb_file *mb_file_at(const sh_mb_bundle *b, const char *request)
@@ -4059,15 +4125,13 @@ static const sh_mb_file *mb_file_at(const sh_mb_bundle *b, const char *request)
 static int mb_need_held(const sh_mb_bundle *b, const sh_mb_resolver *r, const char *type, const char *name)
 {
     const sh_mb_stock_ops *ops = mb_stock();
-    char cand[2][SH_MB_REQUEST_MAX + 1], where[32];
-    int n = sh_mb_need_requests(type, name, cand, 2), i;
-    for (i = 0; i < n; i++) {
-        if (mb_file_at(b, cand[i])) return 1;
-        if (r && r->installed && r->installed(r->installed_context, cand[i]) == 1) return 1;
-        if (ops && ops->container && ops->container(ops->context, cand[i], NULL, where, sizeof where) == SH_MB_STOCK_OK)
-            return 1;
-    }
-    return 0;
+    char *cand[2], where[32];
+    int n = sh_mb_need_requests(type, name, cand, 2), i, held = 0;
+    for (i = 0; i < n && !held; i++)
+        held = mb_file_at(b, cand[i]) || (r && r->installed && r->installed(r->installed_context, cand[i]) == 1) ||
+               (ops && ops->container && ops->container(ops->context, cand[i], NULL, where, sizeof where) == SH_MB_STOCK_OK);
+    sh_mb_requests_free(cand, n);
+    return held;
 }
 
 static int mb_has_need(const sh_mb_file *f, const char *type, const char *name)
@@ -4088,20 +4152,17 @@ static int mb_model_needs(sh_mb_bundle *b, size_t file, const sh_mb_resolver *r,
     if (!b->files[file].ptype || strcmp(b->files[file].ptype, "md6Def") != 0) return 1;
     count = b->files[file].need_count;
     for (k = 0; k < count; k++) {
-        char mesh[SH_MB_REQUEST_MAX + 1], skl[SH_MB_REQUEST_MAX + 1], clip[SH_MB_REQUEST_MAX + 32];
-        char cand[1][SH_MB_REQUEST_MAX + 1];
+        char *mesh = NULL, *skl, *clip;
         const sh_mb_need *need = &b->files[file].needs[k];
         const sh_mb_file *own;
         unsigned char *bytes = NULL;
         size_t len = 0;
-        int heap = 0, got;
-        if (strcmp(need->type, "baseModel") != 0 || sh_mb_need_requests("baseModel", need->name, cand, 1) != 1) continue;
-        strcpy_s(mesh, sizeof mesh, cand[0]);
+        int heap = 0, ok = 1;
+        if (strcmp(need->type, "baseModel") != 0 || sh_mb_need_requests("baseModel", need->name, &mesh, 1) != 1) continue;
         own = mb_file_at(b, mesh);
         if (own && own->stock) {
-            char cause[SH_MB_CAUSE_MAX];
             if (own->stock_source &&
-                sh_mb_stock_read(own->stock_source, own->blob, &bytes, &len, own->path, cause, sizeof cause) == SH_MB_STOCK_OK)
+                sh_mb_stock_read(own->stock_source, own->blob, &bytes, &len, own->path, NULL) == SH_MB_STOCK_OK)
                 heap = 1;
         } else if (own) {
             bytes = mb_read_prefix(root, own->path, MB_MESH_PREFIX, &len);
@@ -4112,19 +4173,23 @@ static int mb_model_needs(sh_mb_bundle *b, size_t file, const sh_mb_resolver *r,
                 ops->read(ops->context, mesh, sha, &bytes, &len) == SH_MB_STOCK_OK)
                 heap = 1;
         }
+        free(mesh);
         if (!bytes) continue;
-        got = mb_mesh_skeleton(bytes, len, skl, sizeof skl);
+        skl = mb_mesh_skeleton(bytes, len);
         if (heap) HeapFree(GetProcessHeap(), 0, bytes); else free(bytes);
-        if (!got) continue;
-        _snprintf_s(clip, sizeof clip, _TRUNCATE, "%s/_default.md6anim", skl);
+        if (!skl) continue;
+        if (!(clip = sh_textf("%s/_default.md6anim", skl))) { free(skl); return 0; }
         if (!mb_has_need(&b->files[file], "skeleton", skl) && mb_need_held(b, r, "skeleton", skl)) {
-            if (!mb_add_need(&b->files[file], "skeleton", skl, strlen(skl))) return 0;
+            if (!mb_add_need(&b->files[file], "skeleton", skl, strlen(skl))) ok = 0;
             added = 1;
         }
-        if (!mb_has_need(&b->files[file], "anim", clip) && mb_need_held(b, r, "anim", clip)) {
-            if (!mb_add_need(&b->files[file], "anim", clip, strlen(clip))) return 0;
+        if (ok && !mb_has_need(&b->files[file], "anim", clip) && mb_need_held(b, r, "anim", clip)) {
+            if (!mb_add_need(&b->files[file], "anim", clip, strlen(clip))) ok = 0;
             added = 1;
         }
+        free(skl);
+        free(clip);
+        if (!ok) return 0;
     }
     if (added) qsort(b->files[file].needs, b->files[file].need_count, sizeof(sh_mb_need), mb_need_cmp);
     return 1;
@@ -4136,29 +4201,28 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
 {
     sh_mb_bundle *b = c->b;
     sh_mb_file *f;
-    char sha[SH_MB_HASH_HEX + 1], type[64], name[SH_MB_REQUEST_MAX + 16], cause[SH_MB_CAUSE_MAX];
+    char sha[SH_MB_HASH_HEX + 1], type[SH_MB_TYPE_CAP], *name = NULL;
     unsigned long long size = 0;
-    size_t idx, n = strlen(request) + 8;
+    size_t idx;
     mb_buf one = {0};
     if (c->ops->identify(c->ops->context, request, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX ||
-        !sh_mb_logical_name(request, type, sizeof type, name, sizeof name))
+        !sh_mb_logical_name(request, type, &name))
         return 1;   /* left to the need check, which reports it as before */
     if (c->n == c->cap) {
         size_t grown_cap = c->cap * 2 + 64, *grown = (size_t *)realloc(c->by_req, sizeof(size_t) * grown_cap);
-        if (!grown) { mb_error(b, "out of memory"); return 0; }
+        if (!grown) { free(name); mb_error(b, "out of memory"); return 0; }
         c->by_req = grown;
         c->cap = grown_cap;
     }
     f = mb_add_file(b);
-    if (!f) { mb_error(b, "out of memory"); return 0; }
+    if (!f) { free(name); mb_error(b, "out of memory"); return 0; }
     idx = b->file_count - 1;
-    f->path = (char *)malloc(n);
+    f->path = sh_textf("assets/%s", request);
     f->request = mb_strdup(request);
     f->stock_source = mb_strdup(request);
     f->ptype = mb_strdup(type);
-    f->pname = mb_strdup(name);
+    f->pname = name;
     if (!f->path || !f->request || !f->stock_source || !f->ptype || !f->pname) { mb_error(b, "out of memory"); return 0; }
-    _snprintf_s(f->path, n, _TRUNCATE, "assets/%s", request);
     memcpy(f->blob, sha, sizeof sha);
     f->size = size;
     f->stock = 1;
@@ -4168,7 +4232,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     if (f->is_decl) {
         unsigned char *text = NULL;
         size_t len = 0;
-        if (sh_mb_stock_read(request, sha, &text, &len, f->path, cause, sizeof cause) == SH_MB_STOCK_OK) {
+        if (sh_mb_stock_read(request, sha, &text, &len, f->path, NULL) == SH_MB_STOCK_OK) {
             if (sh_decl_text_well_formed(text, len)) {
                 mb_need_ctx nc = { f, 0 };
                 sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
@@ -4198,11 +4262,10 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
  * installed mod pointing at the same campaign file does not settle it: that
  * mod is served only where a map declares it, so this bundle carries its own
  * pointer. */
-static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
-                            char cand[][SH_MB_REQUEST_MAX + 1], int n)
+static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need, char *const cand[], int n)
 {
     sh_mb_bundle *b = c->b;
-    char by[SH_MB_REQUEST_MAX + 16];
+    char *by;
     size_t at[2] = { 0, 0 };
     int i, found, campaign = -1;
     for (i = 0; i < n; i++) {
@@ -4218,21 +4281,25 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
     }
     if (campaign < 0) return 0;
     if (strcmp(need->type, "image") == 0 && mb_closure_vt_served(c, &b->files[file], need->name)) return 1;
-    strncpy_s(by, sizeof by, b->files[file].path, _TRUNCATE);
+    /* A copy: the files array may move while the closure grows. */
+    if (!(by = mb_strdup(b->files[file].path))) { mb_error(b, "out of memory"); c->stopped = 1; return 1; }
     if (!mb_closure_add(c, at[campaign], cand[campaign], need, by)) c->stopped = 1;
+    free(by);
     return 1;
 }
 
 /* One member of a program, by its request path. */
 static int mb_closure_member(mb_closure *c, size_t file, const char *request)
 {
-    char cand[1][SH_MB_REQUEST_MAX + 1];
+    char *cand[1];
     sh_mb_need need;
-    if (strlen(request) > SH_MB_REQUEST_MAX) return 0;
-    memcpy(cand[0], request, strlen(request) + 1);
+    int r;
+    if (!(cand[0] = mb_strdup(request))) { mb_error(c->b, "out of memory"); c->stopped = 1; return 0; }
     need.type = "renderProg";
     need.name = cand[0];
-    return mb_closure_offer(c, file, &need, cand, 1);
+    r = mb_closure_offer(c, file, &need, cand, 1);
+    free(cand[0]);
+    return r;
 }
 
 static void mb_closure_missing(mb_closure *c, size_t file, const char *program, const char *member)
@@ -4250,23 +4317,25 @@ static void mb_closure_missing(mb_closure *c, size_t file, const char *program, 
 static void mb_closure_unit(mb_closure *c, size_t file, const char *program, const char *stem, const char *spirv_name)
 {
     static const char *const ext[3] = { ".vspv", ".fspv", ".cspv" };
-    char req[SH_MB_REQUEST_MAX + 32];
+    char *req;
     int k;
-    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc_vulkan.bin", stem);
+    if (!(req = sh_textf("%s_pc_vulkan.bin", stem))) { mb_error(c->b, "out of memory"); c->stopped = 1; return; }
     if (!mb_closure_member(c, file, req)) {
         if (!c->stopped) mb_closure_missing(c, file, program, req);
+        free(req);
         return;
     }
+    free(req);
     if (c->stopped) return;
-    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc.bin", stem);
-    (void)mb_closure_member(c, file, req);
+    if ((req = sh_textf("%s_pc.bin", stem)) != NULL) (void)mb_closure_member(c, file, req);
+    free(req);
     for (k = 0; k < 3 && !c->stopped; k++)
-        if (sh_mb_spirv_request(spirv_name, ext[k], req, sizeof req)) (void)mb_closure_member(c, file, req);
+        if ((req = sh_mb_spirv_request(spirv_name, ext[k])) != NULL) { (void)mb_closure_member(c, file, req); free(req); }
 }
 
 typedef struct mb_perm_list {
     const char *program;
-    char (*req)[SH_MB_REQUEST_MAX + 1];
+    char **req;
     size_t n, cap;
     int oom;
 } mb_perm_list;
@@ -4274,20 +4343,23 @@ typedef struct mb_perm_list {
 static void mb_perm_cb(void *context, const char *path)
 {
     mb_perm_list *l = (mb_perm_list *)context;
-    char program[SH_MB_REQUEST_MAX + 1];
+    char *program = NULL;
     size_t i;
-    if (l->oom || strlen(path) > SH_MB_REQUEST_MAX || !sh_mb_rp_permutation(path, program, sizeof program, NULL) ||
-        strcmp(program, l->program) != 0)
-        return;
+    int same;
+    if (l->oom) return;
+    same = sh_mb_rp_permutation(path, &program, NULL) && strcmp(program, l->program) == 0;
+    free(program);
+    if (!same) return;
     for (i = 0; i < l->n; i++) if (!strcmp(l->req[i], path)) return;
     if (l->n == l->cap) {
         size_t cap = l->cap ? l->cap * 2 : 8;
         void *g = realloc(l->req, cap * sizeof *l->req);
         if (!g) { l->oom = 1; return; }
-        l->req = (char (*)[SH_MB_REQUEST_MAX + 1])g;
+        l->req = (char **)g;
         l->cap = cap;
     }
-    memcpy(l->req[l->n++], path, strlen(path) + 1);
+    if (!(l->req[l->n] = mb_strdup(path))) { l->oom = 1; return; }
+    l->n++;
 }
 
 /* A material's program is one unit with its files (archive_renderprog.py's
@@ -4300,23 +4372,37 @@ static void mb_perm_cb(void *context, const char *path)
  * missing member. SnapMap's own programs add nothing. */
 static void mb_closure_program(mb_closure *c, size_t file, const char *name)
 {
-    char program[SH_MB_REQUEST_MAX + 1], decl[SH_MB_REQUEST_MAX + 48], stem[SH_MB_REQUEST_MAX + 48], where[32];
+    char *program, *decl, *stem, where[32];
     mb_perm_list perms;
     size_t i, n = strlen(name);
-    if (n == 0 || n > SH_MB_REQUEST_MAX - 40 || (n > 5 && mb_ieq_n(name, 5, "mods/"))) return;
-    memcpy(program, name, n + 1);
+    int listed;
+    if (n == 0 || (n > 5 && mb_ieq_n(name, 5, "mods/"))) return;
+    if (!(program = mb_strdup(name))) { mb_error(c->b, "out of memory"); c->stopped = 1; return; }
     mb_lower(program);
-    _snprintf_s(decl, sizeof decl, _TRUNCATE, "generated/decls/renderprog/%s.decl", program);
-    if (c->ops->container(c->ops->context, decl, NULL, where, sizeof where) != SH_MB_STOCK_OK ||
-        strcmp(where, "gameresources") != 0 || !c->ops->list)
+    decl = sh_textf("generated/decls/renderprog/%s.decl", program);
+    if (!decl || c->ops->container(c->ops->context, decl, NULL, where, sizeof where) != SH_MB_STOCK_OK ||
+        strcmp(where, "gameresources") != 0 || !c->ops->list) {
+        free(decl);
+        free(program);
         return;
-    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/%s", program);
+    }
+    free(decl);
+    if (!(stem = sh_textf("generated/renderprogs/%s", program))) {
+        mb_error(c->b, "out of memory");
+        c->stopped = 1;
+        free(program);
+        return;
+    }
     mb_closure_unit(c, file, program, stem, program);
-    if (c->stopped) return;
+    free(stem);
+    if (c->stopped) { free(program); return; }
     memset(&perms, 0, sizeof perms);
     perms.program = program;
-    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/permutations/%s_", program);
-    if (c->ops->list(c->ops->context, stem, mb_perm_cb, &perms) != SH_MB_STOCK_OK) {
+    stem = sh_textf("generated/renderprogs/permutations/%s_", program);
+    listed = stem ? c->ops->list(c->ops->context, stem, mb_perm_cb, &perms) : SH_MB_STOCK_OK;
+    if (!stem) perms.oom = 1;
+    free(stem);
+    if (listed != SH_MB_STOCK_OK) {
         mb_error(c->b, "%s uses render program %s, and Snapmap+ could not read the game's files to find its parts; "
                  "start DOOM normally and press Refresh", c->b->files[file].path, program);
         c->stopped = 1;
@@ -4324,44 +4410,58 @@ static void mb_closure_program(mb_closure *c, size_t file, const char *name)
         mb_error(c->b, "out of memory");
         c->stopped = 1;
     } else if (!perms.n) {
-        char member[SH_MB_REQUEST_MAX + 80];
-        _snprintf_s(member, sizeof member, _TRUNCATE, "permutation (generated/renderprogs/permutations/%s_<16 hex "
-                    "digits>.decl)", program);
-        mb_closure_missing(c, file, program, member);
+        char *member = sh_textf("permutation (generated/renderprogs/permutations/%s_<16 hex digits>.decl)", program);
+        mb_closure_missing(c, file, program, member ? member : "permutation");
+        free(member);
     }
     for (i = 0; i < perms.n && !c->stopped; i++) {
         if (!mb_closure_member(c, file, perms.req[i]) || c->stopped) continue;
-        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%.*s", (int)(strlen(perms.req[i]) - 5), perms.req[i]);
+        if (!(stem = sh_textn(perms.req[i], strlen(perms.req[i]) - 5))) {
+            mb_error(c->b, "out of memory");
+            c->stopped = 1;
+            break;
+        }
         mb_closure_unit(c, file, program, stem, perms.req[i]);
+        free(stem);
     }
+    for (i = 0; i < perms.n; i++) free(perms.req[i]);
     free(perms.req);
+    free(program);
 }
 
 static void mb_closure_need(mb_closure *c, size_t file, size_t k)
 {
-    char cand[2][SH_MB_REQUEST_MAX + 1];
+    char *cand[2];
     sh_mb_need need = c->b->files[file].needs[k];
     int n = sh_mb_need_requests(need.type, need.name, cand, 2), held;
     if (n <= 0) return;
     held = mb_closure_offer(c, file, &need, cand, n);
-    if (c->stopped) return;
+    if (c->stopped) { sh_mb_requests_free(cand, n); return; }
     if (_stricmp(need.type, "renderProg") == 0) {
-        char name[SH_MB_REQUEST_MAX + 1];
-        strncpy_s(name, sizeof name, need.name, _TRUNCATE);   /* the files array may move while the closure grows */
-        mb_closure_program(c, file, name);
+        char *name = mb_strdup(need.name);   /* the files array may move while the closure grows */
+        if (name) mb_closure_program(c, file, name);
+        else { mb_error(c->b, "out of memory"); c->stopped = 1; }
+        free(name);
     } else if (strcmp(need.type, "swf") == 0) {
         /* The movie's atlas is its sibling: generated/swf/<stem>.bimage. */
         size_t m = strlen(cand[0]);
-        if (m > 5 && m + 3 <= SH_MB_REQUEST_MAX && !strcmp(cand[0] + m - 5, ".bswf")) {
-            memcpy(cand[0] + m - 5, ".bimage", 8);
-            mb_closure_offer(c, file, &need, cand, 1);
+        if (m > 5 && !strcmp(cand[0] + m - 5, ".bswf")) {
+            char *atlas[1];
+            if ((atlas[0] = sh_textf("%.*s.bimage", (int)(m - 5), cand[0])) != NULL) {
+                mb_closure_offer(c, file, &need, atlas, 1);
+                free(atlas[0]);
+            }
         }
     } else if (!held && strcmp(need.type, "image") == 0) {
         /* No standalone image: a transparency or decal atlas of that name. */
-        if (mb_binary_name("generated", "transsortatlas", need.name, "bimage", cand[0], SH_MB_REQUEST_MAX + 1) &&
-            mb_binary_name("generated", "decalatlas", need.name, "bimage", cand[1], SH_MB_REQUEST_MAX + 1))
-            mb_closure_offer(c, file, &need, cand, 2);
+        char *atlas[2];
+        atlas[0] = mb_binary_name("generated", "transsortatlas", need.name, "bimage");
+        atlas[1] = mb_binary_name("generated", "decalatlas", need.name, "bimage");
+        if (atlas[0] && atlas[1]) mb_closure_offer(c, file, &need, atlas, 2);
+        free(atlas[0]);
+        free(atlas[1]);
     }
+    sh_mb_requests_free(cand, n);
 }
 
 static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wchar_t *root)
@@ -4413,7 +4513,7 @@ typedef struct mb_script_use {
 typedef struct mb_scripts {
     mb_script_use *u;
     size_t n, cap;
-    char cur[SH_MB_REQUEST_MAX + 16];   /* the file being scanned */
+    const char *cur;       /* the file being scanned (sh_mb_script_file_name) */
     unsigned files, dynamic;
     unsigned long long bytes;
     int node;              /* a script registers an input: the mod gets its Script node row */
@@ -4486,10 +4586,9 @@ static int mb_utf8_ok(const unsigned char *t, size_t n)
  * when there is none), as the runtime's stop line words a file and line. */
 static void mb_script_error(sh_mb_bundle *b, const char *file, int line, const char *what, const char *todo)
 {
-    char where[SH_MB_REQUEST_MAX + 32];
+    char *where = line > 0 ? sh_textf("%s line %d", file, line) : mb_strdup(file);
     char first[8];
-    if (line > 0) _snprintf_s(where, sizeof where, _TRUNCATE, "%s line %d", file, line);
-    else _snprintf_s(where, sizeof where, _TRUNCATE, "%s", file);
+    if (!where) { mb_error(b, "out of memory"); return; }
     if (todo && todo[0]) {
         first[0] = (char)toupper((unsigned char)todo[0]);
         first[1] = 0;
@@ -4497,6 +4596,7 @@ static void mb_script_error(sh_mb_bundle *b, const char *file, int line, const c
     } else {
         mb_error(b, "%s: %s.", where, what);
     }
+    free(where);
 }
 
 /* One script's text: the checks of modbundle.h, the compile check, then the
@@ -4505,41 +4605,38 @@ static void mb_script_file(sh_mb_bundle *b, size_t fi, const unsigned char *text
 {
     const sh_mb_file *f = &b->files[fi];
     sh_mb_script_check_fn check = g_mb_script_check;
-    char file[SH_MB_REQUEST_MAX + 16], what[400], todo[200];
+    char *file, *what = NULL, *todo = NULL;
     int line = 0;
-    sh_mb_script_file_name(f->request, file, sizeof file);
+    if (!(file = sh_mb_script_file_name(f->request))) { mb_error(b, "out of memory"); return; }
     if (len >= 4 && !memcmp(text, "\x1bLua", 4)) {
         mb_script_error(b, file, 0, "the file is compiled Lua, not script text", "put the .lua source text in the file");
-        return;
-    }
-    if (memchr(text, 0, len) || !mb_utf8_ok(text, len)) {
+    } else if (memchr(text, 0, len) || !mb_utf8_ok(text, len)) {
         mb_script_error(b, file, 0, "the file is not UTF-8 text", "save it as UTF-8 text");
-        return;
-    }
-    if (!check) {
+    } else if (!check) {
         mb_script_error(b, file, 0, "the file cannot be checked by this program", "build the mod in Snapmap+");
-        return;
+    } else if (!check(file, sh_mb_script_request(f->request, NULL, NULL) == SH_MB_SCRIPT_ENTRY, (const char *)text, len,
+                      &line, &what, &todo)) {
+        mb_script_error(b, file, line, what && what[0] ? what : "does not compile", todo);
+    } else {
+        s->cur = file;
+        sh_mb_script_scan((const char *)text, len, mb_script_use_cb, s);
+        s->cur = NULL;
+        if (sh_script_node_registers_input((const char *)text, len)) s->node = 1;
     }
-    what[0] = todo[0] = 0;
-    if (!check(file, sh_mb_script_request(f->request, NULL, NULL) == SH_MB_SCRIPT_ENTRY, (const char *)text, len,
-               &line, what, sizeof what, todo, sizeof todo)) {
-        mb_script_error(b, file, line, what[0] ? what : "does not compile", todo);
-        return;
-    }
-    strcpy_s(s->cur, sizeof s->cur, file);
-    sh_mb_script_scan((const char *)text, len, mb_script_use_cb, s);
-    if (sh_script_node_registers_input((const char *)text, len)) s->node = 1;
+    free(what);
+    free(todo);
+    free(file);
 }
 
-/* A use's name with this mod's own "mods/<salt>/" taken off: 1 with the
- * mod-relative name in out; 0 when it names another mod's namespace. */
-static int mb_script_own_name(const sh_mb_bundle *b, const char *name, char *out, size_t cap)
+/* A use's name with this mod's own "mods/<salt>/" taken off: the
+ * mod-relative name (points into name); NULL when it names another mod's
+ * namespace. */
+static const char *mb_script_own_name(const sh_mb_bundle *b, const char *name)
 {
     size_t sl = strlen(b->id);
-    if (_strnicmp(name, "mods/", 5) != 0) { strncpy_s(out, cap, name, _TRUNCATE); return 1; }
-    if (_strnicmp(name + 5, b->id, sl) != 0 || name[5 + sl] != '/' || !name[6 + sl]) return 0;
-    strncpy_s(out, cap, name + 6 + sl, _TRUNCATE);
-    return 1;
+    if (_strnicmp(name, "mods/", 5) != 0) return name;
+    if (_strnicmp(name + 5, b->id, sl) != 0 || name[5 + sl] != '/' || !name[6 + sl]) return NULL;
+    return name + 6 + sl;
 }
 
 static int mb_script_name_cmp(const void *a, const void *b)
@@ -4570,12 +4667,13 @@ static void mb_script_put_names(mb_buf *o, const char *key, char **names, size_t
 
 static int mb_script_entity_owned(const sh_mb_bundle *b, const char *rel)
 {
-    char full[SH_MB_REQUEST_MAX + 1];
-    size_t i;
-    _snprintf_s(full, sizeof full, _TRUNCATE, "mods/%s/%s", b->id, rel);
-    for (i = 0; i < b->file_count; i++)
-        if (b->files[i].ptype && b->files[i].pname && !_stricmp(b->files[i].ptype, "entityDef") &&
-            !_stricmp(b->files[i].pname, full)) return 1;
+    size_t i, sl = strlen(b->id);
+    for (i = 0; i < b->file_count; i++) {
+        const char *p = b->files[i].pname;
+        if (b->files[i].ptype && p && !_stricmp(b->files[i].ptype, "entityDef") && !_strnicmp(p, "mods/", 5) &&
+            !_strnicmp(p + 5, b->id, sl) && p[5 + sl] == '/' && !_stricmp(p + 6 + sl, rel))
+            return 1;
+    }
     return 0;
 }
 
@@ -4598,33 +4696,37 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
     if (!ent || !ev || !in || !outn) { mb_error(b, "out of memory"); goto done; }
     for (i = 0; i < s->n; i++) {
         const mb_script_use *u = &s->u[i];
-        const char *file = u->file;
-        char rel[SH_MB_REQUEST_MAX + 1], what[SH_MB_CAUSE_MAX];
+        const char *file = u->file, *rel;
+        char *what = NULL;
         if (u->what == SH_MB_SCRIPT_REQUIRE) {
             size_t n = strlen(u->name), c;
             int ok = n > 0;
+            char *req;
             for (c = 0; ok && c < n; c++) ok = mb_script_name_char(u->name[c]);
             if (!ok) {
-                _snprintf_s(what, sizeof what, _TRUNCATE, "\"require\" was given \"%s\", which is not a file of this "
-                            "mod's scripts\\lib", u->name);
-                mb_script_error(b, file, u->line, what, "use the file's name in scripts\\lib without folders or "
-                                "\".lua\", as require(\"fsm\") for scripts\\lib\\fsm.lua; a script loads only its own "
-                                "mod's files");
+                what = sh_textf("\"require\" was given \"%s\", which is not a file of this mod's scripts\\lib", u->name);
+                mb_script_error(b, file, u->line, what ? what : "out of memory", "use the file's name in scripts\\lib "
+                                "without folders or \".lua\", as require(\"fsm\") for scripts\\lib\\fsm.lua; a script "
+                                "loads only its own mod's files");
+                free(what);
                 continue;
             }
-            _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/scripts/lib/%s.lua", b->id, u->name);
-            mb_lower(rel);
-            if (!mb_req_has(own, rel)) {
-                _snprintf_s(what, sizeof what, _TRUNCATE, "\"require\" found no scripts\\lib\\%s.lua in this mod",
-                            u->name);
-                mb_script_error(b, file, u->line, what, "add the file to scripts\\lib or correct the name; a script "
-                                "loads only its own mod's files");
+            if (!(req = sh_textf("mods/%s/scripts/lib/%s.lua", b->id, u->name))) { mb_error(b, "out of memory"); goto done; }
+            mb_lower(req);
+            if (!mb_req_has(own, req)) {
+                what = sh_textf("\"require\" found no scripts\\lib\\%s.lua in this mod", u->name);
+                mb_script_error(b, file, u->line, what ? what : "out of memory", "add the file to scripts\\lib or "
+                                "correct the name; a script loads only its own mod's files");
+                free(what);
             }
+            free(req);
             continue;
         }
-        if (!mb_script_own_name(b, u->name, rel, sizeof rel)) {
-            _snprintf_s(what, sizeof what, _TRUNCATE, "\"%s\" is another mod's name", u->name);
-            mb_script_error(b, file, u->line, what, "name this mod's own content by its path inside the mod, as \"ai/imp\"");
+        if (!(rel = mb_script_own_name(b, u->name))) {
+            what = sh_textf("\"%s\" is another mod's name", u->name);
+            mb_script_error(b, file, u->line, what ? what : "out of memory",
+                            "name this mod's own content by its path inside the mod, as \"ai/imp\"");
+            free(what);
             continue;
         }
         if (u->what == SH_MB_SCRIPT_BIND) {
@@ -4688,10 +4790,10 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
     if (o.oom) { free(o.p); mb_error(b, "out of memory"); goto done; }
     {
         /* Canonical (keys in byte order), as a load of the block reads it. */
-        mbj *parsed = mbj_parse(o.p, o.n, NULL, 0);
+        mbj *parsed = mbj_parse(o.p, o.n, NULL);
         mb_buf canon = {0};
         free(o.p);
-        if (!parsed || !mbj_canon(parsed, &canon, NULL, 0) || canon.oom) {
+        if (!parsed || !mbj_canon(parsed, &canon, NULL) || canon.oom) {
             mbj_free(parsed);
             free(canon.p);
             mb_error(b, "out of memory");
@@ -4721,7 +4823,7 @@ done:
 static void mb_derive_requirements(sh_mb_bundle *b, int report)
 {
     static const char *const gates[] = { "g_useResourceBlackList", "g_useImageBlackList" };
-    char cause[SH_MB_CAUSE_MAX], *canon;
+    char *cause = NULL, *canon;
     mbj *req = NULL;
     const mbj *cvars = NULL, *cmds = NULL;
     mb_buf o = {0};
@@ -4731,7 +4833,7 @@ static void mb_derive_requirements(sh_mb_bundle *b, int report)
         need = b->files[i].closure || b->files[i].cls == SH_MB_CLASS_SURFACE;
     if (!need) return;
     if (b->requirements) {
-        req = mbj_parse(b->requirements, strlen(b->requirements), NULL, 0);
+        req = mbj_parse(b->requirements, strlen(b->requirements), NULL);
         cvars = req ? mbj_get(req, "cvars") : NULL;
         cmds = req ? mbj_get(req, "commands") : NULL;
     }
@@ -4754,22 +4856,23 @@ static void mb_derive_requirements(sh_mb_bundle *b, int report)
         mb_puts(&o, ",");
         mb_put_jstr(&o, cvars->keys[i], cvars->klen[i]);
         mb_puts(&o, ":");
-        if (!mbj_canon(v, &o, NULL, 0)) o.oom = 1;
+        if (!mbj_canon(v, &o, NULL)) o.oom = 1;
     }
     mb_puts(&o, "}");
     if (cmds) {
         mb_puts(&o, ",\"commands\":");
-        if (!mbj_canon(cmds, &o, NULL, 0)) o.oom = 1;
+        if (!mbj_canon(cmds, &o, NULL)) o.oom = 1;
     }
     mb_puts(&o, "}");
-    canon = o.oom ? NULL : sh_mb_requirements_canonical(o.p, o.n, cause, sizeof cause);
-    if (!canon) mb_error(b, "the requirements this mod needs could not be recorded (%s)", o.oom ? "out of memory" : cause);
+    canon = o.oom ? NULL : sh_mb_requirements_canonical(o.p, o.n, &cause);
+    if (!canon) mb_error(b, "the requirements this mod needs could not be recorded (%s)", cause ? cause : "out of memory");
     else {
         free(b->requirements);
         b->requirements = canon;
         if (report) mb_note(b, "requirements: g_useResourceBlackList 0 and g_useImageBlackList 0, derived: the mod brings campaign "
                 "content");
     }
+    free(cause);
     free(o.p);
     mbj_free(req);
 }
@@ -4798,7 +4901,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 
     for (i = 0; i < b->file_count; i++) {
         sh_mb_file *f = &b->files[i];
-        char type[64], name[SH_MB_REQUEST_MAX + 16], *rel;
+        char type[SH_MB_TYPE_CAP], *name = NULL, *rel;
         wchar_t *wrel, *full;
         unsigned long long got = 0;
         const char *forbidden = mb_rp_forbidden(f->request);
@@ -4807,13 +4910,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             mb_error(b, "%s may not ship: %s", f->path, forbidden);
             continue;
         }
-        if (!sh_mb_logical_name(f->request, type, sizeof type, name, sizeof name)) {
+        if (!sh_mb_logical_name(f->request, type, &name)) {
             if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
             else mb_error(b, "%s: generated/decls/<type>/ names no decl type this game ships, or the name is empty", f->path);
             continue;
         }
         f->ptype = mb_strdup(type);
-        f->pname = mb_strdup(name);
+        f->pname = name;
         f->is_decl = mb_starts(f->request, "generated/decls/");
         f->is_module = strcmp(f->ptype ? f->ptype : type, "snapModule") == 0;
         f->shadowed = mb_is_shadow(b, f->request);
@@ -4857,12 +4960,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
              * load it as. */
             size_t len = 0;
             unsigned char *bytes = mb_read_wfile(full, MB_ANY_SIZE, &len);
-            char stem[SH_MB_BANK_STEM_MAX + 1], cause[SH_MB_CAUSE_MAX];
+            char stem[SH_MB_BANK_STEM_MAX + 1], *cause = NULL;
             if (!bytes) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(bytes, len, f->blob);
             got = len;
-            if (sh_mb_bank_stem(f->request, stem, sizeof stem) && !sh_mb_bank_header_ok(bytes, len, stem, cause, sizeof cause))
+            if (sh_mb_bank_stem(f->request, stem, sizeof stem) && !sh_mb_bank_header_ok(bytes, len, stem, &cause))
                 mb_error(b, "%s: %s", f->path, cause);
+            free(cause);
             free(bytes);
         } else if (sh_mb_script_request(f->request, NULL, NULL) > 0) {
             /* A script is read whole: checked, compiled and scanned (mb_script_file). */
@@ -4886,12 +4990,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         /* A carried copy of installed content becomes a stock pointer,
          * matched by size and hash (path first, then renamed copies). */
         if (stock && stock->match) {
-            char source[SH_MB_REQUEST_MAX + 1], cause[SH_MB_CAUSE_MAX];
-            if (stock->match(stock->context, f->request, f->size, f->blob, source, sizeof source) == SH_MB_STOCK_OK &&
-                sh_mb_check_source(source, cause, sizeof cause)) {
+            char *source = NULL;
+            if (stock->match(stock->context, f->request, f->size, f->blob, &source) == SH_MB_STOCK_OK && source &&
+                sh_mb_check_source(source, NULL)) {
                 f->stock = 1;
-                f->stock_source = mb_strdup(source);
-                if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
+                f->stock_source = source;
+            } else {
+                free(source);
             }
         }
         /* Identity of decl text is textual: line ends are not content. */
@@ -4912,9 +5017,9 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
              * replaces it (a shadow, derived, never declared) or, for an
              * editor type, is an editor tweak. A decl there is an edited copy
              * whose edits are derived (mb_derive_edits); a binary is refused. */
-            char why[SH_MB_CAUSE_MAX];
+            char *why = NULL;
             int restore = f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source);
-            int in_ns = !restore && mb_ns_test(b, f, why, sizeof why);
+            int in_ns = !restore && mb_ns_test(b, f, &why);
             if (restore) {
                 /* a surface: the game's own bytes at the game's own name */
             } else if (mb_ends(f->request, ".bnk")) {
@@ -4930,10 +5035,9 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 }
             } else if (in_ns) {
                 /* A family member is named by its family, which must be the mod's own. */
-                char slashed[SH_MB_REQUEST_MAX + 2];
-                _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
-                if (!f->is_decl && sh_mb_vt_member(f->request, NULL, 0, NULL) &&
-                    _strnicmp(slashed + 16, ns_raw, strlen(ns_raw)) != 0)
+                /* "virtualtextures/" then "/mods/<salt>/" from its '/' on */
+                if (!f->is_decl && sh_mb_vt_member(f->request, NULL, NULL) &&
+                    _strnicmp(f->request + 15, ns_raw, strlen(ns_raw)) != 0)
                     mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/%s/<family>_sq<N>.mega2",
                              f->path, b->id);
             } else {
@@ -4957,6 +5061,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                              "one; start DOOM normally and press Refresh", f->path, why);
                 }
             }
+            free(why);
         }
     }
 
@@ -4965,11 +5070,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 
     /* A module is placed through its snapModuleInfo, which must travel with it. */
     for (i = 0; i < b->file_count; i++) {
-        char info[SH_MB_REQUEST_MAX + 32];
+        char *info;
         if (!b->files[i].is_module) continue;
-        if (!sh_mb_module_info_request(b->files[i].request, info, sizeof info) || !mb_req_has(&own, info))
+        info = sh_mb_module_info_request(b->files[i].request);
+        if (!info || !mb_req_has(&own, info))
             mb_error(b, "%s: a snapModule needs its snapModuleInfo assets/%s in the same bundle", b->files[i].path,
-                     sh_mb_module_info_request(b->files[i].request, info, sizeof info) ? info : "?");
+                     info ? info : "?");
+        free(info);
     }
 
     /* Pointers carry nothing: the caps count the carried files only. */
@@ -5245,7 +5352,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     static const char *const pkeys[] = { "closure", "needs", "path", "provides", "sha256", "source", NULL };
     const char *list = pointer ? "stock" : "files";
     const mbj *sha, *needs, *path, *prov, *size, *src, *closure, *pt, *pn;
-    char cause[SH_MB_CAUSE_MAX], type[64], name[SH_MB_REQUEST_MAX + 16], *expect;
+    char type[SH_MB_TYPE_CAP], *name = NULL, *expect;
     sh_mb_file *f;
     size_t k;
     unsigned long long sz = 0;
@@ -5271,21 +5378,24 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     expect = mb_strdup(path->s + 7);
     if (!expect) { mb_error(b, "out of memory"); return 0; }
     mb_lower(expect);
-    if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
+    if (!sh_mb_check_request(expect, NULL)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     pt = prov->t == MBJ_OBJ ? mbj_get(prov, "type") : NULL;
     pn = prov->t == MBJ_OBJ ? mbj_get(prov, "name") : NULL;
-    if (!sh_mb_logical_name(expect, type, sizeof type, name, sizeof name) || !pt || !pn || prov->count != 2 ||
+    if (!sh_mb_logical_name(expect, type, &name) || !pt || !pn || prov->count != 2 ||
         pt->t != MBJ_STR || pn->t != MBJ_STR || strcmp(pt->s, type) != 0 || strcmp(pn->s, name) != 0) {
         mb_error(b, MB_BLOCK_EDITED);
+        free(name);
         free(expect);
         return 0;
     }
+    free(name);
+    name = NULL;
     if (!mb_is_hex64(sha)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     if (pointer) {
         char *lower;
         int same;
-        if (src->t != MBJ_STR || strlen(src->s) != src->n || !sh_mb_check_source(src->s, cause, sizeof cause)) {
+        if (src->t != MBJ_STR || strlen(src->s) != src->n || !sh_mb_check_source(src->s, NULL)) {
             mb_error(b, MB_BLOCK_EDITED);
             free(expect);
             return 0;
@@ -5309,7 +5419,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     memcpy(f->blob, sha->s, SH_MB_HASH_HEX + 1);
     f->size = sz;
     f->ptype = mb_strdup(type);
-    f->pname = mb_strdup(name);
+    f->pname = mb_strdup(pn->s);
     f->is_decl = mb_starts(expect, "generated/decls/");
     f->is_module = strcmp(type, "snapModule") == 0;
     if (pointer) {
@@ -5389,11 +5499,11 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     if (v) memcpy(out->tree, v->s, SH_MB_HASH_HEX + 1);
     v = mbj_get(block, "cause");
     if (v && v->t != MBJ_STR) { mb_error(out, MB_BLOCK_EDITED); return 0; }
-    if (v) strncpy_s(out->state_cause, sizeof out->state_cause, v->s, _TRUNCATE);
+    if (v && !sh_mb_set_state_cause(out, v->s)) { mb_error(out, "out of memory"); return 0; }
     out->validated = v == NULL;
     bundle = mbj_get(block, "build");
     if (!bundle) {
-        if (out->state_cause[0]) mb_error(out, "not built: %s", out->state_cause);
+        if (out->state_cause && out->state_cause[0]) mb_error(out, "not built: %s", out->state_cause);
         else mb_error(out, "not built yet");
         return 0;
     }
@@ -5402,7 +5512,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     v = mbj_get(block, "registries");
     if (v) {
         mb_buf rb = {0};
-        if (v->t != MBJ_OBJ || !mbj_canon(v, &rb, NULL, 0)) {
+        if (v->t != MBJ_OBJ || !mbj_canon(v, &rb, NULL)) {
             free(rb.p);
             mb_error(out, MB_BLOCK_EDITED);
             return 0;
@@ -5412,7 +5522,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     v = mbj_get(block, "edits");
     if (v) {
         mb_buf eb = {0};
-        if (v->t != MBJ_ARR || !mbj_canon(v, &eb, NULL, 0)) {
+        if (v->t != MBJ_ARR || !mbj_canon(v, &eb, NULL)) {
             free(eb.p);
             mb_error(out, MB_BLOCK_EDITED);
             return 0;
@@ -5423,7 +5533,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     v = mbj_get(block, "scripts");
     if (v) {
         mb_buf sb = {0};
-        if (v->t != MBJ_OBJ || !mbj_canon(v, &sb, NULL, 0)) {
+        if (v->t != MBJ_OBJ || !mbj_canon(v, &sb, NULL)) {
             free(sb.p);
             mb_error(out, MB_BLOCK_EDITED);
             return 0;
@@ -5475,14 +5585,14 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 
 static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int check)
 {
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     mbj *root;
     int ok;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     if (!text) { mb_error(out, "cannot read mod.json"); return 0; }
-    root = mbj_parse(text, len, cause, sizeof cause);
-    if (!root) { mb_error(out, "mod.json: %s", cause); return 0; }
+    root = mbj_parse(text, len, &cause);
+    if (!root) { mb_error(out, "mod.json: %s", cause ? cause : "out of memory"); free(cause); return 0; }
     ok = mb_load_root(out, root, check);
     mbj_free(root);
     return ok;
@@ -5504,9 +5614,15 @@ int sh_mb_load(const char *path, sh_mb_bundle *out)
 
 int sh_mb_load_folder(const char *folder, sh_mb_bundle *out)
 {
-    char path[MAX_PATH * 4];
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder ? folder : "");
-    return sh_mb_load(path, out);
+    char *path = sh_textf("%s\\mod.json", folder ? folder : "");
+    int ok;
+    if (!path) {
+        if (out) { memset(out, 0, sizeof *out); mb_error(out, "out of memory"); }
+        return 0;
+    }
+    ok = sh_mb_load(path, out);
+    free(path);
+    return ok;
 }
 
 /* ----------------------------------------------------------- splicing ---- */
@@ -5991,9 +6107,9 @@ static char *mb_extra_member(const sh_mb_bundle *b, const char *key)
     const mbj *v;
     mb_buf o = {0};
     if (!b->extra) return NULL;
-    extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     v = extra ? mbj_get(extra, key) : NULL;
-    if (v && !mbj_canon(v, &o, NULL, 0)) { free(o.p); o.p = NULL; }
+    if (v && !mbj_canon(v, &o, NULL)) { free(o.p); o.p = NULL; }
     mbj_free(extra);
     return v ? o.p : NULL;
 }
@@ -6033,7 +6149,7 @@ static char *mb_block_text(const sh_mb_bundle *b)
     if (b->tree[0]) { mb_puts(&o, ",\"tree\":"); mb_put_jcstr(&o, b->tree); }
     mb_puts(&o, ",\"build\":");
     mb_put_jcstr(&o, b->hash);
-    if (!b->validated && b->state_cause[0]) { mb_puts(&o, ",\"cause\":"); mb_put_jcstr(&o, b->state_cause); }
+    if (!b->validated && b->state_cause && b->state_cause[0]) { mb_puts(&o, ",\"cause\":"); mb_put_jcstr(&o, b->state_cause); }
     if (b->warning_list_count) {
         mb_puts(&o, ",\"warnings\":[");
         for (i = 0; i < b->warning_list_count; i++) {
@@ -6132,12 +6248,12 @@ static char *mb_author_synth(const sh_mb_bundle *b, size_t *out_len)
     if (b->author) { mb_puts(&o, ",\"author\":"); mb_put_jcstr(&o, b->author); }
     if (b->homepage) { mb_puts(&o, ",\"homepage\":"); mb_put_jcstr(&o, b->homepage); }
     if (b->requirements) { mb_puts(&o, ",\"requirements\":"); mb_puts(&o, b->requirements); }
-    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     for (i = 0; extra && extra->t == MBJ_OBJ && i < extra->count; i++) {
         mb_put(&o, ",", 1);
         mb_put_jstr(&o, extra->keys[i], extra->klen[i]);
         mb_put(&o, ":", 1);
-        if (!mbj_canon(extra->items[i], &o, NULL, 0)) o.oom = 1;
+        if (!mbj_canon(extra->items[i], &o, NULL)) o.oom = 1;
     }
     mbj_free(extra);
     mb_put(&o, "}", 1);
@@ -6167,22 +6283,22 @@ char *sh_mb_modjson_text(const sh_mb_bundle *b, const char *author_text, size_t 
     return mb_modjson(b, author_text, author_len, out_len);
 }
 
-int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t cap)
+int sh_mb_write(const sh_mb_bundle *b, const char *folder, char **cause)
 {
     wchar_t *root, *mod_path = NULL;
     unsigned char *existing = NULL;
     char *text = NULL;
     size_t elen = 0, len = 0;
     int ok;
-    if (!b || b->errors || !b->canonical) return mb_cause(cause, cap, "the bundle has errors and is not written");
+    if (!b || b->errors || !b->canonical) return mb_cause(cause, "the bundle has errors and is not written");
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
-    if (!mod_path) { free(root); return mb_cause(cause, cap, "out of memory"); }
+    if (!mod_path) { free(root); return mb_cause(cause, "out of memory"); }
     existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
     text = mb_modjson(b, (const char *)existing, elen, &len);
     ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok && text) mb_cause(cause, cap, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
-    else if (!ok) mb_cause(cause, cap, "mod.json could not be composed (is it a JSON object?)");
+    if (!ok && text) mb_cause(cause, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
+    else if (!ok) mb_cause(cause, "mod.json could not be composed (is it a JSON object?)");
     free(text);
     free(existing);
     free(root);
@@ -6190,7 +6306,7 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t c
     return ok;
 }
 
-int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char *why, size_t cap)
+int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char **why)
 {
     wchar_t *root, *mod_path = NULL;
     unsigned char *existing = NULL;
@@ -6198,13 +6314,13 @@ int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char *why, siz
     size_t elen = 0, own_len = 0, len = 0;
     mb_buf o = {0};
     int ok = 0;
-    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(why, cap, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
+    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(why, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
-    if (!mod_path) { free(root); return mb_cause(why, cap, "out of memory"); }
+    if (!mod_path) { free(root); return mb_cause(why, "out of memory"); }
     existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
     own = existing ? sh_mb_author_bytes((const char *)existing, elen, &own_len, NULL) : NULL;
-    if (!own) { mb_cause(why, cap, "mod.json is missing or is not a JSON object"); goto done; }
+    if (!own) { mb_cause(why, "mod.json is missing or is not a JSON object"); goto done; }
     mb_puts(&o, "{\"format\":2,\"salt\":");
     mb_put_jcstr(&o, b->id);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rules\":%d", SH_MB_RULES);
@@ -6215,13 +6331,13 @@ int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char *why, siz
     }
     if (b->tree[0]) { mb_puts(&o, ",\"tree\":"); mb_put_jcstr(&o, b->tree); }
     mb_puts(&o, ",\"cause\":");
-    mb_put_jcstr(&o, b->first_cause[0] ? b->first_cause : "the build failed");
+    mb_put_jcstr(&o, b->first_cause && b->first_cause[0] ? b->first_cause : "the build failed");
     mb_puts(&o, "}");
     block = o.oom ? NULL : mb_pretty(o.p, o.n);
     text = block ? mb_splice(own, own_len, block, &len) : NULL;
     ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok && text) mb_cause(why, cap, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
-    else if (!ok) mb_cause(why, cap, "out of memory");
+    if (!ok && text) mb_cause(why, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
+    else if (!ok) mb_cause(why, "out of memory");
 done:
     free(o.p);
     free(block);
@@ -6233,34 +6349,36 @@ done:
     return ok;
 }
 
-int sh_mb_set_state(const char *folder, int validated, const char *cause, char *why, size_t cap)
+int sh_mb_set_state(const char *folder, int validated, const char *cause, char **why)
 {
     sh_mb_bundle b;
     int ok;
     if (!sh_mb_load_folder(folder, &b)) {
-        mb_cause(why, cap, "%s", b.first_cause);
+        mb_cause(why, "%s", sh_mb_first_cause(&b));
         sh_mb_free(&b);
         return 0;
     }
-    if (b.validated == (validated != 0) && strcmp(b.state_cause, validated ? "" : (cause ? cause : "")) == 0) {
+    if (b.validated == (validated != 0) && strcmp(sh_mb_state_cause(&b), validated ? "" : (cause ? cause : "")) == 0) {
         sh_mb_free(&b);
         return 1;
     }
     b.validated = validated != 0;
-    strncpy_s(b.state_cause, sizeof b.state_cause, validated ? "" : (cause ? cause : ""), _TRUNCATE);
-    ok = sh_mb_write(&b, folder, why, cap);
+    if (!sh_mb_set_state_cause(&b, validated ? NULL : (cause ? cause : ""))) {
+        sh_mb_free(&b);
+        return mb_cause(why, "out of memory");
+    }
+    ok = sh_mb_write(&b, folder, why);
     sh_mb_free(&b);
     return ok;
 }
 
 /* -------------------------------------------------------- salt paths ---- */
 
-int sh_mb_salt_paths_check(const sh_mb_bundle *b, char *cause, size_t cap)
+int sh_mb_salt_paths_check(const sh_mb_bundle *b, char **cause)
 {
     size_t i;
     int pass;
-    if (cause && cap) cause[0] = 0;
-    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(cause, cap, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
+    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(cause, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         for (pass = 0; pass < 2; pass++) {
@@ -6274,7 +6392,7 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char *cause, size_t cap)
                 end = strchr(seg, '/');
                 if (!end || end == seg) continue;
                 if ((size_t)(end - seg) == SH_SALT_LEN && _strnicmp(seg, b->id, SH_SALT_LEN) == 0) continue;
-                return mb_cause(cause, cap, "%s is under mods/%.*s/, which is neither this mod folder's name nor its "
+                return mb_cause(cause, "%s is under mods/%.*s/, which is neither this mod folder's name nor its "
                                 "salt; move it under a mods folder named like this folder and press Refresh",
                                 f->path ? f->path : t, (int)(end - seg), seg);
 
@@ -6323,10 +6441,11 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
     } else if (!has_mod) {
         mb_error(out, "the mod folder has no mod.json");
     } else {
-        char cause[SH_MB_CAUSE_MAX];
+        char *cause = NULL;
         text = mb_read_wfile(desc_mod, MB_ANY_SIZE, &len);
         if (!text) mb_error(out, "cannot read mod.json (missing or unreadable)");
-        else if (!(rootj = mbj_parse((const char *)text, len, cause, sizeof cause))) mb_error(out, "mod.json: %s", cause);
+        else if (!(rootj = mbj_parse((const char *)text, len, &cause)))
+            mb_error(out, "mod.json: %s", cause ? cause : "out of memory");
         else {
             const mbj *block = mbj_get(rootj, SH_MB_BLOCK_KEY), *fmt = NULL, *bs = NULL, *pt;
             if (block && block->t == MBJ_OBJ) {
@@ -6355,6 +6474,7 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
                 }
             }
         }
+        free(cause);
         free(text);
     }
     mbj_free(rootj);
@@ -6370,25 +6490,27 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
         const wchar_t *leaf = wcsrchr(root, L'\\');
         w.folder = sh_mb_utf8(leaf ? leaf + 1 : root);
     }
-    w.stopped = 0;
     w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
     mb_walk_top(&w);
     free((void *)w.folder);
     if (!out->errors) {
         /* Identity: the folder's files live under mods/<its salt>/. */
-        char cause[SH_MB_CAUSE_MAX];
+        char *cause = NULL;
         sh_mb_bundle names;
         memset(&names, 0, sizeof names);
         memcpy(names.id, out->id, sizeof names.id);
         names.files = out->files;
         names.file_count = out->file_count;
-        if (!sh_mb_salt_paths_check(&names, cause, sizeof cause)) mb_error(out, "%s", cause);
+        if (!sh_mb_salt_paths_check(&names, &cause)) mb_error(out, "%s", cause ? cause : "out of memory");
+        free(cause);
     }
     if (!out->errors && out->extra && g_mb_extra_check) {
         /* The content blocks the game reads later ("scenes", "hud"),
          * checked now so a mistake is the build's cause. */
-        char cause[SH_MB_CAUSE_MAX];
-        if (!g_mb_extra_check(out->id, out->extra, strlen(out->extra), cause, sizeof cause)) mb_error(out, "%s", cause);
+        char *cause = NULL;
+        if (!g_mb_extra_check(out->id, out->extra, strlen(out->extra), &cause))
+            mb_error(out, "%s", cause ? cause : "out of memory");
+        free(cause);
     }
     if (!out->errors) mb_check_files(out, root, resolver);
 
@@ -6406,45 +6528,64 @@ finish:
 typedef struct mb_tent { char *rel; unsigned long long size, mtime; } mb_tent;
 typedef struct mb_tlist { mb_tent *e; size_t n, cap; int failed; } mb_tlist;
 
-static void mb_tree_walk(mb_tlist *l, const wchar_t *dir, const char *rel, int depth)
+/* Every file below `top` at any depth (the entries are sorted afterwards, so
+ * the order of the walk does not matter); pending folders on the heap. */
+static void mb_tree_walk(mb_tlist *l, const wchar_t *top, const char *top_rel)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern = mb_wjoin(dir, L"*");
-    HANDLE h;
-    if (!pattern || depth > MB_WALK_DEPTH) { free(pattern); l->failed = 1; return; }
-    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        char *name, *child;
-        size_t cn;
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        name = sh_mb_utf8(fd.cFileName);
-        if (!name) { l->failed = 1; continue; }
-        cn = strlen(rel) + strlen(name) + 2;
-        child = (char *)malloc(cn);
-        if (!child) { free(name); l->failed = 1; continue; }
-        _snprintf_s(child, cn, _TRUNCATE, "%s/%s", rel, name);
-        free(name);
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-            wchar_t *sub = mb_wjoin(dir, fd.cFileName);
-            if (sub) { mb_tree_walk(l, sub, child, depth + 1); free(sub); }
-            free(child);
-            continue;
+    mb_walk_dir_item *stack = NULL, cur;
+    size_t n = 0, cap = 0;
+    cur.dir = _wcsdup(top);
+    cur.rel = mb_strdup(top_rel);
+    if (!cur.dir || !cur.rel) { free(cur.dir); free(cur.rel); l->failed = 1; return; }
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern = mb_wjoin(cur.dir, L"*");
+        HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)
+                           : INVALID_HANDLE_VALUE;
+        if (!pattern) l->failed = 1;
+        free(pattern);
+        while (h != INVALID_HANDLE_VALUE) {
+            if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+                char *name = sh_mb_utf8(fd.cFileName);
+                char *child = name ? sh_textf("%s/%s", cur.rel, name) : NULL;
+                free(name);
+                if (!child) l->failed = 1;
+                else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                         !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    mb_walk_dir_item sub;
+                    sub.dir = mb_wjoin(cur.dir, fd.cFileName);
+                    sub.rel = child;
+                    if (n == cap) {
+                        size_t grow = cap ? cap * 2 : 16;
+                        mb_walk_dir_item *g = (mb_walk_dir_item *)realloc(stack, sizeof *stack * grow);
+                        if (g) { stack = g; cap = grow; }
+                    }
+                    if (!sub.dir || n == cap) { free(sub.dir); free(child); l->failed = 1; }
+                    else stack[n++] = sub;
+                } else {
+                    if (l->n == l->cap) {
+                        size_t grow = l->cap ? l->cap * 2 : 256;
+                        mb_tent *grown = (mb_tent *)realloc(l->e, sizeof *grown * grow);
+                        if (grown) { l->e = grown; l->cap = grow; }
+                    }
+                    if (l->n == l->cap) { free(child); l->failed = 1; }
+                    else {
+                        l->e[l->n].rel = child;
+                        l->e[l->n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                        l->e[l->n].mtime = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                                           fd.ftLastWriteTime.dwLowDateTime;
+                        l->n++;
+                    }
+                }
+            }
+            if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
         }
-        if (l->n == l->cap) {
-            size_t cap = l->cap ? l->cap * 2 : 256;
-            mb_tent *grown = (mb_tent *)realloc(l->e, sizeof *grown * cap);
-            if (!grown) { free(child); l->failed = 1; continue; }
-            l->e = grown;
-            l->cap = cap;
-        }
-        l->e[l->n].rel = child;
-        l->e[l->n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-        l->e[l->n].mtime = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
-        l->n++;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        free(cur.dir);
+        free(cur.rel);
+        if (!n) break;
+        cur = stack[--n];
+    }
+    free(stack);
 }
 
 static int mb_tent_cmp(const void *a, const void *b)
@@ -6474,7 +6615,7 @@ int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
     sh_sha256_update(&s, own, own_len);
     sh_sha256_update(&s, "\n", 1);
     assets = mb_wjoin(root, L"assets");
-    if (assets) { mb_tree_walk(&l, assets, "assets", 1); free(assets); }
+    if (assets) { mb_tree_walk(&l, assets, "assets"); free(assets); }
     if (l.failed) goto done;
     if (l.n > 1) qsort(l.e, l.n, sizeof *l.e, mb_tent_cmp);
     for (i = 0; i < l.n; i++) {
@@ -6573,17 +6714,22 @@ void sh_mb_record_unlock(void)
 
 static wchar_t *mb_record_path(const char *mods_root)
 {
-    char path[MAX_PATH * 4];
+    char *path;
+    wchar_t *w;
     if (!mods_root || !mods_root[0]) return NULL;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_RECORD_FILE, mods_root);
-    return sh_mb_wpath(path);
+    if (!(path = sh_textf("%s\\" SH_MB_RECORD_FILE, mods_root))) return NULL;
+    w = sh_mb_wpath(path);
+    free(path);
+    return w;
 }
 
 /* The record's root object: *state 1 read, 0 absent, -1 the file cannot be
  * read (`why` says why), -2 it is not a JSON object. Another program holding
  * the file without read sharing (a backup tool, an editor, a scanner) is
  * waited for, up to a second. */
-static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t why_cap)
+/* `why` holds a short phrase of its own (no name): MB_REC_WHY bytes. */
+#define MB_REC_WHY 96
+static mbj *mb_record_read(const wchar_t *path, int *state, char why[MB_REC_WHY])
 {
     unsigned char *text = NULL;
     size_t len = 0;
@@ -6591,7 +6737,6 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
     DWORD err = 0;
     int attempt;
     *state = 0;
-    if (why && why_cap) why[0] = 0;
     if (!path || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return NULL;
     for (attempt = 0; attempt < 20; attempt++) {
         SetLastError(ERROR_SUCCESS);
@@ -6603,14 +6748,12 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
     }
     if (!text) {
         *state = -1;
-        if (why && why_cap) {
-            if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION)
-                _snprintf_s(why, why_cap, _TRUNCATE, "another program has it open");
-            else _snprintf_s(why, why_cap, _TRUNCATE, "Windows error %lu", err);
-        }
+        if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION)
+            _snprintf_s(why, MB_REC_WHY, _TRUNCATE, "another program has it open");
+        else _snprintf_s(why, MB_REC_WHY, _TRUNCATE, "Windows error %lu", err);
         return NULL;
     }
-    root = mbj_parse((const char *)text, len, NULL, 0);
+    root = mbj_parse((const char *)text, len, NULL);
     free(text);
     if (!root || root->t != MBJ_OBJ) { mbj_free(root); *state = -2; return NULL; }
     *state = 1;
@@ -6619,40 +6762,37 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
 
 static void mb_rec_log(const char *fmt, ...)
 {
-    char line[1400];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    backend_log(line ? line : "MODS: record: a line could not be written (out of memory)");
+    free(line);
 }
 
 /* The sentence a caller shows the player about the last record read or write
  * this thread could not make: the file and the next step. */
-static __declspec(thread) char g_rec_why[MAX_PATH * 4 + 240];
+static __declspec(thread) char *g_rec_why;
 
 static void mb_rec_why(const char *name, const char *why)
 {
-    _snprintf_s(g_rec_why, sizeof g_rec_why, _TRUNCATE,
-                "%s could not be used (%s); close the program holding it (a backup, sync or antivirus tool, or an "
-                "editor) and try again", name, why && why[0] ? why : "it could not be read");
+    char *text = sh_textf("%s could not be used (%s); close the program holding it (a backup, sync or antivirus tool, "
+                          "or an editor) and try again", name, why && why[0] ? why : "it could not be read");
+    if (!text) return;
+    free(g_rec_why);
+    g_rec_why = text;
 }
 
-void sh_mb_record_why_clear(void) { g_rec_why[0] = 0; }
+void sh_mb_record_why_clear(void) { free(g_rec_why); g_rec_why = NULL; }
 
-int sh_mb_record_why(char *out, size_t cap)
-{
-    if (!g_rec_why[0]) return 0;
-    if (out && cap) strncpy_s(out, cap, g_rec_why, _TRUNCATE);
-    return 1;
-}
+const char *sh_mb_record_why(void) { return g_rec_why; }
 
-/* The record's path for a log line: UTF-8, without the \\?\ prefix. */
-static void mb_record_name(const wchar_t *path, char *out, size_t cap)
+/* The record's path for a log line: UTF-8, without the \\?\ prefix (malloc'd). */
+static char *mb_record_name(const wchar_t *path)
 {
     char *u = sh_mb_utf8(path && !wcsncmp(path, L"\\\\?\\", 4) ? path + 4 : path);
-    strncpy_s(out, cap, u ? u : SH_MB_RECORD_FILE, _TRUNCATE);
-    free(u);
+    return u ? u : mb_strdup(SH_MB_RECORD_FILE);
 }
 
 /* Sections whose last read failed (root and section): a section read as
@@ -6686,27 +6826,27 @@ int sh_mb_record_get(const char *mods_root, const char *section, char **json_out
     const mbj *v;
     mb_buf o = {0};
     int state, r = 0, at;
-    char why[96];
+    char why[MB_REC_WHY] = "";
     unsigned long long key;
     if (json_out) *json_out = NULL;
     if (!path || !section) { free(path); return -1; }
     key = mb_rec_key(mods_root, section);
     sh_mb_record_lock(mods_root);
-    root = mb_record_read(path, &state, why, sizeof why);
+    root = mb_record_read(path, &state, why);
     at = mb_rec_failed_at(key);
     if (state == -1) {
-        char name[MAX_PATH * 4];
-        mb_record_name(path, name, sizeof name);
+        char *name = mb_record_name(path);
         if (at < 0) g_rec_failed[g_rec_failed_next++ % MB_REC_FAILED_MAX] = key;
         mb_rec_log("MODS: record: cannot read %s (%s); its \"%s\" section is not written until it reads again",
-                        name, why, section);
-        mb_rec_why(name, why);
+                   name ? name : SH_MB_RECORD_FILE, why, section);
+        mb_rec_why(name ? name : SH_MB_RECORD_FILE, why);
+        free(name);
     } else if (at >= 0) g_rec_failed[at] = 0;
     sh_mb_record_unlock();
     free(path);
     if (state < 0) return -1;
     v = root ? mbj_get(root, section) : NULL;
-    if (v && mbj_canon(v, &o, NULL, 0) && !o.oom) {
+    if (v && mbj_canon(v, &o, NULL) && !o.oom) {
         r = 1;
         if (json_out) { *json_out = o.p; o.p = NULL; }
     }
@@ -6723,23 +6863,24 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     char *pretty = NULL;
     size_t i;
     int state, placed = 0, ok = 0;
-    char why[96], name[MAX_PATH * 4];
+    char why[MB_REC_WHY] = "", *name;
     if (!path || !section || !section[0] || !strcmp(section, "format")) { free(path); return 0; }
-    if (json && !(value = mbj_parse(json, strlen(json), NULL, 0))) { free(path); return 0; }
+    if (json && !(value = mbj_parse(json, strlen(json), NULL))) { free(path); return 0; }
+    if (!(name = mb_record_name(path))) { mbj_free(value); free(path); return 0; }
     sh_mb_record_lock(mods_root);
-    mb_record_name(path, name, sizeof name);
     if (mb_rec_failed_at(mb_rec_key(mods_root, section)) >= 0) {
         /* The caller's text was built from a failed read: writing it would
          * replace what the section holds with less. */
         mb_rec_log("MODS: record: the \"%s\" section of %s was not written: its last read failed, and the write would "
                    "drop what it holds; it is written once it reads again", section, name);
-        if (!g_rec_why[0]) mb_rec_why(name, "it could not be read a moment ago");
+        if (!g_rec_why) mb_rec_why(name, "it could not be read a moment ago");
         sh_mb_record_unlock();
         mbj_free(value);
         free(path);
+        free(name);
         return 0;
     }
-    root = mb_record_read(path, &state, why, sizeof why);
+    root = mb_record_read(path, &state, why);
     if (state == -1) {
         mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record cannot be read (%s)", section, name,
                    why);
@@ -6747,25 +6888,37 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
         sh_mb_record_unlock();
         mbj_free(value);
         free(path);
+        free(name);
         return 0;
     }
     if (state < 0) {
         /* Never silently lost: the unreadable record is kept beside it. */
-        wchar_t aside[MAX_PATH * 4];
-        char aname[MAX_PATH * 4];
-        _snwprintf_s(aside, MAX_PATH * 4, _TRUNCATE, L"%s.unreadable-%lld", path, mb_now());
-        mb_record_name(aside, aname, sizeof aname);
-        if (MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING)) {
+        size_t pn = wcslen(path) + 40;
+        wchar_t *aside = (wchar_t *)malloc(sizeof(wchar_t) * pn);
+        char *aname = NULL;
+        DWORD err = ERROR_NOT_ENOUGH_MEMORY;
+        int moved = 0;
+        if (aside) {
+            _snwprintf_s(aside, pn, _TRUNCATE, L"%s.unreadable-%lld", path, mb_now());
+            aname = mb_record_name(aside);
+            moved = MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING) != 0;
+            if (!moved) err = GetLastError();
+        }
+        if (moved) {
             mb_rec_log("MODS: record: %s is not valid JSON; it was kept as %s and a new record started (the published "
-                       "maps' links and claims it held are in that file)", name, aname);
-
+                       "maps' links and claims it held are in that file)", name, aname ? aname : "a file beside it");
         } else {
             mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record is not valid JSON and could not "
-                       "be moved aside (Windows error %lu)", section, name, GetLastError());
+                       "be moved aside (Windows error %lu)", section, name, err);
             mb_rec_why(name, "it is not valid JSON and could not be moved aside");
+        }
+        free(aname);
+        free(aside);
+        if (!moved) {
             sh_mb_record_unlock();
             mbj_free(value);
             free(path);
+            free(name);
             return 0;
         }
     }
@@ -6781,13 +6934,13 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
         mb_put(&o, ",", 1);
         mb_put_jstr(&o, root->keys[i], root->klen[i]);
         mb_put(&o, ":", 1);
-        if (!mbj_canon(v, &o, NULL, 0)) o.oom = 1;
+        if (!mbj_canon(v, &o, NULL)) o.oom = 1;
     }
     if (!placed && value) {
         mb_put(&o, ",", 1);
         mb_put_jcstr(&o, section);
         mb_put(&o, ":", 1);
-        if (!mbj_canon(value, &o, NULL, 0)) o.oom = 1;
+        if (!mbj_canon(value, &o, NULL)) o.oom = 1;
     }
     mb_put(&o, "}", 1);
     if (!o.oom) pretty = mb_pretty(o.p, o.n);
@@ -6816,6 +6969,7 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     mbj_free(root);
     mbj_free(value);
     free(path);
+    free(name);
     return ok;
 }
 

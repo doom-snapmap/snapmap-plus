@@ -2,6 +2,7 @@
 #include "backend_log.h"
 #include "../common/log_rotate.h"
 #include "perf.h"
+#include "../common/text.h"
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -68,27 +69,27 @@ void backend_log_close(void)
 
 void backend_log(const char *msg)
 {
-    char line[4096];
+    char stamp[64], brief[4096], *line = brief, *held = NULL;
     SYSTEMTIME st;
+    size_t len;
     DWORD n;
     SH_PERF_BEGIN(t0);
     GetLocalTime(&st);
-    n = (DWORD)_snprintf_s(line, sizeof line, _TRUNCATE,
-        "[snapmap+] %04d-%02d-%02d %02d:%02d:%02d.%03d %s\n",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-        msg ? msg : "");
-    if ((int)n <= 0) {
-        /* Truncated: keep the line readable and end it, so the next line does
-         * not run on after it (a reload listing 90 files overran 512 bytes). */
-        n = (DWORD)strlen(line);
-        if (n + 5 > sizeof line) n = (DWORD)sizeof line - 5;
-        memcpy(line + n, "...\n", 5);
-        n += 4;
+    _snprintf_s(stamp, sizeof stamp, _TRUNCATE, "[snapmap+] %04d-%02d-%02d %02d:%02d:%02d.%03d ",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    /* The whole message, whatever its length (a path inside a mod has none of
+     * its own): a short line stays on the stack (no allocation, as a fault
+     * path needs), a longer one goes to the heap. */
+    if (_snprintf_s(brief, sizeof brief, _TRUNCATE, "%s%s\n", stamp, msg ? msg : "") < 0) {
+        held = sh_textf("%s%s\n", stamp, msg ? msg : "");
+        if (held) line = held;
     }
+    len = strlen(line);
+    n = len > 0xFFFFFFFFu ? 0xFFFFFFFFu : (DWORD)len;
 
     OutputDebugStringA(line);   /* Debugger sink; installed output hooks may also forward this text. */
 
-    if (!g_logpath[0]) { SH_PERF_END(SH_PERF_LOG_WRITE, t0); return; }
+    if (!g_logpath[0]) { free(held); SH_PERF_END(SH_PERF_LOG_WRITE, t0); return; }
     log_lock_init();
     EnterCriticalSection(&g_loglock);
     {
@@ -104,5 +105,6 @@ void backend_log(const char *msg)
         }
     }
     LeaveCriticalSection(&g_loglock);
+    free(held);
     SH_PERF_END(SH_PERF_LOG_WRITE, t0);
 }

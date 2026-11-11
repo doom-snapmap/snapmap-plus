@@ -631,9 +631,10 @@ typedef struct strids_bundle_pass {
  * that bundle's strings only. */
 /* The bundles with strings, and whether the last pass applied their own
  * keys and their string edits (sh_strids_scope_check). */
-#define STRIDS_SCOPED_BUNDLES 256
-static struct { char hash[65]; int own_live, edits_live; } g_scoped[STRIDS_SCOPED_BUNDLES];
-static volatile LONG g_scoped_count;
+typedef struct strids_scoped { char hash[65]; int own_live, edits_live; } strids_scoped;
+static strids_scoped *g_scoped;   /* grows with the bundles; under g_scoped_lock */
+static size_t g_scoped_count, g_scoped_capacity;
+static SRWLOCK g_scoped_lock = SRWLOCK_INIT;
 
 /* A mod's own keys apply where its build serves its names: the build the open
  * map declares (another build of the salt is inert there), and, with no map
@@ -683,15 +684,16 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     for (i = 0; i < pairs.count; i++) edits |= sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
     live = edits ? sh_modserve_bundle_edits_live(hash) : 0;
     own = strids_own_live(hash);
-    {
-        LONG at = InterlockedCompareExchange(&g_scoped_count, 0, 0);
-        if (at < STRIDS_SCOPED_BUNDLES) {
-            strncpy_s(g_scoped[at].hash, sizeof g_scoped[at].hash, hash ? hash : "", _TRUNCATE);
-            g_scoped[at].own_live = own;
-            g_scoped[at].edits_live = edits ? live : -1;
-            InterlockedExchange(&g_scoped_count, at + 1);
-        }
+    AcquireSRWLockExclusive(&g_scoped_lock);
+    if (strids_reserve((void **)&g_scoped, &g_scoped_capacity, g_scoped_count + 1, sizeof *g_scoped)) {
+        strids_scoped *s = &g_scoped[g_scoped_count++];
+        strncpy_s(s->hash, sizeof s->hash, hash ? hash : "", _TRUNCATE);   /* a build hash: 64 hex digits */
+        s->own_live = own;
+        s->edits_live = edits ? live : -1;
+    } else {
+        g_pass_failed = 1;
     }
+    ReleaseSRWLockExclusive(&g_scoped_lock);
     for (i = 0; i < pairs.count; i++) {
         int edit = sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
         if (edit ? !live : !own) continue;
@@ -749,7 +751,9 @@ static long inject_layers(void)
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
     wants_free();
-    InterlockedExchange(&g_scoped_count, 0);
+    AcquireSRWLockExclusive(&g_scoped_lock);
+    g_scoped_count = 0;
+    ReleaseSRWLockExclusive(&g_scoped_lock);
     free_bundle_names();
     memset(g_layer_rows, 0, sizeof g_layer_rows);
 
@@ -1013,14 +1017,16 @@ void sh_strids_request_refresh(void)
 
 int sh_strids_scope_check(void)
 {
-    LONG i, n = InterlockedCompareExchange(&g_scoped_count, 0, 0);
-    for (i = 0; i < n; i++)
-        if (strids_own_live(g_scoped[i].hash) != g_scoped[i].own_live ||
-            (g_scoped[i].edits_live >= 0 && sh_modserve_bundle_edits_live(g_scoped[i].hash) != g_scoped[i].edits_live)) {
-            sh_strids_request_refresh();
-            return 1;
-        }
-    return 0;
+    size_t i;
+    int changed = 0;
+    AcquireSRWLockShared(&g_scoped_lock);
+    for (i = 0; i < g_scoped_count && !changed; i++)
+        changed = strids_own_live(g_scoped[i].hash) != g_scoped[i].own_live ||
+                  (g_scoped[i].edits_live >= 0 &&
+                   sh_modserve_bundle_edits_live(g_scoped[i].hash) != g_scoped[i].edits_live);
+    ReleaseSRWLockShared(&g_scoped_lock);
+    if (changed) sh_strids_request_refresh();
+    return changed;
 }
 
 int sh_strids_refresh_pending(void)

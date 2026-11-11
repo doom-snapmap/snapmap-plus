@@ -37,7 +37,7 @@
  *   Script stopped: <mod name>, scripts\<file>.lua line <n>: <what>. <what to do>.
  * The line, prints and warnings are the mod's script log (every line of the
  * map, whole), kept until the mod's next map start and read by the UI through
- * sh_script_log_read and sh_script_stop_line. Other mods keep running.
+ * sh_script_log_read and sh_script_stop_line_dup. Other mods keep running.
  *
  * Threads: sh_script_map_start, sh_script_tick and sh_script_map_close run
  * Lua and are serialized by one lock (a call made while Lua runs on the same
@@ -64,9 +64,6 @@ extern "C" {
 
 #define SH_SCRIPT_API_VERSION   1
 #define SH_SCRIPT_SALT_CAP      16
-/* A mod's display name: the map row holds it in 320 bytes and the builder
- * refuses a longer one with a sentence, so every name a mod can have fits. */
-#define SH_SCRIPT_MODNAME_CAP   321
 
 #define SH_SCRIPT_HOOK_STRIDE   1000       /* VM instructions between clock reads */
 #define SH_SCRIPT_WALL_MS       5000       /* wall time one delivery may run before it is stopped */
@@ -252,6 +249,11 @@ const char *sh_script_check_name(lua_State *L, int arg, const char *call, int al
  * entities; \"ai/imp\" is not one"). Never returns. */
 int sh_script_refuse(lua_State *L, const char *fmt, ...);
 
+/* The script line at `level` (luaL_where's level): its file whole in *file
+ * (malloc'd; NULL when it is not a script line), and its line. luaL_where
+ * itself names the file cut to the vendored Lua's LUA_IDSIZE. */
+void sh_script_where_line(lua_State *L, int level, char **file, int *line);
+
 /* ------------------------------------------------------------ UI queries */
 
 #define SH_SCRIPT_NONE    0      /* no scripts for this mod in the current or last map */
@@ -260,11 +262,8 @@ int sh_script_refuse(lua_State *L, const char *fmt, ...);
 #define SH_SCRIPT_ENDED   3      /* the map ended with the scripts running */
 int sh_script_status(const char *salt);
 
-/* Copy the stop line of `salt` into out (cut to the caller's cap): 1 when its
- * scripts stopped in the current or last map, else 0 (out holds ""). The
- * line itself has any length: sh_script_stop_line_dup gives it whole,
- * malloc'd (NULL when there is none). Any thread. */
-int sh_script_stop_line(const char *salt, char *out, size_t cap);
+/* The stop line of `salt`, whole, malloc'd (the caller frees it), when its
+ * scripts stopped in the current or last map; else NULL. Any thread. */
 char *sh_script_stop_line_dup(const char *salt);
 
 /* Call fn for each line of `salt`'s script log, oldest first (prints,
@@ -281,7 +280,7 @@ int sh_script_mods(sh_script_mod_fn fn, void *context);
  * the current or last map. Any thread. */
 typedef struct sh_script_mod_info {
     char salt[SH_SCRIPT_SALT_CAP];
-    char name[SH_SCRIPT_MODNAME_CAP];
+    char *name;              /* malloc'd, any length: sh_script_mod_info_free */
     int  status;             /* SH_SCRIPT_NONE .. SH_SCRIPT_ENDED */
     int  waiting;            /* prepared for this map, not started yet (waiting for Play) */
     int  files;              /* entry files found for the map */
@@ -292,6 +291,7 @@ typedef struct sh_script_mod_info {
     int  stopped_line;       /* a stop line is kept: sh_script_stop_line_dup gives it whole */
 } sh_script_mod_info;
 int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out);
+void sh_script_mod_info_free(sh_script_mod_info *info);
 
 /* Compile every script file of `salt` without running anything (the
  * console's reload outside Play): calls fn with one plain line per file that

@@ -1,4 +1,5 @@
 /* Exercise deferred saves across editor lifecycle changes without game code. */
+#include "heap_out.h"
 #include "../src/backend/editor_frame.c"
 
 static unsigned long generation;
@@ -25,7 +26,7 @@ int sh_rawmap_live_serialize_ready(void) { return 1; }
 unsigned long sh_rawmap_load_generation(void) { return generation; }
 int sh_rawmap_load_is_safe(void) { return 1; }
 int sh_rawmap_source_ok(char *msg, int cap) { (void)msg; (void)cap; return 1; }
-int sh_rawmap_prepare_reload(char *why, int cap) { if (why && cap > 0) why[0] = 0; return 1; }
+int sh_rawmap_prepare_reload(char **why) { if (why) *why = NULL; return 1; }
 void sh_rawmap_reload_done(int rc, int faulted) { done_rc = rc; done_faulted = faulted; }
 void sh_rawmap_tell(const char *text) { (void)text; ++tells; }
 void sh_rawmap_get_paths(char *load, int load_cap, char *save, int save_cap)

@@ -67,6 +67,7 @@ static void status_one(void *context, const char *salt, const char *name)
     } else {
         say(c, "%s: its scripts have not run in this map.", i.name);
     }
+    sh_script_mod_info_free(&i);
 }
 
 typedef struct { con *c; int n; } log_ctx;

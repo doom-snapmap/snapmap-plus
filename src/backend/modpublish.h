@@ -149,8 +149,8 @@ void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigne
 void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes);
 
 /* The cached published text the copy gate measures:
- * <cache root>\<id>_<rev>_map.decl. 1 when out holds it. */
-int  sh_modpublish_cache_path(const char *item_id, const char *revision, char *out, size_t cap);
+ * <cache root>\<id>_<rev>_map.decl (malloc'd), or NULL. */
+char *sh_modpublish_cache_path(const char *item_id, const char *revision);
 
 /* ------------------------------------------------------------ seam */
 

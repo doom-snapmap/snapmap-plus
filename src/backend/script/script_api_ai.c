@@ -55,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../common/text.h"
 #include "script_api_ai.h"
 #include "script_runtime.h"
 #include "script_api_common.h"
@@ -2262,12 +2263,13 @@ static int av_only(DWORD code)
 
 static void ai_log(const char *fmt, ...)
 {
-    char line[512];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    if (line) backend_log(line);
+    free(line);
 }
 
 static void *vfn(void *self, size_t slot)

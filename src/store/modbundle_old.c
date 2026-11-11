@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "modbundle.h"
+#include "store_text.h"
 #include "modbundle_old.h"
 #include "mp_json.h"
 
@@ -58,7 +59,7 @@ static void mbo_block_list(sh_mb_old *o, const mpj *list, int pointer)
         if (!p || p->type != MPJ_STR) continue;
         if (!mbo_add(o, p->text, strlen(p->text))) return;
         f = &o->files[o->file_count - 1];
-        if (sha && sha->type == MPJ_STR) strncpy_s(f->sha256, sizeof f->sha256, sha->text, _TRUNCATE);
+        if (sha && sha->type == MPJ_STR) st_cpy(f->sha256, sizeof f->sha256, sha->text);
         if (size && mpj_is_num(size)) f->size = (unsigned long long)mpj_int(size);
         f->pointer = pointer;
         if (pointer && src && src->type == MPJ_STR) f->source = _strdup(src->text);
@@ -86,7 +87,7 @@ static void mbo_walk(sh_mb_old *o, const wchar_t *dir, const char *rel, int dept
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) continue;
-        _snprintf_s(child, sizeof child, _TRUNCATE, "%s/%s", rel, name);
+        st_fmt(child, sizeof child, "%s/%s", rel, name);
         free(name);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             size_t sn = dn + wcslen(fd.cFileName) + 2;
@@ -105,7 +106,7 @@ static void mbo_walk(sh_mb_old *o, const wchar_t *dir, const char *rel, int dept
 static unsigned char *mbo_read(const char *folder, const char *leaf, size_t *len)
 {
     char path[MAX_PATH * 4];
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, leaf);
+    st_fmt(path, sizeof path, "%s\\%s", folder, leaf);
     return sh_mb_read_file(path, (size_t)-1, len);
 }
 
@@ -116,7 +117,7 @@ static void mbo_leaf_key(sh_mb_old *o, const char *folder)
     while (leaf > folder && (leaf[-1] == '\\' || leaf[-1] == '/')) leaf--;
     end = leaf;
     while (leaf > folder && leaf[-1] != '\\' && leaf[-1] != '/') leaf--;
-    _snprintf_s(name, sizeof name, _TRUNCATE, "%.*s", (int)(end - leaf), leaf);
+    st_fmt(name, sizeof name, "%.*s", (int)(end - leaf), leaf);
     if (sh_mb_id_normalize(name, strlen(name), o->key)) o->key_from = SH_MB_OLD_KEY_FROM_FOLDER;
     else o->key[0] = 0;
 }
@@ -143,7 +144,7 @@ int sh_mb_old_load(const char *folder, sh_mb_old *o)
     free(text);
     if (!root || root->type != MPJ_OBJ) {
         mpj_free(root);
-        _snprintf_s(o->cause, sizeof o->cause, _TRUNCATE, "%s is not a JSON object", o->descriptor);
+        st_putf(o->cause, sizeof o->cause, "%s is not a JSON object", o->descriptor);
         return 0;
     }
     o->name = mbo_dump(mpj_get(root, "name"));
@@ -172,7 +173,7 @@ int sh_mb_old_load(const char *folder, sh_mb_old *o)
         if (v && v->type == MPJ_STR && sh_mb_id_normalize(v->text, strlen(v->text), o->key))
             o->key_from = SH_MB_OLD_KEY_FROM_BLOCK;
         v = mpj_get(block, "bundle");
-        if (v && v->type == MPJ_STR) strncpy_s(o->bundle, sizeof o->bundle, v->text, _TRUNCATE);
+        if (v && v->type == MPJ_STR) st_cpy(o->bundle, sizeof o->bundle, v->text);
         v = mpj_get(block, "build");
         if (v && mpj_is_num(v)) o->build = (unsigned long long)mpj_int(v);
         v = mpj_get(block, "built");
@@ -183,7 +184,7 @@ int sh_mb_old_load(const char *folder, sh_mb_old *o)
         if (v && v->type == MPJ_BOOL) o->validated = v->b;
         v = mpj_get(block, "origin");
         if (v && v->type == MPJ_STR && strcmp(v->text, "by-hand"))
-            strncpy_s(o->origin, sizeof o->origin, v->text, _TRUNCATE);
+            st_cpy(o->origin, sizeof o->origin, v->text);
         o->block_legacy = mbo_dump(mpj_get(block, "legacy"));
         o->block_shadows = mbo_dump(mpj_get(block, "shadows"));
         mbo_block_list(o, mpj_get(block, "files"), 0);
@@ -198,7 +199,7 @@ int sh_mb_old_load(const char *folder, sh_mb_old *o)
     if (!block || block->type != MPJ_OBJ) {
         char assets[MAX_PATH * 4];
         wchar_t *w;
-        _snprintf_s(assets, sizeof assets, _TRUNCATE, "%s\\assets", folder);
+        st_fmt(assets, sizeof assets, "%s\\assets", folder);
         w = sh_mb_wpath(assets);
         if (w) { mbo_walk(o, w, "assets", 1); free(w); }
     }

@@ -14,6 +14,7 @@
  * anim_current, anim_event and anim_finished from the node observed each
  * frame; view_angle_to on a player's aim and an entity's facing; now() is
  * the time the tick passes. */
+#include "heap_out.h"
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -287,7 +288,7 @@ static char g_stop[4096];
 static const char *stop_now(void)
 {
     g_stop[0] = 0;
-    sh_script_stop_line(SALT, g_stop, sizeof g_stop);
+    HOS(g_stop, sh_script_stop_line_dup(SALT));
     return g_stop;
 }
 

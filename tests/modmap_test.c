@@ -25,6 +25,15 @@ int sh_modserve_scope_set_choices(const char *const *slots, const char *const *k
 { (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
 
 int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)bundle_hashes; (void)n; return 0; }
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
+{
+    if (!ref) return;
+    free(ref->name);
+    free(ref->folder);
+    free(ref->place);
+    ref->name = ref->folder = ref->place = NULL;
+}
+
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 { (void)row; if (out) memset(out, 0, sizeof *out); return 0; }
 int sh_modserve_active(void) { return 0; }
@@ -158,7 +167,7 @@ int main(void)
         memset(&back, 0, sizeof back);
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "barehand");
-        strcpy_s(row.name, sizeof row.name, "Bare hands");
+        sh_modmanifest_row_set_name(&row, "Bare hands");
         memset(row.build, 'c', 64);
         row.size = 77;
         row.attached = 1;

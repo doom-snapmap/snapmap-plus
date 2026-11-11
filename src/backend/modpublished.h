@@ -224,23 +224,24 @@ int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
 
 /* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
  * for an editor open of a map whose row nothing serves: nothing substitutes
- * (returns 0), and `why` says the mod is not installed on this computer:
+ * (returns 0), and *why (malloc'd) says the mod is not installed on this computer:
  * that the editor opens the map without it, or, when the map's placed
  * entities use it (`placed`), that the editor cannot open the map and what to
  * do, the notice the player gets in place of the engine's damaged-save
  * dialog. */
 int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
-                                 char *why, size_t why_cap);
+                                 char **why);
 
 /* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
  * line say it: "This <subject> needs <title>, which ...". `subject` is "map"
  * or "prefab" (NULL: "map"), `title` the mod's name (the row's, else its
  * salt), `source` the borrow's installed path (verdict 4), `store_code` the
  * MODNET_E_ code of the store's failure (verdict 2; 0 when unknown), worded
- * by plain_reason.h. The dialog shows it truncated to the native body (255
- * bytes); the console line is whole. */
-void sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
-                            int store_code, char *out, size_t cap);
+ * by plain_reason.h. The sentence (malloc'd, whole), NULL for another
+ * verdict. The console says it whole; the game's dialog holds 255 bytes, so
+ * a longer one is shown in the dialog as a pointer to the console. */
+char *sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
+                             int store_code);
 
 /* What the probe learned about one build (modsync.h modsync_probe_build). */
 typedef struct sh_modpub_probe {
@@ -257,10 +258,10 @@ typedef struct sh_modpub_ops {
     int  (*on_main)(void *c);
     /* The asset rule for a map whose place is `place` ("" the root;
      * modserve.h sh_modserve_row_served_in): SH_MODPUB_ROW_*, with the
-     * refusal sentence in `cause` when it is not served. `subject` is "map"
-     * or "prefab" (NULL: "map"). Changes nothing. */
-    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                      size_t cap);
+     * refusal sentence in *cause (malloc'd; cause may be NULL) when it is
+     * not served. `subject` is "map" or "prefab" (NULL: "map"). Changes
+     * nothing. */
+    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause);
     int  (*rescan)(void *c);
     /* Activate the rows' mods through the builds that serve them
      * (sh_modmanifest_activate). */
@@ -277,7 +278,8 @@ typedef struct sh_modpub_ops {
                       volatile int *cancel);
     void *(*metadata_copy)(void *c, const void *metadata);
     void (*metadata_free)(void *c, void *copy);
-    int  (*metadata_ids)(void *c, const void *metadata, char *id, size_t id_cap, char *rev, size_t rev_cap);
+    /* The item id and revision, whole (each malloc'd, either may be NULL on 0). */
+    int  (*metadata_ids)(void *c, const void *metadata, char **id, char **rev);
     /* Is the object the hold captured still the live one (for local play,
      * with an unchanged model)? `token` is what hold_token returned. */
     unsigned long long (*hold_token)(void *c, int hook, void *owner, const void *extra);
@@ -295,27 +297,28 @@ typedef struct sh_modpub_ops {
     /* 1 when a claim this machine holds names the build (modsync_claim_names). */
     int  (*claimed)(void *c, const char *hash);
     /* After a fetch that failed with game content this machine lacks: the
-     * borrow's source path, else 0. */
-    int  (*fetch_detail)(void *c, const char *hash, char *out, size_t cap);
+     * borrow's source path in *out (malloc'd), else 0. */
+    int  (*fetch_detail)(void *c, const char *hash, char **out);
     /* A launch was refused (denied, dropped from its hold, or refused at
      * once): nothing was launched, so the parse's rows must not stay
      * declared (modui.h sh_modui_scope_launch_refused). Called after
      * drop_ui for every hook but a rawmap load and a prefab placement. */
     void (*launch_refused)(void *c, int hook);
-    /* The published item's title from its metadata, else 0. */
-    int  (*metadata_title)(void *c, const void *metadata, char *out, size_t cap);
+    /* The published item's title from its metadata, whole (*out malloc'd), else 0. */
+    int  (*metadata_title)(void *c, const void *metadata, char **out);
     /* 1 when this machine published the item: a claim it holds is keyed by
      * the item, or the record links the item to a map saved here. */
     int  (*own_item)(void *c, const char *item);
     /* The place of the published item `item` titled `title`: the one the
      * store's record gives it, else a free mods\maps\<title>\ (modstore.h
-     * sh_ms_place_dir). 1 with "maps\<segment>", 0 when none can be made. */
-    int  (*item_place)(void *c, const char *title, const char *item, char *out, size_t cap);
+     * sh_ms_place_dir). 1 with "maps\<segment>" in *out (malloc'd), 0 when
+     * none can be made. */
+    int  (*item_place)(void *c, const char *title, const char *item, char **out);
     /* Make `place` the loaded map's (modserve.h sh_modserve_place_set). */
     void (*place_set)(void *c, const char *place);
     /* `place` as a place (modserve.h sh_modserve_place_norm): 1 with it in
-     * `out`, 0 when it is not one. */
-    int  (*place_norm)(void *c, const char *place, char *out, size_t cap);
+     * *out (malloc'd), 0 when it is not one. */
+    int  (*place_norm)(void *c, const char *place, char **out);
     /* The player's setting "Play maps whose mods include scripts" (modui.h
      * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
     int  (*scripted_maps_allowed)(void *c);
@@ -331,12 +334,11 @@ typedef struct sh_modpub_ops {
     void (*progress)(void *c, int hook, void *owner, const char *text);
 } sh_modpub_ops;
 
-#define SH_MODPUB_PLACE_CAP 300
-
 /* The place the next launch serves from, as the last gate or hold decided it
- * for the map it let through: 1 with it in `out` (consumed), 0 when no gate
- * decided since the last call (the launch keeps the place its parse set). */
-int sh_modpub_launch_place(char *out, size_t cap);
+ * for the map it let through: 1 with it in *out (malloc'd; consumed), 0 when
+ * no gate decided since the last call (the launch keeps the place its parse
+ * set). */
+int sh_modpub_launch_place(char **out);
 
 /* The decision a hook detour asks for before calling its original. Returns 1
  * to pass through (call the original now, unchanged) and 0 when the call was
@@ -371,12 +373,10 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
  * nothing is missing and the rawmap loads as before. */
 
 /* Read every row of `text` into *rows (cleared first; free with
- * sh_modmanifest_list_free) and the place the text records into `place`
- * ("" for none; SH_MODPUB_PLACE_CAP is room enough), and return how many
- * rows name a build nothing serves in that place under the asset rule.
- * Changes nothing. */
-size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char *place,
-                                size_t place_cap);
+ * sh_modmanifest_list_free) and the place the text records into *place
+ * (malloc'd; "" for none), and return how many rows name a build nothing
+ * serves in that place under the asset rule. Changes nothing. */
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char **place);
 
 /* 1 when the rawmap may not open because the player turned off "Play maps
  * whose mods include scripts" and the builds serving its rows in its place
@@ -427,12 +427,13 @@ int  sh_modpub_prefab_holding(void);
 typedef void (*sh_modpub_prefab_ready_fn)(const char *name, const sh_modmanifest_list *rows);
 void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn);
 
-/* The prefab's refusal notice (shorter than 256 bytes) and its console line:
- * mode 0 the store does not hold them, 1 the store could not be reached, 2
- * the store was not asked (no gates). `mods` are the mods' names. */
+/* The prefab's refusal notice (shorter than 256 bytes, the game's dialog;
+ * names that do not fit summarized as "and K more") and its console line
+ * (malloc'd, every name whole): mode 0 the store does not hold them, 1 the
+ * store could not be reached, 2 the store was not asked (no gates). `mods`
+ * are the mods' names. */
 void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode);
-void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name, const char *const *mods, size_t count,
-                                         int mode);
+char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *mods, size_t count, int mode);
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISHED_PURE

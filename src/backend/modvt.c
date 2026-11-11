@@ -39,6 +39,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../common/text.h"
 #include "modvt.h"
 #include "modserve.h"
 #include "modbundle.h"
@@ -50,14 +51,16 @@ static void (*g_echo)(const char *line);   /* the console, once commands exist *
 
 static void mv_log(const char *fmt, ...)
 {
-    char line[1024];
+    char *body, *line;
     va_list ap;
-    memcpy(line, "VT: ", 4);
     va_start(ap, fmt);
-    _vsnprintf_s(line + 4, sizeof line - 4, _TRUNCATE, fmt, ap);
+    body = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
-    if (g_echo) g_echo(line);
+    line = sh_textf("VT: %s", body ? body : "(out of memory)");
+    free(body);
+    backend_log(line ? line : "VT: (out of memory)");
+    if (g_echo) g_echo(line ? line : "VT: (out of memory)");
+    free(line);
 }
 
 /* ------------------------------------------------------------------ boards served */
@@ -68,10 +71,10 @@ static void mv_collect_file(void *context, const char *request, uint64_t size, c
                             const char *bundle_hash)
 {
     mv_collect *c = (mv_collect *)context;
-    char fam[SH_MODVT_NAME_MAX];
+    char *fam = NULL;
     int member = 0, i;
     sh_modvt_family *f;
-    if (!sh_mb_vt_member(request, fam, sizeof fam, &member)) return;
+    if (!sh_mb_vt_member(request, &fam, &member)) { free(fam); return; }
     for (i = 0; i < c->n; ++i)
         if (!strcmp(c->out[i].name, fam)) {
             /* Two salts serving one board name: the first keeps it. */
@@ -79,23 +82,33 @@ static void mv_collect_file(void *context, const char *request, uint64_t size, c
                 c->out[i].members |= 1u << (member - 1);
                 c->out[i].bytes += size;
             }
+            free(fam);
             return;
         }
     if (c->n == c->cap) {
         int cap = c->cap ? c->cap * 2 : 8;
         sh_modvt_family *grown = (sh_modvt_family *)realloc(c->out, sizeof *grown * (size_t)cap);
-        if (!grown) { c->oom = 1; return; }
+        if (!grown) { c->oom = 1; free(fam); return; }
         c->out = grown;
         c->cap = cap;
     }
-    f = &c->out[c->n++];
+    f = &c->out[c->n];
     memset(f, 0, sizeof *f);
-    strcpy_s(f->name, sizeof f->name, fam);
-    _snprintf_s(f->path, sizeof f->path, _TRUNCATE, "virtualtextures/%s.pages", fam);
-    _snprintf_s(f->bundle, sizeof f->bundle, _TRUNCATE, "%s", bundle_id);
+    f->name = fam;
+    f->path = sh_textf("virtualtextures/%s.pages", fam);
+    f->bundle = sh_text(bundle_id ? bundle_id : "");
+    if (!f->path || !f->bundle) { free(f->name); free(f->path); free(f->bundle); c->oom = 1; return; }
+    c->n++;
     strncpy_s(f->bundle_hash, sizeof f->bundle_hash, bundle_hash, _TRUNCATE);
     f->members = 1u << (member - 1);
     f->bytes = size;
+}
+
+void sh_modvt_families_free(sh_modvt_family *f, int n)
+{
+    int i;
+    for (i = 0; f && i < n; ++i) { free(f[i].name); free(f[i].path); free(f[i].bundle); }
+    free(f);
 }
 
 int sh_modvt_collect(sh_modvt_family **out)
@@ -107,7 +120,7 @@ int sh_modvt_collect(sh_modvt_family **out)
     sh_modserve_each_served_here(mv_collect_file, &c);
     if (c.oom) mv_log("collecting the boards ran out of memory; %d are considered", c.n);
     if (out) *out = c.out;
-    else free(c.out);
+    else sh_modvt_families_free(c.out, c.n);
     return c.n;
 }
 
@@ -117,9 +130,9 @@ typedef struct mv_owned {
     int used;             /* 1 held; 0 free, or (name set) a record released or taken back */
     int record;
     void *rec;            /* the record's address, while held */
-    char name[SH_MODVT_NAME_MAX];
-    char path[SH_MODVT_PATH_MAX];
-    char bundle[SH_MODVT_NAME_MAX];
+    char *name;           /* malloc'd, NULL until a board took the entry */
+    char *path;
+    char *bundle;
     char bundle_hash[65];
 } mv_owned;
 
@@ -132,12 +145,12 @@ static volatile LONG g_nowned;   /* boards held: the detours' idle test */
 
 /* Materials bound to a board, by board name, so a board registered again
  * binds them again. Kept across releases. */
-typedef struct mv_material { void *material; char name[SH_MODVT_NAME_MAX]; } mv_material;
+typedef struct mv_material { void *material; char *name; } mv_material;   /* name malloc'd */
 static mv_material *g_mats;
 static int g_nmats, g_capmats;
 
 /* Refusals already logged, so a pass does not repeat them: (name, build, cause). */
-typedef struct mv_refusal { char name[SH_MODVT_NAME_MAX]; char hash[65]; int cause; } mv_refusal;
+typedef struct mv_refusal { char *name; char hash[65]; int cause; } mv_refusal;   /* name malloc'd */
 static mv_refusal *g_refused;
 static int g_nrefused, g_caprefused;
 
@@ -156,7 +169,7 @@ static int mv_refusal_new(const sh_modvt_family *f, int cause)
         g_refused = grown;
         g_caprefused = cap;
     }
-    strcpy_s(g_refused[g_nrefused].name, sizeof g_refused[0].name, f->name);
+    if (!(g_refused[g_nrefused].name = sh_text(f->name))) return 1;
     strcpy_s(g_refused[g_nrefused].hash, sizeof g_refused[0].hash, f->bundle_hash);
     g_refused[g_nrefused].cause = cause;
     g_nrefused++;
@@ -166,8 +179,10 @@ static int mv_refusal_new(const sh_modvt_family *f, int cause)
 static void mv_refusal_clear(const char *name)
 {
     int i, w = 0;
-    for (i = 0; i < g_nrefused; ++i)
+    for (i = 0; i < g_nrefused; ++i) {
         if (strcmp(g_refused[i].name, name)) g_refused[w++] = g_refused[i];
+        else free(g_refused[i].name);
+    }
     g_nrefused = w;
 }
 
@@ -175,7 +190,7 @@ static int mv_owned_by_name(const char *name)
 {
     int i;
     for (i = 0; i < SH_MODVT_SLOTS; ++i)
-        if (g_owned[i].used && !strcmp(g_owned[i].name, name)) return i;
+        if (g_owned[i].used && g_owned[i].name && !strcmp(g_owned[i].name, name)) return i;
     return -1;
 }
 
@@ -193,7 +208,7 @@ static int mv_free_owned(const char *name)
 {
     int i, any = -1;
     for (i = 0; i < SH_MODVT_SLOTS; ++i)
-        if (!g_owned[i].used && g_owned[i].record && !strcmp(g_owned[i].name, name)) return i;
+        if (!g_owned[i].used && g_owned[i].record && g_owned[i].name && !strcmp(g_owned[i].name, name)) return i;
     for (i = 0; i < SH_MODVT_SLOTS; ++i) {
         if (g_owned[i].used) continue;
         if (!g_owned[i].record) return i;
@@ -301,7 +316,7 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
             continue;
         }
         idx = mv_free_owned(f->name);
-        if (idx >= 0 && g_owned[idx].record >= 1 && g_owned[idx].record <= SH_MODVT_LAST_USED &&
+        if (idx >= 0 && g_owned[idx].record >= 1 && g_owned[idx].record <= SH_MODVT_LAST_USED && g_owned[idx].name &&
             !strcmp(g_owned[idx].name, f->name) && ops->is_free(ops->context, g_owned[idx].record) == 1)
             slot = g_owned[idx].record;
         for (k = 1; k <= SH_MODVT_LAST_USED && slot < 0; ++k)
@@ -312,9 +327,9 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
                        "map's own families and other boards; record 31 is the engine's); its materials draw with plain "
                        "textures", phase, f->name, f->bundle, SH_MODVT_LAST_USED);
                 if (ops->notice) {
-                    char text[256];
-                    sh_modvt_full_notice(text, sizeof text, f->bundle);
-                    ops->notice(ops->context, text);
+                    char *text = sh_modvt_full_notice(f->bundle);
+                    if (text) ops->notice(ops->context, text);
+                    free(text);
                 }
             }
             res.refused++;
@@ -333,11 +348,22 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
         }
         if (r == 1) {
             mv_owned *m = &g_owned[idx];
+            char *name = sh_text(f->name), *path = sh_text(f->path), *bundle = sh_text(f->bundle), *old[3];
             int again;
+            if (!name || !path || !bundle) {
+                free(name); free(path); free(bundle);
+                mv_log("%s: board '%s' registered as record %d but out of memory recording it; it is released", phase,
+                       f->name, slot);
+                (void)ops->release(ops->context, slot);
+                res.refused++;
+                continue;
+            }
             m->record = slot;
-            strcpy_s(m->name, sizeof m->name, f->name);
-            strcpy_s(m->path, sizeof m->path, f->path);
-            strcpy_s(m->bundle, sizeof m->bundle, f->bundle);
+            AcquireSRWLockExclusive(&g_lock);
+            old[0] = m->name; old[1] = m->path; old[2] = m->bundle;
+            m->name = name; m->path = path; m->bundle = bundle;
+            ReleaseSRWLockExclusive(&g_lock);
+            free(old[0]); free(old[1]); free(old[2]);
             strcpy_s(m->bundle_hash, sizeof m->bundle_hash, f->bundle_hash);
             mv_set_used(m, 1, ops->record(ops->context, slot));
             mv_refusal_clear(f->name);
@@ -378,26 +404,26 @@ int sh_modvt_owned_count(void)
 
 void sh_modvt_reset(void)
 {
+    int i;
     AcquireSRWLockExclusive(&g_lock);
+    for (i = 0; i < SH_MODVT_SLOTS; ++i) { free(g_owned[i].name); free(g_owned[i].path); free(g_owned[i].bundle); }
     memset(g_owned, 0, sizeof g_owned);
+    for (i = 0; i < g_nmats; ++i) free(g_mats[i].name);
     free(g_mats);
     g_mats = NULL;
     g_nmats = g_capmats = 0;
     ReleaseSRWLockExclusive(&g_lock);
     InterlockedExchange(&g_nowned, 0);
+    for (i = 0; i < g_nrefused; ++i) free(g_refused[i].name);
     free(g_refused);
     g_refused = NULL;
     g_nrefused = g_caprefused = 0;
 }
 
-void sh_modvt_full_notice(char *out, size_t cap, const char *mod)
+char *sh_modvt_full_notice(const char *mod)
 {
-    char name[96];
-    if (!out || !cap) return;
-    strncpy_s(name, sizeof name, mod && *mod ? mod : "a mod", _TRUNCATE);
-    _snprintf_s(out, cap, _TRUNCATE,
-                "DOOM has no room for another mod texture board on this map, so %s draws with plain textures; "
-                "a map with fewer mods that carry their own textures avoids this.", name);
+    return sh_textf("DOOM has no room for another mod texture board on this map, so %s draws with plain textures; "
+                    "a map with fewer mods that carry their own textures avoids this.", mod && *mod ? mod : "a mod");
 }
 
 /* ------------------------------------------------------------------ the two detours */
@@ -409,17 +435,22 @@ void *sh_modvt_board_record(const char *name)
     if (!name || !*name || !InterlockedCompareExchange(&g_nowned, 0, 0)) return NULL;
     AcquireSRWLockShared(&g_lock);
     for (i = 0; i < SH_MODVT_SLOTS && !rec; ++i)
-        if (g_owned[i].used && g_owned[i].rec && !strcmp(g_owned[i].name, name)) rec = g_owned[i].rec;
+        if (g_owned[i].used && g_owned[i].rec && g_owned[i].name && !strcmp(g_owned[i].name, name)) rec = g_owned[i].rec;
     ReleaseSRWLockShared(&g_lock);
     return rec;
 }
 
+/* Under g_lock (exclusive). */
 static void mv_remember(void *material, const char *name)
 {
     int i;
+    char *copy;
     for (i = 0; i < g_nmats; ++i)
         if (g_mats[i].material == material) {
-            if (strcmp(g_mats[i].name, name)) strcpy_s(g_mats[i].name, sizeof g_mats[i].name, name);
+            if (strcmp(g_mats[i].name, name) && (copy = sh_text(name)) != NULL) {
+                free(g_mats[i].name);
+                g_mats[i].name = copy;
+            }
             return;
         }
     if (g_nmats == g_capmats) {
@@ -429,14 +460,15 @@ static void mv_remember(void *material, const char *name)
         g_mats = grown;
         g_capmats = cap;
     }
+    if (!(copy = sh_text(name))) return;
     g_mats[g_nmats].material = material;
-    strcpy_s(g_mats[g_nmats].name, sizeof g_mats[0].name, name);
+    g_mats[g_nmats].name = copy;
     g_nmats++;
 }
 
 int sh_modvt_bind_board(void *parms, void *record, const sh_modvt_bind_ops *ops)
 {
-    char name[SH_MODVT_NAME_MAX];
+    char *name = NULL;
     void *image;
     float word[4];
     const float *fb;
@@ -445,15 +477,17 @@ int sh_modvt_bind_board(void *parms, void *record, const sh_modvt_bind_ops *ops)
     AcquireSRWLockShared(&g_lock);
     for (i = 0; i < SH_MODVT_SLOTS && !held; ++i)
         if (g_owned[i].used && g_owned[i].rec == record) {
-            strcpy_s(name, sizeof name, g_owned[i].name);
+            name = sh_text(g_owned[i].name);
             held = 1;
         }
     ReleaseSRWLockShared(&g_lock);
-    if (!held || !ops || !ops->feedback || !ops->set_vec4 || !ops->set_texture || !ops->feedback_handle ||
-        !ops->pagetable_handle)
+    if (!held || !name || !ops || !ops->feedback || !ops->set_vec4 || !ops->set_texture || !ops->feedback_handle ||
+        !ops->pagetable_handle) {
+        free(name);
         return 0;
+    }
     image = *(void *const *)((const uint8_t *)record + SH_VT_REC_PTIMAGE);
-    if (!image) return 0;   /* no page table: the view's values stay, as for any record without one */
+    if (!image) { free(name); return 0; }   /* no page table: the view's values stay, as for any record without one */
     fb = ops->feedback(record, word);
     if (fb != word) memcpy(word, fb, sizeof word);
     ops->set_vec4(parms, ops->feedback_handle, word);
@@ -461,6 +495,7 @@ int sh_modvt_bind_board(void *parms, void *record, const sh_modvt_bind_ops *ops)
     AcquireSRWLockExclusive(&g_lock);
     mv_remember((uint8_t *)parms - SH_VT_MAT_PARMS, name);
     ReleaseSRWLockExclusive(&g_lock);
+    free(name);
     return 1;
 }
 
@@ -677,13 +712,41 @@ static int mv_rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; 
 static int mv_rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { *v = 0; return 0; } }
 static int mv_rd_code(const uint8_t *p, uint8_t *out, size_t n) { __try { memcpy(out, p, n); return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 
-static void mv_rd_cstr(const void *slot, char *out, size_t cap)
+/* The engine's C string at `slot` (a char *), whole (malloc'd); NULL when
+ * there is none or it does not read. */
+static char *mv_rd_cstr(const void *slot)
 {
     const char *s = NULL;
-    out[0] = 0;
-    if (!mv_rd_ptr(slot, (void **)&s) || !s) return;
-    __try { strncpy_s(out, cap, s, _TRUNCATE); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
+    char *out = NULL;
+    if (!mv_rd_ptr(slot, (void **)&s) || !s) return NULL;
+    __try {
+        size_t n = strlen(s);
+        if ((out = (char *)malloc(n + 1)) != NULL) memcpy(out, s, n + 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(out); out = NULL; }
+    return out;
+}
+
+/* 1 when the engine's C string at `slot` is exactly `name` (compared in
+ * place, whole: the detours run per material bind). */
+static int mv_cstr_is(const void *slot, const char *name)
+{
+    const char *s = NULL;
+    int same = 0;
+    if (!name || !mv_rd_ptr(slot, (void **)&s) || !s) return 0;
+    __try { same = !strcmp(s, name); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    return same;
+}
+
+/* 1 when the engine's C string at `slot` is empty or absent. */
+static int mv_cstr_empty(const void *slot)
+{
+    const char *s = NULL;
+    int empty = 1;
+    if (!mv_rd_ptr(slot, (void **)&s) || !s) return 1;
+    __try { empty = !s[0]; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { empty = 1; }
+    return empty;
 }
 
 /* The console only from the main thread; the log always. */
@@ -720,12 +783,14 @@ int sh_modvt_engine_on_main(void)
 int sh_modvt_engine_ready(void)
 {
     uint8_t *r = sh_modvt_engine_record(1);
-    char name[64];
-    int type = 0;
+    char *name;
+    int type = 0, ready;
     if (!r) return 0;
-    mv_rd_cstr(r + SH_VT_REC_NAME, name, sizeof name);
+    name = mv_rd_cstr(r + SH_VT_REC_NAME);
     mv_rd_i32(r + SH_VT_REC_TYPE, &type);
-    return type == 2 && strstr(name, "_vmtr") != NULL;
+    ready = type == 2 && name && strstr(name, "_vmtr") != NULL;
+    free(name);
+    return ready;
 }
 
 static DWORD g_fault_code;
@@ -818,11 +883,17 @@ static int mv_handles(void)
 
 static void *mv_vf_detour(void *sys, void *material)
 {
-    char name[SH_MODVT_NAME_MAX];
-    void *rec;
+    void *rec = NULL;
+    int i;
     if (material && InterlockedCompareExchange(&g_nowned, 0, 0)) {
-        mv_rd_cstr((const uint8_t *)material + SH_VT_MAT_LANDPAGE, name, sizeof name);
-        if (name[0] && (rec = sh_modvt_board_record(name)) != NULL) return rec;
+        /* The landpagefile name, compared whole in place with each board held. */
+        const void *slot = (const uint8_t *)material + SH_VT_MAT_LANDPAGE;
+        AcquireSRWLockShared(&g_lock);
+        for (i = 0; i < SH_MODVT_SLOTS && !rec; ++i)
+            if (g_owned[i].used && g_owned[i].rec && g_owned[i].name && mv_cstr_is(slot, g_owned[i].name))
+                rec = g_owned[i].rec;
+        ReleaseSRWLockShared(&g_lock);
+        if (rec) return rec;
     }
     return g_vf_tramp(sys, material);
 }
@@ -840,13 +911,11 @@ static int op_ready(void *c) { (void)c; return sh_modvt_engine_ready(); }
 static int op_find(void *c, const char *name)
 {
     int k;
-    char n[SH_MODVT_NAME_MAX + 8];
     (void)c;
+    if (!name || !name[0]) return -1;
     for (k = 1; k < SH_MODVT_SLOTS; ++k) {
         uint8_t *r = sh_modvt_engine_record(k);
-        if (!r) continue;
-        mv_rd_cstr(r + SH_VT_REC_NAME, n, sizeof n);
-        if (n[0] && !strcmp(n, name)) return k;
+        if (r && mv_cstr_is(r + SH_VT_REC_NAME, name)) return k;
     }
     return -1;
 }
@@ -854,12 +923,9 @@ static int op_find(void *c, const char *name)
 static int op_is_free(void *c, int k)
 {
     uint8_t *r = sh_modvt_engine_record(k);
-    char path[8], name[8];
     (void)c;
     if (!r) return 0;
-    mv_rd_cstr(r + SH_VT_REC_PATH, path, sizeof path);
-    mv_rd_cstr(r + SH_VT_REC_NAME, name, sizeof name);
-    return !path[0] && !name[0];
+    return mv_cstr_empty(r + SH_VT_REC_PATH) && mv_cstr_empty(r + SH_VT_REC_NAME);
 }
 
 static int op_set_source(void *c, int k, const char *name, const char *path)
@@ -928,12 +994,10 @@ static int op_rebind(void *c, void *material, int k, const char *name)
 {
     sh_process_heap_scope heap = { 0 };
     uint8_t *m = (uint8_t *)material, *r = sh_modvt_engine_record(k);
-    char landpage[SH_MODVT_NAME_MAX];
     int type = 0, ok = 0;
     (void)c;
     if (!m || !r || sh_modvt_engine_on_main() != 1) return 0;
-    mv_rd_cstr(m + SH_VT_MAT_LANDPAGE, landpage, sizeof landpage);
-    if (strcmp(landpage, name) || !mv_rd_i32(r + SH_VT_REC_TYPE, &type)) return 0;
+    if (!mv_cstr_is(m + SH_VT_MAT_LANDPAGE, name) || !mv_rd_i32(r + SH_VT_REC_TYPE, &type)) return 0;
     if (!mv_quiesce()) return 0;
     if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
     __try {
@@ -972,16 +1036,16 @@ static void mv_sync_now(const char *phase, int release_now)
         return;
     }
     n = sh_modvt_collect(&fams);
-    if (!n && !sh_modvt_owned_count()) { free(fams); InterlockedExchange(&g_pending, 0); return; }
+    if (!n && !sh_modvt_owned_count()) { sh_modvt_families_free(fams, n); InterlockedExchange(&g_pending, 0); return; }
     if (!mv_handles()) {
         /* Not set yet (the renderer is still starting), or unavailable for the session. */
         InterlockedExchange(&g_pending, InterlockedCompareExchange(&g_handles, 0, 0) == 0);
-        free(fams);
+        sh_modvt_families_free(fams, n);
         return;
     }
     if (sh_modvt_sync(fams, n, &g_ops, phase, release_now, &res) < 0) InterlockedExchange(&g_pending, 1);
     else InterlockedExchange(&g_pending, res.pending ? 1 : 0);
-    free(fams);
+    sh_modvt_families_free(fams, n);
 }
 
 /* The serving index listener: any thread. The next frame boundary syncs. */

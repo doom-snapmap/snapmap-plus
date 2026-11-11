@@ -17,7 +17,7 @@
  *     "tree": "<sha256>",              the rebuild rule's tree hash (sh_mb_tree_hash)
  *     "build": "<sha256>",             the build hash; absent while the build fails
  *     "cause": "<first cause>",        only while the build fails (or a verification found one)
- *     "warnings": [...],               the first SH_MB_WARNINGS_KEPT warnings, when any
+ *     "warnings": [...],               every warning of the build, when any
  *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
  *     "registries": {"banks": [...], "conductor": [...], "strings": [...]},
@@ -120,15 +120,14 @@
 #define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
 #define SH_MB_EARLIER         SH_MB_SHAPE "Run the Snapmap+ installer again and it converts it."
 #define SH_MB_ID_MAX          64u
-#define SH_MB_NAME_MAX        80u      /* code points */
-#define SH_MB_AUTHOR_MAX      80u      /* code points */
-#define SH_MB_HOMEPAGE_MAX    512u     /* code points */
-/* No count or size limit on a mod (DECISIONS 26): its files, one file, its
- * total and its mod.json grow as the author needs. A published or exported
- * mod's archive is bounded by the ZIP form alone (modzip.h). */
-#define SH_MB_REQUEST_MAX     400u     /* bytes of one request path */
-#define SH_MB_CAUSE_MAX       512u
-#define SH_MB_WARNINGS_KEPT   16u
+/* No count, size or length limit on a mod (DECISIONS 26): its files, one
+ * file, its total, its mod.json, its name, author and homepage, and a
+ * request path grow as the author needs; each is a heap string sized to what
+ * it holds. What bounds them is not the product's: a file's path on disk is
+ * what Windows holds (wide_path.h: 32,767 characters in the long form), a
+ * path inside a published or exported archive what ZIP carries (modzip.h:
+ * 65,535 bytes), and the sentences that name them are heap text too
+ * (text.h). */
 #define SH_MB_HASH_HEX        64u
 /* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
  * console line, as many and as long as the author writes (DECISIONS 26). */
@@ -217,15 +216,14 @@ typedef struct sh_mb_bundle {
     long long built;       /* block "built": the first successful build of this salt in this folder, 0 when none */
     int   validated;       /* 1 when the block records no "cause" (a build without errors) */
     int   rules;           /* block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */
-    char  state_cause[SH_MB_CAUSE_MAX];   /* block "cause" */
+    char *state_cause;     /* block "cause", or NULL (sh_mb_state_cause) */
     sh_mb_need_stats needs;
     unsigned errors, warnings;
-    char  first_cause[SH_MB_CAUSE_MAX];
-    char  first_warning[SH_MB_CAUSE_MAX];
-    /* Every warning of the build in order, the first SH_MB_WARNINGS_KEPT of
-     * them (`warnings` counts them all). */
+    char *first_cause;     /* the first error, or NULL (sh_mb_first_cause) */
+    char *first_warning;   /* the first warning, or NULL (sh_mb_first_warning) */
+    /* Every warning of the build in order (`warnings` counts them). */
     char **warning_list;
-    size_t warning_list_count;
+    size_t warning_list_count, warning_list_cap;
     sh_mb_classes classes; /* counts of the files' classes */
     char *registries;      /* compact JSON of the block's "registries" object, or NULL */
     char *scripts;         /* compact JSON of the block's "scripts" object, or NULL (no scripts) */
@@ -270,7 +268,7 @@ typedef struct sh_mb_stock_ops {
      * preferring `request` itself: SH_MB_STOCK_OK with its path in `source`,
      * ABSENT or UNAVAILABLE. */
     int (*match)(void *context, const char *request, unsigned long long size, const char *sha256,
-                 char *source, size_t source_cap);
+                 char **source);
     /* Hash the installed entry `source`: OK with sha256 and size, ABSENT or UNAVAILABLE. */
     int (*identify)(void *context, const char *source, char sha256[SH_MB_HASH_HEX + 1],
                     unsigned long long *size);
@@ -307,17 +305,17 @@ typedef int (*sh_mb_bank_need_fn)(const char *decl_name, char *bank, size_t cap)
 void sh_mb_set_bank_need(sh_mb_bank_need_fn fn);
 /* The registered operations, with a first cause naming `path` when not OK. */
 int  sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
-                        const char *path, char *cause, size_t cause_cap);
+                        const char *path, char **cause);
 /* The registered identify operation: OK with the installed entry's sha256 and size, ABSENT or UNAVAILABLE. */
 int  sh_mb_stock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size);
 int  sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
-                      const char *path, char *cause, size_t cause_cap);
+                      const char *path, char **cause);
 /* The registered container operation: 1 with the archive (or "loose") in `out`; 0 when no reader answers. */
 int  sh_mb_stock_container(const char *source, const char *sha256, char *out, size_t cap);
 
 /* Validate a stock source path: the request-path rules without the extension
  * whitelist. 1 when valid. */
-int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
+int  sh_mb_check_source(const char *source, char **cause);
 
 /* Build the bundle for `folder` (UTF-8 path). Returns 1 when the bundle has no
  * errors, 0 otherwise; out->first_cause and out->errors describe the refusal.
@@ -335,21 +333,31 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * out->notes holds the report lines the build log prints. */
 int  sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
+/* A bundle's sentences, never NULL: the first error ("" when none), the
+ * first warning and the block's cause. */
+const char *sh_mb_first_cause(const sh_mb_bundle *bundle);
+const char *sh_mb_first_warning(const sh_mb_bundle *bundle);
+const char *sh_mb_state_cause(const sh_mb_bundle *bundle);
+/* Replace the bundle's first cause (or block cause) with a copy of `text`
+ * (NULL clears it); 0 when memory runs out. */
+int  sh_mb_set_first_cause(sh_mb_bundle *bundle, const char *text);
+int  sh_mb_set_state_cause(sh_mb_bundle *bundle, const char *text);
+
 /* Write `<folder>\mod.json`: the author's part (the folder's mod.json without
  * its block, else a synthesized one) and the builder block from `bundle`,
  * including its cause when not validated. Write-through temporary and rename.
  * Refuses a bundle with errors. Returns 1 on success. */
-int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char *cause, size_t cause_cap);
+int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char **cause);
 
 /* Write the block of a failed build into `<folder>\mod.json`: format, salt,
  * rules, built (when it had one), tree and cause (bundle->first_cause) only,
  * so the folder serves nothing until fixed. bundle->id must be a salt.
  * Returns 1 on success. */
-int  sh_mb_write_failed(const sh_mb_bundle *bundle, const char *folder, char *why, size_t why_cap);
+int  sh_mb_write_failed(const sh_mb_bundle *bundle, const char *folder, char **why);
 
 /* Record a verification result in `<folder>\mod.json`'s block (a cause, or
  * none) without changing anything else. Returns 1 on success. */
-int  sh_mb_set_state(const char *folder, int validated, const char *cause, char *why, size_t why_cap);
+int  sh_mb_set_state(const char *folder, int validated, const char *cause, char **why);
 
 /* The complete mod.json text for `bundle` (malloc'd), splicing the builder
  * block into `author_text` (a mod.json text, its own block ignored) or, when
@@ -426,16 +434,16 @@ int  sh_mb_record_put(const char *mods_root, const char *section, const char *js
  * program holding it). A flow that writes the record clears it when it starts
  * and adds it to its result message when sh_mb_record_why returns 1. */
 void sh_mb_record_why_clear(void);
-int  sh_mb_record_why(char *out, size_t cap);
+const char *sh_mb_record_why(void);
 
 void sh_mb_free(sh_mb_bundle *bundle);
 
 /* Build `folder` in place with the game-backed resolver (installed bundles,
  * then the player's game archives) and write its mod.json: the entry the
  * store tool's conversions call. Returns 1 on success; 0 with the first cause
- * in `first_cause` (NUL-terminated, at most n bytes). Defined in modcmd.c,
+ * in *first_cause (malloc'd; the caller frees it). Defined in modcmd.c,
  * which owns the resolver; logs MODS: lines. */
-int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
+int  modbundle_build_folder(const char *folder, char **first_cause);
 
 /* ----------------------------------------------------------- helpers ---- */
 
@@ -453,12 +461,12 @@ int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 int  sh_mb_descriptor_state(const char *folder);
 /* The same, with the refusal sentence (SH_MB_EARLIER) for EARLIER,
  * RETIRED_KEY and UNREADABLE; "" for FRESH and BUILT. */
-int  sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cause_cap);
+int  sh_mb_descriptor_state_why(const char *folder, char **cause);
 
 /* Every carried file and provided name under some mods/<x>/ has x equal to
  * the bundle's salt (any case; a salt has one spelling). 1 when so; else 0
  * with the sentence naming the first file under another mod's salt. */
-int  sh_mb_salt_paths_check(const sh_mb_bundle *bundle, char *cause, size_t cause_cap);
+int  sh_mb_salt_paths_check(const sh_mb_bundle *bundle, char **cause);
 
 /* Every reference to mods/<from> in `text` (n bytes), as written or in the
  * engine's cooked spelling (mb_binary_name), in any case, not inside a longer
@@ -470,8 +478,9 @@ size_t sh_mb_rekey_text(const char *text, size_t n, const char *from, const char
 
 /* `rel` ('/'-separated) with every folder segment right after a "mods"
  * segment that is `from` (as written or cooked, any case) replaced by `to`.
- * 1 when changed, 0 when not, -1 when out is too small. */
-int  sh_mb_rekey_path(const char *rel, const char *from, const char *to, char *out, size_t cap);
+ * 1 with the new path in *out (malloc'd) when changed, 0 when not (*out
+ * NULL), -1 when memory runs out. */
+int  sh_mb_rekey_path(const char *rel, const char *from, const char *to, char **out);
 
 /* A mod.json text with its builder block replaced by {"format": 2, "salt":
  * <salt>} and every reference to mods/<from>/ in the author's part (strings
@@ -515,9 +524,9 @@ int  sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1]);
 
 /* Validate one request path (relative, '/', no "." or ".." segment, allowed
  * characters [A-Za-z0-9._-$+@~()] and internal spaces, no segment that
- * starts with a space or ends in '.' or a space, at most
- * SH_MB_REQUEST_MAX bytes). 1 when valid, else 0 with the cause. */
-int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
+ * starts with a space or ends in '.' or a space; any length). 1 when valid,
+ * else 0 with the cause in *cause (malloc'd; the caller frees it). */
+int  sh_mb_check_request(const char *request, char **cause);
 
 /* Extension whitelist. A .bswf movie is admitted only under
  * generated/swf/. */
@@ -560,27 +569,28 @@ int  sh_mb_script_request(const char *request, const char **name, size_t *name_l
  * folder is named under the mod folder's name (assets\mods\<folder>\...),
  * as the author wrote it, never under the salt the scan moved it to, and the
  * sentence names where scripts go in that same folder. */
-void sh_mb_script_where(const char *child, const char *salt, const char *folder, char *out, size_t cap);
+char *sh_mb_script_where(const char *child, const char *salt, const char *folder);
 
 /* The author's spelling of a script request: "scripts\<name>.lua" or
- * "scripts\lib\<name>.lua", the name every script message uses. */
-void sh_mb_script_file_name(const char *request, char *out, size_t cap);
+ * "scripts\lib\<name>.lua", the name every script message uses (malloc'd). */
+char *sh_mb_script_file_name(const char *request);
 
 /* The compile check the product registers (script_compile.c): `file` is the
  * author's spelling, `entry` 1 for an entry file (which must start with
  * "api = 1"), 0 for a scripts\lib file. 1 when the text compiles (nothing
- * runs); 0 with *line (0 when none) and the plain what and todo, neither
- * ending with a period. Any thread. Without a registered check a build that
- * carries a script fails, naming the file: nothing unchecked serves. */
+ * runs); 0 with *line (0 when none) and the plain what and todo (malloc'd;
+ * the caller frees them), neither ending with a period. Any thread. Without
+ * a registered check a build that carries a script fails, naming the file:
+ * nothing unchecked serves. */
 typedef int (*sh_mb_script_check_fn)(const char *file, int entry, const char *text, size_t len, int *line,
-                                     char *what, size_t what_cap, char *todo, size_t todo_cap);
+                                     char **what, char **todo);
 void sh_mb_set_script_check(sh_mb_script_check_fn fn);
 
 /* The check of the author's content blocks the game reads later ("scenes",
  * "hud"; modcontent.h sh_modcontent_check): `extra` is the build's preserved
- * author keys. 0 with one sentence in `cause` fails the build with it. NULL
- * (the default) checks nothing. */
-typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char *cause, size_t cause_cap);
+ * author keys. 0 with one sentence in *cause (malloc'd) fails the build with
+ * it. NULL (the default) checks nothing. */
+typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char **cause);
 void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
 
 
@@ -623,9 +633,9 @@ int  sh_mb_pointer_only_kind(const char *request);
 int  sh_mb_stock_restore(const char *request, const char *source);
 
 /* For a snapModule decl request maps/modules/<path>.decl, the snapModuleInfo
- * request it needs (generated/decls/snapmoduleinfo/<path>.decl). 1 on
- * success; 0 when the request is not a module decl. */
-int  sh_mb_module_info_request(const char *request, char *out, size_t cap);
+ * request it needs (generated/decls/snapmoduleinfo/<path>.decl), malloc'd;
+ * NULL when the request is not a module decl. */
+char *sh_mb_module_info_request(const char *request);
 
 /* Editor-time content: a request the editor itself reads and the game never
  * does at play (the snapEditor* and snapPropertyInspector* decl types, the
@@ -642,14 +652,15 @@ int  sh_mb_editor_only(const sh_mb_bundle *bundle);
 /* A model reference as an entity's edit state or a decl writes it
  * (models/.../x.lwo, .ase, .ma, .obj, .fbx or a .bmodel path) as the cooked
  * request the provider is asked for (cooked/model/models/.../x.bmodel,
- * lower-cased). 1 on success; 0 when `name` is not a model reference. */
-int  sh_mb_model_key(const char *name, char *out, size_t cap);
+ * lower-cased), malloc'd; NULL when `name` is not a model reference. */
+char *sh_mb_model_key(const char *name);
 /* Every request a model reference may be served under, in the order a model
  * need resolves (sh_mb_need_requests "model"): cooked/model/<stem>.bmodel,
  * then generated/model/<stem>.bmodel (the md6 collision models
  * md6/.../collision/x.lwo ship only there). Returns the count (0 when `name`
- * is not a model reference); a .bmodel path is its own single request. */
-int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max);
+ * is not a model reference); a .bmodel path is its own single request. Each
+ * is malloc'd (sh_mb_requests_free). */
+int  sh_mb_model_keys(const char *name, char *out[], int max);
 
 /* Game files several mods commonly edit: the product
  * generates each per map from the game's text and the declared mods'
@@ -668,15 +679,15 @@ int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int m
  * trimmed), in the author's order. "cvars" is always present; "commands" and
  * each list only when not empty. Returns a malloc'd string, or NULL with the
  * first cause. */
-char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, size_t cause_cap);
+char *sh_mb_requirements_canonical(const char *text, size_t len, char **cause);
 
 /* A private virtual-texture family member:
  * virtualtextures/mods/<id>/[<folders>/]<family>_sq<N>.mega2, N 1 to 16 with
  * no leading zero, no "_vmtr" in the family. Returns 1 and, when non-NULL,
- * the family name ("mods/<id>/.../<family>", which a material names as its
+ * the family name (malloc'd into *family: "mods/<id>/.../<family>", which a material names as its
  * landpagefile) and N; else 0. The only form in which a .mega2 is admitted.
  * A member can never be a shadow: no stock family lives under mods/. */
-int  sh_mb_vt_member(const char *request, char *family, size_t family_cap, int *member);
+int  sh_mb_vt_member(const char *request, char **family, int *member);
 
 /* Sound banks. Wwise opens a bank by file name under one folder, and the bank
  * id is FNV-1 of the lower-cased stem, so a mod bank is admitted only as
@@ -685,7 +696,11 @@ int  sh_mb_vt_member(const char *request, char *family, size_t family_cap, int *
  * listed-bank filter skips those in some game mode), carried (never a stock
  * pointer or a shadow), whose BKHD chunk is version 113 and carries id
  * FNV-1(stem). Its logical name is type "soundBank", the request path. */
-#define SH_MB_BANK_STEM_MAX  64u
+/* Windows holds a file name of at most 255 characters, and a bank is one
+ * file in one folder, served as <stem>.<16 hex of its hash>.bnk (modserve.c):
+ * the stem is at most 234 characters (a stem is ASCII). The platform's bound,
+ * not the product's. */
+#define SH_MB_BANK_STEM_MAX  234u
 #define SH_MB_BANK_VERSION   0x71u
 /* 32-bit FNV-1 (multiply, then xor) of the ASCII-lower-cased first n bytes:
  * Wwise's GetIDFromString. */
@@ -693,35 +708,37 @@ uint32_t sh_mb_fnv1_lower(const char *s, size_t n);
 /* 1 and the stem when request is sound/soundbanks/pc/<stem>.bnk (one level). */
 int  sh_mb_bank_stem(const char *request, char *stem, size_t cap);
 /* The stem rules above for mod `id`; 0 with the cause. */
-int  sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap);
+int  sh_mb_bank_rule(const char *request, const char *id, char **cause);
 /* The header rule above on the bank's first bytes; 0 with the cause. */
-int  sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char *cause, size_t cap);
+int  sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char **cause);
 
-/* Logical name of a request path. Returns 1 and fills type
- * and name; 0 when the path is under generated/decls/ but names no known decl
- * type or an empty name. */
-int  sh_mb_logical_name(const char *request, char *type, size_t type_cap,
-                        char *name, size_t name_cap);
+/* Logical name of a request path. Returns 1 with the type (a word from the
+ * engine's own type table, under SH_MB_TYPE_CAP bytes) in type[] and the
+ * name in *name (malloc'd); 0 when the path is under generated/decls/ but
+ * names no known decl type or an empty name, or memory runs out. */
+#define SH_MB_TYPE_CAP 64
+int  sh_mb_logical_name(const char *request, char type[SH_MB_TYPE_CAP], char **name);
 
 /* Engine spelling of a generated/decls/<folder>/ type folder (case-insensitive),
  * or NULL when 13954591 ships no decl of that type. */
 const char *sh_mb_decl_type(const char *folder, size_t folder_len);
 
 /* Request paths the engine would ask the provider for when it loads the
- * logical (type, name). Lower-cased. Returns the number written (0..max).
+ * logical (type, name). Lower-cased, each malloc'd (sh_mb_requests_free).
+ * Returns the number written (0..max).
  * A model name (.lwo, .ase, .ma, .obj, .fbx) is cooked/model/<stem>.bmodel,
  * then generated/model/<stem>.bmodel: the game ships its md6 collision
  * models (md6/.../collision/<x>.lwo) only under generated/model/, beside
  * their generated/cm/ collision. */
-int  sh_mb_need_requests(const char *type, const char *name,
-                         char out[][SH_MB_REQUEST_MAX + 1], int max);
+int  sh_mb_need_requests(const char *type, const char *name, char *out[], int max);
+void sh_mb_requests_free(char *out[], int count);
 
 /* The path or name with its first "mods/<salt>/" segment removed (at the
  * start or after a '/', key any non-empty segment, so both spellings of a key,
  * '-' in decl names and '_' in md6 paths, are cut): the installed name a
- * renamed copy most likely came from. Returns 1 and fills out (lower-cased)
- * when a segment was removed, 0 otherwise. */
-int  sh_mb_strip_key(const char *in, char *out, size_t cap);
+ * renamed copy most likely came from. Returns it (lower-cased, malloc'd)
+ * when a segment was removed, NULL otherwise. */
+char *sh_mb_strip_key(const char *in);
 
 /* Tolerant decl reference scan (see modbundle.c for the keys). The callback
  * receives each reference; name is not NUL-terminated. */
@@ -749,11 +766,12 @@ int  sh_mb_rp_stages(const unsigned char *bin, size_t len, size_t off[3], size_t
  * decl name, or a permutation decl's request path) and extension (".vspv",
  * ".fspv", ".cspv"): "generated/spirv/" + the name with its extension
  * replaced, a basename of 38 or more characters cut into 30-character
- * components. Returns 1, or 0 when it does not fit. */
-int  sh_mb_spirv_request(const char *name, const char *ext, char *out, size_t cap);
+ * components. Returns it (malloc'd), or NULL when memory runs out. */
+char *sh_mb_spirv_request(const char *name, const char *ext);
 /* generated/renderprogs/permutations/<program>_<16 lowercase hex>.decl:
- * returns 1 with the program name and the mask, else 0. */
-int  sh_mb_rp_permutation(const char *request, char *program, size_t program_cap, char mask[17]);
+ * returns 1 with the program name (malloc'd into *program when program is
+ * not NULL) and the mask, else 0. */
+int  sh_mb_rp_permutation(const char *request, char **program, char mask[17]);
 
 /* SHA-256 as 64 lowercase hex characters. */
 void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]);
@@ -765,7 +783,7 @@ int  sh_mb_sha256_file(const char *path, unsigned long long *size,
  * (.state.json), {"firstCause","installedAt","validated"}. */
 
 int  sh_mb_state_parse(const char *text, size_t len, int *validated,
-                       long long *installed_at, char *cause, size_t cause_cap);
+                       long long *installed_at, char **cause);   /* *cause malloc'd or NULL */
 
 /* Wide long-path form of a UTF-8 path (\\?\ prefixed when absolute), malloc'd.
  * Exposed for modstore. */
@@ -780,7 +798,8 @@ unsigned char *sh_mb_read_file(const char *path, size_t max, size_t *out_len);
 /* The product's user-data folder, %LOCALAPPDATA%\snapmap-plus, in UTF-8
  * (resolved through the wide API: the ANSI code page cannot spell every
  * profile path). Every store, prefab and conversion root derives from it;
- * modstore.h sh_ms_root is its mods\ folder. 1 on success. */
-int sh_mb_user_root(char *out, size_t cap);
+ * modstore.h sh_ms_root is its mods\ folder. Resolved once; NULL when
+ * Windows does not answer. */
+const char *sh_mb_user_root(void);
 
 #endif /* SNAPMAP_PLUS_MODBUNDLE_H */

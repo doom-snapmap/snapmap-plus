@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../common/text.h"
 #include "modregistry.h"
 #include "decl_tree.h"
 
@@ -137,34 +138,29 @@ int sh_modregistry_conductor_rows(const char *text, size_t len,
 {
     size_t open, close, pos;
     int depth = 0, count = 0;
-    char ai[256], def[SH_MB_REQUEST_MAX + 1], key[64];
+    char *ai = NULL, *def = NULL;
     mr_tok prev = { MT_END, 0, 0 }, prev2 = { MT_END, 0, 0 };
     if (!text || !mr_find_block(text, len, 0, len, "aiTypeList", 2, &open, &close)) return -1;
     pos = open + 1;
-    ai[0] = def[0] = key[0] = 0;
     for (;;) {
         mr_tok k = mr_next(text, close, &pos);
         if (k.kind == MT_END) break;
-        if (k.kind == MT_LB) { if (++depth == 1) ai[0] = def[0] = 0; }
+        if (k.kind == MT_LB) { if (++depth == 1) { free(ai); free(def); ai = def = NULL; } }
         else if (k.kind == MT_RB) {
-            if (depth-- == 1) { if (fn) fn(context, ai, def); count++; }
+            if (depth-- == 1) { if (fn) fn(context, ai ? ai : "", def ? def : ""); count++; }
         } else if (k.kind == MT_STR && depth == 1 && prev.kind == MT_EQ && prev2.kind == MT_WORD) {
             size_t n = k.n >= 2 ? k.n - 2 : 0;
-            char *dst = NULL;
-            size_t cap = 0;
-            if (prev2.n < sizeof key) { memcpy(key, text + prev2.at, prev2.n); key[prev2.n] = 0; }
-            else key[0] = 0;
-            if (!_stricmp(key, "aiType")) { dst = ai; cap = sizeof ai; }
-            else if (!_stricmp(key, "entityDef")) { dst = def; cap = sizeof def; }
-            if (dst) {
-                if (n >= cap) n = cap - 1;
-                memcpy(dst, text + k.at + 1, n);
-                dst[n] = 0;
-            }
+            char **dst = NULL;
+            /* The values whole, whatever their length. */
+            if (prev2.n == 6 && !_strnicmp(text + prev2.at, "aiType", 6)) dst = &ai;
+            else if (prev2.n == 9 && !_strnicmp(text + prev2.at, "entityDef", 9)) dst = &def;
+            if (dst) { free(*dst); *dst = sh_textn(text + k.at + 1, n); }
         }
         prev2 = prev;
         prev = k;
     }
+    free(ai);
+    free(def);
     return count;
 }
 
@@ -219,17 +215,17 @@ char *sh_modregistry_rewrite_bits(const char *text, size_t len, const unsigned *
 
 static void mr_line(sh_mr_result *r, const char *fmt, ...)
 {
-    char buf[700];
+    char *buf;
     va_list ap;
     char **g;
     va_start(ap, fmt);
-    _vsnprintf_s(buf, sizeof buf, _TRUNCATE, fmt, ap);
+    buf = sh_vtextf(fmt, ap);
     va_end(ap);
+    if (!buf) return;
     g = (char **)realloc(r->lines, sizeof(char *) * (size_t)(r->nlines + 1));
-    if (!g) return;
+    if (!g) { free(buf); return; }
     r->lines = g;
-    r->lines[r->nlines] = mr_strdup(buf);
-    if (r->lines[r->nlines]) r->nlines++;
+    r->lines[r->nlines++] = buf;
 }
 
 static int mr_grow(void **arr, int n, size_t elem)
@@ -279,7 +275,7 @@ static int mr_entry_cmp(const void *a, const void *b)
     const sh_mr_entry *x = (const sh_mr_entry *)a, *y = (const sh_mr_entry *)b;
     int c;
     if (x->source != y->source) return x->source < y->source ? -1 : 1;
-    c = _stricmp(x->encounter[0] ? x->encounter : x->def, y->encounter[0] ? y->encounter : y->def);
+    c = _stricmp(x->encounter ? x->encounter : x->def, y->encounter ? y->encounter : y->def);
     if (c) return c;
     c = _stricmp(x->def, y->def);
     return c ? c : (x->authored < y->authored ? -1 : x->authored > y->authored);
@@ -357,24 +353,23 @@ static void mr_apply_clash(void *context, const char *slot, const int *sources, 
     sh_mr_clash *k;
     int i;
     if (!mr_grow((void **)&c->r->clashes, c->r->nclashes, sizeof *c->r->clashes)) return;
-    k = &c->r->clashes[c->r->nclashes++];
+    k = &c->r->clashes[c->r->nclashes];
     memset(k, 0, sizeof *k);
-    strncpy_s(k->slot, sizeof k->slot, slot, _TRUNCATE);
+    if (!(k->slot = mr_strdup(slot))) return;
+    c->r->nclashes++;
     k->target = c->target;
     for (i = 0; i < n && i < SH_MR_CLASH_SOURCES; ++i) k->sources[k->n++] = sources[i];
     k->serving = serving;
     k->by_choice = by_choice;
 }
 
-/* A scalar's value without its quotes, into out. */
-static void mr_unquote(const sh_dt_node *n, char *out, size_t cap)
+/* A scalar's value without its quotes, whole (malloc'd), or NULL. */
+static char *mr_unquote(const sh_dt_node *n)
 {
     const char *v = n && !n->block ? n->val : "";
     size_t len = n && !n->block ? n->val_n : 0;
     if (len >= 2 && v[0] == '"' && v[len - 1] == '"') { v++; len -= 2; }
-    if (len >= cap) len = cap - 1;
-    memcpy(out, v, len);
-    out[len] = 0;
+    return sh_textn(v, len);
 }
 
 /* The conductor's rule: each aiTypeList item a source added whose aiType is
@@ -390,27 +385,33 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
     if (!items) return 0;
     for (i = 0; i < list->nkids; ++i) {
         sh_dt_node *it = list->kids[i], *ai, *def;
-        char a[64], d[SH_MB_REQUEST_MAX + 1], *end;
+        char *a, *d, *end;
         unsigned long v;
         int q, dup = -1;
         if (!it->block || it->src < 0) continue;
         ai = sh_dt_child(it, "aiType");
         def = sh_dt_child(it, "entityDef");
-        mr_unquote(ai, a, sizeof a);
-        mr_unquote(def, d, sizeof d);
-        if (!a[0] || strspn(a, "0123456789") != strlen(a)) continue;   /* a SPAWN_AI_TYPE_* name: the game's own */
-        v = strtoul(a, &end, 10);
-        if (sh_modregistry_stock_bit((unsigned)v)) continue;
+        a = mr_unquote(ai);
+        d = mr_unquote(def);
+        if (!a || !d) { free(a); free(d); free(items); return 0; }
+        /* a SPAWN_AI_TYPE_* name, or a stock bit: the game's own */
+        if (!a[0] || strspn(a, "0123456789") != strlen(a) ||
+            sh_modregistry_stock_bit((unsigned)(v = strtoul(a, &end, 10)))) {
+            free(a); free(d);
+            continue;
+        }
         if (!d[0]) {
             mr_line(r, "conductor: %s adds an aiTypeList item with aiType %s and no entityDef; it keeps that number",
                     src[it->src].who, a);
+            free(a); free(d);
             continue;
         }
+        free(a);
         for (q = 0; q < r->nentries && dup < 0; ++q)
             if (r->entries[q].source == it->src && r->entries[q].authored == (unsigned)v) dup = q;
         items[nitems++] = it;
-        if (dup >= 0) continue;   /* one number listed twice by a source: one bit */
-        if (!mr_grow((void **)&r->entries, r->nentries, sizeof *r->entries)) { free(items); return 0; }
+        if (dup >= 0) { free(d); continue; }   /* one number listed twice by a source: one bit */
+        if (!mr_grow((void **)&r->entries, r->nentries, sizeof *r->entries)) { free(d); free(items); return 0; }
         {
             sh_mr_entry *e = &r->entries[r->nentries++];
             const sh_mr_source *so = &src[it->src];
@@ -418,7 +419,7 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
             memset(e, 0, sizeof *e);
             e->source = it->src;
             e->authored = (unsigned)v;
-            strncpy_s(e->def, sizeof e->def, d, _TRUNCATE);
+            e->def = d;
             /* The encounter that names the number orders the entry. */
             for (dd = 0; dd < so->ndecls; ++dd) {
                 unsigned nums[8];
@@ -426,17 +427,21 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
                 if (so->decls[dd].score) continue;
                 nn = mr_custom_numbers(so->decls[dd].text, so->decls[dd].len, nums, 8);
                 for (k = 0; k < nn; ++k)
-                    if (nums[k] == (unsigned)v && (!e->encounter[0] || _stricmp(so->decls[dd].name, e->encounter) < 0))
-                        strncpy_s(e->encounter, sizeof e->encounter, so->decls[dd].name, _TRUNCATE);
+                    if (nums[k] == (unsigned)v && (!e->encounter || _stricmp(so->decls[dd].name, e->encounter) < 0)) {
+                        char *name = mr_strdup(so->decls[dd].name);
+                        if (name) { free(e->encounter); e->encounter = name; }
+                    }
             }
         }
     }
     if (r->nentries) qsort(r->entries, (size_t)r->nentries, sizeof *r->entries, mr_entry_cmp);
     for (i = 0; i < r->nentries; ++i) {
         if (SH_MR_BIT_FIRST + i > SH_MR_BIT_LAST) {
+            int k;
             mr_line(r, "conductor: no free spawn-type bit for %s (%s) of %s: a map holds at most %d custom encounter types; "
-                    "it keeps the number its author wrote", r->entries[i].encounter[0] ? r->entries[i].encounter : "its encounter",
+                    "it keeps the number its author wrote", r->entries[i].encounter ? r->entries[i].encounter : "its encounter",
                     r->entries[i].def, src[r->entries[i].source].who, SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1);
+            for (k = i; k < r->nentries; ++k) { free(r->entries[k].def); free(r->entries[k].encounter); }
             r->nentries = i;
             break;
         }
@@ -445,11 +450,12 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
     /* The items take their bits. */
     for (i = 0; i < nitems; ++i) {
         sh_dt_node *ai = sh_dt_child(items[i], "aiType");
-        char a[64], bit[24];
+        char *a, bit[24];
         unsigned long v;
         int q;
-        mr_unquote(ai, a, sizeof a);
+        if (!(a = mr_unquote(ai))) { free(items); return 0; }
         v = strtoul(a, NULL, 10);
+        free(a);
         for (q = 0; q < r->nentries; ++q)
             if (r->entries[q].source == items[i]->src && r->entries[q].authored == (unsigned)v) {
                 _snprintf_s(bit, sizeof bit, _TRUNCATE, "\"%u\"", r->entries[q].bit);
@@ -460,7 +466,7 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
     free(items);
     for (i = 0; i < r->nentries; ++i)
         mr_line(r, "conductor: aiType %u -> %s (%s, %s, authored %u)", r->entries[i].bit, r->entries[i].def,
-                src[r->entries[i].source].who, r->entries[i].encounter[0] ? r->entries[i].encounter : "no encounter",
+                src[r->entries[i].source].who, r->entries[i].encounter ? r->entries[i].encounter : "no encounter",
                 r->entries[i].authored);
     /* Each source's encounters and scores, rewritten to the bits assigned. */
     for (s = 0; s < n; ++s) {
@@ -516,17 +522,17 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
         mr_apply_ctx ctx;
         sh_dt_report rep;
         sh_dt *t;
-        char game[SH_MB_REQUEST_MAX + 1];
-        (void)sh_dt_game_name(targets[k].request, game, sizeof game);
         out->used[k] = (unsigned char *)calloc((size_t)(n > 0 ? n : 1), 1);
         if (!out->used[k]) goto oom;
         if (!targets[k].text) {
+            char *game = sh_dt_game_name(targets[k].request);
             for (i = 0; i < n; ++i)
                 if (src[i].edits && strstr(src[i].edits, targets[k].request)) {
                     mr_line(out, "%s: the game's text could not be read; the game's own file serves and no mod's edits "
-                            "apply", game);
+                            "apply", game ? game : targets[k].request);
                     break;
                 }
+            free(game);
             continue;
         }
         ctx.r = out;
@@ -572,6 +578,8 @@ void sh_modregistry_result_free(sh_mr_result *r)
     }
     for (i = 0; i < r->nrewrites; ++i) free(r->rewrites[i].text);
     for (i = 0; i < r->nlines; ++i) free(r->lines[i]);
+    for (i = 0; i < r->nentries; ++i) { free(r->entries[i].def); free(r->entries[i].encounter); }
+    for (i = 0; i < r->nclashes; ++i) free(r->clashes[i].slot);
     free(r->text); free(r->len); free(r->used);
     free(r->entries); free(r->rewrites); free(r->clashes); free(r->lines);
     memset(r, 0, sizeof *r);
@@ -583,7 +591,7 @@ int sh_modregistry_slot_valid(const char *slot)
 {
     size_t i, n = slot ? strlen(slot) : 0;
     int parts = 1;
-    if (!n || n >= SH_MR_SLOT_MAX || slot[0] == '/' || slot[n - 1] == '/') return 0;
+    if (!n || slot[0] == '/' || slot[n - 1] == '/') return 0;
     for (i = 0; i < n; ++i) {
         unsigned char c = (unsigned char)slot[i];
         if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\\') return 0;

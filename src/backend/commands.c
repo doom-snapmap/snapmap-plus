@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "commands.h"
+#include "text.h"
 #include "cvars.h"
 #include "overrides.h"
 #include "clipboard.h"
@@ -70,17 +71,24 @@ static int               g_devmode_patch_complete;
 void sh_printf(const char *fmt, ...)
 {
     if (!g_printf) return;
-    char buf[1024];
+    /* The whole text: a short one on the stack, a longer one on the heap. */
+    char buf[1024], *held = NULL;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(buf, sizeof buf, _TRUNCATE, fmt, ap);
+    int n = _vsnprintf_s(buf, sizeof buf, _TRUNCATE, fmt, ap);
     va_end(ap);
-    const char *p = buf;
+    if (n < 0) {
+        va_start(ap, fmt);
+        held = sh_vtextf(fmt, ap);
+        va_end(ap);
+    }
+    const char *p = held ? held : buf;
     __try {
         g_printf(1, "%s", &p);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
 
     }
+    free(held);
 }
 
 /* Shared guarded access to engine-owned command arguments. */
@@ -193,12 +201,12 @@ static int rawmap_list_one_dir(const char *dir, const char *prefix)
         h = FindFirstFileW(glob, &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
         do {
-            char name[SH_RAWMAP_PATH_MAX], full[SH_RAWMAP_PATH_MAX], why[160];
+            char name[SH_RAWMAP_PATH_MAX], full[SH_RAWMAP_PATH_MAX];
             int ok;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             if (!sh_rawmap_path_utf8(fd.cFileName, name, sizeof name)) continue;
             _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, name);
-            ok = k == 0 ? modexport_validate_source(full, why, (int)sizeof why) : sh_rawmap_looks_like_rawmap(full);
+            ok = k == 0 ? modexport_validate_source(full, NULL) : sh_rawmap_looks_like_rawmap(full);
             if (!ok) continue;
             sh_printf("  %s%-38s %llu bytes%s\n", prefix ? prefix : "", name,
                       ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
@@ -308,10 +316,11 @@ static void rawmap_print_state(void)
                           last.mods == 1 ? "" : "s");
             else if (last.zip[0])
                 sh_printf("  the map uses %u mod%s, but %s was not written: %s\n", last.mods,
-                          last.mods == 1 ? "" : "s", last.zip, last.zip_error[0] ? last.zip_error : "unknown cause");
+                          last.mods == 1 ? "" : "s", last.zip, last.zip_error && last.zip_error[0] ? last.zip_error : "unknown cause");
             else if (last.json[0])
                 sh_printf("  the map uses no mods, so the .json is all anyone needs\n");
         }
+        sh_rawmap_save_report_free(&last);
     }
     sh_printf("  'sh_rawmaps help' lists what else it can do.\n");
 }

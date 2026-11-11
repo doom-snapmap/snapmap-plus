@@ -28,9 +28,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* A name's bytes: the request paths a mod carries are far shorter
- * (SH_MB_REQUEST_MAX), so a name over this is not one Snapmap+ wrote. */
-#define SH_ZIP_NAME_MAX     1024u
+/* A name's bytes: an entry's name length is a 16-bit field of the ZIP
+ * format, so a name holds at most 65,535 bytes. That is the format's bound,
+ * not the product's: a path inside a mod has no length of its own. */
+#define SH_ZIP_NAME_MAX     65535u
 #define SH_ZIP_METHOD_FILE  0xFFFFu   /* a folder reader's entry (r->dir set): read from the file */
 
 /* ------------------------------------------------------------ writer ---- */
@@ -43,7 +44,7 @@ typedef struct sh_zip_writer {
     sh_zip_went *e;
     size_t n, cap;             /* n: entries written */
     int failed;
-    char cause[256];           /* the first failure */
+    char *cause;               /* the first failure (malloc'd; sh_zip_writer_free frees it) */
 } sh_zip_writer;
 
 /* Create (or replace) the file at `path` and start an empty archive. Returns 1;
@@ -82,12 +83,13 @@ typedef struct sh_zip_reader {
 
 /* A name a reader may trust: relative, '/'-separated, no empty, "." or ".."
  * segment, no drive, backslash or control character, at most
- * SH_ZIP_NAME_MAX bytes. */
+ * SH_ZIP_NAME_MAX bytes (the format's bound). */
 int  sh_zip_name_ok(const char *s, size_t n);
 
 /* Open the archive at `path` (UTF-8) and read its central directory. Returns
- * 1; 0 with the cause and r zeroed. */
-int  sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t cap);
+ * 1; 0 with the cause (malloc'd into *cause, as every cause of this header)
+ * and r zeroed. */
+int  sh_zip_reader_open(sh_zip_reader *r, const char *path, char **cause);
 
 /* A folder reader's entry (r->dir set by the caller): `name` relative to the
  * folder, '/'-separated. Returns 1; 0 when out of memory.
@@ -96,14 +98,14 @@ int  sh_zip_reader_add(sh_zip_reader *r, const char *name, unsigned long long si
 
 /* Index the entries by name; two entries whose names differ at most in case
  * close the reader and refuse. Returns 1; 0 with the cause. */
-int  sh_zip_reader_sort(sh_zip_reader *r, char *cause, size_t cap);
+int  sh_zip_reader_sort(sh_zip_reader *r, char **cause);
 
 /* The entry's index (the exact name), or -1. */
 long sh_zip_reader_find(const sh_zip_reader *r, const char *name);
 
 /* One entry's bytes (malloc'd, NUL-terminated), at most max bytes, its CRC-32
  * checked. NULL with the cause. */
-unsigned char *sh_zip_reader_read(const sh_zip_reader *r, long idx, size_t max, size_t *out_len, char *cause, size_t cap);
+unsigned char *sh_zip_reader_read(const sh_zip_reader *r, long idx, size_t max, size_t *out_len, char **cause);
 
 /* Close the archive and free everything; r is zeroed. */
 void sh_zip_reader_close(sh_zip_reader *r);

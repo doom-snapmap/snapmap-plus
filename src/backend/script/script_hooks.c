@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../common/text.h"
 #include "script_hooks.h"
 
 /* ---- the mods of this map ---------------------------------------------- */
@@ -314,7 +315,7 @@ static int           g_close_pending_handlers;
 static uint32_t      g_frame;
 static volatile LONG g_routing;          /* records are accepted for this map's states */
 static volatile LONG g_full_logged;
-static char          g_log_last[512];   /* the line written last */
+static char *g_log_last;   /* the last line logged, malloc'd */
 static int           g_vtable_checked;   /* 1 verified, -1 refused */
 static double        g_time;             /* seconds of script frames this Play */
 static LARGE_INTEGER g_last_frame;       /* the previous script frame's game milliseconds + 1 */
@@ -323,14 +324,17 @@ static void commit_combat_hooks(void);
 
 static void hooks_log(const char *fmt, ...)
 {
-    char line[512];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    if (!strcmp(line, g_log_last)) return;   /* the same line again says nothing new */
-    strcpy_s(g_log_last, sizeof g_log_last, line);
+    if (!line) return;
+    /* the same line again says nothing new */
+    if (g_log_last && !strcmp(line, g_log_last)) { free(line); return; }
     backend_log(line);
+    free(g_log_last);
+    g_log_last = line;
 }
 
 /* Only access violations are contained; an engine idException must reach

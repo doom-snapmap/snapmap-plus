@@ -8,6 +8,7 @@
  * modserve_bundles_for_names_visit, declared in modserve.h) is replaced by
  * doubles defined here. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,15 @@ static int g_lookup_calls;
 
 /* The build that serves a row (sh_modserve_row_build): its own build when
  * installed, else the installed (root) build of its salt. */
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
+{
+    if (!ref) return;
+    free(ref->name);
+    free(ref->folder);
+    free(ref->place);
+    ref->name = ref->folder = ref->place = NULL;
+}
+
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     size_t b;
@@ -198,7 +208,7 @@ static void value_round_trip(void)
     char err[128];
     printf("-- row value round trip\n");
     make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
-    strcpy_s(row.name, sizeof row.name, "Pink Imp");
+    sh_modmanifest_row_set_name(&row, "Pink Imp");
     CHECK(sh_modmanifest_row_add_name(&row, "mods/alexpink/imp"));
     CHECK(sh_modmanifest_row_add_name(&row, "MODS/ALEXPINK/IMP"));   /* duplicate, folded */
     CHECK(sh_modmanifest_row_add_name(&row, "a \"quoted\" \\ name"));
@@ -212,7 +222,7 @@ static void value_round_trip(void)
     }
     CHECK(value && sh_modmanifest_parse_value(value, n, &back, err, sizeof err));
     CHECK(!strcmp(back.salt, row.salt) && !strcmp(back.build, row.build) &&
-          !strcmp(back.name, "Pink Imp"));
+          !strcmp(sh_modmanifest_row_name(&back), "Pink Imp"));
     CHECK(back.size == 11782 && back.name_count == 2 && !strcmp(back.names[1], "a \"quoted\" \\ name"));
     sh_modmanifest_row_free(&back);
     free(value);
@@ -231,7 +241,7 @@ static void value_round_trip(void)
         CHECK(!sh_modmanifest_parse_value(no_at, sizeof no_at - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(no_size, sizeof no_size - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(bad_names, sizeof bad_names - 1, &back, err, sizeof err));
-        CHECK(sh_modmanifest_parse_value(extra, sizeof extra - 1, &back, err, sizeof err) && !back.name[0] &&
+        CHECK(sh_modmanifest_parse_value(extra, sizeof extra - 1, &back, err, sizeof err) && !sh_modmanifest_row_name(&back)[0] &&
               !strcmp(back.salt, "alexpink") && !strcmp(back.build, HASH_A));
         sh_modmanifest_row_free(&back);
     }
@@ -348,9 +358,9 @@ static void old_shape_rows(void)
     sh_modmanifest_reset();
     sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);
     CHECK(sh_modmanifest_load_notes_pending() == 1);
-    CHECK(sh_modmanifest_load_refusal(refusal, sizeof refusal) &&
+    CHECK(HO(refusal, sh_modmanifest_load_refusal(HO_P(0))) &&
           !strcmp(refusal, "This map was saved in a format this version does not read."));
-    CHECK(sh_modmanifest_load_notes_flush(0) == 1 && !sh_modmanifest_load_refusal(refusal, sizeof refusal));
+    CHECK(sh_modmanifest_load_notes_flush(0) == 1 && !HO(refusal, sh_modmanifest_load_refusal(HO_P(0))));
     sh_modmanifest_reset();
 }
 
@@ -458,12 +468,12 @@ static void placed_names(void)
 
 /* The substitute op as modpublished binds it: alexgone is installed at HASH_A's build. */
 static int g_subst_calls;
-static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char **why)
 {
     (void)placed;
     g_subst_calls++;
     if (!strcmp(row->salt, "alexgone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
-    strcpy_s(why, why_cap, "This map needs nobodyhr, which is not installed and was never published.");
+    ho_set(why, "This map needs nobodyhr, which is not installed and was never published.");
     return 0;
 }
 
@@ -658,28 +668,24 @@ static void mod_json(void)
         CHECK(!sh_modmanifest_read_mod_json(nosalt, sizeof nosalt - 1, &info, err, sizeof err) && strstr(err, "not been scanned"));
         CHECK(!sh_modmanifest_read_mod_json(noname, sizeof noname - 1, &info, err, sizeof err));
     }
-    /* The longest name the builder admits, 80 four-byte characters (320
-     * bytes), padded with spaces as an author may write it: read whole,
-     * written into a row and read back whole, never cut. */
+    /* A 2,000-character name (four-byte characters, 8,000 bytes), padded
+     * with spaces as an author may write it: read whole, written into a row
+     * and read back whole, never cut. No length bound applies. */
     {
-        char name[400], text[1200], *row;
+        static char name[8001], text[9000];
+        char *row;
         size_t i, len = 0;
         sh_modmanifest_row back;
-        for (i = 0; i < 80; i++) memcpy(name + i * 4, "\xf0\x9f\x98\x80", 4);
-        name[320] = 0;
+        for (i = 0; i < 2000; i++) memcpy(name + i * 4, "\xf0\x9f\x98\x80", 4);
+        name[8000] = 0;
         _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"   %s  \",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\","
                     "\"build\":\"" HASH_A "\",\"files\":[]}}", name);
         CHECK(sh_modmanifest_read_mod_json(text, strlen(text), &info, err, sizeof err) && !strcmp(info.name, name));
         row = sh_modmanifest_format_value(&info, &len);
-        CHECK(row && sh_modmanifest_parse_value(row, len, &back, err, sizeof err) && !strcmp(back.name, name));
+        CHECK(row && sh_modmanifest_parse_value(row, len, &back, err, sizeof err) && !strcmp(sh_modmanifest_row_name(&back), name));
         free(row);
         sh_modmanifest_row_free(&back);
         sh_modmanifest_row_free(&info);
-        /* One character more is refused with the sentence, not cut. */
-        memcpy(name + 320, "\xf0\x9f\x98\x80", 5);
-        _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\","
-                    "\"build\":\"" HASH_A "\",\"files\":[]}}", name);
-        CHECK(!sh_modmanifest_read_mod_json(text, strlen(text), &info, err, sizeof err) && strstr(err, "1 to 80 characters"));
     }
 }
 
@@ -735,7 +741,7 @@ static int fake_resolve(const char *build, const char *salt, sh_modmanifest_row 
     size_t b;
     if (salt && !strcmp(salt, "alexhand")) {
         strcpy_s(out->salt, sizeof out->salt, "alexhand");
-        strcpy_s(out->name, sizeof out->name, "Bare Hands");
+        sh_modmanifest_row_set_name(out, "Bare Hands");
         strcpy_s(out->build, sizeof out->build, HASH_D);
         out->size = 777;
         return 1;
@@ -743,7 +749,7 @@ static int fake_resolve(const char *build, const char *salt, sh_modmanifest_row 
     for (b = 0; b < g_installed_count; b++)
         if (salt && build && !strcmp(g_installed[b].salt, salt) && !strcmp(g_installed[b].hash, build)) {
             strcpy_s(out->salt, sizeof out->salt, salt);
-            strcpy_s(out->name, sizeof out->name, g_installed[b].name);
+            sh_modmanifest_row_set_name(out, g_installed[b].name);
             strcpy_s(out->build, sizeof out->build, build);
             out->size = g_installed[b].size;
             return 1;
@@ -902,14 +908,15 @@ static void choices(void)
 {
     sh_modmanifest_row row, back;
     sh_modmanifest_list rows;
-    char err[192], *value, *written, *engine, *saved, key[80], lines[SH_MODMANIFEST_CHOICES_CAP];
+    char err[192], *value, *written, *engine, *saved, key[80], lines[HO_TEXT];
     size_t len, wlen, elen, slen, i;
     static const char *slots[] = { "weapons/weapon/zion/player/sp/chainsaw", "weapons/weapon/zion/player/sp/pistol",
                                    "weapons/weapon/zion/player/sp/gauss_rifle", "player.hands", "player.body" };
 
     /* The member round trip, entries in text order. */
     make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\talexpink\nweapons/weapon/zion/player/sp/pistol\talexpink\n");
+    free(row.choices);
+    row.choices = _strdup("player.hands\talexpink\nweapons/weapon/zion/player/sp/pistol\talexpink\n");
     value = sh_modmanifest_format_value(&row, &len);
     CHECK(value && strstr(value, ",\"choices\":{\"player.hands\":\"alexpink\",\"weapons/weapon/zion/player/sp/pistol\":\"alexpink\"}"));
     CHECK(value && sh_modmanifest_parse_value(value, len, &back, err, sizeof err) && !strcmp(back.choices, row.choices));
@@ -929,10 +936,14 @@ static void choices(void)
         _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alexpink/a_rather_long_placed_name_number_%02zu", i);
         sh_modmanifest_row_add_name(&row, name);
     }
-    row.choices[0] = 0;
-    for (i = 0; i < 5; i++) {
-        size_t at = strlen(row.choices);
-        _snprintf_s(row.choices + at, sizeof row.choices - at, _TRUNCATE, "%s\talexpink\n", slots[i]);
+    {
+        char lines[1024] = "";
+        for (i = 0; i < 5; i++) {
+            size_t at = strlen(lines);
+            _snprintf_s(lines + at, sizeof lines - at, _TRUNCATE, "%s\talexpink\n", slots[i]);
+        }
+        free(row.choices);
+        row.choices = _strdup(lines);
     }
     value = sh_modmanifest_format_value(&row, &len);
     CHECK(value && len > 1024);
@@ -947,15 +958,17 @@ static void choices(void)
     memset(&rows, 0, sizeof rows);
     make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
     row.attached = 1;
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\talexpink\n");
+    free(row.choices);
+    row.choices = _strdup("player.hands\talexpink\n");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     sh_modmanifest_row_free(&row);
     make_row(&row, "bobroom1", "2", HASH_B, 4096);
     row.attached = 1;
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\tbobroom1\nplayer.body\tbobroom1\n");
+    free(row.choices);
+    row.choices = _strdup("player.hands\tbobroom1\nplayer.body\tbobroom1\n");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     sh_modmanifest_row_free(&row);
-    CHECK(sh_modmanifest_rows_choices(&rows, lines, sizeof lines) == 2 &&
+    CHECK(HOZ(lines, sh_modmanifest_rows_choices(&rows, HO_P(0))) == 2 &&
           !strcmp(lines, "player.hands\talexpink\nplayer.body\tbobroom1\n"));
     written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
     sh_modmanifest_list_free(&rows);
@@ -977,7 +990,7 @@ static void choices(void)
     CHECK(sh_modmanifest_current_choose("player.body", NULL) == 1 && g_choice_n == 2);
     CHECK(sh_modmanifest_current_choose("player.body", "Bad Id") == -1 && sh_modmanifest_current_choose("bad slot", "aaaabbbb") == -1);
     CHECK(sh_modmanifest_current_choose("player.handsD1", "carolgon") == 1);
-    CHECK(sh_modmanifest_current_choices(lines, sizeof lines) == 3);
+    CHECK(HOZ(lines, sh_modmanifest_current_choices(HO_P(0))) == 3);
 
     /* The save writes each choice on the row of its key and drops one naming
      * a key the map declares no build of, with a line. */
@@ -1000,7 +1013,7 @@ static void choices(void)
     /* A map without rows clears them. */
     {
         char *none = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &elen);
-        CHECK(g_choice_n == 0 && sh_modmanifest_current_choices(lines, sizeof lines) == 0);
+        CHECK(g_choice_n == 0 && HOZ(lines, sh_modmanifest_current_choices(HO_P(0))) == 0);
         if (none) HeapFree(GetProcessHeap(), 0, none);
     }
     if (engine) HeapFree(GetProcessHeap(), 0, engine);

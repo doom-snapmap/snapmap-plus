@@ -10,6 +10,7 @@
  * without the map's choice, a weapon's field only when declared, map add and
  * remove, rescan marks, gates and a whole copy at a generated name. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -479,17 +480,17 @@ static void test_generation(void)
     CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00, "
                   "krival00; serving khands00 (row order; choose with "
                   "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<mod name>\")"));
-    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "nobody", line, sizeof line) == -1 &&
+    CHECK(HO(line, sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "nobody", HO_P(0))) == -1 &&
           !strcmp(line, "MODS: choose: no mod named 'nobody' is used by this map."));
     /* The mod is named as the player names it: here by its folder. */
-    CHECK((sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "E-RIVAL", line, sizeof line) >= 1 ||
-           sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "V-RIVAL", line, sizeof line) >= 1) &&
+    CHECK((HO(line, sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "E-RIVAL", HO_P(0))) >= 1 ||
+           HO(line, sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "V-RIVAL", HO_P(0))) >= 1) &&
           strstr(line, "this map now uses krival00's value for entitydef/player/coop/edit/handsModelMPUseDoomHands. Save the map"));
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";") &&
           strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/khands00/body\";"));
     CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) && !strcmp(key, "krival00"));
-    CHECK(sh_modregistry_choose_command("player.hands", "krival00", line, sizeof line) == -1 && strstr(line, "is not a setting two mods disagree on"));
-    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", line, sizeof line) >= 1);
+    CHECK(HO(line, sh_modregistry_choose_command("player.hands", "krival00", HO_P(0))) == -1 && strstr(line, "is not a setting two mods disagree on"));
+    CHECK(HO(line, sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", HO_P(0))) >= 1);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "player/fp_hands.md6"));
     /* The losing source's edit is counted: superseded by row order, then by the map's choice. */
     CHECK(log_has("2 edit(s) from krival00: 0 applied, 1 already held, 1 superseded by khands00 (row order)"));
@@ -510,7 +511,7 @@ static void test_generation(void)
         strcpy_s(rb.build, sizeof rb.build, hr);
         ra.size = rb.size = 10;
         CHECK(sh_modmanifest_current_attach(&ra) >= 0 && sh_modmanifest_current_attach(&rb) >= 0);
-        CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
+        CHECK(HO(line, sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", HO_P(0))) >= 1 &&
               strstr(line, "Save the map to keep the choice."));
         saved = sh_modmanifest_on_save(MAPJ, sizeof MAPJ - 1, &slen);
         CHECK(saved && strstr(saved, "krival00") && strstr(saved, "choices") &&

@@ -15,6 +15,7 @@
 #include "mp_json.h"
 #include "backend_log.h"
 #include "plain_reason.h"
+#include "text.h"
 
 #define MSY_PLACES "maps"   /* mods\maps\<map title>\<mod name>\: the places (ONE-SHAPE rule 4) */
 
@@ -36,23 +37,65 @@ void modsync_store_unlock(void)
 
 static void msy_log(const char *fmt, ...)
 {
-    char line[768];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    backend_log(line ? line : "MODS: a line could not be written (out of memory)");
+    free(line);
 }
 
-static int msy_cause(char *cause, size_t cap, const char *fmt, ...)
+static int msy_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
-    if (cause && cap) {
-        va_start(ap, fmt);
-        _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
-        va_end(ap);
-    }
+    char *text;
+    if (!cause) return 0;
+    va_start(ap, fmt);
+    text = sh_vtextf(fmt, ap);
+    va_end(ap);
+    free(*cause);
+    *cause = text ? text : _strdup("out of memory");
     return 0;
+}
+
+void modsync_stats_free(modsync_stats *st)
+{
+    if (!st) return;
+    free(st->folder);
+    free(st->cause);
+    free(st->game_source);
+    st->folder = st->cause = st->game_source = NULL;
+}
+
+const char *modsync_cause(const modsync_stats *st)
+{
+    return st && st->cause ? st->cause : "";
+}
+
+void modsync_install_info_free(modsync_install_info *info)
+{
+    if (!info) return;
+    free(info->rel);
+    free(info->name);
+    free(info->game_source);
+    info->rel = info->name = info->game_source = NULL;
+}
+
+void modsync_probe_free(modsync_probe *probe)
+{
+    if (!probe) return;
+    free(probe->cause);
+    probe->cause = NULL;
+}
+
+/* Replace *dst with a copy of src (NULL clears it). */
+static void msy_set(char **dst, const char *src)
+{
+    char *copy = src ? _strdup(src) : NULL;
+    if (src && !copy) return;
+    free(*dst);
+    *dst = copy;
 }
 
 static double msy_now_ms(void)
@@ -69,14 +112,15 @@ static int msy_cancelled(const modnet_io *io)
     return io && io->cancel && InterlockedCompareExchange(io->cancel, 0, 0) != 0;
 }
 
-/* UTF-8 dir + '\' + UTF-8 relative path ('/' turned into '\'). */
-static int msy_join(char *out, size_t cap, const char *dir, const char *rel)
+/* UTF-8 dir + '\' + UTF-8 relative path ('/' turned into '\'), malloc'd. */
+static char *msy_join(const char *dir, const char *rel)
 {
     size_t i, n;
-    if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, rel) < 0) return 0;
+    char *out = sh_textf("%s\\%s", dir, rel);
+    if (!out) return NULL;
     n = strlen(out);
     for (i = strlen(dir); i < n; i++) if (out[i] == '/') out[i] = '\\';
-    return 1;
+    return out;
 }
 
 static int msy_exists_w(const wchar_t *w, unsigned long long *size, int *is_dir)
@@ -183,42 +227,53 @@ static int msy_delete_file_w(const wchar_t *path)
  * never followed. */
 static int msy_rmtree_w(const wchar_t *path, const wchar_t *root, int top)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern;
-    HANDLE h;
-    size_t rn = wcslen(root), pn = wcslen(path);
+    /* Any depth: folders wait on the heap, each removed after what it holds
+     * (the list is emptied from its end). */
+    wchar_t **dirs = NULL;
+    size_t rn = wcslen(root), pn = wcslen(path), n = 0, cap = 0, next = 0;
     int ok = 1;
     if (pn <= rn + 1 || _wcsnicmp(path, root, rn) != 0 || path[rn] != L'\\') return 0;
     if (top) {
         const wchar_t *leaf = wcsrchr(path, L'\\');
         if (!leaf || (!wcsstr(leaf, L".staging-") && !wcsstr(leaf, L".old-"))) return 0;
     }
-    pattern = (wchar_t *)malloc(sizeof(wchar_t) * (pn + 3));
-    if (!pattern) return 0;
-    _snwprintf_s(pattern, pn + 3, _TRUNCATE, L"%s\\*", path);
-    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
-    free(pattern);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            size_t cn;
-            wchar_t *child;
-            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-            cn = pn + wcslen(fd.cFileName) + 2;
-            child = (wchar_t *)malloc(sizeof(wchar_t) * cn);
-            if (!child) { ok = 0; continue; }
-            _snwprintf_s(child, cn, _TRUNCATE, L"%s\\%s", path, fd.cFileName);
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                if (!msy_rmtree_w(child, root, 0)) ok = 0;
-            } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                if (!RemoveDirectoryW(child)) ok = 0;
-            } else if (!msy_delete_file_w(child)) {
-                ok = 0;
+    if (!(dirs = (wchar_t **)malloc(sizeof *dirs * 16)) || !(dirs[0] = _wcsdup(path))) { free(dirs); return 0; }
+    n = 1;
+    cap = 16;
+    while (next < n) {
+        WIN32_FIND_DATAW fd;
+        const wchar_t *dir = dirs[next++];
+        wchar_t *pattern = sh_wtextf(L"%s\\*", dir);
+        HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)
+                           : INVALID_HANDLE_VALUE;
+        free(pattern);
+        while (h != INVALID_HANDLE_VALUE) {
+            if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) {
+                wchar_t *child = sh_wtextf(L"%s\\%s", dir, fd.cFileName);
+                if (!child) ok = 0;
+                else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    if (n == cap) {
+                        wchar_t **g = (wchar_t **)realloc(dirs, sizeof *dirs * cap * 2);
+                        if (g) { dirs = g; cap *= 2; }
+                    }
+                    if (n < cap) { dirs[n++] = child; child = NULL; }
+                    else ok = 0;
+                } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    if (!RemoveDirectoryW(child)) ok = 0;
+                } else if (!msy_delete_file_w(child)) {
+                    ok = 0;
+                }
+                free(child);
             }
-            free(child);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+            if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+        }
     }
-    if (!RemoveDirectoryW(path) && GetLastError() != ERROR_FILE_NOT_FOUND) ok = 0;
+    while (n) {
+        n--;
+        if (!RemoveDirectoryW(dirs[n]) && GetLastError() != ERROR_FILE_NOT_FOUND) ok = 0;
+        free(dirs[n]);
+    }
+    free(dirs);
     return ok;
 }
 
@@ -243,15 +298,18 @@ static char *msy_escape(const char *s)
     return out;
 }
 
-/* Printable ASCII without quote or backslash (stored error text). */
-static void msy_plain(const char *in, char *out, size_t cap)
+/* Printable ASCII without quote or backslash (stored error text), whole (malloc'd). */
+static char *msy_plain(const char *in)
 {
     size_t w = 0;
-    for (; in && *in && w + 1 < cap; in++) {
+    char *out = (char *)malloc((in ? strlen(in) : 0) + 1);
+    if (!out) return NULL;
+    for (; in && *in; in++) {
         unsigned char c = (unsigned char)*in;
         if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') out[w++] = (char)c;
     }
     out[w] = 0;
+    return out;
 }
 
 static void msy_obj_remove(mpj *obj, const char *key)
@@ -269,9 +327,9 @@ static void msy_obj_remove(mpj *obj, const char *key)
     }
 }
 
-static int msy_root(char *out, size_t cap)
+static const char *msy_root(void)
 {
-    return sh_ms_root(out, cap);
+    return sh_ms_root();
 }
 
 /* ------------------------------------------------------------ docs ------ */
@@ -283,9 +341,10 @@ static int msy_root(char *out, size_t cap)
  * so the claims it holds are never replaced with fewer. */
 static mpj *msy_doc_load(const char *section, const char *member)
 {
-    char root[MAX_PATH * 4], *text = NULL;
+    const char *root = msy_root();
+    char *text = NULL;
     mpj *doc, *m = NULL;
-    if (!msy_root(root, sizeof root)) return NULL;
+    if (!root) return NULL;
     if (sh_mb_record_get(root, section, &text) == 1 && text) m = mpj_parse(text, strlen(text));
     if (text) { SecureZeroMemory(text, strlen(text)); free(text); }
     if (m && m->type != MPJ_OBJ) { mpj_free(m); m = NULL; }
@@ -299,12 +358,12 @@ static mpj *msy_doc_load(const char *section, const char *member)
 
 static int msy_doc_save(const char *section, const mpj *doc)
 {
-    char root[MAX_PATH * 4];
+    const char *root = msy_root();
     const mpj *m = doc ? mpj_get(doc, section) : NULL;
     size_t len = 0;
     char *text;
     int ok;
-    if (!m || !msy_root(root, sizeof root)) return 0;
+    if (!m || !root) return 0;
     text = mpj_dump(m, &len);
     if (!text) return 0;
     ok = sh_mb_record_put(root, section, text);
@@ -400,11 +459,10 @@ static int msy_pending_put(const char *ref, const char *const *mods, int n, cons
 {
     mpj *doc, *pend, *e, *old;
     const mpj *att, *prov;
-    char *key = msy_escape(ref), plain[200];
+    char *key = msy_escape(ref), *plain = msy_plain(error);
     long long attempts = 1;
     int ok = 0;
-    if (!key) return 0;
-    msy_plain(error, plain, sizeof plain);
+    if (!key || !plain) { free(key); free(plain); return 0; }
     modsync_store_lock();
     doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
     pend = doc ? mpj_get(doc, "pending") : NULL;
@@ -423,6 +481,7 @@ static int msy_pending_put(const char *ref, const char *const *mods, int n, cons
     mpj_free(doc);
     modsync_store_unlock();
     free(key);
+    free(plain);
     return ok;
 }
 
@@ -493,16 +552,16 @@ int modsync_pending_count(void)
     return n;
 }
 
-/* The folder `full` (absolute) under the store root `root`, as its name under mods\. */
-static void msy_rel_of(const char *root, const char *full, char *out, size_t cap)
+/* The folder `full` (absolute) under the store root `root`, as its name under mods\ (malloc'd). */
+static char *msy_rel_of(const char *root, const char *full)
 {
     size_t rl;
     if (!strncmp(root, "\\\\?\\", 4)) root += 4;   /* either may carry the long-path prefix */
     if (!strncmp(full, "\\\\?\\", 4)) full += 4;
     rl = strlen(root);
     while (rl && (root[rl - 1] == '\\' || root[rl - 1] == '/')) rl--;
-    if (!_strnicmp(full, root, rl) && (full[rl] == '\\' || full[rl] == '/')) strncpy_s(out, cap, full + rl + 1, _TRUNCATE);
-    else strncpy_s(out, cap, strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full, _TRUNCATE);
+    if (!_strnicmp(full, root, rl) && (full[rl] == '\\' || full[rl] == '/')) return _strdup(full + rl + 1);
+    return _strdup(strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full);
 }
 
 /* ------------------------------------------------------------ builds ---- */
@@ -530,43 +589,50 @@ static int msy_entry_is(const sh_ms_entry *e, const char *salt, const char *hash
     return sh_ms_entry_usable(e) && !strcmp(e->bundle.id, salt) && (!hash || !strcmp(e->bundle.hash, hash));
 }
 
-/* The place's folder of the salt (its name under mods\), when it has one. */
-static int msy_place_has(const sh_ms_place *place, const char *salt, char *rel, size_t cap)
+/* The place's folder of the salt (its name under mods\, malloc'd into
+ * *rel), when it has one. */
+static int msy_place_has(const sh_ms_place *place, const char *salt, char **rel)
 {
-    return place && sh_ms_place_folder(place, "mod", salt, rel, cap) == 2;
+    *rel = NULL;
+    if (place && sh_ms_place_folder(place, "mod", salt, rel) == 2) return 1;
+    free(*rel);
+    *rel = NULL;
+    return 0;
 }
 
 /* The entry serving salt at hash: a root folder, else the place's folder of
  * the salt (place NULL: any place). Under the store lock. */
 static const sh_ms_entry *msy_locate(const sh_ms_list *l, const char *salt, const char *hash, const sh_ms_place *place)
 {
-    char rel[MODSYNC_FOLDER_MAX];
+    char *rel = NULL;
     int have_rel = 0;
     size_t i;
+    const sh_ms_entry *hit = NULL;
     for (i = 0; i < l->count; i++)
         if (!msy_in_places(&l->items[i]) && msy_entry_is(&l->items[i], salt, hash)) return &l->items[i];
-    if (place) have_rel = msy_place_has(place, salt, rel, sizeof rel);
+    if (place) have_rel = msy_place_has(place, salt, &rel);
     if (place && !have_rel) return NULL;
-    for (i = 0; i < l->count; i++) {
+    for (i = 0; i < l->count && !hit; i++) {
         const sh_ms_entry *e = &l->items[i];
         if (!msy_in_places(e) || !msy_entry_is(e, salt, hash)) continue;
-        if (!have_rel || !_stricmp(e->name, rel)) return e;
+        if (!have_rel || !_stricmp(e->name, rel)) hit = e;
     }
-    return NULL;
+    free(rel);
+    return hit;
 }
 
-int modsync_find_installed(const char *salt, const char *hash, const sh_ms_place *place, char *folder, size_t cap)
+int modsync_find_installed(const char *salt, const char *hash, const sh_ms_place *place, char **folder)
 {
     sh_ms_list l;
     int found = 0;
-    if (folder && cap) folder[0] = 0;
+    if (folder) *folder = NULL;
     if (!salt || !sh_salt_valid(salt, strlen(salt)) || !modnet_valid_hash(hash)) return 0;
     modsync_store_lock();
     if (sh_ms_enumerate(&l)) {
         const sh_ms_entry *e = msy_locate(&l, salt, hash, place);
         if (e) {
             found = 1;
-            if (folder && cap) strncpy_s(folder, cap, e->folder, _TRUNCATE);
+            if (folder && !(*folder = _strdup(e->folder))) found = 0;
         }
         sh_ms_list_free(&l);
     }
@@ -574,20 +640,29 @@ int modsync_find_installed(const char *salt, const char *hash, const sh_ms_place
     return found;
 }
 
-/* A temporary file for one archive: %TEMP%\snapmap-plus-<hash16>-<pid>-<n>.zip. */
-static int msy_temp_archive(const char *hash, char *out, size_t cap)
+/* The temporary folder, UTF-8 with its trailing separator (malloc'd), at
+ * whatever length Windows reports it. */
+static char *msy_temp_dir(void)
+{
+    DWORD need = GetTempPathW(0, NULL), n;
+    wchar_t *dir;
+    char *u;
+    if (!need || !(dir = (wchar_t *)malloc(sizeof(wchar_t) * need))) return NULL;
+    n = GetTempPathW(need, dir);
+    u = n && n < need ? sh_mb_utf8(dir) : NULL;
+    free(dir);
+    return u;
+}
+
+/* A temporary file for one archive: %TEMP%\snapmap-plus-<hash16>-<pid>-<n>.zip (malloc'd). */
+static char *msy_temp_archive(const char *hash)
 {
     static volatile long counter;
-    wchar_t dir[MAX_PATH + 1];
-    char *udir;
-    DWORD n = GetTempPathW(MAX_PATH + 1, dir);
-    if (!n || n > MAX_PATH) return 0;
-    udir = sh_mb_utf8(dir);
-    if (!udir) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%ssnapmap-plus-%.16s-%lu-%ld.zip", udir, hash, GetCurrentProcessId(),
-                InterlockedIncrement(&counter));
+    char *udir = msy_temp_dir(), *out;
+    if (!udir) return NULL;
+    out = sh_textf("%ssnapmap-plus-%.16s-%lu-%ld.zip", udir, hash, GetCurrentProcessId(), InterlockedIncrement(&counter));
     free(udir);
-    return 1;
+    return out;
 }
 
 static void msy_delete_utf8(const char *path)
@@ -604,9 +679,9 @@ static unsigned msy_mb(unsigned long long bytes)
 /* ------------------------------------------------------------ archive --- */
 
 int modsync_write_archive(const char *folder, const char *hash, const char *out_path, unsigned long long *size,
-                          unsigned *pointers, int *code, char *cause, size_t cap)
+                          unsigned *pointers, int *code, char **cause)
 {
-    char mj[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
+    char *mj = NULL, actual[SH_MB_HASH_HEX + 1];
     unsigned char *text = NULL;
     size_t text_len = 0, i;
     sh_mb_bundle b;
@@ -617,61 +692,62 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
     if (size) *size = 0;
     if (pointers) *pointers = 0;
     if (code) *code = MODNET_E_ARG;
-    if (cause && cap) cause[0] = 0;
     memset(&b, 0, sizeof b);
     memset(&w, 0, sizeof w);
     w.h = INVALID_HANDLE_VALUE;
-    if (!folder || !modnet_valid_hash(hash) || !out_path) return msy_cause(cause, cap, "bad argument");
-    msy_join(mj, sizeof mj, folder, "mod.json");
+    if (!folder || !modnet_valid_hash(hash) || !out_path) return msy_cause(cause, "bad argument");
+    if (!(mj = msy_join(folder, "mod.json"))) return msy_cause(cause, "out of memory");
     text = sh_mb_read_file(mj, (size_t)-1, &text_len);
-    if (!text) return msy_cause(cause, cap, "%s cannot be read: %s", mj, sh_reason_win32(GetLastError(), mj, 0));
+    if (!text) { msy_cause(cause, "%s cannot be read: %s", mj, sh_reason_win32(GetLastError(), mj, 0)); goto done; }
     if (!sh_mb_load_text((const char *)text, text_len, &b)) {
-        msy_cause(cause, cap, "%s is not a built mod: %s", mj, b.first_cause);
+        msy_cause(cause, "%s is not a built mod: %s", mj, sh_mb_first_cause(&b));
         goto done;
     }
     label = b.name && b.name[0] ? b.name : b.id;
     if (strcmp(b.hash, hash) != 0) {
-        msy_cause(cause, cap, "%s was built again since the map was saved; save the map again, then publish it", label);
+        msy_cause(cause, "%s was built again since the map was saved; save the map again, then publish it", label);
         goto done;
     }
     if (!b.validated) {
-        msy_cause(cause, cap, "%s does not build: %s", label, b.state_cause[0] ? b.state_cause : "see the Mods tab");
+        msy_cause(cause, "%s does not build: %s", label, sh_mb_state_cause(&b)[0] ? sh_mb_state_cause(&b) : "see the Mods tab");
         goto done;
     }
     for (i = 0; i < b.file_count; i++) if (b.files[i].stock && pointers) (*pointers)++;
     wout = sh_mb_wpath(out_path);
     if (!wout || !sh_zip_writer_open(&w, wout)) {
-        msy_cause(cause, cap, "cannot write the archive %s: %s", out_path, sh_reason_win32(GetLastError(), out_path, 0));
+        msy_cause(cause, "cannot write the archive %s: %s", out_path, sh_reason_win32(GetLastError(), out_path, 0));
         goto done;
     }
     opened = 1;
-    if (!sh_zip_writer_add(&w, "mod.json", text, text_len)) { msy_cause(cause, cap, "%s", w.cause); goto done; }
+    if (!sh_zip_writer_add(&w, "mod.json", text, text_len)) { msy_cause(cause, "%s", w.cause); goto done; }
     for (i = 0; i < b.file_count; i++) {
         const sh_mb_file *f = &b.files[i];
-        char path[MAX_PATH * 4], entry[SH_MB_REQUEST_MAX + 16];
+        char *path, *entry;
         unsigned char *bytes;
         size_t len = 0;
         if (f->stock) continue;   /* the player's own game holds it */
-        msy_join(path, sizeof path, folder, f->path);
-        bytes = sh_mb_read_file(path, (size_t)-1, &len);
+        path = msy_join(folder, f->path);
+        bytes = path ? sh_mb_read_file(path, (size_t)-1, &len) : NULL;
+        free(path);
         if (!bytes) {
-            msy_cause(cause, cap, "%s: %s cannot be read; open the Mods tab and Refresh", label, f->path);
+            msy_cause(cause, "%s: %s cannot be read; open the Mods tab and Refresh", label, f->path);
             goto done;
         }
         sh_mb_sha256_hex(bytes, len, actual);
         if (len != f->size || strcmp(actual, f->blob) != 0) {
             free(bytes);
-            msy_cause(cause, cap, "%s: %s changed since the mod was built; open the Mods tab and Refresh", label, f->path);
+            msy_cause(cause, "%s: %s changed since the mod was built; open the Mods tab and Refresh", label, f->path);
             goto done;
         }
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", f->request);
-        ok = sh_zip_writer_add(&w, entry, bytes, len);
+        entry = sh_textf("assets/%s", f->request);
+        ok = entry && sh_zip_writer_add(&w, entry, bytes, len);
         free(bytes);
-        if (!ok) { msy_cause(cause, cap, "%s", w.cause); goto done; }
+        free(entry);
+        if (!ok) { msy_cause(cause, "%s", w.cause ? w.cause : "out of memory"); goto done; }
         ok = 0;
     }
     if (!sh_zip_writer_finish(&w) || !FlushFileBuffers(w.h)) {
-        msy_cause(cause, cap, "cannot write the archive %s: %s", out_path, w.cause[0] ? w.cause : "flush failed");
+        msy_cause(cause, "cannot write the archive %s: %s", out_path, w.cause ? w.cause : "flush failed");
         goto done;
     }
     if (size) *size = w.off;
@@ -682,6 +758,7 @@ done:
     if (!ok && opened && wout) DeleteFileW(wout);
     free(wout);
     free(text);
+    free(mj);
     sh_mb_free(&b);
     return ok;
 }
@@ -694,19 +771,22 @@ done:
 /* The archive's mod.json, read and loaded. 1 with b filled (release with
  * sh_mb_free) and *text (malloc'd) the file; 0 with the cause. */
 static int msy_archive_modjson(const sh_zip_reader *zr, sh_mb_bundle *b, unsigned char **text, size_t *len,
-                               char *cause, size_t cap)
+                               char **cause)
 {
-    char why[256];
+    char *why = NULL;
     long idx = sh_zip_reader_find(zr, "mod.json");
     *text = NULL;
     *len = 0;
     memset(b, 0, sizeof *b);
-    if (idx < 0) return msy_cause(cause, cap, MSY_MISMATCH " (it has no mod.json)");
-    why[0] = 0;
-    *text = sh_zip_reader_read(zr, idx, (size_t)-1, len, why, sizeof why);
-    if (!*text) return msy_cause(cause, cap, MSY_MISMATCH " (mod.json: %s)", why[0] ? why : "unreadable");
+    if (idx < 0) return msy_cause(cause, MSY_MISMATCH " (it has no mod.json)");
+    *text = sh_zip_reader_read(zr, idx, (size_t)-1, len, &why);
+    if (!*text) {
+        msy_cause(cause, MSY_MISMATCH " (mod.json: %s)", why ? why : "unreadable");
+        free(why);
+        return 0;
+    }
     if (!sh_mb_load_text((const char *)*text, *len, b)) {
-        msy_cause(cause, cap, MSY_MISMATCH " (mod.json: %s)", b->first_cause);
+        msy_cause(cause, MSY_MISMATCH " (mod.json: %s)", sh_mb_first_cause(b));
         free(*text);
         *text = NULL;
         sh_mb_free(b);
@@ -718,21 +798,25 @@ static int msy_archive_modjson(const sh_zip_reader *zr, sh_mb_bundle *b, unsigne
 /* The archive is exactly the build: salt, hash, and one entry per carried
  * file besides mod.json. */
 static int msy_archive_matches(const sh_zip_reader *zr, const sh_mb_bundle *b, const char *salt, const char *hash,
-                               char *cause, size_t cap)
+                               char **cause)
 {
     size_t i, carried = 0;
     if (salt && salt[0] && strcmp(b->id, salt) != 0)
-        return msy_cause(cause, cap, MSY_MISMATCH " (it is the mod %s, not %s)", b->id, salt);
-    if (strcmp(b->hash, hash) != 0) return msy_cause(cause, cap, MSY_MISMATCH " (it is build %.16s)", b->hash);
-    if (!b->validated) return msy_cause(cause, cap, MSY_MISMATCH " (its block records a cause)");
+        return msy_cause(cause, MSY_MISMATCH " (it is the mod %s, not %s)", b->id, salt);
+    if (strcmp(b->hash, hash) != 0) return msy_cause(cause, MSY_MISMATCH " (it is build %.16s)", b->hash);
+    if (!b->validated) return msy_cause(cause, MSY_MISMATCH " (its block records a cause)");
     for (i = 0; i < b->file_count; i++) {
-        char entry[SH_MB_REQUEST_MAX + 16];
+        char *entry;
+        int missing;
         if (b->files[i].stock) continue;
         carried++;
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", b->files[i].request);
-        if (sh_zip_reader_find(zr, entry) < 0) return msy_cause(cause, cap, MSY_MISMATCH " (%s is missing)", entry);
+        if (!(entry = sh_textf("assets/%s", b->files[i].request))) return msy_cause(cause, "out of memory");
+        missing = sh_zip_reader_find(zr, entry) < 0;
+        if (missing) msy_cause(cause, MSY_MISMATCH " (%s is missing)", entry);
+        free(entry);
+        if (missing) return 0;
     }
-    if (zr->n != carried + 1) return msy_cause(cause, cap, MSY_MISMATCH " (it holds files its mod.json does not list)");
+    if (zr->n != carried + 1) return msy_cause(cause, MSY_MISMATCH " (it holds files its mod.json does not list)");
     return 1;
 }
 
@@ -746,47 +830,49 @@ static void msy_note_place(const sh_ms_place *place, const char *rel)
  * carried file checked against its hash, then mod.json. 1, else 0 with the
  * cause (info->mismatch for damaged bytes). */
 static int msy_unpack(sh_zip_reader *zr, const sh_mb_bundle *bp, const char *dir, const unsigned char *modjson,
-                      size_t modjson_len, modsync_install_info *info, char *cause, size_t cap)
+                      size_t modjson_len, modsync_install_info *info, char **cause)
 {
     size_t i;
     for (i = 0; i < bp->file_count; i++) {
         const sh_mb_file *f = &bp->files[i];
-        char entry[SH_MB_REQUEST_MAX + 16], dst[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], why[256];
+        char *entry, *dst, *slash, actual[SH_MB_HASH_HEX + 1], *why = NULL;
         unsigned char *bytes;
         size_t len = 0;
         long idx;
         if (f->stock) continue;   /* never carried: the installed game holds it */
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", f->request);
+        if (!(entry = sh_textf("assets/%s", f->request))) return msy_cause(cause, "out of memory");
         idx = sh_zip_reader_find(zr, entry);
-        why[0] = 0;
-        bytes = idx < 0 ? NULL : sh_zip_reader_read(zr, idx, (size_t)f->size, &len, why, sizeof why);
+        free(entry);
+        bytes = idx < 0 ? NULL : sh_zip_reader_read(zr, idx, (size_t)f->size, &len, &why);
         if (bytes) sh_mb_sha256_hex(bytes, len, actual);
         if (!bytes || len != f->size || strcmp(actual, f->blob) != 0) {
             free(bytes);
             info->mismatch = 1;
-            return msy_cause(cause, cap, MSY_MISMATCH " (%s %s)", f->path, why[0] ? why : "differs from its mod.json");
+            msy_cause(cause, MSY_MISMATCH " (%s %s)", f->path, why ? why : "differs from its mod.json");
+            free(why);
+            return 0;
         }
-        msy_join(dst, sizeof dst, dir, f->path);
-        {
-            char parent[MAX_PATH * 4], *slash;
-            strcpy_s(parent, sizeof parent, dst);
-            slash = strrchr(parent, '\\');
-            if (slash) { *slash = 0; msy_mkdirs(parent); }
-        }
+        if (!(dst = msy_join(dir, f->path))) { free(bytes); return msy_cause(cause, "out of memory"); }
+        slash = strrchr(dst, '\\');
+        if (slash) { *slash = 0; msy_mkdirs(dst); *slash = '\\'; }
         if (!msy_write_file(dst, bytes, len, 0)) {
             DWORD e = GetLastError();
             free(bytes);
-            return msy_cause(cause, cap, "cannot write %s: %s", f->path, sh_reason_win32(e, dst, len));
+            msy_cause(cause, "cannot write %s: %s", f->path, sh_reason_win32(e, dst, len));
+            free(dst);
+            return 0;
         }
+        free(dst);
         free(bytes);
         info->files++;
         info->bytes += len;
     }
     {
-        char mj[MAX_PATH * 4];
-        msy_join(mj, sizeof mj, dir, "mod.json");
-        if (!msy_write_file(mj, modjson, modjson_len, 0))
-            return msy_cause(cause, cap, "cannot write mod.json for %s: %s", info->name, sh_reason_win32(GetLastError(), mj, 0));
+        char *mj = msy_join(dir, "mod.json");
+        int wrote = mj && msy_write_file(mj, modjson, modjson_len, 0);
+        if (!wrote) msy_cause(cause, "cannot write mod.json for %s: %s", info->name, sh_reason_win32(GetLastError(), mj ? mj : "mod.json", 0));
+        free(mj);
+        if (!wrote) return 0;
     }
     return 1;
 }
@@ -795,32 +881,33 @@ static int msy_unpack(sh_zip_reader *zr, const sh_mb_bundle *bp, const char *dir
  * process's own outside the store, then installed at the root as the
  * player's own mod (sh_ms_install_to_root), and the unpacked copy removed. */
 static int msy_install_root(sh_zip_reader *zr, const sh_mb_bundle *bp, const unsigned char *modjson, size_t modjson_len,
-                            modsync_install_info *info, char *cause, size_t cap)
+                            modsync_install_info *info, char **cause)
 {
     static volatile long counter;
-    wchar_t tmp[MAX_PATH + 1], *wtmp = NULL, *wwork = NULL;
-    char *utmp, work[MAX_PATH * 4], dir[MAX_PATH * 4], seg[128], name[SH_MS_NAME_MAX + 1];
+    wchar_t *wtmp = NULL, *wwork = NULL;
+    char *utmp, *work = NULL, *dir = NULL, *seg, *name = NULL;
     sh_ms_install_stats st;
     int ok = 0;
-    DWORD n = GetTempPathW(MAX_PATH + 1, tmp);
-    if (!n || n > MAX_PATH || !(utmp = sh_mb_utf8(tmp))) return msy_cause(cause, cap, "the temporary folder cannot be found");
-    _snprintf_s(work, sizeof work, _TRUNCATE, "%ssnapmap-plus-fetch.staging-%lu-%ld", utmp, GetCurrentProcessId(),
-                InterlockedIncrement(&counter));
+    if (!(utmp = msy_temp_dir())) return msy_cause(cause, "the temporary folder cannot be found");
+    work = sh_textf("%ssnapmap-plus-fetch.staging-%lu-%ld", utmp, GetCurrentProcessId(), InterlockedIncrement(&counter));
     free(utmp);
-    if (!sh_ms_title_segment(info->name, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "mod");
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", work, seg);
+    seg = sh_ms_title_segment(info->name ? info->name : "");
+    dir = work ? sh_textf("%s\\%s", work, seg ? seg : "mod") : NULL;
+    free(seg);
+    if (!work || !dir) { free(work); free(dir); return msy_cause(cause, "out of memory"); }
     wtmp = sh_mb_wpath(work);
     if (wtmp) {
         wchar_t *slash = wcsrchr(wtmp, L'\\');
         wwork = _wcsdup(wtmp);
         if (slash && wwork) wwork[slash - wtmp] = 0;   /* the temporary folder: what the removal stays inside */
     }
-    if (!wtmp || !wwork) msy_cause(cause, cap, "out of memory");
-    else if (!msy_mkdirs(dir)) msy_cause(cause, cap, "cannot create %s: %s", dir, sh_reason_win32(GetLastError(), dir, 0));
-    else if (msy_unpack(zr, bp, dir, modjson, modjson_len, info, cause, cap)) {
+    if (!wtmp || !wwork) msy_cause(cause, "out of memory");
+    else if (!msy_mkdirs(dir)) msy_cause(cause, "cannot create %s: %s", dir, sh_reason_win32(GetLastError(), dir, 0));
+    else if (msy_unpack(zr, bp, dir, modjson, modjson_len, info, cause)) {
         memset(&st, 0, sizeof st);
-        if (sh_ms_install_to_root(dir, NULL, name, sizeof name, &st, NULL, cause, cap)) {
-            strncpy_s(info->rel, sizeof info->rel, name, _TRUNCATE);
+        if (sh_ms_install_to_root(dir, NULL, &name, &st, NULL, cause)) {
+            free(info->rel);
+            info->rel = name;
             info->already_installed = st.present;
             ok = 1;
         }
@@ -828,90 +915,97 @@ static int msy_install_root(sh_zip_reader *zr, const sh_mb_bundle *bp, const uns
     if (wtmp && wwork) msy_rmtree_w(wtmp, wwork, 1);
     free(wtmp);
     free(wwork);
+    free(work);
+    free(dir);
     return ok;
 }
 
 int modsync_install_archive(const char *archive, const char *salt, const char *hash, const sh_ms_place *place,
-                            modsync_install_info *info, char *cause, size_t cap)
+                            modsync_install_info *info, char **cause)
 {
     modsync_install_info local;
     sh_zip_reader zr;
     sh_mb_bundle b;
     unsigned char *modjson = NULL;
     size_t modjson_len = 0, i;
-    char root[MAX_PATH * 4], final[MAX_PATH * 4], staging[MAX_PATH * 4], old[MAX_PATH * 4], rel[MODSYNC_FOLDER_MAX],
-         one[SH_MB_CAUSE_MAX], have[MAX_PATH * 4];
+    const char *root;
+    char *final = NULL, *staging = NULL, *old = NULL, *rel = NULL, *one = NULL, *have = NULL;
     wchar_t *wroot = NULL, *wfinal = NULL, *wstaging = NULL, *wold = NULL;
     int ok = 0, locked = 0, named, replace = 0;
     if (!info) info = &local;
     memset(info, 0, sizeof *info);
     memset(&zr, 0, sizeof zr);
     memset(&b, 0, sizeof b);
-    if (cause && cap) cause[0] = 0;
     if (!archive || !modnet_valid_hash(hash) || (salt && salt[0] && !sh_salt_valid(salt, strlen(salt))))
-        return msy_cause(cause, cap, "bad argument");
-    if (place && (!place->title || !place->title[0])) return msy_cause(cause, cap, "a received build needs a map's place");
-    if (!sh_zip_reader_open(&zr, archive, one, sizeof one)) {
+        return msy_cause(cause, "bad argument");
+    if (place && (!place->title || !place->title[0])) return msy_cause(cause, "a received build needs a map's place");
+    if (!sh_zip_reader_open(&zr, archive, &one)) {
         info->mismatch = 1;
-        return msy_cause(cause, cap, MSY_MISMATCH " (%s)", one);
+        msy_cause(cause, MSY_MISMATCH " (%s)", one ? one : "out of memory");
+        free(one);
+        return 0;
     }
-    if (!msy_archive_modjson(&zr, &b, &modjson, &modjson_len, cause, cap) ||
-        !msy_archive_matches(&zr, &b, salt, hash, cause, cap)) {
+    if (!msy_archive_modjson(&zr, &b, &modjson, &modjson_len, cause) ||
+        !msy_archive_matches(&zr, &b, salt, hash, cause)) {
         info->mismatch = 1;
         goto done;
     }
-    strncpy_s(info->name, sizeof info->name, b.name && b.name[0] ? b.name : b.id, _TRUNCATE);
+    msy_set(&info->name, b.name && b.name[0] ? b.name : b.id);
+    if (!info->name) { msy_cause(cause, "out of memory"); goto done; }
     /* Stock pointers name this player's installed game: a game that lacks an
      * entry (or holds other bytes, a different revision) refuses the build
      * before anything is placed. */
     for (i = 0; i < b.file_count; i++) {
         if (!b.files[i].stock) continue;
-        if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, one, sizeof one) !=
+        if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, &one) !=
             SH_MB_STOCK_OK) {
             /* The game lacks the bytes: permanent for this machine. */
+            const char *source = b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path;
             info->game_lacks = 1;
-            strncpy_s(info->game_source, sizeof info->game_source,
-                      b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path, _TRUNCATE);
-            msy_cause(cause, cap, "%s needs a game file your copy of DOOM does not have (%s); verify the game's files in "
-                      "Steam, then try again", info->name, info->game_source);
-            msy_log("MODS: download: %s: %s", info->name, one);
+            msy_set(&info->game_source, source);
+            msy_cause(cause, "%s needs a game file your copy of DOOM does not have (%s); verify the game's files in "
+                      "Steam, then try again", info->name, source);
+            msy_log("MODS: download: %s: %s", info->name, one ? one : "");
             goto done;
         }
         info->stock_files++;
     }
     if (!place) {
-        ok = msy_install_root(&zr, &b, modjson, modjson_len, info, cause, cap);
+        ok = msy_install_root(&zr, &b, modjson, modjson_len, info, cause);
         goto done;
     }
 
     modsync_store_lock();
     locked = 1;
-    if (!msy_root(root, sizeof root)) { msy_cause(cause, cap, "the store folder cannot be resolved"); goto done; }
+    if (!(root = msy_root())) { msy_cause(cause, "the store folder cannot be resolved"); goto done; }
     /* The root at this hash serves it (rule 4), or the place has it already. */
-    if (modsync_find_installed(b.id, hash, place, have, sizeof have)) {
-        msy_rel_of(root, have, info->rel, sizeof info->rel);
-        if (msy_place_has(place, b.id, rel, sizeof rel) && !_stricmp(rel, info->rel)) msy_note_place(place, info->rel);
+    if (modsync_find_installed(b.id, hash, place, &have)) {
+        free(info->rel);
+        if (!(info->rel = msy_rel_of(root, have))) { msy_cause(cause, "out of memory"); goto done; }
+        if (msy_place_has(place, b.id, &rel) && !_stricmp(rel, info->rel)) msy_note_place(place, info->rel);
+        free(rel);
+        rel = NULL;
         info->already_installed = 1;
         ok = 1;
         goto done;
     }
     /* One build per salt per place: the place's folder of the salt is
      * replaced, else a free folder named after the mod. */
-    named = sh_ms_place_folder(place, info->name, b.id, rel, sizeof rel);
-    if (!named) { msy_cause(cause, cap, "There is no room for %s in this map's folder under mods\\maps; remove old folders "
-                                "there and try again", info->name); goto done; }
-    strncpy_s(info->rel, sizeof info->rel, rel, _TRUNCATE);
-    _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, rel);
-    _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s.staging-%lu", final, GetCurrentProcessId());
-    _snprintf_s(old, sizeof old, _TRUNCATE, "%s.old-%lu", final, GetCurrentProcessId());
+    named = sh_ms_place_folder(place, info->name, b.id, &rel);
+    if (!named) { msy_cause(cause, "out of memory"); goto done; }
+    msy_set(&info->rel, rel);
+    final = sh_textf("%s\\%s", root, rel);
+    staging = final ? sh_textf("%s.staging-%lu", final, GetCurrentProcessId()) : NULL;
+    old = final ? sh_textf("%s.old-%lu", final, GetCurrentProcessId()) : NULL;
+    if (!info->rel || !final || !staging || !old) { msy_cause(cause, "out of memory"); goto done; }
     wroot = sh_mb_wpath(root);
     wfinal = sh_mb_wpath(final);
     wstaging = sh_mb_wpath(staging);
     wold = sh_mb_wpath(old);
-    if (!wroot || !wfinal || !wstaging || !wold) { msy_cause(cause, cap, "out of memory"); goto done; }
+    if (!wroot || !wfinal || !wstaging || !wold) { msy_cause(cause, "out of memory"); goto done; }
     if (msy_exists_w(wstaging, NULL, NULL)) msy_rmtree_w(wstaging, wroot, 1);
     if (!msy_mkdirs_w(wstaging)) {
-        msy_cause(cause, cap, "cannot create %s: %s", rel, sh_reason_win32(GetLastError(), staging, 0));
+        msy_cause(cause, "cannot create %s: %s", rel, sh_reason_win32(GetLastError(), staging, 0));
         goto done;
     }
     /* Files are unpacked without the store lock: a large build never holds
@@ -919,10 +1013,10 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
      * process's own. */
     modsync_store_unlock();
     locked = 0;
-    if (!msy_unpack(&zr, &b, staging, modjson, modjson_len, info, cause, cap)) goto unstage;
+    if (!msy_unpack(&zr, &b, staging, modjson, modjson_len, info, cause)) goto unstage;
     modsync_store_lock();
     locked = 1;
-    if (modsync_find_installed(b.id, hash, place, NULL, 0)) {   /* another thread finished it meanwhile */
+    if (modsync_find_installed(b.id, hash, place, NULL)) {   /* another thread finished it meanwhile */
         msy_rmtree_w(wstaging, wroot, 1);
         info->already_installed = 1;
         msy_note_place(place, info->rel);
@@ -934,7 +1028,7 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
         if (!MoveFileExW(wfinal, wold, 0)) {
             DWORD e = GetLastError();
             msy_rmtree_w(wstaging, wroot, 1);
-            msy_cause(cause, cap, "cannot replace %s: %s", rel, sh_reason_win32(e, final, 0));
+            msy_cause(cause, "cannot replace %s: %s", rel, sh_reason_win32(e, final, 0));
             goto done;
         }
         replace = 1;
@@ -943,7 +1037,7 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
         DWORD e = GetLastError();
         if (replace) MoveFileExW(wold, wfinal, 0);
         msy_rmtree_w(wstaging, wroot, 1);
-        msy_cause(cause, cap, "cannot place %s: %s", rel, sh_reason_win32(e, final, 0));
+        msy_cause(cause, "cannot place %s: %s", rel, sh_reason_win32(e, final, 0));
         goto done;
     }
     /* The place's earlier build was received, never the player's work. */
@@ -960,6 +1054,7 @@ done:
     sh_zip_reader_close(&zr);
     free(modjson);
     free(wroot); free(wfinal); free(wstaging); free(wold);
+    free(final); free(staging); free(old); free(rel); free(one); free(have);
     sh_mb_free(&b);
     return ok;
 }
@@ -999,7 +1094,8 @@ static int msy_stats_fail(modsync_stats *st, int code, const char *fmt, ...)
     va_list ap;
     st->code = code;
     va_start(ap, fmt);
-    _vsnprintf_s(st->cause, sizeof st->cause, _TRUNCATE, fmt, ap);
+    free(st->cause);
+    st->cause = sh_vtextf(fmt, ap);
     va_end(ap);
     return 0;
 }
@@ -1010,28 +1106,28 @@ typedef struct msy_up_build {
     char salt[MODSYNC_SALT_HEX + 1];
     char hash[MODNET_HASH_HEX + 1];
     char *folder;              /* the folder that holds the salt at the hash */
-    char label[128];           /* its display name */
+    char *label;               /* its display name */
     int present;               /* HEAD: the store holds it */
 } msy_up_build;
 
 static void msy_up_free(msy_up_build *u, int n)
 {
     int i;
-    for (i = 0; i < n; i++) free(u[i].folder);
+    for (i = 0; i < n; i++) { free(u[i].folder); free(u[i].label); }
     free(u);
 }
 
 /* Find every build's folder, under the store lock. */
-static int msy_up_collect(const char *const *mods, int n, msy_up_build **out, int *count, char *cause, size_t cap)
+static int msy_up_collect(const char *const *mods, int n, msy_up_build **out, int *count, char **cause)
 {
     msy_up_build *u = (msy_up_build *)calloc((size_t)n, sizeof *u);
     sh_ms_list l;
     int i, nb = 0, ok = 1;
     *out = NULL;
     *count = 0;
-    if (!u) return msy_cause(cause, cap, "out of memory");
+    if (!u) return msy_cause(cause, "out of memory");
     modsync_store_lock();
-    if (!sh_ms_enumerate(&l)) { modsync_store_unlock(); free(u); return msy_cause(cause, cap, "the mods folder cannot be read"); }
+    if (!sh_ms_enumerate(&l)) { modsync_store_unlock(); free(u); return msy_cause(cause, "the mods folder cannot be read"); }
     for (i = 0; i < n && ok; i++) {
         char salt[MODSYNC_SALT_HEX + 1], hash[MODNET_HASH_HEX + 1];
         const sh_ms_entry *e;
@@ -1047,20 +1143,20 @@ static int msy_up_collect(const char *const *mods, int n, msy_up_build **out, in
             for (k = 0; k < l.count && !other; k++)
                 if (!msy_in_places(&l.items[k]) && msy_entry_is(&l.items[k], salt, NULL)) other = &l.items[k];
             if (other)
-                ok = msy_cause(cause, cap, "%s was built again since the map was saved; save the map again, then publish it",
+                ok = msy_cause(cause, "%s was built again since the map was saved; save the map again, then publish it",
                                other->bundle.name && other->bundle.name[0] ? other->bundle.name : other->name);
             else
-                ok = msy_cause(cause, cap, "The map uses a mod that is not on this computer; remove it from the map in the "
+                ok = msy_cause(cause, "The map uses a mod that is not on this computer; remove it from the map in the "
                                "Mods tab (This map), or install the mod again");
             msy_log("MODS: publish: the map names %s, which no folder of this computer holds", mods[i]);
             break;
         }
         strcpy_s(u[nb].salt, sizeof u[nb].salt, salt);
         strcpy_s(u[nb].hash, sizeof u[nb].hash, hash);
-        strncpy_s(u[nb].label, sizeof u[nb].label, e->bundle.name && e->bundle.name[0] ? e->bundle.name : e->name, _TRUNCATE);
+        u[nb].label = _strdup(e->bundle.name && e->bundle.name[0] ? e->bundle.name : e->name);
         u[nb].folder = _strdup(e->folder);
-        if (!u[nb].folder) { ok = msy_cause(cause, cap, "out of memory"); break; }
         nb++;
+        if (!u[nb - 1].folder || !u[nb - 1].label) { ok = msy_cause(cause, "out of memory"); break; }
     }
     sh_ms_list_free(&l);
     modsync_store_unlock();
@@ -1077,11 +1173,14 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
     msy_prog prog;
     modnet_result r;
     char claim[MODNET_CLAIM_HEX + 1], secret[MODNET_HASH_HEX + 1], stored_claim[MODNET_CLAIM_HEX + 1],
-         stored_secret[MODNET_HASH_HEX + 1], cause[512];
+         stored_secret[MODNET_HASH_HEX + 1], *cause = NULL;
     const char **bh = NULL;
 
-    cause[0] = 0;
-    if (!msy_up_collect(mods, n, &u, &nb, cause, sizeof cause)) return msy_stats_fail(st, MODNET_E_ARG, "%s", cause);
+    if (!msy_up_collect(mods, n, &u, &nb, &cause)) {
+        msy_stats_fail(st, MODNET_E_ARG, "%s", cause ? cause : "out of memory");
+        free(cause);
+        return 0;
+    }
     st->builds = (unsigned)nb;
     memset(&prog, 0, sizeof prog);
     prog.outer = io;
@@ -1095,20 +1194,21 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         if (code != MODNET_E_NOT_FOUND) { msy_stats_fail(st, code, "%s: %s", u[i].label, r.message); goto done; }
     }
     for (i = 0; i < nb; i++) {
-        char path[MAX_PATH * 4];
+        char *path;
         unsigned long long size = 0;
         unsigned pointers = 0;
         int wcode = MODNET_E_ARG;
         modnet_io sub;
         if (u[i].present) continue;
         if (msy_cancelled(io)) { msy_stats_fail(st, MODNET_E_CANCELLED, "cancelled"); goto done; }
-        if (!msy_temp_archive(u[i].hash, path, sizeof path)) {
+        if (!(path = msy_temp_archive(u[i].hash))) {
             msy_stats_fail(st, MODNET_E_ARG, "the temporary folder cannot be found");
             goto done;
         }
-        if (!modsync_write_archive(u[i].folder, u[i].hash, path, &size, &pointers, &wcode, cause, sizeof cause)) {
+        if (!modsync_write_archive(u[i].folder, u[i].hash, path, &size, &pointers, &wcode, &cause)) {
             msy_delete_utf8(path);
-            msy_stats_fail(st, wcode, "%s", cause);
+            free(path);
+            msy_stats_fail(st, wcode, "%s", cause ? cause : "out of memory");
             goto done;
         }
         st->stock_files += pointers;
@@ -1116,6 +1216,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         sub = msy_sub_io(io, &prog);
         code = modnet_put_build(u[i].hash, path, size, &sub, &r);
         msy_delete_utf8(path);
+        free(path);
         msy_absorb(st, &r);
         if (code != MODNET_OK) { msy_stats_fail(st, code, "%s: %s", u[i].label, r.message); goto done; }
         prog.base += size;
@@ -1144,11 +1245,10 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         strcpy_s(st->claim, sizeof st->claim, claim);
         sh_mb_record_why_clear();
         if (!msy_claim_store(ref, claim, secret, bh, nb)) {
-            char why[MAX_PATH * 4 + 240];
+            const char *why = sh_mb_record_why();
             SecureZeroMemory(secret, sizeof secret);
             SecureZeroMemory(stored_secret, sizeof stored_secret);
-            if (!sh_mb_record_why(why, sizeof why))
-                strcpy_s(why, sizeof why, "mods\\snapmap-plus.json could not be written");
+            if (!why) why = "mods\\snapmap-plus.json could not be written";
             msy_log("MODS: push: claimed as %s, but the claim was not saved, so it cannot be released later: %s", claim,
                     why);
             /* The publish dialog shows this cause: the file and the next step first. */
@@ -1162,6 +1262,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
     ok = 1;
 done:
     free((void *)bh);
+    free(cause);
     msy_up_free(u, nb);
     return ok;
 }
@@ -1173,7 +1274,7 @@ int modsync_upload_builds(const char *const *mods, int n, const char *ref, const
     double t0 = msy_now_ms();
     int i, ok;
     memset(st, 0, sizeof *st);
-    if (!modnet_valid_ref(ref)) return msy_stats_fail(st, MODNET_E_ARG, "the ref must be 1-64 characters of text");
+    if (!modnet_valid_ref(ref)) return msy_stats_fail(st, MODNET_E_ARG, "%s", MODNET_REF_RULE);
     if (n <= 0 || !mods) return msy_stats_fail(st, MODNET_E_ARG, "name at least one build");
     for (i = 0; i < n; i++)
         if (!modsync_parse_mod(mods[i], NULL, NULL))
@@ -1186,7 +1287,7 @@ int modsync_upload_builds(const char *const *mods, int n, const char *ref, const
         msy_retry_releases(io);
         return 1;
     }
-    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, mods, n, st->cause);
+    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, mods, n, modsync_cause(st));
     return 0;
 }
 
@@ -1201,10 +1302,12 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
     modnet_result r;
     msy_prog prog;
     modnet_io sub;
-    char path[MAX_PATH * 4], cause[600], folder[MAX_PATH * 4], root[MAX_PATH * 4];
+    char *path = NULL, *cause = NULL, *folder = NULL;
+    const char *root = msy_root();
     double t0 = msy_now_ms();
     int code, ok;
     memset(st, 0, sizeof *st);
+    memset(&info, 0, sizeof info);
     if (!row || !sh_salt_valid(row->salt, strlen(row->salt)) || !modnet_valid_hash(row->build))
         return msy_stats_fail(st, MODNET_E_ARG, "not a <salt>@<build hash> row");
     if (place && (!place->title || !place->title[0])) return msy_stats_fail(st, MODNET_E_ARG, "a download needs a map's place");
@@ -1219,23 +1322,30 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
         modsync_store_lock();
         if (sh_ms_enumerate(&l) && (e = msy_locate(&l, row->salt, row->build, NULL)) != NULL) {
             served = !msy_in_places(e);
-            strncpy_s(folder, sizeof folder, e->folder, _TRUNCATE);
+            folder = _strdup(e->folder);
         }
         sh_ms_list_free(&l);
         modsync_store_unlock();
+        if (e && !folder) return msy_stats_fail(st, MODNET_E_NOMEM, "out of memory");
         if (e && served) {
-            if (msy_root(root, sizeof root)) msy_rel_of(root, folder, st->folder, sizeof st->folder);
+            if (root) st->folder = msy_rel_of(root, folder);
+            free(folder);
             st->already_installed = 1;
             st->ms = msy_now_ms() - t0;
             return 1;
         }
         if (e) {
             sh_ms_install_stats is;
-            char name[SH_MS_NAME_MAX + 1];
+            char *name = NULL;
             memset(&is, 0, sizeof is);
-            if (!sh_ms_install_to_root(folder, NULL, name, sizeof name, &is, NULL, cause, sizeof cause))
-                return msy_stats_fail(st, MODNET_E_REFUSED, "%s", cause);
-            strncpy_s(st->folder, sizeof st->folder, name, _TRUNCATE);
+            ok = sh_ms_install_to_root(folder, NULL, &name, &is, NULL, &cause);
+            free(folder);
+            if (!ok) {
+                msy_stats_fail(st, MODNET_E_REFUSED, "%s", cause ? cause : "out of memory");
+                free(cause);
+                return 0;
+            }
+            st->folder = name;
             st->builds_created = 1;
             if (sh_modserve_index_rescan() < 0)
                 msy_log("MODS: %.16s: installed in mods\\%s, but the serving index could not be rebuilt", row->build, name);
@@ -1243,21 +1353,23 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
             st->code = MODNET_OK;
             return 1;
         }
-    } else if (modsync_find_installed(row->salt, row->build, place, folder, sizeof folder)) {
+    } else if (modsync_find_installed(row->salt, row->build, place, &folder)) {
         /* The root at the row's hash, or this map's place, serves it. */
-        if (msy_root(root, sizeof root)) {
-            char rel[MODSYNC_FOLDER_MAX];
-            msy_rel_of(root, folder, st->folder, sizeof st->folder);
+        if (root) {
+            char *rel = NULL;
+            st->folder = msy_rel_of(root, folder);
             modsync_store_lock();
-            if (msy_place_has(place, row->salt, rel, sizeof rel) && !_stricmp(rel, st->folder))
+            if (st->folder && msy_place_has(place, row->salt, &rel) && !_stricmp(rel, st->folder))
                 msy_note_place(place, st->folder);
+            free(rel);
             modsync_store_unlock();
         }
+        free(folder);
         st->already_installed = 1;
         st->ms = msy_now_ms() - t0;
         return 1;
     }
-    if (!msy_temp_archive(row->build, path, sizeof path))
+    if (!(path = msy_temp_archive(row->build)))
         return msy_stats_fail(st, MODNET_E_ARG, "the temporary folder cannot be found");
     memset(&prog, 0, sizeof prog);
     prog.outer = io;
@@ -1265,19 +1377,29 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
     sub = msy_sub_io(io, &prog);
     code = modnet_get_build(row->build, path, &sub, &r);
     msy_absorb(st, &r);
-    if (code != MODNET_OK) { st->ms = msy_now_ms() - t0; return msy_stats_fail(st, code, "%s", r.message); }
-    ok = modsync_install_archive(path, row->salt, row->build, place, &info, cause, sizeof cause);
+    if (code != MODNET_OK) {
+        msy_delete_utf8(path);
+        free(path);
+        st->ms = msy_now_ms() - t0;
+        return msy_stats_fail(st, code, "%s", r.message);
+    }
+    ok = modsync_install_archive(path, row->salt, row->build, place, &info, &cause);
     msy_delete_utf8(path);
-    strncpy_s(st->folder, sizeof st->folder, info.rel, _TRUNCATE);
+    free(path);
+    msy_set(&st->folder, info.rel);
     st->ms = msy_now_ms() - t0;
     if (!ok) {
+        int fail = info.game_lacks ? MODNET_E_GAME : info.mismatch ? MODNET_E_HASH : MODNET_E_REFUSED;
         if (info.game_lacks) {
             st->game_lacks = 1;
-            strncpy_s(st->game_source, sizeof st->game_source, info.game_source, _TRUNCATE);
-            return msy_stats_fail(st, MODNET_E_GAME, "%s", cause);
+            msy_set(&st->game_source, info.game_source);
+        } else {
+            msy_log("MODS: pull %.16s: %s", row->build, cause ? cause : "out of memory");
         }
-        msy_log("MODS: pull %.16s: %s", row->build, cause);
-        return msy_stats_fail(st, info.mismatch ? MODNET_E_HASH : MODNET_E_REFUSED, "%s", cause);
+        msy_stats_fail(st, fail, "%s", cause ? cause : "out of memory");
+        free(cause);
+        modsync_install_info_free(&info);
+        return 0;
     }
     st->already_installed = info.already_installed;
     if (!info.already_installed) {
@@ -1288,6 +1410,7 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
     if (sh_modserve_index_rescan() < 0)
         msy_log("MODS: pull %.16s: installed, but the serving index could not be rebuilt", row->build);
     st->code = MODNET_OK;
+    modsync_install_info_free(&info);
     msy_retry_releases(io);
     return 1;
 }
@@ -1307,7 +1430,7 @@ int modsync_probe_build(const char *hash, const modnet_io *io, modsync_probe *ou
     if (code == MODNET_OK) { out->found = 1; return 1; }
     if (code == MODNET_E_NOT_FOUND || code == MODNET_E_BLOCKED) { out->found = 0; return 0; }
     out->found = -1;
-    strncpy_s(out->cause, sizeof out->cause, r.message[0] ? r.message : modnet_code_text(code), _TRUNCATE);
+    out->cause = _strdup(r.message && r.message[0] ? r.message : modnet_code_text(code));
     return -1;
 }
 
@@ -1346,7 +1469,7 @@ static int msy_release(const char *ref, const modnet_io *io, modsync_stats *st)
     double t0 = msy_now_ms();
     int code;
     memset(st, 0, sizeof *st);
-    if (!modnet_valid_ref(ref)) return msy_stats_fail(st, MODNET_E_ARG, "the ref must be 1-64 characters of text");
+    if (!modnet_valid_ref(ref)) return msy_stats_fail(st, MODNET_E_ARG, "%s", MODNET_REF_RULE);
     if (!modsync_claim_lookup(ref, claim, secret)) {
         msy_pending_drop(ref);
         return msy_stats_fail(st, MODNET_E_NOT_FOUND, "no claim is stored for this ref");
@@ -1360,7 +1483,7 @@ static int msy_release(const char *ref, const modnet_io *io, modsync_stats *st)
         msy_claim_forget(ref);
         msy_pending_drop(ref);
         st->code = MODNET_OK;
-        if (code == MODNET_E_NOT_FOUND) strcpy_s(st->cause, sizeof st->cause, "the store no longer knew the claim; forgotten locally");
+        if (code == MODNET_E_NOT_FOUND) msy_set(&st->cause, "the store no longer knew the claim; forgotten locally");
         return 1;
     }
     return msy_stats_fail(st, code, "%s", r.message);
@@ -1384,7 +1507,8 @@ static void msy_retry_releases(const modnet_io *io)
         if (msy_cancelled(io)) break;
         if (!mpj_str_is(mpj_get(pend->items[i], "kind"), "release") || strchr(ref, '\\')) continue;
         if (msy_release(ref, io, &st)) msy_log("MODS: retry %s: released the queued claim", ref);
-        else if (!modnet_transient(st.code)) { msy_pending_drop(ref); msy_log("MODS: retry %s: release dropped: %s", ref, st.cause); }
+        else if (!modnet_transient(st.code)) { msy_pending_drop(ref); msy_log("MODS: retry %s: release dropped: %s", ref, modsync_cause(&st)); }
+        modsync_stats_free(&st);
     }
     t_msy_retrying = 0;
     mpj_free(doc);
@@ -1401,7 +1525,7 @@ int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
     /* A release the store did not take is not forgotten: a leaked claim
      * keeps its builds on the store. Queued, retried at the next launch
      * and after the next store call that succeeds. */
-    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, NULL, 0, st->cause);
+    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, NULL, 0, modsync_cause(st));
     return 0;
 }
 
@@ -1423,13 +1547,12 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
     for (i = 0; i < pend->n; i++) {
         const mpj *e = pend->items[i], *arr = mpj_get(e, "builds");
         const char **mods;
-        char ref[4 * MODNET_REF_MAX + 1];
+        const char *ref = pend->keys[i];
         modsync_stats st;
         int n = 0, k, valid = 1;
-        size_t rl = strlen(pend->keys[i]);
+        memset(&st, 0, sizeof st);
         if (msy_cancelled(io)) break;
-        if (mpj_str_is(mpj_get(e, "kind"), "release") && rl < sizeof ref && !strchr(pend->keys[i], '\\')) {
-            strcpy_s(ref, sizeof ref, pend->keys[i]);
+        if (mpj_str_is(mpj_get(e, "kind"), "release") && !strchr(ref, '\\')) {
             t_msy_retrying = 1;
             valid = msy_release(ref, io, &st);
             t_msy_retrying = 0;
@@ -1437,15 +1560,15 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
             else if (!modnet_transient(st.code)) {
                 msy_pending_drop(ref);
                 drop_n++;
-                msy_log("MODS: retry %s: release dropped: %s", ref, st.cause);
-            } else msy_log("MODS: retry %s: the release is still failing: %s", ref, st.cause);
-            if (last) *last = st;
+                msy_log("MODS: retry %s: release dropped: %s", ref, modsync_cause(&st));
+            } else msy_log("MODS: retry %s: the release is still failing: %s", ref, modsync_cause(&st));
+            if (last) { modsync_stats_free(last); *last = st; }
+            else modsync_stats_free(&st);
             continue;
         }
         /* Keys are written escaped; a ref that needed escapes is skipped
          * rather than decoded (refs are plain text in practice). */
-        if (rl >= sizeof ref || strchr(pend->keys[i], '\\')) valid = 0;
-        else strcpy_s(ref, sizeof ref, pend->keys[i]);
+        if (strchr(ref, '\\')) valid = 0;
         if (!arr || arr->type != MPJ_ARR || arr->n < 1) valid = 0;
         mods = valid ? (const char **)calloc((size_t)arr->n, sizeof *mods) : NULL;
         if (valid && !mods) break;   /* out of memory: the queue stays for the next try */
@@ -1455,7 +1578,7 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
         }
         if (!valid) {
             msy_log("MODS: retry: a queued upload is malformed; dropped");
-            if (rl < sizeof ref && !strchr(pend->keys[i], '\\')) msy_pending_drop(pend->keys[i]);
+            if (!strchr(ref, '\\')) msy_pending_drop(ref);
             drop_n++;
             free((void *)mods);
             continue;
@@ -1467,12 +1590,13 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
         } else if (!modnet_transient(st.code)) {
             msy_pending_drop(ref);
             drop_n++;
-            msy_log("MODS: retry %s: dropped, the store refused it: %s", ref, st.cause);
+            msy_log("MODS: retry %s: dropped, the store refused it: %s", ref, modsync_cause(&st));
         } else {
-            msy_log("MODS: retry %s: still failing: %s", ref, st.cause);
+            msy_log("MODS: retry %s: still failing: %s", ref, modsync_cause(&st));
         }
         free((void *)mods);
-        if (last) *last = st;
+        if (last) { modsync_stats_free(last); *last = st; }
+        else modsync_stats_free(&st);
     }
     mpj_free(doc);
     if (done) *done = ok_n;

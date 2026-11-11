@@ -6,6 +6,7 @@
  *
  *   modbundle_test.exe <tests\fixtures\mods\alexrimp> [--write-golden]
  */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,7 @@
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 #define CHECK_CAUSE(b, needle) do { CHECK((b).errors > 0); \
-    if (!strstr((b).first_cause, needle)) { fprintf(stderr, "FAIL %s:%d: cause \"%s\" lacks \"%s\"\n", __FILE__, __LINE__, (b).first_cause, needle); failures++; } } while (0)
+    if (!strstr(sh_mb_first_cause(&(b)), needle)) { fprintf(stderr, "FAIL %s:%d: cause \"%s\" lacks \"%s\"\n", __FILE__, __LINE__, sh_mb_first_cause(&(b)), needle); failures++; } } while (0)
 
 /* The last log lines, for the record's plain messages. */
 static char g_log[8][1400];
@@ -100,23 +101,23 @@ static void test_names(void)
     CHECK(!sh_mb_id_normalize(long_id, 65, id));
     CHECK(sh_mb_id_normalize(long_id, 64, id));
 
-    CHECK(sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", cause, sizeof cause));
-    CHECK(sh_mb_check_request("maps/my room/a.bmodel", cause, sizeof cause));
-    CHECK(!sh_mb_check_request("generated/../x.decl", cause, sizeof cause) && strstr(cause, "traversal"));
-    CHECK(!sh_mb_check_request("./x.decl", cause, sizeof cause));
-    CHECK(!sh_mb_check_request("/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
+    CHECK(HO(cause, sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", HO_P(0))));
+    CHECK(HO(cause, sh_mb_check_request("maps/my room/a.bmodel", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request("generated/../x.decl", HO_P(0))) && strstr(cause, "traversal"));
+    CHECK(!HO(cause, sh_mb_check_request("./x.decl", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request("/x.decl", HO_P(0))) && strstr(cause, "absolute"));
     /* A non-ASCII file name: the file and its character, in words (plain_reason.h). */
-    CHECK(!sh_mb_check_request("generated/image/mods/a/caf\xc3\xa9.bimage", cause, sizeof cause) &&
+    CHECK(!HO(cause, sh_mb_check_request("generated/image/mods/a/caf\xc3\xa9.bimage", HO_P(0))) &&
           strstr(cause, "generated/image/mods/a/caf\xc3\xa9.bimage has the character '\xc3\xa9' (U+00E9) in its name; "
                         "the game reads only ASCII file names") != NULL);
-    CHECK(!sh_mb_check_request("a/b*c.decl", cause, sizeof cause) && strstr(cause, "has the character '*' (U+002A)") != NULL);
-    CHECK(!sh_mb_check_request("c:/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
-    CHECK(!sh_mb_check_request("a\\x.decl", cause, sizeof cause) && strstr(cause, "backslash"));
-    CHECK(!sh_mb_check_request("a./x.decl", cause, sizeof cause));
-    CHECK(!sh_mb_check_request("a /x.decl", cause, sizeof cause));
-    CHECK(!sh_mb_check_request(" a/x.decl", cause, sizeof cause));
-    CHECK(!sh_mb_check_request("a//x.decl", cause, sizeof cause));
-    CHECK(!sh_mb_check_request("a/x\"y.decl", cause, sizeof cause));
+    CHECK(!HO(cause, sh_mb_check_request("a/b*c.decl", HO_P(0))) && strstr(cause, "has the character '*' (U+002A)") != NULL);
+    CHECK(!HO(cause, sh_mb_check_request("c:/x.decl", HO_P(0))) && strstr(cause, "absolute"));
+    CHECK(!HO(cause, sh_mb_check_request("a\\x.decl", HO_P(0))) && strstr(cause, "backslash"));
+    CHECK(!HO(cause, sh_mb_check_request("a./x.decl", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request("a /x.decl", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request(" a/x.decl", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request("a//x.decl", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_check_request("a/x\"y.decl", HO_P(0))));
 
     CHECK(sh_mb_extension_allowed("a/b.decl"));
     CHECK(sh_mb_extension_allowed("a/b.bmd6model"));
@@ -144,7 +145,7 @@ static void test_names(void)
 static void ln(const char *req, const char *type, const char *name)
 {
     char t[64], n[512];
-    int ok = sh_mb_logical_name(req, t, sizeof t, n, sizeof n);
+    int ok = HO(n, sh_mb_logical_name(req, t, HO_P(0)));
     if (!ok || strcmp(t, type) || strcmp(n, name)) {
         fprintf(stderr, "FAIL logical name %s -> %s %s (got %d %s %s)\n", req, type, name, ok, ok ? t : "", ok ? n : "");
         failures++;
@@ -156,7 +157,7 @@ static void ln(const char *req, const char *type, const char *name)
  * through, and the editor-only bundle classification. */
 static void test_editor_time(void)
 {
-    char key[SH_MB_REQUEST_MAX + 1];
+    char key[HO_TEXT + 1];
     sh_mb_bundle b;
     sh_mb_file files[3];
     CHECK(sh_mb_editor_time("generated/decls/snapeditorentitydef/func/lift.decl"));
@@ -170,16 +171,15 @@ static void test_editor_time(void)
     CHECK(!sh_mb_editor_time("cooked/model/models/modular/airlock/air_lock_shell.bmodel"));
     CHECK(!sh_mb_editor_time(NULL));
 
-    CHECK(sh_mb_model_key("models/modular/airlock/air_lock_shell.lwo", key, sizeof key) &&
+    CHECK(HOS(key, sh_mb_model_key("models/modular/airlock/air_lock_shell.lwo")) &&
           !strcmp(key, "cooked/model/models/modular/airlock/air_lock_shell.bmodel"));
-    CHECK(sh_mb_model_key("Models/Foo/Bar.LWO", key, sizeof key) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
-    CHECK(sh_mb_model_key("models/foo/bar.ase", key, sizeof key) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
-    CHECK(sh_mb_model_key("cooked/model/models/foo/bar.bmodel", key, sizeof key) &&
+    CHECK(HOS(key, sh_mb_model_key("Models/Foo/Bar.LWO")) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
+    CHECK(HOS(key, sh_mb_model_key("models/foo/bar.ase")) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
+    CHECK(HOS(key, sh_mb_model_key("cooked/model/models/foo/bar.bmodel")) &&
           !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
-    CHECK(!sh_mb_model_key("md6/monsters/imp/imp.md6", key, sizeof key));
-    CHECK(!sh_mb_model_key("snapmaps/props/thing", key, sizeof key));
-    CHECK(!sh_mb_model_key("", key, sizeof key));
-    CHECK(!sh_mb_model_key("models/foo/bar.lwo", key, 8));
+    CHECK(!HOS(key, sh_mb_model_key("md6/monsters/imp/imp.md6")));
+    CHECK(!HOS(key, sh_mb_model_key("snapmaps/props/thing")));
+    CHECK(!HOS(key, sh_mb_model_key("")));
 
     memset(&b, 0, sizeof b);
     memset(files, 0, sizeof files);
@@ -206,8 +206,8 @@ static void test_logical_names(void)
     ln("generated/decls/snapeditorentitydef/mods/a/b.decl", "snapEditorEntityDef", "mods/a/b");
     ln("generated/decls/material/mods/a/b.decl", "material", "mods/a/b");
     ln("generated/decls/renderparm/mods/a/b.decl", "renderParm", "mods/a/b");
-    CHECK(!sh_mb_logical_name("generated/decls/nosuchtype/a.decl", t, sizeof t, n, sizeof n));
-    CHECK(!sh_mb_logical_name("generated/decls/entitydef/.decl", t, sizeof t, n, sizeof n));
+    CHECK(!HO(n, sh_mb_logical_name("generated/decls/nosuchtype/a.decl", t, HO_P(0))));
+    CHECK(!HO(n, sh_mb_logical_name("generated/decls/entitydef/.decl", t, HO_P(0))));
     ln("generated/basemodel/md6/mods/a/assets/mesh/imp.bmd6model", "baseModel", "md6/mods/a/assets/mesh/imp.md6mesh");
     ln("generated/skeleton/md6/mods/a/assets/mesh/imp.bmd6skl", "skeleton", "md6/mods/a/assets/mesh/imp.md6skl");
     ln("cooked/anim/md6/mods/a/motion/idle.bmd6anim", "anim", "md6/mods/a/motion/idle.md6anim");
@@ -227,12 +227,14 @@ static void test_logical_names(void)
 
 static void nr(const char *type, const char *name, int count, const char *first, const char *second)
 {
-    char out[2][SH_MB_REQUEST_MAX + 1];
+    char *out[2] = {0};
     int n = sh_mb_need_requests(type, name, out, 2);
     if (n != count || (n > 0 && strcmp(out[0], first)) || (n > 1 && strcmp(out[1], second))) {
         fprintf(stderr, "FAIL need requests %s %s (got %d %s %s)\n", type, name, n, n > 0 ? out[0] : "", n > 1 ? out[1] : "");
         failures++;
     }
+    free(out[0]);
+    free(out[1]);
 }
 
 static void test_need_requests(void)
@@ -312,7 +314,7 @@ static void test_scan(void)
                           "\t\tguiFile = \"swf/screens/y.swf\";\r\n\t\tmaterial = \"not/scanned\";\r\n\t}\r\n}";
         const char *want_fx = "particle=player/eyes;ribbon=trail;material=lights/l;material=decals/d;";
         const char *want_ent = "swf=swf/doors/x.swf;swf=swf/screens/y.swf;";
-        char cand[2][SH_MB_REQUEST_MAX + 1];
+        char *cand[2] = {0};   /* malloc'd results; the test keeps them */
         got[0] = 0;
         sh_mb_scan_needs("fx", (const unsigned char *)fx, strlen(fx), collect, got);
         CHECK(!strcmp(got, want_fx));
@@ -372,7 +374,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     unsigned char *text;
 
     CHECK(sh_mb_build(fixture, NULL, &RESOLVER, &b));
-    if (b.errors) fprintf(stderr, "  fixture refused: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  fixture refused: %s\n", sh_mb_first_cause(&b));
     if (b.warnings) fprintf(stderr, "  fixture warning: %s\n", b.first_warning);
     CHECK(b.warnings == 0);
     CHECK(!strcmp(b.id, SALT) && b.built > 0 && b.validated);
@@ -473,10 +475,10 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
 
     /* Write, then read back: the author's bytes are kept and the canonical
      * text derived from mod.json is the golden one. */
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
     CHECK(sh_mb_load(path, &again));
-    if (again.errors) fprintf(stderr, "  reload: %s\n", again.first_cause);
+    if (again.errors) fprintf(stderr, "  reload: %s\n", sh_mb_first_cause(&again));
     CHECK(!strcmp(again.hash, b.hash) && again.file_count == b.file_count && again.validated && again.built == b.built);
     CHECK(!strcmp(again.id, SALT) && !strcmp(again.tree, b.tree) && again.rules == SH_MB_RULES);
     CHECK(again.canonical_len == b.canonical_len && !memcmp(again.canonical, b.canonical, b.canonical_len));
@@ -533,7 +535,7 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
     strcpy_s(hash1, sizeof hash1, b.hash);
     built1 = b.built;
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     sh_mb_free(&b);
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b) && !strcmp(b.hash, hash1) && b.built == built1 && !strcmp(b.prev_hash, hash1));
     sh_mb_free(&b);
@@ -541,12 +543,12 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     Sleep(1100);
     mt_append(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited\r\n");
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b) && strcmp(b.hash, hash1) && b.built == built1);
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     sh_mb_free(&b);
     /* A build that fails writes the failed block: the salt, built and cause stay. */
     mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\broken.decl", "{\r\n\tinherit = \"x;\r\n");
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b) && !strcmp(b.id, SALT) && b.built == built1 && strlen(b.tree) == 64);
-    CHECK(sh_mb_write_failed(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write_failed(&b, folder, HO_P(0))));
     sh_mb_free(&b);
     {
         size_t n = 0;
@@ -557,7 +559,7 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     }
     CHECK(!sh_mb_load(path, &again) && !strcmp(again.id, SALT) && again.built == built1 && !again.validated);
     CHECK_CAUSE(again, "not built: ");
-    CHECK(strstr(again.first_cause, "not a well-formed decl") != NULL);
+    CHECK(strstr(sh_mb_first_cause(&again), "not a well-formed decl") != NULL);
     sh_mb_free(&again);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);
     /* Fixed: it builds again from the failed block, "built" kept. */
@@ -591,7 +593,7 @@ static void test_modjson(const char *fixture, const char *tmp)
     CHECK(sh_mb_tree_hash(folder, tree1));
     CHECK(sh_mb_build(folder, SALT, &RESOLVER, &b));
     CHECK(!strcmp(b.tree, tree1));
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
     first = sh_mb_read_file(path, 1 << 20, &n1);
     own = first ? sh_mb_author_bytes((const char *)first, n1, &own_len, &had) : NULL;
@@ -607,13 +609,13 @@ static void test_modjson(const char *fixture, const char *tmp)
     /* An unchanged rebuild writes the same bytes ("built" kept). */
     sh_mb_free(&b);
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     second = sh_mb_read_file(path, 1 << 20, &n2);
     CHECK(first && second && n1 == n2 && !memcmp(first, second, n1));
     free(second);
     /* A verification cause is recorded in the block only. */
-    CHECK(sh_mb_set_state(folder, 0, "a file was edited", cause, sizeof cause));
-    CHECK(sh_mb_load(path, &again) && !again.validated && !strcmp(again.state_cause, "a file was edited"));
+    CHECK(HO(cause, sh_mb_set_state(folder, 0, "a file was edited", HO_P(0))));
+    CHECK(sh_mb_load(path, &again) && !again.validated && !strcmp(sh_mb_state_cause(&again), "a file was edited"));
     sh_mb_free(&again);
     second = sh_mb_read_file(path, 1 << 20, &n2);
     own = second ? sh_mb_author_bytes((const char *)second, n2, &own_len, NULL) : NULL;
@@ -621,8 +623,8 @@ static void test_modjson(const char *fixture, const char *tmp)
     CHECK(second && strstr((const char *)second, "\"cause\": \"a file was edited\""));
     free(own);
     free(second);
-    CHECK(sh_mb_set_state(folder, 1, "", cause, sizeof cause));
-    CHECK(sh_mb_load(path, &again) && again.validated && !again.state_cause[0]);
+    CHECK(HO(cause, sh_mb_set_state(folder, 1, "", HO_P(0))));
+    CHECK(sh_mb_load(path, &again) && again.validated && !sh_mb_state_cause(&again)[0]);
     sh_mb_free(&again);
     /* Editing the author's part changes the tree hash. */
     mt_write(folder, "mod.json", "{\"version\":\"1.0.1\",\"name\":\"R2 Imp copy\"}");
@@ -639,7 +641,7 @@ static void test_modjson(const char *fixture, const char *tmp)
         size_t tlen = 0;
         char *modtext = sh_mb_modjson_text(&b, NULL, 0, &tlen);
         CHECK(modtext && sh_mb_load_text(modtext, tlen, &again));
-        if (again.errors) fprintf(stderr, "  synthesized: %s\n", again.first_cause);
+        if (again.errors) fprintf(stderr, "  synthesized: %s\n", sh_mb_first_cause(&again));
         CHECK(!strcmp(again.hash, b.hash) && again.canonical_len == b.canonical_len &&
               !memcmp(again.canonical, b.canonical, b.canonical_len));
         CHECK(modtext && !strstr(modtext, "\"id\""));
@@ -672,13 +674,13 @@ static void test_identity(const char *fixture, const char *tmp)
     mt_write(folder, "mod.json", "{\"name\":\"x\"}");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_FRESH);
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.r2-imp\",\"build\":3}}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER);
+    CHECK(HO(cause, sh_mb_descriptor_state_why(folder, HO_P(0))) == SH_MB_DESC_EARLIER);
     CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"id\":\"alex.r2-imp\"}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY);
+    CHECK(HO(cause, sh_mb_descriptor_state_why(folder, HO_P(0))) == SH_MB_DESC_RETIRED_KEY);
     CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"hud\":{\"schema\":\"snapmap-plus.weapon-hud.v1\",\"weapons\":{}}}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY && !strcmp(cause, SH_MB_EARLIER));
+    CHECK(HO(cause, sh_mb_descriptor_state_why(folder, HO_P(0))) == SH_MB_DESC_RETIRED_KEY && !strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2}}");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "mod.json", "[1]");
@@ -686,7 +688,7 @@ static void test_identity(const char *fixture, const char *tmp)
     mt_delete(folder, "mod.json");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "package.json", "{\"name\":\"x\"}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER && !strcmp(cause, SH_MB_EARLIER));
+    CHECK(HO(cause, sh_mb_descriptor_state_why(folder, HO_P(0))) == SH_MB_DESC_EARLIER && !strcmp(cause, SH_MB_EARLIER));
     mt_delete(folder, "package.json");
 
     /* Files under another namespace than the salt. */
@@ -826,10 +828,10 @@ static void test_record_read_failure(const char *tmp)
     {
         /* The sentence a caller shows the player: the file and the next step. */
         char why[MAX_PATH * 4 + 240];
-        CHECK(sh_mb_record_why(why, sizeof why) && strstr(why, "recordheld\\snapmap-plus.json could not be used (another "
+        CHECK(sh_mb_record_why() && strstr(sh_mb_record_why(), "recordheld\\snapmap-plus.json could not be used (another "
               "program has it open); close the program holding it (a backup, sync or antivirus tool, or an editor) and try again"));
         sh_mb_record_why_clear();
-        CHECK(!sh_mb_record_why(why, sizeof why));
+        CHECK(!sh_mb_record_why());
     }
     g_logged = 0;
     CHECK(!sh_mb_record_put(root, "cache", "{\"aa\":\"bb\"}"));
@@ -873,7 +875,7 @@ static void refused(const char *fixture, const char *tmp, mutate_fn mutate, cons
     mutate(folder);
     CHECK(!sh_mb_build(folder, SALT, r, &b));
     CHECK_CAUSE(b, needle);
-    CHECK(!sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(!HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     sh_mb_free(&b);
 }
 
@@ -884,7 +886,7 @@ static void accepted(const char *fixture, const char *tmp, mutate_fn mutate, sh_
     CHECK(mt_copy_tree(fixture, folder));
     mutate(folder);
     CHECK(sh_mb_build(folder, SALT, &RESOLVER, out));
-    if (out->errors) fprintf(stderr, "  case %d refused: %s\n", g_case, out->first_cause);
+    if (out->errors) fprintf(stderr, "  case %d refused: %s\n", g_case, sh_mb_first_cause(out));
 }
 
 #define DESC(extra) "{\"name\":\"R2 Imp copy\"" extra "}"
@@ -974,11 +976,11 @@ static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
 static void m_bad_ext(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\notes.txt", "x"); }
 static void m_outside(const char *f) { mt_write(f, "readme.md", "x"); }
 static void m_scenes_x(const char *f) { mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alexrimp/n\":{}}")); }
-static int extra_refuses(const char *salt, const char *extra, size_t len, char *cause, size_t cap)
+static int extra_refuses(const char *salt, const char *extra, size_t len, char **cause)
 {
     (void)len;
     if (!strcmp(salt, SALT) && strstr(extra, "\"scenes\"")) {
-        strcpy_s(cause, cap, "mod.json \"scenes\" is refused: test");
+        ho_set(cause, "mod.json \"scenes\" is refused: test");
         return 0;
     }
     return 1;
@@ -1296,7 +1298,7 @@ static void test_refusals(const char *fixture, const char *tmp)
         memset(&back, 0, sizeof back);
         _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\case%d", tmp, g_case);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
-        CHECK(sh_mb_write(&b, folder, cause, sizeof cause) && sh_mb_load(path, &back) && back.edit_files == 1 && back.edits &&
+        CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))) && sh_mb_load(path, &back) && back.edit_files == 1 && back.edits &&
               strstr(back.edits, "generated/decls/entitydef/monster/imp.decl"));
         sh_mb_free(&back);
     }
@@ -1328,7 +1330,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     /* A copy keeping a stock name the game lacks is reported, not refused;
      * the same dangling name in a mod's own decl still refuses (m_missing_need). */
     accepted(fixture, tmp, m_shadow_dangling, &b);
-    if (b.errors || b.warnings != 1) fprintf(stderr, "  dangling shadow: %s / %s\n", b.first_cause, b.first_warning);
+    if (b.errors || b.warnings != 1) fprintf(stderr, "  dangling shadow: %s / %s\n", sh_mb_first_cause(&b), b.first_warning);
     CHECK(b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1 &&
           strstr(b.first_warning, "resolves to nothing (a replaced stock file") != NULL &&
           find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->edit &&
@@ -1366,17 +1368,17 @@ static void test_refusals(const char *fixture, const char *tmp)
     {
         static const char *const empty_lists = "{\"commands\":{\"activate\":[],\"deactivate\":[]},\"cvars\":{\"b\":false,\"a\":\"x\"}}";
         static const char *const accented = "{\"cvars\":{\"a\":\"\\u00e9\"}}";
-        char cause[SH_MB_CAUSE_MAX];
-        char *c = sh_mb_requirements_canonical(empty_lists, strlen(empty_lists), cause, sizeof cause);
+        char cause[HO_TEXT];
+        char *c = HOT(char *, cause, sh_mb_requirements_canonical(empty_lists, strlen(empty_lists), HO_P(0)));
         CHECK(c && !strcmp(c, "{\"cvars\":{\"a\":\"x\",\"b\":\"0\"}}"));
         free(c);
-        c = sh_mb_requirements_canonical("{}", 2, cause, sizeof cause);
+        c = HOT(char *, cause, sh_mb_requirements_canonical("{}", 2, HO_P(0)));
         CHECK(c && !strcmp(c, "{\"cvars\":{}}"));
         free(c);
-        c = sh_mb_requirements_canonical(accented, strlen(accented), cause, sizeof cause);
+        c = HOT(char *, cause, sh_mb_requirements_canonical(accented, strlen(accented), HO_P(0)));
         CHECK(!c && strstr(cause, "printable ASCII"));
         free(c);
-        c = sh_mb_requirements_canonical("[]", 2, cause, sizeof cause);
+        c = HOT(char *, cause, sh_mb_requirements_canonical("[]", 2, HO_P(0)));
         CHECK(!c && strstr(cause, "must be an object"));
     }
 
@@ -1435,25 +1437,25 @@ static void test_md5fold(void)
 static void test_spirv_names(void)
 {
     char out[512], prog[256], mask[17];
-    CHECK(sh_mb_spirv_request("mods/a/tint", ".vspv", out, sizeof out) && !strcmp(out, "generated/spirv/mods/a/tint.vspv"));
-    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", ".fspv", out, sizeof out) &&
+    CHECK(HOS(out, sh_mb_spirv_request("mods/a/tint", ".vspv")) && !strcmp(out, "generated/spirv/mods/a/tint.vspv"));
+    CHECK(HOS(out, sh_mb_spirv_request("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", ".fspv")) &&
           !strcmp(out, "generated/spirv/generated/renderprogs/permutations/mods/a/tint_0000000000000001.fspv"));
     /* The spellings the archive and the engine use (19- and 17-character names). */
-    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/cyberdemonshockwave_0000000000000001.decl", ".fspv", out, sizeof out) &&
+    CHECK(HOS(out, sh_mb_spirv_request("generated/renderprogs/permutations/cyberdemonshockwave_0000000000000001.decl", ".fspv")) &&
           !strcmp(out, "generated/spirv/generated/renderprogs/permutations/cyberdemonshockwave_0000000000/000001.fspv"));
-    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/abcdefghijklmnopq_0000000000000001.decl", ".vspv", out, sizeof out) &&
+    CHECK(HOS(out, sh_mb_spirv_request("generated/renderprogs/permutations/abcdefghijklmnopq_0000000000000001.decl", ".vspv")) &&
           !strcmp(out, "generated/spirv/generated/renderprogs/permutations/abcdefghijklmnopq_000000000000/0001.vspv"));
     /* 37 characters with the extension stay whole; 38 split. */
-    CHECK(sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz012345", ".vspv", out, sizeof out) &&
+    CHECK(HOS(out, sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz012345", ".vspv")) &&
           !strcmp(out, "generated/spirv/mods/a/abcdefghijklmnopqrstuvwxyz012345.vspv"));
-    CHECK(sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz0123456", ".vspv", out, sizeof out) &&
+    CHECK(HOS(out, sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz0123456", ".vspv")) &&
           !strcmp(out, "generated/spirv/mods/a/abcdefghijklmnopqrstuvwxyz0123/456.vspv"));
-    CHECK(sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", prog, sizeof prog, mask) &&
+    CHECK(HO(prog, sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", HO_P(0), mask)) &&
           !strcmp(prog, "mods/a/tint") && !strcmp(mask, "0000000000000001"));
-    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/x_1.decl", prog, sizeof prog, mask));
-    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_000000000000000g.decl", prog, sizeof prog, mask));
-    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/_0000000000000001.decl", prog, sizeof prog, mask));
-    CHECK(!sh_mb_rp_permutation("generated/renderprogs/mods/a/tint_0000000000000001.decl", prog, sizeof prog, mask));
+    CHECK(!HO(prog, sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/x_1.decl", HO_P(0), mask)));
+    CHECK(!HO(prog, sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_000000000000000g.decl", HO_P(0), mask)));
+    CHECK(!HO(prog, sh_mb_rp_permutation("generated/renderprogs/permutations/_0000000000000001.decl", HO_P(0), mask)));
+    CHECK(!HO(prog, sh_mb_rp_permutation("generated/renderprogs/mods/a/tint_0000000000000001.decl", HO_P(0), mask)));
 }
 
 static void rp_put(const char *folder, const char *rel, const void *data, size_t n)
@@ -1590,7 +1592,7 @@ static void rp_case(const char *tmp, int which, const char *needle)
 
     if (!needle) {
         CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
-        if (b.errors) fprintf(stderr, "  render-program case %d refused: %s\n", g_case, b.first_cause);
+        if (b.errors) fprintf(stderr, "  render-program case %d refused: %s\n", g_case, sh_mb_first_cause(&b));
         CHECK(b.errors == 0);
         if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program of this mod uses it"));
         else CHECK(b.warnings == 0);
@@ -1672,14 +1674,14 @@ static int fake_same(const fake_entry *e, unsigned long long size, const char *s
     sh_mb_sha256_hex(e->text, strlen(e->text), h);
     return strlen(e->text) == size && !strcmp(h, sha);
 }
-static int fake_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+static int fake_match(void *ctx, const char *request, unsigned long long size, const char *sha, char **source)
 {
     const fake_entry *own = fake_find(request);
     int i;
     (void)ctx;
-    if (own && fake_same(own, size, sha)) { strcpy_s(source, cap, own->source); return SH_MB_STOCK_OK; }
+    if (own && fake_same(own, size, sha)) { ho_set(source, own->source); return SH_MB_STOCK_OK; }
     for (i = 0; FAKE[i].source; i++)
-        if (fake_same(&FAKE[i], size, sha)) { strcpy_s(source, cap, FAKE[i].source); return SH_MB_STOCK_OK; }
+        if (fake_same(&FAKE[i], size, sha)) { ho_set(source, FAKE[i].source); return SH_MB_STOCK_OK; }
     return SH_MB_STOCK_ABSENT;
 }
 static int fake_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
@@ -1753,7 +1755,7 @@ static void test_classes(const char *fixture, const char *tmp)
              "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
     sh_mb_set_stock_ops(&ops);
     CHECK(sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
-    if (b.errors) fprintf(stderr, "  classes refused: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  classes refused: %s\n", sh_mb_first_cause(&b));
     f = find_file(&b, "generated/image/mods/alexrimp/rock_copy.bimage");
     CHECK(f && f->cls == SH_MB_CLASS_BORROW && f->stock && !strcmp(f->stock_source, FAKE[0].source) && !f->shadowed);
     f = find_file(&b, "generated/image/stock/rock.bimage");
@@ -1785,7 +1787,7 @@ static void test_classes(const char *fixture, const char *tmp)
           !has_note(&b, "edits generated/decls/snapeditorentitydef") && b.edit_files == 1);
     /* The builder block carries the derived facts; loading reads the salt and
      * recomputes the classes from the same files. */
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
     text = sh_mb_read_file(path, 1 << 20, NULL);
     CHECK(text && strstr((const char *)text, "\"salt\": \"alexrimp\"") &&
@@ -1797,7 +1799,7 @@ static void test_classes(const char *fixture, const char *tmp)
           !strstr((const char *)text, "\"generated/decls/snapeditorentitydef/mods/"));
     free(text);
     CHECK(sh_mb_load_folder(folder, &back));
-    if (back.errors) fprintf(stderr, "  classes reload: %s\n", back.first_cause);
+    if (back.errors) fprintf(stderr, "  classes reload: %s\n", sh_mb_first_cause(&back));
     CHECK(!strcmp(back.hash, b.hash) && !strcmp(back.id, SALT) && back.classes.adds == 13 && back.classes.borrows == 1 &&
           back.classes.surfaces == 1 && back.classes.replaces == 0 && back.classes.edits == 1 && back.classes.editor == 1 &&
           back.edit_files == 1);
@@ -1814,7 +1816,7 @@ static void test_classes(const char *fixture, const char *tmp)
                  "\t\tdamageGroups = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdamageScale = 1.5;\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
         CHECK(sh_mb_build(reg, SALT, &FAKE_RESOLVER, &back) && back.classes.replaces == 0 && back.classes.edits == 1 &&
               back.edit_files == 1);
-        if (back.errors) fprintf(stderr, "  coop refused: %s\n", back.first_cause);
+        if (back.errors) fprintf(stderr, "  coop refused: %s\n", sh_mb_first_cause(&back));
         CHECK(back.edits && strstr(back.edits, "\"op\":\"remove\",\"path\":[\"editorVars\"]") &&
               strstr(back.edits, "\"op\":\"remove\",\"path\":[\"edit\",\"masterWeaponList\"]") &&
               strstr(back.edits, "\"op\":\"set\",\"path\":[\"edit\",\"handsModelMPUseDoomHands\"]") &&
@@ -1823,7 +1825,7 @@ static void test_classes(const char *fixture, const char *tmp)
         sh_mb_free(&back);
         {
             /* An md6 collision model is placed by a name the game ships under generated/model/. */
-            char keys[2][SH_MB_REQUEST_MAX + 1];
+            char *keys[2] = {0};   /* malloc'd results; the test keeps them */
             CHECK(sh_mb_model_keys("md6/monsters/x/collision/death.lwo", keys, 2) == 2 &&
                   !strcmp(keys[0], "cooked/model/md6/monsters/x/collision/death.bmodel") &&
                   !strcmp(keys[1], "generated/model/md6/monsters/x/collision/death.bmodel"));
@@ -1872,7 +1874,7 @@ static void test_classes(const char *fixture, const char *tmp)
                  "\t\t\t}\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"smm_wounded\";\r\n\t\t\t\t}\r\n"
                  "\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
         CHECK(sh_mb_build(fsm, SALT, &FAKE_RESOLVER, &b) && b.edit_files == 1);
-        if (b.errors) fprintf(stderr, "  fsm refused: %s\n", b.first_cause);
+        if (b.errors) fprintf(stderr, "  fsm refused: %s\n", sh_mb_first_cause(&b));
         CHECK(b.edits && strstr(b.edits, "\"op\":\"keyed\",\"path\":[\"edit\",\"subGraphs\"],\"word\":\"subGraph\",\"name\":\"spiderMastermind\"") &&
               strstr(b.edits, "\"name\":\"spiderMastermind_attacks\"") && !strstr(b.edits, "smm_wounded") &&
               !strstr(b.edits, "\"op\":\"unkey\""));
@@ -1913,15 +1915,14 @@ static void test_rekey(void)
         CHECK(sh_mb_rekey_text("{ inherit = \"mods/other/x\"; }", 29, "cyber-probe", "k", &t, &n) == 0 && !t && !n);
     }
     /* Paths: a folder segment right after "mods", written or cooked; never the leaf. */
-    CHECK(sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe/probe.decl", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 &&
+    CHECK(HO(out, sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe/probe.decl", "cyber-probe", "cp_k3j9", HO_P(0))) == 1 &&
           !strcmp(out, "generated/decls/entitydef/mods/cp_k3j9/probe.decl"));
-    CHECK(sh_mb_rekey_path("generated/image/mods/cyber_probe/fx/glow.bimage", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 &&
+    CHECK(HO(out, sh_mb_rekey_path("generated/image/mods/cyber_probe/fx/glow.bimage", "cyber-probe", "cp_k3j9", HO_P(0))) == 1 &&
           !strcmp(out, "generated/image/mods/cp_k3j9/fx/glow.bimage"));
-    CHECK(sh_mb_rekey_path("mods/Cyber-Probe/", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 && !strcmp(out, "mods/cp_k3j9/"));
-    CHECK(sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe", "cyber-probe", "cp_k3j9", out, sizeof out) == 0);
-    CHECK(sh_mb_rekey_path("generated/decls/entitydef/cyber-probe/x.decl", "cyber-probe", "cp_k3j9", out, sizeof out) == 0 &&
-          !strcmp(out, "generated/decls/entitydef/cyber-probe/x.decl"));
-    CHECK(sh_mb_rekey_path("a/mods/cyber-probe/b", "cyber-probe", "cp_k3j9", out, 8) == -1);
+    CHECK(HO(out, sh_mb_rekey_path("mods/Cyber-Probe/", "cyber-probe", "cp_k3j9", HO_P(0))) == 1 && !strcmp(out, "mods/cp_k3j9/"));
+    CHECK(HO(out, sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe", "cyber-probe", "cp_k3j9", HO_P(0))) == 0);
+    CHECK(HO(out, sh_mb_rekey_path("generated/decls/entitydef/cyber-probe/x.decl", "cyber-probe", "cp_k3j9", HO_P(0))) == 0 && !out[0]);
+    CHECK(HO(out, sh_mb_rekey_path("a/mods/cyber-probe/b", "cyber-probe", "cp_k3j9", HO_P(0))) == 1 && !strcmp(out, "a/mods/cp_k3j9/b"));
 
 }
 
@@ -1981,7 +1982,7 @@ static void test_registries(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_registries, &b);
     CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"conductor\":[\"mods/alexrimp/imp_enc\"]") &&
           !b.edits);
-    if (b.errors || !b.registries) fprintf(stderr, "  registries: %s\n", b.registries ? b.registries : b.first_cause);
+    if (b.errors || !b.registries) fprintf(stderr, "  registries: %s\n", b.registries ? b.registries : sh_mb_first_cause(&b));
     sh_mb_free(&b);
 }
 

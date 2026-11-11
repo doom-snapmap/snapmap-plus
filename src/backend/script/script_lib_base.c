@@ -121,15 +121,14 @@ static int sb_print(lua_State *L)
 
 static int sb_warn(lua_State *L)
 {
-    char file[SHS_PATH_CAP];
+    char *file = NULL;
     int ln = 0, at;
     join_args(L);
     at = lua_gettop(L);
-    luaL_where(L, 1);
-    sh_script_split_where(lua_tostring(L, -1), file, sizeof file, &ln);
-    lua_pop(L, 1);
-    if (file[0] && ln) lua_pushfstring(L, "Warning: %s line %d: %s", file, ln, lua_tostring(L, at));
+    sh_script_where_line(L, 1, &file, &ln);
+    if (file && ln) lua_pushfstring(L, "Warning: %s line %d: %s", file, ln, lua_tostring(L, at));
     else lua_pushfstring(L, "Warning: %s", lua_tostring(L, at));
+    free(file);
     shs_log(shs_mod_of(L), lua_tostring(L, -1));
     return 0;
 }
@@ -241,9 +240,9 @@ static int sb_require(lua_State *L)
     shs_mod *m = shs_mod_of(L);
     size_t n, i;
     const char *name = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
-    char rel[96];
+    char *rel;
     int status;
-    if (!name || !n || n > 64)
+    if (!name || !n)
         return sh_script_refuse(L, "\"require\" needs the name of a file in scripts\\lib, as require(\"fsm\") for scripts\\lib\\fsm.lua");
     for (i = 0; i < n; i++) {
         char c = name[i];
@@ -262,9 +261,10 @@ static int sb_require(lua_State *L)
     lua_pushvalue(L, 1);
     lua_pushlightuserdata(L, (void *)m);
     lua_rawset(L, 2);                                               /* loading */
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "lib/%s.lua", name);
-    rel[sizeof rel - 1] = 0;
+    lua_pushfstring(L, "lib/%s.lua", name);   /* held on the stack while it loads */
+    rel = (char *)lua_tostring(L, -1);
     status = shs_load_file(L, m, rel);
+    lua_remove(L, -2);
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
         lua_pushvalue(L, 1); lua_pushnil(L); lua_rawset(L, 2);
@@ -393,23 +393,23 @@ static double yielded_wait(lua_State *co, int nres)
 static int co_error(lua_State *L, lua_State *co, int status)
 {
     shs_mod *m = shs_mod_of(L);
-    char file[128];
+    char *file = NULL;
     int line = 0;
-    file[0] = 0;
     if (status == LUA_ERRMEM && m->stop < 0) m->stop = SH_SCRIPT_STOP_MEMORY;
     if (m->stop >= 0) {
         /* a stop cannot be caught, so it reaches the message handler: record
          * the coroutine's line, which L's stack does not hold */
-        if (!m->err_file[0]) {
-            if (lua_isstring(co, -1)) sh_script_split_where(lua_tostring(co, -1), m->err_file, sizeof m->err_file, &m->err_line);
-            if (!m->err_file[0]) shs_where_from(m, co, 0);
+        if (!m->err_file) {
+            if (lua_isstring(co, -1)) shs_where_msg(m, lua_tostring(co, -1));
+            if (!m->err_file) shs_where_from(m, co, 0);
         }
         return shs_raise_stop(L, 1);
     }
     /* an ordinary error may be caught by the script: carry the coroutine's
      * line in the message itself */
-    if (lua_type(co, -1) == LUA_TSTRING) sh_script_split_where(lua_tostring(co, -1), file, sizeof file, &line);
-    if (!file[0] && lua_type(co, -1) == LUA_TSTRING) {
+    if (lua_type(co, -1) == LUA_TSTRING) sh_script_split_where(lua_tostring(co, -1), &file, &line);
+    free(file);
+    if (!file && lua_type(co, -1) == LUA_TSTRING) {
         lua_Debug ar;
         int level;
         for (level = 0; lua_getstack(co, level, &ar); level++) {

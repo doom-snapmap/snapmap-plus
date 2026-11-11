@@ -17,10 +17,6 @@
 #define SHS_REG_NAMES    "snapmap-plus.names"      /* the last names sh_script_check_name resolved */
 #define SHS_NAME_SLOTS   8
 
-/* A script's path as the log names it (scripts, lib, the file name): a
- * file name is at most 255 characters on Windows file systems. */
-#define SHS_PATH_CAP 512
-
 #define SHS_MT_ENTITY "entity"
 #define SHS_MT_TIMER  "timer"
 #define SHS_MT_GAME   "game name"
@@ -48,7 +44,7 @@ typedef struct shs_timer {
 
 typedef struct shs_mod {
     char salt[SH_SCRIPT_SALT_CAP];
-    char name[SH_SCRIPT_MODNAME_CAP];
+    char *name;              /* the mod's display name, malloc'd, any length */
     int  status;             /* SH_SCRIPT_NONE .. SH_SCRIPT_ENDED */
     int  in_map;             /* listed by the current map */
     lua_State *L;
@@ -59,9 +55,9 @@ typedef struct shs_mod {
     int       charging;      /* inside a delivery */
     long long pattern_steps; /* pattern steps since the clock was last read */
     long long wall_start;    /* QueryPerformanceCounter at the delivery's start */
-    char      last_src[SHS_PATH_CAP];  /* the last line the clock hook saw, for a stop with no line */
+    char     *last_src;      /* the file of the last line the clock hook saw, malloc'd, NULL for none */
     int       last_line;
-    char      err_file[SHS_PATH_CAP];  /* where the current error was raised, by the message handler */
+    char     *err_file;      /* where the current error was raised, by the message handler; malloc'd or NULL */
     int       err_line;
 
     /* this map: the hooks' slot (its queue and its handles), the entry files */
@@ -131,5 +127,8 @@ void shs_call_reset(shs_mod *m);
 /* Record the innermost script line on L's stack, from `first` up, as where
  * the current error was raised (unless one is recorded already). */
 void shs_where_from(shs_mod *m, lua_State *L, int first);
+/* m->err_file from a Lua message's "scripts\x.lua:N:" when it names the file whole. */
+void shs_where_msg(shs_mod *m, const char *msg);
+
 
 #endif

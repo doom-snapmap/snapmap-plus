@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../common/text.h"
+#include "../common/wide_path.h"
 #include "modstock.h"
 #include "modbundle.h"
 #include "raw_deflate.h"
@@ -44,7 +46,7 @@ enum { MST_NEW = 0, MST_READY = 1, MST_FAILED = -1 };
 
 static SRWLOCK g_lock = SRWLOCK_INIT;           /* the table and the root */
 static volatile LONG g_state = MST_NEW;
-static char g_root[MAX_PATH * 4];
+static char *g_root;                            /* the game's folder (malloc'd), or NULL */
 static mst_row *g_rows;
 static uint32_t g_nrows;
 static char *g_names;
@@ -54,7 +56,7 @@ static uint32_t *g_by_size;                     /* row indices sorted by (size, 
 static unsigned char *g_slice_dup;              /* 1: an earlier row of g_by_size names the same slice */
 static HANDLE g_files[MST_CONTAINERS][2];
 static double g_load_ms;
-static char g_cause[160];
+static char *g_cause;                           /* why the table is unavailable (malloc'd), or NULL */
 
 static SRWLOCK g_memo_lock = SRWLOCK_INIT;      /* the per-row SHA-256 memo */
 static unsigned char (*g_sha)[32];
@@ -136,17 +138,36 @@ static int mst_unhex(const char *s, unsigned char d[32])
     return 1;
 }
 
-static void mst_default_root(char *out, size_t cap)
+/* The folder of the running executable (malloc'd UTF-8), or NULL. */
+static char *mst_default_root(void)
 {
-    wchar_t exe[MAX_PATH * 2];
-    DWORD n = GetModuleFileNameW(NULL, exe, (DWORD)(sizeof exe / sizeof exe[0]));
-    wchar_t *slash;
-    out[0] = 0;
-    if (!n || n >= sizeof exe / sizeof exe[0]) return;
+    DWORD cap = MAX_PATH, n;
+    wchar_t *exe = NULL, *slash;
+    char *out;
+    /* GetModuleFileNameW fills the buffer when the path does not fit: grow
+     * until it does (a long-path executable). */
+    for (;;) {
+        wchar_t *grown = (wchar_t *)realloc(exe, (size_t)cap * sizeof *exe);
+        if (!grown) { free(exe); return NULL; }
+        exe = grown;
+        n = GetModuleFileNameW(NULL, exe, cap);
+        if (!n) { free(exe); return NULL; }
+        if (n < cap) break;
+        if (cap >= (DWORD)SH_WPATH_MAX) { free(exe); return NULL; }
+        cap *= 2;
+    }
     slash = wcsrchr(exe, L'\\');
-    if (!slash) return;
+    if (!slash) { free(exe); return NULL; }
     *slash = 0;
-    if (!WideCharToMultiByte(CP_UTF8, 0, exe, -1, out, (int)cap, NULL, NULL)) out[0] = 0;
+    out = sh_mb_utf8(exe);
+    free(exe);
+    return out;
+}
+
+/* <root>\base\<name> (malloc'd), or NULL. */
+static char *mst_base_path(const char *name, const char *ext)
+{
+    return sh_textf("%s\\base\\%s.%s", g_root ? g_root : "", name, ext);
 }
 
 static HANDLE mst_open_read(const char *path_utf8, int random)
@@ -351,36 +372,37 @@ static unsigned char *mst_read_whole(const char *path, size_t max, size_t *len, 
 /* Called with g_lock held exclusively. */
 static void mst_load_locked(void)
 {
-    char path[MAX_PATH * 4 + 64];
+    char *path;
     size_t rows_cap = 0, names_cap = 0;
     double t0 = mst_now_ms();
     int c, any = 0;
     uint32_t i;
-    if (!g_root[0]) mst_default_root(g_root, sizeof g_root);
+    if (!g_root || !g_root[0]) { free(g_root); g_root = mst_default_root(); }
     for (c = 0; c < MST_CONTAINERS; c++) {
         size_t len = 0;
         unsigned char *d;
         int ok;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\base\\%s.pindex", g_root, MST_CONTAINER[c]);
-        d = mst_read_whole(path, MST_MAX_PINDEX, &len, 0);
+        path = mst_base_path(MST_CONTAINER[c], "pindex");
+        d = path ? mst_read_whole(path, MST_MAX_PINDEX, &len, 0) : NULL;
+        free(path);
         if (!d) continue;
         ok = mst_parse_pindex(c, d, len, &rows_cap, &names_cap);
         free(d);
-        if (ok < 0) { strcpy_s(g_cause, sizeof g_cause, "out of memory reading the installed indexes"); goto fail; }
-        if (!ok) { _snprintf_s(g_cause, sizeof g_cause, _TRUNCATE, "%s.pindex does not read as an index", MST_CONTAINER[c]); goto fail; }
+        if (ok < 0) { sh_text_set(&g_cause, "out of memory reading the installed indexes"); goto fail; }
+        if (!ok) { sh_text_set(&g_cause, "%s.pindex does not read as an index", MST_CONTAINER[c]); goto fail; }
         any = 1;
     }
     if (!any) {
-        _snprintf_s(g_cause, sizeof g_cause, _TRUNCATE, "no installed index under %.100s\\base", g_root);
+        sh_text_set(&g_cause, "no installed index under %s\\base", g_root ? g_root : "the game's folder");
         goto fail;
     }
     g_by_name = (uint32_t *)malloc(sizeof(uint32_t) * (g_nrows ? g_nrows : 1));
     g_by_size = (uint32_t *)malloc(sizeof(uint32_t) * (g_nrows ? g_nrows : 1));
-    if (!g_by_name || !g_by_size) { strcpy_s(g_cause, sizeof g_cause, "out of memory sorting the installed indexes"); goto fail; }
+    if (!g_by_name || !g_by_size) { sh_text_set(&g_cause, "out of memory sorting the installed indexes"); goto fail; }
     for (i = 0; i < g_nrows; i++) g_by_name[i] = g_by_size[i] = i;
     qsort(g_by_name, g_nrows, sizeof(uint32_t), mst_name_order);
     qsort(g_by_size, g_nrows, sizeof(uint32_t), mst_size_order);
-    if (!mst_mark_slice_dups()) { strcpy_s(g_cause, sizeof g_cause, "out of memory sorting the installed indexes"); goto fail; }
+    if (!mst_mark_slice_dups()) { sh_text_set(&g_cause, "out of memory sorting the installed indexes"); goto fail; }
     g_load_ms = mst_now_ms() - t0;
     InterlockedExchange(&g_state, MST_READY);
     {
@@ -395,9 +417,9 @@ fail:
     mst_free_table();
     InterlockedExchange(&g_state, MST_FAILED);
     {
-        char line[256];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: stock: installed content unavailable: %s", g_cause);
-        backend_log(line);
+        char *line = sh_textf("MODS: stock: installed content unavailable: %s", g_cause ? g_cause : "out of memory");
+        backend_log(line ? line : "MODS: stock: installed content unavailable");
+        free(line);
     }
 }
 
@@ -420,10 +442,9 @@ static HANDLE mst_archive(const mst_row *r)
     AcquireSRWLockExclusive(&g_lock);
     h = g_files[r->container][r->selector];
     if (!h) {
-        char path[MAX_PATH * 4 + 64];
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\base\\%s.%s", g_root, MST_CONTAINER[r->container],
-                    r->selector ? "patch" : "resources");
-        h = mst_open_read(path, 1);
+        char *path = mst_base_path(MST_CONTAINER[r->container], r->selector ? "patch" : "resources");
+        h = path ? mst_open_read(path, 1) : INVALID_HANDLE_VALUE;
+        free(path);
         g_files[r->container][r->selector] = h;
     }
     ReleaseSRWLockExclusive(&g_lock);
@@ -512,14 +533,15 @@ static uint32_t mst_name_range(const char *name, uint32_t *count)
 
 /* ------------------------------------------------------------- loose files ---- */
 
-static int mst_loose_path(const char *source, int which, char *out, size_t cap)
+/* The loose file of `source` under the game's folder (which 1) or its base
+ * folder (which 0), malloc'd; NULL for a name that is not a stock source. */
+static char *mst_loose_path(const char *source, int which)
 {
-    char cause[SH_MB_CAUSE_MAX];
-    char *p;
-    if (!sh_mb_check_source(source, cause, sizeof cause)) return 0;
-    if (_snprintf_s(out, cap, _TRUNCATE, which ? "%s\\%s" : "%s\\base\\%s", g_root, source) < 0) return 0;
+    char *out, *p;
+    if (!sh_mb_check_source(source, NULL)) return NULL;
+    if (!(out = sh_textf(which ? "%s\\%s" : "%s\\base\\%s", g_root ? g_root : "", source))) return NULL;
     for (p = out; *p; p++) if (*p == '/') *p = '\\';
-    return 1;
+    return out;
 }
 
 /* Size of a loose regular file, or -1. */
@@ -544,59 +566,58 @@ static int mst_loose_sha(const char *path, char hex[SH_MB_HASH_HEX + 1], unsigne
 
 /* --------------------------------------------------------------- the ops ---- */
 
-static int mst_copy_source(const char *name, char *out, size_t cap)
+/* *out = a copy of `name` when it is a stock source. */
+static int mst_copy_source(const char *name, char **out)
 {
-    char cause[SH_MB_CAUSE_MAX];
-    if (!sh_mb_check_source(name, cause, sizeof cause) || strlen(name) >= cap) return 0;
-    strcpy_s(out, cap, name);
-    return 1;
+    if (!sh_mb_check_source(name, NULL)) return 0;
+    return (*out = sh_text(name)) != NULL;
 }
 
 /* Bytes hashing to `want` at exactly `name`: every row of that name and size
  * (both archives, which hold different bytes under some names), then a loose
- * file. 1 with source filled, 0 when none. */
+ * file. 1 with *source (malloc'd), 0 when none. */
 static int mst_match_at(const char *name, unsigned long long size, const unsigned char want[32], const char *sha256,
-                        char *source, size_t source_cap)
+                        char **source)
 {
     unsigned char got[32];
     uint32_t first, count, i;
-    char path[MAX_PATH * 4 + 64];
     int which;
     first = mst_name_range(name, &count);
     for (i = first; i < first + count; i++) {
         uint32_t r = g_by_name[i];
         if (g_rows[r].size != size || !mst_name_eq(g_names + g_rows[r].name, name)) continue;
         if (mst_row_sha(r, got) && !memcmp(got, want, 32))
-            return mst_copy_source(g_names + g_rows[r].name, source, source_cap);
+            return mst_copy_source(g_names + g_rows[r].name, source);
     }
     for (which = 0; which < 2; which++) {
-        char hex[SH_MB_HASH_HEX + 1];
+        char hex[SH_MB_HASH_HEX + 1], *path = mst_loose_path(name, which);
         unsigned long long n = 0;
-        if (!mst_loose_path(name, which, path, sizeof path) || mst_loose_size(path) != (long long)size) continue;
-        if (mst_loose_sha(path, hex, &n) && n == size && !strcmp(hex, sha256))
-            return mst_copy_source(name, source, source_cap);
+        int same = path && mst_loose_size(path) == (long long)size && mst_loose_sha(path, hex, &n) && n == size &&
+                   !strcmp(hex, sha256);
+        free(path);
+        if (same) return mst_copy_source(name, source);
     }
     return 0;
 }
 
-int sh_modstock_match(const char *request, unsigned long long size, const char *sha256,
-                      char *source, size_t source_cap)
+int sh_modstock_match(const char *request, unsigned long long size, const char *sha256, char **source)
 {
     unsigned char want[32], got[32];
     uint32_t i;
-    char stripped[SH_MB_REQUEST_MAX + 1];
+    char *stripped;
     uint32_t ext;
-    if (source && source_cap) source[0] = 0;
+    if (source) *source = NULL;
     if (!request || !sha256 || !source || !mst_unhex(sha256, want) || !size) return SH_MB_STOCK_ABSENT;
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     /* The file's own path. */
-    if (mst_match_at(request, size, want, sha256, source, source_cap)) return SH_MB_STOCK_OK;
+    if (mst_match_at(request, size, want, sha256, source)) return SH_MB_STOCK_OK;
     /* The path with its mods/<salt>/ segment removed: a game file the author
      * copied under the mod's own folder is a borrow of the game's file there. */
-    if (sh_mb_strip_key(request, stripped, sizeof stripped) &&
-        mst_match_at(stripped, size, want, sha256, source, source_cap))
-        return SH_MB_STOCK_OK;
-    if (source_cap) source[0] = 0;
+    if ((stripped = sh_mb_strip_key(request)) != NULL) {
+        int hit = mst_match_at(stripped, size, want, sha256, source);
+        free(stripped);
+        if (hit) return SH_MB_STOCK_OK;
+    }
     /* A renamed copy: rows of the same decoded size and extension, hashed
      * lazily in (size, extension, archive, name) order until one matches,
      * every candidate (each slice is hashed once per process, so the game's
@@ -616,8 +637,7 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
             if (m->size != size || m->ext != ext) break;
             /* One slice can be named by several rows; hash it once. */
             if (g_slice_dup[g_by_size[i]]) continue;
-            if (mst_row_sha(g_by_size[i], got) && !memcmp(got, want, 32) &&
-                mst_copy_source(g_names + m->name, source, source_cap))
+            if (mst_row_sha(g_by_size[i], got) && !memcmp(got, want, 32) && mst_copy_source(g_names + m->name, source))
                 return SH_MB_STOCK_OK;
         }
     }
@@ -627,7 +647,6 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
 int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size)
 {
     uint32_t first, count, i;
-    char path[MAX_PATH * 4 + 64];
     int which;
     if (sha256) sha256[0] = 0;
     if (size) *size = 0;
@@ -644,8 +663,10 @@ int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], un
         return SH_MB_STOCK_OK;
     }
     for (which = 0; which < 2; which++) {
-        if (!mst_loose_path(source, which, path, sizeof path) || mst_loose_size(path) < 0) continue;
-        if (mst_loose_sha(path, sha256, size)) return SH_MB_STOCK_OK;
+        char *path = mst_loose_path(source, which);
+        int ok = path && mst_loose_size(path) >= 0 && mst_loose_sha(path, sha256, size);
+        free(path);
+        if (ok) return SH_MB_STOCK_OK;
     }
     return SH_MB_STOCK_ABSENT;
 }
@@ -654,7 +675,7 @@ int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], un
  * loose file (path filled), -1 when nothing matches; *exists tells whether
  * the source exists at all. */
 static long long mst_locate(const char *source, const unsigned char want[32], const char *sha256,
-                            char *loose, size_t loose_cap, int *exists, unsigned long long *size)
+                            int *exists, unsigned long long *size)
 {
     uint32_t first, count, i;
     int which;
@@ -668,11 +689,14 @@ static long long mst_locate(const char *source, const unsigned char want[32], co
         if (mst_row_sha(r, d) && !memcmp(d, want, 32)) { *size = g_rows[r].size; return r; }
     }
     for (which = 0; which < 2; which++) {
-        char hex[SH_MB_HASH_HEX + 1];
+        char hex[SH_MB_HASH_HEX + 1], *loose = mst_loose_path(source, which);
         unsigned long long n = 0;
-        if (!mst_loose_path(source, which, loose, loose_cap) || mst_loose_size(loose) < 0) continue;
+        int same;
+        if (!loose || mst_loose_size(loose) < 0) { free(loose); continue; }
         *exists = 1;
-        if (mst_loose_sha(loose, hex, &n) && !strcmp(hex, sha256)) { *size = n; return -2; }
+        same = mst_loose_sha(loose, hex, &n) && !strcmp(hex, sha256);
+        free(loose);
+        if (same) { *size = n; return -2; }
     }
     return -1;
 }
@@ -680,13 +704,12 @@ static long long mst_locate(const char *source, const unsigned char want[32], co
 int sh_modstock_verify(const char *source, const char *sha256, unsigned long long *size)
 {
     unsigned char want[32];
-    char loose[MAX_PATH * 4 + 64];
     unsigned long long n = 0;
     int exists = 0;
     if (size) *size = 0;
     if (!source || !mst_unhex(sha256, want)) return SH_MB_STOCK_ABSENT;
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
-    if (mst_locate(source, want, sha256, loose, sizeof loose, &exists, &n) == -1)
+    if (mst_locate(source, want, sha256, &exists, &n) == -1)
         return exists ? SH_MB_STOCK_MISMATCH : SH_MB_STOCK_ABSENT;
     if (size) *size = n;
     return SH_MB_STOCK_OK;
@@ -695,7 +718,7 @@ int sh_modstock_verify(const char *source, const char *sha256, unsigned long lon
 int sh_modstock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len)
 {
     unsigned char want[32], got[32];
-    char loose[MAX_PATH * 4 + 64], hex[SH_MB_HASH_HEX + 1];
+    char hex[SH_MB_HASH_HEX + 1];
     uint32_t first, count, i;
     int exists = 0, which;
     if (bytes) *bytes = NULL;
@@ -730,9 +753,11 @@ int sh_modstock_read(const char *source, const char *sha256, unsigned char **byt
     for (which = 0; which < 2; which++) {
         unsigned char *plain;
         size_t n = 0;
-        if (!mst_loose_path(source, which, loose, sizeof loose) || mst_loose_size(loose) < 0) continue;
+        char *loose = mst_loose_path(source, which);
+        if (!loose || mst_loose_size(loose) < 0) { free(loose); continue; }
         exists = 1;
         plain = mst_read_whole(loose, (size_t)SH_MODSTOCK_MAX_SLICE, &n, 1);
+        free(loose);
         if (!plain) continue;
         sh_mb_sha256_hex(plain, n, hex);
         InterlockedAdd64(&g_bytes_hashed, (LONG64)n);
@@ -748,15 +773,18 @@ int sh_modstock_read(const char *source, const char *sha256, unsigned char **byt
 int sh_modstock_exists(const char *path)
 {
     uint32_t first, count, i;
-    char loose[MAX_PATH * 4 + 64];
     int which;
     if (!path || !path[0]) return 0;
     if (!mst_ready()) return -1;
     first = mst_name_range(path, &count);
     for (i = first; i < first + count; i++)
         if (mst_name_eq(g_names + g_rows[g_by_name[i]].name, path)) return 1;
-    for (which = 0; which < 2; which++)
-        if (mst_loose_path(path, which, loose, sizeof loose) && mst_loose_size(loose) >= 0) return 1;
+    for (which = 0; which < 2; which++) {
+        char *loose = mst_loose_path(path, which);
+        int here = loose && mst_loose_size(loose) >= 0;
+        free(loose);
+        if (here) return 1;
+    }
     return 0;
 }
 
@@ -764,7 +792,6 @@ int sh_modstock_container(const char *source, const char *sha256, char *out, siz
 {
     uint32_t first, count, i;
     unsigned char want[32];
-    char loose[MAX_PATH * 4 + 64];
     int seen[MST_CONTAINERS] = { 0 }, which, c, kinds = 0;
     if (out && cap) out[0] = 0;
     if (!source || !source[0] || !out || !cap) return SH_MB_STOCK_ABSENT;
@@ -788,11 +815,12 @@ int sh_modstock_container(const char *source, const char *sha256, char *out, siz
     }
     for (c = 0; c < MST_CONTAINERS; c++)
         if (seen[c]) { strncpy_s(out, cap, MST_CONTAINER[c], _TRUNCATE); return SH_MB_STOCK_OK; }
-    for (which = 0; which < 2; which++)
-        if (mst_loose_path(source, which, loose, sizeof loose) && mst_loose_size(loose) >= 0) {
-            strncpy_s(out, cap, "loose", _TRUNCATE);
-            return SH_MB_STOCK_OK;
-        }
+    for (which = 0; which < 2; which++) {
+        char *loose = mst_loose_path(source, which);
+        int here = loose && mst_loose_size(loose) >= 0;
+        free(loose);
+        if (here) { strncpy_s(out, cap, "loose", _TRUNCATE); return SH_MB_STOCK_OK; }
+    }
     return SH_MB_STOCK_ABSENT;
 }
 
@@ -803,6 +831,8 @@ int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *p
     uint32_t r;
     if (!prefix || !fn) return SH_MB_STOCK_ABSENT;
     n = strlen(prefix);
+    /* The installed index holds no name longer than its field (MST_MAX_FIELD):
+     * no row starts with a longer prefix. */
     if (n > MST_MAX_FIELD) return SH_MB_STOCK_OK;
     for (i = 0; i < n; i++) folded[i] = mst_fold(prefix[i]);
     folded[n] = 0;
@@ -814,8 +844,8 @@ int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *p
 
 /* ------------------------------------------------------- registration ---- */
 
-static int op_match(void *c, const char *request, unsigned long long size, const char *sha, char *src, size_t cap)
-{ (void)c; return sh_modstock_match(request, size, sha, src, cap); }
+static int op_match(void *c, const char *request, unsigned long long size, const char *sha, char **src)
+{ (void)c; return sh_modstock_match(request, size, sha, src); }
 static int op_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
 { (void)c; return sh_modstock_identify(source, sha, size); }
 static int op_verify(void *c, const char *source, const char *sha, unsigned long long *size)
@@ -844,9 +874,10 @@ void sh_modstock_set_install(const char *doom_root)
 {
     AcquireSRWLockExclusive(&g_lock);
     mst_free_table();
-    if (doom_root && doom_root[0]) strncpy_s(g_root, sizeof g_root, doom_root, _TRUNCATE);
-    else g_root[0] = 0;
-    g_cause[0] = 0;
+    free(g_root);
+    g_root = doom_root && doom_root[0] ? sh_text(doom_root) : NULL;
+    free(g_cause);
+    g_cause = NULL;
     InterlockedExchange(&g_state, MST_NEW);
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -866,7 +897,14 @@ void sh_modstock_get_stats(sh_modstock_stats *out)
     out->slices_hashed = (unsigned)InterlockedCompareExchange(&g_slices_hashed, 0, 0);
     out->bytes_hashed = (unsigned long long)InterlockedCompareExchange64(&g_bytes_hashed, 0, 0);
     out->reads = (unsigned)InterlockedCompareExchange(&g_reads, 0, 0);
-    strcpy_s(out->cause, sizeof out->cause, g_cause);
+    out->cause = sh_text(g_cause ? g_cause : "");
+}
+
+void sh_modstock_stats_free(sh_modstock_stats *s)
+{
+    if (!s) return;
+    free(s->cause);
+    s->cause = NULL;
 }
 
 void sh_modstock_reset(void)

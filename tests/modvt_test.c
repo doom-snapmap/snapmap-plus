@@ -18,6 +18,7 @@
  * decodes from them matches the recorded addresses and the signatures it is
  * checked against. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,8 +65,8 @@ static int log_count(const char *needle)
 
 typedef struct fake {
     int ready;
-    char name[SH_MODVT_SLOTS][SH_MODVT_NAME_MAX];
-    char path[SH_MODVT_SLOTS][SH_MODVT_PATH_MAX];
+    char name[SH_MODVT_SLOTS][HO_TEXT];
+    char path[SH_MODVT_SLOTS][HO_TEXT];
     uint8_t rec[SH_MODVT_SLOTS][REC_BYTES];
     int cache_vmtr[4], cache_unique_vmtrs[4];     /* first int: the cache's flavor */
     uint8_t ptimage[SH_MODVT_SLOTS][8];           /* stands for each record's page-table image */
@@ -228,9 +229,9 @@ static int build_folder(const char *folder, char *hash_out)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
-    int ok = sh_mb_build(folder, NULL, &r, &b) == 1 && b.errors == 0 && sh_mb_write(&b, folder, cause, sizeof cause) == 1;
-    if (!ok) printf("    build %s: %u error(s): %s\n", folder, b.errors, b.errors ? b.first_cause : "");
+    char cause[HO_TEXT];
+    int ok = sh_mb_build(folder, NULL, &r, &b) == 1 && b.errors == 0 && HO(cause, sh_mb_write(&b, folder, HO_P(0))) == 1;
+    if (!ok) printf("    build %s: %u error(s): %s\n", folder, b.errors, b.errors ? sh_mb_first_cause(&b) : "");
     if (hash_out) strcpy_s(hash_out, 65, b.hash);
     sh_mb_free(&b);
     return ok;
@@ -241,7 +242,7 @@ static const char *build_cause(const char *folder, char *cause, size_t cap)
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
     sh_mb_build(folder, NULL, &r, &b);
-    strcpy_s(cause, cap, b.errors ? b.first_cause : "");
+    strcpy_s(cause, cap, b.errors ? sh_mb_first_cause(&b) : "");
     sh_mb_free(&b);
     return cause;
 }
@@ -262,25 +263,25 @@ static void listener(void) { g_listener_calls++; }
 
 static void member_rule(void)
 {
-    char fam[SH_MODVT_NAME_MAX];
+    char fam[HO_TEXT];
     int m = 0;
     printf("-- the member path rule\n");
-    CHECK(sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.mega2", fam, sizeof fam, &m) == 1 &&
+    CHECK(HO(fam, sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.mega2", HO_P(0), &m)) == 1 &&
           !strcmp(fam, "mods/rctest00/fam") && m == 1);
-    CHECK(sh_mb_vt_member("virtualtextures/mods/alexpink/skin/body_sq16.mega2", fam, sizeof fam, &m) == 1 &&
+    CHECK(HO(fam, sh_mb_vt_member("virtualtextures/mods/alexpink/skin/body_sq16.mega2", HO_P(0), &m)) == 1 &&
           !strcmp(fam, "mods/alexpink/skin/body") && m == 16);
-    CHECK(sh_mb_vt_member("VirtualTextures/Mods/rctest00/Fam_SQ3.MEGA2", NULL, 0, &m) == 1 && m == 3);
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq17.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq0.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq01.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_q1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/fam_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/_vmtr_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/my_vmtr_sq1.mega2", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.pages", NULL, 0, NULL));
-    CHECK(!sh_mb_vt_member("models/mods/rctest00/fam_sq1.mega2", NULL, 0, NULL));
+    CHECK(sh_mb_vt_member("VirtualTextures/Mods/rctest00/Fam_SQ3.MEGA2", NULL, &m) == 1 && m == 3);
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq17.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq0.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq01.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/_sq1.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_q1.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/fam_sq1.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/_vmtr_sq1.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/my_vmtr_sq1.mega2", NULL, NULL));
+    CHECK(!sh_mb_vt_member("virtualtextures/mods/rctest00/fam_sq1.pages", NULL, NULL));
+    CHECK(!sh_mb_vt_member("models/mods/rctest00/fam_sq1.mega2", NULL, NULL));
     CHECK(sh_mb_extension_allowed("virtualtextures/mods/rctest00/fam_sq2.mega2"));
     CHECK(!sh_mb_extension_allowed("models/mods/rctest00/fam_sq2.mega2"));
     CHECK(!sh_mb_extension_allowed("virtualtextures/mods/rctest00/fam.pages"));
@@ -376,7 +377,7 @@ static void decode_helpers(void)
 
 static void families(void)
 {
-    char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], cause[HO_TEXT];
     char hash_a[65], hash_a2[65];
     sh_modvt_family *fams = NULL;
     sh_modvt_result res;

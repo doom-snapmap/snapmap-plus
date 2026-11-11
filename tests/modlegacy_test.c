@@ -13,6 +13,7 @@
  * the repository (their packages hold game files); set SH_MODLEGACY_FIXTURES
  * to their folder to add the integration pass; it is skipped otherwise. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,7 +147,7 @@ static char *member_text(const sh_json_object *o, const char *key)
     return out;
 }
 
-int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder, char **first_cause)
 {
     char path[MAX_PATH * 2], hash[65], salted[MAX_PATH * 2];
     char *desc, *id, *version;
@@ -155,12 +156,12 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
     tb out = {0};
     int first = 1, i;
     g_build_calls++;
-    if (g_build_refuse) { strncpy_s(first_cause, n, "test builder refuses this folder", _TRUNCATE); return 0; }
+    if (g_build_refuse) { ho_set(first_cause, "test builder refuses this folder"); return 0; }
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
     desc = read_all(path, &len);
     if (!desc || !sh_json_parse_object(desc, len, 24, &o)) {
         free(desc);
-        strncpy_s(first_cause, n, "no readable mod.json", _TRUNCATE);
+        ho_set(first_cause, "no readable mod.json");
         return 0;
     }
     id = member_text(&o, "id");
@@ -201,7 +202,7 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
 
 /* The salting: a salt block written into mod.json (a package carries no mods/<id>/ names). */
 static unsigned g_salts;
-static int test_salter(const char *folder, const char *from, char salt_out[9], char *cause, size_t cap)
+static int test_salter(const char *folder, const char *from, char salt_out[9], char **cause)
 {
     char path[MAX_PATH * 2], salt[16];
     size_t len = 0, out_len = 0;
@@ -211,7 +212,7 @@ static int test_salter(const char *folder, const char *from, char salt_out[9], c
     _snprintf_s(salt, sizeof salt, _TRUNCATE, "t%07u", ++g_salts);
     out = text ? sh_mb_salt_modjson(text, len, from, salt, &out_len) : NULL;
     free(text);
-    if (!out || !write_all(path, out, out_len)) { free(out); strncpy_s(cause, cap, "test salting failed", _TRUNCATE); return -1; }
+    if (!out || !write_all(path, out, out_len)) { free(out); ho_set(cause, "test salting failed"); return -1; }
     free(out);
     strcpy_s(salt_out, 9, salt);
     return 1;

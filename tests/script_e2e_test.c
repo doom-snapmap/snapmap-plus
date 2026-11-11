@@ -23,6 +23,7 @@
  * fires its rock on the animation notify, and goes for melee up close).
  *
  *   script_e2e_test.exe <tests\fixtures\scripts> */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -158,7 +159,7 @@ static void test_play(void)
     CHECK(sh_script_started());
     CHECK(strstr(log_of("scprobe1"), "probe started\nmarker 1 spawned\n") != NULL);
     CHECK(sh_script_status("scrunaw1") == SH_SCRIPT_STOPPED);
-    CHECK(sh_script_stop_line("scrunaw1", stop, sizeof stop) == 1);
+    CHECK(HOS(stop, sh_script_stop_line_dup("scrunaw1")) == 1);
     printf("  %s\n", stop);
     {
         static const char want[] = "Script stopped: Script Runaway, scripts\\runaway.lua line ";
@@ -419,7 +420,7 @@ static void test_spin_heal(void)
     CHECK(sh_script_status("spinheal") == SH_SCRIPT_RUNNING);
     if (sh_script_status("spinheal") != SH_SCRIPT_RUNNING) {
         char stop[4096];
-        sh_script_stop_line("spinheal", stop, sizeof stop);
+        HOS(stop, sh_script_stop_line_dup("spinheal"));
         printf("  %s\n", stop);
     }
     sh_script_map_close(1);
@@ -620,7 +621,7 @@ static void test_brute(void)
     CHECK(sh_script_status("brutemod") == SH_SCRIPT_RUNNING);
     if (sh_script_status("brutemod") != SH_SCRIPT_RUNNING) {
         char stop[4096];
-        sh_script_stop_line("brutemod", stop, sizeof stop);
+        HOS(stop, sh_script_stop_line_dup("brutemod"));
         printf("  %s\n", stop);
     }
     sh_script_map_close(1);

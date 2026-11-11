@@ -19,6 +19,7 @@
  * 300 alive at once steered every frame, 5,000 alive steered in one frame,
  * every call on one that is gone answering nil or false and never stopping
  * the mod, and the launch records gone with them. */
+#include "heap_out.h"
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -321,7 +322,7 @@ static char g_stop[4096];
 static const char *stop_now(void)
 {
     g_stop[0] = 0;
-    sh_script_stop_line(SALT, g_stop, sizeof g_stop);
+    HOS(g_stop, sh_script_stop_line_dup(SALT));
     return g_stop;
 }
 

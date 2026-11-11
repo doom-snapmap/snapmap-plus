@@ -73,8 +73,6 @@ extern "C" {
 
 #define SH_MODVT_SLOTS      32      /* pointer table slots; records 1..31 */
 #define SH_MODVT_LAST_USED  30      /* the highest record a board takes */
-#define SH_MODVT_NAME_MAX   192
-#define SH_MODVT_PATH_MAX   (SH_MODVT_NAME_MAX + 24)
 #define SH_MODVT_FLAVOR     2       /* the flavor SetSource is given (it allocates no cache) */
 
 /* Record fields (equal on both renderers, build 13954591). The record stride
@@ -104,10 +102,11 @@ extern "C" {
 
 /* ------------------------------------------------------------------ boards */
 
+/* A board's names are heap strings of their own length (malloc'd). */
 typedef struct sh_modvt_family {
-    char name[SH_MODVT_NAME_MAX];        /* "mods/<salt>/<name>" */
-    char path[SH_MODVT_PATH_MAX];        /* "virtualtextures/mods/<salt>/<name>.pages" */
-    char bundle[SH_MODVT_NAME_MAX];      /* the mod's id, for the log and the notice */
+    char *name;                          /* "mods/<salt>/<name>" */
+    char *path;                          /* "virtualtextures/mods/<salt>/<name>.pages" */
+    char *bundle;                        /* the mod's id, for the log and the notice */
     char bundle_hash[65];
     unsigned members;                    /* bit N-1: member _sq<N> is served */
     uint64_t bytes;                      /* sum of the members' sizes */
@@ -115,8 +114,10 @@ typedef struct sh_modvt_family {
 
 /* The boards the loaded map serves, in index order (one per name; a name two
  * builds serve belongs to the first), in a table the caller frees with
- * free(). Returns how many (0 with *out NULL when there are none). */
+ * sh_modvt_families_free. Returns how many (0 with *out NULL when there are
+ * none). */
 int sh_modvt_collect(sh_modvt_family **out);
+void sh_modvt_families_free(sh_modvt_family *f, int n);
 
 /* ------------------------------------------------------------------ sync */
 
@@ -168,8 +169,9 @@ int sh_modvt_owned_count(void);
 /* Forget every board and every remembered material (tests only). */
 void sh_modvt_reset(void);
 
-/* The player's sentence when a board found no free record (under 256 bytes). */
-void sh_modvt_full_notice(char *out, size_t cap, const char *mod);
+/* The player's sentence when a board found no free record (malloc'd, the mod
+ * named whole). */
+char *sh_modvt_full_notice(const char *mod);
 
 /* ------------------------------------------------------------------ the two detours */
 

@@ -601,7 +601,7 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   /* its scripts are said, and their log kept for the Play that ran them; nothing written for authors */
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'scriptLog'], 'nothing written for authors');
   assert.equal(section(h, 'about').textContent, 'About Came with Hell Guard Arena Scripts ' + modsTab.scriptsShortText(3) + ' ' +
-                                                modsTab.PLACE_CLEANUP_TEXT);
+                                                modsTab.PLACE_KEEP_TEXT);
   assert.equal(h.nodes.modsFilesBtn.style.display, 'none');
   assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
   assert.equal(h.nodes.modsUninstallBtn.disabled, false);

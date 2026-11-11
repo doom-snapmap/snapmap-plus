@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <shlobj.h>
 
@@ -25,6 +26,7 @@
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "rawmap.h"       /* the rawmap the reload opens, and the save it writes */
+#include "../common/text.h"
 
 /* EditorFrame prologue steal window. The signature's own 33 bytes, every one of them whole and
  * position-independent (register/rsp/rbp only; no RIP-relative operand and no relative branch), so
@@ -273,8 +275,8 @@ static void ef_service_reload(void *editor)
 {
     ef_reload_request request;
     ef_idstr s;
-    char reason[1280];   /* the rawmap layer's refusal: a file name and the importer's cause */
-    char line[sizeof reason + 96];
+    char *reason = NULL;   /* the rawmap layer's refusal (malloc'd): a file name and the importer's cause */
+    char line[160];
     void *map;
     int rc = 0;
 
@@ -300,9 +302,11 @@ static void ef_service_reload(void *editor)
      * whose mods are missing goes to the rawmap hold (the download question, or a refusal naming
      * them) instead of LoadMap, where SnapMap's validator would throw the player out. This reads
      * the file, so a file moved or replaced since the click is refused here. */
-    if (!sh_rawmap_prepare_reload(reason, (int)sizeof reason)) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "EF: reload not started -- %s", reason);
-        backend_log(line);
+    if (!sh_rawmap_prepare_reload(&reason)) {
+        char *said = sh_textf("EF: reload not started -- %s", reason ? reason : "");
+        backend_log(said ? said : "EF: reload not started");
+        free(said);
+        free(reason);
         return;
     }
 

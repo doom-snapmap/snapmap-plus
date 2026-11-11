@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "store_saves.h"
+#include "store_text.h"
 
 wchar_t *sh_store_saves_root(void)
 {
@@ -92,13 +93,13 @@ int sh_store_sidecar_user(const char *account, const unsigned char *bytes, size_
     for (i = 0; i < 3; i++) {
         if (i == 0 && end && *end) {
             /* Not a number: the name itself is the only candidate. */
-            strncpy_s(text, sizeof text, account, _TRUNCATE);
+            st_put(text, sizeof text, account);
         } else {
             if (end && *end) break;
-            _snprintf_s(text, sizeof text, _TRUNCATE, "%llu", cand[i]);
+            st_putf(text, sizeof text, "%llu", cand[i]);
         }
         if (sh_store_sidecar(bytes, n, sidecar, text, base, got) && !memcmp(got, sidecar, SH_STORE_SIDECAR_LEN)) {
-            if (user && cap) strncpy_s(user, cap, text, _TRUNCATE);
+            if (user && cap) st_cpy(user, cap, text);
             return 1;
         }
     }

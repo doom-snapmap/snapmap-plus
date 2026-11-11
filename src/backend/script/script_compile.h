@@ -29,7 +29,7 @@ int sh_script_api_declared(const char *text, size_t len, long *version, int *lin
  * a file directly in scripts\ (it must declare api = 1). 1 when the text
  * compiles; 0 with *line (0 when none), what and todo (no final period). */
 int sh_script_compile_check(const char *file, int entry, const char *text, size_t len, int *line,
-                            char *what, size_t what_cap, char *todo, size_t todo_cap);
+                            char **what, char **todo);   /* *what, *todo malloc'd (the caller frees them) */
 
 #ifdef __cplusplus
 }

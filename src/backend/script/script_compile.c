@@ -1,4 +1,5 @@
 /* script_compile.c -- see script_compile.h. */
+#include "../../common/text.h"
 #include "script_compile.h"
 #include "script_runtime.h"
 #include "script_reason.h"
@@ -10,7 +11,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-static void put(char *out, size_t cap, const char *fmt, ...);
+static void put(char **out, const char *fmt, ...);
 
 int sh_script_api_declared(const char *t, size_t n, long *version, int *line)
 {
@@ -80,31 +81,32 @@ static void *compile_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     return p;
 }
 
-static void put(char *out, size_t cap, const char *fmt, ...)
+static void put(char **out, const char *fmt, ...)
 {
     va_list ap;
-    if (!out || !cap) return;
+    char *text;
+    if (!out) return;
     va_start(ap, fmt);
-    _vsnprintf_s(out, cap, _TRUNCATE, fmt, ap);
+    text = sh_vtextf(fmt, ap);
     va_end(ap);
-    out[cap - 1] = 0;
+    free(*out);
+    *out = text;
 }
 
 int sh_script_compile_check(const char *file, int entry, const char *text, size_t len, int *line,
-                            char *what, size_t what_cap, char *todo, size_t todo_cap)
+                            char **what, char **todo)
 {
     compile_mem mem = { 0 };
     lua_State *L;
-    char chunk[200];
+    char *chunk = NULL;
     const char *t = text;
     size_t n = len;
     int status;
     *line = 0;
-    put(what, what_cap, "%s", "");
-    put(todo, todo_cap, "%s", "");
+    *what = *todo = NULL;
     if (len >= 4 && memcmp(text, "\x1bLua", 4) == 0) {
-        put(what, what_cap, "the file is compiled Lua, not script text");
-        put(todo, todo_cap, "Put the .lua source text in the file");
+        put(what, "the file is compiled Lua, not script text");
+        put(todo, "Put the .lua source text in the file");
         return 0;
     }
     if (entry) {
@@ -112,44 +114,46 @@ int sh_script_compile_check(const char *file, int entry, const char *text, size_
         int ln = 1;
         if (!sh_script_api_declared(text, len, &version, &ln)) {
             *line = ln;
-            put(what, what_cap, "the file does not start with \"api = 1\"");
-            put(todo, todo_cap, "Add \"api = 1\" as its first line");
+            put(what, "the file does not start with \"api = 1\"");
+            put(todo, "Add \"api = 1\" as its first line");
             return 0;
         }
         if (version > SH_SCRIPT_API_VERSION) {
             *line = ln;
-            put(what, what_cap, "the file asks for scripting version %ld, but this Snapmap+ has version %d", version,
+            put(what, "the file asks for scripting version %ld, but this Snapmap+ has version %d", version,
                 SH_SCRIPT_API_VERSION);
-            put(todo, todo_cap, "Update Snapmap+ to run it");
+            put(todo, "Update Snapmap+ to run it");
             return 0;
         }
         if (version < 1) {
             *line = ln;
-            put(what, what_cap, "the file asks for scripting version %ld, which does not exist", version);
-            put(todo, todo_cap, "Write \"api = 1\"");
+            put(what, "the file asks for scripting version %ld, which does not exist", version);
+            put(todo, "Write \"api = 1\"");
             return 0;
         }
     }
     if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) { t += 3; n -= 3; }
     L = lua_newstate(compile_alloc, &mem);
     if (!L) {
-        put(what, what_cap, "there was not enough memory to check the file");
-        put(todo, todo_cap, "Close other programs and press Refresh again");
+        put(what, "there was not enough memory to check the file");
+        put(todo, "Close other programs and press Refresh again");
         return 0;
     }
-    put(chunk, sizeof chunk, "=%s", file && file[0] ? file : "scripts\\script.lua");
-    status = luaL_loadbufferx(L, t, n, chunk, "t");
+    put(&chunk, "=%s", file && file[0] ? file : "scripts\\script.lua");
+    status = chunk ? luaL_loadbufferx(L, t, n, chunk, "t") : LUA_ERRMEM;
+    free(chunk);
     if (status != LUA_OK) {
-        char where[160];
+        char *where = NULL;
         int ln = 0;
         const char *msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
         const char *rest;
         if (status == LUA_ERRMEM || !msg) {
-            put(what, what_cap, "the file is too large or too deeply nested to check");
-            put(todo, todo_cap, "Split it into smaller files");
+            put(what, "the file is too large or too deeply nested to check");
+            put(todo, "Split it into smaller files");
         } else {
-            rest = sh_script_split_where(msg, where, sizeof where, &ln);
-            sh_script_reason(rest, what, what_cap, todo, todo_cap);
+            rest = sh_script_split_where(msg, &where, &ln);
+            free(where);
+            sh_script_reason(rest, what, todo);
             *line = ln;
         }
     }

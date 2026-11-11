@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "modmigrate.h"
+#include "store_text.h"
 #include "modlegacy.h"
 #include "modbundle.h"
 #include "modstore.h"
@@ -60,6 +61,11 @@ typedef struct mg_ctx {
 static SRWLOCK g_mg_lock = SRWLOCK_INIT;
 static char g_mg_root[MAX_PATH * 4];
 
+/* The migration's record fields: a folder name under mods\ and a cause. A
+ * longer one is said in the log (store_text.h st_put). */
+#define MG_NAME_CAP  1024
+#define MG_CAUSE_CAP 1024
+
 static void mg_log(const char *fmt, ...)
 {
     char line[2048];
@@ -83,7 +89,7 @@ static void mg_cause(char *out, size_t cap, const char *fmt, ...)
 void sh_modmigrate_set_data_root(const char *root)
 {
     AcquireSRWLockExclusive(&g_mg_lock);
-    if (root) strncpy_s(g_mg_root, sizeof g_mg_root, root, _TRUNCATE);
+    if (root) st_cpy(g_mg_root, sizeof g_mg_root, root);
     else g_mg_root[0] = 0;
     ReleaseSRWLockExclusive(&g_mg_lock);
 }
@@ -93,10 +99,10 @@ static int mg_data_root(char *out, size_t cap)
     /* A delivered package converted here takes its salt from the store. */
     sh_modlegacy_set_salter(sh_ms_assign_salt);
     AcquireSRWLockShared(&g_mg_lock);
-    strncpy_s(out, cap, g_mg_root, _TRUNCATE);
+    st_cpy(out, cap, g_mg_root);
     ReleaseSRWLockShared(&g_mg_lock);
     if (out[0]) return 1;
-    return sh_mb_user_root(out, cap);
+    return st_path(out, cap, sh_mb_user_root());
 }
 
 /* A UTF-8 path (plus an optional UTF-8 tail) to the long wide form. */
@@ -125,7 +131,7 @@ static int mg_mods_u8(const wchar_t *mods_w, char *out, size_t cap)
 {
     char *u = mods_w ? sh_mb_utf8(mods_w) : NULL;
     if (!u) return 0;
-    strncpy_s(out, cap, strncmp(u, "\\\\?\\", 4) ? u : u + 4, _TRUNCATE);
+    st_cpy(out, cap, strncmp(u, "\\\\?\\", 4) ? u : u + 4);
     free(u);
     return 1;
 }
@@ -242,7 +248,7 @@ static mg_item *mg_add(mg_ctx *c, const char *name, int kind)
     }
     it = &c->items[c->count++];
     memset(it, 0, sizeof *it);
-    strncpy_s(it->name, sizeof it->name, name, _TRUNCATE);
+    st_cpy(it->name, sizeof it->name, name);
     it->kind = kind;
     it->outcome = SH_MODMIGRATE_PENDING;
     return it;
@@ -292,7 +298,7 @@ static unsigned mg_nested_packages(const wchar_t *dir, char *first, size_t cap)
         if (sub && mg_has_descriptor(sub)) {
             if (!n++) {
                 char *u = sh_mb_utf8(fd.cFileName);
-                if (u) { strncpy_s(first, cap, u, _TRUNCATE); free(u); }
+                if (u) { st_put(first, cap, u); free(u); }
             }
         }
         free(sub);
@@ -381,7 +387,7 @@ static int mg_scan(mg_ctx *c)
                     leaf = sh_mb_utf8(gd.cFileName);
                     sub = mg_wjoin(path, gd.cFileName);
                     children++;
-                    _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s/%s", name, leaf ? leaf : "?");
+                    st_fmt(rel, sizeof rel, "%s/%s", name, leaf ? leaf : "?");
                     if (!leaf || !sub) it = mg_add(c, rel, MG_FILE);
                     else if (gd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
                         it = mg_add(c, rel, MG_LINK);
@@ -420,7 +426,7 @@ static int mg_scan(mg_ctx *c)
                 wchar_t *sub = NULL;
                 if (wfirst) { MultiByteToWideChar(CP_UTF8, 0, first, -1, wfirst, wn); sub = mg_wjoin(path, wfirst); }
                 free(wfirst);
-                _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s/%s", name, first);
+                st_fmt(rel, sizeof rel, "%s/%s", name, first);
                 it = sub ? mg_add(c, rel, MG_PACKAGE) : NULL;
                 if (it) {
                     it->nested = 1;
@@ -462,7 +468,7 @@ static void mg_slug(const char *name, char *out, size_t cap)
     }
     while (w && (tmp[w - 1] == '-' || tmp[w - 1] == '.' || tmp[w - 1] == '_')) w--;
     tmp[w] = 0;
-    if (!sh_modlegacy_normalize_id(tmp, out, cap)) strncpy_s(out, cap, "legacy", _TRUNCATE);
+    if (!sh_modlegacy_normalize_id(tmp, out, cap)) st_cpy(out, cap, "legacy");
 }
 
 /* A JSON string member of a descriptor, decoded, or NULL. */
@@ -517,7 +523,7 @@ static int mg_tree_folder_is(const char *mods, const char *tree, const char *nam
             esc[w++] = name[i] == '\\' ? '/' : name[i];
         }
         esc[w] = 0;
-        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"%s\"", tree, esc);
+        st_fmt(want, sizeof want, "\"%s\":\"%s\"", tree, esc);
         mine = strstr(text, want) != NULL;
     }
     free(esc);
@@ -539,10 +545,10 @@ static int mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t 
         char folder[MAX_PATH * 4], mods[MAX_PATH * 4];
         wchar_t *w;
         DWORD a;
-        if (round == 0) strncpy_s(out, cap, leaf, _TRUNCATE);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s-%.*s", leaf, round == 1 ? 8 : 16, it->tree);
+        if (round == 0) st_cpy(out, cap, leaf);
+        else st_fmt(out, cap, "%s-%.*s", leaf, round == 1 ? 8 : 16, it->tree);
         if (!mg_mods_u8(c->mods_w, mods, sizeof mods)) return 0;
-        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", mods, out);
+        st_fmt(folder, sizeof folder, "%s\\%s", mods, out);
         w = sh_mb_wpath(folder);
         a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
         free(w);
@@ -574,16 +580,17 @@ static int mg_stock(void *context, const char *request)
  * Copies of installed content become stock pointers. A migrated package is
  * content the product received, so its replacements are kept
  * (sh_mb_keep_replacements_here). */
-static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
+static int mg_build_legacy(const char *folder_utf8, char **first_cause)
 {
-    char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
+    const char *folder = folder_utf8;
+    char *cause = NULL;
     sh_ms_list list;
     sh_mb_resolver r;
     sh_mb_bundle b;
     int ok = 0;
-    if (first_cause && n) first_cause[0] = 0;
-    if (!folder_utf8 || strlen(folder_utf8) >= sizeof folder || strncpy_s(folder, sizeof folder, folder_utf8, _TRUNCATE) != 0) {
-        if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
+    if (first_cause) *first_cause = NULL;
+    if (!folder || !folder[0]) {
+        if (first_cause) *first_cause = _strdup("no usable folder path");
         return 0;
     }
     memset(&list, 0, sizeof list);
@@ -594,15 +601,16 @@ static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
     if (!sh_mb_build(folder, NULL, &r, &b)) {
-        if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
-    } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {
-        if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
+        if (first_cause) *first_cause = _strdup(sh_mb_first_cause(&b));
+    } else if (!sh_mb_write(&b, folder, &cause)) {
+        if (first_cause) { *first_cause = cause; cause = NULL; }
     } else {
         ok = 1;
         g_mg_pointers = b.stock_count;
         g_mg_pointer_bytes = b.stock_bytes;
     }
     sh_mb_keep_replacements_here(0);
+    free(cause);
     sh_mb_free(&b);
     sh_ms_list_free(&list);
     return ok;
@@ -614,23 +622,16 @@ static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
 static int mg_install_staged(const char *stage_u8, const char *from, const char *target, char *key, size_t key_cap,
                              sh_ms_install_stats *st, sh_mb_bundle *b, char *cause, size_t cause_cap)
 {
-    char salt[SH_SALT_LEN + 1], root[MAX_PATH * 4], folder[MAX_PATH * 4];
+    char salt[SH_SALT_LEN + 1], *folder = NULL, *why = NULL, *key8 = NULL;
+    const char *root = sh_ms_root();
     int ok, again = 0;
     /* Moved again into the folder an earlier pass made: it keeps its salt. */
-    if (sh_ms_root(root, sizeof root)) {
-        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", root, target);
+    if (root && (folder = sh_textf("%s\\%s", root, target)) != NULL) {
         if (sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT) {
-            wchar_t *w = sh_mb_wpath(folder);
-            char *text = NULL;
+            char *mj = sh_textf("%s\\mod.json", folder), *text = NULL;
             size_t n = 0;
-            if (w) {
-                char *u = sh_mb_utf8(w);
-                char mj[MAX_PATH * 4];
-                _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", u ? u : folder);
-                text = (char *)sh_mb_read_file(mj, 16u << 20, &n);
-                free(u);
-            }
-            free(w);
+            if (mj) text = (char *)sh_mb_read_file(mj, 16u << 20, &n);
+            free(mj);
             if (text) {
                 const char *at = strstr(text, "\"salt\"");
                 at = at ? strchr(at + 6, '"') : NULL;
@@ -643,16 +644,29 @@ static int mg_install_staged(const char *stage_u8, const char *from, const char 
             free(text);
         }
     }
-    if (again ? sh_ms_assign_salt_as(stage_u8, from, salt, cause, cause_cap) < 0
-              : sh_ms_assign_salt(stage_u8, from, salt, cause, cause_cap) < 0)
+    free(folder);
+    if (again ? sh_ms_assign_salt_as(stage_u8, from, salt, &why) < 0 : sh_ms_assign_salt(stage_u8, from, salt, &why) < 0) {
+        st_put(cause, cause_cap, why ? why : "out of memory");
+        free(why);
         return 0;
+    }
+    free(why);
+    why = NULL;
     sh_mb_keep_replacements_here(1);
     {
         /* The game's files decide what a file outside the mod's namespace replaces. */
         static const sh_mb_resolver game = { NULL, NULL, mg_stock, NULL };
-        ok = sh_ms_install_as(stage_u8, target, &game, key, key_cap, st, b, cause, cause_cap);
+        ok = sh_ms_install_as(stage_u8, target, &game, &key8, st, b, &why);
     }
     sh_mb_keep_replacements_here(0);
+    if (ok && !st_path(key, key_cap, key8 ? key8 : "")) {
+        st_putf(cause, cause_cap, "it was installed as mods\\%s, a folder name longer than this tool's record holds",
+                key8 ? key8 : "");
+        ok = 0;
+    }
+    if (!ok && why) st_put(cause, cause_cap, why);
+    free(why);
+    free(key8);
     return ok;
 }
 
@@ -663,7 +677,7 @@ static void mg_note_duplicate(mg_ctx *c, mg_item *it)
         const mg_item *o = &c->items[i];
         if ((o->outcome == SH_MODMIGRATE_BUILT || o->outcome == SH_MODMIGRATE_CONVERTED ||
              o->outcome == SH_MODMIGRATE_REUSED) && !strcmp(o->id, it->id)) {
-            strncpy_s(it->duplicate_of, sizeof it->duplicate_of, o->name, _TRUNCATE);
+            st_cpy(it->duplicate_of, sizeof it->duplicate_of, o->name);
             return;
         }
     }
@@ -674,7 +688,7 @@ static void mg_note_duplicate(mg_ctx *c, mg_item *it)
 static void mg_display(const char *name, char *out, size_t cap)
 {
     size_t i;
-    strncpy_s(out, cap, name, _TRUNCATE);
+    st_cpy(out, cap, name);
     for (i = 0; out[i]; i++) if (out[i] == '/') out[i] = '\\';
 }
 
@@ -684,16 +698,16 @@ static void mg_log_item(const mg_item *it)
     char ptr[128];
     /* Files byte-identical to installed game content became stock pointers:
      * the bundle names them and the store keeps (and uploads) nothing. */
-    _snprintf_s(ptr, sizeof ptr, _TRUNCATE, ", %u of them unchanged game file(s) read from your game (%llu KiB)",
+    st_fmt(ptr, sizeof ptr, ", %u of them unchanged game file(s) read from your game (%llu KiB)",
                 it->pointers, it->pointer_bytes >> 10);
     mg_display(it->name, shown, sizeof shown);
     mg_display(it->store, store, sizeof store);
     if (it->duplicate_of[0]) {
         char first[MG_NAME_MAX];
         mg_display(it->duplicate_of, first, sizeof first);
-        _snprintf_s(dup, sizeof dup, _TRUNCATE, "; duplicate id %s (also " MG_OVERRIDES "\\%s), both kept", it->id, first);
+        st_fmt(dup, sizeof dup, "; duplicate id %s (also " MG_OVERRIDES "\\%s), both kept", it->id, first);
     }
-    if (it->left_out) _snprintf_s(left, sizeof left, _TRUNCATE, "; %u file(s) a mod cannot carry left out (%u of them .bswf movies), first: %s",
+    if (it->left_out) st_fmt(left, sizeof left, "; %u file(s) a mod cannot carry left out (%u of them .bswf movies), first: %s",
                                   it->left_out, it->movies, it->reason);
     if (it->nested) {
         char parent[MG_NAME_MAX], *slash;
@@ -701,7 +715,7 @@ static void mg_log_item(const mg_item *it)
         mg_display(it->name, parent, sizeof parent);
         slash = strrchr(parent, '\\');
         if (slash) *slash = 0;
-        _snprintf_s(dup + at, sizeof dup - at, _TRUNCATE, "; the one package folder inside " MG_OVERRIDES "\\%s, which has no descriptor of its own, migrated under its own id", parent);
+        st_fmt(dup + at, sizeof dup - at, "; the one package folder inside " MG_OVERRIDES "\\%s, which has no descriptor of its own, migrated under its own id", parent);
     }
     switch (it->outcome) {
     case SH_MODMIGRATE_BUILT:
@@ -741,7 +755,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
     modstore_lock();
     memset(&zip, 0, sizeof zip);
     memset(&origin, 0, sizeof origin);
-    _snprintf_s(folder_u8, sizeof folder_u8, _TRUNCATE, "%s\\%s", c->overrides_u8, it->name);
+    st_fmt(folder_u8, sizeof folder_u8, "%s\\%s", c->overrides_u8, it->name);
     for (i = strlen(c->overrides_u8); folder_u8[i]; i++) if (folder_u8[i] == '/') folder_u8[i] = '\\';
     if (!sh_modlegacy_zip_from_folder(folder_u8, &zip, NULL, err, sizeof err)) {
         it->outcome = SH_MODMIGRATE_REFUSED;
@@ -771,22 +785,22 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         it->ms_stage = GetTickCount64() - t1;
         if (!ok) {
             it->outcome = SH_MODMIGRATE_REFUSED;
-            strncpy_s(it->reason, sizeof it->reason, v.reason[0] ? v.reason : "the conversion failed", _TRUNCATE);
+            st_put(it->reason, sizeof it->reason, v.reason[0] ? v.reason : "the conversion failed");
             goto out;
         }
         it->outcome = v.files ? SH_MODMIGRATE_CONVERTED : SH_MODMIGRATE_REUSED;
-        strncpy_s(it->id, sizeof it->id, v.id, _TRUNCATE);
-        strncpy_s(it->bundle, sizeof it->bundle, v.build, _TRUNCATE);
+        st_cpy(it->id, sizeof it->id, v.id);
+        st_cpy(it->bundle, sizeof it->bundle, v.build);
         it->bundle_files = v.files;
         it->left_out = v.skipped;
         it->movies = v.movies;
         {
             const char *leaf = strrchr(v.folder, '\\');
-            strncpy_s(it->store, sizeof it->store, leaf ? leaf + 1 : v.folder, _TRUNCATE);
+            st_cpy(it->store, sizeof it->store, leaf ? leaf + 1 : v.folder);
         }
     } else {
-        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH * 4], key[SH_MS_NAME_MAX + 1], target[SH_MS_NAME_MAX + 1];
-        char cause[SH_MB_CAUSE_MAX] = "";
+        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH * 4], key[MG_NAME_CAP], target[MG_NAME_CAP];
+        char cause[MG_CAUSE_CAP] = "";
         wchar_t *wstage, *wparent;
         sh_ms_install_stats st;
         sh_mb_bundle b;
@@ -800,12 +814,12 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
             goto out;
         }
         origin.source = MG_OVERRIDES;
-        _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\%zu-%lu", c->root, index,
+        st_fmt(staging, sizeof staging, "%s\\mods-migrate.tmp\\%zu-%lu", c->root, index,
                     GetCurrentProcessId());
         wparent = mg_wide(c->root, "mods-migrate.tmp");
         wstage = mg_wide(staging, NULL);
         if (!wparent || !wstage) { free(wparent); free(wstage); it->outcome = SH_MODMIGRATE_REFUSED;
-            strncpy_s(it->reason, sizeof it->reason, "out of memory", _TRUNCATE); goto out; }
+            st_put(it->reason, sizeof it->reason, "out of memory"); goto out; }
         CreateDirectoryW(wparent, NULL);
         if (mg_attr(wstage) != INVALID_FILE_ATTRIBUTES) mg_rmtree(wstage);
         t1 = GetTickCount64();
@@ -816,10 +830,10 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
             RemoveDirectoryW(wparent);
             free(wparent); free(wstage);
             it->outcome = SH_MODMIGRATE_REFUSED;
-            strncpy_s(it->reason, sizeof it->reason, v.reason[0] ? v.reason : "the folder could not be staged", _TRUNCATE);
+            st_put(it->reason, sizeof it->reason, v.reason[0] ? v.reason : "the folder could not be staged");
             goto out;
         }
-        strncpy_s(it->id, sizeof it->id, v.id, _TRUNCATE);
+        st_cpy(it->id, sizeof it->id, v.id);
         it->left_out = v.skipped;
         it->movies = v.movies;
         stage_u8 = sh_mb_utf8(wstage);
@@ -836,20 +850,20 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         free(wstage);
         if (!installed) {
             it->outcome = SH_MODMIGRATE_REFUSED;
-            strncpy_s(it->reason, sizeof it->reason, cause[0] ? cause : "the store refused it", _TRUNCATE);
+            st_put(it->reason, sizeof it->reason, cause[0] ? cause : "the store refused it");
             sh_mb_free(&b);
             goto out;
         }
         it->outcome = SH_MODMIGRATE_BUILT;
-        strncpy_s(it->store, sizeof it->store, key, _TRUNCATE);
-        strncpy_s(it->bundle, sizeof it->bundle, b.hash, _TRUNCATE);
+        st_cpy(it->store, sizeof it->store, key);
+        st_cpy(it->bundle, sizeof it->bundle, b.hash);
         it->bundle_files = (unsigned)b.file_count;
         it->pointers = st.stock_files;
         it->pointer_bytes = st.stock_bytes;
         it->warnings = b.warnings;
         sh_mb_free(&b);
     }
-    if (it->left_out) strncpy_s(it->reason, sizeof it->reason, v.first_skipped, _TRUNCATE);
+    if (it->left_out) st_put(it->reason, sizeof it->reason, v.first_skipped);
     mg_note_duplicate(c, it);
 out:
     sh_modlegacy_zip_free(&zip);
@@ -1073,7 +1087,7 @@ static mg_ctx *mg_prepare(int again, int *why)
     u8 = sh_mb_utf8(c->overrides_w);
     if (!u8) { mg_ctx_free(c); return NULL; }
     /* The plain spelling, for the record and the walk (both accept it). */
-    strncpy_s(c->overrides_u8, sizeof c->overrides_u8, strncmp(u8, "\\\\?\\", 4) ? u8 : u8 + 4, _TRUNCATE);
+    st_put(c->overrides_u8, sizeof c->overrides_u8, strncmp(u8, "\\\\?\\", 4) ? u8 : u8 + 4);
     free(u8);
     if (exists && !again) mg_log("MODS: migration: the record says the last pass did not finish; running it again");
     {
@@ -1352,7 +1366,7 @@ static int mg_loose_open(mg_loose *l)
     {
         char *u = sh_mb_utf8(l->overrides_w);
         if (!u) return 0;
-        strncpy_s(l->overrides_u8, sizeof l->overrides_u8, strncmp(u, "\\\\?\\", 4) ? u : u + 4, _TRUNCATE);
+        st_put(l->overrides_u8, sizeof l->overrides_u8, strncmp(u, "\\\\?\\", 4) ? u : u + 4);
         free(u);
     }
     if (sh_mb_record_get(l->mods_u8, MG_LOOSE_RECORD, &rec) == 1 && rec) {
@@ -1429,7 +1443,7 @@ static unsigned mg_overrides_left(const mg_loose *l, char *first, size_t cap)
                 if (status == 0 && complete && mg_changed_at(path, &fd) <= migrated_at) status = 1;
                 done = status == 1;
             }
-            if (!done && !left++ && first && cap) strncpy_s(first, cap, name ? name : "?", _TRUNCATE);
+            if (!done && !left++ && first && cap) st_cpy(first, cap, name ? name : "?");
             free(path);
             free(name);
         } while (FindNextFileW(h, &fd));
@@ -1450,7 +1464,7 @@ int sh_modmigrate_loose_scan(sh_modmigrate_loose_check *out)
     out->strings_due = l.doc == 1 && l.doc_due;
     out->strings = out->strings_due ? (unsigned)l.pairs.count : 0;
     out->strings_bad = l.doc < 0;
-    if (out->strings_bad) strncpy_s(out->why, sizeof out->why, l.doc_why, _TRUNCATE);
+    if (out->strings_bad) st_put(out->why, sizeof out->why, l.doc_why);
     if (mg_is_dir(l.overrides_w)) {
         out->left = mg_overrides_left(&l, out->first_left, sizeof out->first_left);
         out->overrides_done = !out->left;
@@ -1486,7 +1500,7 @@ static char *mg_strcat3(const char *a, const char *b, const char *c)
 {
     size_t n = strlen(a) + strlen(b) + strlen(c) + 1;
     char *s = (char *)malloc(n);
-    if (s) _snprintf_s(s, n, _TRUNCATE, "%s%s%s", a, b, c);
+    if (s) st_fmt(s, n, "%s%s%s", a, b, c);
     return s;
 }
 
@@ -1525,7 +1539,7 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
             if (path) mg_measure(path, &files, &bytes, 0);
             free(path);
             if (!files) { free(name); continue; }   /* an empty tree carries nothing */
-            _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", l->overrides_u8, name);
+            st_fmt(folder, sizeof folder, "%s\\%s", l->overrides_u8, name);
             memset(&sub, 0, sizeof sub);
             if (!sh_modlegacy_zip_from_folder(folder, &sub, NULL, err, sizeof err)) {
                 mg_cause(why, cap, MG_OVERRIDES "\\%s cannot be read: %s", name, err);
@@ -1535,7 +1549,7 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
                 sh_modlegacy_zip_entry *e = &sub.entries[i];
                 char prefix[MAX_PATH * 4];
                 if (e->directory) continue;
-                _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "assets/%s/", name);
+                st_fmt(prefix, sizeof prefix, "assets/%s/", name);
                 ok = mg_zip_push(z, zcap, mg_strcat3(prefix, e->name, ""), e->source, e->size);
                 e->source = NULL;
                 if (!ok) mg_cause(why, cap, "out of memory");
@@ -1575,7 +1589,7 @@ static void mg_merge_files(const wchar_t *from, const wchar_t *to, const char *r
         src = mg_wjoin(from, fd.cFileName);
         dst = mg_wjoin(to, fd.cFileName);
         leaf = sh_mb_utf8(fd.cFileName);
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s/%s", rel, leaf ? leaf : "?");
+        st_fmt(sub, sizeof sub, "%s/%s", rel, leaf ? leaf : "?");
         if (!src || !dst || !leaf) st->files_failed++;
         else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) mg_merge_files(src, dst, sub, st);
         else if (mg_attr(dst) != INVALID_FILE_ATTRIBUTES) {
@@ -1649,7 +1663,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
         if (raw && raw[0] == '{' && sh_json_parse_object(raw, strlen(raw), 61, &block) &&
             (sv = sh_json_object_get(&block, "salt")) != NULL && sv[0] == '"' && sh_salt_valid(sv + 1, strcspn(sv + 1, "\"")) &&
             sv[1 + SH_SALT_LEN] == '"')
-            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%.8s_", sv + 1);
+            st_fmt(prefix, sizeof prefix, "%.8s_", sv + 1);
         sh_json_object_free(&block);
     }
     for (i = 0; i < pairs->count; i++) {
@@ -1658,7 +1672,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
         const sh_json_member *m = &pm;
         char keyed[SH_SALT_LEN + 2 + 512];
         if (prefix[0] && _strnicmp(m0->key, prefix, SH_SALT_LEN + 1)) {
-            _snprintf_s(keyed, sizeof keyed, _TRUNCATE, "%s%.*s", prefix, (int)m0->key_length, m0->key);
+            st_fmt(keyed, sizeof keyed, "%s%.*s", prefix, (int)m0->key_length, m0->key);
             pm.key = keyed;
             pm.key_length = strlen(keyed);
         }
@@ -1736,7 +1750,7 @@ static void mg_loose_record(const mg_loose *l)
     unsigned long long now;
     GetSystemTimeAsFileTime(&ft);
     now = mg_unix_time(&ft);
-    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"complete\": true, \"migratedAt\": %llu, \"folder\": \"" MG_LOOSE_FOLDER "\"}",
+    st_putf(text, sizeof text, "{\"complete\": true, \"migratedAt\": %llu, \"folder\": \"" MG_LOOSE_FOLDER "\"}",
                 now);
     CreateDirectoryW(l->mods_w, NULL);
     if (!sh_mb_record_put(l->mods_u8, MG_LOOSE_RECORD, text))
@@ -1782,8 +1796,8 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
         goto out;
     }
     /* The descriptor, read where it lies like every other entry. */
-    _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\loose-%lu", l.root, GetCurrentProcessId());
-    _snprintf_s(descpath, sizeof descpath, _TRUNCATE, "%s\\mods-migrate.tmp\\loose-%lu.json", l.root, GetCurrentProcessId());
+    st_fmt(staging, sizeof staging, "%s\\mods-migrate.tmp\\loose-%lu", l.root, GetCurrentProcessId());
+    st_fmt(descpath, sizeof descpath, "%s\\mods-migrate.tmp\\loose-%lu.json", l.root, GetCurrentProcessId());
     wparent = mg_wide(l.root, "mods-migrate.tmp");
     wstage = mg_wide(staging, NULL);
     wdesc = mg_wide(descpath, NULL);
@@ -1851,7 +1865,7 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
                    with_strings ? MG_STRINGS "\\" MG_STRINGS_DOC : "", st->files_added, st->files_kept, st->files_same,
                    st->strings_added, st->strings_kept, st->strings_same);
         } else {
-            char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX] = "";
+            char key[MG_NAME_CAP], cause[MG_CAUSE_CAP] = "";
             sh_ms_install_stats ist;
             sh_mb_bundle b;
             memset(&b, 0, sizeof b);

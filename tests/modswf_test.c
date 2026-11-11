@@ -9,6 +9,7 @@
  * uniquely, its four calls decode to the recorded functions, the open-into
  * helper opens through +0x148, and exactly one read-only qword holds the
  * Load (the idFileResource vtable +0x40). Run via run-tests.ps1. */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -179,7 +180,7 @@ static void test_routing(void)
 static void logical(const char *request, const char *type, const char *name)
 {
     char t[64], n[512];
-    int ok = sh_mb_logical_name(request, t, sizeof t, n, sizeof n);
+    int ok = HO(n, sh_mb_logical_name(request, t, HO_P(0)));
     CHECK(ok && !strcmp(t, type) && !strcmp(n, name));
     if (!ok || strcmp(t, type) || strcmp(n, name)) printf("  %s -> %s %s\n", request, ok ? t : "?", ok ? n : "?");
 }
@@ -242,19 +243,19 @@ static void test_builder(void)
                     "\"snapmap-plus\": {\"format\": 2, \"salt\": \"screensx\"}}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
     CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) &&
-          strstr(b.first_cause, "assets/generated/swf/screens_tech/") &&
-          strstr(b.first_cause, ": the game ships this file and a mod cannot replace it with other bytes; delete your "
+          strstr(sh_mb_first_cause(&b), "assets/generated/swf/screens_tech/") &&
+          strstr(sh_mb_first_cause(&b), ": the game ships this file and a mod cannot replace it with other bytes; delete your "
                                 "copy and the mod borrows the game's, or put your version under a mods folder named like this mod folder"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
-    if (b.errors) printf("  build: %s\n", b.first_cause);
+    if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     for (i = 0; i < b.file_count; i++) if (!strcmp(b.files[i].ptype, "swf")) swf++;
     CHECK(b.file_count == 4 && swf == 2 && b.shadow_count == 2 && b.classes.replaces == 2);
     sh_mb_free(&b);
     /* A .bswf outside generated/swf/ is not a carried type. */
     put("assets/generated/image/mods/screensx/stray.bswf", "x");
-    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(b.first_cause, "file type not allowed"));
+    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(sh_mb_first_cause(&b), "file type not allowed"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
 

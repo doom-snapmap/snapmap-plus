@@ -20,6 +20,7 @@
  * stock Integer Operation calls the variable-changed notification.
  *
  *   script_node_test.exe <tests\fixtures\scripts> [DOOMx64vk.exe] [DOOMx64.exe] */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -139,13 +140,13 @@ static void test_map_names(void)
     char name[128], err[160];
     int type, index, other;
     CHECK(sh_script_node_map_load(k_map, sizeof k_map - 1, err, sizeof err));
-    CHECK(sh_script_node_name_of(61, name, sizeof name) && !strcmp(name, "switch_used"));
-    CHECK(sh_script_node_name_of(62, name, sizeof name) && !strcmp(name, "open_door"));
-    CHECK(sh_script_node_name_of(65, name, sizeof name) && !strcmp(name, "open_door"));
-    CHECK(sh_script_node_name_of(67, name, sizeof name) && !strcmp(name, ""));
-    CHECK(sh_script_node_name_of(68, name, sizeof name) && !strcmp(name, "caf\xC3\xA9 \"door\""));
-    CHECK(!sh_script_node_name_of(64, name, sizeof name));        /* a stock Relay is no Script node */
-    CHECK(!sh_script_node_name_of(99, name, sizeof name));
+    CHECK(HOS(name, sh_script_node_name_dup(61)) && !strcmp(name, "switch_used"));
+    CHECK(HOS(name, sh_script_node_name_dup(62)) && !strcmp(name, "open_door"));
+    CHECK(HOS(name, sh_script_node_name_dup(65)) && !strcmp(name, "open_door"));
+    CHECK(HOS(name, sh_script_node_name_dup(67)) && !strcmp(name, ""));
+    CHECK(HOS(name, sh_script_node_name_dup(68)) && !strcmp(name, "caf\xC3\xA9 \"door\""));
+    CHECK(!HOS(name, sh_script_node_name_dup(64)));        /* a stock Relay is no Script node */
+    CHECK(!HOS(name, sh_script_node_name_dup(99)));
 
     CHECK(sh_script_node_var_find("Score", &type, &index, &other) == 1 && type == SH_SCRIPT_VAR_INTEGER && index == 1);
     CHECK(sh_script_node_var_find("score", &type, &index, &other) == 1 && index == 1);
@@ -166,7 +167,7 @@ static void test_map_names(void)
     /* a map that cannot be read leaves no names behind */
     CHECK(!sh_script_node_map_load("{\"entities\":", 12, err, sizeof err));
     CHECK(strstr(err, "could not be read") != NULL);
-    CHECK(!sh_script_node_name_of(61, name, sizeof name));
+    CHECK(!HOS(name, sh_script_node_name_dup(61)));
     CHECK(sh_script_node_map_load(k_map, sizeof k_map - 1, err, sizeof err));
 }
 
@@ -554,7 +555,7 @@ static void test_api(void)
         sh_script_tick(0.0, 0.0);
         CHECK(sh_script_status(refusals[i].salt) == SH_SCRIPT_STOPPED);
         stop[0] = 0;
-        sh_script_stop_line(refusals[i].salt, stop, sizeof stop);
+        HOS(stop, sh_script_stop_line_dup(refusals[i].salt));
         if (!strstr(stop, refusals[i].want)) printf("  refusal %d: %s\n", i, stop);
         CHECK(strstr(stop, refusals[i].want) != NULL);
         CHECK(strncmp(stop, "Script stopped: Refusing Mod, scripts\\main.lua line ", 52) == 0);

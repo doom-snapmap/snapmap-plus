@@ -35,7 +35,6 @@
 #include "modhud_scene.h"
 #include "modscene_place.h"
 #include "modstore.h"
-#include "modui.h"         /* sh_ms_places_prune: the start-up cleanup of mods\maps */
 #include "modstock.h"
 #include "modpublished.h"
 #include "modpublish.h"
@@ -189,9 +188,6 @@ static void install_features(const sig_result *results, size_t db)
      * first, so it serves on this boot, and the work folders a crash left are
      * removed. */
     (void)sh_ms_recover_work();
-    /* Other people's maps no saved map uses and that were not played for 30
-     * days leave mods\maps\ (DECISIONS 22). */
-    (void)sh_ms_places_prune(30);
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
     (void)sh_modserve_index_boot();

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "store_tool.h"
+#include "store_text.h"
 #include "store_recycle.h"
 #include "store_convert.h"
 #include "store_saves.h"
@@ -307,8 +308,8 @@ static int st_scan_store(const st_store *s, st_scan *out)
 
 static void st_size(unsigned long long bytes, char *out, size_t cap)
 {
-    if (bytes >= (1ull << 20)) _snprintf_s(out, cap, _TRUNCATE, "%llu MiB", bytes >> 20);
-    else _snprintf_s(out, cap, _TRUNCATE, "%llu KiB", (bytes + 1023) >> 10);
+    if (bytes >= (1ull << 20)) st_fmt(out, cap, "%llu MiB", bytes >> 20);
+    else st_fmt(out, cap, "%llu KiB", (bytes + 1023) >> 10);
 }
 
 static void st_list(const st_scan *sc)
@@ -325,15 +326,15 @@ static void st_list(const st_scan *sc)
     if (u->record_files) st_say(0, "  mods\\: old record file(s) %s", u->record_names);
     if (u->tidy_drops + u->tidy_renames > 0 || u->tidy_migration) {
         char parts[256] = "";
-        if (u->tidy_drops) _snprintf_s(parts, sizeof parts, _TRUNCATE, "%u cop%s of an installed mod that a map delivered",
+        if (u->tidy_drops) st_fmt(parts, sizeof parts, "%u cop%s of an installed mod that a map delivered",
                                        u->tidy_drops, u->tidy_drops == 1 ? "y" : "ies");
         if (u->tidy_renames) {
             size_t n = strlen(parts);
-            _snprintf_s(parts + n, sizeof parts - n, _TRUNCATE, "%s%u folder(s) to rename", n ? ", " : "", u->tidy_renames);
+            st_fmt(parts + n, sizeof parts - n, "%s%u folder(s) to rename", n ? ", " : "", u->tidy_renames);
         }
         if (u->tidy_migration) {
             size_t n = strlen(parts);
-            _snprintf_s(parts + n, sizeof parts - n, _TRUNCATE, "%sa finished migration record to shorten", n ? ", " : "");
+            st_fmt(parts + n, sizeof parts - n, "%sa finished migration record to shorten", n ? ", " : "");
         }
         st_say(0, "  mods\\: %s", parts);
     }
@@ -420,7 +421,7 @@ static int st_store_open(const wchar_t *arg, st_store *s)
     }
     s->u8 = st_utf8(s->dir, CP_UTF8, NULL);
     if (!s->u8 || strlen(s->u8) + 6 >= sizeof s->mods) { st_say(1, "error: the store path is too long"); return 0; }
-    _snprintf_s(s->mods, sizeof s->mods, _TRUNCATE, "%s\\mods", s->u8);
+    st_fmt(s->mods, sizeof s->mods, "%s\\mods", s->u8);
     sh_ms_set_root(s->mods);
     /* The overrides migration and the legacy converter take UTF-8 too. */
     sh_modmigrate_set_data_root(s->u8);

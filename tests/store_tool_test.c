@@ -17,6 +17,7 @@
  *
  *   store_tool_test.exe <tests\fixtures\store-retired\data>
  */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1100,7 +1101,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
             CHECK(copy_all(path, p2));
             mt_delete(p2, "README.txt");
             CHECK(sh_mb_build(p2, NULL, &r, &game));
-            if (game.errors) fprintf(stderr, "  game-side build: %s\n", game.first_cause);
+            if (game.errors) fprintf(stderr, "  game-side build: %s\n", sh_mb_first_cause(&game));
             sh_mb_set_bank_need(NULL);
             sh_ms_list_free(&list);
             CHECK(conv.registries && strstr(conv.registries, "\"banks\":[\"doom_weapon_sp.bnk\"]"));
@@ -1150,7 +1151,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
     mt_delete(path, "assets\\generated\\decls\\animweb\\zion\\snapmap\\cyber_boss.decl");
     {
         char cause[256];
-        CHECK(modbundle_build_folder(path, cause, sizeof cause));   /* what the game's next scan does */
+        CHECK(HO(cause, modbundle_build_folder(path, HO_P(0))));   /* what the game's next scan does */
     }
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 saved map(s), rawmap or prefab file(s)"));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("SNAPMAPS00000000000000000006\\map.decl: converted"));

@@ -122,8 +122,7 @@ var modsTab = (function () {
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   /* A downloaded map's mod: the short view, its map, Add to my mods and Remove. */
   var ADD_MINE_TITLE = 'Copy this mod into your own mods, so your own maps can use it';
-  var PLACE_CLEANUP_TEXT = 'Snapmap+ removes it at start when none of your saved maps uses it and you have not played ' +
-                           'that map for 30 days; playing the map downloads it again.';
+  var PLACE_KEEP_TEXT = 'It stays on this computer until you remove it here.';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
@@ -1109,7 +1108,7 @@ var modsTab = (function () {
         var shortAbout = section(box, 'about', 'About');
         field(shortAbout, 'Came with', b.placeTitle || 'a downloaded map');
         if (b.scripts) field(shortAbout, 'Scripts', scriptsShortText(b.scripts.files)).className += ' mods-field-long';
-        shortAbout.appendChild(el('div', 'mods-note', PLACE_CLEANUP_TEXT));
+        shortAbout.appendChild(el('div', 'mods-note', PLACE_KEEP_TEXT));
         if (b.scripts) renderScriptLog(box, b);
         return;
       }
@@ -2126,7 +2125,7 @@ var modsTab = (function () {
           APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
           IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
-          sameFilesText: sameFilesText, bareName: bareName, PLACE_CLEANUP_TEXT: PLACE_CLEANUP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
+          sameFilesText: sameFilesText, bareName: bareName, PLACE_KEEP_TEXT: PLACE_KEEP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,

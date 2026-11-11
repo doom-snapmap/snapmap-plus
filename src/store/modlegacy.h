@@ -177,7 +177,7 @@ typedef struct sh_modlegacy_origin {
     const char *tree;                  /* 64 hex tree fingerprint, or NULL */
     const char *fallback_id;           /* the id when the descriptor names none (era B) */
     /* The builder for sh_modlegacy_convert_folder; NULL: modbundle_build_folder. */
-    int (*build)(const char *folder_utf8, char *first_cause, size_t n);
+    int (*build)(const char *folder_utf8, char **first_cause);
 } sh_modlegacy_origin;
 
 /* Convert a delivered beta.16-19 package folder, read with
@@ -210,7 +210,7 @@ size_t sh_modlegacy_last_report(sh_modlegacy_verdict *out, size_t cap);
 /* How a converted folder takes its salt: sh_ms_assign_salt's signature
  * (the store tool and the overrides migration set modstore.c's). Without
  * one every conversion is cleaned with "no salting is set". */
-typedef int (*sh_modlegacy_salt_fn)(const char *folder, const char *from, char salt_out[9], char *cause, size_t cause_cap);
+typedef int (*sh_modlegacy_salt_fn)(const char *folder, const char *from, char salt_out[9], char **cause);
 void sh_modlegacy_set_salter(sh_modlegacy_salt_fn fn);
 
 /* The data root (default %LOCALAPPDATA%\snapmap-plus); NULL restores the

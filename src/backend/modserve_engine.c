@@ -56,6 +56,7 @@
 #include "signatures.h"
 #include "patch.h"
 #include "backend_log.h"
+#include "text.h"
 #include "process_heap_scope.h"
 #include "engine_globals.h"
 #include "commands.h"
@@ -628,23 +629,31 @@ static int me_plain_int(const char *s)
 
 /* The cvar's value text; the int the engine parsed from it when the text is
  * an integer they disagree on (the int is what bool and int readers use). */
-static int gate_read(void *context, const char *cvar, char *value, size_t cap)
+static int gate_read(void *context, const char *cvar, char **value)
 {
     const unsigned char *c = (const unsigned char *)me_gate_cvar(cvar);
-    int n = 0, ok = 0;
+    int n = 0;
+    char *text = NULL;
     (void)context;
-    if (!c || !value || cap < 16) return 0;
+    if (!value) return 0;
+    *value = NULL;
+    if (!c) return 0;
     __try {
+        /* The whole value text, whatever its length. */
         const char *s = *(const char *const *)(c + ME_CVAR_VALUE_STR);
-        size_t i = 0;
+        size_t len = 0;
         if (s) {
-            for (; i + 1 < cap && s[i]; ++i) value[i] = s[i];
-            value[i] = 0;
-            ok = 1;
+            while (s[len]) len++;
+            if ((text = (char *)malloc(len + 1)) != NULL) { memcpy(text, s, len); text[len] = 0; }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
-    if (!sh_engine_cvar_read_int(c, &n)) return 0;
-    if (!ok || (me_plain_int(value) && atoi(value) != n)) _snprintf_s(value, cap, _TRUNCATE, "%d", n);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(text); text = NULL; }
+    if (!sh_engine_cvar_read_int(c, &n)) { free(text); return 0; }
+    if (!text || (me_plain_int(text) && atoi(text) != n)) {
+        free(text);
+        if (!(text = (char *)malloc(16))) return 0;
+        _snprintf_s(text, 16, _TRUNCATE, "%d", n);
+    }
+    *value = text;
     return 1;
 }
 
@@ -1300,7 +1309,7 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     __try {
         void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
         unsigned char *d = (unsigned char *)decl, state;
-        char model[200], why[ERROR_TEXT_MAX + 80];
+        char *model = NULL, *why = NULL;
         if (!d) return 0;
         state = d[RES_STATE_OFF];
         if (state & 2) { r->pending++; return 0; }   /* not parsed yet: the provider will serve it */
@@ -1315,13 +1324,16 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
         /* An animWeb naming a model the engine cannot find would come out of
          * its parse empty (its nodes freed first, nothing rebuilt): the
          * game's own web stays. */
-        if (!_stricmp(type, "animWeb") && sh_modserve_animweb_check(request, &g_ops, model, sizeof model) == 1) {
-            _snprintf_s(why, sizeof why, _TRUNCATE, "it names the model %s, which SnapMap cannot load, so the game's "
-                        "own animation is used", model);
-            (void)sh_modserve_withdraw(request, type, name, why);
+        if (!_stricmp(type, "animWeb") && sh_modserve_animweb_check(request, &g_ops, &model) == 1) {
+            why = sh_textf("it names the model %s, which SnapMap cannot load, so the game's own animation is used",
+                           model ? model : "");
+            (void)sh_modserve_withdraw(request, type, name, why ? why : "it names a model SnapMap cannot load");
+            free(why);
+            free(model);
             r->skipped++;
             return 1;
         }
+        free(model);
         {
             int refused;
             /* Its default tree follows the bytes it is parsed from now, the
@@ -1340,17 +1352,19 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
                 /* The bundle's bytes stop being served and the engine parses
                  * its own again, so the decl is whole. */
                 {
-                    char first[ERROR_TEXT_MAX], *nl;
-                    strcpy_s(first, sizeof first, refused ? g_refusal : "");
-                    nl = strpbrk(first, "\r\n");
-                    if (nl) *nl = 0;
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "the game could not read it%s%s, so the game's own version "
-                                "is used", first[0] ? ": " : "", first);
+                    /* The engine's first line of its refusal, whole. */
+                    const char *src = refused ? g_refusal : "";
+                    size_t fl = strcspn(src, "\r\n");
+                    why = sh_textf("the game could not read it%s%.*s, so the game's own version is used",
+                                   fl ? ": " : "", (int)fl, src);
                 }
-                if (sh_modserve_withdraw(request, type, name, why)) {
+                if (sh_modserve_withdraw(request, type, name, why ? why : "the game could not read it, so the game's "
+                                                                          "own version is used")) {
                     me_load_in_place(d, "restore", type, name);
                     r->restored++;
                 }
+                free(why);
+                why = NULL;
             }
         }
         result = 1;
@@ -1530,15 +1544,16 @@ static void me_dep_visit(void *context, const char *request, uint64_t size, cons
     body = me_peek(request, &len);
     if (!body) return;
     for (i = 0; i < c->raw->n; ++i) {
-        char type[64], name[SH_MB_REQUEST_MAX + 1];
+        char type[SH_MB_TYPE_CAP], *name = NULL;
         if (c->raw->names[i].kind != ME_RAW_ANIM || !c->raw->names[i].done ||
             !me_body_names(body, len, c->raw->names[i].name))
             continue;
-        if (sh_mb_logical_name(request, type, sizeof type, name, sizeof name)) {
+        if (sh_mb_logical_name(request, type, &name)) {
             if (c->nseen < ME_DEP_SEEN) c->seen[c->nseen++] = request;
             (void)me_reparse_one(c->decls, type, name, request, bundle_id);
             c->found++;
         }
+        free(name);
         break;
     }
     HeapFree(GetProcessHeap(), 0, body);
@@ -2666,12 +2681,15 @@ static void me_ledger_sweep(const char *phase)
         return;
     }
     __try {
+        char *name = NULL;
         for (i = 0; i < s->n; ++i) {
-            char type[64], name[SH_MB_REQUEST_MAX + 1];
+            char type[SH_MB_TYPE_CAP];
             const me_held *h;
             sh_modserve_hit hit;
             const char *rq = s->v[i].request;
-            if (!sh_mb_logical_name(rq, type, sizeof type, name, sizeof name)) continue;
+            free(name);
+            name = NULL;
+            if (!sh_mb_logical_name(rq, type, &name)) continue;
             h = me_held_find(&held, type, name);
             if (!h || (h->state & 2)) continue;   /* not held loaded: its next load reads the current bytes */
             if (!strncmp(rq, "generated/decls/", 16)) {
@@ -2691,6 +2709,7 @@ static void me_ledger_sweep(const char *phase)
                 _snprintf_s(restart_first + strlen(restart_first), sizeof restart_first - strlen(restart_first),
                             _TRUNCATE, "%s%s %s", restart_first[0] ? ", " : "", type, name);
         }
+        free(name);
         if (raw.anims) (void)me_anim_dependents(&raw, &decls);
     } __finally {
         if (!sh_process_heap_leave(&heap)) me_log("%s: ledger: heap scope did not balance", phase);
@@ -2757,11 +2776,12 @@ static void me_print_bundle(void *context, const char *id, const char *hash, int
                             int files, int place)
 {
     (void)context;
-    char name[300];
+    char *name;
     (void)id;
-    sh_modserve_bundle_label(hash, name, sizeof name);
-    sh_printf("  %s%s: %s%s  %d files\n", name, place ? " (a map's own copy)" : "",
+    name = sh_modserve_bundle_label(hash);
+    sh_printf("  %s%s: %s%s  %d files\n", name ? name : "a mod", place ? " (a map's own copy)" : "",
               admitted ? "in use" : "cannot be used: ", admitted ? "" : cause, files);
+    free(name);
 }
 
 static void me_print_line(void *context, const char *line) { (void)context; sh_printf("  %s\n", line); }
@@ -2794,10 +2814,10 @@ static me_census_type *me_census_slot(me_census *c, const char *type)
 static void me_census_visit(void *context, const sh_modledger_rec *rec)
 {
     me_census *c = (me_census *)context;
-    char type[64], name[SH_MB_REQUEST_MAX + 1];
+    char type[SH_MB_TYPE_CAP], *name = NULL;
     const me_held *h = NULL;
     c->records++;
-    if (rec->request && sh_mb_logical_name(rec->request, type, sizeof type, name, sizeof name))
+    if (rec->request && sh_mb_logical_name(rec->request, type, &name))
         h = me_held_find(c->held, type, name);
     if (h) {
         (void)sh_modledger_bind(rec->request, h->obj);
@@ -2810,6 +2830,7 @@ static void me_census_visit(void *context, const sh_modledger_rec *rec)
                 _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
         } else c->held1++;
     }
+    free(name);
     if (c->filter && c->filter[0] && !sh_modledger_name_contains(rec->request, c->filter)) return;
     if (c->lines >= ME_HELD_LINES) { c->skipped++; return; }
     c->lines++;

@@ -551,6 +551,18 @@ These backend files share the work:
   files beside `mod.json` and `assets\` are ignored, and campaign content derives its requirements, so
   every own folder is built again once.
 
+  Lengths: the product puts no bound of its own on a name, author,
+  homepage, request path, folder path, nesting depth, cause or script path.
+  Each is a heap string of its own length (`src/common/text.h`). What
+  remains is the platform's or the format's: Windows' long-path form (32,767
+  UTF-16 units, `SH_WPATH_MAX`) and its 255-unit file name per folder, the
+  ZIP format's 65,535-byte entry name, the engine dialog's 255-byte text
+  (a longer notice prints whole to the console and the dialog says so), the
+  vendored Lua's 60-byte chunk name in its own messages (the runtime reads
+  the whole name from the stack instead), and the fixed fields of the store
+  tool's records and the rawmap interface, where a longer sentence is
+  written whole to the log and the field says so. Nothing is cut silently.
+
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
   `strings`, `hud`, `scenes`, `companions`; any other key is kept in the manifest's
@@ -889,7 +901,7 @@ blob store and there are no hard links: a mod's files live in its own
 Identity is the salt (`modsalt.h`), never the folder name: an author may
 rename any folder at any time and the next scan reads the same salt. A folder
 under `mods\` without `mod.json` or `package.json` is an organizing folder and
-is looked into (to eight levels, `SH_MS_NEST_MAX`); one with a descriptor is a
+is looked into at any depth (only the Windows long-path limit bounds a path); one with a descriptor is a
 mod and is not entered, named by its path under `mods\`
 (`demon-mods\cyberdemon`), which the listing, the console, the Mods tab and
 `sh_mods build` use; the console also takes a nested folder by its own name or
@@ -965,17 +977,11 @@ Mods tab says which map a place serves. A new folder dropped into a place is
 refused (`SH_MODSERVE_PLACE_FRESH`: move it out into your own mods); a hand
 copy inside one place is refused ("This map's folder holds this mod twice").
 
-`mods\maps\` is a cache of other people's maps (DECISIONS 22). Every load of a
-map with a place notes when it was played in the record's entries for that
-place (`sh_ms_place_played`, from `sh_modserve_place_load` and
-`sh_modserve_place_set`). At start, before the boot index, `sh_ms_places_prune(30)`
-(`modui.c`, where the saved maps are read) removes every mod folder of a place
-that no saved map of the player records (`sh_ms_place_saved_maps`: the
-`place` part of each saved map's member) and whose map was not played for 30
-days (`sh_ms_place_played_at`, never earlier than the place folder's
-creation), through `sh_ms_delete_mod_folder` as the Mods tab's Remove does; an
-emptied place goes with its record entry. Saves that cannot be read keep every
-place. Playing the map again downloads its mods again.
+Nothing in the product removes a downloaded map's mods by itself (DECISIONS
+29): a place under `mods\maps\` stays, played or not and used by a saved map or
+not, until the player removes a mod of it with the Mods tab's Remove
+(`sh_ms_delete_mod_folder`, one folder; an emptied place goes with its record
+entry).
 
 Install at the root (`sh_ms_install_to_root`). A built folder of a map's place,
 or a received build unpacked outside the store, is copied to `mods\<its name>`
@@ -1488,9 +1494,7 @@ rebuild of the index removes the files there that no build serves any more,
 unless another game instance serves the same mods folder: each instance holds
 the mark `Local\snapmap-plus-served-<16 hex>`, named for the mods folder as its
 store lock is (`store_lock.h`), so a game on another folder, or a test on its
-own, never holds the cleanup back. Playing a map with a place notes the time
-in the record of the folder the index serves from (`sh_ms_place_played(root,
-place)`), never through the store's default root. A changed
+own, never holds the cleanup back. A changed
 bank is therefore a new bank to Wwise, two builds that carry one bank's bytes
 (the root and a map's place) share it and Wwise loads it once, and the ledger
 and the refresh see a new name. `sh_mods status` lists each bank and whether it was
@@ -3742,7 +3746,7 @@ A refused import reaches the player whole: the editor reload
 (`sh_rawmap_prepare_reload`) prints and toasts "<file> was not opened:
 <the importer's cause>." (a `.json` that cannot be read gets Windows' reason
 through `plain_reason.h`), and the backend log line carries the same cause
-uncut (`MODEXPORT_CAUSE_MAX`). The map importer tells a map from a prefab by
+uncut (every cause is a heap string of its own length). The map importer tells a map from a prefab by
 the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
 `snapmapPlus` block is a map; a prefab's export is refused with "this is a
 prefab's export, not a map's". `sh_mods import "<path.zip>"` installs the mods
