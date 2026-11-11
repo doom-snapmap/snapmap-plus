@@ -532,9 +532,10 @@ static int mg_tree_folder_is(const char *mods, const char *tree, const char *nam
 
 /* The store folder for an authored package: mods\<its overrides folder
  * name>, the same folder again on a repeated pass (the migration record's
- * trees give this tree to it), else that name with the tree's first 8 hex
- * when another mod holds it. */
-static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t cap)
+ * trees give this tree to it), else that name with the tree's first 8, then
+ * 16 hex when another mod holds it. Two packages of one name never share a
+ * folder: 0 when every candidate is another mod's. */
+static int mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t cap)
 {
     const char *leaf = strrchr(it->name, '/');
     int round;
@@ -545,14 +546,15 @@ static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t
         DWORD a;
         if (round == 0) strncpy_s(out, cap, leaf, _TRUNCATE);
         else _snprintf_s(out, cap, _TRUNCATE, "%s-%.*s", leaf, round == 1 ? 8 : 16, it->tree);
-        if (!mg_mods_u8(c->mods_w, mods, sizeof mods)) return;
+        if (!mg_mods_u8(c->mods_w, mods, sizeof mods)) return 0;
         _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", mods, out);
         w = sh_mb_wpath(folder);
         a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
         free(w);
-        if (a == INVALID_FILE_ATTRIBUTES) return;
-        if (mg_tree_folder_is(mods, it->tree, out)) return;
+        if (a == INVALID_FILE_ATTRIBUTES) return 1;
+        if (mg_tree_folder_is(mods, it->tree, out)) return 1;
     }
+    return 0;
 }
 
 /* What the last mg_build_legacy built: its stock pointers (the migration
@@ -812,7 +814,12 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         char *stage_u8;
         int installed;
         mg_identity(&zip, it->name, id, sizeof id);
-        mg_target_name(c, it, target, sizeof target);
+        if (!mg_target_name(c, it, target, sizeof target)) {
+            it->outcome = SH_MODMIGRATE_REFUSED;
+            mg_cause(it->reason, sizeof it->reason, "every folder name it could take in the mods folder belongs to another mod "
+                     "(the last is %s); rename that folder, then close DOOM and run: snapmap-plus migrate", target);
+            goto out;
+        }
         origin.source = MG_OVERRIDES;
         _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\%zu-%lu", c->root, index,
                     GetCurrentProcessId());

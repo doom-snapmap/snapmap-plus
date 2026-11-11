@@ -582,6 +582,39 @@ static void kept_backups(const char *root)
     CHECK(exists(path) && strstr(g_log, "override-backups is not empty; it is left in place") != NULL);
 }
 
+/* Two sources of one name never share a folder: when every name a package
+ * could take is another mod's, it is refused and those folders stay as they are. */
+static void name_clash(const char *root)
+{
+    char ov[MAX_PATH], pack[MAX_PATH * 2], mods[MAX_PATH * 2], tree[65], dir[MAX_PATH * 2];
+    sh_modmigrate_stats st;
+    int i;
+    printf("-- a package whose every folder name is taken is refused, nothing shared\n");
+    make_dir(root);
+    _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    put_file(ov, "clash/package.json", "{\"id\": \"clash\", \"name\": \"Clash\"}");
+    put_file(ov, "clash/assets/generated/decls/entitydef/mods/clash/c.decl", DECL_A);
+    _snprintf_s(pack, sizeof pack, _TRUNCATE, "%s\\clash", ov);
+    CHECK(tree_of(pack, tree));
+    for (i = 0; i < 3; i++) {
+        if (i == 0) _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash", mods);
+        else _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash-%.*s", mods, i == 1 ? 8 : 16, tree);
+        put_file(dir, "mod.json", "{\"name\": \"Someone else's\"}");
+    }
+    configure(root);
+    g_log[0] = 0;
+    CHECK(sh_modmigrate_run(0, &st) == 1 && st.refused == 1 && st.built == 0);
+    CHECK(strstr(g_log, "every folder name it could take in the mods folder belongs to another mod") != NULL);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash\\mod.json", mods);
+    {
+        FILE *f = NULL;
+        char text[64] = "";
+        if (fopen_s(&f, dir, "rb") == 0 && f) { fread(text, 1, sizeof text - 1, f); fclose(f); }
+        CHECK(!strcmp(text, "{\"name\": \"Someone else's\"}"));
+    }
+}
+
 static void incomplete_record(const char *root)
 {
     char path[MAX_PATH * 2], ov[MAX_PATH];
@@ -721,6 +754,9 @@ int main(void)
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_d", base, GetCurrentProcessId());
     incomplete_record(root);
+    remove_tree(root);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_g", base, GetCurrentProcessId());
+    name_clash(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_e", base, GetCurrentProcessId());
     store_lock_contention(root);
