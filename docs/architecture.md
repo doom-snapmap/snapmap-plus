@@ -1104,7 +1104,7 @@ block, the retired author keys and a hud `schema` (every other byte kept),
 salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
 (the same rewrite as the first scan's: paths, texts, strings keys
 `<salt>_<key>` and their `#str_` references) from a view of `mod.json` and
-`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id,
+`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id and every text of the folder that names one (decls, mod.json),
 every other file beside them copied unchanged (DECISIONS 16), and built there
 by the real builder over the store's installed bundles and the game's archives
 (`sh_modstock_exists`, replacements kept). A build that fails, or a salting the
@@ -1116,7 +1116,7 @@ does not read is left as it was. Folders that need another one's names are
 tried again after it. The record section `converted` keeps `keys` (old key to
 salt), `builds` (every old build hash to its salt: the folders', the removed
 copies', `.builds\` snapshots' and the retired `aliases`), `folders`,
-`pending`, `refused` and `maps` (maps left as they were, by content hash). It
+`pending`, `refused` and `maps` (maps left as they were, by content hash; `check` tries each again in memory and counts it as work as soon as it would convert). It
 is written after every folder and every map; a folder's row is `pending` from
 just before its swap to just after, so a run stopped anywhere resumes: the
 next run puts back a `<name>.old-<pid>` whose folder is missing, removes work

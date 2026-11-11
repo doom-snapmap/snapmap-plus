@@ -250,8 +250,8 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  mods\\: 1 folder(s) of an earlier release are not converted yet, because building them needs the DOOM "
                "folder"));
     CHECK(said("Partly done: the store layout upgraded, removed-mods\\ retired"));
-    CHECK(said("Some items are left; close DOOM and run: snapmap-plus migrate"));
-    CHECK(said("--doom \"<DOOM folder>\""));
+    CHECK(said("Some items are left; close DOOM and run the Snapmap+ installer again"));
+    CHECK(said("(it needs to find your DOOM folder)"));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.tiny\\mod.json", data);
     CHECK(mt_exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.tiny\\" A_DECL, data);
@@ -429,7 +429,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     CHECK(!said("not yet moved into mods"));
     /* Without the game folder the loose files wait; nothing is half moved. */
     CHECK(run("migrate", data, NULL, NULL) == SH_STORE_PARTIAL);
-    CHECK(said("its loose files are not moved yet: they need the DOOM folder") && said("--doom \"<DOOM folder>\""));
+    CHECK(said("its loose files are not moved yet: they need the DOOM folder") && said("(it needs to find your DOOM folder)"));
     CHECK(!mt_exists(folder));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("migration: the loose files of overrides\\ and strings\\strids.json moved into mods\\my-overrides\\ (the mod "
@@ -1002,7 +1002,10 @@ static void test_interrupted(const char *fixture, const char *tmp)
     CHECK(copy_all(path, p2));
     /* 5. A sound bank named for the old key. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.bank", mods);
-    mt_write(path, "mod.json", "{\n  \"id\": \"alex.bank\",\n  \"name\": \"Bank\"\n}\n");
+    mt_write(path, "mod.json", "{\n  \"id\": \"alex.bank\",\n  \"name\": \"Bank\",\n  \"soundbank\": \"alex_bank_music\"\n}\n");
+    mt_write(path, "assets\\generated\\decls\\sound\\mods\\alex.bank\\m.decl",
+             "{\n\tbank = \"alex_bank_music\";\n\tother = \"alex_bank_musical\";\n}\n");
+    mt_write(path, "README.txt", "alex_bank_music is my bank\n");
     {
         unsigned char bnk[24] = { 'B', 'K', 'H', 'D', 16, 0, 0, 0, 0x71, 0, 0, 0 };
         uint32_t id = sh_mb_fnv1_lower("alex_bank_music", 15);
@@ -1046,14 +1049,33 @@ static void test_interrupted(const char *fixture, const char *tmp)
         free(bytes);
         _snprintf_s(bp, sizeof bp, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc\\alex_bank_music.bnk", path);
         CHECK(!mt_exists(bp));
+        /* Every text of the mod naming the bank follows it; a longer word and a file beside the mod do not. */
+        {
+            char want[96], rel[MAX_PATH];
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\sound\\mods\\%s\\m.decl", bsalt);
+            t = text_of(path, rel);
+            _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s\";", stem);
+            CHECK(t && strstr(t, want) && strstr(t, "\"alex_bank_musical\"") && !strstr(t, "\"alex_bank_music\""));
+            free(t);
+            t = text_of(path, "mod.json");
+            _snprintf_s(want, sizeof want, _TRUNCATE, "\"soundbank\": \"%s\"", stem);
+            CHECK(t && strstr(t, want));
+            free(t);
+            t = text_of(path, "README.txt");
+            CHECK(t && !strcmp(t, "alex_bank_music is my bank\n"));
+            free(t);
+        }
     }
     /* 6. A folder that cannot build (a new name outside its namespace, as the owner's cyberdemon boss): written in
      * the one shape, its build failed, the cause naming the file and where it must go under the real salt. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber", mods);
     mt_write(path, "mod.json", "{\n  \"id\": \"alex.cyber\",\n  \"name\": \"Cyber\"\n}\n");
     mt_write(path, "assets\\generated\\decls\\animweb\\zion\\snapmap\\cyber_boss.decl", "{\n}\n");
+    mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.cyber\\boss.decl", "{\n\tsize = \"5\";\n}\n");
+    b26_slot(saves, "SNAPMAPS00000000000000000006", B26_MAP("alex.cyber", H6));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("  mods\\cyber: converted (it was alex.cyber; its salt is now ") && said("but it does not build yet: "));
+    CHECK(said("SNAPMAPS00000000000000000006\\map.decl: left as it was"));
     CHECK(!sh_mb_old_is_old(path));
     t = text_of(path, "mod.json");
     if (t && strstr(t, "\"salt\": \"")) {
@@ -1062,6 +1084,19 @@ static void test_interrupted(const char *fixture, const char *tmp)
         _snprintf_s(under, sizeof under, _TRUNCATE, "mods/%s/", csalt);
         CHECK(strstr(t, "\"cause\"") && strstr(t, "cyber_boss") && strstr(t, under) && !strstr(t, "\"build\""));
     } else CHECK(0);
+    free(t);
+    /* The map stays left while its folder fails, and converts at the next run once the author fixed the folder
+     * and the game built it, without the map file changing (DECISIONS 21). */
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("1 map(s) left as they were by an earlier run"));
+    mt_delete(path, "assets\\generated\\decls\\animweb\\zion\\snapmap\\cyber_boss.decl");
+    {
+        char cause[256];
+        CHECK(modbundle_build_folder(path, cause, sizeof cause));   /* what the game's next scan does */
+    }
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 saved map(s), rawmap or prefab file(s)"));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("SNAPMAPS00000000000000000006\\map.decl: converted"));
+    t = b26_slot_text(saves, "SNAPMAPS00000000000000000006", &signed_ok);
+    CHECK(t && signed_ok && !strstr(t, "alex.cyber"));
     free(t);
     CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
     sh_store_tool_set_saves(L"");

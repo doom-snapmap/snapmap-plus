@@ -799,6 +799,8 @@ static char *cv_saved_text(const unsigned char *raw, size_t n, size_t *len)
 
 typedef struct cv_scan_ctx { sh_conv_check *c; cv_rec *rec; int list; } cv_scan_ctx;
 
+static int cv_converts_now(const sh_conv_opts *o, const char *text, size_t n, int kind);
+
 static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int kind, const char *account)
 {
     cv_scan_ctx *x = (cv_scan_ctx *)vctx;
@@ -829,7 +831,9 @@ static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int
     old = text && (kind == CV_MAP_PREFAB ? cv_prefab_old(text, tn) : cv_map_old(text, tn));
     if (old) {
         cv_hex_sha(raw, n, sha);
-        if (cv_rec_get(x->rec, "maps", path, was, sizeof was) && !strcmp(was, sha)) {
+        /* A map left before is looked at again: it is work as soon as its folders let it convert
+         * (DECISIONS 21), whether or not the file changed. */
+        if (cv_rec_get(x->rec, "maps", path, was, sizeof was) && !strcmp(was, sha) && !cv_converts_now(o, text, tn, kind)) {
             x->c->maps_left++;
             if (x->list) cv_say(o, 0, "  %s: left as it is (see the earlier run's line for why)", path);
         } else {
@@ -1024,13 +1028,73 @@ static int cv_link_top(const char *folder, const char *dest, int mod)
  * assets\sound\soundbanks\pc\ whose stem does not start with "<salt>_" becomes
  * "<salt>_<stem>" (an earlier mod's "<old key>_" prefix replaced), and its
  * BKHD bank id follows the new name when it followed the old one. */
+#define CV_BANKS_MAX 64
+typedef struct cv_bank_name { char from[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + 16]; } cv_bank_name;
+
+static int cv_word(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* Every text file under `dir` (a file without a NUL byte, sound banks
+ * aside) has each bank name `from` that stands as a whole word replaced by
+ * its `to`; a file that changes is written as a file of its own. */
+static void cv_rebank_texts(const char *dir, const cv_bank_name *names, size_t count, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    char *pat = cv_join(dir, "*");
+    wchar_t *w = pat ? sh_mb_wpath(pat) : NULL;
+    HANDLE h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pat);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char *leaf, *path;
+        size_t ln;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        leaf = sh_mb_utf8(fd.cFileName);
+        path = leaf ? cv_join(dir, leaf) : NULL;
+        ln = leaf ? strlen(leaf) : 0;
+        if (path && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (depth < 64) cv_rebank_texts(path, names, count, depth + 1);
+        } else if (path && !(ln > 4 && !_stricmp(leaf + ln - 4, ".bnk"))) {
+            size_t n = 0, i, k, wpos = 0;
+            char *t = (char *)cv_read(path, CV_DESC_MAX, &n), *o = NULL;
+            int changed = 0;
+            if (t && !memchr(t, 0, n) && (o = (char *)malloc(n * 2 + 64)) != NULL) {
+                for (i = 0; i < n;) {
+                    int hit = 0;
+                    if (!i || !cv_word(t[i - 1]))
+                        for (k = 0; k < count && !hit; k++) {
+                            size_t fl = strlen(names[k].from), tl = strlen(names[k].to);
+                            if (i + fl <= n && !_strnicmp(t + i, names[k].from, fl) && (i + fl == n || !cv_word(t[i + fl])) &&
+                                wpos + tl + (n - i) < n * 2 + 64) {
+                                memcpy(o + wpos, names[k].to, tl);
+                                wpos += tl;
+                                i += fl;
+                                hit = changed = 1;
+                            }
+                        }
+                    if (!hit) o[wpos++] = t[i++];
+                }
+                if (changed) cv_write(path, o, wpos);
+            }
+            free(o);
+            free(t);
+        }
+        free(leaf);
+        free(path);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 static void cv_name_banks(const char *dest, const char *key, const char *salt)
 {
     char dir[CV_PATH], *pat, prefix[SH_MB_ID_MAX + 2];
     wchar_t *w;
     WIN32_FIND_DATAW fd;
     HANDLE h;
-    size_t i, pn;
+    size_t i, pn, renamed = 0;
+    cv_bank_name *names = (cv_bank_name *)calloc(CV_BANKS_MAX, sizeof *names);
+    if (!names) return;
     for (i = 0; key[i] && i < SH_MB_ID_MAX; i++) prefix[i] = (key[i] == '.' || key[i] == '-') ? '_' : key[i];
     prefix[i] = '_';
     prefix[i + 1] = 0;
@@ -1041,7 +1105,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
     h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
     free(pat);
     free(w);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) { free(names); return; }
     do {
         char *leaf = sh_mb_utf8(fd.cFileName), stem[SH_MB_BANK_STEM_MAX + 1], fresh[SH_MB_BANK_STEM_MAX + 16];
         char *from = NULL, *to = NULL;
@@ -1072,6 +1136,12 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
                     wchar_t *wf = sh_mb_wpath(from);
                     if (wf) DeleteFileW(wf);
                     free(wf);
+                    if (renamed < CV_BANKS_MAX) {
+                        strcpy_s(names[renamed].from, sizeof names[renamed].from, stem);
+                        _snprintf_s(names[renamed].to, sizeof names[renamed].to, _TRUNCATE, "%.*s", (int)(strlen(fresh) - 4),
+                                    fresh);
+                        renamed++;
+                    }
                 }
                 free(bytes);
             }
@@ -1081,6 +1151,9 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
         free(leaf);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+    /* Every text of the staged folder that names a renamed bank follows it, in the same swap. */
+    if (renamed) cv_rebank_texts(dest, names, renamed, 0);
+    free(names);
 }
 
 /* A cause of the salting, about the converted folder rather than the folder
@@ -1212,7 +1285,7 @@ static int cv_swap(const sh_conv_opts *o, const char *path, const char *dest, ch
         if (GetFileAttributesW(wo) != INVALID_FILE_ATTRIBUTES) cv_rmtree_w(wo);
         if (!cv_move(wp, wo))
             _snprintf_s(cause, cap, _TRUNCATE, "the folder could not be set aside (error %lu); close the program that "
-                        "holds a file in it and run this again", GetLastError());
+                        "holds a file in it and run the Snapmap+ installer again", GetLastError());
         else if (!cv_move(wd, wp)) {
             DWORD e = GetLastError();
             cv_move(wo, wp);
@@ -1802,6 +1875,24 @@ done:
     return r;
 }
 
+/* Whether a map left before would convert now (read only). A map carrying
+ * packages is converted only by a run (its packages become folders), so it
+ * is work again only when the file changes. */
+static int cv_converts_now(const sh_conv_opts *o, const char *text, size_t n, int kind)
+{
+    cv_ids ids;
+    char *out = NULL, cause[600];
+    size_t on = 0;
+    int r;
+    if (kind != CV_MAP_PREFAB && cv_has(text, n, "\"smpkg.")) return 0;
+    cv_ids_open(o, &ids);
+    r = kind == CV_MAP_PREFAB ? cv_prefab_text(&ids, text, n, &out, &on, cause, sizeof cause)
+                              : cv_map_text_ids(o, &ids, text, n, &out, &on, cause, sizeof cause);
+    cv_ids_close(&ids);
+    free(out);
+    return r > 0;
+}
+
 typedef struct cv_map_ctx { cv_ids *ids; sh_conv_stats *st; int did; } cv_map_ctx;
 
 static void cv_map_left(const sh_conv_opts *o, cv_map_ctx *x, const char *path, const unsigned char *raw, size_t n,
@@ -1907,14 +1998,14 @@ static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int k
             else if (!cv_write_tmp(vpath, nside, sizeof nside) || !cv_write_tmp(path, nraw, zn + 4)) {
                 cv_drop_tmp(vpath);
                 cv_drop_tmp(path);
-                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run this again");
+                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run the Snapmap+ installer again");
             } else if (!cv_put_tmp(path)) {
                 cv_drop_tmp(vpath);
                 cv_drop_tmp(path);
-                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run this again");
+                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run the Snapmap+ installer again");
             } else if (!cv_put_tmp(vpath)) {
                 /* The map with its own signature again: the new one stays beside it for the next run. */
-                cv_say(o, 0, "  %s: its new signature could not be put in place yet; run this again to finish it", path);
+                cv_say(o, 0, "  %s: its new signature could not be put in place yet; run the Snapmap+ installer again to finish it", path);
                 x->did = 1;
             } else {
                 x->st->maps_converted++;
