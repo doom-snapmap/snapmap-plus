@@ -103,7 +103,7 @@ typedef struct fent {
     int   ready;           /* weapon_ready answer (-1 no weapon) */
     float aim[3];
     int   aimed;
-    char  pain[64];
+    char  pain[512];
     int   block_reaction, block_ms;
     uint32_t monster;      /* getMonsterType */
     char  node[96];        /* the animWeb node playing */
@@ -159,7 +159,7 @@ static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
         case 'v': snprintf(line, sizeof line, "%g %g %g", a->v[0], a->v[1], a->v[2]); break;
         case 'i': case 'b': snprintf(line, sizeof line, "%d", a->i); break;
         case 'f': snprintf(line, sizeof line, "%g", a->f); break;
-        case 's': case '1': snprintf(line, sizeof line, "%s", a->s); break;
+        case 's': case '1': ev_cat(i ? "," : ""); ev_cat(a->s); continue;
         case 'e': snprintf(line, sizeof line, "e%d", idx_of(a->ent)); break;
         case '4': snprintf(line, sizeof line, "noanim"); break;
         default: snprintf(line, sizeof line, "?");
@@ -672,6 +672,39 @@ static void test_refusals(void)
     expect_stop("self:laser('a b', true)", "\"laser\": \"a b\" is not a usable name");
     expect_stop("self:find_position({ min = 10, max = 5 })", "\"find_position\": max must not be less than min");
     expect_stop("ent(2):enemy()", "\"enemy\" works only on this mod's own demons");
+}
+
+/* A tag, laser or pain string name is any length the decl gives it: it reaches the engine whole. */
+static void test_long_tag_names(void)
+{
+    char want[600];
+    int i;
+    CHECK(start(
+        "api = 1\n"
+        "local done = false\n"
+        "on.think('ai/brute', function(self)\n"
+        "  if not done then\n"
+        "    done = true\n"
+        "    self:laser(string.rep('laser_source_', 30), true)\n"
+        "    self:laser_sweep(string.rep('sweep', 40))\n"
+        "    self:pain_string(string.rep('combo', 50))\n"
+        "  end\n"
+        "end)\n"));
+    tick();
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    strcpy(want, "1:setLaserState(1,");
+    for (i = 0; i < 30; i++) strcat(want, "laser_source_");
+    strcat(want, ")\n");
+    CHECK(strstr(g_events, want) != NULL);
+    strcpy(want, "1:ae_startLaserSweep(noanim,");
+    for (i = 0; i < 40; i++) strcat(want, "sweep");
+    strcat(want, ")\n");
+    CHECK(strstr(g_events, want) != NULL);
+    want[0] = 0;
+    for (i = 0; i < 50; i++) strcat(want, "combo");
+    CHECK(strcmp(g_ent[1].pain, want) == 0);
+    sh_script_map_end();
+    expect_stop("self:laser('', true)", "\"laser\" needs a laser tag");
 }
 
 static void test_turn_done(void)
@@ -1217,6 +1250,7 @@ int main(int argc, char **argv)
     test_move_done_and_follow();
     test_queries();
     test_refusals();
+    test_long_tag_names();
     test_turn_done();
     test_removed_and_unavailable();
     test_brain_pure();

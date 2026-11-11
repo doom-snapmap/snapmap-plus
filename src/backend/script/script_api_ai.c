@@ -1081,7 +1081,7 @@ static const char *check_tag(lua_State *L, int idx, const char *call, const char
     size_t n = 0;
     const char *s = lua_type(L, idx) == LUA_TSTRING ? lua_tolstring(L, idx, &n) : NULL;
     size_t i;
-    if (!s || !n || n > 63) sh_script_refuse(L, "\"%s\" needs %s (a short name)", call, what);
+    if (!s || !n) sh_script_refuse(L, "\"%s\" needs %s", call, what);
     for (i = 0; i < n; i++)
         if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9') ||
               s[i] == '_' || s[i] == '/' || s[i] == '.'))
@@ -2122,7 +2122,6 @@ static int l_pain_string(lua_State *L)
         size_t n = 0, i;
         if (lua_type(L, 2) != LUA_TSTRING) sh_script_refuse(L, "\"pain_string\" needs text or nil, got %s", luaL_typename(L, 2));
         text = lua_tolstring(L, 2, &n);
-        if (n > 63) sh_script_refuse(L, "\"pain_string\" needs text of at most 63 characters");
         for (i = 0; i < n; i++)
             if (!((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') ||
                   (text[i] >= '0' && text[i] <= '9') || text[i] == '_' || text[i] == '.'))
