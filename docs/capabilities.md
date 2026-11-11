@@ -906,13 +906,26 @@ and [`fidelity.md`](fidelity.md).
 The backend also carries **mod scripts**: a mod's `assets\mods\<salt>\scripts\*.lua` run during Play,
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
-Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
-`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps game time (`now`, `after`, `every`, `run`,
-`wait`), writes the mod's script log (`print`, `warn`), and works with entities and the world:
-`spawn` its own entities, read any entity's position, facing, velocity, health and animation, move,
-turn, push, heal, animate and remove its own, heal players, find `players()` and `entities_near`,
-and `trace` lines through the world. The AI, combat and logic calls, and the hooks that deliver
-damage, death, animation notifies and Script node inputs, come with the work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
+API version 1 registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.input`, `on.map_start`,
+`on.map_end`, and `on.damage`, `on.death`, `on.anim`, which nothing delivers yet), keeps game time
+(`now`, `after`, `every`, `run`, `wait`) and writes the mod's script log (`print`, `warn`). With
+entities and the world it can `spawn` its own entities, read any entity's position, facing,
+velocity, health and animation, move, turn, push, heal, animate and remove its own, heal players,
+find `players()` and `entities_near`, and `trace` lines through the world. It drives the mod's own
+demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
+`path_length`, `find_position`, `trigger`, `equip`, `laser`, `focus_tag` and the rest; `anim_state`
+and `anim_force` work on demons too): a commanded demon waits in the engine's own script state and
+keeps its pain and death. A mod whose scripts handle an input gets a **Script** node in its Toybox
+category: a wire into a node runs the script's `on.input` handler for the node's name,
+`node(name):fire()` raises On Fired on the mod's nodes of that name, and `vars.get` / `vars.set`
+read and write the map's Integer, Number, Boolean and String variables so wired logic reacts; a map
+with a Script node records the mod like any mod row. A script is checked when its mod builds: a
+syntax error, compiled Lua, a file over 256 KB, more than 64 files or 1 MB of scripts, a `require`
+of a file the mod does not carry or a name of another mod refuses the build with the file and line
+on the mod's row. Scripts travel with the mod everywhere it goes (publish, download, rawmap and
+prefab exports, installs); a Play runs the scripts as they were built at the last Refresh. The
+combat calls (`fire`, `hitscan`, `radius_damage`, `damage`, `fx`, `sound`) and the damage, death
+and animation-notify events come with the work that follows.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing

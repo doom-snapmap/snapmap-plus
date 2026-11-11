@@ -1491,9 +1491,19 @@ for the engine-capability facility once it carries hook rows.
 ### Mod scripts
 
 A mod may carry Lua scripts: `assets/mods/<salt>/scripts/*.lua` (entry files)
-and `scripts/lib/*.lua` (loaded only by `require`). The runtime is
-`src/backend/script/` on the vendored Lua 5.4.9 core (`src/third_party/lua`,
-its README records the version, hashes and the one local change).
+and `scripts/lib/*.lua` (loaded only by `require`). They run during Play, on
+the host only, one sandboxed state per mod per map, and only inside one tick
+on the game thread: every engine hook posts a record and the tick delivers it.
+The code is `src/backend/script/` on the vendored Lua 5.4.9 core
+(`src/third_party/lua`, its README records the version, hashes and the one
+local change). This chapter has five parts: this one (the build, the runtime
+and the sandbox), the engine side (gates, tick, spawns, queues, console), the
+entity, animation and world calls, the demons a script drives, and the Script
+node with map variables. Each install is a row of the feature registry
+(`feature_health.h`): "mod scripts" (the hooks; off when mods are not served),
+and beside it "Script nodes" and "demons driven by scripts", each off with its
+reason when its engine functions are not the expected ones (and off when mod
+scripts are). A failed install never stops another feature.
 
 - **In the build.** A script is a carried file of kind `script` (provides type
   `script`): `assets/mods/<salt>/scripts/<name>.lua` or
@@ -1513,8 +1523,11 @@ its README records the version, hashes and the one local change).
   another mod's `mods/<salt>/`, is refused with the file and line; an
   `on.<event>` name with no entityDef of the mod is a warning. The builder
   block records what was found for the Mods tab (`"scripts": {"files",
-  "entities": [{"name", "events"}], "inputs", "outputs", "dynamic"}`, the
-  last counting names set while running); the author part declares nothing.
+  "entities": [{"name", "events"}], "inputs", "outputs", "node", "dynamic"}`,
+  `node` true when a script registers an input, so the mod gets its Script node
+  row, `dynamic` counting names set while running); the author part declares
+  nothing. An author file at one of the Script node row's two paths is refused
+  (`SH_MB_SCRIPT_NODE_RESERVED`). Builder rules 11.
   A build that carries a script is never sliced (`sh_mb_sliceable`): its
   scripts may build names while running. First-scan salting rewrites
   `mods/<folder>/` inside a `.lua` like any text file. Archives (publish,
@@ -1586,129 +1599,24 @@ its README records the version, hashes and the one local change).
   queue passes a frame. A map end requested while Lua runs waits until it
   returns.
 - **Time.** `now()`, `after(s, fn)`, `every(s, fn)`, `run(fn)` with `wait(s)`
-  inside it, each returning a handle with `cancel()`; game time, per mod,
-  dropped at map end. A coroutine resume is one call.
+  inside it, each returning a handle with `cancel()`; game time (the game
+  clock, so paused time does not count), per mod, dropped at map end. A
+  coroutine resume is one call.
 - **API seam.** Other modules add globals and entity methods to every new
-  state with `sh_script_api_add`, push entity objects with
+  state with `sh_script_api_add` (one implementation per name), whole objects
+  with `sh_script_api_add_opener` (a function run in each new state's
+  protected open: `vars` is opened this way), push entity objects with
   `sh_script_push_entity` (one object per handle per map, with its own
   `e.state` table), check them with `sh_script_check_entity` and
   `sh_script_owns_entity`, and refuse a call with `sh_script_refuse` (one
   plain sentence at the calling line) before touching the engine.
 
-Not here yet: the entity, AI, combat and logic calls, the damage, death,
-animation-notify and Script node hooks that post records come with the
-scripting work that follows. `tests/script_sandbox_test.c` covers the runtime
-without the game; `tests/modscript_test.c` the builder's checks, the static
-pass, the serving index and the archives.
-
-### Mod scripts: entity, animation and world calls
-
-`script_api_entity.c` and `script_api_world.c` add the version 1 calls;
-`script_api_common.{c,h}` holds what every API module shares. Reads work on any
-entity; a call that changes an entity works only on the mod's own (the handle
-table records it under the mod: placed from its entityDefs or spawned by its
-scripts), except that any mod may heal a player. A removed entity answers nil.
-Every argument is checked before the engine is touched, and every refusal is
-one plain sentence at the calling script line (it stops the mod's scripts for
-the map, as any error does).
-
-- **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; at most 64 live and
-  16 a second per mod), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
-  `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
-  `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
-  `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
-  `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
-  `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
-  `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
-  `entities_near(pos, radius)` (nearest first, at most 256) and
-  `trace(from, to, [radius], [ignore])`. Positions are tables `{x, y, z}`; an
-  entity stands for its position wherever a position is asked for.
-- **Engine.** Every call goes through one table of engine operations
-  (`sh_script_engine`), filled at boot by `sh_script_api_install` from private
-  signatures (`script_api_sigs.c`, checked on both executables by
-  `tests/script_api_sigs_test.c`) and faked by `tests/script_api_test.c`.
-  Positions and axes are the physics' (`+0x808`, vtable `+0x80`/`+0x88`) and are
-  set the way the engine's setOrigin event sets them (SetOrigin, SetAxis,
-  UpdateVisuals). Velocity, player health, view angles and removal are the
-  engine's own events (`ProcessEventArgs`, or `PostEventArgs` for commands).
-  An idAI2's health is its idAIHealth (`+0x2B290`): healing goes through the
-  engine's Heal, lowering writes the field and never reaches 0 (death comes
-  from damage). Spawning is idTarget_Spawn's create, pose and finish. A trace
-  is the game's trace query run at once, with the SnapMap laser hazard's
-  contents mask; a radius makes the line thick (nine parallel traces, the
-  nearest hit wins).
-- **Animation.** On an idAI2, requests are `ssaction_ChangeAnimState(Via)` and
-  `ssaction_ForceAnimState` (idAI2 does not handle the stock
-  `changeAnimState` events; the ssaction ones act while the AI is parked in its
-  script state). A bare state name takes the AI's current subweb.
-  `anim_current` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
-  node index). `anim_event` (DEST_BLEND_START, DEST_REACHED,
-  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `anim_finished` are
-  that node, observed every frame (`sh_script_api_frame`, before the tick)
-  against the last request. Other entities use the stock `changeAnimState`,
-  `forceAnimState` and `animState_IsFinished` events.
-- **Time.** `now()` and the timers run on the game clock (idGameLocal vtable
-  `+0x220`, milliseconds): the tick passes the game time since the Play's
-  first script frame.
-
-### Mod scripts: the AI calls
-
-`src/backend/script/script_api_ai.c` adds the AI calls of API version 1 as
-entity methods. Each one works only on a demon (an idAI2 or a subclass, by
-type number) the calling mod owns; any other entity, a bad argument or a
-missing engine function is refused with one plain sentence before the engine
-is touched, and a removed demon answers nil.
-
-- **The park.** The first command a script gives a demon parks it: the
-  detour on `IsRunningScript` (VK 0x14042FBC0, GL 0x14042EE60, 15-byte
-  window, committed at that first command on the game thread) answers true
-  for it, checked by spawn id from the FSM worker threads, so the alert cycle
-  enters its own `ExecuteDoomscript` state from `ac_default` and never leaves
-  it through `Shared_NotExecutingScript`. That state's class overrides no
-  state method; the designer commands below act there, and the engine keeps
-  pain, damage, death and animation. The command also posts
-  `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
-  in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
-  alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
-  0x145CEDF30) when a command arrives while the demon is elsewhere. No decl
-  is edited and no layers config is named; a demon stays parked for the map.
-- **Commands** are catalogue events run with `ProcessEventArgs` on the demon,
-  each format checked against the registry at first use (`SH_AI_EVENTS`):
-  `move_to(pos, [tolerance], [flags])` (`ssaction_SetWalkState` walking or
-  running, then `ssaction_MoveToPoint`; `strafe` or `aim_while_moving` first
-  aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
-  entity's position, given again when it has moved 32 inches; the engine's
-  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
-  (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
-  `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
-  `setPlayerEnemy` closest), `anim_state(node, [via])`,
-  `anim_force(node, [blend_ms])` (`ssaction_ChangeAnimState(Via)`,
-  `ssaction_ForceAnimState`), `trigger(on)` (`pull/releaseTriggerRight`),
-  `equip(index)` (`equipInventoryItemByIndex`), `laser(tag, on)`
-  (`setLaserState`), `laser_state(tag, on)` (`ae_setLaserState`),
-  `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
-  (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
-- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
-  (`isEntityVisible`, the perception's own answer), `aware()`
-  (`hasAwarenessOfEnemy`), `awareness([e])` (`GetAwareness` on the perception
-  at ai+0x29A88: unaware, lost, suspected, confirmed), `distance(t)`,
-  `angle_to(t)` (physics origin and axis), `move_done()` (the move FSM status
-  word at *(ai+0x23198)+0xD20, read as `Shared_MoveDone` and
-  `Shared_MoveFailedAny` read it; done and failed), `turn_done()` (facing
-  within 10 degrees of the last face target), `trigger_pulled()` (the weapon
-  trigger word, as `Shared_TriggerPulled`), `path_length(pos)` and
-  `can_reach(pos)` (the move FSM's path query that
-  `Shared_TargetDistanceFilter` calls, VK 0x140515300 / GL 0x140514030,
-  reached through that unique call site; the query is asynchronous, so a call
-  may answer "searching" and the script asks again), `find_position(parms)`
-  (points on a circle around the target scored by distance band and path
-  length).
-
-`tests/script_api_ai_test.c` runs every call through real scripts over a fake
-engine and checks the catalogue against `tests/fixtures/scripts/
-event_registry_13954591.txt`; `tests/script_ai_sigs_test.c` checks the
-signatures, the detour window, the path site and the offsets on both
-executables.
+Not built yet: the combat calls (`fire`, `hitscan`, `radius_damage`,
+`damage`, `fx`, `sound`) and the damage, death and animation-notify hooks, so
+`on.damage`, `on.death` and `on.anim` register but nothing delivers them yet.
+`tests/script_sandbox_test.c` covers the runtime without the game;
+`tests/modscript_test.c` the builder's checks, the static pass, the serving
+index (scripts and the Script node row), the archives and the fixture mods.
 
 ### Mod scripts: the engine side
 
@@ -1752,9 +1660,13 @@ No script code runs anywhere else.
   deactivate reason is not used: it is 3 only for the editor's own Play and
   stays 0 for a published or My Maps play, so `sh_modserve_engine_in_play`
   would keep scripts off there. An unreadable state runs nothing
-  (`sh_script_tick_decide`). The frame time is the wall time since the last
-  script frame. The detour is committed at the first Play gate that prepares
-  a mod, on the main thread with its prologue verified, and is never unhooked.
+  (`sh_script_tick_decide`). The frame time is the game clock's (idGameLocal
+  vtable `+0x220`, milliseconds) since the last script frame, so a paused game
+  passes no script time; before the tick, `sh_script_api_frame` observes the
+  animation requests of the entity calls. The detour is committed at the first
+  Play gate that prepares a mod, on the main thread with its prologue
+  verified, and is never unhooked. A failed install records "mod scripts" off
+  with its reason, and `sh_scripts` gives that refusal.
 - **Map start and end.** Before the first frame the tick walks the live
   entities once (every entity number's spawn id through the game's lookup)
   and records every entity of a scripted mod the spawn chain did not; the
@@ -1799,15 +1711,137 @@ windows, the tick's single caller and the resolver's vtable slots on both
 executables; `script_hooks_test` covers the queues, the handle table, the mod
 table and the tick's guards; `script_e2e_test` runs fixture mod folders from
 disk (`tests/fixtures/scripts/`) through the source, the runtime and the
-console with the hooks' part played as the hooks play it.
+console with the hooks' part played as the hooks play it, then the door
+example through its Script nodes and the spin-heal example through the entity
+calls against a faked engine table.
+
+### Mod scripts: entity, animation and world calls
+
+`script_api_entity.c` and `script_api_world.c` add the version 1 calls;
+`script_api_common.{c,h}` holds what every API module shares. Reads work on any
+entity; a call that changes an entity works only on the mod's own (the handle
+table records it under the mod: placed from its entityDefs or spawned by its
+scripts), except that any mod may heal a player. A removed entity answers nil.
+Every argument is checked before the engine is touched, and every refusal is
+one plain sentence at the calling script line (it stops the mod's scripts for
+the map, as any error does).
+
+- **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; at most 64 live and
+  16 a second per mod), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
+  `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
+  `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
+  `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
+  `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
+  `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
+  `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
+  `entities_near(pos, radius)` (nearest first, at most 256) and
+  `trace(from, to, [radius], [ignore])`. Positions are tables `{x, y, z}`; an
+  entity stands for its position wherever a position is asked for.
+- **Engine.** Every call goes through one table of engine operations
+  (`sh_script_engine`), filled at boot by `sh_script_api_install` from private
+  signatures (`script_api_sigs.c`, checked on both executables by
+  `tests/script_api_sigs_test.c`) and faked by `tests/script_api_test.c`.
+  Positions and axes are the physics' (`+0x808`, vtable `+0x80`/`+0x88`) and are
+  set the way the engine's setOrigin event sets them (SetOrigin, SetAxis,
+  UpdateVisuals). Velocity, player health, view angles and removal are the
+  engine's own events (`ProcessEventArgs`, or `PostEventArgs` for commands).
+  An idAI2's health is its idAIHealth (`+0x2B290`): healing goes through the
+  engine's Heal, lowering writes the field and never reaches 0 (death comes
+  from damage). Spawning is idTarget_Spawn's create, pose and finish. A trace
+  is the game's trace query run at once, with the SnapMap laser hazard's
+  contents mask; a radius makes the line thick (nine parallel traces, the
+  nearest hit wins).
+- **Animation.** idAI2 ignores the stock `changeAnimState` events, so on a
+  demon `anim_state` and `anim_force` hand the request to the AI calls
+  (`sh_script_ai_anim`): the demon is parked (below) and
+  `ssaction_ChangeAnimState(Via)` or `ssaction_ForceAnimState` runs at once.
+  A bare state name takes the AI's current subweb.
+  `anim_current` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
+  node index). `anim_event` (DEST_BLEND_START, DEST_REACHED,
+  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `anim_finished` are
+  that node, observed every frame (`sh_script_api_frame`, before the tick)
+  against the last request. Other entities use the stock `changeAnimState`,
+  `forceAnimState` and `animState_IsFinished` events.
+- **Events.** `sh_script_api_event` (run now) and `sh_script_api_post`
+  (queued for this frame's event service) are the one way any script call
+  reaches an engine event: the event is found by name in the game's registry
+  and its argument count and types are checked against the caller's before it
+  is sent; a mismatch is logged (the first 32 lines) and the call does nothing.
+  The AI calls use the same helper.
+
+### Mod scripts: the demons a script drives
+
+`src/backend/script/script_api_ai.c` adds the AI calls of API version 1 as
+entity methods. Each one works only on a demon (an idAI2 or a subclass, by
+type number) the calling mod owns; any other entity, a bad argument or a
+missing engine function is refused with one plain sentence before the engine
+is touched, and a removed demon answers nil.
+
+- **The park.** The first command a script gives a demon parks it: the
+  detour on `IsRunningScript` (VK 0x14042FBC0, GL 0x14042EE60, 15-byte
+  window, committed at that first command on the game thread) answers true
+  for it, checked by spawn id from the FSM worker threads, so the alert cycle
+  enters its own `ExecuteDoomscript` state from `ac_default` and never leaves
+  it through `Shared_NotExecutingScript`. That state's class overrides no
+  state method; the designer commands below act there, and the engine keeps
+  pain, damage, death and animation. The command also posts
+  `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
+  in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
+  alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
+  0x145CEDF30) when a command arrives while the demon is elsewhere. No decl
+  is edited and no layers config is named; a demon stays parked for the map.
+- **Commands** are catalogue events (`SH_AI_EVENTS`) run on the demon at once
+  through the entity calls' event helper, which checks each one's arguments
+  against the game's event:
+  `move_to(pos, [tolerance], [flags])` (`ssaction_SetWalkState` walking or
+  running, then `ssaction_MoveToPoint`; `strafe` or `aim_while_moving` first
+  aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
+  entity's position, given again when it has moved 32 inches; the engine's
+  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
+  (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
+  `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
+  `setPlayerEnemy` closest), `trigger(on)` (`pull/releaseTriggerRight`),
+  `equip(index)` (`equipInventoryItemByIndex`), `laser(tag, on)`
+  (`setLaserState`), `laser_state(tag, on)` (`ae_setLaserState`),
+  `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
+  (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
+- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
+  (`isEntityVisible`, the perception's own answer), `aware()`
+  (`hasAwarenessOfEnemy`), `awareness([e])` (`GetAwareness` on the perception
+  at ai+0x29A88: unaware, lost, suspected, confirmed), `angle_to(t)`
+  (physics origin and axis), `move_done()` (the move FSM status
+  word at *(ai+0x23198)+0xD20, read as `Shared_MoveDone` and
+  `Shared_MoveFailedAny` read it; done and failed), `turn_done()` (facing
+  within 10 degrees of the last face target), `trigger_pulled()` (the weapon
+  trigger word, as `Shared_TriggerPulled`), `path_length(pos)` and
+  `can_reach(pos)` (the move FSM's path query that
+  `Shared_TargetDistanceFilter` calls, VK 0x140515300 / GL 0x140514030,
+  reached through that unique call site; the query is asynchronous, so a call
+  may answer "searching" and the script asks again), `find_position(parms)`
+  (points on a circle around the target scored by distance band and path
+  length).
+- **Shared with the entity calls.** `distance`, `anim_state` and `anim_force`
+  are the entity calls' and work on any entity; on a demon the two animation
+  calls come back here (`sh_script_ai_anim`), which parks it first.
+- **Install.** `sh_script_ai_install` runs after the entity calls' engine
+  side and is the "demons driven by scripts" row of the feature registry.
+
+`tests/script_api_ai_test.c` runs every call through real scripts over a fake
+engine (the animation commands through `sh_script_ai_anim`) and checks the catalogue against `tests/fixtures/scripts/
+event_registry_13954591.txt`; `tests/script_ai_sigs_test.c` checks the
+signatures, the detour window, the path site and the offsets on both
+executables.
 
 ### Mod scripts: the Script node and map variables
 
 `src/backend/script/script_node.c` is where a mod's scripts meet SnapMap logic.
 
 - **The row.** A mod whose scripts call `on.input` (`sh_script_node_registers_input`,
-  a scan that skips comments and strings) gets one built-in Toybox row, "Script",
-  generated by `sh_script_node_row_make` and never written into its folder: the
+  a scan that skips comments and strings; the builder records it as the
+  scripts member's `node`) gets one built-in Toybox row, "Script", generated by
+  `sh_script_node_row_make` (`script_node_row.c`, no Lua, linked by the
+  builder, the store tool and the serving index) and never written into its
+  folder: the
   entityDef `mods/<salt>/script` inheriting the stock Relay
   (`snapmaps/logic/relay`, `idSnapMapLogic_Relay`) and the row
   `mods/<salt>/script` inheriting the stock Relay row (`logic/relay`) with the
@@ -1816,9 +1850,25 @@ console with the hooks' part played as the hooks play it.
   property sheet has the name only. A placed node is an ordinary entity of the
   mod's entityDef, so a map, a prefab or an export records the mod as for any
   mod row, and a build without the mod refuses the map in the usual way.
-  `sh_script_node_reserved` names the two paths an author's own file may not use.
-- **Names.** A node's role is its editor name. At the Play gate
-  `sh_script_node_play_begin` reads, from the JSON of the map the Play converts,
+  The serving index serves it (`ms_script_node_row` in `modserve.c`): when a
+  bundle's block has `node`, the two decls are added to that bundle's files
+  with their bytes written once under `mods\.served\files\` by their own hash
+  (as rewritten files are), the row needs the entityDef, and the strings join
+  the bundle's `strings.en` for the string layer unless the author wrote that
+  key. They are not in the manifest or the build hash, and archives never
+  carry them: every machine that holds the build makes the same row from the
+  salt, the mod's name and the category tag of its first Toybox row.
+  `sh_script_node_reserved` names the two paths an author's own file may not
+  use; the builder refuses one there.
+- **Install.** `sh_script_node_install` resolves the Relay DoAction,
+  FireOutput and variable-changed sites at boot and is the "Script nodes" row
+  of the feature registry; the row is served whatever happens to it, so a map
+  holding a node always loads.
+- **Names.** A node's role is its editor name. At the Play gate (the SnapBuild
+  detour in `nav_play.c`, after the scripts are prepared, only when a mod of
+  the Play carries scripts) the map being converted is written to JSON through
+  `EditorMapToJson` (`sh_apply_engine_map_json`) and
+  `sh_script_node_play_begin` reads from it
   every Script node's `uniqueId` and display name and the names of the map's
   Integer, Number, Boolean and String variables in list order. A placed
   entity's game name ends in its `uniqueId` (`MapEntityForSnapEntity` names it
@@ -1834,7 +1884,8 @@ console with the hooks' part played as the hooks play it.
   `FireOutput(node, 8, activator)` (SNAP_EVENT_LOGIC_FIRED, what the stock Relay
   calls) on every Script node of the calling mod with that name and returns how
   many fired; a name no node carries writes one warning per map.
-- **Variables.** `vars.get(name)` and `vars.set(name, value)` read and write the
+- **Variables.** `vars` is opened in every new state (`sh_script_api_add_opener`).
+  `vars.get(name)` and `vars.set(name, value)` read and write the
   game's values (idGameLocal vtable `+0x720`: Integer `+0x138` with bounds
   `+0x150`, Number `+0x168` with bounds `+0x180`, String `+0x198`, Boolean
   `+0x1C8`), clamp an Integer or Number to its bounds as the stock Operation
