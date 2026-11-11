@@ -2053,7 +2053,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_knum(b, "at", mp->claim && mp->claim->updated > 0 ? (unsigned long long)mp->claim->updated : 0, 0);
             mu_putn(b, "}", 1);
         }
-        if (mp->have_info && mp->info.tagged >= 0) mu_kbool(b, "tagged", mp->info.tagged, 0);
         mu_puts(b, ",\"mods\":[");
         for (i = 0; i < mu_map_mod_count(mp); i++) {
             const mu_mapmod *x = &mp->mods[i];
@@ -3645,27 +3644,22 @@ static const char *mu_entry_title(const sh_ms_entry *s)
     return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
 }
 
-/* The folders an uninstall of `key` removes, marked in `mark` (the list's
- * size); returns how many. The tab names one folder (its key). The console
- * (by_key) names a mod as sh_ms_entry_matches reads it (a folder, a nested
- * folder's own name), and every folder of that mod goes: its root folder and
- * the copies maps brought. */
-static int mu_uninstall_targets(const mu_model *m, const char *key, int by_key, unsigned char *mark)
+/* The one folder an uninstall of `key` removes, in the tab and the console
+ * alike: the folder of that name under mods\, else (the console, by_key) the
+ * first folder sh_ms_entry_matches finds for it (a nested folder's own name,
+ * or a salt), the player's own before a map's copy. Another folder of the
+ * same mod stays, and the dry run says so. Returns the entry, or -1. */
+static int mu_uninstall_target(const mu_model *m, const char *key, int by_key)
 {
     size_t i;
-    int n = 0;
-    const char *salt = NULL;
-    for (i = 0; i < m->list.count; i++) {
-        const sh_ms_entry *s = &m->list.items[i];
-        int hit = !strcmp(s->name, key) || (by_key && sh_ms_entry_matches(s, key));
-        if (hit && by_key && s->salt[0] && !salt) salt = s->salt;
-        mark[i] = (unsigned char)hit;
-    }
-    for (i = 0; i < m->list.count; i++) {
-        if (salt && !mark[i] && !_stricmp(m->list.items[i].salt, salt)) mark[i] = 1;
-        n += mark[i];
-    }
-    return n;
+    int pass;
+    for (i = 0; i < m->list.count; i++) if (!strcmp(m->list.items[i].name, key)) return (int)i;
+    for (pass = 0; by_key && pass < 2; pass++)
+        for (i = 0; i < m->list.count; i++) {
+            const sh_ms_entry *s = &m->list.items[i];
+            if ((pass == 0) == (s->place[0] == 0) && sh_ms_entry_matches(s, key)) return (int)i;
+        }
+    return -1;
 }
 
 /* Whether the entry at `at` adds a Toybox row of that display name. */
@@ -3677,20 +3671,10 @@ static int mu_entry_has_row(const mu_model *m, size_t at, const char *name)
     return 0;
 }
 
-/* One folder an uninstall removes, for the dry run. */
-static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *s)
-{
-    char title[400];
-    mu_place_title(s, title, sizeof title);
-    if (s->loaded)
-        mu_line(o, "%s:   mods\\%s (%s%s%s)", verb, s->name, mu_entry_title(s), title[0] ? ", downloaded for " : "", title);
-    else mu_line(o, "%s:   mods\\%s (not built)", verb, s->name);
-}
-
 /* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the
  * tab and the console (o non-NULL prints the same consequences; by_key, the
- * console's uninstall, removes every folder of the mod it names,
- * mu_uninstall_targets). */
+ * console's uninstall, also finds a mod by a nested folder's own name or its
+ * salt, mu_uninstall_target). */
 static int mu_map_action(int action, const char *key, const mu_out *o, int by_key)
 {
     int uninstall = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_UNINSTALL_PREVIEW;
@@ -3703,7 +3687,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     mu_plan p;
     mu_buf b;
     char msg[MAX_PATH * 8 + 900], cause[300], title[300];
-    int entry = -1, ok = 1, builds = 0;
+    int entry = -1, ok = 1;
     unsigned char *targets = NULL;
     size_t i, t;
     memset(&b, 0, sizeof b);
@@ -3723,8 +3707,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     targets = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
     if (!targets) { mu_map_free(&mp); mu_record_free(&rec); mu_model_free(&m); return -1; }
     if (uninstall) {
-        builds = mu_uninstall_targets(&m, key, by_key, targets);
-        for (i = 0; i < m.list.count && entry < 0; i++) if (targets[i]) entry = (int)i;
+        entry = mu_uninstall_target(&m, key, by_key);
+        if (entry >= 0) targets[entry] = 1;
     } else {
         for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
     }
@@ -3793,16 +3777,6 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             mu_kint(&b, "savedMaps", saved, 0);
             mu_kbool(&b, "undoCleared", mp.entities >= 0, 0);
             if (stay) mu_kstr(&b, "keptBuild", stay->name, 0);
-            if (builds > 1) {
-                size_t k = 0;
-                mu_puts(&b, ",\"folders\":[");
-                for (t = 0; t < m.list.count; t++) {
-                    if (!targets[t]) continue;
-                    if (k++) mu_putn(&b, ",", 1);
-                    mu_str(&b, m.list.items[t].name);
-                }
-                mu_putn(&b, "]", 1);
-            }
             mu_putn(&b, "}", 1);
             mu_puts(&b, ",\"editorRows\":[");
             {
@@ -3832,15 +3806,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                     for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
                         if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i]))
                             mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
-                if (builds > 1) {
-                    mu_line(o, "%s: removes all %d folders of %s (yours and the copies maps brought); to keep one, "
-                            "uninstall the others by their folder", verb, builds, title);
-                    mu_line(o, "%s: moves these folders to the Windows Recycle Bin; restore them from there by hand", verb);
-                    for (t = 0; t < m.list.count; t++) if (targets[t]) mu_say_target(o, verb, &m.list.items[t]);
-                } else {
-                    mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
-                            s->name);
-                }
+                mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
+                        s->name);
                 if (stay)
                     mu_line(o, "%s: another folder of %s stays installed (mods\\%s); maps that use it open with it", verb,
                             title, stay->name);
@@ -3893,11 +3860,6 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                 for (t = 0; t < m.list.count; t++) removing[t] = targets[t];
                 mu_remove_marked(&m, removing, &rm);
                 ok = rm.removed > 0 && rm.failed == 0;
-            }
-            if (builds > 1) {
-                char built[40];
-                _snprintf_s(built, sizeof built, _TRUNCATE, " (%zu of %d folders)", rm.removed, builds);
-                strncat_s(title, sizeof title, built, _TRUNCATE);
             }
             mu_log("uninstall %s: %s%s", key, !ok ? "the folder could not be removed" : rm.outright ? "the folder was deleted outright"
                    : "the folder was moved to the Recycle Bin", removed_from_map ? " after the open map was cleaned of it" : "");

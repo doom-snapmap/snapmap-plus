@@ -3474,6 +3474,52 @@ static void ui_mods_open_folder(const std::wstring &folder)
     ui_mods_post_result(L"openFolder", ok, ok ? L"" : L"The mods folder could not be opened.", nullptr);
 }
 
+/* A file's path below its mod folder for Open in editor: '/'-separated plain names, no drive, no "."
+ * or ".." part. */
+static bool ui_mods_relative_file(const std::wstring &path)
+{
+    if (path.empty() || path.size() > 1000) return false;
+    size_t at = 0;
+    for (;;) {
+        size_t cut = path.find(L'/', at);
+        if (!ui_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
+        if (cut == std::wstring::npos) return true;
+        at = cut + 1;
+    }
+}
+
+/* Open in editor (the Files view): one file of a mod folder, "<folder>\t<path below it>", in the
+ * program Windows opens it with; a kind with none (a .decl) gets Windows' own Open with dialog. */
+static void ui_mods_open_file(const std::wstring &arg)
+{
+    size_t tab = arg.find(L'\t');
+    std::wstring folder = tab == std::wstring::npos ? L"" : arg.substr(0, tab), rel = tab == std::wstring::npos ? L"" : arg.substr(tab + 1);
+    sh_mods_call call;
+    char root[MAX_PATH * 4];
+    bool ok = false;
+    if (!ui_mods_relative_folder(folder) || !ui_mods_relative_file(rel)) {
+        ui_mods_post_result(L"openFile", false, L"That file is not inside a mod folder.", nullptr);
+        return;
+    }
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_ROOT;
+    call.out = root;
+    call.out_cap = (int)sizeof root;
+    if (ui_mods_slot(&call) == 1) {
+        std::wstring w = ui_widen(root) + L"\\" + folder + L"\\" + rel;
+        for (wchar_t &c : w) if (c == L'/') c = L'\\';
+        DWORD at = GetFileAttributesW(w.c_str());
+        if (at == INVALID_FILE_ATTRIBUTES || (at & FILE_ATTRIBUTE_DIRECTORY)) {
+            ui_mods_post_result(L"openFile", false, L"That file is no longer in the mod's folder; press Refresh.", nullptr);
+            return;
+        }
+        INT_PTR r = (INT_PTR)ShellExecuteW(g_hwnd, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (r == SE_ERR_NOASSOC) r = (INT_PTR)ShellExecuteW(g_hwnd, L"openas", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        ok = r > 32;
+    }
+    ui_mods_post_result(L"openFile", ok, ok ? L"" : L"Windows could not open the file. Open it from the mod's folder instead.", nullptr);
+}
+
 /* Extract a view's flat tags and re-escape each value. Never splice view
  * bytes into an outgoing JSON envelope. */
 static bool ui_view_tags(const std::string &body, std::vector<std::string> &tags)
@@ -3968,6 +4014,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 sh_webview_json::get_string(json, L"action", act);
                 sh_webview_json::get_string(json, L"arg", arg);
                 if (act == L"openFolder") ui_mods_open_folder(arg);
+                else if (act == L"openFile") ui_mods_open_file(arg);
                 else {
                     int code = ui_mods_action_code(act);
                     if (!code) ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);

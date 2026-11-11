@@ -140,7 +140,6 @@ function standIn(initial, folders) {
   function recount() {
     mods().forEach(function (b) { b.state = b.cause ? 'attention' : 'ready'; });
     if (docu.map && Array.isArray(docu.map.mods)) {
-      docu.map.tagged = docu.map.mods.length > 0;
       docu.map.vanilla = docu.map.mods.length === 0;
     }
   }
@@ -148,7 +147,7 @@ function standIn(initial, folders) {
     var left = mapMods().length - 1;
     return {name: str(docu.map && docu.map.name), entities: arr(r.placedEntities).slice(), entityCount: num(r.placedCount),
             references: arr(r.references).slice(), manifestRow: true, attached: !!r.attached,
-            tagRemoved: left === 0 && docu.map.tagged !== false,
+            tagRemoved: left === 0,
             vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
   }
   /* Uninstall moves the folder to the Recycle Bin; the saved maps are not the preview's to count. */
@@ -714,7 +713,7 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.equal(ov.style.display, 'flex');
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Hell Guard Arena');
   const t = modalText(h);
-  for (const s of ['Name Hell Guard Arena', 'Published Yes, 2026-', 'Its mods Uploaded with the published map', 'Search tag mods (present)',
+  for (const s of ['Name Hell Guard Arena', 'Published Yes, 2026-', 'Its mods Uploaded with the published map',
                    'Mods 3 mods, 5.4 MB for a player to download'])
     assert.ok(t.indexOf(s) >= 0, s);
   assert.ok(t.indexOf('Saved map') < 0, 'no saved-map id');
@@ -726,7 +725,8 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer; playing the map downloads it/);
   /* a choice between mods names the mods, never their ids */
   const opts = h.nodes.modsMapHost.tags('option').map(o => o.textContent);
-  assert.deepEqual(opts, ['R2 Imp copy', 'Doors']);
+  assert.deepEqual(opts, ['The first mod the map lists (R2 Imp copy)', 'R2 Imp copy', 'Doors']);
+  assert.ok(modalText(h).indexOf('Search tag') < 0, 'no search tag row: the product keeps it in step');
   h.nodes.modsMapHost.tags('select')[0].value = 'doorsx8q';
   h.nodes.modsMapHost.tags('select')[0].dispatch('change');
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tdoorsx8q'});
@@ -754,12 +754,26 @@ test('Remove from map: the dry run drives the confirmation; the document drives 
   const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.match(items[0], /^Deletes 3 placed entities from Hell Guard Arena\. Imp \(R2\) 1/);
   assert.match(items[1], /^Severs 2 wire or timeline references to those entities\./);
-  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Delete from map']);
+  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove from map']);
   modalButtons(h)[1].click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveMod', arg: 'alex.r2-imp'});
   assert.equal(h.nodes.modsMapHost.all('mods-map-row').length, 2);
   assert.match(h.toasts.pop().text, /^Removed R2 Imp copy from Hell Guard Arena: 3 entities deleted\./);
   assert.equal(iconOf(rowOf(h, 'alex.r2-imp')), 'ok', 'the row loses the in-this-map glyph');
+});
+test('a choice between mods can be cleared; Remove from map is the one wording', () => {
+  const h = live();
+  h.nodes.modsMapBtn.click();
+  const sel = () => h.nodes.modsMapHost.tags('select')[0];
+  assert.equal(sel().value, '', 'no choice yet: the first mod the map lists decides');
+  sel().value = 'doorsx8q';
+  sel().dispatch('change');
+  assert.equal(sel().value, 'doorsx8q');
+  sel().value = '';
+  sel().dispatch('change');
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\t'});
+  assert.equal(sel().value, '', 'cleared');
+  assert.ok(!/Delete from map/.test(source), 'every control says Remove from map');
 });
 test('Use in this map from the details pane, and back', () => {
   const h = live();
@@ -871,6 +885,20 @@ test('the Files modal: the folder tree with the salt in its paths, one glyph per
   assert.equal(h.nodes.modsFilesModal.style.display, 'none');
   assert.equal(activeElement, h.nodes.modsFilesBtn);
 });
+test('the Files view: Open in editor hands a file of the folder to the system', () => {
+  const h = harness({store: standIn(v4, FOLDERS)});
+  h.ui.show();
+  h.ui.select('alex.r2-imp');
+  h.nodes.modsFilesBtn.click();
+  h.ui.selectFile(IMP);
+  const open = h.nodes.modsFilesHost.all('mf-open')[0];
+  assert.equal(open.textContent, 'Open in editor');
+  open.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFile', arg: 'alex.r2-imp\t' + IMP});
+  assert.equal(h.ui.state().busy, '', 'opening a file never holds the page');
+  h.ui.selectFile('assets/models/monsters/imp/imp.lwo');
+  assert.equal(h.nodes.modsFilesHost.all('mf-open').length, 0, 'a game file the folder does not hold has nothing to open');
+});
 test('the Files view model: classes, sources and the tree', () => {
   const d = modsTab.normFiles({key: 'k', files: [{path: 'b\\x.decl', kind: 'text', class: 'mystery', container: 'mars', game: 'yes'},
                                                   {path: ''}, {path: 'a.json', kind: 'text', class: 'descriptor'}]});
@@ -948,9 +976,11 @@ test('page contract', () => {
 test('host and interface contract', () => {
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
-  for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
+  for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder' && x !== 'openFile'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
   assert.ok(host.includes('if (act == L"openFolder") ui_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('else if (act == L"openFile") ui_mods_open_file(arg);'), 'openFile opens one file of a mod folder');
+  assert.ok(host.includes('ui_mods_relative_file(rel)'), 'openFile takes a path below the mod folder');
   assert.ok(host.includes('ui_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.ok(host.includes('ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });

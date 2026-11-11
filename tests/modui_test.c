@@ -1144,13 +1144,14 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"R2 Imp copy is already one of your mods, in "
                        "mods\\\\alex.r2-imp.\"") && has(doc, "\"key\":\"alex.r2-imp\""));
         free(doc);
-        /* The console's uninstall names the mod: every folder of it, yours and the map's copy. */
+        /* The console's uninstall removes one folder, as the tab's does: yours first; the map's copy stays. */
         {
             const char *un_argv[] = { "uninstall", "alex.r2-imp" };
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
-            CHECK(has(g_doctor, "MODS: uninstall: removes all 2 folders of R2 Imp copy (yours and the copies maps brought)"));
-            CHECK(has(g_doctor, "downloaded for Hell Arena)"));
+            CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp to the Windows Recycle Bin"));
+            CHECK(has(g_doctor, "MODS: uninstall: another folder of R2 Imp copy stays installed (mods\\maps\\Hell Arena\\"));
+            CHECK(!has(g_doctor, "folders of"));
             CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: dry run; add --yes to do it\n"));
             CHECK(lines_prose_ok(g_doctor));
         }

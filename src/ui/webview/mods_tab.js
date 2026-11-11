@@ -52,7 +52,7 @@ var modsTab = (function () {
      shows. mapAddMod attaches the selected mod to the open map without placing anything (a
      map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
      Windows Recycle Bin. */
-  var ACTIONS = ['install', 'rescan', 'openFolder', 'mapAddMod', 'addToMine',
+  var ACTIONS = ['install', 'rescan', 'openFolder', 'openFile', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                  'modFiles', 'modFileText', 'newMod'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
@@ -247,7 +247,6 @@ var modsTab = (function () {
     return {open: open, name: str(m.name), saved: num(m.saved), entities: num(m.entities),
             published: pub ? {state: str(pub.state), at: num(pub.at)} : null,
             uploaded: up ? {claimed: bool(up.claimed), at: num(up.at)} : null,
-            tagged: typeof m.tagged === 'boolean' ? m.tagged : null,
             mods: Array.isArray(m.mods) ? m.mods.map(normMapMod) : null,
             vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null,
             clashes: arr(m.registryClashes).map(normClash).filter(function (c) { return c.slot && c.providers.length > 1; })};
@@ -288,7 +287,6 @@ var modsTab = (function () {
                                          list: m.references.map(refText)});
       if (m.manifestRow) out.push({text: m.attached ? "Removes the mod from the map's list of mods; the whole map used it."
                                                     : "Removes the mod's row from the map's list of mods."});
-      if (m.tagRemoved) out.push({text: 'Removes the search tag mods: this is the last mod the map uses.'});
       if (m.vanillaAfter) out.push({text: 'The map then needs no mods and plays without Snapmap+.'});
       if (m.published) out.push({text: 'The published copy on the server is unaffected until you publish the map again.'});
     }
@@ -1094,7 +1092,6 @@ var modsTab = (function () {
       if (m.uploaded) field(det, 'Its mods', m.uploaded.claimed
         ? 'Uploaded with the published map' + (m.uploaded.at ? ' (' + formatDate(m.uploaded.at) + ')' : '')
         : 'Not uploaded');
-      if (m.tagged !== null) field(det, 'Search tag', m.tagged ? 'mods (present)' : 'mods (absent)');
       if (m.mods) {
         var total = m.mods.reduce(function (a, r) { return a + r.size; }, 0);
         field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));
@@ -1106,13 +1103,18 @@ var modsTab = (function () {
         m.clashes.forEach(function (c) {
           var sel = el('select', 'mods-clash');
           sel.setAttribute('data-slot', c.slot);
+          /* No choice: the first mod the map lists decides, and this option clears a choice. */
+          var first = el('option', '', 'The first mod the map lists (' + c.providers[0].name + ')');
+          first.value = '';
+          if (!c.chosen) first.selected = true;
+          sel.appendChild(first);
           c.providers.forEach(function (p) {
             var o = el('option', '', p.name);
             o.value = p.id;
-            if (p.id === c.serving) o.selected = true;
+            if (c.chosen && p.id === c.chosen) o.selected = true;
             sel.appendChild(o);
           });
-          sel.value = c.serving;
+          sel.value = c.chosen;
           sel.disabled = !!busy;
           sel.addEventListener('change', function () { act('chooseRegistry', c.slot + '\t' + str(sel.value)); });
           modalButtons.push(sel);
@@ -1190,7 +1192,7 @@ var modsTab = (function () {
         if (modal.from === 'uninstall' || modal.from === 'details') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
       }));
-      acts.appendChild(modalButton(uninstall ? verb : 'Delete from map', 'danger-solid', function () {
+      acts.appendChild(modalButton(uninstall ? verb : 'Remove from map', 'danger-solid', function () {
         act(uninstall ? 'uninstall' : 'mapRemoveMod', pv.key);
       }));
       host.appendChild(acts);
@@ -1495,6 +1497,14 @@ var modsTab = (function () {
         meta.appendChild(s);
       });
       head.appendChild(meta);
+      /* The view is read-only: Open in editor hands a file of the folder to the system's editor. */
+      if (f.inFolder) {
+        var ed = el('button', 'btn mf-open', 'Open in editor');
+        ed.type = 'button';
+        ed.title = 'Open this file in your editor; press Refresh in the Mods tab after you save it';
+        ed.addEventListener('click', function () { act('openFile', fm.key + '\t' + f.path); });
+        head.appendChild(ed);
+      }
       pane.appendChild(head);
       if (fm.hint && f.path === fm.want) pane.appendChild(el('div', 'mf-hint', fm.hint));
       var tx = fm.text && fm.asked === f.path ? fm.text : null;
@@ -1620,7 +1630,7 @@ var modsTab = (function () {
       var m = actionMessage(action, arg);
       if (!m) return false;
       quiet = false;
-      if (action !== 'openFolder') setBusy(action);
+      if (action !== 'openFolder' && action !== 'openFile') setBusy(action);
       env.post(m);
       return true;
     }
