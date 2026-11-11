@@ -211,10 +211,15 @@ static int g_str_owned[3];
 static int g_notified[5];
 static int g_vars_ready = 1;
 
+static int g_many;   /* when set: the mod has this many Script nodes, each the first recorded one */
 static int fake_nodes(void *c, int mod, sh_script_handle *out, int cap)
 {
     int i, n = 0;
     (void)c;
+    if (g_many) {
+        for (i = 0; i < g_many && n < cap; i++) out[n++] = g_nodes[0].h;
+        return n;
+    }
     for (i = 0; i < g_nnodes && n < cap; i++)
         if (sh_script_handle_mod(g_nodes[i].h) == mod && sh_script_handle_known(g_nodes[i].h)) out[n++] = g_nodes[i].h;
     return n;
@@ -391,6 +396,13 @@ static int test_open_vars(lua_State *L)
     return 0;
 }
 
+/* A test-only global: the mod has n Script nodes from now on (0: the recorded ones). */
+static int test_many(lua_State *L)
+{
+    g_many = (int)lua_tointeger(L, 1);
+    return 0;
+}
+
 /* ============================================ the door, end to end */
 
 static void test_door(void)
@@ -521,6 +533,7 @@ static void test_api(void)
         "  local nm = string.rep('n', 300)\n"
         "  print('longnode', #node(nm).name, tostring(node(nm)) == 'Script node \"' .. nm .. '\"')\n"
         "  on.input(string.rep('i', 300), function() end)\n"
+        "  test_many(300) print('many', node('open_door'):fire()) test_many(0)\n"
         "end)\n";
     g_nmem++;
     CHECK(sh_script_map_open() == 1);
@@ -544,6 +557,7 @@ static void test_api(void)
     CHECK(strstr(g_out, "n\tScript node \"open_door\"\topen_door\n") != NULL);
     CHECK(strstr(g_out, "fired\t1\t1\n") != NULL && g_nfired == 2 && g_fired[0].activator == 0);
     CHECK(strstr(g_out, "missing\t0\t0\n") != NULL);
+    CHECK(strstr(g_out, "many\t300\n") != NULL);   /* every node of the mod fires: no count is the limit */
     CHECK(strstr(g_out, "longnode\t300\ttrue\n") != NULL);   /* a node name of any length (the old cap was 127) */
     CHECK(strstr(g_out, "Warning: scripts\\main.lua line 14: node(\"no_such_node\"):fire() found no Script node of Vars Mod "
                         "named \"no_such_node\" in this map, so nothing fired. Place a Script node from Vars Mod and name it "
@@ -720,6 +734,7 @@ int main(int argc, char **argv)
     sh_script_node_set_ops(&k_fake);
     CHECK(sh_script_node_api_register());
     CHECK(sh_script_api_add(SH_SCRIPT_API_GLOBAL, "test_open_vars", test_open_vars));
+    CHECK(sh_script_api_add(SH_SCRIPT_API_GLOBAL, "test_many", test_many));
 
     test_registers_input();
     test_row();

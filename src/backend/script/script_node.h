@@ -85,7 +85,7 @@ extern "C" {
 #define SH_SCRIPT_NODE_DEF_PARENT  "snapmaps/logic/relay"   /* the stock Relay entityDef */
 #define SH_SCRIPT_NODE_ROW_PARENT  "logic/relay"            /* the stock Relay row */
 #define SH_SCRIPT_NODE_FIRED       8                        /* SNAP_EVENT_LOGIC_FIRED */
-#define SH_SCRIPT_NODE_PER_MOD     256                      /* Script nodes node():fire() reaches per call */
+#define SH_SCRIPT_NODE_FIRST       64                       /* node():fire() first asks for this many; the list grows */
 
 /* Variable types, as the engine numbers them (snapVarType_t). */
 #define SH_SCRIPT_VAR_INTEGER 0

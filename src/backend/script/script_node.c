@@ -276,15 +276,23 @@ static const char *check_node_name(lua_State *L, int arg, const char *call, size
 static int node_fire(lua_State *L)
 {
     node_ud *self = (node_ud *)luaL_testudata(L, 1, MT_NODE);
-    sh_script_handle act = 0, nodes[SH_SCRIPT_NODE_PER_MOD];
-    int mod, n, i, fired = 0;
+    sh_script_handle act = 0, *nodes = NULL;
+    int mod, n = 0, i, fired = 0, cap = SH_SCRIPT_NODE_FIRST;
     if (!self)
         return sh_script_refuse(L, "\"fire\" is called on a Script node, as node(\"name\"):fire(); it was called on %s",
                                 lua_isnoneornil(L, 1) ? "nothing" : luaL_typename(L, 1));
     if (!lua_isnoneornil(L, 2)) act = (sh_script_handle)sh_script_check_entity(L, 2, "fire");
     /* every check is done: from here on nothing raises */
     mod = sh_script_hooks_mod_find(sh_script_salt(L));
-    n = (mod >= 0 && g_ops.nodes) ? g_ops.nodes(g_ops.context, mod, nodes, SH_SCRIPT_NODE_PER_MOD) : 0;
+    /* every Script node of the mod in the map: the list grows until it holds them all */
+    while (mod >= 0 && g_ops.nodes) {
+        sh_script_handle *grown = (sh_script_handle *)realloc(nodes, (size_t)cap * sizeof *nodes);
+        if (!grown) { n = 0; break; }
+        nodes = grown;
+        n = g_ops.nodes(g_ops.context, mod, nodes, cap);
+        if (n < cap || cap > INT_MAX / 2) break;
+        cap *= 2;
+    }
     for (i = 0; i < n; i++) {
         int uid = g_ops.node_uid ? g_ops.node_uid(g_ops.context, nodes[i]) : -1;
         char *name = uid >= 0 ? sh_script_node_name_dup(uid) : NULL;
@@ -293,6 +301,7 @@ static int node_fire(lua_State *L)
         if (!same) continue;
         if (g_ops.fire && g_ops.fire(g_ops.context, nodes[i], act)) fired++;
     }
+    free(nodes);   /* before anything below can raise */
     if (!fired && n >= 0) {
         luaL_Buffer key;
         const char *p;
