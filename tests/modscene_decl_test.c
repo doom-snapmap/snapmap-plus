@@ -92,8 +92,6 @@ static void test_refusals(void)
         "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"at\":[0,0,0,0]}]}}}",                     /* no entityDef */
         "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"a b\"}]}}}",                /* space */
         "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"x\",\"origin\":[0,0,0]}]}}}",
-        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},"
-        "{\"entityDef\":\"x\"},{\"entityDef\":\"x\"}]}}}",                                    /* five */
         "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"mods/aaaabbbb/N\"}]}}}",         /* itself */
         "{\"scenes\":{\"mods/aaaabbbb/n\":{},\"mods/aaaabbbb/N\":{}}}",                                  /* twice */
     };
@@ -335,27 +333,65 @@ static void test_image(const char *path)
     free(base);
 }
 
+/* Node and entityDef names of any length, and any number of spawns, are kept whole. */
+static void test_long_names_and_many_spawns(void)
+{
+    sh_scene_table t = {0};
+    const sh_scene_entry *e;
+    size_t cap = 64 * 1024, n;
+    char *json = (char *)malloc(cap), *node = (char *)malloc(2100), *def = (char *)malloc(1100);
+    int i;
+    CHECK(json && node && def);
+    strcpy(node, "mods/aaaabbbb/");
+    memset(node + 14, 'n', 2000);
+    node[2014] = 0;
+    strcpy(def, "mods/aaaabbbb/");
+    memset(def + 14, 'd', 1000);
+    def[1014] = 0;
+    n = (size_t)sprintf_s(json, cap, "{\"scenes\":{\"%s\":{\"spawn\":[", node);
+    for (i = 0; i < 20; i++)
+        n += (size_t)sprintf_s(json + n, cap - n, "%s{\"entityDef\":\"%s\"}", i ? "," : "", def);
+    sprintf_s(json + n, cap - n, "]}}}");
+    CHECK(add(&t, "aaaabbbb", json) == 1);
+    e = sh_scene_find(&t, node);
+    CHECK(e && !strcmp(e->node, node) && e->spawn_count == 20);
+    CHECK(e && !strcmp(e->spawns[19].entitydef, def));
+    sh_scene_table_free(&t);
+    free(json);
+    free(node);
+    free(def);
+}
+
 static void test_pending(void)
 {
     sh_scene_pending_table t;
     sh_scene_pending got;
     sh_scene_spawn s[2];
+    char longname[3000];
     int a, b, i, nodes[SH_SCENE_PENDING_ROWS + 1];
     memset(s, 0, sizeof s);
-    strcpy_s(s[0].entitydef, sizeof s[0].entitydef, "mods/m/entrance/imp");
+    memset(&t, 0, sizeof t);
+    s[0].entitydef = "mods/m/entrance/imp";
     s[0].at.x = 10.0f;
     s[0].at.yaw = 90.0f;
-    strcpy_s(s[1].entitydef, sizeof s[1].entitydef, "mods/m/extra");
+    s[1].entitydef = "mods/m/extra";
     sh_scene_pending_clear(&t);
-    CHECK(!sh_scene_pending_set(&t, &a, "n", s, 0) && !sh_scene_pending_set(&t, &a, "n", s, SH_SCENE_MAX_SPAWNS + 1));
+    CHECK(!sh_scene_pending_set(&t, &a, "n", s, 0));
     CHECK(!sh_scene_pending_set(&t, NULL, "n", s, 1) && t.count == 0);
     CHECK(sh_scene_pending_set(&t, &a, "mods/m/imp", s, 1) && t.count == 1);
     CHECK(sh_scene_pending_set(&t, &a, "mods/m/imp", s, 2) && t.count == 1);      /* a later Activate replaces */
     CHECK(!sh_scene_pending_take(&t, &b, &got));
     CHECK(sh_scene_pending_take(&t, &a, &got) && t.count == 0);
     CHECK(got.count == 2 && !strcmp(got.node_name, "mods/m/imp") && !strcmp(got.spawns[1].entitydef, "mods/m/extra"));
+    CHECK(got.spawns[1].entitydef != s[1].entitydef);                            /* the queue keeps its own copy */
     CHECK(approx(got.spawns[0].at.x, 10.0f, 0) && approx(got.spawns[0].at.yaw, 90.0f, 0));
+    sh_scene_pending_release(&got);
     CHECK(!sh_scene_pending_take(&t, &a, &got));                                  /* taken once */
+    memset(longname, 'x', sizeof longname - 1);
+    longname[sizeof longname - 1] = 0;
+    CHECK(sh_scene_pending_set(&t, &a, longname, s, 1));
+    CHECK(sh_scene_pending_take(&t, &a, &got) && !strcmp(got.node_name, longname));
+    sh_scene_pending_release(&got);
     for (i = 0; i <= SH_SCENE_PENDING_ROWS; i++) CHECK(sh_scene_pending_set(&t, &nodes[i], "n", s, 1));
     CHECK(t.count == SH_SCENE_PENDING_ROWS);
     CHECK(!sh_scene_pending_take(&t, &nodes[0], NULL));                          /* the oldest was evicted */
@@ -368,6 +404,7 @@ int main(int argc, char **argv)
 {
     int i;
     test_pending();
+    test_long_names_and_many_spawns();
     test_grammar();
     test_refusals();
     test_namespace_and_order();

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include "modscene_decl.h"
+#include "../common/text.h"
 #include "mp_json.h"
 
 #define SC_PI 3.14159265358979323846
@@ -35,16 +36,15 @@ int sh_scene_owner_namespace(const char *name)
 }
 
 /* A decl name the engine can look up: printable ASCII without quotes, braces,
- * escapes or spaces, shorter than the cap. */
+ * escapes or spaces, of any length. */
 static int plain_name(const char *s)
 {
-    size_t n = 0;
     if (!s || !*s) return 0;
-    for (; *s; s++, n++) {
+    for (; *s; s++) {
         unsigned char c = (unsigned char)*s;
         if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\\' || c == '{' || c == '}' || c == ';') return 0;
     }
-    return n < SH_SCENE_NAME_CAP;
+    return 1;
 }
 
 /* Owner names live under mods/<salt>/. */
@@ -60,10 +60,11 @@ static int in_namespace(const char *owner, const char *salt)
 
 static void say(sh_scene_log_fn log, void *context, const char *fmt, const char *a, const char *b)
 {
-    char line[512];
+    char *line;
     if (!log) return;
-    _snprintf_s(line, sizeof line, _TRUNCATE, fmt, a ? a : "", b ? b : "");
-    log(context, line);
+    line = sh_textf(fmt, a ? a : "", b ? b : "");
+    log(context, line ? line : "its scenes could not be read (out of memory)");
+    free(line);
 }
 
 static int finite_bounded(double v, double bound)
@@ -109,9 +110,24 @@ static int read_spawn(const mpj *e, const sh_scene_pose *anchor, sh_scene_spawn 
     memset(out, 0, sizeof *out);
     def = mpj_get(e, "entityDef");
     if (!def || def->type != MPJ_STR || !plain_name(def->text)) return 0;
-    strncpy_s(out->entitydef, sizeof out->entitydef, def->text, _TRUNCATE);
+    if (!(out->entitydef = _strdup(def->text))) return 0;
     out->at = *anchor;
     return !mpj_get(e, "at") || read_pose(mpj_get(e, "at"), &out->at);
+}
+
+static void spawns_free(sh_scene_spawn *spawns, int count)
+{
+    int i;
+    for (i = 0; spawns && i < count; i++) free(spawns[i].entitydef);
+    free(spawns);
+}
+
+static void entry_free(sh_scene_entry *e)
+{
+    free(e->node);
+    free(e->bundle);
+    spawns_free(e->spawns, e->spawn_count);
+    memset(e, 0, sizeof *e);
 }
 
 /* One owner's entry. Returns NULL when it is well formed, else the reason. */
@@ -137,10 +153,12 @@ static const char *parse_entry(const mpj *e, sh_scene_entry *out)
     }
     v = mpj_get(e, "spawn");
     if (v) {
-        if (v->type != MPJ_ARR || v->n < 1 || v->n > SH_SCENE_MAX_SPAWNS) return "\"spawn\" needs a list of 1 to 4 entities";
+        if (v->type != MPJ_ARR || v->n < 1) return "\"spawn\" needs a list of entities";
+        if (!(out->spawns = (sh_scene_spawn *)calloc((size_t)v->n, sizeof *out->spawns)))
+            return "its spawns could not be read (out of memory)";
+        out->spawn_count = v->n;   /* every row is freed with the entry, read or not */
         for (i = 0; i < v->n; i++)
             if (!read_spawn(v->items[i], &out->anchor, &out->spawns[i])) return "a \"spawn\" entity is malformed";
-        out->spawn_count = v->n;
     }
     out->reaim = out->has_player;
     v = mpj_get(e, "reaim");
@@ -212,19 +230,20 @@ int sh_scene_add_bundle(sh_scene_table *t, const char *salt, const char *extra_j
         }
         e = &t->rows[t->count];
         memset(e, 0, sizeof *e);
-        strncpy_s(e->node, sizeof e->node, owner, _TRUNCATE);
-        strncpy_s(e->bundle, sizeof e->bundle, salt, _TRUNCATE);
+        if (!(e->node = _strdup(owner)) || !(e->bundle = _strdup(salt))) {
+            entry_free(e);
+            say(log, context, "its scenes could not be read (out of memory)%s%s", NULL, NULL);
+            goto rollback;
+        }
         why = parse_entry(block->items[i], e);
         if (why) {
-            char line[512];
-            if (log) {
-                _snprintf_s(line, sizeof line, _TRUNCATE, "its scenes entry '%s': %s", owner, why);
-                log(context, line);
-            }
+            entry_free(e);
+            say(log, context, "its scenes entry '%s': %s", owner, why);
             goto rollback;
         }
         for (j = 0; j < e->spawn_count; j++)
             if (name_equal(e->spawns[j].entitydef, owner)) {
+                entry_free(e);
                 say(log, context, "its scenes entry '%s' spawns itself%s", owner, NULL);
                 goto rollback;
             }
@@ -235,7 +254,7 @@ int sh_scene_add_bundle(sh_scene_table *t, const char *salt, const char *extra_j
     mpj_free(root);
     return added;
 rollback:
-    t->count = start;
+    while (t->count > start) entry_free(&t->rows[--t->count]);
 refused:
     t->refused++;
     mpj_free(root);
@@ -253,9 +272,9 @@ typedef struct sc_load {
 static void sc_refusal(void *context, const char *clause)
 {
     sc_load *c = (sc_load *)context;
-    char line[640];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "SCENES: %s: %s; its scene nodes play at the player", c->salt, clause);
-    c->log(c->context, line);
+    char *line = sh_textf("SCENES: %s: %s; its scene nodes play at the player", c->salt, clause);
+    c->log(c->context, line ? line : "SCENES: a mod's scenes could not be read (out of memory)");
+    free(line);
 }
 
 static void sc_visit(void *context, const char *salt, const char *hash, int place, const char *extra)
@@ -299,7 +318,9 @@ const sh_scene_entry *sh_scene_find(const sh_scene_table *t, const char *name)
 
 void sh_scene_table_free(sh_scene_table *t)
 {
+    int i;
     if (!t) return;
+    for (i = 0; i < t->count; i++) entry_free(&t->rows[i]);
     free(t->rows);
     t->rows = NULL;
     t->count = t->cap = t->refused = 0;
@@ -310,9 +331,22 @@ void sh_scene_table_free(sh_scene_table *t)
 int sh_scene_pending_set(sh_scene_pending_table *t, const void *node, const char *node_name,
                          const sh_scene_spawn *spawns, int count)
 {
-    sh_scene_pending *row = NULL;
+    sh_scene_pending copy, *row = NULL;
     int i;
-    if (!t || !node || !spawns || count < 1 || count > SH_SCENE_MAX_SPAWNS) return 0;
+    if (!t || !node || !spawns || count < 1) return 0;
+    memset(&copy, 0, sizeof copy);
+    copy.node = node;
+    copy.node_name = _strdup(node_name ? node_name : "a scene node");
+    copy.spawns = (sh_scene_spawn *)calloc((size_t)count, sizeof *copy.spawns);
+    copy.count = count;
+    if (!copy.node_name || !copy.spawns) { sh_scene_pending_release(&copy); return 0; }
+    for (i = 0; i < count; i++) {
+        copy.spawns[i].at = spawns[i].at;
+        if (!(copy.spawns[i].entitydef = _strdup(spawns[i].entitydef ? spawns[i].entitydef : ""))) {
+            sh_scene_pending_release(&copy);
+            return 0;
+        }
+    }
     for (i = 0; i < SH_SCENE_PENDING_ROWS && !row; i++)
         if (t->rows[i].node == node) row = &t->rows[i];
     for (i = 0; i < SH_SCENE_PENDING_ROWS && !row; i++)
@@ -322,13 +356,18 @@ int sh_scene_pending_set(sh_scene_pending_table *t, const void *node, const char
         for (i = 1; i < SH_SCENE_PENDING_ROWS; i++)
             if (t->rows[i].stamp < row->stamp) row = &t->rows[i];
     }
-    memset(row, 0, sizeof *row);
-    row->node = node;
-    strncpy_s(row->node_name, sizeof row->node_name, node_name ? node_name : "a scene node", _TRUNCATE);
-    row->count = count;
-    memcpy(row->spawns, spawns, (size_t)count * sizeof *spawns);
+    sh_scene_pending_release(row);
+    *row = copy;
     row->stamp = ++t->next_stamp;
     return 1;
+}
+
+void sh_scene_pending_release(sh_scene_pending *row)
+{
+    if (!row) return;
+    free(row->node_name);
+    spawns_free(row->spawns, row->count);
+    memset(row, 0, sizeof *row);
 }
 
 int sh_scene_pending_take(sh_scene_pending_table *t, const void *node, sh_scene_pending *out)
@@ -337,8 +376,12 @@ int sh_scene_pending_take(sh_scene_pending_table *t, const void *node, sh_scene_
     if (!t || !node) return 0;
     for (i = 0; i < SH_SCENE_PENDING_ROWS; i++) {
         if (t->rows[i].node != node) continue;
-        if (out) *out = t->rows[i];
-        memset(&t->rows[i], 0, sizeof t->rows[i]);
+        if (out) {
+            *out = t->rows[i];
+            memset(&t->rows[i], 0, sizeof t->rows[i]);
+        } else {
+            sh_scene_pending_release(&t->rows[i]);
+        }
         t->count--;
         return 1;
     }
@@ -347,7 +390,10 @@ int sh_scene_pending_take(sh_scene_pending_table *t, const void *node, sh_scene_
 
 void sh_scene_pending_clear(sh_scene_pending_table *t)
 {
-    if (t) memset(t, 0, sizeof *t);
+    int i;
+    if (!t) return;
+    for (i = 0; i < SH_SCENE_PENDING_ROWS; i++) sh_scene_pending_release(&t->rows[i]);
+    memset(t, 0, sizeof *t);
 }
 
 /* ---- frame math ------------------------------------------------------- */

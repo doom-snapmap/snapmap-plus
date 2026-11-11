@@ -2,8 +2,10 @@
  * record table) is above the engine half so the unit test can build it alone
  * with SH_MODSCENE_PLACE_PURE. */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "modscene_place.h"
+#include "../common/text.h"
 
 void sh_modscene_place_yaw_axis(float yaw_degrees, float axis[9])
 {
@@ -30,15 +32,19 @@ int sh_modscene_place_pose_ok(const float origin[3], const float angles[3])
 
 void sh_modscene_place_table_clear(sh_modscene_place_table *t)
 {
-    if (t) memset(t, 0, sizeof *t);
+    size_t i;
+    if (!t) return;
+    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS; i++) free(t->rows[i].player);
+    memset(t, 0, sizeof *t);
 }
 
 int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, const char *player,
                                const float origin[3], const float angles[3])
 {
     sh_modscene_place_record *row = NULL;
+    char *name;
     size_t i;
-    if (!t || !node || !player || !player[0] || strlen(player) >= sizeof row->player || !origin || !angles)
+    if (!t || !node || !player || !player[0] || !origin || !angles || !(name = _strdup(player)))
         return 0;
     for (i = 0; i < SH_MODSCENE_PLACE_RECORDS && !row; i++)
         if (t->rows[i].node == node) row = &t->rows[i];
@@ -49,9 +55,10 @@ int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, con
         for (i = 1; i < SH_MODSCENE_PLACE_RECORDS; i++)
             if (t->rows[i].stamp < row->stamp) row = &t->rows[i];
     }
+    free(row->player);
     memset(row, 0, sizeof *row);
     row->node = node;
-    memcpy(row->player, player, strlen(player) + 1);
+    row->player = name;
     memcpy(row->origin, origin, sizeof row->origin);
     memcpy(row->angles, angles, sizeof row->angles);
     row->stamp = ++t->next_stamp;
@@ -65,6 +72,7 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
     for (i = 0; i < SH_MODSCENE_PLACE_RECORDS; i++) {
         if (t->rows[i].node != node) continue;
         if (out) *out = t->rows[i];
+        else free(t->rows[i].player);
         memset(&t->rows[i], 0, sizeof t->rows[i]);
         return 1;
     }
@@ -121,7 +129,6 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 #define SP_VSLOT_SET_ORIGIN 0x338u
 #define SP_VSLOT_SET_AXIS   0x358u
 #define SP_PSLOT_GET_ORIGIN 0x80u
-#define SP_TARGETS_MAX     64
 #define SP_PSLOT_GET_AXIS   0x88u
 /* Scene spawns (snaphak-re R320). idTarget_Spawn::SpawnSingleEntity (VK
  * 0x140A7A8D0, GL 0x140A79D90) creates the entity through idGameLocal vtable
@@ -136,7 +143,6 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 #define SP_GAME_CREATE_SLOT 0x448u
 #define SP_GAME_FINISH_SLOT 0x458u
 #define SP_HOMES            64      /* scene nodes whose placed pose is remembered per Play */
-#define SP_SCENE_LINES      48      /* per-activation scene lines per Play */
 #define SP_INHERIT_DEPTH    8
 
 /* Engine functions (snaphak-re R313, decompiled on both renderers):
@@ -207,7 +213,7 @@ static volatile LONG g_scenes_stale;   /* read again at the first scene after a 
 static void sp_scenes_current(void);
 static sp_home g_homes[SP_HOMES];
 static int g_home_count;
-static volatile LONG g_scene_lines, g_logged_homes;
+static volatile LONG g_logged_homes;
 static sp_syncstart_fn g_orig_syncstart;
 static sh_scene_pending_table g_pending;
 
@@ -220,16 +226,21 @@ static int sp_av_only(DWORD code)
 
 static void *sp_fn(uint32_t rva) { return (g_base && rva) ? (void *)(g_base + rva) : NULL; }
 
+static void sp_vlog(const char *fmt, va_list ap)
+{
+    char *line = sh_vtextf(fmt, ap);
+    backend_log(line ? line : "scene-place: a line could not be written (out of memory)");
+    if (line) sh_printf("%s\n", line);
+    free(line);
+}
+
 static void sp_log(volatile LONG *once, const char *fmt, ...)
 {
-    char line[320];
     va_list ap;
     if (once && InterlockedExchange(once, 1)) return;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    sp_vlog(fmt, ap);
     va_end(ap);
-    backend_log(line);
-    sh_printf("%s\n", line);
 }
 
 static void *sp_read_ptr(const void *base, size_t off)
@@ -246,16 +257,18 @@ static void *sp_vfn(void *obj, size_t slot)
     return vt ? sp_read_ptr(vt, slot) : NULL;
 }
 
-static int sp_read_cstr(const char *src, char *dst, size_t cap)
+/* The engine's text at src, whole (malloc'd; free); NULL when it is empty,
+ * unreadable, or memory runs out. */
+static char *sp_read_text(const char *src)
 {
-    size_t i = 0;
-    dst[0] = 0;
-    if (!src) return 0;
-    __try {
-        for (; i + 1 < cap && src[i]; i++) dst[i] = src[i];
-        dst[i] = 0;
-    } __except (sp_av_only(GetExceptionCode())) { dst[0] = 0; return 0; }
-    return dst[0] != 0;
+    size_t n = 0;
+    char *out;
+    if (!src) return NULL;
+    __try { while (src[n]) n++; } __except (sp_av_only(GetExceptionCode())) { return NULL; }
+    if (!n || !(out = (char *)malloc(n + 1))) return NULL;
+    __try { memcpy(out, src, n); } __except (sp_av_only(GetExceptionCode())) { free(out); return NULL; }
+    out[n] = 0;
+    return out;
 }
 
 /* 1 when the entity's entityDef is a scene_play row or directly inherits one:
@@ -263,22 +276,26 @@ static int sp_read_cstr(const char *src, char *dst, size_t cap)
 static int sp_is_scene_action(void *ent)
 {
     void *decl = ent ? sp_read_ptr(ent, SP_ENT_DECL) : NULL;
-    char name[160], base[160];
+    char *name, *base;
+    int yes;
     if (!decl) return 0;
-    if (!sp_read_cstr((const char *)sp_read_ptr(decl, SP_DECL_NAME), name, sizeof name)) name[0] = 0;
-    if (!sp_read_cstr((const char *)sp_read_ptr(decl, SP_DECL_INHERIT), base, sizeof base)) base[0] = 0;
-    if (sh_modscene_place_is_scene_row(name) || sh_modscene_place_is_scene_row(base)) return 1;
+    name = sp_read_text((const char *)sp_read_ptr(decl, SP_DECL_NAME));
+    base = sp_read_text((const char *)sp_read_ptr(decl, SP_DECL_INHERIT));
+    yes = sh_modscene_place_is_scene_row(name ? name : "") || sh_modscene_place_is_scene_row(base ? base : "");
     /* A near miss (a scene_play row this test does not recognize) is worth one line. */
-    if (strstr(name, "scene_play") || strstr(base, "scene_play"))
-        sp_log(&g_logged_miss, "scene-place: Activate row '%s' (inherits '%s') is not a mod scene_play row", name, base);
-    return 0;
+    if (!yes && ((name && strstr(name, "scene_play")) || (base && strstr(base, "scene_play"))))
+        sp_log(&g_logged_miss, "scene-place: Activate row '%s' (inherits '%s') is not a mod scene_play row",
+               name ? name : "", base ? base : "");
+    free(name);
+    free(base);
+    return yes;
 }
 
-static const char *sp_entity_name(void *ent, char *out, size_t cap)
+/* The entity's name, whole (malloc'd; free), or a description of it. */
+static char *sp_entity_name(void *ent)
 {
-    if (!ent || !sp_read_cstr((const char *)sp_read_ptr(ent, SP_ENT_NAME), out, cap))
-        _snprintf_s(out, cap, _TRUNCATE, "%s", ent ? "an unnamed entity" : "nobody");
-    return out;
+    char *name = ent ? sp_read_text((const char *)sp_read_ptr(ent, SP_ENT_NAME)) : NULL;
+    return name ? name : _strdup(ent ? "an unnamed entity" : "nobody");
 }
 
 static void *sp_player_of(void *activator)
@@ -296,15 +313,18 @@ static void *sp_event(const char *name, const char *format)
     void *declmgr = sh_typeinfo_get_declmgr(), *evmgr = NULL, *ev = NULL;
     sp_vfn0 acc = (sp_vfn0)sp_vfn(declmgr, SP_EVMGR_VSLOT);
     sp_vfn_name find;
-    char have[16];
+    char *have;
+    int same;
     if (!acc) return NULL;
     __try { evmgr = acc(declmgr); } __except (sp_av_only(GetExceptionCode())) { evmgr = NULL; }
     find = (sp_vfn_name)sp_vfn(evmgr, SP_EV_FIND_VSLOT);
     if (!find) return NULL;
     __try { ev = find(evmgr, name); } __except (sp_av_only(GetExceptionCode())) { ev = NULL; }
     if (!ev) return NULL;
-    if (!sp_read_cstr((const char *)sp_read_ptr(ev, SP_EV_FORMAT_OFF), have, sizeof have)) have[0] = 0;
-    return strcmp(have, format) ? NULL : ev;
+    have = sp_read_text((const char *)sp_read_ptr(ev, SP_EV_FORMAT_OFF));
+    same = have && !strcmp(have, format);
+    free(have);
+    return same ? ev : NULL;
 }
 
 static int sp_events_ready(void)
@@ -358,14 +378,10 @@ static void *sp_target(uint8_t *ref)
 
 static void sp_scene_log(const char *fmt, ...)
 {
-    char line[320];
     va_list ap;
-    if (InterlockedIncrement(&g_scene_lines) > SP_SCENE_LINES) return;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    sp_vlog(fmt, ap);
     va_end(ap);
-    backend_log(line);
-    sh_printf("%s\n", line);
 }
 
 static unsigned char sp_read_u8(const void *base, size_t off)
@@ -407,23 +423,25 @@ static void *sp_find_entitydef(void *manager, const char *name)
 static const sh_scene_entry *sp_scene_of(void *node)
 {
     void *decl = node ? sp_read_ptr(node, SP_ENT_DECL) : NULL, *manager = NULL;
-    char name[SH_SCENE_NAME_CAP];
-    const sh_scene_entry *e;
+    char *name;
+    const sh_scene_entry *e = NULL;
     int depth;
     sp_scenes_current();
     if (!decl || !g_scenes.count) return NULL;
-    if (sp_read_cstr((const char *)sp_read_ptr(decl, SP_DECL_NAME), name, sizeof name) &&
-        (e = sh_scene_find(&g_scenes, name)) != NULL)
-        return e;
-    for (depth = 0; depth < SP_INHERIT_DEPTH; depth++) {
-        if (!sp_read_cstr((const char *)sp_read_ptr(decl, SP_DECL_INHERIT), name, sizeof name)) return NULL;
-        if (!sh_scene_owner_namespace(name)) return NULL;
-        if ((e = sh_scene_find(&g_scenes, name)) != NULL) return e;
-        if (!manager) manager = sp_entitydef_manager();
-        decl = sp_find_entitydef(manager, name);
-        if (!decl) return NULL;
+    name = sp_read_text((const char *)sp_read_ptr(decl, SP_DECL_NAME));
+    if (name) e = sh_scene_find(&g_scenes, name);
+    free(name);
+    for (depth = 0; !e && depth < SP_INHERIT_DEPTH; depth++) {
+        name = sp_read_text((const char *)sp_read_ptr(decl, SP_DECL_INHERIT));
+        if (!name || !sh_scene_owner_namespace(name)) { free(name); return NULL; }
+        if ((e = sh_scene_find(&g_scenes, name)) == NULL) {
+            if (!manager) manager = sp_entitydef_manager();
+            decl = sp_find_entitydef(manager, name);
+        }
+        free(name);
+        if (!e && !decl) return NULL;
     }
-    return NULL;
+    return e;
 }
 
 /* An entity's physics origin and the yaw of its axis. */
@@ -541,22 +559,22 @@ static const char *sp_spawn_scene_entity(const char *entitydef, sh_scene_pose at
 static void sp_place_targets(void *self, void *player)
 {
     float origin[3], angles[3];
-    char who[64], node_name[64];
+    char *who = sp_read_text((const char *)sp_read_ptr(player, SP_ENT_NAME));
     uint8_t *list = (uint8_t *)sp_read_ptr(self, SP_ENT_TARGETS);
     int count = 0, i, moved = 0;
     sh_scene_pose me;
-    if (!sp_read_cstr((const char *)sp_read_ptr(player, SP_ENT_NAME), who, sizeof who)) {
+    if (!who) {
         sp_log(&g_logged_fail, "scene-place: the activating player has no name; the scene plays at the node");
         return;
     }
     if (!sp_player_pose(player, origin, angles)) {
         sp_log(&g_logged_fail, "scene-place: %s's position or view angles could not be read; the scene plays at the node", who);
+        free(who);
         return;
     }
     __try { count = *(const int *)((const uint8_t *)self + SP_ENT_TARGET_N); }
     __except (sp_av_only(GetExceptionCode())) { count = 0; }
-    if (!list || count <= 0) return;
-    if (count > SP_TARGETS_MAX) count = SP_TARGETS_MAX;
+    if (!list || count <= 0) { free(who); return; }
     me.x = origin[0];
     me.y = origin[1];
     me.z = origin[2];
@@ -583,8 +601,10 @@ static void sp_place_targets(void *self, void *player)
             ReleaseSRWLockExclusive(&g_lock);
         }
         if (!e) {
+            char *node_name = sp_entity_name(node);
             sp_log(&g_logged_place, "scene-place: a scene node plays at %s (%s at %.1f %.1f %.1f, yaw %.1f)",
-                   who, sp_entity_name(node, node_name, sizeof node_name), origin[0], origin[1], origin[2], angles[1]);
+                   who, node_name ? node_name : "a scene node", origin[0], origin[1], origin[2], angles[1]);
+            free(node_name);
             continue;
         }
         if (e->at_node)
@@ -598,20 +618,24 @@ static void sp_place_targets(void *self, void *player)
         if (e->spawn_count) {
             /* Spawned when the node's sync actually starts (sp_syncstart), at
              * the frame the node marks now. */
-            sh_scene_spawn at[SH_SCENE_MAX_SPAWNS];
+            sh_scene_spawn *at = (sh_scene_spawn *)calloc((size_t)e->spawn_count, sizeof *at);
             sh_scene_pose frame = sh_scene_node_frame(e, home);
-            int pending;
-            for (k = 0; k < e->spawn_count; k++) {
-                at[k] = e->spawns[k];
-                at[k].at = sh_scene_compose(frame, e->spawns[k].at);
+            int pending = 0;
+            if (at) {
+                for (k = 0; k < e->spawn_count; k++) {
+                    at[k] = e->spawns[k];   /* the names are copied by the queue */
+                    at[k].at = sh_scene_compose(frame, e->spawns[k].at);
+                }
+                AcquireSRWLockExclusive(&g_lock);
+                pending = sh_scene_pending_set(&g_pending, node, e->node, at, e->spawn_count);
+                ReleaseSRWLockExclusive(&g_lock);
+                free(at);
             }
-            AcquireSRWLockExclusive(&g_lock);
-            pending = sh_scene_pending_set(&g_pending, node, e->node, at, e->spawn_count);
-            ReleaseSRWLockExclusive(&g_lock);
             if (!pending) sp_scene_log("Scene %s: its spawns could not be queued; nothing it lists is spawned", e->node);
         }
     }
     if (!moved) sp_log(&g_logged_fail, "scene-place: no scene node could be moved; the scene plays at the node");
+    free(who);
 }
 
 static void sp_doaction(void *self, void *activator)
@@ -624,9 +648,10 @@ static void sp_doaction(void *self, void *activator)
         decision = sh_modscene_place_decide(in_play, 1, player != NULL);
     }
     if (decision == SH_MODSCENE_PLACE_DROP) {
-        char who[64];
+        char *who = sp_entity_name(activator);
         sp_log(&g_logged_drop, "scene-place: dropped an Activate from %s: only a player can play a scene node",
-               sp_entity_name(activator, who, sizeof who));
+               who ? who : "an entity");
+        free(who);
         return;
     }
     if (decision == SH_MODSCENE_PLACE_PLACE) sp_place_targets(self, player);
@@ -656,10 +681,10 @@ static void sp_syncstart(void *link, void *owner, void *arg3, void *link_data, v
     after = sp_link_sync(link);
     if (!after || after == before) {
         sp_scene_log("Scene %s: its sync did not start; nothing was spawned", queued.node_name);
+        sh_scene_pending_release(&queued);
         return;
     }
-    if (sh_modserve_engine_in_play() != 1) return;
-    for (k = 0; k < queued.count; k++) {
+    for (k = 0; sh_modserve_engine_in_play() == 1 && k < queued.count; k++) {
         const sh_scene_spawn *s = &queued.spawns[k];
         const char *why = sp_spawn_scene_entity(s->entitydef, s->at);
         if (why)
@@ -668,6 +693,7 @@ static void sp_syncstart(void *link, void *owner, void *arg3, void *link_data, v
             sp_scene_log("Scene %s: spawned %s at %.1f %.1f %.1f, yaw %.1f with its sync", queued.node_name,
                          s->entitydef, s->at.x, s->at.y, s->at.z, s->at.yaw);
     }
+    sh_scene_pending_release(&queued);
 }
 
 static void sp_return(const sh_modscene_place_record *rec)
@@ -713,17 +739,19 @@ static void sp_used(void *self)
         if ((have || e) && sh_modhud_scene_restore())
             sp_scene_log("scene-place: the HUD was shown again when the scene finished");
     }
+    if (have) free(rec.player);
     g_orig_used(self);
 }
 
 static unsigned char sp_on_action_request(void *component, void *owner, const int *action, void *requester)
 {
     if (!requester) {
-        char who[64];
+        char *who = sp_entity_name(owner);
         int number = -1;
         __try { number = action ? *action : -1; } __except (sp_av_only(GetExceptionCode())) { number = -1; }
         sp_log(&g_logged_null, "scene-place: refused interaction action %d for %s: it has no requester", number,
-               sp_entity_name(owner, who, sizeof who));
+               who ? who : "an entity");
+        free(who);
         return 0;
     }
     return g_orig_request(component, owner, action, requester);
@@ -862,7 +890,6 @@ void sh_modscene_place_play_begin(void)
     /* The scenes blocks are read again for every Play, from the builds it serves. */
     InterlockedExchange(&g_scenes_stale, 1);
 
-    InterlockedExchange(&g_scene_lines, 0);
     InterlockedExchange(&g_logged_homes, 0);
     InterlockedExchange(&g_logged_place, 0);
     InterlockedExchange(&g_logged_return, 0);

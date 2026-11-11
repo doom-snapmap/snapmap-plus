@@ -119,7 +119,7 @@ int sh_modscene_place_pose_ok(const float origin[3], const float angles[3]);
 /* The remembered player pose for one moved node. */
 typedef struct sh_modscene_place_record {
     const void *node;         /* the interactable that was moved; NULL = free */
-    char player[64];          /* the player's entity name, found again at return */
+    char *player;             /* the player's entity name, whole (malloc'd), found again at return */
     float origin[3];          /* the player's feet origin at Activate */
     float angles[3];          /* pitch, yaw, roll at Activate */
     unsigned stamp;           /* insertion order, for replacing the oldest */
@@ -137,7 +137,8 @@ void sh_modscene_place_table_clear(sh_modscene_place_table *t);
 int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, const char *player,
                                const float origin[3], const float angles[3]);
 
-/* Take and remove node's pose. Returns 1 and fills out when it was there. */
+/* Take and remove node's pose. Returns 1 and fills out when it was there;
+ * out->player is then the caller's to free. */
 int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_modscene_place_record *out);
 
 #ifndef SH_MODSCENE_PLACE_PURE

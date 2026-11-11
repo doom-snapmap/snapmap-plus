@@ -50,8 +50,6 @@
 extern "C" {
 #endif
 
-#define SH_SCENE_NAME_CAP    192   /* including the terminator */
-#define SH_SCENE_MAX_SPAWNS  4
 #define SH_SCENE_COORD_MAX   65536.0
 #define SH_SCENE_YAW_MAX     3600.0
 
@@ -60,14 +58,15 @@ typedef struct sh_scene_pose {
     float x, y, z, yaw;
 } sh_scene_pose;
 
+/* Names are whole, malloc'd and owned by the row that holds them. */
 typedef struct sh_scene_spawn {
-    char entitydef[SH_SCENE_NAME_CAP];
+    char *entitydef;
     sh_scene_pose at;              /* in the scene frame */
 } sh_scene_spawn;
 
 typedef struct sh_scene_entry {
-    char node[SH_SCENE_NAME_CAP];
-    char bundle[SH_SCENE_NAME_CAP];   /* the declaring mod's salt */
+    char *node;
+    char *bundle;                  /* the declaring mod's salt */
     int at_node;                   /* 1: "plays": "at_node" */
     sh_scene_pose anchor;          /* scene-frame pose the node's placed transform marks */
     int has_player;
@@ -75,7 +74,7 @@ typedef struct sh_scene_entry {
     int reaim;
     int return_player;
     int spawn_count;
-    sh_scene_spawn spawns[SH_SCENE_MAX_SPAWNS];
+    sh_scene_spawn *spawns;        /* spawn_count of them (malloc'd) */
 } sh_scene_entry;
 
 typedef struct sh_scene_table {
@@ -124,9 +123,9 @@ void sh_scene_table_free(sh_scene_table *t);
 
 typedef struct sh_scene_pending {
     const void *node;
-    char node_name[SH_SCENE_NAME_CAP];
+    char *node_name;               /* malloc'd */
     int count;
-    sh_scene_spawn spawns[SH_SCENE_MAX_SPAWNS];
+    sh_scene_spawn *spawns;        /* count of them, each name its own copy (malloc'd) */
     unsigned stamp;
 } sh_scene_pending;
 
@@ -136,12 +135,14 @@ typedef struct sh_scene_pending_table {
     unsigned next_stamp;
 } sh_scene_pending_table;
 
-/* Queue `count` (1 to SH_SCENE_MAX_SPAWNS) spawns for `node`. Returns 1, or 0
- * for a bad argument. */
+/* Queue `count` (1 or more) spawns for `node`, copied. Returns 1, or 0 for a
+ * bad argument or when memory runs out. */
 int sh_scene_pending_set(sh_scene_pending_table *t, const void *node, const char *node_name,
                          const sh_scene_spawn *spawns, int count);
-/* Take and remove `node`'s row into *out. Returns 1 when there was one. */
+/* Take and remove `node`'s row into *out (which then owns its names: release
+ * it with sh_scene_pending_release). Returns 1 when there was one. */
 int sh_scene_pending_take(sh_scene_pending_table *t, const void *node, sh_scene_pending *out);
+void sh_scene_pending_release(sh_scene_pending *row);
 void sh_scene_pending_clear(sh_scene_pending_table *t);
 
 /* Pose algebra: a * b (b expressed in a's frame), and the inverse. */

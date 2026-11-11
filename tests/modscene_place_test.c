@@ -1,6 +1,7 @@
 /* modscene_place_test.c -- scene-node placement decisions, the record table and
  * the three signature entries. */
 #include <math.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include "../src/backend/modscene_place.h"
@@ -32,7 +33,7 @@ static void check_sig(const char *name, unsigned vk, unsigned gl, const char *pr
 int main(void)
 {
     float axis[9], o[3] = { -548.0f, -2544.0f, 0.25f }, a[3] = { 10.0f, 90.0f, 0.0f };
-    sh_modscene_place_table t;
+    sh_modscene_place_table t = {0};
     sh_modscene_place_record r;
     int i, dummy[20];
 
@@ -89,19 +90,27 @@ int main(void)
     CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));
     CHECK(!sh_modscene_place_remember(&t, NULL, "player1", o, a));
     CHECK(!sh_modscene_place_remember(&t, &dummy[0], "", o, a));
-    CHECK(!sh_modscene_place_remember(&t, &dummy[0],
-          "a-player-name-that-is-much-longer-than-the-sixty-three-bytes-the-row-keeps", o, a));
+    {
+        /* a player's entity name is kept whole, at any length */
+        static const char longer[] = "a-player-name-that-is-much-longer-than-the-sixty-three-bytes-the-row-once-kept";
+        CHECK(sh_modscene_place_remember(&t, &dummy[0], longer, o, a));
+        CHECK(sh_modscene_place_take(&t, &dummy[0], &r) && !strcmp(r.player, longer));
+        free(r.player);
+    }
     CHECK(sh_modscene_place_remember(&t, &dummy[0], "player1", o, a));
     a[1] = 45.0f;
     CHECK(sh_modscene_place_remember(&t, &dummy[0], "player2", o, a));
     CHECK(sh_modscene_place_take(&t, &dummy[0], &r));
     CHECK(!strcmp(r.player, "player2") && close_to(r.angles[1], 45.0f) && close_to(r.origin[0], -548.0f));
+    free(r.player);
     CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));
     for (i = 0; i < SH_MODSCENE_PLACE_RECORDS + 1; i++)
         CHECK(sh_modscene_place_remember(&t, &dummy[i], "player1", o, a));
     CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));   /* the oldest went */
     CHECK(sh_modscene_place_take(&t, &dummy[1], &r));
+    free(r.player);
     CHECK(sh_modscene_place_take(&t, &dummy[SH_MODSCENE_PLACE_RECORDS], &r));
+    free(r.player);
     sh_modscene_place_table_clear(&t);
     CHECK(!sh_modscene_place_take(&t, &dummy[2], &r));
 

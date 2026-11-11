@@ -475,7 +475,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   node's own placement in the editor. The entry for a node (its `mods/<salt>/...` entityDef) gives
   poses as `[x, y, z, yaw]` in the frame of the node's sync: `anchor` is the scene pose the node
   marks (where a demon arrives, facing the way the node is turned), and `player` is the player's first
-  pose in the scene. Each `spawn` entity (up to 4, an `entityDef` and optionally its own `at` pose,
+  pose in the scene. Each `spawn` entity (any number, an `entityDef` and optionally its own `at` pose,
   the anchor when omitted) is spawned at the node's placement the moment the node's sync starts, the
   way the game's own spawn targets spawn (position and orientation set before the spawn chain, then
   `show`); a sync that does not start (the node is busy, disabled or used up) spawns nothing. An
@@ -495,7 +495,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   plain integers or fixed decimals. The log says `scene spawns available` once, and for each
   activation, each starting `Scene <node>:`, `plays at <player> (... turned toward the anchor ...)`,
   `plays at its node`, `spawned <entityDef> at ... with its sync`, `could not spawn`, `its sync did
-  not start` and `finished; the player stays` (48 lines a Play at most):
+  not start` and `finished; the player stays`:
 
       "scenes": { "mods/<salt>/imp_arrival": {
         "anchor": [563.095, 16.698, 0.352, 179.998], "player": [-33.678, 0, 0, 0],
