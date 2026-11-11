@@ -56,36 +56,13 @@ static __inline uintptr_t sh_engine_game_system_slot(const uint8_t *base)
     return rva ? (uintptr_t)base + rva : 0;
 }
 
-/* Features that use engine offsets the build 13954591 address table leaves to a
- * live check (snaphak-re live-checks-13954591.json, results in
- * work/daemon/live-checks-results.json). Such a feature is off by default and
- * logs which values it waits for. It is not a permanent switch: starting DOOM
- * with SNAPMAP_PLUS_LIVE_VERIFY=1 in its environment runs every pending feature
- * (logged as VERIFY), so the live lane can exercise and confirm it without a
- * rebuild. Each feature keeps its own runtime byte or shape checks either way.
- * When a check is confirmed, set its flag to 0. The _WHY string names the
- * unconfirmed values. */
-static __inline int sh_live_verify(void)
-{
-    char value[4];
-    DWORD n = GetEnvironmentVariableA("SNAPMAP_PLUS_LIVE_VERIFY", value, (DWORD)sizeof value);
-    return n == 1 && value[0] == '1';
-}
-#define SH_PENDING_ON(flag) ((flag) && !sh_live_verify())
-
-/* Confirmed live on both renderers by the attended pass (snaphak-re R-012) and
- * bound without a gate: native paste arming (editor+0x209E0/+0x209E4, substate
- * +0x41 bit 0x40, mode +0x420/+0x424 = 0x5C), the decl server's outputs count
- * +0x448, native dialogs (params +0x98, actions 0x4A/0x4B), grid-room
- * properties (action 0x50, +0xAC), module names (stride 0x98, name +0x48), the
- * Start menu row (+0x74/+0x78, stride 0x58, +0xC), the SWF field cap +0x280 and
- * the fault shield's exit flag editor+0x23294. */
-
-/* Also bound after the R-012 addendum and round 3 (snaphak-re R-019): the
- * visibility-toggle registry (+0x20/+0x28: 1384 decls revealed, 1380
- * re-hidden). */
-
-#define SH_PENDING_RENDER_EDITOR      0
-#define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider value +0x120 and dirty byte +0xc8 (map_render_editor.c)"
+/* Confirmed live on both renderers and bound without a gate: native paste
+ * arming (editor+0x209E0/+0x209E4, substate +0x41 bit 0x40, mode +0x420/+0x424
+ * = 0x5C), the decl server's outputs count +0x448, native dialogs (params
+ * +0x98, actions 0x4A/0x4B), grid-room properties (action 0x50, +0xAC), module
+ * names (stride 0x98, name +0x48), the Start menu row (+0x74/+0x78, stride
+ * 0x58, +0xC), the SWF field cap +0x280, the fault shield's exit flag
+ * editor+0x23294, the visibility-toggle registry (+0x20/+0x28) and the render
+ * settings panel's slider value +0x120 and dirty byte +0xc8. */
 
 #endif /* BACKEND_ENGINE_BUILD_H */
