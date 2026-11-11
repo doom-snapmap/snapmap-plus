@@ -9,7 +9,6 @@
 #include <stdint.h>
 #include "signatures.h"
 
-#define SH_BOUNDS_VARIABLE      "smp.bounds.v1"
 #define SH_BOUNDS_NATIVE        16000.0f
 /* Assembled collision (BCM) and navigation (AAS) store world coordinates as
  * signed shorts. The largest navigation outset is 96 units beyond a module,

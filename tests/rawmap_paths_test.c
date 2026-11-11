@@ -841,13 +841,12 @@ static void saves_carry_no_package_payload(void)
 #define MVAR(name, value) \
     "{\"info\":{\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\"," \
     "\"~type\":\"snapVarString_t\"}"
-#define MROW(salt, name, version, hash, size) \
-    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"version\":\"" version "\"," \
-    "\"size\":" size ",\"names\":[]}"
+#define MROW(salt, name, hash, size) \
+    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"size\":" size ",\"names\":[]}"
 static const char MOD_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     MVAR("door_label", "RAWMAP_MARK") "]},"
-    "\"snapmap-plus\":{\"format\":1,\"mods\":[" MROW("testalph", "test.alpha", "1.0", HASH_A, "1048576") "]}}";
+    "\"snapmap-plus\":{\"format\":1,\"mods\":[" MROW("testalph", "test.alpha", HASH_A, "1048576") "]}}";
 static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
 
 extern unsigned long long g_mod_stub_export_result;

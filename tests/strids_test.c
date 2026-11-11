@@ -419,15 +419,15 @@ static void test_bundle_layer(void)
     CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "alpha.mod"));
     /* First writer wins across bundles; one line per disagreeing bundle. */
     CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
-    CHECK(log_count("B1: strids REFUSED '#str_CLASH_KEY' from bundle beta.mod -- bundle alpha.mod "
+    CHECK(log_count("STRINGS: REFUSED '#str_CLASH_KEY' from bundle beta.mod -- bundle alpha.mod "
                     "already defines it with different text; the first definition stands") == 1);
-    CHECK(log_count("B1: strids REFUSED '#str_clash_key' from bundle old.map -- bundle "
+    CHECK(log_count("STRINGS: REFUSED '#str_clash_key' from bundle old.map -- bundle "
                     "alpha.mod already defines it") == 1);
     CHECK(log_count("REFUSED '#str_") == 2);   /* equal text and baked precedence are not conflicts */
     CHECK(count_key("same_key") == 1);
     /* Only en; only admitted bundles. */
     CHECK(count_key("fr_only") == 0 && count_key("gamma_name") == 0);
-    CHECK(strstr(g_log, "B1: strids runtime refresh complete: ") != NULL);
+    CHECK(strstr(g_log, "STRINGS: runtime refresh complete: ") != NULL);
     CHECK(strstr(g_log, " #str_ entries (bundles 7, baked ") != NULL);
     CHECK(strstr(g_log, "supplied") == NULL);   /* quiet without the debug flag */
     CHECK(g_dictionary.count == before + 6);    /* six new bundle keys */
@@ -436,9 +436,9 @@ static void test_bundle_layer(void)
     SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", "1");
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
-    CHECK(log_count("B1: strids: bundle alpha.mod supplied 5 string(s)") == 1);
-    CHECK(log_count("B1: strids: bundle beta.mod supplied 1 string(s)") == 1);
-    CHECK(log_count("B1: strids: bundle old.map supplied 1 string(s)") == 1);
+    CHECK(log_count("STRINGS: bundle alpha.mod supplied 5 string(s)") == 1);
+    CHECK(log_count("STRINGS: bundle beta.mod supplied 1 string(s)") == 1);
+    CHECK(log_count("STRINGS: bundle old.map supplied 1 string(s)") == 1);
     CHECK(log_count("supplied") == 3);
     SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", NULL);
 
@@ -450,7 +450,7 @@ static void test_bundle_layer(void)
     CHECK(count_key("beta_name") == 0 && count_key("same_key") == 0);
     CHECK(value_for("delta_name") && !strcmp(value_for("delta_name"), "Delta"));
     CHECK(count_key("eps_name") == 0);
-    CHECK(strstr(g_log, "B1: strids REFUSED the strings of bundle eps.bad") != NULL);
+    CHECK(strstr(g_log, "STRINGS: REFUSED the strings of bundle eps.bad") != NULL);
     CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
     CHECK(log_count("REFUSED '#str_") == 1);
     CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), baked_nav));
@@ -595,7 +595,7 @@ static void test_sort_hook_recovery(void)
     CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
     CHECK(count_key("hook_recovery_key") == 1);
     CHECK(count_key("boot_name") == 1 && !strcmp(value_for("boot_name"), "Boot"));
-    CHECK(strstr(g_log, "B1: strids injected ") != NULL && strstr(g_log, "(bundles 2, baked ") != NULL);
+    CHECK(strstr(g_log, "STRINGS: injected ") != NULL && strstr(g_log, "(bundles 2, baked ") != NULL);
     CHECK(rearm_strings() == 1);
     CHECK(count_key("hook_recovery_key") == 1);
     /* After it, a published index asks for one refresh, which rearms once. */

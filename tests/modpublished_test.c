@@ -46,7 +46,7 @@ static int g_failed, g_checks;
     "{\"info\":{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"}," \
     "\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\",\"~type\":\"snapVarString_t\"}"
 #define ROW(salt, name, hash, size) \
-    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"version\":\"1\",\"size\":" size ",\"names\":[]}"
+    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"size\":" size ",\"names\":[]}"
 #define MEMBER(rows) ",\"snapmap-plus\":{\"format\":1,\"mods\":[" rows "]}"
 #define MEMBER_AT(rows, place) ",\"snapmap-plus\":{\"format\":1,\"mods\":[" rows "],\"place\":\"" place "\"}"
 

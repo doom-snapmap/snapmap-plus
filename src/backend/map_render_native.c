@@ -54,7 +54,7 @@ int sh_map_render_write(void *map,const sh_map_render *settings)
     sh_map_settings_set_render(settings);
     backend_log(sh_map_render_unlocked(settings)?
         "RENDER: Unlock View Distance on for this map; its next save stores it":
-        "RENDER: Unlock View Distance off for this map; its next save stores no view variable");
+        "RENDER: Unlock View Distance off for this map; its next save stores no view setting");
     return 1;
 }
 /* r_zfar is also left as it is in frames where no environment resolves (the

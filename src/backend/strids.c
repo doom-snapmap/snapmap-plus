@@ -295,7 +295,7 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
             seen->text_hash != strids_text_hash(text)) {
             char line[400];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B1: strids REFUSED '#str_%s' from bundle %s -- bundle %s already defines it with "
+                        "STRINGS: REFUSED '#str_%s' from bundle %s -- bundle %s already defines it with "
                         "different text; the first definition stands",
                         id, strids_owner_name(owner), strids_owner_name(seen->owner));
             backend_log(line);
@@ -569,7 +569,7 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     }
     if (pass && pass->debug) {
         char line[256];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids: bundle %s supplied %zu string(s)", name,
+        _snprintf_s(line, sizeof line, _TRUNCATE, "STRINGS: bundle %s supplied %zu string(s)", name,
                     g_layer_rows[STRIDS_LAYER_BUNDLE] - before);
         backend_log(line);
     }
@@ -578,7 +578,7 @@ refused:
     {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: strids REFUSED the strings of bundle %s: expected extra.strings.en to be a JSON "
+                    "STRINGS: REFUSED the strings of bundle %s: expected extra.strings.en to be a JSON "
                     "object of valid text strings and nonempty IDs", id);
         backend_log(line);
     }
@@ -597,7 +597,7 @@ static void inject_bundles(void)
     pass.debug = strids_debug();
     if (sh_modserve_each_bundle_extra(inject_bundle, &pass) < 0) {
         g_pass_failed = 1;
-        backend_log("B1: strids REFUSED: the bundle string layer could not be read (out of memory)");
+        backend_log("STRINGS: REFUSED: the bundle string layer could not be read (out of memory)");
     }
 }
 
@@ -680,7 +680,7 @@ static long inject_and_resort_once(void)
 
     char summary[128], line[160];
     layer_summary(summary, sizeof summary);
-    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids injected %s", summary);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "STRINGS: injected %s", summary);
     backend_log(line);
     return n;
 }
@@ -701,7 +701,7 @@ static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
         InterlockedExchange(&g_refresh_pending, 0);   /* this pass reads the published index */
         (void)do_inject();
         layer_summary(summary, sizeof summary);
-        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids injected %s", summary);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "STRINGS: injected %s", summary);
         backend_log(line);
         /* The table grew -- re-read the live count from the descriptor so the original sort orders the
          * FULL augmented table, not the pre-inject count it was called with. The descriptor's count is
@@ -734,17 +734,17 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
     }
     if (sort_body_fn == NULL) {
-        backend_log("B1: strids injector SKIPPED -- StridsSortBody not resolved");
+        backend_log("STRINGS: injector SKIPPED -- StridsSortBody not resolved");
         return 0;
     }
     if (!sort_status_ok) {
-        backend_log("B1: strids injector SKIPPED -- StridsSortBody resolved via hook-tolerant fallback "
+        backend_log("STRINGS: injector SKIPPED -- StridsSortBody resolved via hook-tolerant fallback "
                     "(prologue already hooked); not installing over an existing detour");
         return 0;
     }
     if (table_lea_fn == NULL || insert_fn == NULL || hash_fn == NULL || idstr_ctor_fn == NULL) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B1: strids injector SKIPPED -- missing engine fn (lea=%p insert=%p hash=%p ctor=%p)",
+            "STRINGS: injector SKIPPED -- missing engine fn (lea=%p insert=%p hash=%p ctor=%p)",
             table_lea_fn, insert_fn, hash_fn, idstr_ctor_fn);
         backend_log(line);
         return 0;
@@ -752,7 +752,7 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
 
     g_table_desc = decode_table_global((const uint8_t *)table_lea_fn);
     if (g_table_desc == NULL) {
-        backend_log("B1: strids injector SKIPPED -- could not decode the table-global LEA "
+        backend_log("STRINGS: injector SKIPPED -- could not decode the table-global LEA "
                     "(StridsTableLea layout shifted?)");
         return 0;
     }
@@ -762,7 +762,7 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
 
     void *tramp = hook_prepare(sort_body_fn, (void *)sh_sort_detour, SORT_STOLEN);
     if (tramp == NULL) {
-        backend_log("B1: strids injector FAIL -- could not prepare the original callback");
+        backend_log("STRINGS: injector FAIL -- could not prepare the original callback");
         g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
         return 0;
     }
@@ -775,11 +775,11 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
             g_sort_orig = NULL;
             g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
         }
-        backend_log("B1: strids injector FAIL -- hook commit failed; pending restoration retains the original callback");
+        backend_log("STRINGS: injector FAIL -- hook commit failed; pending restoration retains the original callback");
         return 0;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B1: strids injector installed at %p (trampoline %p, stolen %d); table=%p",
+        "STRINGS: injector installed at %p (trampoline %p, stolen %d); table=%p",
         sort_body_fn, tramp, SORT_STOLEN, g_table_desc);
     backend_log(line);
 
@@ -806,7 +806,7 @@ int sh_strids_rearm(void)
         InterlockedExchange(&g_refresh_busy, 0);
     }
     layer_summary(summary, sizeof summary);
-    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids runtime refresh %s: %s",
+    _snprintf_s(line, sizeof line, _TRUNCATE, "STRINGS: runtime refresh %s: %s",
                 ok ? "complete" : "FAILED", summary);
     backend_log(line);
     return ok;
