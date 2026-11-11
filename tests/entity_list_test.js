@@ -126,7 +126,7 @@ check(hostSrc.indexOf('"perf ui-list: seq=%d') >= 0 &&
       hostSrc.indexOf('"perf list-emit: seq=%lu') >= 0,
   'native/UI list timing correlation is missing');
 check(hostSrc.indexOf('perf poll-window:') >= 0 &&
-      hostSrc.indexOf('poc_perf_note_poll(') >= 0,
+      hostSrc.indexOf('ui_perf_note_poll(') >= 0,
   'complete periodic-task timing is missing');
 check(hostSrc.indexOf('std::sort(selids, selids + sn);') >= 0 &&
       hostSrc.indexOf('for (int a = 1; a < sn; a++)') < 0,

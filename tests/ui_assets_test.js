@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const web = path.join(root, 'src/ui/webview');
 const embed = path.join(root, 'src/ui/embed-page.ps1');
 const updater = path.join(root, 'tools/update-avatar.ps1');
-const names = ['mockup.html', 'studio.css', 'decl_language.js', 'schema_slice.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js', 'mods_tab.js'];
+const names = ['mockup.html', 'studio.css', 'decl_language.js', 'schema_slice.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js', 'mods_tab.js', 'page_keys.js'];
 const hash = name => crypto.createHash('sha256').update(fs.readFileSync(path.join(web, name))).digest('hex');
 const before = names.map(hash);
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-ui-assets-'));
@@ -28,6 +28,8 @@ try {
   assert.equal(result.status, 0, result.stderr);
   const embedded = fs.readFileSync(path.join(temporary, 'embedded.html'), 'utf8');
   assert(!/<script\b[^>]*\bsrc=|<link\b[^>]*stylesheet/.test(embedded));
+  /* the browser preview's stand-in host is never assembled into the DLL's page */
+  assert(!embedded.includes('data-preview-only') && !/function previewHandle|PREVIEW_MODS/.test(embedded));
   assert(embedded.includes(fs.readFileSync(path.join(web, 'studio.css'), 'utf8')));
   assert(embedded.includes(fs.readFileSync(path.join(web, 'decl_language.js'), 'utf8')));
   assert(embedded.indexOf('var SnapmapDecl') < embedded.indexOf('var declLanguage = SnapmapDecl.create'));

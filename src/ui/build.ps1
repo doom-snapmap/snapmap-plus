@@ -25,6 +25,9 @@ Write-Host "[build] MSVC toolset $toolset"
 
 # WebView2 SDK. Update the stable version deliberately; NuGet's last entry may be a prerelease.
 $wvPinnedVersion = "1.0.4078.44"
+# SHA-256 of that .nupkg; its SHA-512 matches the packageHash NuGet's catalog publishes for the version.
+# A changed version needs its new hash here.
+$wvPinnedSha256 = "dc4d1d9168df26b830398303e50210b6e1729f6ce5a7ac69d2c766852f489962"
 $wvInclude = Join-Path $sdkDir "build\native\include"
 $wvLib     = Join-Path $sdkDir "build\native\x64\WebView2LoaderStatic.lib"
 if (-not (Test-Path (Join-Path $wvInclude "WebView2.h"))) {
@@ -33,6 +36,11 @@ if (-not (Test-Path (Join-Path $wvInclude "WebView2.h"))) {
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$ver/microsoft.web.webview2.$ver.nupkg"
     $zip = Join-Path $build "webview2.$ver.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip
+    $got = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+    if ($got -ne $wvPinnedSha256) {
+        Remove-Item $zip -Force
+        throw "WebView2 SDK $ver from NuGet has SHA-256 $got, not the pinned $wvPinnedSha256; refusing it"
+    }
     if (Test-Path $sdkDir) { Remove-Item -Recurse -Force $sdkDir }
     Expand-Archive -Path $zip -DestinationPath $sdkDir -Force
     Remove-Item $zip -Force
@@ -63,7 +71,7 @@ if ($hdrOld -ne $sb.ToString()) { Set-Content -Path $hdrPath -Value $sb.ToString
 Write-Host "generated $hdrPath ($([Math]::Round(($html.Length/1KB),1)) KB of HTML)"
 
 # Compile with the dynamic CRT required by the WebView2 static loader.
-# The .def file pins sh_ui_init at ordinal 10 and the sl_* compatibility exports.
+# The .def file pins sh_ui_init at ordinal 10, the window's one export.
 $incArgs = @(
     "/I`"$wvInclude`"",
     "/I`"$objDir`"",
@@ -73,7 +81,7 @@ $incArgs = @(
     "/I`"$backend`""
 ) -join " "
 $Sources = @("webview\snapmap_plus_ui_webview.cpp", "webview\config_message.cpp", "webview\webview_json.cpp",
-             "webview\theme_bootstrap.cpp", "sl_exports.cpp", "..\common\log_rotate.c", "..\backend\host_image.c",
+             "webview\theme_bootstrap.cpp", "..\common\log_rotate.c", "..\backend\host_image.c",
              "..\backend\prefab_grab.c", "..\backend\prefab_block.c")
 $libArgs = @(
     "`"$wvLib`"",

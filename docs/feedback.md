@@ -107,7 +107,9 @@ dump's path appears in the record, but the dump is never uploaded automatically.
 The dialog shows the bounded error and call stack that were recorded, takes an optional "what were
 you doing?" description and optional contact, and offers an **Attach recent logs** checkbox (on by
 default). Attached logs are the *tails* of the local log files, **anonymized before sending** — the
-Windows account name, profile-folder name, and machine name are scrubbed out (`<user>` / `<machine>`).
+Windows account name, profile-folder name (and its 8.3 short form), and machine name are scrubbed out
+(`<user>` / `<machine>`) as UTF-8, ANSI and UTF-16 text, in any letter case. When the report would pass
+the relay's 64 KB cap, the oldest log lines are dropped until it fits.
 Send files it through the relay as `category: crash`; Dismiss (or a successful send) clears the pending
 record so the dialog never nags twice — the full logs and any dump stay on disk untouched.
 

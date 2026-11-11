@@ -16,6 +16,7 @@ const web = path.join(root, 'src', 'ui', 'webview');
 const modsTab = require(path.join(web, 'mods_tab.js'));
 const v4 = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'mods_tab_payload_v4.json'), 'utf8'));
 const html = fs.readFileSync(path.join(web, 'mockup.html'), 'utf8').replace(/\r\n/g, '\n');
+const standin = fs.readFileSync(path.join(web, 'preview_standin.js'), 'utf8').replace(/\r\n/g, '\n');
 const source = fs.readFileSync(path.join(web, 'mods_tab.js'), 'utf8');
 const host = fs.readFileSync(path.join(web, 'snapmap_plus_ui_webview.cpp'), 'utf8').replace(/\r\n/g, '\n');
 const iface = fs.readFileSync(path.join(root, 'src', 'common', 'snapmap_plus_iface.h'), 'utf8').replace(/\r\n/g, '\n');
@@ -664,7 +665,7 @@ test('the header fits at the minimum pane width', () => {
   assert.ok(2 * inset + headGap + buttons * button + (buttons - 1) * gap <= min, 'six buttons fit in a ' + min + ' px pane');
 });
 test('page contract', () => {
-  assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));
+  assert.ok(html.includes('<button type="button" class="tab" role="tab" id="tab-mods" data-tab="mods" aria-controls="panel-mods" aria-selected="false" tabindex="-1">Mods</button>'));
   IDS.forEach(id => assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id));
   GONE.forEach(id => assert.ok(!html.includes('id="' + id + '"'), 'mockup.html no longer has #' + id));
   const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<div class="statusbar">'));
@@ -684,11 +685,11 @@ test('page contract', () => {
   assert.match(html, /if \(which === 'mods'\) modsUi\.show\(\);/);
   assert.match(html, /copy: copyText,/, 'the page hands Copy mod id its clipboard helper');
   /* the browser preview's data is the v4 fixture, answered by the stand-in host */
-  const m = html.match(/\n  var PREVIEW_MODS = (\{.*\});\r?\n/);
+  const m = standin.match(/\nvar PREVIEW_MODS = (\{.*\});\r?\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
   assert.deepEqual(JSON.parse(m[1]), v4, 'PREVIEW_MODS is the v4 fixture');
-  assert.match(html, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
-  const pf = html.match(/\n  var PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
+  assert.match(standin, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
+  const pf = standin.match(/\nvar PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
   assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
   assert.ok(JSON.parse(pf[1])['alex.r2-imp'].files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
   assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
@@ -706,9 +707,9 @@ test('host and interface contract', () => {
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
   for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
-  assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
-  assert.ok(host.includes('poc_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
-  assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
+  assert.ok(host.includes('if (act == L"openFolder") ui_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('ui_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
+  assert.ok(host.includes('ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 
 console.log('mods_tab_test: OK (' + passed + ' tests)');

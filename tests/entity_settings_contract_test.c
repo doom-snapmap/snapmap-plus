@@ -158,7 +158,7 @@ int main(int argc, char **argv)
     CHECK(count_text(
           html,
           "persistEntitySetting(ENTITY_SELECTION_MODE_KEY, mode)") == 2);
-    CHECK(count_text(html, "localStorage") == 2);
+    CHECK(count_text(html, "localStorage") == 0);
     CHECK(strstr(html, "id=\"deselectBtn\"") == NULL);
     CHECK(strstr(html, "function isSelectionWhitespaceTarget(target)") != NULL);
     CHECK(strstr(html,

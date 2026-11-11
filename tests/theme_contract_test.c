@@ -85,10 +85,6 @@ static void check_eol_matcher(void)
 int main(int argc, char **argv)
 {
     char *html;
-    const char *preview_read;
-    const char *preview_write;
-    const char *read_storage;
-    const char *write_storage;
     if (argc != 2) {
         fprintf(stderr, "usage: theme_contract_test <mockup.html>\n");
         return 2;
@@ -122,7 +118,7 @@ int main(int argc, char **argv)
     CHECK(strstr(html, "valueJson:JSON.stringify(value)") != NULL);
     CHECK(strstr(html, "applyTheme(false, true)") != NULL);
     CHECK(strstr(html, "applyTheme(true, true)") != NULL);
-    CHECK(strstr(html, "else configSet('theme', value);") != NULL);
+    CHECK(strstr(html, "configSet('theme', dark ? 'dark' : 'light');") != NULL);
     CHECK(strstr(html, "function setTheme(") == NULL);
     CHECK(strstr(html, "class=\"menu-label\" data-menu=\"view\"") != NULL);
     CHECK(strstr(html, "id=\"menu-view\" role=\"menu\" hidden") != NULL);
@@ -265,39 +261,15 @@ int main(int argc, char **argv)
     CHECK(strstr(html, "function camVal(") != NULL);
     CHECK(strstr(html, "post({cmd:'camLock'") != NULL);
     CHECK(strstr(html, "post({cmd:'camSet'") != NULL);
-    CHECK(strstr(html,
-          "o.cmd === 'camLock' || o.cmd === 'camSet'") != NULL);
 
     CHECK(strstr(html, "d.kind === 'configValue'") != NULL);
     CHECK(strstr(html, "d.kind === 'configSetResult'") != NULL);
     CHECK(strstr(html, "d.kind === 'configStatus'") != NULL);
     CHECK(strstr(html, "SH_CONFIG_STATUS") == NULL);
 
-    preview_read = find_text_eol_agnostic(
-        html,
-        "function previewThemeRead() {\n"
-        "    if (!PREVIEW) return null;\n"
-        "    try { return localStorage.getItem('sh_theme'); } catch (e) { return null; }\n"
-        "  }");
-    preview_write = find_text_eol_agnostic(
-        html,
-        "function previewThemeWrite(value) {\n"
-        "    if (!PREVIEW) return;\n"
-        "    try { localStorage.setItem('sh_theme', value); }\n"
-        "    catch (e) { toast(\"Theme changed for this session, but couldn't be saved.\", 'warn'); }\n"
-        "  }");
-    read_storage = strstr(html, "localStorage.getItem('sh_theme')");
-    write_storage = strstr(html, "localStorage.setItem('sh_theme', value)");
-    CHECK(preview_read != NULL);
-    CHECK(preview_write != NULL);
-    CHECK(read_storage != NULL);
-    CHECK(write_storage != NULL);
-    if (preview_read && preview_write && read_storage && write_storage) {
-        CHECK(preview_read < read_storage);
-        CHECK(read_storage < preview_write);
-        CHECK(preview_write < write_storage);
-    }
-    CHECK(count_text(html, "localStorage") == 2);
+    /* The page keeps no browser storage: the theme lives in config.json, and only the browser
+     * preview's stand-in host (preview_standin.js, never in the DLL) uses localStorage. */
+    CHECK(count_text(html, "localStorage") == 0);
 
     free(html);
     if (g_failed) {

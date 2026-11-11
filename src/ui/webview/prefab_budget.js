@@ -209,9 +209,10 @@ var prefabBudget = (function () {
             filtered: s.filtered};
   }
 
-  // A meter value as the HUD's percentage, one decimal; a nonzero amount below 0.05% reads "<0.1%".
+  // A meter value as the HUD's percentage, one decimal; a nonzero amount below 0.05% reads "<0.1%",
+  // and an amount against a zero limit "over 100%".
   function formatPercent(r) {
-    if (!isFinite(r)) return 'over';
+    if (!isFinite(r)) return 'over 100%';
     var pct = r * 100;
     if (pct > 0 && pct < 0.05) return '<0.1%';
     return pct.toFixed(1) + '%';
