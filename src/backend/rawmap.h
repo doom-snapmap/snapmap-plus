@@ -103,7 +103,10 @@ unsigned long sh_rawmap_save_count(void);
  * at the same path with .zip (rawmap.json -> rawmap.zip), and says so with one
  * toast and one console line. A save whose own path ends in .zip is the export
  * already. A map with no rows writes only the JSON. */
-#define SH_RAWMAP_REPORT_PATH 260
+/* Room for a path in UTF-8: MAX_PATH UTF-16 units take at most three bytes
+ * each. Every rawmap path is UTF-8 and opened through the wide calls. */
+#define SH_RAWMAP_PATH_MAX (260 * 3)
+#define SH_RAWMAP_REPORT_PATH SH_RAWMAP_PATH_MAX
 typedef struct sh_rawmap_save_report {
     char json[SH_RAWMAP_REPORT_PATH];     /* "" when the save was a .zip */
     char zip[SH_RAWMAP_REPORT_PATH];      /* the export, or "" for a map without mods */
@@ -146,9 +149,16 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
 /* Tell the player one sentence (toast and console line) on the next main tick. Any thread. */
 void sh_rawmap_tell(const char *text);
 
-/* Main-thread tick: show the last save's sentence (toast and console line)
- * once. Idle cost: one read. */
+/* Main-thread tick: take a finished import or export (below) and show the
+ * last sentence (toast and console line) once. Idle cost: two reads. */
 void sh_rawmap_poll_main(void);
+
+/* A rawmap ZIP's import, a .zip save and the companion .zip beside a .json
+ * save run on a thread of their own, one at a time, never on DOOM's: an
+ * import holds its text and asks the editor to open the map again when it is
+ * done; an export records the save report and says which file to share. 1
+ * while one runs or waits for the main tick. Any thread. */
+int sh_rawmap_transport_busy(void);
 
 /* The editor reload's own check, on its frame and before LoadMap (MAIN
  * THREAD): read the load path once (a .zip imports its mods here), count

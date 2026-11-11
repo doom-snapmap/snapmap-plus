@@ -196,6 +196,7 @@ typedef struct ms_index {
 static ms_index *volatile g_index;
 static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
+static int ms_bundle_describe(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len);
 static void ms_script_node_row(ms_index *x, ms_bundle *b);
@@ -2685,19 +2686,20 @@ static volatile LONG g_scope_open;
 static volatile LONG g_scope_play;     /* SH_MODSERVE_MODE_PLAY: Play, or a map launched outside the editor */
 static sh_modserve_scope_source_fn volatile g_scope_source;
 
-/* The open map's context (sh_modserve_scope_set_place): its place, a
- * "maps\<segment>" folder below the store root ("" for none), and whether it
- * is the author's own map, whose rows always follow the root folders. Its own
- * lock: ms_bundle_by_hash reads it under the scope lock and without it. */
+/* Where the loaded map finds its mods (sh_modserve_place_set): "" for the
+ * root, else "maps\<segment>". g_place_prev is the place before the last map
+ * parse (sh_modserve_place_load), for a parse or a launch that did not
+ * happen. Its own lock: ms_bundle_by_hash reads it under the scope lock and
+ * without it. */
 static SRWLOCK g_place_lock = SRWLOCK_INIT;
 static char g_place[SH_MODSERVE_PLACE_CAP];
-static int g_place_own;
+static char g_place_prev[SH_MODSERVE_PLACE_CAP];
+static int g_place_prev_valid;
 
-static void ms_scope_place(char *out, size_t cap, int *own)
+static void ms_scope_place(char *out, size_t cap)
 {
     AcquireSRWLockShared(&g_place_lock);
     strncpy_s(out, cap, g_place, _TRUNCATE);
-    if (own) *own = g_place_own;
     ReleaseSRWLockShared(&g_place_lock);
 }
 
@@ -3515,7 +3517,7 @@ static void ms_scope_log(const ms_index *x, const ms_index *old)
         const ms_bundle *b = &x->bundles[i];
         int o;
         if (!b->admitted || !b->scope_editor) continue;
-        o = old ? ms_bundle_by_hash(old, b->hash, 1) : -1;
+        o = old ? ms_bundle_describe(old, b->hash, 1) : -1;
         if (o >= 0) continue;
         ms_log("scope: %s shadows editor-time content (%s); its editor tweaks serve in every map this editor "
                "opens, the rest only in maps that declare it", ms_label(b), b->scope_editor);
@@ -3579,37 +3581,86 @@ int sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *co
     return changed;
 }
 
-int sh_modserve_scope_set_place(const char *place, int own)
+int sh_modserve_place_norm(const char *place, char *out, size_t cap)
+{
+    char seg[SH_MODSERVE_PLACE_CAP], made[SH_MODSERVE_PLACE_CAP];
+    const char *s = place;
+    size_t pl = sizeof SH_MODSERVE_PLACES - 1;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!place || !place[0]) return 1;
+    /* "maps\<segment>", either slash, or the segment alone. */
+    if (!_strnicmp(s, SH_MODSERVE_PLACES, pl) && (s[pl] == '\\' || s[pl] == '/')) s += pl + 1;
+    if (strlen(s) >= sizeof seg) return 0;
+    strcpy_s(seg, sizeof seg, s);
+    for (size_t n = strlen(seg); n > 0 && (seg[n - 1] == '\\' || seg[n - 1] == '/'); --n) seg[n - 1] = 0;
+    /* A segment is exactly what the store makes of a title: no separator, no
+     * dot step, no character Windows refuses in a name. */
+    if (!seg[0] || !sh_ms_title_segment(seg, made, sizeof made) || strcmp(made, seg)) return 0;
+    return _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", SH_MODSERVE_PLACES, seg) > 0;
+}
+
+/* Make `norm` the loaded map's place and recompute the listing (it resolves
+ * its hashes against the place). `remember` keeps the place it replaces for
+ * sh_modserve_place_restore. Returns the bundles that changed. */
+static int ms_place_apply(const char *norm, int remember)
 {
     ms_index *x;
-    char norm[SH_MODSERVE_PLACE_CAP];
     int changed = 0, same;
-    size_t n;
-    char *p;
-    norm[0] = 0;
-    if (place && place[0]) {
-        /* "maps\<segment>", or the segment alone; '/' is '\'. */
-        if (_strnicmp(place, SH_MODSERVE_PLACES "\\", sizeof SH_MODSERVE_PLACES) &&
-            _strnicmp(place, SH_MODSERVE_PLACES "/", sizeof SH_MODSERVE_PLACES))
-            n = (size_t)_snprintf_s(norm, sizeof norm, _TRUNCATE, "%s\\%s", SH_MODSERVE_PLACES, place);
-        else n = (size_t)_snprintf_s(norm, sizeof norm, _TRUNCATE, "%s", place);
-        if (n == (size_t)-1) return 0;   /* too long for a place */
-        for (p = norm; *p; ++p) if (*p == '/') *p = '\\';
-        while ((n = strlen(norm)) > 0 && norm[n - 1] == '\\') norm[n - 1] = 0;
-    }
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)g_index;
     AcquireSRWLockExclusive(&g_scope_lock);
     AcquireSRWLockExclusive(&g_place_lock);
-    same = !_stricmp(g_place, norm) && g_place_own == (own ? 1 : 0);
+    if (remember) {
+        strcpy_s(g_place_prev, sizeof g_place_prev, g_place);
+        g_place_prev_valid = 1;
+    }
+    same = !_stricmp(g_place, norm);
     strcpy_s(g_place, sizeof g_place, norm);
-    g_place_own = own ? 1 : 0;
     ReleaseSRWLockExclusive(&g_place_lock);
-    /* The listing resolves its hashes in this context: a change recomputes it. */
     if (!same && x && g_scope_n) changed = ms_scope_compute(x, 1);
     ReleaseSRWLockExclusive(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
     return changed;
+}
+
+int sh_modserve_place_set(const char *place)
+{
+    char norm[SH_MODSERVE_PLACE_CAP];
+    if (!sh_modserve_place_norm(place, norm, sizeof norm)) return -1;
+    return ms_place_apply(norm, 0);
+}
+
+int sh_modserve_place_load(const char *place)
+{
+    char norm[SH_MODSERVE_PLACE_CAP];
+    if (!sh_modserve_place_norm(place, norm, sizeof norm)) norm[0] = 0;
+    return ms_place_apply(norm, 1);
+}
+
+int sh_modserve_place_restore(void)
+{
+    char prev[SH_MODSERVE_PLACE_CAP];
+    int valid;
+    AcquireSRWLockExclusive(&g_place_lock);
+    valid = g_place_prev_valid;
+    strcpy_s(prev, sizeof prev, g_place_prev);
+    g_place_prev_valid = 0;
+    ReleaseSRWLockExclusive(&g_place_lock);
+    if (!valid) return 0;
+    (void)ms_place_apply(prev, 0);
+    return 1;
+}
+
+void sh_modserve_place_get(char *out, size_t cap)
+{
+    if (out && cap) ms_scope_place(out, cap);
+}
+
+int sh_modserve_scope_set_place(const char *place, int own)
+{
+    int changed = sh_modserve_place_set(own ? NULL : place);
+    return changed < 0 ? 0 : changed;
 }
 
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -3729,7 +3780,7 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     int at, k;
     LONG sv;
     if (out) memset(out, 0, sizeof *out);
-    if (!x || !bundle_hash || (at = ms_bundle_by_hash(x, bundle_hash, 1)) < 0) return 0;
+    if (!x || !bundle_hash || (at = ms_bundle_describe(x, bundle_hash, 1)) < 0) return 0;
     b = &x->bundles[at];
     if (!out) return 1;
     out->scope = ms_scope_always(b) ? SH_MODSERVE_SCOPE_ALWAYS : SH_MODSERVE_SCOPE_MAP;
@@ -4713,26 +4764,36 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
     return r;
 }
 
-/* The bundle at `hash`. One build can sit in several areas (the root and a
- * map's place, or two places): the open map's place first unless the map
- * is the author's own (sh_modserve_scope_set_place), then the root, then
- * any place, in index order; the same hash is the same files, so this only
- * decides which folder's copy answers. */
+/* The bundle at `hash` for the loaded map, the hash half of the one place
+ * resolver (ms_row_build_in): the root's folder at that hash, else the
+ * folder of the map's place at that hash; never another map's place. */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only)
 {
-    int i, round, own;
+    int i, round;
     char place[SH_MODSERVE_PLACE_CAP];
     if (!x || !hash) return -1;
-    ms_scope_place(place, sizeof place, &own);
-    for (round = own || !place[0] ? 1 : 0; round < 3; ++round)
+    ms_scope_place(place, sizeof place);
+    for (round = 0; round < (place[0] ? 2 : 1); ++round)
         for (i = 0; i < x->nbundles; ++i) {
             const ms_bundle *b = &x->bundles[i];
             if (!b->hash || _stricmp(b->hash, hash) || (admitted_only && !b->admitted)) continue;
-            if (round == 0 && (!b->place || _stricmp(b->place, place))) continue;
-            if (round == 1 && b->place) continue;
+            if (round == 0 ? b->place != NULL : (!b->place || _stricmp(b->place, place))) continue;
             return i;
         }
     return -1;
+}
+
+/* A build to describe, not to serve (bundle scope and state, the logs that
+ * name a build once): the folder the resolver names, else any folder that
+ * holds that build. */
+static int ms_bundle_describe(const ms_index *x, const char *hash, int admitted_only)
+{
+    int i = ms_bundle_by_hash(x, hash, admitted_only);
+    for (int k = 0; i < 0 && x && hash && k < x->nbundles; ++k) {
+        const ms_bundle *b = &x->bundles[k];
+        if (b->hash && !_stricmp(b->hash, hash) && (!admitted_only || b->admitted)) i = k;
+    }
+    return i;
 }
 
 int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserve_plan *out, int *unknown)
@@ -6300,7 +6361,7 @@ static void ms_req_index(ms_index *x, const ms_index *old)
         const ms_bundle *b = &x->bundles[order[i]];
         int seen = 0;
         if (old) {
-            int o = ms_bundle_by_hash(old, b->hash, 1);
+            int o = ms_bundle_describe(old, b->hash, 1);
             seen = o >= 0 && old->bundles[o].req_text && !strcmp(old->bundles[o].req_text, b->req_text) &&
                    !old->bundles[o].req_lost == !b->req_lost;
         }
@@ -6786,9 +6847,9 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
     int b;
     if (cause && cause_cap) cause[0] = 0;
     if (!x) return 0;
-    b = ms_bundle_by_hash(x, bundle_hash, 1);
+    b = ms_bundle_describe(x, bundle_hash, 1);
     if (b >= 0) return 1;
-    b = ms_bundle_by_hash(x, bundle_hash, 0);
+    b = ms_bundle_describe(x, bundle_hash, 0);
     if (b < 0) return 0;
     if (cause && cause_cap) strncpy_s(cause, cause_cap, x->bundles[b].cause, _TRUNCATE);
     return -1;
@@ -6865,27 +6926,30 @@ static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, con
     return -1;
 }
 
-/* The build that serves a row (ONE-SHAPE rule 4 and the owner's decision of
- * 2026-11-10), in the open map's context (sh_modserve_scope_set_place), the
- * same presence rule the fetch uses (modsync.c):
- *   a stranger's map: its own place's folder of the salt at the row's hash,
- *     else the root folder of the salt when it is at that hash;
- *   the author's own map: the root folder of the salt at any hash, else its
- *     own place's folder at the row's hash.
- * Never another map's place: each map keeps its own copy. -1 when none: the
- * row is missing and the fetch brings its build into the map's place. */
-static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
+/* The one place resolver (modserve.h, DECISIONS 1 and 11): the build that
+ * serves a row of a map whose place is `place` ("" the root): the root folder
+ * of the salt at the row's hash; then, with a place, that place's folder of
+ * the salt at the row's hash, and without one, the root folder of the salt
+ * at any build. Never another map's place. -1 when none: the row is
+ * missing. */
+static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, const char *place)
 {
-    char salt[SH_MODMANIFEST_SALT_CAP], place[SH_MODSERVE_PLACE_CAP];
-    int own, at = -1;
+    char salt[SH_MODMANIFEST_SALT_CAP];
+    int at = -1;
     if (!x || !row || !sh_salt_valid(row->salt, strlen(row->salt))) return -1;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
-    ms_scope_place(place, sizeof place, &own);
-    if (!own && place[0] && row->build[0]) at = ms_salt_in(x, salt, row->build, place);
-    if (at < 0) at = ms_salt_in(x, salt, own ? NULL : row->build, "");
-    if (at < 0 && own && place[0] && row->build[0]) at = ms_salt_in(x, salt, row->build, place);
-    return at;
+    if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
+    if (at >= 0) return at;
+    if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
+    return ms_salt_in(x, salt, NULL, "");
+}
+
+static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
+{
+    char place[SH_MODSERVE_PLACE_CAP];
+    ms_scope_place(place, sizeof place);
+    return ms_row_build_in(x, row, place);
 }
 
 static void ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
@@ -6898,6 +6962,17 @@ static void ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
     strncpy_s(out->folder, sizeof out->folder, b->folder ? b->folder : "", _TRUNCATE);
     strncpy_s(out->place, sizeof out->place, b->place ? b->place : "", _TRUNCATE);
     out->size = (unsigned long long)b->total;
+}
+
+int sh_modserve_row_build_in(const sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out)
+{
+    const ms_index *x = g_index;
+    char norm[SH_MODSERVE_PLACE_CAP];
+    int at = sh_modserve_place_norm(place, norm, sizeof norm) ? ms_row_build_in(x, row, norm) : -1;
+    if (out) memset(out, 0, sizeof *out);
+    if (at < 0) return 0;
+    ms_ref_fill(&x->bundles[at], out);
+    return 1;
 }
 
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
@@ -6915,8 +6990,16 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
  * serving index. */
 int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
+    char place[SH_MODSERVE_PLACE_CAP];
+    ms_scope_place(place, sizeof place);
+    return sh_modserve_row_served_in(row, place, subject, cause, cap);
+}
+
+int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                              size_t cap)
+{
     const ms_index *x = g_index;
-    char salt[SH_MODMANIFEST_SALT_CAP], title[300], missing[600];
+    char salt[SH_MODMANIFEST_SALT_CAP], title[300], missing[600], norm[SH_MODSERVE_PLACE_CAP];
     const char *what = subject && subject[0] ? subject : "map";
     int i, declared, skipped = -1, absent = 0;
     size_t k, w = 0;
@@ -6930,7 +7013,7 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
     if (ms_editor_only_recorded(x, row->build)) return SH_MODSERVE_ROW_SERVED;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
-    declared = ms_row_build(x, row);
+    declared = sh_modserve_place_norm(place, norm, sizeof norm) ? ms_row_build_in(x, row, norm) : -1;
     /* A folder of the salt that was skipped: the one at the row's hash, else,
      * when no folder of the salt serves at all, any. */
     if (declared < 0 && x) {

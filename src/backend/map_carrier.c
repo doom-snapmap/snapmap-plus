@@ -11,7 +11,8 @@
 
 #define CR_ERR(...) do { if (err && err_cap) _snprintf_s(err, err_cap, _TRUNCATE, __VA_ARGS__); } while (0)
 
-static const char *const cr_parts[3] = {"mods", "settings", "nav"};
+#define CR_PARTS 4
+static const char *const cr_parts[CR_PARTS] = {"mods", "place", "settings", "nav"};
 
 /* ------------------------------------------------------------ scanning */
 
@@ -165,6 +166,9 @@ static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
     if (cr_key_is(s, m, "mods")) {
         if (first != '[' || v->mods.present) { c->bad = 1; return 0; }
         v->mods.present = 1; v->mods.from = m->value_from; v->mods.to = m->value_to;
+    } else if (cr_key_is(s, m, "place")) {
+        if (first != '"' || v->place.present) { c->bad = 1; return 0; }
+        v->place.present = 1; v->place.from = m->value_from; v->place.to = m->value_to;
     } else if (cr_key_is(s, m, "settings")) {
         if (first != '{' || v->settings.present) { c->bad = 1; return 0; }
         v->settings.present = 1; v->settings.from = m->value_from; v->settings.to = m->value_to;
@@ -218,6 +222,7 @@ int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view)
     }
     if (v.state == SH_CARRIER_MALFORMED) {
         memset(&v.mods, 0, sizeof v.mods);
+        memset(&v.place, 0, sizeof v.place);
         memset(&v.settings, 0, sizeof v.settings);
         memset(&v.nav, 0, sizeof v.nav);
     }
@@ -233,6 +238,7 @@ int sh_carrier_part(const char *json, size_t len, const char *part, size_t *from
     if (v.state == SH_CARRIER_MALFORMED) return -1;
     if (!part) return 0;
     if (!strcmp(part, "mods")) sp = &v.mods;
+    else if (!strcmp(part, "place")) sp = &v.place;
     else if (!strcmp(part, "settings")) sp = &v.settings;
     else if (!strcmp(part, "nav")) sp = &v.nav;
     else return 0;
@@ -251,11 +257,38 @@ void sh_carrier_describe(const sh_carrier_view *v, char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "%s member refused (%s); the map loads without it", SH_CARRIER_KEY, v->why);
         return;
     }
-    _snprintf_s(out, cap, _TRUNCATE, "%s member, %zu bytes: %s%s%s%s", SH_CARRIER_KEY,
+    _snprintf_s(out, cap, _TRUNCATE, "%s member, %zu bytes: %s%s%s%s%s", SH_CARRIER_KEY,
                 v->value_to - v->value_from,
-                v->mods.present ? "mods " : "", v->settings.present ? "settings " : "",
-                v->nav.present ? "nav " : "",
-                (v->mods.present || v->settings.present || v->nav.present) ? "" : "no parts");
+                v->mods.present ? "mods " : "", v->place.present ? "place " : "",
+                v->settings.present ? "settings " : "", v->nav.present ? "nav " : "",
+                (v->mods.present || v->place.present || v->settings.present || v->nav.present) ? "" : "no parts");
+}
+
+int sh_carrier_place(const char *json, size_t len, char *out, size_t cap)
+{
+    size_t from = 0, to = 0, n;
+    int got = sh_carrier_part(json, len, "place", &from, &to);
+    if (out && cap) out[0] = 0;
+    if (got <= 0) return got;
+    n = to - from - 2;   /* the string's body, between its quotes */
+    /* A place is a folder name: written without escapes, and short. */
+    if (to - from < 2 || !out || n >= cap || memchr(json + from + 1, '\\', n)) return -1;
+    memcpy(out, json + from + 1, n);
+    out[n] = 0;
+    return 1;
+}
+
+char *sh_carrier_put_place(const char *json, size_t len, const char *place, size_t *out_len, char *err, size_t err_cap)
+{
+    char value[SH_CARRIER_PLACE_CAP + 2];
+    size_t n = place ? strlen(place) : 0;
+    if (n >= SH_CARRIER_PLACE_CAP || (n && (strchr(place, '"') || strchr(place, '\\')))) {
+        if (out_len) *out_len = 0;
+        if (err && err_cap) strncpy_s(err, err_cap, "the place is not a folder name", _TRUNCATE);
+        return NULL;
+    }
+    if (n) _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", place);
+    return sh_carrier_put(json, len, "place", n ? value : NULL, n ? n + 2 : 0, out_len, err, err_cap);
 }
 
 /* ------------------------------------------------------------ strip / put */
@@ -300,25 +333,25 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
                      size_t *out_len, char *err, size_t err_cap)
 {
     sh_carrier_view v;
-    const char *pv[3] = {NULL, NULL, NULL};
-    size_t pl[3] = {0, 0, 0}, need, w, close, before, i;
+    const char *pv[CR_PARTS] = {NULL, NULL, NULL, NULL};
+    size_t pl[CR_PARTS] = {0, 0, 0, 0}, need, w, close, before, i;
     int which = -1, any = 0, empty_root;
     char *base = NULL, *out = NULL;
     const char *src;
     size_t src_len;
     if (out_len) *out_len = 0;
     if (err && err_cap) err[0] = 0;
-    for (i = 0; i < 3; i++) if (part && !strcmp(part, cr_parts[i])) which = (int)i;
+    for (i = 0; i < CR_PARTS; i++) if (part && !strcmp(part, cr_parts[i])) which = (int)i;
     if (which < 0) { CR_ERR("unknown part"); return NULL; }
     if (!json || !len || !sh_carrier_view_read(json, len, &v)) { CR_ERR("the map text did not read"); return NULL; }
     if (v.state == SH_CARRIER_PRESENT) {
-        const sh_carrier_span *sp[3] = {&v.mods, &v.settings, &v.nav};
-        for (i = 0; i < 3; i++)
+        const sh_carrier_span *sp[CR_PARTS] = {&v.mods, &v.place, &v.settings, &v.nav};
+        for (i = 0; i < CR_PARTS; i++)
             if (sp[i]->present) { pv[i] = json + sp[i]->from; pl[i] = sp[i]->to - sp[i]->from; }
     }
     pv[which] = value;
     pl[which] = value ? value_len : 0;
-    for (i = 0; i < 3; i++) if (pv[i]) any = 1;
+    for (i = 0; i < CR_PARTS; i++) if (pv[i]) any = 1;
 
     if (v.state != SH_CARRIER_ABSENT) {
         base = sh_carrier_strip(json, len, &src_len);
@@ -347,7 +380,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
     empty_root = (before > 0 && src[before - 1] == '{');
 
     need = src_len + 64 + SH_CARRIER_KEY_LEN;
-    for (i = 0; i < 3; i++) if (pv[i]) need += pl[i] + 16;
+    for (i = 0; i < CR_PARTS; i++) if (pv[i]) need += pl[i] + 16;
     out = (char *)HeapAlloc(GetProcessHeap(), 0, need);
     if (!out) {
         if (base) HeapFree(GetProcessHeap(), 0, base);
@@ -360,7 +393,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
     CR_EMIT(src, before);
     if (!empty_root) CR_LIT(",");
     CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":1");
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < CR_PARTS; i++) {
         if (!pv[i]) continue;
         CR_LIT(",\"");
         CR_EMIT(cr_parts[i], strlen(cr_parts[i]));

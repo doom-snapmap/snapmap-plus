@@ -1,4 +1,4 @@
-/* "Unlock Map Bounds": one versioned map string variable and the engine cvars
+/* "Unlock Map Bounds": the map's setting (map_settings.h) and the engine cvars
  * that bound module placement, the editor camera and Blueprint floors.
  *
  * Engine evidence (snaphak-re editor-fixes-13954591 R-004, build 13954591):
@@ -131,7 +131,7 @@ int sh_map_bounds_write(void *map,const sh_map_bounds *settings)
     if(ok)sh_map_settings_set_bounds(settings);
     backend_log(!ok?"BOUNDS: map bounds write failed":
         sh_map_bounds_overrides(settings)?"BOUNDS: Unlock Map Bounds on for this map; its next save stores it":
-        "BOUNDS: Unlock Map Bounds off for this map; its next save stores no bounds variable");
+        "BOUNDS: Unlock Map Bounds off for this map; its next save stores no bounds setting");
     return ok;
 }
 

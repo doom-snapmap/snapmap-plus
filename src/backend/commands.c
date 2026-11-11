@@ -162,7 +162,7 @@ static int rawmap_dir_of(const char *path, char *out, size_t cap)
 /* The folder rawmaps default to; it does not move when the load path points elsewhere. */
 static int rawmap_default_dir(char *out, size_t cap)
 {
-    char probe[MAX_PATH] = "";
+    char probe[SH_RAWMAP_PATH_MAX] = "";
     sh_rawmap_get_default_paths(probe, (int)sizeof probe, NULL, 0);
     return rawmap_dir_of(probe, out, cap);
 }
@@ -170,7 +170,7 @@ static int rawmap_default_dir(char *out, size_t cap)
 /* The folder the CURRENT load path lives in: where the person keeps their files. */
 static int rawmap_current_load_dir(char *out, size_t cap)
 {
-    char probe[MAX_PATH] = "";
+    char probe[SH_RAWMAP_PATH_MAX] = "";
     sh_rawmap_get_paths(probe, (int)sizeof probe, NULL, 0);
     return rawmap_dir_of(probe, out, cap);
 }
@@ -193,7 +193,7 @@ static int rawmap_list_one_dir(const char *dir, const char *prefix)
         h = FindFirstFileW(glob, &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
         do {
-            char name[MAX_PATH], full[MAX_PATH], why[160];
+            char name[SH_RAWMAP_PATH_MAX], full[SH_RAWMAP_PATH_MAX], why[160];
             int ok;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             if (!sh_rawmap_path_utf8(fd.cFileName, name, sizeof name)) continue;
@@ -225,7 +225,7 @@ static int rawmap_list_dir_tree(const char *dir)
     h = FindFirstFileW(glob, &fd);
     if (h == INVALID_HANDLE_VALUE) return n;
     do {
-        char name[MAX_PATH], sub[MAX_PATH], prefix[MAX_PATH];
+        char name[SH_RAWMAP_PATH_MAX], sub[SH_RAWMAP_PATH_MAX], prefix[SH_RAWMAP_PATH_MAX];
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
         if (!sh_rawmap_path_utf8(fd.cFileName, name, sizeof name)) continue;
@@ -248,7 +248,7 @@ static void rawmap_list_section(const char *dir, const char *what)
 /* `arg` = a folder to list, or NULL for the default folder and the load path's folder. */
 static void rawmap_print_list(const char *arg)
 {
-    char def_dir[MAX_PATH] = "", cur_dir[MAX_PATH] = "";
+    char def_dir[SH_RAWMAP_PATH_MAX] = "", cur_dir[SH_RAWMAP_PATH_MAX] = "";
     int have_def, have_cur;
 
     if (arg != NULL && arg[0] != '\0') {
@@ -279,7 +279,7 @@ static void rawmap_print_list(const char *arg)
 
 static void rawmap_print_state(void)
 {
-    char load_path[MAX_PATH] = "", save_path[MAX_PATH] = "", why[192] = "";
+    char load_path[SH_RAWMAP_PATH_MAX] = "", save_path[SH_RAWMAP_PATH_MAX] = "", why[192] = "";
     int readable;
 
     sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
@@ -290,7 +290,7 @@ static void rawmap_print_state(void)
     if (!readable && why[0]) sh_printf("             %s\n", why);
     {
         /* Say whether this is the default file or one the person chose. */
-        char target[MAX_PATH] = "";
+        char target[SH_RAWMAP_PATH_MAX] = "";
         sh_rawmap_get_save_target(target, (int)sizeof target);
         sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
                   target[0] ? "   (you chose this file)" : "   (the default file)");
@@ -340,7 +340,8 @@ static void rawmap_print_usage(void)
     sh_printf("Maps that use mods:\n");
     sh_printf("  Every save of such a map also writes <name>.zip beside the .json: the map\n");
     sh_printf("  and its mods in one file. Share the .zip; the .json alone will not load\n");
-    sh_printf("  for anyone who does not have the mods. Opening a .zip installs its mods.\n");
+    sh_printf("  for anyone who does not have the mods. Opening a .zip installs its mods\n");
+    sh_printf("  into mods\\maps\\<the .zip's name>\\, and the map, saved anywhere, finds them there.\n");
     sh_printf("  A rawmap whose mods you do not have is never opened as it is: when the mod\n");
     sh_printf("  store has them the game offers to download them, and otherwise it names\n");
     sh_printf("  them and says to ask the map's author for the .zip.\n");
@@ -354,12 +355,6 @@ static void h_sh_rawmaps(idCmdArgs *a)
     if (verb == NULL || verb[0] == '\0' || _stricmp(verb, "status") == 0) { rawmap_print_state(); return; }
     if (_stricmp(verb, "help") == 0 || strcmp(verb, "?") == 0) { rawmap_print_usage(); return; }
     if (_stricmp(verb, "list") == 0)    { rawmap_print_list(arg); return; }
-
-    if (_stricmp(verb, "on") == 0 || _stricmp(verb, "off") == 0) {
-        sh_printf("Rawmaps no longer apply to every map you open. Use 'sh_rawmaps load <path>'\n"
-                  "or File > Load Rawmap to open one.\n");
-        return;
-    }
 
     /* Named for the thing a person is choosing to allow, so "on" is the permissive one. Never
      * persisted: it destroys a map, and a destructive setting that outlives the session it was
@@ -394,7 +389,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
      * it cannot damage a SAVED map -- the rawmap opens as a new map that has to be named. Nothing
      * is kept for a later map: a rawmap that cannot open now is refused now. */
     if (_stricmp(verb, "load") == 0) {
-        char why[MAX_PATH + 192] = "", path[MAX_PATH] = "";
+        char why[SH_RAWMAP_PATH_MAX + 192] = "", path[SH_RAWMAP_PATH_MAX] = "";
         if (arg != NULL && arg[0] != '\0') strncpy_s(path, sizeof path, arg, _TRUNCATE);
         else sh_rawmap_get_paths(path, (int)sizeof path, NULL, 0);
         if (sh_rawmap_open_now(arg && arg[0] ? arg : NULL, why, (int)sizeof why)) {
@@ -412,14 +407,14 @@ static void h_sh_rawmaps(idCmdArgs *a)
      * file I have loaded". Opening a different map clears whatever was set, so a downloaded map is
      * never written over by a choice made while some other map was open. */
     if (_stricmp(verb, "savepath") == 0) {
-        char target[MAX_PATH] = "";
+        char target[SH_RAWMAP_PATH_MAX] = "";
         char why[192] = "";
 
         if (arg != NULL && arg[0] != '\0') {
             if (_stricmp(arg, "default") == 0) {
                 sh_rawmap_set_save_target(NULL);
             } else if (_stricmp(arg, "rawmap") == 0) {
-                char loaded[MAX_PATH] = "";
+                char loaded[SH_RAWMAP_PATH_MAX] = "";
                 sh_rawmap_get_paths(loaded, (int)sizeof loaded, NULL, 0);
                 if (loaded[0] == '\0' || !sh_rawmap_set_save_target(loaded)) {
                     sh_printf("No rawmap is loaded, so there is nothing to save back over.\n");
@@ -446,8 +441,8 @@ static void h_sh_rawmaps(idCmdArgs *a)
     }
 
     if (_stricmp(verb, "save") == 0) {
-        char why[MAX_PATH + 192] = "";
-        char save_path[MAX_PATH] = "";
+        char why[SH_RAWMAP_PATH_MAX + 192] = "";
+        char save_path[SH_RAWMAP_PATH_MAX] = "";
 
         /* Ask before changing anything: a refused save must not move the save path. */
         if (!sh_editor_frame_can_rawmap_save(why, (int)sizeof why)) {
@@ -1130,25 +1125,6 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* Deliberately refused legacy operations. */
-    if (strcmp(sub, "loadimg_n_break") == 0) {
-        sh_printf("sh_debugrender: '%s' not available -- it ends in a debugger INT3 trap (halts the game). "
-                  "It is not available in Snapmap+.\n", sub);
-        return;
-    }
-    if (strcmp(sub, "dump_megatex") == 0) {
-        sh_printf("sh_debugrender: '%s' not available -- it hardcodes a write to C:\\Users\\Chris\\megatex.raw "
-                  "(a developer's own folder). It is not available in Snapmap+.\n", sub);
-        return;
-    }
-
-    /* Unsupported engine-mutating debug operations. */
-    if (strcmp(sub, "test_rm_commit") == 0 || strcmp(sub, "test_sum_shit") == 0 ||
-        strcmp(sub, "testnewgui") == 0) {
-        sh_printf("sh_debugrender: '%s' changes the renderer's internals and is not available in Snapmap+.\n", sub);
-        return;
-    }
-
     sh_printf("sh_debugrender: unknown sub-op '%s'.\n", sub);
 }
 #endif
@@ -1162,7 +1138,7 @@ static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
     if (iface == NULL) {
-        sh_printf("Ui interface doesnt exist yet!\n");
+        sh_printf("Snapmap+ is still starting; try again in a moment.\n");
         return;
     }
 
@@ -1176,7 +1152,7 @@ static void h_sh_dispatch(idCmdArgs *a)
     sh_cmd_handler handler = NULL;
     void          *ctx     = NULL;
     if (!sh_iface_lookup_cmd(iface, sub, &handler, &ctx) || handler == NULL) {
-        sh_printf("Command %s has not been registered yet\n", sub);
+        sh_printf("There is no Snapmap+ command '%s'. 'sh_help' lists them.\n", sub);
         return;
     }
 

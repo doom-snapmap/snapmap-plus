@@ -18,6 +18,7 @@
 #include "plain_reason.h"
 #include "modzip.h"
 #include "map_carrier.h"
+#include "modsync.h"
 
 #define ME_INDEX_MAX       (1024u * 1024u)
 
@@ -102,6 +103,7 @@ typedef struct me_payload {
     const char *entry;                 /* "<name>.json" */
     const char *text;
     size_t len;
+    const char *place;                 /* where its rows resolve (modserve.h): "" the root */
     const sh_modmanifest_list *rows;   /* prefab: the rows; map: NULL (read from text) */
     modexport_prefab_fn text_for;      /* prefab: the text to carry for the carried rows */
     void *ctx;
@@ -114,11 +116,17 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
 {
     me_payload pl;
     char entry[SH_ZIP_NAME_MAX];
+    char segment[SH_CARRIER_PLACE_CAP], place[SH_MODSERVE_PLACE_CAP] = "";
     memset(&pl, 0, sizeof pl);
     me_map_entry(zip_path ? zip_path : "", entry, sizeof entry);
     pl.entry = entry;
     pl.text = map_json;
     pl.len = len;
+    /* The map's rows resolve in the place it records (none: the root). */
+    if (map_json && sh_carrier_place(map_json, len, segment, sizeof segment) == 1 &&
+        !sh_modserve_place_norm(segment, place, sizeof place))
+        place[0] = 0;
+    pl.place = place;
     return me_write(&pl, zip_path, stp, cause, cap);
 }
 
@@ -158,21 +166,24 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
                         size_t cap)
 {
     const sh_mb_bundle *b = &e->bundle;
+    const char *label = b->name && b->name[0] ? b->name : e->name;
     char name[SH_ZIP_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
     int same;
+    /* Read without the store lock: every file is checked against the build
+     * the listing named, so a folder changed meanwhile refuses the export. */
     me_join_native(path, sizeof path, e->folder, "mod.json");
     bytes = sh_mb_read_file(path, ME_MODJSON_MAX, &blen);
-    if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", e->name);
+    if (!bytes) return me_cause(cause, cap, "%s's mod.json cannot be read. Press Refresh in the Mods tab to see why", label);
     memset(&check, 0, sizeof check);
     same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
     sh_mb_free(&check);
     if (!same) {
         free(bytes);
-        return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; press Refresh and export again",
-                        e->name);
+        return me_cause(cause, cap, "%s changed since Snapmap+ last read it. Press Refresh in the Mods tab, then save again",
+                        label);
     }
     _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", folder);
     sh_zip_writer_add(w, name, bytes, blen);
@@ -186,7 +197,9 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
             sh_mb_sha256_hex(bytes, blen, actual);
             if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
         }
-        if (!bytes) return me_cause(cause, cap, "mods\\%s\\%s is missing or damaged (run sh_mods doctor verify)", e->name, f->path);
+        if (!bytes)
+            return me_cause(cause, cap, "%s's file %s is missing or changed. Press Refresh in the Mods tab, then save again",
+                            label, f->path);
         _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", folder, f->path);
         sh_zip_writer_add(w, name, bytes, blen);
         free(bytes);
@@ -196,18 +209,23 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
     return 1;
 }
 
-/* The folder that carries a row: the usable folder of its salt at exactly
- * the row's build (the root's first, else a map's place), else the root
- * folder of the salt at another build: the export is the author's own map,
- * which follows the root folders (ONE-SHAPE rule 4), and its rows are moved
- * to that build. 1 exact, 2 moved, 0 none. */
-static int me_pick_row(const sh_ms_list *l, const sh_modmanifest_row *row, const sh_ms_entry **out)
+/* The folder that carries a row, as the one place resolver (modserve.h)
+ * names it for a map whose place is `place`: the root folder of its salt at
+ * the row's build; then, with a place, that place's folder at the row's
+ * build, and without one (the player's own map or prefab) the root folder of
+ * its salt at whatever build it holds, to which the row moves. 1 exact, 2
+ * moved, 0 none. */
+static int me_pick_row(const sh_ms_list *l, const sh_modmanifest_row *row, const char *place, const sh_ms_entry **out)
 {
     const sh_ms_entry *e;
     *out = NULL;
     e = sh_ms_find_salt(l, row->salt, NULL, row->build);
-    if (!e) e = sh_ms_find_salt(l, row->salt, "*", row->build);
     if (e && sh_ms_entry_usable(e)) { *out = e; return 1; }
+    if (place && place[0]) {
+        e = sh_ms_find_salt(l, row->salt, place, row->build);
+        if (e && sh_ms_entry_usable(e)) { *out = e; return 1; }
+        return 0;
+    }
     e = sh_ms_find_salt(l, row->salt, NULL, NULL);
     if (e && sh_ms_entry_usable(e)) { *out = e; return 2; }
     return 0;
@@ -274,16 +292,16 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     modstore_lock();
     locked = 1;
     listed = sh_ms_enumerate(&l);
-    if (!listed) { me_cause(cause, cap, "the mods store cannot be listed"); goto done; }
+    if (!listed) { me_cause(cause, cap, "the mods folder cannot be read. Check that it exists, then press Refresh in the Mods tab"); goto done; }
     picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
     if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
     /* Each row at its build, else the root folder of its salt. */
     for (i = 0; i < rows.count; i++) {
-        int how = me_pick_row(&l, &rows.rows[i], &picked[i]);
+        int how = me_pick_row(&l, &rows.rows[i], pl->place, &picked[i]);
         if (!how) {
-            me_cause(cause, cap, "the %s needs %s (%s@%.16s), which is not installed or failed verification",
-                     prefab ? "prefab" : "map", rows.rows[i].name[0] ? rows.rows[i].name : rows.rows[i].salt,
-                     rows.rows[i].salt, rows.rows[i].build);
+            me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the Mods "
+                     "tab, or remove it from the %s", prefab ? "prefab" : "map",
+                     rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
             goto done;
         }
         if (how == 2) moved++;
@@ -315,13 +333,13 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             if (b->name) strncpy_s(r->name, sizeof r->name, b->name, _TRUNCATE);
             r->size = b->total_size;
         }
-        me_log("MODS: export: %zu row(s) pinned an earlier build; the export carries and names the root folder's build",
+        me_log("MODS: export: %zu row(s) named another build; the export carries and names the root folder's build",
                moved);
         if (!prefab) {
             moved_map = sh_modmanifest_write(map_json, len, &fixed, &map_len, err, sizeof err);
             if (!moved_map) {
                 sh_modmanifest_list_free(&fixed);
-                me_cause(cause, cap, "the map's rows could not be moved to the current builds: %s", err[0] ? err : "unknown");
+                me_cause(cause, cap, "the map's list of mods could not be updated (%s). Save the map again", err[0] ? err : "out of memory");
                 goto done;
             }
             map_json = moved_map;
@@ -334,15 +352,20 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
         picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
         if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
         for (i = 0; i < rows.count; i++)
-            if (!me_pick_row(&l, &rows.rows[i], &picked[i])) {
-                me_cause(cause, cap, "%s is not installed", rows.rows[i].salt);
+            if (!me_pick_row(&l, &rows.rows[i], pl->place, &picked[i])) {
+                me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the "
+                         "Mods tab, or remove it from the %s", prefab ? "prefab" : "map",
+                         rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
                 goto done;
             }
     }
     st->bundles = (unsigned)rows.count;
+    /* The builds are chosen: the files are read without the store lock. */
+    modstore_unlock();
+    locked = 0;
     if (prefab && pl->text_for) {
         prefab_text = pl->text_for(pl->ctx, &rows, moved > 0, &len);
-        if (!prefab_text || !len || len > MODEXPORT_PREFAB_MAX) { me_cause(cause, cap, "the prefab's mods could not be written into it"); goto done; }
+        if (!prefab_text || !len || len > MODEXPORT_PREFAB_MAX) { me_cause(cause, cap, "the prefab's export could not be written. Export it again"); goto done; }
         map_json = prefab_text;
         st->map_bytes = len;
     }
@@ -420,11 +443,12 @@ typedef struct me_import {
     me_carry *c;
     size_t nc, cap;
     int kind;                           /* what the export holds */
-    /* The import's place, mods\maps\<title>\ (modstore.h): a map's is named
-     * after its ZIP and keyed "zip:<file name>"; a prefab's after the prefab
-     * its .json names (keyed by that title), so its placement finds it. */
+    /* A map's place, mods\maps\<title>\ (modstore.h): named after its ZIP
+     * and keyed "zip:<the ZIP's path>", so two ZIPs with one name get two
+     * places. A prefab has none: its mods install at the root (DECISIONS
+     * 12). */
     char place_title[MAX_PATH];
-    char place_key[MAX_PATH + 8];
+    char place_key[MAX_PATH * 4 + 48];
 } me_import;
 
 static void me_import_free(me_import *im)
@@ -552,7 +576,7 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         if (ln >= sizeof im->place_title) ln = sizeof im->place_title - 1;
         memcpy(im->place_title, leaf, ln);
         im->place_title[ln] = 0;
-        _snprintf_s(im->place_key, sizeof im->place_key, _TRUNCATE, "zip:%s", leaf);
+        _snprintf_s(im->place_key, sizeof im->place_key, _TRUNCATE, "zip:%s", path);
     }
     if (want == ME_KIND_PREFAB && n > 5 && !_stricmp(path + n - 5, ".json")) {
         wchar_t *w = sh_mb_wpath(path), *slash;
@@ -616,15 +640,6 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
     if (want == ME_KIND_MAP && sh_map_old_shape(*text, *len) != SH_MAP_OLD_NONE) {
         me_open_fail(im, text);
         return me_cause(cause, cap, "%s", MODEXPORT_EARLIER);
-    }
-    if (want == ME_KIND_PREFAB) {
-        /* A prefab's mods go to the prefab's place: mods\maps\<its name>\. */
-        const char *e = im->zr.e[*idx].name;
-        size_t nl = strlen(e) > 5 ? strlen(e) - 5 : 0;
-        if (nl >= sizeof im->place_title) nl = sizeof im->place_title - 1;
-        memcpy(im->place_title, e, nl);
-        im->place_title[nl] = 0;
-        im->place_key[0] = 0;
     }
     im->kind = want;
     if (dir) {
@@ -841,7 +856,8 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
 {
     char prefix[SH_MS_NAME_MAX + 8];
     size_t pl, i;
-    _snprintf_s(c->stage, sizeof c->stage, _TRUNCATE, "%s\\%zu", stage, index);
+    /* Named as the export carries it: a root install takes the folder's name. */
+    _snprintf_s(c->stage, sizeof c->stage, _TRUNCATE, "%s\\%zu\\%s", stage, index, c->name);
     _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", c->name);
     pl = strlen(prefix);
     for (i = 0; i < im->zr.n; i++) {
@@ -924,18 +940,18 @@ static void me_carry_row(const me_carry *c, const sh_modmanifest_list *rows, sh_
     row->name_count = n;
 }
 
-/* Whether something on this machine already serves a carried folder's row,
- * in the context of the map or prefab the import is for: the build
- * sh_modserve_row_build names for it provides every name the rows list
- * (modserve.h, the asset rule), or the record knows it changes only the
- * editor. Such a folder is not installed. */
-static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
+/* Whether something on this machine already serves a carried folder's row
+ * for a map or prefab whose place is `place` ("" the root): the build the one
+ * place resolver names for it provides every name the rows list (modserve.h,
+ * the asset rule), or the record knows it changes only the editor. Such a
+ * folder is not installed. */
+static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows, const char *place)
 {
     sh_modmanifest_row row;
     char **names;
     int st;
     me_carry_row(c, rows, &row, &names);
-    st = sh_modserve_row_served(&row, NULL, 0);
+    st = sh_modserve_row_served_in(&row, place, NULL, NULL, 0);
     free(names);
     return st == SH_MODSERVE_ROW_SERVED;
 }
@@ -947,24 +963,24 @@ static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
  * replacements are kept, and the folder must build to exactly the hash its
  * mod.json records. A refusal removes what the import installed; nothing that
  * was installed before is written. */
-static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_stats *st, char *cause, size_t cap)
+static int me_install(me_import *im, const sh_modmanifest_list *rows, const char *dir, modexport_stats *st,
+                      char *cause, size_t cap)
 {
     sh_mb_resolver r;
     sh_ms_place place;
     char root[MAX_PATH * 4], stage[MAX_PATH * 4] = "";
     size_t i, left = 0;
-    int ok = 0, progress, staged = 0;
+    int ok = 0, progress, staged = 0, locked = 0;
     const char *what = me_kind_word(im->kind);
 
     st->bundles = (unsigned)im->nc;
     st->entries = (unsigned)im->zr.n;
     st->zip_bytes = im->zr.size;
     if (!im->nc) return 1;
-    modstore_lock();
-    if (!sh_ms_root(root, sizeof root)) { me_cause(cause, cap, "the mods folder cannot be resolved"); goto done; }
+    if (!sh_ms_root(root, sizeof root)) return me_cause(cause, cap, "the mods folder cannot be resolved");
     for (i = 0; i < im->nc; i++) {
         me_carry *c = &im->c[i];
-        if (me_carry_served(c, rows)) {
+        if (me_carry_served(c, rows, dir)) {
             c->present = 1;
             st->bundles_present++;
             me_log("MODS: import: mods/%s skipped: %s@%.16s is served on this computer", c->name, c->b.id, c->b.hash);
@@ -974,13 +990,17 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
     }
     if (!left) { ok = 1; goto done; }
 
+    /* The files are copied out of the export without the store lock: a large
+     * import never holds up a save, a download or a build. */
     if (!me_stage_root(stage, sizeof stage)) { me_cause(cause, cap, "no temporary folder could be made for the export's mods"); goto done; }
     staged = 1;
     for (i = 0; i < im->nc; i++)
         if (!im->c[i].present && !me_stage(im, &im->c[i], stage, i, st, cause, cap)) goto done;
+    modstore_lock();
+    locked = 1;
 
-    place.title = im->place_title[0] ? im->place_title : "import";
-    place.map_id = im->place_key[0] ? im->place_key : NULL;
+    place.title = im->place_title;
+    place.map_id = im->place_key;
     /* A mod that needs another carried one builds once that one is installed. */
     r.installed = NULL;
     r.installed_context = NULL;
@@ -998,8 +1018,10 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
             /* An exported folder is its author's build as it was: its
              * replacements are kept, never refused (a received build). */
             sh_mb_keep_replacements_here(1);
-            if (!sh_ms_install_placed(c->stage, &place, &r, c->stored, sizeof c->stored, &is, &built, c->why,
-                                      sizeof c->why)) {
+            if (!(dir[0] ? sh_ms_install_placed(c->stage, &place, &r, c->stored, sizeof c->stored, &is, &built, c->why,
+                                                sizeof c->why)
+                         : sh_ms_install_from_folder(c->stage, &r, c->stored, sizeof c->stored, &is, &built, c->why,
+                                                     sizeof c->why))) {
                 sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
@@ -1046,7 +1068,7 @@ rollback:
     me_rollback(im, root);
     st->bundles_installed = 0;
 done:
-    modstore_unlock();
+    if (locked) modstore_unlock();
     if (staged) {
         wchar_t *w = sh_mb_wpath(stage);
         if (w) { me_rmtree(w); free(w); }
@@ -1055,30 +1077,47 @@ done:
 }
 
 /* Rows that name a build the export does not carry and nothing on this
- * machine serves. */
-static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows, modexport_stats *st)
+ * machine serves in `place`. */
+static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows, const char *place, modexport_stats *st)
 {
     size_t i;
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *row = &rows->rows[i];
         if (me_carried(im, row->salt, row->build)) continue;
-        if (sh_modserve_row_served(row, NULL, 0) == SH_MODSERVE_ROW_SERVED) continue;
+        if (sh_modserve_row_served_in(row, place, NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED) continue;
         st->bundles_absent++;
-        me_log("MODS: import: the %s names %s (%s@%.16s), which the export does not carry", me_kind_word(im->kind),
-               row->name[0] ? row->name : row->salt, row->salt, row->build);
+        me_log("MODS: import: the %s names %s, which the export does not carry", me_kind_word(im->kind),
+               row->name[0] ? row->name : row->salt);
     }
 }
 
-/* The import's place as the serving context's place ("maps\<segment>"), or
- * "" when it has none yet. */
-static void me_place_dir(const me_import *im, char *out, size_t cap)
+/* The map import's place ("maps\<segment>"), keyed by its ZIP's path: the
+ * record's, else a free one named after the ZIP. A carried folder that would
+ * replace the place's folder of its salt (an earlier import of that ZIP, at
+ * another build) never does: the import takes a fresh place beside it, so a
+ * map saved from the earlier import keeps its mods, and a failed import
+ * leaves every installed folder as it was. 1 with `out`, else 0. */
+static int me_place_dir(me_import *im, const sh_modmanifest_list *rows, char *out, size_t cap)
 {
     sh_ms_place place;
+    size_t i;
+    char folder[SH_MS_NAME_MAX + 1];
     out[0] = 0;
-    if (im->place_key[0] && sh_ms_place_of(im->place_key, out, cap, NULL, 0)) return;
-    place.title = im->place_title[0] ? im->place_title : NULL;
-    place.map_id = im->place_key[0] ? im->place_key : NULL;
-    if (!place.title || !sh_ms_place_dir(&place, out, cap)) out[0] = 0;
+    place.title = im->place_title[0] ? im->place_title : "map";
+    place.map_id = im->place_key;
+    if (!sh_ms_place_dir(&place, out, cap)) return 0;
+    for (i = 0; i < im->nc; i++) {
+        const me_carry *c = &im->c[i];
+        if (me_carry_served(c, rows, out) ||
+            sh_ms_place_folder(&place, c->b.name, c->b.id, folder, sizeof folder) != 2)
+            continue;
+        _snprintf_s(im->place_key + strlen(im->place_key), sizeof im->place_key - strlen(im->place_key), _TRUNCATE,
+                    "#%llu", (unsigned long long)GetTickCount64());
+        me_log("MODS: import: mods\\%s holds another build of %s; this import gets a place of its own", out,
+               c->b.name && c->b.name[0] ? c->b.name : c->b.id);
+        return sh_ms_place_dir(&place, out, cap);
+    }
+    return 1;
 }
 
 int modexport_probe(const char *zip_path, char *cause, size_t cap)
@@ -1094,13 +1133,39 @@ int modexport_probe(const char *zip_path, char *cause, size_t cap)
     return 1;
 }
 
+/* The map text with `place` recorded in its member when a row resolves there
+ * (map_carrier.h), else with no place: the map then finds its mods at the
+ * root, as the player's own maps do. malloc'd; NULL when it cannot be
+ * written. */
+static char *me_stamp_place(const char *text, size_t len, const sh_modmanifest_list *rows, const char *place,
+                            size_t *out_len, char *cause, size_t cap)
+{
+    size_t i, n = 0;
+    int used = 0;
+    char err[96] = "", *heap, *out;
+    for (i = 0; i < rows->count && !used; i++) {
+        sh_modserve_bundle_ref ref;
+        used = sh_modserve_row_build_in(&rows->rows[i], place, &ref) && ref.place[0];
+    }
+    heap = sh_carrier_put_place(text, len, used ? place + sizeof SH_MODSERVE_PLACES : NULL, &n, err, sizeof err);
+    if (!heap && err[0]) { me_cause(cause, cap, "the map could not record where its mods are: %s", err); return NULL; }
+    if (!heap) n = len;
+    out = (char *)malloc(n + 1);
+    if (!out) { if (heap) HeapFree(GetProcessHeap(), 0, heap); me_cause(cause, cap, "out of memory"); return NULL; }
+    memcpy(out, heap ? heap : text, n);
+    out[n] = 0;
+    if (heap) HeapFree(GetProcessHeap(), 0, heap);
+    *out_len = n;
+    return out;
+}
+
 char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char *cause, size_t cap)
 {
     modexport_stats local;
     modexport_stats *st = stp ? stp : &local;
     me_import im;
     sh_modmanifest_list rows;
-    char *text = NULL, dir[MAX_PATH];
+    char *text = NULL, *stamped = NULL, dir[SH_MODSERVE_PLACE_CAP];
     size_t len = 0;
     unsigned rejected = 0;
     long idx;
@@ -1111,27 +1176,25 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     if (cause && cap) cause[0] = 0;
     if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
     sh_modmanifest_read(text, len, &rows, &rejected);
-    /* The map this ZIP carries is the next one opened: its context is the
-     * author's own (root folders first) with the ZIP's place, so a carried
-     * folder installs only when nothing serves its row there, and the map
-     * opened from it finds what was installed. */
-    me_place_dir(&im, dir, sizeof dir);
-    (void)sh_modserve_scope_set_place(dir, 1);
-    if (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, &rows, st, cause, cap)) {
-        free(text);
-        text = NULL;
-        len = 0;
-    } else {
-        me_place_dir(&im, dir, sizeof dir);
-        (void)sh_modserve_scope_set_place(dir, 1);
-        me_count_absent(&im, &rows, st);
-        st->map_bytes = len;
-    }
+    /* The map this ZIP carries arrives with its mods: its place is the
+     * ZIP's, and a carried folder installs only when nothing serves its row
+     * there (the root at the row's build first). Nothing here changes what
+     * the loaded map serves: the place is recorded in the text, and the
+     * load of that text sets it. */
+    if (!me_collect(&im, &rows, 0, cause, cap)) goto done;
+    if (!me_place_dir(&im, &rows, dir, sizeof dir)) { me_cause(cause, cap, "no folder could be named for the map's mods"); goto done; }
+    if (!me_install(&im, &rows, dir, st, cause, cap)) goto done;
+    me_count_absent(&im, &rows, dir, st);
+    stamped = me_stamp_place(text, len, &rows, dir, &len, cause, cap);
+    if (stamped) st->map_bytes = len;
+done:
+    free(text);
+    if (!stamped) len = 0;
     sh_modmanifest_list_free(&rows);
     me_import_free(&im);
     st->ms = me_now_ms() - t0;
     if (out_len) *out_len = len;
-    return text;
+    return stamped;
 }
 
 int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
@@ -1154,14 +1217,6 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     if (cause && cap) cause[0] = 0;
     if (!prefab || !path || !path[0]) return me_cause(cause, cap, "nothing to read");
     if (!me_open(&im, path, ME_KIND_PREFAB, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return 0; }
-    /* The placement's context (prefab_mods.c): the player's own root folders
-     * first, then the prefab's place, so a carried folder installs only when
-     * nothing serves its row there. */
-    {
-        char dir[MAX_PATH];
-        me_place_dir(&im, dir, sizeof dir);
-        (void)sh_modserve_scope_set_place(dir, 1);
-    }
     if (name && name_cap) {
         size_t nl = strlen(im.zr.e[idx].name) - 5;
         if (nl >= name_cap) nl = name_cap - 1;
@@ -1173,8 +1228,10 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
         if (n == -2) { me_cause(cause, cap, "%s", MODEXPORT_EARLIER); goto done; }
         if (n < 0) { me_cause(cause, cap, "the prefab's mods cannot be read"); goto done; }
     }
-    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, &rows, st, cause, cap)) goto done;
-    me_count_absent(&im, &rows, st);
+    /* A placed prefab's mods are the player's own: a carried folder installs
+     * at the root when no root folder holds its salt (DECISIONS 12). */
+    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, &rows, "", st, cause, cap)) goto done;
+    me_count_absent(&im, &rows, "", st);
     st->map_bytes = len;
     ok = 1;
 done:
@@ -1193,31 +1250,19 @@ done:
 
 /* ------------------------------------------------------------ rawmap ---- */
 
-static int me_acp_to_utf8(const char *acp, char *out, size_t cap)
-{
-    wchar_t wide[MAX_PATH * 2];
-    if (!acp || !acp[0] || !MultiByteToWideChar(CP_ACP, 0, acp, -1, wide, MAX_PATH * 2)) return 0;
-    return WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)cap, NULL, NULL) > 0;
-}
-
-unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp)
+unsigned long long modexport_write_text(const char *data, size_t len, const char *path)
 {
     char cause[MODEXPORT_CAUSE_MAX];
-    return modexport_write_text_report(data, len, path_acp, NULL, cause, sizeof cause);
+    return modexport_write_text_report(data, len, path, NULL, cause, sizeof cause);
 }
 
-unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
                                                unsigned *bundles, char *cause_out, size_t cause_cap)
 {
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     if (bundles) *bundles = 0;
     if (cause_out && cause_cap) cause_out[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        me_log("MODS: export: the destination path is not usable");
-        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, "the destination path is not usable", _TRUNCATE);
-        return 0;
-    }
     if (!modexport_write(data, len, path, &st, cause, sizeof cause)) {
         me_log("MODS: export %s: refused: %s", path, cause);
         if (bundles) *bundles = st.bundles;
@@ -1230,26 +1275,14 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
     return st.zip_bytes;
 }
 
-char *modexport_read_text(const char *path_acp, size_t *out_len)
-{
-    return modexport_read_text_report(path_acp, out_len, NULL, 0);
-}
-
-char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause_out, size_t cause_cap)
+char *modexport_read_text_report(const char *path, size_t *out_len, char *cause_out, size_t cause_cap)
 {
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     char *text, *heap;
     size_t len = 0;
     if (out_len) *out_len = 0;
     if (cause_out && cause_cap) cause_out[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        me_log("MODS: import: the source path is not usable");
-        if (cause_out && cause_cap)
-            strncpy_s(cause_out, cause_cap, "its path cannot be used; move it to a folder whose name has only plain letters",
-                      _TRUNCATE);
-        return NULL;
-    }
     text = modexport_read(path, &len, &st, cause, sizeof cause);
     if (!text) {
         me_log("MODS: import %s: refused: %s", path, cause);
@@ -1267,16 +1300,88 @@ char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *ca
     return heap;
 }
 
-int modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity)
+int modexport_validate_source(const char *path, char *out_msg, int msg_capacity)
 {
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     int ok;
     if (out_msg && msg_capacity > 0) out_msg[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, "no path given", _TRUNCATE);
-        return 0;
-    }
     ok = modexport_probe(path, cause, sizeof cause);
     if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : cause, _TRUNCATE);
     return ok;
+}
+
+/* ------------------------------------------------------------ received builds */
+
+/* A build fetched for a map without a place lands in a place of its own,
+ * mods\maps\<salt>\, and its folder then moves to the root under a free name
+ * (mods\<its folder name>, " (2)" ...); the emptied place goes with its record
+ * entry. The root does not hold the salt, or the row would have been served.
+ * 1 with `out` the folder under mods\, else 0 with the folder left where it
+ * was. */
+static int me_root_adopt(const char *rel, char *out, size_t cap)
+{
+    char root[MAX_PATH * 4], from[MAX_PATH * 4], to[MAX_PATH * 4], leaf[MAX_PATH * 4], dir[MAX_PATH * 4];
+    const char *slash = strrchr(rel, '\\');
+    wchar_t *wfrom = NULL, *wto = NULL;
+    int i, ok = 0;
+    if (!slash || !sh_ms_root(root, sizeof root)) return 0;
+    strncpy_s(leaf, sizeof leaf, slash + 1, _TRUNCATE);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%.*s", root, (int)(slash - rel), rel);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", root, rel);
+    if (!(wfrom = sh_mb_wpath(from))) return 0;
+    modstore_lock();
+    for (i = 1; i < 64 && !ok; i++) {
+        if (i == 1) _snprintf_s(out, cap, _TRUNCATE, "%s", leaf);
+        else _snprintf_s(out, cap, _TRUNCATE, "%s (%d)", leaf, i);
+        _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", root, out);
+        free(wto);
+        if (!(wto = sh_mb_wpath(to))) break;
+        if (GetFileAttributesW(wto) != INVALID_FILE_ATTRIBUTES) continue;
+        if (!MoveFileExW(wfrom, wto, 0)) break;
+        ok = 1;
+    }
+    modstore_unlock();
+    free(wfrom);
+    free(wto);
+    if (ok) (void)sh_ms_remove_folder(dir);
+    return ok;
+}
+
+int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const modnet_io *io, modsync_stats *st,
+                          char *where, size_t where_cap)
+{
+    sh_ms_place at;
+    char key[SH_MODSERVE_PLACE_CAP + 16], title[SH_MODSERVE_PLACE_CAP];
+    const char *segment = place && place[0] ? strchr(place, '\\') : NULL;
+    if (where && where_cap) where[0] = 0;
+    if (segment) {
+        /* The map's place, under a record key that names exactly that folder. */
+        strncpy_s(title, sizeof title, segment + 1, _TRUNCATE);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "place:%s", title);
+        at.title = title;
+        at.map_id = key;
+        (void)sh_ms_place_note(&at, place);
+    } else {
+        /* A place of the build's own for the download, emptied into the root. */
+        strncpy_s(title, sizeof title, row->salt, _TRUNCATE);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "fetch:%s", row->salt);
+        at.title = title;
+        at.map_id = key;
+    }
+    if (!modsync_fetch_build_for(row, &at, io, st)) return 0;
+    if (where && where_cap) strncpy_s(where, where_cap, st->folder, _TRUNCATE);
+    if (!segment && !st->editor_only && st->folder[0] &&
+        !_strnicmp(st->folder, SH_MODSERVE_PLACES "\\", sizeof SH_MODSERVE_PLACES)) {
+        char adopted[MAX_PATH * 4];
+        if (!me_root_adopt(st->folder, adopted, sizeof adopted)) {
+            _snprintf_s(st->cause, sizeof st->cause, _TRUNCATE,
+                        "%s was downloaded to mods\\%s but could not be moved into mods\\; move it there by hand",
+                        row->name[0] ? row->name : "the mod", st->folder);
+            st->code = MODNET_E_REFUSED;
+            return 0;
+        }
+        if (where && where_cap) strncpy_s(where, where_cap, adopted, _TRUNCATE);
+        if (sh_modserve_index_rescan() < 0) me_log("MODS: %s moved to mods\\%s, but the serving index could not be rebuilt", row->name, adopted);
+    }
+    return 1;
 }

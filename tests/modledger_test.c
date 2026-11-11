@@ -335,6 +335,7 @@ static void test_anim_kind(const char *top)
 
     /* A map pinning its place's build: the anim whose bytes differ is marked,
      * as an anim; the one both builds carry is not. */
+    CHECK(sh_modserve_place_set("maps\\Anim map") >= 0);
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h1));
@@ -369,6 +370,7 @@ static void test_anim_kind(const char *top)
     sh_modserve_each_refresh(on_refresh, &s);
     CHECK(s.walk == 1 && s.idle == 0);
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(0);
 
     /* A rescan that changes the root build's anim and skeleton: the anim is

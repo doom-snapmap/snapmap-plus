@@ -5,6 +5,7 @@
  *
  *   "snapmap-plus":{"format":1,
  *       "mods":[<row>,...],
+ *       "place":"<segment>",
  *       "settings":{"render":"<text>","bounds":"<text>"},
  *       "nav":[{"module":"<category>/<module>","class":"<class>",
  *               "digest":"<16 hex>","geom":"<16 hex>",
@@ -12,13 +13,18 @@
  *
  *   format    the number 1. Any other value, or a member that is not an
  *             object, or a known part of the wrong type (mods and nav arrays,
- *             settings an object), makes the whole member malformed: it is
- *             logged, read as absent and removed, and the map loads without
- *             it.
+ *             settings an object, place a string), makes the whole member
+ *             malformed: it is logged, read as absent and removed, and the
+ *             map loads without it.
  *   mods      one object per declared mod build, the manifest's row JSON
- *             (modmanifest.h: mod "<salt>@<build hash>", name, version, size,
- *             names, attached, choices). A row that does not read is dropped
- *             and counted.
+ *             (modmanifest.h: mod "<salt>@<build hash>", name, size, names,
+ *             attached, choices). A row that does not read is dropped and
+ *             counted.
+ *   place     where the map finds its mods (modserve.h, DECISIONS 11): the
+ *             <segment> of mods\maps\<segment>\ for a map that arrived with
+ *             its mods (a download, a rawmap ZIP import); absent for the
+ *             player's own maps, which find them at the root. A string
+ *             without escapes.
  *   settings  "render" (Unlock View Distance, map_render.h encoding) and
  *             "bounds" (Unlock Map Bounds, map_bounds.h encoding); an absent
  *             key is that setting off (map_settings.h).
@@ -75,7 +81,7 @@ typedef struct sh_carrier_view {
     unsigned members;          /* root members with the carrier's key */
     size_t cut_from, cut_to;   /* the first such member with its separator */
     size_t value_from, value_to;
-    sh_carrier_span mods, settings, nav;
+    sh_carrier_span mods, place, settings, nav;
     char   why[96];            /* MALFORMED: what did not read */
 } sh_carrier_view;
 
@@ -93,7 +99,7 @@ int sh_carrier_part(const char *json, size_t len, const char *part, size_t *from
  * or NULL when it has none or the text does not read. */
 char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
 
-/* `json` with the member carrying `part` ("mods", "settings" or "nav") set to
+/* `json` with the member carrying `part` ("mods", "place", "settings" or "nav") set to
  * `value` (raw JSON of the right type; NULL removes the part) and its other
  * parts as they were, compact and last at the root; with no part left the
  * member is removed. A process-heap buffer (HeapFree), or NULL: with err ""
@@ -101,6 +107,15 @@ char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
  * does not read, an unknown part, no memory). A malformed member is replaced. */
 char *sh_carrier_put(const char *json, size_t len, const char *part, const char *value, size_t value_len,
                      size_t *out_len, char *err, size_t err_cap);
+
+/* The member's place (above): 1 with it in `out`, 0 when the map has none, -1
+ * when the member is malformed or the place is not a plain string that fits. */
+#define SH_CARRIER_PLACE_CAP 300
+int sh_carrier_place(const char *json, size_t len, char *out, size_t cap);
+
+/* sh_carrier_put of the place: `place` NULL or "" removes it; one holding a
+ * quote or a backslash is refused (err). */
+char *sh_carrier_put_place(const char *json, size_t len, const char *place, size_t *out_len, char *err, size_t err_cap);
 
 /* Iterate the elements of a JSON array span. *cursor starts at the '['
  * (whitespace before it allowed). 1 with the next element's span, 0 at the

@@ -2,7 +2,8 @@
  * found only at the root, read by part, stripped, written compact and last
  * with its parts in order, removed when it carries nothing, refused (read as
  * absent, still stripped) when malformed, and a map without it untouched;
- * the earlier-shape detector (sh_map_old_shape). */
+ * the map's place (a plain string, after its mods); the earlier-shape
+ * detector (sh_map_old_shape). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -26,7 +27,7 @@ static int g_failed, g_checks;
     "\"~type\":\"snapVarString_t\"}],\"~type\":\"idSnapVariables\"},\"version\":111,\"~type\":\"idSnapMap\""
 static const char ENGINE[] = ENGINE_HEAD "}";
 
-#define MODS "[{\"mod\":\"aaaabbbb@x\",\"version\":\"1\",\"size\":1,\"names\":[]}]"
+#define MODS "[{\"mod\":\"aaaabbbb@x\",\"size\":1,\"names\":[]}]"
 #define SETTINGS "{\"render\":\"4;0\",\"bounds\":\"1;32671\"}"
 #define NAV "[{\"module\":\"a/b\",\"class\":\"monster48\",\"digest\":\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":[\"QUJD\",\"RUZH\"]}]"
 #define MEMBER(parts) ",\"snapmap-plus\":{\"format\":1" parts "}"
@@ -274,6 +275,36 @@ static void old_shapes(void)
     CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved in a format this version does not read."));
 }
 
+static void place_part(void)
+{
+    char err[128], out[SH_CARRIER_PLACE_CAP], *a, *b, *c;
+    size_t n = 0;
+    printf("-- the place: a plain string after the mods, read back, removed with nothing else\n");
+    a = put(ENGINE, "mods", MODS, &n, err, sizeof err);
+    b = a ? sh_carrier_put_place(a, n, "Caf\xc3\xa9 arena", &n, err, sizeof err) : NULL;
+    CHECK(b && !strcmp(b, ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":\"Caf\xc3\xa9 arena\"") "}"));
+    CHECK(b && sh_carrier_place(b, n, out, sizeof out) == 1 && !strcmp(out, "Caf\xc3\xa9 arena"));
+    CHECK(sh_carrier_place(ENGINE, sizeof ENGINE - 1, out, sizeof out) == 0 && !out[0]);
+    /* No place: removed; the mods stay. */
+    c = b ? sh_carrier_put_place(b, n, NULL, &n, err, sizeof err) : NULL;
+    CHECK(c && !strcmp(c, a));
+    /* Not a folder name: refused, nothing written. */
+    CHECK(sh_carrier_put_place(ENGINE, sizeof ENGINE - 1, "a\\b", &n, err, sizeof err) == NULL && err[0]);
+    CHECK(sh_carrier_put_place(ENGINE, sizeof ENGINE - 1, "a\"b", &n, err, sizeof err) == NULL && err[0]);
+    /* A place with an escape, or one too long, does not read; one of the
+     * wrong type makes the member malformed. */
+    {
+        static const char esc[] = ENGINE_HEAD MEMBER(",\"place\":\"..\\\\x\"") "}";
+        static const char num[] = ENGINE_HEAD MEMBER(",\"place\":7") "}";
+        CHECK(sh_carrier_place(esc, sizeof esc - 1, out, sizeof out) == -1);
+        CHECK(sh_carrier_place(num, sizeof num - 1, out, sizeof out) == -1);
+        CHECK(sh_carrier_place(esc, sizeof esc - 1, out, 2) == -1);
+    }
+    if (a) HeapFree(GetProcessHeap(), 0, a);
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    if (c) HeapFree(GetProcessHeap(), 0, c);
+}
+
 int main(void)
 {
     printf("map_carrier_test\n");
@@ -282,6 +313,7 @@ int main(void)
     placement();
     malformed();
     readers();
+    place_part();
     old_shapes();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -5,10 +5,15 @@
  * The writer stores every entry (method 0) with its CRC-32, a fixed DOS time
  * (1980-01-01, so the same content is byte-identical) and the UTF-8 flag on a
  * non-ASCII name. No ZIP64: at most 65535 entries and 4 GiB. The reader
- * accepts stored (0) and deflate (8) entries, refuses a split or ZIP64
- * archive, an encrypted entry, two entries of one name and any unsafe name
- * (sh_zip_name_ok), and checks every entry's CRC-32 when it reads it. A reader
- * may also stand over a plain folder (dir set, entries added with
+ * trusts no field of an archive: at open it checks the end record, the
+ * directory's bounds, and for every entry the method (stored (0) or deflate
+ * (8) only), the encryption flag, ZIP64 size markers, a stored entry's equal
+ * sizes, a local record and data that lie before the directory, a name
+ * without NUL that sh_zip_name_ok accepts, and no two names that differ only
+ * in case; anything else refuses the whole archive with one sentence ending
+ * "Ask whoever shared it to export it again". A read then checks the local
+ * record, bounds the bytes it allocates by `max`, and checks the CRC-32. A
+ * reader may also stand over a plain folder (dir set, entries added with
  * sh_zip_reader_add): each entry is then a file under that folder. */
 #ifndef SNAPMAP_PLUS_MODZIP_H
 #define SNAPMAP_PLUS_MODZIP_H
@@ -20,7 +25,7 @@
 #define SH_ZIP_NAME_MAX     1024u
 #define SH_ZIP_MAX_ENTRIES  65535u
 #define SH_ZIP_LIMIT        0xFFFFFFFFull
-#define SH_ZIP_METHOD_FILE  0xFFFFu   /* a folder reader's entry: read from the file */
+#define SH_ZIP_METHOD_FILE  0xFFFFu   /* a folder reader's entry (r->dir set): read from the file */
 
 /* ------------------------------------------------------------ writer ---- */
 
@@ -82,11 +87,11 @@ int  sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t 
  * sh_zip_reader_sort indexes the entries once they are all added. */
 int  sh_zip_reader_add(sh_zip_reader *r, const char *name, unsigned long long size);
 
-/* Index the entries by name; two entries of one name close the reader and
- * refuse. Returns 1; 0 with the cause. */
+/* Index the entries by name; two entries whose names differ at most in case
+ * close the reader and refuse. Returns 1; 0 with the cause. */
 int  sh_zip_reader_sort(sh_zip_reader *r, char *cause, size_t cap);
 
-/* The entry's index, or -1. */
+/* The entry's index (the exact name), or -1. */
 long sh_zip_reader_find(const sh_zip_reader *r, const char *name);
 
 /* One entry's bytes (malloc'd, NUL-terminated), at most max bytes, its CRC-32

@@ -639,7 +639,12 @@ static void test_plan(void)
     hashes[1] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     hashes[2] = g_hash_a2;
     CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
+    CHECK(unknown == 2);   /* a2 lies in a place: it serves only the map whose place that is */
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_place_set("maps\\Pinks") >= 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
     CHECK(unknown == 1);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     CHECK(step_index(&p, "entityDef", "mods/alexpink/fireball") >= 0);
     CHECK(step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp") < 0);
     CHECK(step_index(&p, "md6Def", "mods/alexpink/imp.md6") < step_index(&p, "entityDef", "mods/alexpink/imp"));
@@ -3692,10 +3697,10 @@ static void test_scope(void)
         strcpy_s(row.build, sizeof row.build, h_hands);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));
         strcpy_s(row.build, sizeof row.build, h_none);
-        CHECK(!sh_modserve_row_build(&row, &ref));   /* pinned: that build is not installed */
-        CHECK(sh_modserve_scope_set_place(NULL, 1) == 0);
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));
-        CHECK(sh_modserve_scope_set_place(NULL, 0) == 0);
+        CHECK(sh_modserve_place_set("maps\\Their map") == 0);
+        CHECK(!sh_modserve_row_build(&row, &ref));   /* a map with a place: that build is not installed */
+        CHECK(sh_modserve_place_set(NULL) == 0);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));   /* no place: the root's build */
         strcpy_s(row.salt, sizeof row.salt, "rrows000");
         strcpy_s(row.build, sizeof row.build, h_rows);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.id, "rrows000"));
@@ -4027,7 +4032,9 @@ static void test_additive_same_key(void)
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
-    /* Map A pins the first build: its bytes, its own names; the other build is inert. */
+    /* Map A, whose place holds the first build, pins it: its bytes, its own
+     * names; the other build is inert. */
+    CHECK(sh_modserve_place_set("maps\\Fork map") == 0);
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 2);
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { one }"));
@@ -4058,34 +4065,55 @@ static void test_additive_same_key(void)
     /* Map B pins the second build. */
     list[0] = h2;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 2);
+    CHECK(sh_modserve_place_set(NULL) == 0);
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { two }"));
     CHECK(!sh_modserve_lookup(AD_OLD, NULL) && sh_modserve_lookup(AD_NEW, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(strstr(seen.order, "kfork000:mods/kfork000/thing:gone=0") != NULL);
-    /* Both hashes in one listing (a row and a stale closure): the first row's build. */
+    /* Both hashes in one listing (a row and a stale closure) of map A: the first row's build. */
+    CHECK(sh_modserve_place_set("maps\\Fork map") >= 0);
     list[0] = h1; list[1] = h2;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) == 2 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
     CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert);
 
-    /* The asset rule: a stranger's map is served by the build at the row's
-     * hash in its own place, never another map's place; another build is not
-     * it. The author's own map follows the root folder whatever it pins. */
+    /* The one place resolver (DECISIONS 1 and 11): the root at the row's
+     * hash first, then the map's own place at that hash, never another
+     * map's place; a map without a place follows the root folder whatever
+     * it pins. */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kfork000");
     strcpy_s(row.build, sizeof row.build, h1);
+    CHECK(sh_modserve_place_set("maps\\Other map") >= 0);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(sh_modserve_scope_set_place("maps\\Fork map", 0) >= 0);
+    CHECK(sh_modserve_row_served_in(&row, "Fork map", NULL, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_place_set("maps\\Fork map") >= 0);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
+    strcpy_s(row.build, sizeof row.build, h2);   /* the root holds this one: the root answers first */
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
     strcpy_s(row.build, sizeof row.build, h3);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses Fork, which is not installed."));
     CHECK(!sh_modserve_row_build(&row, &ref));
-    CHECK(sh_modserve_scope_set_place("maps\\Fork map", 1) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
-    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    /* Not a place: refused, and nothing changes. */
+    CHECK(sh_modserve_place_set("maps\\..\\..\\Windows") == -1 && sh_modserve_place_set("..") == -1);
+    CHECK(sh_modserve_place_set("maps\\con") == -1);
+    {
+        char now[SH_MODSERVE_PLACE_CAP];
+        sh_modserve_place_get(now, sizeof now);
+        CHECK(!now[0]);
+        /* A parse remembers the place it replaces; a failed one puts it back. */
+        CHECK(sh_modserve_place_load("Fork map") >= 0);
+        sh_modserve_place_get(now, sizeof now);
+        CHECK(!strcmp(now, "maps\\Fork map"));
+        CHECK(sh_modserve_place_restore() == 1);
+        sh_modserve_place_get(now, sizeof now);
+        CHECK(!now[0] && sh_modserve_place_restore() == 0);
+    }
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
 }
@@ -4158,6 +4186,7 @@ static void test_two_builds_requirements(void)
     sh_modserve_plan_free(&p);
 
     /* A map pinning the place's build: that build's bytes and names, all ready. */
+    CHECK(sh_modserve_place_set("maps\\Old map") == 0);
     list[0] = h_old;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && si.listed && si.requirements_live);
@@ -4174,6 +4203,7 @@ static void test_two_builds_requirements(void)
     sh_modserve_plan_free(&p);
 
     /* A map pinning the root build: the same, the other way round. */
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     list[0] = h_new;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
@@ -4427,9 +4457,10 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.newest && !si.in_place && si.names_live);
     CHECK(sh_modserve_bundle_scope(hd, &si) && !si.newest && si.in_place && !si.names_live);
 
-    /* Rows of a stranger's map with no place: the root at the row's hash;
-     * another map's place never serves it, and another hash is missing (the
-     * owner's decision: the root serves a stranger only at the row's hash). */
+    /* Rows of a map with a place: the root at the row's hash; another map's
+     * place never serves it, and another hash is missing (the root serves
+     * such a map only at the row's hash). */
+    CHECK(sh_modserve_place_set("maps\\Elsewhere") >= 0);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kown0000");
     strcpy_s(row.name, sizeof row.name, "Doors Pack");
@@ -4460,9 +4491,9 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.inert);
     CHECK(sh_modserve_scope_set_place("maps\\Gates\\", 0) >= 0);   /* the same build from the other place */
     CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Gates\\Doors Pack\\"));
-    /* The author's own map follows the root folder whatever it pins; with
-     * no root folder of the salt, its own place's build at the row's hash. */
-    CHECK(sh_modserve_scope_set_place("maps\\Doors", 1) >= 0);
+    /* A map without a place (the player's own) follows the root folder
+     * whatever it pins. */
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     strcpy_s(row.build, sizeof row.build, hd);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
     strcpy_s(row.build, sizeof row.build, hx);
@@ -4579,6 +4610,8 @@ static void test_row_served(void)
     names[1] = "MODS/localhel/hell_guard_shield";   /* names fold case */
     row.names = names;
     row.name_count = 2;
+    /* A map with a place: the root serves it only at the row's build. */
+    CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
 
     /* No folder of the salt: missing. */
     CHECK(sh_modserve_index_build(root) >= 0);
@@ -4634,6 +4667,7 @@ static void test_row_served(void)
     }
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, NULL, 0) == SH_MODSERVE_ROW_MISSING);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
     remove_tree(top);
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }

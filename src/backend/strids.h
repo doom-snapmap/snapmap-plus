@@ -13,8 +13,8 @@
  * IDs and bookkeeping grow dynamically; native signed count/length fields
  * and successful allocation bound injection, not fixed application quotas.
  */
-#ifndef BACKEND_B1_STRIDS_H
-#define BACKEND_B1_STRIDS_H
+#ifndef BACKEND_STRIDS_H
+#define BACKEND_STRIDS_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -58,4 +58,4 @@ void sh_strids_test_set_sort(void *sort);
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 
-#endif /* BACKEND_B1_STRIDS_H */
+#endif /* BACKEND_STRIDS_H */

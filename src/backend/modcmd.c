@@ -132,22 +132,28 @@ static int mc_in_store(const char *folder)
     return n && !_strnicmp(folder, root, n) && (folder[n] == '\\' || folder[n] == '/');
 }
 
-static void mc_needs_line(const char *verb, const sh_mb_bundle *b)
+/* A built mod as the console names it: its name, else its folder. */
+static const char *mc_name(const sh_mb_bundle *b, const char *folder)
 {
-    mc_line("MODS: %s %s: needs %u (in bundle %u, installed mods %u, game %u, unresolved %u)",
-            verb, b->id, b->needs.total, b->needs.local, b->needs.installed,
-            b->needs.stock, b->needs.unresolved);
-    if (b->warnings)
-        mc_line("MODS: %s %s: %u warning(s), first: %s", verb, b->id, b->warnings, b->first_warning);
+    return b->name && b->name[0] ? b->name : folder;
 }
 
-/* The salt, the classes and the builder's report lines (additive mods). */
+static void mc_needs_line(const char *verb, const char *folder, const sh_mb_bundle *b)
+{
+    mc_line("MODS: %s %s: needs %u (in the mod %u, installed mods %u, game %u, unresolved %u)",
+            verb, mc_name(b, folder), b->needs.total, b->needs.local, b->needs.installed,
+            b->needs.stock, b->needs.unresolved);
+    if (b->warnings)
+        mc_line("MODS: %s %s: %u warning(s), first: %s", verb, mc_name(b, folder), b->warnings, b->first_warning);
+}
+
+/* The classes and the builder's report lines (additive mods). */
 static void mc_classes_line(const char *verb, const char *folder, const sh_mb_bundle *b)
 {
     char classes[160];
     size_t i;
     sh_mb_classes_text(&b->classes, classes, sizeof classes);
-    mc_line("MODS: %s %s: salt %s; %s", verb, folder, b->id, classes);
+    mc_line("MODS: %s %s: %s", verb, folder, classes);
     for (i = 0; i < b->note_count; i++) mc_line("MODS: %s %s: %s", verb, folder, b->notes[i]);
 }
 
@@ -204,29 +210,29 @@ static void mc_build(const char *folder_in)
     r.stock_context = &stock;
     if (!sh_mb_build(folder, NULL, &r, &b)) {
         if (b.id[0]) {
-            mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.file_count,
+            mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, mc_name(&b, folder), b.file_count,
                     b.total_size);
-            mc_needs_line("build", &b);
+            mc_needs_line("build", folder, &b);
             mc_classes_line("build", folder, &b);
         }
         if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
-        mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
         /* A folder that fails to build serves nothing until it is fixed. */
-        mc_line("MODS: build %s: build failed: %s; the folder serves nothing until it builds", folder, b.first_cause);
+        mc_line("MODS: build %s: does not build (%u error(s)), first: %s; the folder serves nothing until it builds",
+                folder, b.errors, b.first_cause);
         if (mc_in_store(folder)) sh_ms_note_build_failure(folder, b.first_cause);
         sh_mb_free(&b);
         sh_ms_list_free(&list);
         return;
     }
-    mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.file_count,
+    mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, mc_name(&b, folder), b.file_count,
             b.total_size);
-    mc_needs_line("build", &b);
+    mc_needs_line("build", folder, &b);
     mc_stock_line("build", folder, &b);
     mc_classes_line("build", folder, &b);
     if (!sh_mb_write(&b, folder, cause, sizeof cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     else {
-        mc_line("MODS: build %s: build %s written to mod.json's \"snapmap-plus\" block", folder, b.hash);
+        mc_line("MODS: build %s: the build is written to mod.json's \"snapmap-plus\" block", folder);
         if (mc_in_store(folder)) {
             sh_ms_note_build(folder, &b);
             mc_rescan("build");
@@ -251,9 +257,9 @@ static void mc_install_one(const char *folder, int rescan)
     r.stock_context = &stock;
     ok = sh_ms_install_from_folder(folder, &r, name, sizeof name, &st, &b, cause, sizeof cause);
     if (b.id[0]) {
-        mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)%s", folder, b.id, b.file_count,
+        mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)%s", folder, mc_name(&b, folder), b.file_count,
                 b.total_size, b.errors ? "" : ", mod.json written");
-        mc_needs_line("install", &b);
+        mc_needs_line("install", folder, &b);
     }
     if (b.id[0]) mc_stock_line("install", folder, &b);
     if (st.copied)
@@ -262,7 +268,7 @@ static void mc_install_one(const char *folder, int rescan)
     if (st.in_place && ok) mc_line("MODS: install %s: already in the store; built in place", folder);
     if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause);
     else {
-        mc_line("MODS: install %s: installed and verified as mods\\%s (salt %s, build %s)", folder, name, b.id, b.hash);
+        mc_line("MODS: install %s: installed and verified as mods\\%s", folder, name);
         if (rescan) mc_rescan("install");
     }
     sh_mb_free(&b);
@@ -312,13 +318,14 @@ static void mc_list(void)
     mc_line("MODS: list: %zu mod folder(s) under %s", list.count, root);
     for (i = 0; i < list.count; i++) {
         const sh_ms_entry *e = &list.items[i];
-        const char *state = sh_ms_entry_usable(e) ? "installed" : "needs attention";
+        const char *state = sh_ms_entry_usable(e) ? "installed" : "does not build";
         if (e->loaded) {
             char classes[160];
             sh_mb_classes_text(&e->bundle.classes, classes, sizeof classes);
-            mc_line("MODS: list: mods\\%s  %s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->bundle.id,
-                    e->bundle.hash, e->bundle.file_count, e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
-            mc_line("MODS: list: mods\\%s  salt %s; %s", e->name, e->bundle.id, classes);
+            mc_line("MODS: list: mods\\%s  %s  %zu file(s)  %llu byte(s)  %s%s%s", e->name,
+                    e->bundle.name && e->bundle.name[0] ? e->bundle.name : e->name, e->bundle.file_count,
+                    e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
+            mc_line("MODS: list: mods\\%s  %s", e->name, classes);
         } else
             mc_line("MODS: list: mods\\%s  %s: %s", e->name, state, e->cause);
     }
@@ -457,23 +464,19 @@ static void mc_async_line(const char *fmt, ...)
 static double mc_mib(unsigned long long b) { return (double)b / (1024.0 * 1024.0); }
 
 /* One job at a time; its arguments live here until the job ends. */
-typedef enum { MC_JOB_PUSH, MC_JOB_PULL, MC_JOB_RELEASE, MC_JOB_RETRY, MC_JOB_IMPORT } mc_job_kind;
+typedef enum { MC_JOB_PUSH, MC_JOB_RELEASE, MC_JOB_RETRY } mc_job_kind;
 
 typedef struct mc_job {
     mc_job_kind kind;
     char verb[16];
-    char mod[MODSYNC_MOD_MAX + 1];   /* push, pull: "<salt>@<build hash>" */
+    char mod[MODSYNC_MOD_MAX + 1];   /* push: "<salt>@<build hash>" */
     char label[SH_MS_NAME_MAX + 1];
     char ref[4 * MODNET_REF_MAX + 1];
-    char path[MAX_PATH * 4];
     unsigned last_quarter;
     ULONGLONG started;
 } mc_job;
 
 static mc_job g_mc_job;
-
-/* The place a console pull lands in: mods\maps\<it>\<mod name>\. */
-#define MC_PULL_PLACE "Pulled mods"
 
 /* A progress line at each quarter of a transfer. */
 static void mc_job_progress(void *ctx, unsigned long long done, unsigned long long total)
@@ -505,34 +508,17 @@ static int mc_job_run(void *ctx, const modnet_io *io)
             ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
         }
         if (ok)
-            mc_async_line("MODS: push %s: done in %.0f ms: the archive %s, %llu byte(s) up, claim %s%s", j->label, st.ms,
-                          st.builds_sent ? "was sent" : "was already stored", st.bytes_up, st.claim,
-                          st.reclaimed ? " (re-claimed with the stored secret)" : " (new)");
+            mc_async_line("MODS: push %s: done in %.0f ms: the archive %s, %llu byte(s) up, %s", j->label, st.ms,
+                          st.builds_sent ? "was sent" : "was already stored", st.bytes_up,
+                          st.reclaimed ? "its claim renewed" : "claimed");
         else
             mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
                           st.cause, st.queued ? "; queued for 'sh_mods retry'" : "");
         break;
     }
-    case MC_JOB_PULL: {
-        sh_modmanifest_row row;
-        sh_ms_place place;
-        memset(&row, 0, sizeof row);
-        (void)modsync_parse_mod(j->mod, row.salt, row.build);
-        place.title = MC_PULL_PLACE;
-        place.map_id = NULL;
-        ok = modsync_fetch_build_for(&row, &place, io, &st);
-        if (ok && st.already_installed)
-            mc_async_line("MODS: pull %s: already served by mods\\%s; nothing fetched", j->mod, st.folder);
-        else if (ok)
-            mc_async_line("MODS: pull %s: installed as mods\\%s in %.0f ms: %llu byte(s) down, %u request(s)", j->mod,
-                          st.folder, st.ms, st.bytes_down, st.requests);
-        else
-            mc_async_line("MODS: pull %s: FAILED after %.0f ms (%llu byte(s) down): %s", j->mod, st.ms, st.bytes_down, st.cause);
-        break;
-    }
     case MC_JOB_RELEASE:
         ok = modsync_release(j->ref, io, &st);
-        if (ok) mc_async_line("MODS: release: claim %s released in %.0f ms%s%s", st.claim, st.ms, st.cause[0] ? "; " : "", st.cause);
+        if (ok) mc_async_line("MODS: release: released in %.0f ms%s%s", st.ms, st.cause[0] ? "; " : "", st.cause);
         else mc_async_line("MODS: release: FAILED: %s", st.cause);
         break;
     case MC_JOB_RETRY: {
@@ -542,27 +528,6 @@ static int mc_job_run(void *ctx, const modnet_io *io)
         if (left < 0) mc_async_line("MODS: retry: the pending section of mods\\snapmap-plus.json cannot be read");
         else mc_async_line("MODS: retry: %u upload(s) done, %u dropped, %d still queued (%.0f ms)", done, dropped, left,
                            (double)(GetTickCount64() - j->started));
-        break;
-    }
-    case MC_JOB_IMPORT: {
-        modexport_stats es;
-        char cause[MODEXPORT_CAUSE_MAX], why[192];
-        size_t len = 0;
-        char *text = modexport_read(j->path, &len, &es, cause, sizeof cause);
-        why[0] = 0;
-        if (!text) { mc_async_line("MODS: import %s: FAILED: %s", j->path, cause); break; }
-        free(text);
-        mc_async_line("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
-                      "%llu byte(s) read in %.0f ms", j->path, es.bundles, es.bundles_installed, es.bundles_present,
-                      es.files, es.map_bytes, es.zip_bytes, es.ms);
-        /* Open it in the editor now, as 'sh_rawmaps load <path>' does. */
-        if (!sh_rawmap_open_now(j->path, why, (int)sizeof why)) {
-            mc_async_line("MODS: import %s: the mods are installed, but the map could not be opened: %s", j->path,
-                          why[0] ? why : "the editor cannot open it now");
-            break;
-        }
-        mc_async_line("MODS: import %s: opening it in the editor", j->path);
-        ok = 1;
         break;
     }
     }
@@ -613,8 +578,8 @@ static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char *
     return found;
 }
 
-/* push, pull, release, retry, export, import, cancel. Returns 1 when the
- * verb is one of them. */
+/* push, release, retry, export, import, cancel. Returns 1 when the verb is
+ * one of them. */
 static int mc_store_command(idCmdArgs *a, const char *verb)
 {
     mc_job spec;
@@ -632,7 +597,7 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
         const char *name = cmd_argv(a, 2);
         mc_join_args(a, 3, spec.ref, sizeof spec.ref);
         if (!name || !name[0] || !spec.ref[0]) {
-            sh_printf("usage: sh_mods push \"<folder, salt, or salt@build hash>\" \"<ref>\"\n");
+            sh_printf("usage: sh_mods push \"<mod folder>\" \"<ref>\"\n");
             return 1;
         }
         if (!modnet_valid_ref(spec.ref)) { mc_line("MODS: push: the ref must be 1-64 characters of text"); return 1; }
@@ -641,16 +606,7 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
             return 1;
         }
         spec.kind = MC_JOB_PUSH;
-        mc_line("MODS: push mods\\%s (%.25s) under ref '%s'", spec.label, spec.mod, spec.ref);
-        mc_job_launch(&spec);
-        return 1;
-    }
-    if (!_stricmp(verb, "pull")) {
-        mc_join_args(a, 2, arg, sizeof arg);
-        if (!modsync_parse_mod(arg, NULL, NULL)) { sh_printf("usage: sh_mods pull \"<salt>@<64-hex build hash>\"\n"); return 1; }
-        strcpy_s(spec.mod, sizeof spec.mod, arg);
-        spec.kind = MC_JOB_PULL;
-
+        mc_line("MODS: push mods\\%s under ref '%s'", spec.label, spec.ref);
         mc_job_launch(&spec);
         return 1;
     }
@@ -677,14 +633,18 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
             /* The open map through the rawmap writer, which writes a .zip
              * destination as an export (as 'sh_rawmaps save <path.zip>'). */
             if (sh_editor_frame_request_rawmap_save_to(arg, why, (int)sizeof why))
-                mc_line("MODS: export: writing the open map and its mods to %s (the result is logged as 'MODS: export')", arg);
+                mc_line("MODS: export: writing the open map and its mods to %s; the console says when it is done", arg);
             else
                 mc_line("MODS: export: cannot save: %s", why[0] ? why : "the editor is not ready");
             return 1;
         }
-        strncpy_s(spec.path, sizeof spec.path, arg, _TRUNCATE);
-        spec.kind = MC_JOB_IMPORT;
-        mc_job_launch(&spec);
+        {
+            /* Opened as File > Load Rawmap opens it: the import runs off the
+             * game's thread and the map opens when it is done. */
+            char why[192] = "";
+            if (sh_rawmap_open_now(arg, why, (int)sizeof why)) mc_line("MODS: import: opening %s", arg);
+            else mc_line("MODS: import: %s was not opened: %s", arg, why[0] ? why : "the editor cannot open it now");
+        }
         return 1;
     }
     return 0;
@@ -717,10 +677,6 @@ void h_sh_mods(idCmdArgs *a)
     if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) mc_sync();
     if (sh_modserve_command(a, verb)) return;
     if (!_stricmp(verb, "list")) { mc_list(); return; }
-    if (!_stricmp(verb, "removed")) {
-        mc_line("MODS: removed: Uninstalled mods go to the Windows Recycle Bin.");
-        return;
-    }
     if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall") || !_stricmp(verb, "choose")) {
         /* The Mods tab's map details, Remove from map and Uninstall
          * (modui.c): the same dry runs and actions; --yes performs one. */
@@ -755,7 +711,7 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     if (!_stricmp(verb, "verify")) {
-        if (!arg[0]) { sh_printf("usage: sh_mods verify \"<folder or salt>\"\n"); return; }
+        if (!arg[0]) { sh_printf("usage: sh_mods verify \"<mod folder>\"\n"); return; }
         mc_verify(arg);
         return;
     }
@@ -777,75 +733,20 @@ void h_sh_mods(idCmdArgs *a)
     }
     if (!arg[0]) { sh_printf("usage: sh_mods %s \"<folder>\"\n", verb); return; }
     if (!mc_resolve_folder(arg, folder, sizeof folder)) { mc_line("MODS: %s: the store folder cannot be resolved", verb); return; }
+    /* Every verb writes the store: it waits for a store write, an import or a
+     * download in progress. */
+    modstore_lock();
     if (!_stricmp(verb, "build")) mc_build(folder);
     else if (!_stricmp(verb, "rebuild")) {
         /* build, then the rescan the tab's Rebuild runs (a folder in the store rescans in mc_build). */
         mc_build(folder);
         if (!mc_in_store(folder)) mc_rescan("rebuild");
-    } else {
-        /* Waits for a store write or a download in progress. */
-        modstore_lock();
-        mc_install(folder);
-        modstore_unlock();
-    }
-}
-
-int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
-{
-    sh_ms_list list;
-    sh_mb_resolver r;
-    sh_mb_bundle b;
-    mc_stock stock = { 0, 0 };
-    char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
-    int listed, ok = 0;
-    if (first_cause && n) first_cause[0] = 0;
-    /* The store tool's paths are UTF-8, as the builder's are (sh_mb_user_root). */
-    if (!folder_utf8 || !folder_utf8[0] || strlen(folder_utf8) >= sizeof folder ||
-        strncpy_s(folder, sizeof folder, folder_utf8, _TRUNCATE) != 0) {
-        if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
-        return 0;
-    }
-    {
-        /* A folder with no builder block gets its salt first; one that has it
-         * (the store tool salts a migrated folder from its package's id) is
-         * left as it is. */
-        char leaf[MAX_PATH * 4], salt[9];
-        mc_leaf(folder, leaf, sizeof leaf);
-        salt[0] = 0;
-        if (sh_ms_assign_salt(folder, leaf, salt, cause, sizeof cause) < 0) {
-            if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
-            mc_line("MODS: build %s: refused: %s", folder, cause);
-            return 0;
-        }
-    }
-    listed = sh_ms_enumerate(&list);
-    if (!listed) memset(&list, 0, sizeof list);
-    r.installed = sh_ms_request_exists;
-    r.installed_context = &list;
-    r.stock = mc_stock_exists;
-    r.stock_context = &stock;
-    if (!sh_mb_build(folder, NULL, &r, &b)) {
-        if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
-        mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
-    } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {
-        if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
-        mc_line("MODS: build %s: valid but not written: %s", folder, cause);
-    } else {
-        ok = 1;
-        if (mc_in_store(folder)) sh_ms_note_build(folder, &b);   /* built from its current tree */
-        mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s); build %s written", folder, b.id, b.file_count, b.total_size, b.hash);
-        mc_needs_line("build", &b);
-        mc_stock_line("build", folder, &b);
-        mc_classes_line("build", folder, &b);
-    }
-    if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
-    sh_mb_free(&b);
-    sh_ms_list_free(&list);
-    return ok;
+    } else mc_install(folder);
+    modstore_unlock();
 }
 
 /* An export's import builds each carried mod on the thread that imports it
- * (the WebView host's, a rawmap load's, the job worker's), so its stock check
+ * (the WebView host's, a rawmap load's worker), so its stock check
  * is the installed-archive bridge, which is thread-safe, not the engine
  * provider. */
 static int mc_import_stock(void *ctx, const char *request)
