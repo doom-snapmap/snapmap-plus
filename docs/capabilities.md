@@ -907,7 +907,10 @@ on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, 
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
 Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
 `on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps time (`now`, `after`, `every`, `run`,
-`wait`) and writes the mod's script log (`print`, `warn`); the entity, AI, combat and logic calls,
+`wait`), writes the mod's script log (`print`, `warn`) and drives the mod's own demons (`move_to`, `move_done`,
+`face`, `turn_done`, `anim_state`, `set_enemy`, `can_see`, `awareness`, `path_length`, `find_position`,
+`trigger`, `equip`, `laser`, `focus_tag` and the rest of the AI calls: a commanded demon waits in the
+engine's own script state and keeps its pain and death); the entity, combat and logic calls,
 and the hooks that deliver damage, death, animation notifies and Script node inputs, come with the
 work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
