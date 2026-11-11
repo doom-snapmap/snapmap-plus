@@ -938,6 +938,19 @@ typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t
                                     const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
 
+/* Mod scripts (modbundle.h sh_mb_script_request): every script of `salt` that
+ * the index serves now, from the build that serves it (the map scope's choice:
+ * a stranger's map its own place's copy, the author's own map the root
+ * folder), in request order. fn gets the script's path below scripts\ ("x.lua"
+ * or "lib/x.lua", lower case), its request, its size and the SHA-256 the
+ * build recorded (the bytes sh_modserve_open must answer with), and the
+ * serving build's hash. Returns the number visited. The strings stay valid
+ * for the process. The runtime reads scripts only this way, never from a
+ * folder (script_source.c). */
+typedef void (*sh_modserve_script_fn)(void *context, const char *relpath, const char *request, uint64_t size,
+                                      const char *sha256, const char *bundle_hash);
+int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *context);
+
 /* Early decls. The serving index and the provider are published after the
  * backend's signature scan, while the engine is already parsing boot decls,
  * so a shadow parsed before then holds the game's bytes. Visit, in plan rank
@@ -992,6 +1005,7 @@ typedef struct sh_modserve_diff {
     int changed_anims;                    /* anims, reloaded in place at the next map load */
     int changed_map;                      /* other files the next map load reads again (generated/swf/) */
     int changed_restart;                  /* other files nothing reloads in this process (sound banks, skeletons, ...) */
+    int changed_scripts;                  /* mod scripts (added or changed): read again at the next Play */
     int added, added_decls, added_rows;   /* new requests; of them new decl names; of those editor rows */
     int added_active;                     /* new gameplay decl names of mods registered this session */
     int changed_rows;                     /* changed editor rows (snapEditorEntityDef) */

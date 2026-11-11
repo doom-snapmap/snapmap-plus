@@ -2366,6 +2366,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (o >= 0 && !old->files[o].served) o = -1;
         if (o < 0) {
             d->added++;
+            if (f->ptype && !strcmp(f->ptype, "script")) d->changed_scripts++;
             /* A new editor row that shadows a stock one is a palette change too:
              * the refresh below re-parses it, and the palette must be built
              * again to show the mod's row (the removal side counts it as well). */
@@ -2406,6 +2407,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
         else if (kind == SH_MODSERVE_RF_ANIM) d->changed_anims++;
         else if (!strncmp(f->request, "generated/swf/", 14)) d->changed_map++;
+        else if (f->ptype && !strcmp(f->ptype, "script")) d->changed_scripts++;
         else { d->changed_restart++; ms_diff_note(d->restart_first, sizeof d->restart_first, f->request); }
     }
     for (i = 0; i < old->nfiles; ++i) {
@@ -7001,6 +7003,30 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
         if (!f->served || f->withdrawn || !b->admitted) continue;
         fn(context, f->request, f->size, b->id ? b->id : b->folder, b->hash ? b->hash : "");
     }
+}
+
+int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    char prefix[64];
+    size_t pl;
+    int i, n = 0;
+    if (!x || !salt || !salt[0] || strlen(salt) > 32) return 0;
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/scripts/", salt);
+    ms_lower(prefix);
+    pl = strlen(prefix);
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i], *e;
+        const ms_index *ex = NULL;
+        /* Each request once, at its key file; the scope picks the build. */
+        if (f->alt_of >= 0 || f->registry || !f->ptype || strcmp(f->ptype, "script") || strncmp(f->request, prefix, pl))
+            continue;
+        e = ms_lookup_file(&ex, f->request);
+        if (!e || ex != x || e->stock || !e->blob || !x->bundles[e->bundle].admitted) continue;
+        if (fn) fn(context, e->request + pl, e->request, e->size, e->blob, x->bundles[e->bundle].hash ? x->bundles[e->bundle].hash : "");
+        n++;
+    }
+    return n;
 }
 
 /* Early decls: the provider is published seconds into the process, after

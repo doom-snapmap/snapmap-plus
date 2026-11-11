@@ -8,38 +8,27 @@
 #ifndef SH_SCRIPT_PURE
 #include "../modserve.h"
 #include "../modmanifest.h"
-#include "../modstore.h"
+#include "../modbundle.h"
 #endif
 
 #define SRC_PATH_MAX 1024
+#define SRC_REL_MAX  128
+
+typedef struct src_file {
+    char rel[SRC_REL_MAX];       /* "x.lua" or "lib/x.lua" */
+    char *text;                  /* the built bytes (NUL-terminated), NULL when they could not be read */
+    size_t len;
+} src_file;
 
 typedef struct src_mod {
     char salt[SH_SCRIPT_SALT_CAP];
     char name[SH_SCRIPT_MODNAME_CAP];
-    char dir[SRC_PATH_MAX];          /* <store>\<folder>\assets\mods\<salt>\scripts */
+    src_file *f;
+    int n, cap;
 } src_mod;
 
 static src_mod g_src[SH_SCRIPT_MODS_MAX];
 static int     g_nsrc;
-
-static int utf8_to_wide(const char *s, wchar_t *out, int cap)
-{
-    return MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cap) > 0;
-}
-
-static int wide_to_utf8(const wchar_t *s, char *out, int cap)
-{
-    return WideCharToMultiByte(CP_UTF8, 0, s, -1, out, cap, NULL, NULL) > 0;
-}
-
-static int is_dir(const char *path)
-{
-    wchar_t w[SRC_PATH_MAX];
-    DWORD a;
-    if (!utf8_to_wide(path, w, SRC_PATH_MAX)) return 0;
-    a = GetFileAttributesW(w);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
 
 static const src_mod *find_src(const char *salt)
 {
@@ -49,93 +38,86 @@ static const src_mod *find_src(const char *salt)
     return NULL;
 }
 
-/* ------------------------------------------------------------ file source */
-
-/* Call fn for each regular file of dir\<sub> as "<prefix><name>". */
-static int list_dir(const char *dir, const char *sub, const char *prefix, sh_script_file_fn fn, void *fn_context)
+static void mod_free(src_mod *m)
 {
-    char pattern[SRC_PATH_MAX];
-    wchar_t w[SRC_PATH_MAX];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    int n = 0;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s%s%s\\*", dir, sub[0] ? "\\" : "", sub);
-    if (!utf8_to_wide(pattern, w, SRC_PATH_MAX)) return -1;
-    h = FindFirstFileW(w, &fd);
-    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ? 0 : -1;
-    do {
-        char name[260], rel[300];
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (!wide_to_utf8(fd.cFileName, name, sizeof name)) continue;
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s%s", prefix, name);
-        fn(fn_context, rel);
-        n++;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return n;
+    int i;
+    for (i = 0; i < m->n; i++) free(m->f[i].text);
+    free(m->f);
+    memset(m, 0, sizeof *m);
 }
+
+void sh_script_source_clear(void)
+{
+    int i;
+    for (i = 0; i < g_nsrc; i++) mod_free(&g_src[i]);
+    g_nsrc = 0;
+}
+
+static src_mod *mod_add(const char *salt, const char *name)
+{
+    src_mod *m;
+    if (!salt || !salt[0] || strlen(salt) >= SH_SCRIPT_SALT_CAP || g_nsrc >= SH_SCRIPT_MODS_MAX) return NULL;
+    m = &g_src[g_nsrc++];
+    memset(m, 0, sizeof *m);
+    strncpy_s(m->salt, sizeof m->salt, salt, _TRUNCATE);
+    _strlwr_s(m->salt, sizeof m->salt);
+    strncpy_s(m->name, sizeof m->name, name && name[0] ? name : salt, _TRUNCATE);
+    return m;
+}
+
+/* Keep one file (text NULL: listed, but its built bytes could not be read). */
+static int file_add(src_mod *m, const char *rel, char *text, size_t len)
+{
+    src_file *f;
+    if (strlen(rel) >= SRC_REL_MAX) { free(text); return 0; }
+    if (m->n == m->cap) {
+        int cap = m->cap ? m->cap * 2 : 16;
+        src_file *grown = (src_file *)realloc(m->f, (size_t)cap * sizeof *grown);
+        if (!grown) { free(text); return 0; }
+        m->f = grown;
+        m->cap = cap;
+    }
+    f = &m->f[m->n++];
+    strncpy_s(f->rel, sizeof f->rel, rel, _TRUNCATE);
+    f->text = text;
+    f->len = text ? len : 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------ file source */
 
 static int src_list(void *context, const char *salt, sh_script_file_fn fn, void *fn_context)
 {
     const src_mod *m = find_src(salt);
-    int a, b;
+    int i;
     (void)context;
     if (!m || !fn) return 0;
-    a = list_dir(m->dir, "", "", fn, fn_context);
-    if (a < 0) return -1;
-    {
-        char lib[SRC_PATH_MAX];
-        _snprintf_s(lib, sizeof lib, _TRUNCATE, "%s\\lib", m->dir);
-        b = is_dir(lib) ? list_dir(m->dir, "lib", "lib/", fn, fn_context) : 0;
-    }
-    if (b < 0) return -1;
-    return a + b;
-}
-
-/* A relpath the runtime asks for: "x.lua" or "lib/x.lua", nothing that
- * leaves the scripts folder. */
-static int relpath_ok(const char *rel)
-{
-    size_t i, n = rel ? strlen(rel) : 0;
-    if (!n || n >= 200 || rel[0] == '/' || rel[0] == '\\' || strstr(rel, "..") || strchr(rel, ':')) return 0;
-    for (i = 0; i < n; i++) if ((unsigned char)rel[i] < 0x20) return 0;
-    return 1;
+    for (i = 0; i < m->n; i++) fn(fn_context, m->f[i].rel);
+    return m->n;
 }
 
 static int src_read(void *context, const char *salt, const char *relpath, char **text, size_t *len)
 {
     const src_mod *m = find_src(salt);
-    char path[SRC_PATH_MAX];
-    wchar_t w[SRC_PATH_MAX];
-    HANDLE h;
-    LARGE_INTEGER size;
-    DWORD want, got = 0;
-    char *buf;
-    size_t i, at;
+    int i;
     (void)context;
     *text = NULL;
     *len = 0;
-    if (!m || !relpath_ok(relpath)) return 0;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", m->dir, relpath);
-    at = strlen(m->dir) + 1;
-    for (i = at; path[i]; i++) if (path[i] == '/') path[i] = '\\';
-    if (!utf8_to_wide(path, w, SRC_PATH_MAX)) return -1;
-    h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        DWORD e = GetLastError();
-        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? 0 : -1;
+    if (!m || !relpath) return 0;
+    for (i = 0; i < m->n; i++) {
+        const src_file *f = &m->f[i];
+        char *copy;
+        if (_stricmp(f->rel, relpath)) continue;
+        if (!f->text) return -1;
+        copy = (char *)malloc(f->len + 1);
+        if (!copy) return -1;
+        memcpy(copy, f->text, f->len);
+        copy[f->len] = 0;
+        *text = copy;
+        *len = f->len;
+        return 1;
     }
-    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0) { CloseHandle(h); return -1; }
-    /* One byte past the cap is enough for the runtime to refuse the file by name. */
-    want = size.QuadPart > (LONGLONG)SH_SCRIPT_FILE_MAX ? (DWORD)SH_SCRIPT_FILE_MAX + 1 : (DWORD)size.QuadPart;
-    buf = (char *)malloc((size_t)want + 1);
-    if (!buf) { CloseHandle(h); return -1; }
-    if (want && (!ReadFile(h, buf, want, &got, NULL) || got != want)) { free(buf); CloseHandle(h); return -1; }
-    CloseHandle(h);
-    buf[want] = 0;
-    *text = buf;
-    *len = want;
-    return 1;
+    return 0;
 }
 
 static void src_release(void *context, char *text)
@@ -151,48 +133,93 @@ const sh_script_source *sh_script_source_files(void)
     return &k_files;
 }
 
-const char *sh_script_source_folder(const char *salt)
+static int fill(sh_script_mod_desc *out, int cap)
 {
-    const src_mod *m = find_src(salt);
-    return m ? m->dir : "";
+    int i, n = 0;
+    for (i = 0; i < g_nsrc && n < cap; i++) {
+        if (!g_src[i].n) continue;
+        out[n].salt = g_src[i].salt;
+        out[n].name = g_src[i].name;
+        n++;
+    }
+    return n;
 }
 
-void sh_script_source_clear(void)
+#ifdef SH_SCRIPT_PURE
+/* ------------------------------------------------- the tests' stand-in */
+
+static int read_whole(const char *path, char **text, size_t *len)
 {
-    g_nsrc = 0;
+    wchar_t w[SRC_PATH_MAX];
+    HANDLE h;
+    LARGE_INTEGER size;
+    DWORD got = 0;
+    char *buf;
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, SRC_PATH_MAX)) return 0;
+    h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > (LONGLONG)SH_SCRIPT_FILE_MAX + 1) {
+        CloseHandle(h);
+        return 0;
+    }
+    buf = (char *)malloc((size_t)size.QuadPart + 1);
+    if (!buf || (size.QuadPart && (!ReadFile(h, buf, (DWORD)size.QuadPart, &got, NULL) || got != (DWORD)size.QuadPart))) {
+        free(buf);
+        CloseHandle(h);
+        return 0;
+    }
+    CloseHandle(h);
+    buf[size.QuadPart] = 0;
+    *text = buf;
+    *len = (size_t)size.QuadPart;
+    return 1;
+}
+
+static void read_dir(src_mod *m, const char *dir, const char *prefix)
+{
+    char pattern[SRC_PATH_MAX];
+    wchar_t w[SRC_PATH_MAX];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.lua", dir);
+    if (!MultiByteToWideChar(CP_UTF8, 0, pattern, -1, w, SRC_PATH_MAX)) return;
+    h = FindFirstFileW(w, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char name[260], rel[SRC_REL_MAX], path[SRC_PATH_MAX], *text = NULL;
+        size_t len = 0;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof name, NULL, NULL)) continue;
+        _strlwr_s(name, sizeof name);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s%s", prefix, name);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        if (!read_whole(path, &text, &len)) text = NULL;
+        file_add(m, rel, text, len);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static int rel_cmp(const void *a, const void *b)
+{
+    return strcmp(((const src_file *)a)->rel, ((const src_file *)b)->rel);
 }
 
 int sh_script_source_set_folder(const char *salt, const char *name, const char *scripts_dir)
 {
     src_mod *m;
+    char lib[SRC_PATH_MAX];
     int i;
-    if (!salt || !salt[0] || strlen(salt) >= SH_SCRIPT_SALT_CAP || !scripts_dir || strlen(scripts_dir) >= SRC_PATH_MAX)
-        return 0;
-    for (i = 0; i < g_nsrc && _stricmp(g_src[i].salt, salt); i++) {}
-    if (i == g_nsrc) {
-        if (g_nsrc >= SH_SCRIPT_MODS_MAX) return 0;
-        g_nsrc++;
-    }
-    m = &g_src[i];
-    memset(m, 0, sizeof *m);
-    strncpy_s(m->salt, sizeof m->salt, salt, _TRUNCATE);
-    _strlwr_s(m->salt, sizeof m->salt);
-    strncpy_s(m->name, sizeof m->name, name && name[0] ? name : salt, _TRUNCATE);
-    strncpy_s(m->dir, sizeof m->dir, scripts_dir, _TRUNCATE);
+    if (!scripts_dir) return 0;
+    for (i = 0; i < g_nsrc; i++)
+        if (!_stricmp(g_src[i].salt, salt)) { mod_free(&g_src[i]); g_src[i] = g_src[--g_nsrc]; break; }
+    if (!(m = mod_add(salt, name))) return 0;
+    read_dir(m, scripts_dir, "");
+    _snprintf_s(lib, sizeof lib, _TRUNCATE, "%s\\lib", scripts_dir);
+    read_dir(m, lib, "lib/");
+    qsort(m->f, (size_t)m->n, sizeof *m->f, rel_cmp);
     return 1;
 }
 
-static int fill(sh_script_mod_desc *out, int cap)
-{
-    int i;
-    for (i = 0; i < g_nsrc && i < cap; i++) {
-        out[i].salt = g_src[i].salt;
-        out[i].name = g_src[i].name;
-    }
-    return i;
-}
-
-#ifdef SH_SCRIPT_PURE
 /* Without the serving layer the open map's mods are the folders set directly. */
 int sh_script_source_map_mods(sh_script_mod_desc *out, int cap)
 {
@@ -213,16 +240,36 @@ static void salt_of_hash(void *context, const char *id, const char *hash, int ad
     strncpy_s(h->salt, sizeof h->salt, id, _TRUNCATE);
 }
 
-/* Find the folders: fills g_src. Returns the count, -1 when unreadable. */
+/* One served script: its bytes through the index, kept only when they are
+ * the bytes its build recorded. */
+static void keep_script(void *context, const char *relpath, const char *request, uint64_t size, const char *sha256,
+                        const char *bundle_hash)
+{
+    src_mod *m = (src_mod *)context;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    char *text = NULL, actual[SH_MB_HASH_HEX + 1];
+    (void)bundle_hash;
+    if (size <= (uint64_t)SH_SCRIPT_FILE_MAX + 1 && sh_modserve_open(request, &bytes, &len) == 1) {
+        sh_mb_sha256_hex(bytes, len, actual);
+        if (len == size && sha256 && !_stricmp(actual, sha256) && (text = (char *)malloc(len + 1)) != NULL) {
+            memcpy(text, bytes, len);
+            text[len] = 0;
+        }
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    file_add(m, relpath, text, len);
+}
+
+/* Read the scripts of the map's mods into g_src. Returns the count of mods
+ * with scripts, -1 when unreadable; *seed is derived from the builds. */
 static int collect(uint64_t *seed)
 {
     char (*hashes)[SH_MODSERVE_HASH_HEX + 1] = NULL;
-    char root[SRC_PATH_MAX];
     int n, i;
     uint64_t fnv = 1469598103934665603ull;
-    g_nsrc = 0;
+    sh_script_source_clear();
     if (seed) *seed = 0;
-    if (!sh_ms_root(root, sizeof root)) return -1;
     n = sh_modserve_scope_hashes(NULL, 0);
     if (n <= 0) return 0;
     hashes = (char (*)[SH_MODSERVE_HASH_HEX + 1])calloc((size_t)n, sizeof *hashes);
@@ -232,29 +279,24 @@ static int collect(uint64_t *seed)
         hash_salt hs;
         sh_modmanifest_row row;
         sh_modserve_bundle_ref ref;
-        src_mod *m;
         const char *seg;
-        int k, dup = 0;
+        src_mod *m;
+        int k;
         for (k = 0; hashes[i][k]; k++) fnv = (fnv ^ (unsigned char)hashes[i][k]) * 1099511628211ull;
         memset(&hs, 0, sizeof hs);
         hs.hash = hashes[i];
         sh_modserve_each_bundle(salt_of_hash, &hs);
-        if (!hs.salt[0]) continue;
-        for (k = 0; k < g_nsrc; k++) if (!_stricmp(g_src[k].salt, hs.salt)) dup = 1;
-        if (dup) continue;
+        if (!hs.salt[0] || find_src(hs.salt)) continue;
+        if (!sh_modserve_script_files(hs.salt, NULL, NULL)) continue;
         memset(&row, 0, sizeof row);
         strncpy_s(row.salt, sizeof row.salt, hs.salt, _TRUNCATE);
         strncpy_s(row.build, sizeof row.build, hashes[i], _TRUNCATE);
-        if (!sh_modserve_row_build(&row, &ref) || !ref.folder[0]) continue;
-        m = &g_src[g_nsrc];
-        memset(m, 0, sizeof *m);
-        strncpy_s(m->salt, sizeof m->salt, hs.salt, _TRUNCATE);
-        _strlwr_s(m->salt, sizeof m->salt);
-        _snprintf_s(m->dir, sizeof m->dir, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts", root, ref.folder, m->salt);
-        if (!is_dir(m->dir)) continue;
-        seg = strrchr(ref.folder, '\\');
-        strncpy_s(m->name, sizeof m->name, ref.name[0] ? ref.name : seg ? seg + 1 : ref.folder, _TRUNCATE);
-        g_nsrc++;
+        memset(&ref, 0, sizeof ref);
+        (void)sh_modserve_row_build(&row, &ref);
+        seg = ref.folder[0] ? strrchr(ref.folder, '\\') : NULL;
+        m = mod_add(hs.salt, ref.name[0] ? ref.name : seg ? seg + 1 : ref.folder[0] ? ref.folder : "a mod");
+        if (!m) continue;
+        sh_modserve_script_files(m->salt, keep_script, m);
     }
     free(hashes);
     if (seed) *seed = fnv;
@@ -263,18 +305,15 @@ static int collect(uint64_t *seed)
 
 static int provider(void *context, sh_script_mod_desc *out, int cap, const sh_script_source **source, uint64_t *seed)
 {
-    int n;
     (void)context;
     *source = &k_files;
-    n = collect(seed);
-    if (n < 0) return -1;
+    if (collect(seed) < 0) return -1;
     return fill(out, cap);
 }
 
 int sh_script_source_map_mods(sh_script_mod_desc *out, int cap)
 {
-    int n = collect(NULL);
-    if (n < 0) return -1;
+    if (collect(NULL) < 0) return -1;
     return fill(out, cap);
 }
 

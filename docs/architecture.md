@@ -1495,13 +1495,41 @@ and `scripts/lib/*.lua` (loaded only by `require`). The runtime is
 `src/backend/script/` on the vendored Lua 5.4.9 core (`src/third_party/lua`,
 its README records the version, hashes and the one local change).
 
+- **In the build.** A script is a carried file of kind `script` (provides type
+  `script`): `assets/mods/<salt>/scripts/<name>.lua` or
+  `scripts/lib/<name>.lua`, `<name>` of `[A-Za-z0-9_-]`; a `.lua` anywhere else
+  is refused. It is hashed into the build like every file and the engine never
+  opens it. `modbundle.c` checks each one: UTF-8 text without a NUL byte, not
+  compiled Lua, at most 256 KB; at most 64 files and 1 MB per mod (the mod
+  store's Worker refuses the same); then the compile check the product
+  registers (`sh_mb_set_script_check`, `script/script_compile.c`: parse only,
+  nothing runs; an entry file must start with `api = 1`). A failure is the
+  row's cause, worded as the stop line words it:
+  `scripts\door.lua line 4: "end" expected to close "function" on line 2.
+  Correct it, then press Refresh.` A build without a registered check (any
+  program but the game and the store tool) refuses a script. The static pass
+  (`sh_mb_script_scan`) reads the literal registration calls without running
+  anything: a `require` of a module the mod does not carry, or a name under
+  another mod's `mods/<salt>/`, is refused with the file and line; an
+  `on.<event>` name with no entityDef of the mod is a warning. The builder
+  block records what was found for the Mods tab (`"scripts": {"files",
+  "entities": [{"name", "events"}], "inputs", "outputs", "dynamic"}`, the
+  last counting names set while running); the author part declares nothing.
+  A build that carries a script is never sliced (`sh_mb_sliceable`): its
+  scripts may build names while running. First-scan salting rewrites
+  `mods/<folder>/` inside a `.lua` like any text file. Archives (publish,
+  download, rawmap and prefab exports and imports, installs) carry scripts as
+  the files they are, under their lower-case game names (every carried path is
+  recorded that way, whatever its spelling on disk, and a new folder's install
+  writes its `assets\` tree in lower case, so an uppercase letter never refuses
+  a mod).
 - **States.** The Play gate prepares the map's scripted mods
   (`sh_script_map_open`: the provider's mods, their file source and the map
   seed; each mod is listed and registered with the hooks, nothing runs). The
   first frame opens one `lua_State` per prepared mod; `sh_script_map_close`
   closes them. Nothing crosses states. The file source (`sh_script_source`)
-  lists the files under `scripts/` of the folder that serves the mod and reads
-  them. A mod with no entry file gets no state.
+  lists the mod's scripts and answers reads from the copy the gate took
+  through the serving index (below). A mod with no entry file gets no state.
 - **Loading.** Entry files run once at map start in byte-wise name order, then
   the `on.map_start` handlers. Each entry file must start with `api = 1`
   (comments and a byte order mark may precede it); a missing or newer version
@@ -1568,9 +1596,10 @@ its README records the version, hashes and the one local change).
   plain sentence at the calling line) before touching the engine.
 
 Not here yet: the entity, AI, combat and logic calls, the damage, death,
-animation-notify and Script node hooks that post records, and the builder's
-script checks come with the scripting work that follows.
-`tests/script_sandbox_test.c` covers the runtime without the game.
+animation-notify and Script node hooks that post records come with the
+scripting work that follows. `tests/script_sandbox_test.c` covers the runtime
+without the game; `tests/modscript_test.c` the builder's checks, the static
+pass, the serving index and the archives.
 
 ### Mod scripts: the engine side
 
@@ -1592,13 +1621,16 @@ No script code runs anywhere else.
   (`sh_companions_ensure`), before the level's spawns.
 - **Where the scripts come from.** `script_source.c`: the builds the Play's
   map scope declares (`sh_modserve_scope_hashes`: the builds serving the
-  map's rows, then the placed names' closure), each resolved to the folder
-  that serves it for the open map (`sh_modserve_row_build`: a stranger's
-  map's own place, the author's root folder), kept when that folder has
-  `assets\mods\<salt>\scripts\`. The files are read from that folder:
-  `scripts\*.lua` (entry files) and `scripts\lib\*.lua`, so a downloaded map
-  runs the copy it brought. The builder's own source replaces this one behind
-  the same `sh_script_source` contract.
+  map's rows, then the placed names' closure), and for each mod the scripts
+  the serving index serves for the open map (`sh_modserve_script_files`: a
+  stranger's map's own place, the author's root folder). At the gate every
+  script is read once through `sh_modserve_open` and kept only when its bytes
+  hash to the SHA-256 its build recorded; one edited since the last Refresh
+  reads as "could not be read" and stops its mod with that line. Lists, reads
+  and `require` are then answered from that copy, so a Play runs the built
+  scripts it started with and nothing reads a mod folder while it runs. A
+  Refresh that changes scripts reports them as running from the next Play
+  (`changed_scripts` in the serving diff), never as needing a restart.
 - **Tick.** A 15-byte detour on the SuperScript per-frame wrapper (VK
   0x140E9C9D0, GL 0x140E9BF10). Its only caller is `idGameLocal::RunFrame`
   (game vtable `+0x08`), after the entity think loop; RunFrame is reached from

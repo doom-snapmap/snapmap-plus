@@ -1887,7 +1887,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     rows = d.added_rows + d.changed_rows + d.gone_rows;
     later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
     if (rows) InterlockedExchange(&g_palette_wanted, 1);
-    if (!d.changed && !d.gone && !d.added_decls && !d.pending) {
+    if (!d.changed && !d.gone && !d.added_decls && !d.pending && !d.changed_scripts) {
         strncpy_s(r.note, sizeof r.note, "no served file changed", _TRUNCATE);
         me_rlog("refresh: no served file changed");
         if (out) *out = r;
@@ -1939,6 +1939,12 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         me_rlog("refresh: needs a restart: %d changed file(s) nothing reloads in this process%s%s", d.changed_restart,
                 d.restart_first[0] ? ": " : "", d.restart_first);
         me_refresh_note(&r, "%d change(s) need a restart", r.needs_restart);
+    }
+    if (d.changed_scripts) {
+        /* A Play reads its scripts when it starts (script_source.c): a change
+         * during Play runs at the next one, with no restart. */
+        me_rlog("refresh: %d changed mod script file(s) run from the next Play", d.changed_scripts);
+        me_refresh_note(&r, "%d script change(s) run from the next Play", d.changed_scripts);
     }
     if (d.gone_names) {
         me_rlog("refresh: %d removed decl name(s) stay registered until the game restarts; nothing serves them",
