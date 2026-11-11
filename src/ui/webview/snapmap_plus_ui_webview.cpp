@@ -369,36 +369,54 @@ static void poc_perf_note_poll(unsigned long long total_us, unsigned long long c
 static uint64_t hstr(uint64_t h, const char *s) { while (*s) { h = (h ^ (unsigned char)*s) * 1099511628211ull; s++; } return h; }
 static uint64_t hint(uint64_t h, int v) { for (int i = 0; i < 4; i++) { h = (h ^ (unsigned char)(v & 0xff)) * 1099511628211ull; v >>= 8; } return h; }
 
-/* Validate each name component before resolve_prefab_path concatenates it.
- * Reject separators and traversal here as well as in the page. */
-static bool poc_valid_name(const std::string &n)
+/* Validate each name component before resolve_prefab_path concatenates it
+ * (prefab_host.h): a name Windows can hold, with no separator or traversal. */
+static bool poc_valid_name(const std::string &n) { return sh_prefab_host::valid_name(n); }
+
+/* Paths are UTF-8 inside the window and across the backend interface, and wide at
+ * every Windows call, so any user, folder or prefab name opens. */
+static std::wstring poc_widen(const char *utf8)
 {
-    if (n.empty() || n.size() > 200) return false;
-    if (n.find("..") != std::string::npos) return false;
-    if (n.find('/') != std::string::npos || n.find('\\') != std::string::npos) return false;
-    if (n.find(':') != std::string::npos) return false;
-    return true;
+    std::wstring w;
+    if (!utf8) return w;
+    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
+    return w;
+}
+static FILE *poc_open(const char *utf8_path, const wchar_t *mode)
+{
+    FILE *f = nullptr;
+    if (!utf8_path || _wfopen_s(&f, poc_widen(utf8_path).c_str(), mode) != 0) return nullptr;
+    return f;
+}
+static bool poc_exists(const char *utf8_path) { return GetFileAttributesW(poc_widen(utf8_path).c_str()) != INVALID_FILE_ATTRIBUTES; }
+static bool poc_move(const char *from, const char *to) { return MoveFileW(poc_widen(from).c_str(), poc_widen(to).c_str()) != 0; }
+/* %LOCALAPPDATA%\snapmap-plus, created when missing; "" when Windows cannot say. */
+static std::wstring poc_data_dir()
+{
+    PWSTR la = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la)) && la) dir = std::wstring(la) + L"\\snapmap-plus";
+    if (la) CoTaskMemFree(la);
+    if (!dir.empty()) SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
+    return dir;
 }
 /* Keep the user's asset pins in pinned.json, separate from validated settings.
  * A damaged pin list must not reset unrelated preferences. The host transports
  * opaque bytes; the page owns parsing, validation, and the empty-list fallback. */
-static std::string poc_pins_path()
+static std::wstring poc_pins_path()
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return std::string();
-    std::string dir = std::string(la) + "\\snapmap-plus";
-    free(la);
-    SHCreateDirectoryExA(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
-    return dir + "\\pinned.json";
+    std::wstring dir = poc_data_dir();
+    return dir.empty() ? dir : dir + L"\\pinned.json";
 }
 
 static void poc_send_pins()
 {
     std::string data;
-    std::string path = poc_pins_path();
+    std::wstring path = poc_pins_path();
     if (!path.empty()) {
         FILE *f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") == 0 && f) {
+        if (_wfopen_s(&f, path.c_str(), L"rb") == 0 && f) {
             char buf[4096]; size_t r;
             while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
             fclose(f);
@@ -414,28 +432,26 @@ static void poc_send_pins()
 /* Replace the full pin document via a temporary file and atomic move. */
 static void poc_save_pins(const std::string &doc)
 {
-    std::string path = poc_pins_path();
+    std::wstring path = poc_pins_path();
     if (path.empty()) return;
-    std::string tmp = path + ".tmp";
+    std::wstring tmp = path + L".tmp";
     FILE *f = nullptr;
-    if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
+    if (_wfopen_s(&f, tmp.c_str(), L"wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
     size_t w = doc.empty() ? 0 : fwrite(doc.data(), 1, doc.size(), f);
-    fclose(f);
-    if (w != doc.size()) { DeleteFileA(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
-    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileA(tmp.c_str());
+    if (fclose(f) != 0) w = 0;
+    if (w != doc.size()) { DeleteFileW(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
         poc_log("pins: could not replace pinned.json");
     }
 }
 
 static void poc_read_version()
 {
-    char *la = nullptr; size_t n = 0;
-    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return;
-    std::string path = std::string(la) + "\\snapmap-plus\\install.json";
-    free(la);
+    std::wstring dir = poc_data_dir();
+    if (dir.empty()) return;
     FILE *f = nullptr;
-    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
+    if (_wfopen_s(&f, (dir + L"\\install.json").c_str(), L"rb") != 0 || !f) return;
     std::string data; char buf[4096]; size_t r;
     while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
     fclose(f);
@@ -966,10 +982,16 @@ static void poc_apply_create_prefab()
                     (unsigned long)before, (unsigned long)n);
         poc_log(l);
     }
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
-    fwrite(buf, 1, (size_t)n, fp);
-    fclose(fp);
+    FILE *fp = poc_open(path, L"wb");
+    if (!fp) { poc_log("create-prefab: ABORT (the file could not be opened for writing)"); return; }
+    size_t wrote = fwrite(buf, 1, (size_t)n, fp);
+    if (fclose(fp) != 0 || wrote != (size_t)n) {
+        /* A short write leaves a damaged prefab: remove it and report the failure. */
+        DeleteFileW(poc_widen(path).c_str());
+        poc_logf("create-prefab: ABORT (short write: %lu byte(s) written); the partial file was removed", (unsigned long)wrote);
+        g_create_result = 6;
+        return;
+    }
     poc_log("create-prefab: WROTE file ok");
     g_create_result = 1;
     /* One file: the backend writes the prefab's snapmapPlus block into it, with the mods
@@ -1031,7 +1053,7 @@ static void poc_apply_create_module_prefab()
         poc_log("create-module-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+    if (poc_exists(path)) {
         g_create_module_result = 0;
         poc_log("create-module-prefab: REFUSED (a prefab with that name exists)");
         return;
@@ -1110,20 +1132,20 @@ static void poc_strip_trailing_sep(char *s)
 /* list the *.json stems directly inside a resolved directory (non-recursive), sorted. */
 static void poc_list_json_dir(const std::string &dirPath, std::vector<std::string> &names)
 {
-    std::string pattern = dirPath + "*.json";
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    std::wstring pattern = poc_widen(dirPath.c_str()) + L"*.json";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::string fn = fd.cFileName;
+        std::string fn = sh_webview_json::to_utf8(fd.cFileName);
         if (fn.size() > 5 && fn.compare(fn.size() - 5, 5, ".json") == 0) {
             std::string stem = fn.substr(0, fn.size() - 5);
             /* "<name>.meta.json" is a metadata sidecar, not a prefab -- never list it as one */
             if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".meta") == 0) continue;
             names.push_back(stem);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     std::sort(names.begin(), names.end());
 }
@@ -1133,10 +1155,10 @@ static void poc_list_json_dir(const std::string &dirPath, std::vector<std::strin
  * file is always gone afterwards when this returns 1. 0 = still there. */
 static int poc_recycle_file(const char *path)
 {
-    wchar_t wide[1024], full[1024 + 2];
-    int n = MultiByteToWideChar(CP_ACP, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0]));
-    if (n > 0) {
-        DWORD len = GetFullPathNameW(wide, 1024, full, NULL);
+    wchar_t full[1024 + 2];
+    std::wstring wide = poc_widen(path);
+    if (!wide.empty()) {
+        DWORD len = GetFullPathNameW(wide.c_str(), 1024, full, NULL);
         if (len > 0 && len < 1024) {
             full[len + 1] = 0;   /* double NUL: one path */
             SHFILEOPSTRUCTW op;
@@ -1149,7 +1171,7 @@ static int poc_recycle_file(const char *path)
         }
     }
     poc_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
-    return DeleteFileA(path) ? 1 : 0;
+    return DeleteFileW(wide.c_str()) ? 1 : 0;
 }
 
 /* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed, -1 = path refused. */
@@ -1161,7 +1183,7 @@ static int poc_delete_one_prefab(const std::string &folder, const std::string &n
     int result = poc_recycle_file(path);
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
         char mp[1024];
-        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES)
+        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && poc_exists(mp))
             poc_recycle_file(mp);
     }
     return result;
@@ -1187,12 +1209,12 @@ static void poc_apply_rename_prefab()
     char oldp[1024], newp[1024];
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
-    g_rename_result = MoveFileA(oldp, newp) ? 1 : 0;
+    g_rename_result = poc_move(oldp, newp) ? 1 : 0;
     if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
 }
 /* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
@@ -1396,8 +1418,8 @@ static void poc_apply_load_prefab()
         poc_log("load-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
+    FILE *fp = poc_open(path, L"rb");
+    if (!fp) { poc_log("load-prefab: ABORT (the file could not be opened)"); return; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     std::string body;
     if (sz > 0) { body.resize((size_t)sz); size_t got = fread(&body[0], 1, (size_t)sz, fp); body.resize(got); }
@@ -1494,7 +1516,7 @@ static void poc_apply_save_timeline()
     char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
     poc_log(l);
 }
-/* Move a prefab from one folder to another (drag-and-drop target): MoveFileA across the two resolved
+/* Move a prefab from one folder to another (drag-and-drop target): a move across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
 static int poc_move_one_prefab(const std::string &from, const std::string &name, const std::string &to)
 {
@@ -1502,12 +1524,12 @@ static int poc_move_one_prefab(const std::string &from, const std::string &name,
     char oldp[1024], newp[1024];
     if (!poc_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
     if (!poc_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
-    int result = MoveFileA(oldp, newp) ? 1 : 0;
+    int result = poc_move(oldp, newp) ? 1 : 0;
     if (result == 1) {   /* the sidecar follows the move; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path(to, name, newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
     return result;
 }
@@ -1532,10 +1554,10 @@ static void poc_apply_create_folder()
     char dir[1024];
     if (!poc_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
     poc_strip_trailing_sep(dir);
-    if (CreateDirectoryA(dir, nullptr)) { g_create_folder_result = 1; return; }
+    if (CreateDirectoryW(poc_widen(dir).c_str(), nullptr)) { g_create_folder_result = 1; return; }
     g_create_folder_result = (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
 }
-/* Rename a folder: MoveFileA also renames directories. result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
+/* Rename a folder (a move renames a directory too). result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
 static void poc_apply_rename_folder()
 {
     g_rename_folder_result = -1;
@@ -1544,7 +1566,7 @@ static void poc_apply_rename_folder()
     if (!poc_prefab_dir(g_rename_folder_old, oldd, (int)sizeof oldd)) return;
     if (!poc_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
     poc_strip_trailing_sep(oldd); poc_strip_trailing_sep(newd);
-    g_rename_folder_result = MoveFileA(oldd, newd) ? 1 : 0;
+    g_rename_folder_result = poc_move(oldd, newd) ? 1 : 0;
 }
 /* Move contents to the prefab root before removing a folder. A name collision
  * leaves the source file in place and removal fails without overwriting data. */
@@ -1560,14 +1582,14 @@ static void poc_apply_delete_folder()
     for (size_t i = 0; i < items.size(); i++) {
         std::string src = std::string(dir) + items[i] + ".json";
         std::string dst = std::string(rootDir) + items[i] + ".json";
-        if (!MoveFileA(src.c_str(), dst.c_str())) continue;
+        if (!poc_move(src.c_str(), dst.c_str())) continue;
         char oldm[1024], newm[1024];   /* the sidecar follows its prefab; absent is fine */
         if (poc_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
             poc_prefab_meta_path("", items[i], newm, (int)sizeof newm))
-            MoveFileA(oldm, newm);
+            poc_move(oldm, newm);
     }
     poc_strip_trailing_sep(dir);
-    g_delete_folder_result = RemoveDirectoryA(dir) ? 1 : 0;
+    g_delete_folder_result = RemoveDirectoryW(poc_widen(dir).c_str()) ? 1 : 0;
 }
 /* Run enum_inherits (+0x278) or enum_valid_classes (+0x270) into buf; returns 1 + *pcount packed strings
  * (consecutive NUL-terminated, double-NUL end). SEH-guarded, no C++ objects. */
@@ -1879,16 +1901,6 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
  * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
  * Open Rawmap as New Map, so there is nothing to hold on to native-side while the person decides. It must
  * arrive already JSON-escaped (escape_wide), like every other path that crosses this boundary. */
-/* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
- * forwarded verbatim. */
-static std::wstring poc_widen(const char *utf8)
-{
-    std::wstring w;
-    if (!utf8) return w;
-    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
-    return w;
-}
 
 /* Tell the page where the navigation view stands. Sent when the View menu opens
  * and again after an update is asked for. */
@@ -2513,8 +2525,8 @@ static int poc_count_prefab_entities(const std::string &body)
 /* Read a bounded auxiliary file; return false for missing, oversized, or unreadable data. */
 static bool poc_read_small_file(const char *path, std::string &body)
 {
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    FILE *fp = poc_open(path, L"rb");
+    if (!fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     bool ok = false;
     /* A module prefab's sidecar lists every module, so allow more than tags need. */
@@ -2555,8 +2567,8 @@ static int poc_meta_int(const std::string &body, const char *key)
  * (prefab_host.h); "" when that tail names none. */
 static std::string poc_file_top_type(const char *path)
 {
-    FILE *fp = nullptr;
-    if (!path || fopen_s(&fp, path, "rb") != 0 || !fp) return std::string();
+    FILE *fp = poc_open(path, L"rb");
+    if (!fp) return std::string();
     fseek(fp, 0, SEEK_END); long sz = ftell(fp);
     long take = sz < 256 * 1024 ? sz : 256 * 1024;
     std::string tail;
@@ -2573,7 +2585,7 @@ static std::string poc_file_top_type(const char *path)
 static std::wstring poc_prefab_signature(const char *path)
 {
     WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return L"";
+    if (!GetFileAttributesExW(poc_widen(path).c_str(), GetFileExInfoStandard, &fa)) return L"";
     unsigned long long size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
     unsigned long long mtime = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
     return std::to_wstring(size) + L":" + std::to_wstring(mtime);
@@ -2582,10 +2594,10 @@ static std::wstring poc_prefab_signature(const char *path)
  * force a huge WebMessage allocation. */
 static bool poc_read_prefab_scene(const char *path, std::string &body)
 {
-    FILE *fp = nullptr;
+    FILE *fp = poc_open(path, L"rb");
     bool ok = false;
     body.clear();
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    if (!fp) return false;
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
     if (sz > 0 && sz <= 8 * 1024 * 1024) {
         body.resize((size_t)sz);
@@ -2607,8 +2619,8 @@ static std::string poc_prefab_view(const char *path, const char *meta_path, cons
     std::string tail;
     bool is_tail = false;
     if (!text) {
-        FILE *fp = nullptr;
-        if (path && fopen_s(&fp, path, "rb") == 0 && fp) {
+        FILE *fp = poc_open(path, L"rb");
+        if (fp) {
             fseek(fp, 0, SEEK_END); long sz = ftell(fp);
             long take = sz < 1024 * 1024 ? sz : 1024 * 1024;
             if (take > 0) {
@@ -2681,8 +2693,7 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     std::string metaBody, sceneBody, fileBody;
     std::wstring sig;
     char path[1024] = "", mp[1024] = "";
-    if (!name.empty() && poc_prefab_file_path(folder, name, path, (int)sizeof path) &&
-        GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+    if (!name.empty() && poc_prefab_file_path(folder, name, path, (int)sizeof path) && poc_exists(path)) {
         if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) mp[0] = '\0';
         /* The scene is sent only for the selected prefab, without the product's block. */
         bool whole = poc_read_prefab_scene(path, fileBody);
@@ -3217,11 +3228,7 @@ static bool poc_watch_dir(std::wstring &out)
     char path[MAX_PATH * 4];
     out.clear();
     if (!poc_prefab_dir("", path, (int)sizeof path)) return false;
-    int wl = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (wl <= 1) return false;
-    out.assign((size_t)wl, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, &out[0], wl);
-    out.resize(wcslen(out.c_str()));
+    out = poc_widen(path);
     while (!out.empty() && (out.back() == L'\\' || out.back() == L'/')) out.pop_back();
     return !out.empty();
 }
@@ -3425,16 +3432,16 @@ static void poc_send_prefabs()
         poc_list_json_dir(rootDir, rootNames);
 
         std::vector<std::string> subdirs;
-        std::string pattern = std::string(rootDir) + "*";
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+        std::wstring pattern = poc_widen(rootDir) + L"*";
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                std::string dn = fd.cFileName;
+                std::string dn = sh_webview_json::to_utf8(fd.cFileName);
                 if (dn == "." || dn == "..") continue;
                 subdirs.push_back(dn);
-            } while (FindNextFileA(h, &fd));
+            } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
         std::sort(subdirs.begin(), subdirs.end());
