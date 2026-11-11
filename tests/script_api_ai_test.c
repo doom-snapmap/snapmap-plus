@@ -476,6 +476,8 @@ static void test_commands(void)
         "    self:aim_at(nil)\n"
         "    self:trigger(true)\n"
         "    self:trigger(false)\n"
+        "    self:trigger(true, 'left')\n"
+        "    self:trigger(false, 'left')\n"
         "    self:equip(2)\n"
         "    self:laser('laser_sources', true)\n"
         "    self:laser_sweep('rain')\n"
@@ -505,7 +507,8 @@ static void test_commands(void)
     CHECK(strstr(g_events, "1:ssaction_ForceAnimState(0,idle,200,0)\n") != NULL);
     CHECK(strstr(g_events, "1:setPlayerEnemy(0)\n1:setEnemy(e2,1)\n") != NULL);
     CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n1:clearAimFocus()\n") != NULL);
-    CHECK(strstr(g_events, "1:pullTriggerRight()\n1:releaseTriggerRight()\n1:equipInventoryItemByIndex(2)\n") != NULL);
+    CHECK(strstr(g_events, "1:pullTriggerRight()\n1:releaseTriggerRight()\n1:pullTriggerLeft()\n"
+                           "1:releaseTriggerLeft()\n1:equipInventoryItemByIndex(2)\n") != NULL);
     CHECK(strstr(g_events, "1:setLaserState(1,laser_sources)\n1:ae_startLaserSweep(noanim,rain)\n"
                            "1:ae_setLaserState(noanim,0,main_beam)\n") != NULL);
     CHECK(strstr(g_events, "1:ae_setOverrideFocusTagName(noanim,0,focus_aim_idle)\n1:ae_clearOverrideFocusTag(noanim,0)\n") != NULL);

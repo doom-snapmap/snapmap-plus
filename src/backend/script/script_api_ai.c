@@ -88,6 +88,8 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "setScriptAbortFlags",         "bb" },
     { "ae_setLaserState",            "4bs" },
     { "getMonsterType",              "" },
+    { "pullTriggerLeft",             "" },
+    { "releaseTriggerLeft",          "" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -879,17 +881,26 @@ static int l_find_position(lua_State *L)
     return 2;
 }
 
-/* ai:trigger(on) pulls (true) or releases (false) the weapon's trigger. */
+/* ai:trigger(on, [hand]) pulls (true) or releases (false) the trigger of the weapon in `hand`:
+ * "right" (the default, where most demons hold theirs) or "left" (a weapon whose equipSlot is
+ * EQUIP_LEFT_HAND, as the Tyrant's arm cannon). */
 static int l_trigger(lua_State *L)
 {
     sh_script_handle h = 0;
     void *ai;
-    int on;
+    int on, left = 0;
     luaL_checkany(L, 2);
     on = lua_toboolean(L, 2);
+    if (!lua_isnoneornil(L, 3)) {
+        const char *hand = luaL_checkstring(L, 3);
+        if (strcmp(hand, "left") == 0) left = 1;
+        else if (strcmp(hand, "right") != 0)
+            return luaL_error(L, "trigger: the hand is \"left\" or \"right\", not \"%s\"", hand);
+    }
     ai = self_ai(L, "trigger", &h);
     if (!ai || !park(ai, h)) return 0;
-    run(ai, on ? SH_AI_EV_PULL_TRIGGER : SH_AI_EV_RELEASE_TRIGGER, NULL, 0, NULL);
+    if (left) run(ai, on ? SH_AI_EV_PULL_TRIGGER_LEFT : SH_AI_EV_RELEASE_TRIGGER_LEFT, NULL, 0, NULL);
+    else run(ai, on ? SH_AI_EV_PULL_TRIGGER : SH_AI_EV_RELEASE_TRIGGER, NULL, 0, NULL);
     return 0;
 }
 
