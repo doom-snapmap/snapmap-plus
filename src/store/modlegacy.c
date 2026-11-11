@@ -1257,7 +1257,7 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
             {
                 char request[LG_PATH_MAX + 32], *why = NULL;
                 lg_request(target, request, sizeof request);
-                if (!sh_mb_extension_allowed(request)) why = _strdup("type not carried by bundles");
+                if (!sh_mb_extension_allowed(request)) why = _strdup("a file type mods do not carry");
                 else if (!e->size) why = _strdup("empty file");
                 else if (!sh_mb_check_request(request, &why) && !why) why = _strdup("unusable request path");
                 if (why) {
@@ -1280,7 +1280,7 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
             p->count++;
         }
     }
-    if (!p->count) { LG_ERR(err, err_cap, "the package has no files under assets/ after migration"); return 0; }
+    if (!p->count) { LG_ERR(err, err_cap, "the mod has no files under assets/ after its conversion"); return 0; }
     /* Windows folds case: two members on one path must hold the same bytes. */
     qsort(p->files, p->count, sizeof *p->files, lg_target_cmp);
     {
@@ -1716,7 +1716,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     free(cause);
     cause = NULL;
     if (!((origin && origin->build) ? origin->build : modbundle_build_folder)(folder, &cause)) {
-        st_putf(v->reason, sizeof v->reason, "the bundle builder refused it under the current rules: %s",
+        st_putf(v->reason, sizeof v->reason, "it does not build under the current rules: %s",
                 cause && cause[0] ? cause : "no cause given");
         lg_rmtree(folder);
         goto done;

@@ -334,7 +334,7 @@ static void st_list(const st_scan *sc)
         }
         if (u->tidy_migration) {
             size_t n = strlen(parts);
-            st_fmt(parts + n, sizeof parts - n, "%sa finished migration record to shorten", n ? ", " : "");
+            st_fmt(parts + n, sizeof parts - n, "%sa finished conversion record to shorten", n ? ", " : "");
         }
         st_say(0, "  mods\\: %s", parts);
     }
@@ -344,7 +344,7 @@ static void st_list(const st_scan *sc)
     if (sc->ov_due)
         st_say(0, "  overrides\\: %u entr%s not yet moved into mods\\", sc->ov_entries, sc->ov_entries == 1 ? "y" : "ies");
     if (sc->ov_changed)
-        st_say(0, "  overrides\\: %d entr%s added or changed since it was migrated", sc->ov_changed,
+        st_say(0, "  overrides\\: %d entr%s added or changed since it was converted", sc->ov_changed,
                sc->ov_changed == 1 ? "y" : "ies");
     if (sc->lc.loose)
         st_say(0, "  overrides\\: %u loose file(s) or folder(s) of engine paths to move into mods\\my-overrides\\",
@@ -389,10 +389,10 @@ static void st_usage(int err)
     st_emit(err, "  snapmap-plus-store migrate <store> [--doom <DOOM folder>] [--saves <savegame.user folder>]");
     st_emit(err, "");
     st_emit(err, "<store> is the Snapmap+ data folder, usually %LOCALAPPDATA%\\snapmap-plus.");
-    st_emit(err, "check lists what needs migrating and changes nothing (exit 0 nothing to do, 1 work to do, 2 error).");
+    st_emit(err, "check lists what needs converting and changes nothing (exit 0 nothing to do, 1 work to do, 2 error).");
     st_emit(err, "migrate does that work; everything it deletes goes to the Recycle Bin (exit 0 done, 1 partly done,");
     st_emit(err, "2 error). It needs the DOOM folder to move overrides\\ (found through Steam when --doom is not");
-    st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. The loose files of");
+    st_emit(err, "given); entries added to overrides\\ after an earlier conversion are moved too. The loose files of");
     st_emit(err, "overrides\\ and strings\\strids.json become the mod My overrides (mods\\my-overrides), and overrides\\ and");
     st_emit(err, "strings\\ go to the Recycle Bin once everything in them is in mods\\. Mod folders of earlier releases");
     st_emit(err, "are converted to this version's shape and built (one that does not build yet is converted with");
@@ -440,7 +440,7 @@ static int st_check(const st_store *s)
     if (!st_scan_store(s, &sc)) { st_say(1, "error: the store folder %s cannot be read", s->u8); return SH_STORE_ERROR; }
     st_say(0, "Checking %s", s->u8);
     st_list(&sc);
-    if (!sc.kinds) { st_say(0, "Nothing to migrate."); return SH_STORE_OK; }
+    if (!sc.kinds) { st_say(0, "Nothing to convert."); return SH_STORE_OK; }
     st_say(0, "%d kind(s) of work to do.", sc.kinds);
     return SH_STORE_WORK;
 }
@@ -475,7 +475,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         }
     }
     if (!before.kinds) {
-        st_say(0, "Nothing to migrate.");
+        st_say(0, "Nothing to convert.");
         free(doom);
         return SH_STORE_OK;
     }
@@ -495,7 +495,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         return SH_STORE_ERROR;
     }
     if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
-    st_say(0, "Migrating %s", s->u8);
+    st_say(0, "Converting %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     /* Every build here checks and records what the game's own builds do: the
      * stock-bank needs and the "scenes" and "hud" blocks (scripts: store_main.c). */

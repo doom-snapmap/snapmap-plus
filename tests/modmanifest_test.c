@@ -251,7 +251,7 @@ static void value_round_trip(void)
         static const char mixed[] = "{\"mod\":\"alexpink@" HASH_A "\",\"bundle\":\"" HASH_A "\",\"size\":1}";
         static const char with_id[] = "{\"mod\":\"alexpink@" HASH_A "\",\"id\":\"alexpink\",\"size\":1}";
         CHECK(!sh_modmanifest_parse_value(old_row, sizeof old_row - 1, &back, err, sizeof err) &&
-              strstr(err, "earlier shape"));
+              strstr(err, "earlier Snapmap+"));
         CHECK(!sh_modmanifest_parse_value(mixed, sizeof mixed - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(with_id, sizeof with_id - 1, &back, err, sizeof err));
     }

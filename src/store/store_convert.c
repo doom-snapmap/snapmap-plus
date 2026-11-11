@@ -1552,11 +1552,10 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
                     cv_commit(&rec, f->rel, row, f->holder);
                     cv_save(o, &rec);
                     if (r == CV_BUILT)
-                        cv_say(o, 0, "  mods\\%s: converted (it was %s; its salt is now %s)", f->rel, f->key, f->salt);
+                        cv_say(o, 0, "  mods\\%s: converted", f->rel);
                     else {
                         st->failed++;
-                        cv_say(o, 0, "  mods\\%s: converted (it was %s; its salt is now %s), but it does not build yet: %s",
-                               f->rel, f->key, f->salt, cause);
+                        cv_say(o, 0, "  mods\\%s: converted, but it does not build yet: %s", f->rel, cause);
                     }
                     sh_mb_free(&b);
                     continue;
@@ -1699,7 +1698,7 @@ static int cv_resolve(cv_ids *ids, const char *key, const char *bundle, sh_map_o
     }
     e = cv_root_salt(&ids->list, salt);
     if (!e) {
-        st_putf(cause, cap, "it uses %s (now salt %s), whose folder is not installed or does not build", key, salt);
+        st_putf(cause, cap, "it uses %s, whose folder is not installed or does not build", key);
         return 0;
     }
     st_cpy(out->salt, sizeof out->salt, salt);

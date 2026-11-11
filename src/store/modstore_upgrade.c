@@ -571,7 +571,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         goto out;
     }
     if (!ms_up_read_old(dir, &chk, NULL, 0) || strcmp(chk.hash, it->b.hash) != 0) {
-        st_putf(cause, sizeof cause, "the written mod.json does not read back as bundle %.16s", it->b.hash);
+        st_putf(cause, sizeof cause, "the written mod.json does not read back as the mod it was converted from");
         goto out;
     }
     {

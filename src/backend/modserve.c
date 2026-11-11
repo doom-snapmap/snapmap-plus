@@ -810,7 +810,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             inside = !strncmp(subject, ns, strlen(ns)) || strstr(subject, mid) != NULL;
         }
         if (!inside) {
-            ms_fail(b, "'%s' is outside mods/%s/ (its salt) and not listed in shadows", request, b->id);
+            ms_fail(b, "'%s' is outside this mod's own files and is not a game file it changes", request);
             return;
         }
     }
@@ -2223,7 +2223,7 @@ static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, in
         if (share[k] != share[best - i]) tie_sh = 0;
         if (strcmp(x->bundles[f->bundle].id, x->bundles[b->bundle].id)) tie_key = 0;
     }
-    if (!tie_un) *reason = "its needs resolve against the installed bundles where the others' do not";
+    if (!tie_un) *reason = "its needs resolve against the installed mods where the others' do not";
     else if (!tie_sh) *reason = "most providers carry these bytes";
     else if (tie_key) *reason = "the root folder's build of its salt";
     else *reason = "no rule separates them; the first salt in name order (a map's rows decide while it is open)";
@@ -5023,7 +5023,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
             int p = nd->file;
             if (p < 0) {
                 if (ms_need_blocks(nd->name) && !cause[at]) {
-                    char *buf = sh_textf("needs %s '%s', which no admitted bundle provides", nd->type, nd->name);
+                    char *buf = sh_textf("needs %s '%s', which no installed mod provides", nd->type, nd->name);
                     cause[at] = buf ? ms_strdup((ms_index *)x, buf) : NULL;
                     free(buf);
                     if (!cause[at]) cause[at] = "needs a file no installed mod provides";

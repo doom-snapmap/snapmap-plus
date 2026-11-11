@@ -3523,7 +3523,7 @@ static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char **why)
         char mod_ns[SH_MB_ID_MAX + 32];
         _snprintf_s(mod_ns, sizeof mod_ns, _TRUNCATE, "maps/modules/mods/%s/", b->id);
         if (mb_starts(f->request, mod_ns)) return 1;
-        return mb_cause(why, "a snapModule decl must be maps/modules/mods/%s/<name>.decl", b->id);
+        return mb_cause(why, "a snapModule decl must be maps/modules/mods/<this folder's name>/<name>.decl");
     }
     if (f->is_decl && f->ptype && _stricmp(f->ptype, "skins") == 0) {
         char *p;
@@ -3532,11 +3532,11 @@ static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char **why)
         under = strstr(slashed, ns_raw) != NULL;
         free(slashed);
         if (under) return 1;
-        return mb_cause(why, "skins decl %s does not name a mesh under /mods/%s/", f->pname ? f->pname : "", b->id);
+        return mb_cause(why, "skins decl %s does not name a mesh under /mods/<this folder's name>/", f->pname ? f->pname : "");
     }
     if (f->is_decl) {
         if (f->pname && mb_starts(f->pname, ns_decl)) return 1;
-        return mb_cause(why, "decl %s %s is outside mods/%s/", f->ptype ? f->ptype : "", f->pname ? f->pname : "", b->id);
+        return mb_cause(why, "decl %s %s is outside mods/<this folder's name>/", f->ptype ? f->ptype : "", f->pname ? f->pname : "");
     }
     if (mb_ends(f->request, ".bnk")) {
         return sh_mb_bank_rule(f->request, b->id, why);
@@ -5038,8 +5038,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 /* "virtualtextures/" then "/mods/<salt>/" from its '/' on */
                 if (!f->is_decl && sh_mb_vt_member(f->request, NULL, NULL) &&
                     _strnicmp(f->request + 15, ns_raw, strlen(ns_raw)) != 0)
-                    mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/%s/<family>_sq<N>.mega2",
-                             f->path, b->id);
+                    mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/<this folder's name>/<family>_sq<N>.mega2",
+                             f->path);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
                 /* A decl at a game name is an edited copy (mb_derive_edits);
@@ -5074,7 +5074,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         if (!b->files[i].is_module) continue;
         info = sh_mb_module_info_request(b->files[i].request);
         if (!info || !mb_req_has(&own, info))
-            mb_error(b, "%s: a snapModule needs its snapModuleInfo assets/%s in the same bundle", b->files[i].path,
+            mb_error(b, "%s: a snapModule needs its snapModuleInfo assets/%s in the same mod", b->files[i].path,
                      info ? info : "?");
         free(info);
     }
@@ -6290,7 +6290,7 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char **cause)
     char *text = NULL;
     size_t elen = 0, len = 0;
     int ok;
-    if (!b || b->errors || !b->canonical) return mb_cause(cause, "the bundle has errors and is not written");
+    if (!b || b->errors || !b->canonical) return mb_cause(cause, "the mod has errors, so its mod.json is not written");
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
     if (!mod_path) { free(root); return mb_cause(cause, "out of memory"); }
@@ -6457,7 +6457,7 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
             } else if (bs && (bs->t != MBJ_STR || !sh_salt_valid(bs->s, bs->n))) {
                 mb_error(out, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
             } else if (bs && salt && (strlen(salt) != bs->n || memcmp(salt, bs->s, bs->n) != 0)) {
-                mb_error(out, "mod.json's salt is %s, not %s", bs->s, salt);
+                mb_error(out, "This folder's mod.json belongs to another mod; put back this folder's own mod.json from a backup, or make the mod again with New mod");
             } else if (!bs && !(salt && sh_salt_valid(salt, strlen(salt)))) {
                 mb_error(out, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
             } else {

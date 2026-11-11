@@ -706,8 +706,6 @@
   .mods-area-head .pf-fcount { letter-spacing: 0; text-transform: none; }
   /* The same-files hint: a note in the warning colours, as in the Prefabs tab's needs line. */
   .mods-same { margin-top: -6px; padding: 5px 8px; border-radius: 4px; background: var(--warnBg); color: var(--warnText); }
-  /* Copy mod id: a small link under the About fields. */
-  .mods-copy-id { align-self: flex-start; margin-top: 4px; font-size: 10px; }
   .mods-side .muted { color: var(--muted); }
   .mods-paths summary { margin-top: 2px; }
   .mods-paths-list { max-height: 260px; overflow: auto; padding: 3px 0 0 12px; font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }

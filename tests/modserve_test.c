@@ -496,9 +496,9 @@ static void test_index_and_isolation(void)
     CHECK(st.conflicts == 1);
     CHECK(log_has("bundle 'carolbro' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
     CHECK(log_has("bundle 'davex000' skipped: not built: md6Def mesh missing"));
-    CHECK(log_has("bundle 'erinns00' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erinns00/"));
+    CHECK(log_has("bundle 'erinns00' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside this mod's own files and is not a game file it changes"));
     CHECK(log_has("bundle 'unbuilt' skipped: not built yet"));
-    CHECK(log_has("bundle 'hanksnd0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hanksnd0/"));
+    CHECK(log_has("bundle 'hanksnd0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside this mod's own files and is not a game file it changes"));
     CHECK(!log_has("bundle 'gailsnd0' skipped"));
     CHECK(log_count("skipped:") == 5);   /* one line per skipped bundle */
     /* Two mods' shadows of one stock decl: with no map, the static winner
@@ -2043,7 +2043,7 @@ static void test_conflicts(void)
     }
     /* Needs before recency. */
     CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needslat, needsok0; serving needsok0 "
-                  "(its needs resolve against the installed bundles where the others' do not)"));
+                  "(its needs resolve against the installed mods where the others' do not)"));
     CHECK(open_text(NEEDY, text, sizeof text) == 1 && !strcmp(text, "{ pain b }"));
     CHECK(!log_has("serving neither"));
 
@@ -4558,7 +4558,7 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
-    CHECK(log_has("bundle 'elsewhere' skipped: '" SP_THING "' is outside mods/zother00/ (its salt)"));
+    CHECK(log_has("bundle 'elsewhere' skipped: '" SP_THING "' is outside this mod's own files and is not a game file it changes"));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
 

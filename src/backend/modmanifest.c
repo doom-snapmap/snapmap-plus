@@ -414,7 +414,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         return 0;
     }
     if (sh_json_object_get(&object, "id") || sh_json_object_get(&object, "bundle")) {
-        MM_ERR("row is in an earlier shape (it names an id or a bundle)");
+        MM_ERR("the map was saved by an earlier Snapmap+; run the Snapmap+ installer again and it converts the map");
         goto done;
     }
     {

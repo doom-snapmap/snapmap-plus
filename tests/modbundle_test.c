@@ -568,7 +568,7 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     /* A block whose salt differs from the one given is refused. */
     CHECK(!sh_mb_build(folder, "zzzzzzzz", &RESOLVER, &b));
-    CHECK_CAUSE(b, "mod.json's salt is " SALT ", not zzzzzzzz");
+    CHECK_CAUSE(b, "This folder's mod.json belongs to another mod");
     sh_mb_free(&b);
 }
 
@@ -1220,14 +1220,14 @@ static void test_refusals(const char *fixture, const char *tmp)
         sh_mb_free(&ok);
     }
     refused(fixture, tmp, m_empty, &RESOLVER, "empty file");
-    refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/alexrimp/");
+    refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/<this folder's name>/");
     refused(fixture, tmp, m_unns_raw, &RESOLVER, "is not under a mods folder named like this mod folder");
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
     /* Additive mods: a file at a name outside the namespace must be a game
      * name. */
-    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "outside mods/alexrimp/, and the game has no file of that name");
+    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "outside mods/<this folder's name>/, and the game has no file of that name");
     {
         char plain[65];
         accepted(fixture, tmp, m_desc_plain, &b);

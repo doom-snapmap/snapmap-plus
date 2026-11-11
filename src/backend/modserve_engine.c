@@ -1472,7 +1472,7 @@ static int me_anim_ready(me_raw *r, unsigned char *d, const me_raw_name *n)
     int ok;
     if (*(const unsigned *)(d + RES_LIFETIME_OFF) != 4) { r->anims_level1++; return 0; }
     bytes = n->request ? me_peek(n->request, &len) : NULL;
-    if (!bytes) _snprintf_s(why, sizeof why, _TRUNCATE, "its bundle's bytes could not be read");
+    if (!bytes) _snprintf_s(why, sizeof why, _TRUNCATE, "its served bytes could not be read");
     ok = bytes && me_anim_bytes_ok(bytes, len, why, sizeof why);
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     if (!ok) {

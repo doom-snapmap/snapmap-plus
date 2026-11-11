@@ -251,7 +251,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
 
     /* Without the game folder: the layout and the bin, not overrides. */
     CHECK(run("migrate", data, NULL, NULL) == SH_STORE_PARTIAL);
-    CHECK(said("Migrating "));
+    CHECK(said("Converting "));
     CHECK(said("  store: " "alex.tiny@1.0.0+1: mod.json written for alex.tiny@1.0.0+1"));
     CHECK(said("1 hard link(s) replaced by copies"));
     CHECK(said("  store: alex.tiny@1.0.0+1 -> alex.tiny"));
@@ -298,7 +298,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused), "
                "1 retired folder(s) moved to the stand-in bin, 1 mod folder(s) converted (0 of them do not build yet), 0 "
                "left as they were"));
-    CHECK(said("  mods\\alex.tiny: converted (it was alex.tiny; its salt is now "));
+    CHECK(said("  mods\\alex.tiny: converted"));
     {
         /* The converted folder: format 2, salted, its files under mods/<salt>/, built and verified. */
         sh_mb_bundle t1;
@@ -327,7 +327,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" STOCK_REL, data);
     CHECK(!mt_exists(path) && in_bin("overrides"));   /* every entry is in mods\: the folder went to the bin */
 
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
 
     /* Idempotent: a second migrate finds nothing and changes nothing. */
     before = (char *)calloc(1, 1 << 20);
@@ -336,8 +336,8 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     if (before && after) {
         snapshot(data, "", before, 1 << 20);
         discards = g_discards;
-        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to migrate."));
-        CHECK(run("migrate", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to convert."));
+        CHECK(run("migrate", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
         snapshot(data, "", after, 1 << 20);
         CHECK(!strcmp(before, after));
         CHECK(g_discards == discards);
@@ -358,7 +358,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
             CHECK(MoveFileExA(a1, a2, 0));
         }
         CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
-        CHECK(said("  overrides\\: 1 entry added or changed since it was migrated") && said("1 kind(s) of work to do."));
+        CHECK(said("  overrides\\: 1 entry added or changed since it was converted") && said("1 kind(s) of work to do."));
         CHECK(!said("not yet moved into mods"));
         CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
         /* The again pass rebuilds every entry there is (the first went to the bin with the folder). */
@@ -368,7 +368,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
         CHECK(mt_exists(path));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\mod.json", data);
         CHECK(mt_exists(path));
-        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
     }
     free(before);
     free(after);
@@ -476,8 +476,8 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     free(record);
     record = NULL;
     /* A second run finds nothing. */
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
-    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to convert."));
 
     /* 2. The player's own my-overrides: what it lacks is added, what it has is kept. */
     make_loose_store(fixture, data);
@@ -490,7 +490,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
                                  "  \"strings\": {\"en\": {\"sh_a\": \"Mine A\", \"sh_mine\": \"Mine\"}}\n}\n");
     mt_write(folder, MO_DECL, DECL_MINE);
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\my-overrides: converted (it was my-overrides; its salt is now "));
+    CHECK(said("  mods\\my-overrides: converted"));
     CHECK(said("migration: kept my-overrides' assets/generated/decls/entitydef/mods/my-overrides/x.decl; the copy in "
                "overrides\\ differs and was not taken"));
     CHECK(said("migration: kept my-overrides' sh_a; strings\\strids.json said \"Other\""));
@@ -513,7 +513,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     memset(&b, 0, sizeof b);
     CHECK(sh_mb_load_folder(folder, &b) && b.extra && strstr(b.extra, "_sh_c\":\"Gamma\"") && b.file_count == 2);
     sh_mb_free(&b);
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
 
     /* 3. A ZIP the migration skips keeps overrides\; a malformed document keeps strings\. */
     mt_remove_tree(data);
@@ -544,7 +544,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     CHECK(said("strings\\strids.json added to mods\\my-overrides\\: 0 file(s) added, 0 kept, 0 already there; 1 string(s) "
                "added"));
     CHECK(said("migration: strings\\ moved to the stand-in bin"));
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
     sh_modstock_reset();
 }
 
@@ -747,9 +747,9 @@ static void test_beta26(const char *fixture, const char *tmp)
     if (bin_before) snapshot(path, "", bin_before, 1 << 16);
 
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\alex.beta: converted (it was alex.beta; its salt is now "));
+    CHECK(said("  mods\\alex.beta: converted"));
     /* A folder the salting refuses is still written in the one shape, its build failed with the plain cause. */
-    CHECK(said("  mods\\alex.bin: converted (it was alex.bin; its salt is now ") && said("but it does not build yet: "
+    CHECK(said("  mods\\alex.bin: converted") && said("but it does not build yet: "
                "assets/generated/image/mods/alex.bin/x.bimage names mods/alex.bin/ inside a binary file"));
     CHECK(said("  mods\\alex.beta@0123456789abcdef: an extra copy of alex.beta that Snapmap+ made, moved to the stand-in bin"));
     CHECK(said("  mods\\downloads\\Old Map\\alex.beta: an extra copy of alex.beta that Snapmap+ made"));
@@ -865,14 +865,14 @@ static void test_beta26(const char *fixture, const char *tmp)
     CHECK(mt_exists(path));
 
     /* A second run does nothing: what was left is listed, not work. */
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
     CHECK(!said("folder(s) left as they were") && said("  1 map(s) left as they were by an earlier run"));
     before = (char *)calloc(1, 1 << 20);
     after = (char *)calloc(1, 1 << 20);
     if (before && after) {
         unsigned discards = g_discards;
         snapshot(data, "", before, 1 << 20);
-        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to migrate."));
+        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to convert."));
         snapshot(data, "", after, 1 << 20);
         CHECK(!strcmp(before, after) && g_discards == discards);
     }
@@ -885,7 +885,7 @@ static void test_beta26(const char *fixture, const char *tmp)
         mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.late\\l.decl", "{\n\tsize = \"3\";\n}\n");
         mt_write(path, "README.txt", "mods/alex.late/ is where my files are\n");
         CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("1 mod folder(s) of an earlier release to convert"));
-        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("  mods\\late: converted (it was alex.late;"));
+        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("  mods\\late: converted"));
         CHECK(!said("alex.beta") && !said("alex.bin"));
         t = text_of(path, "README.txt");   /* a file beside the mod is never read or rewritten (DECISIONS 16) */
         CHECK(t && !strcmp(t, "mods/alex.late/ is where my files are\n"));
@@ -902,7 +902,7 @@ static void test_beta26(const char *fixture, const char *tmp)
                 *nl = '\n';
             }
         }
-        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
     }
     free(before);
     free(after);
@@ -955,7 +955,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("  mods\\: 2 item(s) an interrupted run left"));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("alex.beta: put back as it was before an interrupted run") &&
-          said("  mods\\alex.beta: converted (it was alex.beta; its salt is now "));
+          said("  mods\\alex.beta: converted"));
     CHECK(!mt_exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.beta", mods);
     memset(&b, 0, sizeof b);
@@ -1011,7 +1011,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
     free(t);
     _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\map.decl.snapmap-plus-tmp", path);
     CHECK(!mt_exists(p2));
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
 
     /* 4. An Explorer copy whose name sorts first: the folder named after the key keeps the key's maps. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.zed", mods);
@@ -1044,7 +1044,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
         if (fopen_s(&f, bp, "wb") == 0 && f) { fwrite(bnk, 1, sizeof bnk, f); fclose(f); }
     }
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\alex.scenes: converted (it was alex.scenes; its salt is now ") &&
+    CHECK(said("  mods\\alex.scenes: converted") &&
           said("mod.json \"scenes\" is refused: "));
     rec = record_section(mods);
     {
@@ -1134,7 +1134,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
     mt_write(path, "assets\\generated\\decls\\entitydef\\mods\\alex.cyber\\boss.decl", "{\n\tsize = \"5\";\n}\n");
     b26_slot(saves, "SNAPMAPS00000000000000000006", B26_MAP("alex.cyber", H6));
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-    CHECK(said("  mods\\cyber: converted (it was alex.cyber; its salt is now ") && said("but it does not build yet: "));
+    CHECK(said("  mods\\cyber: converted") && said("but it does not build yet: "));
     CHECK(said("SNAPMAPS00000000000000000006\\map.decl: left as it was"));
     CHECK(!sh_mb_old_is_old(path));
     t = text_of(path, "mod.json");
@@ -1142,7 +1142,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
         char csalt[SH_SALT_LEN + 1] = "", under[64];
         memcpy(csalt, strstr(t, "\"salt\": \"") + 9, SH_SALT_LEN);
         _snprintf_s(under, sizeof under, _TRUNCATE, "mods/%s/", csalt);
-        CHECK(strstr(t, "\"cause\"") && strstr(t, "cyber_boss") && strstr(t, under) && !strstr(t, "\"build\""));
+        CHECK(strstr(t, "\"cause\"") && strstr(t, "cyber_boss") && strstr(t, "mods/<this folder's name>/") && !strstr(t, "\"build\""));
     } else CHECK(0);
     free(t);
     /* The map stays left while its folder fails, and converts at the next run once the author fixed the folder
@@ -1158,7 +1158,7 @@ static void test_interrupted(const char *fixture, const char *tmp)
     t = b26_slot_text(saves, "SNAPMAPS00000000000000000006", &signed_ok);
     CHECK(t && signed_ok && !strstr(t, "alex.cyber"));
     free(t);
-    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
     sh_store_tool_set_saves(L"");
     sh_modstock_reset();
 }
