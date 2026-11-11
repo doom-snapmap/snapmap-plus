@@ -295,9 +295,17 @@ static int c_anim_node(void *e, char *out, size_t cap)
     strcpy_s(out, cap, ((fent *)e)->node);
     return 1;
 }
+/* the demon's md6Def tags: its aim tags only */
+static int c_tag(void *e, const char *name, float pos[3], float axis[9])
+{
+    (void)axis;
+    if (!((fent *)e)->is_ai || strncmp(name, "focus_aim", 9)) return 0;
+    memcpy(pos, ((fent *)e)->origin, 12);
+    return 1;
+}
 static const sh_script_engine g_common = {
     c_resolve, c_spawn_id, NULL, NULL, c_kind, c_origin, NULL, NULL, NULL, c_event,
-    NULL, NULL, NULL, c_anim_node, NULL, NULL, NULL, f_ground, NULL
+    NULL, NULL, NULL, c_anim_node, NULL, NULL, NULL, f_ground, NULL, c_tag
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -658,6 +666,8 @@ static void test_refusals(void)
     expect_stop("self:move_to({x = 1, y = 2, z = 3}, 5, { fly = true })",
                 "\"move_to\" knows the options run, strafe and aim_while_moving, not \"fly\"");
     expect_stop("self:face(42)", "\"face\" needs a position");
+    expect_stop("self:focus_tag('arm_hand_lf')", "\"focus_tag\": \"arm_hand_lf\" is not a tag of this demon's md6Def "
+                "(the game aims only at tags, not joints)");
     expect_stop("self:equip(-1)", "\"equip\" needs an inventory index of 0 or more, got -1");
     expect_stop("self:laser('a b', true)", "\"laser\": \"a b\" is not a usable name");
     expect_stop("self:find_position({ min = 10, max = 5 })", "\"find_position\": max must not be less than min");

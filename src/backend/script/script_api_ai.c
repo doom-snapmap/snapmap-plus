@@ -1105,8 +1105,16 @@ static int l_focus_tag(lua_State *L)
     sh_script_handle h = 0;
     const char *tag = lua_isnoneornil(L, 2) ? NULL : check_tag(L, 2, "focus_tag", "a tag name");
     void *ai = self_ai(L, "focus_tag", &h);
+    const sh_script_engine *ce = sh_script_api_engine();
     sh_ai_arg a[3];
-    if (!ai || !park(ai, h)) return 0;
+    float pos[3];
+    if (!ai) return 0;
+    /* The engine focuses on md6Def tags only; a joint name or a misspelling
+     * would leave the demon aiming nowhere with a console warning. */
+    if (tag && ce && ce->tag && ce->tag(ai, tag, pos, NULL) == 0)
+        return sh_script_refuse(L, "\"focus_tag\": \"%s\" is not a tag of this demon's md6Def (the game aims only at "
+                                "tags, not joints)", tag);
+    if (!park(ai, h)) return 0;
     a[0] = arg_anim(); a[1] = arg_i(SH_AI_FOCI_AIM);
     if (tag) { a[2] = arg_s('s', tag); run(ai, SH_AI_EV_SET_FOCUS_TAG, a, 3, NULL); }
     else run(ai, SH_AI_EV_CLEAR_FOCUS_TAG, a, 2, NULL);

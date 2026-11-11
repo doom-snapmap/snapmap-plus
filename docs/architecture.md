@@ -2101,13 +2101,19 @@ trigger's does.
   own fx decl, started on every machine); `fx(effect, pos, [dir])`,
   `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
   through `spawn` and its caps, removed by `fx_stop`); `sound(e, sound,
-  [channel])` (`startSoundShader`); `e:tag(joint)` (the joint's world position
-  and forward direction from the base dispatcher's getJoint events);
+  [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
+  a named point with a parent joint and its own offset and rotation, found
+  as the engine finds aim and focus tags: the model decl's `_info` prop row,
+  VK 0x1416CE1E0 / GL 0x1416CEE90, placed in world space by VK 0x1415EFAA0 /
+  GL 0x1415F0CA0; otherwise a joint, from the base dispatcher's getJoint
+  events; the position and forward direction);
   `e:pain()` (the pain reaction an idAI2 is in, idAI2 `+0x5060`, nil once the
-  engine's pain state clears it); `ai:fire(projectile, joint, target)`
+  engine's pain state clears it); `ai:fire(projectile, tag or joint, target)`
   (`ae_launchProjectileAtTarget` run at once with no animation; answers the
   projectile, caught by the launch hook; a position target is reached by
-  steering); `ai:can_see_from(other, joint)`; `p:steer(target, [speed])`
+  steering; from a tag the projectile is placed on the tag and steered at the
+  target); `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
+  name that is not a tag, since the engine aims only at tags; `p:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
   `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
   a projectile one of the mod's entities launched. A script may hold `p` for
