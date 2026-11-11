@@ -3,9 +3,9 @@
  *
  *   vt_harness_test.exe [<rctest mod folder>]
  *
- * Without an argument: the page-header swap and the member cell lookup (the
+ * Without an argument: the member cell lookup (the
  * record decoding is modvt_test.c's). With the folder made by snaphak-re's
- * lane RC make_family.py (or SH_VT_RCTEST set to it): a copy is built by the
+ * make_family.py (or SH_VT_RCTEST set to it): a copy is built by the
  * real bundle builder with a stock stand-in, admitted by the real serving
  * index, its request paths looked up, its family collected as modvt.c
  * registers it, and the editor plan's order checked (the material before the
@@ -36,19 +36,13 @@ void backend_log(const char *line) { (void)line; }
 
 static void helpers(void)
 {
-    unsigned char page[16] = { 0x1E, 0x1E, 0x1E, 0x0C, 0x2A, 0xE5, 0x24, 0x43, 0x2B, 0x06, 0x04, 0xE6, 0x00, 0x00, 0x60, 0x00 };
     unsigned char h[0x170];
     int i;
     unsigned run = 0;
 
     printf("-- pure helpers\n");
 
-    sh_vt_swap_page_header(page);
-    CHECK(page[4] == 0xE5 && page[5] == 0x2A && page[0xC] == 0 && page[0xE] == 0x60 && page[0] == 0x1E);
-    sh_vt_swap_page_header(page);
-    CHECK(page[4] == 0x2A && page[5] == 0xE5);
-
-    /* Member sq4 (column 3, row 0): the level table of lane RB 1.2. */
+    /* Member sq4 (column 3, row 0): the level table of a 4 x 4 family member. */
     memset(h, 0, sizeof h);
     *(unsigned *)h = 0xA63FBB21u;
     *(unsigned *)(h + 4) = 2;

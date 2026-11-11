@@ -22,6 +22,8 @@ static SRWLOCK        g_preview_lock  = SRWLOCK_INIT;
 static char           g_requested[512] = { 0 };
 static int            g_requested_kind = SH_PREVIEW_KIND_AUTO;
 static volatile LONG  g_request_gen    = 0;
+/* Why the latest request produced no picture; empty while it is pending or served. */
+static char           g_failed[SH_PREVIEW_REASON_CAP] = { 0 };
 
 int sh_preview_get(char *out, size_t cap)
 {
@@ -62,6 +64,7 @@ void sh_preview_request_kind(const char *name, int kind)
     AcquireSRWLockExclusive(&g_preview_lock);
     strncpy_s(g_requested, sizeof g_requested, name, _TRUNCATE);
     g_requested_kind = kind;
+    g_failed[0] = '\0';
     /* Invalidate the current image BEFORE the generation bump, or a poll can see the new request with
      * the previous request's picture still marked ready and stop polling one image too early. */
     char *superseded = g_preview_b64;
@@ -73,7 +76,7 @@ void sh_preview_request_kind(const char *name, int kind)
 
     char line[600];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: preview REQUEST #%ld -- '%s' staged (%s)", gen, name,
+        "preview: request #%ld '%s' staged (%s)", gen, name,
         kind == SH_PREVIEW_KIND_AUTO ? "automatic route" : "typed route");
     backend_log(line);
 }
@@ -84,6 +87,7 @@ void sh_preview_cancel(void)
     AcquireSRWLockExclusive(&g_preview_lock);
     g_requested[0] = '\0';
     g_requested_kind = SH_PREVIEW_KIND_AUTO;
+    g_failed[0] = '\0';
     discarded = g_preview_b64;
     g_preview_b64 = NULL;
     InterlockedExchange(&g_preview_ready, 0);
@@ -100,7 +104,7 @@ int sh_preview_take_request(char *out, size_t cap, unsigned long *generation, in
     *kind = SH_PREVIEW_KIND_AUTO;
 
     AcquireSRWLockShared(&g_preview_lock);
-    int pending = (!g_preview_ready && g_requested[0] != '\0');
+    int pending = (!g_preview_ready && !g_failed[0] && g_requested[0] != '\0');
     if (pending) {
         strncpy_s(out, cap, g_requested, _TRUNCATE);
         *generation = (unsigned long)g_request_gen;
@@ -108,6 +112,54 @@ int sh_preview_take_request(char *out, size_t cap, unsigned long *generation, in
     }
     ReleaseSRWLockShared(&g_preview_lock);
     return pending;
+}
+
+int sh_preview_fail(unsigned long generation, const char *reason)
+{
+    int rc = SH_PREVIEW_STALE;
+    AcquireSRWLockExclusive(&g_preview_lock);
+    if (generation && (unsigned long)g_request_gen == generation && g_requested[0] && !g_preview_ready) {
+        strncpy_s(g_failed, sizeof g_failed,
+                  reason && *reason ? reason : "This asset has no preview.", _TRUNCATE);
+        rc = SH_PREVIEW_FAILED;
+    }
+    ReleaseSRWLockExclusive(&g_preview_lock);
+    if (rc == SH_PREVIEW_FAILED) {
+        char line[260];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "preview: request #%lu failed: %s", generation,
+                    reason && *reason ? reason : "no reason given");
+        backend_log(line);
+    }
+    return rc;
+}
+
+int sh_preview_failure(char *out, size_t cap)
+{
+    int failed;
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    AcquireSRWLockShared(&g_preview_lock);
+    failed = g_failed[0] != '\0';
+    if (failed) strncpy_s(out, cap, g_failed, _TRUNCATE);
+    ReleaseSRWLockShared(&g_preview_lock);
+    return failed;
+}
+
+/* Copy `h` rows of `w` RGBA pixels behind a zero filter byte each. Returns 0 on a fault reading
+ * the source. */
+static int preview_copy_rows(unsigned char *raw, size_t raw_stride, const unsigned char *rgba,
+                             unsigned w, unsigned h)
+{
+    __try {
+        for (unsigned y = 0; y < h; ++y) {
+            unsigned char *dst = raw + (size_t)y * raw_stride;
+            dst[0] = 0;                                        /* filter type 0 (None) */
+            memcpy(dst + 1, rgba + (size_t)y * w * 4u, (size_t)w * 4u);
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
 int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsigned w, unsigned h)
@@ -118,7 +170,7 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
 
     if (!generation || !rgba || w == 0 || h == 0) return SH_PREVIEW_FAILED;
 
-    __try {
+    {
         /* Use RGBA PNG so icons and decals retain their alpha channel. Encode
          * zlib with stored DEFLATE blocks of at most 65535 bytes and an
          * Adler-32; each PNG chunk also has a CRC-32.
@@ -129,11 +181,13 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
         const size_t raw_len = raw_stride * h;
 
         unsigned char *raw = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, raw_len);
-        if (!raw) { backend_log("B2: preview -- PNG raw alloc failed"); return SH_PREVIEW_FAILED; }
-        for (unsigned y = 0; y < h; ++y) {
-            unsigned char *dst = raw + (size_t)y * raw_stride;
-            dst[0] = 0;                                        /* filter type 0 (None) */
-            memcpy(dst + 1, rgba + (size_t)y * w * 4u, w * 4u);
+        if (!raw) { backend_log("preview: out of memory for the PNG rows"); return SH_PREVIEW_FAILED; }
+        /* The caller's pixels are the only memory here this module does not own, so the copy is
+         * the only guarded step and nothing allocated below can leak on a fault. */
+        if (!preview_copy_rows(raw, raw_stride, rgba, w, h)) {
+            HeapFree(GetProcessHeap(), 0, raw);
+            backend_log("preview: the decoded pixels could not be read");
+            return SH_PREVIEW_FAILED;
         }
 
         /* CRC-32 table, built once. */
@@ -166,7 +220,7 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
         const size_t pngCap = 8u + (12u + 13u) + (12u + idat_len) + 12u;
 
         unsigned char *png = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, pngCap);
-        if (!png) { HeapFree(GetProcessHeap(), 0, raw); backend_log("B2: preview -- PNG alloc failed"); return SH_PREVIEW_FAILED; }
+        if (!png) { HeapFree(GetProcessHeap(), 0, raw); backend_log("preview: out of memory for the PNG"); return SH_PREVIEW_FAILED; }
 
         size_t o = 0;
         static const unsigned char SIG[8] = {0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A};
@@ -234,7 +288,7 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
         char  *out       = (char *)HeapAlloc(GetProcessHeap(), 0, outCap);
         if (!out) {
             HeapFree(GetProcessHeap(), 0, png_bytes);
-            backend_log("B2: preview -- base64 alloc failed");
+            backend_log("preview: out of memory for the data URI");
             return SH_PREVIEW_FAILED;
         }
         memcpy(out, prefix, prefixLen);
@@ -269,17 +323,15 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
         char *old = g_preview_b64;
         g_preview_b64 = out;
         InterlockedExchange(&g_preview_ready, 1);
+        g_failed[0] = '\0';
         ReleaseSRWLockExclusive(&g_preview_lock);
         if (old) HeapFree(GetProcessHeap(), 0, old);   /* safe: no reader can still hold it */
 
         char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: preview PUBLISHED #%lu -- %ux%u RGBA PNG, %zu base64 chars; fetch via iface ext 13",
+            "preview: request #%lu published, %ux%u RGBA PNG, %zu base64 chars",
             generation, w, h, o);
         backend_log(line);
         return SH_PREVIEW_PUBLISHED;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("B2: preview -- FAULTED encoding the preview");
-        return SH_PREVIEW_FAILED;
     }
 }

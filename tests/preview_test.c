@@ -165,6 +165,31 @@ int main(void)
         CHECK(sh_preview_publish(repeated, old_pixel, 1, 1) == SH_PREVIEW_STALE);
     }
 
+    /* A request with no picture ends with a plain reason instead of staying pending. */
+    {
+        char why[SH_PREVIEW_REASON_CAP];
+        unsigned long failed = 0, next = 0;
+        sh_preview_request("materials/no_image");
+        CHECK(sh_preview_take_request(name, sizeof name, &failed, &kind) == 1);
+        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(sh_preview_fail(failed - 1, "stale") == SH_PREVIEW_STALE);
+        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(sh_preview_fail(failed, "This material has no image to preview.") == SH_PREVIEW_FAILED);
+        CHECK(sh_preview_take_request(name, sizeof name, &next, &kind) == 0);
+        CHECK(sh_preview_failure(why, sizeof why) == 1);
+        CHECK(strcmp(why, "This material has no image to preview.") == 0);
+        CHECK(sh_preview_get(why, sizeof why) == 0);
+        CHECK(sh_preview_publish(failed, old_pixel, 1, 1) == SH_PREVIEW_PUBLISHED);
+        CHECK(sh_preview_failure(why, sizeof why) == 0);   /* a picture after all replaces the reason */
+        sh_preview_request("materials/next");
+        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(sh_preview_take_request(name, sizeof name, &next, &kind) == 1);
+        CHECK(sh_preview_fail(next, NULL) == SH_PREVIEW_FAILED);
+        CHECK(sh_preview_failure(why, sizeof why) == 1 && why[0] != '\0');
+        sh_preview_cancel();
+        CHECK(sh_preview_failure(why, sizeof why) == 0);
+    }
+
     if (failures) {
         fprintf(stderr, "%d preview test(s) failed\n", failures);
         return 1;
