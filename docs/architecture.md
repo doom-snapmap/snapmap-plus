@@ -1399,7 +1399,13 @@ apply in this machine's editor and a map-declared mod's in the maps that use it;
 strings (each editor pass and map activation). When two bundles give one key
 different text the first stands and one `STRINGS: REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
-(bundles B, baked D)`. The player's own document of earlier releases,
+(bundles B, baked D)`. A runtime pass (a rescan, an install, an editor or
+map pass) runs on the main thread inside the game's process heap: an append
+that grows the table allocates its new array from the current heap (the
+list's resize asks for heap -1, VK 0x140280ED0), and the editor's or a map's
+own heap is freed with it, after which the game's string lookups (VK
+0x140281360) read freed memory. A thread where the process heap cannot be
+selected runs no pass and leaves the refresh pending. The player's own document of earlier releases,
 `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
 tool's loose step moves its keys into the mod My overrides (see [Migration of
 the retired overrides folder](#migration-of-the-retired-overrides-folder)), so
