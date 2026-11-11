@@ -81,6 +81,7 @@
 #include "engine_build.h"
 #include "engine_globals.h"
 #include "script/script_hooks.h"
+#include "script/script_api_ai.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -559,6 +560,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             /* Feature registry: record mod scripts as unavailable for this
              * session here once the registry is on this branch. */
         }
+        /* Mod scripts' AI calls (script/script_api_ai.h): the calls are added
+         * to every script state; the demon park hook is committed at the
+         * first command. A failed install writes its one plain line and the
+         * calls refuse with a plain sentence. */
+        if (overrides_installed) (void)sh_script_ai_install(g_doom_base);
 
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
