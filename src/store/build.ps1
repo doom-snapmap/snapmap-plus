@@ -28,13 +28,14 @@ Write-Host "[build] MSVC toolset $toolset"
 
 $outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
 # /MT links the C runtime statically so the tool runs on a machine without the VC redistributable.
+# /STACK reserves 64 MiB: the tool's path buffers each hold any path Windows accepts (store_text.h).
 # Sources compile to build\obj\store (only those changed since the last build), then link.
 $objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /O2 /W3 /MT /Brepro /I..\backend /I..\common" `
     -ObjDir (Join-Path $outDir "obj\store") -ObjDirArg "..\..\build\obj\store\" `
     -IncludeDirs @((Join-Path $here "..\backend"), (Join-Path $here "..\common")) -Log (Join-Path $outDir "store-build.log")
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\store\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /O2 /W3 /MT /Brepro $objArgs " +
-      "/Fe:..\..\build\snapmap-plus-store.exe /link /SUBSYSTEM:CONSOLE shell32.lib ole32.lib advapi32.lib bcrypt.lib /Brepro"
+      "/Fe:..\..\build\snapmap-plus-store.exe /link /SUBSYSTEM:CONSOLE /STACK:67108864 shell32.lib ole32.lib advapi32.lib bcrypt.lib /Brepro"
 Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $outDir "snapmap-plus-store.exe") `
     -Log (Join-Path $outDir "store-link.log")
 Write-Host "built $(Join-Path $outDir 'snapmap-plus-store.exe')"

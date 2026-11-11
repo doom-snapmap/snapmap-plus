@@ -311,6 +311,8 @@ foreach ($t in $tests) {
     }
     $exe = Join-Path $obj ($t.name + ".exe")
     $libs = if ($t.libs) { " /link $($t.libs)" } else { "" }
+    # The store tool's path buffers hold any Windows path; its sources link the stack its build gives it.
+    if ($t.src -match '\\src\\store\\') { $libs = if ($libs) { "$libs /STACK:67108864" } else { " /link /STACK:67108864" } }
     $objArgs = ($t.objs | ForEach-Object { '"' + $_ + '"' }) -join " "
     $cmd = "cl /nologo /O2 /MT$($t.cxx) $objArgs /Fe:obj\$($t.name).exe$libs"
     $record = Join-Path $obj ($t.name + ".link.txt")

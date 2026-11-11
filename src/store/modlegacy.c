@@ -431,7 +431,7 @@ const sh_modlegacy_zip_entry *sh_modlegacy_zip_find(const sh_modlegacy_zip *zip,
 /* paths and layout                                                      */
 /* ==================================================================== */
 
-#define LG_PATH_MAX 512
+#define LG_PATH_MAX 65535   /* a ZIP entry name's longest: the format's 16-bit length */
 
 static int lg_reserved_segment(const char *seg, size_t n)
 {
@@ -537,7 +537,7 @@ static int lg_is_hex64(const char *s)
 /* data root                                                             */
 /* ==================================================================== */
 
-#define LG_PATH (MAX_PATH * 4)   /* a UTF-8 path */
+#define LG_PATH ST_PATH   /* a UTF-8 path */
 static SRWLOCK g_lg_lock = SRWLOCK_INIT;
 static char g_root_override[LG_PATH];
 
@@ -716,7 +716,6 @@ static int lg_walk_dir(lg_walk *w, const wchar_t *dir, const char *prefix, unsig
     HANDLE h;
     int ok = 1;
     if (!pattern) { LG_ERR(w->err, w->err_cap, "out of memory listing the folder"); return 0; }
-    if (depth > 64) { free(pattern); LG_ERR(w->err, w->err_cap, "the folder nests more than 64 levels"); return 0; }
     memcpy(pattern, dir, n * sizeof(wchar_t));
     memcpy(pattern + n, L"\\*", 3 * sizeof(wchar_t));
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
@@ -727,27 +726,24 @@ static int lg_walk_dir(lg_walk *w, const wchar_t *dir, const char *prefix, unsig
         return 0;
     }
     do {
-        char *name, rel[LG_PATH_MAX + 1];
+        char *name, *rel;
         wchar_t *full;
         size_t fn;
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) { LG_ERR(w->err, w->err_cap, "a file name under '%s' is not valid Unicode", prefix); ok = 0; break; }
-        if (_snprintf_s(rel, sizeof rel, _TRUNCATE, "%s%s%s", prefix, prefix[0] ? "/" : "", name) < 0) {
-            LG_ERR(w->err, w->err_cap, "a path under '%s' is longer than %u bytes", prefix, LG_PATH_MAX);
-            free(name);
-            ok = 0;
-            break;
-        }
+        rel = sh_textf("%s%s%s", prefix, prefix[0] ? "/" : "", name);
         free(name);
+        if (!rel) { LG_ERR(w->err, w->err_cap, "out of memory listing the folder"); ok = 0; break; }
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             LG_ERR(w->err, w->err_cap, "links and junctions are not supported: %s", rel);
+            free(rel);
             ok = 0;
             break;
         }
         fn = wcslen(fd.cFileName);
         full = (wchar_t *)malloc((n + fn + 2) * sizeof(wchar_t));
-        if (!full) { LG_ERR(w->err, w->err_cap, "out of memory listing the folder"); ok = 0; break; }
+        if (!full) { LG_ERR(w->err, w->err_cap, "out of memory listing the folder"); free(rel); ok = 0; break; }
         memcpy(full, dir, n * sizeof(wchar_t));
         full[n] = L'\\';
         memcpy(full + n + 1, fd.cFileName, (fn + 1) * sizeof(wchar_t));
@@ -758,6 +754,7 @@ static int lg_walk_dir(lg_walk *w, const wchar_t *dir, const char *prefix, unsig
             ok = lg_walk_add(w, rel, full, 0, size);
         }
         free(full);
+        free(rel);
     } while (ok && FindNextFileW(h, &fd));
     FindClose(h);
     return ok;
@@ -994,7 +991,7 @@ static int lg_write_member(lg_written *w, const char *folder, const char *relati
 
 typedef struct lg_plan_file {
     const sh_modlegacy_zip_entry *entry;
-    char target[LG_PATH_MAX + 32];
+    char *target;                  /* malloc'd */
 } lg_plan_file;
 
 typedef struct lg_plan {
@@ -1021,6 +1018,7 @@ static void lg_plan_free(lg_plan *p)
     sh_json_object_free(&p->cvars);
     sh_json_object_free(&p->english);
     sh_json_object_free(&p->weapons);
+    for (i = 0; i < p->count; i++) free(p->files[i].target);
     free(p->files);
     for (i = 0; i < p->nproviders; i++) free(p->providers[i]);
     free(p->providers);
@@ -1276,7 +1274,7 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
                 p->cap = next;
             }
             p->files[p->count].entry = e;
-            strcpy_s(p->files[p->count].target, sizeof p->files[p->count].target, target);
+            if (!(p->files[p->count].target = _strdup(target))) { LG_ERR(err, err_cap, "out of memory planning the tree"); return 0; }
             p->count++;
         }
     }
@@ -1290,8 +1288,11 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
                 const sh_modlegacy_zip_entry *a = p->files[w - 1].entry, *b = p->files[i].entry;
                 if (a->size != b->size || a->crc != b->crc) {
                     LG_ERR(err, err_cap, "'%s' and '%s' land on one path with different bytes", a->name, b->name);
+                    for (; i < p->count; i++) free(p->files[i].target);   /* [0, w) are the kept ones */
+                    p->count = w;
                     return 0;
                 }
+                free(p->files[i].target);
                 continue;
             }
             p->files[w++] = p->files[i];
@@ -1653,8 +1654,7 @@ static char lg_layout(const lg_plan *plan, const sh_modlegacy_zip *zip)
 
 static void lg_log_unpacked(const lg_plan *plan, const char *folder, ULONGLONG started)
 {
-    char line[MAX_PATH + 1200];
-    st_putf(line, sizeof line,
+    char *line = sh_textf(
         "LEGACY: unpacked %zu file(s) into %s in %llu ms (%u not an input and not kept, %u imported by a "
         "resources manifest, %u policy file(s) folded into mod.json, %u nested component(s), %u file(s) under "
         "assets/ a bundle cannot carry (%u of them .bswf movies)%s%s%s)",
@@ -1662,7 +1662,8 @@ static void lg_log_unpacked(const lg_plan *plan, const char *folder, ULONGLONG s
         plan->imported, plan->policies, plan->nested, plan->unsupported, plan->movies,
         plan->unsupported ? ", first: " : "", plan->first_unsupported,
         plan->gates_dropped ? "; unsupported cvar requirements left out" : "");
-    backend_log(line);
+    backend_log(line ? line : "LEGACY: unpacked a package (out of memory for its line)");
+    free(line);
 }
 
 /* Convert an opened tree into <data>\mods\<id> (else "<id> (2)", ...), salt

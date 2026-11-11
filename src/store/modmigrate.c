@@ -46,8 +46,8 @@ typedef struct mg_item {
 } mg_item;
 
 typedef struct mg_ctx {
-    char root[MAX_PATH * 4];           /* data root, UTF-8 */
-    char overrides_u8[MAX_PATH * 4];   /* UTF-8 */
+    char root[ST_PATH];           /* data root, UTF-8 */
+    char overrides_u8[ST_PATH];   /* UTF-8 */
     wchar_t *overrides_w;              /* long-path form */
     wchar_t *mods_w;
     mg_item *items;
@@ -59,7 +59,7 @@ typedef struct mg_ctx {
 } mg_ctx;
 
 static SRWLOCK g_mg_lock = SRWLOCK_INIT;
-static char g_mg_root[MAX_PATH * 4];
+static char g_mg_root[ST_PATH];
 
 /* The migration's record fields: a folder name under mods\ and a cause. A
  * longer one is said in the log (store_text.h st_put). */
@@ -139,7 +139,7 @@ static int mg_mods_u8(const wchar_t *mods_w, char *out, size_t cap)
 /* The record's text ("migration" section, compact canonical JSON), or NULL. */
 static char *mg_record_text(const wchar_t *mods_w)
 {
-    char mods[MAX_PATH * 4], *text = NULL;
+    char mods[ST_PATH], *text = NULL;
     if (!mg_mods_u8(mods_w, mods, sizeof mods)) return NULL;
     if (sh_mb_record_get(mods, SH_MODMIGRATE_RECORD, &text) != 1) { free(text); return NULL; }
     return text;
@@ -191,7 +191,7 @@ static void mg_measure(const wchar_t *dir, unsigned *files, unsigned long long *
     do {
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && depth < 64) {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
                 wchar_t *sub = mg_wjoin(dir, fd.cFileName);
                 if (sub) { mg_measure(sub, files, bytes, depth + 1); free(sub); }
             }
@@ -320,7 +320,7 @@ static void mg_measure_item(mg_item *it, const wchar_t *path)
  * strings document, into mods\my-overrides\. */
 static int mg_loose_entry(const wchar_t *dir, const WIN32_FIND_DATAW *fd)
 {
-    char first[MAX_PATH], *name;
+    char first[ST_PATH], *name;
     wchar_t *path;
     int loose;
     if (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return 0;
@@ -415,7 +415,7 @@ static int mg_scan(mg_ctx *c)
             it = mg_add(c, name, MG_PACKAGE);
             if (it) mg_measure_item(it, path);
         } else {
-            char first[MAX_PATH];
+            char first[ST_PATH];
             unsigned nested = mg_nested_packages(path, first, sizeof first);
             if (nested == 1) {
                 /* beta.19 read an unmarked folder as a group: its one package
@@ -512,7 +512,7 @@ static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id,
  * `name` (an earlier pass made it from this tree). */
 static int mg_tree_folder_is(const char *mods, const char *tree, const char *name)
 {
-    char *text = NULL, want[MAX_PATH * 2], *esc = NULL;
+    char *text = NULL, *want = NULL, *esc = NULL;
     int mine = 0;
     size_t i, w = 0;
     if (!tree[0] || sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
@@ -523,10 +523,11 @@ static int mg_tree_folder_is(const char *mods, const char *tree, const char *nam
             esc[w++] = name[i] == '\\' ? '/' : name[i];
         }
         esc[w] = 0;
-        st_fmt(want, sizeof want, "\"%s\":\"%s\"", tree, esc);
-        mine = strstr(text, want) != NULL;
+        want = sh_textf("\"%s\":\"%s\"", tree, esc);
+        mine = want && strstr(text, want) != NULL;
     }
     free(esc);
+    free(want);
     free(text);
     return mine;
 }
@@ -542,7 +543,7 @@ static int mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t 
     int round;
     leaf = leaf ? leaf + 1 : it->name;
     for (round = 0; round < 3; round++) {
-        char folder[MAX_PATH * 4], mods[MAX_PATH * 4];
+        char folder[ST_PATH], mods[ST_PATH];
         wchar_t *w;
         DWORD a;
         if (round == 0) st_cpy(out, cap, leaf);
@@ -745,7 +746,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
     sh_modlegacy_zip zip;
     sh_modlegacy_verdict v;
     sh_modlegacy_origin origin;
-    char folder_u8[MAX_PATH * 4], err[MG_CAUSE_MAX] = "", fallback[SH_MB_ID_MAX + 1];
+    char folder_u8[ST_PATH], err[MG_CAUSE_MAX] = "", fallback[SH_MB_ID_MAX + 1];
     ULONGLONG t0 = GetTickCount64(), t1;
     size_t i;
     int ok;
@@ -799,7 +800,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
             st_cpy(it->store, sizeof it->store, leaf ? leaf + 1 : v.folder);
         }
     } else {
-        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH * 4], key[MG_NAME_CAP], target[MG_NAME_CAP];
+        char id[SH_MB_ID_MAX + 1], staging[ST_PATH], key[MG_NAME_CAP], target[MG_NAME_CAP];
         char cause[MG_CAUSE_CAP] = "";
         wchar_t *wstage, *wparent;
         sh_ms_install_stats st;
@@ -974,7 +975,7 @@ static int mg_write_record(mg_ctx *c, int complete)
     sh_modmigrate_stats s;
     size_t i;
     int first = 1, ok;
-    char mods[MAX_PATH * 4];
+    char mods[ST_PATH];
     FILETIME ft;
     unsigned long long now;
     mg_stats(c, &s);
@@ -1222,7 +1223,7 @@ static unsigned long long mg_changed_at(const wchar_t *path, const WIN32_FIND_DA
 
 int sh_modmigrate_pending(unsigned *entries)
 {
-    char root[MAX_PATH * 4];
+    char root[ST_PATH];
     wchar_t *overrides = NULL, *record = NULL, *pattern = NULL;
     char *text = NULL;
     unsigned long long migrated_at = 0;
@@ -1280,9 +1281,9 @@ int sh_modmigrate_pending(unsigned *entries)
 #define MG_STRINGS_DOC  "strids.json"
 
 typedef struct mg_loose {
-    char root[MAX_PATH * 4];
-    char mods_u8[MAX_PATH * 4];
-    char overrides_u8[MAX_PATH * 4];
+    char root[ST_PATH];
+    char mods_u8[ST_PATH];
+    char overrides_u8[ST_PATH];
     wchar_t *overrides_w, *mods_w, *strings_w, *doc_w;
     unsigned long long migrated_at;    /* the loose record's, 0 without one */
     int recorded;                      /* the record says the step completed */
@@ -1531,7 +1532,7 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
             if (!ok) mg_cause(why, cap, "out of memory");
         } else {
             sh_modlegacy_zip sub;
-            char folder[MAX_PATH * 4], err[MG_CAUSE_MAX] = "";
+            char folder[ST_PATH], err[MG_CAUSE_MAX] = "";
             unsigned files = 0;
             unsigned long long bytes = 0;
             wchar_t *path = mg_wjoin(l->overrides_w, fd.cFileName);
@@ -1547,7 +1548,7 @@ static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap,
             }
             for (i = 0; ok && i < sub.count; i++) {
                 sh_modlegacy_zip_entry *e = &sub.entries[i];
-                char prefix[MAX_PATH * 4];
+                char prefix[ST_PATH];
                 if (e->directory) continue;
                 st_fmt(prefix, sizeof prefix, "assets/%s/", name);
                 ok = mg_zip_push(z, zcap, mg_strcat3(prefix, e->name, ""), e->source, e->size);
@@ -1584,13 +1585,13 @@ static void mg_merge_files(const wchar_t *from, const wchar_t *to, const char *r
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         wchar_t *src, *dst;
-        char *leaf, sub[MAX_PATH * 4];
+        char *leaf, *sub;
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         src = mg_wjoin(from, fd.cFileName);
         dst = mg_wjoin(to, fd.cFileName);
         leaf = sh_mb_utf8(fd.cFileName);
-        st_fmt(sub, sizeof sub, "%s/%s", rel, leaf ? leaf : "?");
-        if (!src || !dst || !leaf) st->files_failed++;
+        sub = sh_textf("%s/%s", rel, leaf ? leaf : "?");
+        if (!src || !dst || !leaf || !sub) st->files_failed++;
         else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) mg_merge_files(src, dst, sub, st);
         else if (mg_attr(dst) != INVALID_FILE_ATTRIBUTES) {
             if (mg_same_file(src, dst)) st->files_same++;
@@ -1607,6 +1608,7 @@ static void mg_merge_files(const wchar_t *from, const wchar_t *to, const char *r
         free(src);
         free(dst);
         free(leaf);
+        free(sub);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -1765,7 +1767,7 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
     sh_modlegacy_verdict v;
     sh_modlegacy_origin origin;
     size_t zcap = 0, dn = 0;
-    char why[MG_CAUSE_MAX] = "", tree[SH_MB_HASH_HEX + 1] = "", staging[MAX_PATH * 4], descpath[MAX_PATH * 4];
+    char why[MG_CAUSE_MAX] = "", tree[SH_MB_HASH_HEX + 1] = "", staging[ST_PATH], descpath[ST_PATH];
     char *desc = NULL, *stage_u8 = NULL;
     wchar_t *wparent = NULL, *wstage = NULL, *wdesc = NULL, *target = NULL;
     int with_strings, loose_files = 0, result = -1;

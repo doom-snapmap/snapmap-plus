@@ -28,6 +28,7 @@
 #include "store_convert.h"
 #include "store_deflate.h"
 #include "store_saves.h"
+#include "../src/common/wide_path.h"
 #include "modmanifest.h"
 #include "modstore.h"
 #include "modbundle.h"
@@ -69,10 +70,11 @@ static int said(const char *needle) { return strstr(g_out, needle) != NULL; }
 static int run(const char *a1, const char *a2, const char *a3, const char *a4)
 {
     const char *words[5] = { "snapmap-plus-store", a1, a2, a3, a4 };
-    wchar_t buf[5][MAX_PATH * 2], *argv[5];
+    static wchar_t buf[5][SH_WPATH_MAX];
+    wchar_t *argv[5];
     int argc = 0, i, r;
     for (i = 0; i < 5 && words[i]; i++) {
-        MultiByteToWideChar(CP_UTF8, 0, words[i], -1, buf[i], MAX_PATH * 2);
+        MultiByteToWideChar(CP_UTF8, 0, words[i], -1, buf[i], SH_WPATH_MAX);
         argv[argc++] = buf[i];
     }
     g_out_n = 0;
@@ -1244,6 +1246,94 @@ static void test_recycle_refusals(void)
     CHECK(st.recycled == 0);
 }
 
+/* A file written under a path of any length (the long form, as the store tool uses). */
+static void deep_write(const char *path_utf8, const char *text)
+{
+    wchar_t w[SH_WPATH_MAX], *slash;
+    HANDLE h;
+    DWORD wrote = 0;
+    swprintf_s(w, SH_WPATH_MAX, L"\\\\?\\");
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, w + 4, SH_WPATH_MAX - 4);
+    for (slash = wcschr(w + 7, L'\\'); slash; slash = wcschr(slash + 1, L'\\')) {
+        *slash = 0;
+        CreateDirectoryW(w, NULL);
+        *slash = L'\\';
+    }
+    h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    if (h == INVALID_HANDLE_VALUE) return;
+    WriteFile(h, text, (DWORD)strlen(text), &wrote, NULL);
+    CloseHandle(h);
+}
+
+static int deep_exists(const char *path_utf8)
+{
+    wchar_t w[SH_WPATH_MAX];
+    swprintf_s(w, SH_WPATH_MAX, L"\\\\?\\");
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, w + 4, SH_WPATH_MAX - 4);
+    return GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void deep_remove_w(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pat = (wchar_t *)malloc(sizeof(wchar_t) * (wcslen(dir) + 3)), *sub;
+    HANDLE h;
+    if (!pat) return;
+    swprintf_s(pat, wcslen(dir) + 3, L"%s\\*", dir);
+    h = FindFirstFileW(pat, &fd);
+    free(pat);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            size_t n;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            n = wcslen(dir) + wcslen(fd.cFileName) + 2;
+            if (!(sub = (wchar_t *)malloc(sizeof(wchar_t) * n))) continue;
+            swprintf_s(sub, n, L"%s\\%s", dir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) deep_remove_w(sub);
+            else { SetFileAttributesW(sub, FILE_ATTRIBUTE_NORMAL); DeleteFileW(sub); }
+            free(sub);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* A data folder far deeper than 260 characters (or the tool's old 1,040-byte
+ * buffers) converts like any other: the paths are only Windows's to bound. */
+static void test_deep_data_folder(const char *fixture, const char *tmp)
+{
+    static char data[8192], doom[MAX_PATH], path[8192];
+    size_t n;
+    int i;
+    printf("-- a data folder deeper than 2,000 characters converts and a second run finds nothing to do\n");
+    _snprintf_s(doom, sizeof doom, _TRUNCATE, "%s\\doom-deep", tmp);
+    make_doom(fixture, doom);
+    n = (size_t)_snprintf_s(data, sizeof data, _TRUNCATE, "%s\\deep", tmp);
+    for (i = 0; i < 12; i++) n += (size_t)_snprintf_s(data + n, sizeof data - n, _TRUNCATE, "\\%0180d", i);
+    CHECK(strlen(data) > 2000);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.beta\\mod.json", data);
+    deep_write(path, "{\n  \"id\": \"alex.beta\",\n  \"name\": \"Beta\",\n  \"strings\": {\"en\": {\"beta_name\": \"Beta Imp\"}},\n"
+                     "  \"snapmap-plus\": {\"format\": 1, \"key\": \"alex.beta\", \"build\": 3, \"bundle\": \"" H1 "\", \"built\": "
+                     "1790000000, \"rules\": 7, \"validated\": true}\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.beta\\" B26_BASE, data);
+    deep_write(path, "{\n\tsize = \"1\";\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.beta\\" B26_ROW, data);
+    deep_write(path, "{\n\tinherit = \"mods/alex.beta/base\";\n\tdisplayName = \"#str_beta_name\";\n}\n");
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK && said("  mods\\: 1 mod folder(s) of an earlier release to convert"));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("  mods\\alex.beta: converted"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.beta\\mod.json", data);
+    CHECK(deep_exists(path));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to convert."));
+    {
+        static wchar_t w[SH_WPATH_MAX];
+        swprintf_s(w, SH_WPATH_MAX, L"\\\\?\\");
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\deep", tmp);
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, w + 4, SH_WPATH_MAX - 4);
+        deep_remove_w(w);
+    }
+}
+
 int main(int argc, char **argv)
 {
     char fixture[MAX_PATH], tmp[MAX_PATH];
@@ -1260,6 +1350,7 @@ int main(int argc, char **argv)
     test_loose_layer(fixture, tmp);
     test_link_failures(fixture, tmp);
     test_beta26(fixture, tmp);
+    test_deep_data_folder(fixture, tmp);
     test_interrupted(fixture, tmp);
     test_errors(fixture, tmp);
     test_recycle_refusals();

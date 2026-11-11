@@ -14,14 +14,14 @@ wchar_t *sh_store_saves_root(void)
     static const GUID kSavedGames = { 0x4C5C32FFu, 0xBB9D, 0x43b0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } };
     static const wchar_t tail[] = L"\\id Software\\DOOM\\base\\savegame.user";
     PWSTR wide = NULL;
-    wchar_t base[MAX_PATH * 2], *out;
+    wchar_t base[SH_WPATH_MAX], *out;
     size_t n;
     base[0] = 0;
     if (SUCCEEDED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &wide)) && wide) {
-        wcsncpy_s(base, MAX_PATH * 2, wide, _TRUNCATE);
+        wcsncpy_s(base, SH_WPATH_MAX, wide, _TRUNCATE);
         CoTaskMemFree(wide);
     } else if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, base))) {
-        wcsncat_s(base, MAX_PATH * 2, L"\\Saved Games", _TRUNCATE);
+        wcsncat_s(base, SH_WPATH_MAX, L"\\Saved Games", _TRUNCATE);
     }
     if (!base[0]) return NULL;
     n = wcslen(base) + wcslen(tail) + 1;

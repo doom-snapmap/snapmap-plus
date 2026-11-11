@@ -105,7 +105,7 @@ static void mbo_walk(sh_mb_old *o, const wchar_t *dir, const char *rel, int dept
 
 static unsigned char *mbo_read(const char *folder, const char *leaf, size_t *len)
 {
-    char path[MAX_PATH * 4];
+    char path[ST_PATH];
     st_fmt(path, sizeof path, "%s\\%s", folder, leaf);
     return sh_mb_read_file(path, (size_t)-1, len);
 }
@@ -197,7 +197,7 @@ int sh_mb_old_load(const char *folder, sh_mb_old *o)
         o->key_from = SH_MB_OLD_KEY_FROM_ID;
     if (!o->key_from) mbo_leaf_key(o, folder);
     if (!block || block->type != MPJ_OBJ) {
-        char assets[MAX_PATH * 4];
+        char assets[ST_PATH];
         wchar_t *w;
         st_fmt(assets, sizeof assets, "%s\\assets", folder);
         w = sh_mb_wpath(assets);

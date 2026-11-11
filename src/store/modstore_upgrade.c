@@ -95,7 +95,7 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
     wchar_t *root = ms_wroot(), *bin = NULL, *pattern = NULL, *slash;
     WIN32_FIND_DATAW fd;
     HANDLE h;
-    char root8[MAX_PATH * 4], text[MAX_PATH * 4 + 160], *record = NULL;
+    char root8[ST_PATH], text[ST_PATH + 160], *record = NULL;
     int deleted = 0, failed = 0, had_record = 0;
     if (!root) return -1;
     modstore_lock();
@@ -189,7 +189,7 @@ typedef struct ms_up_item {
 
 typedef struct ms_up_ctx {
     wchar_t *root, *blobs;
-    char rootu[MAX_PATH * 4];
+    char rootu[ST_PATH];
     ms_up_item *items;
     size_t count, cap;
     sh_ms_upgrade_stats *st;
@@ -965,7 +965,7 @@ static void ms_tidy_migration(const char *rootu, const ms_pair *p, size_t np, mp
 /* Rename one product folder; 1 when it moved. */
 static int ms_tidy_move(const char *folder, const char *rootu, const char *to)
 {
-    char path[MAX_PATH * 4];
+    char path[ST_PATH];
     wchar_t *from = sh_mb_wpath(folder), *dst;
     int ok;
     st_fmt(path, sizeof path, "%s\\%s", rootu, to);
@@ -1271,7 +1271,7 @@ int sh_ms_upgrade_scan(sh_ms_upgrade_check *out)
         { L"claims.json", "claims.json" }, { L"publish-links.json", "publish-links.json" },
         { L"pending-uploads.json", "pending-uploads.json" }, { L".migrated.json", ".migrated.json" }, { NULL, NULL } };
     wchar_t *root, *p, *pattern, *slash;
-    char rootu[MAX_PATH * 4], *section = NULL;
+    char rootu[ST_PATH], *section = NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h;
     int i;

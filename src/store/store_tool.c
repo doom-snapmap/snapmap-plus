@@ -22,7 +22,7 @@
 #include "modbankinfo.h"
 #include "modcontent.h"
 
-#define ST_PATH_MAX (MAX_PATH * 4)
+#define ST_PATH_MAX ST_PATH
 
 static sh_store_out_fn g_out;
 static void *g_out_ctx;
@@ -92,16 +92,19 @@ static char *st_utf8(const wchar_t *w, UINT cp, int *lossy)
 }
 
 /* An absolute path without a trailing separator. */
+/* The absolute path in its long form ("\\?\C:\..."), so a folder of any
+ * depth Windows allows is reached; NULL when it cannot be resolved. */
 static wchar_t *st_full(const wchar_t *path)
 {
     DWORD need = GetFullPathNameW(path, 0, NULL, NULL);
     wchar_t *out;
     size_t n;
     if (!need) return NULL;
-    out = (wchar_t *)malloc(sizeof(wchar_t) * (need + 1));
+    out = (wchar_t *)malloc(sizeof(wchar_t) * (need + 8));
     if (!out || !GetFullPathNameW(path, need + 1, out, NULL)) { free(out); return NULL; }
     n = wcslen(out);
     while (n > 3 && (out[n - 1] == L'\\' || out[n - 1] == L'/')) out[--n] = 0;
+    if (!sh_wpath_long(out, need + 8)) { free(out); return NULL; }
     return out;
 }
 
@@ -145,7 +148,7 @@ static int st_doom_folder(const wchar_t *dir)
 /* DOOM through Steam: SteamPath, then every library in libraryfolders.vdf. */
 static wchar_t *st_steam_doom(void)
 {
-    wchar_t steam[MAX_PATH * 2], *vdf_path, *found = NULL;
+    wchar_t steam[SH_WPATH_MAX], *vdf_path, *found = NULL;
     DWORD size = sizeof steam;
     char *text = NULL, *p;
     FILE *f = NULL;
@@ -169,10 +172,10 @@ static wchar_t *st_steam_doom(void)
     free(vdf_path);
     /* The Steam folder first, then each "path" value (backslashes are doubled in the file). */
     for (pass = 0, p = text; !found; pass++) {
-        wchar_t lib[MAX_PATH * 2], *cand;
-        if (pass == 0) wcscpy_s(lib, MAX_PATH * 2, steam);
+        wchar_t lib[SH_WPATH_MAX], *cand;
+        if (pass == 0) wcscpy_s(lib, SH_WPATH_MAX, steam);
         else {
-            char value[MAX_PATH * 4], *q, *end;
+            char value[ST_PATH], *q, *end;
             size_t k = 0;
             if (!p || !(q = strstr(p, "\"path\""))) break;
             q += 6;
@@ -185,7 +188,7 @@ static wchar_t *st_steam_doom(void)
             }
             value[k] = 0;
             p = *end ? end + 1 : end;
-            if (!MultiByteToWideChar(CP_UTF8, 0, value, -1, lib, MAX_PATH * 2)) continue;
+            if (!MultiByteToWideChar(CP_UTF8, 0, value, -1, lib, SH_WPATH_MAX)) continue;
         }
         cand = st_join(lib, L"steamapps\\common\\DOOM");
         if (cand && st_doom_folder(cand)) found = cand;
@@ -402,6 +405,23 @@ static void st_usage(int err)
     st_emit(err, "folders of Saved Games\\id Software\\DOOM\\base\\savegame.user, found by itself). Close DOOM first.");
 }
 
+/* A long-form path as text records and messages spell it, without the
+ * long-form prefix (UTF-8, malloc'd). */
+static char *st_plain_u8(const wchar_t *path)
+{
+    wchar_t *unc;
+    char *out;
+    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) {
+        size_t n = wcslen(path + 8) + 3;
+        if (!(unc = (wchar_t *)malloc(sizeof(wchar_t) * n))) return NULL;
+        swprintf_s(unc, n, L"\\\\%s", path + 8);
+        out = st_utf8(unc, CP_UTF8, NULL);
+        free(unc);
+        return out;
+    }
+    return st_utf8(wcsncmp(path, L"\\\\?\\", 4) ? path : path + 4, CP_UTF8, NULL);
+}
+
 static void st_store_free(st_store *s)
 {
     free(s->dir);
@@ -419,7 +439,7 @@ static int st_store_open(const wchar_t *arg, st_store *s)
         free(u);
         return 0;
     }
-    s->u8 = st_utf8(s->dir, CP_UTF8, NULL);
+    s->u8 = st_plain_u8(s->dir);
     if (!s->u8 || strlen(s->u8) + 6 >= sizeof s->mods) { st_say(1, "error: the store path is too long"); return 0; }
     st_fmt(s->mods, sizeof s->mods, "%s\\mods", s->u8);
     sh_ms_set_root(s->mods);

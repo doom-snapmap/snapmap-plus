@@ -11,6 +11,12 @@
 #include <string.h>
 #include "../backend/backend_log.h"
 #include "../common/text.h"
+#include "../common/wide_path.h"
+
+/* A path buffer of the store tool: any path Windows accepts, in UTF-8
+ * (SH_U8PATH_MAX) or UTF-16 (SH_WPATH_MAX). The tool links a stack that
+ * holds them (build.ps1); a folder walk keeps its paths on the heap. */
+#define ST_PATH SH_U8PATH_MAX
 
 #define ST_TEXT_OVER "the sentence is longer than this record holds; it is in the log whole"
 
@@ -50,7 +56,7 @@ static __inline int st_cpy(char *out, size_t cap, const char *text)
     if (!text) text = "";
     if (strlen(text) < cap) { memcpy(out, text, strlen(text) + 1); return 1; }
     {
-        char *line = sh_textf("STORE: a path or name longer than this tool's %u-byte field is not used: %s",
+        char *line = sh_textf("STORE: a name longer than this tool's %u-byte field is not used: %s",
                               (unsigned)cap, text);
         backend_log(line ? line : "STORE: a path longer than its field is not used (out of memory)");
         free(line);

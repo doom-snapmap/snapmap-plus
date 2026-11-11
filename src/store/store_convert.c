@@ -19,7 +19,7 @@
 #include "prefab_block.h"
 #include "mp_json.h"
 
-#define CV_PATH      (MAX_PATH * 4)
+#define CV_PATH      ST_PATH
 #define CV_NEST_MAX  8              /* how deep an earlier store looked for a mod folder (its SH_MS_NEST_MAX) */
 #define CV_CAUSE_CAP 2048           /* a cause field of the record; a longer sentence is in the log (store_text.h) */
 #define CV_ANY_SIZE  ((size_t)-1)   /* a map, a descriptor or a bank of any size */
@@ -566,17 +566,17 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
     free(w);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
-        char *name, *path, crel[CV_PATH];
+        char *name, *path, *crel;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
         if (fd.cFileName[0] == L'.') continue;
         if (wcsstr(fd.cFileName, L".staging-") || wcsstr(fd.cFileName, L".old-")) continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) continue;
         if (depth == 0 && !_stricmp(name, "maps")) { free(name); continue; }
-        st_fmt(crel, sizeof crel, "%s%s%s", rel, rel[0] ? "\\" : "", name);
+        crel = sh_textf("%s%s%s", rel, rel[0] ? "\\" : "", name);
         path = cv_join(dir, name);
         free(name);
-        if (!path) continue;
+        if (!path || !crel) { free(path); free(crel); continue; }
         if (cv_is_file(path, "mod.json") || cv_is_file(path, "package.json")) {
             if (sh_mb_old_is_old(path) || (!cv_is_file(path, "mod.json") && cv_is_file(path, "package.json"))) {
                 sh_mb_old old;
@@ -584,15 +584,14 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
                 if (l->n == l->cap) {
                     size_t cap = l->cap ? l->cap * 2 : 32;
                     cv_folder *g = (cv_folder *)realloc(l->f, cap * sizeof *g);
-                    if (!g) { free(path); continue; }
+                    if (!g) { free(path); free(crel); continue; }
                     l->f = g;
                     l->cap = cap;
                 }
                 f = &l->f[l->n];
                 memset(f, 0, sizeof *f);
                 f->path = path;
-                f->rel = _strdup(crel);
-                if (!f->rel) { free(path); continue; }
+                f->rel = crel;   /* the folder row keeps it */
                 f->leaf = strrchr(f->rel, '\\') ? strrchr(f->rel, '\\') + 1 : f->rel;
                 sh_mb_old_load(path, &old);
                 st_cpy(f->key, sizeof f->key, old.key[0] ? old.key : f->leaf);
@@ -610,10 +609,12 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
                 continue;
             }
             free(path);
+            free(crel);
             continue;
         }
         if (depth < CV_NEST_MAX) cv_walk(l, mods, path, crel, depth + 1);
         free(path);
+        free(crel);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -1067,7 +1068,7 @@ static void cv_rebank_texts(const char *dir, const cv_bank_name *names, size_t c
         path = leaf ? cv_join(dir, leaf) : NULL;
         ln = leaf ? strlen(leaf) : 0;
         if (path && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            if (depth < 64) cv_rebank_texts(path, names, count, depth + 1);
+            cv_rebank_texts(path, names, count, depth + 1);
         } else if (path && !(ln > 4 && !_stricmp(leaf + ln - 4, ".bnk"))) {
             size_t n = 0, on = 0;
             char *t = (char *)cv_read(path, CV_ANY_SIZE, &n), *o = NULL;
@@ -1406,8 +1407,8 @@ static unsigned cv_leftovers(const sh_conv_opts *o, const char *dir, int depth, 
         if (path && (old || made)) {
             found++;
             if (act) {
-                char target[CV_PATH];
-                st_fmt(target, sizeof target, "%s\\%.*s", dir, (int)base, name);
+                char *target = sh_textf("%s\\%.*s", dir, (int)base, name);
+                if (!target) { free(name); free(path); continue; }
                 if (made) cv_rmtree(path);
                 else if (!cv_is_dir(target)) {
                     wchar_t *wf = sh_mb_wpath(path), *wt = sh_mb_wpath(target);
@@ -1422,6 +1423,7 @@ static unsigned cv_leftovers(const sh_conv_opts *o, const char *dir, int depth, 
                                "(Snapmap+ does not read it)", path);
                     free(wf);
                 }
+                free(target);
             }
         } else if (path && depth < CV_NEST_MAX && !cv_is_file(path, "mod.json") && !cv_is_file(path, "package.json"))
             found += cv_leftovers(o, path, depth + 1, act);

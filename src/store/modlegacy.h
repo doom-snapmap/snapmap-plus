@@ -36,8 +36,8 @@
 #include "map_shards.h"
 #include "modmanifest.h"
 
-#ifndef MAX_PATH
-#define MAX_PATH 260
+#ifndef SH_U8PATH_MAX
+#define SH_U8PATH_MAX (32768 * 3)   /* SH_WPATH_MAX * 3; spelled alike in modlegacy.h */
 #endif
 
 /* The beta.19 writer's representation bounds (the format's, not caps on a
@@ -66,7 +66,7 @@ typedef struct sh_modlegacy_verdict {
     unsigned skipped;                  /* files under assets/ a bundle cannot carry, left out */
     char first_skipped[256];           /* the first of them and why */
     unsigned movies;                   /* of them, .bswf movies */
-    char folder[MAX_PATH * 4];         /* the converted bundle's folder (UTF-8) */
+    char folder[SH_U8PATH_MAX];   /* the converted mod's folder (UTF-8) */
 } sh_modlegacy_verdict;
 
 /* --------------------------------------------------------- carriers ----- */
