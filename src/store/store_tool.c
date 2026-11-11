@@ -376,7 +376,7 @@ static int st_check(const st_store *s)
     st_say(0, "Checking %s", s->u8);
     st_list(&sc);
     if (!sc.kinds) { st_say(0, "Nothing to migrate."); return SH_STORE_OK; }
-    st_say(0, "%d kind(s) of work found. Run: snapmap-plus-store migrate \"%s\"", sc.kinds, s->u8);
+    st_say(0, "%d kind(s) of work to do.", sc.kinds);
     return SH_STORE_WORK;
 }
 
@@ -494,9 +494,13 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         after.kinds = 1;
     }
     if (!g_discard) st_part(done, sizeof done, "%u item(s) moved to the Recycle Bin", g_rc.recycled);
-    if (after.kinds) {
-        st_say(0, "Partly done%s%s. %d kind(s) of work are left; run again: snapmap-plus-store migrate \"%s\"%s", done[0] ? ": " : "",
-               done, after.kinds, s->u8, need_doom ? " --doom \"<DOOM folder>\"" : "");
+    if (!g_discard && g_rc.refused)
+        st_say(0, "  %u item(s) were left in place because the Recycle Bin could not take them (it is turned off "
+               "or too small for that drive, or the folder is not on a local disk); nothing was deleted for good. "
+               "Make room in the Recycle Bin or turn it on, then close DOOM and run: snapmap-plus migrate", g_rc.refused);
+    if (after.kinds || (!g_discard && g_rc.refused)) {
+        st_say(0, "Partly done%s%s. Some items are left; close DOOM and run: snapmap-plus migrate%s", done[0] ? ": " : "",
+               done, need_doom ? " --doom \"<DOOM folder>\"" : "");
         result = SH_STORE_PARTIAL;
     } else {
         st_say(0, "Done: %s.", done[0] ? done : "nothing changed");

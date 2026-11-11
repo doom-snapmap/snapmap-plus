@@ -28,7 +28,8 @@
  *   }
  *
  * Identity is the salt (modsalt.h), nothing else: the namespace mods/<salt>/,
- * the canonical "id", the prefix of every strings key. A folder's name is the
+ * the canonical "id", and the prefix of every strings key (`<salt>_<name>`,
+ * referenced `#str_<salt>_<name>`; no '/' in a string key). A folder's name is the
  * author's and never read. A folder in an earlier shape (package.json, a block
  * without a salt, an author id, key, shadows, stock, scope, player, extends,
  * replaces, legacy, composes or schema key, a hud schema) is refused with

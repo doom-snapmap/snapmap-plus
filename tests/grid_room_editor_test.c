@@ -241,6 +241,8 @@ static void sub_editor_draft_checks(unsigned char *panel)
     widget[0x29]=0;*(void**)(widget+0x48)=NULL;
     rows=saved_rows; /* the later row-count checks count only the main sequence */
 }
+static int tab_calls;
+static int tab_handler(void *p,void *v,int a){(void)p;(void)v;(void)a;return ++tab_calls>0;}
 int main(void)
 {
     unsigned char panel[0x400]={0};sh_grid_size second;
@@ -283,5 +285,13 @@ int main(void)
     {uint32_t text=1;float offset[3]={0};
         grid_add_vec(panel,11,"Grid Offset",&text,&text,1,offset,0,63,1,10,1,panel+0x280,NULL,NULL);
         assert(input_ranges[0]==0&&input_ranges[1]==63&&*(int*)(panel+0x328)==3);}
+    /* Without the Grid Room inspector the shared change hook still serves the
+     * settings tab, and a size id reaches the native dispatcher untouched. */
+    {populate_fn kept=g_populate;int before=native_changes,applied=changes;
+        g_populate=NULL;*(int*)(widget+0x40)=GRID_PROPERTY_SIZE;grid_changed(panel,widget,1);
+        assert(native_changes==before+1&&changes==applied);
+        g_property_handler=tab_handler;grid_changed(panel,widget,1);
+        assert(tab_calls==1&&native_changes==before+1);
+        g_property_handler=NULL;g_populate=kept;}
     assert(reads>=5);blueprint_tests();puts("grid_room_editor_test: passed");return 0;
 }

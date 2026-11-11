@@ -186,11 +186,18 @@ func cleanDoomFolder(doom string, keep []string, own doomOwnership, rec *install
 	}
 	rec.Files = kept
 
-	// 2) Backups earlier installers kept in DOOM, at the top level and under snapmap-plus\.
+	// 2) Backups earlier installers kept in DOOM, at the top level and under snapmap-plus\, and the
+	// temporary files of an install that was stopped.
 	for _, dir := range []string{"", "snapmap-plus"} {
 		entries, _ := os.ReadDir(filepath.Join(doom, dir))
 		for _, e := range entries {
 			if e.IsDir() {
+				continue
+			}
+			if pairLeftover(e.Name()) {
+				if os.Remove(filepath.Join(doom, dir, e.Name())) == nil {
+					t.removed = append(t.removed, filepath.Join(dir, e.Name()))
+				}
 				continue
 			}
 			base := ""
@@ -355,13 +362,13 @@ func moveFile(src, dst string) error {
 
 // printDoomTidy reports cleanDoomFolder's work under the current section.
 func printDoomTidy(t doomTidy, dataDir string) {
-	list := ui.List("Removed files of ours")
+	list := ui.List("Removed Snapmap+ files")
 	for _, rel := range t.removed {
 		list.Add(rel)
 	}
 	list.Close()
 	if len(t.moved) > 0 {
-		moved := ui.List("Backups of files that were not ours, moved to " + filepath.Join(installerCacheDir(dataDir), "backup"))
+		moved := ui.List("Other programs' files Snapmap+ had replaced, moved to " + filepath.Join(installerCacheDir(dataDir), "backup") + " (uninstall puts them back)")
 		for _, rel := range t.moved {
 			moved.Add(rel)
 		}
@@ -371,7 +378,7 @@ func printDoomTidy(t doomTidy, dataDir string) {
 }
 
 func printForeign(foreign []string) {
-	list := ui.List("Not ours, left in place")
+	list := ui.List("Other programs' files (left in place)")
 	for _, rel := range foreign {
 		list.Add(rel)
 	}

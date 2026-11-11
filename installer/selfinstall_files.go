@@ -74,7 +74,7 @@ func ownsExecutable(path, digest string) bool {
 func installSelfCopy(src, dst string) error {
 	dir, name := filepath.Dir(dst), filepath.Base(dst)
 	if !executableName(name) || !plainPath(dst) {
-		return fmt.Errorf("unsafe installer copy path: %s", dst)
+		return fmt.Errorf("Snapmap+ will not write its copy to %s because the path goes through a link", dst)
 	}
 	rec, err := loadExecutableRecord(dir)
 	if err != nil {
@@ -91,10 +91,10 @@ func installSelfCopy(src, dst string) error {
 			return err
 		}
 	} else {
-		return fmt.Errorf("kept unowned or modified executable: %s", dst)
+		return fmt.Errorf("kept %s: it is not the copy Snapmap+ placed there", dst)
 	}
 	if !identicalFiles(src, dst) {
-		return fmt.Errorf("installer copy could not be verified: %s", dst)
+		return fmt.Errorf("the copy written to %s does not match the original and was not used", dst)
 	}
 	rec[name], err = fileSHA256(dst)
 	if err != nil {

@@ -9,14 +9,14 @@
 
 #include "modmanifest.h"
 #include "modserve.h"
+#include "modsalt.h"
 #include "map_shards.h"
 #include "map_carrier.h"
 #include "config_json.h"
 #include "backend_log.h"
 
-/* The build that serves a row now (modserve.h, sh_modserve_row_build): 1 with
- * *out filled, 0 when nothing serves it. */
-int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
+/* A NUL-terminated salt (modsalt.h). */
+static int mm_salt_ok(const char *salt) { return salt && sh_salt_valid(salt, strlen(salt)); }
 
 /* ==================================================================== */
 /* rows                                                                  */
@@ -100,16 +100,6 @@ static sh_modmanifest_row *mm_list_find(sh_modmanifest_list *list, const char *s
 /* ==================================================================== */
 /* grammar                                                               */
 /* ==================================================================== */
-
-int sh_modmanifest_valid_salt(const char *salt)
-{
-    size_t i;
-    if (!salt || strlen(salt) != SH_MODMANIFEST_SALT_LEN) return 0;
-    if (salt[0] < 'a' || salt[0] > 'z') return 0;
-    for (i = 1; i < SH_MODMANIFEST_SALT_LEN; i++)
-        if (!((salt[i] >= 'a' && salt[i] <= 'z') || (salt[i] >= '0' && salt[i] <= '9'))) return 0;
-    return 1;
-}
 
 int sh_modmanifest_valid_hash(const char *text, size_t length)
 {
@@ -380,7 +370,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN);
         out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
         memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
-        if (!sh_modmanifest_valid_salt(out->salt) || !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {
+        if (!mm_salt_ok(out->salt) || !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {
             MM_ERR("row has no valid mod");
             goto done;
         }
@@ -410,7 +400,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                 if (key && co.members[c].key_length < sizeof slot) {
                     memcpy(slot, co.members[c].key, co.members[c].key_length);
                     slot[co.members[c].key_length] = 0;
-                    if (mm_slot_ok(slot) && sh_modmanifest_valid_salt(key))
+                    if (mm_slot_ok(slot) && mm_salt_ok(key))
                         (void)mm_choice_add(out->choices, sizeof out->choices, slot, key);
                 }
                 free(key);
@@ -447,7 +437,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     const char *p;
     if (out_length) *out_length = 0;
     if (!row) return NULL;
-    if (!sh_modmanifest_valid_salt(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build)))
+    if (!mm_salt_ok(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build)))
         return NULL;
     mm_put(&t, "{\"mod\":\"", 8);
     mm_put(&t, row->salt, strlen(row->salt));
@@ -771,7 +761,7 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
     if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 24, &block)) {
         MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;
     }
-    if (!mm_member_text(&block, "salt", out->salt, sizeof out->salt, 1) || !sh_modmanifest_valid_salt(out->salt)) {
+    if (!mm_member_text(&block, "salt", out->salt, sizeof out->salt, 1) || !mm_salt_ok(out->salt)) {
         MM_ERR("mod.json has no salt"); goto done;
     }
     if (!mm_member_text(&block, "build", out->build, sizeof out->build, 1) ||
@@ -872,7 +862,7 @@ int sh_modmanifest_current_choose(const char *slot, const char *key)
     char next[SH_MODMANIFEST_CHOICES_CAP], *p;
     size_t at = 0;
     int ok = 1;
-    if (!mm_slot_ok(slot) || (key && key[0] && !sh_modmanifest_valid_salt(key))) return -1;
+    if (!mm_slot_ok(slot) || (key && key[0] && !mm_salt_ok(key))) return -1;
     next[0] = 0;
     AcquireSRWLockExclusive(&g_current_lock);
     /* Every other slot as it was, then this one (the order of choosing). */
@@ -998,7 +988,7 @@ int sh_modmanifest_current_attach(const sh_modmanifest_row *row)
     sh_modmanifest_row fresh;
     sh_modmanifest_row *have;
     int r;
-    if (!row || !sh_modmanifest_valid_salt(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build))) return -1;
+    if (!row || !mm_salt_ok(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build))) return -1;
     AcquireSRWLockExclusive(&g_current_lock);
     have = mm_list_find(&g_current, row->salt, row->build);
     if (have) {
@@ -1455,7 +1445,7 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *vers
     mm_save_ctx *ctx = (mm_save_ctx *)context;
     sh_modmanifest_row *row;
     if (!ctx || ctx->failed || !bundle_id || !bundle_hash) return;
-    if (!sh_modmanifest_valid_salt(bundle_id) ||
+    if (!mm_salt_ok(bundle_id) ||
         !sh_modmanifest_valid_hash(bundle_hash, strlen(bundle_hash)) ||
         (version && strlen(version) >= SH_MODMANIFEST_VERSION_CAP)) {
         ctx->failed = 1;

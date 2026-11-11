@@ -1945,9 +1945,9 @@ static const char MS_EXAMPLE_ROW[] =
     "\tinherit = \"prop/prop_base\";\r\n"
     "\tedit = {\r\n"
     "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\r\n"
-    "\t\tcategoryNameTag = \"#str_mods/%s/category\";\r\n"
-    "\t\tdisplayNameTag = \"#str_mods/%s/" MS_EXAMPLE_DECL "_name\";\r\n"
-    "\t\tdisplayDescriptionTag = \"#str_mods/%s/" MS_EXAMPLE_DECL "_desc\";\r\n"
+    "\t\tcategoryNameTag = \"#str_%s_category\";\r\n"
+    "\t\tdisplayNameTag = \"#str_%s_" MS_EXAMPLE_DECL "_name\";\r\n"
+    "\t\tdisplayDescriptionTag = \"#str_%s_" MS_EXAMPLE_DECL "_desc\";\r\n"
     "\t\tentityDef = \"mods/%s/" MS_EXAMPLE_DECL "\";\r\n"
     "\t\trenderInfo = {\r\n"
     "\t\t\tsize = {\r\n"
@@ -2041,14 +2041,14 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
     }
     /* The author's part holds what the files cannot say; the block the salt,
      * which never changes afterwards. The example's Toybox text is author
-     * text: its strings, named under the salt. */
+     * text: its strings, keyed <salt>_<name> (no '/' in a string key). */
     strings[0] = 0;
     if (example)
         _snprintf_s(strings, sizeof strings, _TRUNCATE,
                     "  \"strings\": {\r\n    \"en\": {\r\n"
-                    "      \"mods/%s/category\": \"%s\",\r\n"
-                    "      \"mods/%s/" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
-                    "      \"mods/%s/" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
+                    "      \"%s_category\": \"%s\",\r\n"
+                    "      \"%s_" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
+                    "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
                     "    }\r\n  },\r\n", salt, esc, salt, salt);
     _snprintf_s(text, sizeof text, _TRUNCATE,
                 "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"

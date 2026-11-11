@@ -15,6 +15,7 @@
 
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
+#include "../src/backend/modsalt.h"
 #include "../src/backend/map_shards.h"
 #include "../src/backend/map_carrier.h"
 
@@ -181,12 +182,12 @@ static void make_row(sh_modmanifest_row *row, const char *salt, const char *vers
 static void grammar(void)
 {
     printf("-- salt and hash grammar\n");
-    CHECK(sh_modmanifest_valid_salt("alexpink") && sh_modmanifest_valid_salt("a2345678") &&
-          sh_modmanifest_valid_salt("zzzzzzzz"));
-    CHECK(!sh_modmanifest_valid_salt("alexpin") && !sh_modmanifest_valid_salt("alexpinkk") &&
-          !sh_modmanifest_valid_salt("1lexpink") && !sh_modmanifest_valid_salt("Alexpink") &&
-          !sh_modmanifest_valid_salt("alex-ink") && !sh_modmanifest_valid_salt("alex_ink") &&
-          !sh_modmanifest_valid_salt("alex.ink") && !sh_modmanifest_valid_salt("") && !sh_modmanifest_valid_salt(NULL));
+    CHECK(sh_salt_valid("alexpink", 8) && sh_salt_valid("a2345678", 8) &&
+          sh_salt_valid("zzzzzzzz", 8));
+    CHECK(!sh_salt_valid("alexpin", 7) && !sh_salt_valid("alexpinkk", 9) &&
+          !sh_salt_valid("1lexpink", 8) && !sh_salt_valid("Alexpink", 8) &&
+          !sh_salt_valid("alex-ink", 8) && !sh_salt_valid("alex_ink", 8) &&
+          !sh_salt_valid("alex.ink", 8) && !sh_salt_valid("", 0) && !sh_salt_valid(NULL, 8));
     CHECK(sh_modmanifest_valid_hash(HASH_A, 64) && !sh_modmanifest_valid_hash(HASH_A, 63));
     CHECK(!sh_modmanifest_valid_hash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 64));
 }

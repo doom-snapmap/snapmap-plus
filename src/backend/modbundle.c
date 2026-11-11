@@ -3532,6 +3532,19 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
 /* The product block's "registries" object (DESIGN-additive 2.4): what the
  * product will generate from this bundle when a map declares it. Keys in
  * byte order; members only when not empty. */
+/* A strings key is `<salt>_<name>` (DECISIONS 5): the salt, an underscore, and
+ * a name of letters, digits and underscores. No '/': the engine's string ids
+ * were only ever exercised with [a-z0-9_]. Keys compare without case. */
+static int mb_string_key_ok(const char *key, const char *salt)
+{
+    size_t n = strlen(salt), i;
+    if (!n || _strnicmp(key, salt, n) != 0 || key[n] != '_' || !key[n + 1]) return 0;
+    for (i = n + 1; key[i]; i++)
+        if (!((key[i] >= 'a' && key[i] <= 'z') || (key[i] >= 'A' && key[i] <= 'Z') ||
+              (key[i] >= '0' && key[i] <= '9') || key[i] == '_')) return 0;
+    return 1;
+}
+
 static void mb_registries(sh_mb_bundle *b)
 {
     mb_buf o = {0};
@@ -3539,8 +3552,6 @@ static void mb_registries(sh_mb_bundle *b)
     int any, first = 1;
     mbj *extra = NULL;
     const mbj *strings = NULL, *en = NULL;
-    char ns[SH_MB_ID_MAX + 8];
-    _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
     mb_put(&o, "{", 1);
     mb_registry_banks(b, &o, &first);   /* "banks" sorts first */
     for (i = 0, any = 0; i < b->file_count; i++) {
@@ -3567,9 +3578,9 @@ static void mb_registries(sh_mb_bundle *b)
             for (i = 0; i < n; i++) {
                 if (i) mb_put(&o, ",", 1);
                 mb_put_jcstr(&o, keys[i]);
-                if (_strnicmp(keys[i], ns, strlen(ns)) != 0)
-                    mb_error(b, "mod.json strings key %s is outside %s: every string of a mod is named under its salt",
-                             keys[i], ns);
+                if (!mb_string_key_ok(keys[i], b->id))
+                    mb_error(b, "mod.json strings key %s is not named %s_<name>: every string of a mod is named "
+                             "under its salt, in letters, digits and _", keys[i], b->id);
             }
             mb_put(&o, "]", 1);
         }

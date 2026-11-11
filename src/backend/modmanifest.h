@@ -79,9 +79,6 @@ int  sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name);
 
 /* ------------------------------------------------------------ grammar ---- */
 
-/* 1 when `salt` is a mod's salt: [a-z][a-z0-9]{7}, the grammar of
- * sh_salt_valid (modsalt.h). */
-int sh_modmanifest_valid_salt(const char *salt);
 /* 1 when `text` is exactly 64 lowercase hex characters. */
 int sh_modmanifest_valid_hash(const char *text, size_t length);
 

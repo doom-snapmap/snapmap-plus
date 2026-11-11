@@ -54,6 +54,7 @@ snapmap-plus migrate   [--doom <path>]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
 snapmap-plus version
+snapmap-plus set-token <token>
 snapmap-plus help
 ```
 
@@ -68,13 +69,18 @@ The Go lifecycle tests use temporary game and profile directories with a control
 process check; they can run while your real game is open.
 
 `--doom` overrides Steam discovery. `--local` reads the repository's packaged
-`dist/` directory. Downloads use the latest stable release by default, with a
-reported fallback to the newest beta while no stable release exists. `--beta`
-selects the newest beta; `--release` selects a specific tag. A stale installer
+`dist/` directory. Releases are chosen by version, not by publication order:
+by default the newest stable release (the newest beta while none is stable),
+with `--beta` the newest release of either kind, and with `--release` that tag.
+Install and update never move to an older version than the one recorded for
+that DOOM folder unless `--release` names it; they say so and change nothing.
+`--token <token>` supplies a GitHub token for one command; `set-token` saves one.
+Every Releases API request has a 30-second limit and a download a 15-minute one.
+A stale installer
 refreshes itself before it touches the game: at start, every run except
 `version`, `help`, `set-token`, `uninstall`, an offline `--local` run and
 `--no-self` resolves the release, replaces `snapmap-plus.exe` when the release
-ships a newer one, and starts the new image with the same arguments, so the mod
+is a newer version (never an older one, `--release` included), and starts the new image with the same arguments, so the mod
 work is always done by the current installer. `update` still refreshes the
 installer at its end for a run that started current and found a newer release
 meanwhile.
@@ -143,7 +149,13 @@ After any install, update or migration:
   XInput proxy does. A file at one of our names that is not ours, a file under
   `snapmap-plus\` that is not ours, and the proxy-shaped names of other tools at the
   top level (`dinput8.dll*`, `xinput*`, `winmm.dll*`, `snaphak*`) stay where they are
-  and are listed under "Not ours, left in place".
+  and are listed under "Other programs' files (left in place)".
+- **The pair goes in as one change.** Both files are written beside their targets
+  under `.snapmap-plus-new-*` names and checked against the manifest; then each
+  target is renamed aside (`.snapmap-plus-old-*`) and the new file renamed in. A
+  failure puts back every target already replaced, so the folder never holds one
+  release's backend beside another's frontend. Leftovers of a stopped install are
+  removed by the next one.
 - **No backup of our own files.** Neither XInput name exists in a vanilla DOOM
   folder, so uninstall restores vanilla by deleting the pair. The only file ever
   backed up is one that is not ours and that the pair replaces (another tool's
@@ -163,15 +175,24 @@ After any install, update or migration:
   `cache\installer\backup\`, removes the runtime log and crash folders, the store
   tool, the data folder's installer copy and `install.json`, and leaves the
   player's data. An installer copy that is the one running cannot be removed: it
-  stays, and `install.json` then records that copy alone.
+  stays, and `install.json` then records that copy alone. Without an install
+  record, `uninstall --doom <path>` cleans that folder by content: it removes the
+  files whose bytes show they are Snapmap+'s (the rule above) and nothing else. A
+  backup that cannot be put back stays in `cache\installer\backup\`, and the
+  warning names its path.
+- **An unreadable `install.json`** (not valid JSON) is renamed to
+  `install.json.unreadable` with a warning, and a new record is started, so the
+  next `update` runs instead of failing every time.
 
 ### install.json
 
 `install.json` is the installer's only record. The bookkeeping files of earlier
 releases, `installer-files.json`, `installer-versions.json` and
 `<installer>.updates.json`, are folded into it and removed whenever they are found,
-at every start. `"version"` stays the first key: the backend and the frontend read
-the first `"version"` in the file for their reports.
+at every start. `"version"` stays the first key while the backend and the frontend
+still read the first `"version"` in the file for their reports; release builds also
+carry the version in the DLLs themselves (`SNAPMAP_PLUS_VERSION`, see
+[packaging](../docs/packaging.md)).
 
 ```json
 {

@@ -24,8 +24,9 @@ in the editor and a later map load or Play compute the same values from the
 installed room declaration.
 
 A size edit changes only the axes you changed. When the world limit stops an
-axis, the panel shows the value that fits and the backend log names the axis,
-the limiting module, the coordinate it reached and the limit. A room that
+axis, the panel shows the value that fits and a toast names the axis, the
+limiting module, the coordinate it reached and the limit; a refused edit says
+why in the same toast, and "Room size not changed: ..." on the console. A room that
 already extends past the limit (a lowered cvar, an older map) can still be
 shrunk. `sh_gridsize` resizes the selected room from the console through the
 same path.
@@ -138,7 +139,9 @@ A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding `mod.json` and 
 already-cooked idTech 6 files at the paths the game asks for. Converting assets from other games is
 Doomforge's job, not this product's. Each mod has a salt, eight letters and digits it is given once,
 the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, and every `strings` key
-starts with `mods/<salt>/`. The folder's name is yours and you can rename it at any time. A stock file
+is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl as `#str_<salt>_<name>`.
+A folder made by hand has no salt until its first scan, so give it strings after that scan has
+written the salt into `mod.json`. The folder's name is yours and you can rename it at any time. A stock file
 the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.
@@ -596,9 +599,7 @@ Registered with the engine command system; run from the DOOM console.
 
 | Command | What it does |
 |---|---|
-| `sh_rawmaps` | Raw map files: state, paths, load, save. Run it bare (or `sh_rawmaps status`) to see what is set and what the last save wrote, including the `.zip` beside it for a map with mods, or `sh_rawmaps help` (or `?`) for every verb. `load` takes a `.json` or a `.zip`; with a map open it is staged for the next map load and says so, and the next map opened from My Maps reports that the staged file opened in its place (`load` with no path, or the File menu's Load, opens it now); `list` shows both, `savepath` chooses where saves go, `overwrite` chooses whether a rawmap you open may replace the map it opened over. |
-| `sh_rawmaps_on` | Enable raw map save/load (the `rawmap.json` substitution). Same as `sh_rawmaps on`. |
-| `sh_rawmaps_off` | Disable raw map save/load. Same as `sh_rawmaps off`. |
+| `sh_rawmaps` | Raw map files: state, paths, load, save. Run it bare (or `sh_rawmaps status`) to see what is set and what the last save wrote, including the `.zip` beside it for a map with mods, or `sh_rawmaps help` (or `?`) for every verb. `load <path>` opens a `.json` or a `.zip` in the editor now as a new map (with a map open in the editor; otherwise it is refused and nothing is kept), and `load` with no path opens the load path again; `list` shows both, `savepath` chooses where saves go, `overwrite` chooses whether a rawmap you open may replace the map it opened over. |
 | `sh` | The SnapStack dispatcher — routes the 20 SnapStack subcommands (below). |
 | `sh_spawn` | Spawn `<entitydef> <name>` at the player and teleport to it. |
 | `sh_dumpdef` | Print (and copy to clipboard) an existing entity's resolved entity definition. |
@@ -619,7 +620,6 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_gridsize` | Print the selected Grid Room's size, or `sh_gridsize <x> <y> <z> [instance]` to resize it through the same path as Module Properties. Prints the applied size and the reason any axis was limited or the edit refused. `sh_gridsize templates` lists, for the stock modern room and each resized variant, the module entity templates a loaded room receives (diagnostic). Without an instance it uses the Blueprint selection, then the room whose properties are open. |
 | `sh_smp` | Runs a String Set command on `player1` during a playtest, as if a Set (String) node had fired it: `sh_smp smp:event forcePraetorHandsAndBody 1`. `sh_smp on`, `off` and `status` switch String Set commands for the session (on by default). |
 | `sh_event` | The live engine event registry: `sh_event info <name>` prints an event's number, argument format, types and names; `sh_event list [filter]` prints every event (1611 on this build), or those whose line contains the filter. |
-| `sh_playerevent` | Diagnostic: fires one player event with no argument or one int/bool on `player1`, at once or queued (`process` / `post`), and prints the hands model slots before and after; `hands` prints them alone. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_mods` | Installed mods (see [Mods](#mods)). Bare or `status`: what the serving table holds and serves. `rescan` (or `refresh`) rereads the mods folder; `palette rebuild` adds rows of mods installed after the editor first opened. `rescan` also builds every mod folder whose files or `mod.json` changed and applies what changed to the running game, printing one `MODS: refresh:` line per category: decls re-parsed by type, models and images reloaded, anims waiting for the next map load, new names that need a map reload or `palette rebuild`, changes that need a restart, and changes left pending during Play; `status` says when changes are pending. `held [filter]` prints what the game was served under each name this session (bundle, file, serves, and whether the game holds the name and for how long) and the names it holds for the session by type. `build "<folder>"` checks a mod and writes the `snapmap-plus` member of its `mod.json`; `install "<folder>"` copies it into the store as `mods\<id>`, verifies it and rescans; `list` shows every mod folder and its state; `verify "<folder>"` rehashes one installed mod (an id, or `id@version`, checks every folder declaring it). `copystock "<engine path>" "<file>"` writes the bytes of an installed game file to a new file, so a stock mesh or animation can be placed in a mod under a new name; it never replaces a file. `migrate` moves the retired `overrides\` folder into the store again in the background (`--again` repeats a completed move; see [Mods](#mods)). `map` prints the open map (name, saved-map id, last save, published and uploaded state, search tag) and each mod it uses with its placed entities and the wires and Timelines pointing at them, whether it is used by the whole map, and where each mod applies. `map add "<id>"` uses that mod in the whole open map without placing anything (the Mods tab's Use in this map). `status` and `doctor` print each mod's scope and whether it is active in the open map. `map remove "<id>"` prints what removing that mod from the open map does, and with `--yes` does it (the Mods tab's Remove from map); `uninstall "<id>"` prints what uninstalling does (the open map first, the Toybox rows, the folder moved to the Windows Recycle Bin, how many of your saved maps use it, and that the undo history is cleared) and does it with `--yes`; a key installed at several builds loses every one of them, each folder listed in the dry run, while `uninstall "<id>@<build>"` (a build hash's first 16 digits) removes that build alone; `removed` only says "Uninstalled mods go to the Windows Recycle Bin."; `rebuild "<folder>"` builds a mod folder again and rescans (the tab's Rebuild). `choose "<game file>/<path>" "<key>"` picks whose edit serves a field several of the open map's mods set to different values (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; an empty key clears). `new "<name>"` makes a mod folder under a generated key. `doctor` also prints one line per build of a key installed at several, which layer serves each path several mods carry, and the registries with their clashes. A folder or file without a drive is taken relative to the mods folder. |
 | `sh_vt` | Virtual-texture diagnostic. `status` and `list` show the game's page-source records, marking those registered for an installed mod's family; `sync` registers the installed mods' families now; `register "<name>" "<path>" [flavor]` and `release "<name>"` create and remove a record by hand for format experiments (never a mod's); `decode <family> <level> <x> <y> <out>` decodes one stored page to its five planes. |
@@ -647,6 +647,10 @@ Console variables; defaults shown in parentheses.
 
 Subcommands of `sh`, operating on numbered entity-id stacks and named groups. A numbered stack
 is one-shot scratch — apply/use ops drain it; move a set into a named group (`pop2g`) to reuse it.
+Stacks and groups hold the open map's entity ids, so opening another map empties them all. A bulk
+edit (`bss`, `bsi`, `bsf`, `bsb`, `bse`, `accl`, `acctargets`, `bsin`, `bscls`, `bsincls`) changes at
+most 512 entities at once; a larger stack is refused before anything changes and stays as it was.
+Each edit reports the true count: "Changed N of M entities".
 
 The SnapStack stores + all 20 handlers live in the **backend** (`src/backend/snapstack.c` +
 `json_patch.c`), registered once before the frontend loads. See
@@ -661,7 +665,7 @@ letter-first **group name** in place of the stack index):
 | `popsel` | Add the stacked ids (or a named group's) back into the editor selection. |
 | `phov` | Push the hovered entity onto the stack (de-duplicated). |
 | `pr` | Push every valid id in an inclusive `[lo..hi]` range. |
-| `pg` | Push a named group's ids onto the stack. `sh pg <grp>` alone implies stack 0. |
+| `pg` | `sh pg <stack> <grp>`: push a named group's ids onto the stack. `sh pg <grp>` alone implies stack 0; a group that does not exist is named in the refusal. |
 | `pop2g` | Move the stack into a named group. `sh pop2g <grp>` alone implies stack 0. |
 | `cstk` | Empty the stack. |
 | `filtinh` | Keep only the stacked ids whose inherit matches the argument. |
@@ -671,9 +675,9 @@ letter-first **group name** in place of the stack index):
 | `bsf` | Bulk-set a float property. |
 | `bsb` | Bulk-set a boolean property. |
 | `bse` | Pop the last id; set each remaining id's chosen property to that id's id-string. |
-| `bsin` | Set the inherit of each stacked entity. |
-| `bscls` | Set the classname of each stacked entity. |
-| `bsincls` | Apply a validated inherit/classname pair, rebuild its declaration, and reassert the pair. Reports completed, refused and partial outcomes separately. |
+| `bsin` | Set the inherit of each stacked entity. The resulting pair is checked first, so an inherit the classname cannot take is refused instead of faulting the game. |
+| `bscls` | Set the classname of each stacked entity, checked the same way. |
+| `bsincls` | Set an inherit and classname together, checked as one pair. Each of the three reports how many changed, how many were refused, and how many need the command run again. |
 | `accl` | Pop the last id as the receiver; reference-assign the remaining ids to it. |
 | `acctargets` | Pop the last id; append the remaining ids to its `targets` list. |
 | `mkcmd` | Synthesize a reusable command-entity macro from the stacked ids. |
@@ -687,7 +691,6 @@ goes to the `~` console with a summary toast.
 | `chkstk [N]` | Inspect stack `N` (ids + id-strings); omit `N` to summarize every non-empty stack. |
 | `chkgrp [name]` | Inspect a group's ids; omit `name` to list all groups + counts. |
 | `clrgrp <name>\|*` | Delete a named group entirely (`*` deletes all). |
-| `snapstack_diag` | Report, per subcommand, which loaded DLL currently owns the handler. |
 
 ## The Studio window
 
@@ -864,10 +867,10 @@ Engine detours and resource-loader shadows the backend installs.
 
 | Hook | What it does |
 |---|---|
-| Rawmap load | When rawmaps are on, load the map from the staged rawmap file — `%LOCALAPPDATA%\snapmap-plus\rawmap.json` unless **File ▸ Load Rawmap...** points it somewhere else — instead of the engine's own save. A `.zip` installs the mods it carries first. A rawmap that names a mod you do not have is never substituted: the game offers the download when the mod store has the mod, serves it with the installed build when another build of that mod is installed, and otherwise refuses with a notice and a console line naming each missing mod and its version and asking for the author's `.zip`. |
-| Rawmap save | When rawmaps are on, mirror each saved map's JSON to the save path. That is `%LOCALAPPDATA%\snapmap-plus\rawmap.json` until **File ▸ Save Rawmap As...** or `sh_rawmaps savepath` names another file, and opening a different map returns it to the default. A file someone downloads and opens is an archive entry, so nothing about opening one aims a save at it. Off, your save is untouched and that file is left alone — the same switch governs both directions. A map that uses mods also gets `<name>.zip` beside the `.json` on every rawmap save, with a toast and a console line saying to share it. |
+| Rawmap load | **File ▸ Load Rawmap...** and `sh_rawmaps load` open a rawmap in the editor at once, through an editor reload whose one parse reads the rawmap instead of the saved map it borrows; no other map load is ever replaced, so a published or lobby map always loads as itself. A `.zip` installs the mods it carries first. A rawmap that names a mod you do not have is never opened as it is: the game offers the download when the mod store has the mod, serves it with the installed build when another build of that mod is installed, and otherwise refuses with a notice and a console line naming each missing mod and its version and asking for the author's `.zip`. |
+| Rawmap save | **Save Rawmap** and `sh_rawmaps save` write the open map's JSON to the save path. That is `%LOCALAPPDATA%\snapmap-plus\rawmap.json` until **File ▸ Save Rawmap As...** or `sh_rawmaps savepath` names another file, and opening a different map returns it to the default. A file someone downloads and opens is an archive entry, so nothing about opening one aims a save at it. The engine's own Save never writes a rawmap. A map that uses mods also gets `<name>.zip` beside the `.json` on every rawmap save, with a toast and a console line saying to share it. Paths may hold any characters Windows allows. |
 | Rawmap branch answer | A map opened from a rawmap counts as a new map, so the engine's own Save asks for a name instead of replacing whichever map the rawmap opened over. Detours `idSnapEditorLocal::IsBranchMap`, the one function the editor's save menus ask, and answers for a substituted map without writing to the map. A sibling function in the image has the same body around the `map:new` check, so the scan confirms its target by the literal the callee names. `sh_rawmaps overwrite on` allows the replacement instead, for that session only, and says so when it is turned on. Loads are refused if the protective hook is unavailable unless overwrite was explicitly enabled. |
-| Rawmap file menu | **File > Load Rawmap...** stages a `.json` or `.zip` file (both are listed) and offers to open it in place after confirmation; a `.zip` brings its mods, and missing mods are offered for download or refused before the map opens. **Save Rawmap As...** offers `.zip` first when the map uses mods, and the menu names the `.zip` to share after a save. **Open Rawmap as New Map** confirms before replacing unsaved editor work. **Save Rawmap / Save Rawmap As...** serialize the live map, including unsaved edits; a missing or busy editor is refused, and a map change cancels queued saves. The File menu shows both paths and lets the user release a chosen save destination or enable rawmaps for every load/save. See the [rawmap guide](https://www.snapmapplus.com/snapmap-plus-guide.html#rawmaps). |
+| Rawmap file menu | **File > Load Rawmap...** picks a `.json` or `.zip` file (both are listed) and, after a confirmation that unsaved editor work is discarded, opens it in place at once; with no map open in the editor it is refused; a `.zip` brings its mods, and missing mods are offered for download or refused before the map opens. **Save Rawmap As...** offers `.zip` first when the map uses mods, and the menu names the `.zip` to share after a save. **Open Rawmap as New Map** confirms before replacing unsaved editor work. **Save Rawmap / Save Rawmap As...** serialize the live map, including unsaved edits; a missing or busy editor is refused, and a map change cancels queued saves. The File menu shows both paths and lets the user release a chosen save destination. See the [rawmap guide](https://www.snapmapplus.com/snapmap-plus-guide.html#rawmaps). |
 | Overrides file-shadow | Serves map navigation, the generated Grid Room variants, the built-in default declarations and then installed mods through native file opens, falling back to installed originals, which it reads through the provider's own open (`read_installed_resource`). The only user files it reads are the files of installed mod bundles, through a table built at startup. The custom stream requires the audited native ABI. |
 | Installed mods | Serves the files of every admitted bundle in `mods\` below the product's own sources and above the game's archives, from one table read at startup (sizes checked, never hashes) and replaced only by a rescan. Answers the decl existence probe for served decls, detoured only when a bundle provides one. Registers the bundles' new editor rows inside the palette build, and a map's gameplay decls when a map whose manifest names their bundle loads, at the engine's own map lifetime (the decls of a mod that adds Toybox rows are kept for the session, as the editor pass keeps its rows' decls, unless the game already holds them permanently). A runtime palette rebuild runs inside process heap 0 and is refused while the editor holds an entity or a wire. With an empty `mods\` folder every hook passes through. See [Mods](#mods). |
 | Maps in an earlier shape | A map saved or published by an earlier release in a shape this one does not read (its packages, mod rows, settings or navigation as `smpkg.`, `smpmod1.`, `smpprod1.`, `smp.render.v1`, `smp.bounds.v1`, `smnav1.`, `smpbind.` or `smpref.` string variables, or mod rows that name an `id` and a `bundle`) is refused before the engine parses it, with "This map was saved in a format this version does not read." Its file is not changed. See [Mods](#mods). |
