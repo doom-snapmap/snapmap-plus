@@ -1485,18 +1485,24 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (ref && ref.length >= suffix.length && ref.slice(-suffix.length) === suffix) return ref.slice(0, -suffix.length);
     return ref;
   }
+  // The live entity a Runs on value names, or null: its ID, or its "ID: name" label, exactly,
+  // with or without the " (no module)" suffix. An ID inside a longer one is a different entity.
+  function tlFindEntity(ref) {
+    if (!ref) return null;
+    var bare = tlStripNoModuleSuffix(ref);
+    for (var i = 0; i < allEntities.length; i++) {
+      var e = allEntities[i];
+      if (!e.id) continue;
+      if (bare === e.id || (e.name && bare === e.id + ': ' + e.name)) return e;
+    }
+    return null;
+  }
   // Convert displayed entity labels to canonical references before commit.
   // Keep unmatched free-typed references, such as player1, unchanged.
   function tlResolveCommitRef(entityStr) {
     if (!entityStr) return '';
-    for (var i = 0; i < allEntities.length; i++) {
-      var e = allEntities[i];
-      if (entityStr === e.id) return e.id;                              // already the ref
-      if (e.name && entityStr === (e.id + ': ' + e.name)) return e.id;  // the exact display label -> ref
-    }
-    for (var j = 0; j < allEntities.length; j++)                        // fallback: any string containing a known id
-      if (allEntities[j].id && entityStr.indexOf(allEntities[j].id) !== -1) return allEntities[j].id;
-    return entityStr;                                                   // free-typed ref, no live match
+    var e = tlFindEntity(entityStr);
+    return e ? e.id : entityStr;
   }
   // Keep numeric edits as strings while typing, then convert them to JSON numbers at commit.
   // Other argument kinds already have their serialized types.
@@ -1580,20 +1586,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Show both ID and display name; the ID disambiguates entities with the same name.
   function tlEntityLabel(ref) {
     if (!ref) return '(no entity)';
-    for (var i = 0; i < allEntities.length; i++) {
-      var e = allEntities[i];
-      if (e.id === ref || (ref.indexOf(e.id) !== -1)) return e.name ? (e.id + ': ' + e.name) : e.id;
-    }
-    return ref;
+    var e = tlFindEntity(ref);
+    if (!e) return ref;
+    return e.name ? (e.id + ': ' + e.name) : e.id;
   }
   // Resolve the displayed Runs on value to an eid, or -1 for an unmatched reference.
   function tlResolveEntityEid(ref) {
-    if (!ref) return -1;
-    for (var i = 0; i < allEntities.length; i++) {
-      var e = allEntities[i];
-      if (e.id === ref || ref.indexOf(e.id) !== -1) return e.eid;
-    }
-    return -1;
+    var e = tlFindEntity(ref);
+    return e ? e.eid : -1;
   }
   // Fetch and cache target inheritance lazily. Until it arrives, use ordinary argument widgets.
   function tlResolveEntitySlug(ref) {

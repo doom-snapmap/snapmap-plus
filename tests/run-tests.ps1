@@ -301,7 +301,7 @@ foreach ($t in @($tests | Where-Object { -not $_.skip })) {
     $runJobs += @{ dir = $cwd; cmd = "`"$exe`" $argText"; log = (Join-Path $obj ($t.name + ".run.log")); name = $t.name; serial = $t.serial }
 }
 $nativeCount = $runJobs.Count
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js", "timeline_target_test.js")
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $Only.Count -and $node) {
     foreach ($jsTest in $jsTests) {
