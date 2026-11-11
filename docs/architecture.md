@@ -2125,7 +2125,15 @@ trigger's does.
   `ae_notify "<notify>"`; `on.frame_event(name, command, fn(self, args))` for a
   row `ae_notify "<command>:<a>:<b>"` (args `{a, b}`, numbers as numbers);
   `on.projectile(name, fn(self, p, decl, origin, dir))` for every projectile
-  the entity launches.
+  the entity launches. Every launch the engine makes for a demon passes
+  through `idProjectile::Launch` (VK 0x140F3A380) with the demon as owner:
+  its weapons (fire control VK 0x1404456E0, `TestFireWeapon` VK 0x1403E01E0,
+  `InitForFire` VK 0x140F18530 taking the demon as the fire owner,
+  `FinishLaunchProjectile` VK 0x140EE3730), the `ae_launchProjectile*` rows
+  and `ai:fire`. A weapon fires only while the demon's weapon hand
+  (`weaponSlot`) holds one, so `equip` writes one line to the mod's log when
+  it puts a weapon in the other hand: until the decl names that hand, the
+  demon launches nothing and `on.projectile` has nothing to report.
 - **Hooks.** Six detours, resolved at boot from `script_sigs.c` and
   `script_combat_sigs.c` (both checked on both executables by
   `tests/script_sigs_test.c` and `tests/script_combat_sigs_test.c`; one not

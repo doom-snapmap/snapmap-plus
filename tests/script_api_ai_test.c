@@ -949,7 +949,8 @@ static void test_brain_calls(void)
  * buffer held 64). */
 /* trigger, trigger_pulled, weapon_ready and equip act on the same weapon:
  * the one in the hand a script names, else the demon's weapon hand; equip
- * takes the item by its decl and says where it went. */
+ * takes the item by its decl and says where it went, and tells the author
+ * once when the game would never fire it. */
 static void test_weapon_hands(void)
 {
     const char *log;
@@ -988,6 +989,10 @@ static void test_weapon_hands(void)
     tick();
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "hand left\nhand2 left\nhand3 right\n") != NULL);
+    /* the right hand is the weapon hand: the cannon in the left one is never fired, said once */
+    CHECK(strstr(log, "weapon/ai/brute/cannon goes in the demon's left hand") != NULL);
+    CHECK(strstr(log, "set weaponSlot = \"EQUIP_LEFT_HAND\"") != NULL);
+    CHECK(strstr(strstr(log, "goes in the demon's left hand") + 1, "goes in the demon's left hand") == NULL);
     CHECK(strstr(g_events, "1:equipInventoryItemByIndex(1)\n1:equipInventoryItemByIndex(1)\n"
                            "1:equipInventoryItemByIndex(0)\n1:pullTriggerRight()\n") != NULL);
     CHECK(strstr(log, "pulled true\n") != NULL);

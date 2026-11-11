@@ -59,6 +59,7 @@
 #include "script_runtime.h"
 #include "script_api_common.h"
 #include "script_api_combat.h"
+#include "script_internal.h"
 #include "../../third_party/lua/lauxlib.h"
 
 #define AI_PI 3.14159265358979323846
@@ -188,6 +189,7 @@ typedef struct ai_rec {
     int        facing;           /* a face order is standing: 1 an entity, 2 a position */
     sh_script_handle face_ent;
     float      face_pos[3];
+    unsigned   hand_noted;       /* equip told the author of a weapon outside the weapon hand (a bit per hand) */
 } ai_rec;
 
 #define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
@@ -975,8 +977,9 @@ static int l_equip(lua_State *L)
     lua_Integer idx = -1;
     const char *want = NULL;
     char decl[512];
-    int hand = -1, r, i;
+    int hand = -1, weapon_hand, r, i;
     sh_ai_arg a;
+    ai_rec *rec;
     decl[0] = 0;
     if (lua_isinteger(L, 2)) {
         if ((idx = lua_tointeger(L, 2)) < 0 || idx > INT_MAX)
@@ -1016,6 +1019,21 @@ static int l_equip(lua_State *L)
     if (!park(ai, h)) { lua_pushnil(L); return 1; }
     a = arg_i((int)idx);
     run(ai, SH_AI_EV_EQUIP_ITEM, &a, 1, NULL);
+    /* The fire control fires nothing unless the weapon hand holds a weapon. */
+    weapon_hand = g_engine->weapon_hand ? g_engine->weapon_hand(ai) : -1;
+    if (hand_name(hand) && weapon_hand >= 0 && weapon_hand != hand && (rec = rec_of(h)) != NULL &&
+        !(rec->hand_noted & (1u << hand))) {
+        char line[768];
+        rec->hand_noted |= 1u << hand;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "\"equip\": %s goes in the demon's %s hand, but the game fires a demon's weapons only while the "
+                    "hand its aibehavior decl names in weaponSlot holds one (now %s); set weaponSlot = \"%s\" in that "
+                    "decl, or the demon never fires.", own_name(L, decl), hand_name(hand),
+                    weapon_hand == SH_AI_HAND_LEFT ? "the left hand" : weapon_hand == SH_AI_HAND_RIGHT ? "the right hand"
+                                                                                                 : "no hand",
+                    hand == SH_AI_HAND_LEFT ? "EQUIP_LEFT_HAND" : "EQUIP_RIGHT_HAND");
+        shs_log(shs_mod_of(L), line);
+    }
     if (hand_name(hand)) lua_pushstring(L, hand_name(hand)); else lua_pushnil(L);
     return 1;
 }
