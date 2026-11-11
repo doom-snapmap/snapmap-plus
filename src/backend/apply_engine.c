@@ -13,6 +13,7 @@
 #include "modpublished.h"
 #include "modpublish.h"
 #include "modui.h"
+#include "modvt.h"
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
@@ -3128,6 +3129,7 @@ void sh_apply_prefab_poll_play(void)
     sh_modpublished_poll();
     sh_modpublish_poll();   /* held publishes, their uploads and claims */
     sh_rawmap_poll_main();  /* a rawmap save's "share the .zip" toast and console line */
+    sh_modvt_frame();       /* mod texture boards: a queued release or registration */
     /* Mods: an uninstalled mod the open map needs again (Ctrl+Z, a load, a
      * save): the owed refresh and its toast, and the undo watch. */
     if (sh_modui_poll_due()) (void)ae_main_call_invoke(sh_modui_poll_main, NULL);

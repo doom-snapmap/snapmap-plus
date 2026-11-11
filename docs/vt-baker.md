@@ -10,8 +10,9 @@ ones. This document is the contract between a tool that writes such a family
 (`src/backend/modvt.c`, `src/backend/modbundle.c`). Everything here is for
 build 13954591 on both executables unless marked.
 
-Status: the file layout, the material text, the registration and the drawing
-of a family made from copied stock pages are confirmed in game on Vulkan. The
+Status: the file layout, the material text and the registration are confirmed
+in game on Vulkan; drawing a board with the stock lit programs (the product's
+board binding) is not yet confirmed in game. The
 plane contents are confirmed by decoding stock pages, except the split of the
 normal across the two alpha channels, which is inferred. Whether the page
 codec is standard JPEG XR is not settled, so a new encoder must pass the
@@ -177,8 +178,8 @@ by 245,760, written with at least 8 significant digits. Do not write
 | Member file | at most 64 MiB (the bundle builder's per-file cap). The cell index alone is 1,398,108 bytes and the header 368, so about 62.6 MB is left for pages. |
 | Bundle | at most 256 MiB and 4096 files in all. |
 | Families per bundle | no limit of its own; each family takes one record. |
-| Records | 30 for everything the game and mods register at once (see below). |
-| Memory per family | about 14 MB while registered (13.9 MB measured on Vulkan): 11,184,810 bytes of host page table, the member's index and page table, and a 2048 x 2048, 12-level page-table image. |
+| Records | 31 in the game, shared with its own board, the map's own textures and the engine (see below). |
+| Memory per board | about 14 MB while registered (13.9 MB measured on Vulkan): 11,184,810 bytes of host page table, the member's index and page table, and a 2048 x 2048, 12-level page-table image. |
 
 Measured sizes of the reference family's one member, `fam_sq1.mega2`:
 2,955,715 bytes = 368 header + 1,555,751 bytes of 93 pages (7,023 to 42,288
@@ -191,23 +192,25 @@ limits a mod to roughly forty.
 ## What Snapmap+ does with it
 
 - The members are served through the game's resource provider like any other
-  bundle file.
-- One page-source record per family is created with
-  `SetSource(record, "mods/<id>/<family>", "virtualtextures/mods/<id>/<family>.pages", flavor, 2)`
-  when the mod is installed, or for mods present at startup at the first
-  editor entry or map load, always before any of the mod's materials is read.
-  A material read before its family exists is bound as an ordinary unique
-  family instead, without the mod's record, for the rest of the session.
-- The game has 31 records; the product uses 1 to 30 and never evicts a record
-  it did not create. A family that finds them full is refused with one
-  `VT:` log line.
-- The flavor is 2 on both renderers (the game's `UniqueVmtrs` page cache),
-  except on OpenGL with the AMD sparse texture extension loaded and
-  `vt_enablePRT 1`, where the game itself uses sparse page tables and the
-  family is registered with flavor 4 to match.
-- Removing the mod releases its family's record, unless the editor or a map
-  was opened while it was registered; then the record stays until DOOM exits.
-- `vt_reloadMega2Vmtrs` does not reload a served family.
+  mod file.
+- The family is the mod's own board. One page-source record per board is
+  created with
+  `SetSource(record, "mods/<id>/<family>", "virtualtextures/mods/<id>/<family>.pages", 2, 2)`
+  and then pointed at the game's material page cache (the pool its own board
+  pages through), for each mod the loaded map uses (in the editor, each mod
+  the Toybox shows), always before any of the mod's materials is read. The
+  board keeps its own 2048 x 2048-page address space: nothing of it is placed
+  in the game's own `_vmtr` family.
+- A material naming the board draws with the stock lit programs: Snapmap+ sets
+  the board's page table and feedback word in that material's parameters, so
+  `skinvmtr` and `skinvmtrwounds` read the board as they read the game's own.
+- The game has 31 records; the game's own board, the map's own textures and
+  record 31 use some, and boards take the rest among 2 to 30. A board that
+  finds none is refused with one `VT:` log line and the player is told in one
+  sentence.
+- A board the loaded map no longer uses is released at the next frame; served
+  again, its materials are bound to it again.
+- `vt_reloadMega2Vmtrs` does not reload a served board.
 
 ## Validation
 

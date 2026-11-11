@@ -116,13 +116,14 @@ static void fixture(const char *src)
     CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam.pages", &hit) == 0);
     CHECK(sh_modserve_lookup("generated/decls/material/mods/rctestvt/vtprop.decl", &hit) == 1 && hit.is_decl);
     {
-        sh_modvt_family fam[4];
-        int nf = sh_modvt_collect(fam, 4);
+        sh_modvt_family *fam = NULL;
+        int nf = sh_modvt_collect(&fam);
         CHECK(nf == 1 && !strcmp(fam[0].name, "mods/rctestvt/fam") && fam[0].members == 1u &&
               !strcmp(fam[0].path, "virtualtextures/mods/rctestvt/fam.pages") &&
               sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq1.mega2", &hit) == 1 && fam[0].bytes == hit.size);
         if (nf == 1) printf("    family %s (%s): members 0x%X, %llu bytes\n", fam[0].name, fam[0].path, fam[0].members,
                             (unsigned long long)fam[0].bytes);
+        free(fam);
     }
 
     CHECK(sh_modserve_plan_editor(&plan) == 3 && plan.blocked == 0);
