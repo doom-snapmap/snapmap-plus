@@ -17,7 +17,10 @@
  * door example run through its Script nodes (the third switch fires the
  * door's node once, with the player who used it); and the spin-heal example
  * run through the entity calls against a faked engine table (it spins, heals
- * a hurt player who comes close and is gone).
+ * a hurt player who comes close and is gone); and the brute example run
+ * through the AI and combat calls against the same kind of faked engine (it
+ * takes the player as its enemy, parks, throws when it can see the player,
+ * fires its rock on the animation notify, and goes for melee up close).
  *
  *   script_e2e_test.exe <tests\fixtures\scripts> */
 #include <windows.h>
@@ -32,6 +35,8 @@
 #include "script/script_console.h"
 #include "script/script_node.h"
 #include "script/script_api_common.h"
+#include "script/script_api_ai.h"
+#include "script/script_api_combat.h"
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -417,6 +422,207 @@ static void test_spin_heal(void)
     sh_script_handles_set_resolver(resolve);
 }
 
+/* ------------------------------- the brute, through the AI and combat calls */
+
+typedef struct bent { uint32_t id; int kind, alive, parked; float pos[3], ax[9], vel[3]; char def[64], name[32]; } bent;
+static bent g_b[4];   /* 0 the brute, 1 the player, 2.. projectiles */
+static int g_bn;
+static uint32_t g_b_enemy;   /* the brute's enemy's spawn id, 0 none */
+static char g_b_log[4096];
+
+static void b_cat(const char *s) { if (strlen(g_b_log) + strlen(s) + 1 < sizeof g_b_log) strcat_s(g_b_log, sizeof g_b_log, s); }
+static bent *b_find(uint32_t id)
+{
+    int i;
+    for (i = 0; i < g_bn; i++) if (g_b[i].id == id && g_b[i].alive) return &g_b[i];
+    return NULL;
+}
+static void *b_resolve(uint32_t id) { return b_find(id); }
+static uint32_t b_spawn_id(void *e) { return e ? ((bent *)e)->id : SH_SCRIPT_SPAWN_ID_NONE; }
+static int b_slots(void) { return g_bn; }
+static uint32_t b_slot_id(int n) { return n >= 0 && n < g_bn && g_b[n].alive ? g_b[n].id : SH_SCRIPT_SPAWN_ID_NONE; }
+static int b_kind(void *e) { return e ? ((bent *)e)->kind : SH_SCRIPT_KIND_GONE; }
+static int b_origin(void *e, float out[3]) { memcpy(out, ((bent *)e)->pos, 12); return 1; }
+static int b_axis(void *e, float out[9]) { memcpy(out, ((bent *)e)->ax, 36); return 1; }
+static int b_place(void *e, const float *o, const float *a)
+{
+    if (o) memcpy(((bent *)e)->pos, o, 12);
+    if (a) memcpy(((bent *)e)->ax, a, 36);
+    return 1;
+}
+static int b_def(void *e, char *out, size_t cap) { strcpy_s(out, cap, ((bent *)e)->def); return 1; }
+static int b_event(void *ent, const char *name, const sh_script_earg *a, int n, sh_script_earg *ret, int post)
+{
+    bent *e = (bent *)ent;
+    (void)a; (void)n; (void)post;
+    if (ret) memset(ret, 0, sizeof *ret);
+    if (!strcmp(name, "ae_launchProjectileAtTarget") && g_bn < 4) {
+        /* the engine spawns the projectile at the joint; its launch hook notes it */
+        bent *p = &g_b[g_bn++];
+        int mod = -1;
+        sh_script_handle owner = sh_script_handles_find(e->id, &mod);
+        memset(p, 0, sizeof *p);
+        p->id = 700 + (uint32_t)g_bn; p->kind = SH_SCRIPT_KIND_OTHER; p->alive = 1;
+        memcpy(p->pos, e->pos, 12);
+        p->ax[0] = p->ax[4] = p->ax[8] = 1;
+        strcpy_s(p->def, sizeof p->def, "projectile/rock");
+        sh_script_combat_note_launch(p->id, owner, mod);
+        b_cat("launch;");
+    }
+    return 1;
+}
+static int b_no_health(void *ai, float *cur, float *max) { (void)ai; (void)cur; (void)max; return 0; }
+static int b_no_heal(void *ai, float v) { (void)ai; (void)v; return 0; }
+static int b_no_node(void *ai, char *out, size_t cap) { (void)ai; (void)out; (void)cap; return 0; }
+static void *b_no_spawn(const char *def, const float o[3], float yaw, const char **why)
+{
+    (void)def; (void)o; (void)yaw;
+    *why = "no spawns here";
+    return NULL;
+}
+static int b_no_trace(const float a[3], const float b[3], uint32_t ignore, sh_script_trace *tr)
+{
+    (void)a; (void)b; (void)ignore; (void)tr;
+    return 0;
+}
+static int b_time(int *ms) { *ms = g_ms; return 1; }
+static const sh_script_engine k_brute_world = {
+    b_resolve, b_spawn_id, b_slots, b_slot_id, b_kind, b_origin, b_axis, b_place, b_def, b_event,
+    b_no_health, b_no_heal, b_no_heal, b_no_node, b_no_spawn, b_no_trace, b_time
+};
+
+/* the AI calls' seam */
+static void *ba_entity(sh_script_handle h) { return sh_script_handle_entity(h); }
+static sh_script_handle ba_handle_of(void *e)
+{
+    sh_script_handle h = sh_script_handles_find(((bent *)e)->id, NULL);
+    return h ? h : sh_script_handles_ref(((bent *)e)->id);
+}
+static int ba_is_ai(void *e) { return ((bent *)e)->kind == SH_SCRIPT_KIND_AI; }
+static int ba_yaw(void *e, float *deg) { (void)e; *deg = 0; return 1; }
+static int ba_event(void *ent, int ev, const sh_ai_arg *args, int n, double *ret)
+{
+    char line[160];
+    (void)ent;
+    _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s%s;", SH_AI_EVENTS[ev].name,
+                n > 1 && args[1].type == '1' ? ":" : "", n > 1 && args[1].type == '1' ? args[1].s : "");
+    b_cat(line);
+    if (ev == SH_AI_EV_SET_ENEMY && n > 0) g_b_enemy = ((bent *)args[0].ent)->id;
+    if (ret) *ret = ev == SH_AI_EV_IS_ENTITY_VISIBLE ? 1 : 0;
+    return 1;
+}
+static int ba_park(void *e) { if (!((bent *)e)->parked) b_cat("park;"); ((bent *)e)->parked = 1; return 1; }
+static void *ba_enemy(void *e) { (void)e; return g_b_enemy ? b_find(g_b_enemy) : NULL; }
+static int ba_awareness(void *ai, void *tgt) { (void)ai; (void)tgt; return SH_AI_AWARE_CONFIRMED; }
+static int ba_move_status(void *e) { (void)e; return 0; }
+static int ba_trigger(void *e) { (void)e; return -1; }
+static int ba_path(void *ai, const float goal[3], int key, float *len) { (void)ai; (void)goal; (void)key; *len = 0; return 0; }
+static uint32_t ba_frame(void) { return (uint32_t)g_ms; }
+static const sh_script_ai_engine k_brute_ai = {
+    ba_entity, ba_handle_of, ba_is_ai, b_origin, ba_yaw, ba_event, ba_park, ba_enemy, ba_awareness,
+    ba_move_status, ba_trigger, ba_path, ba_frame
+};
+
+/* the combat calls' seam */
+static int g_rock;
+static void *bc_decl(const char *type, const char *name)
+{
+    return !strcmp(type, "projectile") && !strcmp(name, "mods/brutemod/brute/rock") ? &g_rock : NULL;
+}
+static int bc_radius(const float pos[3], void *decl, void *inflictor, void *attacker)
+{
+    (void)pos; (void)decl; (void)inflictor; (void)attacker;
+    return 0;
+}
+static int bc_explode(void *p) { (void)p; return 0; }
+static int bc_pain(void *ai) { (void)ai; return -1; }
+static int bc_name(void *e, char *out, size_t cap) { strcpy_s(out, cap, ((bent *)e)->name); return 1; }
+static int bc_fx(const char *name) { (void)name; return -1; }
+static void *bc_world(void) { return NULL; }
+static const sh_script_combat_engine k_brute_combat = {
+    bc_decl, bc_radius, bc_explode, bc_pain, bc_name, bc_fx, bc_world
+};
+
+static void brute_frame(int ms)
+{
+    g_ms += ms;
+    sh_script_api_frame();
+    sh_script_tick(g_ms / 1000.0, ms / 1000.0);
+}
+
+static void test_brute(void)
+{
+    const char *names[2] = { "mods/brutemod/ai/brute", "snapmaps/placeablesnapaiencounter/imp" };
+    bent *brute = &g_b[0], *player = &g_b[1];
+    sh_script_handle bh;
+    int mod = -1;
+
+    memset(g_b, 0, sizeof g_b);
+    g_bn = 2;
+    g_b_enemy = 0;
+    g_b_log[0] = 0;
+    brute->id = 601; brute->kind = SH_SCRIPT_KIND_AI; brute->alive = 1;
+    brute->ax[0] = brute->ax[4] = brute->ax[8] = 1;
+    strcpy_s(brute->def, sizeof brute->def, names[0]);
+    strcpy_s(brute->name, sizeof brute->name, "brute_1");
+    player->id = 602; player->kind = SH_SCRIPT_KIND_PLAYER; player->alive = 1;
+    player->ax[0] = player->ax[4] = player->ax[8] = 1;
+    player->pos[0] = 400;
+    strcpy_s(player->def, sizeof player->def, "player/sp");
+    strcpy_s(player->name, sizeof player->name, "player1");
+    sh_script_handles_set_resolver(b_resolve);
+    sh_script_api_set_engine(&k_brute_world);
+    sh_script_ai_set_engine(&k_brute_ai);
+    sh_script_combat_set_engine(&k_brute_combat);
+
+    sh_script_source_clear();
+    set_folder("brutemod", "Brute", "brute");
+    CHECK(sh_script_map_open() == 1);
+    bh = sh_script_hooks_record(brute->id, names, 2, NULL);
+    g_ms = 0;
+    sh_script_tick(0.0, 0.0);
+    CHECK(sh_script_status("brutemod") == SH_SCRIPT_RUNNING);
+
+    /* far off and in sight: it takes the player and parks; at time 0 it walks, a moment later it throws */
+    brute_frame(100);
+    printf("  brute: %s\n", g_b_log);
+    CHECK(strstr(g_b_log, "setEnemy;") != NULL && g_b_enemy == player->id);
+    CHECK(strstr(g_b_log, "park;") != NULL);
+    CHECK(strstr(g_b_log, "ssaction_ChangeAnimState:throw;") != NULL);
+    CHECK(strstr(g_b_log, "launch;") == NULL);
+
+    /* the throw clip's ae_notify "throw": the rock flies at its enemy */
+    sh_script_handles_find(brute->id, &mod);
+    CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, bh, 0, 0, 0, "throw", NULL) == 1);
+    brute_frame(100);
+    CHECK(strstr(g_b_log, "launch;") != NULL && g_bn == 3);
+    {
+        int launched_mod = -1;
+        sh_script_handle by = 0;
+        CHECK(sh_script_combat_launched(g_b[2].id, &launched_mod, &by) && by == bh && launched_mod == mod);
+    }
+
+    /* "attack_done", then the player comes within reach: melee */
+    CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, bh, 0, 0, 0, "attack_done", NULL) == 1);
+    player->pos[0] = 80;
+    g_b_log[0] = 0;
+    brute_frame(100);
+    brute_frame(100);
+    printf("  brute: %s\n", g_b_log);
+    CHECK(strstr(g_b_log, "ssaction_ChangeAnimState:melee;") != NULL);
+    CHECK(sh_script_status("brutemod") == SH_SCRIPT_RUNNING);
+    if (sh_script_status("brutemod") != SH_SCRIPT_RUNNING) {
+        char stop[SH_SCRIPT_LINE_CAP];
+        sh_script_stop_line("brutemod", stop, sizeof stop);
+        printf("  %s\n", stop);
+    }
+    sh_script_map_close(1);
+    sh_script_api_set_engine(NULL);
+    sh_script_ai_set_engine(NULL);
+    sh_script_combat_set_engine(NULL);
+    sh_script_handles_set_resolver(resolve);
+}
+
 int main(int argc, char **argv)
 {
     const char *base = argc > 1 ? argv[1] : "fixtures\\scripts";
@@ -426,10 +632,13 @@ int main(int argc, char **argv)
     sh_script_node_set_ops(&k_node_ops);
     CHECK(sh_script_node_api_register());
     sh_script_api_install(NULL, 0, NULL);   /* the entity, animation, world and time calls */
+    (void)sh_script_ai_register();
+    sh_script_combat_register();
     test_play();
     test_examples_compile();
     test_door_nodes();
     test_spin_heal();
+    test_brute();
     printf(g_fail ? "script_e2e_test: FAILED\n" : "script_e2e_test: ok\n");
     return g_fail;
 }
