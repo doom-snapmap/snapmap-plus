@@ -10,7 +10,9 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | File | Responsibility |
 |---|---|
 | `src/ui/webview/snapmap_plus_ui_webview.cpp` | Window, WebView2 startup, message bridge, file operations and polling. |
-| `src/ui/webview/mockup.html` | Layout, controls, entity and timeline editors, asset browser and browser preview. |
+| `src/ui/webview/mockup.html` | Layout, controls, entity and timeline editors, asset browser and every player-facing message. |
+| `src/ui/webview/page_keys.js` | Keyboard ownership, the dialog stack (Escape, Tab kept inside, focus restored), menu and tab-strip arrow keys. No page state; `tests/page_keys_test.js`. |
+| `src/ui/webview/preview_standin.js` | The browser preview's stand-in host: a fake `window.chrome.webview` answering the page with sample data. Loaded only by a page opened from disk; `embed-page.ps1` leaves it out of the DLL. |
 | `src/ui/webview/studio.css` | Shared layout, controls and light/dark themes. |
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
@@ -18,6 +20,12 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the list (Your mods, and one group per downloaded map), the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
+| `src/ui/webview/player_text.h` | The description text a player sees from the generated entity and event tables: study notes (addresses, offsets, handler and decompile wording, runtime class and field lists) and name-only entries are left out. Pure; `tests/player_text_test.cpp`. |
+| `src/ui/webview/report_scrub.h` | Crash-report attachments: the account, profile-folder and machine names scrubbed as UTF-8, ANSI, UTF-16LE and short-path text; whole-line log tails; the logs trimmed oldest-first to fit the relay's 64 KB cap. `tests/report_scrub_test.c`. |
+| `src/ui/webview/game_identity.h` | The game identity (`--game=`) and the backend's release (`--version=`) from the startup arguments. `tests/game_identity_arg_test.cpp`. |
+| `src/ui/webview/folder_watch.h` | The debounce behind the prefabs folder watcher. `tests/folder_watch_test.c`. |
+| `src/ui/webview/growing_text_buffer.h`, `serialization_buffer.h` | Retained buffers that grow for large declarations and serialized entities, up to 32 MiB. |
+| `src/ui/webview/webview_profile.h` | The WebView2 profile folder under `cache\`. |
 | `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
@@ -25,8 +33,9 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/crash_pending.h` | Pending-report ordering and complete filename-inventory change detection. |
 | `src/ui/webview/theme_bootstrap.{h,cpp}` | Saved-theme validation and initial document styling. |
 | `src/ui/webview/LUCIDE_LICENSE.md` | License for embedded Lucide icons. |
-| `src/ui/build.ps1` | SDK retrieval, embedded assets and frontend compilation. |
-| `src/ui/embed-page.ps1` | Assemble the browser's local assets into the embedded page, refusing missing or duplicate assets. |
+| `src/ui/build.ps1` | SDK retrieval (the WebView2 package is pinned by version and SHA-256), embedded assets and frontend compilation. |
+| `src/ui/embed-page.ps1` | Assemble the page's local assets into the embedded page, refusing missing or duplicate assets, and leave the preview stand-in out. |
+| `src/ui/snapmap-plus-ui.def` | The DLL's one export, `sh_ui_init` at ordinal 10. |
 
 ## Build and preview
 
@@ -43,9 +52,11 @@ layouts matched. The frontend statically links the WebView2 loader; the runtime
 is installed separately. Logs go to
 `<DOOM>\snapmap-plus\logs\snapmap-plus-ui.log`.
 
-Open `src/ui/webview/mockup.html` in a browser for sample-data preview. That mode
-uses browser storage for preferences and does not call the engine. Production
-uses the backend configuration service. See [contributing](contributing.md) for
+Open `src/ui/webview/mockup.html` in a browser for sample-data preview. Its
+`preview_standin.js` installs a stand-in `window.chrome.webview` that answers the
+page with sample data and keeps the theme in browser storage; the page itself is
+unchanged and never calls the engine there. The DLL's page has no stand-in and no
+browser storage: settings go through the backend configuration service. See [contributing](contributing.md) for
 the build and test requirements.
 
 Normal builds read committed assets and write only build outputs. To refresh the
@@ -63,7 +74,7 @@ The header defines the complete ABI. These are the main entry points:
 | Entity list and state | Count, validity, classname, inherit, display name and serialization slots. |
 | Selection | `get_selection` at `+0x150`, `add_to_selection` at `+0x138`, and `clear_selection` at `+0x148`. |
 | Camera position | `get_editor_vec3` at `+0x08` and `set_editor_vec3` at `+0x00`. Position lock reapplies saved coordinates. |
-| Create prefab | `serialize_selection` at `+0xB0`; the engine's copy check (PrefabPopulate) requires the hovered entity to be one of the selected ones. The host checks `get_selection` and `hovered_id` first (`prefab_host.h`) and answers `createPrefabResult` 0 nothing selected, 2 nothing hovered, 4 the hovered entity is not selected, or, when the serializer still returns nothing, 5 (the check refused for its other causes: a wired or referenced entity left out, or one the editor does not copy; the backend logs its status). |
+| Create prefab | `serialize_selection` at `+0xB0`; the engine's copy check (PrefabPopulate) requires the hovered entity to be one of the selected ones. In one `run_on_main` call the host reads `get_selection` and `hovered_id` (`prefab_host.h`), serializes and reads the grab-frame verdict, then writes the file on its own thread. It answers `createPrefabResult` 0 nothing selected, 2 nothing hovered, 4 the hovered entity is not selected, 5 the copy check refused for its other causes (a wired or referenced entity left out, or one the editor does not copy; the backend logs its status), 6 the file was not written whole (the partial file is removed), 7 the game did not run the request in time, -1 the name is one Windows cannot hold. |
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. The game thread decides on its next frame whether the paste was queued or the prefab only staged, and why (`prefab_watch`'s `place_seq`, `place_result`, `place_reason`); the host waits up to 2.5 s for that and posts `loadPrefabResult` with `placed`. |
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
@@ -72,14 +83,18 @@ The header defines the complete ABI. These are the main entry points:
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
-| File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state; its file types come from `rawmap_picker.h` (Load lists `.json` and `.zip`; Save As puts `.zip` first when the status's `mapMods` is above zero, read on the UI thread before the picker thread starts). Loading stages a file: the swap substitutes it into the next map the engine parses. A file `rawmap_configure` refuses (a prefab's export, an earlier release's `.zip`) is logged by the backend (`B1: rawmap: load of <path> refused: <reason>`), printed to the console on the next game tick ("The rawmap was not loaded: <reason>.") and logged by the host (`rawmap load: refused`), besides the page's "Refused:" toast. The status's `lastZip` fields name the export the last save wrote, and the path readout says to share it. |
+| File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state; its file types come from `rawmap_picker.h` (Load lists `.json` and `.zip`; Save As puts `.zip` first when the status's `mapMods` is above zero, read on the UI thread before the picker thread starts). Load Rawmap opens the picked file in the editor at once, after the page's confirm; nothing is kept for a later map, and Open <name> Again reopens the last opened file. A file `rawmap_configure` refuses (a prefab's export, an earlier release's `.zip`) is logged by the backend (`B1: rawmap: load of <path> refused: <reason>`), printed to the console on the next game tick ("The rawmap was not loaded: <reason>.") and logged by the host (`rawmap load: refused`), besides the page's error toast with the backend's reason (the host marks a refusal with `error` on `rawmapStatus`). The status's `lastZip` fields name the export the last save wrote, and the path readout says to share it. |
 | File dialog folders | Every dialog opens in the last folder the player used for its kind, kept in `config.json`: `dialogs.rawmap_load`, `dialogs.rawmap_save`, `dialogs.prefab_export`, `dialogs.prefab_import` (UI read and write, `""` until first used). Without a kept folder, or when it no longer exists, the prefab dialogs open in Downloads (`SHGetKnownFolderPath(FOLDERID_Downloads)`) and the rawmap dialogs in the rawmaps folder, `%LOCALAPPDATA%\snapmap-plus`. The host reads the folder on the UI thread before the dialog's thread starts and keeps the picked file's folder when the dialog returns. |
 | View menu navigation | `navmesh_view` at `+0x340` reports whether the preview is out of date and, when asked, requests an update on the game's next frame. |
-| Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save and camera writes run on the game's thread; the page waits up to one second, then drops the edit and logs it. |
+| Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save, camera writes, Create Prefab's serialize and the entity serialize behind opening a timeline and resolving an event's target run on the game's thread; the window waits up to one second for the game to start the call, then drops it and logs it. |
+| Install check | At load the window compares the backend's interface-table size with its own and, when the backend passes `--version=`, its release with its own compiled-in `SNAPMAP_PLUS_VERSION` (`dev` for a local build). A mismatch shows one notice, "Reinstall Snapmap+", and the window calls nothing else. |
 
-Prefab files use the path returned by `resolve_prefab_path`; their rename,
-delete and folder operations are native filesystem work (an older prefab's
-read-only sidecar moves with it). Feedback and
+Prefab files use the path returned by `resolve_prefab_path` (UTF-8); every file call
+on it is the wide Windows one. Names are refused when Windows cannot hold them
+(`prefab_host.h`: reserved characters, a trailing dot or space, device names such as
+CON). Rename, delete and folder operations are native filesystem work (an older
+prefab's read-only sidecar moves with it), and a failure carries its `reason`
+(`exists`, `inUse`, `missing`, `notEmpty`) so the page can say what to do. Feedback and
 crash submission use a short-lived HTTPS worker in the host and the
 [feedback pipeline](feedback.md).
 
@@ -88,7 +103,7 @@ crash submission use a short-lived HTTPS worker in the host and the
 | Direction | Message | Meaning |
 |---|---|---|
 | host to page | `editorMode {entityMode, blueprint, modules}` | The editor state, posted on change: module prefabs place only in Blueprint, object prefabs and new timelines in Object mode. `modules` is the number of modules selected in Blueprint (0 outside it, -1 when the backend cannot say); with `selCount {count}`, the selected entities, it gates Create (below). |
-| host to page | `createPrefabResult {result, name, grab?}` | 1 saved; 0 nothing selected; 2 nothing hovered; 3 no usable grab frame; 4 the hovered entity is not selected ("The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again"); 5 the copy check refused the selection; -1 failed. |
+| host to page | `createPrefabResult {result, name}` | 1 saved; 0 nothing selected; 2 nothing hovered; 3 no usable grab frame; 4 the hovered entity is not selected ("The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again"); 5 the copy check refused the selection; 6 not written whole; 7 the game did not answer; -1 the name was refused. A corrected grab frame is logged, not shown. |
 | page to host | `movePrefabs {names, fromFolders, toFolder}` / `deletePrefabs {names, folders}` | A multi-selection drop or delete, one tick, one `movePrefabsResult` / `deletePrefabsResult`, one list refresh. |
 | page to host | `flyTo {eid}` | Apply kind 4: the EditorFrame detour switches to Object mode and aims the camera at the entity; `flyToResult` confirms the queue only. |
 | page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the view of the summary the backend wrote into the file's block. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
@@ -260,7 +275,7 @@ prefab's row lists, whatever its hash; `MODS_STATUS` rows carry `state`
 Prefab Details shows a Mods section under the module warning: one row per mod
 with Installed or Not installed, and a line saying that Load / Place offers to download missing mods
 when the mod store has them and otherwise to ask for the prefab's ZIP export.
-P29's module warning stays above it; a module one of the rows provides is a
+The module warning stays above it; a module one of the rows provides is a
 mod, not a missing room.
 
 Load / Place asks the backend first (`MODS_RESOLVE`, with the whole file) for
@@ -383,7 +398,7 @@ consequence list the confirmation shows, with exactly two buttons (Cancel, and D
 Uninstall). A map left with no mods reads as vanilla.
 
 **Files modal (read-only).** Files opens the selected mod's folder in the standard modal at the
-expanded Decl Text editor's size (`#modsFilesModal`; Escape and the backdrop close it, Tab stays
+expanded declaration editor's size (`#modsFilesModal`; Escape and the backdrop close it, Tab stays
 inside, focus returns to the opener; every render keeps focus inside). Its head is the mod's name
 and the details pane's sentence. On the left, a filter and the folder as a tree with the Prefabs
 primitives (a folder holding only one folder shown as one row; a folder above `mods/` keeps its own
@@ -393,7 +408,7 @@ the right: the path once, the file's class as one phrase ("New file", "Your edit
 game file under this mod's own name", "A game file SnapMap cannot see on its own", "Replaces a game
 file", "An editor tweak, on this computer only", "About the mod: ..." for `mod.json`, "Not read yet"
 for a file the build does not hold), where a game file comes from, and a text file's text in the
-Decl Text editor primitive, read-only (`mod.json` without the part Snapmap+ writes). The plain cause
+declaration editor primitive, read-only (`mod.json` without the part Snapmap+ writes). The plain cause
 naming the file is shown in the Entity State problem strip. The two reads never set the page's busy
 state or its status line.
 
@@ -420,13 +435,13 @@ runs, posts `{"kind": "mods", "pushed": true, "data": ...}`, so a console verb (
 as any document and keeps its status line.
 
 In the browser preview, `modsTab.standIn` stands in for the host, starting from
-`tests/fixtures/mods_tab_payload_v4.json` (the page's `PREVIEW_MODS` must equal it; its Files answers
+`tests/fixtures/mods_tab_payload_v4.json` (`PREVIEW_MODS` in `preview_standin.js` must equal it; its Files answers
 come from `PREVIEW_MOD_FILES`). `tests/modui_test.c` checks the document against a temporary store
 and a fake editor, including that every key of that fixture is one the backend writes.
 
 ### Colour in the details pane
 
-The details pane colours a thing by its kind with the Decl Text editor's own token hues
+The details pane colours a thing by its kind with the declaration editor's own token hues
 (`studio.css`, both themes). Colour marks a kind, never decoration; every coloured part, or the line
 holding it, has a hover title naming its meaning.
 
@@ -531,6 +546,21 @@ its stored type ("bool  (not in the event catalogue)"). `tests/timeline_eventcal
 lifts these functions from the page and checks the saved shape, the reopen, the note and
 that every named bool argument is labelled by its catalogue name.
 
+## Keyboard, dialogs and messages
+
+Keys belong to the control they are typed in (`page_keys.js`): arrow keys, Delete and
+Escape act on a list only from its filter box or when no text field, list box, dialog or
+menu has focus. Every dialog opens through one stack: Escape closes the top one (after
+any popup inside it used the key), Tab stays inside, and focus returns to where it was.
+Menus, right-click menus and the tab strip (`role="tablist"`) walk with the arrow keys;
+Shift+F10 or the menu key opens the selected row's right-click menu. Toasts are read out
+(a polite live region); an error toast is an alert and stays until it is dismissed.
+
+A message the player sees says the cause and the next step in plain words. It never
+points at a log, guesses ("editor down?"), names a console command, or uses the
+reverse-engineering vocabulary; `tests/page_messages_test.js` scans every string the page
+and the host can show. Each tab's empty state says what the tab is for.
+
 ## Driving the page from a test
 
 A file `%LOCALAPPDATA%\snapmap-plus\devtools-port` containing one port number (1024 to
@@ -566,7 +596,10 @@ and the meters are recomputed from the latest usage. The budget table is held
 once by the page and looked up by key. The map's usage is read at the same
 330 ms cadence once the page has asked for it and posted only when it or the
 held prefab changed.
-Entity state and selection are sampled roughly every 330 ms. Timeline scanning
+Entity state and selection are sampled roughly every 330 ms: the backend exposes no
+generation for entity or declaration edits, so the host copies the shown entity's
+declaration and compares a hash (the budget table and the Mods tab already follow the
+backend's generations). Timeline scanning
 is change-gated. Prefab rendering redraws when scene data, input, theme or
 viewport dimensions change.
 
@@ -590,6 +623,8 @@ recovery are described in [persistent configuration](architecture.md#configurati
   committed engine edit.
 - Browser preview verifies page behavior, not engine calls, native window
   behavior or gameplay. Changes to those paths need the corresponding tests.
+- A new timeline is found by comparing the timeline list before and after its
+  paste: the backend does not report the pasted entity's ID.
 - The File menu answers in browser preview with the default path pair, so the
   readout and layout can be checked outside the game. Load and Save As are inert
   there and report preview only.
