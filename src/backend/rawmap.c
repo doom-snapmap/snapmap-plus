@@ -35,6 +35,7 @@
 #include "nav_regions.h"
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
 #include "../common/text.h"
+#include "../fault_shield/recovery.h"   /* shield_note_refused_load: a refused map is sound */
 
 /* A reason given to a caller's fixed message buffer (the page's slots, the
  * console commands): whole when it fits, else this sentence, with the whole
@@ -829,7 +830,10 @@ static int deser_prepared(const char *json, void *out_map)
     sh_modmanifest_set_editor_load(0);
     if (refused) {
         /* The engine never parses it: the open map keeps its settings, and the
-         * gates see a failed parse whose refusal note they say. */
+         * gates see a failed parse whose refusal note they say. The map is
+         * sound, so the engine's "damaged" notice and its offer to replace
+         * the map with its published version are dismissed. */
+        shield_note_refused_load();
         sh_map_settings_loaded(0);
         sh_modpublished_parse_seen(g_parse_kind, json, out_map, 0);
         return 0;

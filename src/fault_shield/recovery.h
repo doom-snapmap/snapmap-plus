@@ -17,8 +17,16 @@ void recovery_note_redirect(void);
 int  recovery_redirected_this_frame(void);
 void log_engine_error_text(void); /* the VEH's C++-throw path records a masked FatalError's verbatim text */
 int  shield_last_engine_msg(char *out, size_t n); /* SEH-guarded read of the engine's last-error text; 1 if non-empty */
-/* The reason shown after the save guard dismisses the engine's offer to delete
- * a damaged save (GDM id of that offer). */
-const char *shield_damaged_save_text(int gdm);
+/* The sentence shown after the save guard dismisses the engine's offer to
+ * delete a save it could not load (GDM 0x1D). It claims only what the
+ * dismissal guarantees: no button ran, so the game did not delete it. */
+extern const char SHIELD_DAMAGED_SAVE_TEXT[];
+/* Show one sentence in the engine's own notice on a later frame (the newest
+ * wins). Main thread. */
+void shield_tell(const char *text);
+/* Snapmap+ refused the map being loaded (rawmap.c's parse refusal): for the
+ * next frames the guard dismisses the engine's "damaged save" notice and its
+ * offer to replace the map with the published version. Any thread. */
+void shield_note_refused_load(void);
 
 #endif /* SHIELD_RECOVERY_H */

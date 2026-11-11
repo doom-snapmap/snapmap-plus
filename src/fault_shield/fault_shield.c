@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "crash_report.h"
+#include "saved_map_guard.h"
 #include "shield_sigs.h"
 #ifdef SH_DIAG
 #include "../common/wide_path.h"
@@ -45,6 +46,7 @@ int recovery_install(void);   /* recovery.c */
 static int shield_install_hooks(const sig_result *results, size_t count)
 {
     shield_resolve_engine(results, count);   /* Cache engine addresses before recovery can run. */
+    saved_map_guard_install(results, count); /* its own log line says when it is off */
     return veh_install() && recovery_install();
 }
 

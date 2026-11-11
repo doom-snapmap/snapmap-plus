@@ -56,6 +56,7 @@ static const site SITES[] = {
     { "commands.c",           "RenderLogStub",              SITE_SIG, 0, 14, STUB_PADDING, 6 },
     { "commands.c",           "AddCommand",                 SITE_SIG, 0, 15, REPLAYS, 0 },
     { "editor_frame.c",       "EditorFrame",                SITE_SIG, 0, 25, REPLAYS, 0 },
+    { "editor_frame.c",       "ReadLocalSavedMapText",      SITE_SIG, 0, 17, REPLAYS, 0 },
     { "engine_dialog.c",      "DialogAction",               SITE_SIG, 0, 16, REPLAYS, 0 },
     { "grid_room_editor.c",   "GridPropertyChanged",        SITE_SIG, 9, 17, REPLAYS, 0 },
     { "grid_room_editor.c",   "GridModuleProperties",       SITE_SIG, 0, 16, REPLAYS, 0 },
@@ -125,6 +126,7 @@ static const site SITES[] = {
     { "fault_shield/mapload_guards.c", "EventLink",         SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/mapload_guards.c", "InteractableSpawn", SITE_SIG, 0, 19, REPLAYS, 0 },
     { "fault_shield/load_screen_stop.c", "CancelMapChange", SITE_SIG, 0, 15, REPLAYS, 0 },
+    { "fault_shield/saved_map_guard.c", "DeleteBadSaveSlots", SITE_SIG, 0, 19, NEVER_REPLAYED, 0 },
     { "fault_shield/recovery.c", "Frame (RVA_FRAME)",       SITE_FRAME_RVA, 0, 15, REPLAYS, 0 },
     /* Decoded at install since 88f7a5b; listed so the table is complete. */
     { "algo.c",               "AlgoMatMul",                 SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
@@ -350,7 +352,7 @@ static void check_image(const char *path)
  * hook.c and patch.c hold the definitions; smoke.c detours its own scratch code. */
 static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\algo.c", 1 }, { "backend\\apply_engine.c", 1 }, { "backend\\commands.c", 2 },
-    { "backend\\editor_frame.c", 1 }, { "backend\\engine_dialog.c", 1 },
+    { "backend\\editor_frame.c", 2 }, { "backend\\engine_dialog.c", 1 },
     { "backend\\grid_room_editor.c", 5 }, { "backend\\grid_room_native.c", 4 },
     { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 4 },
     { "backend\\nav_menu.c", 4 },
@@ -363,7 +365,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\modtypeinfo.c", 2 }, { "backend\\modvt.c", 3 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
-    { "fault_shield\\load_screen_stop.c", 1 },
+    { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
 };
 
 static int count_calls(const char *text)
