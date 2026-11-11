@@ -722,6 +722,14 @@ These backend files share the work:
   each carried folder the asset rule does not find served already as a folder
   from elsewhere (`sh_ms_install_as`), as in
   [Rawmaps that name mods](#rawmaps-that-name-mods). It has no network code.
+- `modzip.c` is the product's ZIP form, shared by those exports and the mod
+  store's build archives: the writer stores every entry (method 0) with its
+  CRC-32 and a fixed 1980-01-01 time, so the same content is byte-identical;
+  the reader accepts stored and deflate entries, refuses ZIP64, split and
+  encrypted archives, duplicate names and unsafe names (an absolute path, a
+  `..` step, a backslash, a colon or a control character), checks each
+  entry's CRC-32 when it reads it, and can stand over a plain folder (a
+  prefab file and its `mods\` beside it). At most 65535 entries and 4 GiB.
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
   inserts and strips it, and removes the serializer's comments so the file is

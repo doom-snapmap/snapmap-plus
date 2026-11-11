@@ -35,8 +35,8 @@ param(
                            "modbundle.c", "modbankinfo.c", "modstock.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
                            # The one-time move of the retired overrides folder into the mods store.
                            "modmigrate.c",
-                           # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
-                           "modnet.c", "modsync.c", "modexport.c",
+                           # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
+                           "modnet.c", "modsync.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
                            "modvt.c", "vt_harness.c",
                            # Owner-bound companions a mod declares for its tiles.
