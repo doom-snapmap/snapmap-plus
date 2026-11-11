@@ -1005,7 +1005,8 @@ static void m_shadow_not_stock(const char *f)
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
 }
 static void m_desc_plain(const char *f) { mt_write(f, "mod.json", DESC("")); }
-/* Keys and a name the mod store refuses at publish (mods_store.js): built, with warnings. */
+/* Author keys and a name with a tab: kept as written, built without warnings (the mod store
+ * reads the same author part). */
 static void m_store_refuses(const char *f)
 {
     mt_write(f, "mod.json", "{\"version\":\"1.0.0\",\"name\":\"R2\\tImp\","
@@ -1204,14 +1205,10 @@ static void test_refusals(const char *fixture, const char *tmp)
         CHECK(b.errors == 0 && b.note_count == 0);
         CHECK(b.warnings == 0);
         sh_mb_free(&b);
-        /* The store's key and name rules, heard at the build. */
+        /* Any author key and name are the author's: built, nothing warned. */
         accepted(fixture, tmp, m_store_refuses, &b);
-        CHECK(b.errors == 0 && b.warnings == 3);
-        CHECK(has_note(&b, "mod.json key \"displayName\": the mod store refuses it at publish (\"bad extra key\")"));
-        CHECK(has_note(&b, "mod.json key \"$schema\": the mod store refuses it at publish (\"bad extra key\")"));
-        CHECK(has_note(&b, "mod.json name contains a tab (U+0009); the mod store refuses it at publish (\"bad name\")"));
-        CHECK(!has_note(&b, "key \"tags\""));
-        CHECK(strstr(b.first_warning, "the mod store refuses it at publish") != NULL);
+        CHECK(b.errors == 0 && b.warnings == 0);
+        CHECK(!has_note(&b, "mod store"));
         sh_mb_free(&b);
         (void)plain;
     }
