@@ -5,7 +5,7 @@
  *   maps\<map title>\<mod name>\ a mod a map brought (a download, or an import of a
  *                                rawmap or prefab ZIP): a "place" (below)
  *   snapmap-plus.json            the product record (modbundle.h): claims, links,
- *                                the migration record, the places
+ *                                the places, which folder holds each salt
  *
  * Identity is the salt (modsalt.h, ONE-SHAPE rule 1): eight characters in the
  * builder block, given once. A folder name is the author's and never carries
@@ -362,8 +362,9 @@ int  sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *fold
 /* New mod from the Mods tab: as sh_ms_new_mod, plus an example that places
  * and plays untouched: an entityDef at mods/<salt>/example_crate (the game's
  * SnapMap crate01 model), its Toybox row (snapEditorEntityDef) and the row's
- * strings in mod.json's author part (mods/<salt>/category named after the
- * mod, mods/<salt>/example_crate_name and _desc). Nothing binary.
+ * strings in mod.json's author part (<salt>_category named after the mod,
+ * <salt>_example_crate_name and _desc). Nothing binary.
+
  * `example_out` receives the row's path below the folder, with '/'. */
 int  sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                            char *example_out, size_t example_cap, char *cause, size_t cause_cap);

@@ -1224,6 +1224,24 @@ static void test_crash_leftovers(const char *tmp)
     mt_remove_tree(dir);
 }
 
+/* Folder names an earlier layout used are ordinary names now. */
+static void test_ordinary_names(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], salt[SH_SALT_LEN + 1];
+    sh_ms_sync_stats ss;
+    int usable;
+    printf("-- names: folders called blobs or legacy are mods like any other\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ordinary\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\legacy", root);
+    make_small_mod(dir, "legacy");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\sorted\\blobs", root);
+    make_small_mod(dir, "blobs");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 2 && ss.failed == 0);
+    CHECK(entry_of("legacy", salt, NULL, &usable) && usable && salt[0]);
+    CHECK(entry_of("sorted\\blobs", salt, NULL, &usable) && usable && salt[0]);
+}
+
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], name[SH_MS_NAME_MAX + 1];
@@ -1420,6 +1438,7 @@ int main(int argc, char **argv)
     test_work_folder_names(tmp);
     test_crash_leftovers(tmp);
     test_nested(tmp);
+    test_ordinary_names(tmp);
     test_bin_sweep(tmp);
     test_upgrade_steps(tmp);
     test_boot_sync(fixture, tmp);

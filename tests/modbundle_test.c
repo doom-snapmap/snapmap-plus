@@ -100,8 +100,6 @@ static void test_names(void)
     memset(long_id, 'a', 65); long_id[65] = 0;
     CHECK(!sh_mb_id_normalize(long_id, 65, id));
     CHECK(sh_mb_id_normalize(long_id, 64, id));
-    sh_mb_id_sanitized("alexrimp", s);
-    CHECK(!strcmp(s, "alexrimp"));
 
     CHECK(sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", cause, sizeof cause));
     CHECK(sh_mb_check_request("maps/my room/a.bmodel", cause, sizeof cause));
@@ -363,19 +361,6 @@ static int stock_exists(void *ctx, const char *request)
 }
 static const sh_mb_resolver RESOLVER = { NULL, NULL, stock_exists, NULL };
 
-/* The manifest form (the canonical text with "bundle"): spliced after the
- * fixture's "author", the key before it in byte order. */
-static char *manifest_of(const sh_mb_bundle *b, size_t *len)
-{
-    const char *after = strstr(b->canonical, "\"extra\":");
-    size_t head = after ? (size_t)(after - b->canonical) : 0, n = b->canonical_len + 80;
-    char *t = after ? (char *)malloc(n) : NULL;
-    if (!t) return NULL;
-    _snprintf_s(t, n, _TRUNCATE, "%.*s\"bundle\":\"%s\",%s", (int)head, b->canonical, b->hash, after);
-    *len = strlen(t);
-    return t;
-}
-
 static void test_fixture(const char *fixture, const char *tmp, int write_golden)
 {
     sh_mb_bundle b, again;
@@ -525,26 +510,6 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
         free(mod);
     }
 
-    /* The manifest form loads back to the same canonical text; a tampered
-     * one is refused. */
-    {
-        size_t mlen = 0;
-        char *m = manifest_of(&b, &mlen), *at;
-        CHECK(m != NULL);
-        if (m) {
-            CHECK(sh_mb_load_manifest_text(m, mlen, &again));
-            if (again.errors) fprintf(stderr, "  manifest: %s\n", again.first_cause);
-            CHECK(again.canonical_len == b.canonical_len && !memcmp(again.canonical, b.canonical, b.canonical_len));
-            sh_mb_free(&again);
-            at = strstr(m, "\"size\":3001");
-            CHECK(at != NULL);
-            if (at) at[7] = '2';
-            CHECK(!sh_mb_load_manifest_text(m, mlen, &again));
-            CHECK_CAUSE(again, "does not match its bundle hash");
-            sh_mb_free(&again);
-            free(m);
-        }
-    }
     sh_mb_free(&b);
 }
 
@@ -666,23 +631,18 @@ static void test_modjson(const char *fixture, const char *tmp)
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
     free(first);
 
-    /* A manifest alone gets a synthesized author part; the written mod.json
-     * reloads with the manifest's hash. */
+    /* A bundle with no author text gets a synthesized author part; the
+     * written mod.json reloads with the bundle's hash. */
     {
-        size_t blen = 0, tlen = 0;
-        char *m = manifest_of(&b, &blen), *modtext;
-        sh_mb_bundle mb;
-        CHECK(m && sh_mb_load_manifest_text(m, blen, &mb));
-        modtext = sh_mb_modjson_text(&mb, NULL, 0, &tlen);
+        size_t tlen = 0;
+        char *modtext = sh_mb_modjson_text(&b, NULL, 0, &tlen);
         CHECK(modtext && sh_mb_load_text(modtext, tlen, &again));
         if (again.errors) fprintf(stderr, "  synthesized: %s\n", again.first_cause);
         CHECK(!strcmp(again.hash, b.hash) && again.canonical_len == b.canonical_len &&
               !memcmp(again.canonical, b.canonical, b.canonical_len));
         CHECK(modtext && !strstr(modtext, "\"id\""));
         sh_mb_free(&again);
-        sh_mb_free(&mb);
         free(modtext);
-        free(m);
     }
     sh_mb_free(&b);
 }

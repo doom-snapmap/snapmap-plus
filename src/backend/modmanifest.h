@@ -36,7 +36,7 @@
 #define SNAPMAP_PLUS_MODMANIFEST_H
 
 #include <stddef.h>
-/* Bundle hash text: 64 lowercase hex characters (Contract 1). */
+/* Build hash text: 64 lowercase hex characters. */
 #define SH_MOD_HASH_CHARS 64
 
 #define SH_MODMANIFEST_SALT_LEN   8
@@ -125,8 +125,10 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 /* ------------------------------------------------------------ hooks ------ */
 
 /* Activate the rows' mods: each row through the build that serves it now
- * (sh_modserve_row_build: the map's place, else the root, else another
- * place), else the build the editor substitutes, else its own hash. Returns
+ * (sh_modserve_row_build: the root when it has the row's build or the map
+ * is the player's own, else the map's own place), else the build the editor
+ * substitutes, else its own hash. Returns
+
  * modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
@@ -174,7 +176,7 @@ typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
 /* An editor open of the author's own map whose row pins a build that no
- * place serves (DESIGN-additive 2.5, 2.8): another build of the same salt
+ * place serves: another build of the same salt
  * serves in its place for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none

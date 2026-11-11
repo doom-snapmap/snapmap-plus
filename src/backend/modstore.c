@@ -299,12 +299,12 @@ static const wchar_t *ms_work_at(const wchar_t *name, const wchar_t *tag)
 static int ms_work_suffix(const wchar_t *name, const wchar_t *tag) { return ms_work_at(name, tag) != NULL; }
 
 /* Folders of the store that can be mods: not hidden, not a staging or
- * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
+ * replaced copy. */
 int ms_candidate(const WIN32_FIND_DATAW *fd)
 {
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
     if (fd->cFileName[0] == L'.') return 0;
-    if (!_wcsicmp(fd->cFileName, L"blobs") || !_wcsicmp(fd->cFileName, L"legacy")) return 0;
+
     if (ms_work_suffix(fd->cFileName, L".staging-") || ms_work_suffix(fd->cFileName, L".old-")) return 0;
     return 1;
 }
@@ -2027,7 +2027,7 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
 
 /* ---------------------------------------------------------- new mod ---- */
 
-/* New mod's example (DESIGN-additive 2.2): a crate that places and plays
+/* New mod's example: a crate that places and plays
  * untouched. Its entityDef is the game's SnapMap crate01 under the mod's salt,
  * its Toybox row is the game's crate01 row (snapeditorentitydef
  * prop/new/crate01: the prop_base parent, its preview, size, arrow and sounds)
@@ -2037,8 +2037,8 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
  * model as the stock prop rows do; it names no renderInfo.renderModelName,
  * which only rows whose entity has no model of its own carry (pickups,
  * encounters, logic); the earlier example's flooded the editor log with
- * "modelMatrix invert failed on model .../crate01.lwo" every frame (V13).
- * The entityDef is the game's text whole, editorVars included: V14 saw the
+ * "modelMatrix invert failed on model .../crate01.lwo" every frame.
+ * The entityDef is the game's text whole, editorVars included: the editor logged the
  * same line while the Toybox previewed or the crosshair hovered the crate
  * with the block left out. */
 #define MS_EXAMPLE_DECL "example_crate"

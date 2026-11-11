@@ -298,30 +298,6 @@ static void test_builder(const char *tmp)
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
     sh_modstock_register();
-
-    /* Manifest grammar: a pointer may not carry blob or size, and its source
-     * is a lower-cased path. */
-    {
-        static const char *const bad[] = {
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"size\":300,\"stock\":{\"sha256\":\"%s\",\"source\":\"" P_IMAGE "\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"Generated/Image/Stock/B.bimage\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"../x.bimage\"}}",
-        };
-        int k;
-        hex_of(IMG_B, sizeof IMG_B, h);
-        for (k = 0; k < 3; k++) {
-            char file[1024], text[2048];
-            _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
-            _snprintf_s(text, sizeof text, _TRUNCATE, "{\"bundle\":\"%s\",\"files\":[%s],\"format\":2,\"id\":\"" SALT_STOCK "\","
-                        "\"name\":\"x\"}", h, file);
-            CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
-            CHECK(strstr(b.first_cause, "stock") != NULL);
-            sh_mb_free(&b);
-        }
-    }
 }
 
 /* ------------------------------------- renamed copies, names, dead needs ---- */

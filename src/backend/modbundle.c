@@ -866,18 +866,6 @@ int sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1])
     return 1;
 }
 
-void sh_mb_id_sanitized(const char *id, char out[SH_MB_ID_MAX + 1])
-{
-    size_t i;
-    for (i = 0; id[i] && i < SH_MB_ID_MAX; i++) {
-        char c = id[i];
-        int keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                   c == '$' || c == '.' || c == '/' || c == '\\';
-        out[i] = keep ? c : '_';
-    }
-    out[i] = 0;
-}
-
 
 static int mb_path_char(char c)
 {
@@ -1344,31 +1332,29 @@ int sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap
     char stem[SH_MB_BANK_STEM_MAX + 1], prefix[SH_MB_ID_MAX + 2], low[SH_MB_BANK_STEM_MAX + 1];
     size_t i, n, pn;
     if (!sh_mb_bank_stem(request, stem, sizeof stem))
-        return mb_cause(cause, cap, "%s: a sound bank must be sound/soundbanks/pc/<stem>.bnk with a stem of at most %u "
-                        "characters (Wwise opens banks by file name in that one folder)", request ? request : "",
-                        (unsigned)SH_MB_BANK_STEM_MAX);
-    for (i = 0; id[i] && i < SH_MB_ID_MAX; i++) prefix[i] = (id[i] == '.' || id[i] == '-') ? '_' : id[i];
-    prefix[i] = '_';
-    prefix[i + 1] = 0;
-    pn = i + 1;
+        return mb_cause(cause, cap, "%s: a sound bank goes in sound/soundbanks/pc/ with a file name of at most %u "
+                        "characters; move or rename it", request ? request : "", (unsigned)SH_MB_BANK_STEM_MAX);
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s_", id);
+    pn = strlen(prefix);
     n = strlen(stem);
     for (i = 0; i < n; i++) {
         char c = stem[i];
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
-            return mb_cause(cause, cap, "%s: a sound bank stem may hold only letters, digits and '_'", request);
+            return mb_cause(cause, cap, "%s: a sound bank's file name may hold only letters, digits and _; rename it",
+                            request);
         low[i] = c;
     }
     low[n] = 0;
     if (n <= pn || strncmp(low, prefix, pn) != 0)
-        return mb_cause(cause, cap, "%s: a sound bank stem must start with '%s' (the mod id with '.' and '-' as '_') and "
-                        "name something after it", request, prefix);
+        return mb_cause(cause, cap, "%s: a sound bank's file name must start with this mod folder's name and _ (for "
+                        "example <folder name>_music.bnk); rename it and press Refresh", request);
     /* The engine's listed-bank filter skips these in some game mode (doom_*_sp
      * in SnapMap, *_snapmaps outside it, *initial* and Init always), and the
      * product submits banks through that filter. */
     if (strstr(low, "_sp") || strstr(low, "_snapmaps") || strstr(low, "initial") || !strcmp(low, "init"))
-        return mb_cause(cause, cap, "%s: a sound bank stem must not contain '_sp', '_snapmaps' or 'initial' (the "
-                        "engine skips such banks)", request);
+        return mb_cause(cause, cap, "%s: the game skips a sound bank whose file name contains _sp, _snapmaps or "
+                        "initial; rename it", request);
     return 1;
 }
 
@@ -1376,23 +1362,24 @@ int sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *ste
 {
     uint32_t size, version, id, want;
     if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) != 0)
-        return mb_cause(cause, cap, "%s.bnk does not start with a Wwise BKHD chunk", stem);
+        return mb_cause(cause, cap, "%s.bnk is not a Wwise sound bank; export it from Wwise again", stem);
     memcpy(&size, bytes + 4, 4);
     memcpy(&version, bytes + 8, 4);
     memcpy(&id, bytes + 12, 4);
     if (size < 8 || (size_t)size + 8 > len)
-        return mb_cause(cause, cap, "%s.bnk has a truncated BKHD chunk", stem);
+        return mb_cause(cause, cap, "%s.bnk is cut short; export it from Wwise again", stem);
     if (version != SH_MB_BANK_VERSION)
-        return mb_cause(cause, cap, "%s.bnk is Wwise bank version %u; this game reads only version %u", stem,
-                        (unsigned)version, (unsigned)SH_MB_BANK_VERSION);
+        return mb_cause(cause, cap, "%s.bnk is a Wwise bank of version %u, and this game reads only version %u; export "
+                        "it with the Wwise version DOOM uses", stem, (unsigned)version, (unsigned)SH_MB_BANK_VERSION);
     want = sh_mb_fnv1_lower(stem, strlen(stem));
     if (id != want)
-        return mb_cause(cause, cap, "%s.bnk carries bank id %u, but the game loads it by name as id %u (FNV-1 of the "
-                        "stem); rebuild it under this name", stem, (unsigned)id, (unsigned)want);
+        return mb_cause(cause, cap, "%s.bnk carries bank id %u, but the game loads it by its name as id %u; press "
+                        "Refresh and Snapmap+ corrects the id", stem, (unsigned)id, (unsigned)want);
+
     return 1;
 }
 
-/* Contract 1 logical-name table, on a lower-cased request path. */
+/* The logical-name table, on a lower-cased request path. */
 int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_t ncap)
 {
     size_t n = strlen(r);
@@ -2641,59 +2628,27 @@ static char *mb_path_dup(const char *s, size_t n)
     return d;
 }
 
-static int mb_hex64_text(const char *s, size_t n, char out[SH_MB_HASH_HEX + 1])
+/* The author's fields of mod.json: name, author, homepage, requirements. */
+static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
 {
-    size_t i;
-    if (n != SH_MB_HASH_HEX) return 0;
-    for (i = 0; i < n; i++) {
-        char c = s[i];
-        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
-        out[i] = c;
-    }
-    out[n] = 0;
-    return 1;
-}
-
-/* Fields shared by the author block (manifest 0) and a manifest (1). A
- * manifest's "id" is the salt; an author block has none (mb_retired_key). */
-static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
-{
-    const mbj *id = mbj_get(root, "id"), *name = mbj_get(root, "name");
+    const mbj *name = mbj_get(root, "name");
     const mbj *author = mbj_get(root, "author"), *home = mbj_get(root, "homepage");
-    const mbj *req = mbj_get(root, "requirements"), *sh = mbj_get(root, "shadows");
-    const mbj *fmt = mbj_get(root, "format");
-    const char *what = manifest ? "the manifest" : "mod.json";
+    const mbj *req = mbj_get(root, "requirements");
+    const char *what = "mod.json";
     char cause[SH_MB_CAUSE_MAX];
 
-    if (manifest) {
-        if (!fmt || fmt->t != MBJ_NUM || !mb_plain_integer(fmt->s, fmt->n)) {
-            mb_error(b, "%s format must be the integer %d", what, SH_MB_FORMAT);
-            return 0;
-        }
-        if (strcmp(fmt->s, "2") != 0) {
-            mb_error(b, "%s format %s is not supported by this release (it reads format %d)", what, fmt->s, SH_MB_FORMAT);
-            return 0;
-        }
-        if (!id || id->t != MBJ_STR || !sh_salt_valid(id->s, id->n)) {
-            mb_error(b, "%s id must be a salt (8 characters of a-z and 0-9, starting with a letter)", what);
-            return 0;
-        }
-        memcpy(b->id, id->s, SH_SALT_LEN);
-        b->id[SH_SALT_LEN] = 0;
-    }
     if (!name || name->t != MBJ_STR || strlen(name->s) != name->n) {
         mb_error(b, "%s is missing its required name", what);
         return 0;
     }
-    b->name = manifest ? mb_strdup(name->s) : mb_trimmed_dup(name);
+    b->name = mb_trimmed_dup(name);
     if (!b->name || !b->name[0] || mb_codepoints(b->name, strlen(b->name)) > SH_MB_NAME_MAX) {
         mb_error(b, "%s name must be 1-%u characters", what, SH_MB_NAME_MAX);
         return 0;
     }
     if (author) {
         if (author->t != MBJ_STR || strlen(author->s) != author->n) { mb_error(b, "%s author must be a string", what); return 0; }
-        b->author = manifest ? mb_strdup(author->s) : mb_trimmed_dup(author);
+        b->author = mb_trimmed_dup(author);
         if (!b->author || mb_codepoints(b->author, strlen(b->author)) > SH_MB_AUTHOR_MAX) {
             mb_error(b, "%s author must be at most %u characters", what, SH_MB_AUTHOR_MAX);
             return 0;
@@ -2702,7 +2657,7 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
     }
     if (home) {
         if (home->t != MBJ_STR || strlen(home->s) != home->n) { mb_error(b, "%s homepage must be a string", what); return 0; }
-        b->homepage = manifest ? mb_strdup(home->s) : mb_trimmed_dup(home);
+        b->homepage = mb_trimmed_dup(home);
         if (!b->homepage) { mb_error(b, "out of memory"); return 0; }
         if (!b->homepage[0]) { free(b->homepage); b->homepage = NULL; }
         else if (mb_codepoints(b->homepage, strlen(b->homepage)) > SH_MB_HOMEPAGE_MAX ||
@@ -2716,7 +2671,6 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
         b->requirements = mb_requirements(req, cause, sizeof cause);
         if (!b->requirements) { mb_error(b, "%s %s", what, cause); return 0; }
     }
-    if (sh && manifest && !mb_set_shadows(b, sh)) return 0;
     return 1;
 }
 
@@ -2742,7 +2696,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
         return 0;
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "mod.json \"" SH_MB_BLOCK_KEY "\" must be an object"); return 0; }
-    if (!mb_common_fields(b, root, 0)) return 0;
+    if (!mb_common_fields(b, root)) return 0;
     {
         mbj tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -3563,21 +3517,18 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
     HeapFree(GetProcessHeap(), 0, game);
 }
 
-/* Whether f's name is under the mod's own namespace (DESIGN-additive 2.1,
- * 2.2): 1 yes; 0 no, with the rule it misses in `why`. A decl is named
+/* Whether f's name is under the mod's own namespace: 1 yes; 0 no, with the rule it misses in `why`. A decl is named
  * mods/<salt>/...; a skins decl by the mesh it skins and a raw file by its
  * path, either containing /mods/<salt>/ or the engine's '_' spelling of it; a
  * module lives in maps/modules/mods/<salt>/; a bank's stem starts with the
  * key. Pure: the sub-rules of a name under it are the caller's. */
 static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char *why, size_t cap)
 {
-    char sanitized[SH_MB_ID_MAX + 1], ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8], ns_raw_s[SH_MB_ID_MAX + 8];
+    char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
     char slashed[SH_MB_REQUEST_MAX + 18];
     if (why && cap) why[0] = 0;
-    sh_mb_id_sanitized(b->id, sanitized);
     _snprintf_s(ns_decl, sizeof ns_decl, _TRUNCATE, "mods/%s/", b->id);
     _snprintf_s(ns_raw, sizeof ns_raw, _TRUNCATE, "/mods/%s/", b->id);
-    _snprintf_s(ns_raw_s, sizeof ns_raw_s, _TRUNCATE, "/mods/%s/", sanitized);
     if (f->is_module) {
         char mod_ns[SH_MB_ID_MAX + 32];
         _snprintf_s(mod_ns, sizeof mod_ns, _TRUNCATE, "maps/modules/mods/%s/", b->id);
@@ -3588,7 +3539,7 @@ static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char *why, siz
         char *p;
         _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->pname ? f->pname : "");
         for (p = slashed; *p; p++) *p = (char)tolower((unsigned char)*p);
-        if (strstr(slashed, ns_raw) || strstr(slashed, ns_raw_s)) return 1;
+        if (strstr(slashed, ns_raw)) return 1;
         return mb_cause(why, cap, "skins decl %s does not name a mesh under /mods/%s/", f->pname ? f->pname : "", b->id);
     }
     if (f->is_decl) {
@@ -3601,7 +3552,7 @@ static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char *why, siz
         return mb_cause(why, cap, "%s", cause);
     }
     _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
-    if (strstr(slashed, ns_raw) || strstr(slashed, ns_raw_s)) return 1;
+    if (strstr(slashed, ns_raw)) return 1;
     return mb_cause(why, cap, "the path does not contain /mods/%s/", b->id);
 }
 
@@ -3611,7 +3562,7 @@ static int mb_class_of(const sh_mb_bundle *b, const sh_mb_file *f)
     int restore = f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source);
     int in_ns = !restore && mb_ns_test(b, f, NULL, 0);
     /* An editor type outside the key is a local tweak; under the key it is a
-     * Toybox row the mod adds and travels with it (DESIGN-additive 2.6). */
+     * Toybox row the mod adds and travels with it */
     if (sh_mb_editor_time(f->request) && !in_ns) return SH_MB_CLASS_EDITOR;
     if (restore) return SH_MB_CLASS_SURFACE;
     if (in_ns) return f->stock ? SH_MB_CLASS_BORROW : SH_MB_CLASS_ADD;
@@ -3702,7 +3653,7 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
     *first = 0;
 }
 
-/* The product block's "registries" object (DESIGN-additive 2.4): what the
+/* The product block's "registries" object: what the
  * product will generate from this bundle when a map declares it. Keys in
  * byte order; members only when not empty. */
 /* A strings key is `<salt>_<name>` (DECISIONS 5): the salt, an underscore, and
@@ -3806,7 +3757,7 @@ static wchar_t *mb_file_wpath(const wchar_t *root, const char *path)
     return full;
 }
 
-/* Derived edits (DESIGN-additive 2.4): every decl the mod carries at a game
+/* Derived edits: every decl the mod carries at a game
  * name with other bytes is an edited copy. Its structural diff against the
  * game's text of the same decl is recorded (b->edits); the product applies
  * it per map and never serves the copy. A copy or a game text outside the
@@ -4844,18 +4795,15 @@ done:
 
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
-    char sanitized[SH_MB_ID_MAX + 1], ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8],
-         ns_raw_s[SH_MB_ID_MAX + 8];
+    char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
     const sh_mb_stock_ops *stock = mb_stock();
     mb_scripts scripts;
     size_t i, k;
 
     memset(&scripts, 0, sizeof scripts);
-    sh_mb_id_sanitized(b->id, sanitized);
     _snprintf_s(ns_decl, sizeof ns_decl, _TRUNCATE, "mods/%s/", b->id);
     _snprintf_s(ns_raw, sizeof ns_raw, _TRUNCATE, "/mods/%s/", b->id);
-    _snprintf_s(ns_raw_s, sizeof ns_raw_s, _TRUNCATE, "/mods/%s/", sanitized);
 
     qsort(b->files, b->file_count, sizeof(sh_mb_file), mb_file_cmp);
     own.req = (const char **)malloc(sizeof(char *) * (b->file_count ? b->file_count : 1));
@@ -5010,8 +4958,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 char slashed[SH_MB_REQUEST_MAX + 2];
                 _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
                 if (!f->is_decl && sh_mb_vt_member(f->request, NULL, 0, NULL) &&
-                    _strnicmp(slashed + 16, ns_raw, strlen(ns_raw)) != 0 &&
-                    _strnicmp(slashed + 16, ns_raw_s, strlen(ns_raw_s)) != 0)
+                    _strnicmp(slashed + 16, ns_raw, strlen(ns_raw)) != 0)
                     mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/%s/<family>_sq<N>.mega2",
                              f->path, b->id);
             } else {
@@ -5125,14 +5072,12 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             else if (got == 0 && (also = mb_stock_names_too(&twin, f, &f->needs[k])) != NULL)
                 mb_warn(b, "%s names %s %s, which no archive holds; the game's own %s names it too", f->path,
                         f->needs[k].type, f->needs[k].name, also);
-            /* An animWeb's clip names were not checked before rules 3: a clip
-             * no archive holds is reported, not refused, so a mod that built
-             * before keeps building. */
+            /* An animWeb clip no archive holds is reported, not refused (the
+             * engine tolerates it). */
             else if (got == 0 && f->ptype && strcmp(f->ptype, "animWeb") == 0 && strcmp(f->needs[k].type, "anim") == 0)
                 mb_warn(b, "%s names anim %s, which no archive holds (an animWeb clip: reported, not refused)", f->path,
                         f->needs[k].name);
-            /* Effects, particles, ribbons and movies were not checked before
-             * rules 4: the same, so a mod that built before keeps building. */
+            /* Effects, particles, ribbons and movies likewise. */
             else if (got == 0 && (!strcmp(f->needs[k].type, "particle") || !strcmp(f->needs[k].type, "ribbon") ||
                                   !strcmp(f->needs[k].type, "swf") ||
                                   (f->ptype && (!strcmp(f->ptype, "fx") || !strcmp(f->ptype, "particle") ||
@@ -5301,183 +5246,6 @@ static int mb_only_keys(const mbj *o, const char *const *keys)
     }
     return 1;
 }
-
-static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
-{
-    static const char *const keys[] = { "blob", "needs", "path", "provides", "request", "size", NULL };
-    static const char *const stock_keys[] = { "needs", "path", "provides", "request", "stock", NULL };
-    static const char *const pointer_keys[] = { "sha256", "source", NULL };
-    const mbj *blob = mbj_get(e, "blob"), *needs = mbj_get(e, "needs"), *path = mbj_get(e, "path"),
-              *prov = mbj_get(e, "provides"), *req = mbj_get(e, "request"), *size = mbj_get(e, "size");
-    const mbj *pt = prov ? mbj_get(prov, "type") : NULL, *pn = prov ? mbj_get(prov, "name") : NULL;
-    const mbj *stock = e->t == MBJ_OBJ ? mbj_get(e, "stock") : NULL, *ssha = NULL, *ssrc = NULL;
-    char cause[SH_MB_CAUSE_MAX], type[64], name[SH_MB_REQUEST_MAX + 16], *expect;
-    sh_mb_file *f;
-    size_t k;
-    unsigned long long sz = 0;
-
-    if (stock) {
-        /* A stock pointer: no blob and no size. */
-        if (!mb_only_keys(e, stock_keys) || !needs || !path || !prov || !req) {
-            mb_error(b, "bundle.json files[%zu] is a stock pointer and must have exactly needs, path, provides, request "
-                     "and stock", index);
-            return 0;
-        }
-        ssha = stock->t == MBJ_OBJ ? mbj_get(stock, "sha256") : NULL;
-        ssrc = stock->t == MBJ_OBJ ? mbj_get(stock, "source") : NULL;
-        if (stock->t != MBJ_OBJ || !mb_only_keys(stock, pointer_keys) || !mb_is_hex64(ssha) || !ssrc ||
-            ssrc->t != MBJ_STR || strlen(ssrc->s) != ssrc->n || !sh_mb_check_source(ssrc->s, cause, sizeof cause)) {
-            mb_error(b, "bundle.json files[%zu].stock must be {\"sha256\": 64 lowercase hex, \"source\": an installed path}",
-                     index);
-            return 0;
-        }
-        {
-            char *lower = mb_path_dup(ssrc->s, ssrc->n);
-            int same = lower && strcmp(lower, ssrc->s) == 0;
-            free(lower);
-            if (!same) {
-                mb_error(b, "bundle.json files[%zu].stock.source must be lower-case with '/' separators", index);
-                return 0;
-            }
-        }
-    } else if (e->t != MBJ_OBJ || !mb_only_keys(e, keys) || !blob || !needs || !path || !prov || !req || !size) {
-        mb_error(b, "bundle.json files[%zu] must have exactly blob, needs, path, provides, request and size", index);
-        return 0;
-    }
-    if (path->t != MBJ_STR || strlen(path->s) != path->n || !mb_starts(path->s, "assets/")) {
-        mb_error(b, "bundle.json files[%zu].path must start with assets/", index);
-        return 0;
-    }
-    expect = mb_strdup(path->s + 7);
-    if (!expect) { mb_error(b, "out of memory"); return 0; }
-    mb_lower(expect);
-    if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, "bundle.json %s: %s", path->s, cause); free(expect); return 0; }
-    if (!stock && !sh_mb_extension_allowed(expect)) { mb_error(b, "bundle.json: file type not allowed: %s", path->s); free(expect); return 0; }
-    if (req->t != MBJ_STR || strcmp(req->s, expect) != 0) {
-        mb_error(b, "bundle.json %s: request must be %s", path->s, expect);
-        free(expect);
-        return 0;
-    }
-    if (!sh_mb_logical_name(expect, type, sizeof type, name, sizeof name) || !pt || !pn ||
-        prov->t != MBJ_OBJ || prov->count != 2 || pt->t != MBJ_STR || pn->t != MBJ_STR ||
-        strcmp(pt->s, type) != 0 || strcmp(pn->s, name) != 0) {
-        mb_error(b, "bundle.json %s: provides does not match the request path", path->s);
-        free(expect);
-        return 0;
-    }
-    if (!stock && !mb_is_hex64(blob)) { mb_error(b, "bundle.json %s: blob must be 64 lowercase hex characters", path->s); free(expect); return 0; }
-    if (!stock && (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
-        (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE)) {
-        mb_error(b, "bundle.json %s: size must be 1 to 64 MiB", path->s);
-        free(expect);
-        return 0;
-    }
-    if (needs->t != MBJ_ARR) { mb_error(b, "bundle.json %s: needs must be an array", path->s); free(expect); return 0; }
-    f = mb_add_file(b);
-    if (!f) { mb_error(b, "out of memory"); free(expect); return 0; }
-    f->path = mb_strdup(path->s);
-    f->request = expect;
-    memcpy(f->blob, stock ? ssha->s : blob->s, SH_MB_HASH_HEX + 1);
-    f->size = sz;
-    f->ptype = mb_strdup(type);
-    f->pname = mb_strdup(name);
-    f->is_decl = mb_starts(expect, "generated/decls/");
-    f->is_module = strcmp(type, "snapModule") == 0;
-    f->shadowed = 0;
-    if (stock) {
-        f->stock = 1;
-        f->stock_source = mb_strdup(ssrc->s);
-        b->stock_count++;
-        if (!f->stock_source) { mb_error(b, "out of memory"); return 0; }
-    }
-    b->total_size += sz;
-    for (k = 0; k < needs->count; k++) {
-        const mbj *n = needs->items[k], *nt = mbj_get(n, "type"), *nn = mbj_get(n, "name");
-        if (n->t != MBJ_OBJ || n->count != 2 || !nt || !nn || nt->t != MBJ_STR || nn->t != MBJ_STR ||
-            !nt->n || !nn->n || strlen(nn->s) != nn->n || strlen(nt->s) != nt->n) {
-            mb_error(b, "bundle.json %s: needs[%zu] must be {\"name\",\"type\"}", path->s, k);
-            return 0;
-        }
-        if (f->need_count) {
-            sh_mb_need probe;
-            probe.type = nt->s;
-            probe.name = nn->s;
-            if (mb_need_cmp(&f->needs[f->need_count - 1], &probe) >= 0) {
-                mb_error(b, "bundle.json %s: needs are not sorted and unique", path->s);
-                return 0;
-            }
-        }
-        if (!mb_add_need(f, nt->s, nn->s, nn->n)) { mb_error(b, "out of memory"); return 0; }
-    }
-    if (!f->path || !f->ptype || !f->pname) { mb_error(b, "out of memory"); return 0; }
-    return 1;
-}
-
-/* The manifest form (the canonical manifest with "bundle"): its pointers
- * have no file in the folder that holds it. */
-int sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out)
-{
-    static const char *const keys[] = { "author", "bundle", "extra", "files", "format", "homepage", "id",
-                                        "name", "requirements", "shadows", NULL };
-    char cause[SH_MB_CAUSE_MAX];
-    mbj *root;
-    const mbj *files, *bundle, *extra;
-    size_t i;
-    if (!out) return 0;
-    memset(out, 0, sizeof *out);
-    if (!text || len > SH_MB_MANIFEST_MAX + 65536) { mb_error(out, "bundle.json is missing or too large"); return 0; }
-    root = mbj_parse(text, len, cause, sizeof cause);
-    if (!root) { mb_error(out, "bundle.json: %s", cause); return 0; }
-    if (root->t != MBJ_OBJ) { mb_error(out, "bundle.json must contain one JSON object"); goto done; }
-    if (!mb_only_keys(root, keys)) { mb_error(out, "bundle.json has a key this release does not know"); goto done; }
-    if (!mb_common_fields(out, root, 1)) goto done;
-    for (i = 1; i < out->shadow_count; i++)
-        if (strcmp(out->shadows[i - 1], out->shadows[i]) >= 0) { mb_error(out, "bundle.json shadows are not sorted and unique"); goto done; }
-    extra = mbj_get(root, "extra");
-    if (extra) {
-        mb_buf e = {0};
-        if (extra->t != MBJ_OBJ || !mbj_canon(extra, &e, cause, sizeof cause)) {
-            mb_error(out, "bundle.json extra must be an object of plain values");
-            free(e.p);
-            goto done;
-        }
-        out->extra = e.p;
-    }
-    bundle = mbj_get(root, "bundle");
-    if (!mb_is_hex64(bundle)) { mb_error(out, "bundle.json bundle must be 64 lowercase hex characters"); goto done; }
-    files = mbj_get(root, "files");
-    if (!files || files->t != MBJ_ARR) { mb_error(out, "bundle.json files must be an array"); goto done; }
-    if (files->count > SH_MB_MAX_FILES) { mb_error(out, "bundle.json lists more than %u files", SH_MB_MAX_FILES); goto done; }
-    for (i = 0; i < files->count; i++) {
-        if (!mb_load_file(out, files->items[i], i)) goto done;
-        if (i && strcmp(out->files[i - 1].path, out->files[i].path) >= 0) {
-            mb_error(out, "bundle.json files are not sorted by path and unique");
-            goto done;
-        }
-    }
-    for (i = 1; i < out->file_count; i++) {
-        size_t k;
-        for (k = 0; k < i; k++)   /* paths differ only in case would collide on disk */
-            if (strcmp(out->files[k].request, out->files[i].request) == 0) {
-                mb_error(out, "bundle.json has two files with request %s", out->files[i].request);
-                goto done;
-            }
-    }
-    if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "bundle.json files exceed 256 MiB"); goto done; }
-    for (i = 0; i < out->file_count; i++) {
-        out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
-        out->files[i].absent = out->files[i].stock;
-    }
-    mb_classify_all(out);
-    mb_finish(out);
-    if (!out->errors && strcmp(out->hash, bundle->s) != 0)
-        mb_error(out, "bundle.json does not match its bundle hash (edited or damaged)");
-    out->validated = 1;
-done:
-    mbj_free(root);
-    return out->errors == 0;
-}
-
 
 /* ------------------------------------------------------------ mod.json ---- */
 
@@ -5750,14 +5518,6 @@ static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int 
 int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
 {
     return mb_load_modjson(text, len, out, 1);
-}
-
-int sh_mb_load_text_earlier_rules(const char *text, size_t len, sh_mb_bundle *out)
-{
-    if (!mb_load_modjson(text, len, out, 0)) return 0;
-    if (out->rules < SH_MB_RULES && strcmp(out->hash, out->prev_hash)) return 1;
-    mb_error(out, "mod.json changed since it was built (the author block or the product block was edited)");
-    return 0;
 }
 
 int sh_mb_load(const char *path, sh_mb_bundle *out)
@@ -6283,7 +6043,7 @@ static char *mb_block_text(const sh_mb_bundle *b)
         }
         mb_put(&o, "]", 1);
     }
-    /* Derived facts the Mods tab and the doctor read (DESIGN-additive 2.9);
+    /* Derived facts the Mods tab and the doctor read;
      * not part of the canonical manifest. */
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"classes\":{\"adds\":%u", b->classes.adds);
     mb_puts(&o, num);
@@ -6757,24 +6517,6 @@ void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
     free(o.p);
 }
 
-int sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part)
-{
-    const char **have;
-    size_t i, n = 0;
-    int ok = 1;
-    if (!big || !part || !part->file_count || part->file_count > big->file_count) return 0;
-    have = (const char **)malloc(sizeof(char *) * big->file_count);
-    if (!have) return 0;
-    for (i = 0; i < big->file_count; i++) if (big->files[i].request) have[n++] = big->files[i].request;
-    qsort(have, n, sizeof *have, mb_req_cmp);
-    for (i = 0; i < part->file_count && ok; i++) {
-        const char *r = part->files[i].request;
-        ok = r && bsearch(&r, have, n, sizeof *have, mb_req_cmp) != NULL;
-    }
-    free(have);
-    return ok;
-}
-
 /* ---------------------------------------------------- product record ---- */
 
 /* The record lock: the named record lock of the mods folder (modlock.h),
@@ -6989,8 +6731,9 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
         _snwprintf_s(aside, MAX_PATH * 4, _TRUNCATE, L"%s.unreadable-%lld", path, mb_now());
         mb_record_name(aside, aname, sizeof aname);
         if (MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING)) {
-            mb_rec_log("MODS: record: %s is not valid JSON; it was kept as %s and a new record started (the claims, links "
-                       "and aliases it held are in that file)", name, aname);
+            mb_rec_log("MODS: record: %s is not valid JSON; it was kept as %s and a new record started (the published "
+                       "maps' links and claims it held are in that file)", name, aname);
+
         } else {
             mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record is not valid JSON and could not "
                        "be moved aside (Windows error %lu)", section, name, GetLastError());

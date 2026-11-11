@@ -10,10 +10,14 @@
 #include "modmanifest.h"
 #include "modserve.h"
 #include "modsalt.h"
-#include "map_shards.h"
 #include "map_carrier.h"
 #include "config_json.h"
 #include "backend_log.h"
+
+#define MM_DEPTH_MAX 256u   /* JSON nesting a manifest scan follows */
+static int mm_space(char c) { return c == 0x20 || c == 0x09 || c == 0x0d || c == 0x0a; }
+static int mm_isdigit(char c) { return c >= '0' && c <= '9'; }
+static int mm_ishex(char c) { return mm_isdigit(c) || (c >= 'a' && c <= 'f'); }
 
 /* A NUL-terminated salt (modsalt.h). */
 static int mm_salt_ok(const char *salt) { return salt && sh_salt_valid(salt, strlen(salt)); }
@@ -105,7 +109,7 @@ int sh_modmanifest_valid_hash(const char *text, size_t length)
 {
     size_t i;
     if (!text || length != SH_MOD_HASH_CHARS) return 0;
-    for (i = 0; i < length; i++) if (!sh_shard_is_hex(text[i])) return 0;
+    for (i = 0; i < length; i++) if (!mm_ishex(text[i])) return 0;
     return 1;
 }
 
@@ -115,7 +119,7 @@ int sh_modmanifest_valid_hash(const char *text, size_t length)
 
 static const char *mm_ws(const char *p, const char *end)
 {
-    while (p < end && sh_shard_is_ws(*p)) p++;
+    while (p < end && mm_space(*p)) p++;
     return p;
 }
 
@@ -139,7 +143,7 @@ static const char *mm_skip_value(const char *p, const char *end)
     if (p >= end) return NULL;
     if (*p == '"') return mm_skip_string(p, end);
     if (*p != '{' && *p != '[') {
-        while (p < end && *p != ',' && *p != '}' && *p != ']' && !sh_shard_is_ws(*p)) p++;
+        while (p < end && *p != ',' && *p != '}' && *p != ']' && !mm_space(*p)) p++;
         return p;
     }
     for (; p < end; p++) {
@@ -221,7 +225,7 @@ static int mm_member_uint(const sh_json_object *object, const char *key, unsigne
     unsigned long long v = 0;
     if (!raw || !*raw) return 0;
     for (p = raw; *p; p++) {
-        if (!sh_shard_is_digit(*p)) return 0;
+        if (!mm_isdigit(*p)) return 0;
         if (v > (ULLONG_MAX - 9) / 10) return 0;
         v = v * 10 + (unsigned long long)(*p - '0');
     }
@@ -628,7 +632,7 @@ void sh_modmanifest_names_free(char **names, size_t count)
 
 size_t sh_modmanifest_placed_names(const char *json, size_t length, char ***out_names, int *failed)
 {
-    mm_frame stack[SH_SHARD_MAX_DEPTH];
+    mm_frame stack[MM_DEPTH_MAX];
     unsigned depth = 0;
     mm_names s = {0};
     const char *p = json, *end = json + length;
@@ -639,10 +643,10 @@ size_t sh_modmanifest_placed_names(const char *json, size_t length, char ***out_
 
     while (p < end) {
         char c = *p;
-        if (sh_shard_is_ws(c) || c == ':') { p++; continue; }
+        if (mm_space(c) || c == ':') { p++; continue; }
         if (c == '{' || c == '[') {
             int edit = 0;
-            if (depth >= SH_SHARD_MAX_DEPTH) goto bad;
+            if (depth >= MM_DEPTH_MAX) goto bad;
             if (depth) {
                 mm_frame *top = &stack[depth - 1];
                 edit = top->in_edit || (top->kind == '{' && top->key == MM_KEY_EDIT);
@@ -743,7 +747,7 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     if (text && length >= 3 && !memcmp(text, "\xef\xbb\xbf", 3)) { text += 3; length -= 3; }
-    while (length && sh_shard_is_ws(*text)) { text++; length--; }
+    while (length && mm_space(*text)) { text++; length--; }
     if (!text || !length || !sh_json_parse_object(text, length, 24, &object)) {
         MM_ERR("mod.json is not a JSON object");
         return 0;
@@ -1165,7 +1169,7 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
                         "MODS: map: %s: %.16s is not installed; the installed %.16s serves it in the editor and "
                         "the next save records it", r->salt, r->build, to);
         } else if (why[0]) {
-            /* Held until the gate decides (B5): for a published map this
+            /* Held until the gate decides: for a published map this
              * parse was not recognised as, the sentence is not the cause. */
             AcquireSRWLockExclusive(&g_current_lock);
             if (g_nnotes < MM_NOTES_MAX)
@@ -1280,8 +1284,7 @@ void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed) { g_listed = lis
 
 /* A load's activation: its rows and every build its listing declares
  * beyond them, which is the placed names' closure the scope hook just
- * listed (a rawmap opened without rows places mods no row names: ADD-V4a
- * defect R). A My Maps load of the same map, saved, has a row for each. */
+ * listed (a rawmap opened without rows places mods no row names). A My Maps load of the same map, saved, has a row for each. */
 static int mm_activate_load(const sh_modmanifest_list *rows)
 {
     sh_modmanifest_listed_fn listed = g_listed;

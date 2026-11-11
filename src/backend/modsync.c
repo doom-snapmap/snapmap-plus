@@ -812,7 +812,7 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
         if (!b.files[i].stock) continue;
         if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, one, sizeof one) !=
             SH_MB_STOCK_OK) {
-            /* DESIGN-additive 2.8, case 4: permanent for this machine. */
+            /* The game lacks the bytes: permanent for this machine. */
             info->game_lacks = 1;
             strncpy_s(info->game_source, sizeof info->game_source,
                       b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path, _TRUNCATE);
