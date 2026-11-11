@@ -60,9 +60,6 @@
   .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
-  .mat-result { font-weight: 600; }
-  .mat-result.ok  { color: #2e7d46; }
-  .mat-result.err { color: var(--danger); }
 
   /* Asset browser: type rail, catalog, and inspector. Shared by the tab and entity modal. */
   .ab-grid { display: flex; gap: 8px; align-items: stretch; flex: 1; min-height: 0; }
@@ -343,7 +340,7 @@
   .combo-opt:hover, .combo-opt.active { background: var(--sel); color: var(--selText); }
   .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
   /* blank / not-in-the-enumerated-list Inherit or Classname -- same red as .toast.err, so it reads as the same "this will be refused" signal */
-  .combo.invalid input, .combo.invalid .combo-arrow { border-color: #a3352f; }
+  .combo.invalid input, .combo.invalid .combo-arrow { border-color: var(--danger); }
 
   .tl-head { color: var(--muted); flex-shrink: 0; padding-bottom: 6px; }
   .tl-head b { color: var(--text); }
@@ -355,7 +352,7 @@
   .tl-inner-tab.tl-add .ui-icon { width: 13px; height: 13px; }
   .tl-tab-del { width: 15px; height: 15px; border: 0; background: transparent; border-radius: 3px; color: var(--muted); cursor: pointer; flex-shrink: 0; }
   .tl-tab-del .ui-icon { width: 11px; height: 11px; }
-  .tl-tab-del:hover { background: #a3352f; color: #fff; }
+  .tl-tab-del:hover { background: var(--danger); color: #ffffff; }
   .tl-inner-body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; padding-top: 2px; }
   .event-list { display: flex; flex-direction: column; gap: 6px; }
   /* Stack parameter widgets below the time/event/delete row. */
@@ -376,7 +373,7 @@
   .ev-arg-row .combo.ev-arg-combo { flex: 1; min-width: 0; }   /* decl/enum -- fills the row same as the plain-text arg inputs */
   .ev-del { width: 22px; height: 22px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 5px; flex-shrink: 0; }
   .ev-del .ui-icon { width: 13px; height: 13px; }
-  .ev-del:hover { background: #a3352f; color: #fff; }
+  .ev-del:hover { background: var(--danger); color: #ffffff; }
 
   /* Entity picker shared by Runs on and entity arguments. */
   .entity-picker { display: flex; flex-direction: column; gap: 5px; }
@@ -422,7 +419,7 @@
   .pf-folder-del { width: 20px; height: 20px; margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
   .pf-folder-del .ui-icon { width: 12px; height: 12px; }
   .pf-folder-head:hover .pf-folder-del { opacity: 1; }
-  .pf-folder-del:hover { color: #a3352f; }
+  .pf-folder-del:hover { color: var(--dangerText); }
   .pf-folder-name { width: 130px; padding: 1px 5px; }
   .pf-item-name { width: 100%; padding: 1px 4px; }
   .prefab-card { flex: 1; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
@@ -569,8 +566,7 @@
   .status-camera .cam-lock input { flex: none; margin: 0; }
   .status-right { margin-left: auto; gap: 10px; padding-left: 22px; }
   .statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 5px; }
-  .statusbar .dot.ok { background: #2e9e5b; }
-  .statusbar .dot.no { background: #c9483d; }
+  .statusbar .dot.ok { background: var(--ok); }
   .statusbar b { color: var(--text); }
   .statusbar .muted { color: var(--muted); }
 
@@ -610,7 +606,7 @@
   .toast.show { opacity: 1; transform: translateX(0); }
   .toast.ok   { background: #2e7d46; }
   .toast.warn { background: #9a6a1a; }
-  .toast.err  { background: #a3352f; }
+  .toast.err  { background: var(--danger); }
 
 /* File menu: disabled items stay readable, the arm toggle shares the tick
    gutter with the theme radios, and the staged-path readout sizes the popup. */
