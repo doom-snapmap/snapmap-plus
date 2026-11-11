@@ -1247,6 +1247,204 @@ static void measure(const char *data, const char *doom)
     sh_modstock_set_install(NULL);
 }
 
+/* --------------------------------------------- render programs (D7) ---- */
+/* A seventh install: a campaign program tw (decl, cooked .bin, SPIR-V and one
+ * permutation, all CRLF text and valid headers) and tp, whose permutation
+ * lacks its .bin, only in gameresources; a SnapMap program sw and a SnapMap
+ * entityDef in snap_gameresources. */
+
+#define R7_TW_DECL  "generated/decls/renderprog/tw.decl"
+#define R7_TW_BIN   "generated/renderprogs/tw_pc_vulkan.bin"
+#define R7_TW_VS    "generated/spirv/tw.vspv"
+#define R7_TW_FS    "generated/spirv/tw.fspv"
+#define R7_TW_PERM  "generated/renderprogs/permutations/tw_0000000000000001.decl"
+#define R7_TW_PBIN  "generated/renderprogs/permutations/tw_0000000000000001_pc_vulkan.bin"
+#define R7_TW_PVS   "generated/spirv/generated/renderprogs/permutations/tw_0000000000000001.vspv"
+#define R7_TW_PFS   "generated/spirv/generated/renderprogs/permutations/tw_0000000000000001.fspv"
+#define R7_SNAP_DEF "generated/decls/entitydef/s7/crate.decl"
+static const char R7_DECL[] = "{\r\n\tparms {\r\n\t\tstageSort sortTransSort\r\n\t}\r\n\thlsl_fp {\r\n\t\t#include \"water.inc\"\r\n\t}\r\n}\r\n";
+static const char R7_PERM[] = "{\r\n\tpermutations {\r\n\t\tdefault AMD_VK_EXTENSIONS\r\n\t}\r\n\tparms {\r\n"
+                              "\t\tstageSort sortTransSort\r\n\t}\r\n\tstate {\r\n\t\tblend GL_ONE GL_ONE_MINUS_SRC_ALPHA\r\n\t}\r\n}\r\n";
+static const char R7_DEF[] = "{\r\n\tinherit = \"prop\";\r\n\tedit = {\r\n\t\tsize = 4;\r\n\t}\r\n}\r\n";
+#define R7_VS_TEXT "#version 450 core\nvoid main() { gl_Position = vec4( 0.0 ); }\n"
+#define R7_FS_TEXT "#version 450 core\nlayout( location = 0 ) out vec4 o;\nvoid main() { o = vec4( 1.0 ); }\n"
+
+typedef struct r7_blob { unsigned char p[512]; size_t n; } r7_blob;
+static r7_blob R7B[16];
+static int R7N;
+
+static void r7_be32(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16); p[2] = (unsigned char)(v >> 8); p[3] = (unsigned char)v;
+}
+
+/* A cooked program of `decl` (modbundle_test's rp_bin): magic, checksum, 16
+ * bytes, three stage records, the 36-byte trailer. */
+static const r7_blob *r7_bin(const char *decl)
+{
+    const char *st[3] = { R7_VS_TEXT, R7_FS_TEXT, "" };
+    r7_blob *o = &R7B[R7N++];
+    size_t pos, k, n = strlen(decl);
+    while (n && (decl[n - 1] == '\n' || decl[n - 1] == '\r' || decl[n - 1] == ' ')) n--;
+    r7_be32(o->p, 0xB68800ADu);
+    r7_be32(o->p + 4, sh_mb_md5fold(decl, n));
+    pos = 8;
+    memset(o->p + pos, 0, 16); pos += 16;
+    for (k = 0; k < 3; k++) {
+        size_t ln = strlen(st[k]);
+        memset(o->p + pos, 0xff, 10); o->p[pos + 8] = 0; o->p[pos + 9] = (unsigned char)(k == 1 ? 1 : 3); pos += 10;
+        o->p[pos] = (unsigned char)ln; o->p[pos + 1] = (unsigned char)(ln >> 8); o->p[pos + 2] = 0; o->p[pos + 3] = 0; pos += 4;
+        memcpy(o->p + pos, st[k], ln); pos += ln;
+    }
+    memset(o->p + pos, 0xff, 36); pos += 36;
+    o->n = pos;
+    return o;
+}
+
+/* A SPIR-V file: the engine's header and 8 bytes of module. */
+static const r7_blob *r7_spv(const char *stage)
+{
+    r7_blob *o = &R7B[R7N++];
+    r7_be32(o->p, 4);
+    r7_be32(o->p + 4, sh_mb_md5fold(stage, strlen(stage)));
+    r7_be32(o->p + 8, 0x12345678u);
+    r7_be32(o->p + 12, 8);
+    memcpy(o->p + 16, "\x03\x02\x23\x07\x00\x00\x01\x00", 8);
+    o->n = 24;
+    return o;
+}
+
+#define R7_T(path, text) { path, (const unsigned char *)(text), sizeof text - 1, 0, 0 }
+#define R7_B(path, blob) { path, (blob)->p, (blob)->n, 0, 0 }
+
+static void make_install7(const char *d7)
+{
+    const r7_blob *bin, *pbin, *vs, *fs;
+    R7N = 0;
+    bin = r7_bin(R7_DECL);
+    pbin = r7_bin(R7_PERM);
+    vs = r7_spv(R7_VS_TEXT);
+    fs = r7_spv(R7_FS_TEXT);
+    {
+        entry g[] = {
+            R7_T(R7_TW_DECL, R7_DECL), R7_B(R7_TW_BIN, bin), R7_B(R7_TW_VS, vs), R7_B(R7_TW_FS, fs),
+            R7_T(R7_TW_PERM, R7_PERM), R7_B(R7_TW_PBIN, pbin), R7_B(R7_TW_PVS, vs), R7_B(R7_TW_PFS, fs),
+            R7_T("generated/decls/renderprog/tp.decl", R7_DECL), R7_B("generated/renderprogs/tp_pc_vulkan.bin", bin),
+            R7_B("generated/spirv/tp.vspv", vs), R7_B("generated/spirv/tp.fspv", fs),
+            R7_T("generated/renderprogs/permutations/tp_0000000000000001.decl", R7_PERM),
+            R7_B("generated/spirv/generated/renderprogs/permutations/tp_0000000000000001.vspv", vs),
+            R7_B("generated/spirv/generated/renderprogs/permutations/tp_0000000000000001.fspv", fs),
+        };
+        entry s[] = {
+            R7_T("generated/decls/renderprog/sw.decl", R7_DECL), R7_B("generated/renderprogs/sw_pc_vulkan.bin", bin),
+            R7_B("generated/spirv/sw.vspv", vs), R7_B("generated/spirv/sw.fspv", fs),
+            R7_T("generated/renderprogs/permutations/sw_0000000000000001.decl", R7_PERM),
+            R7_B("generated/renderprogs/permutations/sw_0000000000000001_pc_vulkan.bin", pbin),
+            R7_B("generated/spirv/generated/renderprogs/permutations/sw_0000000000000001.vspv", vs),
+            R7_B("generated/spirv/generated/renderprogs/permutations/sw_0000000000000001.fspv", fs),
+            R7_T(R7_SNAP_DEF, R7_DEF),
+        };
+        write_container(d7, "gameresources", g, (int)(sizeof g / sizeof g[0]));
+        write_container(d7, "snap_gameresources", s, (int)(sizeof s / sizeof s[0]));
+    }
+}
+
+/* `text` with every CRLF turned into LF, as an export that normalised line
+ * ends writes it, then `tail`. */
+static void r7_write_lf(const char *dir, const char *request, const char *text, const char *tail)
+{
+    char rel[MAX_PATH * 2], *lf = (char *)malloc(strlen(text) + strlen(tail) + 1), *q = lf;
+    const char *p;
+    if (!lf) return;
+    for (p = text; *p; p++) if (!(p[0] == '\r' && p[1] == '\n')) *q++ = *p;
+    strcpy(q, tail);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", request);
+    put_rel(dir, rel, lf, strlen(lf));
+    free(lf);
+}
+
+static void r7_write_bytes(const char *dir, const char *request, const r7_blob *blob)
+{
+    char rel[MAX_PATH * 2];
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", request);
+    put_rel(dir, rel, blob->p, blob->n);
+}
+
+/* Identity of decl-grammar text is textual: a copy at a game name that
+ * differs only in line ends is the game's file (a pointer recording the
+ * game's hash), permutation decls included; an edited copy of a decl is still
+ * an edit; an edited permutation is refused with what to do, never as a
+ * binary. */
+static void test_text_identity(const char *tmp)
+{
+    char d7[MAX_PATH * 2], dir[MAX_PATH * 2], sha[65];
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+    const r7_blob *bin, *pbin, *vs, *fs;
+
+    _snprintf_s(d7, sizeof d7, _TRUNCATE, "%s\\d7", tmp);
+    make_install7(d7);
+    bin = &R7B[0]; pbin = &R7B[1]; vs = &R7B[2]; fs = &R7B[3];
+    sh_modstock_set_install(d7);
+
+    /* The water case: the whole program, its two text decls exported as LF
+     * (the program decl without its final newline), its binaries byte for
+     * byte. Every file is the game's: eight surfaces, nothing carried. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text1", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
+    r7_write_lf(dir, R7_TW_DECL, "{\r\n\tparms {\r\n\t\tstageSort sortTransSort\r\n\t}\r\n\thlsl_fp {\r\n\t\t#include \"water.inc\"\r\n\t}\r\n}", "");
+    r7_write_lf(dir, R7_TW_PERM, R7_PERM, "");
+    r7_write_bytes(dir, R7_TW_BIN, bin);
+    r7_write_bytes(dir, R7_TW_VS, vs);
+    r7_write_bytes(dir, R7_TW_FS, fs);
+    r7_write_bytes(dir, R7_TW_PBIN, pbin);
+    r7_write_bytes(dir, R7_TW_PVS, vs);
+    r7_write_bytes(dir, R7_TW_PFS, fs);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    if (b.errors) fprintf(stderr, "  text identity: %s\n", b.first_cause);
+    CHECK(b.file_count == 8 && b.stock_count == 8 && b.total_size == 0 && b.classes.surfaces == 8 && !b.edits);
+    f = find(&b, R7_TW_PERM);
+    hex_of(R7_PERM, sizeof R7_PERM - 1, sha);
+    CHECK(f && f->stock && !f->absent && f->cls == SH_MB_CLASS_SURFACE && f->stock_source &&
+          !strcmp(f->stock_source, R7_TW_PERM) && !strcmp(f->blob, sha) && f->size == sizeof R7_PERM - 1);
+    f = find(&b, R7_TW_DECL);
+    hex_of(R7_DECL, sizeof R7_DECL - 1, sha);
+    CHECK(f && f->stock && f->cls == SH_MB_CLASS_SURFACE && !strcmp(f->blob, sha));
+    CHECK(b.canonical && strstr(b.canonical, sha) != NULL);
+    sh_mb_free(&b);
+
+    /* A SnapMap decl copied with LF and one more final newline: the game's. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text2", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
+    r7_write_lf(dir, R7_SNAP_DEF, R7_DEF, "\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && b.classes.surfaces == 1);
+    f = find(&b, R7_SNAP_DEF);
+    hex_of(R7_DEF, sizeof R7_DEF - 1, sha);
+    CHECK(f && f->stock && !strcmp(f->blob, sha) && f->cls == SH_MB_CLASS_SURFACE);
+    sh_mb_free(&b);
+
+    /* An edited copy of it is still an edit, derived from its text. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text3", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
+    r7_write_lf(dir, R7_SNAP_DEF, "{\n\tinherit = \"prop\";\n\tedit = {\n\t\tsize = 8;\n\t}\n}\n", "");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && b.edit_files == 1 && b.classes.edits == 1);
+    if (b.errors) fprintf(stderr, "  edited copy: %s\n", b.first_cause);
+    f = find(&b, R7_SNAP_DEF);
+    CHECK(f && !f->stock && f->edited && f->edit && strstr(f->edit, "\"set\"") != NULL);
+    sh_mb_free(&b);
+
+    /* An edited permutation decl is decl text, not a binary: the refusal says
+     * what to do instead. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text4", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
+    r7_write_lf(dir, R7_TW_PERM, "{\n\tpermutations {\n\t\tdefault AMD_VK_EXTENSIONS\n\t}\n\tstate {\n"
+                                 "\t\tblend GL_ONE GL_SRC_ALPHA\n\t}\n}\n", "");
+    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1);
+    CHECK_CAUSE(b, "edits the game's render-program permutation " R7_TW_PERM);
+    CHECK(!strstr(b.first_cause, "a binary"));
+    sh_mb_free(&b);
+}
+
 int main(void)
 {
     char tmp[MAX_PATH], d1[MAX_PATH * 2], d2[MAX_PATH * 2], data[MAX_PATH * 2], doom[MAX_PATH * 2];
@@ -1264,6 +1462,7 @@ int main(void)
     test_closure_effects(tmp);
     test_whole_models(tmp);
     test_closure_store_path(tmp);
+    test_text_identity(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();

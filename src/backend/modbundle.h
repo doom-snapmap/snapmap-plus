@@ -115,7 +115,7 @@
  * is built again once by the rebuild rule, so a product update reclassifies
  * every installed folder; aliases keep the maps pinned to its earlier hash
  * working. Raise it when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           6
+#define SH_MB_RULES           7
 #define SH_MB_ID_MAX          64u
 #define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */
@@ -285,6 +285,12 @@ typedef struct sh_mb_bundle {
     char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
     size_t note_count, note_cap;
 } sh_mb_bundle;
+
+/* Whether two decl texts are one text: line ends are not content, so CRLF
+ * and LF compare equal and the run of line ends at the end is ignored. The
+ * builder compares a decl-grammar copy at a game name with the game's text
+ * this way (rules 7); a binary keeps byte identity. */
+int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, size_t bn);
 
 /* Existence of one lower-cased request path: 1 present, 0 absent, -1 cannot
  * tell (reader unavailable). */

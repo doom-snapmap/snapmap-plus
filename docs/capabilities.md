@@ -146,9 +146,12 @@ about it. The builder records what your copy changes against the game's text (fi
 list entries, named entries such as an AI graph or a body clip, added rows) and the build log says
 "edits <path>: N operations". The copy itself is never served: a map that uses the mod gets the game's
 text with your edits and those of every other mod it uses, so two mods that add to one list or one
-body both apply. A copy that does not read as a decl is refused with the line it stops at, and a
-binary at a game name with other bytes (a model, an image) is refused: put it under `mods/<key>/` and
-point your decls at it. The keys `player`, `extends` and `replaces` of earlier releases are ignored,
+body both apply. A copy that differs from the game's only in line endings (CRLF or LF, a final newline)
+is the game's own file and is borrowed, not edited. A copy that does not read as a decl is refused with
+the line it stops at, and a binary at a game name with other bytes (a model, an image) is refused: put
+it under `mods/<key>/` and point your decls at it. A render program's permutation decl is text, but an
+edited one is refused too, since the game file cannot be generated per map: delete the copy, or ship
+your program whole under `mods/<key>/`. The keys `player`, `extends` and `replaces` of earlier releases are ignored,
 and a partial file they named is refused with "put the whole edited copy of <game file> at its game
 name". Mods you download or import are never refused on their files. A map whose mods need Snapmap+ features records the version it needs.
 

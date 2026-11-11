@@ -471,19 +471,34 @@ These backend files share the work:
   tweak (an editor-only type outside the key), a surface (the game's own bytes
   at the game's own name, served from the player's disk, never carried and
   never refused; SnapMap's provider cannot see campaign-only content without
-  it), or a replacement (any other file at a game name). Replacements and
-  editor tweaks are the bundle's `shadows`, derived and never declared. A
-  replacement that is a decl is an edited copy: its structural diff against
-  the game's text is the product block's `edits` and the game file is
-  generated per map (see [Derived edits](#derived-edits)); a binary
-  replacement fails the build, except in a folder the product received, and
-  so does a copy outside the decl grammar. The retired author keys `player`,
+  it), or a replacement (any other file at a game name). Whether a file is
+  the game's own bytes is decided by bytes for a binary and by text for a
+  file in the decl grammar (a decl, a snapModule decl, or a render
+  program's permutation decl `generated/renderprogs/permutations/<program>_<mask>.decl`,
+  `{ permutations { } parms { } state { } hlsl_vp { } hlsl_fp { } }`):
+  line ends are not content (CRLF equals LF, the final run of line ends is
+  ignored, `sh_mb_text_same`), so a copy an export turned from CRLF to LF
+  is a pointer recording the game's hash and size (`mb_text_pointer`).
+  Replacements and editor tweaks are the bundle's `shadows`, derived and
+  never declared. A replacement that is a decl is an edited copy: its
+  structural diff against the game's text is the product block's `edits`
+  and the game file is generated per map (see [Derived edits](#derived-edits));
+  a binary replacement fails the build, except in a folder the product
+  received, and so does a copy outside the decl grammar. An edited
+  permutation decl is decl text, never a binary, but it fails the build with
+  what to do instead: the product generates edited game files under
+  `generated/decls/` only (`ms_registry_files`), and a permutation is opened
+  with its program's cooked `.bin` and SPIR-V, so the author either deletes
+  the copy (the mod borrows the game's) or ships a whole program under
+  `mods/<key>/`. Of the 494 permutation decls the installed archives hold,
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. The retired author keys `player`,
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
   below, rules 4 its effects, movies and atlases, rules 5 a closure no
-  other installed mod stands in for, and rules 6 whole models, so every
-  installed folder is built again once.
+  other installed mod stands in for, rules 6 whole models and rules 7
+  textual identity of decl-grammar files, so every installed folder is built
+  again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.

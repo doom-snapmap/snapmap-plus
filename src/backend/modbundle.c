@@ -3623,6 +3623,71 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
 
 /* ------------------------------------------------------ classification ---- */
 
+static size_t mb_text_end(const unsigned char *t, size_t n)
+{
+    while (n && (t[n - 1] == '\n' || t[n - 1] == '\r')) n--;
+    return n;
+}
+
+int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, size_t bn)
+{
+    size_t i = 0, j = 0;
+    if (!a || !b) return 0;
+    an = mb_text_end(a, an);
+    bn = mb_text_end(b, bn);
+    for (;;) {
+        if (i + 1 < an && a[i] == '\r' && a[i + 1] == '\n') i++;
+        if (j + 1 < bn && b[j] == '\r' && b[j + 1] == '\n') j++;
+        if (i == an || j == bn) return i == an && j == bn;
+        if (a[i] != b[j]) return 0;
+        i++;
+        j++;
+    }
+}
+
+/* Decl-grammar text: a decl under generated/decls/, a snapModule decl, or a
+ * render program's permutation decl (generated/renderprogs/permutations/
+ * <program>_<mask>.decl, `{ permutations { } parms { } state { } hlsl_vp { }
+ * hlsl_fp { } }`), which the engine parses like its program's decl. Its
+ * identity is its text and a copy at a game name is never a binary. */
+static int mb_decl_text(const sh_mb_file *f)
+{
+    char program[SH_MB_REQUEST_MAX + 1];
+    return f->is_decl || f->is_module || sh_mb_rp_permutation(f->request, program, sizeof program, NULL);
+}
+
+/* A decl-grammar copy at a game name whose text is the game's but for line
+ * ends (an export that turned CRLF into LF) is the game's file: a pointer
+ * recording the game's bytes, served from the player's disk. Anything else
+ * is left as it was (an edited copy, or a name the game does not hold). */
+static wchar_t *mb_file_wpath(const wchar_t *root, const char *path);
+static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
+{
+    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    unsigned long long size = 0;
+    unsigned char *game = NULL, *copy;
+    size_t glen = 0, clen = 0;
+    wchar_t *full;
+    if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK || size > SH_MB_MAX_FILE) return;
+    if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
+    full = mb_file_wpath(root, f->path);
+    copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
+    free(full);
+    if (copy && sh_mb_text_same(game, glen, copy, clen)) {
+        char *source = mb_strdup(f->request);
+        if (!source) {
+            mb_error(b, "out of memory");
+        } else {
+            f->stock = 1;
+            f->stock_source = source;
+            memcpy(f->blob, sha, sizeof sha);
+            f->size = size;
+        }
+    }
+    free(copy);
+    HeapFree(GetProcessHeap(), 0, game);
+}
+
 /* Whether f's name is under the mod's own namespace (DESIGN-additive 2.1,
  * 2.2): 1 yes; 0 no, with the rule it misses in `why`. A decl is named
  * mods/<key>/...; a skins decl by the mesh it skins and a raw file by its
@@ -3886,6 +3951,17 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         char *json;
         free(f->edit);
         f->edit = NULL;
+        if (f->shadowed && !f->stock && !f->is_decl && !f->is_module && !received && mb_decl_text(f)) {
+            /* modserve generates edited game files under generated/decls/
+             * only (ms_registry_files): an edit here would build and never
+             * apply. */
+            mb_error(b, "%s edits the game's render-program permutation %s, which the product cannot generate per map "
+                     "(it generates edited decls under generated/decls/ only, and a permutation is opened with its "
+                     "program's cooked .bin and SPIR-V); delete your copy and the mod borrows the game's, or ship your "
+                     "program whole under mods/%s/ (decl, .bin, SPIR-V and permutations) and point your material at it",
+                     f->path, f->request, b->id);
+            continue;
+        }
         if (!f->shadowed || !f->is_decl || f->stock || f->is_module || sh_mb_editor_time(f->request)) continue;
         full = mb_file_wpath(root, f->path);
         copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
@@ -4628,6 +4704,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
             }
         }
+        /* Identity of decl text is textual: line ends are not content. */
+        if (!f->stock && !b->legacy && stock && mb_decl_text(f)) mb_text_pointer(b, f, root);
         if (!f->stock && f->deferred) {
             if (f->deferred == 1 && sh_mb_pointer_only_kind(f->request))
                 mb_error(b, "%s is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a "
@@ -4676,7 +4754,7 @@ names:
                  * a binary has no structure to diff and the game loads it by
                  * its fixed name, so it is refused, except in a folder the
                  * product received. */
-                if (got == 1 && !f->is_decl && !f->is_module && !sh_mb_editor_time(f->request) && !mb_received(b) &&
+                if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !mb_received(b) &&
                     !g_mb_keep_here) {
                     mb_error(b, "%s would replace the game's %s with other bytes; a binary at a game name cannot be "
                              "merged with other mods: put it under mods/%s/ and point your decls at it", f->path,

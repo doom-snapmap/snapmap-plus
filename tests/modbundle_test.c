@@ -1316,6 +1316,22 @@ static void test_refusals(const char *fixture, const char *tmp)
     }
 }
 
+/* Decl text compares without its line ends: CRLF equals LF, the final run
+ * of line ends is ignored, and any other byte is content. */
+static void test_text_same(void)
+{
+    const unsigned char crlf[] = "{\r\n\tx = 1;\r\n}\r\n", lf[] = "{\n\tx = 1;\n}", more[] = "{\n\tx = 1;\n}\n\n\r\n",
+                        other[] = "{\n\tx = 2;\n}\n", lone_cr[] = "{\r\tx = 1;\r\n}\r\n", gap[] = "{\n\n\tx = 1;\n}\n";
+    CHECK(sh_mb_text_same(crlf, sizeof crlf - 1, lf, sizeof lf - 1));
+    CHECK(sh_mb_text_same(lf, sizeof lf - 1, more, sizeof more - 1));
+    CHECK(sh_mb_text_same(crlf, sizeof crlf - 1, crlf, sizeof crlf - 1));
+    CHECK(!sh_mb_text_same(crlf, sizeof crlf - 1, other, sizeof other - 1));
+    CHECK(!sh_mb_text_same(lone_cr, sizeof lone_cr - 1, lf, sizeof lf - 1));   /* a lone CR is content */
+    CHECK(!sh_mb_text_same(gap, sizeof gap - 1, lf, sizeof lf - 1));           /* an inner blank line too */
+    CHECK(!sh_mb_text_same(lf, sizeof lf - 1, (const unsigned char *)"{", 1));
+    CHECK(sh_mb_text_same((const unsigned char *)"\r\n", 2, (const unsigned char *)"", 0));
+}
+
 /* ------------------------------------------------------ render programs ---- */
 
 static void test_md5fold(void)
@@ -1510,6 +1526,7 @@ static void rp_case(const char *tmp, int which, const char *needle)
 
 static void test_renderprogs(const char *tmp)
 {
+    test_text_same();
     test_md5fold();
     test_spirv_names();
     {
