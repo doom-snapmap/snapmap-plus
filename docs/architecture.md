@@ -32,6 +32,10 @@ Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
 set (named and unnamed) and exports nothing else. The proxy loads the system `XInput1_4.dll`
 from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
+Only the diagnostic build (`build.ps1 -Diag`) links `xinput1_4_diag.def`, the same set plus
+`sh_diag_status` at ordinal 300: one JSON object with the product version, the interface
+table's size, the features off this session and the last rawmap open (`diag_status.h`), for
+the development daemon. A release has neither the export nor its code.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
@@ -66,9 +70,11 @@ The scan, `sig_scan_one`, is the developer tool that derives and audits the tabl
 `sig_test` (and `tools/signatures/sigscan.py`) prove that every pattern matches
 exactly once in each executable, at the recorded RVA. Contributor changes to
 signatures or anchors require that two-image test gate in
-[contributing](contributing.md#7-run-the-tests). Generated anchors in the globals
-table still locate their code site by scanning, because the RVAs that table records
-are those of the globals themselves.
+[contributing](contributing.md#7-run-the-tests). The globals table's anchors are
+checked the same way: each row records the RVA of its anchor's code site on both
+renderers (`site_vk`, `site_gl`), next to the audit RVAs of the global itself, and
+`glb_resolve` decodes the displacement only where the whole anchor holds at that
+site.
 
 A pattern that matches more than once is not an identification. Where two
 functions share a body, the caller must confirm its target by something the
@@ -303,7 +309,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x388`; the current table occupies `0x390`
+retained, with extensions through `+0x398`; the current table occupies `0x3A0`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -318,7 +324,9 @@ section, built on the game thread after each palette build by
 gates Create, the Load / Place held in the 3D view, and the game thread's last
 paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`), then
 `features_off` (`+0x388`, the one line naming the features that are off this session,
-from `feature_health.c`). The retired
+from `feature_health.c`), `preview_failure` (`+0x390`, why the latest image preview
+failed, `preview.c`) and `sound_refusal` (`+0x398`, why the latest sound audition was
+refused, `soundpreview.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -3197,6 +3205,35 @@ the stolen prologue is verified at startup on both renderers
 (`tests/load_screen_stop_test.c`). Only while that detour is armed does the
 policy redirect a fault with the loading-screen thread running; otherwise it
 declines it as before.
+
+Redirects are bounded per incident, not per session: an incident starts at its
+first redirect and lasts 30 seconds, and may redirect four faults
+(`SHIELD_INCIDENT_REDIRECTS`, `redirect_policy.h`). An incident that keeps
+faulting past that is left to the fatal handlers; a later, separate fault starts
+a new incident, so a long session survives any number of recoveries. An access
+violation is classified first-chance by the vectored handler. Any other hardware
+fault (a divide, a floating-point or misalignment fault, an in-page error) is
+redirected only at second chance, from the unhandled-exception filter
+(`shield_second_chance`), so the engine's own `__except` blocks see it first.
+The shield also changes `FatalError`'s level byte from 7 to 6 at startup
+(through `code_patch`, the byte compared first), so a fatal engine error thrown
+inside Frame takes the same recoverable path; direct dispatcher calls and
+failures outside Frame still exit.
+
+What the player reads after a recovery is one fixed sentence,
+`SHIELD_RECOVERED_TEXT` (`recovery.c`): "Snapmap+ caught a problem in the game and
+returned you to the menu. Unsaved changes to this map were lost." It is the text
+of the `Error(6)` the redirect raises, so the engine's own error dialog shows it,
+and the crash record carries it; the fault's code and address go to
+`shield_faults.log` only. When the fault leaves the editor open, `recovery_tick`
+drives the editor's own exit to the map browser and answers its exit prompt Yes,
+which is what the sentence says.
+
+The damaged-save guard dismisses the engine's offer to delete a save it cannot
+read (the shell's own ClearDialog, so no button action runs and nothing is
+deleted) and then, once that dialog has left the queue, raises one engine dialog
+of its own saying why the map did not open and that the file was kept
+(`shield_damaged_save_text`).
 
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves
