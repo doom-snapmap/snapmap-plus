@@ -376,9 +376,9 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   came from: the root is yours, `mods\maps\` holds what maps brought.
 - Playing a published map (or a My Maps map) that uses a mod no installed folder provides first
   asks the mod store about each missing build, then asks you, in the game's own Yes/No dialog,
-  naming the mods and their size, after one console line per mod: "This map uses Hell Guards
-  (local.hell-guard), which is not installed." or "Hell Guards (local.hell-guard) is installed but
-  does not provide mods/local.hell-guard/hell_guard_combo_enc, which this map uses.". The question
+  naming the mods and their size, after one console line per mod: "This map uses Hell Guards,
+  which is not installed." or "Hell Guards is installed but does not provide
+  hell_guard_combo_enc, which this map uses.". The question
   is the same whether or not you have another version of the mod: "This map needs 1 mod: Hell
   Guards (1.2 MB). Download and install now?". When the mods include scripts the question says so
   before it asks: "These mods include scripts (N files). Scripts run only inside this map and
@@ -397,9 +397,9 @@ on their files. A map whose mods need Snapmap+ features records the version it n
 - A build that cannot be obtained stops that map (or rawmap, or prefab) from loading, in exactly
   one of four causes, each said in the game's own dialog and in one console line, before anything
   is asked or downloaded:
-  - the map is published and the build left the mod store: "This map needs Hell Guards
-    (hell-guards-7f3k), which is no longer available: its author unpublished it, or it was
-    removed. This is permanent on this machine.";
+  - the map is published and the build left the mod store: "This map needs Hell Guards,
+    which is no longer available: its author unpublished it, or it was removed. This is permanent
+    on this machine.";
   - the mod store did not answer: "..., which could not be downloaded: " and the store's
     failure in words, for example "the mod store is busy; try again in a few minutes." or "the mod
     store could not be reached; check the internet connection and try again.";

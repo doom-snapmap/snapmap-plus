@@ -175,8 +175,8 @@ by 245,760, written with at least 8 significant digits. Do not write
 
 | Limit | Value |
 |---|---|
-| Member file | at most 64 MiB (the bundle builder's per-file cap). The cell index alone is 1,398,108 bytes and the header 368, so about 62.6 MB is left for pages. |
-| Bundle | at most 256 MiB and 4096 files in all. |
+| Member file | no size of the builder's own (DECISIONS 26). The cell index alone is 1,398,108 bytes and the header 368. |
+| Bundle | no size or file count of the builder's own. |
 | Families per bundle | no limit of its own; each family takes one record. |
 | Records | 31 in the game, shared with its own board, the map's own textures and the engine (see below). |
 | Memory per board | about 14 MB while registered (13.9 MB measured on Vulkan): 11,184,810 bytes of host page table, the member's index and page table, and a 2048 x 2048, 12-level page-table image. |
@@ -185,9 +185,8 @@ Measured sizes of the reference family's one member, `fam_sq1.mega2`:
 2,955,715 bytes = 368 header + 1,555,751 bytes of 93 pages (7,023 to 42,288
 bytes, about 16.7 KB each) + 1,398,108 index + 1,488 page table. At that page
 size a 1920 x 1920 material (348 pages over all levels: 256, 64, 16, 4, 1 and
-seven shared coarse cells) costs about 5.8 MB, so one 64 MiB member holds
-about ten such materials, and the 256 MiB bundle cap, not the member cap,
-limits a mod to roughly forty.
+seven shared coarse cells) costs about 5.8 MB; a mod carries as many such materials as its members
+hold, with no cap of Snapmap+'s own.
 
 ## What Snapmap+ does with it
 
@@ -242,9 +241,8 @@ is a different format and is not written by this contract. A stock multiplayer
 map's `.pages` file needs nothing from a baker. An authored map would need
 either a `.pages` version 3 writer, or a mega2 family as above, fixed at 2048
 pages and 12 levels. A `.pages` file is also refused by the bundle builder today
-(the file type is not admitted, and real map files exceed the 64 MiB member cap:
-stock multiplayer maps' are 110 to 516 MB), so carrying one needs a builder
-change and a larger cap for that file type.
+(the file type is not admitted; stock multiplayer maps' are 110 to 516 MB), so
+carrying one needs a builder change for that file type.
 
 ## Evidence
 
