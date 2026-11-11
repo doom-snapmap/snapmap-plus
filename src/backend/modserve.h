@@ -783,6 +783,12 @@ typedef struct sh_modserve_scope_info {
 /* The scope of the admitted bundle `bundle_hash` (in the open map's context). 1 filled, 0 not admitted. */
 int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out);
 
+/* A mod the open map uses, named as a player names it: its name (mod.json
+ * "name"), its folder, the folder's last part, or its salt, ASCII
+ * case-insensitive. 1 with its salt and the name lines use (`label`: its
+ * name, else its folder), 0 when the open map uses no such mod. */
+int  sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *label, size_t label_cap);
+
 /* 1 when the admitted bundle `bundle_hash`'s edits of game content apply now:
  * map scope is off, the open map declares it, or it is the editor-tweak class
  * (its editor tweaks serve in every map); else 0. A mod's string edits

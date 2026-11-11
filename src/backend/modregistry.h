@@ -130,9 +130,10 @@ int  sh_modregistry_slot_valid(const char *slot);
 int  sh_modregistry_choices_set(const char *slot, const char *key);
 /* 1 with the key chosen for `slot`, 0 when the map has no choice for it. */
 int  sh_modregistry_choices_get(const char *slot, char *key, size_t cap);
-/* The console verb `sh_mods choose "<game file>/<path>" "<key>"` (modcmd calls
- * it; an empty key clears): one line for the console in `out`. Returns as
- * sh_modregistry_choices_set. */
-int  sh_modregistry_choose_command(const char *slot, const char *key, char *out, size_t cap);
+/* The console verb `sh_mods choose "<game file>/<path>" "<mod name>"` (an empty
+ * name clears): the mod is one the open map uses, named by its name, its
+ * folder or its salt (sh_modserve_listed_mod). One line for the console in
+ * `out`, naming the mod by its name. Returns as sh_modregistry_choices_set. */
+int  sh_modregistry_choose_command(const char *slot, const char *mod, char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODREGISTRY_H */

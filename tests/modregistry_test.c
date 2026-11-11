@@ -479,12 +479,16 @@ static void test_generation(void)
     CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00, "
                   "krival00; serving khands00 (row order; choose with "
                   "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<key>\")"));
-    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
-          strstr(line, "is served from krival00"));
+    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "nobody", line, sizeof line) == -1 &&
+          !strcmp(line, "MODS: choose: no mod named 'nobody' is used by this map."));
+    /* The mod is named as the player names it: here by its folder. */
+    CHECK((sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "E-RIVAL", line, sizeof line) >= 1 ||
+           sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "V-RIVAL", line, sizeof line) >= 1) &&
+          strstr(line, "this map now uses krival00's value for entitydef/player/coop/edit/handsModelMPUseDoomHands. Save the map"));
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";") &&
           strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/khands00/body\";"));
     CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) && !strcmp(key, "krival00"));
-    CHECK(sh_modregistry_choose_command("player.hands", "krival00", line, sizeof line) == -1 && strstr(line, "is not a slot"));
+    CHECK(sh_modregistry_choose_command("player.hands", "krival00", line, sizeof line) == -1 && strstr(line, "is not a setting two mods disagree on"));
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", line, sizeof line) >= 1);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "player/fp_hands.md6"));
     /* The losing source's edit is counted: superseded by row order, then by the map's choice. */
@@ -507,7 +511,7 @@ static void test_generation(void)
         ra.size = rb.size = 10;
         CHECK(sh_modmanifest_current_attach(&ra) >= 0 && sh_modmanifest_current_attach(&rb) >= 0);
         CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
-              strstr(line, "applies now; saved with the map's next save"));
+              strstr(line, "Save the map to keep the choice."));
         saved = sh_modmanifest_on_save(MAPJ, sizeof MAPJ - 1, &slen);
         CHECK(saved && strstr(saved, "krival00") && strstr(saved, "choices") &&
               strstr(saved, "entitydef/player/coop/edit/handsModelMPUseDoomHands"));

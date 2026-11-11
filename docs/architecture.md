@@ -2679,7 +2679,9 @@ map's choices).
   (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; a keyed entry adds its
   name, a named block segment is `word:name`). Two sources setting one slot to
   different values: the map's choice (`"choices"` in the manifest rows,
-  `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<key>"`),
+  `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<mod name>"`,
+  the mod named by its name, its folder or its salt among the mods the open
+  map uses, `sh_modserve_listed_mod`),
   else the first in row order, with one line naming the slot and the command;
   the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`),
   a row resolved as serving resolves it: its own build, else the build the

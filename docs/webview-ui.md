@@ -524,7 +524,7 @@ keptBuild?}`. A refused dry run is `ok: false` with the plain reason in `message
 | `sh_mods map add "<mod folder>"` | Use in this map (`mapAddMod`) |
 | `sh_mods map remove "<mod folder>" [--yes]` | Remove from map |
 | `sh_mods uninstall "<mod folder>" [--yes]` | Uninstall (every folder of the mod: the player's own and the copies maps brought) |
-| `sh_mods choose "<slot>" "<mod folder>"` | Choices between mods (`chooseRegistry`) |
+| `sh_mods choose "<slot>" "<mod name>"` (its name or its folder) | Choices between mods (`chooseRegistry`) |
 | `sh_mods rebuild "<folder>"` | Rebuild (`rebuild`) |
 | `sh_mods install "<folder>"` | the install button (`install`) |
 | `sh_mods rescan` | Refresh (`rescan`) |

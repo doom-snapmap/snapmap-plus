@@ -286,7 +286,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   packs never collide), the player body's clips (two packs that add rows to one clip both keep them), the
   player entity, weapons, AI FSM states, whitelists. Identical edits merge and additions combine. When two
   mods a map uses set one field to different values, the map's choice (`sh_mods choose "<game file>/<path>"
-  "<mod key>"`, which applies now and is saved with the map's next save) decides, else the first in the map's list, with one log line.
+  "<mod name>"`, the mod named by its name or its folder, which applies now and is saved with the map's next save) decides, else the first in the map's list, with one log line.
 - A saved map records each mod a placed entity needs in its Snapmap+ data (one `snapmap-plus`
   section of the map file, never a map variable, so the Toybox variables list shows only the
   author's own), and the next load activates exactly those mods. A map saved by an earlier build

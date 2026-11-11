@@ -7765,3 +7765,25 @@ int sh_modserve_is_mod_sedef(const char *name)
     ms_lower(lower);
     return ms_provider(x, "snapeditorentitydef", lower) >= 0;
 }
+
+/* A mod the open map uses, named as a player names it (sh_modserve_listed_mod). */
+int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *label, size_t label_cap)
+{
+    const ms_index *x = g_index;
+    int i, found = -1;
+    if (salt && salt_cap) salt[0] = 0;
+    if (label && label_cap) label[0] = 0;
+    if (!x || !name || !name[0]) return 0;
+    for (i = 0; i < x->nbundles && found < 0; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        const char *seg = b->folder ? strrchr(b->folder, '\\') : NULL;
+        if (!b->admitted || InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) < 0) continue;
+        if ((b->id && !_stricmp(b->id, name)) || (b->name && !_stricmp(b->name, name)) ||
+            (b->folder && !_stricmp(b->folder, name)) || (seg && !_stricmp(seg + 1, name)))
+            found = i;
+    }
+    if (found < 0) return 0;
+    if (salt && salt_cap) strncpy_s(salt, salt_cap, x->bundles[found].id, _TRUNCATE);
+    if (label && label_cap) strncpy_s(label, label_cap, ms_label(&x->bundles[found]), _TRUNCATE);
+    return 1;
+}
