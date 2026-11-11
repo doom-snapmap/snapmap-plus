@@ -37,6 +37,33 @@ check(/could not be read: the file is missing, damaged or in use\./.test(api.pla
 check(/busy\. Try Load \/ Place again/.test(api.place({result: 0, name: 'Stairs'}).text), 'a refused queue');
 check(api.place({result: 1, name: 'Stairs', placed: 'queued'}).level === 'ok', 'a placed prefab');
 
+/* A module prefab: the backend's sentence says which outcome happened; a short internal phrase never
+ * reaches the player, the page's own sentence for the result does. */
+const mod = {};
+new Function('api', fn('pfModuleSentence') + fn('pfModulePlaceToast') + fn('pfModuleCreateToast') +
+             '\napi.place = pfModulePlaceToast; api.create = pfModuleCreateToast;')(mod);
+const undoStep = "This prefab put the map over the editor's limits and could not be taken back by itself; press Ctrl+Z to undo it.";
+check(mod.place({result: -5, name: 'Hub', message: undoStep}).text === undoStep, 'over the limits, left as one undo step: Ctrl+Z');
+check(mod.place({result: -5, name: 'Hub', message: undoStep}).level === 'warn', 'over the limits is a warning');
+check(/does not fit/.test(mod.place({result: -5, name: 'Hub', message: ''}).text), 'over the limits without a sentence: the page says it');
+check(mod.place({result: 0, name: 'Hub', message: 'Module prefabs are off until DOOM restarts, after an earlier failure.'}).text ===
+      'Module prefabs are off until DOOM restarts, after an earlier failure.', 'module prefabs off until a restart says so');
+check(/^The editor did not place "Hub"\./.test(mod.place({result: 0, name: 'Hub', message: 'the map changed before the placement; try again'}).text),
+      'an internal phrase is not shown');
+check(/Switch to Blueprint mode/.test(mod.place({result: -4, name: 'Hub', message: 'switch to Blueprint mode'}).text), 'Blueprint mode');
+check(/could not be read/.test(mod.place({result: -1, name: 'Hub', message: 'not a module prefab'}).text), 'an unreadable file');
+check(mod.place({result: -1, name: 'Hub', message: 'This prefab could not be placed: its file is damaged. Ask its author to export it again.'}).text
+      .indexOf('Ask its author') > 0, 'a damaged file: the backend\'s sentence');
+check(/needs rooms/.test(mod.place({result: -6, name: 'Hub', message: 'Hub needs rooms you do not have (DLC or a mod you do not have)'}).text),
+      'missing rooms are named whatever the punctuation');
+check(mod.place({result: 1, name: 'Hub'}).level === 'ok', 'placed');
+check(mod.create({result: -1, name: 'Hub', message: 'Select the modules again and press Create.'}).text === 'Select the modules again and press Create.',
+      'a save refused: the backend\'s sentence');
+check(/Send feedback/.test(mod.create({result: -1, name: 'Hub', message: 'the prefab file could not be written'}).text), 'a save failed');
+check(/already exists/.test(mod.create({result: 0, name: 'Hub'}).text), 'a taken name');
+check(host.includes('L",\\"message\\":\\""; m += sh_webview_json::escape_wide(g_create_module_message.c_str());'),
+      'the host passes a refused save\'s sentence');
+
 /* No string the player can see sends them to a log, guesses, or names a console command. */
 const shown = (page.match(/'[^'\n]*'/g) || []).concat(host.match(/L"[^"\n]*"/g) || []);
 const banned = [/\(see (the )?log\)/i, /see the log/i, /editor down\?/i, /most likely\)/i, /\bRun sh_/, /`sh /,

@@ -176,6 +176,7 @@ static volatile bool g_pending_create_module = false;
 static std::string   g_create_module_name;
 static int           g_create_module_result = 0;  /* 1 ok; 0 name exists; -1 failed; -2 not in Blueprint; -3 no module selected */
 static std::string   g_create_module_summary;     /* the view of the block the backend wrote */
+static std::string   g_create_module_message;     /* the backend's text for a refused save */
 static bool          g_load_prefab_modules = false;  /* the last Load/Place read a module prefab */
 static int           g_module_place_seq = 0;      /* placement being followed, 0 = none */
 static std::string   g_load_message;              /* the backend's text for a refused module placement */
@@ -1098,6 +1099,7 @@ static void ui_apply_create_module_prefab()
 {
     g_create_module_result = -1;
     g_create_module_summary.clear();
+    g_create_module_message.clear();
     if (g_create_module_name.empty() || !ui_valid_name(g_create_module_name)) {
         ui_log("create-module-prefab: ABORT (name rejected)");
         return;
@@ -1123,6 +1125,7 @@ static void ui_apply_create_module_prefab()
     int r = ui_module_prefab_call(&call);
     g_create_module_result = (r == 1 || r == -2 || r == -3) ? r : -1;
     if (r == 1) g_create_module_summary = out;
+    else g_create_module_message.assign(out, strnlen(out, 1024));   /* the page shows it when it is a sentence */
     char l[512];
     _snprintf_s(l, sizeof l, _TRUNCATE, "create-module-prefab: name='%s' result=%d %s", g_create_module_name.c_str(), r,
                 r == 1 ? "" : out);
@@ -1401,6 +1404,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
         return;
     }
     g_load_result = (r == -1 || r == -4) ? r : 0;
+    g_load_message = msg;           /* the page shows it when it is the backend's sentence */
 }
 /* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
  * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
@@ -4658,6 +4662,9 @@ static void ui_think_loop()
                 std::wstring w(g_create_module_summary.begin(), g_create_module_summary.end());
                 m += w;
             } else m += L"{}";
+            if (g_create_module_result != 1 && !g_create_module_message.empty()) {
+                m += L",\"message\":\""; m += sh_webview_json::escape_wide(g_create_module_message.c_str()); m += L"\"";
+            }
             m += L"}";
             ui_post_json(m.c_str());
             if (g_create_module_result == 1) ui_send_prefabs();
