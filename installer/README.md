@@ -319,12 +319,12 @@ custom strings file `strings\strids.json` into one mod, My overrides
 everything in `overrides\` is in `mods\` that folder goes to the Recycle Bin, and
 `strings\` once its strings are moved; a skipped entry (a ZIP) keeps `overrides\`.
 A package added to `overrides\` after that first move is moved by the next check
-and migrate, so running `update` again (or `migrate`) picks it up.
+and migrate, so running the installer again picks it up.
 
 The same run converts everything an earlier release left in an earlier shape,
 because the game reads only the current one. Every run looks again, so a mod
 folder or map of an earlier release copied in later is converted the next time
-the installer (or `migrate`) runs:
+the installer runs again:
 
 - every mod folder in `mods\` (outside `mods\maps\`) with a mod.json of an
   earlier release (a format-1 block, an author `id`, `shadows`, `stock` or
@@ -358,7 +358,7 @@ the record's retired sections (`cache`, `aliases`, `snapshots`, `renamed`,
 `downloads`) are removed. Building needs the DOOM folder, as `overrides\` does.
 Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
 check or migrate that does not finish is a warning, never a failed install; the
-warning gives the command to run by hand with DOOM closed, `snapmap-plus migrate`.
+warning says to close DOOM and run the Snapmap+ installer again.
 The tool holds the mods folder's named lock for its whole run
 (`src/common/store_lock.h`).
 `snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) runs the same check and

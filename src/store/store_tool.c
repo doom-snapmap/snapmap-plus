@@ -476,7 +476,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         return SH_STORE_OK;
     }
     if (st_doom_is_running()) {
-        st_say(1, "error: DOOM is running; close it and run this again (nothing was changed)");
+        st_say(1, "error: DOOM is running; close it and run the Snapmap+ installer again (nothing was changed)");
         free(doom);
         return SH_STORE_ERROR;
     }
@@ -485,7 +485,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     lock = wmods ? sh_store_lock_take(wmods, 30000) : NULL;
     free(wmods);
     if (!lock) {
-        st_say(1, "error: another program is changing the mods folder; close DOOM and run this again (nothing was "
+        st_say(1, "error: another program is changing the mods folder; close DOOM and run the Snapmap+ installer again (nothing was "
                "changed)");
         free(doom);
         return SH_STORE_ERROR;
@@ -600,10 +600,10 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     if (!g_discard && g_rc.refused)
         st_say(0, "  %u item(s) were left in place because the Recycle Bin could not take them (it is turned off "
                "or too small for that drive, or the folder is not on a local disk); nothing was deleted for good. "
-               "Make room in the Recycle Bin or turn it on, then close DOOM and run: snapmap-plus migrate", g_rc.refused);
+               "Make room in the Recycle Bin or turn it on, then close DOOM and run the Snapmap+ installer again", g_rc.refused);
     if (after.kinds || (!g_discard && g_rc.refused)) {
-        st_say(0, "Partly done%s%s. Some items are left; close DOOM and run: snapmap-plus migrate%s", done[0] ? ": " : "",
-               done, need_doom ? " --doom \"<DOOM folder>\"" : "");
+        st_say(0, "Partly done%s%s. Some items are left; close DOOM and run the Snapmap+ installer again%s", done[0] ? ": " : "",
+               done, need_doom ? " (it needs to find your DOOM folder)" : "");
         result = SH_STORE_PARTIAL;
     } else {
         st_say(0, "Done: %s.", done[0] ? done : "nothing changed");

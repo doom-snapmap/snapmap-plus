@@ -54,7 +54,7 @@ func placeStoreTool(bundleRoot, dir string) (string, string) {
 	src := filepath.Join(bundleRoot, storeToolName)
 	if _, err := os.Stat(src); err != nil {
 		return "", "this download of Snapmap+ is missing " + storeToolName + ", so your mods were not checked for files " +
-			"of earlier releases; Snapmap+ itself is installed, and running snapmap-plus update fetches it again."
+			"of earlier releases; Snapmap+ itself is installed, and running the Snapmap+ installer again fetches it."
 	}
 	want, err := storeToolDigest(bundleRoot)
 	if err == nil {
@@ -65,7 +65,7 @@ func placeStoreTool(bundleRoot, dir string) (string, string) {
 	}
 	if err != nil {
 		return "", fmt.Sprintf("%s in this download of Snapmap+ was not run (%v), so your mods were not checked for "+
-			"files of earlier releases; Snapmap+ itself is installed, and running snapmap-plus update fetches it again",
+			"files of earlier releases; Snapmap+ itself is installed, and running the Snapmap+ installer again fetches it",
 			storeToolName, err)
 	}
 	dst := filepath.Join(dir, storeToolName)

@@ -370,7 +370,7 @@ static int mg_scan(mg_ctx *c)
             it = mg_add(c, name, MG_ZIP);
             if (it)
                 mg_skip(it, "it is a ZIP archive; unpack it into a folder of its own with package.json at the top, then "
-                            "close DOOM and run: snapmap-plus migrate");
+                            "close DOOM and run the Snapmap+ installer again");
         } else if (mg_is_group(name)) {
             /* beta.16-19 delivered packages: overrides\map-<16 hex>\<package>. */
             WIN32_FIND_DATAW gd;
@@ -439,8 +439,8 @@ static int mg_scan(mg_ctx *c)
             it = mg_add(c, name, MG_UNMARKED);   /* none one level down is the loose layer */
             if (it)
                 mg_skip(it, "it has no package.json or mod.json at its top but holds %u package folders one level down "
-                            "(the first is %s\\%s); move each directly into " MG_OVERRIDES ", then close DOOM and run: "
-                            "snapmap-plus migrate", nested, name, first);
+                            "(the first is %s\\%s); move each directly into " MG_OVERRIDES ", then close DOOM and run the "
+                            "Snapmap+ installer again", nested, name, first);
         }
         free(name);
         free(path);
@@ -815,7 +815,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         if (!mg_target_name(c, it, target, sizeof target)) {
             it->outcome = SH_MODMIGRATE_REFUSED;
             mg_cause(it->reason, sizeof it->reason, "every folder name it could take in the mods folder belongs to another mod "
-                     "(the last is %s); rename that folder, then close DOOM and run: snapmap-plus migrate", target);
+                     "(the last is %s); rename that folder, then close DOOM and run the Snapmap+ installer again", target);
             goto out;
         }
         origin.source = MG_OVERRIDES;
@@ -1658,7 +1658,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
     if (p && n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) { p += 3; n -= 3; }
     if (!p || !sh_json_parse_object(p, n, 64, &root)) {
         mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json cannot be read as a JSON object; the strings of "
-               MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run this again)");
+               MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run the Snapmap+ installer again)");
         goto done;
     }
     raw = sh_json_object_get(&root, "strings");
@@ -1708,7 +1708,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
         if (!(out = sh_json_serialize_object(&root, 0, &outn))) goto oom;
         if (!mg_write_whole(modjson, out, outn)) {
             mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json could not be written (error %lu); the strings of "
-                   MG_STRINGS "\\" MG_STRINGS_DOC " were not added (close the program holding it and run this again)",
+                   MG_STRINGS "\\" MG_STRINGS_DOC " were not added (close the program holding it and run the Snapmap+ installer again)",
                    GetLastError());
             goto done;
         }
@@ -1718,7 +1718,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
     goto done;
 bad:
     mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json has a \"strings\" value that is not an object of languages; "
-           "the strings of " MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run this again)");
+           "the strings of " MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run the Snapmap+ installer again)");
     goto done;
 oom:
     mg_log("MODS: migration: out of memory adding the strings of " MG_STRINGS "\\" MG_STRINGS_DOC);
@@ -1790,7 +1790,7 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
     }
     st->strings_bad = l.doc < 0;
     if (l.doc < 0)
-        mg_log("MODS: migration: " MG_STRINGS "\\" MG_STRINGS_DOC " left as it is: %s; fix it or remove it and run this again",
+        mg_log("MODS: migration: " MG_STRINGS "\\" MG_STRINGS_DOC " left as it is: %s; fix it or remove it and run the Snapmap+ installer again",
                l.doc_why);
     with_strings = l.doc == 1 && l.doc_due;
     if (!l.due && !with_strings) { mg_loose_close(&l); return 0; }

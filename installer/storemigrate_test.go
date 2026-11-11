@@ -153,7 +153,7 @@ func TestMigrateStoreWarnsWithoutTheTool(t *testing.T) {
 		t.Fatalf("a missing tool ran: %q %q", calls, tool)
 	}
 	if !strings.Contains(printed, "this download of Snapmap+ is missing snapmap-plus-store.exe") ||
-		!strings.Contains(printed, "Snapmap+ itself is installed, and running snapmap-plus update fetches it again.") {
+		!strings.Contains(printed, "Snapmap+ itself is installed, and running the Snapmap+ installer again fetches it.") {
 		t.Errorf("printed %q", printed)
 	}
 }
@@ -164,7 +164,7 @@ func TestMigrateStoreWarnsWhenMigrateFails(t *testing.T) {
 		t.Fatalf("calls = %q", calls)
 	}
 	for _, want := range []string{"snapmap-plus-store.exe did not finish moving your mods (exit code 1); Snapmap+ itself is installed. " +
-		"Close DOOM and run: snapmap-plus migrate"} {
+		"Close DOOM and run the Snapmap+ installer again"} {
 		if !strings.Contains(printed, want) {
 			t.Errorf("printed %q, want %q", printed, want)
 		}

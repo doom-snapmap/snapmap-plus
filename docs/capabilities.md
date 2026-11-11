@@ -524,8 +524,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   running `snapmap-plus-store.exe` (kept beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`).
   It first runs `check`, which lists what it finds from earlier releases, and runs `migrate` only
   when there is something to do; its lines are printed as it goes, and a failure is a warning that
-  names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
-  `snapmap-plus migrate` runs the same check and migrate on its own, without reinstalling, which is
+  says to close DOOM and run the Snapmap+ installer again. Running the installer again is also
   how a package dropped into `overrides\` after the first conversion gets moved. The same run
   converts every mod folder and saved map of an earlier release it finds, each time it runs (so a
   folder of an earlier release copied in later is converted by running the installer again): each
