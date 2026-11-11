@@ -237,7 +237,6 @@ static char g_toast[600], g_print[600];
 static int g_toasts;
 static void fake_toast(const char *title, const char *text) { g_toasts++; _snprintf_s(g_toast, sizeof g_toast, _TRUNCATE, "%s: %s", title, text); }
 static void fake_print(const char *line) { strncpy_s(g_print, sizeof g_print, line, _TRUNCATE); }
-static int fake_entity_valid(int uid) { return g_map_on && ent_alive(uid); }
 
 /* The undo clear (editor_undo.h): available while a map is open, how often
  * it ran, and the editor's pending delete commit the tick waits for. */
@@ -336,7 +335,6 @@ static void bind_fakes(void)
     e.delete_entities = fake_delete;
     e.remove_tag = fake_remove_tag;
     e.busy = fake_busy;
-    e.entity_valid = fake_entity_valid;
     e.toast = fake_toast;
     e.print = fake_print;
     e.on_main_thread = fake_on_main;
@@ -857,8 +855,8 @@ int main(int argc, char **argv)
         CHECK(sh_modui_slot(NULL, &call) == 0);
         call.op = SH_MODS_FETCH;
         CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);   /* the earlier document remains */
-        call.op = SH_MODS_WAIT;
-        CHECK(sh_modui_slot(NULL, &call) == 1);                       /* nothing runs in the background */
+        call.op = 5;                                                   /* the retired WAIT */
+        CHECK(sh_modui_slot(NULL, &call) == 0);
     }
     g_main = 1;
 
@@ -887,13 +885,16 @@ int main(int argc, char **argv)
         free(doc);
         bind_fakes();
     }
-    /* the retired actions answer a refusal */
-    doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
-    CHECK(has(doc, "\"ok\":false,\"message\":\"Unknown action.\""));
-    free(doc);
-    doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
-    CHECK(has(doc, "\"ok\":false"));
-    free(doc);
+    /* the retired action numbers (verify, prune, remove, migrate, the recycle bin's) are unknown */
+    {
+        static const int retired[] = { 2, 5, 6, 7, 8, 14, 15, 17, 19 };
+        int r;
+        for (r = 0; r < (int)(sizeof retired / sizeof retired[0]); r++) {
+            doc = run_doc(retired[r], NULL);
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Unknown action.\""));
+            free(doc);
+        }
+    }
     g_rescans = 0;
 
     printf("-- install through the tab: named by the mod, ready, its rows in the palette\n");

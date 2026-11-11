@@ -14,8 +14,8 @@
  *             from the game, its console settings, the builder's warnings in
  *             plain words, and the informational same-files hint (another of
  *             the player's mods carries at least half of its files). "salt"
- *             is the mod's identity for the page's Copy mod id and the Files
- *             view; no sentence names a salt, a hash or a build number.
+ *             is the mod's identity for the Files view; no sentence names a
+ *             salt, a hash or a build number.
  *   map       the manifest rows the last map load carried (modmanifest's
  *             current record), each with its state under the asset rule
  *             (modserve.h sh_modserve_row_served: active, incomplete,
@@ -31,7 +31,7 @@
  * modmanifest.h) and remove a mod from it, their dry runs, the registry
  * choice, rescan (the tab's Refresh: there is no folder watcher, so Refresh
  * is how edits are picked up), New mod, the read-only Files view, and the
- * console's verify and palette rebuild. What the tab does not show (every
+ * palette rebuild. What the tab does not show (every
  * folder's state, conflicts with their winners, the game files mods replace,
  * verification) is printed by sh_modui_doctor, the `sh_mods doctor` verb.
  *
@@ -100,10 +100,6 @@ typedef struct sh_modui_engine {
     /* 1 with the cause when the game cannot take a change now (Play is
      * running, a map is loading), else 0. */
     int (*busy)(char *cause, size_t cap);
-    /* 1 when the open editor map holds the entity with this uniqueId. Main
-     * thread. Bound by iface_engine.c; nothing reads it since the undo watch
-     * was retired with the recycle bin. */
-    int (*entity_valid)(int uid);
     /* The editor toast with a title and literal text; nothing outside the editor. */
     void (*toast)(const char *title, const char *text);
     /* One line in the game console (no newline). */
@@ -165,16 +161,16 @@ int  sh_modui_list(void);
 /* Run one action (SH_MODS_ACT_*) and keep its result document
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
  * INSTALL (absolute; several separated by newlines), a row's key (its folder
- * name under mods\) for REBUILD, UNINSTALL and the map actions, and "" or a
- * key for VERIFY (the console's check). UNINSTALL, in order: the open map's
+ * name under mods\) for REBUILD, UNINSTALL and the map actions. UNINSTALL, in
+ * order: the open map's
  * entities of the mod through the native delete (refused, with nothing
  * deleted, while Play runs, a map loads or the editor is busy), the open
  * map's undo and redo history cleared to the current state (after the
  * delete's own commit, on the tick), the folder moved to the Windows Recycle
  * Bin (sh_ms_delete_mod_folder; deleted outright, and the result says so,
  * when the bin cannot take it), the rescan. The product never brings a
- * folder back; the player can restore one from the bin by hand. The retired
- * actions (MIGRATE, PRUNE_*, REMOVE, REMOVED_*) answer a refusal. Returns the
+ * folder back; the player can restore one from the bin by hand. An action
+ * number the slot does not know answers "Unknown action.". Returns the
  * result length, or -1 when refused before the action ran.
  *
  * MAP_ADD (arg: a key) attaches that mod to the open map: the current
@@ -262,10 +258,6 @@ int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
  * is closed and nothing is declared. The serving mode returns to EDITOR.
  * Main thread. Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch_refused(const char *why);
-
-/* The slot's WAIT: nothing of the tab runs in the background (no migration,
- * no folder watcher), so it answers 1 (idle) at once. Any thread. */
-int  sh_modui_wait(unsigned ms);
 
 
 /* `sh_mods doctor [verify]`: every mod folder with its state and its plain

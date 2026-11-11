@@ -1415,8 +1415,7 @@ static int ie_mods_remove_tag(const char *tag)
     return r;
 }
 
-/* The Mods tab's undo watch, reinstatement toast and console line. */
-static int ie_mods_entity_valid(int uid) { return slot_is_valid_id(NULL, uid); }
+/* The Mods tab's toast and console line. */
 static void ie_mods_toast(const char *title, const char *text) { slot_toast(NULL, title, text); }
 static void ie_mods_print(const char *line) { if (line) sh_printf("%s\n", line); }
 
@@ -1556,7 +1555,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         (void)sh_process_heap_bind(&g_mods_heap, results, n, module_base); /* unbound: the tag edit refuses */
         mods.remove_tag      = ie_mods_remove_tag;
         mods.busy            = ie_mods_busy;
-        mods.entity_valid    = ie_mods_entity_valid;
         mods.toast           = ie_mods_toast;
         mods.print           = ie_mods_print;
         mods.map_left        = ie_mods_map_left;

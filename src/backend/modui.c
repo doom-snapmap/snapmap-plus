@@ -150,7 +150,6 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->delete_entities) g_engine.delete_entities = engine->delete_entities;
         if (engine->remove_tag) g_engine.remove_tag = engine->remove_tag;
         if (engine->busy) g_engine.busy = engine->busy;
-        if (engine->entity_valid) g_engine.entity_valid = engine->entity_valid;
         if (engine->toast) g_engine.toast = engine->toast;
         if (engine->print) g_engine.print = engine->print;
         if (engine->scope_apply) g_engine.scope_apply = engine->scope_apply;
@@ -767,7 +766,7 @@ static int mu_model_build(mu_model *m)
                 /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
                 if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
                 /* An edited copy is counted under edits and an editor tweak under
-                 * editor (DESIGN-additive 2.6), never as a replaced game file. */
+                 * editor, never as a replaced game file. */
                 if (f->shadowed && !f->edited && f->cls != SH_MB_CLASS_EDITOR) u->shadows++;
             }
         if (!e->loaded || e->refused) {
@@ -926,7 +925,7 @@ static int mu_suffix(const char *s, const char *suffix)
 
 static const char *mu_entry_title(const sh_ms_entry *s);
 
-/* ---- additive facts (DESIGN-additive 2.1, 2.4, 2.6, 2.9) */
+/* ---- what the builder derived */
 
 /* The stock banks the product block's registries "banks" names (DESIGN-
  * additive 2.4, "Sound events"), each with this process's state: up to 8. */
@@ -975,7 +974,7 @@ static void mu_put_stock_banks(mu_buf *b, const sh_mb_bundle *bd)
 /* What the builder derived from the files (payload "facts"): the classes,
  * the editor tweaks, every replacement with whether it is an edited copy,
  * the game files the mod edits with their operation counts (the product
- * block's "edits", DESIGN-additive 2.4), and the product block's
+ * block's "edits"), and the product block's
  * "registries" (conductor encounters, string keys, stock banks). */
 typedef struct mu_edits_ctx { mu_buf *b; int first; unsigned files; } mu_edits_ctx;
 
@@ -1448,7 +1447,7 @@ typedef struct mu_mapmod {
     size_t uid_count, uid_cap;
     int modules;              /* placed modules (Blueprint instances) that use it */
     /* Its row's declared build when the editor serves the row through this
-     * (installed) build of its key (a SUBSTITUTE load, DESIGN-additive 2.5). */
+     * (installed) build of its salt (an editor load that substituted it). */
     char declared[SH_MODMANIFEST_HASH_CAP];
 } mu_mapmod;
 
@@ -1900,8 +1899,7 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
     free(c.slots);
 }
 
-/* The state a map entry shows: installed, superseded, incomplete, skipped,
- * missing. A mod the placed names reach is installed; one only a row names
+/* The state a map entry shows: installed, incomplete, skipped, missing. A mod the placed names reach is installed; one only a row names
  * is judged by that row. */
 static const char *mu_mapmod_state(const mu_model *m, const mu_map *mp, const mu_mapmod *x)
 {
@@ -2131,7 +2129,6 @@ static const char *mu_action_name(int action)
 {
     switch (action) {
     case SH_MODS_ACT_INSTALL: return "install";
-    case SH_MODS_ACT_VERIFY: return "verify";
     case SH_MODS_ACT_RESCAN: return "rescan";
     case SH_MODS_ACT_PALETTE: return "palette";
     case SH_MODS_ACT_REBUILD: return "rebuild";
@@ -2494,12 +2491,11 @@ static int mu_install(const char *arg)
 
 /* ---- verify */
 
-/* Rehash the folders `key` names (sh_ms_entry_matches: a folder or a
- * salt), or every loaded one when key is empty, adding the results up. Each
- * failure is also printed to `o` when given. Returns 0 when the store cannot
- * be read. */
-static int mu_verify_core(const char *key, const mu_out *o, sh_ms_verify_stats *sum, unsigned *passed,
-                          unsigned *failed, char *first, size_t first_cap)
+/* `sh_mods doctor verify`: rehash every loaded folder, adding the results
+ * up. Each failure is also printed to `o`. Returns 0 when the store cannot be
+ * read. */
+static int mu_verify_all(const mu_out *o, sh_ms_verify_stats *sum, unsigned *passed, unsigned *failed, char *first,
+                         size_t first_cap)
 {
     sh_ms_list list;
     sh_ms_verify_stats st;
@@ -2508,20 +2504,6 @@ static int mu_verify_core(const char *key, const mu_out *o, sh_ms_verify_stats *
     memset(sum, 0, sizeof *sum);
     *passed = *failed = 0;
     first[0] = 0;
-    if (key && key[0]) {
-        int ok;
-        memset(&st, 0, sizeof st);
-        ok = sh_ms_verify(key, &st, cause, sizeof cause);
-        *sum = st;
-        if (ok) *passed = st.entries ? st.entries : 1;
-        else {
-            *failed = 1;
-            _snprintf_s(first, first_cap, _TRUNCATE, "%s: %s", key, cause);
-            mu_say(o, "verify %s: FAILED: %s", key, cause);
-        }
-        mu_log("verify %s: %s%s%s", key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
-        return 1;
-    }
     if (!sh_ms_enumerate(&list)) return 0;
     for (i = 0; i < list.count; i++) {
         const sh_ms_entry *e = &list.items[i];
@@ -2551,25 +2533,6 @@ static void mu_verify_message(unsigned passed, unsigned failed, const char *firs
     else if (!failed) _snprintf_s(msg, cap, _TRUNCATE, "Checked %u mod%s: every file is as it was built.", passed, passed == 1 ? "" : "s");
     else _snprintf_s(msg, cap, _TRUNCATE, "%u of %u mods have files that changed since they were built; press Refresh to build "
                      "them again. First: %s", failed, passed + failed, first);
-}
-
-static int mu_verify(const char *key)
-{
-    sh_ms_verify_stats sum;
-    char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
-    unsigned passed = 0, failed = 0;
-    mu_buf b;
-    memset(&b, 0, sizeof b);
-    if (!mu_verify_core(key, NULL, &sum, &passed, &failed, first, sizeof first))
-        return mu_simple_result(SH_MODS_ACT_VERIFY, 0, "The mods folder cannot be read.");
-    InterlockedIncrement(&g_gen);
-    mu_verify_message(passed, failed, first, msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_VERIFY, failed == 0 && passed > 0, msg);
-    mu_knum(&b, "passed", passed, 0);
-    mu_knum(&b, "failed", failed, 0);
-    mu_knum(&b, "filesChecked", sum.files, 0);
-    mu_knum(&b, "mib", sum.bytes_mb, 0);
-    return mu_result_tail(&b);
 }
 
 /* What one removal did. */
@@ -2804,7 +2767,7 @@ static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
 
 /* A hub launch's listing and what the product has seen of its Play
- * (ADD-V4a H2). The gate's listing must hold through the level load: a
+ * The gate's listing must hold through the level load: a
  * poll that finds the game idle between the gate and the load is not the
  * end of the Play. Driven by the signals the product has:
  *
@@ -2902,8 +2865,8 @@ static int mu_listing_skipped(const char *hash)
 
 /* The build a placed name (or its closure) lists. The closure resolves each
  * name under the listing in force, which at a load is the previous map's, so
- * the build it reports may be one that map declared (ADD-L6 F2: a rawmap
- * opened over a map pinning an older build saved that build). The listing
+ * the build it reports may be one that map declared (a rawmap opened over a
+ * map pinning an older build would save that build). The listing
  * instead takes, per salt, what the new map serves: the build its rows
  * declare (already listed), else the build sh_modserve_row_build names for
  * that salt in the open map's context (the root folder's for the player's own
@@ -3044,7 +3007,7 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
 /* The serving layer's source at the Play entry: Play does not serialize the
  * map. Only the editor's Play reads the open map live; a hub launch keeps the
  * listing its launch gate set (sh_modui_scope_launch), since the editor's
- * entities and manifest are not the launched map's (ADD-L6 H). */
+ * entities and manifest are not the launched map's. */
 static int mu_scope_source(int when)
 {
     if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
@@ -3069,7 +3032,7 @@ int sh_modui_scope_launch(const char *why)
     if (!mu_on_main()) return 0;
     /* Once per launch, at the gate, before anything of the launch is set:
      * the decls the level load would parse are parsed here, at the hub, in
-     * the hub's (editor) mode, as an editor entry parses them (ADD-L11). A
+     * the hub's (editor) mode, as an editor entry parses them. A
      * second boundary of the same launch (launched, or loading: its level
      * load has not reached Play) does not run it again. */
     if (e->launch_preload && InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LAUNCHED &&
@@ -3175,7 +3138,7 @@ static void mu_scope_tick(int editor_map)
             /* ENDED: the launched Play began, the game was busy with it, and
              * it is idle again, so that Play is over. Never on an idle poll
              * before its Play ran (the gap between the gate and the level
-             * load: ADD-V4a H2). */
+             * load). */
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             mu_settings_close();
@@ -3740,7 +3703,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
 
 /* The map's mod rows and choices live outside the edit map, so a change to
  * them alone leaves the editor's map unmodified and leaving it without a Save
- * writes nothing (ADD-V7b). Each change commits one undo step, as a placed
+ * writes nothing. Each change commits one undo step, as a placed
  * entity does, so the editor asks to save. */
 static void mu_mark_modified(const char *label)
 {
@@ -3796,7 +3759,7 @@ static int mu_map_add(const char *key, const mu_out *o)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s, so only that map uses it. To use it in your own "
                     "maps, copy its folder into your own mods and press Refresh.", title, place);
     else if (sh_mb_editor_only(&m.list.items[entry].bundle))
-        /* Editor tweaks are client-side (DESIGN-additive 2.6): every map opened in
+        /* Editor tweaks are this computer's: every map opened in
          * this editor already has them, a map never records them. */
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s changes only this computer's editor (%u editor tweak%s); every "
                     "map you open here already has them, and a map never lists them.", title,
@@ -3852,7 +3815,7 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
-/* ---- registry choice (DESIGN-additive 2.4) */
+/* ---- registry choice */
 
 /* The open map's registry choice for a slot several declared mods set
  * (`sh_mods choose`, the tab's clash select): applied at once, written into
@@ -4482,12 +4445,6 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     return 1;
 }
 
-int sh_modui_wait(unsigned ms)
-{
-    (void)ms;
-    return 1;
-}
-
 /* ------------------------------------------------------------------ the doctor */
 
 static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
@@ -4562,7 +4519,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
         unsigned passed = 0, failed = 0;
         char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
         mu_say(&o, "verify: checking every mod's files");
-        if (!mu_verify_core("", &o, &sum, &passed, &failed, first, sizeof first)) mu_say(&o, "verify: the mods folder cannot be read");
+        if (!mu_verify_all(&o, &sum, &passed, &failed, first, sizeof first)) mu_say(&o, "verify: the mods folder cannot be read");
         else {
             mu_verify_message(passed, failed, first, msg, sizeof msg);
             mu_say(&o, "verify: %s (%u file(s), %u MiB)", msg, sum.files, sum.bytes_mb);
@@ -4586,8 +4543,6 @@ int sh_modui_run(int action, const char *arg)
     switch (action) {
     case SH_MODS_ACT_INSTALL:
         return mu_install(arg);
-    case SH_MODS_ACT_VERIFY:
-        return mu_verify(arg);
     case SH_MODS_ACT_RESCAN: {
         int n;
         char msg[520];
@@ -4623,11 +4578,6 @@ int sh_modui_run(int action, const char *arg)
     case SH_MODS_ACT_MAP_REMOVE:
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW:
         return mu_map_action(action, arg, NULL, 0);
-    case SH_MODS_ACT_REMOVED_EMPTY:
-    case SH_MODS_ACT_REMOVED_RESTORE:
-    case SH_MODS_ACT_REMOVE:
-        /* The product's own bin is retired: Uninstall moves the folder to the Windows Recycle Bin. */
-        return mu_simple_result(action, 0, "Uninstalled mods go to the Windows Recycle Bin; use Uninstall.");
     case SH_MODS_ACT_MAP_ADD:
         return mu_map_add(arg, NULL);
     case SH_MODS_ACT_CHOOSE: {
@@ -4670,9 +4620,6 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
         return n >= 0;
     case SH_MODS_FETCH:
         return sh_modui_fetch(call->out, call->out_cap, &call->needed, &call->generation);
-    case SH_MODS_WAIT:
-        call->needed = 0;
-        return sh_modui_wait(call->out_cap > 0 ? (unsigned)call->out_cap : 0);
     case SH_MODS_STORE: {
         unsigned gen = 0;
         call->needed = modstore_lock_busy(&gen) ? 1 : 0;

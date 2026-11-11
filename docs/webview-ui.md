@@ -79,7 +79,7 @@ The header defines the complete ABI. These are the main entry points:
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
-| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, WAIT answers idle at once (nothing of the tab runs in the background). See [Mods tab](#mods-tab). |
+| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, STORE says whether a store write holds the store lock. See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
@@ -434,10 +434,12 @@ runs, posts `{"kind": "mods", "pushed": true, "data": ...}`, so a console verb (
 `sh_mods uninstall`, `sh_mods choose`, a build or rescan) reaches an open tab. The page renders it
 as any document and keeps its status line.
 
-In the browser preview, `modsTab.standIn` stands in for the host, starting from
-`tests/fixtures/mods_tab_payload_v4.json` (`PREVIEW_MODS` in `preview_standin.js` must equal it; its Files answers
-come from `PREVIEW_MOD_FILES`). `tests/modui_test.c` checks the document against a temporary store
-and a fake editor, including that every key of that fixture is one the backend writes.
+In the browser preview, `preview_standin.js` answers the document and Refresh with
+`tests/fixtures/mods_tab_payload_v4.json` (`PREVIEW_MODS` must equal it) and the Files view from
+`PREVIEW_MOD_FILES`; every other action says it runs in the game. `mods_tab.js`, which the release
+page carries, holds no stand-in. `tests/mods_tab_test.js` drives the page through its own fake host,
+and `tests/modui_test.c` checks the document against a temporary store and a fake editor, including
+that every key of that fixture is one the backend writes.
 
 ### Colour in the details pane
 
@@ -509,8 +511,8 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `modFiles`, `modFileText` | The Files view's reads (no fresh document follows). |
 | `newMod` | `arg` is a display name: `mods\<name>\` with `mod.json`, a new salt and a working example (an entityDef and its Toybox row), built at once; `data` is `{key, file}`. |
 
-The retired actions (`migrate`, `verify` from the tab, `remove`, `pruneList`, `pruneApply`,
-`removedEmpty`) are not sent by the page; the backend answers a refusal.
+An action the host does not know is answered "Unknown mods action."; an action number the
+backend does not know is answered "Unknown action.".
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` for `uninstallPreview`.
 `map` is null when the open map does not use the mod, else `{name, entities, entityCount,
@@ -560,14 +562,6 @@ A message the player sees says the cause and the next step in plain words. It ne
 points at a log, guesses ("editor down?"), names a console command, or uses the
 reverse-engineering vocabulary; `tests/page_messages_test.js` scans every string the page
 and the host can show. Each tab's empty state says what the tab is for.
-
-## Driving the page from a test
-
-A file `%LOCALAPPDATA%\snapmap-plus\devtools-port` containing one port number (1024 to
-65535) makes the host open Chromium's remote debugging on `127.0.0.1` at that port when
-the window is created; the log says `devtools: remote debugging on ...`. Nothing is opened
-when the file is absent or malformed. The research daemon's `webview` step writes and
-removes this file and drives the page over it. Remove the file when you are done.
 
 ## Threading and polling
 
