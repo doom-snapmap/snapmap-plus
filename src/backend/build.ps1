@@ -58,15 +58,19 @@ if ($Sources.Count -eq 1 -and $Sources[0] -match ",") { $Sources = $Sources[0].S
 
 # Include the optional logger; DllMain arms it when SH_DIAG is defined.
 $defs = ""
+$def = "xinput1_4.def"
 if ($Diag) {
     # The cs_dontuse / sh_alginfo math overrides exist only in this build.
-    $Sources += "../fault_shield/shield_diag.c", "algo.c"
+    # The development daemon's status export (diag_status.h), at ordinal 300.
+    $Sources += "../fault_shield/shield_diag.c", "algo.c", "diag_status.c"
     $defs = "/DSH_DIAG"
-    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c +algo.c /DSH_DIAG"
+    $def = "xinput1_4_diag.def"
+    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c +algo.c +diag_status.c /DSH_DIAG, xinput1_4_diag.def"
 }
 
 # Compile from this directory with relative paths to avoid cmd quoting issues.
-# xinput1_4.def is the sole export source and fixes native XInput ordinals.
+# xinput1_4.def is the sole export source and fixes native XInput ordinals (the
+# diagnostic build uses xinput1_4_diag.def, the same set plus sh_diag_status).
 # DOOM imports by ordinal; automatic alphabetical numbering calls wrong functions.
 $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp files under build/obj/backend.
 # Include the shared interface ABI used by the backend factory and paired UI DLL.
@@ -86,7 +90,7 @@ $objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O
     -ObjDir $objDir -ObjDirArg "..\..\build\obj\backend\" -IncludeDirs @((Join-Path $here "..\common")) -Log $buildLog
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\backend\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $objArgs /Fe:..\..\build\$Out " +
-      "/link /DEF:xinput1_4.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
+      "/link /DEF:$def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
       "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
 Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $outDir $Out) -Log (Join-Path $outDir "link.log") `
     -Remove @((Join-Path $outDir ($Out -replace '\.dll$', '.pdb')))

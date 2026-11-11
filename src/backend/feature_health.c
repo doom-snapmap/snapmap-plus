@@ -47,6 +47,18 @@ int sh_feature_is_off(const char *feature)
     return off;
 }
 
+#ifdef SH_DIAG
+int sh_feature_off_name(int index, char *out, size_t cap)
+{
+    int ok;
+    AcquireSRWLockShared(&g_lock);
+    ok = index >= 0 && index < g_count && out && cap;
+    if (ok) strncpy_s(out, cap, g_off[index], _TRUNCATE);
+    ReleaseSRWLockShared(&g_lock);
+    return ok;
+}
+#endif
+
 /* Append s; stop silently at the end of out (always terminated). */
 static void append(char *out, size_t cap, size_t *len, const char *s)
 {
