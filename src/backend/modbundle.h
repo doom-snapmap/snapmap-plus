@@ -379,7 +379,7 @@ int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
  * read. Returns 1 and the hex. */
 int  sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1]);
 
-/* The store tool's conversion only (it compiles this file too): what a
+/* The store tool's conversion only (src/store/store_old_ids.c): what a
  * bundle serves, independent of its label: SHA-256 over id, requirements,
  * shadows, extra, and every file's request, kind, hash and size. */
 void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1]);
@@ -508,7 +508,7 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
  * rescan's rule. */
 void sh_mb_keep_replacements_here(int on);
 
-/* The store tool's conversion only: an earlier release's mod id, trimmed,
+/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's mod id, trimmed,
  * lower-cased and checked (1-64 characters of [a-z0-9._-], starting and
  * ending with a letter or digit, no ".."). Returns 1 and writes out. */
 int  sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1]);
@@ -756,7 +756,7 @@ void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]
 int  sh_mb_sha256_file(const char *path, unsigned long long *size,
                        char out[SH_MB_HASH_HEX + 1]);
 
-/* The store tool's conversion only: an earlier release's install state file
+/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's install state file
  * (.state.json), {"firstCause","installedAt","validated"}. */
 
 int  sh_mb_state_parse(const char *text, size_t len, int *validated,

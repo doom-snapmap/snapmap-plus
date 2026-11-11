@@ -839,34 +839,6 @@ const char *sh_mb_decl_type(const char *folder, size_t folder_len)
 
 /* ------------------------------------------------------ name rules -------- */
 
-int sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1])
-{
-    size_t i, n;
-    char buf[SH_MB_ID_MAX + 1];
-    if (!in) return 0;
-    while (len && strchr(" \t\r\n", *in)) { in++; len--; }
-    while (len && strchr(" \t\r\n", in[len - 1])) len--;
-    if (len == 0 || len > SH_MB_ID_MAX) return 0;
-    for (i = 0; i < len; i++) {
-        char c = in[i];
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        buf[i] = c;
-    }
-    buf[len] = 0;
-    n = len;
-    for (i = 0; i < n; i++) {
-        char c = buf[i];
-        int alnum = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-        if (alnum) continue;
-        if (c != '.' && c != '_' && c != '-') return 0;
-        if (i == 0 || i + 1 == n) return 0;
-        if (c == '.' && buf[i - 1] == '.') return 0;
-    }
-    memcpy(out, buf, n + 1);
-    return 1;
-}
-
-
 static int mb_path_char(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
@@ -6580,43 +6552,6 @@ done:
     return ok;
 }
 
-void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
-{
-    mb_buf o = {0};
-    mbj *extra = NULL;
-    size_t i;
-    out[0] = 0;
-    if (!b) return;
-    mb_puts(&o, b->id);
-    mb_puts(&o, "\n");
-    if (b->requirements) mb_puts(&o, b->requirements);
-    mb_puts(&o, "\n");
-    for (i = 0; i < b->shadow_count; i++) { mb_puts(&o, b->shadows[i]); mb_puts(&o, "\n"); }
-    mb_puts(&o, "--\n");
-    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
-    for (i = 0; extra && extra->t == MBJ_OBJ && i < extra->count; i++) {
-        mb_put_jstr(&o, extra->keys[i], extra->klen[i]);
-        mb_put(&o, ":", 1);
-        if (!mbj_canon(extra->items[i], &o, NULL, 0)) o.oom = 1;
-        mb_puts(&o, "\n");
-    }
-    mbj_free(extra);
-    mb_puts(&o, "--\n");
-    for (i = 0; i < b->file_count; i++) {
-        const sh_mb_file *f = &b->files[i];
-        char size[32];
-        mb_puts(&o, f->request);
-        mb_puts(&o, f->stock ? "\tstock " : "\tcarried ");
-        if (f->stock) mb_puts(&o, f->stock_source ? f->stock_source : "");
-        mb_puts(&o, "\t");
-        mb_puts(&o, f->blob);
-        _snprintf_s(size, sizeof size, _TRUNCATE, "\t%llu\n", f->stock ? 0ull : f->size);
-        mb_puts(&o, size);
-    }
-    if (!o.oom) sh_mb_sha256_hex(o.p, o.n, out);
-    free(o.p);
-}
-
 /* ---------------------------------------------------- product record ---- */
 
 /* The mods folder's named lock (store_lock.h), shared by every process that
@@ -6943,27 +6878,3 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     return ok;
 }
 
-/* ---------------------------------------------------------------- state ---- */
-
-int sh_mb_state_parse(const char *text, size_t len, int *validated, long long *installed_at,
-                      char *cause, size_t cap)
-{
-    mbj *root = mbj_parse(text, len, NULL, 0);
-    const mbj *v, *at, *fc;
-    int ok = 0;
-    if (validated) *validated = 0;
-    if (installed_at) *installed_at = 0;
-    if (cause && cap) cause[0] = 0;
-    if (!root || root->t != MBJ_OBJ) goto done;
-    v = mbj_get(root, "validated");
-    at = mbj_get(root, "installedAt");
-    fc = mbj_get(root, "firstCause");
-    if (!v || v->t != MBJ_BOOL) goto done;
-    if (validated) *validated = v->b;
-    if (at && at->t == MBJ_NUM && installed_at) *installed_at = _strtoi64(at->s, NULL, 10);
-    if (fc && fc->t == MBJ_STR && cause && cap) strncpy_s(cause, cap, fc->s, _TRUNCATE);
-    ok = 1;
-done:
-    mbj_free(root);
-    return ok;
-}
