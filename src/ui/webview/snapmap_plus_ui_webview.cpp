@@ -4,6 +4,7 @@
  * drains UI requests at about 30 Hz, and polls change-gated editor state.
  * Engine mutations use backend interface slots declared in snapmap_plus_iface.h. */
 #include <windows.h>
+#include <lmcons.h>
 #include <dwmapi.h>
 #include <shlobj.h>
 #include <winhttp.h>
@@ -3710,21 +3711,25 @@ static void crash_clear_pending()
 }
 
 /* Read bounded log tails, then scrub account, profile-folder, and machine names
- * before attachment. This targets those identifiers, not arbitrary personal data. */
+ * before attachment, in every encoding a log can carry them in (report_scrub.h).
+ * This targets those identifiers, not arbitrary personal data. */
 static std::string crash_collect_logs()
 {
     static const char *files[] = { "shield_faults.log", "sh_backend.log", "snapmap-plus-ui.log" };
-    char user[64] = "", comp[64] = "", prof[MAX_PATH] = "";
-    const char *profleaf = "";
-    DWORD un = sizeof user, cn = sizeof comp;
-    GetUserNameA(user, &un);
-    GetComputerNameA(comp, &cn);
-    if (GetEnvironmentVariableA("USERPROFILE", prof, MAX_PATH)) {
-        const char *s = strrchr(prof, '\\');
-        if (s) profleaf = s + 1;
+    static rs_forms names;
+    memset(&names, 0, sizeof names);
+    {
+        wchar_t user[UNLEN + 1] = L"", comp[MAX_COMPUTERNAME_LENGTH + 1] = L"", prof[MAX_PATH] = L"", shortp[MAX_PATH] = L"";
+        DWORD un = UNLEN + 1, cn = MAX_COMPUTERNAME_LENGTH + 1;
+        if (GetUserNameW(user, &un)) rs_add_name(&names, user, "<user>");
+        if (GetEnvironmentVariableW(L"USERPROFILE", prof, MAX_PATH)) {
+            rs_add_path_leaf(&names, prof, "<user>");
+            if (GetShortPathNameW(prof, shortp, MAX_PATH)) rs_add_path_leaf(&names, shortp, "<user>");
+        }
+        if (GetComputerNameW(comp, &cn)) rs_add_name(&names, comp, "<machine>");
     }
     std::string out;
-    std::vector<char> raw(CRASH_LOG_TAIL_KEEP + 4096), scrub(2 * (CRASH_LOG_TAIL_KEEP + 4096));
+    std::vector<char> raw(CRASH_LOG_TAIL_KEEP + 4096), scrub(4 * (CRASH_LOG_TAIL_KEEP + 4096));
     for (const char *fn : files) {
         std::string path = std::string("snapmap-plus\\logs\\") + fn;
         FILE *f = nullptr;
@@ -3737,16 +3742,7 @@ static std::string crash_collect_logs()
         fclose(f);
         if (got == 0) continue;
         size_t off = rs_tail_offset(raw.data(), got, CRASH_LOG_TAIL_KEEP);
-        std::string chunk(raw.data() + off, got - off);
-        /* scrub passes: account name, profile-folder leaf (when different), machine name. */
-        rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), user, "<user>");
-        chunk = scrub.data();
-        if (profleaf[0] && _stricmp(profleaf, user) != 0) {
-            rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), profleaf, "<user>");
-            chunk = scrub.data();
-        }
-        rs_scrub(scrub.data(), scrub.size(), chunk.c_str(), comp, "<machine>");
-        chunk = scrub.data();
+        std::string chunk(scrub.data(), rs_scrub_forms(scrub.data(), scrub.size(), raw.data() + off, got - off, &names));
         out += "==== ";
         out += fn;
         out += (start > 0) ? " (tail) ====\n" : " ====\n";
@@ -4206,7 +4202,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                             g_report_inflight = false;
                             poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
                         }
-                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false,\"reason\":\"tooLarge\"}");
                 }
             } else if (cmd == L"crashSubmit") {
                 /* Compose crash reports here to add optional local log tails, then use the
@@ -4237,7 +4233,14 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     p += "\",\"game\":\"";                         p += sh_webview_json::escape_utf8(
                         game.empty() ? g_game : sh_webview_json::to_utf8(game));
                     p += "\",\"website\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(hp));
-                    p += "\",\"logs\":\"";                         p += sh_webview_json::escape_utf8(logs);
+                    p += "\",\"logs\":\"";
+                    /* The logs give way first: their oldest lines go until the report fits the cap. */
+                    {
+                        size_t room = REPORT_PAYLOAD_CAP > p.size() + 2 ? REPORT_PAYLOAD_CAP - p.size() - 2 : 0;
+                        size_t cut = rs_fit_escaped_tail(logs.data(), logs.size(), room);
+                        if (cut) poc_logf("crash report: logs trimmed by %lu byte(s) to fit the report", (unsigned long)cut);
+                        p += sh_webview_json::escape_utf8(logs.substr(cut));
+                    }
                     p += "\"}";
                     if (p.size() <= REPORT_PAYLOAD_CAP) {
                         g_report_payload.swap(p);
@@ -4249,7 +4252,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                             g_report_inflight = false; g_report_is_crash = false;
                             poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
                         }
-                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false,\"reason\":\"tooLarge\"}");
                 }
             } else if (cmd == L"crashDismiss") {
                 /* dismiss = handled: clear the pending records so the dialog never nags twice. The
