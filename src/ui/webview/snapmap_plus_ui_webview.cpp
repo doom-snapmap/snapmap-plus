@@ -64,6 +64,9 @@ static std::string              g_version = "dev";
 static std::string              g_game;
 static unsigned int             g_config_status_flags = 0;
 static bool                     g_config_status_posted = false;
+/* The backend's interface table is not this window's (an install with files of two releases):
+ * the window shows one refusal and touches nothing else. */
+static bool                     g_pair_mismatch = false;
 
 #define POC_CONFIG_KEY_CAP 128u
 #define POC_CONFIG_VALUE_CAP (64u * 1024u)
@@ -1940,11 +1943,6 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
 static void poc_rawmap_configure(const char *load_path, const char *save_path, int arm,
                                  const wchar_t *ok_note)
 {
-    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_configure) {
-        poc_send_rawmap_status(L"This build's backend has no rawmap file surface.");
-        return;
-    }
-
     char msg[192] = "";
     int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm,
                                              msg, (int)sizeof msg);
@@ -2124,7 +2122,7 @@ static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip
     m += L"\",\"ok\":"; m += r >= 0 && (kind == 3 || r == 1) ? L"true" : L"false";
     m += L",\"result\":"; m += std::to_wstring(r);
     if (kind == 2) {
-        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "This backend cannot export prefabs."); m += L"\"";
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "The prefab could not be exported. Try again."); m += L"\"";
     } else {
         /* the backend's {"ok","added","name","message"}: only its message and name are forwarded */
         std::string text = out, message, name;
@@ -2138,7 +2136,7 @@ static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip
             size_t i = at + 8;
             while (i < text.size() && text[i] != '"') { if (text[i] == '\\' && i + 1 < text.size()) i++; name += text[i]; i++; }
         }
-        m += L",\"message\":\""; m += sh_webview_json::escape_wide(message.empty() ? "This backend cannot import prefabs." : message.c_str());
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(message.empty() ? "The prefab could not be imported. Try again." : message.c_str());
         m += L"\",\"name\":\""; m += sh_webview_json::escape_wide(name.c_str()); m += L"\"";
     }
     m += L"}";
@@ -3128,11 +3126,6 @@ static void poc_mods_post_result(const wchar_t *action, bool ok, const wchar_t *
 static bool poc_mods_begin(int action, bool pick, const std::string &arg)
 {
     const wchar_t *name = poc_mods_action_name(action);
-    if (!SH_IFACE_HAS_SLOT(g_iface, mods)) {
-        if (action) poc_mods_post_result(name, false, L"This build's backend has no Mods tab.", nullptr);
-        else poc_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"This build's backend has no Mods tab.\"}");
-        return false;
-    }
     if (InterlockedCompareExchange(&g_mods_busy, 1, 0) != 0) {
         /* A running job always ends with a fresh document, so a list request is already answered. */
         if (action) poc_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
@@ -3845,6 +3838,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
         }
 
         std::wstring json(jp); CoTaskMemFree(jp);
+        if (g_pair_mismatch) return S_OK;   /* the window only shows the reinstall notice */
         std::wstring cmd;
         if (sh_webview_json::get_string(json, L"cmd", cmd)) {
             if (cmd == L"refresh") {
@@ -4099,14 +4093,12 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * without a trip to the SnapMap menu. The reply is a REQUEST result, not a
                  * completion -- the reload lands a frame later, and the status refresh that follows
                  * is what shows whether the swap actually fired. */
-                if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_load_now) {
-                    poc_send_rawmap_status(L"This build's backend cannot reload the map.");
-                } else {
+                {
                     char msg[192] = "";
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
                     poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
                     poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
-                                              : (L"Cannot open: " + sh_webview_json::escape_wide(msg)).c_str());
+                                              : (L"Could not open the rawmap: " + sh_webview_json::escape_wide(msg)).c_str());
                 }
             } else if (cmd == L"rawmapArm") {
                 int on = 0; sh_webview_json::get_int(json, L"on", &on);
@@ -4347,6 +4339,10 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
     g_cam_read_published = false;
     g_page_loaded = true;
     g_webview_ready = true;
+    if (g_pair_mismatch) {
+        poc_post_json(L"{\"kind\":\"installMismatch\"}");
+        return S_OK;
+    }
     poc_post_config_status();
     poc_send_list("navigation-completed");
     return S_OK;
@@ -4443,6 +4439,15 @@ static void poc_think_loop()
     unsigned frame = 0;
     for (;;) {
         frame++;
+        if (g_pair_mismatch) {
+            /* Shown with the editor like the working window, holding only the notice. */
+            bool ready = g_webview_ready && poc_editor_ready() != 0;
+            if (ready != was_visible) { ShowWindow(g_hwnd, ready ? SW_SHOW : SW_HIDE); was_visible = ready; }
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+            Sleep(0x21);
+            continue;
+        }
         bool did_save = false, did_delete = false, did_create_prefab = false, did_select_refused = false;
         int  select_refused_reason = 0;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
@@ -4804,6 +4809,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     InitializeCriticalSection(&g_loop->mtx); g_loop->flags = 0;
     if (args && args->out_slot) *reinterpret_cast<void **>(args->out_slot) = g_loop;
     g_iface = args ? args->iface : nullptr;
+    /* The window and the backend are built together: their interface tables must be the
+     * same size, or every slot past the shorter one is unknown. A mismatched pair runs the
+     * window only to say so. */
+    g_pair_mismatch = g_iface && sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl);
     g_ents = (PocEnt *)malloc(sizeof(PocEnt) * POC_MAX_ENTS);
     g_tls  = (PocTl  *)malloc(sizeof(PocTl)  * POC_MAX_TLS);
     if (!g_ents || !g_tls) {
@@ -4817,6 +4826,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
 
     poc_log("=== sh_ui_init (WebView2 POC, entities-deep) entered ===");
     poc_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
+    if (g_pair_mismatch) {
+        char v[160];
+        _snprintf_s(v, sizeof v, _TRUNCATE, "install mismatch: the backend's interface is %u bytes, this window's %u; "
+                    "showing the reinstall notice only", (unsigned)sh_iface_vtbl_bytes(g_iface), (unsigned)sizeof(sh_iface_vtbl));
+        poc_log(v);
+    }
     { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "installed version: %s", g_version.c_str()); poc_log(v); }
     { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); poc_log(v); }
 
