@@ -752,9 +752,22 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
         MM_ERR("mod.json is not a JSON object");
         return 0;
     }
-    if (!mm_member_text(&object, "name", out->name, sizeof out->name, 1) || !out->name[0]) {
-        MM_ERR("mod.json has no name of at most %d characters", SH_MODMANIFEST_DISPLAY_CAP - 1); goto done;
+    {
+        /* The name as the builder reads it: trimmed of ASCII whitespace. */
+        char name[4096];
+        size_t a = 0, n;
+        if (!mm_member_text(&object, "name", name, sizeof name, 1)) name[0] = 0;
+        n = strlen(name);
+        while (a < n && mm_space(name[a])) a++;
+        while (n > a && mm_space(name[n - 1])) n--;
+        if (n == a || n - a >= sizeof out->name) {
+            MM_ERR("mod.json has no name of 1 to 80 characters; give the mod a shorter name and press Refresh");
+            goto done;
+        }
+        memcpy(out->name, name + a, n - a);
+        out->name[n - a] = 0;
     }
+
     raw = sh_json_object_get(&object, "snapmap-plus");
     if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 24, &block)) {
         MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;

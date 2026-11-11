@@ -41,7 +41,11 @@
 
 #define SH_MODMANIFEST_SALT_LEN   8
 #define SH_MODMANIFEST_SALT_CAP   (SH_MODMANIFEST_SALT_LEN + 1)
-#define SH_MODMANIFEST_DISPLAY_CAP 129  /* the author's name: at most 128 characters */
+/* The author's name, as the builder admits it: at most 80 characters
+ * (SH_MB_NAME_MAX code points), so at most 320 bytes of UTF-8, and a NUL. A
+ * name is never cut: every row, label and title buffer holds a whole one. */
+#define SH_MODMANIFEST_DISPLAY_CAP (80 * 4 + 1)
+
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
 #define SH_MODMANIFEST_NAME_MAX   512
 #define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */

@@ -658,6 +658,29 @@ static void mod_json(void)
         CHECK(!sh_modmanifest_read_mod_json(nosalt, sizeof nosalt - 1, &info, err, sizeof err) && strstr(err, "no salt"));
         CHECK(!sh_modmanifest_read_mod_json(noname, sizeof noname - 1, &info, err, sizeof err));
     }
+    /* The longest name the builder admits, 80 four-byte characters (320
+     * bytes), padded with spaces as an author may write it: read whole,
+     * written into a row and read back whole, never cut. */
+    {
+        char name[400], text[1200], *row;
+        size_t i, len = 0;
+        sh_modmanifest_row back;
+        for (i = 0; i < 80; i++) memcpy(name + i * 4, "\xf0\x9f\x98\x80", 4);
+        name[320] = 0;
+        _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"   %s  \",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\","
+                    "\"build\":\"" HASH_A "\",\"files\":[]}}", name);
+        CHECK(sh_modmanifest_read_mod_json(text, strlen(text), &info, err, sizeof err) && !strcmp(info.name, name));
+        row = sh_modmanifest_format_value(&info, &len);
+        CHECK(row && sh_modmanifest_parse_value(row, len, &back, err, sizeof err) && !strcmp(back.name, name));
+        free(row);
+        sh_modmanifest_row_free(&back);
+        sh_modmanifest_row_free(&info);
+        /* One character more is refused with the sentence, not cut. */
+        memcpy(name + 320, "\xf0\x9f\x98\x80", 5);
+        _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\","
+                    "\"build\":\"" HASH_A "\",\"files\":[]}}", name);
+        CHECK(!sh_modmanifest_read_mod_json(text, strlen(text), &info, err, sizeof err) && strstr(err, "1 to 80 characters"));
+    }
 }
 
 /* Activation: a row is activated through the build sh_modserve_row_build
