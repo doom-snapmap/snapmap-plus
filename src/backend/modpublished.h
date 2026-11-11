@@ -332,6 +332,10 @@ typedef struct sh_modpub_ops {
      * shows while it downloads a published map), its text replaced in place:
      * `text` shows or updates it, NULL hides it. */
     void (*progress)(void *c, int hook, void *owner, const char *text);
+    /* After a fetch that failed: what stopped it, in its own words (the
+     * store's sentence, or why the downloaded mod could not be installed), in
+     * *out (malloc'd), else 0. NULL counts as none. */
+    int  (*fetch_cause)(void *c, const char *hash, char **out);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it

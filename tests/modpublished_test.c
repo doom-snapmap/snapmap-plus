@@ -367,6 +367,14 @@ static void f_scripts_approval(void *c, unsigned files, char *out, size_t cap)
                 "read or change your files.", files, files == 1 ? "" : "s");
 }
 static int f_claimed(void *c, const char *hash) { (void)c; return F.claimed_a && !strcmp(hash, HASH_A); }
+static const char *g_fake_fetch_cause;
+static int f_fetch_cause(void *c, const char *hash, char **out)
+{
+    (void)c; (void)hash;
+    *out = g_fake_fetch_cause ? _strdup(g_fake_fetch_cause) : NULL;
+    return *out != NULL;
+}
+
 static int f_fetch_detail(void *c, const char *hash, char **out)
 {
     (void)c; (void)hash;
@@ -409,7 +417,7 @@ static const sh_modpub_ops OPS = {
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
     f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts,
-    f_progress
+    f_progress, f_fetch_cause
 };
 
 static void reset(void)
@@ -876,6 +884,20 @@ static void fetch_failure_drops(void)
     tick(2);
     CHECK(strstr(F.last_ask, "alex.pink-imp could not be downloaded: ") == F.last_ask &&
           strstr(F.last_ask, "The map was not loaded.") != NULL);
+
+    /* the fetch says in its own words what stopped it (the store's sentence, or why the download did not install) */
+    reset();
+    g_fake_fetch_cause = "its file assets/x.decl is outside the mod's own folders.";
+    F.fetch_fails = -14;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    tick_until_idle();
+    tick(2);
+    CHECK(!strcmp(F.last_ask, "alex.pink-imp could not be downloaded and installed: its file assets/x.decl is outside "
+                              "the mod's own folders. The map was not loaded."));
+    g_fake_fetch_cause = NULL;
 
     reset();
     F.refuse_install = 1;

@@ -1249,10 +1249,23 @@ static void pub_finish(void)
             free(detail);
         }
         {
-            char *reason = sh_reason(SH_REASON_STORE, job->failed_code, NULL, 0);
-            line = sh_textf("%s could not be downloaded: %s. %s", job->names[job->failed_index],
-                            reason && reason[0] ? reason : "try again", pub_not_done(h->hook));
-            free(reason);
+            /* What stopped it, in its own words when the fetch has them (the
+             * store's sentence, or why the downloaded mod did not install),
+             * else the answer's plain reason. */
+            char *said = NULL;
+            if (g_ops.fetch_cause && g_ops.fetch_cause(g_ops.context, job->hashes[job->failed_index], &said) && said &&
+                said[0]) {
+                size_t n = strlen(said);
+                while (n && (said[n - 1] == '.' || said[n - 1] == ' ')) said[--n] = 0;
+                line = sh_textf("%s could not be downloaded and installed: %s. %s", job->names[job->failed_index], said,
+                                pub_not_done(h->hook));
+            } else {
+                char *reason = sh_reason(SH_REASON_STORE, job->failed_code, NULL, 0);
+                line = sh_textf("%s could not be downloaded: %s. %s", job->names[job->failed_index],
+                                reason && reason[0] ? reason : "try again", pub_not_done(h->hook));
+                free(reason);
+            }
+            free(said);
         }
         pub_drop(line ? line : "A mod could not be downloaded.", why);
         free(line);
@@ -2031,6 +2044,7 @@ static int eng_worker_run(void *c, void (*job)(void *), void *ctx)
  * the gate's cause 4. Written on the worker, read on the main tick after the
  * job is done (the job's completion is the barrier). */
 static char g_eng_fetch_hash[SH_MODMANIFEST_HASH_CAP], *g_eng_fetch_source;   /* the source: malloc'd, or NULL */
+static char g_eng_fetch_cause_hash[SH_MODMANIFEST_HASH_CAP], *g_eng_fetch_cause;   /* the last failed fetch's own words */
 
 C_ASSERT(PUB_NET_CONFIG == MODNET_E_CONFIG && PUB_NET_NET == MODNET_E_NET && PUB_NET_TIMEOUT == MODNET_E_TIMEOUT);
 C_ASSERT(PUB_NET_CANCELLED == MODNET_E_CANCELLED && PUB_NET_HTTP == MODNET_E_HTTP && PUB_NET_PROTOCOL == MODNET_E_PROTOCOL);
@@ -2063,6 +2077,9 @@ static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *pla
         return 0;
     }
     pub_logf("MODS: the download of %s failed: %s", pub_title(row), st.cause && st.cause[0] ? st.cause : modnet_code_text(st.code));
+    free(g_eng_fetch_cause);
+    g_eng_fetch_cause = st.cause && st.cause[0] ? sh_text(st.cause) : NULL;
+    strcpy_s(g_eng_fetch_cause_hash, sizeof g_eng_fetch_cause_hash, row->build);
     if (st.game_lacks) {
         strcpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, row->build);
         g_eng_fetch_source = st.game_source ? sh_text(st.game_source) : NULL;
@@ -2107,6 +2124,14 @@ static int eng_place_norm(void *c, const char *place, char **out)
 {
     (void)c;
     return (*out = sh_modserve_place_norm(place)) != NULL;
+}
+
+static int eng_fetch_cause(void *c, const char *hash, char **out)
+{
+    (void)c;
+    *out = NULL;
+    if (!hash || _stricmp(hash, g_eng_fetch_cause_hash) || !g_eng_fetch_cause || !g_eng_fetch_cause[0]) return 0;
+    return (*out = sh_text(g_eng_fetch_cause)) != NULL;
 }
 
 static int eng_fetch_detail(void *c, const char *hash, char **out)
@@ -2490,7 +2515,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
-    eng_served_scripts, eng_progress
+    eng_served_scripts, eng_progress, eng_fetch_cause
 };
 
 /* ------------------------------------------------------------ detours */

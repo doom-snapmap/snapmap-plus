@@ -1291,6 +1291,18 @@ static int msy_unpack(sh_zip_reader *zr, const sh_mb_bundle *bp, const char *dir
     return 1;
 }
 
+/* What a fetched mod's install reads the game with: whether the game ships a
+ * file (modsync_set_stock). A mod that edits one of the game's decls carries
+ * its copy at the game's name, which only that question tells from a file
+ * misplaced outside the mod's own folders. */
+static const sh_mb_resolver *msy_install_resolver(sh_mb_resolver *r)
+{
+    memset(r, 0, sizeof *r);
+    r->stock = g_cut_stock;
+    r->stock_context = g_cut_stock_ctx;
+    return r->stock ? r : NULL;
+}
+
 /* A received build for a map without a place: unpacked into a folder of this
  * process's own outside the store, then installed at the root as the
  * player's own mod (sh_ms_install_to_root), and the unpacked copy removed. */
@@ -1319,7 +1331,8 @@ static int msy_install_root(sh_zip_reader *zr, const sh_mb_bundle *bp, const uns
     else if (!msy_mkdirs(dir)) msy_cause(cause, "cannot create %s: %s", dir, sh_reason_win32(GetLastError(), dir, 0));
     else if (msy_unpack(zr, bp, dir, modjson, modjson_len, info, cause)) {
         memset(&st, 0, sizeof st);
-        if (sh_ms_install_to_root(dir, NULL, &name, &st, NULL, cause)) {
+        sh_mb_resolver game;
+        if (sh_ms_install_to_root(dir, msy_install_resolver(&game), &name, &st, NULL, cause)) {
             free(info->rel);
             info->rel = name;
             info->already_installed = st.present;
@@ -1790,7 +1803,8 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
             sh_ms_install_stats is;
             char *name = NULL;
             memset(&is, 0, sizeof is);
-            ok = sh_ms_install_to_root(folder, NULL, &name, &is, NULL, &cause);
+            sh_mb_resolver game;
+            ok = sh_ms_install_to_root(folder, msy_install_resolver(&game), &name, &is, NULL, &cause);
             free(folder);
             if (!ok) {
                 msy_stats_fail(st, MODNET_E_REFUSED, "%s", cause ? cause : "out of memory");
