@@ -2364,7 +2364,8 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
         if (dir && ms_exists(dir)) { free(dir); dir = NULL; }
     }
     if (!dir) { ms_cause(cause, cap, "no free folder name under mods\\ for \"%s\"", name); goto done; }
-    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, cap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
+    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, cap, "Windows could not supply the random numbers that name a new mod; restart the game and "
+                                                     "try again"); goto done; }
     assets = ms_wjoin(dir, L"assets");
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) {
@@ -2531,7 +2532,7 @@ int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char *cause, size_t c
     char first[SH_MB_CAUSE_MAX];
     first[0] = 0;
     if (st) memset(st, 0, sizeof *st);
-    if (!spec || !spec[0]) return ms_cause(cause, cap, "no mod named (use its folder or its salt)");
+    if (!spec || !spec[0]) return ms_cause(cause, cap, "Name the mod: its folder name under mods, or its salt");
     modstore_lock();
     if (!sh_ms_enumerate(&l)) { modstore_unlock(); return ms_cause(cause, cap, "the store cannot be listed"); }
     for (i = 0; i < l.count; i++) {
@@ -2605,7 +2606,8 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
     int state;
     memset(b, 0, sizeof *b);
     if (ms_in_place(folder)) {
-        ms_cause(cause, cap, "mods\\%s is a build a map brought; it is kept as the map pins it and never built again",
+        ms_cause(cause, cap, "mods\\%s came with a downloaded map and is kept exactly as the map uses it; to change "
+                 "it, copy it to the top of the mods folder",
                  ms_rel(folder));
         strncpy_s(b->first_cause, sizeof b->first_cause, cause ? cause : "", _TRUNCATE);
         return 0;

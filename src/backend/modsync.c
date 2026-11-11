@@ -722,7 +722,8 @@ done:
 
 /* ------------------------------------------------------------ install --- */
 
-#define MSY_MISMATCH "the mod store sent a build that does not match the map"
+#define MSY_MISMATCH "The downloaded mod was damaged on the way; try again, and if it happens again ask the map's " \
+                     "author for the map's .zip"
 
 /* The archive's mod.json, read and loaded. 1 with b filled (release with
  * sh_mb_free) and *text (malloc'd) the file; 0 with the cause. */
@@ -816,7 +817,9 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
             info->game_lacks = 1;
             strncpy_s(info->game_source, sizeof info->game_source,
                       b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path, _TRUNCATE);
-            msy_cause(cause, cap, "refused: %s", one);
+            msy_cause(cause, cap, "%s needs a game file your copy of DOOM does not have (%s); verify the game's files in "
+                      "Steam, then try again", info->name, info->game_source);
+            msy_log("MODS: download: %s: %s", info->name, one);
             goto done;
         }
         info->stock_files++;
@@ -836,7 +839,8 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
     /* One build per salt per place: the place's folder of the salt is
      * replaced, else a free folder named after the mod. */
     named = sh_ms_place_folder(place, info->name, b.id, rel, sizeof rel);
-    if (!named) { msy_cause(cause, cap, "no free folder for %s in the map's place", info->name); goto done; }
+    if (!named) { msy_cause(cause, cap, "There is no room for %s in this map's folder under mods\\maps; remove old folders "
+                                "there and try again", info->name); goto done; }
     strncpy_s(info->rel, sizeof info->rel, rel, _TRUNCATE);
     _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, rel);
     _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s.staging-%lu", final, GetCurrentProcessId());
@@ -1029,8 +1033,9 @@ static int msy_up_collect(const char *const *mods, int n, msy_up_build **out, in
                 ok = msy_cause(cause, cap, "%s was built again since the map was saved; save the map again, then publish it",
                                other->bundle.name && other->bundle.name[0] ? other->bundle.name : other->name);
             else
-                ok = msy_cause(cause, cap, "the map uses a mod this machine does not have (%s); add it to your mods folder "
-                               "or remove it from the map", mods[i]);
+                ok = msy_cause(cause, cap, "The map uses a mod that is not on this computer; remove it from the map in the "
+                               "Mods tab (This map), or install the mod again");
+            msy_log("MODS: publish: the map names %s, which no folder of this computer holds", mods[i]);
             break;
         }
         strcpy_s(u[nb].salt, sizeof u[nb].salt, salt);

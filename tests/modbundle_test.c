@@ -504,7 +504,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
         if (at) {
             at[9] = '2';
             CHECK(!sh_mb_load_text((const char *)mod, mlen, &again));
-            CHECK_CAUSE(again, "changed since it was built");
+            CHECK_CAUSE(again, "was edited after its last build");
             sh_mb_free(&again);
         }
         free(mod);
@@ -1120,9 +1120,9 @@ static void test_refusals(const char *fixture, const char *tmp)
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
     sh_mb_free(&b);
     /* Every strings key is <salt>_<name> (DECISIONS 5: no '/'). */
-    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t is not named alexrimp_<name>");
-    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t is not named alexrimp_<name>");
-    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ is not named alexrimp_<name>");
+    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t does not start with alexrimp_");
+    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t does not start with alexrimp_");
+    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ does not start with alexrimp_");
     /* DECISIONS 9: keys the game or Snapmap+ defines are string edits, unprefixed. */
     accepted(fixture, tmp, m_string_edits, &b);
     CHECK(b.errors == 0 && b.registries &&
@@ -1141,7 +1141,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_bad_version, &b);
     CHECK(b.errors == 0 && b.extra && strstr(b.extra, "\"version\":\"1/2\"") && !strstr(b.canonical, ",\"version\":"));
     sh_mb_free(&b);
-    refused(fixture, tmp, m_reserved, &RESOLVER, "may not contain files, build or bundle");
+    refused(fixture, tmp, m_reserved, &RESOLVER, "at its top level, which Snapmap+ writes itself");
     refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer or fixed decimal");
     accepted(fixture, tmp, m_decimal, &b);
     CHECK(strstr(b.canonical, "\"pos\":[0.0,12.25,-0.70710678118654757]") != NULL);
@@ -1176,7 +1176,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     }
     refused(fixture, tmp, m_empty, &RESOLVER, "empty file");
     refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/alexrimp/");
-    refused(fixture, tmp, m_unns_raw, &RESOLVER, "does not contain /mods/alexrimp/");
+    refused(fixture, tmp, m_unns_raw, &RESOLVER, "is not under a mods folder named like this mod folder");
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
@@ -1197,7 +1197,7 @@ static void test_refusals(const char *fixture, const char *tmp)
         sh_mb_free(&b);
         (void)plain;
     }
-    refused(fixture, tmp, m_nothing, &no_stock, "cannot be checked against the game");
+    refused(fixture, tmp, m_nothing, &no_stock, "could not read the game's files to look for it");
 
     refused(fixture, tmp, m_chain_broken, &RESOLVER, "needs entityDef mods/alexrimp/mid, which resolves to nothing");
     accepted(fixture, tmp, m_chain, &b);
@@ -1275,7 +1275,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_binary_replace, &RESOLVER,
             "assets/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
             "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
-            "version under mods/alexrimp/ and point your decls at it");
+            "version under a mods folder named like this mod folder and point your decls at it");
     /* Received content keeps a binary replacement: an import on its own thread. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
@@ -1549,7 +1549,7 @@ static void rp_case(const char *tmp, int which, const char *needle)
         CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
         if (b.errors) fprintf(stderr, "  render-program case %d refused: %s\n", g_case, b.first_cause);
         CHECK(b.errors == 0);
-        if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program in the bundle binds it"));
+        if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program of this mod uses it"));
         else CHECK(b.warnings == 0);
         if (which == RP_OK) {
             const sh_mb_file *p = find_file(&b, "generated/renderprogs/permutations/mods/trpcases/tint_0000000000000001.decl");
@@ -1591,7 +1591,7 @@ static void test_renderprogs(const char *tmp)
     rp_case(tmp, RP_NO_PERM_SPV, "permutations/mods/trpcases/tint_0000000000000001.fspv (its fragment stage)");
     rp_case(tmp, RP_NO_PERM, "ships no permutation decl");
     rp_case(tmp, RP_NO_BIN, "tint_pc_vulkan.bin: Vulkan needs the cooked program");
-    rp_case(tmp, RP_ORPHAN_PERM, "permutation of mods/trpcases/other, which the bundle does not ship");
+    rp_case(tmp, RP_ORPHAN_PERM, "permutation of mods/trpcases/other, which this mod does not include");
     rp_case(tmp, RP_BARE_NAME, "must be quoted");                   /* check 6 */
     rp_case(tmp, RP_DOT_NAME, "'.' in its last component");
     rp_case(tmp, RP_INCLUDE, "shared render-program include");      /* check 7 */
@@ -1811,7 +1811,7 @@ static void test_classes(const char *fixture, const char *tmp)
         v = sh_mb_fnv1_lower("doom_ui", 7); memcpy(bank + 12, &v, 4);
         rp_put(folder, "assets\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
         CHECK(!sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "a stock sound bank cannot be replaced");
+        CHECK_CAUSE(b, "so a mod cannot replace one");
         sh_mb_free(&b);
     }
     /* AI FSM states: the spider's new root graph takes the stock graph's

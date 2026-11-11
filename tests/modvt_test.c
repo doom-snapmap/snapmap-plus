@@ -225,7 +225,7 @@ static void families(void)
     CHECK(strstr(build_cause(c, cause, sizeof cause), "file type not allowed") != NULL);
     mt_delete(c, "assets\\virtualtextures\\mods\\badvt000\\fam.mega2");
     mt_write(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");
-    CHECK(strstr(build_cause(c, cause, sizeof cause), "under mods/other/ but it is badvt000") != NULL || (printf("  cause: %s\n", cause), 0));
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "is under mods/other/, which is neither this mod folder") != NULL || (printf("  cause: %s\n", cause), 0));
     mt_delete(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2");
     mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested family name */

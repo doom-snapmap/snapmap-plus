@@ -276,13 +276,13 @@ static void test_builder(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod2", tmp);
     make_mod(dir, ",\"stock\":{\"" REQ_OWN "\":{\"source\":\"" P_IMAGE "\"}}");
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "mod.json uses \"stock\", which this version does not read");
+    CHECK_CAUSE(b, SH_MB_EARLIER);
     sh_mb_free(&b);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod5", tmp);   /* a .tome that is not installed content */
     make_mod(dir, NULL);
     put_rel(dir, "assets\\maps\\mods\\tstock00\\other.tome", OWN, sizeof OWN);
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a stock pointer");
+    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not the game's own file: a .sbsp, .ambientsh, .tome or .pages file can only be an unchanged copy");
     sh_mb_free(&b);
 
     /* Without a reader nothing becomes a pointer. The files at game names
@@ -576,8 +576,8 @@ static void test_campaign_closure(const char *tmp)
         }
         mt_write(dir, K_WEB, K_WEB_TEXT);
         CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign archives hold; bringing it along would take "
-                       "the bundle past 4096 files");
+        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign holds; bringing it along would take "
+                       "this mod past 4096 files");
         sh_mb_free(&b);
     }
 }
@@ -1028,7 +1028,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
      * pointer it cannot answer falls through to the engine. */
     sh_modstock_set_install(d2);
     CHECK(!sh_ms_verify(key, &vs, cause, sizeof cause));
-    CHECK(strstr(cause, " points at installed content ") != NULL);
+    CHECK(strstr(cause, " uses the game's file ") != NULL);
     CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in mod.json */
     sh_modstock_set_install(d1);
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));

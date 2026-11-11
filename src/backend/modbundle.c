@@ -2535,14 +2535,14 @@ static void mb_stock_cause(int r, const char *source, const char *path, char *ca
     const char *who = path && path[0] ? path : source;
     if (!cause || !cap) return;
     if (r == SH_MB_STOCK_UNAVAILABLE)
-        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which cannot be checked (the "
-                    "installed-content reader is unavailable)", who, source);
+        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, and Snapmap+ could not read the game's files "
+                    "to check it; start DOOM normally and press Refresh", who, source);
     else if (r == SH_MB_STOCK_MISMATCH)
-        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which this game holds with other "
-                    "bytes (a different game revision)", who, source);
+        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, which your copy of DOOM holds with other bytes "
+                    "(another game version); verify the game's files in Steam", who, source);
     else
-        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which this game does not have",
-                    who, source);
+        _snprintf_s(cause, cap, _TRUNCATE, "%s uses the game's file %s, which your copy of DOOM does not have; verify "
+                    "the game's files in Steam", who, source);
 }
 
 int sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
@@ -2672,8 +2672,8 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
         return 0;
     }
     if (mbj_get(root, "files") || mbj_get(root, "bundle") || mbj_get(root, "build")) {
-        mb_error(b, "mod.json may not contain files, build or bundle at its top level; the builder writes them in "
-                 "\"" SH_MB_BLOCK_KEY "\"");
+        mb_error(b, "mod.json has \"files\", \"build\" or \"bundle\" at its top level, which Snapmap+ writes itself; "
+                 "remove it and press Refresh");
         return 0;
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "mod.json \"" SH_MB_BLOCK_KEY "\" must be an object"); return 0; }
@@ -2776,8 +2776,8 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 mb_error(w->b, "%s: " SH_MB_SCRIPT_WHERE, child);
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
                 if (sh_mb_pointer_only_kind(req_lower))
-                    mb_error(w->b, "%s can only be a stock pointer to the installed game, never carried "
-                             "(the game's resource reader is unavailable)", child);
+                    mb_error(w->b, "%s can only be an unchanged copy of the game's own file, and Snapmap+ could not "
+                             "read the game's files to check it; start DOOM normally and press Refresh", child);
                 else mb_error(w->b, "file type not allowed: %s", child);
             } else if (size == 0) {
                 mb_error(w->b, "empty file: %s", child);
@@ -2790,7 +2790,8 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 mb_error(w->b, "assets/ larger than 256 MiB");
                 w->stopped = 1;
             } else if (defer && w->b->total_size + size > MB_MAX_WALK) {
-                mb_error(w->b, "assets/ larger than %llu MiB, counting copies of installed content", MB_MAX_WALK >> 20);
+                mb_error(w->b, "assets is larger than %llu MiB, counting copies of game files; split the mod into two",
+                         MB_MAX_WALK >> 20);
                 w->stopped = 1;
             } else if ((f = mb_add_file(w->b)) == NULL) {
                 mb_error(w->b, "out of memory");
@@ -2843,7 +2844,7 @@ static void mb_walk_top(mb_walk *w)
         free(name);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    if (!have_assets) mb_error(w->b, "the mod folder has no assets/ folder");
+    if (!have_assets) mb_error(w->b, "the mod folder has no assets folder; put the mod's files in assets and press Refresh");
 }
 
 /* ------------------------------------------------------ needs, namespace ---- */
@@ -3413,14 +3414,14 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
         if (ctx.used[i] || !f->ptype) continue;
         if (mb_starts(r, "generated/renderprogs/permutations/") && mb_ends(r, ".decl")) {
             if (sh_mb_rp_permutation(r, program, sizeof program, mask))
-                MB_RP_ERR(1, "%s is a permutation of %s, which the bundle does not ship", f->path, program);
+                MB_RP_ERR(1, "%s is a permutation of %s, which this mod does not include; add the program's decl or delete the permutation", f->path, program);
             else
                 MB_RP_ERR(1, "%s: a permutation decl is named <program>_<16 hex digits>.decl", f->path);
         } else if (mb_starts(r, "generated/renderprogs/") && mb_ends(r, ".bin")) {
-            MB_RP_ERR(1, "%s: no render program in the bundle reads it (ship its decl)", f->path);
+            MB_RP_ERR(1, "%s: no render program of this mod reads it; add its decl or delete the file", f->path);
         } else if (mb_starts(r, "generated/spirv/")) {
             mb_rp_check_spirv(rp, f, NULL, 0, 1);
-            mb_warn(b, "%s: no render program in the bundle binds it", f->path);
+            mb_warn(b, "%s: no render program of this mod uses it; it can be deleted", f->path);
         }
     }
     free(ctx.used);
@@ -3529,7 +3530,7 @@ static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char *why, siz
     }
     _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
     if (strstr(slashed, ns_raw)) return 1;
-    return mb_cause(why, cap, "the path does not contain /mods/%s/", b->id);
+    return mb_cause(why, cap, "it is not under a mods folder named like this mod folder");
 }
 
 /* SH_MB_CLASS_* of one file of a built or loaded bundle. */
@@ -3696,9 +3697,8 @@ static void mb_registries(sh_mb_bundle *b)
                 if (i) mb_put(&o, ",", 1);
                 mb_put_jcstr(&o, keys[i]);
                 if (!mb_string_key_ok(keys[i], b->id))
-                    mb_error(b, "mod.json strings key %s is not named %s_<name>: a string of the mod's own is named "
-                             "under its salt, in letters, digits and _ (a key the game defines changes that string)",
-                             keys[i], b->id);
+                    mb_error(b, "mod.json strings key %s does not start with %s_; press Refresh and Snapmap+ names it "
+                             "so (a key the game already defines changes that game string instead)", keys[i], b->id);
             }
             mb_put(&o, "]", 1);
         }
@@ -4194,8 +4194,8 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
         !sh_mb_logical_name(request, type, sizeof type, name, sizeof name))
         return 1;   /* left to the need check, which reports it as before */
     if (b->file_count >= SH_MB_MAX_FILES) {
-        mb_error(b, "%s needs %s %s, which only the campaign archives hold; bringing it along would take the bundle past "
-                 "%u files", by, need->type, need->name, SH_MB_MAX_FILES);
+        mb_error(b, "%s needs %s %s, which only the campaign holds; bringing it along would take this mod past %u "
+                 "files, so split the mod into two", by, need->type, need->name, SH_MB_MAX_FILES);
         return 0;
     }
     f = mb_add_file(b);
@@ -4234,8 +4234,8 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     c->manifest += one.n + 1;
     free(one.p);
     if (c->manifest > SH_MB_MANIFEST_MAX) {
-        mb_error(b, "%s needs %s %s, which only the campaign archives hold; bringing it along would make the bundle "
-                 "manifest larger than 1 MiB", by, need->type, need->name);
+        mb_error(b, "%s needs %s %s, which only the campaign holds; this mod already brings so much campaign content "
+                 "that its file list would pass 1 MiB, so split the mod into two", by, need->type, need->name);
         return 0;
     }
     memmove(c->by_req + at + 1, c->by_req + at, sizeof(size_t) * (c->n - at));
@@ -4371,8 +4371,8 @@ static void mb_closure_program(mb_closure *c, size_t file, const char *name)
     perms.program = program;
     _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/permutations/%s_", program);
     if (c->ops->list(c->ops->context, stem, mb_perm_cb, &perms) != SH_MB_STOCK_OK) {
-        mb_error(c->b, "%s: the permutations of render program %s cannot be listed (the installed-content reader is "
-                 "unavailable)", c->b->files[file].path, program);
+        mb_error(c->b, "%s uses render program %s, and Snapmap+ could not read the game's files to find its parts; "
+                 "start DOOM normally and press Refresh", c->b->files[file].path, program);
         c->stopped = 1;
     } else if (perms.oom) {
         mb_error(c->b, "out of memory");
@@ -4850,7 +4850,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
     own.n = b->file_count;
     qsort(own.req, own.n, sizeof(char *), mb_req_cmp);
     for (i = 1; i < own.n; i++)
-        if (strcmp(own.req[i - 1], own.req[i]) == 0) mb_error(b, "two files have the request path %s", own.req[i]);
+        if (strcmp(own.req[i - 1], own.req[i]) == 0) mb_error(b, "two files of this mod land on one game path, %s (they differ only in letter case); delete one",
+                                                          own.req[i]);
 
     for (i = 0; i < b->file_count; i++) {
         sh_mb_file *f = &b->files[i];
@@ -4944,7 +4945,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             continue;
         }
         free(full);
-        if (got != f->size) { mb_error(b, "%s changed while the bundle was built", f->path); continue; }
+        if (got != f->size) { mb_error(b, "%s changed while Snapmap+ was building the mod; save your work and press Refresh", f->path); continue; }
 
         /* A carried copy of installed content becomes a stock pointer,
          * matched by size and hash (path first, then renamed copies). */
@@ -4961,8 +4962,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         if (!f->stock && stock && mb_decl_text(f)) mb_text_pointer(b, f, root);
         if (!f->stock && f->deferred) {
             if (f->deferred == 1 && sh_mb_pointer_only_kind(f->request))
-                mb_error(b, "%s is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a "
-                         "stock pointer to the installed game, never carried", f->path);
+                mb_error(b, "%s is not the game's own file: a .sbsp, .ambientsh, .tome or .pages file can only be an "
+                         "unchanged copy of the game's; delete it", f->path);
             else if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
             else mb_error(b, "file larger than 64 MiB: %s", f->path);
             continue;
@@ -4983,12 +4984,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 /* a surface: the game's own bytes at the game's own name */
             } else if (mb_ends(f->request, ".bnk")) {
                 if (in_ns && f->stock) {
-                    mb_error(b, "%s: a sound bank is carried, never a pointer to installed content", f->path);
+                    mb_error(b, "%s is a copy of a game sound bank; a mod's bank must be its own, so delete it or rebuild it under "
+                                "its own name", f->path);
                 } else if (!in_ns) {
                     int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
                     if (got == 1)
-                        mb_error(b, "%s: a stock sound bank cannot be replaced (the game loads every stock bank before "
-                                 "mods are read)", f->path);
+                        mb_error(b, "%s: the game loads its own sound banks before mods, so a mod cannot replace one; "
+                                 "delete it and put your sounds in a bank of your own", f->path);
                     else mb_error(b, "%s", why);
                 }
             } else if (in_ns) {
@@ -5008,16 +5010,16 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                  * also simply go: the mod then borrows the game's. */
                 if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !g_mb_keep_here) {
                     mb_error(b, "%s: the game ships this file and a mod cannot replace it with other bytes; delete your "
-                             "copy and the mod borrows the game's, or put your version under mods/%s/ and point your "
-                             "decls at it", f->path, b->id);
+                             "copy and the mod borrows the game's, or put your version under a mods folder named like "
+                             "this mod folder and point your decls at it", f->path);
                 } else if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {
-                    mb_error(b, "%s: %s, and the game has no file of that name for it to replace; put it under mods/%s/",
-                             f->path, why, b->id);
+                    mb_error(b, "%s: %s, and the game has no file of that name for it to replace; move it under "
+                             "assets\\<its game folder>\\mods\\<this folder's name>\\ and press Refresh", f->path, why);
                 } else {
-                    mb_error(b, "%s: %s, and whether it replaces a game file cannot be confirmed (the game's resource "
-                             "reader is unavailable)", f->path, why);
+                    mb_error(b, "%s: %s, and Snapmap+ could not read the game's files to tell whether it replaces "
+                             "one; start DOOM normally and press Refresh", f->path, why);
                 }
             }
         }
@@ -5123,7 +5125,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 mb_warn(b, "%s names %s %s, which no archive holds (an effect's or a movie's reference: reported, not "
                         "refused)", f->path, f->needs[k].type, f->needs[k].name);
             else if (got < 0)
-                mb_error(b, "%s needs %s %s, which is not in the bundle and cannot be checked against the game (resource reader unavailable)",
+                mb_error(b, "%s needs %s %s, which this mod does not include, and Snapmap+ could not read the game's "
+                         "files to look for it; start DOOM normally and press Refresh",
                          f->path, f->needs[k].type, f->needs[k].name);
             else
                 mb_error(b, "%s needs %s %s, which resolves to nothing", f->path, f->needs[k].type, f->needs[k].name);
@@ -5237,7 +5240,8 @@ static void mb_finish(sh_mb_bundle *b)
     free(b->canonical);
     b->canonical = mb_emit(b, 0, &b->canonical_len);
     if (!b->canonical) { mb_error(b, "out of memory"); return; }
-    if (b->canonical_len > SH_MB_MANIFEST_MAX) mb_error(b, "the bundle manifest is larger than 1 MiB");
+    if (b->canonical_len > SH_MB_MANIFEST_MAX)
+        mb_error(b, "this mod lists too many files for one mod (its file list is over 1 MiB); split it into two");
     sh_mb_sha256_hex(b->canonical, b->canonical_len, b->hash);
 }
 
@@ -5287,6 +5291,9 @@ static int mb_only_keys(const mbj *o, const char *const *keys)
 
 /* ------------------------------------------------------------ mod.json ---- */
 
+#define MB_BLOCK_EDITED "The part of mod.json that Snapmap+ writes was changed by hand; press Refresh in the " \
+                        "Mods tab to build the mod again"
+
 static long long mb_now(void)
 {
     FILETIME ft;
@@ -5297,7 +5304,9 @@ static long long mb_now(void)
     return (long long)((u.QuadPart - 116444736000000000ull) / 10000000ull);
 }
 
-/* One entry of the product block's "files" (pointer 0) or "stock" (pointer 1) list. */
+/* One entry of the product block's "files" (pointer 0) or "stock" (pointer 1) list.
+ * Every refusal of the product's own section is MB_BLOCK_EDITED: the next
+ * scan builds the folder again and writes the section anew. */
 static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int pointer)
 {
     static const char *const keys[] = { "needs", "path", "provides", "sha256", "size", NULL };
@@ -5309,9 +5318,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     size_t k;
     unsigned long long sz = 0;
     if (e->t != MBJ_OBJ || !mb_only_keys(e, pointer ? pkeys : keys)) {
-        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] must have exactly %s", list, index,
-                 pointer ? "path, sha256, source, provides, needs, and closure (optional)"
-                         : "path, sha256, size, provides and needs");
+        mb_error(b, MB_BLOCK_EDITED);
         return 0;
     }
     sha = mbj_get(e, "sha256");
@@ -5322,47 +5329,47 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     src = mbj_get(e, "source");
     closure = mbj_get(e, "closure");
     if (!sha || !needs || !path || !prov || (pointer ? !src : !size)) {
-        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] is missing a member", list, index);
+        mb_error(b, MB_BLOCK_EDITED);
         return 0;
     }
     if (path->t != MBJ_STR || strlen(path->s) != path->n || !mb_starts(path->s, "assets/")) {
-        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu].path must start with assets/", list, index);
+        mb_error(b, MB_BLOCK_EDITED);
         return 0;
     }
     expect = mb_strdup(path->s + 7);
     if (!expect) { mb_error(b, "out of memory"); return 0; }
     mb_lower(expect);
-    if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, "mod.json %s: %s", path->s, cause); free(expect); return 0; }
-    if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, "mod.json: file type not allowed: %s", path->s); free(expect); return 0; }
+    if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
+    if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     pt = prov->t == MBJ_OBJ ? mbj_get(prov, "type") : NULL;
     pn = prov->t == MBJ_OBJ ? mbj_get(prov, "name") : NULL;
     if (!sh_mb_logical_name(expect, type, sizeof type, name, sizeof name) || !pt || !pn || prov->count != 2 ||
         pt->t != MBJ_STR || pn->t != MBJ_STR || strcmp(pt->s, type) != 0 || strcmp(pn->s, name) != 0) {
-        mb_error(b, "mod.json %s: provides does not match the request path", path->s);
+        mb_error(b, MB_BLOCK_EDITED);
         free(expect);
         return 0;
     }
-    if (!mb_is_hex64(sha)) { mb_error(b, "mod.json %s: sha256 must be 64 lowercase hex characters", path->s); free(expect); return 0; }
+    if (!mb_is_hex64(sha)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     if (pointer) {
         char *lower;
         int same;
         if (src->t != MBJ_STR || strlen(src->s) != src->n || !sh_mb_check_source(src->s, cause, sizeof cause)) {
-            mb_error(b, "mod.json %s: source must be an installed path", path->s);
+            mb_error(b, MB_BLOCK_EDITED);
             free(expect);
             return 0;
         }
         lower = mb_path_dup(src->s, src->n);
         same = lower && strcmp(lower, src->s) == 0;
         free(lower);
-        if (!same) { mb_error(b, "mod.json %s: source must be lower-case with '/' separators", path->s); free(expect); return 0; }
-        if (closure && closure->t != MBJ_BOOL) { mb_error(b, "mod.json %s: closure must be true or false", path->s); free(expect); return 0; }
+        if (!same) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
+        if (closure && closure->t != MBJ_BOOL) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     } else if (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
                (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE) {
-        mb_error(b, "mod.json %s: size must be 1 to 64 MiB", path->s);
+        mb_error(b, MB_BLOCK_EDITED);
         free(expect);
         return 0;
     }
-    if (needs->t != MBJ_ARR) { mb_error(b, "mod.json %s: needs must be an array", path->s); free(expect); return 0; }
+    if (needs->t != MBJ_ARR) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     f = mb_add_file(b);
     if (!f) { mb_error(b, "out of memory"); free(expect); return 0; }
     f->path = mb_strdup(path->s);
@@ -5386,7 +5393,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         const mbj *n = needs->items[k], *nt = mbj_get(n, "type"), *nn = mbj_get(n, "name");
         if (n->t != MBJ_OBJ || n->count != 2 || !nt || !nn || nt->t != MBJ_STR || nn->t != MBJ_STR ||
             !nt->n || !nn->n || strlen(nn->s) != nn->n || strlen(nt->s) != nt->n) {
-            mb_error(b, "mod.json %s: needs[%zu] must be {\"type\",\"name\"}", path->s, k);
+            mb_error(b, MB_BLOCK_EDITED);
             return 0;
         }
         if (f->need_count) {
@@ -5394,7 +5401,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
             probe.type = nt->s;
             probe.name = nn->s;
             if (mb_need_cmp(&f->needs[f->need_count - 1], &probe) >= 0) {
-                mb_error(b, "mod.json %s: needs are not sorted and unique", path->s);
+                mb_error(b, MB_BLOCK_EDITED);
                 return 0;
             }
         }
@@ -5414,10 +5421,10 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
                                          "registries", "rules", "salt", "scripts", "shadows", "stock", "tree", "warnings", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i, total;
-    if (root->t != MBJ_OBJ) { mb_error(out, "mod.json must contain one JSON object"); return 0; }
+    if (root->t != MBJ_OBJ) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     block = mbj_get(root, SH_MB_BLOCK_KEY);
     if (!block || block->t != MBJ_OBJ) {
-        mb_error(out, "mod.json has not been built yet (no \"" SH_MB_BLOCK_KEY "\" block)");
+        mb_error(out, "This mod has not been built yet; press Refresh in the Mods tab");
         return 0;
     }
     v = mbj_get(block, "format");
@@ -5425,7 +5432,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         mb_error(out, SH_MB_EARLIER);
         return 0;
     }
-    if (!mb_only_keys(block, bkeys)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" has a key this release does not know"); return 0; }
+    if (!mb_only_keys(block, bkeys)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     v = mbj_get(block, "salt");
     if (!v || v->t != MBJ_STR || !sh_salt_valid(v->s, v->n)) {
         mb_error(out, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
@@ -5435,21 +5442,21 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     out->id[SH_SALT_LEN] = 0;
     v = mbj_get(block, "built");
     if (v && (v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-')) {
-        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" built must be a time in seconds");
+        mb_error(out, MB_BLOCK_EDITED);
         return 0;
     }
     out->built = v ? _strtoi64(v->s, NULL, 10) : 0;
     v = mbj_get(block, "rules");
     if (v && (v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-')) {
-        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" rules must be a number");
+        mb_error(out, MB_BLOCK_EDITED);
         return 0;
     }
     out->rules = v ? atoi(v->s) : 0;
     v = mbj_get(block, "tree");
-    if (v && !mb_is_hex64(v)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" tree must be 64 lowercase hex characters"); return 0; }
+    if (v && !mb_is_hex64(v)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     if (v) memcpy(out->tree, v->s, SH_MB_HASH_HEX + 1);
     v = mbj_get(block, "cause");
-    if (v && v->t != MBJ_STR) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" cause must be a string"); return 0; }
+    if (v && v->t != MBJ_STR) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     if (v) strncpy_s(out->state_cause, sizeof out->state_cause, v->s, _TRUNCATE);
     out->validated = v == NULL;
     bundle = mbj_get(block, "build");
@@ -5458,14 +5465,14 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         else mb_error(out, "not built yet");
         return 0;
     }
-    if (!mb_is_hex64(bundle)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" build must be 64 lowercase hex characters"); return 0; }
+    if (!mb_is_hex64(bundle)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     if (!mb_descriptor_root(out, root, block, 0)) return 0;
     v = mbj_get(block, "registries");
     if (v) {
         mb_buf rb = {0};
         if (v->t != MBJ_OBJ || !mbj_canon(v, &rb, NULL, 0)) {
             free(rb.p);
-            mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" registries must be an object");
+            mb_error(out, MB_BLOCK_EDITED);
             return 0;
         }
         out->registries = rb.p;
@@ -5475,7 +5482,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         mb_buf eb = {0};
         if (v->t != MBJ_ARR || !mbj_canon(v, &eb, NULL, 0)) {
             free(eb.p);
-            mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" edits must be an array");
+            mb_error(out, MB_BLOCK_EDITED);
             return 0;
         }
         out->edits = eb.p;
@@ -5486,7 +5493,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         mb_buf sb = {0};
         if (v->t != MBJ_OBJ || !mbj_canon(v, &sb, NULL, 0)) {
             free(sb.p);
-            mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" scripts must be an object");
+            mb_error(out, MB_BLOCK_EDITED);
             return 0;
         }
         out->scripts = sb.p;
@@ -5496,34 +5503,34 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         if (!mb_set_shadows(out, sh)) return 0;
         for (i = 1; i < out->shadow_count; i++)
             if (strcmp(out->shadows[i - 1], out->shadows[i]) >= 0) {
-                mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" shadows are not sorted and unique");
+                mb_error(out, MB_BLOCK_EDITED);
                 return 0;
             }
     }
     files = mbj_get(block, "files");
     stock = mbj_get(block, "stock");
     if ((files && files->t != MBJ_ARR) || (stock && stock->t != MBJ_ARR)) {
-        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" files and stock must be arrays");
+        mb_error(out, MB_BLOCK_EDITED);
         return 0;
     }
     total = (files ? files->count : 0) + (stock ? stock->count : 0);
-    if (total > SH_MB_MAX_FILES) { mb_error(out, "mod.json lists more than %u files", SH_MB_MAX_FILES); return 0; }
+    if (total > SH_MB_MAX_FILES) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     for (i = 0; files && i < files->count; i++) if (!mb_load_block_file(out, files->items[i], i, 0)) return 0;
     for (i = 0; stock && i < stock->count; i++) if (!mb_load_block_file(out, stock->items[i], i, 1)) return 0;
     qsort(out->files, out->file_count, sizeof(sh_mb_file), mb_file_cmp);
     for (i = 1; i < out->file_count; i++) {
         size_t k;
         if (strcmp(out->files[i - 1].path, out->files[i].path) == 0) {
-            mb_error(out, "mod.json lists %s twice", out->files[i].path);
+            mb_error(out, MB_BLOCK_EDITED);
             return 0;
         }
         for (k = 0; k < i; k++)
             if (strcmp(out->files[k].request, out->files[i].request) == 0) {
-                mb_error(out, "mod.json has two files with request %s", out->files[i].request);
+                mb_error(out, MB_BLOCK_EDITED);
                 return 0;
             }
     }
-    if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "mod.json files exceed 256 MiB"); return 0; }
+    if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     for (i = 0; i < out->file_count; i++) {
         out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
         if (!out->files[i].stock && sh_mb_script_request(out->files[i].request, NULL, NULL) > 0) out->script_files++;
@@ -5534,8 +5541,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     mb_finish(out);
     if (!check) memcpy(out->prev_hash, bundle->s, SH_MB_HASH_HEX + 1);   /* the hash its block records */
     if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
-        mb_error(out, "mod.json changed since it was built (the author block or the builder block was edited); "
-                 "Refresh in the Mods tab builds it again");
+        mb_error(out, "mod.json was edited after its last build; press Refresh in the Mods tab to build it again");
     return out->errors == 0;
 }
 
@@ -6264,7 +6270,7 @@ int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char *why, siz
     size_t elen = 0, own_len = 0, len = 0;
     mb_buf o = {0};
     int ok = 0;
-    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(why, cap, "the folder has no salt to record");
+    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(why, cap, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
     if (!mod_path) { free(root); return mb_cause(why, cap, "out of memory"); }

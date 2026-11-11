@@ -779,7 +779,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
         _snprintf_s(dropped, sizeof dropped, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
         CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
         CHECK(!sh_ms_install_from_folder(path, &RESOLVER, built, sizeof built, &s2, NULL, c2, sizeof c2) &&
-              strstr(c2, "never built again"));
+              strstr(c2, "came with a downloaded map"));
     }
     /* A hand copy inside one place: the newer one is refused. */
     {

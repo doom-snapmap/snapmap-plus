@@ -533,19 +533,19 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
     if (out_length) *out_length = 0;
     if (err && err_cap) err[0] = 0;
     if (!json || !length) { MM_ERR("no map text"); return NULL; }
-    if (count > SH_MODMANIFEST_MAX_ROWS) { MM_ERR("too many manifest rows"); goto done; }
+    if (count > SH_MODMANIFEST_MAX_ROWS) { MM_ERR("This map uses more than 4096 mod builds; it was saved without its mod list"); goto done; }
     if (count) {
         mm_put(&value, "[", 1);
         for (i = 0; i < count; i++) {
             size_t vlen = 0;
             char *row = sh_modmanifest_format_value(&rows->rows[i], &vlen);
-            if (!row) { MM_ERR("manifest row for '%s' could not be formatted", rows->rows[i].salt); goto done; }
+            if (!row) { MM_ERR("The mod %s could not be recorded in the map; the map was saved without its mod list", rows->rows[i].name[0] ? rows->rows[i].name : rows->rows[i].salt); goto done; }
             if (i) mm_put(&value, ",", 1);
             mm_put(&value, row, vlen);
             free(row);
         }
         mm_put(&value, "]", 1);
-        if (value.failed) { MM_ERR("out of memory building the manifest"); goto done; }
+        if (value.failed) { MM_ERR("Out of memory while recording the map's mods; the map was saved without its mod list"); goto done; }
     }
     out = sh_carrier_put(src, src_len, "mods", count ? value.p : NULL, value.n, &w, err, err_cap);
     if (out) {
@@ -555,7 +555,7 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
     } else if (count) {
         /* Already exactly this: a copy, so a caller always gets the text it asked for. */
         out = (char *)HeapAlloc(GetProcessHeap(), 0, src_len + 1);
-        if (!out) MM_ERR("out of memory building the manifest");
+        if (!out) MM_ERR("Out of memory while recording the map's mods; the map was saved without its mod list");
         else {
             memcpy(out, src, src_len);
             out[src_len] = 0;
@@ -770,10 +770,10 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 
     raw = sh_json_object_get(&object, "snapmap-plus");
     if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 24, &block)) {
-        MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;
+        MM_ERR("This mod has not been built yet; press Refresh in the Mods tab"); goto done;
     }
     if (!mm_member_text(&block, "salt", out->salt, sizeof out->salt, 1) || !mm_salt_ok(out->salt)) {
-        MM_ERR("mod.json has no salt"); goto done;
+        MM_ERR("This mod folder has not been scanned yet; press Refresh in the Mods tab"); goto done;
     }
     if (!mm_member_text(&block, "build", out->build, sizeof out->build, 1) ||
         !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {

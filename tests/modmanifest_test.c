@@ -655,7 +655,7 @@ static void mod_json(void)
         static const char noname[] = "{\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\",\"build\":\"" HASH_A "\",\"files\":[]}}";
         CHECK(!sh_modmanifest_read_mod_json(unbuilt, sizeof unbuilt - 1, &info, err, sizeof err));
         CHECK(!sh_modmanifest_read_mod_json(failing, sizeof failing - 1, &info, err, sizeof err) && strstr(err, "not been built"));
-        CHECK(!sh_modmanifest_read_mod_json(nosalt, sizeof nosalt - 1, &info, err, sizeof err) && strstr(err, "no salt"));
+        CHECK(!sh_modmanifest_read_mod_json(nosalt, sizeof nosalt - 1, &info, err, sizeof err) && strstr(err, "not been scanned"));
         CHECK(!sh_modmanifest_read_mod_json(noname, sizeof noname - 1, &info, err, sizeof err));
     }
     /* The longest name the builder admits, 80 four-byte characters (320
