@@ -260,6 +260,13 @@ static void old_shapes(void)
                                     "\"variables\":{\"string\":[{\"info\":{\"name\":\"door\"},\"initialValue\":\"smnav1.x\"}]}}";
         CHECK(sh_map_old_shape(prose, sizeof prose - 1) == SH_MAP_OLD_NONE);
     }
+    /* An entity or object an author named like a family is not a variable. */
+    for (i = 0; i < sizeof families / sizeof families[0]; i++) {
+        _snprintf_s(map, sizeof map, _TRUNCATE,
+                    "{\"entities\":[{\"entityDef\":{\"name\":\"%s\",\"className\":\"idSnapEntity\"}}],"
+                    "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}", families[i]);
+        CHECK(sh_map_old_shape(map, strlen(map)) == SH_MAP_OLD_NONE);
+    }
     /* Member rows: the current row passes; an id or a bundle row is named. */
     {
         static const char now[] = ENGINE_HEAD MEMBER(",\"mods\":" MODS) "}";
