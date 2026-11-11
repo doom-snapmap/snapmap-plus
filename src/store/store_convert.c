@@ -742,7 +742,11 @@ static void cv_maps_each(const sh_conv_opts *o, cv_map_fn fn, void *ctx)
 {
     char *p;
     if (o->saves) {
+        /* The folder as records and lines spell it: without a long-form prefix
+         * (sh_mb_wpath gives every path its long form again). */
         char *root = sh_mb_utf8(o->saves);
+        if (root && !strncmp(root, "\\\\?\\UNC\\", 8)) { root[6] = '\\'; memmove(root, root + 6, strlen(root + 6) + 1); }
+        else if (root && !strncmp(root, "\\\\?\\", 4)) memmove(root, root + 4, strlen(root + 4) + 1);
         WIN32_FIND_DATAW fa;
         char *pat = root ? cv_join(root, "*") : NULL;
         wchar_t *w = pat ? sh_mb_wpath(pat) : NULL;

@@ -756,6 +756,7 @@ static void test_beta26(const char *fixture, const char *tmp)
     CHECK(said("  mods\\alex.beta@0123456789abcdef: an extra copy of alex.beta that Snapmap+ made, moved to the stand-in bin"));
     CHECK(said("  mods\\downloads\\Old Map\\alex.beta: an extra copy of alex.beta that Snapmap+ made"));
     CHECK(said("SNAPMAPS00000000000000000001\\map.decl: converted"));
+    CHECK(!said("\\\\?\\"));   /* paths are written as the player knows them, never in their long form */
     CHECK(said("SNAPMAPS00000000000000000002\\map.decl: left as it was: it uses nobody.else, which no installed mod folder "
                "provides"));
     CHECK(said("rawmap.json: converted") && said("p.json: converted"));
