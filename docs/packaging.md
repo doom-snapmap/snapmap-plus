@@ -46,8 +46,7 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
 
 `dist/` mirrors this tree (it also holds `snapmap-plus-store.exe` and `TOOLS.sha256`, which never go
 into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
-root. The Snapmap+ window opens in the SnapMap editor (run `sh` in the console if it doesn't
-auto-open).
+root. The Snapmap+ window opens beside the game in the SnapMap editor.
 
 ## The installed file contract
 
