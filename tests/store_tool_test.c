@@ -229,7 +229,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  mods\\: old record file(s) claims.json"));
     CHECK(said("  removed-mods\\: 1 entry of the retired recycle bin"));
     CHECK(said("  overrides\\: 1 entry not yet moved into mods\\"));
-    CHECK(said("5 kind(s) of work found. Run: snapmap-plus-store migrate \""));
+    CHECK(said("5 kind(s) of work to do."));
     /* check changes nothing */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" TINY "\\bundle.json", data);
     CHECK(mt_exists(path));
@@ -246,8 +246,8 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(said("  removed-mods: 1 folder(s) moved to the stand-in bin; the bin is retired"));
     CHECK(said("  overrides\\: not moved yet: it needs the DOOM folder"));
     CHECK(said("  mods\\: 1 folder(s) of an earlier release are not converted yet: building them needs the DOOM folder"));
-    CHECK(said("Partly done: the store layout upgraded, removed-mods\\ retired. 2 kind(s) of work are left; run again: "
-               "snapmap-plus-store migrate \""));
+    CHECK(said("Partly done: the store layout upgraded, removed-mods\\ retired"));
+    CHECK(said("Some items are left; close DOOM and run: snapmap-plus migrate"));
     CHECK(said("--doom \"<DOOM folder>\""));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\alex.tiny\\mod.json", data);
     CHECK(mt_exists(path));
@@ -270,7 +270,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(mt_exists(path));
 
     CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
-    CHECK(said("  overrides\\: 1 entry not yet moved into mods\\") && said("2 kind(s) of work found"));
+    CHECK(said("  overrides\\: 1 entry not yet moved into mods\\") && said("2 kind(s) of work to do."));
     /* The upgraded folder is beta.26's shape (a format-1 block): the conversion to the one shape is due. */
     CHECK(said("  mods\\: 1 mod folder(s) of an earlier release to convert to this version's shape"));
     CHECK(!said("retired layout") && !said("blobs") && !said("removed-mods"));
@@ -341,7 +341,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
             CHECK(MoveFileExA(a1, a2, 0));
         }
         CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
-        CHECK(said("  overrides\\: 1 entry added or changed since it was migrated") && said("1 kind(s) of work found"));
+        CHECK(said("  overrides\\: 1 entry added or changed since it was migrated") && said("1 kind(s) of work to do."));
         CHECK(!said("not yet moved into mods"));
         CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
         /* The again pass rebuilds every entry there is (the first went to the bin with the folder). */
@@ -520,7 +520,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     free(t);
     /* The ZIP alone is no work for a second run; the document still is, until it is fixed. */
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_PARTIAL && !said("moved into mods\\my-overrides") &&
-          !said("added to mods\\my-overrides") && said("1 kind(s) of work are left"));
+          !said("added to mods\\my-overrides") && said("Some items are left"));
     Sleep(1100);   /* the record's migratedAt has one-second resolution; the fixed document must be newer */
     mt_write(data, "strings\\strids.json", "{\"sh_a\": \"Fixed\"}");
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
