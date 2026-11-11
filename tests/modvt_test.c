@@ -8,10 +8,12 @@
  * bundle), the index listener, rescan idempotence, release on removal, a
  * changed build, the hold after a registration pass, a full table (stock
  * records and record 31 untouched, one line), a name another record holds, a
- * record the engine took back, OpenGL without sparse page tables and a VT
- * system that is not up. With executables: VtSetSource and VtForMaterial
- * resolve on each, and the VT system, Release, the record table and (OpenGL)
- * the sparse globals decode to the recorded addresses. */
+ * record the engine took back, the flavor on each renderer (OpenGL without
+ * sparse page tables registers with flavor 2, as Vulkan does) and a VT system
+ * that is not up. With executables: VtSetSource and VtForMaterial resolve on
+ * each, the VT system, Release, the record table and (OpenGL) the sparse
+ * globals decode to the recorded addresses, and SetSource's flavor-2 branch
+ * gives the record the VT system's UniqueVmtrs page cache on both. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -200,6 +202,21 @@ static void decode_helpers(void)
     CHECK(sh_modvt_find_table_disp(tgl, 7) == 0);
     CHECK(sh_modvt_release_head_ok(rel, sizeof rel));
     CHECK(!sh_modvt_release_head_ok(rel, 8));
+    {
+        /* OpenGL needs the sparse test: without it the record's flavor cannot follow the material's. */
+        unsigned char ss[0xC0], vf[0xC0];
+        sh_modvt_layout l;
+        memset(ss, 0x90, sizeof ss);
+        memcpy(ss + 0x40, gl, sizeof gl);
+        memset(vf, 0x90, sizeof vf);
+        memcpy(vf + 0x81, tgl, sizeof tgl);
+        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, 0, &l) == 1 && l.table_off == 0xA400u);
+        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, 1, &l) == 0);
+    }
+    /* The flavor a matched material carries. */
+    CHECK(sh_modvt_flavor(1, 0, 0) == 2 && sh_modvt_flavor(1, 1, 1) == 2);
+    CHECK(sh_modvt_flavor(0, 0, 0) == 2 && sh_modvt_flavor(0, 0, 1) == 2 && sh_modvt_flavor(0, 1, 0) == 2);
+    CHECK(sh_modvt_flavor(0, 0x7FF812345678ull, 1) == 4);
 }
 
 static void families(void)
@@ -351,15 +368,17 @@ static void families(void)
     f.name[17][0] = f.path[17][0] = 0;
     CHECK(sync_index(&f, "map", &res) == 1 && f_find(&f, "mods/vtmod000/fam") == 17);
 
-    /* OpenGL without sparse page tables: never registered, said once. */
+    /* OpenGL without sparse page tables (any card, vt_enablePRT 0): flavor 2, as on Vulkan. */
     sh_modvt_reset();
     fake_init(&f);
-    f.flavor = 0;
+    f.flavor = sh_modvt_flavor(0, 0, 0);
     g_nlog = 0;
-    CHECK(sync_index(&f, "editor", &res) == 0 && res.refused == 1 && f.sets == 0);
-    CHECK(sync_index(&f, "map", &res) == 0 && log_count("cannot be served on this renderer") == 1);
+    CHECK(sync_index(&f, "editor", &res) == 1 && res.registered == 1 && res.refused == 0 &&
+          f.fl[f_find(&f, "mods/vtmod000/fam")] == 2);
     /* OpenGL with them: flavor 4. */
-    f.flavor = 4;
+    sh_modvt_reset();
+    fake_init(&f);
+    f.flavor = sh_modvt_flavor(0, 1, 1);
     CHECK(sync_index(&f, "map", &res) == 1 && f.fl[f_find(&f, "mods/vtmod000/fam")] == 4);
 
     /* SetSource refused (no member opened): logged once, retried at later syncs. */
@@ -406,6 +425,19 @@ static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
     return img;
 }
 
+/* A RIP-relative LEA in code[0..len) (at rva) whose target is `target`. */
+static int lea_to(const uint8_t *code, size_t len, uint32_t rva, uint32_t target)
+{
+    size_t i;
+    int32_t d;
+    for (i = 0; i + 7 <= len; ++i) {
+        if ((code[i] != 0x48 && code[i] != 0x4C) || code[i + 1] != 0x8D || (code[i + 2] & 0xC7) != 0x05) continue;
+        memcpy(&d, code + i + 3, 4);
+        if ((uint32_t)((int64_t)rva + (int64_t)i + 7 + d) == target) return 1;
+    }
+    return 0;
+}
+
 static void image(const char *path)
 {
     size_t sz = 0, total, i;
@@ -443,6 +475,9 @@ static void image(const char *path)
         CHECK(l.sys_rva == 0x4FE6120u && l.release_rva == 0x185A460u && l.table_off == 0xA400u);
         CHECK(l.sparse_cvar_rva == 0x4FE60B0u && l.sparse_ext_rva != 0 && l.sparse_ext_rva < sz);
     }
+    /* SetSource's flavor-2 branch stores the VT system's UniqueVmtrs page cache (VK sys+0xFEB0,
+     * GL sys+0x11870; the start-up builds it and every frame services it, sparse or not). */
+    CHECK(ss->rva + 0x1000 <= sz && lea_to(base + ss->rva, 0x1000, ss->rva, l.sys_rva + (id->vulkan ? 0xFEB0u : 0x11870u)));
     free(base);
 }
 

@@ -201,9 +201,10 @@ limits a mod to roughly forty.
 - The game has 31 records; the product uses 1 to 30 and never evicts a record
   it did not create. A family that finds them full is refused with one
   `VT:` log line.
-- On OpenGL a family is registered only when the AMD sparse texture extension
-  and its cvar are on (the game then uses sparse page tables); otherwise it is
-  not registered and the log says so.
+- The flavor is 2 on both renderers (the game's `UniqueVmtrs` page cache),
+  except on OpenGL with the AMD sparse texture extension loaded and
+  `vt_enablePRT 1`, where the game itself uses sparse page tables and the
+  family is registered with flavor 4 to match.
 - Removing the mod releases its family's record, unless the editor or a map
   was opened while it was registered; then the record stays until DOOM exits.
 - `vt_reloadMega2Vmtrs` does not reload a served family.
