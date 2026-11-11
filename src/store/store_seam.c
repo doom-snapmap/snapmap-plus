@@ -37,13 +37,6 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
 
 int sh_modserve_active(void) { return 0; }
 
-int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
-{
-    (void)bundle_hash; (void)id;
-    if (out) memset(out, 0, sizeof *out);
-    return 0;
-}
-
 /* The manifest's activation asks which build serves a row: none here. */
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
