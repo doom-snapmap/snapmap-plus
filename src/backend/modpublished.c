@@ -60,7 +60,7 @@
 #include "modsync.h"
 #endif
 
-#define PUB_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: the shape map_package.c used */
+#define PUB_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: a Yes/No body of our own text */
 #define PUB_BUTTONS_YES_NO  6u
 #define PUB_BUTTONS_ACCEPT  0u
 #define PUB_RAISE_TICKS     600     /* about ten seconds at 60 Hz */
@@ -136,7 +136,7 @@ static pub_record g_record;
  * and the completion (and launch) it feeds run in one call chain, inside one
  * frame; a record from an earlier frame belongs to some other load. */
 static unsigned long g_frame;
-/* The parse whose cause sentences the manifest holds (ADD-V5 B5): a gate that
+/* The parse whose cause sentences the manifest holds: a gate that
  * takes it drops them; a later frame's poll logs them, since no gate did. */
 static int g_notes_held;
 static unsigned long g_notes_frame;
@@ -834,7 +834,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
             if (begun < 0) {
                 pub_log("MODS: the cached lobby map needs mods and could not be held; it is refused");
                 pub_launch_refused(hook);
-                pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
+                pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
             }
             return begun == 0;
         }
@@ -909,7 +909,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
         if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, owner);
         pub_launch_refused(hook);
-        pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
+        pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
         return 0;
     }
     if (!begun) { pub_place_decided(place); return 1; }
@@ -956,7 +956,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     pub_logf("MODS: the %s was refused: its mods are not installed and it cannot be held", pub_hook_name(hook));
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, manager);
     pub_launch_refused(hook);
-    pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
+    pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
     return 0;
 }
 
@@ -1009,7 +1009,7 @@ static void pub_start_fetch(void)
     pub_job *job = calloc(1, sizeof(*job));
     if (!job || !pub_job_rows(job, h)) {
         char line[PUB_TEXT_CAP];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded (out of memory). %s",
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded: Snapmap+ ran out of memory. %s Restart DOOM and try again.",
                     pub_thing(h->hook), pub_not_done(h->hook));
         pub_job_free(job);
         pub_drop(line, "no memory for the fetch job");
@@ -1021,7 +1021,7 @@ static void pub_start_fetch(void)
     h->progress_at = GetTickCount64();
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
         char line[PUB_TEXT_CAP];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod download could not start. %s", pub_not_done(h->hook));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "Snapmap+ is busy with another upload or download. %s Try again in a moment.", pub_not_done(h->hook));
         h->job = NULL;
         pub_job_free(job);
         pub_drop(line, "the worker refused the job");
@@ -1068,8 +1068,12 @@ static void pub_finish(void)
             }
             free(verdicts);
         }
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Could not download the mod %s. %s",
-                    job->names[job->failed_index], pub_not_done(h->hook));
+        {
+            char reason[200];
+            (void)sh_reason(SH_REASON_STORE, job->failed_code, NULL, 0, reason, sizeof reason);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "%s could not be downloaded: %s. %s",
+                        job->names[job->failed_index], reason[0] ? reason : "try again", pub_not_done(h->hook));
+        }
         pub_drop(line, cause);
         return;
     }
@@ -1077,8 +1081,8 @@ static void pub_finish(void)
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         if (pub_row_state(row, h->place, pub_thing(h->hook), cause, sizeof cause) == SH_MODPUB_ROW_SERVED) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed.%s%s %s",
-                    row->name[0] ? row->name : row->salt, cause[0] ? " " : "", cause, pub_not_done(h->hook));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s was downloaded but cannot be used.%s%s %s",
+                    row->name[0] ? row->name : "The mod", cause[0] ? " " : "", cause, pub_not_done(h->hook));
         pub_drop(line, "a fetched row is not served");
         return;
     }
@@ -1116,7 +1120,7 @@ static void pub_resume(size_t installed)
     }
     if ((h->hook == SH_MODPUB_CACHE_READY || h->hook == SH_MODPUB_CACHE_LOBBY) &&
         (!g_ops.host_matches || !g_ops.host_matches(g_ops.context, h->id, h->revision))) {
-        pub_drop("The mods were installed, but the lobby's map changed meanwhile.",
+        pub_drop("The mods are installed, but the host changed maps while they downloaded. Join the lobby again.",
                  "the lobby host's item differs from the held map");
         return;
     }
@@ -1136,7 +1140,7 @@ static void pub_resume(size_t installed)
     ok = g_ops.resume ? g_ops.resume(g_ops.context, &r) : 0;
     InterlockedExchange(&g_resuming, 0);
     if (!ok) {
-        pub_drop("The mods were installed, but the map could not be resumed. Try opening it again.",
+        pub_drop("The mods are installed, but the map could not be opened. Open it again.",
                  "the resume did not reach the original");
         return;
     }
@@ -1250,8 +1254,9 @@ static void pub_rawmap_refuse(int hook, const char *source, const char *place, c
     char notice[PUB_TEXT_CAP], line[1024], piece[PUB_LABEL_CAP + 4];
     const char **labels = calloc(count ? count : 1, sizeof(*labels));
     char (*storage)[PUB_LABEL_CAP] = calloc(count ? count : 1, sizeof(*storage));
-    const char *bare = pub_is_prefab(hook) ? "This prefab was not placed. It needs mods you do not have."
-                                           : "This map was not loaded. It needs mods you do not have.";
+    const char *bare = pub_is_prefab(hook)
+        ? "This prefab was not placed: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and place it again."
+        : "This map was not loaded: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and open it again.";
     char single[PUB_CAUSE_CAP] = "";
     /* The asset rule's sentence for each row first; one row's sentence is
      * also the notice. */
@@ -1327,7 +1332,7 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, c
     begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", place, rows, NULL);
     if (begun == 0) return 0;
     if (begun < 0) {
-        pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
+        pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
         return -1;
     }
     g_hold.state = HOLD_PROBING;
@@ -1382,7 +1387,7 @@ static void pub_start_probe(void)
     }
     if (!job || !job->probes || !pub_job_rows(job, h)) {
         char line[PUB_TEXT_CAP];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s needs mods that could not be prepared. %s", pub_thing(h->hook),
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be checked: Snapmap+ ran out of memory. %s Restart DOOM and try again.", pub_thing(h->hook),
                     pub_not_done(h->hook));
         pub_job_free(job);
         pub_drop(line, "no memory for the store check");
@@ -1441,7 +1446,7 @@ static void pub_probe_finish(void)
     size_t denied = 0;
     if (!verdicts) {
         char line[PUB_TEXT_CAP];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s needs mods that could not be prepared. %s", pub_thing(h->hook),
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be checked: Snapmap+ ran out of memory. %s Restart DOOM and try again.", pub_thing(h->hook),
                     pub_not_done(h->hook));
         pub_drop(line, "no memory");
         return;

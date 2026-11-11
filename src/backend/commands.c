@@ -1125,25 +1125,6 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* Deliberately refused legacy operations. */
-    if (strcmp(sub, "loadimg_n_break") == 0) {
-        sh_printf("sh_debugrender: '%s' not available -- it ends in a debugger INT3 trap (halts the game). "
-                  "It is not available in Snapmap+.\n", sub);
-        return;
-    }
-    if (strcmp(sub, "dump_megatex") == 0) {
-        sh_printf("sh_debugrender: '%s' not available -- it hardcodes a write to C:\\Users\\Chris\\megatex.raw "
-                  "(a developer's own folder). It is not available in Snapmap+.\n", sub);
-        return;
-    }
-
-    /* Unsupported engine-mutating debug operations. */
-    if (strcmp(sub, "test_rm_commit") == 0 || strcmp(sub, "test_sum_shit") == 0 ||
-        strcmp(sub, "testnewgui") == 0) {
-        sh_printf("sh_debugrender: '%s' changes the renderer's internals and is not available in Snapmap+.\n", sub);
-        return;
-    }
-
     sh_printf("sh_debugrender: unknown sub-op '%s'.\n", sub);
 }
 #endif
@@ -1157,7 +1138,7 @@ static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
     if (iface == NULL) {
-        sh_printf("Ui interface doesnt exist yet!\n");
+        sh_printf("Snapmap+ is still starting; try again in a moment.\n");
         return;
     }
 
@@ -1171,7 +1152,7 @@ static void h_sh_dispatch(idCmdArgs *a)
     sh_cmd_handler handler = NULL;
     void          *ctx     = NULL;
     if (!sh_iface_lookup_cmd(iface, sub, &handler, &ctx) || handler == NULL) {
-        sh_printf("Command %s has not been registered yet\n", sub);
+        sh_printf("There is no Snapmap+ command '%s'. 'sh_help' lists them.\n", sub);
         return;
     }
 

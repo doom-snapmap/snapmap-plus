@@ -142,7 +142,7 @@ void sh_modpublish_launch(void);
 int  sh_modpublish_holding(void);
 
 /* "This map uses N mod(s) (size). Upload them to the mod store so other
- * players can download them? (asked once)", under 256 bytes. */
+ * players can download them? You are asked this only once.", under 256 bytes. */
 void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigned long long bytes);
 
 /* Byte counts as the notices print them: "1 byte", "512 bytes", "12.3 MB". */
@@ -153,13 +153,6 @@ void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes);
 int  sh_modpublish_cache_path(const char *item_id, const char *revision, char *out, size_t cap);
 
 /* ------------------------------------------------------------ seam */
-
-#define SH_MODPUBLISH_ASKED_BY_TOAST (-1)
-
-/* The editor-toast wording of the first-time question (the alternative route):
- * "Publishing this map uploads its N mod(s) (size) to the mod store so other
- * players can download them. Publish again to agree." */
-void sh_modpublish_compose_toast_question(char *out, size_t cap, size_t count, unsigned long long bytes);
 
 typedef struct sh_modpublish_ops {
     void *context;
@@ -174,11 +167,8 @@ typedef struct sh_modpublish_ops {
     void (*resume)(void *c, void *editor);         /* the original PublishAfterSave */
     void (*editor_notice)(void *c, void *editor, const char *text);   /* the editor toast */
     /* The first-time upload question (the only ask site). Returns a dialog
-     * ticket polled with poll(), 0 when it could not be raised, or
-     * SH_MODPUBLISH_ASKED_BY_TOAST when the route informs instead of asking:
-     * the explanation was shown as an editor toast, this publish is cancelled
-     * and the next one counts as the agreement. NULL uses ask() with the
-     * Yes/No dialog. */
+     * ticket polled with poll(), 0 when it could not be raised. NULL uses
+     * ask() with the Yes/No dialog. */
     int  (*upload_question)(void *c, void *editor, size_t count, unsigned long long bytes);
     void (*log)(void *c, const char *line);
     /* Add `tag` to a saved-map model's tags (idLocalSavedMapModel, tags at

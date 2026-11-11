@@ -596,7 +596,8 @@ static void launch_boundary(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
     CHECK(!sh_modpublished_holding() && F.drop_ui == 1 && F.asks == 0);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map needs mods that could not be prepared. The map was not loaded."));
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map was not loaded: Snapmap+ ran out of memory preparing its mods. "
+                                           "Restart DOOM and open it again."));
     tick(1);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
 
@@ -850,7 +851,8 @@ static void fetch_failure_drops(void)
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.resumes == 0 && F.activations == 0 && F.drop_ui == 1);
     tick(2);
-    CHECK(strstr(F.last_ask, "Could not download the mod alex.pink-imp") != NULL);
+    CHECK(strstr(F.last_ask, "alex.pink-imp could not be downloaded: ") == F.last_ask &&
+          strstr(F.last_ask, "The map was not loaded.") != NULL);
 
     reset();
     F.refuse_install = 1;
@@ -861,8 +863,8 @@ static void fetch_failure_drops(void)
     tick_until_idle();
     CHECK(F.rescans == 1 && F.resumes == 0 && F.activations == 0);
     tick(2);
-    CHECK(strstr(F.last_ask, "could not be installed. This map uses alex.pink-imp, which is installed but cannot be used: "
-                             "a file size differs.") != NULL);
+    CHECK(strstr(F.last_ask, "alex.pink-imp was downloaded but cannot be used. This map uses alex.pink-imp, which is "
+                             "installed but cannot be used: a file size differs.") != NULL);
 }
 
 static void second_load_abandons(void)
@@ -934,7 +936,7 @@ static void joiner_host_mismatch_drops(void)
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.resumes == 0 && F.activations == 0 && F.drop_ui == 1);
     tick(2);
-    CHECK(strstr(F.last_ask, "lobby's map changed") != NULL);
+    CHECK(strstr(F.last_ask, "the host changed maps while they downloaded. Join the lobby again.") != NULL);
 
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);

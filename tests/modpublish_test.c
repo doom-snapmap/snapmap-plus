@@ -49,7 +49,6 @@ static struct {
     unsigned long long token;     /* the editor's live edit object */
     int fails, resumes, asks, ask_buttons, answer;
     char asked[256], toast[256];
-    int toast_route;
     /* the search tag: calls, the tag asked for, what the fake returns, and
      * whether the fake model already has it */
     int tag_calls, tag_result, tags_present, untag_calls;
@@ -122,21 +121,12 @@ static int f_published_query(void *c, const char *cloud, unsigned ticket)
     return F.query_start;
 }
 static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)editor; strcpy_s(F.toast, sizeof F.toast, text); }
-static int f_toast_question(void *c, void *editor, size_t count, unsigned long long bytes)
-{
-    char text[256];
-    sh_modpublish_compose_toast_question(text, sizeof text, count, bytes);
-    f_notice(c, editor, text);
-    return SH_MODPUBLISH_ASKED_BY_TOAST;
-}
-
-static void set_ops(int toast_route)
+static void set_ops(void)
 {
     sh_modpublish_ops ops;
     memset(&ops, 0, sizeof ops);
     ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
     ops.editor_token = f_token; ops.publish_fail = f_fail; ops.resume = f_resume; ops.editor_notice = f_notice;
-    ops.upload_question = toast_route ? f_toast_question : NULL;
     ops.log = f_log;
     ops.add_tag = f_add_tag;
     ops.remove_tag = f_remove_tag;
@@ -303,7 +293,7 @@ int main(int argc, char **argv)
     CHECK(install(dir, hB, mB));
     both_h[0] = mA; both_h[1] = mB;
     sh_modpublish_test_set_cache_root(cache);
-    set_ops(0);
+    set_ops();
     memset(&F, 0, sizeof F);
     F.token = 0xED17;
     F.tag_result = 1;
@@ -314,7 +304,7 @@ int main(int argc, char **argv)
     {
         char q[256];
         sh_modpublish_compose_question(q, sizeof q, 2, 3u * 1024u * 1024u);
-        CHECK(!strcmp(q, "This map uses 2 mods (3.0 MB). Upload them to the mod store so other players can download them? (asked once)"));
+        CHECK(!strcmp(q, "This map uses 2 mods (3.0 MB). Upload them to the mod store so other players can download them? You are asked this only once."));
         sh_modpublish_compose_question(q, sizeof q, 1, 512);
         CHECK(strstr(q, "uses 1 mod (512 bytes). Upload it") != NULL && strlen(q) < 256);
     }
@@ -711,7 +701,7 @@ int main(int argc, char **argv)
         stub_fail_next("POST /mods/claim", 503);
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(F.resumes == resumes && F.fails == fails + 1);
-        CHECK(strstr(F.toast, "could not be uploaded") != NULL && strstr(F.toast, "It was not published.") != NULL);
+        CHECK(!strcmp(F.toast, "The map was not published: the mod store is busy; try again in a few minutes."));
         PUMP_UNTIL(idle_all());
         /* modsync queued the transient failure under the provisional ref. */
         CHECK(modsync_pending_count() == 1);
@@ -748,31 +738,6 @@ int main(int argc, char **argv)
         CHECK(!sh_modpublish_holding() && F.fails == fails + 1 && F.resumes == resumes);
         CHECK(strstr(F.toast, "saved again") != NULL);
         PUMP_UNTIL(idle_all());
-    }
-
-    printf("-- the toast route cancels once; the next publish is the agreement\n");
-    {
-        int fails = F.fails, resumes = F.resumes, asks = F.asks;
-        CHECK(sh_config_set_json("mods.upload_confirmed", "false"));
-        set_ops(1);
-        sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_after_save(EDITOR) == 0);
-        sh_modpublish_poll();
-        CHECK(!sh_modpublish_holding() && F.fails == fails + 1 && F.asks == asks);
-        CHECK(strstr(F.toast, "Publishing this map uploads its 2 mods") != NULL && strstr(F.toast, "Publish again to agree.") != NULL);
-        CHECK(setting_confirmed() == 1);
-        sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_after_save(EDITOR) == 0 && sh_modpublish_test_state() == 4);
-        PUMP_UNTIL(!sh_modpublish_holding());
-        CHECK(F.resumes == resumes + 1);
-        /* Its context never sees a feed post: the editor leaves, and the
-         * provisional claim is released. */
-        strcpy_s(provisional, sizeof provisional, sh_modpublish_test_provisional());
-        CHECK(stub_live_claim(provisional) != NULL);
-        F.token = 0xED19;
-        PUMP_UNTIL(idle_all() && stub_live_claim(provisional) == NULL);
-        CHECK(stub_live_claim(provisional) == NULL);
-        set_ops(0);
     }
 
     printf("-- the copy gate on both sides of the bound\n");

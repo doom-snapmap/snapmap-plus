@@ -566,8 +566,11 @@ static int mn_status_fail(modnet_result *r, const unsigned char *body, size_t le
     else if (s == 451) code = MODNET_E_BLOCKED;
     else if (s >= 500 && s < 600) code = MODNET_E_UNAVAILABLE;
     else code = MODNET_E_HTTP;
-    if (cause[0]) return mn_fail(r, code, "%s: HTTP %d: %s", what, s, cause);
-    return mn_fail(r, code, "%s: HTTP %d: %s", what, s, modnet_code_text(code));
+    /* The store's own sentence is the message, alone; the status stays in
+     * r->status for the caller's log. */
+    (void)what;
+    if (cause[0]) return mn_fail(r, code, "%s", cause);
+    return mn_fail(r, code, "%s", modnet_code_text(code));
 }
 
 static void mn_begin(modnet_result *r, double *t0)

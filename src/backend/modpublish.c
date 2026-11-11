@@ -54,6 +54,7 @@
 #include "mp_json.h"
 #include "map_carrier.h"
 #include "config.h"
+#include "plain_reason.h"
 
 #define MP_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: the Yes/No shape modpublished.c uses */
 #define MP_BUTTONS_YES_NO  6u
@@ -120,20 +121,8 @@ void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigne
     else strcpy_s(size, sizeof size, "size unknown");
     _snprintf_s(out, cap, _TRUNCATE,
                 "This map uses %u mod%s (%s). Upload %s to the mod store so other players can download %s? "
-                "(asked once)", (unsigned)count, count == 1 ? "" : "s", size, count == 1 ? "it" : "them",
+                "You are asked this only once.", (unsigned)count, count == 1 ? "" : "s", size, count == 1 ? "it" : "them",
                 count == 1 ? "it" : "them");
-}
-
-void sh_modpublish_compose_toast_question(char *out, size_t cap, size_t count, unsigned long long bytes)
-{
-    char size[32];
-    if (!out || !cap) return;
-    if (cap > MP_TEXT_CAP) cap = MP_TEXT_CAP;
-    if (bytes) sh_modpublish_size_text(size, sizeof size, bytes);
-    else strcpy_s(size, sizeof size, "size unknown");
-    _snprintf_s(out, cap, _TRUNCATE,
-                "Publishing this map uploads its %u mod%s (%s) to the mod store so other players can download %s. "
-                "Publish again to agree.", (unsigned)count, count == 1 ? "" : "s", size, count == 1 ? "it" : "them");
 }
 
 /* ------------------------------------------------------------ the save record */
@@ -745,7 +734,8 @@ int sh_modpublish_after_save(void *editor)
     if (!h->hashes) {
         mp_log("MODS: publish refused: no memory to hold the bundle set");
         if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
-        mp_editor_notice(editor, "The map's mods could not be prepared for upload. It was not published.");
+        mp_editor_notice(editor, "The map was not published: Snapmap+ ran out of memory preparing its mods. Restart "
+                                 "DOOM and publish again.");
         return 0;
     }
     memcpy(h->hashes, g_save.hashes, g_save.count * sizeof(*h->hashes));
@@ -1230,8 +1220,13 @@ static void mp_upload_finished(void)
     void *editor = h->editor;
     if (!job->ok) {
         const char *cause = job->st.cause[0] ? job->st.cause : modnet_code_text(job->st.code);
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The map's mods could not be uploaded (%s). It was not published.",
-                    cause);
+        char reason[200];
+        if (job->st.code == MODNET_E_REFUSED && job->st.cause[0])
+            /* The mod store's own sentence, shown alone. */
+            _snprintf_s(line, sizeof line, _TRUNCATE, "The map was not published. %s", job->st.cause);
+        else
+            _snprintf_s(line, sizeof line, _TRUNCATE, "The map was not published: %s.",
+                        sh_reason(SH_REASON_STORE, job->st.code, NULL, 0, reason, sizeof reason));
         mp_logf("MODS: publish: the upload of %d bundle(s) failed after %u request(s): %s%s", h->count,
                 job->st.requests, cause, job->st.queued ? " (left in the retry queue)" : "");
         mp_cancel(line, "the upload failed");
@@ -1287,26 +1282,14 @@ static void mp_poll_hold(void)
         if (g_notice_ticket) break;
         if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
             if (++h->waited > MP_RAISE_TICKS)
-                mp_cancel("The mod upload question could not be shown. The map was not published.",
+                mp_cancel("The map was not published: the upload question could not be shown. Publish it again.",
                           "the dialog surface never became idle");
             break;
         }
         h->ticket = mp_upload_question(h, text, sizeof text);
-        if (h->ticket == SH_MODPUBLISH_ASKED_BY_TOAST) {
-            /* Informed, not asked: the explanation is on screen; the next
-             * publish is the agreement. */
-            void *editor = h->editor;
-            h->ticket = 0;
-            if (!sh_config_set_json(MP_SETTING, "true"))
-                mp_log("MODS: publish: the upload agreement could not be saved; it will be shown again");
-            mp_logf("MODS: publish: cancelled: the first-time upload explanation was shown as a toast");
-            mp_hold_free();
-            if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
-            break;
-        }
         if (h->ticket <= 0) {
             h->ticket = 0;
-            mp_cancel("The mod upload question could not be shown. The map was not published.",
+            mp_cancel("The map was not published: the upload question could not be shown. Publish it again.",
                       "the dialog would not raise; nothing is uploaded without an answer");
             break;
         }
@@ -1325,14 +1308,14 @@ static void mp_poll_hold(void)
         }
         if (!sh_config_set_json(MP_SETTING, "true"))
             mp_log("MODS: publish: the upload agreement could not be saved; it will be asked again");
-        else mp_log("MODS: publish: the player agreed to upload mods at publish (asked once)");
+        else mp_log("MODS: publish: the player agreed to upload mods at publish");
         h->state = HOLD_WORKER;
         /* fall through */
     case HOLD_WORKER:
         if (!h->job) {
             h->job = mp_job_new(JOB_UPLOAD, h->ref, (const char (*)[MP_MOD_CAP])h->hashes, h->count);
-            if (!h->job) { mp_cancel("The map's mods could not be uploaded (out of memory). It was not published.",
-                                     "no memory for the upload job"); break; }
+            if (!h->job) { mp_cancel("The map was not published: Snapmap+ ran out of memory preparing its mods. Restart "
+                                     "DOOM and publish again.", "no memory for the upload job"); break; }
         }
         rc = mp_job_start(h->job);
         if (rc == 1) {
@@ -1629,13 +1612,10 @@ static void eng_editor_notice(void *c, void *editor, const char *text)
     }
 }
 
-/* The first-time upload question, two routes (pick one in ENG_UPLOAD_QUESTION):
- *   dialog  the native Yes/No (GDM 0x29, button set 6) through engine_dialog,
- *           raised over the editor; unverified inside the editor, where a
- *           shell dialog may activate the browser (fault_shield/engine_layout.h)
- *   toast   the editor toast PublishFail itself uses (VK 0x1272760 / GL
- *           0x1271D10 on editor+0x21088): the explanation is shown, this
- *           publish is cancelled, and publishing again is the agreement */
+/* The first-time upload question: the native Yes/No (GDM 0x29, button set 6)
+ * through engine_dialog, raised over the editor. Its behaviour inside the
+ * editor, where a shell dialog may activate the browser
+ * (fault_shield/engine_layout.h), needs a live check. */
 static int eng_upload_question_dialog(void *c, void *editor, size_t count, unsigned long long bytes)
 {
     char text[MP_TEXT_CAP];
@@ -1804,11 +1784,10 @@ static int eng_published_query(void *c, const char *cloud_id, unsigned ticket)
     return 1;
 }
 
-#define ENG_UPLOAD_QUESTION eng_upload_question_dialog
 
 static const sh_modpublish_ops ENG_OPS = {
     NULL, eng_on_main, eng_can_ask, eng_ask, eng_poll, eng_release, eng_editor_token, eng_publish_fail,
-    eng_resume, eng_editor_notice, ENG_UPLOAD_QUESTION, eng_log, eng_add_tag, eng_edit_ids, eng_published_query,
+    eng_resume, eng_editor_notice, eng_upload_question_dialog, eng_log, eng_add_tag, eng_edit_ids, eng_published_query,
     eng_remove_tag
 };
 
