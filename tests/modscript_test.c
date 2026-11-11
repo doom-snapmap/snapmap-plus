@@ -283,12 +283,23 @@ static void test_builds(void)
 
     good_mod(dir, sizeof dir);
     mt_write(dir, "assets\\mods\\" SALT "\\door.lua", "api = 1\n");
-    refused(dir, "assets/mods/" SALT "/door.lua: a script goes in the scripts folder inside this mod's own folder");
+    /* Named in the author's words, under the mod folder's name; never the salt. */
+    {
+        sh_mb_bundle b;
+        char want[256];
+        const char *folder = strrchr(dir, '\\') + 1;
+        CHECK(!build(dir, &b) && !strstr(b.first_cause, SALT));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "assets\\mods\\%s\\door.lua: a script goes in this mod's own "
+                    "scripts folder, assets\\mods\\%s\\scripts\\ for the files that run or assets\\mods\\%s\\scripts\\lib\\ "
+                    "for the files loaded with require; move it there", folder, folder, folder);
+        CHECK(!strcmp(b.first_cause, want));
+        if (strcmp(b.first_cause, want)) fprintf(stderr, "    got: %s%c", b.first_cause, 10);
+        sh_mb_free(&b);
+    }
 
     good_mod(dir, sizeof dir);
     mt_write(dir, "assets\\mods\\" SALT "\\scripts\\more\\b.lua", "api = 1\n");
-    refused(dir, "a script goes in the scripts folder inside this mod's own folder: scripts\\ for the files that run, "
-                 "scripts\\lib\\ for the files loaded with require; move it there");
+    refused(dir, "scripts\\more\\b.lua: a script goes in this mod's own scripts folder");
 
     good_mod(dir, sizeof dir);
     mt_write(dir, ENTRY, "-- no api line\nprint(1)\n");

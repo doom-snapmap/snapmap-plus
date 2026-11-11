@@ -888,6 +888,23 @@ void sh_mb_script_file_name(const char *request, char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "%s", request ? request : "");
 }
 
+void sh_mb_script_where(const char *child, const char *salt, const char *folder, char *out, size_t cap)
+{
+    size_t n = salt ? strlen(salt) : 0, len;
+    char *p;
+    if (!out || !cap) return;
+    if (!folder || !folder[0]) folder = "<this mod's folder>";
+    if (n && child && !_strnicmp(child, "assets/mods/", 12) && !_strnicmp(child + 12, salt, n) && child[12 + n] == '/')
+        _snprintf_s(out, cap, _TRUNCATE, "assets/mods/%s/%s", folder, child + 13 + n);
+    else
+        _snprintf_s(out, cap, _TRUNCATE, "%s", child ? child : "");
+    for (p = out; *p; p++) if (*p == '/') *p = '\\';
+    len = strlen(out);
+    _snprintf_s(out + len, cap - len, _TRUNCATE, ": a script goes in this mod's own scripts folder, "
+                "assets\\mods\\%s\\scripts\\ for the files that run or assets\\mods\\%s\\scripts\\lib\\ for the files "
+                "loaded with require; move it there", folder, folder);
+}
+
 static volatile sh_mb_script_check_fn g_mb_script_check;
 
 void sh_mb_set_script_check(sh_mb_script_check_fn fn)
@@ -2663,6 +2680,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
 typedef struct mb_walk {
     sh_mb_bundle *b;
     wchar_t *root;          /* the mod folder, long form */
+    const char *folder;     /* its name, as the author named it (UTF-8) */
     int stopped;            /* a cap was hit; stop collecting */
     int stock;              /* a stock reader is registered: defer type and size refusals */
 } mb_walk;
@@ -2715,7 +2733,9 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
             } else if (mb_rp_forbidden(req_lower)) {
                 mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
             } else if (sh_mb_script_request(req_lower, NULL, NULL) == SH_MB_SCRIPT_MISPLACED) {
-                mb_error(w->b, "%s: " SH_MB_SCRIPT_WHERE, child);
+                char where[SH_MB_CAUSE_MAX];
+                sh_mb_script_where(child, w->b->id, w->folder, where, sizeof where);
+                mb_error(w->b, "%s", where);
             } else if (sh_script_node_reserved(w->b->id, req_lower)) {
                 mb_error(w->b, "%s: " SH_MB_SCRIPT_NODE_RESERVED, child);
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
@@ -6348,9 +6368,14 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
 
     w.b = out;
     w.root = root;
+    {
+        const wchar_t *leaf = wcsrchr(root, L'\\');
+        w.folder = sh_mb_utf8(leaf ? leaf + 1 : root);
+    }
     w.stopped = 0;
     w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
     mb_walk_top(&w);
+    free((void *)w.folder);
     if (!out->errors) {
         /* Identity: the folder's files live under mods/<its salt>/. */
         char cause[SH_MB_CAUSE_MAX];

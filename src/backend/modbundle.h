@@ -548,7 +548,8 @@ int  sh_mb_extension_allowed(const char *request);
 /* What `request` (lower-cased, below assets/) is to scripts: SH_MB_SCRIPT_ENTRY
  * or SH_MB_SCRIPT_LIB for a script path (`*name` then points at its <name>,
  * `*name_len` its length; either may be NULL), SH_MB_SCRIPT_MISPLACED for any
- * other .lua (refused with SH_MB_SCRIPT_WHERE), else 0. Pure. */
+ * other .lua (refused at build with the sentence of sh_mb_script_where), else
+ * 0. Pure. */
 #define SH_MB_SCRIPT_ENTRY      1
 #define SH_MB_SCRIPT_LIB        2
 #define SH_MB_SCRIPT_MISPLACED  (-1)
@@ -557,10 +558,14 @@ int  sh_mb_extension_allowed(const char *request);
 #define SH_MB_SCRIPT_NODE_RESERVED \
     "Snapmap+ makes this mod's Script node at this path, so the file cannot be here; remove it or give it another " \
     "name"
-#define SH_MB_SCRIPT_WHERE \
-    "a script goes in the scripts folder inside this mod's own folder: scripts\\ for the files that run, " \
-    "scripts\\lib\\ for the files loaded with require; move it there"
 int  sh_mb_script_request(const char *request, const char **name, size_t *name_len);
+
+/* The build's sentence for a misplaced script `child` (its path in the mod
+ * folder, "assets/..."), in the author's words: a file under the mod's own
+ * folder is named under the mod folder's name (assets\mods\<folder>\...),
+ * as the author wrote it, never under the salt the scan moved it to, and the
+ * sentence names where scripts go in that same folder. */
+void sh_mb_script_where(const char *child, const char *salt, const char *folder, char *out, size_t cap);
 
 /* The author's spelling of a script request: "scripts\<name>.lua" or
  * "scripts\lib\<name>.lua", the name every script message uses. */
