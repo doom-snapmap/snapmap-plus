@@ -15,6 +15,7 @@ static int failures;
 } while (0)
 
 void backend_log(const char *msg) { (void)msg; }
+const wchar_t *sh_host_dir(void) { return L""; }
 const char *sh_megapreview_name_at(int index) { (void)index; return NULL; }
 int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsigned w, unsigned h)
 { (void)generation; (void)rgba; (void)w; (void)h; return SH_PREVIEW_PUBLISHED; }
@@ -138,10 +139,10 @@ static void check_catalog_root(const char *root)
 {
     reset_records();
     memset(g_box, 0, sizeof g_box);
-    _snprintf_s(g_baseDir, sizeof g_baseDir, _TRUNCATE, "%s", root);
+    _snwprintf_s(g_baseDir, sizeof g_baseDir / sizeof g_baseDir[0], _TRUNCATE, L"%hs", root);
 
-    int snap = imgpreview_load_box(0, "snap_gameresources");
-    int game = imgpreview_load_box(1, "gameresources");
+    int snap = imgpreview_load_box(0, L"snap_gameresources");
+    int game = imgpreview_load_box(1, L"gameresources");
     size_t raw = g_box[0].idxLen + g_box[1].idxLen;
     size_t released = imgpreview_compact_names();
     CHECK(snap == 1 && game == 1);

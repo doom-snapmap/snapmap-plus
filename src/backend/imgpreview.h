@@ -5,18 +5,19 @@
 #ifndef BACKEND_IMGPREVIEW_H
 #define BACKEND_IMGPREVIEW_H
 
-/* One-time setup. Cheap: resource indexes are parsed lazily on the first request, and optional
- * Wwise/.vmtr catalog metadata waits for its corresponding category. Always returns 1. */
+/* Startup note for the log. Nothing needs setting up: resource indexes are parsed lazily on the
+ * first request, and optional Wwise/.vmtr catalog metadata waits for its category. Returns 1. */
 int sh_imgpreview_install(void);
 
 /* Resolve a material name through its decl to an image, or accept a direct image name, decode it to
- * RGBA, and publish through sh_preview_publish. Returns 1 if something was published, 0 otherwise.
- * Call it only AFTER the megatexture route has declined for a material request. */
-int sh_imgpreview_produce(const char *name, unsigned long generation);
+ * RGBA, and publish through sh_preview_publish. Returns SH_PREVIEW_PUBLISHED, SH_PREVIEW_STALE, or
+ * SH_PREVIEW_FAILED with the plain reason the Assets tab shows in *why. Call it only AFTER the
+ * megatexture route has declined for a material request. */
+int sh_imgpreview_produce(const char *name, unsigned long generation, const char **why);
 
-/* Decode exactly the named Image record. Unlike the compatibility producer above, this never treats a
- * same-named Material as authoritative and is called before any VMTR work for a typed Image selection. */
-int sh_imgpreview_produce_image(const char *name, unsigned long generation);
+/* Decode exactly the named Image record. Unlike the producer above, this never treats a same-named
+ * Material as authoritative and is called before any VMTR work for a typed Image selection. */
+int sh_imgpreview_produce_image(const char *name, unsigned long generation, const char **why);
 
 /* The SH_ASSET_* type ids live in the shared ABI header -- the UI sends one across the iface. */
 #include "../common/snapmap_plus_iface.h"

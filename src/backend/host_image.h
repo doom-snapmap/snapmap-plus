@@ -23,6 +23,11 @@ size_t sh_host_image_size(void);
  * Use this for log lines and crash records so a report names the build it came from. */
 const char *sh_host_image_name(void);
 
+/* The folder holding the host executable, without a trailing separator, or
+ * L"" if unresolved. It is held whole however long it is; the game's own
+ * files (base, virtualtextures) are found from here. */
+const wchar_t *sh_host_dir(void);
+
 /* Infer Vulkan (1), OpenGL (0), or unresolved (-1) from loaded renderer libraries. */
 int sh_host_is_vulkan(void);
 

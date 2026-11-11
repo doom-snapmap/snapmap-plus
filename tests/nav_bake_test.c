@@ -64,12 +64,13 @@ static unsigned char *no_shipped_bytes(const char *name, size_t *out_len)
     return NULL;
 }
 
+static int g_damaged;   /* the stub validator refuses every file */
 int sh_navmesh_validate_aas(const unsigned char *payload, size_t len,
                             char *err, size_t err_cap)
 {
     (void)payload; (void)len;
-    if (err && err_cap) err[0] = 0;
-    return 1;
+    if (err && err_cap) strcpy_s(err, err_cap, g_damaged ? "edge 3 references a vertex outside the 2 present" : "");
+    return !g_damaged;
 }
 
 /* ---- synthetic maps ---------------------------------------------------- */
@@ -319,7 +320,7 @@ static void test_open_never_reads_the_live_editor(void)
 
     printf("a bake never reads the live editor (issues #87/#89)\n");
     sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
+    sh_nav_bake_set_live_editor(live_valid, live_json, NULL, NULL);
     live_reset();
 
     json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
@@ -333,48 +334,12 @@ static void test_open_never_reads_the_live_editor(void)
     (void)sh_nav_bake_open("maps/modules/ind_dlc/room/room.aas_monster128",
                            no_shipped_bytes, &bytes, &len);
 
-    CHECK_MSG(g_live_count_calls == 0,
-              "an open must not ask the editor how many entities it has");
     CHECK_MSG(g_live_valid_calls == 0,
               "an open must not probe live entity ids");
     CHECK_MSG(g_live_json_calls == 0,
               "an open must not serialize a live entity -- that is the EntityClone fault");
 
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
-}
-
-/* Editor-side refresh must include unsaved navigation toggles in the plan. */
-static void test_refresh_live_is_callable_from_the_editor(void)
-{
-    const int owner[1] = { 0 };
-    char *json;
-
-    printf("the editor-side refresh reads the live editor\n");
-    sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
-    live_reset();
-
-    json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
-    sh_nav_bake_set_map(json, strlen(json));
-
-    sh_nav_bake_refresh_live();
-    CHECK_MSG(g_live_count_calls > 0,
-              "the editor-side refresh is what reads the live surface now");
-
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
-}
-
-/* Without a map there is nothing to attribute a live mark to, and the refresh
- * must be a no-op rather than a scan -- it is called from the editor tick. */
-static void test_refresh_live_without_a_map_is_a_no_op(void)
-{
-    printf("the editor-side refresh does nothing without a map\n");
-    sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
-    live_reset();
-    sh_nav_bake_refresh_live();
-    CHECK_MSG(g_live_count_calls == 0, "no map means nothing to refresh");
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
 }
 
 static const char *g_snapshot_json;
@@ -648,7 +613,7 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     int read = 0;
     sh_nav_bake_test_reset();
     sh_nav_bake_set_snapshot(snapshot_read, NULL);
-    sh_nav_bake_set_live_editor(live_count, box_valid, box_json, NULL, NULL);
+    sh_nav_bake_set_live_editor(box_valid, box_json, NULL, NULL);
     g_snapshot_json = make_map("ind_dlc/room", 1, 2, 1, 3, owner);
     sh_nav_bake_refresh_live();
     sh_nav_bake_test_copy_map(&before);
@@ -687,7 +652,7 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     sh_nav_bake_test_copy_map(&after);
     CHECK(after.region_count == 0 && after.obstacle_count == 0);
     g_box_missing = 0; g_box_x = 0; g_box_blocks = 3; g_box_marked = 1;
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
     sh_nav_bake_set_snapshot(NULL, NULL);
 }
 
@@ -770,51 +735,6 @@ static void test_source_invalidation_retires_cached_and_inflight_results(void)
     sh_nav_bake_test_reset();
 }
 
-typedef struct guarded_read {
-    HANDLE started;
-    const char *name;
-    unsigned char *bytes;
-    size_t length;
-    int result;
-} guarded_read;
-static DWORD WINAPI guarded_reader(LPVOID context)
-{
-    guarded_read *read = (guarded_read *)context;
-    SetEvent(read->started);
-    read->result = sh_nav_bake_open(read->name, no_shipped_bytes, &read->bytes, &read->length);
-    return 0;
-}
-static void test_source_update_guards_navigation_reads(void)
-{
-    const int owner[] = {0};
-    const char *raw = "maps/modules/ind_dlc/room/room.aas_monster48";
-    char requested[384];
-    char *json = make_map("ind_dlc/room", 1, 1, 1, 1, owner);
-    unsigned long revision;
-    int committed;
-    sh_nav_bake_test_reset(); sh_nav_bake_set_map(json, strlen(json)); sh_nav_bake_enable_instances(1);
-    revision = sh_nav_bake_geometry_revision();
-    CHECK(sh_nav_bake_instance_name(0, raw, requested, sizeof(requested)));
-    sh_nav_bake_test_preview_complete(revision, "held cache");
-    for (committed = 0; committed < 2; committed++) {
-        guarded_read read = {0};
-        HANDLE thread;
-        read.name = requested; read.started = CreateEventA(NULL, TRUE, FALSE, NULL);
-        CHECK(read.started != NULL);
-        sh_nav_bake_source_update_begin();
-        thread = CreateThread(NULL, 0, guarded_reader, &read, 0, NULL); CHECK(thread != NULL);
-        CHECK(WaitForSingleObject(read.started, 5000) == WAIT_OBJECT_0);
-        CHECK(WaitForSingleObject(thread, 30) == WAIT_TIMEOUT);
-        sh_nav_bake_source_update_end(committed);
-        CHECK(WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0);
-        CHECK(committed ? (!read.result && !read.bytes && !read.length) :
-            (read.result && read.bytes && read.length == 10 && !memcmp(read.bytes, "held cache", 10)));
-        CHECK(committed ? sh_nav_bake_geometry_revision() != revision : sh_nav_bake_geometry_revision() == revision);
-        if (read.bytes) HeapFree(GetProcessHeap(), 0, read.bytes);
-        CloseHandle(thread); CloseHandle(read.started);
-    }
-    sh_nav_bake_test_reset();
-}
 
 
 /* ---- degrading instead of refusing ------------------------------------ */
@@ -968,6 +888,9 @@ static void test_toast_names_the_room_and_reason(void)
     CHECK(log_contains("  monster48   built"));
     CHECK(log_contains("  ind_dlc/room  copy 1  "));
     CHECK(log_contains("status"));
+    CHECK(!log_contains("  bake cache: "));          /* developer detail: sh_navmesh detail */
+    g_log_count = 0;
+    sh_nav_bake_report_detail(report_line);
     CHECK(log_contains("  bake cache: "));
     {
         int i, longest = 0;
@@ -979,8 +902,9 @@ static void test_toast_names_the_room_and_reason(void)
     sh_nav_bake_summary_get(&s);
     sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
     CHECK(!strcmp(title, "Navmesh Partly Built"));
-    CHECK(strstr(body, "2 of 2 rooms built, partly") != NULL);
+    CHECK(strstr(body, "2 of 2 rooms built.") != NULL);
     CHECK(strstr(body, "256-per-area") != NULL);
+    CHECK(strstr(body, "Boxes drawn red or amber are the ones left out.") != NULL);
 
     sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_BUILT, "");
     sh_nav_bake_summary_get(&s);
@@ -1003,16 +927,18 @@ static void test_toast_names_the_room_and_reason(void)
     sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
     CHECK(!strcmp(title, "Navmesh Build Failed"));
     CHECK(strstr(body, "No room could be built. room (copy 0)") != NULL);
+    CHECK(strstr(body, "The boxes drawn red are the ones to move.") != NULL);
 
     /* A very long room name and reason are shortened in the middle; the
-     * pointer to sh_navmesh at the end survives. */
+     * sentence about the red boxes at the end survives. */
     {
         sh_nav_bake_summary longer = s;
         memset(longer.first, 'x', sizeof longer.first - 1);
         longer.first[sizeof longer.first - 1] = 0;
         sh_nav_bake_toast(&longer, 1, title, sizeof title, body, sizeof body);
         CHECK(strlen(body) < SH_NAV_TOAST_BODY_CAP);
-        CHECK(strstr(body, "See sh_navmesh.") != NULL && strstr(body, "...") != NULL);
+        CHECK(strstr(body, "drawn red") != NULL && strstr(body, "...") != NULL);
+        CHECK(strstr(body, "sh_navmesh") == NULL);
     }
 
     sh_nav_bake_toast(&s, 0, title, sizeof title, body, sizeof body);
@@ -1111,14 +1037,46 @@ static void test_tree_depth_limit_keeps_most_floors(void)
         if (state != SH_NAV_CLASS_REFUSED) break;
     }
     CHECK(state == SH_NAV_CLASS_PARTIAL);
-    CHECK(strstr(brief, "left out at the 128 tree-depth limit") != NULL);
+    CHECK(strstr(brief, "boxes left out (too many overlap); spread or merge them") != NULL);
     CHECK(marks > 0);
     /* A limit nothing fits under is a named refusal. */
     sh_aug_test_set_depth_limit(1);
     state = sh_nav_bake_test_run("depth", p, 12, module, len, brief, sizeof brief, &marks);
     CHECK(state == SH_NAV_CLASS_REFUSED);
-    CHECK(!strcmp(brief, "navigation tree deeper than 128"));
+    CHECK(!strcmp(brief, "too many boxes overlap in this room; spread or merge some"));
     sh_aug_test_set_depth_limit(was);
+    free(module);
+}
+
+/* A damaged navigation file (a corrupt or mod-supplied one) is refused before
+ * the bake reads a record of it, with a reason the player can act on. */
+static void test_damaged_module_file_is_refused(void)
+{
+    sh_aug_platform p[1];
+    unsigned char *module;
+    size_t len = 0;
+    char brief[128];
+    int marks = 0, state;
+    printf("a damaged module navigation file is refused before the bake reads it\n");
+    module = fixture_module(&len);
+    CHECK(module != NULL);
+    if (!module) return;
+    memset(p, 0, sizeof p);
+    p[0].c[0][0] = 0;   p[0].c[0][1] = 200;
+    p[0].c[1][0] = 200; p[0].c[1][1] = 200;
+    p[0].c[2][0] = 200; p[0].c[2][1] = -200;
+    p[0].c[3][0] = 0;   p[0].c[3][1] = -200;
+    p[0].c[0][2] = p[0].c[1][2] = p[0].c[2][2] = p[0].c[3][2] = 16.0f;
+    p[0].n[2] = 1.0f; p[0].face = 4; p[0].depth = 16.0f;
+    strcpy_s(p[0].name, sizeof p[0].name, "volume 0");
+    g_damaged = 1;
+    state = sh_nav_bake_test_run("damaged", p, 1, module, len, brief, sizeof brief, &marks);
+    g_damaged = 0;
+    CHECK(state == SH_NAV_CLASS_REFUSED);
+    CHECK(!strcmp(brief, "this module's own navigation file is damaged"));
+    CHECK(strstr(sh_nav_bake_test_last_reason(), "references a vertex") != NULL);
+    state = sh_nav_bake_test_run("damaged", p, 1, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_BUILT);
     free(module);
 }
 
@@ -1156,7 +1114,7 @@ static void test_payload_cap_thins_instead_of_refusing(void)
     state = sh_nav_bake_test_run("size", p, 12, module, len, brief, sizeof brief, &marks);
     CHECK(state == SH_NAV_CLASS_PARTIAL);
     CHECK(sh_nav_bake_test_last_length() > 0 && sh_nav_bake_test_last_length() <= full - 64);
-    CHECK(strstr(brief, "file limit") != NULL);
+    CHECK(strstr(brief, "too many boxes in this room") != NULL);
     CHECK(strstr(sh_nav_bake_test_last_reason(), "to keep the navigation file within") != NULL);
     CHECK(strstr(sh_nav_bake_test_last_reason(), "did not produce") == NULL);
     /* Barely above the module's own file: only floors can go; at worst it is a
@@ -1164,7 +1122,7 @@ static void test_payload_cap_thins_instead_of_refusing(void)
     sh_aas_test_set_payload_cap(len + 8);
     state = sh_nav_bake_test_run("size", p, 12, module, len, brief, sizeof brief, &marks);
     CHECK(state == SH_NAV_CLASS_REFUSED);
-    CHECK(strstr(brief, "navigation file over") != NULL);
+    CHECK(strstr(brief, "too many boxes for one navigation file") != NULL);
     CHECK(strstr(sh_nav_bake_test_last_reason(), "MiB is served per room") != NULL);
     sh_aas_test_set_payload_cap(0);
     free(module);
@@ -1641,11 +1599,11 @@ static void test_cache_keeps_to_its_budget(void)
 
 int main(void)
 {
+    test_damaged_module_file_is_refused();
     printf("nav_bake_test\n");
     test_fast_snapshot_reads_ids_and_obstacles();
     test_empty_preview_completes();
     test_source_invalidation_retires_cached_and_inflight_results();
-    test_source_update_guards_navigation_reads();
     test_name_grammar();
     test_marked_volume_is_planned();
     test_unmarked_map_is_silent();
@@ -1656,8 +1614,6 @@ int main(void)
     test_open_is_total();
     test_malformed_map_does_not_take_the_load_down();
     test_open_never_reads_the_live_editor();
-    test_refresh_live_is_callable_from_the_editor();
-    test_refresh_live_without_a_map_is_a_no_op();
     test_complete_snapshot_tracks_creation_and_deletion();
     test_refused_read_holds_no_map();
     test_snapshot_moves_and_changes_ownership();

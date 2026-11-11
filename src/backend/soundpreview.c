@@ -5,6 +5,9 @@
 #include <string.h>
 #include "soundpreview.h"
 #include "imgpreview.h"      /* sh_imgpreview_has -- the name gate in front of the engine's find */
+#include "engine_globals.h"
+#include "engine_build.h"
+#include "engine_cvar_read.h"
 #include "backend_log.h"
 
 /* idSoundWorld PREVIEW: void*(this, uint64 *outHandle, const char *name). Slot +0x30. */
@@ -50,8 +53,7 @@ typedef enum { SP_OP_PLAY = 0, SP_OP_STOP, SP_OP_SESSION_ON, SP_OP_SESSION_OFF }
 typedef struct { sp_op op; unsigned long sequence; char name[SP_NAME_CAP]; } sp_item;
 static sp_item          g_queue[SP_QUEUE_MAX];
 static int              g_qhead, g_qcount;
-static CRITICAL_SECTION g_qlock;
-static int              g_qlock_init;
+static SRWLOCK          g_qlock = SRWLOCK_INIT;
 static volatile LONG    g_cmd_registered;
 static volatile LONG    g_post_sequence;
 static snd_buffer_cmd_fn  g_buffer_cmd;
@@ -76,14 +78,57 @@ static const uint8_t SP_STOP_PROLOGUE[] = {
 };
 
 static unsigned long long g_handle;    /* the one live preview, 0 = nothing playing */
+static void              *g_handle_world;   /* the sound world that handle belongs to */
 
 /* Preview mode enables background audio plus the native solo/forced-listener
  * settings. g_session holds the mode while the browser is open; g_mode_on
  * records whether it is active. Without a session, play enters the mode and
- * stop leaves it.
+ * stop leaves it. Entering saves the player's own three settings and leaving
+ * puts exactly those back.
  */
 static int g_session;
 static int g_mode_on;
+
+#define SP_SOLO_CAP 256
+typedef struct sp_saved {
+    int  background, force_listener;
+    char solo[SP_SOLO_CAP];
+} sp_saved;
+static sp_saved          g_saved;
+static const uint8_t    *g_cvar_slot;          /* the cvar system's global slot */
+
+/* Why the last audition was refused, in one plain sentence; empty when it was accepted. */
+static SRWLOCK g_why_lock = SRWLOCK_INIT;
+static char    g_why[160];
+
+#define WHY_UNAVAILABLE "Sound preview is not available on this game build."
+#define WHY_NOT_SOUND   "That sound is not in the game's files."
+#define WHY_NO_MAP      "Sounds play only inside a map."
+#define WHY_BUSY        "Sound preview could not start; try again."
+#define WHY_DECLINED    "The game could not play that sound."
+
+static void sp_refuse(const char *why)
+{
+    AcquireSRWLockExclusive(&g_why_lock);
+    strncpy_s(g_why, sizeof g_why, why ? why : "", _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_why_lock);
+    if (why && why[0]) {
+        char l[200];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "soundpreview: refused: %s", why);
+        backend_log(l);
+    }
+}
+
+int sh_soundpreview_refusal(char *out, size_t cap)
+{
+    int refused;
+    if (!out || !cap) return 0;
+    AcquireSRWLockShared(&g_why_lock);
+    refused = g_why[0] != '\0';
+    strncpy_s(out, cap, g_why, _TRUNCATE);
+    ReleaseSRWLockShared(&g_why_lock);
+    return refused;
+}
 
 /* Decode RIP-relative loads for any destination register: ModRM must satisfy
  * (modrm & 0xc7) == 0x05. The shared command helper accepts fewer destination
@@ -135,7 +180,7 @@ static int sp_bind_stop(void *world)
         if (slot_preview != (void *)g_preview) {
             char l[200];
             _snprintf_s(l, sizeof l, _TRUNCATE,
-                "B2: soundpreview -- vtable+0x30 is %p but the signature found %p; layout moved, "
+                "soundpreview: vtable+0x30 is %p but the signature found %p; layout moved, "
                 "refusing to trust +0x98", slot_preview, (void *)g_preview);
             backend_log(l);
             return 0;
@@ -146,7 +191,7 @@ static int sp_bind_stop(void *world)
             if (stop[i] != SP_STOP_PROLOGUE[i]) {
                 char l[200];
                 _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "B2: soundpreview -- vtable+0x98 -> %p does not look like StopSound (byte %zu); refusing",
+                    "soundpreview: vtable+0x98 -> %p does not look like StopSound (byte %zu); refusing",
                     (const void *)stop, i);
                 backend_log(l);
                 return 0;
@@ -155,7 +200,7 @@ static int sp_bind_stop(void *world)
         g_stop_bound = 1;
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-            "B2: soundpreview -- stop bound from vtable+0x98 -> %p (vtable verified via +0x30)",
+            "soundpreview: stop bound from vtable+0x98 -> %p (vtable verified via +0x30)",
             (const void *)stop);
         backend_log(l);
         return 1;
@@ -186,10 +231,10 @@ static void __cdecl sp_drain_cmd(void)
     /* Runs on the DOOM main thread. Drain everything queued since the last frame, in order. */
     for (;;) {
         sp_item it;
-        if (g_qlock_init) EnterCriticalSection(&g_qlock);
+        AcquireSRWLockExclusive(&g_qlock);
         int have = g_qcount > 0;
         if (have) { it = g_queue[g_qhead]; g_qhead = (g_qhead + 1) % SP_QUEUE_MAX; g_qcount--; }
-        if (g_qlock_init) LeaveCriticalSection(&g_qlock);
+        ReleaseSRWLockExclusive(&g_qlock);
         if (!have) return;
 
         switch (it.op) {
@@ -215,7 +260,7 @@ static int sp_ensure_command(void)
         InterlockedExchange(&g_cmd_registered, 0);
         return 0;
     }
-    backend_log("B2: soundpreview -- " SP_CMD_NAME " registered (auditions now run on the main thread)");
+    backend_log("soundpreview: " SP_CMD_NAME " registered; auditions run on the main thread");
     return 1;
 }
 
@@ -239,7 +284,7 @@ static int sp_post(sp_op op, const char *name)
     sp_item dropped;
     int dropped_oldest = 0;
 
-    if (g_qlock_init) EnterCriticalSection(&g_qlock);
+    AcquireSRWLockExclusive(&g_qlock);
     if (g_qcount == SP_QUEUE_MAX) {          /* full: drop the oldest, keep the newest intent */
         dropped = g_queue[g_qhead];
         dropped_oldest = 1;
@@ -275,7 +320,7 @@ static int sp_post(sp_op op, const char *name)
             g_qcount++;
         }
     }
-    if (g_qlock_init) LeaveCriticalSection(&g_qlock);
+    ReleaseSRWLockExclusive(&g_qlock);
 
     if (!enq) backend_log("soundpreview: REFUSED -- main-thread command could not be buffered");
     else if (dropped_oldest) backend_log("soundpreview: queue full -- dropped the oldest pending operation");
@@ -287,10 +332,8 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
 {
     if (g_installed) return g_preview != NULL;
     g_installed = 1;
-    (void)module_base;
     g_cmdsys = cmdsys;
-
-    if (!g_qlock_init) { InitializeCriticalSection(&g_qlock); g_qlock_init = 1; }
+    g_cvar_slot = module_base ? (const uint8_t *)glb_resolve(module_base, "cvar_system_slot", NULL) : NULL;
 
     const uint8_t *acc = (const uint8_t *)sig_addr_by_name(results, n, "SoundWorldLea");
     if (acc) g_slot = sp_decode_rip_any(acc);
@@ -301,47 +344,83 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
     /* g_stop is NOT resolved here. It comes from the sound world's own vtable at first use --
      * see sp_bind_stop for why a signature cannot find it. */
 
-    if (!g_slot || !g_preview || !g_buffer_cmd || !g_add_command) {
+    if (!g_slot || !g_preview || !g_buffer_cmd || !g_add_command || !g_cvar_slot) {
         char l[260];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-            "B2: soundpreview DISABLED (worldSlot=%p preview=%p bufferCmd=%p addCmd=%p) -- sound "
+            "soundpreview: off (worldSlot=%p preview=%p bufferCmd=%p addCmd=%p cvars=%p); sound "
             "auditioning unavailable", (void *)g_slot, (void *)g_preview,
-            (void *)g_buffer_cmd, (void *)g_add_command);
+            (void *)g_buffer_cmd, (void *)g_add_command, (const void *)g_cvar_slot);
         backend_log(l);
         g_preview = NULL;
         return 0;
     }
     char l[260];
     _snprintf_s(l, sizeof l, _TRUNCATE,
-        "B2: soundpreview installed (worldSlot=%p preview=%p; stop binds from the vtable on first "
+        "soundpreview: installed (worldSlot=%p preview=%p; stop binds from the vtable on first "
         "use; every audition runs on the main thread via " SP_CMD_NAME ")",
         (void *)g_slot, (void *)g_preview);
     backend_log(l);
     return 1;
 }
 
-/* Raise background audio. The engine's preview call writes s_soloSound/s_forceListener itself, so
- * entering the mode only has to do the half the engine does not. Idempotent. */
-static void sp_enter_mode(void)
+/* Read the player's current value of one sound setting: its integer, or its text. */
+static int sp_cvar_int(const char *name, int *value)
 {
-    if (g_mode_on) return;
-    sp_console("s_playSoundInBackground 1");
-    g_mode_on = 1;
-    backend_log("soundpreview: preview mode ON (s_playSoundInBackground 1)");
+    return sh_engine_cvar_read_int(sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name),
+                                   value);
 }
 
-/* Drop the whole mode: the solo/forced-listener pair the engine set, and our background raise.
- * Clearing solo matters even if nothing was playing -- leave it set and every other sound in the
- * editor stays muted. */
+/* idCVar keeps its value as an idStr at +0: length at +0x08, data pointer at +0x10. */
+static int sp_cvar_text(const char *name, char *out, size_t cap)
+{
+    const uint8_t *cvar = (const uint8_t *)sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
+    if (!cvar) return 0;
+    __try {
+        int len = *(const int *)(cvar + 0x08);
+        const char *data = *(const char *const *)(cvar + 0x10);
+        if (len < 0 || (size_t)len >= cap || !data) return 0;
+        memcpy(out, data, (size_t)len);
+        out[len] = '\0';
+        return strchr(out, '"') == NULL;          /* restored through a quoted console line */
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* Save the player's background, solo and forced-listener settings, then raise background audio.
+ * The engine's preview call writes s_soloSound/s_forceListener itself, so entering the mode only
+ * has to do the half the engine does not. Returns 0, changing nothing, when the settings cannot
+ * be read: leaving the mode could not put them back. Idempotent. */
+static int sp_enter_mode(void)
+{
+    if (g_mode_on) return 1;
+    sp_saved saved;
+    if (!sp_cvar_int("s_playSoundInBackground", &saved.background) ||
+        !sp_cvar_int("s_forceListener", &saved.force_listener) ||
+        !sp_cvar_text("s_soloSound", saved.solo, sizeof saved.solo)) {
+        backend_log("soundpreview: the sound settings could not be read, so preview mode was not entered");
+        return 0;
+    }
+    g_saved = saved;
+    sp_console("s_playSoundInBackground 1");
+    g_mode_on = 1;
+    backend_log("soundpreview: preview mode on");
+    return 1;
+}
+
+/* Put the player's own settings back: the solo/forced-listener pair the engine set while
+ * previewing, and the background raise. Restoring solo matters even if nothing was playing --
+ * leave a preview's solo set and every other sound in the editor stays muted. */
 static void sp_leave_mode(void)
 {
-    sp_console("s_soloSound \"\"");
-    sp_console("s_forceListener 0");
-    if (g_mode_on) {
-        sp_console("s_playSoundInBackground 0");
-        g_mode_on = 0;
-        backend_log("soundpreview: preview mode OFF");
-    }
+    char line[SP_SOLO_CAP + 32];
+    if (!g_mode_on) return;
+    _snprintf_s(line, sizeof line, _TRUNCATE, "s_soloSound \"%s\"", g_saved.solo);
+    sp_console(line);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "s_forceListener %d", g_saved.force_listener);
+    sp_console(line);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "s_playSoundInBackground %d", g_saved.background);
+    sp_console(line);
+    g_mode_on = 0;
+    backend_log("soundpreview: preview mode off; the player's sound settings are back");
 }
 
 /* Stop only the current emitter between previews; keep the mode cvars
@@ -349,20 +428,23 @@ static void sp_leave_mode(void)
  */
 static void sp_stop_emitter(void)
 {
+    /* A handle names an emitter of the world that started it. After a map change or s_restart
+     * the slot holds another world, where the same number could be someone else's sound. */
     void *w = sp_world();
-    if (g_handle && w && g_stop) {
+    if (g_handle && w && w == g_handle_world && g_stop) {
         unsigned long long h = g_handle;
         __try { g_stop(w, h); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
-    /* Cleared even if the call faulted or the world went away: the handle names an emitter in a
-     * world that no longer exists, so keeping it can only cause a second bad call later. */
+    /* Cleared even if the call faulted or the world went away: keeping it can only cause a
+     * second bad call later. */
     g_handle = 0;
+    g_handle_world = NULL;
 }
 
 /* MAIN THREAD ONLY (reached via sp_drain_cmd). */
 static void sp_do_session(int on)
 {
-    if (on) { g_session = 1; sp_enter_mode(); return; }
+    if (on) { g_session = 1; (void)sp_enter_mode(); return; }
     g_session = 0;
     sp_stop_emitter();
     sp_leave_mode();
@@ -390,30 +472,22 @@ void sh_soundpreview_stop(void) { sp_post(SP_OP_STOP, NULL); }
 /* MAIN THREAD ONLY (reached via sp_drain_cmd). Everything here touches the live sound world. */
 static void sp_do_play(const char *name)
 {
+    /* The catalog already admitted the name when it was queued (sh_soundpreview_play), and the
+     * catalog never changes, so the main thread does not take its lock again. */
     if (!g_preview || !name || !name[0]) return;
 
-    /* Validate with our catalog before native find-or-create, whose missing-
-     * name behavior can raise an engine error.
-     */
-    if (!sh_imgpreview_has(SH_ASSET_SOUND, name)) {
-        char l[320];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-            "soundpreview: REFUSED '%s' -- not a soundshader in the shipped containers", name);
-        backend_log(l);
-        return;
-    }
-
     void *w = sp_world();
-    if (!w) { backend_log("soundpreview: no sound world (not in a map yet?)"); return; }
+    if (!w) { sp_refuse(WHY_NO_MAP); return; }
 
     /* Bind stopping before starting any emitter. */
     if (!sp_bind_stop(w)) {
-        backend_log("soundpreview: REFUSED -- StopSound could not be bound, so nothing is played");
+        backend_log("soundpreview: StopSound could not be bound, so nothing is played");
+        sp_refuse(WHY_UNAVAILABLE);
         return;
     }
 
     /* Enter preview mode if the session has not already enabled it. */
-    sp_enter_mode();
+    if (!sp_enter_mode()) { sp_refuse(WHY_UNAVAILABLE); return; }
 
     /* Stop the previous emitter before allocating another; keep preview mode
      * active.
@@ -425,11 +499,13 @@ static void sp_do_play(const char *name)
     __except (EXCEPTION_EXECUTE_HANDLER) { h = 0; }
 
     g_handle = h;
+    g_handle_world = h ? w : NULL;
     char l[320];
     _snprintf_s(l, sizeof l, _TRUNCATE, "soundpreview: '%s' -> handle 0x%llx%s",
                 name, h, h ? "" : " (engine declined)");
     backend_log(l);
     if (!h) {
+        sp_refuse(WHY_DECLINED);
         /* The engine set solo on the way in and nothing is playing, so hand the editor its audio
          * back -- unless a session is open, in which case the next click needs the mode anyway. */
         if (!g_session) sp_leave_mode();
@@ -442,22 +518,16 @@ static void sp_do_play(const char *name)
  */
 int sh_soundpreview_play(const char *name)
 {
-    if (!g_preview || !name || !name[0]) return 0;
+    if (!name || !name[0]) return 0;
+    if (!g_preview) { sp_refuse(WHY_UNAVAILABLE); return 0; }
 
-    /* Repeat the catalog check here for synchronous feedback and at execution
-     * time.
-     */
-    if (!sh_imgpreview_has(SH_ASSET_SOUND, name)) {
-        char l[320];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-            "soundpreview: REFUSED '%s' -- not a soundshader in the shipped containers", name);
-        backend_log(l);
-        return 0;
-    }
-    /* Read only the global world pointer here; emitter access stays on the
-     * main thread.
-     */
-    if (!sp_world()) { backend_log("soundpreview: no sound world (not in a map yet?)"); return 0; }
+    /* Validate with our catalog before native find-or-create, whose missing-name behavior can
+     * raise an engine error. */
+    if (!sh_imgpreview_has(SH_ASSET_SOUND, name)) { sp_refuse(WHY_NOT_SOUND); return 0; }
+    /* Read only the global world pointer here; emitter access stays on the main thread. */
+    if (!sp_world()) { sp_refuse(WHY_NO_MAP); return 0; }
 
-    return sp_post(SP_OP_PLAY, name);
+    sp_refuse("");
+    if (!sp_post(SP_OP_PLAY, name)) { sp_refuse(WHY_BUSY); return 0; }
+    return 1;
 }

@@ -23,6 +23,7 @@ static unsigned char publish_first[4];
 } while (0)
 
 void backend_log(const char *msg) { (void)msg; }
+const wchar_t *sh_host_dir(void) { return L""; }
 const char *sh_megapreview_name_at(int index)
 {
     return vmtr_names ? vmtr_names[index] : NULL;
@@ -78,6 +79,36 @@ static void write_be32(unsigned char *p, unsigned v)
     p[2] = (unsigned char)(v >> 8); p[3] = (unsigned char)v;
 }
 
+/* A large image previews from the first mip that still covers the preview size. */
+static void check_mip_choice(void)
+{
+    enum { HEAD = BIM_MIP_HEAD };
+    /* Level 0 and level 1 carry a second face, as a cube map's records do. */
+    static const unsigned rec[5][3] = { { 0, 0, 960 }, { 0, 1, 960 }, { 1, 0, 480 }, { 1, 1, 480 },
+                                        { 2, 0, 240 } };
+    unsigned char image[BIM_MIP0 + 5 * (HEAD + 16)] = {0};
+    size_t at = BIM_MIP0, third = 0;
+    bim_mip m;
+    for (int r = 0; r < 5; ++r) {
+        if (r == 4) third = at;
+        write_be32(image + at, rec[r][0]);
+        write_be32(image + at + 4, rec[r][1]);
+        write_be32(image + at + 8, rec[r][2]);
+        write_be32(image + at + 0x0C, rec[r][2]);
+        write_be32(image + at + 0x10, 16);
+        at += HEAD + 16;
+    }
+    CHECK(bim_pick_mip(image, sizeof image, &m) == 1);
+    CHECK(m.w == 240 && m.h == 240 && m.size == 16 && m.face == 0);
+    CHECK(m.data == third + HEAD);
+    /* A record that is not the next level ends the walk at the last good one. */
+    write_be32(image + third, 7);
+    CHECK(bim_pick_mip(image, sizeof image, &m) == 1);
+    CHECK(m.w == 480);
+    /* A mip past the end of the payload is refused. */
+    CHECK(bim_pick_mip(image, BIM_MIP0 + HEAD + 8, &m) == 0);
+}
+
 static void check_direct_image_preview(void)
 {
     unsigned char image[0x46] = {0};
@@ -111,6 +142,7 @@ static void check_direct_image_preview(void)
         g_rec[1].roff = 0;
         g_rec[1].usz = (unsigned)sizeof image;
         g_rec[1].csz = (unsigned)sizeof image;
+        imgpreview_index_names();
     }
     g_box[0].res = (HANDLE)(intptr_t)_get_osfhandle(_fileno(file));
     publish_calls = 0;
@@ -118,9 +150,15 @@ static void check_direct_image_preview(void)
     publish_w = publish_h = 0;
     memset(publish_first, 0, sizeof publish_first);
 
-    CHECK(sh_imgpreview_produce("textures/direct", 76) == SH_PREVIEW_FAILED);
+    {
+        const char *why = NULL;
+        CHECK(sh_imgpreview_produce("textures/direct", 76, &why) == SH_PREVIEW_FAILED);
+        CHECK(why != NULL && why[0] != '\0');
+        CHECK(sh_imgpreview_produce_image("textures/missing", 75, &why) == SH_PREVIEW_FAILED);
+        CHECK(why != NULL && strstr(why, "not in the game's files") != NULL);
+    }
     CHECK(publish_calls == 0);
-    CHECK(sh_imgpreview_produce_image("textures/direct", 77) == SH_PREVIEW_PUBLISHED);
+    CHECK(sh_imgpreview_produce_image("textures/direct", 77, NULL) == SH_PREVIEW_PUBLISHED);
     CHECK(publish_calls == 1);
     CHECK(publish_generation == 77);
     CHECK(publish_w == 4 && publish_h == 4);
@@ -158,14 +196,15 @@ int main(void)
         "materials/existing", "Materials/Existing", "materials/vt", "MATERIALS/VT", NULL
     };
 
-    InitializeCriticalSection(&g_lock);
     g_loaded = 1;
     check_direct_image_preview();
+    check_mip_choice();
 
     set_records(1);
     if (g_rec) {
         g_rec[0].name = "play_existing";
         g_rec[0].kind = SH_ASSET_SOUND;
+        imgpreview_index_names();
     }
     size_t xml_len = sizeof xml - 1;
     unsigned char *manifest = (unsigned char *)malloc(xml_len + 1u);
@@ -230,6 +269,7 @@ int main(void)
     if (g_rec) {
         g_rec[0].name = "materials/existing";
         g_rec[0].kind = SH_ASSET_MATERIAL;
+        imgpreview_index_names();
     }
     vmtr_names = atlas;
     CHECK(g_vmtrLoaded == 0);
@@ -255,13 +295,40 @@ int main(void)
         CHECK(sh_imgpreview_list(SH_ASSET_VTONLY, 0, out, sizeof out) == 1);
     }
 
+    /* A page that cannot fit the next name stops there: a shorter name later in the listing
+     * must not be written ahead of it, or the next page would skip one name and repeat another. */
+    set_records(2);
+    if (g_rec) {
+        g_rec[0].name = "aaaaaaaaaaaa";
+        g_rec[1].name = "bbbbbbbbbbbbbbbbbbbb";
+        g_rec[0].kind = g_rec[1].kind = SH_ASSET_SOUND;
+        imgpreview_index_names();
+    }
+    {
+        static const char *const events[] = { "c" };
+        char page[24], seen[128] = "";
+        unsigned start = 0;
+        int n, pages = 0;
+        free(g_ev);
+        g_ev = (const char **)malloc(sizeof events);
+        CHECK(g_ev != NULL);
+        if (g_ev) { memcpy((void *)g_ev, events, sizeof events); g_evCount = 1; }
+        while ((n = sh_imgpreview_list(SH_ASSET_SOUND, start, page, sizeof page)) > 0 && pages < 8) {
+            strcat_s(seen, sizeof seen, page);
+            start += (unsigned)n;
+            pages++;
+        }
+        CHECK(strcmp(seen, "aaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbb\nc\n") == 0);
+        CHECK(pages == 2);
+    }
+
     free(g_vt); g_vt = NULL; g_vtCount = 0;
     free(g_sb); g_sb = NULL; g_sbCount = 0;
     free(g_ev); g_ev = NULL; g_evCount = 0;
     free(g_wwise); g_wwise = NULL; g_wwiseBytes = 0;
     g_wwiseSourceBytes = g_wwiseTagBytes = 0;
     free(g_rec); g_rec = NULL; g_recCount = 0;
-    DeleteCriticalSection(&g_lock);
+    free(g_byName); g_byName = NULL;
 
     if (failures) {
         fprintf(stderr, "%d catalog test(s) failed\n", failures);

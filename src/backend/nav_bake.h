@@ -23,15 +23,14 @@
  */
 void sh_nav_bake_set_map(const char *json, size_t len);
 
-/* Retain map geometry while retiring source-derived previews and traversal
- * rows. Older worker results cannot publish into the new revision. No engine
- * callbacks occur. A source change uses the paired boundary below. */
+/* The files a bake reads (the modules' shipped navigation and the traversal
+ * table) may have changed: a mod was installed, removed or updated. Retain the
+ * map geometry, drop the bake cache, the previews and the traversal table, and
+ * plan again; older worker results cannot publish into the new revision. No
+ * engine callbacks occur, so any thread. Registered as a serving-index
+ * listener (sh_modserve_set_index_listener), which calls it after every table
+ * the mod layer publishes. */
 void sh_nav_bake_invalidate_sources(void);
-/* Paired final-publication boundary: no bake/gather/cache read overlaps the
- * provider swap. Acquire before the compilation lock, release after it. A
- * refused activation leaves the current cache and geometry revision intact. */
-void sh_nav_bake_source_update_begin(void);
-void sh_nav_bake_source_update_end(int committed);
 
 /* Read the effective base resource into a process-heap buffer the caller frees, or
  * return NULL. The provider hook supplies this callback because it owns the
@@ -48,6 +47,9 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 /* Console report: what this map asked for and what it got, per module copy
  * and per demon class, with every reason and every box left out. */
 void sh_nav_bake_report(void (*out)(const char *fmt, ...));
+/* The developer detail behind it (sh_navmesh detail): geometry revision, map
+ * tables, the engine's navigation opens and the bake cache. */
+void sh_nav_bake_report_detail(void (*out)(const char *fmt, ...));
 
 /* What one demon class of one module copy got. */
 enum { SH_NAV_CLASS_UNTRIED = 0, SH_NAV_CLASS_BUILT, SH_NAV_CLASS_PARTIAL,
@@ -73,11 +75,6 @@ void sh_nav_bake_summary_get(sh_nav_bake_summary *s);
  * itself could not run (the editor left the state, or the read failed). */
 void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
                        size_t title_cap, char *body, size_t body_cap);
-
-/* Legacy per-entity callbacks avoid a direct dependency on engine code.
- * Production editor baking uses the complete-map snapshot callback below.
- */
-typedef int (*sh_nav_bake_entity_count)(void *ctx);
 
 /* Refresh geometry and ownership on DOOM's main thread before map conversion.
  * Play does not serialize the editor map, so the loaded JSON alone misses
@@ -169,10 +166,12 @@ void sh_nav_bake_preview_stop(void);
  * as that read is away. */
 int sh_nav_bake_preview_pending(void);
 
+#ifdef SH_DIAG
 /* Mark the first `count` marked volumes of every module as unplaced, the way
  * a refused bake does, so the marks can be seen without a map that refuses.
- * Zero clears them. Returns how many are marked. */
+ * Zero clears them. Returns how many are marked. Diagnostic build only. */
 int sh_nav_bake_show_marks(int count);
+#endif
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 
@@ -191,8 +190,8 @@ void sh_nav_bake_overlay_clear(void);
  * models and discard any preview bake of the previous map still in flight. */
 void sh_nav_bake_map_opened(void);
 
-void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
-                                 sh_navr_entity_valid valid,
+/* The per-box surface the volumes-only refresh reads (sh_nav_bake_refresh_volumes). */
+void sh_nav_bake_set_live_editor(sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
                                  sh_navr_entity_transform get_transform,
                                  void *ctx);

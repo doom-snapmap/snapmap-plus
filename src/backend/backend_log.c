@@ -1,13 +1,15 @@
-/* Write timestamped backend diagnostics to the debugger sink and session log.
-
- */
+/* Write timestamped backend diagnostics to the debugger sink and session log. */
 #include "backend_log.h"
 #include "../common/log_rotate.h"
 #include "perf.h"
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
-static char              g_logpath[MAX_PATH] = {0};
+/* The log file, as a wide path for the file calls and as UTF-8 for log rotation. Both are held
+ * whole: the DLL sits in the game folder, which can be deeper than MAX_PATH. */
+static wchar_t           g_logpath[32768];
+static char              g_logpath_utf8[3 * 32768];
 static HANDLE            g_loghandle = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION  g_loglock;
 static LONG volatile     g_lock_ready = 0;
@@ -19,7 +21,7 @@ static HANDLE log_handle(void)
 {
     if (g_loghandle != INVALID_HANDLE_VALUE) return g_loghandle;
     if (!g_logpath[0]) return INVALID_HANDLE_VALUE;
-    g_loghandle = CreateFileA(g_logpath, FILE_APPEND_DATA,
+    g_loghandle = CreateFileW(g_logpath, FILE_APPEND_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     return g_loghandle;
@@ -37,21 +39,23 @@ static void log_lock_init(void)
 
 void backend_set_logpath_from_module(HINSTANCE self)
 {
-    char path[MAX_PATH];
-    DWORD len = GetModuleFileNameA((HMODULE)self, path, MAX_PATH);
+    static wchar_t path[32768];
+    const size_t cap = sizeof path / sizeof path[0];
+    DWORD len = GetModuleFileNameW((HMODULE)self, path, (DWORD)cap);
+    wchar_t *slash;
     log_lock_init();
-    if (len == 0 || len >= MAX_PATH) { strcpy_s(g_logpath, MAX_PATH, "sh_backend.log"); return; }
-    char *slash = strrchr(path, '\\');
-    if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
-    /* Create snapmap-plus/logs beneath the game directory, one level at a time. */
-    char dir[MAX_PATH];
-    _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus", path);
-    CreateDirectoryA(dir, NULL);
-    _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs", path);
-    CreateDirectoryA(dir, NULL);
-    _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\sh_backend.log", dir);
+    if (len == 0 || len >= cap) return;    /* no log file; the debugger sink still gets every line */
+    slash = wcsrchr(path, L'\\');
+    if (slash) slash[1] = 0; else path[0] = 0;
+    /* Create snapmap-plus/logs beside the DLL, one level at a time. */
+    _snwprintf_s(g_logpath, cap, _TRUNCATE, L"%lssnapmap-plus", path);
+    CreateDirectoryW(g_logpath, NULL);
+    _snwprintf_s(g_logpath, cap, _TRUNCATE, L"%lssnapmap-plus\\logs", path);
+    CreateDirectoryW(g_logpath, NULL);
+    _snwprintf_s(g_logpath, cap, _TRUNCATE, L"%lssnapmap-plus\\logs\\sh_backend.log", path);
+    WideCharToMultiByte(CP_UTF8, 0, g_logpath, -1, g_logpath_utf8, (int)sizeof g_logpath_utf8, NULL, NULL);
     /* Roll the accumulated log aside before this session appends to it. */
-    log_rotate_if_large(g_logpath, LOG_ROTATE_CAP_BYTES);
+    log_rotate_if_large(g_logpath_utf8, LOG_ROTATE_CAP_BYTES);
 }
 
 void backend_log_close(void)

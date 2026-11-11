@@ -1,11 +1,12 @@
-/* Toggle editor-decl visibility bits 0xC0 at +0x3CD, keeping idInfoPath visible
- * when hiding. The same flags also affect wire coloring.
+/* Reveal the editor-decl visibility bits 0xC0 at +0x3CD, and put back exactly
+ * what the reveal changed. The same flags also affect wire coloring.
  * GetDeclsOfType returns a registry node with array@+0x20 and count@+0x28.
- * The array is engine-owned and must not be freed. Recheck these offsets and
- * the entityDef/className hops when porting engine builds. */
+ * The array is engine-owned and must not be freed. Recheck these offsets when
+ * porting engine builds. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "target_any.h"
 #include "commands.h"
@@ -15,16 +16,18 @@
 #define LIST_ARRAY_OFF      0x20     /* decl-manager node -> decl-pointer array */
 #define LIST_COUNT_OFF      0x28     /* decl-manager node -> decl count (uint) */
 #define DECL_FLAGS_OFF      0x3CD    /* decl -> editor-flags byte; bits 7-6 (0xC0) = the visibility pair */
-#define DECL_ENTITYDEF_OFF  0x1C8    /* decl -> entityDef pointer */
-#define ENTITYDEF_CLASS_OFF 0x60     /* entityDef -> className idStr ptr (re-hide idInfoPath spare only) */
 #define VIS_BITS            0xC0     /* the editor-visibility pair the toggle flips */
 #define COUNT_CAP           (1u << 20) /* Bound implausible registry counts. */
 
 typedef void *(*get_decls_fn)(const char *type_name);
 
-static void         *g_get_decls        = NULL;
-static volatile LONG g_shown            = 0;      /* 0 = hidden, 1 = shown. */
+/* One decl the reveal changed, and the visibility bits it had before. */
+typedef struct revealed { uint8_t *flags; uint8_t before; } revealed;
 
+static void         *g_get_decls = NULL;
+static volatile LONG g_shown     = 0;      /* 0 = hidden, 1 = shown. */
+static revealed     *g_revealed  = NULL;   /* what the reveal changed, for the hide */
+static uint32_t      g_revealed_count;
 
 static int safe_read_ptr(const void *src, void **out)
 {
@@ -32,73 +35,66 @@ static int safe_read_ptr(const void *src, void **out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-
 static int safe_read_u32(const void *src, uint32_t *out)
 {
     __try { *out = *(const uint32_t *)src; return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Check the class only when hiding. Unreadable hops compare unequal. */
-static int decl_class_is_infopath(const uint8_t *decl)
+/* Show every decl whose visibility pair is not fully set, remembering each one
+ * changed. Returns 0 when the registry cannot be read (nothing changed). */
+static int target_any_reveal(uint32_t *out_count, uint32_t *out_changed)
 {
-    __try {
-        const uint8_t *entdef = *(const uint8_t *const *)(decl + DECL_ENTITYDEF_OFF);
-        if (entdef == NULL) return 0;
-        const char *name = *(const char *const *)(entdef + ENTITYDEF_CLASS_OFF);
-        if (name == NULL) return 0;
-        return strcmp(name, "idInfoPath") == 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    void *list, *array = NULL;
+    uint32_t count = 0, i;
+    *out_count = *out_changed = 0;
+    list = ((get_decls_fn)g_get_decls)(DECL_TYPE_NAME);
+    if (!list || !safe_read_ptr((const uint8_t *)list + LIST_ARRAY_OFF, &array) ||
+        !safe_read_u32((const uint8_t *)list + LIST_COUNT_OFF, &count) || count > COUNT_CAP)
         return 0;
+    *out_count = count;
+    free(g_revealed);
+    g_revealed = NULL;
+    g_revealed_count = 0;
+    if (!array || !count) return 1;
+    g_revealed = (revealed *)malloc((size_t)count * sizeof *g_revealed);
+    if (!g_revealed) return 0;
+    for (i = 0; i < count; i++) {
+        void *decl = NULL;
+        uint8_t *fp;
+        if (!safe_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
+        if (!decl) continue;
+        fp = (uint8_t *)decl + DECL_FLAGS_OFF;
+        __try {
+            uint8_t cur = *fp;
+            if ((cur & VIS_BITS) != VIS_BITS) {
+                g_revealed[g_revealed_count].flags = fp;
+                g_revealed[g_revealed_count].before = (uint8_t)(cur & VIS_BITS);
+                *fp = (uint8_t)(cur | VIS_BITS);
+                g_revealed_count++;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
     }
+    *out_changed = g_revealed_count;
+    return 1;
 }
 
-/* Apply visibility and return registry/touched counts. Return 0 with an error
- * if lookup fails; inaccessible individual decls are skipped. */
-static int target_any_apply(int show, uint32_t *out_count, uint32_t *out_touched, const char **out_err)
+/* Put back the visibility pair of every decl the reveal changed, and nothing
+ * else: a decl that was visible before the reveal stays visible. */
+static uint32_t target_any_restore(void)
 {
-    *out_count = 0; *out_touched = 0; *out_err = NULL;
-
-    if (g_get_decls == NULL) { *out_err = "GetDeclsOfType not resolved"; return 0; }
-
-    void *list = ((get_decls_fn)g_get_decls)(DECL_TYPE_NAME);
-    if (list == NULL) { *out_err = "GetDeclsOfType returned null"; return 0; }
-
-    void    *array = NULL;
-    uint32_t count = 0;
-    if (!safe_read_ptr((const uint8_t *)list + LIST_ARRAY_OFF, &array) ||
-        !safe_read_u32((const uint8_t *)list + LIST_COUNT_OFF, &count)) {
-        *out_err = "decl list array/count unreadable";
-        return 0;
+    uint32_t i, restored = 0;
+    for (i = 0; i < g_revealed_count; i++) {
+        __try {
+            uint8_t *fp = g_revealed[i].flags;
+            *fp = (uint8_t)((*fp & (uint8_t)~VIS_BITS) | g_revealed[i].before);
+            restored++;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
     }
-    *out_count = count;
-    if (array == NULL || count == 0) return 1;
-    if (count > COUNT_CAP) { *out_err = "decl count implausible (stale manager node?)"; return 0; }
-
-    uint32_t touched = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        void *decl_v = NULL;
-        if (!safe_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl_v)) break;
-        uint8_t *decl = (uint8_t *)decl_v;
-        if (decl == NULL) continue;
-
-        uint8_t *fp = decl + DECL_FLAGS_OFF;
-        uint8_t  cur;
-        __try { cur = *fp; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
-
-        if (show) {
-            __try { *fp = (uint8_t)(cur | VIS_BITS); touched++; }
-            __except (EXCEPTION_EXECUTE_HANDLER) { }
-        } else {
-            if (decl_class_is_infopath(decl)) continue;
-            __try { *fp = (uint8_t)(cur & (uint8_t)~VIS_BITS); touched++; }
-            __except (EXCEPTION_EXECUTE_HANDLER) { }
-        }
-    }
-
-    *out_touched = touched;
-    return 1;
+    free(g_revealed);
+    g_revealed = NULL;
+    g_revealed_count = 0;
+    return restored;
 }
 
 void sh_target_any_install(void *get_decls_of_type)
@@ -113,22 +109,29 @@ int sh_target_any_is_shown(void)
 
 void h_target_any(struct idCmdArgs *a)
 {
+    char line[160];
     (void)a;
     if (g_get_decls == NULL) {
-        sh_printf("sh_target_any: GetDeclsOfType unresolved -- cannot toggle.\n");
+        sh_printf("sh_target_any is not available on this game build.\n");
         return;
     }
-
-    LONG shown = InterlockedExchange(&g_shown, !g_shown);
-    shown = !shown;
-
-    uint32_t count = 0, touched = 0;
-    const char *err = NULL;
-    if (target_any_apply((int)shown, &count, &touched, &err)) {
-        sh_printf("sh_target_any: %s %u/%u editor entity decls.\n",
-                  shown ? "revealed" : "re-hid", touched, count);
-        backend_log(shown ? "B2: sh_target_any REVEAL" : "B2: sh_target_any RE-HIDE");
+    if (!g_shown) {
+        uint32_t count = 0, changed = 0;
+        if (!target_any_reveal(&count, &changed)) {
+            sh_printf("sh_target_any is not available on this game build.\n");
+            backend_log("target_any: the editor entity registry could not be read");
+            return;
+        }
+        InterlockedExchange(&g_shown, 1);
+        sh_printf("sh_target_any: hidden palette entries shown (run again to hide them).\n");
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "target_any: revealed %u of %u editor entity decls", changed, count);
     } else {
-        sh_printf("sh_target_any: could not run (%s).\n", err ? err : "unknown");
+        uint32_t restored = target_any_restore();
+        InterlockedExchange(&g_shown, 0);
+        sh_printf("sh_target_any: hidden palette entries hidden again.\n");
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "target_any: hid the %u editor entity decls the reveal showed", restored);
     }
+    backend_log(line);
 }

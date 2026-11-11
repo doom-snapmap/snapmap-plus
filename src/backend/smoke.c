@@ -1,6 +1,7 @@
-/* Check live signature resolution and exercise detours on scratch memory.
- * RVA drift is diagnostic; resolution requires uniqueness or a verified hooked
- * fallback. Handwritten scratch code guarantees a 16-byte relocatable prologue. */
+/* Report live signature resolution at startup. RVA drift is diagnostic;
+ * resolution requires uniqueness or a verified hooked fallback. The diagnostic
+ * build (SH_DIAG) also exercises the detour engine on scratch code; a release
+ * build allocates no writable-executable memory for it. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,7 +11,9 @@
 #include "backend_log.h"
 #include "host_image.h"
 
-/* Scratch detour target. */
+#ifdef SH_DIAG
+/* Scratch detour target. Handwritten scratch code guarantees a 16-byte
+ * relocatable prologue. */
 #define TAG_ORIG   1
 #define TAG_DETOUR 2
 
@@ -33,6 +36,7 @@ static const uint8_t SCRATCH_DETOUR_CODE[] = {
     0xC3                                  /* ret */
 };
 #define SCRATCH_STOLEN 16
+#endif
 
 static const char *sig_status_str(sig_status s)
 {
@@ -97,61 +101,16 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
     if (readable) hexdump(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "PB0: sig FAIL %s status=%s @known_rva=0x%x exp=[%s] got=[%s]",
+        "startup: sig %s unresolved, status=%s @recorded_rva=0x%x exp=[%s] got=[%s]",
         e->name, sig_status_str(st), (unsigned)known_rva, exp_hex,
         readable ? got_hex : "<unreadable page>");
     backend_log(line);
 }
 
-/* Full smoke check. */
-int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
-                 unsigned long deferred_ms)
+#ifdef SH_DIAG
+/* Install, call through and remove a detour on scratch code. */
+static int scratch_detour_check(const char **why)
 {
-    char line[256];
-
-
-    size_t total = sig_db_count();
-    size_t ok = 0;
-    /* Refuse an undersized results array instead of silently omitting signatures. */
-    if (total > count) {
-        char over[160];
-        _snprintf_s(over, sizeof over, _TRUNCATE,
-            "PB0: SIGNATURE DB OVERFLOW -- %zu entries but only %zu result slots; raise "
-            "SIG_RESULTS_MAX. The last %zu signature(s) were NOT resolved.",
-            total, count, total - count);
-        backend_log(over);
-        total = count;
-    }
-
-    int rva_match = 0, rva_diff = 0, hooked = 0;
-    char hooked_names[160] = {0};   /* comma-list of the hook-tolerant sigs for the success line */
-    const char *first_bad = NULL;
-    sig_status  first_bad_status = SIG_OK;
-    for (size_t i = 0; i < total; i++) {
-        if (results[i].status == SIG_OK) {
-            ok++;
-            if (results[i].rva == sh_host_image_rva(doom_base, BACKEND_ENGINE_SIGNATURES[i].rva_vk,
-                                                    BACKEND_ENGINE_SIGNATURES[i].rva_gl)) rva_match++;
-            else rva_diff++;
-        } else if (results[i].status == SIG_OK_HOOKED) {
-            ok++;
-            /* A matching tail identifies an entry whose prologue is already detoured. */
-            hooked++;
-            size_t l = strlen(hooked_names);
-            _snprintf_s(hooked_names + l, sizeof hooked_names - l, _TRUNCATE,
-                        "%s%s", l ? "/" : "", results[i].name);
-        } else {
-            if (!first_bad) {
-                first_bad = results[i].name;
-                first_bad_status = results[i].status;
-            }
-            /* Log bytes for every unresolved entry. */
-            log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
-        }
-    }
-    int resolver_ok = (ok == sig_db_count());
-
-
     typedef int (*scratch_fn)(int, volatile int *);
     int detour_ok = 0;
     int scratch_retained = 0;
@@ -209,27 +168,84 @@ int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t cou
     }
 
 
+    *why = detour_why;
+    return detour_ok;
+}
+#endif
+
+/* Full smoke check. */
+int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
+                 unsigned long deferred_ms)
+{
+    char line[256];
+
+
+    size_t total = sig_db_count();
+    size_t ok = 0;
+    /* Refuse an undersized results array instead of silently omitting signatures. */
+    if (total > count) {
+        char over[160];
+        _snprintf_s(over, sizeof over, _TRUNCATE,
+            "startup: signature table overflow, %zu entries but only %zu result slots; raise "
+            "SIG_RESULTS_MAX. The last %zu signature(s) were NOT resolved.",
+            total, count, total - count);
+        backend_log(over);
+        total = count;
+    }
+
+    int rva_match = 0, rva_diff = 0, hooked = 0;
+    char hooked_names[160] = {0};   /* comma-list of the hook-tolerant sigs for the success line */
+    const char *first_bad = NULL;
+    sig_status  first_bad_status = SIG_OK;
+    for (size_t i = 0; i < total; i++) {
+        if (results[i].status == SIG_OK) {
+            ok++;
+            if (results[i].rva == sh_host_image_rva(doom_base, BACKEND_ENGINE_SIGNATURES[i].rva_vk,
+                                                    BACKEND_ENGINE_SIGNATURES[i].rva_gl)) rva_match++;
+            else rva_diff++;
+        } else if (results[i].status == SIG_OK_HOOKED) {
+            ok++;
+            /* A matching tail identifies an entry whose prologue is already detoured. */
+            hooked++;
+            size_t l = strlen(hooked_names);
+            _snprintf_s(hooked_names + l, sizeof hooked_names - l, _TRUNCATE,
+                        "%s%s", l ? "/" : "", results[i].name);
+        } else {
+            if (!first_bad) {
+                first_bad = results[i].name;
+                first_bad_status = results[i].status;
+            }
+            /* Log bytes for every unresolved entry. */
+            log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
+        }
+    }
+    int resolver_ok = (ok == sig_db_count());
+
+
+    int detour_ok = 1;
+    const char *detour_why = "OK";
+#ifdef SH_DIAG
+    detour_ok = scratch_detour_check(&detour_why);
+#endif
+
     if (resolver_ok && detour_ok) {
         if (hooked > 0) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "PB0: resolved %zu/%zu sigs (deferred %lums; rva-pinned %d, hook-tolerant %d: %s); "
-                "test detour OK",
+                "startup: resolved %zu/%zu sigs (after %lums; rva-pinned %d, hook-tolerant %d: %s)",
                 ok, total, deferred_ms, rva_match, hooked, hooked_names);
         } else {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "PB0: resolved %zu/%zu sigs (deferred %lums past load; rva-pinned %d, rva-shifted %d); "
-                "test detour OK",
+                "startup: resolved %zu/%zu sigs (after %lums; rva-pinned %d, rva-shifted %d)",
                 ok, total, deferred_ms, rva_match, rva_diff);
         }
     } else if (!resolver_ok) {
-        /* The remaining signatures may be encrypted, patched, or incompatible. */
+        /* The remaining signatures are patched by another tool, or this is not a supported build. */
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "PB0: FAIL resolver still %zu/%zu sigs after %lums (SteamStub not decrypted?; "
-            "first bad: %s status=%d); detour %s",
+            "startup: resolved only %zu/%zu sigs after %lums (first unresolved: %s status=%d); detour %s",
             ok, total, deferred_ms, first_bad ? first_bad : "?", (int)first_bad_status, detour_why);
     } else {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "PB0: resolved %zu/%zu sigs (deferred %lums past load); FAIL test detour (%s)",
+            "startup: resolved %zu/%zu sigs (after %lums); the scratch detour test failed (%s)",
             ok, total, deferred_ms, detour_why);
     }
     backend_log(line);

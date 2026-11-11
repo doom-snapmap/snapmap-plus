@@ -235,7 +235,7 @@ static void test_builder(const char *tmp, const char *install)
     sh_modstock_set_install(install);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena", tmp);
     make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  module build refused: %s\n", b.first_cause);
     CHECK(b.errors == 0 && b.file_count == 12 && b.stock_count == 10);
     CHECK(b.total_size == sizeof MODULE_TEXT - 1 + sizeof INFO_TEXT - 1);
@@ -279,7 +279,7 @@ static void test_builder(const char *tmp, const char *install)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_copy", tmp);
     make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
     put_rel(dir, "assets\\" MOD "/copy.sbsp", SBSP, sizeof SBSP);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 0 && (f = find(&b, MOD "/copy.sbsp")) && f->stock && !strcmp(f->stock_source, S_SBSP));
     sh_mb_free(&b);
     {
@@ -292,7 +292,7 @@ static void test_builder(const char *tmp, const char *install)
             make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT, NULL);
             _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", kinds[k]);
             put_rel(dir, rel, JUNK, sizeof JUNK);
-            CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+            CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
             CHECK(b.errors == 1);
             CHECK_CAUSE(b, "can only be a stock pointer to the installed game, never carried");
             sh_mb_free(&b);
@@ -304,7 +304,7 @@ static void test_builder(const char *tmp, const char *install)
         mt_write(dir, "mod.json", "{\"id\":\"" ID "\",\"name\":\"Arena\"}");
         put_rel(dir, "assets\\" MOD "/arena.sbsp", SBSP, sizeof SBSP);
         sh_mb_set_stock_ops(NULL);
-        CHECK(!sh_mb_build(dir, NULL, &b));
+        CHECK(!sh_mb_build(dir, "tarenaaa", NULL, &b));
         CHECK(b.errors >= 1);
         CHECK_CAUSE(b, "can only be a stock pointer to the installed game, never carried");
         sh_mb_free(&b);
@@ -314,21 +314,21 @@ static void test_builder(const char *tmp, const char *install)
     /* A module without its snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_noinfo", tmp);
     make_module_mod(dir, ID, R_DECL, 0, MODULE_TEXT, NULL);
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "a snapModule needs its snapModuleInfo assets/" R_INFO " in the same bundle");
     sh_mb_free(&b);
     /* A module outside maps/modules/mods/<id>/: this rule first, then its missing snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_ns", tmp);
     make_module_mod(dir, ID, "maps/modules/other/" ID "/arena.decl", 0, MODULE_TEXT, NULL);
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 2);
     CHECK_CAUSE(b, "a snapModule decl must be maps/modules/mods/" ID "/<name>.decl");
     sh_mb_free(&b);
     /* A malformed module decl. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_bad", tmp);
     make_module_mod(dir, ID, R_DECL, 1, "{\r\n\tedit = {\r\n", NULL);
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "is not a well-formed decl");
     sh_mb_free(&b);
@@ -337,7 +337,7 @@ static void test_builder(const char *tmp, const char *install)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_alias", tmp);
     make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT,
                     ",\"generated/decls/material/textures/t_arena/alias.decl\":{\"source\":\"" S_MAT "\"}");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "is outside mods/" ID "/, and the game has no file of that name");
     sh_mb_free(&b);
@@ -542,9 +542,10 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
                 size_t wlen = 0;
                 memset(&rows, 0, sizeof rows);
                 memset(&row, 0, sizeof row);
-                strcpy_s(row.id, sizeof row.id, b->id);
+                strncpy_s(row.salt, sizeof row.salt, b->id, _TRUNCATE);
+                if (b->name) strncpy_s(row.name, sizeof row.name, b->name, _TRUNCATE);
                 strcpy_s(row.version, sizeof row.version, b->version);
-                strcpy_s(row.bundle, sizeof row.bundle, hash);
+                strcpy_s(row.build, sizeof row.build, hash);
                 row.size = b->total_size;
                 CHECK(sh_modmanifest_row_add_name(&row, sum.modules[0].name));
                 CHECK(sh_modmanifest_list_add(&rows, &row));
@@ -571,7 +572,7 @@ static void build_acceptance(const char *source, const char *doom, const char *p
     sh_modstock_stats ms;
     double t0 = (double)GetTickCount64();
     sh_modstock_set_install(doom);
-    if (!sh_mb_build(source, &RESOLVER, &b)) { CHECK(!"acceptance build ran"); return; }
+    if (!sh_mb_build(source, NULL, &RESOLVER, &b)) { CHECK(!"acceptance build ran"); return; }
     for (i = 0; i < b.file_count; i++) {
         if (b.files[i].is_module) modules++;
         if (b.files[i].stock && sh_mb_stock_restore(b.files[i].request, b.files[i].stock_source)) restores++;

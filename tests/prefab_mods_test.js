@@ -23,8 +23,9 @@ new Function('api', src.slice(begin, end) +
   '\napi.parse = pfModsParse; api.badge = pfModsBadge; api.detail = pfModsDetail; api.loadToast = pfModsLoadToast;' +
   ' api.fileToast = pfFileResultToast; api.label = pfModLabel;')(api);
 
-const door = {id: 'test.door', version: '1.0.0', bundle: 'a'.repeat(64), size: 100, installed: true};
-const ghost = {id: 'ghost.mod', version: '2.0', bundle: '9'.repeat(64), size: 1048576, installed: false};
+/* MODS_STATUS rows: "id" is the row's name (else its salt), with the salt and the build. */
+const door = {id: 'test.door', salt: 'testdoor', version: '1.0.0', build: 'a'.repeat(64), size: 100, installed: true};
+const ghost = {id: 'ghost.mod', salt: 'ghostmod', version: '2.0', build: '9'.repeat(64), size: 1048576, installed: false};
 const both = JSON.stringify({count: 2, missing: 1, mods: [door, ghost]});
 
 /* Parsing: the host's escaped string or an object; anything malformed is no mods. */

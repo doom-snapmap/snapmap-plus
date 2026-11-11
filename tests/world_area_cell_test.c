@@ -11,6 +11,11 @@ void sh_grid_native_set_adaptive_cells(int live){adaptive=live;}
 int sh_grid_native_render_cell(void *map,sh_render_cell_choice *out)
 {(void)map;if(!count_ok)return 0;*out=next_choice;return 1;}
 void *sh_grid_native_editor_map(void){return editor_map;}
+static char toast_text[256];static int toasts;
+static void fake_toast(sh_iface *self,const char *title,const char *text)
+{(void)self;(void)title;toasts++;strncpy_s(toast_text,sizeof toast_text,text,_TRUNCATE);}
+static sh_iface_vtbl fake_vtbl;static sh_iface fake_iface;
+sh_iface *sh_ui_get_iface(void){fake_vtbl.toast=fake_toast;fake_iface.vtbl=&fake_vtbl;return &fake_iface;}
 
 /* A BuildRenderWorld-shaped site: the cell-size load, its store, then the
  * 512.0 constant it reads 0x40 bytes further on. */
@@ -97,6 +102,26 @@ int main(void)
     sh_world_area_cell_editor_tick();
     assert(strstr(last_log,"RENDER: map opened; Play will use world-area cell size 1024 for 4160 areas"));
     last_log[0]=0;sh_world_area_cell_editor_tick();assert(!last_log[0]);
+    assert(toasts==0);
+
+    /* An edit that makes the map too large to load is told before Play, once per size. */
+    next_choice.cell=65536;next_choice.fits=0;next_choice.count.areas=9000;next_choice.count.nodes=9100;
+    *(int*)(map+0x758)=3;
+    {int i;for(i=0;i<61;++i)sh_world_area_cell_editor_tick();}
+    assert(toasts==1&&strstr(toast_text,"This map needs 9100 world areas and Play loads at most 8192"));
+    assert(strstr(toast_text,"Make the map smaller before choosing Play."));
+    {int i;for(i=0;i<200;++i)sh_world_area_cell_editor_tick();}
+    assert(toasts==1);
+    *(int*)(map+0x758)=4;
+    {int i;for(i=0;i<61;++i)sh_world_area_cell_editor_tick();}
+    assert(toasts==1);                                     /* the same size: told already */
+    next_choice.cell=1024;next_choice.fits=1;next_choice.count.areas=4160;next_choice.count.nodes=4159;
+    *(int*)(map+0x758)=5;
+    {int i;for(i=0;i<61;++i)sh_world_area_cell_editor_tick();}
+    next_choice.cell=65536;next_choice.fits=0;next_choice.count.areas=9000;next_choice.count.nodes=9100;
+    *(int*)(map+0x758)=6;
+    {int i;for(i=0;i<61;++i)sh_world_area_cell_editor_tick();}
+    assert(toasts==2);                                     /* back over the limit: told again */
 
     /* The redirect is removable: unpatching restores the native operand. */
     assert(code_unpatch(&g_patch)==B2_PATCH_OK&&site_reads(site)==512.0f);

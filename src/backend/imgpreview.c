@@ -14,6 +14,7 @@
 #include "preview.h"
 #include "bcn.h"
 #include "megapreview.h"   /* the .vmtr atlas: the other half of the material catalog */
+#include "host_image.h"
 #include "backend_log.h"
 #include "raw_deflate.h"
 
@@ -101,8 +102,9 @@ static size_t  g_namePoolBytes;
 static int     g_loaded;
 static int     g_soundLoaded;            /* optional Wwise union attempted */
 static int     g_vmtrLoaded;             /* optional decl-less material union attempted */
-static char    g_baseDir[MAX_PATH];
-static CRITICAL_SECTION g_lock;
+static int    *g_byName;                 /* record indices sorted by (kind, name, index) */
+static wchar_t g_baseDir[32768];         /* <game>\base, held whole */
+static SRWLOCK g_lock = SRWLOCK_INIT;
 
 static unsigned be32(const unsigned char *p) { return ((unsigned)p[0]<<24)|((unsigned)p[1]<<16)|((unsigned)p[2]<<8)|p[3]; }
 static unsigned long long be64(const unsigned char *p)
@@ -212,11 +214,12 @@ static int imgpreview_parse_box_index(int b, unsigned char *buf, size_t len)
     return 1;
 }
 
-static int imgpreview_load_box(int b, const char *stem)
+static int imgpreview_load_box(int b, const wchar_t *stem)
 {
-    char p[MAX_PATH];
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.index", g_baseDir, stem);
-    HANDLE f = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    static wchar_t p[32768];
+    const size_t pcap = sizeof p / sizeof p[0];
+    _snwprintf_s(p, pcap, _TRUNCATE, L"%ls\\%ls.index", g_baseDir, stem);
+    HANDLE f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 ||
@@ -232,8 +235,8 @@ static int imgpreview_load_box(int b, const char *stem)
         CloseHandle(f); free(buf); return 0;
     }
     CloseHandle(f);
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.resources", g_baseDir, stem);
-    HANDLE res = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    _snwprintf_s(p, pcap, _TRUNCATE, L"%ls\\%ls.resources", g_baseDir, stem);
+    HANDLE res = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (res == INVALID_HANDLE_VALUE) { free(buf); return 0; }
 
     /* Header: magic "\x05SER", BE count at +0x20, records at +0x28. Each record is three
@@ -334,6 +337,28 @@ static int __cdecl cmp_rec_kind_name(const void *a, const void *b)
     int c = _stricmp(x->name, y->name);
     if (c) return c;
     return ia - ib;
+}
+
+/* Sort indices by kind, name and original index: the order find_rec searches. */
+static int __cdecl cmp_rec_lookup(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    const rec_t *x = &g_sortRec[ia], *y = &g_sortRec[ib];
+    if (x->kind != y->kind) return (int)x->kind - (int)y->kind;
+    int c = _stricmp(x->name, y->name);
+    return c ? c : ia - ib;
+}
+
+/* Build the lookup order once the record table is final. Without it (out of memory) lookups
+ * answer nothing rather than scanning. */
+static void imgpreview_index_names(void)
+{
+    free(g_byName);
+    g_byName = g_recCount ? (int *)malloc((size_t)g_recCount * sizeof *g_byName) : NULL;
+    if (!g_byName) return;
+    for (int i = 0; i < g_recCount; ++i) g_byName[i] = i;
+    g_sortRec = g_rec;
+    qsort(g_byName, (size_t)g_recCount, sizeof *g_byName, cmp_rec_lookup);
 }
 
 /* Same, over the (event, bank) pair table -- groups an event's per-bank repeats together. */
@@ -561,7 +586,7 @@ static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, 
     imgpreview_shrink_wwise_tables();
     char line[500];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: imgpreview -- Wwise manifest: %d distinct event(s) with no decl added to the sound "
+        "imgpreview: Wwise manifest: %d distinct event(s) with no decl added to the sound "
         "catalog (%d bank-repeats collapsed, %d already had a decl); %d event(s) mapped to a bank; "
         "%llu source bytes streamed through %llu relevant tag bytes to %llu retained string bytes",
         g_evCount, raw - g_evCount, dup, g_sbCount,
@@ -614,18 +639,19 @@ static int imgpreview_append_wwise_tag(unsigned char **buf, size_t *len, size_t 
  */
 static void imgpreview_load_wwise_file(void)
 {
-    char p[MAX_PATH];
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\sound\\soundbanks\\pc\\soundbanksinfo.xml", g_baseDir);
-    FILE *f = _fsopen(p, "rb", _SH_DENYNO);
+    static wchar_t p[32768];
+    _snwprintf_s(p, sizeof p / sizeof p[0], _TRUNCATE, L"%ls\\sound\\soundbanks\\pc\\soundbanksinfo.xml",
+                 g_baseDir);
+    FILE *f = _wfsopen(p, L"rb", _SH_DENYNO);
     if (!f) {
-        backend_log("B2: imgpreview -- no soundbanksinfo.xml; Wwise events unavailable");
+        backend_log("imgpreview: no soundbanksinfo.xml; Wwise events unavailable");
         return;
     }
     if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return; }
     long long fileEnd = _ftelli64(f);
     if (fileEnd < 0 || (unsigned long long)fileEnd > (size_t)-1) {
         fclose(f);
-        backend_log("B2: imgpreview -- soundbanksinfo.xml is too large to read safely");
+        backend_log("imgpreview: soundbanksinfo.xml is too large to read safely");
         return;
     }
     size_t sourceBytes = (size_t)fileEnd;
@@ -661,7 +687,7 @@ static void imgpreview_load_wwise_file(void)
     fclose(f);
     if (!ok || !buf) {
         free(buf);
-        backend_log("B2: imgpreview -- Wwise relevant-tag stream could not be built");
+        backend_log("imgpreview: the Wwise event list could not be built");
         return;
     }
     imgpreview_parse_wwise_buffer_sized(buf, len, sourceBytes);
@@ -713,7 +739,7 @@ static void imgpreview_load_sound_catalog(void)
     int wrapped = imgpreview_hide_wrapped_sounds();
     char line[220];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: imgpreview -- sound catalog ready in %llu ms; "
+        "imgpreview: sound catalog ready in %llu ms; "
         "%d wrapper sound decl(s) hidden behind a Play_ event",
         (unsigned long long)(GetTickCount64() - started), wrapped);
     backend_log(line);
@@ -765,7 +791,7 @@ static void imgpreview_load_vmtr(void)
 
     char line[280];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: imgpreview -- .vmtr atlas: %d distinct decl-less material(s) added to the material "
+        "imgpreview: .vmtr atlas: %d distinct decl-less material(s) added to the material "
         "catalog (%d shard-repeats collapsed, %d already had a decl) in %llu ms",
         g_vtCount, raw - g_vtCount, dup,
         (unsigned long long)(GetTickCount64() - started));
@@ -777,21 +803,19 @@ static int imgpreview_load(void)
     if (g_loaded) return g_loaded > 0;
     g_loaded = -1;
     ULONGLONG started = GetTickCount64();
-    char exe[MAX_PATH] = {0};
-    if (!GetModuleFileNameA(NULL, exe, MAX_PATH)) return 0;
-    char *slash = strrchr(exe, '\\'); if (!slash) return 0;
-    *slash = '\0';
-    _snprintf_s(g_baseDir, sizeof g_baseDir, _TRUNCATE, "%s\\base", exe);
+    const wchar_t *game = sh_host_dir();
+    if (!game || !game[0]) return 0;
+    _snwprintf_s(g_baseDir, sizeof g_baseDir / sizeof g_baseDir[0], _TRUNCATE, L"%ls\\base", game);
 
-    int a = imgpreview_load_box(0, "snap_gameresources");
-    int b = imgpreview_load_box(1, "gameresources");
+    int a = imgpreview_load_box(0, L"snap_gameresources");
+    int b = imgpreview_load_box(1, L"gameresources");
     size_t indexBytes = g_box[0].idxLen + g_box[1].idxLen;
     size_t releasedIndexBytes = imgpreview_compact_names();
     size_t retainedIndexBytes =
         (releasedIndexBytes == indexBytes) ? g_namePoolBytes : indexBytes;
     const char *indexMode = (releasedIndexBytes == indexBytes) ? "compacted" : "raw retained";
 
-    /* Promote bmodels with a same-named collision record into Modules. */
+    /* Promote the SnapMap palette's module bmodels (.../palettes/mega_blessed/) into Modules. */
     int modules = 0;
     for (int i = 0; i < g_recCount; ++i)
         if (g_rec[i].kind == SH_ASSET_BMODEL && strstr(g_rec[i].name, "/palettes/mega_blessed/")) {
@@ -871,10 +895,11 @@ static int imgpreview_load(void)
     free(snapSounds);
 
     g_rec = (rec_t *)imgpreview_shrink_array(g_rec, (size_t)g_recCount, sizeof *g_rec);
+    imgpreview_index_names();
 
     char line[600];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
+        "imgpreview: indexed %d records (snap=%s game=%s); %d SnapMap modules; "
         "%d light material(s) also listed under Lights; "
         "%d record(s) collapsed as a repeat of a name in the same box; "
         "index metadata %llu raw bytes -> %llu retained bytes (%s); "
@@ -897,10 +922,33 @@ static void imgpreview_prepare_list_kind(int kind)
     }
 }
 
+/* (kind, name) against a record, case-folded like every name comparison here. */
+static int rec_key_cmp(int kind, const char *name, size_t n, const rec_t *r)
+{
+    if (kind != r->kind) return kind - (int)r->kind;
+    return n ? _strnicmp(name, r->name, n) : _stricmp(name, r->name);
+}
+
+/* The first position in g_byName whose record is not below (kind, name); with n > 0 only the
+ * first n characters of the record's name take part, which finds a prefix range. */
+static int rec_lower_bound(int kind, const char *name, size_t n)
+{
+    int lo = 0, hi = g_recCount;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (rec_key_cmp(kind, name, n, &g_rec[g_byName[mid]]) > 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* The earliest-indexed record of this kind and name, as the catalog has always answered. */
 static const rec_t *find_rec(const char *name, int kind)
 {
-    for (int i = 0; i < g_recCount; ++i)
-        if (g_rec[i].kind == kind && _stricmp(g_rec[i].name, name) == 0) return &g_rec[i];
+    if (!g_byName) return NULL;
+    int at = rec_lower_bound(kind, name, 0);
+    if (at < g_recCount && rec_key_cmp(kind, name, 0, &g_rec[g_byName[at]]) == 0)
+        return &g_rec[g_byName[at]];
     return NULL;
 }
 
@@ -908,7 +956,7 @@ static const rec_t *find_rec(const char *name, int kind)
 int sh_imgpreview_has(int kind, const char *name)
 {
     if (!name || !name[0]) return 0;
-    EnterCriticalSection(&g_lock);
+    AcquireSRWLockExclusive(&g_lock);
     int ok = 0;
     if (imgpreview_load()) {
         if (kind == SH_ASSET_SOUND) imgpreview_load_sound_catalog();
@@ -916,13 +964,12 @@ int sh_imgpreview_has(int kind, const char *name)
         /* Admit Wwise event-only names without a sound decl. Native find-or-
          * create creates their wrappers; its missing-resource error remains
          * subject to resource_errorInGame, including the fatal setting 2.
+         * g_ev is sorted case-insensitively.
          */
-        if (!ok && kind == SH_ASSET_SOUND) {
-            for (int e = 0; e < g_evCount && !ok; ++e)
-                if (_stricmp(g_ev[e], name) == 0) ok = 1;
-        }
+        if (!ok && kind == SH_ASSET_SOUND && g_ev && g_evCount > 0)
+            ok = bsearch(&name, g_ev, (size_t)g_evCount, sizeof *g_ev, cmp_ci) != NULL;
     }
-    LeaveCriticalSection(&g_lock);
+    ReleaseSRWLockExclusive(&g_lock);
     return ok;
 }
 
@@ -933,12 +980,15 @@ static const rec_t *find_image(const char *name)
     const rec_t *r = find_rec(name, SH_ASSET_IMAGE);
     if (r) return r;
     size_t n = strlen(name);
-    for (int i = 0; i < g_recCount; ++i) {
-        if (g_rec[i].kind != SH_ASSET_IMAGE) continue;
-        const char *nm = g_rec[i].name;
-        if (_strnicmp(nm, name, n) == 0 && nm[n] == '$') return &g_rec[i];
+    if (!n || !g_byName) return NULL;
+    /* Every name starting with `name` sits in one sorted run; the earliest-indexed variant wins. */
+    const rec_t *best = NULL;
+    for (int at = rec_lower_bound(SH_ASSET_IMAGE, name, n); at < g_recCount; ++at) {
+        const rec_t *c = &g_rec[g_byName[at]];
+        if (rec_key_cmp(SH_ASSET_IMAGE, name, n, c) != 0) break;
+        if (c->name[n] == '$' && (!best || c < best)) best = c;
     }
-    return NULL;
+    return best;
 }
 
 /* Read a record's payload, inflating if needed. Caller frees. */
@@ -967,7 +1017,7 @@ int sh_imgpreview_read_payload(int kind, const char *name, size_t max_bytes,
     if (out_len) *out_len = 0;
     if (!out_bytes || !out_len || !name || !name[0] || max_bytes == 0) return 0;
 
-    EnterCriticalSection(&g_lock);
+    AcquireSRWLockExclusive(&g_lock);
     int ok = 0;
     if (imgpreview_load()) {
         const rec_t *r = find_rec(name, kind);
@@ -983,7 +1033,7 @@ int sh_imgpreview_read_payload(int kind, const char *name, size_t max_bytes,
             }
         }
     }
-    LeaveCriticalSection(&g_lock);
+    ReleaseSRWLockExclusive(&g_lock);
     return ok;
 }
 
@@ -1048,64 +1098,106 @@ static void downscale(const unsigned char *src, unsigned sw, unsigned sh, unsign
     }
 }
 
-static int imgpreview_produce_kind(const char *name, unsigned long generation, int direct_image)
+/* A .bimage holds one record per mip and face, level-major (a cube map lists its six faces of
+ * level 0, then of level 1): BE u32 level, BE u32 face, BE u32 width, BE u32 height, BE u32 size,
+ * then the data. The first record is at +0x2A. */
+#define BIM_MIP0     0x2Au
+#define BIM_MIP_HEAD 0x14u
+typedef struct { unsigned level, face, w, h, size; size_t data; } bim_mip;
+
+static int bim_read_mip(const unsigned char *bim, size_t blen, size_t at, bim_mip *m)
+{
+    if (at > blen || blen - at < BIM_MIP_HEAD) return 0;
+    m->level = be32(bim + at);
+    m->face = be32(bim + at + 4);
+    m->w = be32(bim + at + 8);
+    m->h = be32(bim + at + 0x0C);
+    m->size = be32(bim + at + 0x10);
+    m->data = at + BIM_MIP_HEAD;
+    return m->w && m->h && m->w <= 8192 && m->h <= 8192 && m->size <= blen - m->data;
+}
+
+/* Face 0 of the smallest mip still at least the preview size on its longer side, so a large
+ * image is not decoded at full size only to be shrunk. The records are walked while each face-0
+ * record is exactly the next level of the one before; anything else ends the walk at the last
+ * good one. */
+static int bim_pick_mip(const unsigned char *bim, size_t blen, bim_mip *out)
+{
+    bim_mip m, next;
+    if (!bim_read_mip(bim, blen, BIM_MIP0, &m) || m.level != 0 || m.face != 0) return 0;
+    size_t at = m.data + m.size;
+    while ((m.w > MAX_PREVIEW || m.h > MAX_PREVIEW) && bim_read_mip(bim, blen, at, &next)) {
+        at = next.data + next.size;
+        if (next.face != 0) continue;
+        unsigned w = m.w > 1 ? m.w / 2 : 1, h = m.h > 1 ? m.h / 2 : 1;
+        if (next.level != m.level + 1 || next.w != w || next.h != h ||
+            (w < MAX_PREVIEW && h < MAX_PREVIEW))
+            break;
+        m = next;
+    }
+    *out = m;
+    return 1;
+}
+
+/* Plain reasons for an asset with no picture, as the Assets tab shows them. */
+#define WHY_NO_RECORD   "This asset is not in the game's files."
+#define WHY_NO_IMAGE    "This material has no image to preview."
+#define WHY_NOT_IMAGE   "This asset's image could not be read."
+#define WHY_FORMAT      "This image uses a format the preview cannot show."
+#define WHY_MEMORY      "There was not enough memory to preview this asset."
+
+static int imgpreview_produce_kind(const char *name, unsigned long generation, int direct_image,
+                                   const char **why)
 {
     ULONGLONG started = GetTickCount64();
-    EnterCriticalSection(&g_lock);
-    int ok = 0;
+    int ok = SH_PREVIEW_FAILED;
+    const char *reason = WHY_NO_RECORD;
     unsigned char *decl = NULL, *bim = NULL, *rgba = NULL, *thumb = NULL;
-    __try {
-        if (!imgpreview_load()) __leave;
+    char img[256];
+    const char *image_name = name;
+    size_t blen = 0;
 
-        char img[256];
-        const char *image_name = NULL;
+    /* The catalog and its file handles are shared, so finding and reading the payload holds the
+     * lock; decoding works on this call's own copy and does not, so a sound check on the main
+     * thread never waits on a decode. */
+    AcquireSRWLockExclusive(&g_lock);
+    if (imgpreview_load()) {
         const rec_t *ir = NULL;
         const rec_t *mr = direct_image ? NULL : find_rec(name, SH_ASSET_MATERIAL);
         if (mr) {
-            size_t dlen = 0; decl = read_payload(mr, &dlen);
-            if (!decl || !dlen) { backend_log("B2: imgpreview -- decl read failed"); __leave; }
-            if (!decl_find_image((const char *)decl, dlen, img, sizeof img)) {
-                char l[320]; _snprintf_s(l,sizeof l,_TRUNCATE,
-                    "B2: imgpreview -- '%s' decl names no usable image (atlased decal/particle?)", name);
-                backend_log(l); __leave;
-            }
-            ir = find_image(img);
-            image_name = img;
-            if (!ir) {
-                char l[400]; _snprintf_s(l,sizeof l,_TRUNCATE,
-                    "B2: imgpreview -- '%s' -> image '%s' not in any container", name, img);
-                backend_log(l); __leave;
-            }
+            size_t dlen = 0;
+            decl = read_payload(mr, &dlen);
+            if (!decl || !dlen) reason = WHY_NO_RECORD;
+            else if (!decl_find_image((const char *)decl, dlen, img, sizeof img)) reason = WHY_NO_IMAGE;
+            else if (!(ir = find_image(img))) reason = WHY_NO_IMAGE;
+            else image_name = img;
         } else {
             ir = find_image(name);
-            if (!ir) {
-                backend_log(direct_image ? "B2: imgpreview -- no direct image record"
-                                         : "B2: imgpreview -- no material or image record");
-                __leave;
-            }
-            image_name = ir->name;
+            if (ir) image_name = ir->name;
         }
+        if (ir) {
+            bim = read_payload(ir, &blen);
+            if (!bim) reason = WHY_NOT_IMAGE;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
 
-        size_t blen = 0; bim = read_payload(ir, &blen);
-        if (!bim || blen < 0x40 || memcmp(bim + 4, "\x07MIB", 4) != 0) {
-            backend_log("B2: imgpreview -- not a .bimage"); __leave;
+    __try {
+        if (!bim) __leave;
+        bim_mip mip;
+        if (blen < 0x40 || memcmp(bim + 4, "\x07MIB", 4) != 0 || !bim_pick_mip(bim, blen, &mip)) {
+            reason = WHY_NOT_IMAGE; __leave;
         }
-        unsigned fmt = le32(bim + 0x20);
-        /* First mip record at +0x30: BE u32 level, BE u16 w @+4, BE u16 h @+8, BE u32 size @+0x0A. */
-        unsigned w  = ((unsigned)bim[0x34] << 8) | bim[0x35];
-        unsigned h  = ((unsigned)bim[0x38] << 8) | bim[0x39];
-        unsigned sz = be32(bim + 0x3A);
-        if (!w || !h || w > 8192 || h > 8192 || (size_t)0x3E + sz > blen) {
-            backend_log("B2: imgpreview -- bad mip record"); __leave;
-        }
+        unsigned fmt = le32(bim + 0x20), w = mip.w, h = mip.h;
 
         size_t need = bcn_rgba_size(w, h);
         rgba = (unsigned char *)malloc(need);
-        if (!rgba) __leave;
-        if (!bcn_decode(fmt, bim + 0x3E, sz, w, h, rgba)) {
-            char l[220]; _snprintf_s(l,sizeof l,_TRUNCATE,
-                "B2: imgpreview -- '%s' format code %u not decodable (only 10/11/23)", name, fmt);
-            backend_log(l); __leave;
+        if (!rgba) { reason = WHY_MEMORY; __leave; }
+        if (!bcn_decode(fmt, bim + mip.data, mip.size, w, h, rgba)) {
+            char l[300]; _snprintf_s(l,sizeof l,_TRUNCATE,
+                "imgpreview: '%s' uses format code %u, which the preview does not decode", name, fmt);
+            backend_log(l);
+            reason = WHY_FORMAT; __leave;
         }
 
         unsigned pw = BCN_PAD(w);
@@ -1116,32 +1208,58 @@ static int imgpreview_produce_kind(const char *name, unsigned long generation, i
             if (!dw) dw = 1; if (!dh) dh = 1;
         }
         thumb = (unsigned char *)malloc((size_t)dw * dh * 4);
-        if (!thumb) __leave;
+        if (!thumb) { reason = WHY_MEMORY; __leave; }
         downscale(rgba, w, h, pw, thumb, dw, dh);
 
         ok = sh_preview_publish(generation, thumb, dw, dh);
+        if (ok == SH_PREVIEW_FAILED) reason = WHY_MEMORY;
         if (ok != SH_PREVIEW_PUBLISHED) __leave;
         char l[400];
         _snprintf_s(l, sizeof l, _TRUNCATE,
-            "B2: imgpreview -- '%s' -> image '%s' %ux%u fmt=%u -> %ux%u preview in %llu ms",
+            "imgpreview: '%s' -> image '%s' %ux%u fmt=%u -> %ux%u preview in %llu ms",
             name, image_name, w, h, fmt, dw, dh,
             (unsigned long long)(GetTickCount64() - started));
         backend_log(l);
     } __finally {
         free(decl); free(bim); free(rgba); free(thumb);
-        LeaveCriticalSection(&g_lock);
     }
+    if (ok == SH_PREVIEW_FAILED) {
+        char l[400];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "imgpreview: no preview for '%s': %s", name, reason);
+        backend_log(l);
+    }
+    if (why) *why = ok == SH_PREVIEW_FAILED ? reason : NULL;
     return ok;
 }
 
-int sh_imgpreview_produce(const char *name, unsigned long generation)
+int sh_imgpreview_produce(const char *name, unsigned long generation, const char **why)
 {
-    return imgpreview_produce_kind(name, generation, 0);
+    return imgpreview_produce_kind(name, generation, 0, why);
 }
 
-int sh_imgpreview_produce_image(const char *name, unsigned long generation)
+int sh_imgpreview_produce_image(const char *name, unsigned long generation, const char **why)
 {
-    return imgpreview_produce_kind(name, generation, 1);
+    return imgpreview_produce_kind(name, generation, 1, why);
+}
+
+/* One page of names. Positions count every visible name in the listing's order; once one name
+ * does not fit, nothing after it is written, so the next page starts exactly there. */
+typedef struct {
+    char *out; size_t cap, used;
+    unsigned start, seen;
+    int written, full;
+} list_page;
+
+static void list_emit(list_page *p, const char *name, const char *bank)
+{
+    if (p->full) return;
+    if (p->seen++ < p->start) return;
+    size_t n = strlen(name), m = bank ? strlen(bank) + 1u : 0u;
+    if (p->used + n + m + 2 > p->cap) { p->full = 1; return; }   /* room for '\n' and NUL */
+    memcpy(p->out + p->used, name, n); p->used += n;
+    if (bank) { p->out[p->used++] = '|'; memcpy(p->out + p->used, bank, m - 1); p->used += m - 1; }
+    p->out[p->used++] = '\n';
+    p->written++;
 }
 
 int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
@@ -1150,69 +1268,31 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
     out[0] = '\0';
     /* Validate the public SH_ASSET_* range before indexing category state. */
     if (kind < 0 || kind >= SH_ASSET_COUNT) return 0;
-    EnterCriticalSection(&g_lock);
-    int written = 0;
+    AcquireSRWLockExclusive(&g_lock);
+    list_page p = { out, cap, 0, start, 0, 0, 0 };
     if (imgpreview_load()) {
         imgpreview_prepare_list_kind(kind);
-        size_t used = 0;
-        unsigned seen = 0;
-        for (int i = 0; i < g_recCount; ++i) {
-            /* `hidden` is decided once at load: everything in box 1 except sounds, and box-1
-             * sounds that duplicate a SnapMap one. See imgpreview_load. */
-            if (g_rec[i].kind != kind || g_rec[i].hidden) continue;
-            if (seen++ < start) continue;
-            size_t n = strlen(g_rec[i].name);
-            if (used + n + 2 > cap) break;                            /* leave room for \n and NUL */
-            memcpy(out + used, g_rec[i].name, n); used += n;
-            out[used++] = '\n';
-            written++;
-        }
-        /* Page over the same ordering used to count visible names. */
-        if (kind == SH_ASSET_SOUND) {
-            for (int e = 0; e < g_evCount; ++e) {
-                if (seen++ < start) continue;
-                size_t n = strlen(g_ev[e]);
-                if (used + n + 2 > cap) break;
-                memcpy(out + used, g_ev[e], n); used += n;
-                out[used++] = '\n';
-                written++;
-            }
-        }
-        /* Publish event|bank lines on a separate pseudo-kind. The sound-name
-         * list is applied verbatim and must contain only names.
-         */
-        if (kind == SH_ASSET_SNDBANK) {
-            for (int b = 0; b < g_sbCount; ++b) {
-                if (seen++ < start) continue;
-                size_t n = strlen(g_sb[b].name), m = strlen(g_sb[b].bank);
-                if (used + n + m + 3 > cap) break;               /* name + '|' + bank + '\n' + NUL */
-                memcpy(out + used, g_sb[b].name, n); used += n;
-                out[used++] = '|';
-                memcpy(out + used, g_sb[b].bank, m); used += m;
-                out[used++] = '\n';
-                written++;
-            }
-        }
+        /* `hidden` is decided once at load: everything in box 1 except sounds, and box-1 sounds
+         * that duplicate a SnapMap one. See imgpreview_load. */
+        for (int i = 0; i < g_recCount && !p.full; ++i)
+            if (g_rec[i].kind == kind && !g_rec[i].hidden) list_emit(&p, g_rec[i].name, NULL);
+        if (kind == SH_ASSET_SOUND)
+            for (int e = 0; e < g_evCount && !p.full; ++e) list_emit(&p, g_ev[e], NULL);
+        /* Publish event|bank lines on a separate pseudo-kind. The sound-name list is applied
+         * verbatim and must contain only names. */
+        if (kind == SH_ASSET_SNDBANK)
+            for (int b = 0; b < g_sbCount && !p.full; ++b) list_emit(&p, g_sb[b].name, g_sb[b].bank);
         /* Atlas-only materials remain selectable through their VMTR rectangle. */
-        if (kind == SH_ASSET_MATERIAL || kind == SH_ASSET_VTONLY) {
-            for (int v = 0; v < g_vtCount; ++v) {
-                if (seen++ < start) continue;
-                size_t n = strlen(g_vt[v]);
-                if (used + n + 2 > cap) break;
-                memcpy(out + used, g_vt[v], n); used += n;
-                out[used++] = '\n';
-                written++;
-            }
-        }
-        out[used] = '\0';
+        if (kind == SH_ASSET_MATERIAL || kind == SH_ASSET_VTONLY)
+            for (int v = 0; v < g_vtCount && !p.full; ++v) list_emit(&p, g_vt[v], NULL);
     }
-    LeaveCriticalSection(&g_lock);
-    return written;
+    out[p.used] = '\0';
+    ReleaseSRWLockExclusive(&g_lock);
+    return p.written;
 }
 
 int sh_imgpreview_install(void)
 {
-    InitializeCriticalSection(&g_lock);
-    backend_log("B2: imgpreview -- installed (containers load lazily on first request)");
+    backend_log("imgpreview: ready; the game's resource indexes load on the first request");
     return 1;
 }

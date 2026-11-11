@@ -16,6 +16,7 @@
 #include "apply_engine.h"
 #include "grid_room_native.h"
 #include "modserve.h"
+#include "near_page.h"
 
 void backend_log(const char *message);
 
@@ -134,29 +135,17 @@ static void *nav_instance_load(void *self,const char *name,unsigned char a,unsig
  * intact. */
 static void *nav_near_relay(uintptr_t call,void *handler,int instance)
 {
-    SYSTEM_INFO info;uintptr_t step,center,delta;
-    GetSystemInfo(&info);step=info.dwAllocationGranularity;center=call&~(step-1);
-    for(delta=step;delta<0x7fff0000u;delta+=step) {
-        uintptr_t candidates[2]={center>=delta?center-delta:0,center+delta};int i;
-        for(i=0;i<2;i++) {
-            MEMORY_BASIC_INFORMATION mbi;unsigned char *relay;DWORD old;int at=0;
-            uintptr_t address=candidates[i];
-            if(address<(uintptr_t)info.lpMinimumApplicationAddress||
-               address>(uintptr_t)info.lpMaximumApplicationAddress||
-               !VirtualQuery((void*)address,&mbi,sizeof mbi)||mbi.State!=MEM_FREE)continue;
-            relay=(unsigned char*)VirtualAlloc((void*)address,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-            if(!relay)continue;
-            if(instance==1){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
-            if(instance==2){relay[at++]=0x48;relay[at++]=0x8b;relay[at++]=0xcb;}
-            if(instance==3){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xcd;}
-            relay[at++]=0xff;relay[at++]=0x25;
-            memset(relay+at,0,4);at+=4;memcpy(relay+at,&handler,8);at+=8;
-            if(!VirtualProtect(relay,4096,PAGE_EXECUTE_READ,&old)){
-                VirtualFree(relay,0,MEM_RELEASE);return NULL;}
-            FlushInstructionCache(GetCurrentProcess(),relay,at);return relay;
-        }
-    }
-    return NULL;
+    /* The patched CALL's rel32 is relative to its end, call + 5. */
+    unsigned char *relay=(unsigned char*)sh_near_page_alloc(call+5);DWORD old;int at=0;
+    if(!relay)return NULL;
+    if(instance==1){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
+    if(instance==2){relay[at++]=0x48;relay[at++]=0x8b;relay[at++]=0xcb;}
+    if(instance==3){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xcd;}
+    relay[at++]=0xff;relay[at++]=0x25;
+    memset(relay+at,0,4);at+=4;memcpy(relay+at,&handler,8);at+=8;
+    if(!VirtualProtect(relay,SH_NEAR_PAGE_BYTES,PAGE_EXECUTE_READ,&old)){
+        VirtualFree(relay,0,MEM_RELEASE);return NULL;}
+    FlushInstructionCache(GetCurrentProcess(),relay,at);return relay;
 }
 
 int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)

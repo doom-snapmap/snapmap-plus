@@ -1,14 +1,15 @@
 /* Backend ownership and startup of the shared frontend interface. */
-#ifndef BACKEND_B2_UI_BRIDGE_H
-#define BACKEND_B2_UI_BRIDGE_H
+#ifndef BACKEND_UI_BRIDGE_H
+#define BACKEND_UI_BRIDGE_H
 
 #include "snapmap_plus_iface.h"
 
-/* The frontend's path relative to the DOOM folder. It names the supported build so the
- * 2018 release's snapmap-plus\snapmap-plus-ui.dll, which the release bundle also carries
- * for installers without build detection, is never loaded here. package.ps1 and the
+/* The frontend's path relative to the folder this DLL loads from (the DOOM folder). It names the
+ * supported build so the 2018 release's snapmap-plus\snapmap-plus-ui.dll, which the release bundle
+ * also carries for installers without build detection, is never loaded here. package.ps1 and the
  * installer use the same path (an installer test checks them). */
-#define SH_UI_DLL_PATH ".\\snapmap-plus\\snapmap-plus-ui-13954591.dll"
+#define SH_UI_DLL_DIR  L"snapmap-plus"
+#define SH_UI_DLL_PATH L"snapmap-plus\\snapmap-plus-ui-13954591.dll"
 
 /* Return the shared interface, or NULL before it is created. */
 sh_iface *sh_ui_get_iface(void);
@@ -18,4 +19,4 @@ sh_iface *sh_ui_get_iface(void);
  * fails, or 0 on allocation failure. Only interface creation is idempotent. */
 int sh_ui_bridge_install(void);
 
-#endif /* BACKEND_B2_UI_BRIDGE_H */
+#endif /* BACKEND_UI_BRIDGE_H */

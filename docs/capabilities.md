@@ -38,7 +38,9 @@ the loading screen and returns to the menu with DOOM's error). A single modern r
 reaches that at about 32768 x 32768. Snapmap+ counts the areas when Play
 builds the map: a map that fits keeps DOOM's 512-unit areas exactly, and a
 larger one is built with the smallest coarser size (1024, 2048 and so on)
-that fits, so oversized rooms load. Coarser areas mean coarser visibility
+that fits, so oversized rooms load. A map too large even for the coarsest size is
+told in the editor, before Play, as soon as an edit makes it so: a toast ("Map Too Large")
+says how many world areas it needs and that it must be made smaller. Coarser areas mean coarser visibility
 culling, so very large maps draw more of themselves each frame. The log names
 the size Play uses when a map is opened, on each Play and after a resize that
 needs a coarser size. On a build where the size cannot be changed, a resize
@@ -289,16 +291,15 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folder it is installed as.
 - A rawmap of a map that uses mods is shared as a `.zip`: every rawmap save of such a map writes
   `<name>.zip` beside the `.json` (for the default file, `rawmap.zip`), holding the map as
-  `<name>.json` and every mod it uses at the build the map records, exactly as that build sits in
-  your mods folder (`mods/<folder>/mod.json` and `mods/<folder>/assets/...`; a build whose folder
-  moved on is taken from its last good build snapshot), and one toast and one console line say to
+  `<name>.json` and every mod it uses as its folder (`mods/<folder name>/mod.json` and
+  `mods/<folder name>/assets/...`, byte for byte; a row naming an older build of one of your mods
+  carries your current build), and one toast and one console line say to
   share the `.zip`, because the `.json` alone does not load for anyone who lacks the mods. **Save
   Rawmap As...** offers `.zip` first for such a map. Opening a `.zip` (**Load Rawmap...**,
-  `sh_rawmaps load`) is the ordinary install by hash of each mod folder it carries: a build you
-  already have is left as it is, any other build of a mod you have (another version, or the same
-  version with other files) is installed beside yours, and the map opens; nothing is refused for a
-  mod reason. A `.zip` saved by an earlier release is
-  refused with a request to save it again; a refusal in **Load Rawmap...** (a prefab's export, an
+  `sh_rawmaps load`, `sh_mods import`) installs each mod folder it carries into
+  `mods\maps\<zip name>\<mod name>\` unless one of your own mods (any build of it) or that folder
+  already serves it, and the map opens. A `.zip` saved by an earlier release is
+  refused: "This export was saved in a format this version does not read."; a refusal in **Load Rawmap...** (a prefab's export, an
   earlier release's `.zip`) is also written to the console ("The rawmap was not loaded: ...") and
   the logs. **Load Rawmap...** and **Save Rawmap As...** each open in the folder last used for them
   (`dialogs.rawmap_load`, `dialogs.rawmap_save` in `config.json`), the rawmaps folder
@@ -374,15 +375,13 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   A My Maps map, rawmap or prefab counts as published when a map published from this machine (and
   not unpublished) used that build. With several, the dialog names the first and says how many
   more; the console has one line each. A lobby join words them the same way.
-- Your own maps play with the build you have. When a My Maps map, a rawmap or a prefab names a
-  build that is not installed and cannot be downloaded (the mod store lacks it, did not answer, or
-  it needs a game file you do not have) while another build of the same mod is installed, it is
-  not refused: the installed build serves it, as it does when you open the map in the editor, and
-  the console says so once per mod: "My Maps play: <key>: uses the installed mod; the next save of
-  the map records it". The Play declares that installed build, the same map plays again in that session
-  without asking, and a prefab placed this way adds the installed build to the map. A build the
-  mod store has is still offered for download first. A community map you play from the browser, a
-  lobby or the feed keeps its author's build and is refused as above when that build is gone.
+- Your own maps follow your own mods. A My Maps map, a rawmap, a prefab and a map you published
+  from this machine are served by your folder of each mod at whatever build it is now; the next
+  save records that build. A community map you play from the browser, a lobby or the feed is
+  served by the build it pins, from its own folder under `mods\maps\<map title>\`, else by your
+  folder when it is at that very build; otherwise it is downloaded there, and refused as above
+  when that build is gone.
+
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes an ordinary mod folder `mods\<id>\`
   (unless an installed mod already serves the same content) and the map gets a manifest row for it;
@@ -502,7 +501,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   (N 1 to 16), and materials naming it with `landpagefile "mods/<id>/<family>"` and an explicit
   `virtualmapping`. The family is registered with the game when the mod is installed (or, for mods
   present at startup, when the editor is first opened or a map using it loads), before any of its
-  materials is read, with no console command; `sh_mods status` and `sh_vt list` show it. Each family
+  materials is read, with no console command; `sh_mods status` shows it. Each family
   takes one of the game's 30 usable page-source records and about 14 MB of memory; a family that
   finds them all in use is not registered and its materials draw with default images. On OpenGL a
   family is registered only when the graphics driver offers AMD sparse textures; otherwise the log
@@ -622,9 +621,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_event` | The live engine event registry: `sh_event info <name>` prints an event's number, argument format, types and names; `sh_event list [filter]` prints every event (1611 on this build), or those whose line contains the filter. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_mods` | Installed mods (see [Mods](#mods)). Bare or `status`: what the serving table holds and serves. `rescan` (or `refresh`) rereads the mods folder; `palette rebuild` adds rows of mods installed after the editor first opened. `rescan` also builds every mod folder whose files or `mod.json` changed and applies what changed to the running game, printing one `MODS: refresh:` line per category: decls re-parsed by type, models and images reloaded, anims waiting for the next map load, new names that need a map reload or `palette rebuild`, changes that need a restart, and changes left pending during Play; `status` says when changes are pending. `held [filter]` prints what the game was served under each name this session (bundle, file, serves, and whether the game holds the name and for how long) and the names it holds for the session by type. `build "<folder>"` checks a mod and writes the `snapmap-plus` member of its `mod.json`; `install "<folder>"` copies it into the store as `mods\<id>`, verifies it and rescans; `list` shows every mod folder and its state; `verify "<folder>"` rehashes one installed mod (an id, or `id@version`, checks every folder declaring it). `copystock "<engine path>" "<file>"` writes the bytes of an installed game file to a new file, so a stock mesh or animation can be placed in a mod under a new name; it never replaces a file. `map` prints the open map (name, last save, published and uploaded state, search tag) and each mod it uses, by its name and folder, with its placed entities and the wires and Timelines pointing at them and whether it is used by the whole map. `map add "<mod folder>"` uses that mod in the whole open map without placing anything (the Mods tab's Use in this map). `status` and `doctor` print each mod's scope and whether it is active in the open map. `map remove "<mod folder>"` prints what removing that mod from the open map does, and with `--yes` does it (the Mods tab's Remove from map); `uninstall "<mod folder>"` prints what uninstalling does (the open map first, the Toybox rows, the folder moved to the Windows Recycle Bin, how many of your saved maps use it, and that the undo history is cleared) and does it with `--yes`; it removes every folder of that mod, your own and the copies downloaded maps brought, each listed in the dry run; `removed` only says "Uninstalled mods go to the Windows Recycle Bin."; `rebuild "<folder>"` builds one of your mod folders again and rescans (the tab's Rebuild). `choose "<game file>/<path>" "<mod folder>"` picks whose edit serves a field several of the open map's mods set to different values (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; none clears). `new "<name>"` makes a mod folder named after the mod. `doctor` prints every mod folder with its state and its plain cause, which layer serves each path several mods carry, and the registries with their clashes. A folder or file without a drive is taken relative to the mods folder. |
-| `sh_vt` | Virtual-texture diagnostic. `status` and `list` show the game's page-source records, marking those registered for an installed mod's family; `sync` registers the installed mods' families now; `register "<name>" "<path>" [flavor]` and `release "<name>"` create and remove a record by hand for format experiments (never a mod's); `decode <family> <level> <x> <y> <out>` decodes one stored page to its five planes. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — for each marked module copy, each demon size's outcome (built, built with parts left out, keeps its shipped navigation, or not baked yet) with its reason and which faces of each marked box carry a floor climb for how many demons (or the commonest reason none does), and every box the map read left out with why; it also says which map the last Play read its boxes from. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. |
-| `sh_navmesh marks <n>` | Mark the first `n` marked volumes of every module red, the way a refused bake marks the ones it could not place, so the marks can be checked without a map that refuses. `0` clears them. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data (e.g. emit the eventDef table as a header). |
 | `cs_dumpeventdefs` | Dump all eventDefs to a file. |
 | `cs_fieldinfo` | Print field info for a type (developer tool). |
@@ -879,7 +876,7 @@ Engine detours and resource-loader shadows the backend installs.
 | Placement grid around marked boxes | The faint green grid the editor shows while a demon is held is a stock model per module and demon size (`<module>/<leaf>_aas_<size>.bmodel`), loaded by name whenever the editor rebuilds its placement surfaces. After each preview bake, every copy whose floor the bake cut gets that model rewritten so its floor triangles cover only the floor the bake kept: the grid stops around each box grown by that size's clearance and continues under a box high enough to walk beneath, as demons will. The preview therefore bakes all three demon sizes, and Play reuses those bakes. The native rebuild asks for a cut copy's model under a private name (`maps/smpnavgrid/<hash>/<stock name>`, substituted at the call that completes the name, VK 0x1198E7F / GL 0x11980AF) and still creates, shows and hides it for the held demon. A changed set of cut models rebuilds the placement surfaces once, inside a process-heap scope; unmarking every box restores the stock models, and copies with nothing cut load the stock model unchanged. A model that cannot be cut keeps its stock model and is logged. Cut models already loaded stay in the engine's model list until it purges them, a few kilobytes each. |
 | Unrestricted placement | Any entity can be placed or moved anywhere in the editor, including open air. DOOM refuses a held entity whose placement flags ask for a floor (every demon, the player start, encounter spawners, AI path and combat points, item hints and pickups) when no floor is under it, showing it red; `place_anywhere.c` turns off only that refusal, in the test that colours the held entity and in the one that admits Place. A floor or wall under the entity still counts as before, Drop to Floor still drops it, and an entity that overlaps another or lies outside every module is still refused. Nothing new is written into the map. In Play the player starts on the floor below a floating player start, and floating demons are found on the floor once they are active. If the two tests are not found on the running executable, the log says unrestricted placement is unavailable and the native rule applies. |
 | Strids injector | Combines every installed mod's `strings.en` with the built-in strings (the old `strings\strids.json` is moved into the mod My overrides by the store tool and not read). A refresh publishes the owned values without duplicate rows, retaining storage needed by live native readers. See `src/backend/strids.h`. |
-| Text-field clipboard | **Ctrl+C / Ctrl+V in the editor's text fields** — every free-text property (datapad and transmission message bodies) plus the text-backed int / float / vec3 / size inspectors. Copies the selection, or the whole field when nothing is selected; pastes over the selection, or at the caret. Multi-line text pasted into a single-line field collapses each break to a space; datapad bodies keep their newlines. Respects the field's own character cap. Vanilla has no text clipboard at all here (only the dev console accepts a paste) — and it is genuinely absent rather than disabled: the engine's SWF text-edit key handler has no Ctrl branch whatsoever. Entity-level Ctrl+C/Ctrl+V and Ctrl+X are untouched. Exceeds the original. |
+| Text-field clipboard | **Ctrl+C / Ctrl+V in the editor's text fields** — every free-text property (datapad and transmission message bodies) plus the text-backed int / float / vec3 / size inspectors. Copies the selection, or the whole field when nothing is selected; pastes over the selection, or at the caret. Multi-line text pasted into a single-line field collapses each break to a space; datapad bodies keep their newlines. Text is Unicode on the Windows clipboard, so accented and non-Latin text copies and pastes intact. Respects the field's own character cap, cutting at a whole character, and a paste the cap cuts short says so in a toast ("Pasted text was cut to the field's N-character limit."). Vanilla has no text clipboard at all here (only the dev console accepts a paste) — and it is genuinely absent rather than disabled: the engine's SWF text-edit key handler has no Ctrl branch whatsoever. Entity-level Ctrl+C/Ctrl+V and Ctrl+X are untouched. Exceeds the original. |
 | Boot pacing | DOOM reaches the SnapMap hub in about 19 s on Vulkan and 22 s on OpenGL instead of about 158 s and 141 s (warm boots on the test machine). The engine's startup resource preload was paced by waits, not by the disk: the load-screen video slept 10 ms at a time while holding the lock the file-stream thread needs, and the main thread polled every read with `Sleep(1)`. `boot_pacing.c` releases that lock for the video's sleep and lets the poll spin and yield before it sleeps. The load-screen video and progress ring look and play as before. Both sites are byte-checked and patched about 0.1 s after launch; when a site does not match, it is logged and left alone. Map loads run through the same two sites. |
 | Owner-bound companions | When an installed mod declares `companions`, detours `idClass::CallSpawn` so that each entity spawned from a listed tile gets its companions right after its own spawn: spawned the way the game's own spawners spawn at a position, relative to the tile, bound to it and added to its targets in order. With no such mod the spawn path is untouched. See [Mods](#mods). |
 | String Set commands | Detours the Set (String) action's `DoAction`; a literal value starting with `smp:` runs as a command on the activator's player before the stock write (see [Map behaviour](#map-behaviour-string-set-commands)). |

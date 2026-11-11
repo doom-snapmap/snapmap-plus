@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "module_orientation.h"
 #include "nav_snapshot.h"
 
 #define NAVS_PREFIX  "maps/modules/"
@@ -85,18 +86,12 @@ static int navs_matches(const sh_nav_snapshot_sources *src, const sh_nav_map *ma
 }
 
 /* The inverse of nav_bake.c's bake_world_point: world.xy = origin.xy +
- * M[o] * local.xy, world.z = origin.z + local.z. Every M[o] is orthogonal, so
- * its inverse is its transpose. */
+ * M[o] * local.xy, world.z = origin.z + local.z (module_orientation.h). */
 static void navs_point_to_local(const sh_nav_instance *in, float p[3], int vector)
 {
-    static const int xy[8][4] = {{1,0,0,1},{0,-1,1,0},{-1,0,0,-1},{0,1,-1,0},
-                                 {-1,0,0,1},{0,1,1,0},{1,0,0,-1},{0,-1,-1,0}};
-    int o = in->orientation;
     float dx = p[0], dy = p[1];
-    if (o < 0 || o > 7) o = 0;
     if (!vector) { dx -= in->origin[0]; dy -= in->origin[1]; p[2] -= in->origin[2]; }
-    p[0] = xy[o][0] * dx + xy[o][2] * dy;
-    p[1] = xy[o][1] * dx + xy[o][3] * dy;
+    sh_module_orient_inverse(in->orientation, dx, dy, &p[0], &p[1]);
 }
 
 static void navs_regions_to_local(const sh_nav_map *m, sh_nav_region *r, int count)

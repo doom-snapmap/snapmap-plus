@@ -8,8 +8,10 @@
 #include <stdint.h>
 
 /* Install once after clean handler/type resolution. Ctrl+C copies the selection
- * or whole field; Ctrl+V replaces the selection. If idStr assignment does not
- * resolve, only copy is enabled. Failures are logged. */
+ * or whole field; Ctrl+V replaces the selection, and a paste the field's limit
+ * cuts short says so in a toast. Text is Unicode on the clipboard and UTF-8 in
+ * the field. If idStr assignment does not resolve, only copy is enabled.
+ * Failures are logged. */
 void sh_swf_textedit_install(const uint8_t *module_base);
 
 /* Remove the detour if installed. */
