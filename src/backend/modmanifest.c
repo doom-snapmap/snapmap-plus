@@ -1,4 +1,4 @@
-/* Map manifest rows: read, strip, write, and the save-time closure. */
+/* Map manifest rows: read, write, and the save-time closure. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <limits.h>
@@ -13,6 +13,10 @@
 #include "map_carrier.h"
 #include "config_json.h"
 #include "backend_log.h"
+
+/* The build that serves a row now (modserve.h, sh_modserve_row_build): 1 with
+ * *out filled, 0 when nothing serves it. */
+int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
 
 /* ==================================================================== */
 /* rows                                                                  */
@@ -83,11 +87,13 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
     return 1;
 }
 
-static sh_modmanifest_row *mm_list_find(sh_modmanifest_list *list, const char *bundle)
+/* The row of `salt` at `build`; NULL salt matches the build alone. */
+static sh_modmanifest_row *mm_list_find(sh_modmanifest_list *list, const char *salt, const char *build)
 {
     size_t i;
     for (i = 0; i < list->count; i++)
-        if (!strcmp(list->rows[i].bundle, bundle)) return &list->rows[i];
+        if (!strcmp(list->rows[i].build, build) && (!salt || !strcmp(list->rows[i].salt, salt)))
+            return &list->rows[i];
     return NULL;
 }
 
@@ -95,19 +101,13 @@ static sh_modmanifest_row *mm_list_find(sh_modmanifest_list *list, const char *b
 /* grammar                                                               */
 /* ==================================================================== */
 
-int sh_modmanifest_valid_id(const char *id)
+int sh_modmanifest_valid_salt(const char *salt)
 {
-    size_t i, n;
-    if (!id) return 0;
-    n = strlen(id);
-    if (n == 0 || n > 64) return 0;
-    if (!((id[0] >= 'a' && id[0] <= 'z') || (id[0] >= '0' && id[0] <= '9'))) return 0;
-    for (i = 0; i < n; i++) {
-        char c = id[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-            return 0;
-        if (c == '.' && (i + 1 == n || id[i + 1] == '.')) return 0;
-    }
+    size_t i;
+    if (!salt || strlen(salt) != SH_MODMANIFEST_SALT_LEN) return 0;
+    if (salt[0] < 'a' || salt[0] > 'z') return 0;
+    for (i = 1; i < SH_MODMANIFEST_SALT_LEN; i++)
+        if (!((salt[i] >= 'a' && salt[i] <= 'z') || (salt[i] >= '0' && salt[i] <= '9'))) return 0;
     return 1;
 }
 
@@ -116,37 +116,6 @@ int sh_modmanifest_valid_hash(const char *text, size_t length)
     size_t i;
     if (!text || length != SH_MOD_HASH_CHARS) return 0;
     for (i = 0; i < length; i++) if (!sh_shard_is_hex(text[i])) return 0;
-    return 1;
-}
-
-static int mm_digits(const char **p, const char *end, unsigned *value)
-{
-    unsigned long v = 0;
-    int digits = 0;
-    while (*p < end && sh_shard_is_digit(**p)) {
-        if (++digits > 7) return 0;
-        v = v * 10 + (unsigned long)(**p - '0');
-        (*p)++;
-    }
-    if (!digits) return 0;
-    *value = (unsigned)v;
-    return 1;
-}
-
-int sh_modmanifest_header(const char *header, size_t length, unsigned *index, unsigned *count)
-{
-    const char *p, *end;
-    unsigned i = 0, n = 0;
-    if (!header || length <= SH_MODMANIFEST_MAGIC_LEN ||
-        memcmp(header, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return 0;
-    p = header + SH_MODMANIFEST_MAGIC_LEN;
-    end = header + length;
-    if (!mm_digits(&p, end, &i) || p >= end || *p != '.') return 0;
-    p++;
-    if (!mm_digits(&p, end, &n) || p != end) return 0;
-    if (n == 0 || i >= n) return 0;
-    if (index) *index = i;
-    if (count) *count = n;
     return 1;
 }
 
@@ -397,17 +366,33 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         MM_ERR("row value is not a JSON object");
         return 0;
     }
-    if (!mm_member_text(&object, "id", out->id, sizeof out->id, 1) ||
-        !sh_modmanifest_valid_id(out->id)) { MM_ERR("row has no valid id"); goto done; }
-    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 1)) {
-        MM_ERR("row '%s' has no valid version", out->id); goto done;
+    if (sh_json_object_get(&object, "id") || sh_json_object_get(&object, "bundle")) {
+        MM_ERR("row is in an earlier shape (it names an id or a bundle)");
+        goto done;
     }
-    if (!mm_member_text(&object, "bundle", out->bundle, sizeof out->bundle, 1) ||
-        !sh_modmanifest_valid_hash(out->bundle, strlen(out->bundle))) {
-        MM_ERR("row '%s' has no valid bundle hash", out->id); goto done;
+    {
+        char mod[SH_MODMANIFEST_SALT_CAP + SH_MODMANIFEST_HASH_CAP + 1];
+        if (!mm_member_text(&object, "mod", mod, sizeof mod, 1) || strlen(mod) != SH_MODMANIFEST_SALT_LEN + 1 + SH_MOD_HASH_CHARS ||
+            mod[SH_MODMANIFEST_SALT_LEN] != '@') {
+            MM_ERR("row has no valid mod");
+            goto done;
+        }
+        memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN);
+        out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
+        memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
+        if (!sh_modmanifest_valid_salt(out->salt) || !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {
+            MM_ERR("row has no valid mod");
+            goto done;
+        }
+    }
+    if (!mm_member_text(&object, "name", out->name, sizeof out->name, 0)) {
+        MM_ERR("row '%s' has no valid name", out->salt); goto done;
+    }
+    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 0)) {
+        MM_ERR("row '%s' has no valid version", out->salt); goto done;
     }
     if (!mm_member_uint(&object, "size", &out->size)) {
-        MM_ERR("row '%s' has no valid size", out->id); goto done;
+        MM_ERR("row '%s' has no valid size", out->salt); goto done;
     }
     {
         const char *attached = sh_json_object_get(&object, "attached");
@@ -425,7 +410,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                 if (key && co.members[c].key_length < sizeof slot) {
                     memcpy(slot, co.members[c].key, co.members[c].key_length);
                     slot[co.members[c].key_length] = 0;
-                    if (mm_slot_ok(slot) && sh_modmanifest_valid_id(key))
+                    if (mm_slot_ok(slot) && sh_modmanifest_valid_salt(key))
                         (void)mm_choice_add(out->choices, sizeof out->choices, slot, key);
                 }
                 free(key);
@@ -445,7 +430,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
             if (name && strlen(name) <= SH_MODMANIFEST_NAME_MAX) sh_modmanifest_row_add_name(out, name);
             free(name);
         }
-        if (r < 0) { MM_ERR("row '%s' has a malformed names list", out->id); goto done; }
+        if (r < 0) { MM_ERR("row '%s' has a malformed names list", out->salt); goto done; }
     }
     ok = 1;
 done:
@@ -462,20 +447,30 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     const char *p;
     if (out_length) *out_length = 0;
     if (!row) return NULL;
-    mm_put(&t, "{\"id\":", 6);
-    mm_put_quoted(&t, row->id);
+    if (!sh_modmanifest_valid_salt(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build)))
+        return NULL;
+    mm_put(&t, "{\"mod\":\"", 8);
+    mm_put(&t, row->salt, strlen(row->salt));
+    mm_put(&t, "@", 1);
+    mm_put(&t, row->build, strlen(row->build));
+    mm_put(&t, "\",\"name\":", 9);
+    mm_put_quoted(&t, row->name);
     mm_put(&t, ",\"version\":", 11);
     mm_put_quoted(&t, row->version);
-    mm_put(&t, ",\"bundle\":", 10);
-    mm_put_quoted(&t, row->bundle);
     _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
     mm_put(&t, number, strlen(number));
+    mm_put(&t, ",\"names\":[", 10);
+    for (i = 0; i < row->name_count; i++) {
+        if (i) mm_put(&t, ",", 1);
+        mm_put_quoted(&t, row->names[i]);
+    }
+    mm_put(&t, "]", 1);
     if (row->attached) mm_put(&t, ",\"attached\":true", 16);
     if (mm_choice_count(row->choices)) {
         mm_put(&t, ",\"choices\":{", 12);
         for (c = 0, p = row->choices; p && *p; c++) {
             const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
-            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
+            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_SALT_CAP];
             if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
             memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
             memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
@@ -487,12 +482,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         }
         mm_put(&t, "}", 1);
     }
-    mm_put(&t, ",\"names\":[", 10);
-    for (i = 0; i < row->name_count; i++) {
-        if (i) mm_put(&t, ",", 1);
-        mm_put_quoted(&t, row->names[i]);
-    }
-    mm_put(&t, "]}", 2);
+    mm_put(&t, "}", 1);
     if (t.failed) { free(t.p); return NULL; }
     if (out_length) *out_length = t.n;
     return t.p;
@@ -502,33 +492,10 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
 /* map text                                                              */
 /* ==================================================================== */
 
-#define MM_VALUE_WINDOW 4096
-
-/* The JSON string literal that is the row's initialValue, quotes included.
- * The shard scanner only reads base64 values; a manifest row's value is an
- * escaped JSON object. */
-static int mm_find_value(const char *after_header, const char *end, const char **lit, size_t *lit_len)
-{
-    size_t window = (size_t)(end - after_header);
-    const char *key, *v, *close;
-    if (window > MM_VALUE_WINDOW) window = MM_VALUE_WINDOW;
-    key = sh_shard_find(after_header, window, "\"initialValue\"", 14);
-    if (!key) return 0;
-    v = mm_ws(key + 14, end);
-    if (v >= end || *v != ':') return 0;
-    v = mm_ws(v + 1, end);
-    if (v >= end || *v != '"') return 0;
-    close = mm_skip_string(v, (size_t)(end - v) > SH_SHARD_MAX_CHUNK + 2 ? v + SH_SHARD_MAX_CHUNK + 2 : end);
-    if (!close) return 0;
-    *lit = v;
-    *lit_len = (size_t)(close - v);
-    return 1;
-}
-
-/* Add a parsed row to `out`, merging a bundle already there. */
+/* Add a parsed row to `out`, merging a row of the same salt and build. */
 static int mm_merge_row(sh_modmanifest_list *out, sh_modmanifest_row *row)
 {
-    sh_modmanifest_row *existing = mm_list_find(out, row->bundle);
+    sh_modmanifest_row *existing = mm_list_find(out, row->salt, row->build);
     int ok = 1;
     if (existing) {
         size_t i;
@@ -557,96 +524,33 @@ static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_li
 size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list *out,
                            unsigned *rejected)
 {
-    size_t pos = 0, read = 0;
-    const char *hdr, *chunk;
-    size_t hdr_len, chunk_len;
+    size_t from = 0, to = 0, read = 0;
     unsigned bad = 0;
     if (rejected) *rejected = 0;
     if (!json || !length || !out) return 0;
-    {
-        /* The map's member wins over any legacy row (map_carrier.h). */
-        size_t from = 0, to = 0;
-        if (sh_carrier_part(json, length, "mods", &from, &to) == 1) {
-            read = mm_read_member(json + from, json + to, out, &bad);
-            if (rejected) *rejected = bad;
-            return read;
-        }
-    }
-    if (!sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return 0;
-    while (out->count < SH_MODMANIFEST_MAX_ROWS &&
-           sh_shard_next(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN, &pos,
-                         &hdr, &hdr_len, &chunk, &chunk_len)) {
-        const char *lit;
-        size_t lit_len;
-        char *value;
-        sh_modmanifest_row row;
-        if (!sh_modmanifest_header(hdr, hdr_len, NULL, NULL)) continue;
-        if (!mm_find_value(hdr + hdr_len + 1, json + length, &lit, &lit_len)) { bad++; continue; }
-        value = mm_decode(lit, lit_len);
-        if (!value) { bad++; continue; }
-        if (!sh_modmanifest_parse_value(value, strlen(value), &row, NULL, 0)) {
-            free(value); bad++; continue;
-        }
-        free(value);
-        if (!mm_merge_row(out, &row)) bad++;
-        read++;
-    }
+    if (sh_carrier_part(json, length, "mods", &from, &to) != 1) return 0;
+    read = mm_read_member(json + from, json + to, out, &bad);
     if (rejected) *rejected = bad;
     return read;
-}
-
-static int mm_strip_filter(const char *hdr, size_t hdr_len, void *ctx)
-{
-    (void)ctx;
-    return sh_modmanifest_header(hdr, hdr_len, NULL, NULL);
-}
-
-char *sh_modmanifest_strip(const char *json, size_t length, size_t *out_length,
-                           unsigned *removed, int *doc_failed)
-{
-    unsigned elements = 0, runs = 0;
-    int failed = 0;
-    size_t written = 0;
-    char *out;
-    if (out_length) *out_length = 0;
-    if (removed) *removed = 0;
-    if (doc_failed) *doc_failed = 0;
-    if (!json || !length ||
-        !sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return NULL;
-    out = sh_shard_strip(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN,
-                         mm_strip_filter, NULL, SH_MODMANIFEST_MAX_ROWS * 2u,
-                         &written, &elements, &runs, &failed);
-    if (doc_failed) *doc_failed = failed;
-    if (!out) return NULL;
-    if (out_length) *out_length = written;
-    if (removed) *removed = elements;
-    return out;
 }
 
 char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest_list *rows,
                            size_t *out_length, char *err, size_t err_cap)
 {
-    char *base = NULL, *out = NULL;
-    const char *src;
-    size_t src_len = 0, i, count = rows ? rows->count : 0, w = 0;
-    int failed = 0;
+    char *out = NULL;
+    const char *src = json;
+    size_t src_len = length, i, count = rows ? rows->count : 0, w = 0;
     mm_text value = {0};
     if (out_length) *out_length = 0;
     if (err && err_cap) err[0] = 0;
     if (!json || !length) { MM_ERR("no map text"); return NULL; }
-
-    /* Legacy rows never survive a write: the member carries the rows. */
-    base = sh_modmanifest_strip(json, length, &src_len, NULL, &failed);
-    if (failed) { MM_ERR("the map's existing manifest rows could not be removed"); return NULL; }
-    src = base ? base : json;
-    if (!base) src_len = length;
     if (count > SH_MODMANIFEST_MAX_ROWS) { MM_ERR("too many manifest rows"); goto done; }
     if (count) {
         mm_put(&value, "[", 1);
         for (i = 0; i < count; i++) {
             size_t vlen = 0;
             char *row = sh_modmanifest_format_value(&rows->rows[i], &vlen);
-            if (!row) { MM_ERR("manifest row for '%s' could not be formatted", rows->rows[i].id); goto done; }
+            if (!row) { MM_ERR("manifest row for '%s' could not be formatted", rows->rows[i].salt); goto done; }
             if (i) mm_put(&value, ",", 1);
             mm_put(&value, row, vlen);
             free(row);
@@ -659,11 +563,6 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
         if (out_length) *out_length = w;
     } else if (err && err_cap && err[0]) {
         /* failed; err says why */
-    } else if (base) {
-        /* The member already carried exactly these rows; the legacy rows went. */
-        out = base;
-        base = NULL;
-        if (out_length) *out_length = src_len;
     } else if (count) {
         /* Already exactly this: a copy, so a caller always gets the text it asked for. */
         out = (char *)HeapAlloc(GetProcessHeap(), 0, src_len + 1);
@@ -676,7 +575,6 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
     } else MM_ERR("nothing to write");
 done:
     free(value.p);
-    if (base) HeapFree(GetProcessHeap(), 0, base);
     return out;
 }
 
@@ -855,7 +753,6 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 {
     sh_json_object object = {0}, block = {0};
     const char *raw, *files, *stock;
-    size_t i;
     int ok = 0;
     if (err && err_cap) err[0] = 0;
     if (!out) return 0;
@@ -866,17 +763,20 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
         MM_ERR("mod.json is not a JSON object");
         return 0;
     }
-    if (!mm_member_text(&object, "id", out->id, sizeof out->id, 1)) { MM_ERR("mod.json has no id"); goto done; }
-    for (i = 0; out->id[i]; i++) if (out->id[i] >= 'A' && out->id[i] <= 'Z') out->id[i] = (char)(out->id[i] + 32);
-    if (!sh_modmanifest_valid_id(out->id)) { MM_ERR("mod.json has no valid id"); goto done; }
+    if (!mm_member_text(&object, "name", out->name, sizeof out->name, 1) || !out->name[0]) {
+        MM_ERR("mod.json has no name of at most %d characters", SH_MODMANIFEST_DISPLAY_CAP - 1); goto done;
+    }
     if (!mm_member_text(&object, "version", out->version, sizeof out->version, 1)) strcpy_s(out->version, sizeof out->version, "0.0.0");
     raw = sh_json_object_get(&object, "snapmap-plus");
-    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 16, &block)) {
+    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 24, &block)) {
         MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;
     }
-    if (!mm_member_text(&block, "bundle", out->bundle, sizeof out->bundle, 1) ||
-        !sh_modmanifest_valid_hash(out->bundle, strlen(out->bundle))) {
-        MM_ERR("mod.json has no bundle hash"); goto done;
+    if (!mm_member_text(&block, "salt", out->salt, sizeof out->salt, 1) || !sh_modmanifest_valid_salt(out->salt)) {
+        MM_ERR("mod.json has no salt"); goto done;
+    }
+    if (!mm_member_text(&block, "build", out->build, sizeof out->build, 1) ||
+        !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {
+        MM_ERR("mod.json has not been built (no build hash)"); goto done;
     }
     files = sh_json_object_get(&block, "files");
     stock = sh_json_object_get(&block, "stock");
@@ -956,7 +856,7 @@ size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, s
         const char *p = rows->rows[i].choices;
         while (*p) {
             const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
-            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
+            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_SALT_CAP];
             if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
             memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
             memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
@@ -972,7 +872,7 @@ int sh_modmanifest_current_choose(const char *slot, const char *key)
     char next[SH_MODMANIFEST_CHOICES_CAP], *p;
     size_t at = 0;
     int ok = 1;
-    if (!mm_slot_ok(slot) || (key && key[0] && !sh_modmanifest_valid_id(key))) return -1;
+    if (!mm_slot_ok(slot) || (key && key[0] && !sh_modmanifest_valid_salt(key))) return -1;
     next[0] = 0;
     AcquireSRWLockExclusive(&g_current_lock);
     /* Every other slot as it was, then this one (the order of choosing). */
@@ -1029,7 +929,7 @@ static void mm_choices_load(const sh_modmanifest_list *rows)
     (void)mm_choices_push(0);
 }
 
-/* At a save: each choice on the row of the key it names. */
+/* At a save: each choice on the row of the salt it names. */
 static void mm_choices_save(sh_modmanifest_list *rows)
 {
     char lines[SH_MODMANIFEST_CHOICES_CAP], *p, line[400];
@@ -1045,7 +945,7 @@ static void mm_choices_save(sh_modmanifest_list *rows)
         *tab = 0;
         *nl = 0;
         for (i = 0; i < rows->count && !placed; i++)
-            if (!strcmp(rows->rows[i].id, tab + 1))
+            if (!strcmp(rows->rows[i].salt, tab + 1))
                 placed = mm_choice_add(rows->rows[i].choices, sizeof rows->rows[i].choices, p, tab + 1);
         if (!placed) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -1083,7 +983,7 @@ size_t sh_modmanifest_current_remove(const char *bundle)
     if (!bundle || !bundle[0]) return 0;
     AcquireSRWLockExclusive(&g_current_lock);
     for (i = 0, w = 0; i < g_current.count; i++) {
-        if (!strcmp(g_current.rows[i].bundle, bundle)) { sh_modmanifest_row_free(&g_current.rows[i]); dropped++; continue; }
+        if (!strcmp(g_current.rows[i].build, bundle)) { sh_modmanifest_row_free(&g_current.rows[i]); dropped++; continue; }
         if (w != i) g_current.rows[w] = g_current.rows[i];
         w++;
     }
@@ -1098,9 +998,9 @@ int sh_modmanifest_current_attach(const sh_modmanifest_row *row)
     sh_modmanifest_row fresh;
     sh_modmanifest_row *have;
     int r;
-    if (!row || !sh_modmanifest_valid_id(row->id) || !sh_modmanifest_valid_hash(row->bundle, strlen(row->bundle))) return -1;
+    if (!row || !sh_modmanifest_valid_salt(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build))) return -1;
     AcquireSRWLockExclusive(&g_current_lock);
-    have = mm_list_find(&g_current, row->bundle);
+    have = mm_list_find(&g_current, row->salt, row->build);
     if (have) {
         r = have->attached ? 0 : 1;
         have->attached = 1;
@@ -1132,15 +1032,16 @@ size_t sh_modmanifest_current_attached(sh_modmanifest_list *out)
 static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
 {
     size_t i;
-    if (!strcmp(from, to->bundle)) return;
+    if (!strcmp(from, to->build)) return;
     AcquireSRWLockExclusive(&g_current_lock);
-    if (!mm_list_find(&g_current, to->bundle))
+    if (!mm_list_find(&g_current, to->salt, to->build))
         for (i = 0; i < g_current.count; i++) {
             sh_modmanifest_row *r = &g_current.rows[i];
-            if (strcmp(r->bundle, from)) continue;
-            strcpy_s(r->id, sizeof r->id, to->id);
+            if (strcmp(r->build, from)) continue;
+            strcpy_s(r->salt, sizeof r->salt, to->salt);
+            strcpy_s(r->name, sizeof r->name, to->name);
             strcpy_s(r->version, sizeof r->version, to->version);
-            strcpy_s(r->bundle, sizeof r->bundle, to->bundle);
+            strcpy_s(r->build, sizeof r->build, to->build);
             r->size = to->size;
             break;
         }
@@ -1226,86 +1127,17 @@ int sh_modmanifest_load_notes_flush(int say)
     return n + over;
 }
 
-/* At an editor load (a map opened in the editor, a My Maps play): a row
- * pinning an earlier build of this machine's own folder, which an in-place
- * rebuild left as an alias, is rewritten to the folder's current build
- * (sh_modserve_row_follow), with one log line and no prompt; the listing, the
- * Mods tab and the next save then name it. A row of a folder the product
- * received keeps its pin (DESIGN-additive A.4, owner 2026-11-09). Returns the
- * rows rewritten. */
-static sh_modmanifest_resolve_fn volatile g_follow;
-void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow) { g_follow = follow; }
-
-static int mm_follow_load(sh_modmanifest_list *list);
-
-int sh_modmanifest_current_follow(sh_modmanifest_resolve_fn follow, const char *item)
-{
-    size_t i;
-    int n = 0;
-    if (!follow) return 0;
-    AcquireSRWLockExclusive(&g_current_lock);
-    for (i = 0; i < g_current.count; i++) {
-        sh_modmanifest_row *r = &g_current.rows[i], to;
-        char line[400];
-        memset(&to, 0, sizeof to);
-        if (follow(r->bundle, r->id, &to) != 1) continue;
-        if (!sh_modmanifest_valid_id(to.id) || !sh_modmanifest_valid_hash(to.bundle, strlen(to.bundle)) ||
-            !strcmp(to.bundle, r->bundle) || mm_list_find(&g_current, to.bundle))
-            continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "MODS: map: %s: follows its own folder, your published map '%s' (%.16s -> %.16s); nothing is "
-                    "downloaded for it", r->id, item && item[0] ? item : "?", r->bundle, to.bundle);
-        strcpy_s(r->id, sizeof r->id, to.id);
-        strcpy_s(r->version, sizeof r->version, to.version);
-        strcpy_s(r->bundle, sizeof r->bundle, to.bundle);
-        r->size = to.size;
-        backend_log(line);
-        n++;
-    }
-    ReleaseSRWLockExclusive(&g_current_lock);
-    return n;
-}
-
-static int mm_follow_load(sh_modmanifest_list *list)
-{
-    sh_modmanifest_resolve_fn follow = g_follow;
-    int editor = InterlockedCompareExchange(&g_editor_load, 0, 0) != 0, n = 0;
-    size_t i;
-    if (!list || !editor || !follow) return 0;
-    for (i = 0; i < list->count; i++) {
-        sh_modmanifest_row *r = &list->rows[i], to;
-        char line[320];
-        memset(&to, 0, sizeof to);
-        if (follow(r->bundle, r->id, &to) != 1) continue;
-        if (!sh_modmanifest_valid_id(to.id) || !sh_modmanifest_valid_hash(to.bundle, strlen(to.bundle)) ||
-            !strcmp(to.bundle, r->bundle) || mm_list_find(list, to.bundle))
-            continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "MODS: map: %s: follows its own folder, rebuilt since the map was saved (%.16s -> %.16s); "
-                    "the next save records it", r->id, r->bundle, to.bundle);
-        strcpy_s(r->id, sizeof r->id, to.id);
-        strcpy_s(r->version, sizeof r->version, to.version);
-        strcpy_s(r->bundle, sizeof r->bundle, to.bundle);
-        r->size = to.size;
-        backend_log(line);
-        n++;
-    }
-    return n;
-}
-
-/* 1 when a placed name lies in the row's namespace: "mods/<id>/", the id
- * spelled as written or with '-' as '_' (the engine's binary names). */
+/* 1 when a placed name lies in the row's namespace "mods/<salt>/" (a salt has
+ * one spelling: no '-' for the engine to cook). */
 static int mm_row_placed(const sh_modmanifest_row *r, char **names, size_t count)
 {
-    char a[SH_MODMANIFEST_ID_CAP + 8], b[SH_MODMANIFEST_ID_CAP + 8], *c;
+    char a[SH_MODMANIFEST_SALT_CAP + 8];
     size_t i, n;
-    if (!r->id[0] || !names) return 0;
-    _snprintf_s(a, sizeof a, _TRUNCATE, "mods/%s/", r->id);
-    strcpy_s(b, sizeof b, a);
-    for (c = b; *c; c++) if (*c == '-') *c = '_';
+    if (!r->salt[0] || !names) return 0;
+    _snprintf_s(a, sizeof a, _TRUNCATE, "mods/%s/", r->salt);
     n = strlen(a);
     for (i = 0; i < count; i++)
-        if (names[i] && (!_strnicmp(names[i], a, n) || !_strnicmp(names[i], b, n))) return 1;
+        if (names[i] && !_strnicmp(names[i], a, n)) return 1;
     return 0;
 }
 
@@ -1328,7 +1160,8 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
         sh_modserve_bundle_ref ref;
         char to[SH_MODMANIFEST_HASH_CAP] = "", why[400] = "", line[700];
         int placed;
-        if (sh_modserve_bundle_serving(r->bundle, NULL, &ref)) continue;   /* its own build serves */
+        memset(&ref, 0, sizeof ref);
+        if (sh_modserve_row_build(r, &ref)) continue;   /* a place or the root serves it */
         /* The placed names, read once, for the rows nothing serves. */
         if (!named && json && length) {
             int failed = 0;
@@ -1337,23 +1170,23 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
             if (failed) { names = NULL; count = 0; }
         }
         placed = mm_row_placed(r, names, count);
-        if (sub(r, to, sizeof to, placed, why, sizeof why) == 1 && sh_modmanifest_valid_hash(to, strlen(to)) && strcmp(to, r->bundle)) {
+        if (sub(r, to, sizeof to, placed, why, sizeof why) == 1 && sh_modmanifest_valid_hash(to, strlen(to)) && strcmp(to, r->build)) {
             AcquireSRWLockExclusive(&g_current_lock);
             if (g_nsubst < MM_SUBST_MAX) {
-                strcpy_s(g_subst[g_nsubst].from, sizeof g_subst[g_nsubst].from, r->bundle);
+                strcpy_s(g_subst[g_nsubst].from, sizeof g_subst[g_nsubst].from, r->build);
                 strcpy_s(g_subst[g_nsubst].to, sizeof g_subst[g_nsubst].to, to);
                 g_nsubst++;
             }
             ReleaseSRWLockExclusive(&g_current_lock);
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "MODS: map: %s: %.16s is not installed; the installed %.16s serves it in the editor and "
-                        "the next save records it", r->id, r->bundle, to);
+                        "the next save records it", r->salt, r->build, to);
         } else if (why[0]) {
             /* Held until the gate decides (B5): for a published map this
              * parse was not recognised as, the sentence is not the cause. */
             AcquireSRWLockExclusive(&g_current_lock);
             if (g_nnotes < MM_NOTES_MAX)
-                _snprintf_s(g_notes[g_nnotes++], sizeof g_notes[0], _TRUNCATE, "MODS: map: %s: %s", r->id, why);
+                _snprintf_s(g_notes[g_nnotes++], sizeof g_notes[0], _TRUNCATE, "MODS: map: %s: %s", r->salt, why);
             else g_notes_over++;
             if (placed && !g_refusal[0]) strcpy_s(g_refusal, sizeof g_refusal, why);
             ReleaseSRWLockExclusive(&g_current_lock);
@@ -1396,15 +1229,15 @@ static void mm_scope_load(const char *json, size_t length, const sh_modmanifest_
     sh_modmanifest_names_free(names, count);
 }
 
-/* "id@version, id@version, ..." for a log line. */
+/* "salt@build16, salt@build16, ..." for a log line. */
 static void mm_describe(const sh_modmanifest_list *list, char *out, size_t cap)
 {
     size_t i, w = 0;
     if (!cap) return;
     out[0] = 0;
     for (i = 0; i < list->count && w + 1 < cap; i++) {
-        int n = _snprintf_s(out + w, cap - w, _TRUNCATE, "%s%s@%s", i ? ", " : "",
-                            list->rows[i].id, list->rows[i].version);
+        int n = _snprintf_s(out + w, cap - w, _TRUNCATE, "%s%s@%.16s", i ? ", " : "",
+                            list->rows[i].salt, list->rows[i].build);
         if (n < 0) break;
         w += (size_t)n;
     }
@@ -1426,22 +1259,22 @@ static int mm_activate(const sh_modmanifest_list *rows, char (*extra)[SH_MODMANI
     hashes = (const char **)calloc(nrows + (size_t)nextra, sizeof *hashes);
     served = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(nrows ? nrows : 1, sizeof *served);
     if (!hashes || !served) { free((void *)hashes); free(served); return -1; }
-    /* The asset rule: a row is activated through the build that serves its
-     * id now (its own hash or an alias of it, else the installed build of
-     * the id), whatever hash the row pins. */
+    /* A row is activated through the build that serves it now
+     * (sh_modserve_row_build), else the one the editor substitutes, else its
+     * own hash. */
     for (i = 0; i < nrows; i++) {
         sh_modserve_bundle_ref ref;
-        if (sh_modserve_bundle_serving(rows->rows[i].bundle, rows->rows[i].id, &ref) &&
-            strlen(ref.hash) == SH_MOD_HASH_CHARS)
+        memset(&ref, 0, sizeof ref);
+        if (sh_modserve_row_build(&rows->rows[i], &ref) && strlen(ref.hash) == SH_MOD_HASH_CHARS)
             strcpy_s(served[i], sizeof served[i], ref.hash);
-        else if (!sh_modmanifest_substituted(rows->rows[i].bundle, served[i], sizeof served[i]))
-            strcpy_s(served[i], sizeof served[i], rows->rows[i].bundle);
+        else if (!sh_modmanifest_substituted(rows->rows[i].build, served[i], sizeof served[i]))
+            strcpy_s(served[i], sizeof served[i], rows->rows[i].build);
         hashes[n++] = served[i];
     }
     for (e = 0; e < nextra; e++) {
         int seen = !extra[e][0];
         for (k = 0; k < n && !seen; k++) seen = !_stricmp(hashes[k], extra[e]);
-        for (i = 0; i < nrows && !seen; i++) seen = !_stricmp(rows->rows[i].bundle, extra[e]);
+        for (i = 0; i < nrows && !seen; i++) seen = !_stricmp(rows->rows[i].build, extra[e]);
         if (seen) continue;
         hashes[n++] = extra[e];
         if (added) (*added)++;
@@ -1487,52 +1320,12 @@ static int mm_activate_load(const sh_modmanifest_list *rows)
     return active;
 }
 
-/* ==================================================================== */
-/* stale product-version variable                                        */
-/* ==================================================================== */
-
-/* Earlier development builds recorded a "smpprod1.<version>" string variable
- * in a saved map. Nothing reads it any more: a load and a save remove it. */
-#define MM_PRODUCT_MAGIC     "smpprod1."
-#define MM_PRODUCT_MAGIC_LEN 9
-
-static int mm_product_filter(const char *hdr, size_t hdr_len, void *ctx)
-{
-    (void)ctx;
-    return hdr_len >= MM_PRODUCT_MAGIC_LEN && !memcmp(hdr, MM_PRODUCT_MAGIC, MM_PRODUCT_MAGIC_LEN);
-}
-
-/* `json` without its "smpprod1." variables (allocCount[4] rewritten), one log
- * line when any was removed. Process-heap buffer, or NULL when the map has
- * none or its text does not read (the caller keeps the original). */
-static char *mm_product_strip(const char *json, size_t length, size_t *out_length, const char *when)
-{
-    char *out, line[160];
-    size_t out_len = 0;
-    unsigned elements = 0, runs = 0;
-    int failed = 0;
-    if (out_length) *out_length = 0;
-    if (!json || !length || !sh_shard_find(json, length, MM_PRODUCT_MAGIC, MM_PRODUCT_MAGIC_LEN)) return NULL;
-    out = sh_shard_strip(json, length, MM_PRODUCT_MAGIC, MM_PRODUCT_MAGIC_LEN, mm_product_filter, NULL, 64,
-                         &out_len, &elements, &runs, &failed);
-    if (failed || !out || !elements) {
-        if (out) HeapFree(GetProcessHeap(), 0, out);
-        return NULL;
-    }
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "MODS: %s: %u older-format row(s) migrated (stale smpprod1 variables removed)", when, elements);
-    backend_log(line);
-    if (out_length) *out_length = out_len;
-    return out;
-}
-
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
 
-/* 1 when the text carries rows: the member's "mods" part or a legacy row. */
+/* 1 when the text carries rows: the member's "mods" part. */
 static int mm_carries_rows(const char *json, size_t length)
 {
     if (!json || !length) return 0;
-    if (sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return 1;
     return sh_carrier_part(json, length, "mods", NULL, NULL) == 1;
 }
 
@@ -1587,29 +1380,29 @@ int sh_modmanifest_current_restore_previous(void)
 
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length)
 {
-    char *bare, *rows;
-    size_t bare_len = 0, rows_len = 0;
     mm_prev_take();
-    if (out_length) *out_length = 0;
-    bare = mm_product_strip(json, length, &bare_len, "load");
-    if (!bare) return mm_prepare_rows(json, length, out_length);
-    rows = mm_prepare_rows(bare ? bare : json, bare ? bare_len : length, &rows_len);
-    if (rows) {
-        if (bare) HeapFree(GetProcessHeap(), 0, bare);
-        if (out_length) *out_length = rows_len;
-        return rows;
-    }
-    if (bare && out_length) *out_length = bare_len;
-    return bare;
+    return mm_prepare_rows(json, length, out_length);
+}
+
+void sh_modmanifest_load_refuse(const char *sentence)
+{
+    char line[760];
+    if (!sentence || !sentence[0]) return;
+    AcquireSRWLockExclusive(&g_current_lock);
+    _snprintf_s(g_notes[0], sizeof g_notes[0], _TRUNCATE, "MODS: map: %s", sentence);
+    g_nnotes = 1;
+    g_notes_over = 0;
+    strncpy_s(g_refusal, sizeof g_refusal, sentence, _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_current_lock);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: map refused before parse: %s", sentence);
+    backend_log(line);
 }
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length)
 {
     sh_modmanifest_list list = {0};
-    unsigned rejected = 0, removed = 0;
-    int doc_failed = 0, active, from_member;
-    size_t stripped_len = 0;
-    char *stripped = NULL;
+    unsigned rejected = 0;
+    int active;
     char line[512], names[320];
 
     if (out_length) *out_length = 0;
@@ -1621,15 +1414,12 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         (void)mm_activate_load(NULL);
         return NULL;
     }
-    from_member = sh_carrier_part(json, length, "mods", NULL, NULL) == 1;
     sh_modmanifest_read(json, length, &list, &rejected);
-    stripped = sh_modmanifest_strip(json, length, &stripped_len, &removed, &doc_failed);
 
     mm_describe(&list, names, sizeof names);
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
-    (void)mm_follow_load(&list);
     mm_subst_load(&list, json, length);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);
@@ -1642,9 +1432,8 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         else if (!active) strcpy_s(what, sizeof what, "no new decls to register");
         else _snprintf_s(what, sizeof what, _TRUNCATE, "%d registration step(s) ready", active);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "MODS: map manifest names %zu bundle(s)%s%s; %s; %u older-format row(s) migrated before parse; %s",
-            list.count, list.count ? ": " : "", names,
-            from_member ? "from the snapmap-plus member" : "from older-format smpmod1 rows", removed, what);
+            "MODS: map manifest names %zu build(s)%s%s; %s",
+            list.count, list.count ? ": " : "", names, what);
     }
     backend_log(line);
     if (rejected) {
@@ -1652,13 +1441,10 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
             "MODS: %u manifest row(s) did not parse and were dropped", rejected);
         backend_log(line);
     }
-    if (doc_failed)
-        backend_log("MODS: the manifest rows could not be removed (the map's JSON did not read "
-                    "cleanly); they stay as inert string variables");
     mm_set_current(&list);
     sh_modmanifest_list_free(&list);
-    if (stripped && out_length) *out_length = stripped_len;
-    return stripped;
+    /* Nothing to strip: the member goes with the parse detour's last step. */
+    return NULL;
 }
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;
@@ -1669,19 +1455,19 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *vers
     mm_save_ctx *ctx = (mm_save_ctx *)context;
     sh_modmanifest_row *row;
     if (!ctx || ctx->failed || !bundle_id || !bundle_hash) return;
-    if (!sh_modmanifest_valid_id(bundle_id) ||
+    if (!sh_modmanifest_valid_salt(bundle_id) ||
         !sh_modmanifest_valid_hash(bundle_hash, strlen(bundle_hash)) ||
         (version && strlen(version) >= SH_MODMANIFEST_VERSION_CAP)) {
         ctx->failed = 1;
         return;
     }
-    row = mm_list_find(&ctx->list, bundle_hash);
+    row = mm_list_find(&ctx->list, bundle_id, bundle_hash);
     if (!row) {
         sh_modmanifest_row fresh;
         memset(&fresh, 0, sizeof fresh);
-        strcpy_s(fresh.id, sizeof fresh.id, bundle_id);
+        strcpy_s(fresh.salt, sizeof fresh.salt, bundle_id);
         strcpy_s(fresh.version, sizeof fresh.version, version ? version : "");
-        strcpy_s(fresh.bundle, sizeof fresh.bundle, bundle_hash);
+        strcpy_s(fresh.build, sizeof fresh.build, bundle_hash);
         fresh.size = size;
         if (!sh_modmanifest_list_add(&ctx->list, &fresh)) { ctx->failed = 1; return; }
         row = &ctx->list.rows[ctx->list.count - 1];
@@ -1693,8 +1479,8 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *vers
 static int mm_row_order(const void *a, const void *b)
 {
     const sh_modmanifest_row *x = (const sh_modmanifest_row *)a, *y = (const sh_modmanifest_row *)b;
-    int c = strcmp(x->id, y->id);
-    return c ? c : strcmp(x->bundle, y->bundle);
+    int c = strcmp(x->salt, y->salt);
+    return c ? c : strcmp(x->build, y->build);
 }
 
 static int mm_cstr_cmp(const void *a, const void *b)
@@ -1702,7 +1488,25 @@ static int mm_cstr_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Add the map-level rows to the save's rows: a bundle the placed closure
+/* The placed closure's rows take their display name (and version) from the
+ * build that serves them, which the closure visit does not give. */
+static void mm_save_names(mm_save_ctx *ctx)
+{
+    sh_modmanifest_resolve_fn resolve = g_resolve;
+    size_t i;
+    for (i = 0; resolve && i < ctx->list.count; i++) {
+        sh_modmanifest_row *r = &ctx->list.rows[i], served;
+        memset(&served, 0, sizeof served);
+        if (!r->name[0] && resolve(r->build, r->salt, &served) == 1 && !strcmp(served.build, r->build) &&
+            !strcmp(served.salt, r->salt)) {
+            strcpy_s(r->name, sizeof r->name, served.name);
+            if (!r->version[0]) strcpy_s(r->version, sizeof r->version, served.version);
+        }
+        sh_modmanifest_row_free(&served);
+    }
+}
+
+/* Add the map-level rows to the save's rows: a build the placed closure
  * already names gets its row marked, any other is added, renamed to the build
  * that serves it when the resolver knows one. */
 static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attached)
@@ -1715,42 +1519,24 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
         memset(&served, 0, sizeof served);
         row.names = NULL;
         row.name_count = 0;
-        if (resolve && resolve(row.bundle, row.id, &served) == 1 && sh_modmanifest_valid_id(served.id) &&
-            sh_modmanifest_valid_hash(served.bundle, strlen(served.bundle))) {
-            mm_current_rename(row.bundle, &served);
-            strcpy_s(row.id, sizeof row.id, served.id);
+        if (resolve && resolve(row.build, row.salt, &served) == 1 && !strcmp(served.salt, row.salt) &&
+            sh_modmanifest_valid_hash(served.build, strlen(served.build))) {
+            mm_current_rename(row.build, &served);
+            strcpy_s(row.name, sizeof row.name, served.name);
             strcpy_s(row.version, sizeof row.version, served.version);
-            strcpy_s(row.bundle, sizeof row.bundle, served.bundle);
+            strcpy_s(row.build, sizeof row.build, served.build);
             row.size = served.size;
         }
         sh_modmanifest_row_free(&served);
         row.attached = 1;
-        have = mm_list_find(&ctx->list, row.bundle);
+        have = mm_list_find(&ctx->list, row.salt, row.build);
         if (have) { have->attached = 1; continue; }
         if (!sh_modmanifest_list_add(&ctx->list, &row)) return 0;
     }
     return 1;
 }
 
-static char *mm_save_rows(const char *json, size_t length, size_t *out_length);
-
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length)
-{
-    char *rows, *out;
-    size_t rows_len = 0, out_len = 0;
-    if (out_length) *out_length = 0;
-    rows = mm_save_rows(json, length, &rows_len);
-    out = rows ? mm_product_strip(rows, rows_len, &out_len, "save") : mm_product_strip(json, length, &out_len, "save");
-    if (!out) {
-        if (out_length) *out_length = rows_len;
-        return rows;
-    }
-    if (rows) HeapFree(GetProcessHeap(), 0, rows);
-    if (out_length) *out_length = out_len;
-    return out;
-}
-
-static char *mm_save_rows(const char *json, size_t length, size_t *out_length)
 {
     char **names = NULL;
     size_t count, i, written = 0;
@@ -1782,6 +1568,7 @@ static char *mm_save_rows(const char *json, size_t length, size_t *out_length)
     }
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
     sh_modmanifest_names_free(names, count);
+    if (!ctx.failed) mm_save_names(&ctx);
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {
@@ -1802,7 +1589,7 @@ static char *mm_save_rows(const char *json, size_t length, size_t *out_length)
     mm_describe(&ctx.list, described, sizeof described);
     if (out) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "MODS: save manifest wrote %zu bundle row(s) into the snapmap-plus member%s%s%s; %zu -> %zu bytes",
+            "MODS: save manifest wrote %zu row(s) into the snapmap-plus member%s%s%s; %zu -> %zu bytes",
             ctx.list.count, ctx.list.count ? ": " : "", described,
             stale ? " (stale rows replaced)" : "", length, written);
         if (out_length) *out_length = written;

@@ -1,4 +1,5 @@
-/* Tests smnav1 reassembly, structural AAS validation and map-scoped serving.
+/* Tests baked-navigation reassembly from the map's member, structural AAS
+ * validation and map-scoped serving.
  * All AAS2 3.29 fixtures are synthetic; accept the valid payload and refuse
  * each malformed mutation without a crash. */
 #define WIN32_LEAN_AND_MEAN
@@ -233,109 +234,81 @@ static const char *base_map(const char *module)
     return map;
 }
 
-static char *insert_shards(const char *json, const sh_shard_out *parts, size_t count,
-                           size_t *out_len)
-{
-    char err[256];
-    char *out = sh_shard_insert(json, strlen(json), parts, count, out_len, err, sizeof err);
-    if (!out) fprintf(stderr, "insert_shards failed: %s\n", err);
-    return out;
-}
-
-/* Cut `payload` into wire shards and splice them into `json`. `bad` selects one
- * of the delivery faults a hostile or damaged map can present. */
+/* Cut `payload` into base64 chunks of NAV_TEST_CHUNK characters and add it to
+ * the "nav" part of `json`'s member as one set (map_carrier.h), after any set
+ * the part already has. `fault` selects one of the delivery faults a hostile
+ * or damaged map can present. Returns a process-heap text. */
+#define NAV_TEST_CHUNK 8192
 typedef enum {
     MAP_GOOD = 0,
     MAP_BAD_DIGEST,
-    MAP_MISSING_SHARD,
-    MAP_DUPLICATE_SHARD,
-    MAP_OVERSIZE_CHUNK
+    MAP_MISSING_SHARD,      /* the last chunk left out: the payload no longer matches its digest */
+    MAP_DUPLICATE_SHARD,    /* the set given twice: its chunks appear twice */
+    MAP_UNREADABLE_CHUNK    /* a chunk that is not a string */
 } map_fault;
 
 static char *make_map(const char *json, const char *module, const char *cls,
                       const unsigned char *payload, size_t payload_len,
                       map_fault fault, size_t *out_len)
 {
-    char digest[SH_SHARD_DIGEST_CHARS + 1];
-    char *b64;
-    size_t b64_len, shards, i;
-    sh_shard_out *parts;
-    char *headers, *out;
-    char *fat = NULL;
+    char digest[SH_SHARD_DIGEST_CHARS + 1], err[256] = "";
+    char *b64, *set, *part, *put, *out;
+    size_t b64_len, chunks, i, w = 0, cap, len = strlen(json), from = 0, to = 0, put_len = 0, set_len;
+    int have = sh_carrier_part(json, len, "nav", &from, &to) == 1 && to - from > 2;
 
     b64 = (char *)malloc(((payload_len + 2) / 3) * 4 + 1);
     if (!b64) return NULL;
     b64_len = sh_shard_b64_encode(payload, payload_len, b64);
     sh_shard_digest16(payload, payload_len, digest);
     if (fault == MAP_BAD_DIGEST) digest[0] = (digest[0] == 'a') ? 'b' : 'a';
+    chunks = (b64_len + NAV_TEST_CHUNK - 1) / NAV_TEST_CHUNK;
+    if (chunks == 0) chunks = 1;
+    if (fault == MAP_MISSING_SHARD && chunks < 2) { free(b64); return NULL; }
 
-    shards = (b64_len + SH_SHARD_CHARS - 1) / SH_SHARD_CHARS;
-    if (shards == 0) shards = 1;
-    if (fault == MAP_MISSING_SHARD && shards < 2) { free(b64); return NULL; }
-
-    parts = (sh_shard_out *)calloc(shards + 1, sizeof *parts);
-    headers = (char *)calloc(shards + 1, SH_SMNAV_HEADER_CAP);
-    if (!parts || !headers) { free(b64); free(parts); free(headers); return NULL; }
-
-    for (i = 0; i < shards; i++) {
-        char *h = headers + i * SH_SMNAV_HEADER_CAP;
-        size_t chunk_len = b64_len - i * SH_SHARD_CHARS;
-        if (chunk_len > SH_SHARD_CHARS) chunk_len = SH_SHARD_CHARS;
-        _snprintf_s(h, SH_SMNAV_HEADER_CAP, _TRUNCATE, "smnav1.%s.%s.%u.%u.%s.%s",
-                    module, cls, (unsigned)i, (unsigned)shards, digest,
-                    "fedcba9876543210");
-        parts[i].header = h;
-        parts[i].chunk = b64 + i * SH_SHARD_CHARS;
-        parts[i].chunk_len = chunk_len;
+    cap = b64_len + chunks * 4 + 512;
+    set = (char *)malloc(cap);
+    if (!set) { free(b64); return NULL; }
+    w = (size_t)_snprintf_s(set, cap, _TRUNCATE, "{\"module\":\"%s\",\"class\":\"%s\",\"digest\":\"%s\","
+                            "\"geom\":\"fedcba9876543210\",\"data\":[", module, cls, digest);
+    for (i = 0; i < chunks; i++) {
+        size_t at = i * NAV_TEST_CHUNK, n = b64_len - at;
+        if (fault == MAP_MISSING_SHARD && i + 1 == chunks) break;
+        if (n > NAV_TEST_CHUNK) n = NAV_TEST_CHUNK;
+        if (i) set[w++] = ',';
+        if (fault == MAP_UNREADABLE_CHUNK && i == 0) { memcpy(set + w, "7", 1); w += 1; continue; }
+        set[w++] = '"';
+        memcpy(set + w, b64 + at, n);
+        w += n;
+        set[w++] = '"';
     }
-    if (fault == MAP_MISSING_SHARD) {
-        shards--;                                  /* drop the last one, keep `total` */
-    } else if (fault == MAP_DUPLICATE_SHARD) {
-        memcpy(headers + shards * SH_SMNAV_HEADER_CAP, headers, SH_SMNAV_HEADER_CAP);
-        parts[shards].header = headers + shards * SH_SMNAV_HEADER_CAP;
-        parts[shards].chunk = parts[0].chunk;
-        parts[shards].chunk_len = parts[0].chunk_len;
-        shards++;
-    } else if (fault == MAP_OVERSIZE_CHUNK) {
-        size_t fat_len = SH_SHARD_MAX_CHUNK + 8;
-        fat = (char *)malloc(fat_len + 1);
-        if (!fat) { free(b64); free(parts); free(headers); return NULL; }
-        memset(fat, 'A', fat_len);
-        fat[fat_len] = '\0';
-        parts[0].chunk = fat;
-        parts[0].chunk_len = fat_len;
-        shards = 1;
-        _snprintf_s(headers, SH_SMNAV_HEADER_CAP, _TRUNCATE, "smnav1.%s.%s.0.1.%s.%s",
-                    module, cls, digest, "fedcba9876543210");
-        {
-            char error[256]; size_t ignored;
-            char *invalid = sh_shard_insert(json, strlen(json), parts, shards, &ignored, error, sizeof(error));
-            CHECK(!invalid); if (invalid) HeapFree(GetProcessHeap(), 0, invalid);
-        }
-        parts[0].chunk_len = 1; /* mutate a legal envelope after the writer */
-    }
-
-    out = insert_shards(json, parts, shards, out_len);
-    if (out && fault == MAP_OVERSIZE_CHUNK) {
-        const char *header = strstr(out, headers);
-        const char *value = header ? strstr(header, "\"initialValue\":\"") : NULL;
-        size_t fat_len = strlen(fat), offset;
-        char *grown;
-        CHECK(value);
-        if (value) {
-            offset = (size_t)(value - out) + strlen("\"initialValue\":\"");
-            grown = (char *)HeapReAlloc(GetProcessHeap(), 0, out, *out_len + fat_len);
-            CHECK(grown);
-            if (grown) {
-                out = grown; memmove(out + offset + fat_len, out + offset + 1, *out_len - offset);
-                memcpy(out + offset, fat, fat_len); *out_len += fat_len - 1;
-            }
-        }
-    }
+    memcpy(set + w, "]}", 3);
+    w += 2;
+    set_len = w;
     free(b64);
-    free(fat);
-    free(parts);
-    free(headers);
+
+    part = (char *)malloc((have ? to - from : 0) + 2 * set_len + 8);
+    if (!part) { free(set); return NULL; }
+    w = 0;
+    part[w++] = '[';
+    if (have) {
+        memcpy(part + w, json + from + 1, to - from - 2);
+        w += to - from - 2;
+        part[w++] = ',';
+    }
+    memcpy(part + w, set, set_len);
+    w += set_len;
+    if (fault == MAP_DUPLICATE_SHARD) {
+        part[w++] = ',';
+        memcpy(part + w, set, set_len);
+        w += set_len;
+    }
+    part[w++] = ']';
+    free(set);
+    put = sh_carrier_put(json, len, "nav", part, w, &put_len, err, sizeof err);
+    free(part);
+    if (!put) { fprintf(stderr, "make_map: %s\n", err); return NULL; }
+    out = put;
+    if (out_len) *out_len = put_len;
     return out;
 }
 
@@ -638,49 +611,38 @@ static void test_reader(void)
                   "maps/modules/" BASE_MODULE "/ind_totally_blank_room_4x.aas_monster128",
                   &bytes, &len) == 0);
 
-        /* strip: the envelope never becomes map state */
+        /* A save of the bare map puts it back, byte for byte. */
         {
-            size_t stripped_len = 0;
-            char *stripped;
+            size_t bare_len = 0, back_len = 0;
+            char *bare, *back;
             sh_navmesh_build_from_map(map, map_len);
-            stripped = sh_navmesh_strip(map, map_len, &stripped_len);
-            CHECK(stripped != NULL);
-            if (stripped) {
-                CHECK(strstr(stripped, "smnav1.") == NULL);
-                CHECK(stripped_len < map_len);
-                CHECK(strlen(stripped) == stripped_len);
-
-                /* ...and a save puts it back, byte for byte */
-                {
-                    size_t back_len = 0;
-                    char *back = sh_navmesh_embed_all(stripped, stripped_len, &back_len);
-                    CHECK(back != NULL);
-                    if (back) {
-                        unsigned char *again = NULL;
-                        size_t again_len = 0;
-                        sh_navmesh_build_from_map(back, back_len);
-                        CHECK(sh_navmesh_test_served_count() == 1);
-                        CHECK(sh_navmesh_open(
-                                  "maps/modules/" BASE_MODULE
-                                  "/ind_totally_blank_room_4x.aas_monster128",
-                                  &again, &again_len) == 1);
-                        CHECK(again_len == b.len);
-                        if (again && again_len == b.len)
-                            CHECK(memcmp(again, b.p, again_len) == 0);
-                        if (again) HeapFree(GetProcessHeap(), 0, again);
-                        HeapFree(GetProcessHeap(), 0, back);
-                    }
-                }
-                HeapFree(GetProcessHeap(), 0, stripped);
+            bare = sh_carrier_strip(map, map_len, &bare_len);
+            CHECK(bare != NULL);
+            back = bare ? sh_navmesh_embed_all(bare, bare_len, &back_len) : NULL;
+            CHECK(back != NULL);
+            if (back) {
+                unsigned char *again = NULL;
+                size_t again_len = 0;
+                sh_navmesh_build_from_map(back, back_len);
+                CHECK(sh_navmesh_test_served_count() == 1);
+                CHECK(sh_navmesh_open(
+                          "maps/modules/" BASE_MODULE
+                          "/ind_totally_blank_room_4x.aas_monster128",
+                          &again, &again_len) == 1);
+                CHECK(again_len == b.len);
+                if (again && again_len == b.len)
+                    CHECK(memcmp(again, b.p, again_len) == 0);
+                if (again) HeapFree(GetProcessHeap(), 0, again);
+                HeapFree(GetProcessHeap(), 0, back);
             }
+            if (bare) HeapFree(GetProcessHeap(), 0, bare);
         }
         free(map);
     }
     free_aas(&b);
 
-    /* Reassembly across a shard boundary. The padding pushes the payload past
-     * the 8192-character shard cap, so this exercises ordering as well as
-     * decoding. */
+    /* Reassembly across chunks. The padding pushes the payload past one
+     * 8192-character chunk, so this exercises ordering as well as decoding. */
     CHECK(build_aas(&b, 60, NODES_TREE, 0));
     CHECK(b.len > 6144);
     sh_navmesh_test_reset();
@@ -703,10 +665,10 @@ static void test_reader(void)
     /* every delivery fault: refused, held nothing, and said so */
     {
         struct { map_fault fault; const char *needle; } cases[] = {
-            { MAP_BAD_DIGEST,      "digest" },
-            { MAP_MISSING_SHARD,   "shards are present" },
-            { MAP_DUPLICATE_SHARD, "twice" },
-            { MAP_OVERSIZE_CHUNK,  "could not be read" }
+            { MAP_BAD_DIGEST,       "digest" },
+            { MAP_MISSING_SHARD,    "digest" },
+            { MAP_DUPLICATE_SHARD,  "twice" },
+            { MAP_UNREADABLE_CHUNK, "could not be read" }
         };
         size_t i;
         for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
@@ -799,9 +761,8 @@ static void test_reader(void)
     }
 }
 
-/* A map whose prose merely contains the magic is not perturbed: the scanner
- * only accepts a header that is the value of a "name" key inside a
- * snapVarInfo_t, and entity names are author-controlled free text. */
+/* A map whose prose merely contains an earlier build's variable header is
+ * not perturbed: navigation is read from the member only. */
 static void test_prose(void)
 {
     static const char *padding =
@@ -828,13 +789,11 @@ static void test_prose(void)
     sh_navmesh_build_from_map(map, strlen(map));
     CHECK(sh_navmesh_test_served_count() == 0);
     CHECK(sh_navmesh_test_held_count() == 0);
-    CHECK(g_log_count == 0);                       /* not even a refusal: no shard was seen */
-    CHECK(sh_navmesh_strip(map, strlen(map), NULL) == NULL);   /* and nothing is removed */
+    CHECK(g_log_count == 0);                       /* not even a refusal: no set was seen */
 }
 
 /* The map's "snapmap-plus" member (map_carrier.h): a save writes the
- * navigation there, never as variables; a load reads it there first and the
- * legacy smnav1 variables only when the member has no "nav" part. */
+ * navigation there, never as variables, and a load reads it there. */
 static unsigned count_of(const char *hay, const char *needle)
 {
     unsigned n = 0;
@@ -858,30 +817,29 @@ static int serves_exactly(const char *cls, const aas_build *b)
 static void test_carrier(void)
 {
     aas_build big, small;
-    char *legacy, *stripped, *saved, *again;
-    size_t legacy_len = 0, stripped_len = 0, saved_len = 0, again_len = 0;
+    char *made, *bare, *saved, *again;
+    size_t made_len = 0, bare_len = 0, saved_len = 0, again_len = 0;
     const char *base = base_map(BASE_MODULE);
     size_t base_len = strlen(base);
 
-    CHECK(build_aas(&big, 60, NODES_TREE, 0));      /* more than one legacy 8192-character shard */
+    CHECK(build_aas(&big, 60, NODES_TREE, 0));      /* more than one 8192-character chunk */
     CHECK(build_aas(&small, 0, NODES_TREE, 0));
     sh_navmesh_test_reset();
     log_reset();
 
-    /* Legacy shards in, member out: the save writes no variable and leaves
-     * the variable list and allocCount as the engine wrote them. */
-    legacy = make_map(base, BASE_MODULE, "monster48", big.p, big.len, MAP_GOOD, &legacy_len);
-    CHECK(legacy != NULL && strstr(legacy, "\"smnav1.") != NULL);
-    if (!legacy) { free_aas(&big); free_aas(&small); return; }
-    sh_navmesh_build_from_map(legacy, legacy_len);
+    /* A map's member in, the save's member out: one chunk per set, the
+     * variable list and allocCount as the engine wrote them. */
+    made = make_map(base, BASE_MODULE, "monster48", big.p, big.len, MAP_GOOD, &made_len);
+    CHECK(made != NULL && big.len > 6144);
+    if (!made) { free_aas(&big); free_aas(&small); return; }
+    sh_navmesh_build_from_map(made, made_len);
     CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
-    stripped = sh_navmesh_strip(legacy, legacy_len, &stripped_len);
-    CHECK(stripped && !strcmp(stripped, base));
-    saved = stripped ? sh_navmesh_embed_all(stripped, stripped_len, &saved_len) : NULL;
+    bare = sh_carrier_strip(made, made_len, &bare_len);
+    CHECK(bare && !strcmp(bare, base));
+    saved = bare ? sh_navmesh_embed_all(bare, bare_len, &saved_len) : NULL;
     CHECK(saved && saved_len == strlen(saved));
     if (saved) {
-        CHECK(!strstr(saved, "smnav1.") && strstr(saved, "\"string\":[]") &&
-              strstr(saved, "\"allocCount\":[0,0,0,0,0,0,0,0,0,16]"));
+        CHECK(strstr(saved, "\"string\":[]") && strstr(saved, "\"allocCount\":[0,0,0,0,0,0,0,0,0,16]"));
         CHECK(!memcmp(saved, base, base_len - 1));
         {
             static const char lead[] = ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE
@@ -894,36 +852,36 @@ static void test_carrier(void)
               strlen(saved) - base_len < SH_SMNAV_CARRIER_CHUNK);
         CHECK(saved_len > 6 && !strcmp(saved + saved_len - 6, "\"]}]}}"));     /* chunk, data, set, nav, member, root */
 
-        /* Reloaded from the member: the same bytes are served. */
+        /* Reloaded from the member: the same bytes are served; a second save
+         * is byte-identical. */
         sh_navmesh_test_reset();
         sh_navmesh_build_from_map(saved, saved_len);
         CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
-        /* The legacy strip has nothing to remove; a second save is byte-identical. */
-        CHECK(sh_navmesh_strip(saved, saved_len, NULL) == NULL);
         {
-            char *bare = sh_carrier_strip(saved, saved_len, &again_len);
-            CHECK(bare && !strcmp(bare, base));
-            again = bare ? sh_navmesh_embed_all(bare, again_len, &again_len) : NULL;
+            char *plain = sh_carrier_strip(saved, saved_len, &again_len);
+            CHECK(plain && !strcmp(plain, base));
+            again = plain ? sh_navmesh_embed_all(plain, again_len, &again_len) : NULL;
             CHECK(again && again_len == saved_len && !strcmp(again, saved));
             if (again) HeapFree(GetProcessHeap(), 0, again);
-            if (bare) HeapFree(GetProcessHeap(), 0, bare);
+            if (plain) HeapFree(GetProcessHeap(), 0, plain);
         }
 
-        /* Both forms: the member wins; the legacy shards are only removed. */
+        /* Two sets in one member: both serve. */
         {
             char *both = make_map(saved, BASE_MODULE, "monster128", small.p, small.len, MAP_GOOD, &again_len);
-            CHECK(both && strstr(both, "\"smnav1.") && strstr(both, "snapmap-plus"));
+            CHECK(both && count_of(both, "\"module\":") == 2);
             if (both) {
                 sh_navmesh_test_reset();
                 sh_navmesh_build_from_map(both, again_len);
-                CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
-                CHECK(!serves_exactly("monster128", &small));
-                free(both);
+                CHECK(sh_navmesh_test_served_count() == 2 && serves_exactly("monster48", &big) &&
+                      serves_exactly("monster128", &small));
+                HeapFree(GetProcessHeap(), 0, both);
             }
         }
 
         /* A set object in the member that does not read is refused, by
-         * itself; the map still loads and nothing else is affected. */
+         * itself; the map still loads and nothing else is affected. A
+         * malformed member is no member: nothing is served. */
         {
             char bad[2048];
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
@@ -935,20 +893,11 @@ static void test_carrier(void)
             sh_navmesh_build_from_map(bad, strlen(bad));
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
             CHECK(log_contains("does not read"));
-            /* A malformed member is no member at all: the legacy shards are read. */
-            {
-                char *legacy_bad;
-                _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
-                            ",\"snapmap-plus\":{\"format\":1,\"nav\":{\"not\":\"an array\"}}}");
-                legacy_bad = make_map(bad, BASE_MODULE, "monster128", small.p, small.len, MAP_GOOD, &again_len);
-                CHECK(legacy_bad != NULL);
-                if (legacy_bad) {
-                    sh_navmesh_test_reset();
-                    sh_navmesh_build_from_map(legacy_bad, again_len);
-                    CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster128", &small));
-                    free(legacy_bad);
-                }
-            }
+            _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
+                        ",\"snapmap-plus\":{\"format\":1,\"nav\":{\"not\":\"an array\"}}}");
+            sh_navmesh_test_reset();
+            sh_navmesh_build_from_map(bad, strlen(bad));
+            CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
         }
 
         /* Navigation off: nothing is served, and a save carries the member's
@@ -968,8 +917,8 @@ static void test_carrier(void)
         CHECK(sh_navmesh_embed_all(base, base_len, &again_len) == NULL);
         HeapFree(GetProcessHeap(), 0, saved);
     }
-    if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
-    free(legacy);
+    if (bare) HeapFree(GetProcessHeap(), 0, bare);
+    HeapFree(GetProcessHeap(), 0, made);
     free_aas(&big);
     free_aas(&small);
 }

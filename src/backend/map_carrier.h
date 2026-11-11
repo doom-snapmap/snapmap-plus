@@ -14,11 +14,11 @@
  *             object, or a known part of the wrong type (mods and nav arrays,
  *             settings an object), makes the whole member malformed: it is
  *             logged, read as absent and removed, and the map loads without
- *             it (its legacy rows, if any, are read instead).
- *   mods      one object per declared bundle, exactly the row JSON the
- *             manifest always used (modmanifest.h: id, version, bundle, size,
- *             attached, choices, names). A row that does not read is dropped
- *             and counted, as a malformed row always was.
+ *             it.
+ *   mods      one object per declared mod build, the manifest's row JSON
+ *             (modmanifest.h: mod "<salt>@<build hash>", name, version, size,
+ *             names, attached, choices). A row that does not read is dropped
+ *             and counted.
  *   settings  "render" (Unlock View Distance, map_render.h encoding) and
  *             "bounds" (Unlock Map Bounds, map_bounds.h encoding); an absent
  *             key is that setting off (map_settings.h).
@@ -33,11 +33,11 @@
  *
  * Load: every parse the DeserializeFromJson detour sees (rawmap.c
  * prepare_map_buffer: My Maps, a published read, a lobby joiner's download, a
- * rawmap) has each subsystem read its part from the raw text -- the member's
- * part when the member has it, else that family's legacy string variables
- * (smpmod1., smp.render.v1, smp.bounds.v1, smnav1.) -- and strip its legacy
- * rows; the retired smpprod1., smpkg., smpbind. and smpref. rows are removed
- * as before. The member itself is stripped last, so the engine never sees it.
+ * rawmap) first asks sh_map_old_shape whether the text is in an earlier shape
+ * (below); such a map is refused with "This map was saved in a format this
+ * version does not read." and its text is not changed. Otherwise each
+ * subsystem reads its part from the member, and the member itself is
+ * stripped last, so the engine never sees it.
  *
  * Save: after the engine serializes (rawmap.c sh_ser_detour, and the rawmap
  * export), the settings, navigation and manifest steps each put their part
@@ -121,5 +121,16 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
 /* One line for the load log ("member: mods, settings, nav" or the reason it
  * was refused); empty when the text has no member. */
 void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
+
+/* Earlier shapes. Builds before this one carried the same data as string
+ * variables in the author's table (info.name smpkg., smpbind., smpref.,
+ * smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1.) or as member
+ * rows naming the mod by an "id" and its build as a "bundle". The game reads
+ * none of them: one pass answers SH_MAP_OLD_VARIABLES for a variables.string
+ * name starting with a family, SH_MAP_OLD_ROWS for such a member row, else
+ * SH_MAP_OLD_NONE. The installer's store tool converts them (map_old.h). */
+enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
+int sh_map_old_shape(const char *json, size_t len);
+#define SH_MAP_OLD_REFUSAL "This map was saved in a format this version does not read."
 
 #endif /* SNAPMAP_PLUS_MAP_CARRIER_H */

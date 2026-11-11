@@ -8,7 +8,7 @@
  * BuildAAS loads, transforms and merges that instance's payload, then frees
  * the temporary resource. Stock name-based cached resources stay shared.
  *
- * navmesh.c separately serves the older smnav1 embedded-payload format.
+ * navmesh.c separately serves navigation baked into the map's member (map_carrier.h).
  */
 #ifndef SNAPMAP_PLUS_NAV_BAKE_H
 #define SNAPMAP_PLUS_NAV_BAKE_H

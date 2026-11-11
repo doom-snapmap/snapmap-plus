@@ -1,10 +1,10 @@
-/* modmanifest_test -- the map manifest: grammar, row round trip, the rows in
- * the map's "snapmap-plus" member (map_carrier.h) and the legacy smpmod1 rows
- * it replaces (read, converted, stripped with allocCount), placed names, the
- * save-time closure through the serving layer, the load step, and map-level
- * rows (attached mods) with the map scope's hook and the row resolver.
+/* modmanifest_test -- the map manifest: the salt and row grammar, the row
+ * round trip, the rows in the map's "snapmap-plus" member (map_carrier.h),
+ * rows in an earlier shape refused, placed names, the save-time closure
+ * through the serving layer, the load step, and map-level rows (attached
+ * mods) with the map scope's hook and the row resolver.
  *
- * The serving layer (modserve_activate_bundles and
+ * The serving layer (modserve_activate_bundles, sh_modserve_row_build and
  * modserve_bundles_for_names_visit, declared in modserve.h) is replaced by
  * doubles defined here. */
 #define WIN32_LEAN_AND_MEAN
@@ -53,25 +53,25 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int count)
     return count;
 }
 
-typedef struct installed { const char *id, *version, *hash; unsigned long long size; const char *names[4]; } installed;
+typedef struct installed { const char *salt, *name, *version, *hash; unsigned long long size; const char *names[4]; } installed;
 static const installed *g_installed;
 static size_t g_installed_count;
 static int g_lookup_calls;
 
-/* The build that serves a row: its hash when installed, else the installed
- * build of its id (the asset rule's activation). */
-int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
+/* The build that serves a row (sh_modserve_row_build): its own build when
+ * installed, else the installed (root) build of its salt. */
+int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     size_t b;
     if (out) memset(out, 0, sizeof *out);
+    if (!row) return 0;
     for (b = 0; b < g_installed_count; b++)
-        if (bundle_hash && !strcmp(g_installed[b].hash, bundle_hash)) break;
+        if (!strcmp(g_installed[b].hash, row->build)) break;
     if (b == g_installed_count)
         for (b = 0; b < g_installed_count; b++)
-            if (id && !strcmp(g_installed[b].id, id)) break;
+            if (!strcmp(g_installed[b].salt, row->salt)) break;
     if (b == g_installed_count) return 0;
     if (out) {
-        strcpy_s(out->id, sizeof out->id, g_installed[b].id);
         strcpy_s(out->version, sizeof out->version, g_installed[b].version);
         strcpy_s(out->hash, sizeof out->hash, g_installed[b].hash);
         out->size = g_installed[b].size;
@@ -89,7 +89,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         for (i = 0; i < count; i++)
             for (k = 0; k < 4 && g_installed[b].names[k]; k++)
                 if (!_stricmp(names[i], g_installed[b].names[k])) {
-                    visit(context, g_installed[b].id, g_installed[b].version, g_installed[b].hash,
+                    visit(context, g_installed[b].salt, g_installed[b].version, g_installed[b].hash,
                           g_installed[b].size, names[i]);
                     any = 1;
                 }
@@ -104,8 +104,8 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
 #define HASH_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 static const installed INSTALLED[] = {
-    { "alex.pink-imp", "1.0.0", HASH_A, 11782, { "mods/alex.pink-imp/imp", "mods/alex.pink-imp/skin", NULL, NULL } },
-    { "bob.room", "2", HASH_B, 4096, { "maps/modules/mods/bob.room/hall.decl", NULL, NULL, NULL } },
+    { "alexpink", "Pink Imp", "1.0.0", HASH_A, 11782, { "mods/alexpink/imp", "mods/alexpink/skin", NULL, NULL } },
+    { "bobroom1", "Room", "2", HASH_B, 4096, { "maps/modules/mods/bobroom1/hall.decl", NULL, NULL, NULL } },
 };
 
 #define VAR(name, value) \
@@ -113,14 +113,14 @@ static const installed INSTALLED[] = {
     "\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\",\"~type\":\"snapVarString_t\"}"
 
 static const char MAP[] =
-    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alex.pink-imp/imp\","
+    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alexpink/imp\","
     "\"name\":\"\",\"state\":{\"edit\":{\"props\":{\"capDecl\":\"doors/industrial_cap_05\"},"
-    "\"skins\":[\"MODS/ALEX.PINK-IMP/SKIN\"],\"count\":3}}}},"
+    "\"skins\":[\"MODS/ALEXPINK/SKIN\"],\"count\":3}}}},"
     "{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/visblockers/industrial/cap_01\","
     "\"name\":\"\",\"state\":{\"other\":\"not/a/name\"}}}],"
     "\"instances\":[{\"moduleName\":\"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl\"}],"
     "\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-    VAR("door_label", "Open") "," VAR("smnav1.x", "QUJD")
+    VAR("door_label", "Open") "," VAR("lamp_label", "QUJD")
     "]}}";
 
 static int alloc_string_count(const char *json, unsigned *value)
@@ -166,17 +166,13 @@ static char *engine_text(char *prepared, const char *input, size_t input_len, si
     return bare;
 }
 
-/* A legacy row as an earlier build wrote it (escaped JSON in initialValue). */
-#define ROW_A_LEGACY "{\\\"id\\\":\\\"alex.pink-imp\\\",\\\"version\\\":\\\"1.0.0\\\",\\\"bundle\\\":\\\"" HASH_A \
-                     "\\\",\\\"size\\\":11782,\\\"names\\\":[\\\"mods/alex.pink-imp/imp\\\"]}"
-
-static void make_row(sh_modmanifest_row *row, const char *id, const char *version, const char *hash,
+static void make_row(sh_modmanifest_row *row, const char *salt, const char *version, const char *hash,
                      unsigned long long size)
 {
     memset(row, 0, sizeof *row);
-    strcpy_s(row->id, sizeof row->id, id);
+    strcpy_s(row->salt, sizeof row->salt, salt);
     strcpy_s(row->version, sizeof row->version, version);
-    strcpy_s(row->bundle, sizeof row->bundle, hash);
+    strcpy_s(row->build, sizeof row->build, hash);
     row->size = size;
 }
 
@@ -184,24 +180,13 @@ static void make_row(sh_modmanifest_row *row, const char *id, const char *versio
 
 static void grammar(void)
 {
-    unsigned i = 9, n = 9;
-    printf("-- header and identity grammar\n");
-    CHECK(sh_modmanifest_header("smpmod1.0.1", 11, &i, &n) && i == 0 && n == 1);
-    CHECK(sh_modmanifest_header("smpmod1.12.13", 13, &i, &n) && i == 12 && n == 13);
-    CHECK(!sh_modmanifest_header("smpmod1.1.1", 11, NULL, NULL));        /* index below count */
-    CHECK(!sh_modmanifest_header("smpmod1.0.0", 11, NULL, NULL));
-    CHECK(!sh_modmanifest_header("smpmod1.0", 9, NULL, NULL));
-    CHECK(!sh_modmanifest_header("smpmod1.0.1.x", 13, NULL, NULL));
-    CHECK(!sh_modmanifest_header("smpmod1.a.1", 11, NULL, NULL));
-    CHECK(!sh_modmanifest_header("smpmod1.0.12345678", 18, NULL, NULL));  /* 8 digits */
-    CHECK(!sh_modmanifest_header("smpmod2.0.1", 11, NULL, NULL));
-    CHECK(sh_modmanifest_valid_id("alex.pink-imp") && sh_modmanifest_valid_id("a") &&
-          sh_modmanifest_valid_id("local.sp_pistol2"));
-    CHECK(!sh_modmanifest_valid_id("Alex") && !sh_modmanifest_valid_id(".a") &&
-          !sh_modmanifest_valid_id("a..b") && !sh_modmanifest_valid_id("a.") &&
-          !sh_modmanifest_valid_id("") && !sh_modmanifest_valid_id("a/b") &&
-          !sh_modmanifest_valid_id("_a"));
-    CHECK(!sh_modmanifest_valid_id("a234567890123456789012345678901234567890123456789012345678901234x"));
+    printf("-- salt and hash grammar\n");
+    CHECK(sh_modmanifest_valid_salt("alexpink") && sh_modmanifest_valid_salt("a2345678") &&
+          sh_modmanifest_valid_salt("zzzzzzzz"));
+    CHECK(!sh_modmanifest_valid_salt("alexpin") && !sh_modmanifest_valid_salt("alexpinkk") &&
+          !sh_modmanifest_valid_salt("1lexpink") && !sh_modmanifest_valid_salt("Alexpink") &&
+          !sh_modmanifest_valid_salt("alex-ink") && !sh_modmanifest_valid_salt("alex_ink") &&
+          !sh_modmanifest_valid_salt("alex.ink") && !sh_modmanifest_valid_salt("") && !sh_modmanifest_valid_salt(NULL));
     CHECK(sh_modmanifest_valid_hash(HASH_A, 64) && !sh_modmanifest_valid_hash(HASH_A, 63));
     CHECK(!sh_modmanifest_valid_hash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 64));
 }
@@ -213,39 +198,61 @@ static void value_round_trip(void)
     size_t n = 0;
     char err[128];
     printf("-- row value round trip\n");
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
-    CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.pink-imp/imp"));
-    CHECK(sh_modmanifest_row_add_name(&row, "MODS/ALEX.PINK-IMP/IMP"));   /* duplicate, folded */
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
+    strcpy_s(row.name, sizeof row.name, "Pink Imp");
+    CHECK(sh_modmanifest_row_add_name(&row, "mods/alexpink/imp"));
+    CHECK(sh_modmanifest_row_add_name(&row, "MODS/ALEXPINK/IMP"));   /* duplicate, folded */
     CHECK(sh_modmanifest_row_add_name(&row, "a \"quoted\" \\ name"));
     CHECK(row.name_count == 2);
     value = sh_modmanifest_format_value(&row, &n);
     CHECK(value && n == strlen(value));
     {
-        static const char expect[] = "{\"id\":\"alex.pink-imp\",\"version\":\"1.0.0\",\"bundle\":\"" HASH_A
-                                     "\",\"size\":11782,\"names\":[\"mods/alex.pink-imp/imp\",";
+        static const char expect[] = "{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"Pink Imp\",\"version\":\"1.0.0\","
+                                     "\"size\":11782,\"names\":[\"mods/alexpink/imp\",";
         CHECK(value && !strncmp(value, expect, sizeof expect - 1));
     }
     CHECK(value && sh_modmanifest_parse_value(value, n, &back, err, sizeof err));
-    CHECK(!strcmp(back.id, row.id) && !strcmp(back.version, row.version) && !strcmp(back.bundle, row.bundle));
+    CHECK(!strcmp(back.salt, row.salt) && !strcmp(back.version, row.version) && !strcmp(back.build, row.build) &&
+          !strcmp(back.name, "Pink Imp"));
     CHECK(back.size == 11782 && back.name_count == 2 && !strcmp(back.names[1], "a \"quoted\" \\ name"));
     sh_modmanifest_row_free(&back);
     free(value);
 
-    /* Refusals: wrong hash, bad id, missing size, names not a list. */
+    /* Refusals: wrong hash, bad salt, no "@", missing size, names not a list;
+     * an unknown member is kept out, a missing name or version is empty. */
     {
-        static const char short_hash[] = "{\"id\":\"a\",\"version\":\"1\",\"bundle\":\"x\",\"size\":1}";
+        static const char short_hash[] = "{\"mod\":\"alexpink@abc\",\"size\":1}";
+        static const char bad_salt[] = "{\"mod\":\"Alexpink@" HASH_A "\",\"size\":1}";
+        static const char no_at[] = "{\"mod\":\"alexpink:" HASH_A "\",\"size\":1}";
+        static const char no_size[] = "{\"mod\":\"alexpink@" HASH_A "\"}";
+        static const char bad_names[] = "{\"mod\":\"alexpink@" HASH_A "\",\"size\":1,\"names\":[1,}";
+        static const char extra[] = "{\"mod\":\"alexpink@" HASH_A "\",\"size\":1,\"future\":true}";
         CHECK(!sh_modmanifest_parse_value(short_hash, sizeof short_hash - 1, &back, err, sizeof err));
-    }
-    {
-        static const char bad_id[] = "{\"id\":\"A\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1}";
-        static const char no_size[] = "{\"id\":\"a\",\"version\":\"1\",\"bundle\":\"" HASH_A "\"}";
-        static const char bad_names[] = "{\"id\":\"a\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,\"names\":[1,}";
-        static const char extra[] = "{\"id\":\"a\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,\"future\":true}";
-        CHECK(!sh_modmanifest_parse_value(bad_id, sizeof bad_id - 1, &back, err, sizeof err));
+        CHECK(!sh_modmanifest_parse_value(bad_salt, sizeof bad_salt - 1, &back, err, sizeof err));
+        CHECK(!sh_modmanifest_parse_value(no_at, sizeof no_at - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(no_size, sizeof no_size - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(bad_names, sizeof bad_names - 1, &back, err, sizeof err));
-        CHECK(sh_modmanifest_parse_value(extra, sizeof extra - 1, &back, err, sizeof err));
+        CHECK(sh_modmanifest_parse_value(extra, sizeof extra - 1, &back, err, sizeof err) && !back.name[0] &&
+              !back.version[0] && !strcmp(back.salt, "alexpink") && !strcmp(back.build, HASH_A));
         sh_modmanifest_row_free(&back);
+    }
+    /* A row that names an "id" or a "bundle" is in an earlier shape. */
+    {
+        static const char old_row[] = "{\"id\":\"alex.pink-imp\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1}";
+        static const char mixed[] = "{\"mod\":\"alexpink@" HASH_A "\",\"bundle\":\"" HASH_A "\",\"size\":1}";
+        static const char with_id[] = "{\"mod\":\"alexpink@" HASH_A "\",\"id\":\"alexpink\",\"size\":1}";
+        CHECK(!sh_modmanifest_parse_value(old_row, sizeof old_row - 1, &back, err, sizeof err) &&
+              strstr(err, "earlier shape"));
+        CHECK(!sh_modmanifest_parse_value(mixed, sizeof mixed - 1, &back, err, sizeof err));
+        CHECK(!sh_modmanifest_parse_value(with_id, sizeof with_id - 1, &back, err, sizeof err));
+    }
+    /* A row without a valid salt or build is not formatted. */
+    {
+        sh_modmanifest_row bad;
+        make_row(&bad, "bad-salt", "1", HASH_A, 1);
+        CHECK(sh_modmanifest_format_value(&bad, &n) == NULL);
+        make_row(&bad, "alexpink", "1", "abc", 1);
+        CHECK(sh_modmanifest_format_value(&bad, &n) == NULL);
     }
 
     /* No row budget: every name is kept, however long the row. */
@@ -253,11 +260,11 @@ static void value_round_trip(void)
         int i;
         char name[64];
         for (i = 0; i < 200; i++) {
-            _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alex.pink-imp/a/rather/long/name_%03d", i);
+            _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alexpink/a/rather/long/name_%03d", i);
             sh_modmanifest_row_add_name(&row, name);
         }
         value = sh_modmanifest_format_value(&row, &n);
-        CHECK(value && n > 4096 && strstr(value, "mods/alex.pink-imp/imp") && strstr(value, "name_199"));
+        CHECK(value && n > 4096 && strstr(value, "mods/alexpink/imp") && strstr(value, "name_199"));
         CHECK(value && sh_modmanifest_parse_value(value, n, &back, err, sizeof err) &&
               back.name_count == row.name_count);
         sh_modmanifest_row_free(&back);
@@ -272,15 +279,14 @@ static void text_round_trip_and_order(void)
     sh_modmanifest_row row;
     char err[192] = "", *written, *stripped;
     size_t wlen = 0, slen = 0;
-    unsigned count = 0, removed = 0, rejected = 0;
-    int failed = 0;
-    printf("-- rows written into the member, read, stripped; the variables untouched\n");
+    unsigned count = 0, rejected = 0;
+    printf("-- rows written into the member, read; the variables untouched\n");
 
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
-    sh_modmanifest_row_add_name(&row, "mods/alex.pink-imp/imp");
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
+    sh_modmanifest_row_add_name(&row, "mods/alexpink/imp");
     sh_modmanifest_list_add(&rows, &row);
     sh_modmanifest_row_free(&row);
-    make_row(&row, "bob.room", "2", HASH_B, 4096);
+    make_row(&row, "bobroom1", "2", HASH_B, 4096);
     sh_modmanifest_list_add(&rows, &row);
     sh_modmanifest_row_free(&row);
 
@@ -290,20 +296,18 @@ static void text_round_trip_and_order(void)
     CHECK(wlen == strlen(written));
     /* The author's variables and allocCount are the engine's; the member is last at the root. */
     CHECK(string_rows(written) == 2 && alloc_string_count(written, &count) && count == 2);
-    CHECK(!strstr(written, "smpmod1."));
     CHECK(!memcmp(written, MAP, sizeof MAP - 2));
     CHECK(!strcmp(written + sizeof MAP - 2,
-                  ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.pink-imp\",\"version\":\"1.0.0\",\"bundle\":\""
-                  HASH_A "\",\"size\":11782,\"names\":[\"mods/alex.pink-imp/imp\"]},{\"id\":\"bob.room\",\"version\":\"2\","
-                  "\"bundle\":\"" HASH_B "\",\"size\":4096,\"names\":[]}]}}"));
+                  ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"\","
+                  "\"version\":\"1.0.0\",\"size\":11782,\"names\":[\"mods/alexpink/imp\"]},{\"mod\":\"bobroom1@" HASH_B
+                  "\",\"name\":\"\",\"version\":\"2\",\"size\":4096,\"names\":[]}]}}"));
 
     CHECK(sh_modmanifest_read(written, wlen, &back, &rejected) == 2 && rejected == 0 && back.count == 2);
-    CHECK(back.count == 2 && !strcmp(back.rows[0].id, "alex.pink-imp") && !strcmp(back.rows[1].bundle, HASH_B) &&
+    CHECK(back.count == 2 && !strcmp(back.rows[0].salt, "alexpink") && !strcmp(back.rows[1].build, HASH_B) &&
           back.rows[0].size == 11782 && back.rows[0].name_count == 1);
     sh_modmanifest_list_free(&back);
 
-    /* No legacy row to strip; the member strip gives the map back byte for byte. */
-    CHECK(sh_modmanifest_strip(written, wlen, &slen, &removed, &failed) == NULL && !failed);
+    /* The member strip gives the map back byte for byte. */
     stripped = sh_carrier_strip(written, wlen, &slen);
     CHECK(stripped && slen == sizeof MAP - 1 && strcmp(stripped, MAP) == 0);
     if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
@@ -320,91 +324,37 @@ static void text_round_trip_and_order(void)
         CHECK(none && !strcmp(none, MAP));
         if (none) HeapFree(GetProcessHeap(), 0, none);
     }
-    /* A lookalike name is an ordinary variable and stays. */
-    {
-        static const char look[] = "{\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-            VAR("smpmod1.notes", "x") "," VAR("smpmod1.0.1.extra", "y") "]}}";
-        CHECK(sh_modmanifest_strip(look, sizeof look - 1, &slen, &removed, &failed) == NULL && !failed);
-    }
     HeapFree(GetProcessHeap(), 0, written);
     sh_modmanifest_list_free(&rows);
-}
-
-/* Maps an earlier build saved carry smpmod1 string variables: they are read,
- * removed (allocCount[4] back to the author's count) and a write converts them
- * to the member. When both forms are present the member wins. */
-static void legacy_rows(void)
-{
-    static const char LEGACY[] =
-        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-        VAR("door_label", "Open") "," VAR("smpmod1.0.1", ROW_A_LEGACY) "]}}";
-    static const char BARE[] =
-        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[" VAR("door_label", "Open") "]}}";
-    sh_modmanifest_list rows = {0};
-    sh_modmanifest_row row;
-    char err[192] = "", *out, *engine;
-    size_t n = 0, en = 0;
-    unsigned rejected = 0, count = 0;
-    printf("-- legacy smpmod1 rows: read, removed, converted; the member wins over them\n");
-    CHECK(sh_modmanifest_read(LEGACY, sizeof LEGACY - 1, &rows, &rejected) == 1 && !rejected &&
-          !strcmp(rows.rows[0].id, "alex.pink-imp") && rows.rows[0].name_count == 1);
-    out = sh_modmanifest_write(LEGACY, sizeof LEGACY - 1, &rows, &n, err, sizeof err);
-    CHECK(out && !strstr(out, "smpmod1.") && string_rows(out) == 1 && alloc_string_count(out, &count) && count == 1);
-    CHECK(out && !memcmp(out, BARE, sizeof BARE - 2) &&
-          strstr(out, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.pink-imp\""));
-    sh_modmanifest_list_free(&rows);
-    /* A load of the legacy text: the rows activate and leave the engine's text. */
-    sh_modmanifest_reset();
-    g_activate_calls = 0;
-    engine = engine_text(sh_modmanifest_prepare_load(LEGACY, sizeof LEGACY - 1, &en), LEGACY, sizeof LEGACY - 1, &en);
-    CHECK(engine && !strcmp(engine, BARE) && g_activate_calls == 1 && g_activate_count == 1);
-    CHECK(strstr(g_last_log, "from older-format smpmod1 rows; 1 older-format row(s) migrated") != NULL);
-    HeapFree(GetProcessHeap(), 0, engine);
-    /* Both forms: the member (bob.room) is read; the legacy row is only removed. */
-    if (out) {
-        static const char BOB[] = ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"bob.room\",\"version\":\"2\","
-                                  "\"bundle\":\"" HASH_B "\",\"size\":4096,\"names\":[]}]}}";
-        char both[4096];
-        sh_modmanifest_list cur;
-        _snprintf_s(both, sizeof both, _TRUNCATE, "%.*s%s", (int)(sizeof LEGACY - 2), LEGACY, BOB);
-        CHECK(sh_modmanifest_read(both, strlen(both), &rows, NULL) == 1 && !strcmp(rows.rows[0].id, "bob.room"));
-        sh_modmanifest_list_free(&rows);
-        engine = engine_text(sh_modmanifest_prepare_load(both, strlen(both), &en), both, strlen(both), &en);
-        CHECK(engine && !strcmp(engine, BARE));
-        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_B));
-        CHECK(strstr(g_last_log, "from the snapmap-plus member; 1 older-format row(s) migrated") != NULL);
-        sh_modmanifest_list_free(&cur);
-        HeapFree(GetProcessHeap(), 0, engine);
-        HeapFree(GetProcessHeap(), 0, out);
-    }
-    /* A malformed member is no member: the legacy row is read. */
-    {
-        char bad[4096];
-        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(sizeof LEGACY - 2), LEGACY,
-                    ",\"snapmap-plus\":{\"format\":2,\"mods\":[]}}");
-        CHECK(sh_modmanifest_read(bad, strlen(bad), &rows, NULL) == 1 && !strcmp(rows.rows[0].id, "alex.pink-imp"));
-        sh_modmanifest_list_free(&rows);
-        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(sizeof BARE - 2), BARE,
-                    ",\"snapmap-plus\":{\"format\":1,\"mods\":{\"not\":\"an array\"}}}");
-        CHECK(sh_modmanifest_read(bad, strlen(bad), &rows, &rejected) == 0 && rows.count == 0);
-        engine = engine_text(sh_modmanifest_prepare_load(bad, strlen(bad), &en), bad, strlen(bad), &en);
-        CHECK(engine && !strcmp(engine, BARE));
-        HeapFree(GetProcessHeap(), 0, engine);
-        /* A row in the member that does not read is dropped and counted. */
-        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(sizeof BARE - 2), BARE,
-                    ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"Bad\"},7,{\"id\":\"bob.room\",\"version\":\"2\","
-                    "\"bundle\":\"" HASH_B "\",\"size\":6,\"names\":[]}]}}");
-        CHECK(sh_modmanifest_read(bad, strlen(bad), &rows, &rejected) == 1 && rejected == 2 &&
-              !strcmp(rows.rows[0].id, "bob.room"));
-        sh_modmanifest_list_free(&rows);
-    }
-    (void)row;
-    sh_modmanifest_reset();
 }
 
 /* The save chain on one text: settings, then navigation, then the manifest,
  * each putting its part; the member carries all three in its order and the
  * load reads the rows back while the other parts are left to their readers. */
+/* A member whose rows name an "id" and a "bundle" is an earlier shape (the
+ * parse detour refuses such a map first, sh_map_old_shape): its rows do not
+ * read, and the refusal note is held as the load's refusal. */
+static void old_shape_rows(void)
+{
+    static const char OLD[] =
+        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+        "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.pink-imp\",\"version\":\"1.0.0\",\"bundle\":\""
+        HASH_A "\",\"size\":11782,\"names\":[\"mods/alex.pink-imp/imp\"]}]}}";
+    sh_modmanifest_list rows = {0};
+    unsigned rejected = 0;
+    char refusal[200];
+    printf("-- rows in an earlier shape: not read; a refused load holds its sentence\n");
+    CHECK(sh_modmanifest_read(OLD, sizeof OLD - 1, &rows, &rejected) == 0 && rows.count == 0 && rejected == 1);
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_reset();
+    sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);
+    CHECK(sh_modmanifest_load_notes_pending() == 1);
+    CHECK(sh_modmanifest_load_refusal(refusal, sizeof refusal) &&
+          !strcmp(refusal, "This map was saved in a format this version does not read."));
+    CHECK(sh_modmanifest_load_notes_flush(0) == 1 && !sh_modmanifest_load_refusal(refusal, sizeof refusal));
+    sh_modmanifest_reset();
+}
+
 static void all_parts(void)
 {
     static const char SETTINGS[] = "{\"render\":\"4;0\",\"bounds\":\"1;32671\"}";
@@ -422,12 +372,12 @@ static void all_parts(void)
     saved = b ? sh_modmanifest_on_save(b, bn, &sn) : NULL;
     CHECK(saved != NULL);
     if (saved) {
-        CHECK(!memcmp(saved, MAP, sizeof MAP - 2) && string_rows(saved) == 2 && !strstr(saved, "smpmod1."));
-        CHECK(strstr(saved, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.pink-imp\"") != NULL);
+        CHECK(!memcmp(saved, MAP, sizeof MAP - 2) && string_rows(saved) == 2);
+        CHECK(strstr(saved, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\"") != NULL);
         CHECK(sh_carrier_part(saved, sn, "settings", &from, &to) == 1 && to - from == sizeof SETTINGS - 1 &&
               !memcmp(saved + from, SETTINGS, to - from));
         CHECK(sh_carrier_part(saved, sn, "nav", &from, &to) == 1 && to - from == sizeof NAV - 1);
-        CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 1 && !strcmp(back.rows[0].bundle, HASH_A));
+        CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 1 && !strcmp(back.rows[0].build, HASH_A));
         sh_modmanifest_list_free(&back);
         engine = engine_text(sh_modmanifest_prepare_load(saved, sn, &en), saved, sn, &en);
         CHECK(engine && !strcmp(engine, MAP) && g_activate_count == 1);
@@ -449,10 +399,10 @@ static void member_carries_everything(void)
     size_t wlen = 0, elen = 0;
     int i;
     printf("-- a long row stays whole in the member; the engine parses the map's own text\n");
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 1);
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 1);
     for (i = 0; i < 100; i++) {
         char name[96];
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alex.pink-imp/decls/a_fairly_long_entity_name_%03d", i);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alexpink/decls/a_fairly_long_entity_name_%03d", i);
         sh_modmanifest_row_add_name(&row, name);
     }
     sh_modmanifest_list_add(&rows, &row);
@@ -482,8 +432,8 @@ static void placed_names(void)
     n = sh_modmanifest_placed_names(MAP, sizeof MAP - 1, &names, &failed);
     CHECK(!failed && n == 5);
     for (i = 0; i < n; i++) {
-        if (!strcmp(names[i], "mods/alex.pink-imp/imp")) has_imp = 1;
-        if (!_stricmp(names[i], "mods/alex.pink-imp/skin")) has_skin = 1;
+        if (!strcmp(names[i], "mods/alexpink/imp")) has_imp = 1;
+        if (!_stricmp(names[i], "mods/alexpink/skin")) has_skin = 1;
         if (!strcmp(names[i], "doors/industrial_cap_05")) has_cap = 1;
         if (!strcmp(names[i], "snapmaps/visblockers/industrial/cap_01")) has_vis = 1;
         if (!strcmp(names[i], "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl")) has_module = 1;
@@ -507,14 +457,14 @@ static void placed_names(void)
     CHECK(failed && n == 0 && names == NULL);
 }
 
-/* The substitute op as modpublished binds it: alex.gone is installed at HASH_A's build. */
+/* The substitute op as modpublished binds it: alexgone is installed at HASH_A's build. */
 static int g_subst_calls;
 static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
     (void)placed;
     g_subst_calls++;
-    if (!strcmp(row->id, "alex.gone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
-    strcpy_s(why, why_cap, "This map needs nobody.here, which is not installed and was never published.");
+    if (!strcmp(row->salt, "alexgone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
+    strcpy_s(why, why_cap, "This map needs nobodyhr, which is not installed and was never published.");
     return 0;
 }
 
@@ -526,17 +476,17 @@ static void editor_substitution(void)
     size_t tl = 0, ll = 0;
     static const char gone[] = "00000000000000000000000000000000000000000000000000000000000000ab";
     static const char none[] = "00000000000000000000000000000000000000000000000000000000000000cd";
-    printf("-- an editor open serves a gone build's key through its installed build\n");
+    printf("-- an editor open serves a build no place has through another build of its salt\n");
     g_installed = INSTALLED;
     g_installed_count = 2;
     memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "alex.gone");
+    strcpy_s(row.salt, sizeof row.salt, "alexgone");
     strcpy_s(row.version, sizeof row.version, "0.9.0");
-    strcpy_s(row.bundle, sizeof row.bundle, gone);
+    strcpy_s(row.build, sizeof row.build, gone);
     row.size = 10;
     CHECK(sh_modmanifest_list_add(&rows, &row));
-    strcpy_s(row.id, sizeof row.id, "nobody.here");
-    strcpy_s(row.bundle, sizeof row.bundle, none);
+    strcpy_s(row.salt, sizeof row.salt, "nobodyhr");
+    strcpy_s(row.build, sizeof row.build, none);
     CHECK(sh_modmanifest_list_add(&rows, &row));
     text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
     CHECK(text != NULL);
@@ -554,10 +504,10 @@ static void editor_substitution(void)
     CHECK(g_subst_calls == 2 && sh_modmanifest_substituted(gone, sub, sizeof sub) && !strcmp(sub, HASH_A));
     CHECK(!sh_modmanifest_substituted(none, sub, sizeof sub));
     CHECK(g_activate_count == 2 && (!strcmp(g_activated[0], HASH_A) || !strcmp(g_activated[1], HASH_A)));
-    CHECK(strstr(g_last_log, "MODS: map manifest names 2 bundle(s)") != NULL);
+    CHECK(strstr(g_last_log, "MODS: map manifest names 2 build(s)") != NULL);
     {
         sh_modmanifest_list cur;
-        CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].bundle, gone));
+        CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].build, gone));
         sh_modmanifest_list_free(&cur);
     }
     /* The next load starts over. */
@@ -571,74 +521,6 @@ static void editor_substitution(void)
     sh_modmanifest_list_free(&rows);
     sh_modmanifest_reset();
     g_installed_count = 0;
-}
-
-/* The follow op as modui binds it: OWN_OLD is an earlier hash of a folder
- * this machine made, now HASH_A; DL_OLD is a downloaded map's pin, which an
- * alias of a received folder answers but never rewrites. */
-#define OWN_OLD "00000000000000000000000000000000000000000000000000000000000000e1"
-#define DL_OLD  "00000000000000000000000000000000000000000000000000000000000000e2"
-static int g_follow_calls;
-static int fake_follow(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
-{
-    (void)id;
-    g_follow_calls++;
-    if (strcmp(bundle_hash, OWN_OLD)) return 0;
-    strcpy_s(out->id, sizeof out->id, "alex.own");
-    strcpy_s(out->version, sizeof out->version, "1.1.0");
-    strcpy_s(out->bundle, sizeof out->bundle, HASH_A);
-    out->size = 4321;
-    return 1;
-}
-
-static void own_folder_follow(void)
-{
-    sh_modmanifest_list rows = {0}, cur;
-    sh_modmanifest_row row;
-    char err[256], *text, *loaded;
-    size_t tl = 0, ll = 0;
-    printf("-- an editor load follows the author's own rebuilt folder; a downloaded pin stays\n");
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "alex.own");
-    strcpy_s(row.version, sizeof row.version, "1.0.0");
-    strcpy_s(row.bundle, sizeof row.bundle, OWN_OLD);
-    row.size = 10;
-    CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.own/thing"));
-    CHECK(sh_modmanifest_list_add(&rows, &row));
-    sh_modmanifest_row_free(&row);
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.id, sizeof row.id, "bob.dl");
-    strcpy_s(row.version, sizeof row.version, "2.0.0");
-    strcpy_s(row.bundle, sizeof row.bundle, DL_OLD);
-    row.size = 20;
-    CHECK(sh_modmanifest_list_add(&rows, &row));
-    text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
-    CHECK(text != NULL);
-    sh_modmanifest_set_follow(fake_follow);
-    /* A published map's parse is not the author's editor: nothing is asked. */
-    g_follow_calls = 0;
-    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-    CHECK(g_follow_calls == 0);
-    CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].bundle, OWN_OLD));
-    sh_modmanifest_list_free(&cur);
-    /* The editor's parse: the own row is rewritten, with its names; the downloaded one keeps its pin. */
-    g_last_log[0] = 0;
-    sh_modmanifest_set_editor_load(1);
-    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
-    sh_modmanifest_set_editor_load(0);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-    CHECK(g_follow_calls == 2);
-    CHECK(sh_modmanifest_current(&cur) == 2);
-    CHECK(!strcmp(cur.rows[0].bundle, HASH_A) && !strcmp(cur.rows[0].version, "1.1.0") && cur.rows[0].size == 4321 &&
-          cur.rows[0].name_count == 1 && !strcmp(cur.rows[0].names[0], "mods/alex.own/thing"));
-    CHECK(!strcmp(cur.rows[1].bundle, DL_OLD) && !strcmp(cur.rows[1].version, "2.0.0"));
-    sh_modmanifest_list_free(&cur);
-    CHECK(g_activate_count == 2 && !strcmp(g_activated[0], HASH_A));
-    sh_modmanifest_set_follow(NULL);
-    if (text) HeapFree(GetProcessHeap(), 0, text);
-    sh_modmanifest_list_free(&rows);
-    sh_modmanifest_reset();
 }
 
 static void save_closure(void)
@@ -657,14 +539,14 @@ static void save_closure(void)
     /* The open map's record follows the save (a map loaded with no rows, from a rawmap). */
     {
         sh_modmanifest_list cur;
-        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A) && cur.rows[0].name_count == 2);
+        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A) && cur.rows[0].name_count == 2);
         sh_modmanifest_list_free(&cur);
     }
     if (out) {
         CHECK(sh_modmanifest_read(out, n, &back, NULL) == 1 && back.count == 1);
-        CHECK(back.count == 1 && !strcmp(back.rows[0].bundle, HASH_A) && back.rows[0].name_count == 2 &&
-              back.rows[0].size == 11782 && !strcmp(back.rows[0].version, "1.0.0"));
-        CHECK(!strstr(out, "smpmod1.") && string_rows(out) == 2 && strstr(out, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{"));
+        CHECK(back.count == 1 && !strcmp(back.rows[0].build, HASH_A) && back.rows[0].name_count == 2 &&
+              back.rows[0].size == 11782 && !strcmp(back.rows[0].version, "1.0.0") && !strcmp(back.rows[0].salt, "alexpink"));
+        CHECK(string_rows(out) == 2 && strstr(out, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@"));
         sh_modmanifest_list_free(&back);
 
         /* Saving the saved text again gives the same bytes. */
@@ -692,12 +574,12 @@ static void save_closure(void)
     CHECK(sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n) == NULL);
     /* A placed module provided by a bundle. */
     {
-        static const char room[] = "{\"instances\":[{\"moduleName\":\"maps/modules/mods/bob.room/hall.decl\"}],"
+        static const char room[] = "{\"instances\":[{\"moduleName\":\"maps/modules/mods/bobroom1/hall.decl\"}],"
                                    "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
         unsigned count = 9;
         g_installed_count = 2;
         out = sh_modmanifest_on_save(room, sizeof room - 1, &n);
-        CHECK(out && strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"bob.room\"") &&
+        CHECK(out && strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"bobroom1@") &&
               string_rows(out) == 0 && alloc_string_count(out, &count) && count == 0);
         if (out) HeapFree(GetProcessHeap(), 0, out);
     }
@@ -710,10 +592,10 @@ static void load_step(void)
     char err[192], *written, *engine;
     size_t wlen = 0, elen = 0;
     printf("-- load step: keep, strip, activate\n");
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 5);
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 5);
     sh_modmanifest_list_add(&rows, &row);
     sh_modmanifest_row_free(&row);
-    make_row(&row, "bob.room", "2", HASH_B, 6);
+    make_row(&row, "bobroom1", "2", HASH_B, 6);
     sh_modmanifest_list_add(&rows, &row);
     sh_modmanifest_row_free(&row);
     written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
@@ -722,7 +604,7 @@ static void load_step(void)
     engine = written ? engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen) : NULL;
     CHECK(engine && !strcmp(engine, MAP) && g_activate_calls == 1 && g_activate_count == 2);
     CHECK(!strcmp(g_activated[0], HASH_A) && !strcmp(g_activated[1], HASH_B));
-    CHECK(sh_modmanifest_current(&current) == 2 && !strcmp(current.rows[1].id, "bob.room"));
+    CHECK(sh_modmanifest_current(&current) == 2 && !strcmp(current.rows[1].salt, "bobroom1"));
     sh_modmanifest_list_free(&current);
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
 
@@ -734,15 +616,14 @@ static void load_step(void)
 
     /* One unreadable row is dropped, the readable one still activates. */
     {
-        static const char mixed[] = "{\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-            VAR("smpmod1.0.2", "{\\\"id\\\":\\\"Bad\\\"}") ","
-            VAR("smpmod1.1.2", "{\\\"id\\\":\\\"bob.room\\\",\\\"version\\\":\\\"2\\\",\\\"bundle\\\":\\\"" HASH_B
-                "\\\",\\\"size\\\":6,\\\"names\\\":[]}") "]}}";
+        static const char mixed[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+            "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"Bad\"},"
+            "{\"mod\":\"bobroom1@" HASH_B "\",\"size\":6,\"names\":[]}]}}";
         g_activate_calls = 0;
         engine = sh_modmanifest_prepare_load(mixed, sizeof mixed - 1, &elen);
-        CHECK(engine && !strstr(engine, "smpmod1.") && string_rows(engine) == 0);
+        CHECK(engine == NULL);
         CHECK(g_activate_count == 1 && !strcmp(g_activated[0], HASH_B));
-        if (engine) HeapFree(GetProcessHeap(), 0, engine);
+        CHECK(strstr(g_last_log, "1 manifest row(s) did not parse") != NULL);
     }
     if (written) HeapFree(GetProcessHeap(), 0, written);
     sh_modmanifest_list_free(&rows);
@@ -752,47 +633,53 @@ static void load_step(void)
 static void mod_json(void)
 {
     static const char text[] =
-        "\xef\xbb\xbf{\n  \"id\": \"Alex.Pink-Imp\", \"version\": \"1.0.0\", \"name\": \"Pink Imp\", \"x-note\": [1],\n"
-        "  \"snapmap-plus\": {\"format\": 1, \"build\": 2, \"bundle\": \"" HASH_A "\",\n"
+        "\xef\xbb\xbf{\n  \"version\": \"1.0.0\", \"name\": \"Pink Imp\", \"x-note\": [1],\n"
+        "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"alexpink\", \"rules\": 8, \"build\": \"" HASH_A "\",\n"
         "  \"files\": [\n"
-        "    {\"path\": \"assets/generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl\", \"sha256\": \"" HASH_B "\","
-        " \"size\": 11782, \"provides\": {\"type\": \"md6Def\", \"name\": \"mods/alex.pink-imp/imp.md6\"}, \"needs\": []},\n"
+        "    {\"path\": \"assets/generated/decls/md6def/mods/alexpink/imp.md6.decl\", \"sha256\": \"" HASH_B "\","
+        " \"size\": 11782, \"provides\": {\"type\": \"md6Def\", \"name\": \"mods/alexpink/imp.md6\"}, \"needs\": []},\n"
         "    {\"path\": \"assets/x.bin\", \"sha256\": \"" HASH_B "\", \"size\": 18, \"provides\": {\"type\": \"file\", \"name\": \"x.bin\"}}\n"
         "  ],\n  \"stock\": [{\"path\": \"assets/maps/a.sbsp\", \"sha256\": \"" HASH_B "\", \"source\": \"maps/a.sbsp\","
-        " \"provides\": {\"type\": \"file\", \"name\": \"maps/a.sbsp\"}, \"needs\": [], \"inAssets\": false}]}\n}\n";
+        " \"provides\": {\"type\": \"file\", \"name\": \"maps/a.sbsp\"}, \"needs\": []}]}\n}\n";
     sh_modmanifest_row info;
     char err[160];
     printf("-- mod.json reader\n");
     CHECK(sh_modmanifest_read_mod_json(text, sizeof text - 1, &info, err, sizeof err));
-    CHECK(!strcmp(info.id, "alex.pink-imp") && !strcmp(info.version, "1.0.0") && !strcmp(info.bundle, HASH_A));
-    CHECK(info.size == 11800 && info.name_count == 3 && !strcmp(info.names[0], "mods/alex.pink-imp/imp.md6"));
+    CHECK(!strcmp(info.salt, "alexpink") && !strcmp(info.version, "1.0.0") && !strcmp(info.build, HASH_A) &&
+          !strcmp(info.name, "Pink Imp"));
+    CHECK(info.size == 11800 && info.name_count == 3 && !strcmp(info.names[0], "mods/alexpink/imp.md6"));
     sh_modmanifest_row_free(&info);
     {
-        static const char unbuilt[] = "{\"id\":\"a\",\"version\":\"1\",\"name\":\"a\"}";
-        static const char nohash[] = "{\"id\":\"a\",\"version\":\"1\",\"snapmap-plus\":{\"files\":[]}}";
+        static const char unbuilt[] = "{\"version\":\"1\",\"name\":\"a\"}";
+        static const char failing[] = "{\"name\":\"a\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\","
+                                      "\"cause\":\"it does not build\",\"files\":[]}}";
+        static const char nosalt[] = "{\"name\":\"a\",\"snapmap-plus\":{\"format\":1,\"bundle\":\"" HASH_A "\",\"files\":[]}}";
+        static const char noname[] = "{\"snapmap-plus\":{\"format\":2,\"salt\":\"alexpink\",\"build\":\"" HASH_A "\",\"files\":[]}}";
         CHECK(!sh_modmanifest_read_mod_json(unbuilt, sizeof unbuilt - 1, &info, err, sizeof err));
-        CHECK(!sh_modmanifest_read_mod_json(nohash, sizeof nohash - 1, &info, err, sizeof err));
+        CHECK(!sh_modmanifest_read_mod_json(failing, sizeof failing - 1, &info, err, sizeof err) && strstr(err, "not been built"));
+        CHECK(!sh_modmanifest_read_mod_json(nosalt, sizeof nosalt - 1, &info, err, sizeof err) && strstr(err, "no salt"));
+        CHECK(!sh_modmanifest_read_mod_json(noname, sizeof noname - 1, &info, err, sizeof err));
     }
 }
 
-/* The asset rule at activation: a row whose pinned hash no folder carries is
- * activated through the installed build of its id; a row of an id nothing
- * installed declares keeps its own hash (the activation reports it unknown). */
+/* Activation: a row is activated through the build sh_modserve_row_build
+ * answers (here the installed build of its salt at another hash); a row
+ * nothing serves keeps its own hash (the activation reports it unknown). */
 static void activate_by_id(void)
 {
     sh_modmanifest_list rows;
     sh_modmanifest_row row;
-    printf("-- activation: a row pinning another build of an installed id activates the installed one\n");
+    printf("-- activation: through the build that serves the row\n");
     memset(&rows, 0, sizeof rows);
     memset(&row, 0, sizeof row);
     g_installed = INSTALLED;
     g_installed_count = 2;
-    strcpy_s(row.id, sizeof row.id, INSTALLED[1].id);
+    strcpy_s(row.salt, sizeof row.salt, INSTALLED[1].salt);
     strcpy_s(row.version, sizeof row.version, "0.9");
-    strcpy_s(row.bundle, sizeof row.bundle, "9999999999999999999999999999999999999999999999999999999999999999");
+    strcpy_s(row.build, sizeof row.build, "9999999999999999999999999999999999999999999999999999999999999999");
     CHECK(sh_modmanifest_list_add(&rows, &row));
-    strcpy_s(row.id, sizeof row.id, "nobody.has-this");
-    strcpy_s(row.bundle, sizeof row.bundle, "8888888888888888888888888888888888888888888888888888888888888888");
+    strcpy_s(row.salt, sizeof row.salt, "nobodyht");
+    strcpy_s(row.build, sizeof row.build, "8888888888888888888888888888888888888888888888888888888888888888");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     g_activate_calls = 0;
     CHECK(sh_modmanifest_activate(&rows) == 2 && g_activate_calls == 1 && g_activate_count == 2);
@@ -821,16 +708,28 @@ static void fake_scope(const sh_modmanifest_list *rows, const char *const *names
 }
 static int fake_scope_armed(void) { return g_scope_armed_value; }
 
-/* bare-hands is installed as a newer build (HASH_D); HASH_E is not installed. */
-static int fake_resolve(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+/* alexhand serves as a newer build (HASH_D); alexpink and bobroom1 serve as
+ * installed; HASH_E is not installed. */
+static int fake_resolve(const char *build, const char *salt, sh_modmanifest_row *out)
 {
-    if ((bundle_hash && (!strcmp(bundle_hash, HASH_C) || !strcmp(bundle_hash, HASH_D))) || (id && !strcmp(id, "alex.bare-hands"))) {
-        strcpy_s(out->id, sizeof out->id, "alex.bare-hands");
+    size_t b;
+    if (salt && !strcmp(salt, "alexhand")) {
+        strcpy_s(out->salt, sizeof out->salt, "alexhand");
+        strcpy_s(out->name, sizeof out->name, "Bare Hands");
         strcpy_s(out->version, sizeof out->version, "1.1.0");
-        strcpy_s(out->bundle, sizeof out->bundle, HASH_D);
+        strcpy_s(out->build, sizeof out->build, HASH_D);
         out->size = 777;
         return 1;
     }
+    for (b = 0; b < g_installed_count; b++)
+        if (salt && build && !strcmp(g_installed[b].salt, salt) && !strcmp(g_installed[b].hash, build)) {
+            strcpy_s(out->salt, sizeof out->salt, salt);
+            strcpy_s(out->name, sizeof out->name, g_installed[b].name);
+            strcpy_s(out->version, sizeof out->version, g_installed[b].version);
+            strcpy_s(out->build, sizeof out->build, build);
+            out->size = g_installed[b].size;
+            return 1;
+        }
     return 0;
 }
 
@@ -840,21 +739,21 @@ static void map_level(void)
     sh_modmanifest_list rows, current;
     char *value, *written, *engine, *saved, err[160];
     size_t vlen = 0, wlen = 0, elen = 0, slen = 0;
-    printf("-- map-level rows: the attached key, load, save, attach, remove\n");
+    printf("-- map-level rows: the attached member, load, save, attach, remove\n");
     /* The key round-trips and is written only for a map-level row. */
-    make_row(&row, "alex.bare-hands", "1.0.0", HASH_C, 512);
+    make_row(&row, "alexhand", "1.0.0", HASH_C, 512);
     value = sh_modmanifest_format_value(&row, &vlen);
     CHECK(value && !strstr(value, "attached"));
     free(value);
     row.attached = 1;
     value = sh_modmanifest_format_value(&row, &vlen);
-    CHECK(value && !strcmp(value, "{\"id\":\"alex.bare-hands\",\"version\":\"1.0.0\",\"bundle\":\"" HASH_C
-                                  "\",\"size\":512,\"attached\":true,\"names\":[]}"));
+    CHECK(value && !strcmp(value, "{\"mod\":\"alexhand@" HASH_C "\",\"name\":\"\",\"version\":\"1.0.0\","
+                                  "\"size\":512,\"names\":[],\"attached\":true}"));
     CHECK(value && sh_modmanifest_parse_value(value, vlen, &back, err, sizeof err) && back.attached == 1);
     sh_modmanifest_row_free(&back);
     free(value);
-    CHECK(sh_modmanifest_parse_value("{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_C "\",\"size\":1,\"attached\":false}",
-                                     strlen("{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_C "\",\"size\":1,\"attached\":false}"),
+    CHECK(sh_modmanifest_parse_value("{\"mod\":\"aaaabbbb@" HASH_C "\",\"size\":1,\"attached\":false}",
+                                     strlen("{\"mod\":\"aaaabbbb@" HASH_C "\",\"size\":1,\"attached\":false}"),
                                      &back, err, sizeof err) && back.attached == 0);
     sh_modmanifest_row_free(&back);
 
@@ -862,8 +761,8 @@ static void map_level(void)
     memset(&rows, 0, sizeof rows);
     {
         sh_modmanifest_row placed;
-        make_row(&placed, "alex.pink-imp", "1.0.0", HASH_A, 11782);
-        sh_modmanifest_row_add_name(&placed, "mods/alex.pink-imp/imp");
+        make_row(&placed, "alexpink", "1.0.0", HASH_A, 11782);
+        sh_modmanifest_row_add_name(&placed, "mods/alexpink/imp");
         CHECK(sh_modmanifest_list_add(&rows, &placed));
         sh_modmanifest_row_free(&placed);
     }
@@ -886,7 +785,7 @@ static void map_level(void)
           g_scope_names > 0);
     CHECK(g_activate_count == 2);
     CHECK(sh_modmanifest_current(&current) == 2 && sh_modmanifest_current_attached(&rows) == 1 &&
-          !strcmp(rows.rows[0].bundle, HASH_C));
+          !strcmp(rows.rows[0].build, HASH_C));
     sh_modmanifest_list_free(&current);
     sh_modmanifest_list_free(&rows);
 
@@ -900,10 +799,11 @@ static void map_level(void)
     /* The save keeps the map-level row (nothing places it), renamed to the
      * build that serves; the closure's row is written as before. */
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
-    CHECK(saved && strstr(saved, "alex.pink-imp") && strstr(saved, HASH_D) && !strstr(saved, HASH_C));
+    CHECK(saved && strstr(saved, "alexpink") && strstr(saved, HASH_D) && !strstr(saved, HASH_C) &&
+          strstr(saved, "\"name\":\"Bare Hands\"") && strstr(saved, "\"name\":\"Pink Imp\""));
     CHECK(saved && strstr(saved, "\"attached\":true"));
     CHECK(g_scope_when == SH_MODSERVE_AT_SAVE && g_scope_rows == 2 && g_scope_attached == 1);
-    CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].bundle, HASH_D) &&
+    CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].build, HASH_D) &&
           !strcmp(rows.rows[0].version, "1.1.0"));
     sh_modmanifest_list_free(&rows);
     if (saved) {
@@ -918,20 +818,20 @@ static void map_level(void)
 
     /* Attach: a new row, then again (already attached), then a row of a mod
      * not installed, which a save keeps as it is. */
-    make_row(&back, "bob.room", "2", HASH_B, 4096);
+    make_row(&back, "bobroom1", "2", HASH_B, 4096);
     CHECK(sh_modmanifest_current_attach(&back) == 1 && sh_modmanifest_current_attach(&back) == 0);
     sh_modmanifest_row_free(&back);
-    make_row(&back, "erin.gone", "3", HASH_E, 9);
+    make_row(&back, "eringone", "3", HASH_E, 9);
     sh_modmanifest_row_add_name(&back, "x/y");
     CHECK(sh_modmanifest_current_attach(&back) == 1);
     sh_modmanifest_row_free(&back);
-    make_row(&back, "Bad Id", "3", HASH_E, 9);
+    make_row(&back, "Bad", "3", HASH_E, 9);
     CHECK(sh_modmanifest_current_attach(&back) == -1);
     sh_modmanifest_row_free(&back);
     CHECK(sh_modmanifest_current_attached(&rows) == 3);
     sh_modmanifest_list_free(&rows);
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
-    CHECK(saved && strstr(saved, HASH_B) && strstr(saved, HASH_E) && strstr(saved, "erin.gone"));
+    CHECK(saved && strstr(saved, HASH_B) && strstr(saved, HASH_E) && strstr(saved, "eringone"));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     /* Remove from map drops the row; the next save writes none for it. */
@@ -939,17 +839,17 @@ static void map_level(void)
     CHECK(sh_modmanifest_current_remove(HASH_E) == 1);
     CHECK(sh_modmanifest_current_remove(HASH_B) == 1);
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
-    CHECK(saved && !strstr(saved, HASH_D) && !strstr(saved, HASH_B) && strstr(saved, "alex.pink-imp"));
+    CHECK(saved && !strstr(saved, HASH_D) && !strstr(saved, HASH_B) && strstr(saved, "alexpink"));
     CHECK(g_scope_attached == 0 && g_scope_rows == 1);
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     /* A map-level row alone (no placed mod, nothing served for it) is still written. */
     g_installed_count = 0;
-    make_row(&back, "erin.gone", "3", HASH_E, 9);
+    make_row(&back, "eringone", "3", HASH_E, 9);
     CHECK(sh_modmanifest_current_attach(&back) == 1);
     sh_modmanifest_row_free(&back);
     saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &slen);
-    CHECK(saved && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"erin.gone\"") && strstr(saved, HASH_E));
+    CHECK(saved && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"eringone@" HASH_E "\""));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
@@ -991,31 +891,31 @@ static void choices(void)
                                    "weapons/weapon/zion/player/sp/gauss_rifle", "player.hands", "player.body" };
 
     /* The member round trip, entries in text order. */
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\talex.pink-imp\nweapons/weapon/zion/player/sp/pistol\talex.pink-imp\n");
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\talexpink\nweapons/weapon/zion/player/sp/pistol\talexpink\n");
     value = sh_modmanifest_format_value(&row, &len);
-    CHECK(value && strstr(value, ",\"choices\":{\"player.hands\":\"alex.pink-imp\",\"weapons/weapon/zion/player/sp/pistol\":\"alex.pink-imp\"}"));
+    CHECK(value && strstr(value, ",\"choices\":{\"player.hands\":\"alexpink\",\"weapons/weapon/zion/player/sp/pistol\":\"alexpink\"}"));
     CHECK(value && sh_modmanifest_parse_value(value, len, &back, err, sizeof err) && !strcmp(back.choices, row.choices));
     sh_modmanifest_row_free(&back);
     free(value);
     /* Entries that do not read are skipped; the row stays. */
     {
-        static const char odd[] = "{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,"
-                                  "\"choices\":{\"player.hands\":\"Bad Id\",\"bad slot\":\"a.b\",\"player.body\":\"a.b\",\"x\":3},"
+        static const char odd[] = "{\"mod\":\"aaaabbbb@" HASH_A "\",\"size\":1,"
+                                  "\"choices\":{\"player.hands\":\"Bad Id\",\"bad slot\":\"aaaabbbb\",\"player.body\":\"aaaabbbb\",\"x\":3},"
                                   "\"names\":[]}";
-        CHECK(sh_modmanifest_parse_value(odd, sizeof odd - 1, &back, err, sizeof err) && !strcmp(back.choices, "player.body\ta.b\n"));
+        CHECK(sh_modmanifest_parse_value(odd, sizeof odd - 1, &back, err, sizeof err) && !strcmp(back.choices, "player.body\taaaabbbb\n"));
         sh_modmanifest_row_free(&back);
     }
     /* No budget: names and choices are all kept. */
     for (i = 0; i < 40; i++) {
         char name[96];
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alex.pink-imp/a_rather_long_placed_name_number_%02zu", i);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alexpink/a_rather_long_placed_name_number_%02zu", i);
         sh_modmanifest_row_add_name(&row, name);
     }
     row.choices[0] = 0;
     for (i = 0; i < 5; i++) {
         size_t at = strlen(row.choices);
-        _snprintf_s(row.choices + at, sizeof row.choices - at, _TRUNCATE, "%s\talex.pink-imp\n", slots[i]);
+        _snprintf_s(row.choices + at, sizeof row.choices - at, _TRUNCATE, "%s\talexpink\n", slots[i]);
     }
     value = sh_modmanifest_format_value(&row, &len);
     CHECK(value && len > 1024);
@@ -1028,18 +928,18 @@ static void choices(void)
     /* A load gives the choices to the serving index before the listing, the
      * first row naming a slot winning; no recompute (the listing follows). */
     memset(&rows, 0, sizeof rows);
-    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+    make_row(&row, "alexpink", "1.0.0", HASH_A, 11782);
     row.attached = 1;
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\talex.pink-imp\n");
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\talexpink\n");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     sh_modmanifest_row_free(&row);
-    make_row(&row, "bob.room", "2", HASH_B, 4096);
+    make_row(&row, "bobroom1", "2", HASH_B, 4096);
     row.attached = 1;
-    strcpy_s(row.choices, sizeof row.choices, "player.hands\tbob.room\nplayer.body\tbob.room\n");
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\tbobroom1\nplayer.body\tbobroom1\n");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     sh_modmanifest_row_free(&row);
     CHECK(sh_modmanifest_rows_choices(&rows, lines, sizeof lines) == 2 &&
-          !strcmp(lines, "player.hands\talex.pink-imp\nplayer.body\tbob.room\n"));
+          !strcmp(lines, "player.hands\talexpink\nplayer.body\tbobroom1\n"));
     written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
     sh_modmanifest_list_free(&rows);
     CHECK(written != NULL);
@@ -1049,26 +949,26 @@ static void choices(void)
     g_choice_calls = 0;
     engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
     CHECK(g_choice_calls == 1 && g_choice_n == 2 && g_choice_recompute == 0 &&
-          !strcmp(g_choice_last, "player.hands=alex.pink-imp;player.body=bob.room;"));
-    CHECK(sh_modmanifest_current_choice("player.hands", key, sizeof key) == 1 && !strcmp(key, "alex.pink-imp"));
+          !strcmp(g_choice_last, "player.hands=alexpink;player.body=bobroom1;"));
+    CHECK(sh_modmanifest_current_choice("player.hands", key, sizeof key) == 1 && !strcmp(key, "alexpink"));
     CHECK(sh_modmanifest_current_choice("player.handsD1", key, sizeof key) == 0 && !key[0]);
 
     /* A choice: recomputed at once; a cleared one is gone; an invalid one refused. */
-    CHECK(sh_modmanifest_current_choose("player.hands", "bob.room") == 1 && g_choice_recompute == 1 &&
-          !strcmp(g_choice_last, "player.body=bob.room;player.hands=bob.room;"));
-    CHECK(sh_modmanifest_current_choose("weapons/weapon/zion/player/sp/pistol", "alex.pink-imp") == 1 && g_choice_n == 3);
+    CHECK(sh_modmanifest_current_choose("player.hands", "bobroom1") == 1 && g_choice_recompute == 1 &&
+          !strcmp(g_choice_last, "player.body=bobroom1;player.hands=bobroom1;"));
+    CHECK(sh_modmanifest_current_choose("weapons/weapon/zion/player/sp/pistol", "alexpink") == 1 && g_choice_n == 3);
     CHECK(sh_modmanifest_current_choose("player.body", NULL) == 1 && g_choice_n == 2);
-    CHECK(sh_modmanifest_current_choose("player.body", "Bad Id") == -1 && sh_modmanifest_current_choose("bad slot", "a.b") == -1);
-    CHECK(sh_modmanifest_current_choose("player.handsD1", "carol.gone") == 1);
+    CHECK(sh_modmanifest_current_choose("player.body", "Bad Id") == -1 && sh_modmanifest_current_choose("bad slot", "aaaabbbb") == -1);
+    CHECK(sh_modmanifest_current_choose("player.handsD1", "carolgon") == 1);
     CHECK(sh_modmanifest_current_choices(lines, sizeof lines) == 3);
 
     /* The save writes each choice on the row of its key and drops one naming
      * a key the map declares no build of, with a line. */
     g_mods_lines = 0;
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
-    CHECK(saved && strstr(saved, "\"choices\":{\"player.hands\":\"bob.room\"}"));
-    CHECK(saved && strstr(saved, "\"choices\":{\"weapons/weapon/zion/player/sp/pistol\":\"alex.pink-imp\"}"));
-    CHECK(saved && !strstr(saved, "carol.gone"));
+    CHECK(saved && strstr(saved, "\"choices\":{\"player.hands\":\"bobroom1\"}"));
+    CHECK(saved && strstr(saved, "\"choices\":{\"weapons/weapon/zion/player/sp/pistol\":\"alexpink\"}"));
+    CHECK(saved && !strstr(saved, "carolgon"));
     CHECK(g_mods_lines >= 1);
     if (saved) {
         /* Reloaded: the same choices (minus the dropped one). */
@@ -1076,7 +976,7 @@ static void choices(void)
         g_choice_calls = 0;
         again = sh_modmanifest_prepare_load(saved, slen, &elen);
         CHECK(g_choice_calls == 1 && g_choice_n == 2 && sh_modmanifest_current_choice("player.hands", key, sizeof key) &&
-              !strcmp(key, "bob.room"));
+              !strcmp(key, "bobroom1"));
         if (again) HeapFree(GetProcessHeap(), 0, again);
         HeapFree(GetProcessHeap(), 0, saved);
     }
@@ -1092,67 +992,23 @@ static void choices(void)
     g_installed_count = 2;
 }
 
-/* A stale "smpprod1.<version>" variable an earlier development build
- * recorded: a load and a save remove it (allocCount[4] rewritten); a map
- * without one passes through untouched. */
-static void stale_product(void)
-{
-    static const char STALE[] =
-        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],\"string\":["
-        VAR("door_label", "Open") "," VAR("smnav1.x", "QUJD") "," VAR("smpprod1.v0.2.1-beta.24", "v0.2.1-beta.24")
-        "]}}";
-    static const char PLAIN[] =
-        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-        VAR("door_label", "Open") "," VAR("smnav1.x", "QUJD")
-        "]}}";
-    char *loaded, *saved, *plain;
-    size_t llen = 0, slen = 0, plen = 0;
-    unsigned count = 0;
-    printf("-- stale smpprod1: stripped at load and at save, nothing written\n");
-    sh_modmanifest_reset();
-    loaded = sh_modmanifest_prepare_load(STALE, sizeof STALE - 1, &llen);
-    CHECK(loaded && llen == strlen(loaded) && !strstr(loaded, "smpprod1.") && strstr(loaded, "smnav1.x") &&
-          strstr(loaded, "door_label") && alloc_string_count(loaded, &count) && count == 2 && string_rows(loaded) == 2);
-    saved = sh_modmanifest_on_save(STALE, sizeof STALE - 1, &slen);
-    CHECK(saved && slen == strlen(saved) && !strstr(saved, "smpprod1.") && strstr(saved, "smnav1.x") &&
-          alloc_string_count(saved, &count) && count == 2 && string_rows(saved) == 2);
-    /* A map without one: the strip path returns nothing, the caller keeps the map. */
-    plain = sh_modmanifest_on_save(PLAIN, sizeof PLAIN - 1, &plen);
-    CHECK(!plain && plen == 0);
-    if (plain) HeapFree(GetProcessHeap(), 0, plain);
-    plain = sh_modmanifest_prepare_load(PLAIN, sizeof PLAIN - 1, &plen);
-    CHECK(!plain && plen == 0);
-    if (plain) HeapFree(GetProcessHeap(), 0, plain);
-    /* A save of the stripped map writes no variable back. */
-    if (loaded) {
-        char *again = sh_modmanifest_on_save(loaded, llen, &plen);
-        CHECK(!again || !strstr(again, "smpprod1."));
-        if (again) HeapFree(GetProcessHeap(), 0, again);
-    }
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-    if (saved) HeapFree(GetProcessHeap(), 0, saved);
-    sh_modmanifest_reset();
-}
-
 int main(void)
 {
     printf("modmanifest_test\n");
     grammar();
     value_round_trip();
     text_round_trip_and_order();
-    legacy_rows();
+    old_shape_rows();
     member_carries_everything();
     all_parts();
     placed_names();
     save_closure();
     editor_substitution();
-    own_folder_follow();
     activate_by_id();
     load_step();
     mod_json();
     map_level();
     choices();
-    stale_product();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

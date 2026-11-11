@@ -50,7 +50,6 @@
 #include "modsync.h"
 #include "modstore.h"
 #include "mp_json.h"
-#include "map_shards.h"
 #include "map_carrier.h"
 #include "config.h"
 
@@ -178,8 +177,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
             g_save.carrier = 0;
         }
     }
-    if (!g_save.carrier &&
-        !sh_shard_find(text, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return;
+    if (!g_save.carrier) return;
     memset(&rows, 0, sizeof rows);
     __try {
         (void)sh_modmanifest_read(text, length, &rows, &rejected);
@@ -196,7 +194,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
             return;
         }
         for (size_t i = 0; i < rows.count; i++) {
-            strcpy_s(g_save.hashes[i], sizeof g_save.hashes[i], rows.rows[i].bundle);
+            strcpy_s(g_save.hashes[i], sizeof g_save.hashes[i], rows.rows[i].build);
             g_save.bytes += rows.rows[i].size;
         }
         g_save.count = rows.count;

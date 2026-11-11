@@ -1,39 +1,36 @@
-/* The map manifest: one row per bundle a map needs (Contract 3), carried in
- * the "mods" part of the map's "snapmap-plus" member (map_carrier.h, which
- * describes the member's grammar once).
+/* The map manifest: one row per mod build a map needs, carried in the "mods"
+ * part of the map's "snapmap-plus" member (map_carrier.h, which describes the
+ * member's grammar once).
  *
  * A row is the compact JSON
- * {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
- * where "bundle" is the bundle hash and "names" the placed logical names the
- * bundle provides (informational; every name is kept, there is no row
- * budget). "choices": {"<slot>": "<key>", ...} records the map's choices
+ * {"mod":"<salt>@<build hash>","name","version","size","names":[...],"attached"?,"choices"?}
+ * where "mod" names the mod by its salt (the eight characters in its
+ * mod.json's "snapmap-plus" block) and the build by the SHA-256 of its
+ * canonical manifest, which itself records the salt, so a build verified
+ * against the hash is proved to be that salt. "name" and "version" are the
+ * author's, for display only. "names" lists the placed logical names the
+ * build provides (informational; every name is kept, there is no row
+ * budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
  * between its mods' edits (modregistry.h: which declared mod's value serves a
  * field or keyed entry several of them edit, slot "<game file>/<path>",
  * "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each
- * choice on the row of the key it names, a load reads them from every row
+ * choice on the row of the salt it names, a load reads them from every row
  * (the first row naming a slot wins). "attached": true marks a map-level row:
  * the mod was attached to the map (the Mods tab's Use in this map, `sh_mods
  * map add`) without placing anything, so the map keeps the row whatever it
- * places. A reader that does not know the key treats the row as a placed
- * mod's. Rows never carry asset bytes.
+ * places. Rows never carry asset bytes, and merge by salt and build.
  *
- * Legacy: earlier builds wrote each row as a "smpmod1.<index>.<count>" string
- * variable, appended last in variables.string[] with the row JSON escaped in
- * its initialValue. Every reader here still reads them when the member has no
- * "mods" part (the member wins when both exist); a load removes them
- * (allocCount[4] rewritten) and a write never writes one: it removes them and
- * puts the member's part.
+ * A row object with an "id" or "bundle" member is an earlier shape and does
+ * not parse; the parse detour refuses a map carrying one before any of this
+ * runs (sh_map_old_shape, map_carrier.h).
  *
- * Load: every parse the DeserializeFromJson detour sees reads the rows, keeps
- * them as the current map's manifest, removes the legacy rows and asks the
- * serving layer to activate the named bundles; the member itself is stripped
- * last by the parse detour (rawmap.c). Save: the SerializeToJson detour
- * computes the placed names, asks the serving layer which bundles provide
- * them, adds the current manifest's map-level rows, and puts one row per
- * bundle into the member.
- *
- * Both also remove a stale "smpprod1.<version>" string variable that earlier
- * development builds recorded; nothing writes or reads it now.
+ * Load: every parse the DeserializeFromJson detour sees reads the rows from
+ * the member, keeps them as the current map's manifest and asks the serving
+ * layer to activate the builds that serve them (sh_modserve_row_build); the
+ * member itself is stripped last by the parse detour (rawmap.c). Save: the
+ * SerializeToJson detour computes the placed names, asks the serving layer
+ * which builds provide them, adds the current manifest's map-level rows, and
+ * puts one row per build into the member.
  */
 #ifndef SNAPMAP_PLUS_MODMANIFEST_H
 #define SNAPMAP_PLUS_MODMANIFEST_H
@@ -42,28 +39,29 @@
 /* Bundle hash text: 64 lowercase hex characters (Contract 1). */
 #define SH_MOD_HASH_CHARS 64
 
-#define SH_MODMANIFEST_MAGIC      "smpmod1."
-#define SH_MODMANIFEST_MAGIC_LEN  8
-#define SH_MODMANIFEST_ID_CAP     65    /* Contract 1: at most 64 characters */
+#define SH_MODMANIFEST_SALT_LEN   8
+#define SH_MODMANIFEST_SALT_CAP   (SH_MODMANIFEST_SALT_LEN + 1)
+#define SH_MODMANIFEST_DISPLAY_CAP 129  /* the author's name: at most 128 characters */
 #define SH_MODMANIFEST_VERSION_CAP 33   /* at most 32 */
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
 #define SH_MODMANIFEST_NAME_MAX   512
 #define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */
 #define SH_MODMANIFEST_MAX_ROWS   4096
-/* Registry choices a row carries ("slot\tkey\n" lines) and per map. */
+/* Registry choices a row carries ("slot\tsalt\n" lines) and per map. */
 #define SH_MODMANIFEST_CHOICES_CAP 768
 #define SH_MODMANIFEST_SLOT_MAX    160
 #define SH_MODMANIFEST_CHOICES_MAX 64
 
 typedef struct sh_modmanifest_row {
-    char id[SH_MODMANIFEST_ID_CAP];
-    char version[SH_MODMANIFEST_VERSION_CAP];
-    char bundle[SH_MODMANIFEST_HASH_CAP];
+    char salt[SH_MODMANIFEST_SALT_CAP];          /* the mod */
+    char build[SH_MODMANIFEST_HASH_CAP];         /* its canonical manifest's SHA-256 */
+    char name[SH_MODMANIFEST_DISPLAY_CAP];       /* display only */
+    char version[SH_MODMANIFEST_VERSION_CAP];    /* display only */
     unsigned long long size;
     char **names;          /* malloc'd strings; owned by the row */
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
-    char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<key>\n" per entry, in text order */
+    char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<salt>\n" per entry, in text order */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -81,17 +79,14 @@ int  sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name);
 
 /* ------------------------------------------------------------ grammar ---- */
 
-/* 1 when `id` is a bundle id: lowercase [a-z0-9][a-z0-9._-]*, no consecutive
- * dots, no trailing dot, at most 64 characters. */
-int sh_modmanifest_valid_id(const char *id);
+/* 1 when `salt` is a mod's salt: [a-z][a-z0-9]{7}, the grammar of
+ * sh_salt_valid (modsalt.h). */
+int sh_modmanifest_valid_salt(const char *salt);
 /* 1 when `text` is exactly 64 lowercase hex characters. */
 int sh_modmanifest_valid_hash(const char *text, size_t length);
 
-/* 1 when `header` (quotes excluded) is a legacy row's "smpmod1.<index>.<count>",
- * 1-7 digits each, count at least 1, index below count. */
-int sh_modmanifest_header(const char *header, size_t length, unsigned *index, unsigned *count);
-
-/* Parse a decoded row value. 1 on success; 0 with the reason in err. */
+/* Parse a row value. 1 on success; 0 with the reason in err (a row with an
+ * "id" or "bundle" member is an earlier shape and is refused). */
 int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_row *out,
                                char *err, size_t err_cap);
 /* The compact row value, NUL-terminated, malloc'd (free). Every name is kept. */
@@ -99,24 +94,16 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
 
 /* ------------------------------------------------------------ map text --- */
 
-/* Read every well-formed row in `json` into `out` (appended, duplicates by
- * bundle hash merged): the member's "mods" part when the map has one, else
- * the legacy smpmod1 rows. Returns the number of rows read; rows that do not
- * parse are counted in *rejected. */
+/* Read every well-formed row of the member's "mods" part in `json` into `out`
+ * (appended, duplicates by salt and build merged). Returns the number of rows
+ * read; rows that do not parse are counted in *rejected. */
 size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list *out,
                            unsigned *rejected);
 
-/* Remove every legacy smpmod1 row and rewrite allocCount[4] (the member is
- * left; sh_carrier_strip removes it). Returns an owned
- * NUL-terminated process-heap buffer (HeapFree), or NULL when there is none or
- * the structure cannot be read (*doc_failed set). */
-char *sh_modmanifest_strip(const char *json, size_t length, size_t *out_length,
-                           unsigned *removed, int *doc_failed);
-
-/* Remove any legacy rows, then put one row per entry of `rows` as the member's
- * "mods" part (map_carrier.h). Returns an owned process-heap buffer
- * (HeapFree), or NULL with the reason in err. With count 0 this only removes
- * the rows and the part (NULL when there was nothing to remove). */
+/* Put one row per entry of `rows` as the member's "mods" part
+ * (map_carrier.h). Returns an owned process-heap buffer (HeapFree), or NULL
+ * with the reason in err. With count 0 this only removes the part (NULL when
+ * there was nothing to remove). */
 char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest_list *rows,
                            size_t *out_length, char *err, size_t err_cap);
 
@@ -131,19 +118,21 @@ void sh_modmanifest_names_free(char **names, size_t count);
 
 /* ------------------------------------------------------------ mod.json --- */
 
-/* What the manifest needs from an installed bundle's mod.json: its id and
- * version (author block), bundle hash, total carried size, and every file's
- * provides.name (product block "files" and "stock", stored as `names`). 1 on
- * success; 0 with the reason in err. */
+/* What the manifest needs from a built mod's mod.json: its salt and build
+ * hash (the "snapmap-plus" block's "salt" and "build"), its name and version
+ * (author block, display only), total carried size, and every file's
+ * provides.name (block "files" and "stock", stored as `names`). 1 on
+ * success; 0 with the reason in err (a block without a salt or a build, as
+ * while its build fails, is not built). */
 int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest_row *out,
                                  char *err, size_t err_cap);
 
 /* ------------------------------------------------------------ hooks ------ */
 
 /* Activate the rows' mods: each row through the build that serves it now
- * (sh_modserve_bundle_serving: its hash or an alias of it, else the installed
- * build of its id), so a map plays with the installed copy whatever hash it
- * pins. Returns modserve_activate_bundles' result. Main thread. */
+ * (sh_modserve_row_build: the map's place, else the root, else another
+ * place), else the build the editor substitutes, else its own hash. Returns
+ * modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
 /* The DeserializeFromJson step: read and keep the rows as the current
@@ -181,40 +170,21 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 typedef int (*sh_modmanifest_listed_fn)(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed);
 
-/* The build that serves a map-level row at save (modui.c binds the serving
- * index): `bundle_hash` (aliases resolve), else the installed build of `id`.
- * Fills id, version, bundle and size and returns 1, or 0 when nothing
- * installed answers (the row is written as it is). */
-typedef int (*sh_modmanifest_resolve_fn)(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
+/* The build that serves a row at save (modui.c binds the serving index,
+ * sh_modserve_row_build): for `build` of `salt`. Fills salt, build, name,
+ * version and size and returns 1, or 0 when nothing installed answers (the
+ * row is written as it is). A map-level row is renamed to that build; a row
+ * the placed names gave takes its name and version from it. */
+typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh_modmanifest_row *out);
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
-/* An author's own map follows their own folder (DESIGN-additive A.4, owner
- * 2026-11-09): at an editor load (sh_modmanifest_set_editor_load 1: a map
- * opened in the editor, a My Maps play), each row is offered to this op
- * (modui.c binds sh_modserve_row_follow); 1 with `out` filled rewrites the
- * row to that build before anything reads it, with one log line and no
- * prompt, so the listing, the Mods tab and the next save name it. The op
- * answers 1 only for an earlier hash of a folder of this machine's own (an
- * alias an in-place rebuild recorded), never for a folder the product
- * received with a map. NULL unbinds. */
-void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow);
-
-/* An author's own published map follows their own folders the same way
- * (DESIGN-additive A.4, owner 2026-11-10): the published gate, for an item
- * this machine published (modpublished.c), offers each row of the current
- * manifest to `follow` (bound there to sh_modserve_row_follow_own: the build
- * of the row's key that one of this machine's own folders serves); 1 with
- * `out` filled rewrites the row, with one "MODS: map: <key>: follows its own
- * folder" line naming `item`. Returns the rows rewritten. */
-int  sh_modmanifest_current_follow(sh_modmanifest_resolve_fn follow, const char *item);
-
-/* An editor open of the author's own map whose row pins a build that is no
- * longer installed (DESIGN-additive 2.5, 2.8): the installed build of the
- * same key serves in its place for this editor session, with the hashes on
+/* An editor open of the author's own map whose row pins a build that no
+ * place serves (DESIGN-additive 2.5, 2.8): another build of the same salt
+ * serves in its place for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
  * (why: the gate's sentence, may be empty). `placed` says the map's placed
- * entities name the row's namespace (`mods/<id>/`): with nothing to serve
+ * entities name the row's namespace (`mods/<salt>/`): with nothing to serve
  * them, the engine's validator refuses the map, so the editor cannot open it. Bound by modpublished.c, which
  * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
  * the engine makes for the editor (sh_modmanifest_set_editor_load 1, set by
@@ -229,7 +199,7 @@ typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char 
 void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);
 void sh_modmanifest_set_editor_load(int editor);
 /* The cause sentences such a load found for rows nothing serves ("MODS: map:
- * <key>: <sentence>") are held, not logged, until the gate has decided: a
+ * <salt>: <sentence>") are held, not logged, until the gate has decided: a
  * gate that takes the parse (a published or launched map the parse detour
  * did not recognise as one) says its own cause, so it drops them (say 0); a
  * parse no gate took was the editor's, and its notes are logged once (say 1).
@@ -240,6 +210,11 @@ int  sh_modmanifest_load_notes_pending(void);
  * editor refuses such a map): its sentence in out (without the "MODS: map:"
  * prefix), returning 1; 0 when there is none. Cleared with the notes. */
 int  sh_modmanifest_load_refusal(char *out, size_t cap);
+/* Refuse the map being parsed before anything reads it (rawmap.c: a map in an
+ * earlier shape, sh_map_old_shape; the engine does not parse it, so the open
+ * map's manifest stays): `sentence` replaces the held notes as the load's one
+ * note and its refusal, said as the other refusals are. */
+void sh_modmanifest_load_refuse(const char *sentence);
 /* The build serving in place of a declared one in the open map: 1 with it in
  * out, 0 when `declared` is served as itself. */
 int  sh_modmanifest_substituted(const char *declared, char *out, size_t cap);
@@ -247,13 +222,13 @@ int  sh_modmanifest_substituted(const char *declared, char *out, size_t cap);
 /* A copy of the manifest of the map last parsed (rows from its text). Free
  * with sh_modmanifest_list_free. Returns the row count. */
 size_t sh_modmanifest_current(sh_modmanifest_list *out);
-/* Drop the current manifest's rows naming `bundle` (exact hash): the Mods
+/* Drop the current manifest's rows naming `build` (exact hash): the Mods
  * tab removed that mod from the open map, so the map no longer carries it
  * (the next save rebuilds the rows from the placed entities). Returns the
  * number of rows dropped. */
-size_t sh_modmanifest_current_remove(const char *bundle);
+size_t sh_modmanifest_current_remove(const char *build);
 /* Attach a mod to the open map: mark the current manifest's row of
- * `row->bundle` map-level, or add `row` as a map-level row (names dropped).
+ * `row->salt` at `row->build` map-level, or add `row` as a map-level row (names dropped).
  * The next save writes it (sh_modmanifest_on_save) and every later load keeps
  * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
@@ -272,20 +247,20 @@ void sh_modmanifest_current_close(void);
 int    sh_modmanifest_current_restore_previous(void);
 
 /* The open map's registry choices (modregistry.h): read from the rows at
- * every load, written at every save on the row of the key each names (a
- * choice naming a key the save writes no row for is dropped, logged), and
+ * every load, written at every save on the row of the salt each names (a
+ * choice naming a salt the save writes no row for is dropped, logged), and
  * given to the serving index as its choice input
  * (sh_modserve_scope_set_choices) at the load, before the listing. */
-/* Set (key) or clear (key NULL or "") the choice for `slot`, and give the
+/* Set (salt) or clear (salt NULL or "") the choice for `slot`, and give the
  * choices to the serving index, which recomputes the registries. Returns the
- * bundles whose serving changed (>= 0), -1 for an invalid slot or key. */
-int    sh_modmanifest_current_choose(const char *slot, const char *key);
-/* 1 with the key chosen for `slot` in `key`, 0 when there is none. */
-int    sh_modmanifest_current_choice(const char *slot, char *key, size_t cap);
-/* The choices as "slot\tkey\n" lines in `out`. Returns their count. */
+ * builds whose serving changed (>= 0), -1 for an invalid slot or salt. */
+int    sh_modmanifest_current_choose(const char *slot, const char *salt);
+/* 1 with the salt chosen for `slot` in `salt`, 0 when there is none. */
+int    sh_modmanifest_current_choice(const char *slot, char *salt, size_t cap);
+/* The choices as "slot\tsalt\n" lines in `out`. Returns their count. */
 size_t sh_modmanifest_current_choices(char *out, size_t cap);
 /* The choices a list of rows carries, merged (the first row naming a slot
- * wins), as "slot\tkey\n" lines. Returns their count. */
+ * wins), as "slot\tsalt\n" lines. Returns their count. */
 size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */

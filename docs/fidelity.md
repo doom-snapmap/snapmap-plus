@@ -45,12 +45,12 @@ stays where it was placed but turns red and cannot be put down in the air again
 once it is picked up. In Play the player starts on the floor under a floating
 player start, and floating demons are on the floor once they are active.
 
-A Snapmap+ map carries no mod files: it carries one `smpmod1.` string
-variable per installed mod it uses, the files stay in
-`%LOCALAPPDATA%\snapmap-plus\mods\`, and the unmodified game reads the rows as
-inert strings. A map carrying packages from an earlier Snapmap+ release has a
-complete package converted into a local mod on load and any other package
-removed. See [Mods](capabilities.md#mods).
+A Snapmap+ map carries no mod files: it carries one row per mod it uses in
+its `snapmap-plus` member, the files stay in
+`%LOCALAPPDATA%\snapmap-plus\mods\`, and the unmodified game ignores the
+member. A map saved by an earlier Snapmap+ release in a shape this one does not
+read is refused with a plain reason, its file unchanged. See
+[Mods](capabilities.md#mods).
 
 The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
 inside the engine's command callback. SnapHak queued these handlers onto its

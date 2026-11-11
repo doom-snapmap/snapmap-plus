@@ -49,23 +49,20 @@ static void unlocked_block(const float *values,float native)
     }
 }
 /* Parse a map whose string variables are an author's and, when value is not
- * NULL, one smp.render.v1 row (twice when twice is set): the open map's
- * settings are then that map's, as after a real parse. */
-static void parse_map(const char *value,int twice)
+ * NULL, whose member's settings part carries it as "render" (an unreadable
+ * part, an array, when broken is set): the open map's settings are then that
+ * map's, as after a real parse. */
+static void parse_map(const char *value,int broken)
 {
     char json[1024];size_t n=0;char *out;
-    const char *pre=",{\"info\":{\"name\":\"" SH_RENDER_VARIABLE "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"";
-    const char *post="\",\"~type\":\"snapVarString_t\"}";
     _snprintf_s(json,sizeof json,_TRUNCATE,
-        "{\"variables\":{\"allocCount\":[0,0,0,0,%d],\"string\":["
+        "{\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
         "{\"info\":{\"name\":\"author\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"x\",\"~type\":\"snapVarString_t\"}"
-        "%s%s%s%s%s%s],\"~type\":\"idSnapVariables\"}}",
-        value?(twice?3:2):1,
-        value?pre:"",value?value:"",value?post:"",
-        twice?pre:"",twice?value:"",twice?post:"");
+        "],\"~type\":\"idSnapVariables\"}%s%s%s}",
+        value?(broken?",\"snapmap-plus\":{\"format\":1,\"settings\":[\"":",\"snapmap-plus\":{\"format\":1,\"settings\":{\"render\":\""):"",
+        value?value:"",value?(broken?"\"]}":"\"}}"):"");
     out=sh_map_settings_prepare_load(json,strlen(json),&n);
-    if(value)assert(out&&!strstr(out,SH_RENDER_VARIABLE));
-    if(out)HeapFree(GetProcessHeap(),0,out);
+    assert(!out);
     sh_map_settings_loaded(1);
 }
 int main(void)
@@ -148,7 +145,7 @@ int main(void)
     parse_map(NULL,0);sh_map_render_build(edit);blueprint=1;assert(render_clip(block,NULL,0)==66000);
     parse_map("4;0",0);sh_map_render_loaded(saved);assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);
     blueprint=0;
-    /* Duplicated or malformed metadata reads as off, as earlier builds refused it. */
+    /* A settings part that does not read, or a value that does not, reads as off. */
     parse_map("4;0",1);sh_map_render_loaded(saved);assert(g_ready&&!g_runtime.unlocked&&far_floor==0);
     fresh_block(values);assert(render_clip(block,NULL,0)==46);
     parse_map("malformed",0);sh_map_render_loaded(saved);assert(g_ready&&!g_runtime.unlocked);

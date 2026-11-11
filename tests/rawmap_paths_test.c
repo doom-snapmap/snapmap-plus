@@ -24,10 +24,9 @@
  * bridge. None of that is reachable from the destination rules -- those are two strings and a file
  * write -- so the collaborators are stubbed rather than linked. A stub that gets called would be a
  * bug in the test, so the ones with a return value return failure, which the caller under test
- * treats as "not available" and reports rather than ignores. The legacy carrier policy
- * (modlegacy.c, map_legacy_payload.c), the map manifest (modmanifest.c) and the shard walker
- * (map_shards.c) are linked for real; the mod builder and serving layer resolve to their
- * built-in defaults.
+ * treats as "not available" and reports rather than ignores. The map manifest (modmanifest.c),
+ * the member (map_carrier.c) and the text helpers (map_shards.c) are linked for real; the mod
+ * builder and serving layer resolve to their built-in defaults.
  */
 #include "signatures.h"
 #include "navmesh.h"
@@ -39,11 +38,11 @@
 
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL, NULL, 0u } };
 
-static int log_removed_payload;
+static int log_refused;
 void backend_log(const char *line)
 {
-    /* One verdict line per legacy carrier (modlegacy.c). */
-    if (line && !strncmp(line, "LEGACY: smpkg.", 14) && strstr(line, "): CLEAN -- ")) log_removed_payload++;
+    /* One line per map refused for its earlier shape (rawmap.c). */
+    if (line && !strncmp(line, "CARRIER: map refused: ", 22)) log_refused++;
 }
 static int render_loaded_calls;
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
@@ -670,11 +669,10 @@ static void large_sources_use_native_lengths(void)
     DeleteFileA(path); clean_state();
 }
 
-/* ---- R-021: maps load and save without the package layer ------------------------------------ */
+/* ---- maps in an earlier shape are refused ------------------------------------------------- */
 
-/* A map saved or published by the retired package system: its packages ride as "smpkg." string
- * variables beside an ordinary one, and allocCount[4] counts all three. The two shards decode to
- * bytes whose digest is not the header's, so the section 11 policy cleans the carrier. */
+/* A map an earlier build saved: its packages ride as "smpkg." string variables beside an
+ * ordinary one, and allocCount[4] counts all three. */
 static const char LEGACY_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],"
     "\"string\":["
@@ -695,44 +693,70 @@ static int fixture_deser(const char *json, void *out_map)
     return 1;
 }
 
-static void a_retired_package_map_loads_plain(const char *json)
+/* What a refused parse leaves: the engine parsed nothing, the text is as it was, and the load's
+ * refusal is the plain sentence. */
+static void refused_plainly(int parses_before, int refusals_before)
 {
-    CHECK(strstr(g_parsed, "smpkg.") == NULL);
-    CHECK(strstr(g_parsed, "door_label") != NULL && strstr(g_parsed, "\"Open\"") != NULL);
-    CHECK(strstr(g_parsed, "\"allocCount\":[0,0,0,0,1]") != NULL);
-    CHECK(strstr(json, "smpkg.") != NULL);   /* the engine's own buffer is never edited in place */
+    char refusal[256];
+    CHECK(g_parses == parses_before);
+    CHECK(log_refused == refusals_before + 1);
+    CHECK(sh_modmanifest_load_refusal(refusal, sizeof refusal) &&
+          !strcmp(refusal, "This map was saved in a format this version does not read."));
+    (void)sh_modmanifest_load_notes_flush(0);
 }
 
-/* The engine's own load of a local save and of a published map both reach DeserializeFromJson
- * with the engine's JSON. A carrier that cannot be converted is removed with one verdict line
- * and the map parses natively. */
-static void saved_and_published_maps_load_without_packages(void)
+/* Every load the parse detour sees (a local save, a published map) refuses a map in an earlier
+ * shape before the engine parses it: each retired variable family, and a member whose rows name
+ * an "id" or a "bundle". A map in the current shape, and one whose words only look like a
+ * family's, parse as before. */
+static void earlier_shape_maps_are_refused(void)
 {
     static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
-    int rendered;
-    printf("\n-- local-save and published maps load natively; a retired payload is removed\n");
+    static const char *const families[] = {
+        "smpkg.a.0.1.0123456789abcdef", "smpbind.x.0123456789abcdef", "smpref.y.0123456789abcdef",
+        "smpmod1.0.1", "smpprod1.v0.2.1-beta.24", "smp.render.v1", "smp.bounds.v1",
+        "smnav1.ind_dlc/room.monster48.0.1.0123456789abcdef.fedcba9876543210" };
+    char map[1024];
+    size_t i;
+    int parses, refusals;
+    printf("\n-- a map in an earlier shape is refused with the plain sentence; its text is unchanged\n");
     clean_state();
     g_deser_orig = fixture_deser;
     sh_rawmap_swap_arm(0);
 
-    g_parses = 0; log_removed_payload = 0; rendered = render_loaded_calls;
-    CHECK(sh_deser_detour(LEGACY_MAP, (void *)1) == 1);
-    CHECK(g_parses == 1 && log_removed_payload == 1 && render_loaded_calls == rendered + 2);
-    a_retired_package_map_loads_plain(LEGACY_MAP);
+    g_parses = 0; log_refused = 0;
+    CHECK(sh_deser_detour(LEGACY_MAP, (void *)1) == 0);
+    refused_plainly(0, 0);
+    CHECK(strstr(LEGACY_MAP, "smpkg.") != NULL);   /* the engine's own buffer is never edited */
+    for (i = 0; i < sizeof families / sizeof families[0]; i++) {
+        _snprintf_s(map, sizeof map, _TRUNCATE,
+                    "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
+                    "{\"info\":{\"name\":\"%s\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"QUJD\"}]}}", families[i]);
+        parses = g_parses; refusals = log_refused;
+        CHECK(sh_deser_detour(map, (void *)1) == 0);
+        refused_plainly(parses, refusals);
+    }
+    {
+        static const char id_rows[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"snapmap-plus\":{\"format\":1,"
+            "\"mods\":[{\"id\":\"alex.pink-imp\",\"version\":\"1\",\"bundle\":\"" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "\",\"size\":1,\"names\":[]}]}}";
+        parses = g_parses; refusals = log_refused;
+        CHECK(sh_deser_detour(id_rows, (void *)1) == 0);
+        refused_plainly(parses, refusals);
+    }
 
-    /* A map that never carried a package is handed to the engine byte for byte. */
-    g_parses = 0; log_removed_payload = 0;
+    /* The current shape is handed to the engine byte for byte. */
+    g_parses = 0; log_refused = 0;
     CHECK(sh_deser_detour(plain, (void *)1) == 1);
-    CHECK(g_parses == 1 && log_removed_payload == 0 && strcmp(g_parsed, plain) == 0);
-
-    /* A name that only looks like a header is an ordinary variable and stays. */
+    CHECK(g_parses == 1 && log_refused == 0 && strcmp(g_parsed, plain) == 0);
+    /* A name that only looks like a family, or a family's words in a value, is the author's. */
     {
         static const char lookalike[] =
             "{\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
-            "{\"info\":{\"name\":\"smpkg.notes\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"x\"}]}}";
-        g_parses = 0; log_removed_payload = 0;
+            "{\"info\":{\"name\":\"notes smpkg.\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"smnav1.x\"}]}}";
+        g_parses = 0; log_refused = 0;
         CHECK(sh_deser_detour(lookalike, (void *)1) == 1);
-        CHECK(log_removed_payload == 0 && strcmp(g_parsed, lookalike) == 0);
+        CHECK(log_refused == 0 && strcmp(g_parsed, lookalike) == 0);
     }
     g_deser_orig = NULL;
     clean_state();
@@ -761,21 +785,20 @@ static void a_reload_into_the_same_map_object_is_a_new_map(void)
     clean_state();
 }
 
-/* The rawmap load swap substitutes the staged file and strips it the same way. */
-static void a_staged_rawmap_with_a_retired_payload_loads_plain(void)
+/* The rawmap load swap substitutes the staged file and refuses it the same way. */
+static void a_staged_rawmap_in_an_earlier_shape_is_refused(void)
 {
     char staged[MAX_PATH];
-    printf("\n-- a staged rawmap carrying a retired payload loads as a plain map\n");
+    printf("\n-- a staged rawmap in an earlier shape is refused the same way\n");
     clean_state();
     CHECK(write_file("rawmap_legacy_payload.json", LEGACY_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     sh_rawmap_set_branch_tag(0);                /* this test installs no IsBranchMap answer */
     g_deser_orig = fixture_deser;
     sh_rawmap_swap_arm(1);
-    g_parses = 0; log_removed_payload = 0;
-    CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"entities\":[]}", (void *)1) == 1);
-    CHECK(g_parses == 1 && log_removed_payload == 1);
-    a_retired_package_map_loads_plain(LEGACY_MAP);
+    g_parses = 0; log_refused = 0;
+    CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"entities\":[]}", (void *)1) == 0);
+    refused_plainly(0, 0);
     sh_rawmap_swap_arm(0);
     sh_rawmap_set_branch_tag(1);
     g_deser_orig = NULL;
@@ -835,23 +858,6 @@ static void saves_carry_no_package_payload(void)
     clean_state();
 }
 
-/* The header grammar the removal keys on. */
-static void retired_header_grammar(void)
-{
-    static const char *const accepted[] = {
-        "smpkg.a.0.1.0123456789abcdef", "smpkg.acceptance.r128.cyberdemon.12.13.fedcba9876543210",
-        "smpkg.legacy.0123456789abcdef.0.1.0123456789abcdef" };
-    static const char *const refused[] = {
-        "smpkg.", "smpkg.notes", "smpkg.a.0.1.0123456789abcdeF", "smpkg..0.1.0123456789abcdef",
-        "smpkg.a.0.1.0123456789abcde", "smpkg.a.x.1.0123456789abcdef", "smnav1.a.0.1.0123456789abcdef",
-        "smpkg.a.0.123456789.0123456789abcdef" };
-    printf("\n-- the retired header grammar\n");
-    for (size_t i = 0; i < sizeof accepted / sizeof accepted[0]; i++)
-        CHECK(sh_map_legacy_payload_header(accepted[i], strlen(accepted[i])) == 1);
-    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
-        CHECK(sh_map_legacy_payload_header(refused[i], strlen(refused[i])) == 0);
-}
-
 /* ---- the mods a rawmap names ------------------------------------------------------------------
  * The engine never parses a rawmap whose mods are missing: the swap falls back to the engine's own
  * map and the rawmap hold (modpublished.c, linked for real) asks the store, then refuses or offers
@@ -861,12 +867,13 @@ static void retired_header_grammar(void)
 #define MVAR(name, value) \
     "{\"info\":{\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\"," \
     "\"~type\":\"snapVarString_t\"}"
-#define MROW(id, version, hash, size) \
-    "{\\\"id\\\":\\\"" id "\\\",\\\"version\\\":\\\"" version "\\\",\\\"bundle\\\":\\\"" hash "\\\"," \
-    "\\\"size\\\":" size ",\\\"names\\\":[]}"
+#define MROW(salt, name, version, hash, size) \
+    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"version\":\"" version "\"," \
+    "\"size\":" size ",\"names\":[]}"
 static const char MOD_MAP[] =
-    "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
-    MVAR("door_label", "RAWMAP_MARK") "," MVAR("smpmod1.0.1", MROW("test.alpha", "1.0", HASH_A, "1048576")) "]}}";
+    "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
+    MVAR("door_label", "RAWMAP_MARK") "]},"
+    "\"snapmap-plus\":{\"format\":1,\"mods\":[" MROW("testalph", "test.alpha", "1.0", HASH_A, "1048576") "]}}";
 static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
 
 extern unsigned long long g_mod_stub_export_result;
@@ -886,7 +893,7 @@ static int r_row_state(void *c, const sh_modmanifest_row *row, const char *subje
 {
     (void)c; (void)subject;
     if (cause && cap) cause[0] = 0;
-    return !strcmp(row->bundle, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
+    return !strcmp(row->build, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
 }
 static int r_rescan(void *c) { (void)c; return 1; }
 static int r_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
@@ -1014,7 +1021,7 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
         sh_rawmap_swap_arm(1);                  /* the reload's own arm window */
         g_parses = 0;
         CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"name\":\"BORROWED\"}", (void *)1) == 1);
-        CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL && strstr(g_parsed, "smpmod1.") == NULL);
+        CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL && strstr(g_parsed, "snapmap-plus") == NULL);
         CHECK(sh_rawmap_swap_count() == swaps + 1 && g_prepared == NULL);
         sh_rawmap_swap_arm(0);
         sh_rawmap_reload_done();
@@ -1110,7 +1117,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     /* The editor has a map open whose row pins a build. */
     sh_rawmap_swap_arm(0);
     CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1);
-    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A));
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
     sh_modmanifest_list_free(&cur);
     /* A rawmap without rows opened over it: none of the borrowed map's rows stays. */
     CHECK(write_file("rawmap_own_rows.json", plain, staged, sizeof staged));
@@ -1139,7 +1146,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     CHECK(sh_rawmap_swap_set_source(staged));
     sh_rawmap_load_arm_once();
     CHECK(sh_deser_detour(plain, (void *)1) == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
-    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A));
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
     sh_modmanifest_list_free(&cur);
     sh_rawmap_set_branch_tag(1);
     g_fake_edit_id[0] = 0;
@@ -1276,9 +1283,8 @@ int main(void)
     a_live_export_is_pretty_when_asked();
     snapshots_visit_without_save_effects();
     large_sources_use_native_lengths();
-    retired_header_grammar();
-    saved_and_published_maps_load_without_packages();
-    a_staged_rawmap_with_a_retired_payload_loads_plain();
+    earlier_shape_maps_are_refused();
+    a_staged_rawmap_in_an_earlier_shape_is_refused();
     a_reload_into_the_same_map_object_is_a_new_map();
     saves_carry_no_package_payload();
     a_rawmap_open_is_unsaved_until_its_first_save();
