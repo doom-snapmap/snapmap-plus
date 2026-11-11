@@ -1987,7 +1987,13 @@ is touched, and a removed demon answers nil.
   aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
   entity's position, given again when it has moved 32 inches; the engine's
   move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
-  (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
+  (`setFocus`), `face(pos, [{ travel = inches }])` (a zero-length
+  `ssaction_MoveToPoint` with align; its tolerance is the arrival radius of
+  the engine's turn-clip query, which for a turn in place rejects a clip whose
+  root ends farther than 1.0-1.3 x max(1, radius) from its start, flag
+  `ANIMQUERY_REJECT_OVERSHOOT`, VK 0x141AD9E90 / GL 0x141AF40E0; the default
+  0.1 picks clips that turn in place, `travel` admits a demon's own stepping
+  turns; with `travel` an entity target turns toward where it stands),
   `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
   `setPlayerEnemy` closest), `trigger(on, [hand])`
   (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
