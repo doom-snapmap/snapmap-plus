@@ -365,10 +365,13 @@ static void test_fresh_folder_strings(const char *tmp)
     fb_make(dir, "talker");
     mt_write(dir, "mod.json",
              "{\r\n  \"name\": \"Talker\",\r\n  \"version\": \"1.0.0\",\r\n  \"strings\": {\r\n    \"en\": {\r\n"
-             "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\"\r\n    }\r\n  }\r\n}\r\n");
+             "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\",\r\n"
+             "      \"snapentity_demon_baron\": \"Big Baron\",\r\n      \"sh_bv_navigation_desc\": \"Mine\"\r\n"
+             "    }\r\n  }\r\n}\r\n");
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "talker");
     mt_write(dir, rel, "{\r\n\tinherit = \"mods/talker/probe_base\";\r\n\tdisplayName = \"#str_probe_name\";\r\n"
-                       "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n}");
+                       "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n"
+                       "\tbaron = \"#str_snapentity_demon_baron\";\r\n}");
     g_logged = 0;
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 0);
     if (ss.failed || !ss.salted) log_dump("strings");
@@ -379,6 +382,9 @@ static void test_fresh_folder_strings(const char *tmp)
     CHECK(t && strstr(t, want));
     _snprintf_s(want, sizeof want, _TRUNCATE, "Says #str_%s_probe_name.", salt);
     CHECK(t && strstr(t, want) && !strstr(t, "\"probe_desc\""));
+    /* DECISIONS 9: a key the game (snapentity_demon_baron) or Snapmap+
+     * (sh_bv_navigation_desc) defines is a string edit and keeps its name. */
+    CHECK(t && strstr(t, "\"snapentity_demon_baron\": \"Big Baron\"") && strstr(t, "\"sh_bv_navigation_desc\": \"Mine\""));
     free(t);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
     t = slurp(dir, rel, NULL);
@@ -387,6 +393,7 @@ static void test_fresh_folder_strings(const char *tmp)
     _snprintf_s(want, sizeof want, _TRUNCATE, "description = \"#str_%s_probe_desc\"", salt);
     CHECK(t && strstr(t, want));
     CHECK(t && strstr(t, "other = \"#str_probe_names\""));   /* not one of its keys: a name boundary */
+    CHECK(t && strstr(t, "baron = \"#str_snapentity_demon_baron\""));   /* a string edit's reference stays */
     free(t);
     /* A copy: its keys and references follow its new salt. */
     _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\talker - Copy", root);

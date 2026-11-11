@@ -103,9 +103,9 @@ static void table_log(void *context, const char *line)
     backend_log(line);
 }
 
-static void read_bundle(void *context, const char *id, int legacy, const char *extra)
+static void read_bundle(void *context, const char *id, const char *hash, int legacy, const char *extra)
 {
-    (void)context; (void)legacy;
+    (void)context; (void)hash; (void)legacy;
     if (id && extra) (void)sh_companion_add_bundle(&g_table, id, extra, strlen(extra), table_log, NULL);
 }
 

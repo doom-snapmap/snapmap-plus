@@ -145,7 +145,11 @@ is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl a
 A folder made by hand has no salt until its first scan: write its strings with plain keys
 (`imp_blue_name`, referenced `#str_imp_blue_name`), and that scan names them `<salt>_imp_blue_name`
 and rewrites the folder's own references with them. After that scan a new key must carry the
-prefix itself; one without it is refused with a sentence naming the expected prefix. The folder's
+prefix itself; one without it is refused with a sentence naming the expected prefix. A key the game
+or Snapmap+ already defines (`snapentity_demon_baron`, referenced `#str_snapentity_demon_baron`) is
+a string edit instead: it keeps its name in any mod, the Mods tab lists it as "Changes the text of N
+game strings", and it applies where the mod's other edits apply (an editor-tweaks mod's in your
+editor, any other mod's in the maps that use it). The folder's
 name is yours and you can rename it at any time. A stock file
 the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and

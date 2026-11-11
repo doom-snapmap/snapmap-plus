@@ -476,7 +476,7 @@ Per entry of `mods`:
 | `"folder"`, `"group"` | string | The folder's own name, and the organizing folder it sits in at the root ("" at the top and for a map's mods). |
 | `"place"`, `"placeTitle"` | string | For a mod a downloaded map brought: its place `maps\<segment>` and the map's name; "" for the player's own. |
 | `"requirements"` | object | The builder's canonical `{commands?: {activate?, deactivate?}, cvars: {name: "value"}}`. |
-| `"facts"` | object | For a built mod: `{adds, borrows, surfaces, editor, replaces, editorOnly, editorTweaks, replacements: [{path, edits}], edits: [{file, ops, set, remove, list, keyed, bag, drop}], registries, stockBanks?}`. |
+| `"facts"` | object | For a built mod: `{adds, borrows, surfaces, editor, replaces, editorOnly, editorTweaks, replacements: [{path, edits}], edits: [{file, ops, set, remove, list, keyed, bag, drop}], registries, stockBanks?}`; `registries.stringEdits` lists the game strings the mod changes (shown as "Changes the text of N game strings"). |
 | `"borrows"` | object | For a built mod: `{paths: [the game file each borrowed file reads], count}`. |
 | `"warnings"` | string[] | The builder's warnings, in plain words. |
 | `"publishedMaps"` | number | How many of the player's published maps record its build; absent when unknown. |

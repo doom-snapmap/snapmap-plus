@@ -829,9 +829,9 @@ static void sp_scene_refusal(void *context, const char *line)
     backend_log(line);
 }
 
-static void sp_read_scenes(void *context, const char *id, int legacy, const char *extra)
+static void sp_read_scenes(void *context, const char *id, const char *hash, int legacy, const char *extra)
 {
-    (void)context; (void)legacy;
+    (void)context; (void)hash; (void)legacy;
     if (id && extra) (void)sh_scene_add_bundle(&g_scenes, id, extra, strlen(extra), sp_scene_refusal, NULL);
 }
 

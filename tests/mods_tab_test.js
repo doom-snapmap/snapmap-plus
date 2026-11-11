@@ -356,6 +356,8 @@ test('details: description, what it adds, what it changes, what it borrows, cons
   assert.match(ch.textContent, /^What it changes in the game Edits 2 game files; a map that uses this mod gets the game's text with these edits\./);
   assert.match(ch.textContent, /entitydef\/player\/ coop : +3 fields set/);
   assert.match(ch.textContent, /Adds 1 encounter to the encounter list of a map that uses it\. encounter +single_imp/);
+  /* a strings key the game defines changes that text (DECISIONS 9) */
+  assert.match(ch.textContent, /Changes the text of 1 game string in a map that uses it\./);
   const bw = section(h, 'borrows').textContent;
   assert.match(bw, /^What it borrows from the game 2 game files, read from your install models\/monsters\/imp\/ +imp\.lwo /);
   assert.ok(bw.endsWith(modsTab.BORROWS_NOTE));

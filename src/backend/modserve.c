@@ -3502,6 +3502,14 @@ int sh_modserve_scope_relevant(void)
     return any || (x && x->admitted > 0);
 }
 
+int sh_modserve_bundle_edits_live(const char *bundle_hash)
+{
+    sh_modserve_scope_info si;
+    if (!sh_modserve_scope_enabled()) return 1;
+    if (!bundle_hash || !sh_modserve_bundle_scope(bundle_hash, &si)) return 0;
+    return si.listed || si.scope == SH_MODSERVE_SCOPE_ALWAYS;
+}
+
 int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out)
 {
     const ms_index *x = g_index;
@@ -6962,7 +6970,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     ReleaseSRWLockExclusive(&order_lock);
     for (i = 0; i < n; ++i) {
         const ms_bundle *b = &x->bundles[order[i]];
-        fn(context, b->id ? b->id : b->folder, b->place != NULL, b->extra);
+        fn(context, b->id ? b->id : b->folder, b->hash ? b->hash : "", b->place != NULL, b->extra);
     }
     free(order);
     return n;

@@ -12,6 +12,7 @@
 
 #include "modbundle.h"
 #include "modsalt.h"
+#include "strkeys.h"   /* string edits: keys the game or the product defines (DECISIONS 9) */
 #include "companion.h"
 #include "mp_json.h"
 #include "plain_reason.h"
@@ -3532,11 +3533,28 @@ static void mb_registries(sh_mb_bundle *b)
     strings = extra ? mbj_get(extra, "strings") : NULL;
     en = strings && strings->t == MBJ_OBJ ? mbj_get(strings, "en") : NULL;
     if (en && en->t == MBJ_OBJ && en->count) {
-        char **keys = (char **)calloc(en->count, sizeof(char *));
-        size_t n = 0;
-        for (i = 0; keys && i < en->count; i++) {
-            keys[n] = mb_strndup(en->keys[i], en->klen[i]);
-            if (keys[n]) n++;
+        /* DECISIONS 9: a key the game or the product defines is an edit of
+         * that string ("stringEdits"); every other key is the mod's own,
+         * named under its salt ("strings"). */
+        char **keys = (char **)calloc(en->count, sizeof(char *)), **edits = (char **)calloc(en->count, sizeof(char *));
+        size_t n = 0, ne = 0;
+        for (i = 0; keys && edits && i < en->count; i++) {
+            char *k = mb_strndup(en->keys[i], en->klen[i]);
+            if (!k) continue;
+            if (sh_strkey_is_edit(k, strlen(k))) edits[ne++] = k;
+            else keys[n++] = k;
+        }
+        if (edits && ne) {
+            qsort(edits, ne, sizeof(char *), mb_cstr_cmp);
+            mb_puts(&o, first ? "\"stringEdits\":[" : ",\"stringEdits\":[");
+            for (i = 0; i < ne; i++) {
+                if (i) mb_put(&o, ",", 1);
+                mb_put_jcstr(&o, edits[i]);
+            }
+            mb_put(&o, "]", 1);
+            first = 0;
+            mb_note(b, "changes the text of %zu string%s the game or Snapmap+ defines: they apply %s", ne,
+                    ne == 1 ? "" : "s", "where this mod's other edits apply");
         }
         if (keys && n) {
             qsort(keys, n, sizeof(char *), mb_cstr_cmp);
@@ -3545,13 +3563,16 @@ static void mb_registries(sh_mb_bundle *b)
                 if (i) mb_put(&o, ",", 1);
                 mb_put_jcstr(&o, keys[i]);
                 if (!mb_string_key_ok(keys[i], b->id))
-                    mb_error(b, "mod.json strings key %s is not named %s_<name>: every string of a mod is named "
-                             "under its salt, in letters, digits and _", keys[i], b->id);
+                    mb_error(b, "mod.json strings key %s is not named %s_<name>: a string of the mod's own is named "
+                             "under its salt, in letters, digits and _ (a key the game defines changes that string)",
+                             keys[i], b->id);
             }
             mb_put(&o, "]", 1);
         }
         for (i = 0; keys && i < n; i++) free(keys[i]);
+        for (i = 0; edits && i < ne; i++) free(edits[i]);
         free(keys);
+        free(edits);
     }
     mbj_free(extra);
     mb_put(&o, "}", 1);
@@ -5504,6 +5525,7 @@ static int mb_sk_key(void *vctx, const char *key, size_t key_len, const char *va
     (void)value_end;
     if (memchr(k, '\\', kn)) return 1;   /* an escaped key is left as written (the build names it) */
     if (kn > sl && !_strnicmp(k, c->salt, sl) && k[sl] == '_') return 1;   /* already prefixed */
+    if (sh_strkey_is_edit(k, kn)) return 1;   /* a string edit stays as the game names it (DECISIONS 9) */
     for (i = 0; i < c->nkeys && !(strlen(c->keys[i].from) == kn && !memcmp(c->keys[i].from, k, kn)); i++) {}
     if (i == c->nkeys) {
         if (c->nkeys == c->kcap) {

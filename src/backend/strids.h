@@ -37,6 +37,12 @@ int sh_strids_rearm(void);
  * so the bundle layer may have changed. Only marks the refresh pending. */
 void sh_strids_request_refresh(void);
 
+/* Any thread: a mod's string edits apply only where its edits apply
+ * (sh_modserve_bundle_edits_live). When that changed for a bundle whose
+ * strings carry string edits since the last pass (a map opened or closed,
+ * another map declared), mark the refresh pending. Returns 1 when marked. */
+int sh_strids_scope_check(void);
+
 /* Engine main thread: when a refresh is pending and the first injection has
  * run, clear the request and rearm. Returns -1 when nothing ran (no request,
  * or the first injection is still to come and will read the index itself),

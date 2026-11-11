@@ -161,6 +161,7 @@ var modsTab = (function () {
                       keyed: num(e.keyed), bag: num(e.bag), drop: num(e.drop)};
             }).filter(function (e) { return e.file.length > 0; }),
             conductor: normNames(reg.conductor),
+            stringEdits: normNames(reg.stringEdits),
             stockBanks: normStockBanks(reg.banks, f.stockBanks)};
   }
   /* registries.banks (the builder's list) with facts.stockBanks (this session's state of each). */
@@ -403,14 +404,20 @@ var modsTab = (function () {
   function valueClass(v) { return /^-?\d+(\.\d+)?$/.test(str(v).trim()) ? 'mk-num' : 'mk-str'; }
 
   /* What the mod changes in the game, as {text, list?, kind?, items?} lines in the details pane's
-     order: the game files it edits (in words), the game files a received folder replaces, the
-     encounters it lists, the game sound banks it loads, and its editor tweaks. */
+     order: the game files it edits (in words), the texts it changes, the game files a received
+     folder replaces, the encounters it lists, the game sound banks it loads, and its editor tweaks. */
   function changeLines(b) {
     var f = b.facts, out = [];
     if (!f) return out;
     if (f.edits.length) {
       out.push({text: 'Edits ' + plural(f.edits.length, 'game file') + '; a map that uses this mod gets the game\'s text with these edits.',
                 list: f.edits.map(editLine), kind: 'edits', items: f.edits});
+    }
+    /* A strings key the game or Snapmap+ defines changes that text where the mod's edits apply. */
+    if (f.stringEdits.length) {
+      out.push({text: 'Changes the text of ' + plural(f.stringEdits.length, 'game string') + (f.editorOnly || f.editor
+                  ? ' in your editor.' : ' in a map that uses it.'),
+                list: f.stringEdits.map(function (k) { return '#str_' + k; }), kind: 'strings'});
     }
     /* An edited copy is an edit, never a replacement. */
     var other = f.replacements.filter(function (r) { return !r.edits; });

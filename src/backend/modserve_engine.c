@@ -2219,6 +2219,7 @@ static void me_pass_prelude(const char *phase)
 {
     sh_modvt_before_pass(phase);
     sh_modsound_before_pass(phase);
+    (void)sh_strids_scope_check();   /* string edits follow the open map's declared mods */
     (void)sh_strids_refresh_pending();
 }
 
@@ -2665,6 +2666,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     sh_modsound_before_pass("map");
     /* Stock banks the declared bundles' borrowed sound events need (modsound.h). */
     (void)sh_modsound_stock_before_map(bundle_hashes, n);
+    (void)sh_strids_scope_check();
     (void)sh_strids_refresh_pending();
     me_ensure_probe();
     t0 = me_now_ms();

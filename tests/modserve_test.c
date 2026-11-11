@@ -3424,9 +3424,10 @@ static void test_registration_reparse_of_held_permanent(void)
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
-static void collect_extra(void *c, const char *id, int place, const char *extra)
+static void collect_extra(void *c, const char *id, const char *hash, int place, const char *extra)
 {
     (void)c;
+    CHECK(hash && strlen(hash) == 64);
     CHECK(extra && extra[0] == '{' && strstr(extra, "\"strings\""));
     _snprintf_s(g_extra_seen + strlen(g_extra_seen), sizeof g_extra_seen - strlen(g_extra_seen), _TRUNCATE,
                 "%s%s;", id, place ? "(place)" : "");

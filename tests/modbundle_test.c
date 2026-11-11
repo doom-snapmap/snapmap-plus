@@ -14,6 +14,7 @@
 #include "modbundle.h"
 #include "mod_test_util.h"
 #include "modsalt.h"
+#include "strkeys.h"
 #include "modbundle_old.h"
 
 /* The fixture's salt (its block's), passed to every build. */
@@ -937,6 +938,11 @@ static void m_no_name(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1
 static void m_bad_json(const char *f) { mt_write(f, "mod.json", "{\"name\":\"x\",\"name\":\"y\"}"); }
 static void m_strings_outside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/other/t\":\"x\"}}")); }
 static void m_strings_inside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_t\":\"x\"}}")); }
+static void m_string_edits(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_t\":\"x\",\"SnapEntity_Demon_Baron\":\"Big\","
+                                 "\"sh_bv_navigation_desc\":\"Mine\"}}"));
+}
 static void m_strings_slash(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/alexrimp/t\":\"x\"}}")); }
 static void m_strings_bare(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_\":\"x\"}}")); }
 static void m_bad_version(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1/2\",\"name\":\"x\"}"); }
@@ -1146,6 +1152,15 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t is not named alexrimp_<name>");
     refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t is not named alexrimp_<name>");
     refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ is not named alexrimp_<name>");
+    /* DECISIONS 9: keys the game or Snapmap+ defines are string edits, unprefixed. */
+    accepted(fixture, tmp, m_string_edits, &b);
+    CHECK(b.errors == 0 && b.registries &&
+          strstr(b.registries, "\"stringEdits\":[\"SnapEntity_Demon_Baron\",\"sh_bv_navigation_desc\"],\"strings\":[\"alexrimp_t\"]") &&
+          has_note(&b, "changes the text of 2 strings the game or Snapmap+ defines"));
+    if (b.registries && !strstr(b.registries, "stringEdits")) fprintf(stderr, "  registries %s\n", b.registries);
+    sh_mb_free(&b);
+    CHECK(sh_strkey_is_edit("snapentity_demon_baron", 22) && sh_strkey_is_edit("SH_BV_NAVIGATION_DESC", 21) &&
+          !sh_strkey_is_edit("sh_snapentity_dynamic", 21) && !sh_strkey_is_edit("alexrimp_t", 10) && !sh_strkey_is_edit("", 0));
     accepted(fixture, tmp, m_strings_inside, &b);
     CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"strings\":[\"alexrimp_t\"]"));
     sh_mb_free(&b);

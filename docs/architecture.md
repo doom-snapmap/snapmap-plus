@@ -515,7 +515,13 @@ These backend files share the work:
   `mods/<salt>/` (a salt has one spelling in decl text and cooked paths), and
   every strings key is `<salt>_<name>` (letters, digits and `_`; no `/`, since
   the engine's string ids were only ever exercised with `[a-z0-9_]`), which a
-  decl references as `#str_<salt>_<name>`. Every file is classified from
+  decl references as `#str_<salt>_<name>`. A strings key the game's language
+  table or the product's built-in table already defines (`strkeys.c`: the
+  game's keys compiled in as hashes from the supported build's English table,
+  `strkeys_game.h`, and the baked set) is a string edit: it keeps that name, any
+  mod may carry it, the build lists it under the block's `registries`
+  `stringEdits` (the mod's own keys under `strings`), and it applies where the
+  mod's other edits apply (below, the bundle string layer). Every file is classified from
   its path and bytes: an addition or a borrow (a stock pointer) under the salt,
   editor-only types included (a Toybox row travels with its mod), an editor
   tweak (an editor-only type outside the salt), a surface (the game's own bytes
@@ -871,7 +877,8 @@ or New mod; there is no folder watcher. Under the store lock it:
    folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
    `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s references and
    its block `{"format": 2, "salt": ...}`). Its strings keys gain the salt's
-   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced),
+   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced;
+   a string edit keeps its name),
    and every `#str_<key>` reference in its own text files, `mod.json` among
    them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
    writes plain keys in a new folder; a binary file naming one of them refuses
@@ -1296,8 +1303,14 @@ two layers and keeps the first writer of each key (case-insensitive): the
 `strings.en` object of every admitted bundle's author block (root folders
 before maps' places, then by salt, then folder, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
-`#str_` prefix decls use (a mod's keys are `<salt>_<name>`, which the builder
-enforces), and only `en` is read. When two bundles give one key
+`#str_` prefix decls use (a mod's own keys are `<salt>_<name>`, which the
+builder enforces), and only `en` is read. A string edit (a key the game or the
+product defines, `strkeys.h`) applies only where its mod's edits apply
+(`sh_modserve_bundle_edits_live`: map scope off, the open map declares the
+build, or it is the editor-tweak class), so an editor-tweaks mod's string edits
+apply in this machine's editor and a map-declared mod's in the maps that use it;
+`sh_strids_scope_check` marks a refresh when that changes for a bundle that
+carries one (each editor pass and map activation). When two bundles give one key
 different text the first stands and one `B1: strids REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
 (bundles B, baked D)`. The player's own document of earlier releases,
@@ -2432,7 +2445,8 @@ package is: placed under `assets\` at their paths below `overrides\`, files a
 mod cannot carry left out and counted, copies of installed content made stock
 pointers, with a descriptor of id `my-overrides`, name `My overrides` and the
 document's keys as `strings.en`, and installed by `modstore.c` as
-`mods\my-overrides\`, salted from `my-overrides` (its strings `<salt>_<key>`).
+`mods\my-overrides\`, salted from `my-overrides` (its own strings `<salt>_<key>`;
+a key the game or the product defines stays as it is, a string edit).
 With the document alone the folder is `mod.json` (the same author part) and an
 empty `assets\`. When `mods\my-overrides\` already exists only what it lacks is added
 (files compared by path, keys case-insensitively) and one `MODS: migration:

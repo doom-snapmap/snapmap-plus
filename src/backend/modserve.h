@@ -752,6 +752,12 @@ typedef struct sh_modserve_scope_info {
 /* The scope of the admitted bundle `bundle_hash` (in the open map's context). 1 filled, 0 not admitted. */
 int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out);
 
+/* 1 when the admitted bundle `bundle_hash`'s edits of game content apply now:
+ * map scope is off, the open map declares it, or it is the editor-tweak class
+ * (its editor tweaks serve in every map); else 0. A mod's string edits
+ * (strkeys.h, strids.c) follow this. */
+int  sh_modserve_bundle_edits_live(const char *bundle_hash);
+
 /* For sh_mods status, doctor and map: one header per mod installed at several
  * builds, then one line per admitted bundle with what it serves for the open
  * map. A mod is named by its name (else its folder), never by its salt or a
@@ -915,7 +921,7 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
  * text; the strings stay valid for the process. Returns the number visited,
  * or -1 when the order could not be allocated (nothing is visited). Used by
  * strids.c for the bundle string layer. */
-typedef void (*sh_modserve_extra_fn)(void *context, const char *id, int place, const char *extra);
+typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *hash, int place, const char *extra);
 int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
 
 /* Visit every admitted bundle in index order with its salt, its hash and its

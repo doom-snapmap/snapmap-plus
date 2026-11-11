@@ -79,9 +79,19 @@ typedef struct fake_bundle {
     const char *id, *version;
     int place, admitted;
     const char *extra;
+    int edits_off;      /* its edits do not apply now (another map, not declared) */
 } fake_bundle;
 static fake_bundle g_bundles[8];
 static int g_nbundles, g_bundle_visits, g_bundle_refuse;
+
+/* The double names each bundle's build by its id. */
+int sh_modserve_bundle_edits_live(const char *bundle_hash)
+{
+    int i;
+    for (i = 0; i < g_nbundles; i++)
+        if (bundle_hash && !strcmp(g_bundles[i].id, bundle_hash)) return !g_bundles[i].edits_off;
+    return 0;
+}
 
 int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
 {
@@ -90,7 +100,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     if (g_bundle_refuse) return -1;
     for (i = 0; i < g_nbundles; i++) {
         if (!g_bundles[i].admitted || !g_bundles[i].extra) continue;
-        fn(context, g_bundles[i].id, g_bundles[i].place, g_bundles[i].extra);
+        fn(context, g_bundles[i].id, g_bundles[i].id, g_bundles[i].place, g_bundles[i].extra);
         n++;
     }
     return n;
@@ -472,6 +482,27 @@ static void test_bundle_layer(void)
  * packs each carry <salt>_ci_tab with the same text. Identical text under
  * different keys is two rows and no conflict; one key with two texts is
  * still one. */
+/* DECISIONS 9: a string edit (a key the game or Snapmap+ defines) applies
+ * where its mod's edits apply; the mod's own keys always do. */
+static void test_string_edits(void)
+{
+    static fake_bundle packs[] = {
+        { "edmod000", "", 0, 1, "{\"strings\":{\"en\":{\"sh_bv_navigation_desc\":\"EDITED\",\"edmod000_own\":\"Own\"}}}", 1 },
+    };
+    set_bundles(packs, 1);
+    CHECK(rearm_strings() == 1);
+    CHECK(value_for("edmod000_own") && !strcmp(value_for("edmod000_own"), "Own"));
+    CHECK(value_for("sh_bv_navigation_desc") && strcmp(value_for("sh_bv_navigation_desc"), "EDITED") != 0);
+    CHECK(sh_strids_scope_check() == 0);
+    g_bundles[0].edits_off = 0;   /* a map that declares it opens */
+    CHECK(sh_strids_scope_check() == 1);
+    CHECK(rearm_strings() == 1);
+    CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), "EDITED"));
+    CHECK(sh_strids_scope_check() == 0);
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+}
+
 static void test_namespaced_keys(void)
 {
     static const fake_bundle packs[] = {
@@ -674,6 +705,7 @@ int main(void)
     CHECK(rearm_strings() == 1);
     test_bundle_layer();
     test_namespaced_keys();
+    test_string_edits();
     test_dictionary_retirement();
     test_sort_hook_recovery();
     test_native_table_extent();
