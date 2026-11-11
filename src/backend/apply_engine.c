@@ -1189,15 +1189,25 @@ static int ae_mkcmd_one(const char *prefab_text)
     if (!ed || !prefab_text) return 0;
     void *staging = (void *)(ed + PASTE_STAGING_OFF);
     /* Reconstruct reused staging before deserializing: stale nested strings can
- * fault during compare/assign. The constructor replaces fields without
- * freeing prior allocations, so this intentionally leaks the previous slot. */
+     * fault during compare/assign. The constructor replaces fields without
+     * freeing them, so contents whose entity block is a live process or
+     * persistent allocation (a previous Load / Place's) are destroyed first;
+     * anything else is map-heap storage the next teardown releases, or state
+     * not safe to free. */
+    {
+        void *blobs = NULL;
+        if (g_prefab_ctor && g_prefab_dtor && ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobs) && blobs &&
+            ae_block_survives_map(blobs)) {
+            __try { g_prefab_dtor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {
+                backend_log("APPLY stage: releasing the previous staged prefab faulted; it is left allocated");
+            }
+        }
+    }
     /* Allocate staged contents under process-heap scope so they survive Play.
- * Always balance a successful push, including exception paths. */
-
+     * Always balance a successful push, including exception paths. */
     int pushWhy = 0;
     int pushed = ae_push_heap_global_why(&pushWhy);
     (void)pushWhy;
-
 
     int ok = 0;
     __try {
