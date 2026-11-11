@@ -162,7 +162,12 @@ function Invoke-CbLink {
     if (-not $need) { Write-Host "[build] up to date: $Output"; return }
     foreach ($r in $Remove) { Remove-Item $r -Force -ErrorAction SilentlyContinue }
     Remove-Item $record -Force -ErrorAction SilentlyContinue
-    cmd /c "cd /d `"$WorkDir`" && $Command > `"$Log`" 2>&1"
+    # The tool's arguments go through a response file: the object list of a large
+    # target exceeds cmd.exe's 8191-character command line in a deep checkout.
+    $tool, $toolArgs = $Command -split ' ', 2
+    $rsp = "$Output.rsp"
+    [System.IO.File]::WriteAllText($rsp, $toolArgs)
+    cmd /c "cd /d `"$WorkDir`" && $tool @`"$rsp`" > `"$Log`" 2>&1"
     $exit = $LASTEXITCODE
     Get-Content $Log | Write-Host
     if ($exit -ne 0) { throw "link failed (exit $exit) -- see $Log" }
