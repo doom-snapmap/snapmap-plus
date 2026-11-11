@@ -483,6 +483,22 @@ static void test_empty_index(void)
     CHECK(!sh_modserve_active());
     CHECK(sh_modserve_open(A_ENT, &b, &n) == 0 && b == NULL && n == 0);
     CHECK(log_has("MODS: index built in ") && log_has("(0 bundles, 0 files)"));
+    /* A map without mods, the first of the session: its place is the root,
+     * a failed parse puts the root back, and nothing is listed or served. */
+    {
+        char now[HO_TEXT];
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0]);
+        CHECK(sh_modserve_place_load("") == 0);
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0]);
+        CHECK(sh_modserve_place_restore() == 1 && sh_modserve_place_restore() == 0);
+        CHECK(sh_modserve_place_load(NULL) == 0);
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0]);
+        CHECK(sh_modserve_scope_hashes(NULL, 0) == 0);
+        CHECK(sh_modserve_script_files("anything", NULL, NULL) == 0);
+    }
 }
 
 static void test_index_and_isolation(void)

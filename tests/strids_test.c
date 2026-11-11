@@ -597,6 +597,25 @@ static void test_own_strings_follow_the_build(void)
     CHECK(count_key("mmmmmmmm_title") == 0);
 }
 
+/* A map without mods: nothing is scoped, so the map load's check asks for no
+ * refresh, and when the game rebuilds its dictionary only the product's own
+ * rows are added again. */
+static void test_plain_map(void)
+{
+    CHECK(user_doc("{}"));
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+    CHECK(sh_strids_scope_check() == 0);
+    CHECK(sh_strids_refresh_pending() == -1);
+    g_dictionary.count = 0;
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(strstr(g_log, "STRINGS: runtime refresh complete") != NULL);
+    CHECK(strstr(g_log, "the game rebuilt its string table") != NULL);
+    CHECK(value_for("sh_bv_navigation_desc") != NULL);
+    CHECK(sh_strids_scope_check() == 0 && sh_strids_refresh_pending() == -1);
+}
+
 /* The engine rebuilds its own dictionary (a language reload): every row this
  * injector added is gone and the game's rows are new records. A Refresh that
  * changes a mod's strings while a map is open must leave a valid table: each
@@ -932,6 +951,7 @@ int main(void)
     test_string_edits();
     test_scope_check_many_bundles();
     test_own_strings_follow_the_build();
+    test_plain_map();
     test_rebuilt_table();
     test_failed_refresh_changes_nothing();
     test_dictionary_retirement();

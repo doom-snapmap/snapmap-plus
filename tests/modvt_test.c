@@ -375,6 +375,29 @@ static void decode_helpers(void)
     }
 }
 
+/* A map without mods, the first of a session: nothing is served and nothing is
+ * held, so the map pass and every frame do nothing, and binding a material
+ * reads no board. */
+static void plain_map(void)
+{
+    static fake f;
+    sh_modvt_family *fams = NULL;
+    sh_modvt_result res;
+    sh_modvt_ops ops = { &f, f_ready, f_find, f_is_free, f_set, f_adopt, f_release, f_record, f_rebind, f_notice };
+    uint8_t parms[256];
+    printf("-- a map without mods\n");
+    fake_init(&f);
+    CHECK(sh_modvt_collect(&fams) == 0 && fams == NULL);
+    CHECK(sh_modvt_sync(NULL, 0, &ops, "map", 0, &res) == 0);
+    CHECK(sh_modvt_sync(NULL, 0, &ops, "frame", 1, &res) == 0);
+    CHECK(!f.sets && !f.releases && !f.adopts && !f.rebinds && !f.notices);
+    CHECK(res.wanted == 0 && !res.registered && !res.released && !res.refused && !res.pending && !res.lost);
+    CHECK(sh_modvt_owned_count() == 0 && sh_modvt_record_owner(1) == NULL);
+    CHECK(sh_modvt_board_record("anything") == NULL && sh_modvt_board_record(NULL) == NULL);
+    memset(parms, 0, sizeof parms);
+    CHECK(sh_modvt_bind_board(parms, f.rec[1], &g_bops) == 0 && sh_modvt_material_count(NULL) == 0);
+}
+
 static void families(void)
 {
     char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], cause[HO_TEXT];
@@ -829,6 +852,7 @@ int main(int argc, char **argv)
     g_echo_log = GetEnvironmentVariableA("MODVT_ECHO", NULL, 0) != 0;
     member_rule();
     decode_helpers();
+    plain_map();
     families();
     detours();
     families_follow_the_map();

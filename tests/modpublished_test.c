@@ -1197,6 +1197,13 @@ static void rawmap_scripts_follow_the_setting(void)
     CHECK(HOZ(place, sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, HO_P(0))) == 0 && !place[0]);
     CHECK(!sh_modpub_rawmap_scripts_off(&rows, place) && F.served_scripts_calls == 0);
     sh_modmanifest_list_free(&rows);
+    /* A rawmap without mods, scripts off: nothing to check, nothing asked. */
+    F.served_scripts_calls = 0;
+    CHECK(HOZ(place, sh_modpub_rawmap_missing(VANILLA, strlen(VANILLA), &rows, HO_P(0))) == 0 && !place[0]);
+    CHECK(rows.count == 0);
+    CHECK(!sh_modpub_rawmap_scripts_off(&rows, place) && !sh_modpub_rawmap_scripts_off(&rows, NULL));
+    CHECK(!sh_modpub_rawmap_scripts_off(NULL, NULL) && F.served_scripts_calls == 0);
+    sh_modmanifest_list_free(&rows);
 }
 
 static void scripts_and_the_setting(void)

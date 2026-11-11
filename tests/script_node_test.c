@@ -168,6 +168,14 @@ static void test_map_names(void)
     CHECK(!sh_script_node_map_load("{\"entities\":", 12, err, sizeof err));
     CHECK(strstr(err, "could not be read") != NULL);
     CHECK(!HOS(name, sh_script_node_name_dup(61)));
+    /* a map without Script nodes or variables reads as empty */
+    {
+        static const char plain[] = "{\"entities\":[],\"instances\":[],\"variables\":{}}";
+        int type = -1, index = -1, other = -1;
+        CHECK(sh_script_node_map_load(plain, sizeof plain - 1, err, sizeof err));
+        CHECK(!HOS(name, sh_script_node_name_dup(61)));
+        CHECK(!sh_script_node_var_find("door_open", &type, &index, &other));
+    }
     CHECK(sh_script_node_map_load(k_map, sizeof k_map - 1, err, sizeof err));
 }
 
