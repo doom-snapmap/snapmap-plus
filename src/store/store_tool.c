@@ -17,6 +17,8 @@
 #include "modstock.h"
 #include "modbundle.h"
 #include "backend_log.h"
+#include "store_lock.h"
+#include "modbankinfo.h"
 
 #define ST_PATH_MAX (MAX_PATH * 4)
 
@@ -313,7 +315,7 @@ static void st_list(const st_scan *sc)
     const sh_ms_upgrade_check *u = &sc->uc;
     char size[32];
     if (u->layout_folders)
-        st_say(0, "  mods\\: %u folder(s) in the retired layout (bundle.json and .state.json beside assets\\)", u->layout_folders);
+        st_say(0, "  mods\\: %u folder(s) in the folder layout of an earlier release", u->layout_folders);
     if (u->blobs_present) {
         st_size(u->blob_bytes, size, sizeof size);
         st_say(0, "  mods\\blobs\\: %u file(s), %s, shared with the mod folders by hard links", u->blob_files, size);
@@ -351,11 +353,12 @@ static void st_list(const st_scan *sc)
         st_say(0, "  strings\\strids.json: %s; fix it (a JSON object of \"id\": \"text\" pairs) or remove it", sc->lc.why);
     if (sc->lc.overrides_done) st_say(0, "  overrides\\: every entry is in mods\\; the folder goes to the Recycle Bin");
     if (sc->lc.strings_done) st_say(0, "  strings\\: nothing left to move; the folder goes to the Recycle Bin");
+    if (sc->cv.leftovers)
+        st_say(0, "  mods\\: %u item(s) an interrupted run left, to put right", sc->cv.leftovers);
     if (sc->cv.folders)
-        st_say(0, "  mods\\: %u mod folder(s) of an earlier release to convert to this version's shape (a salt, mods/<salt>/ "
-               "paths, strings named <salt>_<key>)", sc->cv.folders);
+        st_say(0, "  mods\\: %u mod folder(s) of an earlier release to convert to this version's shape", sc->cv.folders);
     if (sc->cv.duplicates)
-        st_say(0, "  mods\\: %u second build(s) of a mod that Snapmap+ made, to go to the Recycle Bin", sc->cv.duplicates);
+        st_say(0, "  mods\\: %u extra copies of a mod that Snapmap+ made, to go to the Recycle Bin", sc->cv.duplicates);
     if (sc->cv.folders_left)
         st_say(0, "  mods\\: %u folder(s) left as they were by an earlier run (they could not be converted)", sc->cv.folders_left);
     if (sc->cv.builds_dir) st_say(0, "  mods\\.builds\\: the retired last good builds; the folder goes to the Recycle Bin");
@@ -452,7 +455,8 @@ static void st_part(char *out, size_t cap, const char *fmt, ...)
 static int st_migrate(const st_store *s, const wchar_t *doom_arg)
 {
     st_scan before, after;
-    wchar_t *doom = NULL;
+    wchar_t *doom = NULL, *wmods;
+    HANDLE lock;
     char *doom_u8 = NULL, done[1024] = "";
     int need_doom = 0, com, result;
     if (!st_scan_store(s, &before)) { st_say(1, "error: the store folder %s cannot be read", s->u8); return SH_STORE_ERROR; }
@@ -473,13 +477,25 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         return SH_STORE_OK;
     }
     if (st_doom_is_running()) {
-        st_say(1, "error: DOOM is running; close it and run this again (nothing was changed)");
+        st_say(1, "error: DOOM is running; close it and run the Snapmap+ installer again (nothing was changed)");
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
+    /* The mods folder's named lock (store_lock.h): no other process writes it while this runs. */
+    wmods = st_join(s->dir, L"mods");
+    lock = wmods ? sh_store_lock_take(wmods, 30000) : NULL;
+    free(wmods);
+    if (!lock) {
+        st_say(1, "error: another program is changing the mods folder; close DOOM and run the Snapmap+ installer again (nothing was "
+               "changed)");
+        free(doom);
+        return SH_STORE_ERROR;
+    }
+    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
+    /* Every build here records its stock-bank needs exactly as the game's own builds do. */
+    sh_mb_set_bank_need(sh_mbi_bundle_need);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
     else sh_ms_set_discard(sh_store_recycle, &g_rc, "moved to the Recycle Bin");
     com = SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
@@ -511,6 +527,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             int r;
             doom_u8 = st_utf8(doom, CP_UTF8, NULL);
             sh_modstock_set_install(doom_u8);
+            sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
             sh_modstock_register();
             st_say(0, "  overrides\\: moving into mods\\, reading game files from %s", doom_u8 ? doom_u8 : "?");
             r = sh_modmigrate_run(before.ov_due ? 0 : 1, &ms);
@@ -531,6 +548,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             if (doom && !doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
+                sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
                 sh_modstock_register();
             }
             if (sh_modmigrate_loose_run(&ls) > 0)
@@ -550,22 +568,23 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         sh_conv_stats cs;
         st_store *ws = (st_store *)s;
         memset(&cs, 0, sizeof cs);
-        if ((before.cv.folders || before.layout_work || before.cv.maps) && doom && !ws->stock) {
+        if ((before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && doom && !ws->stock) {
             if (!doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
+                sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
                 sh_modstock_register();
             }
             ws->stock = 1;
         }
         st_conv_opts(ws, &o);
-        if (before.cv.folders || before.cv.duplicates || before.layout_work) {
+        if (before.cv.folders || before.cv.duplicates || before.cv.leftovers || before.layout_work) {
             /* (a folder the layout upgrade just wrote is beta.26's shape) */
             sh_conv_folders(&o, &cs);
             if (cs.waiting) need_doom = 1;
             if (cs.converted || cs.refused || cs.removed)
-                st_part(done, sizeof done, "%u mod folder(s) converted, %u left as they were, %u second build(s) removed",
-                        cs.converted, cs.refused, cs.removed);
+                st_part(done, sizeof done, "%u mod folder(s) converted (%u of them do not build yet), %u left as they were, "
+                        "%u extra copies removed", cs.converted, cs.failed, cs.refused, cs.removed);
         }
         sh_conv_maps(&o, &cs);
         if (cs.maps_converted || cs.maps_refused)
@@ -582,14 +601,15 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         memset(&after, 0, sizeof after);
         after.kinds = 1;
     }
+    sh_store_lock_give(lock);
     if (!g_discard) st_part(done, sizeof done, "%u item(s) moved to the Recycle Bin", g_rc.recycled);
     if (!g_discard && g_rc.refused)
         st_say(0, "  %u item(s) were left in place because the Recycle Bin could not take them (it is turned off "
                "or too small for that drive, or the folder is not on a local disk); nothing was deleted for good. "
-               "Make room in the Recycle Bin or turn it on, then close DOOM and run: snapmap-plus migrate", g_rc.refused);
+               "Make room in the Recycle Bin or turn it on, then close DOOM and run the Snapmap+ installer again", g_rc.refused);
     if (after.kinds || (!g_discard && g_rc.refused)) {
-        st_say(0, "Partly done%s%s. Some items are left; close DOOM and run: snapmap-plus migrate%s", done[0] ? ": " : "",
-               done, need_doom ? " --doom \"<DOOM folder>\"" : "");
+        st_say(0, "Partly done%s%s. Some items are left; close DOOM and run the Snapmap+ installer again%s", done[0] ? ": " : "",
+               done, need_doom ? " (it needs to find your DOOM folder)" : "");
         result = SH_STORE_PARTIAL;
     } else {
         st_say(0, "Done: %s.", done[0] ? done : "nothing changed");

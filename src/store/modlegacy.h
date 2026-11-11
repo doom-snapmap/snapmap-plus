@@ -1,6 +1,6 @@
-/* Legacy first-generation carriers (beta.6 through beta.19), for the store
- * tool only (src\store\build.ps1; never linked into the game DLL, which
- * refuses such a map: map_carrier.h).
+/* modlegacy.h -- first-generation carriers (beta.6 through beta.19) and the
+ * retired overrides\ packages, for the store tool only (src\store\build.ps1;
+ * never linked into the game DLL, which refuses such a map: map_carrier.h).
  *
  * A complete "smpkg." set whose ZIP decodes and whose package.json parses is
  * CONVERTED into the one shape: its tree is written to a new mod folder
@@ -201,14 +201,14 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
 int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_origin *origin,
                               const char *dest, sh_modlegacy_verdict *verdict);
 
-/* The DeserializeFromJson step: convert or clean every legacy carrier, strip
- * smpkg./smpbind./smpref. rows, and write manifest rows for the converted
- * bundles into the member. Returns the new buffer (HeapFree), or NULL to keep `json` (no
+/* Convert or clean every legacy carrier of a map text, strip its
+ * smpkg./smpbind./smpref. rows, and write rows for the converted mods into
+ * the member. Returns the new buffer (HeapFree), or NULL to keep `json` (no
  * legacy rows, or a structure that does not read; logged). */
 char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length);
 
-/* The verdicts of the last processed map, for the load gate. Copies at most
- * `cap` and returns the total. */
+/* The verdicts of the last processed map. Copies at most `cap` and returns
+ * the total. */
 size_t sh_modlegacy_last_report(sh_modlegacy_verdict *out, size_t cap);
 
 /* How a converted folder takes its salt: sh_ms_assign_salt's signature

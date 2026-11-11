@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/backend/map_old.h"
+#include "../src/store/map_old.h"
 #include "../src/backend/map_carrier.h"
 #include "../src/backend/modmanifest.h"
 
@@ -160,8 +160,11 @@ static void member_rows(void)
     CHECK(out != NULL);
     if (out) {
         sh_modmanifest_list rows = {0};
-        CHECK(sh_map_old_shape(out, n) == SH_MAP_OLD_VARIABLES);   /* the kept row still names its family */
-        CHECK(strstr(out, VAR("smp.render.v1", "4;8192")) && alloc4(out) == 3 && strstr(out, "bound by index"));
+        /* The row an author variable follows keeps its index under a name the game reads. */
+        CHECK(sh_map_old_shape(out, n) == SH_MAP_OLD_NONE);
+        CHECK(strstr(out, VAR("unused", "")) && !strstr(out, "smp.render.v1") && alloc4(out) == 3 &&
+              strstr(out, "bound by index"));
+        CHECK(strstr(out, VAR("unused", "")) < strstr(out, "bound by index"));
         CHECK(sh_modmanifest_read(out, n, &rows, NULL) == 2);
         CHECK(rows.count == 2 && !strcmp(rows.rows[0].name, "alex.pink-imp") &&
               !strcmp(rows.rows[1].salt, "bobroom1") && !strcmp(rows.rows[1].name, "Room") && rows.rows[1].attached);
@@ -191,6 +194,9 @@ static void edges(void)
     static const char twice[] =
         "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],\"string\":["
         VAR("door_label", "Open") "," VAR("smp.render.v1", "4;0") "," VAR("smp.render.v1", "4;0") "]}}";
+    static const char between[] =
+        "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],\"string\":["
+        VAR("door_label", "Open") "," VAR("smp.bounds.v1", "1;20000") "," VAR("String 2", "bound by index") "]}}";
     static const char current[] =
         "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\",\"size\":1}]}}";
     sh_map_old old;
@@ -221,6 +227,16 @@ static void edges(void)
     CHECK(!old.render[0] && old.settings_refused == 2);
     out = sh_map_old_write(twice, sizeof twice - 1, &old, NULL, 0, &n, err, sizeof err);
     CHECK(out && alloc4(out) == 1 && !strstr(out, "snapmap-plus"));
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    sh_map_old_free(&old);
+
+    /* A settings row an author variable follows: the setting moves to the member, the row keeps
+     * its index under a name the game reads, and the author's variables stay in order. */
+    CHECK(sh_map_old_read(between, sizeof between - 1, &old, err, sizeof err) && !strcmp(old.bounds, "1;20000"));
+    out = sh_map_old_write(between, sizeof between - 1, &old, NULL, 0, &n, err, sizeof err);
+    CHECK(out && alloc4(out) == 3 && sh_map_old_shape(out, n) == SH_MAP_OLD_NONE && !strstr(out, "smp.bounds.v1") &&
+          strstr(out, "\"settings\":{\"bounds\":\"1;20000\"}"));
+    CHECK(out && strstr(out, VAR("door_label", "Open") "," VAR("unused", "") "," VAR("String 2", "bound by index")));
     if (out) HeapFree(GetProcessHeap(), 0, out);
     sh_map_old_free(&old);
 

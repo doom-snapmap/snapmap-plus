@@ -112,31 +112,69 @@ static unsigned char *cv_read(const char *path, size_t max, size_t *len)
     return sh_mb_read_file(path, max, len);
 }
 
-/* Write `path` whole through a temporary beside it and a replacing rename. */
-static int cv_write(const char *path, const void *data, size_t n)
+#define CV_TMP ".snapmap-plus-tmp"
+
+/* `path` + CV_TMP written whole and flushed (the file is not put in place). */
+static int cv_write_tmp(const char *path, const void *data, size_t n)
 {
     char *tmp = (char *)malloc(strlen(path) + 32);
-    wchar_t *wt, *wp;
+    wchar_t *wt;
     HANDLE h;
     DWORD done = 0;
     int ok = 0;
     if (!tmp) return 0;
-    _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s.snapmap-plus-tmp", path);
+    _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
     wt = sh_mb_wpath(tmp);
-    wp = sh_mb_wpath(path);
-    if (wt && wp) {
+    if (wt) {
         h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             ok = (n == 0 || (WriteFile(h, data, (DWORD)n, &done, NULL) && done == n)) && FlushFileBuffers(h);
             CloseHandle(h);
-            if (ok) ok = MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
             if (!ok) DeleteFileW(wt);
         }
     }
     free(wt);
-    free(wp);
     free(tmp);
     return ok;
+}
+
+/* `path` + CV_TMP put in place of `path`. */
+static int cv_put_tmp(const char *path)
+{
+    char *tmp = (char *)malloc(strlen(path) + 32);
+    wchar_t *wt = NULL, *wp = sh_mb_wpath(path);
+    int ok = 0;
+    if (tmp) {
+        _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        wt = sh_mb_wpath(tmp);
+    }
+    if (wt && wp) ok = MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    free(tmp);
+    free(wt);
+    free(wp);
+    return ok;
+}
+
+static void cv_drop_tmp(const char *path)
+{
+    char *tmp = (char *)malloc(strlen(path) + 32);
+    wchar_t *wt = NULL;
+    if (tmp) {
+        _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        wt = sh_mb_wpath(tmp);
+    }
+    if (wt) DeleteFileW(wt);
+    free(tmp);
+    free(wt);
+}
+
+/* Write `path` whole through a temporary beside it and a replacing rename. */
+static int cv_write(const char *path, const void *data, size_t n)
+{
+    if (!cv_write_tmp(path, data, n)) return 0;
+    if (cv_put_tmp(path)) return 1;
+    cv_drop_tmp(path);
+    return 0;
 }
 
 /* A copy of `path` as it was, beside it; the first copy is kept. */
@@ -205,7 +243,17 @@ static void cv_rec_load(const sh_conv_opts *o, cv_rec *r)
 
 static int cv_rec_save(const sh_conv_opts *o, cv_rec *r)
 {
-    char *text = r->root ? mpj_dump(r->root, NULL) : NULL;
+    char *text;
+    int i, j;
+    /* An emptied part of the record goes. */
+    for (i = r->root ? r->root->n - 1 : -1; i >= 0; i--)
+        if (r->root->items[i]->type == MPJ_OBJ && !r->root->items[i]->n) {
+            mpj_free(r->root->items[i]);
+            free(r->root->keys[i]);
+            for (j = i + 1; j < r->root->n; j++) { r->root->items[j - 1] = r->root->items[j]; r->root->keys[j - 1] = r->root->keys[j]; }
+            r->root->n--;
+        }
+    text = r->root ? mpj_dump(r->root, NULL) : NULL;
     int ok = text && sh_mb_record_put(o->mods, SH_CONV_RECORD, text);
     free(text);
     return ok;
@@ -472,11 +520,11 @@ typedef struct cv_folder {
     char bundle[65];
     char tree[65];
     char descriptor[16];
-    long long built;
     int product;                /* a second build the product made */
     int keep;                   /* 1 convert, 0 remove */
     int left;                   /* refused before and unchanged since */
     int done;                   /* converted in this run */
+    int holder;                 /* of its old key's folders, the one whose salt the key's maps follow */
     char *why;                  /* the last cause while it waits for another folder */
     char salt[SH_SALT_LEN + 1];
 } cv_folder;
@@ -553,7 +601,6 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
                 }
                 strncpy_s(f->bundle, sizeof f->bundle, old.bundle, _TRUNCATE);
                 strncpy_s(f->descriptor, sizeof f->descriptor, old.descriptor[0] ? old.descriptor : "mod.json", _TRUNCATE);
-                f->built = old.built;
                 f->product = cv_product_made(f->rel, f->leaf, old.origin);
                 sh_mb_old_free(&old);
                 if (!sh_mb_tree_hash(path, f->tree)) f->tree[0] = 0;
@@ -570,8 +617,25 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
     FindClose(h);
 }
 
-/* Which folders are kept: every folder of the player's own, and of a key
- * the product alone made, its newest; the other product-made ones go. */
+/* Of several folders, the one that held the old key first is decided from
+ * the record, never from a "built" time (an Explorer copy has the same one,
+ * DECISIONS 15): the folder this conversion's record already gives the key's
+ * salt, else the folder named after the key (an earlier product named the
+ * first build of a key so), else the first in path order. */
+static int cv_rank(const cv_folder *f, cv_rec *rec)
+{
+    char salt[16];
+    if (cv_rec_get(rec, "folders", f->rel, salt, sizeof salt)) {
+        char want[16];
+        if (cv_rec_get_key(rec, f->key, want, sizeof want) && !strcmp(want, salt)) return 0;
+    }
+    return _stricmp(f->leaf, f->key) ? 2 : 1;
+}
+
+/* Which folders are kept: every folder of the player's own, and of a key the
+ * product alone made, the one that held it first; the other product-made
+ * ones go. Of the kept folders of one key, `holder` marks the one whose salt
+ * the key's maps follow (own folders before product-made ones). */
 static void cv_decide(cv_list *l, cv_rec *rec)
 {
     size_t i, j;
@@ -583,34 +647,36 @@ static void cv_decide(cv_list *l, cv_rec *rec)
     }
     for (i = 0; i < l->n; i++) {
         int owner = 0;
-        size_t newest = (size_t)-1;
+        size_t first = (size_t)-1, hold = (size_t)-1;
         if (l->f[i].keep != -1) continue;
         for (j = i; j < l->n; j++) {
             if (_stricmp(l->f[j].key, l->f[i].key)) continue;
             if (!l->f[j].product) owner = 1;
-            else if (newest == (size_t)-1 || l->f[j].built > l->f[newest].built) newest = j;
+            else if (first == (size_t)-1 || cv_rank(&l->f[j], rec) < cv_rank(&l->f[first], rec)) first = j;
         }
         for (j = i; j < l->n; j++) {
             if (_stricmp(l->f[j].key, l->f[i].key)) continue;
-            l->f[j].keep = !l->f[j].product || (!owner && j == newest);
+            l->f[j].keep = !l->f[j].product || (!owner && j == first);
+            if (l->f[j].keep && (hold == (size_t)-1 || cv_rank(&l->f[j], rec) < cv_rank(&l->f[hold], rec))) hold = j;
         }
+        if (hold != (size_t)-1) l->f[hold].holder = 1;
     }
 }
 
-/* The kept folder of `f`'s key, when it is not `f` itself. */
+/* The kept folder that holds `f`'s key, when it is not `f` itself. */
 static const cv_folder *cv_keeper(const cv_list *l, const cv_folder *f)
 {
     size_t i;
-    const cv_folder *best = NULL;
     for (i = 0; i < l->n; i++) {
         const cv_folder *g = &l->f[i];
-        if (g == f || !g->keep || _stricmp(g->key, f->key)) continue;
-        if (!best || (best->product && !g->product) || (g->product == best->product && g->built < best->built)) best = g;
+        if (g != f && g->holder && !_stricmp(g->key, f->key)) return g;
     }
-    return best;
+    return NULL;
 }
 
 /* -------------------------------------------------------------- scan ---- */
+
+static unsigned cv_leftovers(const sh_conv_opts *o, const char *dir, int depth, int act);
 
 static const char *const CV_SECTIONS[] = { "cache", "aliases", "snapshots", "renamed", "downloads", NULL };
 
@@ -634,7 +700,8 @@ static int cv_prefab_old(const char *text, size_t n)
     if (sh_prefab_block_find(text, n, &sp) != 1) return 0;
     v = text + sp.value_at;
     e = v + sp.value_len;
-    for (; v + 5 < e; v++) if (!memcmp(v, "\"id\":", 5) || !memcmp(v, "\"bundle\":", 9)) return 1;
+    for (; v + 5 <= e; v++)
+        if (!memcmp(v, "\"id\":", 5) || (v + 9 <= e && !memcmp(v, "\"bundle\":", 9))) return 1;
     return 0;
 }
 
@@ -732,21 +799,41 @@ static char *cv_saved_text(const unsigned char *raw, size_t n, size_t *len)
 
 typedef struct cv_scan_ctx { sh_conv_check *c; cv_rec *rec; int list; } cv_scan_ctx;
 
+static int cv_converts_now(const sh_conv_opts *o, const char *text, size_t n, int kind);
+
 static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int kind, const char *account)
 {
     cv_scan_ctx *x = (cv_scan_ctx *)vctx;
     size_t n = 0, tn = 0;
-    unsigned char *raw = cv_read(path, CV_MAP_MAX, &n);
+    unsigned char *raw;
     char *text = NULL, sha[65], was[80];
     int old;
     (void)account;
+    if (kind == CV_MAP_SAVED) {
+        /* A saved map an interrupted run left half written is work. */
+        char *v = (char *)malloc(strlen(path) + 40);
+        int half = 0;
+        if (v) {
+            _snprintf_s(v, strlen(path) + 40, _TRUNCATE, "%s.verify" CV_TMP, path);
+            half = cv_attr(v, NULL);
+        }
+        free(v);
+        if (half) {
+            if (!x->c->maps) strncpy_s(x->c->first_map, sizeof x->c->first_map, path, _TRUNCATE);
+            x->c->maps++;
+            return;
+        }
+    }
+    raw = cv_read(path, CV_MAP_MAX, &n);
     if (!raw) return;
     text = kind == CV_MAP_SAVED ? cv_saved_text(raw, n, &tn) : (char *)raw;
     if (kind != CV_MAP_SAVED) tn = n;
     old = text && (kind == CV_MAP_PREFAB ? cv_prefab_old(text, tn) : cv_map_old(text, tn));
     if (old) {
         cv_hex_sha(raw, n, sha);
-        if (cv_rec_get(x->rec, "maps", path, was, sizeof was) && !strcmp(was, sha)) {
+        /* A map left before is looked at again: it is work as soon as its folders let it convert
+         * (DECISIONS 21), whether or not the file changed. */
+        if (cv_rec_get(x->rec, "maps", path, was, sizeof was) && !strcmp(was, sha) && !cv_converts_now(o, text, tn, kind)) {
             x->c->maps_left++;
             if (x->list) cv_say(o, 0, "  %s: left as it is (see the earlier run's line for why)", path);
         } else {
@@ -769,7 +856,11 @@ int sh_conv_scan(const sh_conv_opts *o, sh_conv_check *out, int list)
     memset(&l, 0, sizeof l);
     if (!o || !o->mods) return -1;
     cv_rec_load(o, &rec);
-    if (cv_is_dir(o->mods)) cv_walk(&l, o->mods, o->mods, "", 0);
+    if (cv_is_dir(o->mods)) {
+        mpj *p = rec.root ? mpj_get(rec.root, "pending") : NULL;
+        out->leftovers = cv_leftovers(o, o->mods, 0, 0) + (p && p->type == MPJ_OBJ ? (unsigned)p->n : 0);
+        cv_walk(&l, o->mods, o->mods, "", 0);
+    }
     cv_decide(&l, &rec);
     for (i = 0; i < l.n; i++) {
         const cv_folder *f = &l.f[i];
@@ -805,7 +896,8 @@ int sh_conv_scan(const sh_conv_opts *o, sh_conv_check *out, int list)
     }
     cv_list_free(&l);
     cv_rec_free(&rec);
-    kinds = (out->folders > 0) + (out->duplicates > 0) + out->builds_dir + (out->sections > 0) + (out->maps > 0);
+    kinds = (out->folders > 0) + (out->duplicates > 0) + out->builds_dir + (out->sections > 0) + (out->maps > 0) +
+            (out->leftovers > 0);
     return kinds;
 }
 
@@ -817,7 +909,8 @@ static int cv_stock(void *context, const char *request)
     return sh_modstock_exists(request);
 }
 
-/* Build `dest` with the real builder and write its mod.json. */
+/* Build `dest` with the real builder and write its mod.json. 1 built; 0 with
+ * the builder's own first cause in b->first_cause (the folder is not written). */
 static int cv_build(const char *dest, sh_mb_bundle *b, char *cause, size_t cap)
 {
     sh_ms_list list;
@@ -830,8 +923,7 @@ static int cv_build(const char *dest, sh_mb_bundle *b, char *cause, size_t cap)
     r.stock = cv_stock;
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
-    if (!sh_mb_build(dest, NULL, &r, b))
-        _snprintf_s(cause, cap, _TRUNCATE, "it does not build under this version's rules: %s", b->first_cause);
+    if (!sh_mb_build(dest, NULL, &r, b)) strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
     else if (!sh_mb_write(b, dest, cause, cap)) {}
     else ok = 1;
     sh_mb_keep_replacements_here(0);
@@ -854,6 +946,330 @@ static BOOL cv_move(const wchar_t *from, const wchar_t *to)
     return FALSE;
 }
 
+/* `src` (a file or a folder tree) at `dst`: files hard-linked where the volume
+ * allows it, else copied; links are not followed. 1 on success. */
+static int cv_link_tree_w(const wchar_t *src, const wchar_t *dst)
+{
+    DWORD a = GetFileAttributesW(src);
+    WIN32_FIND_DATAW fd;
+    size_t n;
+    wchar_t *pattern, *s, *d;
+    HANDLE h;
+    int ok = 1;
+    if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return a != INVALID_FILE_ATTRIBUTES;
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return CreateHardLinkW(dst, src, NULL) || sh_ms_copy_file(src, dst);
+    if (!CreateDirectoryW(dst, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    n = wcslen(src) + wcslen(dst) + MAX_PATH + 4;
+    pattern = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    s = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    d = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    h = INVALID_HANDLE_VALUE;
+    if (pattern && s && d) {
+        _snwprintf_s(pattern, n, _TRUNCATE, L"%s\\*", src);
+        h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    } else ok = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            _snwprintf_s(s, n, _TRUNCATE, L"%s\\%s", src, fd.cFileName);
+            _snwprintf_s(d, n, _TRUNCATE, L"%s\\%s", dst, fd.cFileName);
+            if (!cv_link_tree_w(s, d)) ok = 0;
+        } while (ok && FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    free(pattern);
+    free(s);
+    free(d);
+    return ok;
+}
+
+/* The top-level entries of `folder` into `dest`: those a mod is made of
+ * (mod.json, package.json, assets\) when `mod` is 1, every other one when 0. */
+static int cv_link_top(const char *folder, const char *dest, int mod)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *wf = sh_mb_wpath(folder), *wd = sh_mb_wpath(dest), *pattern = NULL, *s = NULL, *d = NULL;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    size_t n;
+    int ok = wf && wd;
+    if (ok) {
+        n = wcslen(wf) + wcslen(wd) + MAX_PATH + 4;
+        pattern = (wchar_t *)malloc(sizeof(wchar_t) * n);
+        s = (wchar_t *)malloc(sizeof(wchar_t) * n);
+        d = (wchar_t *)malloc(sizeof(wchar_t) * n);
+        ok = pattern && s && d && (CreateDirectoryW(wd, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+        if (ok) {
+            _snwprintf_s(pattern, n, _TRUNCATE, L"%s\\*", wf);
+            h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+        }
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                int part;
+                if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+                part = !_wcsicmp(fd.cFileName, L"mod.json") || !_wcsicmp(fd.cFileName, L"package.json") ||
+                       !_wcsicmp(fd.cFileName, L"assets");
+                if (part != mod) continue;
+                _snwprintf_s(s, n, _TRUNCATE, L"%s\\%s", wf, fd.cFileName);
+                _snwprintf_s(d, n, _TRUNCATE, L"%s\\%s", wd, fd.cFileName);
+                if (!cv_link_tree_w(s, d)) ok = 0;
+            } while (ok && FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    free(wf);
+    free(wd);
+    free(pattern);
+    free(s);
+    free(d);
+    return ok;
+}
+
+/* Sound banks named for the salt (DECISIONS 16): a bank under
+ * assets\sound\soundbanks\pc\ whose stem does not start with "<salt>_" becomes
+ * "<salt>_<stem>" (an earlier mod's "<old key>_" prefix replaced), and its
+ * BKHD bank id follows the new name when it followed the old one. */
+#define CV_BANKS_MAX 64
+typedef struct cv_bank_name { char from[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + 16]; } cv_bank_name;
+
+static int cv_word(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* Every text file under `dir` (a file without a NUL byte, sound banks
+ * aside) has each bank name `from` that stands as a whole word replaced by
+ * its `to`; a file that changes is written as a file of its own. */
+static void cv_rebank_texts(const char *dir, const cv_bank_name *names, size_t count, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    char *pat = cv_join(dir, "*");
+    wchar_t *w = pat ? sh_mb_wpath(pat) : NULL;
+    HANDLE h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pat);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char *leaf, *path;
+        size_t ln;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        leaf = sh_mb_utf8(fd.cFileName);
+        path = leaf ? cv_join(dir, leaf) : NULL;
+        ln = leaf ? strlen(leaf) : 0;
+        if (path && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (depth < 64) cv_rebank_texts(path, names, count, depth + 1);
+        } else if (path && !(ln > 4 && !_stricmp(leaf + ln - 4, ".bnk"))) {
+            size_t n = 0, i, k, wpos = 0;
+            char *t = (char *)cv_read(path, CV_DESC_MAX, &n), *o = NULL;
+            int changed = 0;
+            if (t && !memchr(t, 0, n) && (o = (char *)malloc(n * 2 + 64)) != NULL) {
+                for (i = 0; i < n;) {
+                    int hit = 0;
+                    if (!i || !cv_word(t[i - 1]))
+                        for (k = 0; k < count && !hit; k++) {
+                            size_t fl = strlen(names[k].from), tl = strlen(names[k].to);
+                            if (i + fl <= n && !_strnicmp(t + i, names[k].from, fl) && (i + fl == n || !cv_word(t[i + fl])) &&
+                                wpos + tl + (n - i) < n * 2 + 64) {
+                                memcpy(o + wpos, names[k].to, tl);
+                                wpos += tl;
+                                i += fl;
+                                hit = changed = 1;
+                            }
+                        }
+                    if (!hit) o[wpos++] = t[i++];
+                }
+                if (changed) cv_write(path, o, wpos);
+            }
+            free(o);
+            free(t);
+        }
+        free(leaf);
+        free(path);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void cv_name_banks(const char *dest, const char *key, const char *salt)
+{
+    char dir[CV_PATH], *pat, prefix[SH_MB_ID_MAX + 2];
+    wchar_t *w;
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t i, pn, renamed = 0;
+    cv_bank_name *names = (cv_bank_name *)calloc(CV_BANKS_MAX, sizeof *names);
+    if (!names) return;
+    for (i = 0; key[i] && i < SH_MB_ID_MAX; i++) prefix[i] = (key[i] == '.' || key[i] == '-') ? '_' : key[i];
+    prefix[i] = '_';
+    prefix[i + 1] = 0;
+    pn = i + 1;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc", dest);
+    pat = cv_join(dir, "*.bnk");
+    w = pat ? sh_mb_wpath(pat) : NULL;
+    h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pat);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) { free(names); return; }
+    do {
+        char *leaf = sh_mb_utf8(fd.cFileName), stem[SH_MB_BANK_STEM_MAX + 1], fresh[SH_MB_BANK_STEM_MAX + 16];
+        char *from = NULL, *to = NULL;
+        size_t sn;
+        if (!leaf || (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { free(leaf); continue; }
+        sn = strlen(leaf) - 4;
+        if (sn > SH_MB_BANK_STEM_MAX) { free(leaf); continue; }
+        memcpy(stem, leaf, sn);
+        stem[sn] = 0;
+        if (_strnicmp(stem, salt, SH_SALT_LEN) || stem[SH_SALT_LEN] != '_') {
+            const char *rest = !_strnicmp(stem, prefix, pn) && stem[pn] ? stem + pn : stem;
+            _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s_%s.bnk", salt, rest);
+            from = cv_join(dir, leaf);
+            to = cv_join(dir, fresh);
+            if (from && to) {
+                size_t n = 0;
+                unsigned char *bytes = cv_read(from, (size_t)256 << 20, &n);
+                uint32_t id, was = sh_mb_fnv1_lower(stem, strlen(stem));
+                if (bytes && n >= 16 && !memcmp(bytes, "BKHD", 4)) {
+                    memcpy(&id, bytes + 12, 4);
+                    if (id == was) {
+                        id = sh_mb_fnv1_lower(fresh, strlen(fresh) - 4);
+                        memcpy(bytes + 12, &id, 4);
+                    }
+                }
+                /* The link to the original goes; the renamed bank is a file of its own. */
+                if (bytes && cv_write(to, bytes, n)) {
+                    wchar_t *wf = sh_mb_wpath(from);
+                    if (wf) DeleteFileW(wf);
+                    free(wf);
+                    if (renamed < CV_BANKS_MAX) {
+                        strcpy_s(names[renamed].from, sizeof names[renamed].from, stem);
+                        _snprintf_s(names[renamed].to, sizeof names[renamed].to, _TRUNCATE, "%.*s", (int)(strlen(fresh) - 4),
+                                    fresh);
+                        renamed++;
+                    }
+                }
+                free(bytes);
+            }
+        }
+        free(from);
+        free(to);
+        free(leaf);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    /* Every text of the staged folder that names a renamed bank follows it, in the same swap. */
+    if (renamed) cv_rebank_texts(dest, names, renamed, 0);
+    free(names);
+}
+
+/* A cause of the salting, about the converted folder rather than the folder
+ * as it was: SH_MB_SHAPE and "; the folder is unchanged" cut. */
+static void cv_salt_cause(char *cause, size_t cap)
+{
+    size_t k = strlen(SH_MB_SHAPE), n;
+    static const char tail[] = "; the folder is unchanged";
+    if (!strncmp(cause, SH_MB_SHAPE, k)) memmove(cause, cause + k, strlen(cause + k) + 1);
+    n = strlen(cause);
+    if (n >= sizeof tail - 1 && !strcmp(cause + n - (sizeof tail - 1), tail)) cause[n - (sizeof tail - 1)] = 0;
+    (void)cap;
+}
+
+enum { CV_BUILT = 1, CV_FAILED = 2, CV_LEFT = 0, CV_LATER = -1 };
+
+/* `f` written in the one shape into "<folder>.staging-<pid>": salted (files
+ * named under mods/<old key>/ and its strings follow the salt), its sound
+ * banks named for the salt, every file outside mod.json and assets\ beside
+ * them unchanged, then built. A folder the salting refuses (a binary file
+ * naming its old key, files under another mod's name) is copied as it is
+ * with a fresh salt. CV_BUILT; CV_FAILED: built and failed, the failed block
+ * written with the builder's cause (DECISIONS 14); CV_LATER: it needs a mod
+ * that has not been converted yet (`last` 0); CV_LEFT: nothing written, the
+ * cause in `cause`. */
+static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *dest, sh_mb_bundle *b, char *cause,
+                    size_t cap)
+{
+    char *dpath = cv_join(f->path, f->descriptor), view[CV_PATH], *fresh = NULL;
+    unsigned char *text = NULL;
+    size_t n = 0, fl = 0;
+    unsigned retired = 0;
+    int r, result = CV_LEFT;
+    (void)o;
+    cause[0] = 0;
+    text = dpath ? cv_read(dpath, CV_DESC_MAX, &n) : NULL;
+    free(dpath);
+    if (!text) { _snprintf_s(cause, cap, _TRUNCATE, "its %s cannot be read", f->descriptor); return CV_LEFT; }
+    fresh = cv_fresh((const char *)text, n, f->key, &fl, &retired);
+    free(text);
+    if (!fresh) { _snprintf_s(cause, cap, _TRUNCATE, "its %s is not a JSON object; fix it", f->descriptor); return CV_LEFT; }
+    /* The salting reads a view of the mod's own part only: files beside it are never read or rewritten (DECISIONS 16). */
+    _snprintf_s(view, sizeof view, _TRUNCATE, "%s.view-%lu", f->path, GetCurrentProcessId());
+    if (cv_is_dir(view)) cv_rmtree(view);
+    if (!cv_link_top(f->path, view, 1)) {
+        _snprintf_s(cause, cap, _TRUNCATE, "its files could not be read (error %lu)", GetLastError());
+        cv_rmtree(view);
+        free(fresh);
+        return CV_LEFT;
+    }
+    r = sh_ms_salt_copy(view, fresh, fl, f->key, dest, f->salt, cause, cap);
+    if (r < 0 && strstr(cause, " file(s) are under mods/") && _stricmp(f->leaf, f->key)) {
+        /* Its files are under its folder's name rather than its key. */
+        if (cv_is_dir(dest)) cv_rmtree(dest);
+        r = sh_ms_salt_copy(view, fresh, fl, f->leaf, dest, f->salt, cause, cap);
+    }
+    cv_rmtree(view);
+    if (r < 0) {
+        /* Not salted: the folder as it is, with a fresh author part and a salt, its build failed. */
+        char *mj;
+        if (cv_is_dir(dest)) cv_rmtree(dest);
+        cv_salt_cause(cause, cap);
+        mj = cv_join(dest, "mod.json");
+        if (!sh_salt_generate(f->salt) || !cv_link_top(f->path, dest, 1) || !mj) {
+            free(mj);
+            free(fresh);
+            _snprintf_s(cause, cap, _TRUNCATE, "its files could not be copied (error %lu)", GetLastError());
+            return CV_LEFT;
+        }
+        {
+            char *pj = cv_join(dest, "package.json");
+            wchar_t *wp = pj ? sh_mb_wpath(pj) : NULL, *wm = sh_mb_wpath(mj);
+            if (wp) DeleteFileW(wp);
+            if (wm) DeleteFileW(wm);   /* a link to the original: the fresh text is written as a file of its own */
+            free(wp);
+            free(wm);
+            free(pj);
+        }
+        if (!cv_write(mj, fresh, fl)) {
+            free(mj);
+            free(fresh);
+            _snprintf_s(cause, cap, _TRUNCATE, "its new mod.json could not be written (error %lu)", GetLastError());
+            return CV_LEFT;
+        }
+        free(mj);
+        free(fresh);
+        memset(b, 0, sizeof *b);
+        strcpy_s(b->id, sizeof b->id, f->salt);
+        if (!sh_mb_tree_hash(dest, b->tree)) b->tree[0] = 0;
+        strncpy_s(b->first_cause, sizeof b->first_cause, cause, _TRUNCATE);
+        if (!sh_mb_write_failed(b, dest, cause, cap)) return CV_LEFT;
+        strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
+        if (!cv_link_top(f->path, dest, 0)) {
+            _snprintf_s(cause, cap, _TRUNCATE, "the files beside its mod could not be copied (error %lu)", GetLastError());
+            return CV_LEFT;
+        }
+        return CV_FAILED;
+    }
+    free(fresh);
+    cv_name_banks(dest, f->key, f->salt);
+    if (cv_build(dest, b, cause, cap)) result = CV_BUILT;
+    else if (!last && strstr(cause, "resolves to nothing")) return CV_LATER;
+    else {
+        if (!sh_salt_valid(b->id, strlen(b->id))) strcpy_s(b->id, sizeof b->id, f->salt);
+        if (!b->first_cause[0]) strncpy_s(b->first_cause, sizeof b->first_cause, cause, _TRUNCATE);
+        if (!sh_mb_write_failed(b, dest, cause, cap)) return CV_LEFT;
+        strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
+        result = CV_FAILED;
+    }
+    if (!cv_link_top(f->path, dest, 0)) {
+        _snprintf_s(cause, cap, _TRUNCATE, "the files beside its mod could not be copied (error %lu)", GetLastError());
+        return CV_LEFT;
+    }
+    return result;
+}
+
 /* Put `dest` in place of `path`; the folder as it was goes to the Recycle Bin. */
 static int cv_swap(const sh_conv_opts *o, const char *path, const char *dest, char *cause, size_t cap)
 {
@@ -868,62 +1284,23 @@ static int cv_swap(const sh_conv_opts *o, const char *path, const char *dest, ch
     else {
         if (GetFileAttributesW(wo) != INVALID_FILE_ATTRIBUTES) cv_rmtree_w(wo);
         if (!cv_move(wp, wo))
-            _snprintf_s(cause, cap, _TRUNCATE, "the folder could not be set aside (error %lu; a program may hold a file in it)",
-                        GetLastError());
+            _snprintf_s(cause, cap, _TRUNCATE, "the folder could not be set aside (error %lu); close the program that "
+                        "holds a file in it and run the Snapmap+ installer again", GetLastError());
         else if (!cv_move(wd, wp)) {
             DWORD e = GetLastError();
             cv_move(wo, wp);
-            _snprintf_s(cause, cap, _TRUNCATE, "the converted folder could not be put in place (error %lu)", e);
+            _snprintf_s(cause, cap, _TRUNCATE, "the converted folder could not be put in its place (error %lu); run this "
+                        "again", e);
         } else {
             ok = 1;
             if (!o->discard || !o->discard(o->discard_context, wo))
-                cv_say(o, 0, "  %s.old-%lu: the folder as it was could not go to the Recycle Bin; remove it by hand (Snapmap+ "
-                       "does not read it)", path, GetCurrentProcessId());
+                cv_say(o, 0, "  %s.old-%lu: the folder as it was could not go to the Recycle Bin; remove it yourself "
+                       "(Snapmap+ does not read it)", path, GetCurrentProcessId());
         }
     }
     free(wp);
     free(wd);
     free(wo);
-    return ok;
-}
-
-static int cv_convert_one(const sh_conv_opts *o, cv_folder *f, sh_mb_bundle *b, char *cause, size_t cap)
-{
-    char *dpath = cv_join(f->path, f->descriptor), dest[CV_PATH], *fresh = NULL;
-    unsigned char *text = NULL;
-    size_t n = 0, fl = 0;
-    unsigned retired = 0;
-    int r, ok = 0;
-    cause[0] = 0;
-    text = dpath ? cv_read(dpath, CV_DESC_MAX, &n) : NULL;
-    free(dpath);
-    if (!text) { _snprintf_s(cause, cap, _TRUNCATE, "its %s cannot be read", f->descriptor); return 0; }
-    fresh = cv_fresh((const char *)text, n, f->key, &fl, &retired);
-    free(text);
-    if (!fresh) { _snprintf_s(cause, cap, _TRUNCATE, "its %s is not a JSON object", f->descriptor); return 0; }
-    _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s.staging-%lu", f->path, GetCurrentProcessId());
-    if (cv_is_dir(dest)) cv_rmtree(dest);
-    r = sh_ms_salt_copy(f->path, fresh, fl, f->key, dest, f->salt, cause, cap);
-    if (r < 0 && strstr(cause, " file(s) are under mods/") && _stricmp(f->leaf, f->key)) {
-        /* Its files are under its folder's name rather than its key. */
-        if (cv_is_dir(dest)) cv_rmtree(dest);
-        r = sh_ms_salt_copy(f->path, fresh, fl, f->leaf, dest, f->salt, cause, cap);
-    }
-    free(fresh);
-    if (r < 0) {
-        if (cv_is_dir(dest)) cv_rmtree(dest);
-        return 0;
-    }
-    if (!cv_build(dest, b, cause, cap)) {
-        cv_rmtree(dest);
-        return 0;
-    }
-    if (!cv_swap(o, f->path, dest, cause, cap)) {
-        cv_rmtree(dest);
-        return 0;
-    }
-    ok = 1;
-    (void)retired;
     return ok;
 }
 
@@ -976,6 +1353,139 @@ static void cv_snapshot_builds(const sh_conv_opts *o, cv_rec *rec)
     free(dir);
 }
 
+/* ------------------------------------------------- interrupted runs ---- */
+/* A run stopped part way (a crash, a power cut, the installer closed) leaves
+ * at most: "<folder>.view-<pid>" and "<folder>.staging-<pid>" (made by this
+ * tool, removed), "<folder>.old-<pid>" (the folder as it was: put back when
+ * the folder is missing, else the swap finished and it goes to the Recycle
+ * Bin), and a "pending" row of the record for a folder swapped in before its
+ * row was moved to "keys", "builds" and "folders". Saved maps: see
+ * cv_saved_repair. */
+
+static int cv_work_suffix(const wchar_t *name, const wchar_t *what, size_t *base)
+{
+    const wchar_t *at = wcsstr(name, what), *p;
+    if (!at || at == name) return 0;
+    for (p = at + wcslen(what); *p; p++) if (*p < L'0' || *p > L'9') return 0;
+    if (p == at + wcslen(what)) return 0;
+    *base = (size_t)(at - name);
+    return 1;
+}
+
+/* Count (do 0) or put right (do 1) what interrupted runs left under `dir`. */
+static unsigned cv_leftovers(const sh_conv_opts *o, const char *dir, int depth, int act)
+{
+    WIN32_FIND_DATAW fd;
+    char *pat = cv_join(dir, "*");
+    wchar_t *w = pat ? sh_mb_wpath(pat) : NULL;
+    HANDLE h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    unsigned found = 0;
+    free(pat);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        size_t base = 0;
+        int old = 0, made = 0;
+        char *name, *path;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            fd.cFileName[0] == L'.')
+            continue;
+        if (depth == 0 && !_wcsicmp(fd.cFileName, L"maps")) continue;
+        old = cv_work_suffix(fd.cFileName, L".old-", &base);
+        made = !old && (cv_work_suffix(fd.cFileName, L".staging-", &base) || cv_work_suffix(fd.cFileName, L".view-", &base));
+        name = sh_mb_utf8(fd.cFileName);
+        path = name ? cv_join(dir, name) : NULL;
+        if (path && (old || made)) {
+            found++;
+            if (act) {
+                char target[CV_PATH];
+                _snprintf_s(target, sizeof target, _TRUNCATE, "%s\\%.*s", dir, (int)base, name);
+                if (made) cv_rmtree(path);
+                else if (!cv_is_dir(target)) {
+                    wchar_t *wf = sh_mb_wpath(path), *wt = sh_mb_wpath(target);
+                    if (wf && wt && cv_move(wf, wt))
+                        cv_say(o, 0, "  %s: put back as it was before an interrupted run", target);
+                    free(wf);
+                    free(wt);
+                } else {
+                    wchar_t *wf = sh_mb_wpath(path);
+                    if (!wf || !o->discard || !o->discard(o->discard_context, wf))
+                        cv_say(o, 0, "  %s: the folder as it was could not go to the Recycle Bin; remove it yourself "
+                               "(Snapmap+ does not read it)", path);
+                    free(wf);
+                }
+            }
+        } else if (path && depth < CV_NEST_MAX && !cv_is_file(path, "mod.json") && !cv_is_file(path, "package.json"))
+            found += cv_leftovers(o, path, depth + 1, act);
+        free(name);
+        free(path);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+/* The salt in <folder>\mod.json's block, or "". */
+static void cv_folder_salt(const char *folder, char salt[SH_SALT_LEN + 1])
+{
+    char *mj = cv_join(folder, "mod.json"), *t;
+    size_t n = 0;
+    mpj *j, *blk, *s;
+    salt[0] = 0;
+    t = mj ? (char *)cv_read(mj, CV_DESC_MAX, &n) : NULL;
+    free(mj);
+    j = t ? mpj_parse(t, n) : NULL;
+    free(t);
+    blk = j && j->type == MPJ_OBJ ? mpj_get(j, SH_MB_BLOCK_KEY) : NULL;
+    s = blk && blk->type == MPJ_OBJ ? mpj_get(blk, "salt") : NULL;
+    if (s && s->type == MPJ_STR && sh_salt_valid(s->text, strlen(s->text))) strcpy_s(salt, SH_SALT_LEN + 1, s->text);
+    mpj_free(j);
+}
+
+/* A folder's row: "<salt> <old key> <old build hash or ->". */
+static void cv_commit(cv_rec *rec, const char *rel, const char *row, int holder)
+{
+    char salt[SH_SALT_LEN + 1] = "", key[SH_MB_ID_MAX + 1] = "", bundle[80] = "", have[16];
+    if (sscanf_s(row, "%8s %64s %79s", salt, (unsigned)sizeof salt, key, (unsigned)sizeof key, bundle,
+                 (unsigned)sizeof bundle) < 2)
+        return;
+    if (!cv_rec_get_key(rec, key, have, sizeof have) && holder) cv_rec_set(rec, "keys", key, salt);
+    if (bundle[0] && strcmp(bundle, "-")) cv_rec_set(rec, "builds", bundle, salt);
+    cv_rec_set(rec, "folders", rel, salt);
+    cv_rec_set(rec, "refused", rel, NULL);
+    cv_rec_set(rec, "pending", rel, NULL);
+}
+
+/* Pending rows of an interrupted run: a folder swapped in with that salt is
+ * committed; any other row is dropped (nothing names its salt yet). */
+static int cv_pending(const sh_conv_opts *o, cv_rec *rec)
+{
+    mpj *p = rec->root ? mpj_get(rec->root, "pending") : NULL;
+    int i, any;
+    if (!p || p->type != MPJ_OBJ) return 0;
+    any = p->n > 0;
+    for (i = p->n - 1; i >= 0; i--) {
+        char *path = cv_join(o->mods, p->keys[i]), salt[SH_SALT_LEN + 1], *rel = _strdup(p->keys[i]), *row = NULL;
+        if (p->items[i]->type == MPJ_STR) row = _strdup(p->items[i]->text);
+        if (path && rel && row) {
+            cv_folder_salt(path, salt);
+            if (salt[0] && !strncmp(row, salt, SH_SALT_LEN)) cv_commit(rec, rel, row, 1);
+            else cv_rec_set(rec, "pending", rel, NULL);
+        }
+        free(path);
+        free(rel);
+        free(row);
+        p = mpj_get(rec->root, "pending");
+        if (!p || p->type != MPJ_OBJ) break;
+        if (i > p->n) i = p->n;
+    }
+    return any;
+}
+
+static void cv_save(const sh_conv_opts *o, cv_rec *rec)
+{
+    if (!cv_rec_save(o, rec)) cv_say(o, 1, "  mods\\snapmap-plus.json: the conversion record could not be written");
+}
+
 int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
 {
     cv_list l;
@@ -985,65 +1495,85 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
     memset(&l, 0, sizeof l);
     if (!o || !o->mods || !cv_is_dir(o->mods)) return 0;
     cv_rec_load(o, &rec);
+    if (cv_leftovers(o, o->mods, 0, 1)) did = 1;
+    if (cv_pending(o, &rec)) did = 1;
+    if (did) cv_save(o, &rec);
     cv_walk(&l, o->mods, o->mods, "", 0);
-    if (!l.n) { cv_rec_free(&rec); return 0; }
+    if (!l.n) { cv_list_free(&l); cv_rec_free(&rec); return did; }
     cv_decide(&l, &rec);
     if (!o->stock) {
         for (i = 0; i < l.n; i++) if (l.f[i].keep && !l.f[i].left) st->waiting++;
         if (st->waiting)
-            cv_say(o, 0, "  mods\\: %u folder(s) of an earlier release are not converted yet: building them needs the DOOM "
-                   "folder, and DOOM was not found through Steam", st->waiting);
+            cv_say(o, 0, "  mods\\: %u folder(s) of an earlier release are not converted yet, because building them needs "
+                   "the DOOM folder and DOOM was not found through Steam", st->waiting);
         cv_list_free(&l);
         cv_rec_free(&rec);
-        return 0;
+        return did;
     }
-    /* Folders that need another one's names build after it: passes until nothing more builds. */
+    /* Folders that need another one's names build after it: passes until nothing more builds.
+     * The record is written after every folder, so a run stopped part way resumes and loses nothing. */
     for (pass = 0, progress = 1; progress && pass < 4; pass++) {
-        progress = 0;
         size_t order;
+        progress = 0;
         for (order = 0; order < 2 * l.n; order++) {
             cv_folder *f = &l.f[order % l.n];
             sh_mb_bundle b;
-            char cause[SH_MB_CAUSE_MAX + 128];
-            i = order % l.n;
+            char cause[SH_MB_CAUSE_MAX + 128], dest[CV_PATH], row[160];
+            int r;
             if ((order < l.n) == (f->product != 0)) continue;   /* the player's own folders first */
             if (!f->keep || f->left || f->done) continue;
             memset(&b, 0, sizeof b);
-            if (cv_convert_one(o, f, &b, cause, sizeof cause)) {
-                char have[16];
-                f->done = 1;
-                progress = did = 1;
-                st->converted++;
-                cv_say(o, 0, "  mods\\%s: converted: old key %s, salt %s, build %.16s, %zu file(s)", f->rel, f->key, f->salt,
-                       b.hash, b.file_count);
-                if (!cv_rec_get_key(&rec, f->key, have, sizeof have)) cv_rec_set(&rec, "keys", f->key, f->salt);
-                if (f->bundle[0]) cv_rec_set(&rec, "builds", f->bundle, f->salt);
-                cv_rec_set(&rec, "folders", f->rel, f->salt);
-                cv_rec_set(&rec, "refused", f->rel, NULL);
-            } else if (pass == 3 || !strstr(cause, "resolves to nothing")) {
-                free(f->why);
-                f->why = NULL;
-                /* The last pass, or a cause another folder cannot settle. */
-                f->left = 1;
-                st->refused++;
-                did = 1;
-                cv_say(o, 0, "  mods\\%s: left as it was: %s", f->rel, cause);
-                cv_rec_set(&rec, "refused", f->rel, f->tree[0] ? f->tree : "-");
-            } else {
+            _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s.staging-%lu", f->path, GetCurrentProcessId());
+            if (cv_is_dir(dest)) cv_rmtree(dest);
+            r = cv_stage(o, f, pass == 3, dest, &b, cause, sizeof cause);
+            if (r == CV_LATER) {
                 free(f->why);
                 f->why = _strdup(cause);   /* tried again after the others */
+                cv_rmtree(dest);
+                sh_mb_free(&b);
+                continue;
             }
+            if (r != CV_LEFT) {
+                _snprintf_s(row, sizeof row, _TRUNCATE, "%s %s %s", f->salt, f->key, f->bundle[0] ? f->bundle : "-");
+                cv_rec_set(&rec, "pending", f->rel, row);
+                cv_save(o, &rec);
+                if (cv_swap(o, f->path, dest, cause, sizeof cause)) {
+                    f->done = 1;
+                    progress = did = 1;
+                    st->converted++;
+                    cv_commit(&rec, f->rel, row, f->holder);
+                    cv_save(o, &rec);
+                    if (r == CV_BUILT)
+                        cv_say(o, 0, "  mods\\%s: converted (it was %s; its salt is now %s)", f->rel, f->key, f->salt);
+                    else {
+                        st->failed++;
+                        cv_say(o, 0, "  mods\\%s: converted (it was %s; its salt is now %s), but it does not build yet: %s",
+                               f->rel, f->key, f->salt, cause);
+                    }
+                    sh_mb_free(&b);
+                    continue;
+                }
+                cv_rec_set(&rec, "pending", f->rel, NULL);
+                cv_rmtree(dest);
+            }
+            free(f->why);
+            f->why = NULL;
+            f->left = 1;
+            st->refused++;
+            did = 1;
+            cv_say(o, 0, "  mods\\%s: left as it was: %s", f->rel, cause);
+            cv_rec_set(&rec, "refused", f->rel, f->tree[0] ? f->tree : "-");
+            cv_save(o, &rec);
             sh_mb_free(&b);
         }
     }
+    /* A key whose holder could not be converted follows another of its converted folders. */
     for (i = 0; i < l.n; i++) {
+        char have[16], row[160];
         cv_folder *f = &l.f[i];
-        if (f->keep && !f->left && !f->done) {
-            f->left = 1;
-            st->refused++;
-            cv_say(o, 0, "  mods\\%s: left as it was: %s", f->rel, f->why ? f->why : "it needs a mod that did not build");
-            cv_rec_set(&rec, "refused", f->rel, f->tree[0] ? f->tree : "-");
-        }
+        if (!f->done || cv_rec_get_key(&rec, f->key, have, sizeof have)) continue;
+        _snprintf_s(row, sizeof row, _TRUNCATE, "%s %s -", f->salt, f->key);
+        cv_commit(&rec, f->rel, row, 1);
     }
     /* Second builds the product made: gone once the kept folder is converted. */
     for (i = 0; i < l.n; i++) {
@@ -1053,7 +1583,8 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
         if (f->keep) continue;
         k = cv_keeper(&l, f);
         if (!k || !k->done) {
-            cv_say(o, 0, "  mods\\%s: kept for now: a second build of %s, whose own folder was not converted", f->rel, f->key);
+            cv_say(o, 0, "  mods\\%s: kept for now: it is a second build of %s, whose own folder was not converted", f->rel,
+                   f->key);
             continue;
         }
         w = sh_mb_wpath(f->path);
@@ -1061,16 +1592,16 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
             st->removed++;
             did = 1;
             if (f->bundle[0]) cv_rec_set(&rec, "builds", f->bundle, k->salt);
-            cv_say(o, 0, "  mods\\%s: a second build of %s that Snapmap+ made; %s (mods\\%s is that mod, salt %s)", f->rel,
-                   f->key, sh_ms_discard_verb(), k->rel, k->salt);
+            cv_say(o, 0, "  mods\\%s: an extra copy of %s that Snapmap+ made, %s (mods\\%s is that mod)", f->rel, f->key,
+                   sh_ms_discard_verb(), k->rel);
         } else
-            cv_say(o, 0, "  mods\\%s: a second build of %s could not go to the Recycle Bin (error %lu)", f->rel, f->key,
-                   GetLastError());
+            cv_say(o, 0, "  mods\\%s: an extra copy of %s could not go to the Recycle Bin (error %lu); it is tried again at "
+                   "the next run", f->rel, f->key, GetLastError());
         free(w);
     }
     cv_alias_builds(o, &rec);
     cv_snapshot_builds(o, &rec);
-    if (did && !cv_rec_save(o, &rec)) cv_say(o, 1, "  mods\\snapmap-plus.json: the conversion record could not be written");
+    if (did) cv_save(o, &rec);
     cv_list_free(&l);
     cv_rec_free(&rec);
     return did;
@@ -1344,6 +1875,24 @@ done:
     return r;
 }
 
+/* Whether a map left before would convert now (read only). A map carrying
+ * packages is converted only by a run (its packages become folders), so it
+ * is work again only when the file changes. */
+static int cv_converts_now(const sh_conv_opts *o, const char *text, size_t n, int kind)
+{
+    cv_ids ids;
+    char *out = NULL, cause[600];
+    size_t on = 0;
+    int r;
+    if (kind != CV_MAP_PREFAB && cv_has(text, n, "\"smpkg.")) return 0;
+    cv_ids_open(o, &ids);
+    r = kind == CV_MAP_PREFAB ? cv_prefab_text(&ids, text, n, &out, &on, cause, sizeof cause)
+                              : cv_map_text_ids(o, &ids, text, n, &out, &on, cause, sizeof cause);
+    cv_ids_close(&ids);
+    free(out);
+    return r > 0;
+}
+
 typedef struct cv_map_ctx { cv_ids *ids; sh_conv_stats *st; int did; } cv_map_ctx;
 
 static void cv_map_left(const sh_conv_opts *o, cv_map_ctx *x, const char *path, const unsigned char *raw, size_t n,
@@ -1352,18 +1901,54 @@ static void cv_map_left(const sh_conv_opts *o, cv_map_ctx *x, const char *path, 
     char sha[65];
     cv_hex_sha(raw, n, sha);
     cv_rec_set(&x->ids->rec, "maps", path, sha);
+    cv_save(o, &x->ids->rec);
     x->st->maps_refused++;
     x->did = 1;
     cv_say(o, 0, "  %s: left as it was: %s", path, cause);
+}
+
+/* A saved map is written as one step: the new map.decl.verify and map.decl
+ * are written beside them first (CV_TMP), then map.decl is put in place, then
+ * map.decl.verify. A run stopped in between leaves the temporary sidecar; the
+ * next run finishes it when it signs the map.decl in place, else drops it
+ * (and a temporary map.decl, which was never put in place). */
+static void cv_saved_repair(const sh_conv_opts *o, cv_map_ctx *x, const char *path, const char *account)
+{
+    char *vpath = (char *)malloc(strlen(path) + 8), *vt = (char *)malloc(strlen(path) + 40);
+    char *mt = (char *)malloc(strlen(path) + 32), user[32];
+    if (vpath && vt && mt) {
+        _snprintf_s(vpath, strlen(path) + 8, _TRUNCATE, "%s.verify", path);
+        _snprintf_s(vt, strlen(path) + 40, _TRUNCATE, "%s" CV_TMP, vpath);
+        _snprintf_s(mt, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        if (cv_attr(mt, NULL)) {
+            cv_drop_tmp(path);
+            cv_drop_tmp(vpath);
+        } else if (cv_attr(vt, NULL)) {
+            size_t n = 0, sn = 0;
+            unsigned char *raw = cv_read(path, CV_MAP_MAX, &n), *side = cv_read(vt, 64, &sn);
+            if (raw && side && sn == SH_STORE_SIDECAR_LEN &&
+                sh_store_sidecar_user(account, raw, n, side, "map.decl", user, sizeof user) && cv_put_tmp(vpath)) {
+                x->did = 1;
+                cv_say(o, 0, "  %s: its signature, which an interrupted run had not put in place, is in place", path);
+            } else cv_drop_tmp(vpath);
+            free(raw);
+            free(side);
+        }
+    }
+    free(vpath);
+    free(vt);
+    free(mt);
 }
 
 static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int kind, const char *account)
 {
     cv_map_ctx *x = (cv_map_ctx *)vctx;
     size_t n = 0, tn = 0, on = 0;
-    unsigned char *raw = cv_read(path, CV_MAP_MAX, &n);
+    unsigned char *raw;
     char *text = NULL, *out = NULL, cause[600] = "";
     int r;
+    if (kind == CV_MAP_SAVED) cv_saved_repair(o, x, path, account);
+    raw = cv_read(path, CV_MAP_MAX, &n);
     if (!raw) return;
     if (kind == CV_MAP_SAVED) {
         text = cv_saved_text(raw, n, &tn);
@@ -1382,7 +1967,8 @@ static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int k
             x->st->maps_converted++;
             x->did = 1;
             cv_rec_set(&x->ids->rec, "maps", path, NULL);
-            cv_say(o, 0, "  %s: converted (%s as it was: %s%s)", path, kind == CV_MAP_PREFAB ? "the prefab" : "the rawmap",
+            cv_save(o, &x->ids->rec);
+            cv_say(o, 0, "  %s: converted (the file as it was is beside it as %s%s)", path,
                    strrchr(path, '\\') ? strrchr(path, '\\') + 1 : path, SH_CONV_BACKUP_SUFFIX);
         }
     } else if (r > 0) {
@@ -1409,16 +1995,25 @@ static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int k
                 cv_map_left(o, x, path, raw, n, "it could not be signed");
             else if (!cv_backup(path) || !cv_backup(vpath))
                 cv_map_left(o, x, path, raw, n, "a copy of it as it was could not be written beside it");
-            else if (!cv_write(path, nraw, zn + 4))
-                cv_map_left(o, x, path, raw, n, "it could not be written (a program may hold it)");
-            else if (!cv_write(vpath, nside, sizeof nside)) {
-                cv_write(path, raw, n);   /* the map as it was, with its own sidecar */
-                cv_map_left(o, x, path, raw, n, "its map.decl.verify could not be written; the map is as it was");
+            else if (!cv_write_tmp(vpath, nside, sizeof nside) || !cv_write_tmp(path, nraw, zn + 4)) {
+                cv_drop_tmp(vpath);
+                cv_drop_tmp(path);
+                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run the Snapmap+ installer again");
+            } else if (!cv_put_tmp(path)) {
+                cv_drop_tmp(vpath);
+                cv_drop_tmp(path);
+                cv_map_left(o, x, path, raw, n, "it could not be written; close the program that holds it and run the Snapmap+ installer again");
+            } else if (!cv_put_tmp(vpath)) {
+                /* The map with its own signature again: the new one stays beside it for the next run. */
+                cv_say(o, 0, "  %s: its new signature could not be put in place yet; run the Snapmap+ installer again to finish it", path);
+                x->did = 1;
             } else {
                 x->st->maps_converted++;
                 x->did = 1;
                 cv_rec_set(&x->ids->rec, "maps", path, NULL);
-                cv_say(o, 0, "  %s: converted (map.decl and map.decl.verify as they were: *%s)", path, SH_CONV_BACKUP_SUFFIX);
+                cv_save(o, &x->ids->rec);
+                cv_say(o, 0, "  %s: converted (map.decl and map.decl.verify as they were are beside them as "
+                       "*%s)", path, SH_CONV_BACKUP_SUFFIX);
             }
             free(check);
         }
@@ -1442,7 +2037,7 @@ int sh_conv_maps(const sh_conv_opts *o, sh_conv_stats *st)
     x.st = st;
     x.did = 0;
     cv_maps_each(o, cv_do_map, &x);
-    if (x.did && !cv_rec_save(o, &ids.rec)) cv_say(o, 1, "  mods\\snapmap-plus.json: the conversion record could not be written");
+    if (x.did) cv_save(o, &ids.rec);
     cv_ids_close(&ids);
     return x.did;
 }

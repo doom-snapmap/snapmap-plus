@@ -9,10 +9,9 @@
  * that overrides\ is byte-for-byte unchanged, that a second pass does nothing
  * and --again repeats it identically, that a map carrying the same delivery
  * (or the same authored tree) is answered by the migrated bundle without a
- * conversion, and the in-game pass on the worker (sh_mods migrate): the
- * record completes and the serving index is rebuilt. The Mods tab's Migrate button
- * follows sh_modmigrate_pending: entries the record does not list, and
- * skipped or refused ones changed since it was written.
+ * conversion. The store tool's check follows sh_modmigrate_pending: entries
+ * the record does not list, and skipped or refused ones changed since it was
+ * written.
  *
  * Links the real builder, store and legacy converter; the serving index and
  * the product's builder entry are the seam stub (mod_seam_stub.c), whose
@@ -24,15 +23,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/backend/modmigrate.h"
-#include "../src/backend/modlegacy.h"
+#include "../src/store/modmigrate.h"
+#include "../src/store/modlegacy.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modbundle.h"
 
-/* A folder big enough that the worker is still busy while the test installs. */
+/* A folder of a few MiB: its build takes measurable time. */
 #define MG_TEST_LARGE ((16ull << 20) + 4096)
 #include "../src/backend/map_shards.h"
-#include "../src/backend/map_old.h"
+#include "../src/store/map_old.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -51,7 +50,7 @@ void backend_log(const char *line)
     if (g_echo && line) printf("    %s\n", line);
     if (line && at + n + 2 < sizeof g_log) { memcpy(g_log + at, line, n); g_log[at + n] = '\n'; g_log[at + n + 1] = 0; }
 }
-extern int g_mod_stub_rescans;
+
 
 /* ---- files ------------------------------------------------------------------------------------ */
 
@@ -481,25 +480,25 @@ static void full_pass(const char *root)
           !strstr(record, "\"outcome\":\"built\"") && !strstr(record, "\"entries\""));
     CHECK(entry_has(record, "stray.zip", "\"kind\":\"zip\"", "\"outcome\":\"skipped\""));
     CHECK(entry_has(record, "huge", "\"kind\":\"package\"", "\"outcome\":\"skipped\""));
-    CHECK(record && strstr(record, "it holds 2 package folders one level down (first: twodesc\\\\"));
+    CHECK(record && strstr(record, "holds 2 package folders one level down (the first is twodesc\\\\"));
     CHECK(record && !strstr(record, "\"nodesc/inner\"") && strstr(record, "\":\"pack-c\""));   /* pack-c's tree */
     CHECK(entry_has(record, "big", "\"outcome\":\"refused\"", NULL));
     CHECK(bundle_of(mods, "inner", &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: built mods\\inner,") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: moved into mods\\inner,") != NULL &&
           strstr(g_log, "the one package folder inside overrides\\nodesc, which has no descriptor of its own, "
                         "migrated under its own id") != NULL);
     CHECK(record && strstr(record, tree_d));
-    CHECK(strstr(g_log, "MODS: migration: overrides\\stray.zip: skipped -- a ZIP archive") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\huge: skipped -- over the migration cap") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\big: refused -- a bundle of it would hold at least 1 file(s), 300 MiB, "
-                        "over the bundle caps") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: built mods\\dupe-b,") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\stray.zip: skipped -- it is a ZIP archive") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\huge: skipped -- it holds at least") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\big: refused -- it would hold at least 1 file(s) and 300 MiB, "
+                        "more than one mod can hold") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: moved into mods\\dupe-b,") != NULL &&
           strstr(g_log, "duplicate id local.dupe (also overrides\\dupe-a), both kept") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: delivered package converted to "
+    CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: a package a map delivered, moved into "
                         "mods\\doors,") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: built mods\\pack-c,") != NULL &&
-          strstr(g_log, "1 file(s) a bundle cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: moved into mods\\pack-c,") != NULL &&
+          strstr(g_log, "1 file(s) a mod cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
     CHECK(strstr(g_log, "MODS: migration: 10 entries in overrides: 5 built, 1 delivered converted") != NULL);
     free(record);
 
@@ -547,7 +546,7 @@ static void full_pass(const char *root)
     sh_mb_free(&b);
     CHECK(bundle_of(mods, dupe_b_key, &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "delivered package already converted as mods\\doors ") != NULL);
+    CHECK(strstr(g_log, "a package a map delivered, already in mods\\doors") != NULL);
     {
         unsigned bundles = 0;
         memset(&list, 0, sizeof list);
@@ -583,44 +582,44 @@ static void kept_backups(const char *root)
     CHECK(exists(path) && strstr(g_log, "override-backups is not empty; it is left in place") != NULL);
 }
 
-/* `sh_mods migrate` in the game: the pass on the worker, then the serving index rebuilt. */
-static void worker_pass(const char *root)
+/* Two sources of one name never share a folder: when every name a package
+ * could take is another mod's, it is refused and those folders stay as they are. */
+static void name_clash(const char *root)
 {
-    char ov[MAX_PATH], path[MAX_PATH * 2], *record;
+    char ov[MAX_PATH], pack[MAX_PATH * 2], mods[MAX_PATH * 2], tree[65], dir[MAX_PATH * 2];
     sh_modmigrate_stats st;
-    int rescans;
-    printf("-- sh_mods migrate: the pass on the worker, then the serving index\n");
+    int i;
+    printf("-- a package whose every folder name is taken is refused, nothing shared\n");
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
-    put_file(ov, "small/package.json", "{\"id\": \"small\", \"name\": \"Small\"}");
-    put_file(ov, "small/assets/generated/decls/entitydef/mods/small/s.decl", DECL_A);
-    put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
-    put_bytes(ov, "large/assets/generated/image/mods/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    put_file(ov, "clash/package.json", "{\"id\": \"clash\", \"name\": \"Clash\"}");
+    put_file(ov, "clash/assets/generated/decls/entitydef/mods/clash/c.decl", DECL_A);
+    _snprintf_s(pack, sizeof pack, _TRUNCATE, "%s\\clash", ov);
+    CHECK(tree_of(pack, tree));
+    for (i = 0; i < 3; i++) {
+        if (i == 0) _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash", mods);
+        else _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash-%.*s", mods, i == 1 ? 8 : 16, tree);
+        put_file(dir, "mod.json", "{\"name\": \"Someone else's\"}");
+    }
     configure(root);
     g_log[0] = 0;
-    rescans = g_mod_stub_rescans;
-    CHECK(sh_modmigrate_start(0) == 1);
-    CHECK(sh_modmigrate_wait(120000) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\small\\mod.json", root);
-    CHECK(exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large\\mod.json", root);
-    CHECK(exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
-    record = record_of(path);
-    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"folders\":[]"));
-    free(record);
-    sh_modmigrate_last(&st);
-    CHECK(st.built == 2 && st.pending == 0);
-    CHECK(g_mod_stub_rescans == rescans + 1 && strstr(g_log, "serving index rebuilt after the background pass") != NULL);
-    /* Done: the next pass without --again has nothing to do. */
-    CHECK(sh_modmigrate_start(0) == 0);
+    CHECK(sh_modmigrate_run(0, &st) == 1 && st.refused == 1 && st.built == 0);
+    CHECK(strstr(g_log, "every folder name it could take in the mods folder belongs to another mod") != NULL);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\clash\\mod.json", mods);
+    {
+        FILE *f = NULL;
+        char text[64] = "";
+        if (fopen_s(&f, dir, "rb") == 0 && f) { fread(text, 1, sizeof text - 1, f); fclose(f); }
+        CHECK(!strcmp(text, "{\"name\": \"Someone else's\"}"));
+    }
 }
 
 static void incomplete_record(const char *root)
 {
     char path[MAX_PATH * 2], ov[MAX_PATH];
     sh_modmigrate_stats st;
-    printf("-- an incomplete record (the worker did not finish) runs the pass again\n");
+    printf("-- an incomplete record (an interrupted pass) runs the pass again\n");
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
@@ -648,7 +647,7 @@ static DWORD WINAPI mg_hold_thread(void *p)
     return 0;
 }
 
-/* What the Mods tab's Migrate button counts. */
+/* What the store tool's check counts. */
 static void pending_entries(const char *root)
 {
     char ov[MAX_PATH], path[MAX_PATH * 2];
@@ -700,23 +699,19 @@ static void pending_entries(const char *root)
 
 static void store_lock_contention(const char *root)
 {
-    char ov[MAX_PATH], path[MAX_PATH * 2], mod[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char ov[MAX_PATH];
     sh_modmigrate_stats st;
-    sh_ms_install_stats ist;
     mg_hold h = { 300, 0, 0 };
     HANDLE t;
     ULONGLONG done;
-    unsigned waits, installs = 0, failed = 0;
-    printf("-- the store lock: the pass waits for a store step, an install during the pass waits for a folder\n");
+    unsigned waits;
+    printf("-- the store lock: the pass waits for a store step\n");
     make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/mods/tiny/t.decl", DECL_A);
     put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
     put_bytes(ov, "large/assets/generated/image/mods/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
-    _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s\\authoring\\test.lockmod", root);
-    put_file(mod, "mod.json", "{\"version\": \"1.0.0\", \"name\": \"Lock\", \"author\": \"tester\"}");
-    put_file(mod, "assets/generated/image/mods/test.lockmod/a.bimage", "bytes for the lock test");
     configure(root);
     /* Another thread holds the lock (an install or a download): the pass waits, then runs. */
     waits = modstore_lock_waits();
@@ -727,20 +722,6 @@ static void store_lock_contention(const char *root)
     done = GetTickCount64();
     if (t) { WaitForSingleObject(t, 60000); CloseHandle(t); }
     CHECK(done >= h.released_at && modstore_lock_waits() > waits);
-    /* An install while the worker migrates: every one waits its turn and succeeds. */
-    CHECK(sh_modmigrate_start(1) == 1);
-    do {
-        if (sh_ms_install_from_folder(mod, NULL, key, sizeof key, &ist, NULL, cause, sizeof cause)) installs++;
-        else { failed++; fprintf(stderr, "  install during the pass: %s\n", cause); }
-    } while (sh_modmigrate_busy() && installs < 50);
-    CHECK(sh_modmigrate_wait(120000) == 1);
-    CHECK(installs >= 1 && failed == 0);
-    sh_modmigrate_last(&st);
-    CHECK(st.built == 2 && st.refused == 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large\\mod.json", root);
-    CHECK(exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\test.lockmod\\mod.json", root);
-    CHECK(exists(path));
 }
 
 int main(void)
@@ -770,10 +751,12 @@ int main(void)
     kept_backups(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_c", base, GetCurrentProcessId());
-    worker_pass(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_d", base, GetCurrentProcessId());
     incomplete_record(root);
+    remove_tree(root);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_g", base, GetCurrentProcessId());
+    name_clash(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_e", base, GetCurrentProcessId());
     store_lock_contention(root);

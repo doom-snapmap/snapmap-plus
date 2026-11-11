@@ -128,20 +128,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   that the ledger's record matches what the index serves until another build is
   declared, and that a rescan counts a changed anim as a map-load reload and a
   changed skeleton as a restart.
-- `mod_pipeline_test.c` links the builder, the serving index, the manifest and
-  the legacy converter together: a built fixture is admitted, saved as one
-  `smpmod1.` row and activated on the next load; a legacy-form bundle with
-  non-stock shadows builds and registers only its new names; skins decls pass
-  by their mesh path. With `SH_MODLEGACY_FIXTURES` set, each carrier map is
-  converted with the real builder and activated in the same parse. Set
-  `SH_MODLEGACY_BETA19` to the path of one rawmap file written by
-  v0.2.1-beta.19 (the owner's acceptance map; not in the repository, its
-  carriers hold game files) to add a pass that converts every carrier in it,
-  prints per carrier what the bundle provides and how many placed names it
-  covers, the parse time and the process peak working set, then checks that a
-  second parse is answered by the memo and a fresh-process parse by the folders
-  on disk without a build. `MOD_PIPELINE_ECHO=1` prints the log lines and the
-  placed names each bundle covers.
+- `mod_pipeline_test.c` links the builder, the serving index and the manifest
+  together: a built fixture is admitted, saved as one row and activated on the
+  next load; a bundle with non-stock shadows builds and registers only its new
+  names; skins decls pass by their mesh path; a cut-content bundle's
+  requirements are set before its first registration. `MOD_PIPELINE_ECHO=1`
+  prints the log lines.
 - `modmigrate_test.c` moves a small synthetic `overrides\` tree into a
   temporary store with the real builder, store and legacy converter: an era C
   pack (an unsupported cvar dropped, strings and composes kept, a sidecar left
@@ -153,11 +145,13 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   unchanged, that a second pass does nothing and `--again` rebuilds the same
   bundles, that a map carrying the same delivery or the same authored tree is
   answered by the migrated bundle without a conversion, a non-empty
-  `override-backups` left alone, the in-game pass on the worker (`sh_mods
-  migrate`: the record completes, then one rescan), the rerun of an
-  unfinished record, and the store lock (a pass waits for a holder, and
-  installs during a worker pass wait their turn and succeed).
-  `MODMIGRATE_ECHO=1` prints the log lines.
+  `override-backups` left alone, the rerun of an unfinished record, and the
+  store lock (a pass waits for a holder). It links store-tool sources
+  (`src/store/`) only. `MODMIGRATE_ECHO=1` prints the log lines.
+- `store_upgrade_test.c` checks the store tool's readers of earlier store
+  layouts: the retired `removed-mods\` bin swept, the second upgrade step over
+  format-1 folders, a Contract 2 folder this release cannot read left as it
+  was, and the reader of earlier `mod.json` shapes (`modbundle_old.h`).
 - `store_tool_test.c` runs `snapmap-plus-store` (`src/store/`) on a copy of
   `fixtures\store-retired\data`, a store of an earlier release (a folder of the
   retired layout with `bundle.json`, an old record file, a `removed-mods\`

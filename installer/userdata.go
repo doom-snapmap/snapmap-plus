@@ -18,8 +18,8 @@ import (
 var userContentSubdirs = []string{"prefabs"}
 
 // retiredContent reports whether a path relative to a content root belongs to the retired
-// first-generation package system. It is never copied, scaffolded or removed: the package system
-// is being rebuilt, and the player decides what to do with the old folders.
+// first-generation package system. It is never copied, scaffolded or removed by the installer: the
+// store tool moves what it holds into mods\ and sends the folder to the Recycle Bin.
 func retiredContent(rel string) bool {
 	first := strings.ToLower(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
 	switch first {

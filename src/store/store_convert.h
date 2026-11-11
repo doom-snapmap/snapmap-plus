@@ -7,26 +7,38 @@
  * earlier shape (a format-1 block, an author id, key, shadows, stock, scope
  * or another retired key, package.json), from beta.20 to beta.26:
  *   - its old key is its author id, else its block's key, else its name;
- *   - second builds of one key: the player's own folder is kept and
+ *   - extra copies of one key: the player's own folders are kept and
  *     converted; folders the product made ("<key>@<hash16>", and those under
  *     downloads\ or imports\) go to the Recycle Bin when the player has one,
- *     else the newest of them is kept and converted;
+ *     else the one that held the key first is kept and converted. Of several
+ *     kept folders of a key, the key's maps follow the one the record already
+ *     gives the key, else the one named after the key, else the first by path
+ *     (DECISIONS 15: never a "built" time);
  *   - a kept folder is salted into a work folder beside it ("<name>.staging-
- *     <pid>", sh_ms_salt_copy) from a fresh author part (the block, the
- *     retired author keys and a hud "schema" cut out, every other byte kept),
- *     its mods/<old key>/ paths and texts rewritten to mods/<salt>/, its
- *     strings keys named "<salt>_<key>" with their #str_ references, then
- *     built by the real builder under the current rules (replacements kept:
- *     content the product received). Only a successful build is swapped in
- *     under the folder's own name; the folder as it was goes to the Recycle
- *     Bin. A folder that cannot be converted (a binary file naming its old
- *     key or one of its strings, files under another key, a build failure)
- *     is left exactly as it was, with its plain cause; it is listed again
- *     only after it changes.
+ *     <pid>", sh_ms_salt_copy, reading a view of mod.json and assets\ only)
+ *     from a fresh author part (the block, the retired author keys and a hud
+ *     "schema" cut out, every other byte kept), its mods/<old key>/ paths and
+ *     texts rewritten to mods/<salt>/, its strings keys named "<salt>_<key>"
+ *     with their #str_ references, its sound banks named "<salt>_<name>" with
+ *     their bank id, every other file beside mod.json and assets\ copied
+ *     unchanged (DECISIONS 16), then built by the real builder under the
+ *     current rules (replacements kept: content the product received). A
+ *     build that fails, or a salting the folder refuses (then the folder is
+ *     copied as it is with a fresh salt), is written as a failed build with
+ *     the builder's plain cause (DECISIONS 14): the game shows the cause and
+ *     the author fixes the folder. The work folder is swapped in under the
+ *     folder's own name; the folder as it was goes to the Recycle Bin. Only a
+ *     folder whose descriptor does not read is left as it was, with its cause.
  * The record's section "converted" keeps what was done: {"keys": {"<old
  * key>": "<salt>"}, "builds": {"<old build hash>": "<salt>"}, "folders":
- * {"<folder under mods\>": "<salt>"}, "refused": {"<folder>": "<tree>"},
- * "maps": {"<file>": "<sha256>"}} (maps left as they are).
+ * {"<folder under mods\>": "<salt>"}, "pending": {"<folder>": "<salt> <old
+ * key> <old build or ->"}, "refused": {"<folder>": "<tree>"}, "maps":
+ * {"<file>": "<sha256>"}} (maps left as they are). It is written after every
+ * folder and every map. A folder's row is "pending" from just before its swap
+ * until just after it, so a run stopped at any point resumes and loses
+ * nothing: the next run puts back a folder set aside ("<name>.old-<pid>"),
+ * removes work folders, and commits a pending row whose folder carries its
+ * salt. Every run looks at every folder and map again (DECISIONS 21).
  *
  * Retirement. mods\.builds\ goes to the Recycle Bin, and the record's retired
  * sections ("cache", "aliases", "snapshots", "renamed", "downloads") are
@@ -41,7 +53,10 @@
  * ("<name>.before-snapmap-plus-1.0"; for a saved map, map.decl and
  * map.decl.verify, re-signed). A map naming a key no installed folder
  * provides, or whose signature cannot be matched, is left untouched with its
- * cause. */
+ * cause. A saved map is written as one step: the
+ * new map.decl.verify and map.decl are written beside them, then put in
+ * place map first; a run stopped in between leaves the new signature beside
+ * it, which the next run puts in place. */
 #ifndef SNAPMAP_PLUS_STORE_CONVERT_H
 #define SNAPMAP_PLUS_STORE_CONVERT_H
 
@@ -66,6 +81,7 @@ typedef struct sh_conv_opts {
 } sh_conv_opts;
 
 typedef struct sh_conv_check {
+    unsigned leftovers;         /* work folders and record rows an interrupted run left */
     unsigned folders;           /* folders in an earlier shape to convert */
     unsigned duplicates;        /* second builds the product made, to remove */
     unsigned folders_left;      /* left as they were before and unchanged since */
@@ -82,7 +98,9 @@ typedef struct sh_conv_check {
 int sh_conv_scan(const sh_conv_opts *o, sh_conv_check *out, int list);
 
 typedef struct sh_conv_stats {
-    unsigned converted, refused, removed, waiting;
+    unsigned converted;         /* folders now in the one shape */
+    unsigned failed;            /* of them, those whose build failed (the cause is in their block) */
+    unsigned refused, removed, waiting;
     unsigned maps_converted, maps_refused;
     unsigned retired;
 } sh_conv_stats;

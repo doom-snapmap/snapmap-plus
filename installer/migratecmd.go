@@ -7,29 +7,29 @@ import (
 )
 
 // runStoreMigration runs the store tool's check on the data folder and, when check finds work, its
-// migrate with the DOOM folder. Every failure is a warning that says to run snapmap-plus migrate.
+// migrate with the DOOM folder. Every failure is a warning that says to run the installer again.
 // It returns 1 when the tool migrated, 0 when there was nothing to do, and -1 when the tool could not
 // run or did not finish.
 func runStoreMigration(tool, dir, doom string) int {
 	code, err := runStoreTool(tool, "check", dir)
 	switch {
 	case err != nil:
-		ui.Warn("%s could not run (%v), so your mods were not checked. Close DOOM and run: snapmap-plus migrate", storeToolName, err)
+		ui.Warn("%s could not run (%v), so your mods were not checked. Close DOOM and run the Snapmap+ installer again", storeToolName, err)
 		return -1
 	case code == 0:
 		return 0
 	case code != 1:
-		ui.Warn("%s could not check your mods folder (exit code %d). Close DOOM and run: snapmap-plus migrate", storeToolName, code)
+		ui.Warn("%s could not check your mods folder (exit code %d). Close DOOM and run the Snapmap+ installer again", storeToolName, code)
 		return -1
 	}
 	code, err = runStoreTool(tool, "migrate", dir, "--doom", doom)
 	switch {
 	case err != nil:
-		ui.Warn("%s could not run (%v), so your mods were not moved. Close DOOM and run: snapmap-plus migrate", storeToolName, err)
+		ui.Warn("%s could not run (%v), so your mods were not moved. Close DOOM and run the Snapmap+ installer again", storeToolName, err)
 		return -1
 	case code != 0:
 		ui.Warn("%s did not finish moving your mods (exit code %d); Snapmap+ itself is installed. "+
-			"Close DOOM and run: snapmap-plus migrate", storeToolName, code)
+			"Close DOOM and run the Snapmap+ installer again", storeToolName, code)
 		return -1
 	}
 	return 1
