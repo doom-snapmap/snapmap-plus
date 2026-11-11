@@ -80,6 +80,7 @@
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
 #include "script/script_node.h"
+#include "script/script_api_ai.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG

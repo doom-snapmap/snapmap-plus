@@ -1651,6 +1651,65 @@ the map, as any error does).
   `+0x220`, milliseconds): the tick passes the game time since the Play's
   first script frame.
 
+### Mod scripts: the AI calls
+
+`src/backend/script/script_api_ai.c` adds the AI calls of API version 1 as
+entity methods. Each one works only on a demon (an idAI2 or a subclass, by
+type number) the calling mod owns; any other entity, a bad argument or a
+missing engine function is refused with one plain sentence before the engine
+is touched, and a removed demon answers nil.
+
+- **The park.** The first command a script gives a demon parks it: the
+  detour on `IsRunningScript` (VK 0x14042FBC0, GL 0x14042EE60, 15-byte
+  window, committed at that first command on the game thread) answers true
+  for it, checked by spawn id from the FSM worker threads, so the alert cycle
+  enters its own `ExecuteDoomscript` state from `ac_default` and never leaves
+  it through `Shared_NotExecutingScript`. That state's class overrides no
+  state method; the designer commands below act there, and the engine keeps
+  pain, damage, death and animation. The command also posts
+  `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
+  in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
+  alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
+  0x145CEDF30) when a command arrives while the demon is elsewhere. No decl
+  is edited and no layers config is named; a demon stays parked for the map.
+- **Commands** are catalogue events run with `ProcessEventArgs` on the demon,
+  each format checked against the registry at first use (`SH_AI_EVENTS`):
+  `move_to(pos, [tolerance], [flags])` (`ssaction_SetWalkState` walking or
+  running, then `ssaction_MoveToPoint`; `strafe` or `aim_while_moving` first
+  aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
+  entity's position, given again when it has moved 32 inches; the engine's
+  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
+  (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
+  `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
+  `setPlayerEnemy` closest), `anim_state(node, [via])`,
+  `anim_force(node, [blend_ms])` (`ssaction_ChangeAnimState(Via)`,
+  `ssaction_ForceAnimState`), `trigger(on)` (`pull/releaseTriggerRight`),
+  `equip(index)` (`equipInventoryItemByIndex`), `laser(tag, on)`
+  (`setLaserState`), `laser_state(tag, on)` (`ae_setLaserState`),
+  `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
+  (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
+- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
+  (`isEntityVisible`, the perception's own answer), `aware()`
+  (`hasAwarenessOfEnemy`), `awareness([e])` (`GetAwareness` on the perception
+  at ai+0x29A88: unaware, lost, suspected, confirmed), `distance(t)`,
+  `angle_to(t)` (physics origin and axis), `move_done()` (the move FSM status
+  word at *(ai+0x23198)+0xD20, read as `Shared_MoveDone` and
+  `Shared_MoveFailedAny` read it; done and failed), `turn_done()` (facing
+  within 10 degrees of the last face target), `trigger_pulled()` (the weapon
+  trigger word, as `Shared_TriggerPulled`), `path_length(pos)` and
+  `can_reach(pos)` (the move FSM's path query that
+  `Shared_TargetDistanceFilter` calls, VK 0x140515300 / GL 0x140514030,
+  reached through that unique call site; the query is asynchronous, so a call
+  may answer "searching" and the script asks again), `find_position(parms)`
+  (points on a circle around the target scored by distance band and path
+  length).
+
+`tests/script_api_ai_test.c` runs every call through real scripts over a fake
+engine and checks the catalogue against `tests/fixtures/scripts/
+event_registry_13954591.txt`; `tests/script_ai_sigs_test.c` checks the
+signatures, the detour window, the path site and the offsets on both
+executables.
+
 ### Mod scripts: the engine side
 
 `src/backend/script/script_hooks.c` connects mod scripts to the engine; the
