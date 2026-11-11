@@ -443,7 +443,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *          the mod folders (one row per folder) and the open map's manifest
  *          rows and placed-name closure. Returns 1, or 0 when refused (off the
  *          main thread, no memory). needed is set.
- *   RUN    main thread, except INSTALL, NEW_MOD and RESCAN, which may run on
+ *   RUN    main thread, except INSTALL, NEW_MOD, RESCAN and ADD_MINE, which may run on
  *          any thread: their file work (copies, salts, builds) runs there with
  *          no time limit, and off the main thread their result says
  *          "apply": true, asking for APPLY on the main thread, which brings the
@@ -481,6 +481,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_FILE_TEXT          21    /* arg: "<folder>\t<path below the folder>": one text file (read-only; no list) */
 #define SH_MODS_ACT_NEW_MOD            22    /* arg: a display name: a new mod folder with a working example, then the rescan (any thread) */
 #define SH_MODS_ACT_APPLY              23    /* main thread: finish the file action that ran off it (its "apply": true) */
+#define SH_MODS_ACT_ADD_MINE           24    /* arg: a downloaded map's mod folder: copy it to the root as one of your mods (any thread) */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

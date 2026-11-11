@@ -52,7 +52,7 @@ var modsTab = (function () {
      shows. mapAddMod attaches the selected mod to the open map without placing anything (a
      map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
      Windows Recycle Bin. */
-  var ACTIONS = ['install', 'rescan', 'openFolder', 'mapAddMod',
+  var ACTIONS = ['install', 'rescan', 'openFolder', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                  'modFiles', 'modFileText', 'newMod'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
@@ -109,7 +109,10 @@ var modsTab = (function () {
   /* A folder of editor tweaks only (facts.editorOnly): a map never records it (DESIGN-additive 2.6). */
   var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
-  var PLACE_USE_TITLE = 'This mod came with a downloaded map; only that map uses it';
+  /* A downloaded map's mod (decision 22): the short view, its map, Add to my mods and Remove. */
+  var ADD_MINE_TITLE = 'Copy this mod into your own mods, so your own maps can use it';
+  var PLACE_CLEANUP_TEXT = 'Snapmap+ removes it at start when none of your saved maps uses it and you have not played ' +
+                           'that map for 30 days; playing the map downloads it again.';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
@@ -629,7 +632,7 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
-                     newMod: 'Making the new mod...'};
+                     newMod: 'Making the new mod...', addToMine: 'Copying it into your mods...'};
 
     function selectedMod() {
       for (var i = 0; i < model.mods.length; i++) if (model.mods[i].key === selectedKey) return model.mods[i];
@@ -645,7 +648,14 @@ var modsTab = (function () {
       });
       /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
-      if (fb) fb.disabled = !sel;
+      if (fb) { fb.disabled = !sel; fb.style.display = sel && b.place ? 'none' : ''; }
+      /* A downloaded map's mod is removed from this computer, the same uninstall under its short name. */
+      var un = byId('modsUninstallBtn');
+      if (un) {
+        un.textContent = sel && b.place ? 'Remove' : 'Uninstall';
+        un.title = sel && b.place ? 'Remove this mod of a downloaded map from this computer'
+                                  : 'Uninstall the selected mod; you see everything it changes before you decide';
+      }
       var mb = byId('modsMapBtn');
       if (mb) {
         var mm = model.map && model.map.open && model.map.mods ? model.map.mods.length : -1;
@@ -669,13 +679,22 @@ var modsTab = (function () {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
+      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it. */
+      if (b && b.place) {
+        u.style.display = '';
+        u.textContent = 'Add to my mods';
+        u.className = 'btn';
+        u.title = ADD_MINE_TITLE;
+        u.disabled = !!busy || needsAttention(b);
+        return;
+      }
       /* A folder of editor tweaks only has no map action: a map never records it. */
       u.style.display = open && !editorOnly(b) ? '' : 'none';
       var used = mapUses(b);
       u.textContent = used ? 'Remove from map' : 'Use in this map';
       u.className = 'btn' + (used ? ' danger' : '');
-      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : b && b.place ? PLACE_USE_TITLE : USE_TITLE;
-      u.disabled = !!busy || !b || !open || (!used && (needsAttention(b) || !!b.place));
+      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : USE_TITLE;
+      u.disabled = !!busy || !b || !open || (!used && needsAttention(b));
     }
     function setBusy(action) {
       busy = action || '';
@@ -904,12 +923,19 @@ var modsTab = (function () {
       head.appendChild(el('span', 'mods-detail-name', title(b)));
       box.appendChild(head);
       box.appendChild(el('div', 'mods-detail-sentence ' + info.tone, info.sentence));
+      /* A downloaded map's mod: the short view. A player who only plays maps needs its name, its
+         map and Remove; Add to my mods (the head) makes it one of their own. */
+      if (b.place) {
+        var shortAbout = section(box, 'about', 'About');
+        field(shortAbout, 'Came with', b.placeTitle || 'a downloaded map');
+        shortAbout.appendChild(el('div', 'mods-note', PLACE_CLEANUP_TEXT));
+        return;
+      }
       if (b.sameFilesAs) box.appendChild(el('div', 'mods-note mods-same', sameFilesText(b.sameFilesAs)));
 
       var about = section(box, 'about', 'About');
       if (b.description) field(about, 'Description', b.description).className += ' mods-field-long';
       if (b.author) field(about, 'Author', b.author);
-      if (b.place) field(about, 'Came with', b.placeTitle || 'a downloaded map');
       var link = el('button', 'mods-link', b.key);
       link.type = 'button';
       link.title = 'Open this folder in Explorer';
@@ -981,7 +1007,7 @@ var modsTab = (function () {
         var wl = section(box, 'warnings', 'Warnings');
         b.warnings.forEach(function (w) { wl.appendChild(el('div', 'mods-line mods-warning', w)); });
       }
-      if (b.publishedMaps >= 0 && !b.place) {
+      if (b.publishedMaps >= 0) {
         var share = section(box, 'sharing', 'Sharing');
         field(share, 'Published maps', b.publishedMaps ? 'Used by ' + plural(b.publishedMaps, 'of your published maps', 'of your published maps') : 'Used by none of your published maps');
       }
@@ -1128,7 +1154,10 @@ var modsTab = (function () {
     function renderConfirm(host, pv) {
       var name = pv.name || modName(pv.key, '');
       var uninstall = pv.action === 'uninstall';
-      modalHead(host, uninstall ? 'Uninstall ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
+      var placed = false;
+      model.mods.forEach(function (b) { if (b.key === pv.key && b.place) placed = true; });
+      var verb = placed ? 'Remove' : 'Uninstall';
+      modalHead(host, uninstall ? verb + ' ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
@@ -1161,7 +1190,7 @@ var modsTab = (function () {
         if (modal.from === 'uninstall' || modal.from === 'details') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
       }));
-      acts.appendChild(modalButton(uninstall ? 'Uninstall' : 'Delete from map', 'danger-solid', function () {
+      acts.appendChild(modalButton(uninstall ? verb : 'Delete from map', 'danger-solid', function () {
         act(uninstall ? 'uninstall' : 'mapRemoveMod', pv.key);
       }));
       host.appendChild(acts);
@@ -1654,7 +1683,7 @@ var modsTab = (function () {
       }
       setStatus(message, ok ? 'ok' : 'err');
       if (message) env.toast(message, ok ? 'ok' : 'err');
-      if (action === 'install' && ok && data.key) reveal = selectedKey = str(data.key);
+      if ((action === 'install' || action === 'addToMine') && ok && data.key) reveal = selectedKey = str(data.key);
       /* A new mod: selected, and the Files modal opens on its example's Toybox row. */
       if (action === 'newMod' && ok && data.key) {
         reveal = selectedKey = str(data.key);
@@ -1684,7 +1713,8 @@ var modsTab = (function () {
       on('modsUseBtn', 'click', function () {
         var b = selectedMod();
         if (!b || busy) return;
-        if (mapUses(b)) {
+        if (b.place) act('addToMine', b.key);
+        else if (mapUses(b)) {
           modal.from = 'details';
           modal.opener = byId('modsUseBtn');
           act('mapRemoveModPreview', b.key);
@@ -1754,7 +1784,7 @@ var modsTab = (function () {
           APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
           IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
-          sameFilesText: sameFilesText, bareName: bareName, COPY_ID_TITLE: COPY_ID_TITLE,
+          sameFilesText: sameFilesText, bareName: bareName, PLACE_CLEANUP_TEXT: PLACE_CLEANUP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, COPY_ID_TITLE: COPY_ID_TITLE,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,

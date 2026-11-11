@@ -2146,6 +2146,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_FILES: return "modFiles";
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
     case SH_MODS_ACT_NEW_MOD: return "newMod";
+    case SH_MODS_ACT_ADD_MINE: return "addToMine";
     default: return "unknown";
     }
 }
@@ -2291,7 +2292,8 @@ static char *g_owed_extra;
 
 static int mu_file_action(int action)
 {
-    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN;
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
+           action == SH_MODS_ACT_ADD_MINE;
 }
 
 /* The finished result: the action's message, then the sentence a change
@@ -4285,6 +4287,178 @@ static int mu_file_text(const char *arg)
     return mu_result_tail(&b);
 }
 
+/* ---- Add to my mods */
+
+/* Copy the tree `from` into `to` (wide long paths), real files only (links
+ * are not followed). 1 when every file was copied. */
+static int mu_copy_tree(const wchar_t *from, const wchar_t *to, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t nf = wcslen(from), nt = wcslen(to);
+    wchar_t *pattern;
+    int ok = 1;
+    if (depth > 32 || (!CreateDirectoryW(to, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)) return 0;
+    pattern = (wchar_t *)malloc((nf + 3) * sizeof *pattern);
+    if (!pattern) return 0;
+    _snwprintf_s(pattern, nf + 3, _TRUNCATE, L"%ls\\*", from);
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    do {
+        size_t nl = wcslen(fd.cFileName);
+        wchar_t *a, *b;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        a = (wchar_t *)malloc((nf + nl + 2) * sizeof *a);
+        b = (wchar_t *)malloc((nt + nl + 2) * sizeof *b);
+        if (a && b) {
+            _snwprintf_s(a, nf + nl + 2, _TRUNCATE, L"%ls\\%ls", from, fd.cFileName);
+            _snwprintf_s(b, nt + nl + 2, _TRUNCATE, L"%ls\\%ls", to, fd.cFileName);
+            ok = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? mu_copy_tree(a, b, depth + 1) : sh_ms_copy_file(a, b);
+        } else ok = 0;
+        free(a);
+        free(b);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* Remove a tree this file made (wide long path), links removed and never followed. */
+static void mu_remove_tree(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t n = wcslen(dir);
+    wchar_t *pattern = (wchar_t *)malloc((n + 3) * sizeof *pattern);
+    if (!pattern) return;
+    _snwprintf_s(pattern, n + 3, _TRUNCATE, L"%ls\\*", dir);
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            size_t nl = wcslen(fd.cFileName);
+            wchar_t *p;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            p = (wchar_t *)malloc((n + nl + 2) * sizeof *p);
+            if (!p) continue;
+            _snwprintf_s(p, n + nl + 2, _TRUNCATE, L"%ls\\%ls", dir, fd.cFileName);
+            SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                mu_remove_tree(p);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(p);
+            else DeleteFileW(p);
+            free(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* For integration (modui.h): the store's install of a folder of the store
+ * (a mod a map brought) at the root, until the store side provides it. The
+ * folder is copied outside the store first, so the install takes it as a mod
+ * from elsewhere: every file it holds is copied to mods\<its name> and built
+ * under its own salt (decision 10: nothing is dropped). */
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap)
+{
+    wchar_t tmp[MAX_PATH + 1];
+    char *tmpu, work[MAX_PATH * 4 + 64], copy[MAX_PATH * 4 + 320];
+    wchar_t *src = NULL, *wwork = NULL, *wcopy = NULL;
+    int ok = 0;
+    if (cause && cause_cap) cause[0] = 0;
+    if (!GetTempPathW(MAX_PATH, tmp) || (tmpu = sh_mb_utf8(tmp)) == NULL) {
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be found", _TRUNCATE);
+        return 0;
+    }
+    _snprintf_s(work, sizeof work, _TRUNCATE, "%ssnapmap-plus-add-%lu-%llu", tmpu, GetCurrentProcessId(), GetTickCount64());
+    free(tmpu);
+    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\%s", work, mu_leaf(folder));
+    src = sh_mb_wpath(folder);
+    wwork = sh_mb_wpath(work);
+    wcopy = sh_mb_wpath(copy);
+    if (!src || !wwork || !wcopy) strncpy_s(cause, cause_cap, "out of memory", _TRUNCATE);
+    else if (!CreateDirectoryW(wwork, NULL) || !mu_copy_tree(src, wcopy, 0))
+        _snprintf_s(cause, cause_cap, _TRUNCATE, "its files could not be copied (error %lu); close any program using them",
+                    GetLastError());
+    else ok = sh_ms_install_from_folder(copy, resolver, name_out, name_cap, stats, bundle_out, cause, cause_cap);
+    if (wwork) mu_remove_tree(wwork);
+    free(src);
+    free(wwork);
+    free(wcopy);
+    return ok;
+}
+
+/* addToMine (arg: a folder of a downloaded map's mods): copy it to the root
+ * of mods\ as one of the player's own mods, which their own maps can then use
+ * (decision 23). A salt the root already holds is that folder. */
+static int mu_add_mine(const char *key)
+{
+    const int action = SH_MODS_ACT_ADD_MINE;
+    sh_ms_list l;
+    const sh_ms_entry *e, *own;
+    char name[300], folder[MAX_PATH * 4], ownname[SH_MS_NAME_MAX + 1] = "", made[SH_MS_NAME_MAX + 1] = "",
+         cause[SH_MB_CAUSE_MAX] = "", msg[SH_MB_CAUSE_MAX + 900];
+    int place, usable, ok;
+    mu_buf x;
+    memset(&x, 0, sizeof x);
+    if (!key || !key[0]) return mu_simple_result(action, 0, "Select a mod first.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "Snapmap+ cannot read your mods folder; press Refresh.");
+    e = mu_entry_named(&l, key);
+    if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
+    {
+        char *n = mu_folder_name(e);
+        strncpy_s(name, sizeof name, n ? n : mu_leaf(e->folder), _TRUNCATE);
+        free(n);
+    }
+    strncpy_s(folder, sizeof folder, e->folder, _TRUNCATE);
+    place = e->place[0] != 0;
+    usable = e->loaded && sh_ms_entry_usable(e);
+    own = e->salt[0] ? sh_ms_find_salt(&l, e->salt, NULL, NULL) : NULL;
+    if (own) strncpy_s(ownname, sizeof ownname, own->name, _TRUNCATE);
+    sh_ms_list_free(&l);
+    if (!place) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already one of your mods.", name);
+        mu_kstr(&x, "key", key, 0);
+        return mu_file_result(action, 1, msg, &x, 0);
+    }
+    if (ownname[0]) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already one of your mods, in mods\\%s.", name, ownname);
+        mu_kstr(&x, "key", ownname, 0);
+        return mu_file_result(action, 1, msg, &x, 0);
+    }
+    if (!usable) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s cannot be added to your mods while it cannot be used; press Refresh.", name);
+        return mu_simple_result(action, 0, msg);
+    }
+    {
+        sh_mb_resolver r;
+        sh_ms_install_stats st;
+        sh_mb_bundle bd;
+        mu_stock stock = { 0 };
+        memset(&st, 0, sizeof st);
+        memset(&bd, 0, sizeof bd);
+        r.installed = NULL;
+        r.installed_context = NULL;
+        r.stock = mu_stock_exists;
+        r.stock_context = &stock;
+        mu_log("add to my mods %s: copying to the root", key);
+        ok = sh_ms_install_to_root(folder, &r, made, sizeof made, &st, &bd, cause, sizeof cause);
+        sh_mb_free(&bd);
+    }
+    if (ok) {
+        mu_log("add to my mods %s: now mods\\%s", key, made);
+        mu_sync();
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Added %s to your mods, in mods\\%s; your own maps can use it now.", name, made);
+    } else {
+        mu_log("add to my mods %s: refused: %s", key, cause);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not added to your mods: %s.", name, cause[0] ? cause : "it could not be copied");
+    }
+    mu_kstr(&x, "key", ok ? made : "", 0);
+    return mu_file_result(action, ok, msg, &x, ok);
+}
+
 /* newMod: a mod folder named after the mod with a working example (an
  * entityDef and its Toybox row), built at once by the rescan, so the list
  * shows it ready and the Toybox has its row. There is no folder watcher: the
@@ -4592,6 +4766,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_file_text(arg);
     case SH_MODS_ACT_NEW_MOD:
         return mu_new_mod(arg);
+    case SH_MODS_ACT_ADD_MINE:
+        return mu_add_mine(arg);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

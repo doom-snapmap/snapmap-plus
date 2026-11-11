@@ -290,6 +290,45 @@ void sh_modui_note_changed(void);
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
+/* ---- For integration: what this file needs from the store and serving side.
+ * Each is declared here with the exact signature the window calls; where a
+ * thin implementation lives in modui.c until the owning side provides it, the
+ * owner's definition replaces it at integration. */
+struct sh_mb_resolver;
+struct sh_mb_bundle;
+struct sh_ms_install_stats;
+
+/* Install a folder of the store (a mod a downloaded map or an imported ZIP
+ * brought, mods\maps\<map>\<mod>) at the root of mods\ as one of the player's
+ * own mods, as sh_ms_install_from_folder installs a folder from elsewhere:
+ * every file it holds copied to mods\<its name> (" (2)" when taken) under its
+ * own salt, built, the source untouched. Returns 1 with the folder name under
+ * mods\, else 0 with the plain cause. Any thread; takes the store lock. Add
+ * to my mods calls it; decision 12's install of a prefab's mods at the root is
+ * the same step. Thin implementation: modui.c (copies the folder outside the
+ * store, then installs that copy). */
+int sh_ms_install_to_root(const char *folder, const struct sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          struct sh_ms_install_stats *stats, struct sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+
+/* How many of the player's saved maps record `place` ("maps\<segment>") as
+ * where they find their mods (decision 11's record), or -1 when it cannot be
+ * told. The Mods tab's short view of a downloaded map's mods says whether the
+ * start-up cleanup keeps them. Serving or store side; no implementation here:
+ * until it lands the short view states the cleanup rule without a count. */
+int sh_ms_place_saved_maps(const char *place);
+
+/* The start-up cleanup of decision 22: every place under mods\maps\ that no
+ * saved map of the player records and whose map was not played for `days`
+ * days is removed (playing the map again downloads it again). Returns how
+ * many places went, -1 when the store cannot be read. Store side, called at
+ * boot; the window only describes it. */
+int sh_ms_places_prune(unsigned days);
+
+/* The published-map gate sets the launched map's place through
+ * sh_modui_scope_launch_at today. With decision 11 the place is a fact of the
+ * map, set from its record at every load, so the gate sets it and calls
+ * sh_modui_scope_launch; sh_modui_scope_launch_at then goes. */
+
 #ifdef SH_MODUI_TESTING
 /* The hub launch state machine (modui.c): "none", "launched", "loading",
  * "playing", "running" or "ended". */

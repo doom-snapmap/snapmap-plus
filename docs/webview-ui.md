@@ -508,6 +508,7 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |
 | `uninstallPreview`, `uninstall` | The dry run and the uninstall: the open map cleaned of the mod, its undo history cleared, the folder moved to the Recycle Bin, the rescan. |
 | `modFiles`, `modFileText` | The Files view's reads (no fresh document follows). |
+| `addToMine` | A downloaded map's mod (a folder under `mods\maps\`): copied to the root of `mods\` as one of the player's own mods under the same salt, which their own maps then use; `data` is `{key}`, the new folder. A mod already at the root answers its folder. File work off the game's thread, like Install. |
 | `newMod` | `arg` is a display name: `mods\<name>\` with `mod.json`, a new salt and a working example (an entityDef and its Toybox row), built at once; `data` is `{key, file}`. |
 
 An action the host does not know is answered "Unknown mods action."; an action number the

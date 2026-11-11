@@ -1085,6 +1085,11 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy came with the map Hell Arena, so only that map uses it."));
         free(doc);
         g_map_on = 0;
+        /* Add to my mods: the salt is already yours, so that folder is the one. */
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"R2 Imp copy is already one of your mods, in "
+                       "mods\\\\alex.r2-imp.\"") && has(doc, "\"key\":\"alex.r2-imp\""));
+        free(doc);
         /* The console's uninstall names the mod: every folder of it, yours and the map's copy. */
         {
             const char *un_argv[] = { "uninstall", "alex.r2-imp" };
@@ -1100,6 +1105,64 @@ int main(int argc, char **argv)
         free(doc);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, name);
         CHECK(!mt_exists(path));
+    }
+
+    printf("-- Add to my mods: a downloaded map's mod copied to the root, off the game's thread\n");
+    {
+        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "", key[600], esc[800];
+        sh_ms_install_stats st;
+        sh_ms_place place;
+        sh_mb_bundle bd;
+        sh_mb_resolver r;
+        size_t q, w = 0;
+        _snprintf_s(solo, sizeof solo, _TRUNCATE, "%s\\solo", g_root);
+        put_fresh_mod(solo, "Solo", "solo", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tsolo = 1;\r\n}\r\n");
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        _snprintf_s(recv, sizeof recv, _TRUNCATE, "%s\\authoring\\solo_received", tmp);
+        CHECK(mt_copy_tree(solo, recv));
+        memset(&st, 0, sizeof st);
+        memset(&place, 0, sizeof place);
+        memset(&bd, 0, sizeof bd);
+        memset(&r, 0, sizeof r);
+        r.stock = stock_cb;
+        place.title = "Solo Arena";
+        place.map_id = "6ae40b378bf5037d3d63bd77";
+        CHECK(sh_ms_install_placed(recv, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+        sh_mb_free(&bd);
+        CHECK(sh_ms_delete_mod_folder(solo, cause, sizeof cause) != 0);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
+        esc[w] = 0;
+        g_main = 0;
+        g_refreshes = 0;
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"Added Solo to your mods, in mods\\\\Solo; your own "
+                       "maps can use it now.\"") && has(doc, "\"apply\":true") && g_refreshes == 0);
+        free(doc);
+        g_main = 1;
+        doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true") && has(doc, "\"key\":\"Solo\"") && g_refreshes == 1);
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "Solo", "\"state\":\"ready\"") && bundle_has(doc, "Solo", "\"place\":\"\""));
+        CHECK(bundle_has(doc, esc, "\"state\":\"ready\""));   /* the map's copy stays for its map */
+        {
+            char a[16] = "", b[16] = "";
+            row_salt(doc, "Solo", a, sizeof a);
+            row_salt(doc, esc, b, sizeof b);
+            CHECK(a[0] && !strcmp(a, b));   /* one mod: the same salt at the root and in the place */
+            note_salt(a);
+        }
+        CHECK(doc_prose_ok(doc));
+        free(doc);
+        /* Your own mod: nothing to add. */
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, "Solo");
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is already one of your mods.\""));
+        free(doc);
+        strcpy_s(key, sizeof key, name);
+        free(run_doc(SH_MODS_ACT_UNINSTALL, key));
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "Solo"));
+        mt_remove_tree(recv);
     }
 
     printf("-- the open map: rows by salt, the asset rule's states, plain causes\n");

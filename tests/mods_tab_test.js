@@ -216,7 +216,18 @@ function standIn(initial, folders) {
     }
     var r = mapModOf(key), b = modOf(key);
     if (a === 'rescan') msg = '';
-    else if (a === 'mapAddMod') {
+    else if (a === 'addToMine') {
+      if (!b) { ok = false; msg = 'That mod is no longer installed.'; }
+      else if (!b.place) msg = nameOf(key) + ' is already one of your mods.';
+      else {
+        var mine = JSON.parse(JSON.stringify(b));
+        mine.key = mine.folder = b.folder;
+        mine.place = mine.placeTitle = '';
+        mods().push(mine);
+        data.key = mine.key;
+        msg = 'Added ' + nameOf(key) + ' to your mods, in mods\\' + mine.key + '; your own maps can use it now.';
+      }
+    } else if (a === 'mapAddMod') {
       if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
       else if (!b) { ok = false; msg = key + ' is not installed.'; }
       else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ', so only that map uses it.'; }
@@ -581,15 +592,33 @@ test('details: a mod that cannot be used says what is wrong and what to do, plai
                    ['about', 'adds', 'requirements', 'files', 'sharing'], 'no derived facts for a mod that is not built');
   assert.equal(h.nodes.modsUseBtn.disabled, true, 'a mod that cannot be used is not added to a map');
 });
-test('details: a downloaded map\'s mod: where it came from, not rebuilt, not used in your maps', () => {
+test('details: a downloaded map\'s mod has the short view: its name, its map, Add to my mods and Remove', () => {
   const h = live();
   h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
-  assert.match(section(h, 'about').textContent, /Came with Hell Guard Arena/);
-  assert.match(section(h, 'changes').textContent, /Replaces 1 game file for the maps that use it\./);
-  assert.equal(h.nodes.modsUseBtn.disabled, true);
-  assert.match(h.nodes.modsUseBtn.title, /only that map uses it/);
-  assert.equal(section(h, 'sharing'), undefined, 'your published maps do not use a downloaded copy');
-  assert.equal(h.nodes.modsUninstallBtn.disabled, false, 'a downloaded copy can be uninstalled');
+  const d = h.nodes.modsDetail;
+  assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
+  assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Came with the map Hell Guard Arena; only that map uses it.');
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about'], 'nothing written for authors');
+  assert.equal(section(h, 'about').textContent, 'About Came with Hell Guard Arena ' + modsTab.PLACE_CLEANUP_TEXT);
+  assert.equal(h.nodes.modsFilesBtn.style.display, 'none');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, false);
+  const add = h.nodes.modsUseBtn;
+  assert.equal(add.textContent, 'Add to my mods');
+  assert.equal(add.style.display, '');
+  assert.equal(add.disabled, false);
+  assert.equal(add.title, modsTab.ADD_MINE_TITLE);
+  add.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'addToMine', arg: 'maps\\Hell Guard Arena\\Hell Guards'});
+  assert.match(h.toasts.pop().text, /^Added Hell Guards to your mods, in mods\\Hell Guards; your own maps can use it now\.$/);
+  assert.equal(h.ui.state().selectedKey, 'Hell Guards', 'your new copy is selected');
+  assert.equal(h.nodes.modsUseBtn.textContent, 'Use in this map');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Uninstall');
+  /* Remove: the uninstall confirmation, named Remove */
+  h.ui.select('maps\\Hell Guard Arena\\Lava Floor');
+  h.nodes.modsUninstallBtn.click();
+  assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
+  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
 test('details: Copy mod id hands the id to the page, for authors', () => {
   const copied = [];

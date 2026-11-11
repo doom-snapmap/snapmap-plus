@@ -3059,7 +3059,8 @@ static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 /* The actions whose file work runs on the worker itself (modui.h): never through run_on_main. */
 static bool ui_mods_file_action(int action)
 {
-    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN;
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
+           action == SH_MODS_ACT_ADD_MINE;
 }
 
 static DWORD WINAPI ui_mods_thread(LPVOID)
@@ -3130,6 +3131,7 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_FILES:              return L"modFiles";
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
     case SH_MODS_ACT_NEW_MOD:            return L"newMod";
+    case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
     default:                      return L"";
     }
 }
@@ -3154,6 +3156,7 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"modFiles")            return SH_MODS_ACT_FILES;
     if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
     if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
+    if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
     return 0;
 }
 
