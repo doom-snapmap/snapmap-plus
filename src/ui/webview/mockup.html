@@ -181,7 +181,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <span class="hint" id="dirtyNote"></span>
           <button type="button" class="btn icon icon-button" id="flyToBtn" disabled title="Fly to entity: switch to Object mode and put the cursor on this entity" aria-label="Fly to entity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-locate"></use></svg></button>
           <button class="btn" id="revertBtn" disabled>Revert</button>
-          <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
+          <button class="btn primary" id="saveBtn" disabled title="Write these changes into the map">Save</button>
         </div>
       </div>
       <div class="panel-body placeholder" id="selInfo">Select an entity from the list.</div>
@@ -198,10 +198,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="field grow"><label>Classname</label><div class="combo grow" id="cClassname"><input type="text" id="fClassname" autocomplete="off"><button type="button" class="combo-arrow icon-button" aria-label="Show classname options"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-chevron-down"></use></svg></button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
         </div>
-        <div class="section-label"><span>Decl Text</span>
+        <div class="section-label"><span>Declaration</span>
           <span class="prob-count" id="probCount"></span>
           <div class="focus-head" id="focusHead"></div>
-          <button type="button" class="btn icon icon-button" id="declFocusBtn" title="Expand Decl Text editor" aria-label="Expand Decl Text editor"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-maximize-2"></use></svg></button>
+          <button type="button" class="btn icon icon-button" id="declFocusBtn" title="Expand the declaration editor" aria-label="Expand the declaration editor"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-maximize-2"></use></svg></button>
         </div>
         <div class="code-editor" id="codeEditor">
           <div class="ce-gutter" aria-hidden="true"><div id="declGutter"></div></div>
@@ -419,12 +419,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 </div>
 
 <div class="ctxmenu" id="ctxmenu" role="menu" aria-label="Actions"></div>
+<div class="install-mismatch" id="installMismatch" role="alert" hidden>
+  <div class="modal-title">Reinstall Snapmap+</div>
+  <div>Its two files do not match: they come from different releases. Run the Snapmap+ installer again, then restart DOOM.</div>
+</div>
 <div id="toastHost" role="status" aria-live="polite"></div>
 <div class="rz rz-t"></div><div class="rz rz-b"></div><div class="rz rz-l"></div><div class="rz rz-r"></div>
 <div class="rz rz-tl"></div><div class="rz rz-tr"></div><div class="rz rz-bl"></div><div class="rz rz-br"></div>
 <!-- Expanded Decl Text reuses the live #editor node inside this standard modal host. -->
 <div class="modal-overlay" id="declFocusModal" style="display:none;" aria-hidden="true">
-  <div class="modal decl-focus-modal" role="dialog" aria-modal="true" aria-label="Expanded Decl Text editor">
+  <div class="modal decl-focus-modal" role="dialog" aria-modal="true" aria-label="Declaration editor">
     <div class="decl-focus-host" id="declFocusHost"></div>
   </div>
 </div>
@@ -1200,7 +1204,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     tlCreatePending = null;
     if (d.result === -2) toast('Move the mouse off that entity first -- the editor will not paste while hovering one', 'warn');
     else if (d.result === -3) toast('Deselect in the 3D view first -- a new timeline cannot be pasted over a selection', 'warn');
-    else toast('Could not stage a new timeline (see log)', 'err');
+    else toast('Could not start a new timeline. ' + EDITOR_NOT_ANSWERED, 'err');
   }
   // After a placement the rescan lists the new timeline: select and open it.
   function tlCheckCreated() {
@@ -1444,7 +1448,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     // Without a schema for this position, preserve the raw-pair display.
     var pairs = tlArgPairs(argVal);
-    if (pairs.length === 0) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val muted">(not editable yet)</span></div>';
+    if (pairs.length === 0) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val muted">(read only)</span></div>';
     // ONE pair -- prefer the SCHEMA label over the raw pair label (tlArgPairs would give the coincidental
     // on-disk key, not the parameter's actual name -- less useful, even if not wrong).
     if (pairs.length === 1) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val">' + esc(pairs[0].value) + '</span></div>';
@@ -1713,7 +1717,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var bodyEl = document.getElementById('tlBody');
     if (!head || !tabsEl || !bodyEl) return;
     if (!d.ok) {
-      tlModel = null; head.textContent = 'Could not open this timeline (see log).'; tabsEl.innerHTML = ''; bodyEl.innerHTML = '';
+      tlModel = null; head.textContent = 'This timeline could not be read from the map. Select it again.'; tabsEl.innerHTML = ''; bodyEl.innerHTML = '';
       document.getElementById('revertTimelineBtn').disabled = true;
       document.getElementById('saveTimelineBtn').disabled = true;   // Disable Save when no timeline model is available.
       return;
@@ -1770,7 +1774,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
        + '<div class="muted" id="tlRunsOnNote" style="margin:2px 0 6px;">' + esc(tlRuntimeTargetNote(tab.entity)) + '</div>';
 
     // Append a blank event to the local tab model; Save performs the native commit.
-    h += '<div><button type="button" class="btn" id="tlAddEventcall">Add Eventcall</button></div>';
+    h += '<div><button type="button" class="btn" id="tlAddEventcall">Add event</button></div>';
 
     h += '<div class="event-list">';
     if (tab.events.length === 0) {
@@ -1900,7 +1904,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (d.status === S.DISPATCHED)
       return {text: 'Deleted ' + d.released + ' entit' + (d.released === 1 ? 'y' : 'ies'), level: 'ok'};
     if (d.status === S.INCOMPLETE)
-      return {text: 'Deleted ' + d.released + ' of ' + d.targets + '; see the log', level: 'err'};
+      return {text: 'Deleted ' + d.released + ' of ' + d.targets + '; the rest are still selected in the editor', level: 'err'};
     if (d.status === S.BUSY)
       return d.busy === DELETE_BUSY_HOLDING
         ? {text: 'Place or cancel what you are holding in the 3D view first, then delete', level: 'warn'}
@@ -1909,12 +1913,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (d.status === S.RESTRICTED) return {text: 'Not deleted: this map does not allow deleting objects here', level: 'warn'};
     if (d.status === S.PORTAL) return {text: 'Not deleted: room doors and caps belong to their room', level: 'warn'};
     if (d.status === S.PROTECTED) return {text: 'Not deleted: the selection includes an object the editor protects', level: 'warn'};
-    if (d.status === S.REFERENCED) return {text: 'Not deleted: another object still uses this one', level: 'warn'};
+    if (d.status === S.REFERENCED) return {text: 'Not deleted: another object still uses this one. Remove its wires or references first', level: 'warn'};
     if (d.status === S.NOT_ENTITY || d.status === S.NOT_READY)
       return {text: 'Not deleted: switch to object editing in the 3D editor first', level: 'warn'};
     if (d.status === S.UNAVAILABLE)
-      return {text: 'Delete is unavailable; reinstall Snapmap+ so both of its files match', level: 'err'};
-    return {text: 'Delete failed (see log)', level: 'err'};
+      return {text: 'Delete is not available: Snapmap+ could not find the editor\'s delete in this game. Use Send feedback', level: 'err'};
+    return {text: 'Not deleted: the editor answered with code ' + d.status + '. Try again; if it repeats, use Send feedback', level: 'err'};
   }
   function applyDeleteResult(d) {
     if (!deleteInFlight) return;   /* nothing outstanding: a stale or repeated reply changes nothing */
@@ -1944,7 +1948,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     });
     if (n === 1) addCtx('Fly to entity', function(){ flyToEntity(ids[0]); });
     addCtx('Delete' + (n>1?' ('+n+')':''), function(){ requestDelete(ids); });
-    addCtx('Push to stack 0' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
+    addCtx('Add to SnapStack (stack 0)' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
     addCtx('Clear SnapStack (stack 0)', function(){ post({cmd:'clearStack'}); });   // the whole stack, not just this selection
     openCtx(x, y);
   }
@@ -2070,7 +2074,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (eid !== loadedEid) post({cmd:'select', eid: primaryEid});
     }
     else if (n === 0) { primaryEid = -1; showPlaceholder('Select an entity from the list.'); }
-    else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its decl.<br><span style="opacity:0.75;">Right-click for actions on all ' + n + '.</span>'); }
+    else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its properties.<br><span style="opacity:0.75;">Right-click for actions on all ' + n + '.</span>'); }
     if (push !== false) pushSelectionToEditor();
     // The asset browser applies to ONE entity, so it follows the same single-selection rule the
     // decl editor does.
@@ -2093,7 +2097,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!d.ok || d.truncated) {
       showPlaceholder(d.truncated
         ? 'This entity declaration exceeds the 32 MiB editor safety limit and was not opened.<br><span style="opacity:0.75;">The declaration remains unchanged in the map.</span>'
-        : 'Could not read this entity state.');
+        : 'This entity could not be read; select it again.');
       return;
     }
     var decl = declLanguage.naturalize(d.decl || '');
@@ -2203,11 +2207,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (kind !== 'err') setTimeout(dismiss, 4000);
   }
 
+  // The words for a file change Windows refused: why, then what to do. q is the quoted name.
+  function fsFailText(d, q, what) {
+    if (d.result === -1) return q + ' cannot be used as a ' + (what || 'name') + ' in Windows. Choose another name.';
+    if (d.reason === 'exists') return 'Something named ' + q + ' is already there. Choose another name.';
+    if (d.reason === 'inUse') return q + ' is open in another program. Close it and try again.';
+    if (d.reason === 'missing') return q + ' is no longer there. The list has been refreshed.';
+    return 'Windows did not change ' + q + '. Try again; if it keeps failing, use Send feedback.';
+  }
+  var EDITOR_NOT_ANSWERED = 'The editor did not answer. Open a map in the SnapMap editor and try again.';
+
   // ---- messages from native ----
   function onMessage(d) {
     if (typeof modsUi !== 'undefined' && modsUi.onMessage(d)) return;
+    if (d.kind === 'installMismatch') {
+      document.getElementById('installMismatch').hidden = false;
+      return;
+    }
+    if (d.kind === 'closeRefused') { toast('The Snapmap+ window closes with the SnapMap editor.'); return; }
     if (d.kind === 'navmeshState') {
-      if (!d.ok) { navmeshNote('This build has no navigation view.'); return; }
+      if (!d.ok) { navmeshNote('Open a map in the editor to see its navmesh.'); return; }
       var st = d.state || {};
       var empty = !st.floors && !st.walls;
       var red = st.red || 0, rooms = st.rooms || 0, total = st.total || 0;
@@ -2216,12 +2235,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var leftNote = left ? '. ' + left + ' box' + (left === 1 ? '' : 'es') + ' left out' : '';
       navmeshNote(st.pending ? 'Updating...'
                 : st.refused ? 'Could not read this map' + (st.note ? ': ' + st.note : '')
-                               + '. Run sh_navmesh for the reason'
                 : red        ? red + ' volume' + (red === 1 ? '' : 's')
                                + ' in conflict, shown red' + note
                 : rooms      ? (total > rooms ? (total - rooms) + ' of ' + total + ' rooms built'
                                               : 'No room could be built')
-                               + note + leftNote + '. Run sh_navmesh for the reasons'
+                               + note + leftNote
                 : st.partial ? 'Navmesh built with parts left out, shown amber' + note
                                + leftNote
                 : left       ? 'Navmesh built; ' + left + ' box' + (left === 1 ? '' : 'es')
@@ -2329,9 +2347,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         inhBox.value = d.inherit; loaded.inherit = d.inherit; updateDirty();
       }
     } else if (d.kind === 'saveResult') {
-      if (d.result === 1) toast('Saved to decl', 'ok');
-      else if (d.result === 0) toast('Save refused; check the class, inherit and engine log', 'warn');
-      else toast('Save failed (see log)', 'err');
+      if (d.result === 1) toast('Saved to the map. Save the map in SnapMap to keep it.', 'ok');
+      else if (d.result === 0) toast('The editor refused this class and inherit pair. Pick both from their lists and save again.', 'warn');
+      else toast('This entity could not be saved: it may have been deleted. Select it again and retry.', 'err');
     } else if (d.kind === 'reportResult') {
       if (crashInFlight) {   // the crash dialog and the feedback dialog share the relay round-trip
         crashSendDone(d);
@@ -2343,7 +2361,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                       : 'Report sent -- thank you!', 'ok');
         } else {
           // keep the dialog open with everything the user typed -- nothing is lost on a failed send
-          toast('Could not send the report -- check your connection and try again', 'err');
+          toast(d.reason === 'tooLarge' ? 'The report is too long to send. Shorten the details and send again.'
+                                        : 'Could not reach the feedback service. Check your internet connection and send again.', 'err');
         }
       }
     } else if (d.kind === 'crashPending') {
@@ -2356,8 +2375,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'faultRecovered') {
       // Show the nonterminal record notice. Retain the record for diagnostics.
       var nrec = d.count || 1;
-      toast(nrec > 1 ? ('Recovered from ' + nrec + ' internal faults -- the editor kept running')
-                     : 'Recovered from an internal fault -- the editor kept running', 'warn');
+      toast((nrec > 1 ? 'Snapmap+ recovered from ' + nrec + ' internal faults' : 'Snapmap+ recovered from an internal fault')
+            + ' and the editor kept running. Save your map soon; if it happens again, use Send feedback.', 'warn');
     } else if (d.kind === 'editorSelect') {
       selectedEids = {}; var esel = d.eids || []; for (var ei=0; ei<esel.length; ei++) selectedEids[esel[ei]] = true;
       anchorEid = esel.length ? esel[esel.length-1] : -1;
@@ -2420,8 +2439,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var activeRef = tlModel.tabs[tlModel.active].entity;
         if (activeRef && tlResolveEntityEid(activeRef) === d.eid) renderTlBody();
       }
-    } else if (d.kind === 'info') {
-      toast(d.text || '', 'warn');
     } else if (d.kind === 'camera') {
       setCamField('camX', d.x); setCamField('camY', d.y); setCamField('camZ', d.z);
     } else if (d.kind === 'prefabs') {
@@ -2468,7 +2485,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else if (d.result === 0) toast('A prefab named "' + d.name + '" already exists', 'warn');
       else if (d.result === -2) toast('Switch to Blueprint mode (Tab in the editor) to save modules as a prefab', 'warn');
       else if (d.result === -3) toast('Select one or more modules in Blueprint first', 'warn');
-      else toast('Could not create "' + d.name + '" (see log)', 'err');
+      else toast('Could not save the selected modules as "' + d.name + '". Try again; if it keeps failing, use Send feedback.', 'err');
     } else if (d.kind === 'prefabDetail') {
       renderPrefabDetail(d);
     } else if (d.kind === 'budgetTable') {
@@ -2524,26 +2541,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var createdMeta = pendingCreateMeta; pendingCreateMeta = null;
       if (d.result === 1 && createdMeta && createdMeta.name === d.name)
         post({cmd:'savePrefabMeta', name: d.name, folder: '', body: createdMeta.body});
-      if (d.result === 1 && d.grab === 'corrected')
-        toast('Created "' + d.name + '" (grab point corrected: the view centre missed the hovered entity, so it is anchored on that entity)', 'ok');
-      else if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
+      if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else if (d.result === 4) toast('The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again', 'warn');
       else if (d.result === 5) toast('The editor would not copy this selection -- select every entity wired to it or that it refers to, then try again', 'warn');
       else if (d.result === 3) toast('Could not anchor "' + d.name + '" -- point the view centre at the hovered entity and try again', 'warn');
-      else toast('Could not create "' + d.name + '" (see log)', 'err');
+      else if (d.result === 6) toast('Could not write "' + d.name + '" whole: the disk may be full or the folder read-only. Free some space and try again.', 'err');
+      else if (d.result === 7) toast(EDITOR_NOT_ANSWERED, 'err');
+      else toast(fsFailText(d, '"' + d.name + '"', 'prefab name'), 'err');
     } else if (d.kind === 'setDisplayNamesResult') {
-      if (d.failed) toast('Could not rename ' + d.failed + ' timeline' + (d.failed === 1 ? '' : 's') + ' (editor down?)', 'err');
+      if (d.failed) toast('Could not rename ' + d.failed + ' timeline' + (d.failed === 1 ? '' : 's') + '. ' + EDITOR_NOT_ANSWERED, 'err');
     } else if (d.kind === 'flyToResult') {
       if (d.result === 1) toast('Flying to entity ' + d.eid, 'ok');
-      else toast('Could not fly to that entity (editor down?)', 'err');
+      else toast(EDITOR_NOT_ANSWERED, 'err');
     } else if (d.kind === 'pushStackResult') {
-      if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
-      else toast('Push to stack 0: ' + d.count + ' selected -- failed (editor down, or nothing selected)', 'err');
+      if (d.result === 1) toast('Added ' + d.count + ' entit' + (d.count === 1 ? 'y' : 'ies') + ' to SnapStack (stack 0). The guide\'s SnapStack section lists what you can do with it.', 'ok');
+      else toast('Could not add to SnapStack: nothing was selected or the editor did not answer.', 'err');
     } else if (d.kind === 'clearStackResult') {
-      if (d.result === 1) toast('Cleared stack 0 (' + d.count + ' id' + (d.count === 1 ? '' : 's') + ' removed)', 'ok');
-      else toast('Clear stack 0 failed (editor down?)', 'err');
+      if (d.result === 1) toast('Cleared SnapStack (' + d.count + ' removed)', 'ok');
+      else toast('Could not clear SnapStack. ' + EDITOR_NOT_ANSWERED, 'err');
     } else if (d.kind === 'loadPrefabResult') {
       /* An object prefab's result comes once the game thread has queued the native paste (in
          hand) or only staged it (Ctrl+V), with the reason (pfPlaceToast). A prefab whose mods
@@ -2552,27 +2569,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (pml) toast(pml.text, pml.level);
       else if (d.prefabKind === 'modules') {
         if (d.result === 1) toast('"' + d.name + '" is under the cursor -- move it into place and press Space, or Esc to cancel', 'ok');
-        else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
+        else if (d.result === -1) toast('"' + d.name + '" could not be read: the file is missing, damaged or in use.', 'err');
         else if (d.result === -4) toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn');
         else if (d.result === -5) toast('"' + d.name + '" does not fit: the map would exceed its module budget', 'warn');
         else if (d.result === -6) toast(d.message || ('"' + d.name + '" needs modules that are not in your palette'), 'warn');
-        else toast('The editor refused to place "' + d.name + '" (see log)', 'err');
+        else toast('The editor did not place "' + d.name + '". Open the map in Blueprint mode and try again.', 'err');
       }
       else { var plt = pfPlaceToast(d); toast(plt.text, plt.level); }
     } else if (d.kind === 'deletePrefabResult') {
       if (d.result === 1) {
         toast('Moved "' + d.name + '" to the Recycle Bin', 'ok');
         clearPrefabSelection();
-      } else if (d.result === 0) toast('Could not delete "' + d.name + '" (missing or in use)', 'err');
-      else toast('Could not delete "' + d.name + '" (see log)', 'err');
+      } else toast(fsFailText(d, '"' + d.name + '"'), 'err');
     } else if (d.kind === 'renamePrefabResult') {
       if (d.result === 1) toast('Renamed to "' + d.newName + '"', 'ok');
-      else if (d.result === 0) toast('Could not rename (the name may already exist)', 'err');
-      else toast('Could not rename "' + d.oldName + '" (see log)', 'err');
+      else toast(d.result === -1 || d.reason === 'exists' ? fsFailText(d, '"' + d.newName + '"', 'prefab name')
+                                                          : fsFailText(d, '"' + d.oldName + '"'), 'err');
     } else if (d.kind === 'createFolderResult') {
       if (d.result === 1) { toast('Created folder "' + d.name + '"', 'ok'); pfSetFolderOpen(d.name, true); }
-      else if (d.result === 0) toast('A folder named "' + d.name + '" already exists', 'warn');
-      else toast('Could not create folder "' + d.name + '" (see log)', 'err');
+      else if (d.reason === 'exists') toast('A folder named "' + d.name + '" already exists', 'warn');
+      else toast(fsFailText(d, '"' + d.name + '"', 'folder name'), 'err');
     } else if (d.kind === 'renameFolderResult') {
       if (d.result === 1) {
         toast('Renamed folder to "' + d.newName + '"', 'ok');
@@ -2580,29 +2596,35 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         for (var rfi = 0; rfi < pfSel.length; rfi++) if (pfSel[rfi].folder === d.oldName) pfSel[rfi].folder = d.newName;
         if (selectedPrefabFolder === d.oldName) selectedPrefabFolder = d.newName;
       }
-      else if (d.result === 0) toast('Could not rename folder (the name may already exist)', 'err');
-      else toast('Could not rename folder "' + d.oldName + '" (see log)', 'err');
+      else toast(d.result === -1 || d.reason === 'exists' ? fsFailText(d, '"' + d.newName + '"', 'folder name')
+                                                          : fsFailText(d, '"' + d.oldName + '"'), 'err');
     } else if (d.kind === 'deleteFolderResult') {
       if (d.result === 1) toast('Folder deleted', 'ok');
-      else if (d.result === 0) toast('Could not fully delete the folder (a name collision left a file behind)', 'err');
-      else toast('Could not delete folder (see log)', 'err');
+      else if (d.result === 0) toast('The folder "' + d.name + '" was not deleted: a prefab in it has the same name as one in the root list. Rename one of them and try again.', 'err');
+      else toast('The folder "' + d.name + '" could not be deleted. Try again; if it keeps failing, use Send feedback.', 'err');
     } else if (d.kind === 'movePrefabResult') {
       if (d.result === 1) { toast('Moved "' + d.name + '"' + (d.toFolder ? ' to "' + d.toFolder + '"' : ' to the root list'), 'ok'); pfAfterMove(d.toFolder || '', [d.name]); }
-      else toast('Could not move "' + d.name + '" (a name collision, most likely)', 'err');
+      else toast(d.reason === 'exists' ? 'A prefab named "' + d.name + '" is already in ' + (d.toFolder ? '"' + d.toFolder + '"' : 'the root list') + '. Rename one of them first.'
+                                       : fsFailText(d, '"' + d.name + '"'), 'err');
     } else if (d.kind === 'movePrefabsResult') {
       var movedNames = d.moved || [];
       if (movedNames.length) { toast('Moved ' + movedNames.length + ' prefab' + (movedNames.length === 1 ? '' : 's') + (d.toFolder ? ' to "' + d.toFolder + '"' : ' to the root list'), 'ok'); pfAfterMove(d.toFolder || '', movedNames); }
-      if (d.failed) toast('Could not move ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ' (a name collision, most likely)', 'err');
+      if (d.failed) toast('Could not move ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ': '
+                          + (d.reason === 'exists' ? 'a prefab with the same name is already there. Rename one of them first.'
+                             : d.reason === 'inUse' ? 'open in another program. Close it and try again.'
+                             : 'Windows refused. Try again.'), 'err');
     } else if (d.kind === 'deletePrefabsResult') {
       if (d.deleted) toast('Moved ' + d.deleted + ' prefab' + (d.deleted === 1 ? '' : 's') + ' to the Recycle Bin', 'ok');
-      if (d.failed) toast('Could not delete ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ' (missing or in use)', 'err');
+      if (d.failed) toast('Could not delete ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ': '
+                          + (d.reason === 'inUse' ? 'open in another program. Close it and try again.'
+                             : d.reason === 'missing' ? 'no longer there.' : 'Windows refused. Try again.'), 'err');
       clearPrefabSelection();
     } else if (d.kind === 'timelineData') {
       if (tlSavePendingEid === d.eid) {
         tlSavePendingEid = -1;
-        if (!d.ok) { toast('Save failed: could not re-read the entity (editor down?)', 'err'); return; }
+        if (!d.ok) { toast('The timeline could not be read back from the map. ' + EDITOR_NOT_ANSWERED, 'err'); return; }
         var patched = tlBuildPatchedEntityJson(d.json);
-        if (!patched) { toast('Save failed: could not patch the entity JSON', 'err'); return; }
+        if (!patched) { toast('This timeline could not be saved: the editor sent back an entity it cannot hold events. Select it again.', 'err'); return; }
         post({cmd:'saveTimeline', eid: d.eid, json: patched});
       } else {
         renderTimelineEditor(d.ok ? parseTimeline(d.eid, d.json) : {eid:d.eid, ok:false});
@@ -2611,7 +2633,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // Report Save refusal directly; a newly placed timeline does not need a reload workaround.
       if (d.result === 1) { toast('Timeline saved', 'ok'); tlDirty = false; }   // just-committed local model is the new clean baseline
       else if (d.result === -2) toast('Save is still running. Wait for the engine result before saving again.', 'warn');
-      else toast('Save failed (see log)', 'err');
+      else toast('The editor refused the timeline. Check that each entity it runs on is still in the map, then save again.', 'err');
     }
   }
 
@@ -2968,7 +2990,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var card = document.getElementById('prefabCard'), empty = document.getElementById('pcEmpty');
     /* 'flex', not 'block' -- #pcEmpty's .placeholder class centers via flex, and an inline 'block'
      * would override it (the empty state then sits top-left instead of centered like the Entities tab) */
-    if (!d.ok) { card.style.display = 'none'; empty.style.display = 'flex'; empty.textContent = 'Could not read "' + d.name + '".'; setPrefabButtons(false); metaBaseline = null; prefabViewport.clear(); return; }
+    if (!d.ok) { card.style.display = 'none'; empty.style.display = 'flex'; empty.textContent = '"' + d.name + '" could not be read: the file is damaged or larger than 8 MB.'; setPrefabButtons(false); metaBaseline = null; prefabViewport.clear(); return; }
     empty.style.display = 'none'; card.style.display = 'flex';
     setPrefabButtons(true);
     document.getElementById('pcName').value = d.name;
@@ -3336,8 +3358,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       document.getElementById('declFocusHost').appendChild(col);
     }
     col.classList.toggle('focus-mode', on);
-    btn.title = on ? 'Close (Esc)' : 'Expand Decl Text editor';
-    btn.setAttribute('aria-label', on ? 'Close expanded Decl Text editor' : 'Expand Decl Text editor');
+    btn.title = on ? 'Close (Esc)' : 'Expand the declaration editor';
+    btn.setAttribute('aria-label', on ? 'Close the expanded declaration editor' : 'Expand the declaration editor');
     setIcon(btn, on ? 'x' : 'maximize-2');
     // Move the existing save controls into focus mode, then restore them on exit.
     var dest = document.getElementById(on ? 'focusHead' : 'entityStateHead');
@@ -3351,11 +3373,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (on) {
       revertBtn.innerHTML = iconSvg('undo-2');
       saveBtn.innerHTML = iconSvg('save');
-      revertBtn.title = 'Revert'; saveBtn.title = 'Save to Decl';
-      revertBtn.setAttribute('aria-label', 'Revert'); saveBtn.setAttribute('aria-label', 'Save to Decl');
+      revertBtn.title = 'Revert'; saveBtn.title = 'Save';
+      revertBtn.setAttribute('aria-label', 'Revert'); saveBtn.setAttribute('aria-label', 'Save');
     } else {
-      revertBtn.textContent = 'Revert'; saveBtn.textContent = 'Save to Decl';
-      revertBtn.removeAttribute('title'); saveBtn.removeAttribute('title');
+      revertBtn.textContent = 'Revert'; saveBtn.textContent = 'Save';
+      revertBtn.removeAttribute('title'); saveBtn.title = 'Write these changes into the map';
       revertBtn.removeAttribute('aria-label'); saveBtn.removeAttribute('aria-label');
     }
     if (on) {
@@ -3540,7 +3562,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var note = document.getElementById('menuRawmapPaths');
     var armBtn = document.getElementById('menuRawmapArm');
     if (!st) {
-      if (note) note.textContent = 'Rawmap paths unavailable in this build.';
+      if (note) note.textContent = 'The rawmap paths could not be read. Open the menu again.';
       return;
     }
     RAWMAP_ARMED = !!st.armed;
@@ -4730,14 +4752,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
              : noDecl ? 'This texture has no material decl &mdash; it exists only as a rectangle in the '
                       + 'megatexture atlas, so there is no name for the engine to resolve. Use '
                       + 'Virtual Mapping.'
-                      : 'This texture&rsquo;s material decl is in the base-game resource box, which SnapMap does not '
-                      + 'load, so it cannot be applied by name. Use Virtual Mapping &mdash; that addresses '
-                      + 'the atlas by rectangle and needs no decl.'},
+                      : 'SnapMap cannot load this texture&rsquo;s material by name. Use Virtual Mapping '
+                      + '&mdash; it places the texture by its position in the atlas instead.'},
         {id:'vm', label:'Virtual Mapping', ok:true,
-         why: xp ? 'Applies the texture by renderParms virtualmapping &mdash; a rectangle of the '
-                 + 'megatexture, not a name. This one is on the tested cross-platform list, so it '
-                 + 'shows the same art on PC, Xbox and PlayStation.'
-                 : 'Applies the material by renderParms virtualmapping. Only works for materials that '
+         why: xp ? 'Applies the texture by its position in the megatexture, not by name. This one is '
+                 + 'on the tested cross-platform list, so it shows the same art on PC, Xbox and PlayStation.'
+                 : 'Applies the texture by its position in the megatexture. Only works for textures that '
                  + 'are in the megatexture, and may not be the same texture on other platforms.'}
       ];
     }
@@ -4784,13 +4804,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                         + 'through. Apply it to a light you have already placed, or use '
                                         + 'New entity and pick point or spot below.'}];
     if (type === 'perk')     return [{id:'pk', label:'Reference only', ok:false,
-                                      why:'A perk is granted by an idTarget_Command entity, not placed. '
-                                        + 'The command structure is not worked out yet, so copy the name '
-                                        + 'and wire it by hand for now.'}];
+                                      why:'A perk is granted, not placed. Copy its name for wiring '
+                                        + 'it by hand.'}];
     if (type === 'swf')      return [{id:'sw', label:'Reference only', ok:false,
                                       why:'A Flash movie belongs to an entity that owns a screen. Copy the '
-                                        + 'name onto one you have already placed &mdash; building that '
-                                        + 'entity from scratch is not something we can do yet.'}];
+                                        + 'name onto one you have already placed.'}];
     if (type === 'decal')    return [{id:'d', label:'Reference only', ok:false,
                                       why:'A decal atlas is the sheet many decal materials are baked into. '
                                         + 'You apply one of those materials, not the atlas.'}];
@@ -4949,26 +4967,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
    * or the reason it may not. */
   function abApplyDenied(carrier, cls) {
     cls = cls || '';
-    if (abNoApplyEver(cls)) return 'Nothing can be applied to ' + cls;
+    if (abNoApplyEver(cls)) return 'Nothing can be applied to this entity';
     /* Geometry and collision follow the model rule -- anything that can wear a model can wear brush
      * geometry, and the clip model is the same surface seen by physics rather than the renderer.
      * Variables and the player spawn are excluded by abRenderTargetOk matching neither. */
     if (carrier === 'm' || carrier === 'mod' || carrier === 'cl')
-      return abModelTargetOk(cls) ? null : cls + ' cannot wear a model';
+      return abModelTargetOk(cls) ? null : 'This entity cannot take a model';
     if (carrier === 'cm' || carrier === 'vm')
-      return abRenderTargetOk(cls) ? null : cls + ' cannot wear a material';
+      return abRenderTargetOk(cls) ? null : 'This entity cannot take a material';
     if (carrier === 's')
       return abIsSpeaker(cls) ? null
-           : 'A sound goes on a speaker -- ' + cls + ' has no sound to replace';
+           : 'A sound goes on a Speaker; this entity has no sound to replace';
     if (carrier === 'li')
       return abIsLight(cls) ? null
-           : 'A light material goes on a light -- ' + cls + ' would ignore it';
+           : 'A light material goes on a Light; this entity would ignore it';
     if (carrier === 'p')
       return abIsEmitter(cls) ? null
-           : 'A particle goes on an emitter -- ' + cls + ' has no particle system to replace';
+           : 'A particle goes on a Particle Emitter; this entity has none to replace';
     if (carrier === 'f')
       return abIsFxEntity(cls) ? null
-           : 'An FX goes on an FX entity -- ' + cls + ' has no fxDecl of its own to replace';
+           : 'An FX goes on an FX entity; this entity has none of its own to replace';
     return null;
   }
 
@@ -5006,16 +5024,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function abApplyNow(m, name, carrier, rect) {
     var box = document.getElementById('declText');
     var next = dpApply(box.value, abSelType(m), carrier, name, rect, abVmExtra(m, name));
-    if (next === null) { toast('That carrier cannot be written', 'err'); return; }
-    if (next === box.value) { toast('Already set to that -- nothing changed'); return; }
+    if (next === null) { toast('This asset cannot be applied that way to this entity.', 'err'); return; }
+    if (next === box.value) { toast('This entity already uses that asset.'); return; }
     box.value = next;
     refreshDecl(); updateDirty();
-    /* Name the property that changed -- the saveResult toast that follows says whether it stuck,
-     * but not what was touched, and Decl Text is scrolled wherever the user left it. */
-    var PROP = {cm:'customMaterial', vm:'renderParms virtualmapping', m:'model',
-                f:'fxDecl', s:'sound', p:'particleSystem',
-                cl:'clipModelInfo.clipModelName', mod:'model + clipModelName (solid)'};
-    toast((PROP[carrier] || 'property') + ' = ' + name);
+    /* Name what was applied; the saveResult toast that follows says whether it stuck. */
+    var who = document.getElementById('fDisplayname').value || 'the selected entity';
+    toast('Applied ' + name + ' to ' + who + '; saving...');
     /* Explain a refused render-asset target. */
     /* Save validates class/inherit; a refusal leaves the patch dirty for correction. */
     doSave();
@@ -5036,7 +5051,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var p = (pa && d.name === pa.name) ? pa : ((pn && d.name === pn.name) ? pn : null);
     if (!p) return;
     if (!d.ok) {
-      toast('"' + d.name + '" is not in the megatexture, so it has no virtualmapping', 'err');
+      toast('This material cannot be applied with Virtual Mapping; use Custom Material.', 'err');
       return;
     }
     var rect = {x: d.x, y: d.y, w: d.w, h: d.h};
@@ -5170,7 +5185,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     /* Apply backend results only to the current request; a late refusal must not clear newer playback. */
     if (d.playing) { if (d.name) abSoundPlaying = d.name; }
     else if (d.name && abSoundPlaying === d.name) {
-      toast('Could not preview that sound (see log)', 'err');
+      toast('That sound could not be played. Open a map in the SnapMap editor and try again.', 'err');
       abSoundPlaying = null;
     }
     abRefreshInspectors();
@@ -5434,9 +5449,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     m.sel = path;
     abActive = m;
     if (m.mode === 'modal') {
-      var pe = document.getElementById('amPath'), ce = document.getElementById('amCopy');
+      var pe = document.getElementById('amPath');
       if (pe) pe.textContent = path;
-      if (ce) ce.disabled = false;
     }
     if (!abPreviewable(abSelType(m))) {
       /* Modules are worth saying more about than "no preview": the pane is the only place to
@@ -5466,11 +5480,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!m.sel || d.name !== m.sel || !abPreviewable(abSelType(m))) return;
     if (!d.ok) {
       abStopPoll(m);
-      /* `note` is only ever set by the browser-preview stand-in; the real backend answers ok/not-ok
-       * with no reason, so the generic message below stays the in-game text. */
       m.pvUri = null;
-      m.pvNote = d.note || 'The backend refused the request - is the engine hook installed?';
-      abStatus(m, d.note ? '' : 'refused'); abApplyImage(m);
+      m.pvNote = 'No preview for this asset.';
+      abStatus(m, 'no preview'); abApplyImage(m);
       return;
     }
     abStopPoll(m);
@@ -5480,7 +5492,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         abStopPoll(m);
         m.pvUri = null;
         m.pvNote = 'No preview for this one. Its pixels live in a shared atlas rather than a texture '
-                 + 'of its own (decals and particles mostly). The backend log has the exact reason.';
+                 + 'of its own (decals and particles mostly).';
         abStatus(m, 'no preview'); abApplyImage(m);
         return;
       }
@@ -5573,7 +5585,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (abMounts[j].type === t.id) abRenderTree(abMounts[j]);
     }
     if (!names.length)
-      toast('The ' + t.label.toLowerCase() + ' catalog came back empty - is base\\snap_gameresources.index readable?');
+      toast('The game\'s ' + t.label.toLowerCase() + ' list could not be read; restart DOOM. If it persists, use Send feedback.', 'err');
   }
   /* Build a one-entity prefab for the native Load/Place path. Author JSON as text
    * to preserve decimal points in engine float fields; indexed lists use item[N] keys. */
@@ -5831,7 +5843,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function onNewEntityResult(d) {
     if (d.result === -2) { toast('Move the mouse off that entity first -- the editor will not paste while hovering one', 'warn'); return; }
     if (d.result === -3) { toast('Deselect in the 3D view first -- a new entity cannot be pasted over a selection', 'warn'); return; }
-    if (d.result !== 1)  { toast('Could not stage that entity (see log)', 'err'); return; }
+    if (d.result !== 1)  { toast('Could not start the new entity. ' + EDITOR_NOT_ANSWERED, 'err'); return; }
     toast('Ready to place: ' + d.label, 'ok');
     if (abNewFromModal) abCloseModal();
   }
@@ -6644,8 +6656,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // in hand when the native paste was queued, staged only (with the reason) when Ctrl+V is needed.
   function pfPlaceToast(d) {
     var q = '"' + d.name + '"';
-    if (d.result === -1) return {text: 'Could not read ' + q + ' (see log)', level: 'err'};
-    if (d.result !== 1) return {text: 'Could not stage ' + q + ' (editor down?)', level: 'err'};
+    if (d.result === -1) return {text: q + ' could not be read: the file is missing, damaged or in use.', level: 'err'};
+    if (d.result !== 1) return {text: 'The editor is busy. Try Load / Place again in a moment.', level: 'err'};
     if (d.placed === 'queued') return {text: q + ' is in hand: position it and press Space, or Esc to cancel', level: 'ok'};
     if (d.placed === 'staged') {
       var why = d.reason ? ' because ' + d.reason : '';
@@ -6710,7 +6722,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     ctx.innerHTML = '';
     addCtx('Load / Place', function(){ post({cmd:'loadPrefab', name: nm, folder: folder}); });
     addCtx('Rename', function(){ renamePrefabItem(item); });
-    addCtx('Delete', function(){ showConfirm('Delete "' + nm + '"? This removes the file from disk.', function(){ post({cmd:'deletePrefab', name: nm, folder: folder}); }); });
+    addCtx('Delete', function(){ showConfirm('Delete "' + nm + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: nm, folder: folder}); }, 'Delete prefab', 'Delete'); });
     openCtx(e.pageX, e.pageY);
   });
 
@@ -6788,7 +6800,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                   : 'Crash report sent -- thank you!', 'ok');
     } else {
       // keep the dialog (and the pending record) -- nothing is lost on a failed send
-      toast('Could not send the crash report -- check your connection and try again', 'err');
+      toast(d.reason === 'tooLarge' ? 'The crash report is too large to send. Untick Attach recent logs and send again.'
+                                    : 'Could not reach the feedback service. Check your internet connection and send again.', 'err');
     }
   }
   function crashPopulate(rec, count){

@@ -118,12 +118,12 @@ static volatile bool g_cam_read_published = false;  /* force one readout after e
 static volatile bool g_pending_create_prefab = false;
 static std::string   g_create_prefab_name;
 static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; 2 not hovering an entity in selection; 3 no usable grab frame; -1 resolve/serialize/write failure */
-static bool          g_create_grab_corrected = false; /* Create rebuilt a missed grab frame from the hovered box */
 static int           g_last_selcount = -1;       /* last broadcast editor-selection count (Create-button gating) */
 
 static volatile bool g_pending_delete_prefab = false;
 static std::string   g_delete_prefab_name, g_delete_prefab_folder;   /* folder="" -> root (prefabs/) */
-static int           g_delete_result = 0;        /* 1 ok; 0 DeleteFile failed (missing/locked); -1 resolve failed */
+static int           g_delete_result = 0;        /* 1 ok; 0 the file operation failed (g_delete_reason); -1 path refused */
+static const wchar_t *g_delete_reason = L"";
 
 static volatile bool g_pending_rename_prefab = false;
 /* Timelines tree: one batch of display-name writes (folder moves and renames are
@@ -133,7 +133,8 @@ static std::vector<int>         g_set_names_eids;
 static std::vector<std::string> g_set_names_names;
 static int           g_set_names_applied = 0, g_set_names_failed = 0;
 static std::string   g_rename_prefab_old, g_rename_prefab_new, g_rename_prefab_folder;
-static int           g_rename_result = 0;        /* 1 ok; 0 MoveFile failed (dest exists/missing/locked); -1 resolve failed */
+static int           g_rename_result = 0;        /* 1 ok; 0 the move failed (g_rename_reason); -1 path refused */
+static const wchar_t *g_rename_reason = L"";
 
 static volatile bool g_pending_load_prefab = false;
 static std::string   g_load_prefab_name, g_load_prefab_folder;
@@ -198,11 +199,13 @@ static std::wstring  g_pick_folder;
  * folder="" always means the root prefabs\ dir. The folder/file IS the truth -- no separate manifest. */
 static volatile bool g_pending_create_folder = false;
 static std::string   g_create_folder_name;
-static int           g_create_folder_result = 0;   /* 1 ok; 0 already exists / empty name; -1 CreateDirectory failed */
+static int           g_create_folder_result = 0;   /* 1 ok; 0 not created (g_create_folder_reason); -1 name refused */
+static const wchar_t *g_create_folder_reason = L"";
 
 static volatile bool g_pending_rename_folder = false;
 static std::string   g_rename_folder_old, g_rename_folder_new;
-static int           g_rename_folder_result = 0;   /* 1 ok; 0 MoveFile failed (dest exists/locked); -1 resolve failed */
+static int           g_rename_folder_result = 0;   /* 1 ok; 0 the move failed (g_rename_folder_reason); -1 name refused */
+static const wchar_t *g_rename_folder_reason = L"";
 
 static volatile bool g_pending_delete_folder = false;
 static std::string   g_delete_folder_name;
@@ -211,15 +214,18 @@ static int           g_delete_folder_result = 0;   /* 1 ok (removed, any content
 
 static volatile bool g_pending_move_prefab = false;
 static std::string   g_move_prefab_name, g_move_prefab_from, g_move_prefab_to;
-static int           g_move_prefab_result = 0;      /* 1 ok; 0 MoveFile failed (dest name collision); -1 resolve failed */
+static int           g_move_prefab_result = 0;      /* 1 ok; 0 the move failed (g_move_prefab_reason); -1 path refused */
+static const wchar_t *g_move_prefab_reason = L"";
 /* A multi-selection drop: every move in one UI tick, one result, one refresh. */
 static volatile bool g_pending_move_prefabs = false;
 static std::vector<std::string> g_move_prefabs_names, g_move_prefabs_from, g_move_prefabs_moved;
 static std::string   g_move_prefabs_to;
 static int           g_move_prefabs_failed = 0;
+static const wchar_t *g_move_prefabs_reason = L"";   /* the first failure's */
 static volatile bool g_pending_delete_prefabs = false;
 static std::vector<std::string> g_delete_prefabs_names, g_delete_prefabs_folders;
 static int           g_delete_prefabs_deleted = 0, g_delete_prefabs_failed = 0;
+static const wchar_t *g_delete_prefabs_reason = L"";   /* the first failure's */
 
 /* Defer timeline serialization to the UI drain, then send its JSON to the page. */
 static volatile bool g_pending_open_timeline = false;
@@ -394,6 +400,25 @@ static FILE *poc_open(const char *utf8_path, const wchar_t *mode)
 }
 static bool poc_exists(const char *utf8_path) { return GetFileAttributesW(poc_widen(utf8_path).c_str()) != INVALID_FILE_ATTRIBUTES; }
 static bool poc_move(const char *from, const char *to) { return MoveFileW(poc_widen(from).c_str(), poc_widen(to).c_str()) != 0; }
+/* Why the file operation just made failed, as the page names it: "exists" (the name is taken),
+ * "inUse" (another program holds the file), "missing" (it is gone), "notEmpty" (a folder kept a
+ * file), or "" (another Windows error, logged with its code). Call right after the failure. */
+static const wchar_t *poc_fs_reason()
+{
+    DWORD e = GetLastError();
+    switch (e) {
+    case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return L"exists";
+    case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION: case ERROR_ACCESS_DENIED: return L"inUse";
+    case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: return L"missing";
+    case ERROR_DIR_NOT_EMPTY: return L"notEmpty";
+    default: {
+        char l[96];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "file operation failed: Windows error %lu", (unsigned long)e);
+        poc_log(l);
+        return L"";
+    }
+    }
+}
 /* %LOCALAPPDATA%\snapmap-plus, created when missing; "" when Windows cannot say. */
 static std::wstring poc_data_dir()
 {
@@ -931,7 +956,6 @@ static int poc_create_prefab_main(void *ctx)
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
-    g_create_grab_corrected = false;
     { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); poc_log(l); }
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
@@ -989,7 +1013,6 @@ static void poc_apply_create_prefab()
                     "(native grabDistance=%g, %g units outside it); saved grabDistance=%g from its centre",
                     (double)grab.native_distance, (double)grab.outside, (double)grab.distance);
         poc_log(l);
-        g_create_grab_corrected = true;
     } else if (grab_status == SH_PREFAB_GRAB_UNCHECKED) {
         double d = 0.0;
         if (sh_prefab_grab_json_check(buf, (size_t)n, &d) == 0) {
@@ -1204,13 +1227,15 @@ static int poc_recycle_file(const char *path)
     return DeleteFileW(wide.c_str()) ? 1 : 0;
 }
 
-/* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed, -1 = path refused. */
-static int poc_delete_one_prefab(const std::string &folder, const std::string &name)
+/* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed (*reason), -1 = path refused. */
+static int poc_delete_one_prefab(const std::string &folder, const std::string &name, const wchar_t **reason)
 {
+    *reason = L"";
     if (name.empty()) return -1;
     char path[1024];
     if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return -1;
     int result = poc_recycle_file(path);
+    if (result != 1) *reason = poc_fs_reason();
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
         char mp[1024];
         if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && poc_exists(mp))
@@ -1220,14 +1245,16 @@ static int poc_delete_one_prefab(const std::string &folder, const std::string &n
 }
 static void poc_apply_delete_prefab()
 {
-    g_delete_result = poc_delete_one_prefab(g_delete_prefab_folder, g_delete_prefab_name);
+    g_delete_result = poc_delete_one_prefab(g_delete_prefab_folder, g_delete_prefab_name, &g_delete_reason);
 }
 static void poc_apply_delete_prefabs()
 {
-    g_delete_prefabs_deleted = 0; g_delete_prefabs_failed = 0;
+    g_delete_prefabs_deleted = 0; g_delete_prefabs_failed = 0; g_delete_prefabs_reason = L"";
     for (size_t i = 0; i < g_delete_prefabs_names.size(); i++) {
         const std::string &folder = i < g_delete_prefabs_folders.size() ? g_delete_prefabs_folders[i] : std::string();
-        if (poc_delete_one_prefab(folder, g_delete_prefabs_names[i]) == 1) g_delete_prefabs_deleted++; else g_delete_prefabs_failed++;
+        const wchar_t *why = L"";
+        if (poc_delete_one_prefab(folder, g_delete_prefabs_names[i], &why) == 1) g_delete_prefabs_deleted++;
+        else { if (!g_delete_prefabs_failed) g_delete_prefabs_reason = why; g_delete_prefabs_failed++; }
     }
 }
 /* Rename within the folder without overwriting an existing destination.
@@ -1240,6 +1267,7 @@ static void poc_apply_rename_prefab()
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp, (int)sizeof oldp)) return;
     if (!poc_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp, (int)sizeof newp)) return;
     g_rename_result = poc_move(oldp, newp) ? 1 : 0;
+    g_rename_reason = g_rename_result == 1 ? L"" : poc_fs_reason();
     if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm, (int)sizeof oldm) &&
@@ -1470,7 +1498,6 @@ static void poc_apply_load_prefab()
      * block is cut out here, so placement never depends on the parser skipping it. */
     body.resize(sh_prefab_block_strip(&body[0], body.size()));
     if (g_load_prefab_modules) {
-        g_load_prefab_modules = true;
         poc_apply_place_module_prefab(body);
         return;
     }
@@ -1548,13 +1575,16 @@ static void poc_apply_save_timeline()
 }
 /* Move a prefab from one folder to another (drag-and-drop target): a move across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
-static int poc_move_one_prefab(const std::string &from, const std::string &name, const std::string &to)
+static int poc_move_one_prefab(const std::string &from, const std::string &name, const std::string &to,
+                               const wchar_t **reason)
 {
+    *reason = L"";
     if (name.empty()) return -1;
     char oldp[1024], newp[1024];
     if (!poc_prefab_file_path(from, name, oldp, (int)sizeof oldp)) return -1;
     if (!poc_prefab_file_path(to, name, newp, (int)sizeof newp)) return -1;
     int result = poc_move(oldp, newp) ? 1 : 0;
+    if (result != 1) *reason = poc_fs_reason();
     if (result == 1) {   /* the sidecar follows the move; absent is fine */
         char oldm[1024], newm[1024];
         if (poc_prefab_meta_path(from, name, oldm, (int)sizeof oldm) &&
@@ -1565,27 +1595,30 @@ static int poc_move_one_prefab(const std::string &from, const std::string &name,
 }
 static void poc_apply_move_prefab()
 {
-    g_move_prefab_result = poc_move_one_prefab(g_move_prefab_from, g_move_prefab_name, g_move_prefab_to);
+    g_move_prefab_result = poc_move_one_prefab(g_move_prefab_from, g_move_prefab_name, g_move_prefab_to, &g_move_prefab_reason);
 }
 static void poc_apply_move_prefabs()
 {
-    g_move_prefabs_moved.clear(); g_move_prefabs_failed = 0;
+    g_move_prefabs_moved.clear(); g_move_prefabs_failed = 0; g_move_prefabs_reason = L"";
     for (size_t i = 0; i < g_move_prefabs_names.size(); i++) {
         const std::string &from = i < g_move_prefabs_from.size() ? g_move_prefabs_from[i] : std::string();
-        if (poc_move_one_prefab(from, g_move_prefabs_names[i], g_move_prefabs_to) == 1) g_move_prefabs_moved.push_back(g_move_prefabs_names[i]);
-        else g_move_prefabs_failed++;
+        const wchar_t *why = L"";
+        if (poc_move_one_prefab(from, g_move_prefabs_names[i], g_move_prefabs_to, &why) == 1) g_move_prefabs_moved.push_back(g_move_prefabs_names[i]);
+        else { if (!g_move_prefabs_failed) g_move_prefabs_reason = why; g_move_prefabs_failed++; }
     }
 }
 /* Create a real subdirectory under prefabs\. result: 1 created, 0 empty name / already exists, -1 failed. */
 static void poc_apply_create_folder()
 {
     g_create_folder_result = -1;
-    if (g_create_folder_name.empty()) { g_create_folder_result = 0; return; }
+    g_create_folder_reason = L"";
+    if (g_create_folder_name.empty()) return;
     char dir[1024];
     if (!poc_prefab_dir(g_create_folder_name, dir, (int)sizeof dir)) return;
     poc_strip_trailing_sep(dir);
     if (CreateDirectoryW(poc_widen(dir).c_str(), nullptr)) { g_create_folder_result = 1; return; }
-    g_create_folder_result = (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
+    g_create_folder_reason = poc_fs_reason();
+    g_create_folder_result = 0;
 }
 /* Rename a folder (a move renames a directory too). result: 1 ok, 0 dest exists/locked, -1 resolve failed. */
 static void poc_apply_rename_folder()
@@ -1597,6 +1630,7 @@ static void poc_apply_rename_folder()
     if (!poc_prefab_dir(g_rename_folder_new, newd, (int)sizeof newd)) return;
     poc_strip_trailing_sep(oldd); poc_strip_trailing_sep(newd);
     g_rename_folder_result = poc_move(oldd, newd) ? 1 : 0;
+    g_rename_folder_reason = g_rename_folder_result == 1 ? L"" : poc_fs_reason();
 }
 /* Move contents to the prefab root before removing a folder. A name collision
  * leaves the source file in place and removal fails without overwriting data. */
@@ -1806,21 +1840,6 @@ static void poc_send_desc(const char *inherit, const char *classname)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Resolve a material and return the metadata supplied by the backend. */
-static void poc_send_material_result(const char *name)
-{
-    if (!g_webview) return;
-    char info[256] = "";
-    int found = 0;
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->find_material && name && name[0]) {
-        found = g_iface->vtbl->find_material(g_iface, name, info, (int)sizeof info);
-    }
-    std::wstring json = L"{\"kind\":\"materialResult\",\"name\":\"";
-    json += sh_webview_json::escape_wide(name ? name : "");
-    json += L"\",\"found\":"; json += found ? L"true" : L"false";
-    json += L",\"info\":\""; json += sh_webview_json::escape_wide(info); json += L"\"}";
-    g_webview->PostWebMessageAsJson(json.c_str());
-}
 /* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
  * the +0x328/+0x330 slots. Load STAGES a file -- the swap substitutes it into the
  * engine's next map-load parse -- so every string below says "staged", not "loaded".
@@ -3789,7 +3808,12 @@ static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_controller) { RECT rc; GetClientRect(hwnd, &rc); g_controller->put_Bounds(rc); }
         poc_post_window_state(hwnd);
         return 0;
-    case WM_CLOSE: return 0;   /* inert: don't let the user close the UI while in the editor (would need a map reload) */
+    case WM_CLOSE: {
+        /* The window lives with the editor; Alt+F4 says so once instead of doing nothing. */
+        static bool told = false;
+        if (!told && g_webview_ready) { told = true; poc_post_json(L"{\"kind\":\"closeRefused\"}"); }
+        return 0;
+    }
     case WM_NCCALCSIZE:
         /* frameless: consume the non-client area so the client (WebView2) fills the window and the native
          * title bar is gone. WS_THICKFRAME stays so Aero Snap + maximize work; the default maximize sizing
@@ -3876,9 +3900,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
         if (g_pair_mismatch) return S_OK;   /* the window only shows the reinstall notice */
         std::wstring cmd;
         if (sh_webview_json::get_string(json, L"cmd", cmd)) {
-            if (cmd == L"refresh") {
-                poc_send_list("manual-refresh");
-            } else if (cmd == L"perfList") {
+            if (cmd == L"perfList") {
                 int seq = 0, entities = 0, matched = 0, mounted = 0;
                 double render_ms = 0.0, handler_ms = 0.0;
                 if (sh_webview_json::get_int(json, L"seq", &seq) &&
@@ -4087,10 +4109,6 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring inh, cls; sh_webview_json::get_string(json, L"inherit", inh); sh_webview_json::get_string(json, L"classname", cls);
                 std::string i8 = sh_webview_json::to_utf8(inh), c8 = sh_webview_json::to_utf8(cls);
                 poc_send_desc(i8.c_str(), c8.c_str());
-            } else if (cmd == L"findMaterial") {
-                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
-                std::string n8 = sh_webview_json::to_utf8(nm);
-                poc_send_material_result(n8.c_str());
             } else if (cmd == L"rawmapStatus") {
                 poc_send_rawmap_status(L"");
             } else if (cmd == L"rawmapLoadPick") {
@@ -4576,19 +4594,20 @@ static void poc_think_loop()
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"";
-            if (g_create_result == 1 && g_create_grab_corrected) m += L",\"grab\":\"corrected\"";
             m += L"}";
             poc_post_json(m.c_str());
             if (g_create_result == 1) poc_send_prefabs();
         }
         if (did_delete_prefab) {
             std::wstring m = L"{\"kind\":\"deletePrefabResult\",\"result\":"; m += std::to_wstring(g_delete_result);
+            m += L",\"reason\":\""; m += g_delete_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_delete_prefab_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_delete_result == 1) poc_send_prefabs();
         }
         if (did_rename_prefab) {
             std::wstring m = L"{\"kind\":\"renamePrefabResult\",\"result\":"; m += std::to_wstring(g_rename_result);
+            m += L",\"reason\":\""; m += g_rename_reason; m += L"\"";
             m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_old.c_str());
             m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_new.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
@@ -4641,12 +4660,14 @@ static void poc_think_loop()
         }
         if (did_create_folder) {
             std::wstring m = L"{\"kind\":\"createFolderResult\",\"result\":"; m += std::to_wstring(g_create_folder_result);
+            m += L",\"reason\":\""; m += g_create_folder_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_folder_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_create_folder_result == 1) poc_send_prefabs();
         }
         if (did_rename_folder) {
             std::wstring m = L"{\"kind\":\"renameFolderResult\",\"result\":"; m += std::to_wstring(g_rename_folder_result);
+            m += L",\"reason\":\""; m += g_rename_folder_reason; m += L"\"";
             m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_old.c_str());
             m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_new.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
@@ -4660,6 +4681,7 @@ static void poc_think_loop()
         }
         if (did_move_prefab) {
             std::wstring m = L"{\"kind\":\"movePrefabResult\",\"result\":"; m += std::to_wstring(g_move_prefab_result);
+            m += L",\"reason\":\""; m += g_move_prefab_reason; m += L"\"";
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_move_prefab_name.c_str());
             m += L"\",\"toFolder\":\""; m += sh_webview_json::escape_wide(g_move_prefab_to.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
@@ -4669,13 +4691,15 @@ static void poc_think_loop()
             std::wstring m = L"{\"kind\":\"movePrefabsResult\",\"moved\":[";
             for (size_t i = 0; i < g_move_prefabs_moved.size(); i++) { if (i) m += L","; m += L"\""; m += sh_webview_json::escape_wide(g_move_prefabs_moved[i].c_str()); m += L"\""; }
             m += L"],\"failed\":"; m += std::to_wstring(g_move_prefabs_failed);
+            m += L",\"reason\":\""; m += g_move_prefabs_reason; m += L"\"";
             m += L",\"toFolder\":\""; m += sh_webview_json::escape_wide(g_move_prefabs_to.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (!g_move_prefabs_moved.empty()) poc_send_prefabs();
         }
         if (did_delete_prefabs) {
             std::wstring m = L"{\"kind\":\"deletePrefabsResult\",\"deleted\":"; m += std::to_wstring(g_delete_prefabs_deleted);
-            m += L",\"failed\":"; m += std::to_wstring(g_delete_prefabs_failed); m += L"}";
+            m += L",\"failed\":"; m += std::to_wstring(g_delete_prefabs_failed);
+            m += L",\"reason\":\""; m += g_delete_prefabs_reason; m += L"\"}";
             poc_post_json(m.c_str());
             if (g_delete_prefabs_deleted) poc_send_prefabs();
         }

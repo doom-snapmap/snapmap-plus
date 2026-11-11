@@ -150,9 +150,8 @@ check(html.includes('prefabTransform.countNavigationBoxes(doc)') && html.include
       'Prefab Details counts AI Navigation boxes beside the entity count');
 check(js.includes("if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true)"),
       'an unresolved blocking decl keeps its 16/128/64 default instead of 1-unit slabs');
-check(html.includes("d.grab === 'corrected'") && html.includes('d.result === 3') &&
-      host.includes('sh_prefab_grab_json_check(buf') && host.includes('L",\\"grab\\":\\"corrected\\""'),
-      'Create reports a corrected grab point and refuses only an unusable frame');
+check(html.includes('d.result === 3') && host.includes('sh_prefab_grab_json_check(buf'),
+      'Create refuses only an unusable frame');
 
 /* Demons and player starts: role, model source and status text, run against the real viewport code
    with no DOM (no canvas, so no GL; the pure helpers are exported as `testing`). */

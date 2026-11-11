@@ -145,7 +145,7 @@ check(posts.length === 2, 'a timeout reply did not release the request');
 api.applyDeleteResult({status: codes.SH_DELETE_BUSY, busy: codes.SH_DELETE_BUSY_PHASE});
 
 /* The context menu only requests; it no longer edits selection or toasts itself. */
-const menu = slice(page, "    addCtx('Delete'", "    addCtx('Push to stack 0'");
+const menu = slice(page, "    addCtx('Delete'", "    addCtx('Add to SnapStack (stack 0)'");
 check(/requestDelete\(ids\)/.test(menu), 'context-menu Delete does not use requestDelete');
 check(!/toast\(/.test(menu) && !/delete selectedEids/.test(menu),
   'context-menu Delete still edits selection or announces success');
