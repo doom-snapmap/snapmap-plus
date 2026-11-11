@@ -44,9 +44,8 @@
 extern "C" {
 #endif
 
-#define SH_MODHUD_MAX_RULES 256
-#define SH_MODHUD_NAME_CAP  192
-#define SH_MODHUD_FILE_CAP  (64u * 1024u)    /* one mod's hud object */
+/* No count of rules, length of a weapon name or size of a hud object of its
+ * own: as many and as long as the mods in use give (DECISIONS 26). */
 
 /* Start a pending table. */
 void sh_modhud_begin(void);

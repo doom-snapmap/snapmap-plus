@@ -34,7 +34,7 @@ static int mc_hud_name(const char *s)
 {
     const char *part = s;
     size_t n = strlen(s), i;
-    if (!n || n >= SH_MODHUD_NAME_CAP || s[0] == '/' || s[n - 1] == '/') return 0;
+    if (!n || s[0] == '/' || s[n - 1] == '/') return 0;
     for (i = 0; i <= n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (!c || c == '/') {
@@ -56,8 +56,6 @@ static int mc_hud(const char *json, size_t len, char *cause, size_t cap)
     const char *raw;
     size_t i;
     int ok = 0;
-    if (len > SH_MODHUD_FILE_CAP)
-        return mc_cause(cause, cap, "mod.json \"hud\" is larger than 64 KB; make it smaller and press Refresh");
     if (!sh_json_parse_object(json, len, 5, &root))
         return mc_cause(cause, cap, "mod.json \"hud\" must be an object like {\"weapons\": {...}}; correct it and press Refresh");
     if (!root.count) { sh_json_object_free(&root); return 1; }

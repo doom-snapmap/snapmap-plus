@@ -924,10 +924,24 @@ static void m_bad_req_key(const char *f) { mt_write(f, "mod.json", DESC(",\"requ
 static void m_bad_line(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"activate\":[\"echo a; quit\"]}}")); }
 static void m_bad_line_ctrl(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"deactivate\":[\"echo a\\nquit\"]}}")); }
 static void m_bad_line_key(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"start\":[\"echo\"]}}")); }
-static void m_bad_line_count(const char *f)
+/* Requirements of any size: 300 lines and 200 cvars, with long names, values
+ * and lines. */
+static void m_many_reqs(const char *f)
 {
-    mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"activate\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\","
-                                 "\"g\",\"h\",\"i\",\"j\",\"k\",\"l\",\"m\",\"n\",\"o\",\"p\",\"q\"]}}"));
+    size_t cap = 1u << 20, at = 0;
+    char *t = (char *)malloc(cap);
+    int i;
+    if (!t) return;
+    at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "{\"name\":\"R2 Imp copy\",\"requirements\":{\"commands\":{\"activate\":[");
+    for (i = 0; i < 300; i++)
+        at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "%s\"echo line %d %0400d\"", i ? "," : "", i, i);
+    at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "]},\"cvars\":{");
+    for (i = 0; i < 200; i++)
+        at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "%s\"sh_a_cvar_name_longer_than_sixty_four_characters_for_the_test_%03d\":\"%0300d\"",
+                                  i ? "," : "", i, i);
+    _snprintf_s(t + at, cap - at, _TRUNCATE, "}}}");
+    mt_write(f, "mod.json", t);
+    free(t);
 }
 static void m_gates_only(const char *f)
 {
@@ -1161,7 +1175,10 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_line, &RESOLVER, "requirements.commands.activate[0] must be one console command");
     refused(fixture, tmp, m_bad_line_ctrl, &RESOLVER, "requirements.commands.deactivate[0] must be one console command");
     refused(fixture, tmp, m_bad_line_key, &RESOLVER, "requirements.commands key start is not supported");
-    refused(fixture, tmp, m_bad_line_count, &RESOLVER, "requirements.commands.activate has more than 16 lines");
+    accepted(fixture, tmp, m_many_reqs, &b);
+    CHECK(b.requirements && strstr(b.requirements, "\"echo line 299 ") &&
+          strstr(b.requirements, "\"sh_a_cvar_name_longer_than_sixty_four_characters_for_the_test_199\":\""));
+    sh_mb_free(&b);
     refused(fixture, tmp, m_bad_home, &RESOLVER, "homepage");
     refused(fixture, tmp, m_no_desc, &RESOLVER, "the mod folder has no mod.json");
     refused(fixture, tmp, m_bad_ext, &RESOLVER, "file type not allowed");

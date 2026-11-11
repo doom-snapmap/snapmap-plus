@@ -240,9 +240,32 @@ static void test_image(const char *path)
     free(base);
 }
 
+/* Any number of rules, of weapon names of any length. */
+static void test_any_count(void)
+{
+    size_t cap = 1u << 20, at = 0;
+    char *t = (char *)malloc(cap), name[600];
+    int i;
+    CHECK(t != NULL);
+    if (!t) return;
+    at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "{\"weapons\": {");
+    for (i = 0; i < 2000; i++)
+        at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, "%s\"weapon/many/w%d\": {\"ammo_display\": \"weapon\"}",
+                                  i ? ", " : "", i);
+    memset(name, 'a', 500);
+    name[500] = 0;
+    at += (size_t)_snprintf_s(t + at, cap - at, _TRUNCATE, ", \"weapon/%s\": {\"ammo_display\": \"weapon\"}}}", name);
+    CHECK(parse_one(t, "many") && sh_modhud_count() == 2001);
+    CHECK(sh_modhud_select("weapon/many/w1999", 1) == 0);
+    _snprintf_s(t, cap, _TRUNCATE, "weapon/%s", name);
+    CHECK(sh_modhud_select(t, 1) == 0);
+    free(t);
+}
+
 int main(int argc, char **argv)
 {
     test_grammar();
+    test_any_count();
     test_builds();
     test_follows_index();
     /* The relay reads the live table: weapon/test/unlimited is a weapon rule. */

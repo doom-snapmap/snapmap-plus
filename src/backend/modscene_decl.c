@@ -206,10 +206,6 @@ int sh_scene_add_bundle(sh_scene_table *t, const char *salt, const char *extra_j
                 say(log, context, "its scenes entry '%s' is listed twice%s", owner, NULL);
                 goto rollback;
             }
-        if (t->count >= SH_SCENE_MAX_OWNERS) {
-            say(log, context, "the mods in use declare more than 256 scene nodes in all%s%s", NULL, NULL);
-            goto rollback;
-        }
         if (!grow(t, t->count + 1)) {
             say(log, context, "its scenes could not be read (out of memory)%s%s", NULL, NULL);
             goto rollback;

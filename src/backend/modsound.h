@@ -81,11 +81,12 @@
 #include <stdint.h>
 #include <wchar.h>
 
+#include "modbankinfo.h"   /* SH_MBI_BANKS_MAX: the game's own bank count */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define SH_MODSOUND_MAX_BANKS   64
 #define SH_MODSOUND_LEAF_MAX    72      /* <stem>.bnk */
 #define SH_MODSOUND_HW_OFF      0x140u  /* soundSystem -> idSoundHardware_WWise * */
 #define SH_MODSOUND_DEVICE_OFF  0x630u  /* resolver -> AkDeviceID */
@@ -131,14 +132,14 @@ typedef struct sh_modsound_bank {
 } sh_modsound_bank;
 
 typedef struct sh_modsound_table {
-    int count;
-    int skipped;            /* stock pointers and overflow, logged */
-    sh_modsound_bank banks[SH_MODSOUND_MAX_BANKS];
+    int count, cap;         /* banks grows: the mods in use carry as many banks as they have */
+    int skipped;            /* stock pointers and repeated names, logged */
+    sh_modsound_bank *banks;
 } sh_modsound_table;
 
 /* Add one served file: 1 for a bank added, 0 for a file that is not a bank,
- * -1 for a bank refused (a stock pointer, no disk path, a full table, a leaf
- * already in the table). */
+ * -1 for a bank refused (a stock pointer, no disk path, a leaf already in
+ * the table, out of memory). */
 int sh_modsound_table_add(sh_modsound_table *t, const char *request, const char *disk_path, uint64_t size,
                           const char *bundle_id, int is_stock);
 void sh_modsound_table_free(sh_modsound_table *t);
@@ -154,8 +155,7 @@ void sh_modsound_fill_desc(sh_modsound_file_desc *d, uint64_t size, void *handle
 
 #define SH_MODSOUND_STOCK_WAIT_MS   3000   /* the map pass waits this long for a stock bank's callback */
 #define SH_MODSOUND_COOKIE_SIZE     0x130u /* the wrapper's operator new for its cookie */
-#define SH_MODSOUND_NEED_BANKS      4      /* stock banks one bundle may need */
-#define SH_MODSOUND_NEED_BUNDLES    128
+
 
 /* Decode AudioBankCookieSite (the wrapper's post-filter sequence): 1 with the
  * absolute targets of operator new, the cookie ctor, the callback LEA and the
@@ -163,21 +163,23 @@ void sh_modsound_fill_desc(sh_modsound_file_desc *d, uint64_t size, void *handle
 int sh_modsound_decode_cookie_site(const uint8_t *site, uintptr_t *op_new, uintptr_t *cookie_ctor,
                                    uintptr_t *callback, uintptr_t *load_bank);
 
-/* The stock banks each bundle needs (by bundle hash). */
+/* The stock banks each bundle needs (by bundle hash). A bundle may need every
+ * bank the game's index lists (SH_MBI_BANKS_MAX, the game's own count); the
+ * bundles grow as the builds in use have them. */
 typedef struct sh_modsound_need {
     char hash[65];
     char key[80];
     int  count;
-    char banks[SH_MODSOUND_NEED_BANKS][SH_MODSOUND_LEAF_MAX];
+    char banks[SH_MBI_BANKS_MAX][SH_MODSOUND_LEAF_MAX];
 } sh_modsound_need;
 typedef struct sh_modsound_needs {
-    int count;
-    sh_modsound_need bundles[SH_MODSOUND_NEED_BUNDLES];
+    int count, cap;
+    sh_modsound_need *bundles;
 } sh_modsound_needs;
 
 /* Add that the bundle `hash` (key `key`) needs stock bank `bank`: 1 added, 0
  * already there, -1 refused (not a bank the game's index lists as one
- * SnapMap skips, or a full table). Uses modbankinfo. */
+ * SnapMap skips, or out of memory). Uses modbankinfo. */
 int sh_modsound_needs_add(sh_modsound_needs *t, const char *hash, const char *key, const char *bank);
 /* Add every bank a registries object's "banks" array names. Returns the
  * number added. */

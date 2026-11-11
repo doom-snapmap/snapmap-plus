@@ -45,9 +45,6 @@ extern "C" {
 #endif
 
 #define SH_MODSERVE_HASH_HEX    64
-#define SH_MODSERVE_MAX_FILES   4096u            /* per bundle, as the builder caps it */
-#define SH_MODSERVE_MAX_FILE    (64ull << 20)    /* per file */
-#define SH_MODSERVE_MAX_JSON    (4u << 20)       /* mod.json */
 #define SH_MODSERVE_CACHE_FILE  (1u << 20)       /* files below this are cached */
 #define SH_MODSERVE_CACHE_TOTAL (8u << 20)       /* the cache's total byte bound */
 

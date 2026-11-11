@@ -19,12 +19,13 @@
 #define HUD_OWNER_CAP    120
 
 typedef struct hud_rule {
-    char name[SH_MODHUD_NAME_CAP];
+    char *name;              /* the weapon decl, malloc'd, any length */
     char owner[HUD_OWNER_CAP];
     int weapon_mode;
     int conflicted;          /* two mods ask different displays: the game's stays */
 } hud_rule;
-typedef struct hud_table { size_t count; hud_rule rules[SH_MODHUD_MAX_RULES]; } hud_table;
+/* As many rules as the mods in use give. */
+typedef struct hud_table { size_t count, cap; hud_rule *rules; } hud_table;
 
 static hud_table g_live, g_pending;
 static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -51,7 +52,7 @@ static int hud_name_valid(const char *s)
 {
     const char *part = s;
     size_t n = strlen(s);
-    if (!n || n >= SH_MODHUD_NAME_CAP || s[0] == '/' || s[n - 1] == '/') return 0;
+    if (!n || s[0] == '/' || s[n - 1] == '/') return 0;
     for (size_t i = 0; i <= n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (!c || c == '/') {
@@ -71,7 +72,15 @@ static int hud_string(const char *raw, char *out, size_t cap)
     return raw && sh_json_decode_string(raw, strlen(raw), out, cap, &length) && strlen(out) == length;
 }
 
-void sh_modhud_begin(void) { memset(&g_pending, 0, sizeof g_pending); }
+static void hud_table_free(hud_table *t)
+{
+    size_t i;
+    for (i = 0; i < t->count; i++) free(t->rules[i].name);
+    free(t->rules);
+    memset(t, 0, sizeof *t);
+}
+
+void sh_modhud_begin(void) { hud_table_free(&g_pending); }
 
 /* One weapon's member: 1 "weapon", 0 "engine", -1 when it does not read. */
 static int hud_member_mode(const sh_json_member *m)
@@ -100,14 +109,18 @@ static void hud_add(const char *weapon, int weapon_mode, const char *owner)
         }
         return;
     }
-    if (g_pending.count == SH_MODHUD_MAX_RULES) {
-        hud_log("weapon-hud: more than %d weapons have rules; the rule %s gives %s is not used", SH_MODHUD_MAX_RULES,
-                owner, weapon);
-        return;
+    if (g_pending.count == g_pending.cap) {
+        size_t cap = g_pending.cap ? g_pending.cap * 2 : 32;
+        hud_rule *grown = (hud_rule *)realloc(g_pending.rules, cap * sizeof *grown);
+        if (!grown) { hud_log("weapon-hud: out of memory; the rule %s gives %s is not used", owner, weapon); return; }
+        g_pending.rules = grown;
+        g_pending.cap = cap;
     }
     {
-        hud_rule *r = &g_pending.rules[g_pending.count++];
-        strcpy_s(r->name, sizeof r->name, weapon);
+        hud_rule *r = &g_pending.rules[g_pending.count];
+        r->name = _strdup(weapon);
+        if (!r->name) { hud_log("weapon-hud: out of memory; the rule %s gives %s is not used", owner, weapon); return; }
+        g_pending.count++;
         strncpy_s(r->owner, sizeof r->owner, owner, _TRUNCATE);
         r->weapon_mode = weapon_mode;
         r->conflicted = 0;
@@ -121,7 +134,7 @@ int sh_modhud_parse(const char *json, size_t length, const char *owner)
     size_t i;
     int ok = 0;
     if (!owner) owner = "a mod";
-    if (!json || length > SH_MODHUD_FILE_CAP || !sh_json_parse_object(json, length, 5, &root)) goto done;
+    if (!json || !sh_json_parse_object(json, length, 5, &root)) goto done;
     if (!root.count) { ok = 1; goto done; }
     /* Exactly {"weapons": {...}}. */
     if (root.count != 1) goto done;
@@ -146,9 +159,13 @@ static size_t hud_count_of(const hud_table *t)
 
 void sh_modhud_publish(void)
 {
+    hud_table old;
     AcquireSRWLockExclusive(&g_lock);
-    g_live = g_pending;
+    old = g_live;
+    g_live = g_pending;   /* the pending table moves to live; a new one starts empty */
+    memset(&g_pending, 0, sizeof g_pending);
     ReleaseSRWLockExclusive(&g_lock);
+    hud_table_free(&old);
 }
 
 size_t sh_modhud_count(void)
@@ -264,16 +281,23 @@ static volatile LONG g_reported;
 static unsigned char hud_mode(void *game, const unsigned char *widget)
 {
     unsigned char original = g_original(game), result = original;
-    char name[SH_MODHUD_NAME_CAP];
+    char small[256], *name = NULL;
+    size_t n = 0;
+    /* The weapon's decl name, copied out of the engine's memory first (the
+     * select takes a lock), whole whatever its length. */
     __try {
         const unsigned char *decl = widget ? *(const unsigned char *const *)(widget + 0x1f8) : NULL;
         const char *source = decl ? *(const char *const *)(decl + 8) : NULL;
         if (source) {
-            size_t i;
-            for (i = 0; i < sizeof name; i++) { name[i] = source[i]; if (!name[i]) break; }
-            if (i < sizeof name) result = sh_modhud_select(name, original);
+            n = strlen(source);
+            name = n < sizeof small ? small : (char *)malloc(n + 1);
+            if (name) memcpy(name, source, n + 1);
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { result = original; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { if (name && name != small) free(name); name = NULL; }
+    if (name) {
+        result = sh_modhud_select(name, original);
+        if (name != small) free(name);
+    }
     if (result != original && InterlockedCompareExchange(&g_reported, 1, 0) == 0)
         hud_log("weapon-hud active: a mod's weapon-capacity display is in use");
     return result;

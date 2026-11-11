@@ -668,13 +668,21 @@ static int gate_set(void *context, const char *cvar, const char *value)
 /* One console line, for the engine's next command-buffer pass. */
 static int gate_command(void *context, const char *line)
 {
-    char text[SH_MB_REQ_LINE_MAX + 2];
+    size_t n;
+    char *text;
+    int ok = 1;
     (void)context;
     if (!g_buffer_cmd || !g_cmdsys || !line) return 0;
-    _snprintf_s(text, sizeof text, _TRUNCATE, "%s\n", line);
+    n = strlen(line);
+    text = (char *)malloc(n + 2);
+    if (!text) return 0;
+    memcpy(text, line, n);
+    text[n] = '\n';
+    text[n + 1] = 0;
     __try { g_buffer_cmd(g_cmdsys, text); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-    return 1;
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    free(text);
+    return ok;
 }
 
 static const sh_modserve_gate_ops g_gate_ops = { NULL, gate_read, gate_set, NULL, gate_command };

@@ -2268,7 +2268,7 @@ static char *mb_trimmed_dup(const mbj *v)
 static int mb_req_cvar_name(const char *s, size_t n)
 {
     size_t i;
-    if (n < 1 || n > SH_MB_REQ_NAME_MAX) return 0;
+    if (n < 1) return 0;
     if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
     for (i = 1; i < n; i++)
         if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
@@ -2289,9 +2289,8 @@ static const char *mb_req_value(const mbj *v, const char *name, char *num, size_
                                 char *cause, size_t cap)
 {
     if (v->t == MBJ_STR) {
-        if (v->n > SH_MB_REQ_VALUE_MAX || strlen(v->s) != v->n || !mb_req_printable(v->s, v->n)) {
-            mb_cause(cause, cap, "requirements.cvars.%.64s must be printable ASCII of at most %u characters", name,
-                     SH_MB_REQ_VALUE_MAX);
+        if (strlen(v->s) != v->n || !mb_req_printable(v->s, v->n)) {
+            mb_cause(cause, cap, "requirements.cvars.%.64s must be printable ASCII", name);
             return NULL;
         }
         *len = v->n;
@@ -2313,10 +2312,6 @@ static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char *ca
 {
     size_t i;
     if (arr->t != MBJ_ARR) { mb_cause(cause, cap, "requirements.commands.%s must be an array of console lines", which); return 0; }
-    if (arr->count > SH_MB_REQ_COMMANDS_MAX) {
-        mb_cause(cause, cap, "requirements.commands.%s has more than %u lines", which, SH_MB_REQ_COMMANDS_MAX);
-        return 0;
-    }
     for (i = 0; i < arr->count; i++) {
         const mbj *v = arr->items[i];
         size_t a = 0, z;
@@ -2327,9 +2322,9 @@ static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char *ca
         z = v->n;
         while (a < z && v->s[a] == ' ') a++;
         while (z > a && v->s[z - 1] == ' ') z--;
-        if (a == z || z - a > SH_MB_REQ_LINE_MAX || !mb_req_printable(v->s + a, z - a) || memchr(v->s + a, ';', z - a)) {
+        if (a == z || !mb_req_printable(v->s + a, z - a) || memchr(v->s + a, ';', z - a)) {
             mb_cause(cause, cap, "requirements.commands.%s[%zu] must be one console command: printable ASCII without ';', "
-                     "1 to %u characters", which, i, SH_MB_REQ_LINE_MAX);
+                     "not empty", which, i);
             return 0;
         }
         if (out->n) mb_put(out, ",", 1);
@@ -2355,10 +2350,6 @@ static char *mb_requirements(const mbj *req, char *cause, size_t cap)
     if (cvars && cvars->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements.cvars must be an object"); return NULL; }
     if (commands && commands->t != MBJ_OBJ) {
         mb_cause(cause, cap, "requirements.commands must be an object of activate and deactivate lists");
-        return NULL;
-    }
-    if (cvars && cvars->count > SH_MB_REQ_CVARS_MAX) {
-        mb_cause(cause, cap, "requirements.cvars names more than %u cvars", SH_MB_REQ_CVARS_MAX);
         return NULL;
     }
     for (i = 0; commands && i < commands->count; i++) {
@@ -2393,7 +2384,7 @@ static char *mb_requirements(const mbj *req, char *cause, size_t cap)
             const char *value;
             if (!mb_req_cvar_name(name, n) || strlen(name) != n) {
                 mb_cause(cause, cap, "requirements.cvars key %.64s is not a cvar name (a letter or '_', then letters, "
-                         "digits or '_', at most %u)", name, SH_MB_REQ_NAME_MAX);
+                         "digits or '_')", name);
                 goto fail;
             }
             for (k = 0; k < i; k++)

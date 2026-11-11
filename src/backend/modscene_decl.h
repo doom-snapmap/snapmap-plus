@@ -52,7 +52,6 @@ extern "C" {
 
 #define SH_SCENE_NAME_CAP    192   /* including the terminator */
 #define SH_SCENE_MAX_SPAWNS  4
-#define SH_SCENE_MAX_OWNERS  256   /* across all bundles */
 #define SH_SCENE_COORD_MAX   65536.0
 #define SH_SCENE_YAW_MAX     3600.0
 

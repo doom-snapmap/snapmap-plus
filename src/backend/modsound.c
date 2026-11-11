@@ -124,9 +124,16 @@ int sh_modsound_table_add(sh_modsound_table *t, const char *request, const char 
     sh_modsound_bank *b;
     int i;
     if (!t || !sh_modsound_leaf(request, leaf, sizeof leaf)) return 0;
-    if (is_stock || !disk_path || !disk_path[0] || t->count >= SH_MODSOUND_MAX_BANKS) { t->skipped++; return -1; }
+    if (is_stock || !disk_path || !disk_path[0]) { t->skipped++; return -1; }
     for (i = 0; i < t->count; i++)
         if (!strcmp(t->banks[i].leaf, leaf)) { t->skipped++; return -1; }
+    if (t->count == t->cap) {
+        int cap = t->cap ? t->cap * 2 : 16;
+        sh_modsound_bank *grown = (sh_modsound_bank *)realloc(t->banks, (size_t)cap * sizeof *grown);
+        if (!grown) { t->skipped++; return -1; }
+        t->banks = grown;
+        t->cap = cap;
+    }
     b = &t->banks[t->count];
     memset(b, 0, sizeof *b);
     memcpy(b->leaf, leaf, strlen(leaf) + 1);
@@ -143,6 +150,7 @@ void sh_modsound_table_free(sh_modsound_table *t)
     int i;
     if (!t) return;
     for (i = 0; i < t->count; i++) free(t->banks[i].disk_path);
+    free(t->banks);
     memset(t, 0, sizeof *t);
 }
 
@@ -199,7 +207,14 @@ static sh_modsound_need *ms_need_slot(sh_modsound_needs *t, const char *hash, co
 {
     int i;
     for (i = 0; i < t->count; i++) if (!_stricmp(t->bundles[i].hash, hash)) return &t->bundles[i];
-    if (!create || t->count >= SH_MODSOUND_NEED_BUNDLES) return NULL;
+    if (!create) return NULL;
+    if (t->count == t->cap) {
+        int cap = t->cap ? t->cap * 2 : 8;
+        sh_modsound_need *grown = (sh_modsound_need *)realloc(t->bundles, (size_t)cap * sizeof *grown);
+        if (!grown) return NULL;
+        t->bundles = grown;
+        t->cap = cap;
+    }
     memset(&t->bundles[t->count], 0, sizeof t->bundles[0]);
     strncpy_s(t->bundles[t->count].hash, sizeof t->bundles[0].hash, hash, _TRUNCATE);
     strncpy_s(t->bundles[t->count].key, sizeof t->bundles[0].key, key ? key : "", _TRUNCATE);
@@ -221,7 +236,7 @@ int sh_modsound_needs_add(sh_modsound_needs *t, const char *hash, const char *ke
     n = ms_need_slot(t, hash, key, 1);
     if (!n) return -1;
     for (k = 0; k < n->count; k++) if (!strcmp(n->banks[k], leaf)) return 0;
-    if (n->count >= SH_MODSOUND_NEED_BANKS) return -1;
+    if (n->count >= SH_MBI_BANKS_MAX) return -1;   /* every bank the game lists is in already */
     memcpy(n->banks[n->count++], leaf, len + 1);
     return 1;
 }
@@ -430,8 +445,9 @@ static unsigned g_stock_wait_ms = SH_MODSOUND_STOCK_WAIT_MS;
 static sh_modsound_needs *volatile g_needs;   /* published; retired tables are never freed */
 
 /* One stock bank asked for in this process. Slots are claimed on the main
- * thread and never released; the callback finds its slot by cookie. */
-#define MS_STOCK_SLOTS 8
+ * thread and never released; the callback finds its slot by cookie. Each
+ * bank is asked once a session, so the game's own bank count bounds them. */
+#define MS_STOCK_SLOTS SH_MBI_BANKS_MAX
 typedef struct ms_stock {
     char leaf[SH_MODSOUND_LEAF_MAX];
     char key[80];
@@ -645,8 +661,8 @@ static void __fastcall ms_loadbanks(void *hardware)
  * Wwise under that name is not given again (Wwise keeps the first bytes for
  * a bank id until it restarts). */
 typedef struct ms_restart { char leaf[SH_MODSOUND_LEAF_MAX]; char owner[80]; } ms_restart;
-static ms_restart g_restart[SH_MODSOUND_MAX_BANKS];
-static int        g_restart_count;
+static ms_restart *g_restart;   /* grows; read and written under the lock */
+static int        g_restart_count, g_restart_cap;
 static SRWLOCK    g_restart_lock = SRWLOCK_INIT;
 
 static void ms_restart_note(const char *leaf, const char *owner)
@@ -654,7 +670,12 @@ static void ms_restart_note(const char *leaf, const char *owner)
     int i;
     AcquireSRWLockExclusive(&g_restart_lock);
     for (i = 0; i < g_restart_count && strcmp(g_restart[i].leaf, leaf); i++) {}
-    if (i < SH_MODSOUND_MAX_BANKS) {
+    if (i == g_restart_count && g_restart_count == g_restart_cap) {
+        int cap = g_restart_cap ? g_restart_cap * 2 : 16;
+        ms_restart *grown = (ms_restart *)realloc(g_restart, (size_t)cap * sizeof *grown);
+        if (grown) { g_restart = grown; g_restart_cap = cap; }
+    }
+    if (i < g_restart_cap) {
         strncpy_s(g_restart[i].leaf, sizeof g_restart[i].leaf, leaf, _TRUNCATE);
         strncpy_s(g_restart[i].owner, sizeof g_restart[i].owner, owner ? owner : "", _TRUNCATE);
         if (i == g_restart_count) g_restart_count++;
@@ -789,8 +810,8 @@ static void ms_collect_file(void *context, const char *request, uint64_t size, c
     if (!sh_modserve_lookup(request, &hit)) return;
     switch (sh_modsound_table_add(c->t, request, hit.disk_path, hit.size, hit.bundle_id, hit.is_stock)) {
     case 1: c->banks++; break;
-    case -1: ms_log("%s is not loaded: it is a stock pointer, or the mods in use carry more than %d banks", leaf,
-                    SH_MODSOUND_MAX_BANKS); break;
+    case -1: ms_log("%s is not loaded: it is a stock pointer, another mod in use serves that name, or memory ran out",
+                    leaf); break;
     default: break;
     }
 }

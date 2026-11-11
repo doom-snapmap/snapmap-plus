@@ -96,13 +96,14 @@ static void test_table(void)
     CHECK(sh_modsound_lookup(&t, w, 0) == &t.banks[0]);
     CHECK(sh_modsound_lookup(&t, w, 1) == NULL);   /* write opens are never answered */
     CHECK(sh_modsound_lookup(&t, L"doom_ui.bnk", 0) == NULL);
-    for (i = 1; i < SH_MODSOUND_MAX_BANKS; i++) {
+    /* The table grows: the mods in use carry as many banks as they have. */
+    for (i = 1; i < 1000; i++) {
         char r[64];
         _snprintf_s(r, sizeof r, _TRUNCATE, "sound/soundbanks/pc/p6probe_%d.bnk", i);
         CHECK(sh_modsound_table_add(&t, r, "C:\\m\\n.bnk", 1, "p6probe", 0) == 1);
     }
-    CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_full.bnk", "C:\\m\\n.bnk", 1, "p6probe", 0) == -1);
-    CHECK(t.count == SH_MODSOUND_MAX_BANKS);
+    CHECK(t.count == 1000 && t.skipped == 2 && !strcmp(t.banks[999].leaf, "p6probe_999.bnk"));
+    CHECK(sh_modsound_lookup(&t, w, 0) == &t.banks[0]);
     sh_modsound_table_free(&t);
     CHECK(t.count == 0);
 }
@@ -376,6 +377,17 @@ static void test_needs(void)
     n = sh_modsound_needs_find(t, H_OTHER);
     CHECK(n && n->count == 2 && !strcmp(n->banks[1], "doom_vo_sp.bnk"));
     CHECK(t->count == 2 && !sh_modsound_needs_find(t, H_SERVED) && !sh_modsound_needs_find(t, "dd"));
+    /* Any number of builds may need stock banks: the list grows. */
+    {
+        int i;
+        for (i = 0; i < 500; i++) {
+            char h[65];
+            _snprintf_s(h, sizeof h, _TRUNCATE, "%064d", i + 1);
+            CHECK(sh_modsound_needs_add(t, h, "many", "doom_vo_sp.bnk") == 1);
+        }
+        CHECK(t->count == 502 && sh_modsound_needs_find(t, "0000000000000000000000000000000000000000000000000000000000000500"));
+    }
+    free(t->bundles);
     free(t);
 }
 

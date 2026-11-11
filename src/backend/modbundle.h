@@ -131,12 +131,7 @@
 #define SH_MB_WARNINGS_KEPT   16u
 #define SH_MB_HASH_HEX        64u
 /* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
- * console line, within these bounds. The Worker's manifest check mirrors them. */
-#define SH_MB_REQ_CVARS_MAX    32u     /* cvars one bundle may set */
-#define SH_MB_REQ_NAME_MAX     64u     /* bytes of a cvar name */
-#define SH_MB_REQ_VALUE_MAX    64u     /* bytes of a cvar value */
-#define SH_MB_REQ_COMMANDS_MAX 16u     /* lines in each of activate and deactivate */
-#define SH_MB_REQ_LINE_MAX     256u    /* bytes of one console line */
+ * console line, as many and as long as the author writes (DECISIONS 26). */
 #define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's builder block */
 
 typedef struct sh_mb_need {

@@ -35,6 +35,7 @@
  * lock. */
 #define SH_SERVED_MARK_PREFIX L"Local\\snapmap-plus-served-"
 
+#define MS_ANY_SIZE      ((size_t)-1)   /* a read or a string of any size */
 #define MS_NAME_MAX      1024u
 #define MS_JSON_DEPTH    16u
 #define MS_CAUSE_MAX     200
@@ -462,11 +463,14 @@ static int ms_jmember(ms_json *c, char *key, size_t cap, const char **v, const c
 
 /* A string value decoded into the arena; NULL when it is not a string, holds
  * a NUL or exceeds the bound. */
+/* A JSON string value, decoded; NULL when it is not one or (for a field of
+ * a fixed form, as a hash) its text is longer than `max` (MS_ANY_SIZE: any
+ * length). */
 static char *ms_jstr(ms_index *x, const char *v, const char *ve, size_t max)
 {
     size_t n = 0, cap = (size_t)(ve - v) + 1;
     char *out;
-    if (v >= ve || *v != '"' || cap > max + 3) return NULL;
+    if (v >= ve || *v != '"' || (max != MS_ANY_SIZE && cap > max + 3)) return NULL;
     out = (char *)ms_alloc(x, cap);
     if (!out || !sh_json_decode_string(v, (size_t)(ve - v), out, cap, &n) || n >= cap || strlen(out) != n)
         return NULL;
@@ -504,26 +508,33 @@ static int ms_wide(const char *path, wchar_t *out, size_t cap)
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out + at, (int)(cap - at)) > 0;
 }
 
+/* The whole file, of any size, read in pieces (one ReadFile moves at most
+ * 4 GB); NULL when it cannot be read or is larger than `max`. */
 static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
 {
     HANDLE h;
     LARGE_INTEGER size;
     unsigned char *buf = NULL;
-    DWORD got = 0;
     wchar_t wide[MS_PATH_MAX + 8];
     *len = 0;
     if (!ms_wide(path, wide, sizeof wide / sizeof wide[0])) return NULL;
     h = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return NULL;
-    if (GetFileSizeEx(h, &size) && size.QuadPart >= 0 && (uint64_t)size.QuadPart <= max) {
-        buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size.QuadPart ? (size_t)size.QuadPart : 1u);
-        if (buf && size.QuadPart &&
-            (!ReadFile(h, buf, (DWORD)size.QuadPart, &got, NULL) || got != (DWORD)size.QuadPart)) {
-            HeapFree(GetProcessHeap(), 0, buf);
-            buf = NULL;
+    if (GetFileSizeEx(h, &size) && size.QuadPart >= 0 && (uint64_t)size.QuadPart <= max &&
+        (uint64_t)size.QuadPart < (uint64_t)SIZE_MAX) {
+        size_t want = (size_t)size.QuadPart, have = 0;
+        buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, want ? want : 1u);
+        while (buf && have < want) {
+            DWORD piece = want - have > (1u << 30) ? (1u << 30) : (DWORD)(want - have), got = 0;
+            if (!ReadFile(h, buf + have, piece, &got, NULL) || !got) {
+                HeapFree(GetProcessHeap(), 0, buf);
+                buf = NULL;
+                break;
+            }
+            have += got;
         }
-        if (buf) *len = (size_t)size.QuadPart;
+        if (buf) *len = want;
     }
     CloseHandle(h);
     return buf;
@@ -594,9 +605,9 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     if (!ms_jenter(c, '{')) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
     while (ms_jnext(c, '}')) {
         if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
-        if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, 511);
+        if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, MS_ANY_SIZE);
         else if (!strcmp(key, "sha256")) blob = ms_jstr(x, v, ve, 64);
-        else if (pointer && !strcmp(key, "source")) stock = ms_jstr(x, v, ve, 511);
+        else if (pointer && !strcmp(key, "source")) stock = ms_jstr(x, v, ve, MS_ANY_SIZE);
         else if (!strcmp(key, "stock")) {
             /* A stock pointer (modbundle.h): installed content, no blob, no size. */
             ms_json p = { v, ve };
@@ -604,11 +615,11 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             if (ms_jenter(&p, '{')) while (ms_jnext(&p, '}')) {
                 const char *pv, *pve;
                 if (!ms_jmember(&p, key, sizeof key, &pv, &pve)) break;
-                if (!strcmp(key, "source")) stock = ms_jstr(x, pv, pve, 511);
+                if (!strcmp(key, "source")) stock = ms_jstr(x, pv, pve, MS_ANY_SIZE);
                 else if (!strcmp(key, "sha256")) blob = ms_jstr(x, pv, pve, 64);
             }
         }
-        else if (!strcmp(key, "request")) request = ms_jstr(x, v, ve, 511);
+        else if (!strcmp(key, "request")) request = ms_jstr(x, v, ve, MS_ANY_SIZE);
         else if (!strcmp(key, "size")) { if (!ms_jnum(v, ve, &size)) size = -1; }
         else if (!strcmp(key, "provides")) {
             ms_json p = { v, ve };
@@ -616,7 +627,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
                 const char *pv, *pve;
                 if (!ms_jmember(&p, key, sizeof key, &pv, &pve)) break;
                 if (!strcmp(key, "type")) ptype = ms_jstr(x, pv, pve, 63);
-                else if (!strcmp(key, "name")) pname = ms_jstr(x, pv, pve, 511);
+                else if (!strcmp(key, "name")) pname = ms_jstr(x, pv, pve, MS_ANY_SIZE);
             }
         } else if (!strcmp(key, "needs")) {
             ms_json a = { v, ve };
@@ -628,7 +639,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
                     const char *nv, *nve;
                     if (!ms_jmember(&o, key, sizeof key, &nv, &nve)) break;
                     if (!strcmp(key, "type")) nt = ms_jstr(x, nv, nve, 63);
-                    else if (!strcmp(key, "name")) nn = ms_jstr(x, nv, nve, 511);
+                    else if (!strcmp(key, "name")) nn = ms_jstr(x, nv, nve, MS_ANY_SIZE);
                 }
                 if (!nt || !nn) continue;
                 ms_lower(nn);
@@ -649,7 +660,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     if (stock) {
         if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
         size = 0;
-    } else if (size < 0 || size > (double)SH_MODSERVE_MAX_FILE || size != (double)(uint64_t)size) {
+    } else if (size < 0 || size >= 18446744073709551616.0 || size != (double)(uint64_t)size) {
         ms_fail(b, MS_DAMAGED, path);
         return;
     }
@@ -760,7 +771,8 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
  * see the same cvars and lines. No cvar or command is known here by name. */
 static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, const char *ve)
 {
-    char cause[SH_MB_CAUSE_MAX], key[SH_MB_REQ_NAME_MAX + 16];
+    char cause[SH_MB_CAUSE_MAX], *key;
+    size_t key_cap;
     char *canon = sh_mb_requirements_canonical(v, (size_t)(ve - v), cause, sizeof cause);
     ms_json o;
     const char *mv, *mve;
@@ -768,19 +780,23 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
     b->req_text = ms_strdup(x, canon);
     free(canon);
     if (!b->req_text) { ms_fail(b, "out of memory"); return; }
+    /* Any key of the text fits a buffer as long as the text. */
+    key_cap = strlen(b->req_text) + 1;
+    key = (char *)ms_alloc(x, key_cap);
+    if (!key) { ms_fail(b, "out of memory"); return; }
     o.p = b->req_text;
     o.e = b->req_text + strlen(b->req_text);
     if (!ms_jenter(&o, '{')) { ms_fail(b, "requirements could not be read"); return; }
     while (!b->cause[0] && ms_jnext(&o, '}')) {
         ms_json c;
-        if (!ms_jmember(&o, key, sizeof key, &mv, &mve)) { ms_fail(b, "requirements could not be read"); return; }
+        if (!ms_jmember(&o, key, key_cap, &mv, &mve)) { ms_fail(b, "requirements could not be read"); return; }
         c.p = mv;
         c.e = mve;
         if (!strcmp(key, "cvars")) {
             int n = 0;
             ms_json k = c;
             if (ms_jenter(&k, '{')) while (ms_jnext(&k, '}')) {
-                if (!ms_jmember(&k, key, sizeof key, &mv, &mve)) break;
+                if (!ms_jmember(&k, key, key_cap, &mv, &mve)) break;
                 n++;
             }
             if (!n) continue;
@@ -788,9 +804,9 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
             if (!b->req_cvars) { ms_fail(b, "out of memory"); return; }
             if (ms_jenter(&c, '{')) while (b->req_ncvars < n && ms_jnext(&c, '}')) {
                 ms_req_cvar *r = &b->req_cvars[b->req_ncvars];
-                if (!ms_jmember(&c, key, sizeof key, &mv, &mve)) break;
+                if (!ms_jmember(&c, key, key_cap, &mv, &mve)) break;
                 r->name = ms_strdup(x, key);
-                r->value = ms_jstr(x, mv, mve, SH_MB_REQ_VALUE_MAX);
+                r->value = ms_jstr(x, mv, mve, MS_ANY_SIZE);
                 if (!r->name || !r->value) { ms_fail(b, "out of memory"); return; }
                 b->req_ncvars++;
             }
@@ -800,7 +816,7 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
                 const char **lines;
                 int *count, n = 0;
                 ms_json a, k;
-                if (!ms_jmember(&c, key, sizeof key, &mv, &mve)) break;
+                if (!ms_jmember(&c, key, key_cap, &mv, &mve)) break;
                 if (!strcmp(key, "activate")) { count = &b->req_nact; }
                 else if (!strcmp(key, "deactivate")) { count = &b->req_ndeact; }
                 else continue;
@@ -813,7 +829,7 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
                 if (ms_jenter(&a, '[')) while (*count < n && ms_jnext(&a, ']')) {
                     const char *sv = a.p, *se = ms_jskip(a.p, a.e);
                     a.p = se;
-                    lines[*count] = ms_jstr(x, sv, se, SH_MB_REQ_LINE_MAX);
+                    lines[*count] = ms_jstr(x, sv, se, MS_ANY_SIZE);
                     if (!lines[*count]) { ms_fail(b, "out of memory"); return; }
                     (*count)++;
                 }
@@ -901,13 +917,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
-    text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
+    text = ms_read_whole(path, MS_ANY_SIZE, &len);
     if (!text) {
         char pkg[MS_PATH_MAX];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
         if (ms_file_size(path) >= 0)
-            ms_fail(b, "mod.json could not be read (it may be open in another program, or larger than %u MB). Close it "
-                    "and press Refresh.", SH_MODSERVE_MAX_JSON >> 20);
+            ms_fail(b, "mod.json could not be read (it may be open in another program). Close it and press Refresh.");
         else if (ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_EARLIER);
         else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
         return;
@@ -931,7 +946,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         const char *ks = c.p;
         if (!ms_jmember(&c, key, sizeof key, &v, &ve)) break;
         for (k = 0; !retired && g_ms_retired[k]; ++k) if (!strcmp(key, g_ms_retired[k])) retired = g_ms_retired[k];
-        if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, 400);
+        if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, MS_ANY_SIZE);
         else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
         else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "author") || !strcmp(key, "homepage")) continue;
@@ -1024,10 +1039,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         ms_json a = { shadows_v, shadows_e };
         if (ms_jenter(&a, '[')) while (ms_jnext(&a, ']')) {
             const char *sv = a.p, *se = ms_jskip(a.p, a.e);
-            char *s = ms_jstr(x, sv, se, 511);
+            char *s = ms_jstr(x, sv, se, MS_ANY_SIZE);
             a.p = se;
             if (!s) continue;
-            if (nshadows == (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u shadows", SH_MODSERVE_MAX_FILES); break; }
             if (!ms_grow((void **)&shadows, &cshadows, nshadows + 1, sizeof(char *))) { ms_fail(b, "out of memory"); break; }
             ms_lower(s);
             shadows[nshadows++] = s;
@@ -1046,10 +1060,6 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
                 ms_json one = { a.p, ms_jskip(a.p, a.e) };
                 a.p = one.e;
-                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) {
-                    ms_fail(b, "This mod has more than %u files; split it into two mods.", SH_MODSERVE_MAX_FILES);
-                    break;
-                }
                 ms_parse_file(x, b, &one, shadows, nshadows, pass);
             }
         }
@@ -1096,7 +1106,7 @@ static void ms_row_category(const ms_index *x, const ms_bundle *b, char *out, si
         size_t len = 0;
         const char *p, *q;
         if (!f->is_sedef || f->is_shadow || f->stock) continue;
-        text = ms_read_whole(f->disk, 1u << 20, &len);
+        text = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
         if (!text) continue;
         p = strstr((const char *)text, "categoryNameTag");
         if (p) p = strchr(p, '"');
@@ -4137,7 +4147,7 @@ static int ms_mkdirs_for(const char *path)
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len)
 {
     size_t have_len = 0;
-    unsigned char *have = ms_read_whole(path, (size_t)SH_MODSERVE_MAX_FILE, &have_len);
+    unsigned char *have = ms_read_whole(path, MS_ANY_SIZE, &have_len);
     char tmp[MS_PATH_MAX];
     wchar_t wide[MS_PATH_MAX + 8], wtmp[MS_PATH_MAX + 8];
     HANDLE h;
@@ -4239,22 +4249,29 @@ static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *byte
     return f->disk && f->blob;
 }
 
-#define MS_BANKS_MAX 16
 static void ms_bank_stems(ms_index *x)
 {
     int bi;
     for (bi = 0; bi < x->nbundles; ++bi) {
         ms_bundle *b = &x->bundles[bi];
-        char stems[MS_BANKS_MAX][SH_MB_BANK_STEM_MAX + 1], renamed[MS_BANKS_MAX][SH_MB_BANK_STEM_MAX + 20];
+        /* One entry per bank the bundle carries: as many as it has. */
+        char (*stems)[SH_MB_BANK_STEM_MAX + 1] = NULL, (*renamed)[SH_MB_BANK_STEM_MAX + 20] = NULL;
         int n = 0, i, k;
-        if (!b->admitted || !b->hash || strlen(b->hash) != 64 || !b->id) continue;
+        if (!b->admitted || !b->hash || strlen(b->hash) != 64 || !b->id || b->file_count <= 0) continue;
+        stems = calloc((size_t)b->file_count, sizeof *stems);
+        renamed = calloc((size_t)b->file_count, sizeof *renamed);
+        if (!stems || !renamed) {
+            free(stems);
+            free(renamed);
+            ms_log("bundle '%s': out of memory; its banks keep their names", b->id);
+            continue;
+        }
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
             char stem[SH_MB_BANK_STEM_MAX + 1], req[SH_MB_REQUEST_MAX + 1];
             unsigned char *bytes;
             size_t len = 0;
             if (f->stock || !sh_mb_bank_stem(f->request, stem, sizeof stem)) continue;
-            if (n >= MS_BANKS_MAX) { ms_log("bundle '%s': more than %d banks; the rest keep their names", b->id, MS_BANKS_MAX); break; }
             if (!f->blob || strlen(f->blob) != 64) {
                 ms_log("bundle '%s': %s has no recorded hash; it keeps its name", b->id, f->request);
                 continue;
@@ -4262,7 +4279,7 @@ static void ms_bank_stems(ms_index *x)
             /* The bank's own hash names it: two builds
              * with one bank's bytes share it, and Wwise loads it once. */
             _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
-            bytes = ms_read_whole(f->disk, (size_t)SH_MODSERVE_MAX_FILE, &len);
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
             if (!bytes || !sh_modserve_bank_patch_id(bytes, len, renamed[n])) {
                 if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
                 ms_log("bundle '%s': %s cannot be served under a stem of its own (unreadable or not a BKHD bank); it keeps "
@@ -4283,7 +4300,7 @@ static void ms_bank_stems(ms_index *x)
             ms_log("bundle '%s': bank %s.bnk served as %s.bnk (a stem of its own to Wwise)", b->id, stem, renamed[n]);
             n++;
         }
-        if (!n) continue;
+        if (!n) { free(stems); free(renamed); continue; }
         /* The bundle's served decls naming a bank follow the rename. */
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
@@ -4292,7 +4309,7 @@ static void ms_bank_stems(ms_index *x)
             size_t len = 0, tl = 0;
             int changed = 0;
             if (!f->is_decl || f->stock) continue;
-            bytes = ms_read_whole(f->disk, 8u << 20, &len);
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
             if (!bytes) continue;
             text = (char *)malloc(len + 1);
             if (text) { memcpy(text, bytes, len); text[len] = 0; tl = len; }
@@ -4309,6 +4326,8 @@ static void ms_bank_stems(ms_index *x)
             }
             free(text);
         }
+        free(stems);
+        free(renamed);
     }
 }
 
@@ -4548,14 +4567,14 @@ static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
     if (f->stock) {
         char cause[SH_MB_CAUSE_MAX], hex[SH_MB_HASH_HEX + 1];
         if (sh_mb_stock_read(f->stock, f->blob, &buf, len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) return buf;
-        buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
+        buf = ms_read_whole(f->disk, MS_ANY_SIZE, len);
         if (buf) {
             sh_mb_sha256_hex(buf, *len, hex);
             if (strcmp(hex, f->blob) != 0) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; *len = 0; }
         }
         return buf;
     }
-    buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
+    buf = ms_read_whole(f->disk, MS_ANY_SIZE, len);
     if (buf && (uint64_t)*len != f->size) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; *len = 0; }
     return buf;
 }
@@ -6445,8 +6464,8 @@ int sh_modserve_plan_unvisited(const sh_modserve_plan *plan)
 #define MS_REQ_ORIGINAL_MAX 512
 #define MS_WHO_MAX          200
 typedef struct ms_held {
-    char name[SH_MB_REQ_NAME_MAX + 1];
-    char want[SH_MB_REQ_VALUE_MAX + 1];   /* the value the accepted bundles ask */
+    char *name;                           /* malloc'd, any length */
+    char *want;                           /* the value the accepted bundles ask (malloc'd) */
     char original[MS_REQ_ORIGINAL_MAX];   /* what this layer displaced (owned only) */
     char owner[MS_WHO_MAX];               /* the name of the earliest install asking it */
     int needed;                           /* an accepted bundle asks it (this pass) */
@@ -6457,7 +6476,7 @@ typedef struct ms_held {
 
 typedef struct ms_active {
     char id[100], who[MS_WHO_MAX];
-    char *deact[SH_MB_REQ_COMMANDS_MAX];  /* its deactivate lines, run when it stops */
+    char **deact;                         /* its deactivate lines, run when it stops (malloc'd) */
     int ndeact, act_ran, act_total;
 } ms_active;
 
@@ -6528,6 +6547,7 @@ static void ms_active_drop(int i)
 {
     int k;
     for (k = 0; k < g_active[i].ndeact; ++k) free(g_active[i].deact[k]);
+    free(g_active[i].deact);
     memmove(&g_active[i], &g_active[i + 1], sizeof *g_active * (size_t)(g_nactive - i - 1));
     g_nactive--;
 }
@@ -6714,13 +6734,22 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
                     ms_held *h = ms_held_find(b->req_cvars[k].name);
                     if (h && h->needed) continue;
                     if (!h) {
-                        if (!ms_grow((void **)&g_held, &g_cheld, g_nheld + 1, sizeof *g_held)) continue;
+                        char *name = _strdup(b->req_cvars[k].name);
+                        if (!name || !ms_grow((void **)&g_held, &g_cheld, g_nheld + 1, sizeof *g_held)) {
+                            free(name);
+                            continue;
+                        }
                         h = &g_held[g_nheld++];
                         memset(h, 0, sizeof *h);
-                        strncpy_s(h->name, sizeof h->name, b->req_cvars[k].name, _TRUNCATE);
+                        h->name = name;
                     }
-                    if (strcmp(h->want, b->req_cvars[k].value)) h->state = 0;
-                    strncpy_s(h->want, sizeof h->want, b->req_cvars[k].value, _TRUNCATE);
+                    if (!h->want || strcmp(h->want, b->req_cvars[k].value)) {
+                        char *want = _strdup(b->req_cvars[k].value);
+                        if (!want) continue;
+                        free(h->want);
+                        h->want = want;
+                        h->state = 0;
+                    }
                     _snprintf_s(h->owner, sizeof h->owner, _TRUNCATE, "%s", ms_label(b));
                     h->needed = 1;
                     r.needed++;
@@ -6873,6 +6902,8 @@ finish:
     /* Entries neither asked nor holding a displaced value are done. */
     for (i = g_nheld - 1; i >= 0; --i)
         if (!g_held[i].needed && !g_held[i].owned) {
+            free(g_held[i].name);
+            free(g_held[i].want);
             memmove(&g_held[i], &g_held[i + 1], sizeof *g_held * (size_t)(g_nheld - i - 1));
             g_nheld--;
         }
@@ -6903,11 +6934,14 @@ finish:
         /* The current build's lines run when it stops. */
         _snprintf_s(a->who, sizeof a->who, _TRUNCATE, "%s", ms_label(b));
         for (k = 0; k < a->ndeact; ++k) free(a->deact[k]);
+        free(a->deact);
+        a->deact = NULL;
         a->ndeact = 0;
-        for (k = 0; k < b->req_ndeact && k < (int)SH_MB_REQ_COMMANDS_MAX; ++k) {
-            a->deact[a->ndeact] = _strdup(b->req_deact[k]);
-            if (a->deact[a->ndeact]) a->ndeact++;
-        }
+        if (b->req_ndeact > 0 && (a->deact = (char **)calloc((size_t)b->req_ndeact, sizeof(char *))) != NULL)
+            for (k = 0; k < b->req_ndeact; ++k) {
+                a->deact[a->ndeact] = _strdup(b->req_deact[k]);
+                if (a->deact[a->ndeact]) a->ndeact++;
+            }
     }
     for (i = 0; x && i < x->nbundles; ++i)
         if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
@@ -7069,6 +7103,7 @@ void sh_modserve_test_reset_gates(void)
     int i;
     AcquireSRWLockExclusive(&g_req_lock);
     for (i = g_nactive - 1; i >= 0; --i) ms_active_drop(i);
+    for (i = 0; i < g_nheld; ++i) { free(g_held[i].name); free(g_held[i].want); }
     g_nheld = 0;
     g_nstopped = 0;
     ReleaseSRWLockExclusive(&g_req_lock);
