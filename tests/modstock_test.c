@@ -276,13 +276,13 @@ static void test_builder(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod2", tmp);
     make_mod(dir, ",\"stock\":{\"" REQ_OWN "\":{\"source\":\"" P_IMAGE "\"}}");
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "mod.json uses \"stock\", which this version does not read");
+    CHECK_CAUSE(b, SH_MB_EARLIER);
     sh_mb_free(&b);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod5", tmp);   /* a .tome that is not installed content */
     make_mod(dir, NULL);
     put_rel(dir, "assets\\maps\\mods\\tstock00\\other.tome", OWN, sizeof OWN);
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a stock pointer");
+    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not the game's own file: a .sbsp, .ambientsh, .tome or .pages file can only be an unchanged copy");
     sh_mb_free(&b);
 
     /* Without a reader nothing becomes a pointer. The files at game names
@@ -298,30 +298,6 @@ static void test_builder(const char *tmp)
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
     sh_modstock_register();
-
-    /* Manifest grammar: a pointer may not carry blob or size, and its source
-     * is a lower-cased path. */
-    {
-        static const char *const bad[] = {
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"size\":300,\"stock\":{\"sha256\":\"%s\",\"source\":\"" P_IMAGE "\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"Generated/Image/Stock/B.bimage\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
-            "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"../x.bimage\"}}",
-        };
-        int k;
-        hex_of(IMG_B, sizeof IMG_B, h);
-        for (k = 0; k < 3; k++) {
-            char file[1024], text[2048];
-            _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
-            _snprintf_s(text, sizeof text, _TRUNCATE, "{\"bundle\":\"%s\",\"files\":[%s],\"format\":2,\"id\":\"" SALT_STOCK "\","
-                        "\"name\":\"x\"}", h, file);
-            CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
-            CHECK(strstr(b.first_cause, "stock") != NULL);
-            sh_mb_free(&b);
-        }
-    }
 }
 
 /* ------------------------------------- renamed copies, names, dead needs ---- */
@@ -533,9 +509,26 @@ static void test_campaign_closure(const char *tmp)
     CHECK(f && f->need_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness") && has_note(&b, "(first " K_MD6 ")"));
     CHECK(b.canonical && strstr(b.canonical, "\"source\":\"" K_SKL "\"") != NULL);
+    /* Campaign content derives the blacklist requirement the author never
+     * writes (DECISIONS 17), and a load of the written block agrees. */
+    CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+    CHECK(has_note(&b, "derived: the mod brings campaign content"));
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && b.requirements && strstr(b.requirements, "g_useImageBlackList"));
+    sh_mb_free(&b);
+    /* An author value is replaced, with a warning; other requirements stay. */
+    {
+        char d2[MAX_PATH];
+        _snprintf_s(d2, sizeof d2, _TRUNCATE, "%s\\close1b", tmp);
+        mt_write(d2, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\","
+                 "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":1,\"r_fullscreen\":0}}}");
+        mt_write(d2, K_WEB, K_WEB_TEXT);
+        CHECK(sh_mb_build(d2, NULL, &RESOLVER, &b) && b.warnings == 1 && b.requirements &&
+              !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\",\"r_fullscreen\":\"0\"}}"));
+        sh_mb_free(&b);
+    }
     /* The builder block marks them as derived pointers; a rebuild derives
      * them again and keeps the hash and the note. */
     {
@@ -583,8 +576,8 @@ static void test_campaign_closure(const char *tmp)
         }
         mt_write(dir, K_WEB, K_WEB_TEXT);
         CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign archives hold; bringing it along would take "
-                       "the bundle past 4096 files");
+        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign holds; bringing it along would take "
+                       "this mod past 4096 files");
         sh_mb_free(&b);
     }
 }
@@ -1035,7 +1028,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
      * pointer it cannot answer falls through to the engine. */
     sh_modstock_set_install(d2);
     CHECK(!sh_ms_verify(key, &vs, cause, sizeof cause));
-    CHECK(strstr(cause, " points at installed content ") != NULL);
+    CHECK(strstr(cause, " uses the game's file ") != NULL);
     CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in mod.json */
     sh_modstock_set_install(d1);
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));

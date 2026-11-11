@@ -5,7 +5,7 @@
  *   maps\<map title>\<mod name>\ a mod a map brought (a download, or an import of a
  *                                rawmap or prefab ZIP): a "place" (below)
  *   snapmap-plus.json            the product record (modbundle.h): claims, links,
- *                                the migration record, the places
+ *                                the places, which folder holds each salt
  *
  * Identity is the salt (modsalt.h, ONE-SHAPE rule 1): eight characters in the
  * builder block, given once. A folder name is the author's and never carries
@@ -23,15 +23,26 @@
  * The scan (sh_ms_sync: boot, Refresh, and after an install, a download or
  * New mod; no folder watcher, rule 3). Under the store lock:
  *   1. a root folder with no builder block is a new mod: it gets its salt
- *      (sh_ms_assign_salt, its own references to mods/<folder name>/
- *      rewritten to mods/<salt>/) and keeps its folder name;
- *   2. two root folders carrying one salt (a copied folder): the one built
- *      first ("built" in the block; ties by folder path) keeps it, every
- *      other one gets a new salt with its own references rewritten;
+ *      (sh_ms_assign_salt) and keeps its folder name;
+ *   2. two root folders carrying one salt (a copied folder): the folder the
+ *      record's "salts" section names (the one that held it at the last
+ *      scan) keeps it, else the one created first; every other one gets a
+ *      new salt with its own references rewritten. The scan then records
+ *      each salt's folder;
  *   3. a root folder whose tree hash (sh_mb_tree_hash) or builder rules
  *      differ from its block's, or whose last build failed, is built again;
  *      a failed build records its cause in the block and the folder serves
  *      nothing until fixed (rule 2: no snapshots, no last good build).
+ * Before a root folder is built (1 and 3), what the author wrote under its
+ * folder name moves under the salt (DECISIONS 20): files under
+ * assets\...\mods\<folder name>\, references to mods/<folder name>/ in
+ * mod.json and every text under assets\ (scripts among them), strings keys
+ * without the "<salt>_" prefix that are not string edits with their #str_
+ * references, and a sound bank "<folder name>_x.bnk" (renamed
+ * "<salt>_x.bnk", its id following the name). A folder name equal to a salt
+ * of the store names that mod and is never moved. Renaming a folder changes
+ * nothing already moved. Files beside mod.json and assets\ are left alone.
+
  * A folder in an earlier shape is listed with its plain reason and nothing in
  * it is written. Enumeration only reads.
  *
@@ -48,9 +59,14 @@
 #include "modbundle.h"
 #include "modsalt.h"
 
-/* The store lock (recursive). modsync_store_lock and modsync_store_unlock
- * (modsync.h) are the same lock under their older names. A thread that finds
- * it held logs one "MODS: store: waiting" line and waits. */
+/* The store lock (recursive per thread): the mods folder's named lock
+ * (store_lock.h; the record lock is the same mutex), shared with every other
+ * process on the folder (a second game, the store tool, which holds it for
+ * its whole run). modsync_store_lock and modsync_store_unlock (modsync.h)
+
+ * take the same lock. A thread that finds it held logs one "MODS: store:
+ * waiting" line and waits. The counts below are this process's. */
+
 void modstore_lock(void);
 void modstore_unlock(void);
 /* How many lock calls had to wait so far (tests, diagnostics). */
@@ -359,8 +375,9 @@ int  sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *fold
 /* New mod from the Mods tab: as sh_ms_new_mod, plus an example that places
  * and plays untouched: an entityDef at mods/<salt>/example_crate (the game's
  * SnapMap crate01 model), its Toybox row (snapEditorEntityDef) and the row's
- * strings in mod.json's author part (mods/<salt>/category named after the
- * mod, mods/<salt>/example_crate_name and _desc). Nothing binary.
+ * strings in mod.json's author part (<salt>_category named after the mod,
+ * <salt>_example_crate_name and _desc). Nothing binary.
+
  * `example_out` receives the row's path below the folder, with '/'. */
 int  sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                            char *example_out, size_t example_cap, char *cause, size_t cause_cap);

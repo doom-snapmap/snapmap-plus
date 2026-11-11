@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c", "store_convert.c", "store_saves.c",
-             "store_deflate.c", "../backend/prefab_block.c",
+             "store_deflate.c", "store_old_ids.c", "../backend/prefab_block.c",
              "../backend/modstore.c", "modstore_upgrade.c", "modmigrate.c", "modlegacy.c", "../backend/modbundle.c",
              "../backend/modsalt.c", "../backend/strkeys.c", "modbundle_old.c", "../backend/companion.c", "../backend/modstock.c",
              "../backend/modmanifest.c", "map_legacy_payload.c", "map_old.c",

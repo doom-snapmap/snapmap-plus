@@ -478,8 +478,13 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
     out[0] = 0;
     if (!c[0]) return;
     if (mu_starts(c, "not built: ")) c += 11;
+    if (!strcmp(c, SH_MB_EARLIER)) {   /* already the one plain sentence (DECISIONS 21) */
+        strncpy_s(out, cap, c, _TRUNCATE);
+        return;
+    }
     if (!_strnicmp(c, SH_MB_SHAPE, shape)) {
         const char *t = c + shape;
+
         if (strstr(t, "package.json"))
             strncpy_s(out, cap, "This mod folder uses package.json, which this version of Snapmap+ does not read; make a new "
                       "mod with New mod and move this folder's assets folder into it.", _TRUNCATE);

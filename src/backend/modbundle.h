@@ -13,7 +13,7 @@
  * builder's part, the member "snapmap-plus", is written only by the product:
  *
  *   "snapmap-plus": {
- *     "format": 2, "salt": "<8 characters>", "rules": 8, "built": <unix seconds>,
+ *     "format": 2, "salt": "<8 characters>", "rules": 10, "built": <unix seconds>,
  *     "tree": "<sha256>",              the rebuild rule's tree hash (sh_mb_tree_hash)
  *     "build": "<sha256>",             the build hash; absent while the build fails
  *     "cause": "<first cause>",        only while the build fails (or a verification found one)
@@ -39,7 +39,7 @@
  * author's and never read. A folder in an earlier shape (package.json, a block
  * without a salt, an author id, key, shadows, stock, scope, player, extends,
  * replaces, legacy, composes or schema key, a hud schema) is refused with
- * SH_MB_SHAPE and a cause about the thing itself (sh_mb_descriptor_state).
+ * SH_MB_EARLIER, one sentence (sh_mb_descriptor_state).
  *
  * Additive mods. The builder classifies every file from its path and bytes
  * (SH_MB_CLASS_*); "shadows" is derived from the classification (every
@@ -110,10 +110,15 @@
  * rebuild rule, so a product update reclassifies every own folder. Raise it
  * when a build's classification, edits or manifest change. 10: mod scripts
  * (a folder that failed only on a .lua file builds now). 11: the scripts
- * member records whether the mod gets its Script node row ("node"). */
-#define SH_MB_RULES           11
-/* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
-#define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
+ * member records whether the mod gets its Script node row ("node"). 12:
+ * files beside mod.json and assets are ignored, and campaign content derives
+ * its requirements. */
+#define SH_MB_RULES           12
+
+/* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
+ * SH_MB_SHAPE is its first part, which readers of a cause match on. */
+#define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
+#define SH_MB_EARLIER         SH_MB_SHAPE "Run the Snapmap+ installer again and it converts it."
 #define SH_MB_ID_MAX          64u
 #define SH_MB_NAME_MAX        80u      /* code points */
 #define SH_MB_AUTHOR_MAX      80u      /* code points */
@@ -164,7 +169,7 @@ typedef struct sh_mb_file {
     int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */
 } sh_mb_file;
 
-/* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
+/* Per-file classification. Decided from the
  * file's path and bytes, never from the descriptor:
  *   EDITOR   an editor-only type (sh_mb_editor_time) outside the namespace:
  *            a local tweak. The same types under the namespace are ADD or
@@ -232,7 +237,7 @@ typedef struct sh_mb_bundle {
     char *registries;      /* compact JSON of the block's "registries" object, or NULL */
     char *scripts;         /* compact JSON of the block's "scripts" object, or NULL (no scripts) */
     unsigned script_files; /* files of kind script (sh_mb_script_request) */
-    /* Derived edits (DESIGN-additive 2.4): the block's "edits", a JSON array
+    /* Derived edits: the block's "edits", a JSON array
      * with one element per decl the mod carries at a game name with other
      * bytes (decl_tree.h), or NULL; edit_files elements. */
     char *edits;
@@ -244,7 +249,7 @@ typedef struct sh_mb_bundle {
 /* Whether two decl texts are one text: line ends are not content, so CRLF
  * and LF compare equal and the run of line ends at the end is ignored. The
  * builder compares a decl-grammar copy at a game name with the game's text
- * this way (rules 7); a binary keeps byte identity. */
+ * this way; a binary keeps byte identity. */
 int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, size_t bn);
 
 /* Existence of one lower-cased request path: 1 present, 0 absent, -1 cannot
@@ -304,8 +309,7 @@ int  sh_mb_stock_available(void);
  * Wwise bank a sound decl named `decl_name` needs loaded on demand (a bank
  * SnapMap's game-mode filter skips, the only kind filing its event), else 0.
  * With one registered, a build lists each such bank once, in byte order, as
- * the product block's registries "banks" (DESIGN-additive 2.4, "Sound
- * events") and notes which decl needs it. NULL (the default) lists none. */
+ * the product block's registries "banks" and notes which decl needs it. NULL (the default) lists none. */
 typedef int (*sh_mb_bank_need_fn)(const char *decl_name, char *bank, size_t cap);
 void sh_mb_set_bank_need(sh_mb_bank_need_fn fn);
 /* The registered operations, with a first cause naming `path` when not OK. */
@@ -328,7 +332,7 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * written to disk. The salt is the block's; `salt` (NULL to read it) gives
  * one to a folder whose block has none yet, and must equal the block's when
  * both are present. A folder in an earlier shape, or one without a salt, is
- * refused with SH_MB_SHAPE. "built" is the block's when it has one, else the
+ * refused with SH_MB_EARLIER. "built" is the block's when it has one, else the
  * time of this build when it succeeds; out->tree is the folder's tree hash and
  * out->prev_hash the build hash its block recorded. Every file is classified
  * (out->files[].cls, out->classes); a file outside the namespace that is not a
@@ -365,25 +369,16 @@ char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, si
 char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
 
 /* Read and check a built mod.json: the author's part, the builder block,
- * structure, salt, version, paths, logical names and the build hash
+ * structure, salt, paths, logical names and the build hash
  * recomputed from the canonical form. Files on disk are not read. Returns 1
  * when valid. A block without "build" fails with "not built: <cause>" (or
  * "not built yet"), after filling id, built, rules, tree and state_cause; an
- * earlier shape fails with SH_MB_SHAPE. A block with a "cause" beside its
+ * earlier shape fails with SH_MB_EARLIER. A block with a "cause" beside its
  * "build" loads with validated 0. */
 int  sh_mb_load(const char *mod_json_path, sh_mb_bundle *out);
 int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
-/* A built mod.json that fails sh_mb_load_text's check only because an earlier
- * builder's rules wrote its block ("rules" absent or below SH_MB_RULES): 1 with
- * the bundle as today's rules read it (out->hash) and the hash its block
- * records (out->prev_hash); 0 for anything else, with the cause. */
-int  sh_mb_load_text_earlier_rules(const char *text, size_t len, sh_mb_bundle *out);
 /* `<folder>\mod.json`. */
 int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
-
-/* Read and check a manifest (the canonical form with "bundle", format 2,
- * "id" the salt). */
-int  sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out);
 
 /* Tree hash of a mod folder, the rebuild rule's key (the block's "tree"):
  * SHA-256 over the author's bytes of mod.json, then every file under
@@ -391,30 +386,39 @@ int  sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out);
  * read. Returns 1 and the hex. */
 int  sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1]);
 
-/* What a bundle serves, independent of its label: SHA-256 over id,
- * requirements, shadows, extra, and every file's request,
- * kind, hash and size. Two bundles with one key serve the same bytes under
- * the same names. */
+/* The store tool's conversion only (src/store/store_old_ids.c): what a
+ * bundle serves, independent of its label: SHA-256 over id, requirements,
+ * shadows, extra, and every file's request, kind, hash and size. */
 void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1]);
-
-/* Whether every request path of `part` (at least one) is one of `big`'s. */
-int  sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part);
 
 /* ------------------------------------------------- the product record ---- */
 /* <mods_root>\snapmap-plus.json, the product's one file under mods\:
  *   {"format": 1, "claims": {...}, "links": {...}, "pending": {...},
- *    "migration": {...}, "cache": {"<tree hash>": "<bundle hash>"},
- *    "aliases": {"<bundle hash>": "<bundle hash>"}}
+ *    "places": {...}, "salts": {...}, ...}
  * Each section is owned by one module and read and written whole. Writes are
- * a read, a replace of that section and a write-through rename, under one
- * recursive lock (sh_mb_record_lock) that a caller may also hold around its
- * own read-modify-write. A file another program holds is waited for, up to a
- * second. A file that is not JSON is moved aside when a section is written,
- * logged with the aside file's name, and a new one started. A file that
- * cannot be read is never replaced. */
+ * a read, a replace of that section and a write-through rename, under the
+ * mods folder's named lock (sh_mb_record_lock; store_lock.h), the same mutex
+ * as the store lock and shared with every other process on the folder, that
+ * a caller may also hold around its own read-modify-write. A file another
+ * program holds is waited for, up to a second. A file that is not JSON is
+ * moved aside when a section is written, logged with the aside file's name,
+ * and a new one started. A file that cannot be read is never replaced. */
 #define SH_MB_RECORD_FILE "snapmap-plus.json"
-void sh_mb_record_lock(void);
+/* Recursive per thread; sh_mb_record_unlock releases this thread's hold. */
+void sh_mb_record_lock(const char *mods_root);
 void sh_mb_record_unlock(void);
+/* The mods folder's named lock (store_lock.h), opened once per folder and
+ * kept; NULL when it cannot be opened. sh_mb_store_wait takes it, logging one
+ * "MODS: store: waiting" line when another thread or process holds it; the
+ * caller releases it with ReleaseMutex. sh_mb_store_waiting counts this
+ * process's threads waiting for it now, sh_mb_store_waits the waits so far.
+ * The mutex is a Win32 HANDLE. */
+void    *sh_mb_store_mutex(const char *mods_root);
+void     sh_mb_store_wait(void *mutex);
+long     sh_mb_store_waiting(void);
+unsigned sh_mb_store_waits(void);
+
+
 /* 1 with the section's JSON text (malloc'd, compact), 0 when absent, -1 when
  * the record cannot be read (a "MODS: record:" line names the file when it
  * could not be opened or read; that section is then not written until a get
@@ -454,13 +458,13 @@ int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 #define SH_MB_DESC_RETIRED_KEY 4
 #define SH_MB_DESC_UNREADABLE  5
 int  sh_mb_descriptor_state(const char *folder);
-/* The same, with the refusal sentence (SH_MB_SHAPE + cause) for EARLIER,
+/* The same, with the refusal sentence (SH_MB_EARLIER) for EARLIER,
  * RETIRED_KEY and UNREADABLE; "" for FRESH and BUILT. */
 int  sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cause_cap);
 
 /* Every carried file and provided name under some mods/<x>/ has x equal to
  * the bundle's salt (any case; a salt has one spelling). 1 when so; else 0
- * with SH_MB_SHAPE "its files are under mods/<x>/ but it is <salt>". */
+ * with the sentence naming the first file under another mod's salt. */
 int  sh_mb_salt_paths_check(const sh_mb_bundle *bundle, char *cause, size_t cause_cap);
 
 /* Every reference to mods/<from> in `text` (n bytes), as written or in the
@@ -507,18 +511,14 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
  * builds it runs (an install of content the product received, such as a
  * rawmap or prefab import or a store-tool conversion, is never refused on its
  * files); 0 ends it. Every other build refuses such a file
- * (DESIGN-additive 2.4). Thread-local, so a worker's import never changes a
+ * Thread-local, so a worker's import never changes a
  * rescan's rule. */
 void sh_mb_keep_replacements_here(int on);
 
-/* Trim ASCII whitespace, lower-case, and validate a mod id: 1-64 characters of
- * [a-z0-9._-], starting and ending with a letter or digit, no "..".
- * Returns 1 and writes out on success. */
+/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's mod id, trimmed,
+ * lower-cased and checked (1-64 characters of [a-z0-9._-], starting and
+ * ending with a letter or digit, no ".."). Returns 1 and writes out. */
 int  sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1]);
-
-/* The id as it appears inside an engine-derived binary name: the engine's name
- * sanitiser turns every character outside [A-Za-z0-9$./\\] into '_'. */
-void sh_mb_id_sanitized(const char *id, char out[SH_MB_ID_MAX + 1]);
 
 /* Validate one request path (relative, '/', no "." or ".." segment, allowed
  * characters [A-Za-z0-9._-$+@~()] and internal spaces, no segment that
@@ -526,7 +526,7 @@ void sh_mb_id_sanitized(const char *id, char out[SH_MB_ID_MAX + 1]);
  * SH_MB_REQUEST_MAX bytes). 1 when valid, else 0 with the cause. */
 int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
 
-/* Extension whitelist (Contract 1). A .bswf movie is admitted only under
+/* Extension whitelist. A .bswf movie is admitted only under
  * generated/swf/. */
 int  sh_mb_extension_allowed(const char *request);
 
@@ -583,6 +583,14 @@ void sh_mb_script_file_name(const char *request, char *out, size_t cap);
 typedef int (*sh_mb_script_check_fn)(const char *file, int entry, const char *text, size_t len, int *line,
                                      char *what, size_t what_cap, char *todo, size_t todo_cap);
 void sh_mb_set_script_check(sh_mb_script_check_fn fn);
+
+/* The check of the author's content blocks the game reads later ("scenes",
+ * "hud"; modcontent.h sh_modcontent_check): `extra` is the build's preserved
+ * author keys. 0 with one sentence in `cause` fails the build with it. NULL
+ * (the default) checks nothing. */
+typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char *cause, size_t cause_cap);
+void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
+
 
 /* The static registration pass: every literal call of the registration API in
  * one script's text, without running it. Lua comments and strings are
@@ -650,7 +658,7 @@ int  sh_mb_model_key(const char *name, char *out, size_t cap);
  * is not a model reference); a .bmodel path is its own single request. */
 int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max);
 
-/* Game files several mods commonly edit (DESIGN-additive 2.4): the product
+/* Game files several mods commonly edit: the product
  * generates each per map from the game's text and the declared mods'
  * derived edits (modregistry.h); the names are kept for readers. */
 #define SH_MB_REGISTRY_CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
@@ -696,7 +704,7 @@ int  sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t ca
 /* The header rule above on the bank's first bytes; 0 with the cause. */
 int  sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char *cause, size_t cap);
 
-/* Logical name of a request path (Contract 1 table). Returns 1 and fills type
+/* Logical name of a request path. Returns 1 and fills type
  * and name; 0 when the path is under generated/decls/ but names no known decl
  * type or an empty name. */
 int  sh_mb_logical_name(const char *request, char *type, size_t type_cap,
@@ -760,8 +768,9 @@ void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]
 int  sh_mb_sha256_file(const char *path, unsigned long long *size,
                        char out[SH_MB_HASH_HEX + 1]);
 
-/* The retired install state file (.state.json) of the old layout, for the
- * store upgrade: {"firstCause","installedAt","validated"}. */
+/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's install state file
+ * (.state.json), {"firstCause","installedAt","validated"}. */
+
 int  sh_mb_state_parse(const char *text, size_t len, int *validated,
                        long long *installed_at, char *cause, size_t cause_cap);
 

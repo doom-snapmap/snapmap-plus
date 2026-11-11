@@ -422,7 +422,7 @@ int main(void)
         list[0] = unknown;
         before = g_stub.requests;
         CHECK(!modsync_upload_builds(list, 1, "item-2", NULL, &st));
-        CHECK(st.code == MODNET_E_ARG && strstr(st.cause, "this machine does not have") && !st.queued && g_stub.requests == before);
+        CHECK(st.code == MODNET_E_ARG && strstr(st.cause, "not on this computer") && !st.queued && g_stub.requests == before);
     }
     /* Alpha built again: the map's row names the earlier build. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Alpha Pack", r1);
@@ -626,7 +626,7 @@ int main(void)
             free(copy);
             row_of(&row, "rocks003", hx);
             CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
-            CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "the mod store sent a build that does not match the map"));
+            CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "damaged on the way"));
             CHECK(count_dirs(placedir) == 0);
             /* The right build of another salt. */
             row_of(&row, "zzzzzzz9", hr);

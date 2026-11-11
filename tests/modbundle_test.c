@@ -99,8 +99,6 @@ static void test_names(void)
     memset(long_id, 'a', 65); long_id[65] = 0;
     CHECK(!sh_mb_id_normalize(long_id, 65, id));
     CHECK(sh_mb_id_normalize(long_id, 64, id));
-    sh_mb_id_sanitized("alexrimp", s);
-    CHECK(!strcmp(s, "alexrimp"));
 
     CHECK(sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", cause, sizeof cause));
     CHECK(sh_mb_check_request("maps/my room/a.bmodel", cause, sizeof cause));
@@ -362,19 +360,6 @@ static int stock_exists(void *ctx, const char *request)
 }
 static const sh_mb_resolver RESOLVER = { NULL, NULL, stock_exists, NULL };
 
-/* The manifest form (the canonical text with "bundle"): spliced after the
- * fixture's "author", the key before it in byte order. */
-static char *manifest_of(const sh_mb_bundle *b, size_t *len)
-{
-    const char *after = strstr(b->canonical, "\"extra\":");
-    size_t head = after ? (size_t)(after - b->canonical) : 0, n = b->canonical_len + 80;
-    char *t = after ? (char *)malloc(n) : NULL;
-    if (!t) return NULL;
-    _snprintf_s(t, n, _TRUNCATE, "%.*s\"bundle\":\"%s\",%s", (int)head, b->canonical, b->hash, after);
-    *len = strlen(t);
-    return t;
-}
-
 static void test_fixture(const char *fixture, const char *tmp, int write_golden)
 {
     sh_mb_bundle b, again;
@@ -471,13 +456,13 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     sh_mb_free(&again);
     /* Without a block a salt must be given. */
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &again));
-    CHECK_CAUSE(again, SH_MB_SHAPE "it has no salt yet");
+    CHECK_CAUSE(again, "This mod folder has not been scanned yet");
     sh_mb_free(&again);
     /* package.json is an earlier shape. */
     mt_delete(folder, "mod.json");
     mt_write(folder, "package.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\"}");
     CHECK(!sh_mb_build(folder, SALT, &RESOLVER, &again));
-    CHECK_CAUSE(again, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
+    CHECK_CAUSE(again, SH_MB_EARLIER);
     sh_mb_free(&again);
     mt_delete(folder, "package.json");
     mt_write(folder, "mod.json", "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
@@ -518,32 +503,12 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
         if (at) {
             at[9] = '2';
             CHECK(!sh_mb_load_text((const char *)mod, mlen, &again));
-            CHECK_CAUSE(again, "changed since it was built");
+            CHECK_CAUSE(again, "was edited after its last build");
             sh_mb_free(&again);
         }
         free(mod);
     }
 
-    /* The manifest form loads back to the same canonical text; a tampered
-     * one is refused. */
-    {
-        size_t mlen = 0;
-        char *m = manifest_of(&b, &mlen), *at;
-        CHECK(m != NULL);
-        if (m) {
-            CHECK(sh_mb_load_manifest_text(m, mlen, &again));
-            if (again.errors) fprintf(stderr, "  manifest: %s\n", again.first_cause);
-            CHECK(again.canonical_len == b.canonical_len && !memcmp(again.canonical, b.canonical, b.canonical_len));
-            sh_mb_free(&again);
-            at = strstr(m, "\"size\":3001");
-            CHECK(at != NULL);
-            if (at) at[7] = '2';
-            CHECK(!sh_mb_load_manifest_text(m, mlen, &again));
-            CHECK_CAUSE(again, "does not match its bundle hash");
-            sh_mb_free(&again);
-            free(m);
-        }
-    }
     sh_mb_free(&b);
 }
 
@@ -665,23 +630,18 @@ static void test_modjson(const char *fixture, const char *tmp)
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
     free(first);
 
-    /* A manifest alone gets a synthesized author part; the written mod.json
-     * reloads with the manifest's hash. */
+    /* A bundle with no author text gets a synthesized author part; the
+     * written mod.json reloads with the bundle's hash. */
     {
-        size_t blen = 0, tlen = 0;
-        char *m = manifest_of(&b, &blen), *modtext;
-        sh_mb_bundle mb;
-        CHECK(m && sh_mb_load_manifest_text(m, blen, &mb));
-        modtext = sh_mb_modjson_text(&mb, NULL, 0, &tlen);
+        size_t tlen = 0;
+        char *modtext = sh_mb_modjson_text(&b, NULL, 0, &tlen);
         CHECK(modtext && sh_mb_load_text(modtext, tlen, &again));
         if (again.errors) fprintf(stderr, "  synthesized: %s\n", again.first_cause);
         CHECK(!strcmp(again.hash, b.hash) && again.canonical_len == b.canonical_len &&
               !memcmp(again.canonical, b.canonical, b.canonical_len));
         CHECK(modtext && !strstr(modtext, "\"id\""));
         sh_mb_free(&again);
-        sh_mb_free(&mb);
         free(modtext);
-        free(m);
     }
     sh_mb_free(&b);
 }
@@ -710,12 +670,12 @@ static void test_identity(const char *fixture, const char *tmp)
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_FRESH);
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.r2-imp\",\"build\":3}}");
     CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER);
-    CHECK(!strcmp(cause, SH_MB_SHAPE "it was built by an earlier version of Snapmap+"));
+    CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"id\":\"alex.r2-imp\"}");
     CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY);
-    CHECK(!strcmp(cause, SH_MB_SHAPE "mod.json uses \"id\", which this version does not read"));
+    CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"hud\":{\"schema\":\"snapmap-plus.weapon-hud.v1\",\"weapons\":{}}}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY && strstr(cause, "\"hud.schema\""));
+    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY && !strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2}}");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "mod.json", "[1]");
@@ -723,7 +683,7 @@ static void test_identity(const char *fixture, const char *tmp)
     mt_delete(folder, "mod.json");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "package.json", "{\"name\":\"x\"}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER && strstr(cause, "package.json"));
+    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER && !strcmp(cause, SH_MB_EARLIER));
     mt_delete(folder, "package.json");
 
     /* Files under another namespace than the salt. */
@@ -731,7 +691,7 @@ static void test_identity(const char *fixture, const char *tmp)
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2,\"salt\":\"yyyyyyyy\"}}");
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, SH_MB_SHAPE "its files are under mods/alexrimp/ but it is yyyyyyyy");
+    CHECK_CAUSE(b, "is under mods/alexrimp/, which is neither this mod folder's name nor its salt");
     sh_mb_free(&b);
 
     /* The block a first scan writes: the author's bytes kept, its own
@@ -976,6 +936,16 @@ static void m_both(const char *f) { mt_write(f, "package.json", DESC("")); }
 static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
 static void m_bad_ext(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\notes.txt", "x"); }
 static void m_outside(const char *f) { mt_write(f, "readme.md", "x"); }
+static void m_scenes_x(const char *f) { mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alexrimp/n\":{}}")); }
+static int extra_refuses(const char *salt, const char *extra, size_t len, char *cause, size_t cap)
+{
+    (void)len;
+    if (!strcmp(salt, SALT) && strstr(extra, "\"scenes\"")) {
+        strcpy_s(cause, cap, "mod.json \"scenes\" is refused: test");
+        return 0;
+    }
+    return 1;
+}
 static void m_empty(const char *f) { mt_write(f, "assets\\generated\\image\\mods\\alexrimp\\empty.bimage", ""); }
 static void m_unns_decl(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
 static void m_unns_raw(const char *f) { mt_write(f, "assets\\generated\\image\\other\\x.bimage", "bytes"); }
@@ -1131,27 +1101,27 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_bundle b;
     sh_mb_resolver no_stock = { NULL, NULL, NULL, NULL };
     /* Earlier shapes and retired author keys: refused with the plain reason. */
-    refused(fixture, tmp, m_bad_id, &RESOLVER, SH_MB_SHAPE "mod.json uses \"id\", which this version does not read");
-    refused(fixture, tmp, m_key, &RESOLVER, SH_MB_SHAPE "mod.json uses \"key\"");
-    refused(fixture, tmp, m_legacy, &RESOLVER, SH_MB_SHAPE "mod.json uses \"legacy\"");
-    refused(fixture, tmp, m_era_schema, &RESOLVER, SH_MB_SHAPE "mod.json uses \"schema\"");
-    refused(fixture, tmp, m_stock_key, &RESOLVER, SH_MB_SHAPE "mod.json uses \"stock\"");
-    refused(fixture, tmp, m_hud_schema, &RESOLVER, SH_MB_SHAPE "mod.json uses \"hud.schema\"");
-    refused(fixture, tmp, m_scope_map, &RESOLVER, SH_MB_SHAPE "mod.json uses \"scope\"");
-    refused(fixture, tmp, m_shadow_not_shipped, &RESOLVER, SH_MB_SHAPE "mod.json uses \"shadows\"");
-    refused(fixture, tmp, m_replaces_declared, &RESOLVER, SH_MB_SHAPE "mod.json uses \"replaces\"");
-    refused(fixture, tmp, m_old_player, &RESOLVER, SH_MB_SHAPE "mod.json uses \"player\"");
-    refused(fixture, tmp, m_old_extends, &RESOLVER, SH_MB_SHAPE "mod.json uses \"extends\"");
-    refused(fixture, tmp, m_old_body_events, &RESOLVER, SH_MB_SHAPE "mod.json uses \"player\"");
-    refused(fixture, tmp, m_old_block, &RESOLVER, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
+    refused(fixture, tmp, m_bad_id, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_key, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_legacy, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_era_schema, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_stock_key, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_hud_schema, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_scope_map, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_shadow_not_shipped, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_replaces_declared, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_player, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_extends, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_body_events, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_block, &RESOLVER, SH_MB_EARLIER);
     /* The folder's name is never the key: the salt given is. */
     accepted(fixture, tmp, m_no_id, &b);
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
     sh_mb_free(&b);
     /* Every strings key is <salt>_<name> (DECISIONS 5: no '/'). */
-    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t is not named alexrimp_<name>");
-    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t is not named alexrimp_<name>");
-    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ is not named alexrimp_<name>");
+    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t does not start with alexrimp_");
+    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t does not start with alexrimp_");
+    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ does not start with alexrimp_");
     /* DECISIONS 9: keys the game or Snapmap+ defines are string edits, unprefixed. */
     accepted(fixture, tmp, m_string_edits, &b);
     CHECK(b.errors == 0 && b.registries &&
@@ -1170,7 +1140,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_bad_version, &b);
     CHECK(b.errors == 0 && b.extra && strstr(b.extra, "\"version\":\"1/2\"") && !strstr(b.canonical, ",\"version\":"));
     sh_mb_free(&b);
-    refused(fixture, tmp, m_reserved, &RESOLVER, "may not contain files, build or bundle");
+    refused(fixture, tmp, m_reserved, &RESOLVER, "at its top level, which Snapmap+ writes itself");
     refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer or fixed decimal");
     accepted(fixture, tmp, m_decimal, &b);
     CHECK(strstr(b.canonical, "\"pos\":[0.0,12.25,-0.70710678118654757]") != NULL);
@@ -1184,13 +1154,28 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_line_key, &RESOLVER, "requirements.commands key start is not supported");
     refused(fixture, tmp, m_bad_line_count, &RESOLVER, "requirements.commands.activate has more than 16 lines");
     refused(fixture, tmp, m_bad_home, &RESOLVER, "homepage");
-    refused(fixture, tmp, m_both, &RESOLVER, "only the descriptor and assets/ may be in the mod folder: package.json");
     refused(fixture, tmp, m_no_desc, &RESOLVER, "the mod folder has no mod.json");
     refused(fixture, tmp, m_bad_ext, &RESOLVER, "file type not allowed");
-    refused(fixture, tmp, m_outside, &RESOLVER, "only the descriptor and assets/");
+    {
+        /* Files beside mod.json and assets/ are ignored and never carried
+         * (DECISIONS 16), package.json among them. */
+        sh_mb_bundle ok;
+        size_t k;
+        /* The registered content check's sentence is the build's cause. */
+        sh_mb_set_extra_check(extra_refuses);
+        refused(fixture, tmp, m_scenes_x, &RESOLVER, "mod.json \"scenes\" is refused: test");
+        sh_mb_set_extra_check(NULL);
+        accepted(fixture, tmp, m_scenes_x, &ok);
+        sh_mb_free(&ok);
+        accepted(fixture, tmp, m_outside, &ok);
+        for (k = 0; k < ok.file_count; k++) CHECK(strncmp(ok.files[k].path, "assets/", 7) == 0);
+        sh_mb_free(&ok);
+        accepted(fixture, tmp, m_both, &ok);
+        sh_mb_free(&ok);
+    }
     refused(fixture, tmp, m_empty, &RESOLVER, "empty file");
     refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/alexrimp/");
-    refused(fixture, tmp, m_unns_raw, &RESOLVER, "does not contain /mods/alexrimp/");
+    refused(fixture, tmp, m_unns_raw, &RESOLVER, "is not under a mods folder named like this mod folder");
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
@@ -1211,7 +1196,7 @@ static void test_refusals(const char *fixture, const char *tmp)
         sh_mb_free(&b);
         (void)plain;
     }
-    refused(fixture, tmp, m_nothing, &no_stock, "cannot be checked against the game");
+    refused(fixture, tmp, m_nothing, &no_stock, "could not read the game's files to look for it");
 
     refused(fixture, tmp, m_chain_broken, &RESOLVER, "needs entityDef mods/alexrimp/mid, which resolves to nothing");
     accepted(fixture, tmp, m_chain, &b);
@@ -1289,7 +1274,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_binary_replace, &RESOLVER,
             "assets/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
             "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
-            "version under mods/alexrimp/ and point your decls at it");
+            "version under a mods folder named like this mod folder and point your decls at it");
     /* Received content keeps a binary replacement: an import on its own thread. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
@@ -1563,7 +1548,7 @@ static void rp_case(const char *tmp, int which, const char *needle)
         CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
         if (b.errors) fprintf(stderr, "  render-program case %d refused: %s\n", g_case, b.first_cause);
         CHECK(b.errors == 0);
-        if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program in the bundle binds it"));
+        if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program of this mod uses it"));
         else CHECK(b.warnings == 0);
         if (which == RP_OK) {
             const sh_mb_file *p = find_file(&b, "generated/renderprogs/permutations/mods/trpcases/tint_0000000000000001.decl");
@@ -1605,7 +1590,7 @@ static void test_renderprogs(const char *tmp)
     rp_case(tmp, RP_NO_PERM_SPV, "permutations/mods/trpcases/tint_0000000000000001.fspv (its fragment stage)");
     rp_case(tmp, RP_NO_PERM, "ships no permutation decl");
     rp_case(tmp, RP_NO_BIN, "tint_pc_vulkan.bin: Vulkan needs the cooked program");
-    rp_case(tmp, RP_ORPHAN_PERM, "permutation of mods/trpcases/other, which the bundle does not ship");
+    rp_case(tmp, RP_ORPHAN_PERM, "permutation of mods/trpcases/other, which this mod does not include");
     rp_case(tmp, RP_BARE_NAME, "must be quoted");                   /* check 6 */
     rp_case(tmp, RP_DOT_NAME, "'.' in its last component");
     rp_case(tmp, RP_INCLUDE, "shared render-program include");      /* check 7 */
@@ -1825,7 +1810,7 @@ static void test_classes(const char *fixture, const char *tmp)
         v = sh_mb_fnv1_lower("doom_ui", 7); memcpy(bank + 12, &v, 4);
         rp_put(folder, "assets\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
         CHECK(!sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "a stock sound bank cannot be replaced");
+        CHECK_CAUSE(b, "so a mod cannot replace one");
         sh_mb_free(&b);
     }
     /* AI FSM states: the spider's new root graph takes the stock graph's

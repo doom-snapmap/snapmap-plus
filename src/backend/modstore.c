@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <ctype.h>
+#include <stdint.h>
 
 #include "modstore.h"
 #include "config_json.h"
@@ -19,42 +21,45 @@
 #include "modstore_internal.h"
 /* ------------------------------------------------------------ lock ----- */
 
-/* The store lock: one critical section for every writer of mods\ (installs,
- * downloads, the migration, exports, claims). It is recursive on purpose: the
- * install and verification below take it themselves, and their callers (the
- * migration pass, a download) already hold it around a larger step. */
-static INIT_ONCE        g_ms_lock_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_ms_lock;
-static volatile LONG    g_ms_lock_waits;
-static volatile LONG    g_ms_lock_depth;   /* nested holds of the owner; read from any thread */
+/* The store lock: the mods folder's named lock (store_lock.h, opened and
+ * waited for by modbundle.c's sh_mb_store_mutex and sh_mb_store_wait), so
+ * every writer of mods\ in this process and in any other (a second game, the
+ * store tool) takes turns: installs, downloads, scans, builds, exports. It is
+ * recursive on purpose: the install and verification below take it
+ * themselves, and their callers (a download) already hold it around a larger
+ * step. The counts below are this process's. */
+static volatile LONG    g_ms_lock_depth;   /* nested holds of this process's owner; read from any thread */
 static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
-static volatile LONG    g_ms_lock_waiting; /* threads waiting for it now (the boot build yields to them) */
-
-static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
-{
-    (void)once; (void)p; (void)ctx;
-    InitializeCriticalSection(&g_ms_lock);
-    return TRUE;
-}
+static __declspec(thread) HANDLE t_ms_held;   /* the mutex this thread holds */
+static __declspec(thread) LONG   t_ms_depth;  /* this thread's nested holds */
 
 void modstore_lock(void)
 {
-    InitOnceExecuteOnce(&g_ms_lock_once, ms_lock_init, NULL, NULL);
-    if (!TryEnterCriticalSection(&g_ms_lock)) {
-        /* Held by another thread: wait for it rather than fail. */
-        InterlockedIncrement(&g_ms_lock_waits);
-        InterlockedIncrement(&g_ms_lock_waiting);
-        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
-        EnterCriticalSection(&g_ms_lock);
-        InterlockedDecrement(&g_ms_lock_waiting);
+    char root[MAX_PATH * 4];
+    HANDLE h;
+    if (t_ms_depth > 0) {
+        t_ms_depth++;
+        InterlockedIncrement(&g_ms_lock_depth);
+        return;
     }
+    if (!sh_ms_root(root, sizeof root)) root[0] = 0;
+    h = sh_mb_store_mutex(root);
+    if (h) sh_mb_store_wait(h);
+    else backend_log("MODS: store: the mods folder's lock could not be opened; the store operation goes ahead unguarded");
+    t_ms_held = h;
+    t_ms_depth = 1;
     InterlockedIncrement(&g_ms_lock_depth);
 }
 
 void modstore_unlock(void)
 {
+    if (t_ms_depth <= 0) return;
     if (InterlockedDecrement(&g_ms_lock_depth) == 0) InterlockedIncrement(&g_ms_lock_gen);
-    LeaveCriticalSection(&g_ms_lock);
+    if (--t_ms_depth == 0 && t_ms_held) {
+        HANDLE h = t_ms_held;
+        t_ms_held = NULL;
+        ReleaseMutex(h);
+    }
 }
 
 int modstore_lock_busy(unsigned *generation)
@@ -65,7 +70,7 @@ int modstore_lock_busy(unsigned *generation)
 
 unsigned modstore_lock_waits(void)
 {
-    return (unsigned)InterlockedCompareExchange(&g_ms_lock_waits, 0, 0);
+    return sh_mb_store_waits();
 }
 
 /* The boot build's hand-over between folders: when another thread waits for
@@ -75,14 +80,14 @@ unsigned modstore_lock_waits(void)
 static int ms_lock_yield(void)
 {
     int i;
-    if (InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) <= 0 ||
+    if (sh_mb_store_waiting() <= 0 ||
         InterlockedCompareExchange(&g_ms_lock_depth, 0, 0) != 1)
         return 0;
     modstore_unlock();
     /* The waiter leaves the count once it holds the lock; until then this
-     * thread stays off it, so the critical section's unfair hand-over cannot
-     * give it straight back. */
-    for (i = 0; i < 2000 && InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) > 0; i++) Sleep(1);
+     * thread stays off it, so the mutex's unfair hand-over cannot give it
+     * straight back. */
+    for (i = 0; i < 2000 && sh_mb_store_waiting() > 0; i++) Sleep(1);
     modstore_lock();
     return 1;
 }
@@ -274,12 +279,12 @@ static const wchar_t *ms_work_at(const wchar_t *name, const wchar_t *tag)
 static int ms_work_suffix(const wchar_t *name, const wchar_t *tag) { return ms_work_at(name, tag) != NULL; }
 
 /* Folders of the store that can be mods: not hidden, not a staging or
- * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
+ * replaced copy. */
 int ms_candidate(const WIN32_FIND_DATAW *fd)
 {
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
     if (fd->cFileName[0] == L'.') return 0;
-    if (!_wcsicmp(fd->cFileName, L"blobs") || !_wcsicmp(fd->cFileName, L"legacy")) return 0;
+
     if (ms_work_suffix(fd->cFileName, L".staging-") || ms_work_suffix(fd->cFileName, L".old-")) return 0;
     return 1;
 }
@@ -869,7 +874,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         if (e->place[0]) {
             /* A place holds the builds a map brought; nothing is made there. */
             e->refused = 1;
-            strcpy_s(e->cause, sizeof e->cause, SH_MB_SHAPE "it was not built by the mod store");
+            strcpy_s(e->cause, sizeof e->cause, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
         } else if (recorded[0]) {
             strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
         } else {
@@ -882,7 +887,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         e->refused = 1;
         if (e->state == SH_MB_DESC_UNREADABLE && e->folder && sh_ms_descriptor_unparsable(e->folder, recorded, sizeof recorded))
             strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
-        else strncpy_s(e->cause, sizeof e->cause, why[0] ? why : SH_MB_SHAPE "its mod.json cannot be read", _TRUNCATE);
+        else strncpy_s(e->cause, sizeof e->cause, why[0] ? why : "This mod folder's mod.json cannot be read; close any program holding it and press Refresh", _TRUNCATE);
         return;
     }
     e->loaded = sh_mb_load_folder(e->folder, &e->bundle);
@@ -927,13 +932,14 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
                   _TRUNCATE);
 }
 
-/* The copy rule's order: the first successful build of the salt in its folder
- * ("built"), a folder never built last; ties by folder path. */
-static int ms_older(const sh_ms_entry *a, const sh_ms_entry *b)
+static mpj *ms_salts_record(void);
+static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, const char *a_folder, const char *b_name,
+                         const char *b_folder);
+
+/* The copy rule's order (DECISIONS 15, ms_keeps_salt): 1 when a keeps the salt over b. */
+static int ms_older(const mpj *rec, const sh_ms_entry *a, const sh_ms_entry *b)
 {
-    long long x = a->installed_at > 0 ? a->installed_at : LLONG_MAX, y = b->installed_at > 0 ? b->installed_at : LLONG_MAX;
-    if (x != y) return x < y;
-    return _stricmp(a->name, b->name) < 0;
+    return ms_keeps_salt(a->place[0] ? NULL : rec, a->salt, a->name, a->folder, b->name, b->folder);
 }
 
 /* Two folders of one salt in one area: at the root the older keeps the salt
@@ -942,7 +948,9 @@ static int ms_older(const sh_ms_entry *a, const sh_ms_entry *b)
 static void ms_mark_duplicates(sh_ms_list *l)
 {
     size_t i, k, *keeper;
+    mpj *rec;
     if (l->count < 2 || !(keeper = (size_t *)malloc(l->count * sizeof *keeper))) return;
+    rec = ms_salts_record();
     for (i = 0; i < l->count; i++) {
         const sh_ms_entry *e = &l->items[i];
         keeper[i] = (size_t)-1;
@@ -950,16 +958,17 @@ static void ms_mark_duplicates(sh_ms_list *l)
         for (k = 0; k < l->count; k++) {
             const sh_ms_entry *o = &l->items[k];
             if (k == i || o->refused || !o->salt[0] || _stricmp(o->salt, e->salt) || _stricmp(o->place, e->place)) continue;
-            if (ms_older(o, e) && (keeper[i] == (size_t)-1 || ms_older(o, &l->items[keeper[i]]))) keeper[i] = k;
+            if (ms_older(rec, o, e) && (keeper[i] == (size_t)-1 || ms_older(rec, o, &l->items[keeper[i]]))) keeper[i] = k;
         }
     }
+    mpj_free(rec);
     for (i = 0; i < l->count; i++) {
         sh_ms_entry *e = &l->items[i];
         if (keeper[i] == (size_t)-1) continue;
         e->refused = 1;
         if (e->place[0]) {
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, SH_MB_SHAPE "another folder of this map has the same mod: "
-                        "mods\\%s", l->items[keeper[i]].name);
+            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "Another folder of this map's mods, mods\\%s, holds the same "
+                        "mod; remove one of them", l->items[keeper[i]].name);
         } else {
             /* A copy the scan could not give a new salt (its binaries name
              * the salt, as an outside converter's do) says why, plainly;
@@ -1212,10 +1221,12 @@ typedef struct ms_rk_file {
 typedef struct ms_rk {
     ms_rk_file *f;
     size_t n, cap;
-    const char *leaf, *key;      /* from, and the new salt */
-    const sh_mb_strkey *skeys;   /* the strings keys renamed "<salt>_<key>" (DECISIONS 6) */
+    const char *leaf, *key;      /* from (NULL: no mods/<from>/ rewrite), and the salt */
+    const sh_mb_strkey *skeys;   /* the strings keys renamed "<salt>_<key>" */
     size_t nskeys;
-    unsigned refs, rewritten, moved, srefs;
+    char bank_from[SH_MB_BANK_STEM_MAX + 1];   /* a bank stem prefix that becomes "<salt>_", or "" */
+    int keep;                    /* a folder that has its salt: binaries naming mods/<from>/ are left alone */
+    unsigned refs, rewritten, moved, srefs, banks;
     int failed;
     char cause[SH_MB_CAUSE_MAX];
 } ms_rk;
@@ -1276,7 +1287,45 @@ static ms_rk_file *ms_rk_add(ms_rk *r)
     return &r->f[r->n++];
 }
 
+/* A sound bank: Wwise opens it by file name and the bank's id is FNV-1 of the
+ * name, so a bank named for the folder ("<folder name>_x.bnk") is renamed
+ * "<salt>_x.bnk", and a bank whose BKHD id does not match its (new) name has
+ * the 4 id bytes corrected. Anything else is left to the build. */
+static void ms_rk_bank(ms_rk *r, ms_rk_file *f, const wchar_t *path, const char *child)
+{
+    char stem[SH_MB_BANK_STEM_MAX + 1], low[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + SH_SALT_LEN + 2];
+    size_t i, len = 0, bl = strlen(r->bank_from);
+    unsigned char *bytes;
+    uint32_t id, want;
+    if (!sh_mb_bank_stem(child + 7, stem, sizeof stem)) return;
+    for (i = 0; stem[i]; i++) low[i] = (char)tolower((unsigned char)stem[i]);
+    low[i] = 0;
+    strcpy_s(to, sizeof to, stem);
+    if (bl && !strncmp(low, r->bank_from, bl) && low[bl] == '_' && low[bl + 1])
+        _snprintf_s(to, sizeof to, _TRUNCATE, "%s_%s", r->key, stem + bl + 1);
+    if (strlen(to) > SH_MB_BANK_STEM_MAX) return;   /* the build names the length rule */
+    bytes = (unsigned char *)ms_read_text(path, MS_RK_TEXT_MAX, &len);
+    if (!bytes) return;   /* the build reads it again and names what is wrong */
+    if (len < 16 || memcmp(bytes, "BKHD", 4)) { free(bytes); return; }
+    memcpy(&id, bytes + 12, 4);
+    want = sh_mb_fnv1_lower(to, strlen(to));
+    if (id == want && !strcmp(to, stem)) { free(bytes); return; }
+    memcpy(bytes + 12, &want, 4);
+    if (strcmp(to, stem)) {
+        char moved[SH_MB_REQUEST_MAX + 128];
+        size_t dl = strlen(child) - strlen(stem) - 4;   /* "assets/sound/soundbanks/pc/" as written */
+        _snprintf_s(moved, sizeof moved, _TRUNCATE, "%.*s%s%s", (int)dl, child, to, child + dl + strlen(stem));
+        free(f->new_rel);
+        if (!(f->new_rel = _strdup(moved))) { free(bytes); ms_rk_fail(r, "out of memory"); return; }
+        r->moved++;
+    }
+    f->text = (char *)bytes;
+    f->text_len = len;
+    r->banks++;
+}
+
 /* Read the tree below `dir` (rel "" at the folder itself) into the plan. */
+
 static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
 {
     WIN32_FIND_DATAW fd;
@@ -1293,7 +1342,7 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
         char *name, child[SH_MB_REQUEST_MAX + 64], moved[SH_MB_REQUEST_MAX + 128];
         wchar_t *path;
         ms_rk_file *f;
-        int changed = 0;
+        int changed = 0, in_assets;
         if (r->failed) break;
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         name = sh_mb_utf8(fd.cFileName);
@@ -1306,7 +1355,8 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
             (!_stricmp(child, "mod.json") || !_stricmp(child, "package.json")))
             continue;
         strcpy_s(moved, sizeof moved, child);
-        if (!_strnicmp(child, "assets/", 7)) {
+        in_assets = !_strnicmp(child, "assets/", 7);
+        if (in_assets && r->leaf) {
             /* "assets/x/mods/<from>/y" -> "assets/x/mods/<salt>/y"; a
              * directory is probed with a trailing '/' so its own last
              * segment counts as a folder segment. */
@@ -1314,7 +1364,7 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
             int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, c;
             _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s%s", child + 7, dir ? "/" : "");
             c = sh_mb_rekey_path(probe, r->leaf, r->key, tail, sizeof tail);
-            if (c < 0) { ms_rk_fail(r, "path too long once renamed: %s", child); break; }
+            if (c < 0) { ms_rk_fail(r, "%s: the path is too long once moved under the salt; shorten it", child); break; }
             if (dir) { size_t tl = strlen(tail); if (tl && tail[tl - 1] == '/') tail[tl - 1] = 0; }
             if (c > 0) { _snprintf_s(moved, sizeof moved, _TRUNCATE, "assets/%s", tail); changed = 1; }
         }
@@ -1329,18 +1379,24 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             f->dir = 1;
             ms_rk_walk(r, path, child, depth + 1);
+        } else if (!in_assets) {
+            /* Outside mod.json and assets\ (a README, desktop.ini): the
+             * build ignores it, and so does the move. */
+        } else if (sh_mb_bank_stem(child + 7, NULL, 0)) {
+            ms_rk_bank(r, f, path, child);
         } else {
             unsigned long long size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
             size_t len = 0;
             char *t = size <= MS_RK_TEXT_MAX ? ms_read_text(path, MS_RK_TEXT_MAX, &len) : NULL;
             if (size <= MS_RK_TEXT_MAX && !t) {
-                ms_rk_fail(r, "cannot read %s (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
+                ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
             } else if (t && !memchr(t, 0, len)) {
-                /* A text: decl text and anything else without a NUL byte.
-                 * mods/<from>/ first, then the #str_ references of the
+                /* A text: decl text, scripts and anything else without a NUL
+                 * byte. mods/<from>/ first, then the #str_ references of the
                  * renamed strings keys. */
                 char *out = NULL, *out2 = NULL;
-                size_t out_len = 0, out2_len = 0, s = 0, c = sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len);
+                size_t out_len = 0, out2_len = 0, s = 0;
+                size_t c = r->leaf ? sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len) : 0;
                 if (c != (size_t)-1 && r->nskeys)
                     s = sh_mb_restr_text(c ? out : t, c ? out_len : len, r->skeys, r->nskeys, &out2, &out2_len);
                 if (c == (size_t)-1 || s == (size_t)-1) { free(out); ms_rk_fail(r, "out of memory"); }
@@ -1348,16 +1404,22 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
                     if (s) { free(out); out = out2; out_len = out2_len; r->srefs += (unsigned)s; }
                     if (c || s) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
                 }
-            } else {
-                int hit = t ? (sh_mb_rekey_text(t, len, r->leaf, r->key, NULL, NULL) > 0) : ms_rk_binary_names(path, r->leaf);
+            } else if (!r->keep) {
+                /* A new mod's binary that spells its folder's name or one of
+                 * its strings cannot be renamed with it. A mod that has its
+                 * salt keeps its binaries as they are: the build decides. */
+                int hit = !r->leaf ? 0 : t ? (sh_mb_rekey_text(t, len, r->leaf, r->key, NULL, NULL) > 0)
+                                           : ms_rk_binary_names(path, r->leaf);
                 int shit = t && r->nskeys && sh_mb_restr_text(t, len, r->skeys, r->nskeys, NULL, NULL) > 0;
-                if (hit < 0) ms_rk_fail(r, "cannot read %s (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
+                if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
                 else if (hit)
-                    ms_rk_fail(r, SH_MB_SHAPE "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rewrite; "
-                               "the folder is unchanged", child, r->leaf);
+                    ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
+                               "New mod in the Mods tab first, then export the file under the new mod's folder", child,
+                               r->leaf);
                 else if (shit)
-                    ms_rk_fail(r, SH_MB_SHAPE "%s names one of its strings (#str_) inside a binary file, which Snapmap+ "
-                               "cannot rewrite; the folder is unchanged", child);
+                    ms_rk_fail(r, "%s names one of this mod's strings (#str_) inside a binary file, which Snapmap+ cannot "
+                               "rename; make the mod with New mod in the Mods tab first, then export the file with the "
+                               "string names that mod's mod.json shows", child);
             }
             free(t);
         }
@@ -1399,32 +1461,82 @@ static int ms_rk_stage(ms_rk *r, const wchar_t *src, const wchar_t *staging, int
     return !r->failed;
 }
 
-/* The salting of `folder` (rule 1): in memory first, then staged beside it
- * and swapped in under the same name. `from` is the folder name, the package
- * id it was converted from, or the salt a copy carried. The folder's own
+/* Whether `name` is the salt of some folder of the store. */
+static int ms_is_store_salt(const char *name)
+{
+    ms_salts h;
+    int held;
+    if (!name || !sh_salt_valid(name, strlen(name))) return 0;
+    ms_salts_read(&h, NULL);
+    held = ms_salt_held(&h, name);
+    free(h.s);
+    return held;
+}
+
+/* The bank stem prefix a folder name gives ("Blue Imp" -> "blue_imp"). */
+static void ms_bank_prefix(const char *name, char *out, size_t cap)
+{
+    size_t i;
+    for (i = 0; name && name[i] && i + 1 < cap; i++) {
+        unsigned char c = (unsigned char)tolower((unsigned char)name[i]);
+        out[i] = (char)(((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ? c : '_');
+    }
+    out[i] = 0;
+}
+
+/* Moving a folder's own content under its salt (rule 1, DECISIONS 20): in
+ * memory first, then staged beside it and swapped in under the same name.
+ * `from` is the folder's name (from_name 1) or the salt a copy carried. Files
+ * under assets\...\mods\<from>\ move to mods\<salt>\, references to
+ * mods/<from>/ in every text under assets\ and in mod.json follow, strings
+ * keys without the salt's prefix (string edits aside) gain it with their
+ * #str_ references, and a bank named for the folder takes the salt's name.
+ * A folder name that is the folder's own salt or another folder's salt names
+ * that mod, never this folder, so nothing is moved for it; a folder name
+ * equal to another folder's name is no question, since each folder moves
+ * only its own files.
+ *
+ * `keep` (the folder's salt) is a folder already salted: its builder block
+ * is kept, binaries are left as they are, and nothing is written when there
+ * is nothing to move (returns 0). Otherwise a new salt is drawn (or
+ * sh_ms_assign_salt_as's), the block becomes {"format": 2, "salt"} and a
+ * binary that spells the folder's name refuses the folder. The folder's own
  * mod.json is read unless `given` (a fresh author text) replaces it. With
- * `dest` the salted folder is written there instead (it must not exist) and
+ * `dest` the result is written there instead (it must not exist) and
  * `folder` is left as it is. Returns 1 with the salt, -1 with the cause (the
  * folder untouched). The caller holds the store lock. */
-static int ms_assign_to(const char *folder, const char *given, size_t given_len, const char *from, const char *dest,
-                        char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+static int ms_assign_to(const char *folder, const char *given, size_t given_len, const char *from, int from_name,
+                        const char *keep, const char *dest, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
 {
     ms_rk r;
     char salt[SH_SALT_LEN + 1];
     wchar_t *src = NULL, *staging = NULL, *old = NULL, *mj, *parent = NULL, *slash;
     char *author = NULL, *modjson = NULL, *keyed = NULL;
     sh_mb_strkey *skeys = NULL;
-    size_t alen = 0, mlen = 0, i, drefs, nskeys = 0, srefs = 0;
+    size_t alen = 0, mlen = 0, i, drefs = 0, nskeys = 0, srefs = 0;
+    const char *named_salt = NULL;
     int ok = -1;
     memset(&r, 0, sizeof r);
+
     if (salt_out) salt_out[0] = 0;
     src = sh_mb_wpath(folder);
     if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, ccap, "out of memory"); goto done; }
     parent[slash - src] = 0;
-    if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
-    else if (!ms_new_salt(salt, from)) { ms_cause(cause, ccap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
+    if (keep) strcpy_s(salt, sizeof salt, keep);
+    else if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
+    else if (!ms_new_salt(salt, from)) {
+        ms_cause(cause, ccap, "Windows could not supply the random numbers that name a new mod; restart the game and press "
+                 "Refresh");
+        goto done;
+    }
+    if (from_name && from && _stricmp(from, salt) && ms_is_store_salt(from)) {
+        named_salt = from;   /* the name is another mod's salt: it names that mod */
+        from = NULL;
+    } else if (from_name && from && !_stricmp(from, salt)) from = NULL;
     r.leaf = from;
     r.key = salt;
+    r.keep = keep != NULL;
+    if (from_name && from) ms_bank_prefix(from, r.bank_from, sizeof r.bank_from);
     /* Read and rewrite everything in memory first. */
     if (given) {
         author = (char *)malloc(given_len + 1);
@@ -1435,15 +1547,27 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX * 16, &alen);
         free(mj);
     }
-    if (!author) { ms_cause(cause, ccap, "cannot read mod.json (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
-    drefs = sh_mb_rekey_text(author, alen, from, salt, NULL, NULL);
+    if (!author) { ms_cause(cause, ccap, "mod.json could not be read (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
+    if (from) drefs = sh_mb_rekey_text(author, alen, from, salt, NULL, NULL);
     if (drefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
-    modjson = sh_mb_salt_modjson(author, alen, from, salt, &mlen);
-    if (!modjson) { ms_cause(cause, ccap, SH_MB_SHAPE "its mod.json is not a JSON object"); goto done; }
+    if (keep) {
+        /* The builder block stays; the next build rewrites it. */
+        if (drefs) {
+            size_t c = sh_mb_rekey_text(author, alen, from, salt, &modjson, &mlen);
+            if (c == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
+        } else if ((modjson = (char *)malloc(alen + 1)) != NULL) {
+            memcpy(modjson, author, alen + 1);
+            mlen = alen;
+        }
+        if (!modjson) { ms_cause(cause, ccap, "out of memory"); goto done; }
+    } else {
+        modjson = sh_mb_salt_modjson(author, alen, from, salt, &mlen);
+        if (!modjson) { ms_cause(cause, ccap, "mod.json is not one JSON object { ... }; correct it and press Refresh"); goto done; }
+    }
     /* Its strings keys gain the salt's prefix, and every #str_ reference
      * to them in its own text files (mod.json among them) follows. */
-    keyed = sh_mb_salt_strings(modjson, mlen, from, salt, &skeys, &nskeys, &i);
-    if (!keyed) { ms_cause(cause, ccap, SH_MB_SHAPE "its mod.json does not read as JSON"); goto done; }
+    keyed = sh_mb_salt_strings(modjson, mlen, from_name ? NULL : from, salt, &skeys, &nskeys, &i);
+    if (!keyed) { ms_cause(cause, ccap, "mod.json is not valid JSON; correct it and press Refresh"); goto done; }
     free(modjson);
     modjson = keyed;
     mlen = i;
@@ -1461,10 +1585,14 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         qsort(r.f, r.n, sizeof *r.f, ms_rk_rel_cmp);
         for (i = 1; i < r.n && !r.failed; i++)
             if (!_stricmp(r.f[i - 1].new_rel, r.f[i].new_rel) && !(r.f[i - 1].dir && r.f[i].dir))
-                ms_rk_fail(&r, "%s and %s would both become %s; the folder is unchanged", r.f[i - 1].rel, r.f[i].rel,
-                           r.f[i].new_rel);
+                ms_rk_fail(&r, "%s and %s would both become %s once moved under the salt; rename one of them and press "
+                           "Refresh (the folder is unchanged)", r.f[i - 1].rel, r.f[i].rel, r.f[i].new_rel);
     }
-    if (!r.failed) {
+    if (keep && !r.failed && !drefs && !nskeys && !r.moved && !r.rewritten && !r.banks) {
+        ok = 0;   /* nothing of the author's waits under the folder's name */
+        goto done;
+    }
+    if (!r.failed && !keep) {
         /* Files under another mod's mods/<x>/ (x neither `from` nor the new
          * salt) would be refused by the build: refuse before anything moves. */
         unsigned files = 0, foreign = 0;
@@ -1482,9 +1610,13 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
                 _snprintf_s(other, sizeof other, _TRUNCATE, "%.*s", (int)(e - (p + 6)), p + 6);
             }
         }
-        if (foreign)
-            ms_rk_fail(&r, SH_MB_SHAPE "%u of its %u file(s) are under mods/%s/ (the first: %s), not mods/%s/; move them "
-                       "under mods/%s/ and Refresh", foreign, files, other, first, from, from);
+        if (foreign && named_salt && !_stricmp(other, named_salt))
+            ms_rk_fail(&r, "this folder's name, %s, is another mod's salt, so its files under mods/%s/ belong to that mod; "
+                       "rename this folder and press Refresh", named_salt, named_salt);
+        else if (foreign)
+            ms_rk_fail(&r, "%u of this folder's %u file(s) are under mods/%s/ (the first: %s), which is not this folder's "
+                       "name; move them under a mods folder named like this folder and press Refresh", foreign, files,
+                       other, first);
     }
     if (r.failed) { ms_cause(cause, ccap, "%s", r.cause); goto done; }
     if (dest) {
@@ -1527,8 +1659,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     if (!ms_move_folder(src, old)) {
         DWORD err = GetLastError();
         ms_rmtree(staging, parent);
-        ms_cause(cause, ccap, "the folder could not be set aside to take its salt (%s); the folder is unchanged",
-                 ms_why(err, ms_rel(folder), 0, 0));
+        ms_cause(cause, ccap, "Snapmap+ could not prepare this mod folder (%s); close any program using it and press "
+                 "Refresh (the folder is unchanged)", ms_why(err, ms_rel(folder), 0, 0));
         goto done;
     }
     if (!ms_move_folder(staging, src)) {
@@ -1537,8 +1669,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             ms_log("MODS: store: %s: the folder could not be put back from %ls (%s)", ms_rel(folder), old,
                    ms_why(GetLastError(), ms_rel(folder), 0, 0));
         ms_rmtree(staging, parent);
-        ms_cause(cause, ccap, "the salted folder could not be put in place (%s); the folder is unchanged",
-                 ms_why(err, ms_rel(folder), 0, 0));
+        ms_cause(cause, ccap, "Snapmap+ could not finish preparing this mod folder (%s); close any program using it and "
+                 "press Refresh (the folder is unchanged)", ms_why(err, ms_rel(folder), 0, 0));
         goto done;
     }
     {
@@ -1549,10 +1681,12 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             ms_log("MODS: store: %s: the folder as it was before its salt, %ls, could not be removed completely; it is not "
                    "a mod (its name ends in .old-)", ms_rel(folder), old);
     }
-    ms_log("MODS: store: mods\\%s is a new mod: salt %s; %u reference(s) to mods/%s/ rewritten in %u file(s)%s, %u file(s) "
-           "moved under mods/%s/; %zu strings key(s) named %s_<key>, %u #str_ reference(s) to them rewritten",
-           ms_rel(folder), salt, r.refs, from, r.rewritten + (drefs ? 1u : 0u), drefs ? " (mod.json among them)" : "", r.moved,
-           salt, nskeys, salt, r.srefs + (unsigned)srefs);
+    ms_log("MODS: store: mods\\%s %s: salt %s; %u reference(s) to mods/%s/ rewritten in %u file(s)%s, %u file(s) "
+           "moved under mods/%s/ (%u sound bank(s) named or corrected); %zu strings key(s) named %s_<key>, %u #str_ "
+           "reference(s) to them rewritten",
+           ms_rel(folder), keep ? "moved its new content under its salt" : "is a new mod", salt, r.refs,
+           from ? from : "<none>", r.rewritten + (drefs ? 1u : 0u), drefs ? " (mod.json among them)" : "", r.moved, salt,
+           r.banks, nskeys, salt, r.srefs + (unsigned)srefs);
     if (salt_out) strcpy_s(salt_out, SH_SALT_LEN + 1, salt);
     ok = 1;
 done:
@@ -1568,9 +1702,20 @@ done:
     return ok;
 }
 
-static int ms_assign(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+/* A new salt for `folder`: from its name (from_name 1) or from the salt a
+ * copy carried. */
+static int ms_assign(const char *folder, const char *from, int from_name, char salt_out[SH_SALT_LEN + 1], char *cause,
+                     size_t ccap)
 {
-    return ms_assign_to(folder, NULL, 0, from, NULL, salt_out, cause, ccap);
+    return ms_assign_to(folder, NULL, 0, from, from_name, NULL, NULL, salt_out, cause, ccap);
+}
+
+/* A salted root folder's new content under its name moved under its salt
+ * (DECISIONS 20): 1 moved, 0 nothing to move, -1 with the cause. */
+static int ms_rehome(const char *folder, const char *name, const char *salt, char *cause, size_t ccap)
+{
+    char got[SH_SALT_LEN + 1];
+    return ms_assign_to(folder, NULL, 0, name, 1, salt, NULL, got, cause, ccap);
 }
 
 /* Whether `folder` lies in a place of the store (mods\maps\<segment>\...). */
@@ -1605,10 +1750,10 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
         ms_cause(cause, ccap, "%s", why);
         r = -1;
     } else if (ms_in_place(folder)) {
-        ms_cause(cause, ccap, SH_MB_SHAPE "it was not built by the mod store");
+        ms_cause(cause, ccap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
         r = -1;
     } else {
-        r = ms_assign_to(folder, NULL, 0, from, NULL, salt_out, cause, ccap);
+        r = ms_assign_to(folder, NULL, 0, from, 1, NULL, NULL, salt_out, cause, ccap);
     }
     if (r < 0) ms_note_cause(folder, cause);
     else if (r > 0) ms_note_cause(folder, NULL);
@@ -1638,7 +1783,7 @@ int sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len,
     if (!folder || !folder[0] || !from || !from[0] || !dest || !dest[0] || !modjson)
         return ms_cause(cause, ccap, "no folder named") - 1;
     modstore_lock();
-    r = ms_assign_to(folder, modjson, modjson_len, from, dest, salt_out, cause, ccap);
+    r = ms_assign_to(folder, modjson, modjson_len, from, 1, NULL, dest, salt_out, cause, ccap);
     modstore_unlock();
     return r;
 }
@@ -1794,7 +1939,7 @@ int sh_ms_place_dir(const sh_ms_place *place, char *out, size_t cap)
     if (!place || !out || !cap || !sh_ms_root(rootu, sizeof rootu) || !ms_pl_key(place, key, sizeof key)) return 0;
     if (!place->title || !sh_ms_title_segment(place->title, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "map");
     if (!(ek = ms_pl_escape(key))) return 0;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     entry = doc ? mpj_get(doc, ek) : NULL;
     if (entry && entry->type == MPJ_OBJ) {
@@ -1884,7 +2029,7 @@ int sh_ms_place_note(const sh_ms_place *place, const char *dir_in)
     et = ms_pl_escape(place->title ? place->title : "");
     ef = ms_pl_escape(dir);
     if (!ek || !et || !ef) goto out;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     entry = doc ? mpj_new(MPJ_OBJ) : NULL;
     if (entry) {
@@ -1910,7 +2055,7 @@ int sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size
     if (dir && dir_cap) dir[0] = 0;
     if (title && title_cap) title[0] = 0;
     if (!key || !key[0] || !sh_ms_root(rootu, sizeof rootu) || !(ek = ms_pl_escape(key))) return 0;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
     for (i = 0; doc && i < doc->n && !found; i++) {
@@ -1943,7 +2088,7 @@ int sh_ms_place_title(const char *folder, char *title, size_t cap)
         if (_strnicmp(name, SH_MS_PLACES "\\", pl + 1) || !name[pl + 1] || strchr(name + pl + 1, '\\')) return 0;
         strcpy_s(place, sizeof place, name);
     }
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
     for (i = 0; doc && i < doc->n && !found; i++) {
@@ -1975,7 +2120,7 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
     }
     free(copy);
     if (!sh_ms_root(rootu, sizeof rootu)) return;
-    sh_mb_record_lock();
+    sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     for (i = 0; doc && i < doc->n; i++) {
         char f[SH_MS_NAME_MAX + 1], full[MAX_PATH * 4];
@@ -2000,9 +2145,88 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
     sh_mb_record_unlock();
 }
 
+/* ------------------------------------------ which folder keeps a salt ---- */
+
+/* DECISIONS 15. The record's "salts" section names, for every salt at the
+ * root, the folder (its name under mods\) that held it at the last scan.
+ * Of two folders with one salt, the one the record names keeps it; when the
+ * record names neither (no scan saw them yet, or the holder was renamed and
+ * copied before one), the folder created first keeps it. The build time
+ * never decides: an Explorer copy carries the same mod.json. */
+#define MS_SALTS_SECTION "salts"
+
+static mpj *ms_salts_record(void)
+{
+    char rootu[MAX_PATH * 4], *text = NULL;
+    mpj *doc = NULL;
+    if (!sh_ms_root(rootu, sizeof rootu)) return NULL;
+    if (sh_mb_record_get(rootu, MS_SALTS_SECTION, &text) == 1 && text) doc = mpj_parse(text, strlen(text));
+    free(text);
+    if (doc && doc->type != MPJ_OBJ) { mpj_free(doc); doc = NULL; }
+    return doc;
+}
+
+static int ms_salt_recorded_at(const mpj *rec, const char *salt, const char *name)
+{
+    const mpj *v = rec && salt && salt[0] ? mpj_get(rec, salt) : NULL;
+    char held[SH_MS_NAME_MAX + 1];
+    return v && v->type == MPJ_STR && v->text && ms_pl_decode(v->text, held, sizeof held) && !_stricmp(held, name);
+}
+
+static unsigned long long ms_created(const char *folder)
+{
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    wchar_t *w = folder ? sh_mb_wpath(folder) : NULL;
+    unsigned long long t = ULLONG_MAX;
+    if (w && GetFileAttributesExW(w, GetFileExInfoStandard, &d))
+        t = ((unsigned long long)d.ftCreationTime.dwHighDateTime << 32) | d.ftCreationTime.dwLowDateTime;
+    free(w);
+    return t;
+}
+
+static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, const char *a_folder, const char *b_name,
+                  const char *b_folder)
+{
+    int ra = ms_salt_recorded_at(rec, salt, a_name), rb = ms_salt_recorded_at(rec, salt, b_name);
+    unsigned long long ca, cb;
+    if (ra != rb) return ra;
+    ca = ms_created(a_folder);
+    cb = ms_created(b_folder);
+    if (ca != cb) return ca < cb;
+    return _stricmp(a_name, b_name) < 0;
+}
+
+/* Record the folder of each salt at the root after a scan: `salts[i]` held
+ * by `names[i]`. Written only when it changed. */
+static void ms_salts_note(const char *const *salts, const char *const *names, size_t n)
+{
+    char rootu[MAX_PATH * 4];
+    mpj *doc = mpj_new(MPJ_OBJ), *was;
+    char *a = NULL, *b = NULL;
+    size_t i, al = 0, bl = 0;
+    if (!doc || !sh_ms_root(rootu, sizeof rootu)) { mpj_free(doc); return; }
+    for (i = 0; i < n; i++) {
+        char *e = ms_pl_escape(names[i]);
+        if (!e || !mpj_set(doc, salts[i], mpj_new_str(e))) { free(e); mpj_free(doc); return; }
+        free(e);
+    }
+    sh_mb_record_lock(rootu);
+    was = ms_salts_record();
+    a = mpj_dump(doc, &al);
+    b = was ? mpj_dump(was, &bl) : NULL;
+    if (a && (!b || al != bl || memcmp(a, b, al)))
+        if (!sh_mb_record_put(rootu, MS_SALTS_SECTION, doc->n ? a : NULL))
+            ms_log("MODS: record: which folder holds each salt could not be noted");
+    sh_mb_record_unlock();
+    free(a);
+    free(b);
+    mpj_free(was);
+    mpj_free(doc);
+}
+
 /* ---------------------------------------------------------- new mod ---- */
 
-/* New mod's example (DESIGN-additive 2.2): a crate that places and plays
+/* New mod's example: a crate that places and plays
  * untouched. Its entityDef is the game's SnapMap crate01 under the mod's salt,
  * its Toybox row is the game's crate01 row (snapeditorentitydef
  * prop/new/crate01: the prop_base parent, its preview, size, arrow and sounds)
@@ -2012,8 +2236,8 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
  * model as the stock prop rows do; it names no renderInfo.renderModelName,
  * which only rows whose entity has no model of its own carry (pickups,
  * encounters, logic); the earlier example's flooded the editor log with
- * "modelMatrix invert failed on model .../crate01.lwo" every frame (V13).
- * The entityDef is the game's text whole, editorVars included: V14 saw the
+ * "modelMatrix invert failed on model .../crate01.lwo" every frame.
+ * The entityDef is the game's text whole, editorVars included: the editor logged the
  * same line while the Toybox previewed or the crosshair hovered the crate
  * with the block left out. */
 #define MS_EXAMPLE_DECL "example_crate"
@@ -2140,7 +2364,8 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
         if (dir && ms_exists(dir)) { free(dir); dir = NULL; }
     }
     if (!dir) { ms_cause(cause, cap, "no free folder name under mods\\ for \"%s\"", name); goto done; }
-    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, cap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
+    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, cap, "Windows could not supply the random numbers that name a new mod; restart the game and "
+                                                     "try again"); goto done; }
     assets = ms_wjoin(dir, L"assets");
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) {
@@ -2307,7 +2532,7 @@ int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char *cause, size_t c
     char first[SH_MB_CAUSE_MAX];
     first[0] = 0;
     if (st) memset(st, 0, sizeof *st);
-    if (!spec || !spec[0]) return ms_cause(cause, cap, "no mod named (use its folder or its salt)");
+    if (!spec || !spec[0]) return ms_cause(cause, cap, "Name the mod: its folder name under mods, or its salt");
     modstore_lock();
     if (!sh_ms_enumerate(&l)) { modstore_unlock(); return ms_cause(cause, cap, "the store cannot be listed"); }
     for (i = 0; i < l.count; i++) {
@@ -2381,14 +2606,15 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
     int state;
     memset(b, 0, sizeof *b);
     if (ms_in_place(folder)) {
-        ms_cause(cause, cap, "mods\\%s is a build a map brought; it is kept as the map pins it and never built again",
+        ms_cause(cause, cap, "mods\\%s came with a downloaded map and is kept exactly as the map uses it; to change "
+                 "it, copy it to the top of the mods folder",
                  ms_rel(folder));
         strncpy_s(b->first_cause, sizeof b->first_cause, cause ? cause : "", _TRUNCATE);
         return 0;
     }
     state = sh_mb_descriptor_state_why(folder, why, sizeof why);
     if (state == SH_MB_DESC_FRESH) {
-        if (ms_assign(folder, from && from[0] ? from : ms_leaf(folder), salt, one, sizeof one) < 0) {
+        if (ms_assign(folder, from && from[0] ? from : ms_leaf(folder), 1, salt, one, sizeof one) < 0) {
             ms_note_cause(folder, one);
             strncpy_s(b->first_cause, sizeof b->first_cause, one, _TRUNCATE);
             return ms_cause(cause, cap, "%s", one);
@@ -2397,6 +2623,18 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
         ms_note_cause(folder, why);
         strncpy_s(b->first_cause, sizeof b->first_cause, why, _TRUNCATE);
         return ms_cause(cause, cap, "%s", why);
+    } else {
+        /* What the author added under the folder's name since moves under
+         * the salt before every build (DECISIONS 20). */
+        wchar_t *w = sh_mb_wpath(folder);
+        salt[0] = 0;
+        if (w) ms_block_salt(w, salt);
+        free(w);
+        if (salt[0] && ms_rehome(folder, from && from[0] ? from : ms_leaf(folder), salt, one, sizeof one) < 0) {
+            ms_note_cause(folder, one);
+            strncpy_s(b->first_cause, sizeof b->first_cause, one, _TRUNCATE);
+            return ms_cause(cause, cap, "%s", one);
+        }
     }
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
@@ -2576,7 +2814,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
          * with its references rewritten (the source is only read), built; a
          * refused build leaves nothing installed. */
         char *fu;
-        if (place) { ms_cause(cause, cap, SH_MB_SHAPE "it was not built by the mod store"); goto done; }
+        if (place) { ms_cause(cause, cap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh"); goto done; }
         if (as_name && as_name[0]) strncpy_s(name, sizeof name, as_name, _TRUNCATE);
         else if (!ms_free_root_name(root, leaf, name, sizeof name)) { ms_cause(cause, cap, "no free folder name under mods\\ for %s", leaf); goto done; }
         final = ms_wjoin_utf8(root, name);
@@ -2696,7 +2934,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
             char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1];
             const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL, NULL);
             strcpy_s(was, sizeof was, b.id);
-            if (ms_assign(ms_plain(fu), was, salt, cause, cap) < 0) {
+            if (ms_assign(ms_plain(fu), was, 0, salt, cause, cap) < 0) {
                 ms_rmtree(final, root);
                 free(fu);
                 goto done;
@@ -2816,21 +3054,17 @@ static void ms_sf_free(ms_sf *v, size_t n)
     free(v);
 }
 
-static int ms_sf_older(const ms_sf *a, const ms_sf *b)
-{
-    long long x = a->built > 0 ? a->built : LLONG_MAX, y = b->built > 0 ? b->built : LLONG_MAX;
-    if (x != y) return x < y;
-    return _stricmp(a->name, b->name) < 0;
-}
-
-/* The folder of v[i]'s salt that keeps it (the oldest), or (size_t)-1 when v[i] is that one. */
-static size_t ms_sf_keeper(const ms_sf *v, size_t n, size_t i)
+/* The folder of v[i]'s salt that keeps it (ms_keeps_salt), or (size_t)-1 when v[i] is that one. */
+static size_t ms_sf_keeper(const mpj *rec, const ms_sf *v, size_t n, size_t i)
 {
     size_t k, keep = (size_t)-1;
     if (!v[i].salt[0]) return keep;
     for (k = 0; k < n; k++) {
-        if (k == i || !v[k].salt[0] || _stricmp(v[k].salt, v[i].salt) || !ms_sf_older(&v[k], &v[i])) continue;
-        if (keep == (size_t)-1 || ms_sf_older(&v[k], &v[keep])) keep = k;
+        if (k == i || !v[k].salt[0] || _stricmp(v[k].salt, v[i].salt) ||
+            !ms_keeps_salt(rec, v[i].salt, v[k].name, v[k].folder, v[i].name, v[i].folder))
+            continue;
+        if (keep == (size_t)-1 || ms_keeps_salt(rec, v[i].salt, v[k].name, v[k].folder, v[keep].name, v[keep].folder))
+            keep = k;
     }
     return keep;
 }
@@ -2857,7 +3091,7 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
     for (i = 0; i < n; i++) {
         char salt[SH_SALT_LEN + 1], cause[SH_MB_CAUSE_MAX];
         if (v[i].state != SH_MB_DESC_FRESH) continue;
-        if (ms_assign(v[i].folder, ms_leaf(v[i].folder), salt, cause, sizeof cause) < 0) {
+        if (ms_assign(v[i].folder, ms_leaf(v[i].folder), 1, salt, cause, sizeof cause) < 0) {
             st->failed++;
             ms_note_cause(v[i].folder, cause);
             ms_log("MODS: store: %s refused: %s", v[i].name, cause);
@@ -2870,16 +3104,19 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         v[i].built = 0;
         v[i].current = 0;
     }
-    /* 2. A salt in two root folders: the one built first keeps it. Keepers
-     * are settled before anything changes, so three copies resolve at once. */
+    /* 2. A salt in two root folders: the folder the record names keeps it,
+     * else the one created first (DECISIONS 15). Keepers are settled before
+     * anything changes, so three copies resolve at once. */
     {
         size_t *keep = n ? (size_t *)malloc(n * sizeof *keep) : NULL;
-        for (i = 0; keep && i < n; i++) keep[i] = v[i].state == SH_MB_DESC_BUILT ? ms_sf_keeper(v, n, i) : (size_t)-1;
+        mpj *rec = ms_salts_record();
+        for (i = 0; keep && i < n; i++) keep[i] = v[i].state == SH_MB_DESC_BUILT ? ms_sf_keeper(rec, v, n, i) : (size_t)-1;
+        mpj_free(rec);
         for (i = 0; keep && i < n; i++) {
             char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1], cause[SH_MB_CAUSE_MAX];
             if (keep[i] == (size_t)-1) continue;
             strcpy_s(was, sizeof was, v[i].salt);
-            if (ms_assign(v[i].folder, was, salt, cause, sizeof cause) < 0) {
+            if (ms_assign(v[i].folder, was, 0, salt, cause, sizeof cause) < 0) {
                 st->failed++;
                 ms_note_cause(v[i].folder, cause);
                 ms_log("MODS: store: %s is a copy of %s and could not become a new mod: %s", v[i].name, v[keep[i]].name, cause);
@@ -2893,6 +3130,16 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
             v[i].current = 0;
         }
         free(keep);
+    }
+    /* Each salt's folder, for the next scan's copy rule. */
+    {
+        const char **salts = n ? (const char **)malloc(n * sizeof *salts) : NULL, **names = n ? (const char **)malloc(n * sizeof *names) : NULL;
+        size_t k = 0;
+        for (i = 0; salts && names && i < n; i++)
+            if (v[i].state == SH_MB_DESC_BUILT && v[i].salt[0]) { salts[k] = v[i].salt; names[k] = v[i].name; k++; }
+        if (salts && names) ms_salts_note(salts, names, k);
+        free(salts);
+        free(names);
     }
     /* 3. The rebuild rule: a root folder not built from its current tree under
      * these rules is built again; one whose last build failed too. */
@@ -2941,6 +3188,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st) { return ms
 
 int sh_ms_sync_pending(void)
 {
+    mpj *rec;
     wchar_t *root;
     ms_sf *v = NULL;
     size_t n, i;
@@ -2950,10 +3198,12 @@ int sh_ms_sync_pending(void)
     if (!ms_exists(root)) { free(root); return 0; }
     modstore_lock();
     n = ms_sync_scan(root, &v);
+    rec = ms_salts_record();
     for (i = 0; i < n; i++) {
         if (v[i].state == SH_MB_DESC_FRESH) pending++;
-        else if (v[i].state == SH_MB_DESC_BUILT && (!v[i].current || ms_sf_keeper(v, n, i) != (size_t)-1)) pending++;
+        else if (v[i].state == SH_MB_DESC_BUILT && (!v[i].current || ms_sf_keeper(rec, v, n, i) != (size_t)-1)) pending++;
     }
+    mpj_free(rec);
     ms_sf_free(v, n);
     modstore_unlock();
     free(root);

@@ -583,31 +583,30 @@ static void test_builder(void)
           !strcmp(t, "sound") && !strcmp(n, "mods/p6probes/p6probes_far"));
 
     CHECK(sh_mb_bank_rule("sound/soundbanks/pc/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
-    CHECK(sh_mb_bank_rule("sound/soundbanks/pc/alex_pink_imp_growls.bnk", "alex.pink-imp", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/alex.pink-imp_growls.bnk", "alex.pink-imp", cause, sizeof cause) &&
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes.x_growls.bnk", "p6probes", cause, sizeof cause) &&
           strstr(cause, "letters, digits"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "p6probes_"));
+    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "must start with this mod folder's name and _"));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_.bnk", "p6probes", cause, sizeof cause));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_spider.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "_sp"));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_x_snapmaps.bnk", "p6probes", cause, sizeof cause));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_initial.bnk", "p6probes", cause, sizeof cause));
     CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/english(us)/p6probes_vo.bnk", "p6probes", cause, sizeof cause) &&
-          strstr(cause, "sound/soundbanks/pc/<stem>.bnk"));
+          strstr(cause, "a sound bank goes in sound/soundbanks/pc/"));
     CHECK(!sh_mb_bank_rule("sound/mods/p6probes/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
 
     memcpy(head, "BKHD", 4);
     { uint32_t v = 16; memcpy(head + 4, &v, 4); v = 0x71; memcpy(head + 8, &v, 4); v = 3604064235u; memcpy(head + 12, &v, 4); }
-    CHECK(!sh_mb_bank_header_ok(head, 16, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "truncated"));
+    CHECK(!sh_mb_bank_header_ok(head, 16, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "cut short"));
     {
         uint8_t full[24];
         memcpy(full, head, 16);
         memset(full + 16, 0, 8);
         CHECK(sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause));
-        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", cause, sizeof cause) && strstr(cause, "FNV-1"));
+        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", cause, sizeof cause) && strstr(cause, "Snapmap+ corrects the id"));
         full[8] = 0x78;
         CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "version 120"));
         full[0] = 'X';
-        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "BKHD"));
+        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "is not a Wwise sound bank"));
     }
 
     GetTempPathA(sizeof tmp, tmp);
@@ -678,23 +677,23 @@ static void test_builder(void)
 
     /* Bank refusals. */
     put_bank(BANK, "p6probes_sfx", 0x71, 1);
-    build_expect(0, "FNV-1");
+    build_expect(0, "Snapmap+ corrects the id");
     put_bank(BANK, "p6probes_sfx", 0x78, 0);
     build_expect(0, "version 120");
     put_bank(BANK, "p6probes_sfx", 0x71, 0);
     put_bank("assets/sound/soundbanks/pc/p6probes_spider.bnk", "p6probes_spider", 0x71, 0);
-    build_expect(0, "'_sp'");
+    build_expect(0, "contains _sp, _snapmaps or initial");
     drop("assets/sound/soundbanks/pc/p6probes_spider.bnk");
     put_bank("assets/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
-    build_expect(0, "must start with 'p6probes_'");
+    build_expect(0, "must start with this mod folder's name and _");
     drop("assets/sound/soundbanks/pc/other_sfx.bnk");
     put_bank("assets/sound/mods/p6probes/p6probes_x.bnk", "p6probes_x", 0x71, 0);
-    build_expect(0, "sound/soundbanks/pc/<stem>.bnk");
+    build_expect(0, "a sound bank goes in sound/soundbanks/pc/");
     drop("assets/sound/mods/p6probes/p6probes_x.bnk");
     /* The retired "shadows" key refuses the folder (a stock bank's refusal: modbundle_test). */
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Sound probe\", "
                     "\"shadows\": [\"sound/soundbanks/pc/p6probes_sfx.bnk\"]}");
-    build_expect(0, "mod.json uses \"shadows\", which this version does not read");
+    build_expect(0, SH_MB_EARLIER);
     put("mod.json", DESC);
     build_expect(1, "");
 

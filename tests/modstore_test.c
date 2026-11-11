@@ -20,6 +20,7 @@
 
 #include "modstore.h"
 #include "mod_test_util.h"
+#include "store_lock.h"
 
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -408,7 +409,8 @@ static void test_fresh_folder_strings(const char *tmp)
     _snprintf_s(want, sizeof want, _TRUNCATE, "#str_%s_probe_desc", s2);
     CHECK(t && strstr(t, want));
     free(t);
-    /* After the first scan a key without the prefix is refused, naming it. */
+    /* A key added without the prefix after the first scan gains it at the
+     * next scan, and the folder builds (DECISIONS 20). */
     t = slurp(dir, "mod.json", NULL);
     if (t) {
         char *at = strstr(t, "\"en\": {");
@@ -423,10 +425,10 @@ static void test_fresh_folder_strings(const char *tmp)
         }
         free(t);
     }
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "strings key late_key is not named %s_<name>", salt);
-    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_late_key\": \"Late\"", salt);
+    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
     free(t);
 }
 
@@ -468,11 +470,13 @@ static void test_fresh_folder_refusals(const char *tmp)
     free(mj1);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "binprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, SH_MB_SHAPE) &&
-          strstr(e->cause, "m.bmd6model names mods/binprobe/ inside a binary file, which Snapmap+ cannot rewrite"));
+    CHECK(e && !sh_ms_entry_usable(e) &&
+          strstr(e->cause, "m.bmd6model names mods/binprobe/ inside a binary file, which Snapmap+ cannot rename") &&
+          strstr(e->cause, "New mod"));
     if (e) printf("   %s\n", e->cause);
     e = find_entry(&list, "foreignprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") && strstr(e->cause, "not mods/foreignprobe/"));
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") &&
+          strstr(e->cause, "not this folder's name"));
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
     /* Called directly: refused with the cause; an already salted folder answers 0. */
@@ -508,7 +512,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\lockedprobe\\probe.decl", path);
         h = CreateFileA(rel, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
-        CHECK(sh_ms_assign_salt(path, "lockedprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "cannot read"));
+        CHECK(sh_ms_assign_salt(path, "lockedprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "could not be read"));
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         t = slurp(path, "mod.json", NULL);
         CHECK(t && !strstr(t, "salt"));
@@ -586,7 +590,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     fb_make(a, "guards");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1);
     CHECK(entry_of("guards", sa, ha, &usable) && usable);
-    /* Copied in Explorer: same block, same built, same files; ties by path. */
+    /* Copied in Explorer: same block, same built, same files. */
     _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\guards - Copy", root);
     CHECK(mt_copy_tree(a, b));
     CHECK(sh_ms_enumerate(&list));
@@ -611,35 +615,49 @@ static void test_copy_gets_new_salt(const char *tmp)
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/probe_base", sb);
     CHECK(t && strstr(t, rel));
     free(t);
-    /* The earlier "built" keeps the salt whatever the path order. */
-    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\a copy built later", root);
+    /* A copy whose name sorts first, with the same "built": the folder the
+     * record names keeps the salt (DECISIONS 15). */
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\a copy", root);
     CHECK(mt_copy_tree(a, c));
-    {
-        char *text = slurp(c, "mod.json", NULL), *at = text ? strstr(text, "\"built\": ") : NULL;
-        if (at) { at += 9; while (*at >= '0' && *at <= '9') { *at = '9'; at++; } }
-        if (text) mt_write(c, "mod.json", text);
-        free(text);
-    }
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "a copy built later");
+    e = find_entry(&list, "a copy");
     CHECK(e && e->refused && strstr(e->cause, "is a copy of mods\\guards"));
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(entry_of("guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
-    CHECK(entry_of("a copy built later", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    CHECK(entry_of("a copy", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    /* Renamed and copied before a scan, so the record names neither: the
+     * folder created first keeps the salt. */
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\zz guards", root);
+    CHECK(MoveFileA(a, b));
+    Sleep(20);
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\aa guards", root);
+    CHECK(mt_copy_tree(b, c));
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
+    CHECK(entry_of("zz guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
+    CHECK(entry_of("aa guards", sc, NULL, &usable) && usable && strcmp(sc, sa));
+    /* The record decides before the creation time: the folder at the path
+     * that held the salt keeps it even when it was created later. */
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\older elsewhere", root);
+    CHECK(MoveFileA(b, c));
+    Sleep(20);
+    CHECK(mt_copy_tree(c, b));
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
+    CHECK(entry_of("zz guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
+    CHECK(entry_of("older elsewhere", sc, NULL, &usable) && usable && strcmp(sc, sa));
 }
 
 static void test_earlier_shapes(const char *tmp)
 {
     static const struct { const char *leaf, *file, *text, *cause; } cases[] = {
         { "format1", "mod.json", "{\"name\":\"Old\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.old\",\"build\":3}}",
-          "it was built by an earlier version of Snapmap+" },
+          "Run the Snapmap+ installer again and it converts it." },
         { "pkg", "package.json", "{\"id\":\"alex.pkg\",\"name\":\"Pkg\"}",
-          "its descriptor is package.json, which this version does not read" },
-        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "mod.json uses \"id\", which this version does not read" },
-        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "mod.json uses \"key\", which this version does not read" },
-        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "mod.json uses \"scope\"" },
-        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "mod.json uses \"hud.schema\"" },
+          "Run the Snapmap+ installer again and it converts it." },
+        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "Run the Snapmap+ installer again and it converts it." },
         { "notjson", "mod.json", "{\"name\": oops", "mod.json is not a valid JSON object" },
         { NULL, NULL, NULL, NULL } };
     char root[MAX_PATH], dir[MAX_PATH], *before[16], *after;
@@ -734,7 +752,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
     }
     free(t);
     CHECK(!sh_ms_install_placed(src2, &arena, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause) &&
-          strstr(cause, "its files are under mods/alexrimp/ but it is otherimp"));
+          strstr(cause, "is under mods/alexrimp/, which is neither this mod folder"));
     /* The same title for another map: a place of its own. */
     CHECK(sh_ms_place_dir(&other, dir, sizeof dir) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
     CHECK(sh_ms_install_placed(src, &other, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
@@ -750,15 +768,15 @@ static void test_place_folders(const char *fixture, const char *tmp)
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.salted == 0 && ss.folders == 0);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "maps\\Hell Arena Part 1\\dropped");
-    CHECK(e && e->refused && strstr(e->cause, "it was not built by the mod store"));
+    CHECK(e && e->refused && strstr(e->cause, "where Snapmap+ builds nothing"));
     sh_ms_list_free(&list);
     {
         char built[SH_MS_NAME_MAX + 1], c2[600], dropped[MAX_PATH * 2];
         sh_ms_install_stats s2;
         _snprintf_s(dropped, sizeof dropped, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
-        CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "not built by the mod store"));
+        CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
         CHECK(!sh_ms_install_from_folder(path, &RESOLVER, built, sizeof built, &s2, NULL, c2, sizeof c2) &&
-              strstr(c2, "never built again"));
+              strstr(c2, "came with a downloaded map"));
     }
     /* A hand copy inside one place: the newer one is refused. */
     {
@@ -768,7 +786,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
         CHECK(mt_copy_tree(path, copy));
         CHECK(sh_ms_enumerate(&list));
         e = find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy (hand)");
-        CHECK(e && e->refused && strstr(e->cause, "another folder of this map has the same mod: mods\\maps\\pack.rawmap.zip\\R2 Imp copy"));
+        CHECK(e && e->refused && strstr(e->cause, "Another folder of this map's mods, mods\\maps\\pack.rawmap.zip\\R2 Imp copy, holds the same mod"));
         CHECK(sh_ms_entry_usable(find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy")));
         sh_ms_list_free(&list);
         mt_remove_tree(copy);
@@ -838,30 +856,104 @@ static DWORD WINAPI install_thread(void *p)
     return 0;
 }
 
-typedef struct hold_job { DWORD ms; volatile LONG held; ULONGLONG released_at; } hold_job;
+typedef struct hold_job { unsigned waits; volatile LONG held; ULONGLONG released_at; } hold_job;
 
-/* Stands for a long store step: holds the store lock for a while. */
+/* Stands for a long store step: holds the store lock (recursively) until
+ * another thread is waiting for it. */
 static DWORD WINAPI hold_thread(void *p)
 {
     hold_job *h = (hold_job *)p;
+    int i;
     modstore_lock();
     modstore_lock();   /* recursive */
     InterlockedExchange(&h->held, 1);
-    Sleep(h->ms);
+    for (i = 0; i < 60000 && modstore_lock_waits() == h->waits; i++) Sleep(1);
     h->released_at = GetTickCount64();
     modstore_unlock();
     modstore_unlock();
     return 0;
 }
 
+/* Stands for another process: takes a named lock through a handle of its
+ * own, opened by name (store_lock.h), and lets go once `waits` moved (the store
+ * code is waiting for it) or, with no wait count to watch, after `ms`. */
+typedef struct named_job {
+    wchar_t name[64];
+    unsigned waits;
+    DWORD ms;
+    volatile LONG held;
+    ULONGLONG released_at;
+} named_job;
+
+static DWORD WINAPI named_holder(void *p)
+{
+    named_job *j = (named_job *)p;
+    HANDLE h = CreateMutexW(NULL, FALSE, j->name);
+    int i;
+    if (!h || WaitForSingleObject(h, 10000) != WAIT_OBJECT_0) { InterlockedExchange(&j->held, -1); return 0; }
+    InterlockedExchange(&j->held, 1);
+    if (j->ms) Sleep(j->ms);
+    else for (i = 0; i < 60000 && modstore_lock_waits() == j->waits; i++) Sleep(1);
+    j->released_at = GetTickCount64();
+    ReleaseMutex(h);
+    CloseHandle(h);
+    return 0;
+}
+
+static void test_named_locks(const char *tmp)
+{
+    char root[MAX_PATH], *text = NULL;
+    wchar_t wroot[MAX_PATH], a[64], b[64];
+    named_job j;
+    HANDLE th;
+    ULONGLONG got;
+    printf("-- lock: the store and its record share the mods folder's named lock with other processes\n");
+    /* One name for one folder however it is spelled; another folder, another name. */
+    CHECK(sh_store_lock_name(L"C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods", a, 64));
+    CHECK(sh_store_lock_name(L"\\\\?\\c:/users/a/appdata/local/snapmap-plus/MODS\\", b, 64));
+    CHECK(!wcscmp(a, b) && !wcsncmp(a, L"Local\\snapmap-plus-store-", 25) && wcslen(a) == 25 + 16);
+    CHECK(sh_store_lock_name(L"C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods2", b, 64) && wcscmp(a, b) != 0);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\named\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    MultiByteToWideChar(CP_UTF8, 0, root, -1, wroot, MAX_PATH);
+    /* The store lock held through another handle: modstore_lock waits for it. */
+    memset(&j, 0, sizeof j);
+    CHECK(sh_store_lock_name(wroot, j.name, 64));
+    j.waits = modstore_lock_waits();
+    th = CreateThread(NULL, 0, named_holder, &j, 0, NULL);
+    CHECK(th != NULL);
+    while (th && !InterlockedCompareExchange(&j.held, 0, 0)) Sleep(1);
+    CHECK(j.held == 1);
+    modstore_lock();
+    got = GetTickCount64();
+    modstore_unlock();
+    CHECK(modstore_lock_waits() > j.waits && got >= j.released_at);
+    if (th) { WaitForSingleObject(th, 60000); CloseHandle(th); }
+    /* The record waits for the same lock: a section is read only after the
+     * holder let go. */
+    memset(&j, 0, sizeof j);
+    CHECK(sh_store_lock_name(wroot, j.name, 64));
+    j.waits = modstore_lock_waits();
+    th = CreateThread(NULL, 0, named_holder, &j, 0, NULL);
+    CHECK(th != NULL);
+    while (th && !InterlockedCompareExchange(&j.held, 0, 0)) Sleep(1);
+    CHECK(j.held == 1);
+    (void)sh_mb_record_get(root, "places", &text);
+    got = GetTickCount64();
+    free(text);
+    CHECK(got >= j.released_at && j.released_at != 0);
+    if (th) { WaitForSingleObject(th, 60000); CloseHandle(th); }
+}
+
 static void test_lock(const char *tmp)
 {
     char root[MAX_PATH], cause[600];
-    hold_job h = { 400, 0, 0 };
+    hold_job h = { 0, 0, 0 };
     lock_job a, c;
     HANDLE th, ti[2];
     sh_ms_verify_stats vs;
     unsigned waits = modstore_lock_waits();
+    h.waits = waits;
     printf("-- lock: a second installer waits for the holder; two at once both succeed\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\lock\\mods", tmp);
     CHECK(sh_ms_set_root(root));
@@ -881,7 +973,6 @@ static void test_lock(const char *tmp)
     CHECK(a.ok);
     if (!a.ok) fprintf(stderr, "  waiting install: %s\n", a.cause);
     CHECK(a.done_at >= h.released_at);
-    CHECK(modstore_lock_waits() > waits);
     if (ti[0]) CloseHandle(ti[0]);
     if (th) CloseHandle(th);
     _snprintf_s(a.folder, sizeof a.folder, _TRUNCATE, "%s\\lock\\in\\lockthree", tmp);
@@ -1012,7 +1103,10 @@ static void test_boot_release(const char *tmp)
     at_lock = InterlockedCompareExchange(&g_boot_rescans, 0, 0);
     built_at_lock = log_count(" built: ");
     modstore_unlock();
-    CHECK(modstore_lock_waits() == waits + 1 && at_lock == rescans && built_at_lock == 1);
+    /* The waiting thread got the store between the two folders: one built,
+     * not yet indexed; the build then resumed and finished. */
+    CHECK(at_lock == rescans && built_at_lock == 1);
+
     for (i = 0; i < 800 && InterlockedCompareExchange(&g_boot_rescans, 0, 0) == rescans; i++) Sleep(25);
     CHECK(g_boot_rescans == rescans + 1);
     for (i = 0; i < 400 && !log_has("MODS: store: boot: 2 of 2 folder(s) built"); i++) Sleep(25);
@@ -1143,6 +1237,150 @@ static void test_crash_leftovers(const char *tmp)
     mt_remove_tree(dir);
 }
 
+/* The scripts' compile check, standing in for script_compile.c. */
+static int script_ok(const char *file, int entry, const char *text, size_t len, int *line, char *what, size_t what_cap,
+                     char *todo, size_t todo_cap)
+{
+    (void)file; (void)entry; (void)text; (void)len; (void)what; (void)what_cap; (void)todo; (void)todo_cap;
+    if (line) *line = 0;
+    return 1;
+}
+
+/* A Wwise bank header (version 113) carrying `id`, padded to 32 bytes. */
+static void write_bank(const char *folder, const char *rel, unsigned long id)
+{
+    unsigned char bytes[32];
+    char path[MAX_PATH * 2];
+    FILE *f;
+    memset(bytes, 0, sizeof bytes);
+    memcpy(bytes, "BKHD", 4);
+    mt_put32(bytes + 4, 24);
+    mt_put32(bytes + 8, 0x71);
+    mt_put32(bytes + 12, id);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
+}
+
+static unsigned long bank_id(const char *folder, const char *rel)
+{
+    size_t len = 0;
+    char *t = slurp(folder, rel, &len);
+    unsigned long id = 0;
+    if (t && len >= 16) memcpy(&id, t + 12, 4);
+    free(t);
+    return id;
+}
+
+/* DECISIONS 20 and 16: what an author writes under the folder's name moves
+ * under the salt at every scan, not only the first; a rename between scans
+ * changes nothing already moved; a bank named for the folder takes the
+ * salt's name and id; a README beside mod.json is ignored. */
+static void test_rehome(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], renamed[MAX_PATH * 2], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1];
+    char rel[MAX_PATH], want[200], *t;
+    sh_ms_sync_stats ss;
+    int usable;
+    printf("-- scan: new content under the folder's name moves under the salt at every scan\n");
+    sh_mb_set_script_check(script_ok);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\rehome\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\imp", root);
+    make_small_mod(dir, "imp");
+    mt_write(dir, "README.txt", "notes about mods/imp/ that stay as written");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.failed == 0);
+    CHECK(entry_of("imp", salt, NULL, &usable) && usable && salt[0]);
+    t = slurp(dir, "README.txt", NULL);
+    CHECK(t && !strcmp(t, "notes about mods/imp/ that stay as written"));
+    free(t);
+    /* A second file, a second string and a script, all under the folder's name. */
+    mt_write(dir, "assets\\generated\\image\\mods\\imp\\b.bimage", "second image of imp");
+    mt_write(dir, "assets\\mods\\imp\\scripts\\door.lua",
+             "api = 1\r\nlocal image = \"mods/imp/b\"\r\nlocal title = \"#str_imp_title\"\r\n");
+    t = slurp(dir, "mod.json", NULL);
+    if (t) {
+        size_t n = strlen(t) + 128;
+        char *edited = (char *)malloc(n);
+        if (edited) {
+            _snprintf_s(edited, n, _TRUNCATE, "{\r\n  \"strings\": {\"en\": {\"imp_title\": \"Imp\"}},%s", t + 1);
+            mt_write(dir, "mod.json", edited);
+            free(edited);
+        }
+        free(t);
+    }
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.rebuilt == 1);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
+    CHECK(mt_has(dir, rel) && !mt_has(dir, "assets\\generated\\image\\mods\\imp\\b.bimage"));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", salt);
+    t = slurp(dir, rel, NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"mods/%s/b\"", salt);
+    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"#str_%s_imp_title\"", salt);
+    CHECK(t && strstr(t, want));
+    free(t);
+    t = slurp(dir, "mod.json", NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_imp_title\": \"Imp\"", salt);
+    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
+    free(t);
+    CHECK(entry_of("imp", s2, NULL, &usable) && usable && !strcmp(s2, salt));
+    /* Renamed: what was moved stays; new content under the new name moves,
+     * and a bank named for the folder takes the salt's name and id. */
+    _snprintf_s(renamed, sizeof renamed, _TRUNCATE, "%s\\beast", root);
+    CHECK(MoveFileA(dir, renamed));
+    mt_write(renamed, "assets\\generated\\image\\mods\\beast\\c.bimage", "third image");
+    write_bank(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk", 12345);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 0);
+    if (ss.failed) log_dump("rehome");
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\c.bimage", salt);
+    CHECK(mt_has(renamed, rel));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
+    CHECK(mt_has(renamed, rel));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\sound\\soundbanks\\pc\\%s_music.bnk", salt);
+    CHECK(mt_has(renamed, rel) && !mt_has(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk"));
+    {
+        char stem[32];
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s_music", salt);
+        CHECK(bank_id(renamed, rel) == (unsigned long)sh_mb_fnv1_lower(stem, strlen(stem)));
+    }
+    CHECK(entry_of("beast", s2, NULL, &usable) && usable && !strcmp(s2, salt));
+    /* A current folder is not moved again: nothing to do, nothing written. */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    /* A new folder named like another mod's salt: that name is the other
+     * mod's, so nothing is moved for it and it says so. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, salt);
+    make_small_mod(dir, salt);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    {
+        sh_ms_list list;
+        const sh_ms_entry *e;
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, salt);
+        CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "is another mod's salt") && strstr(e->cause, "rename this folder"));
+        if (e) printf("   %s\n", e->cause);
+        sh_ms_list_free(&list);
+    }
+    sh_mb_set_script_check(NULL);
+}
+
+/* Folder names an earlier layout used are ordinary names now. */
+static void test_ordinary_names(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], salt[SH_SALT_LEN + 1];
+    sh_ms_sync_stats ss;
+    int usable;
+    printf("-- names: folders called blobs or legacy are mods like any other\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ordinary\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\legacy", root);
+    make_small_mod(dir, "legacy");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\sorted\\blobs", root);
+    make_small_mod(dir, "blobs");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 2 && ss.failed == 0);
+    CHECK(entry_of("legacy", salt, NULL, &usable) && usable && salt[0]);
+    CHECK(entry_of("sorted\\blobs", salt, NULL, &usable) && usable && salt[0]);
+}
+
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], name[SH_MS_NAME_MAX + 1];
@@ -1227,10 +1465,13 @@ int main(int argc, char **argv)
     test_place_folders(fixture, tmp);
     test_new_mod(tmp);
     test_lock(tmp);
+    test_named_locks(tmp);
     test_recycle(tmp);
     test_work_folder_names(tmp);
     test_crash_leftovers(tmp);
     test_nested(tmp);
+    test_ordinary_names(tmp);
+    test_rehome(tmp);
     test_boot_sync(fixture, tmp);
     test_boot_release(tmp);
     sh_ms_set_root(NULL);

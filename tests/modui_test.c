@@ -993,11 +993,10 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "broken", "\"state\":\"attention\""));
         CHECK(row_str(doc, "broken", "cause", cause, sizeof cause) && !strncmp(cause, "This mod could not be built: ", 29));
         if (cause[0]) printf("    broken: %s\n", cause);
-        CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "Its mod.json uses \"id\", which this version of Snapmap+ does not read; remove it from mod.json and "
-                             "press Refresh."));
+        CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) && !strcmp(cause, SH_MB_EARLIER));
         if (cause[0]) printf("    old_shape: %s\n", cause);
-        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) && strstr(cause, "package.json") && strstr(cause, "New mod"));
+        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) && !strcmp(cause, SH_MB_EARLIER));
+
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);

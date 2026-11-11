@@ -292,7 +292,7 @@ static void test_builder(const char *tmp, const char *install)
             put_rel(dir, rel, JUNK, sizeof JUNK);
             CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
             CHECK(b.errors == 1);
-            CHECK_CAUSE(b, "can only be a stock pointer to the installed game, never carried");
+            CHECK_CAUSE(b, "can only be an unchanged copy of the game");
             sh_mb_free(&b);
         }
     }
@@ -304,7 +304,7 @@ static void test_builder(const char *tmp, const char *install)
         sh_mb_set_stock_ops(NULL);
         CHECK(!sh_mb_build(dir, "tarenaaa", NULL, &b));
         CHECK(b.errors >= 1);
-        CHECK_CAUSE(b, "can only be a stock pointer to the installed game, never carried");
+        CHECK_CAUSE(b, "can only be an unchanged copy of the game");
         sh_mb_free(&b);
         sh_modstock_register();
         sh_modstock_set_install(install);
