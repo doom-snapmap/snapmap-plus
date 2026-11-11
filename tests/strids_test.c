@@ -80,6 +80,7 @@ typedef struct fake_bundle {
     int place, admitted;
     const char *extra;
     int edits_off;      /* its edits do not apply now (another map, not declared) */
+    int names_off;      /* its own names do not serve now (inert: the map declares another build) */
 } fake_bundle;
 static fake_bundle g_bundles[8];
 static int g_nbundles, g_bundle_visits, g_bundle_refuse;
@@ -90,6 +91,17 @@ int sh_modserve_bundle_edits_live(const char *bundle_hash)
     int i;
     for (i = 0; i < g_nbundles; i++)
         if (bundle_hash && !strcmp(g_bundles[i].id, bundle_hash)) return !g_bundles[i].edits_off;
+    return 0;
+}
+
+static int g_scope_on;
+int sh_modserve_scope_enabled(void) { return g_scope_on; }
+int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out)
+{
+    int i;
+    memset(out, 0, sizeof *out);
+    for (i = 0; i < g_nbundles; i++)
+        if (bundle_hash && !strcmp(g_bundles[i].id, bundle_hash)) { out->names_live = !g_bundles[i].names_off; return 1; }
     return 0;
 }
 
@@ -503,6 +515,120 @@ static void test_string_edits(void)
     CHECK(rearm_strings() == 1);
 }
 
+/* R6: a mod's own strings come from the build that serves the open map. The
+ * root's build of salt mmmmmmmm and a downloaded map's build of it both
+ * carry mmmmmmmm_title; the map declares its own build, so the root's is
+ * inert and the map's text shows; with the map closed the root's returns. */
+static void test_own_strings_follow_the_build(void)
+{
+    static fake_bundle builds[] = {
+        { "mmmmmmmm", "", 0, 1, "{\"strings\":{\"en\":{\"mmmmmmmm_title\":\"Root text\"}}}", 0, 1 },
+        { "mmmmmmmm-place", "", 1, 1, "{\"strings\":{\"en\":{\"mmmmmmmm_title\":\"Map text\"}}}", 0, 0 },
+    };
+    CHECK(user_doc("{}"));
+    set_bundles(builds, 2);
+    g_scope_on = 1;
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("mmmmmmmm_title") == 1 && !strcmp(value_for("mmmmmmmm_title"), "Map text"));
+    CHECK(strstr(g_log, "REFUSED") == NULL);   /* the inert build does not compete */
+    CHECK(sh_strids_scope_check() == 0);
+    g_bundles[0].names_off = 0;   /* the map closes: the root's build serves its names, the place's does not */
+    g_bundles[1].names_off = 1;
+    CHECK(sh_strids_scope_check() == 1);
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("mmmmmmmm_title") == 1 && !strcmp(value_for("mmmmmmmm_title"), "Root text"));
+    g_scope_on = 0;
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("mmmmmmmm_title") == 0);
+}
+
+/* The engine rebuilds its own dictionary (a language reload): every row this
+ * injector added is gone and the game's rows are new records. A Refresh that
+ * changes a mod's strings while a map is open must leave a valid table: each
+ * key once, the new text, sorted. */
+static void test_rebuilt_table(void)
+{
+    static fake_bundle mod[] = {
+        { "rrrrrrrr", "", 0, 1, "{\"strings\":{\"en\":{\"rrrrrrrr_name\":\"Before\",\"rrrrrrrr_other\":\"Other\"}}}" },
+    };
+    unsigned char game[32] = {0};
+    unsigned int i, j;
+    CHECK(user_doc("{}"));
+    set_bundles(mod, 1);
+    CHECK(rearm_strings() == 1 && count_key("rrrrrrrr_name") == 1);
+    /* The rebuild: the table holds only the game's rows, as freshly read. */
+    g_dictionary.count = 0;
+    *(unsigned int *)game = fake_hash("#str_game_row");
+    fake_idstr_ctor(game + 8, "#str_game_row");
+    fake_idstr_ctor(game + 16, "Game");
+    *(unsigned int *)(game + 24) = *(unsigned int *)(game + 28) = 4;
+    fake_insert(&g_dictionary, game);
+    /* Refresh with a changed string. */
+    g_bundles[0].extra = "{\"strings\":{\"en\":{\"rrrrrrrr_name\":\"After\",\"rrrrrrrr_other\":\"Other\"}}}";
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(strstr(g_log, "STRINGS: runtime refresh complete") != NULL);
+    CHECK(strstr(g_log, "the game rebuilt its string table") != NULL);
+    CHECK(count_key("rrrrrrrr_name") == 1 && !strcmp(value_for("rrrrrrrr_name"), "After"));
+    CHECK(count_key("rrrrrrrr_other") == 1 && count_key("game_row") == 1);
+    CHECK(value_for("sh_bv_navigation_desc") != NULL);   /* the baked layer is back too */
+    for (i = 1; i < g_dictionary.count; i++) CHECK(*(unsigned int *)g_records[i - 1] <= *(unsigned int *)g_records[i]);
+    for (i = 0; i < g_dictionary.count; i++)
+        for (j = i + 1; j < g_dictionary.count; j++)
+            CHECK(_stricmp(*(char **)(g_records[i] + 8), *(char **)(g_records[j] + 8)) != 0);
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1 && count_key("rrrrrrrr_name") == 0 && count_key("game_row") == 1);
+}
+
+/* A refresh that cannot complete leaves the previous table whole: here one
+ * wanted key matches two game rows (an ambiguous adoption), while another
+ * key the injector owns changes text. Nothing of the pass may land. */
+static void test_failed_refresh_changes_nothing(void)
+{
+    static fake_bundle mod[] = {
+        { "ffffffff", "", 0, 1, "{\"strings\":{\"en\":{\"ffffffff_name\":\"Before\"}}}" },
+    };
+    static unsigned char snapshot[CAP][32];
+    unsigned char twin[32] = {0};
+    unsigned int count;
+    CHECK(user_doc("{}"));
+    set_bundles(mod, 1);
+    CHECK(rearm_strings() == 1 && !strcmp(value_for("ffffffff_name"), "Before"));
+    *(unsigned int *)twin = fake_hash("#str_twin_key");
+    fake_idstr_ctor(twin + 8, "#str_twin_key");
+    fake_idstr_ctor(twin + 16, "One");
+    fake_insert(&g_dictionary, twin);
+    fake_idstr_ctor(twin + 8, "#str_TWIN_KEY");
+    fake_idstr_ctor(twin + 16, "Two");
+    fake_insert(&g_dictionary, twin);
+    qsort(g_records, g_dictionary.count, 32, compare_record);
+    count = g_dictionary.count;
+    memcpy(snapshot, g_records, (size_t)count * 32u);
+    g_bundles[0].extra = "{\"strings\":{\"en\":{\"ffffffff_name\":\"After\",\"twin_key\":\"Mine\"}}}";
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 0);
+    CHECK(strstr(g_log, "STRINGS: runtime refresh FAILED") != NULL);
+    CHECK(g_dictionary.count == count && !memcmp(snapshot, g_records, (size_t)count * 32u));
+    CHECK(!strcmp(value_for("ffffffff_name"), "Before"));
+    /* The game's twin rows go; the next refresh completes. */
+    g_dictionary.count = count - 2;
+    {
+        unsigned int r, w = 0;
+        for (r = 0; r < count; r++) {
+            const char *k = *(char **)(snapshot[r] + 8);
+            if (k && !_stricmp(k, "#str_twin_key")) continue;
+            memcpy(g_records[w++], snapshot[r], 32);
+        }
+        g_dictionary.count = w;
+    }
+    CHECK(rearm_strings() == 1 && !strcmp(value_for("ffffffff_name"), "After") && !strcmp(value_for("twin_key"), "Mine"));
+    set_bundles(NULL, 0);
+    g_bundles[0].extra = "{\"strings\":{\"en\":{\"ffffffff_name\":\"Before\"}}}";
+    CHECK(rearm_strings() == 1 && count_key("ffffffff_name") == 0 && count_key("twin_key") == 0);
+}
+
 static void test_namespaced_keys(void)
 {
     static const fake_bundle packs[] = {
@@ -706,6 +832,9 @@ int main(void)
     test_bundle_layer();
     test_namespaced_keys();
     test_string_edits();
+    test_own_strings_follow_the_build();
+    test_rebuilt_table();
+    test_failed_refresh_changes_nothing();
     test_dictionary_retirement();
     test_sort_hook_recovery();
     test_native_table_extent();

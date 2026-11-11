@@ -54,6 +54,7 @@ static int g_pass_failed;
 static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet injected) */
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
+static int g_table_changed;                     /* the last pass wrote to the live table */
 
 /* Decode the first LEA RCX,[rip+disp32] in StridsTableLea to find the
  * dictionary descriptor. A later matching LEA references the error string, so
@@ -217,49 +218,55 @@ static strids_owned_row *find_owned(const char *id)
     return NULL;
 }
 
-static unsigned char *find_live_owned(const strids_owned_row *row)
+/* Where an owned row sits in the live table: 1 with its index, 0 when the
+ * table no longer holds it (the engine rebuilt its dictionary, which drops
+ * every row this injector added), -1 when the table cannot be read or two
+ * rows claim it. */
+static int find_live_owned(const strids_owned_row *row, uint32_t *at)
 {
     unsigned char *array;
     uint32_t count;
     size_t i;
-    unsigned char *found = NULL;
-    if (!strids_table(&array, &count)) return NULL;
+    int found = 0;
+    if (!strids_table(&array, &count)) return -1;
     for (i = strids_index_first(row->hash); i < g_index_n && g_index[i].hash == row->hash; i++) {
         if (g_index[i].key == row->key_handle) {
             unsigned char *entry;
-            if (g_index[i].index >= count) return NULL;
+            if (g_index[i].index >= count) return -1;
             entry = array + (size_t)g_index[i].index * 32u;
-            if (*(unsigned int *)entry != row->hash || *(void **)(entry + 8) != row->key_handle) return NULL;
-            if (found) return NULL; /* Ambiguous ownership must not remove a row. */
-            found = entry;
+            if (*(unsigned int *)entry != row->hash || *(void **)(entry + 8) != row->key_handle) return -1;
+            if (found) return -1; /* Ambiguous ownership must not touch a row. */
+            found = 1;
+            *at = g_index[i].index;
         }
     }
     return found;
 }
 
-/* Adopt an existing game row instead of appending a duplicate key. Native
+/* An existing game row with `key`: 1 with its index, 0 none, -1 ambiguous or
+ * unreadable. Adopting it instead of appending keeps one row per key; native
  * AtomicString assignment and dictionary copies do not transfer ownership of
- * the pool's text; keeping the original record permits exact restoration. */
-static int find_existing_key(unsigned int hash, const char *key, unsigned char **found)
+ * the pool's text, so keeping the original record permits exact restoration. */
+static int find_existing_key(unsigned int hash, const char *key, uint32_t *at)
 {
     unsigned char *array;
     uint32_t count;
     size_t i;
-    *found = NULL;
-    if (!strids_table(&array, &count)) return 0;
+    int found = 0;
+    if (!strids_table(&array, &count)) return -1;
     for (i = strids_index_first(hash); i < g_index_n && g_index[i].hash == hash; i++) {
         if (!_stricmp(g_index[i].key, key)) {
             unsigned char *row;
-            if (g_index[i].index >= count) return 0;
+            if (g_index[i].index >= count) return -1;
             row = array + (size_t)g_index[i].index * 32u;
-            if (*(uint32_t *)row != hash || *(const char **)(row + 8) != g_index[i].key) return 0;
-            if (*found) return 0;
-            *found = row;
+            if (*(uint32_t *)row != hash || *(const char **)(row + 8) != g_index[i].key) return -1;
+            if (found) return -1;
+            found = 1;
+            *at = g_index[i].index;
         }
     }
-    return 1;
+    return found;
 }
-
 
 static unsigned int strids_text_hash(const char *text)
 {
@@ -281,12 +288,36 @@ static const char *strids_owner_name(int owner)
     return "<baked>";
 }
 
-/* Append one #str_<id> row through native helpers unless this pass already
- * supplied the key.
- */
-static void inject_row_owned(const char *id, const char *text, size_t text_len, int owner, int layer)
+/* ---- one pass: every row it wants is gathered first (the plan), checked
+ * and given its memory; only then is the live table changed. A pass that
+ * cannot be planned leaves the table exactly as it was. */
+
+typedef struct strids_want {
+    char *id;                 /* the key without "#str_" */
+    char *text;               /* the text (process heap, handed to the owned row) */
+    size_t text_len;
+    int owner, layer;
+} strids_want;
+static strids_want *g_want;
+static size_t g_want_n, g_want_capacity;
+
+static void wants_free(void)
+{
+    size_t i;
+    for (i = 0; i < g_want_n; i++) {
+        free(g_want[i].id);
+        if (g_want[i].text) HeapFree(GetProcessHeap(), 0, g_want[i].text);
+    }
+    g_want_n = 0;
+}
+
+/* Add one #str_<id> row to the pass unless an earlier layer or bundle
+ * supplied the key (first writer wins). */
+static void want_row(const char *id, const char *text, size_t text_len, int owner, int layer)
 {
     strids_row *seen = find_injected(id);
+    strids_want *w;
+    size_t id_length = strlen(id);
     if (seen != NULL) {
         /* Two bundles with different text: the first stands and one line
          * names both. Equal text composes silently; the baked layer
@@ -300,103 +331,50 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
                         id, strids_owner_name(owner), strids_owner_name(seen->owner));
             backend_log(line);
         }
-        return;                                             /* first-writer-wins: never append twice */
+        return;
     }
-    size_t id_length = strlen(id);
-    if (!id_length || id_length > INT_MAX - 5u || text_len > INT_MAX ||
-        g_injected_n == SIZE_MAX ||
-        !strids_reserve((void **)&g_injected_ids, &g_injected_capacity,
-                        g_injected_n + 1, sizeof(*g_injected_ids))) {
+    if (!id_length || id_length > INT_MAX - 5u || text_len > INT_MAX || g_injected_n == SIZE_MAX ||
+        !strids_reserve((void **)&g_injected_ids, &g_injected_capacity, g_injected_n + 1, sizeof(*g_injected_ids)) ||
+        !strids_reserve((void **)&g_want, &g_want_capacity, g_want_n + 1, sizeof(*g_want))) {
         g_pass_failed = 1;
         return;
     }
-    {
-        strids_owned_row *owned = find_owned(id);
-        unsigned char *live = NULL;
-        unsigned char rec[32] = {0};
-        unsigned char original[32] = {0};
-        int replaced = 0;
-        char *key = NULL, *saved_id = NULL;
-        char *saved_text;
-        uint32_t length = (uint32_t)text_len;
-        if (owned) {
-            live = find_live_owned(owned);
-            if (!live) { g_pass_failed = 1; return; }
-            if (strcmp(owned->text, text) == 0 && *(char **)(live + 16) &&
-                strcmp(*(char **)(live + 16), text) == 0) goto record_seen;
-            memcpy(rec, live, sizeof(rec));
-        } else {
-            unsigned char *array;
-            uint32_t count;
-            if (!strids_table(&array, &count) ||
-                g_owned_n == SIZE_MAX ||
-                !strids_reserve((void **)&g_owned_rows, &g_owned_capacity,
-                                g_owned_n + 1, sizeof(*g_owned_rows))) {
-                g_pass_failed = 1; return;
-            }
-            key = (char *)malloc(id_length + 6);
-            saved_id = _strdup(id);
-            if (!key || !saved_id) { free(key); free(saved_id); g_pass_failed = 1; return; }
-            memcpy(key, "#str_", 5); memcpy(key + 5, id, id_length + 1);
-            *(uint32_t *)rec = g_hash(key);
-            if (!find_existing_key(*(uint32_t *)rec, key, &live) || (!live && count == INT_MAX)) {
-                free(key); free(saved_id); g_pass_failed = 1; return;
-            }
-            if (live) {
-                memcpy(original, live, sizeof(original));
-                memcpy(rec, live, sizeof(rec)); replaced = 1;
-            } else g_idstr_ctor(rec + 8, key);
-            free(key);
-        }
-        saved_text = (char *)HeapAlloc(GetProcessHeap(), 0, text_len + 1);
-        if (!saved_text) { free(saved_id); g_pass_failed = 1; return; }
-        memcpy(saved_text, text, text_len + 1);
-        /* AtomicString assignment interns text and writes its borrowed pointer.
-         * It does not release the old value; dictionary rows own no pool memory. */
-        g_idstr_ctor(live ? live + 16 : rec + 16, text);
-        memcpy(live ? live + 24 : rec + 24, &length, 4);
-        memcpy(live ? live + 28 : rec + 28, &length, 4);
-        if (owned) {
-            HeapFree(GetProcessHeap(), 0, owned->text);
-        } else {
-            if (!live) {
-                uint32_t before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
-                g_insert(g_table_desc, rec);
-                if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
-                    HeapFree(GetProcessHeap(), 0, saved_text);
-                    free(saved_id);
-                    g_pass_failed = 1;
-                    return;
-                }
-                InterlockedIncrement(&g_inject_count);
-            }
-            owned = &g_owned_rows[g_owned_n++];
-            memset(owned, 0, sizeof(*owned));
-            owned->id = saved_id;
-            owned->key_handle = *(void **)(rec + 8);
-            owned->hash = *(uint32_t *)rec;
-            owned->replaced = replaced;
-            memcpy(owned->original, original, sizeof(original));
-        }
-        owned->text = saved_text;
-record_seen:
-        g_injected_ids[g_injected_n].id = owned->id;
-        g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
-        g_injected_ids[g_injected_n].owner = owner;
-        g_injected_ids[g_injected_n].layer = layer;
-        g_injected_n++;
-        g_layer_rows[layer]++;
+    w = &g_want[g_want_n];
+    memset(w, 0, sizeof *w);
+    w->id = _strdup(id);
+    w->text = (char *)HeapAlloc(GetProcessHeap(), 0, text_len + 1);
+    if (!w->id || !w->text) {
+        free(w->id);
+        if (w->text) HeapFree(GetProcessHeap(), 0, w->text);
+        g_pass_failed = 1;
+        return;
     }
+    memcpy(w->text, text, text_len);
+    w->text[text_len] = 0;
+    w->text_len = text_len;
+    w->owner = owner;
+    w->layer = layer;
+    g_want_n++;
+    g_injected_ids[g_injected_n].id = w->id;
+    g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
+    g_injected_ids[g_injected_n].owner = owner;
+    g_injected_ids[g_injected_n].layer = layer;
+    g_injected_n++;
+    g_layer_rows[layer]++;
 }
 
-static void inject_row(const char *id, const char *text, size_t text_len)
-{
-    inject_row_owned(id, text, text_len, STRIDS_OWNER_NONE, STRIDS_LAYER_BAKED);
-}
+enum { STRIDS_KEEP, STRIDS_UPDATE, STRIDS_ADOPT, STRIDS_APPEND };
+
+typedef struct strids_step {
+    int action;               /* STRIDS_* */
+    size_t owned;             /* KEEP, UPDATE: the owned row */
+    uint32_t at;              /* UPDATE, ADOPT: the live row's index in the table as read */
+    uint32_t hash;            /* ADOPT, APPEND */
+} strids_step;
 
 typedef struct strids_retirement {
     uint32_t index;
-    size_t owner;
+    size_t owned;
 } strids_retirement;
 
 static int retirement_compare(const void *left, const void *right)
@@ -405,49 +383,187 @@ static int retirement_compare(const void *left, const void *right)
     return a->index < b->index ? -1 : a->index > b->index;
 }
 
-/* At the main-thread refresh boundary, remove only absent product-owned rows.
- * Preflight the complete set before changing the list; compact once, retaining
- * unrelated rows and order. Native list resize/clear copies/frees only records,
- * never their AtomicString pointers. The engine pool remains untouched. */
-static void retire_absent_rows(void)
+static void owned_free(strids_owned_row *o)
 {
-    strids_retirement *retired;
+    if (o->text) HeapFree(GetProcessHeap(), 0, o->text);
+    free(o->id);
+}
+
+/* Bring the live table to exactly the gathered rows (g_want). Everything a
+ * pass can fail on is settled before the table is touched: where each owned
+ * row is, which wanted rows update, adopt or append, which owned rows retire,
+ * and the memory for all of it. A pass that cannot be planned returns 0 with
+ * the table exactly as it was. Once applying, only an engine append can
+ * refuse: the rows before it stand, each owned, and 0 is returned so the
+ * next pass settles the rest. */
+static int strids_commit(void)
+{
     unsigned char *array;
-    uint32_t count, read, written = 0;
-    size_t i, n = 0, next = 0, kept = 0;
-    if (g_pass_failed || !g_owned_n) return;
-    if (g_owned_n > SIZE_MAX / sizeof(*retired) ||
-        !(retired = malloc(g_owned_n * sizeof(*retired)))) { g_pass_failed = 1; return; }
-    if (!strids_table(&array, &count)) { g_pass_failed = 1; goto done; }
-    for (i = 0; i < g_owned_n; i++) if (!find_injected(g_owned_rows[i].id)) {
-        unsigned char *row = find_live_owned(&g_owned_rows[i]);
-        if (!row) { g_pass_failed = 1; goto done; }
-        retired[n++] = (strids_retirement){(uint32_t)((row - array) / 32u), i};
+    uint32_t count, appends = 0, *live_at = NULL;
+    strids_step *steps = NULL;
+    strids_retirement *retire = NULL;
+    char **keys = NULL;
+    size_t i, nretire = 0, nnew = 0, kept;
+    int ok = 0;
+
+    g_table_changed = 0;
+    if (g_pass_failed || !strids_table(&array, &count)) return 0;
+    /* An owned row the table no longer holds went with the engine's own
+     * rebuild of its dictionary (which drops every row this injector added):
+     * it is forgotten here and, when still wanted, added again below. */
+    if (g_owned_n && !(live_at = (uint32_t *)calloc(g_owned_n, sizeof *live_at))) return 0;
+    for (i = 0, kept = 0; i < g_owned_n; i++) {
+        uint32_t at = 0;
+        int r = find_live_owned(&g_owned_rows[i], &at);
+        if (r < 0) { free(live_at); return 0; }
+        if (r == 0) { owned_free(&g_owned_rows[i]); continue; }
+        live_at[kept] = at;
+        g_owned_rows[kept++] = g_owned_rows[i];
     }
-    if (!n) goto done;
-    qsort(retired, n, sizeof(*retired), retirement_compare);
-    for (i = 1; i < n; i++) if (retired[i - 1].index == retired[i].index) {
-        g_pass_failed = 1; goto done;
-    }
-    for (read = 0; read < count; read++) {
-        const unsigned char *source = array + (size_t)read * 32u;
-        if (next < n && retired[next].index == read) {
-            const strids_owned_row *owned = &g_owned_rows[retired[next++].owner];
-            if (!owned->replaced) continue;
-            source = owned->original;
-        }
-        memmove(array + (size_t)written++ * 32u, source, 32u);
-    }
-    *(uint32_t *)((unsigned char *)g_table_desc + 8) = written;
-    for (i = 0; i < g_owned_n; i++) {
-        if (!find_injected(g_owned_rows[i].id)) {
-            HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
-            free(g_owned_rows[i].id);
-        } else g_owned_rows[kept++] = g_owned_rows[i];
+    if (kept != g_owned_n) {
+        char line[160];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "STRINGS: the game rebuilt its string table; %zu of Snapmap+'s rows "
+                    "are added again", g_owned_n - kept);
+        backend_log(line);
     }
     g_owned_n = kept;
-done:
-    free(retired);
+
+    if (g_want_n && (!(steps = (strids_step *)calloc(g_want_n, sizeof *steps)) ||
+                     !(keys = (char **)calloc(g_want_n, sizeof *keys))))
+        goto out;
+    if (g_owned_n && !(retire = (strids_retirement *)calloc(g_owned_n, sizeof *retire))) goto out;
+    for (i = 0; i < g_want_n; i++) {
+        const strids_want *w = &g_want[i];
+        strids_owned_row *o = find_owned(w->id);
+        if (o) {
+            size_t k = (size_t)(o - g_owned_rows);
+            const unsigned char *live = array + (size_t)live_at[k] * 32u;
+            const char *now = *(char *const *)(live + 16);
+            steps[i].owned = k;
+            steps[i].at = live_at[k];
+            steps[i].action = !strcmp(o->text, w->text) && now && !strcmp(now, w->text) ? STRIDS_KEEP : STRIDS_UPDATE;
+        } else {
+            size_t id_length = strlen(w->id);
+            int r;
+            if (!(keys[i] = (char *)malloc(id_length + 6))) goto out;
+            memcpy(keys[i], "#str_", 5);
+            memcpy(keys[i] + 5, w->id, id_length + 1);
+            steps[i].hash = g_hash(keys[i]);
+            r = find_existing_key(steps[i].hash, keys[i], &steps[i].at);
+            if (r < 0) goto out;
+            steps[i].action = r ? STRIDS_ADOPT : STRIDS_APPEND;
+            if (!r) appends++;
+            nnew++;
+        }
+    }
+    /* Owned rows no layer wants any more retire (a replaced game row gets its
+     * original record back, an added one goes). */
+    for (i = 0; i < g_owned_n; i++)
+        if (!find_injected(g_owned_rows[i].id)) {
+            retire[nretire].index = live_at[i];
+            retire[nretire++].owned = i;
+        }
+    if (nretire > 1) {
+        qsort(retire, nretire, sizeof *retire, retirement_compare);
+        for (i = 1; i < nretire; i++) if (retire[i - 1].index == retire[i].index) goto out;
+    }
+    if (appends > (uint32_t)INT_MAX - count) goto out;
+    if (nnew > SIZE_MAX - g_owned_n ||
+        !strids_reserve((void **)&g_owned_rows, &g_owned_capacity, g_owned_n + nnew, sizeof(*g_owned_rows)))
+        goto out;
+
+    g_table_changed = 1;
+    /* Apply: in place first (the indexes are of the table as read), then the
+     * appends at the end, then the retirements by those same indexes (an
+     * append never moves an earlier row's index; the array is read again
+     * after the appends, which may move it). */
+    for (i = 0; i < g_want_n; i++) {
+        strids_want *w = &g_want[i];
+        uint32_t length = (uint32_t)w->text_len;
+        unsigned char *live;
+        strids_owned_row *o;
+        if (steps[i].action != STRIDS_UPDATE && steps[i].action != STRIDS_ADOPT) continue;
+        live = array + (size_t)steps[i].at * 32u;
+        if (steps[i].action == STRIDS_UPDATE) {
+            o = &g_owned_rows[steps[i].owned];
+            HeapFree(GetProcessHeap(), 0, o->text);
+        } else {
+            o = &g_owned_rows[g_owned_n++];
+            memset(o, 0, sizeof *o);
+            memcpy(o->original, live, sizeof o->original);
+            o->key_handle = *(void **)(live + 8);
+            o->hash = steps[i].hash;
+            o->replaced = 1;
+            o->id = w->id;
+            w->id = NULL;
+        }
+        /* AtomicString assignment interns text and writes its borrowed
+         * pointer. It does not release the old value; dictionary rows own no
+         * pool memory. */
+        g_idstr_ctor(live + 16, w->text);
+        memcpy(live + 24, &length, 4);
+        memcpy(live + 28, &length, 4);
+        o->text = w->text;
+        w->text = NULL;
+    }
+    for (i = 0; i < g_want_n; i++) {
+        strids_want *w = &g_want[i];
+        uint32_t length = (uint32_t)w->text_len, before;
+        unsigned char rec[32] = {0};
+        strids_owned_row *o;
+        if (steps[i].action != STRIDS_APPEND) continue;
+        *(uint32_t *)rec = steps[i].hash;
+        g_idstr_ctor(rec + 8, keys[i]);
+        g_idstr_ctor(rec + 16, w->text);
+        memcpy(rec + 24, &length, 4);
+        memcpy(rec + 28, &length, 4);
+        before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
+        g_insert(g_table_desc, rec);
+        if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
+            backend_log("STRINGS: the game refused a new string row; the rows before it stand and the next refresh "
+                        "adds the rest");
+            goto out;
+        }
+        InterlockedIncrement(&g_inject_count);
+        o = &g_owned_rows[g_owned_n++];
+        memset(o, 0, sizeof *o);
+        o->id = w->id;
+        w->id = NULL;
+        o->key_handle = *(void **)(rec + 8);
+        o->hash = steps[i].hash;
+        o->text = w->text;
+        w->text = NULL;
+    }
+    if (nretire) {
+        uint32_t read, written = 0;
+        size_t next = 0;
+        if (!strids_table(&array, &count)) goto out;
+        for (read = 0; read < count; read++) {
+            const unsigned char *source = array + (size_t)read * 32u;
+            if (next < nretire && retire[next].index == read) {
+                const strids_owned_row *owned = &g_owned_rows[retire[next++].owned];
+                if (!owned->replaced) continue;
+                source = owned->original;
+            }
+            memmove(array + (size_t)written++ * 32u, source, 32u);
+        }
+        *(uint32_t *)((unsigned char *)g_table_desc + 8) = written;
+        /* The retired rows leave the owned list (only rows before the
+         * appended ones can retire, so their positions are as planned). */
+        for (i = 0, kept = 0; i < g_owned_n; i++) {
+            if (!find_injected(g_owned_rows[i].id)) { owned_free(&g_owned_rows[i]); continue; }
+            g_owned_rows[kept++] = g_owned_rows[i];
+        }
+        g_owned_n = kept;
+    }
+    ok = 1;
+out:
+    for (i = 0; keys && i < g_want_n; i++) free(keys[i]);
+    free(keys);
+    free(steps);
+    free(retire);
+    free(live_at);
+    return ok;
 }
 
 /* Decode the whole flat dictionary before publishing any of its rows. The
@@ -512,11 +628,22 @@ typedef struct strids_bundle_pass {
  * refuses any other, so a decl references #str_<salt>_<name>). Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
-/* The bundles whose strings carry string edits, and whether the last pass
- * applied them (sh_strids_scope_check). */
-#define STRIDS_EDIT_BUNDLES 64
-static struct { char hash[65]; int live; } g_edit_bundles[STRIDS_EDIT_BUNDLES];
-static volatile LONG g_edit_count;
+/* The bundles with strings, and whether the last pass applied their own
+ * keys and their string edits (sh_strids_scope_check). */
+#define STRIDS_SCOPED_BUNDLES 256
+static struct { char hash[65]; int own_live, edits_live; } g_scoped[STRIDS_SCOPED_BUNDLES];
+static volatile LONG g_scoped_count;
+
+/* A mod's own keys apply where its build serves its names: the build the open
+ * map declares (another build of the salt is inert there), and, with no map
+ * declaring the salt, the root's build in the editor (modserve.h, map scope).
+ * Two builds of one salt with different text therefore never compete. */
+static int strids_own_live(const char *hash)
+{
+    sh_modserve_scope_info si;
+    if (!sh_modserve_scope_enabled()) return 1;
+    return hash && sh_modserve_bundle_scope(hash, &si) && si.names_live;
+}
 
 static void inject_bundle(void *context, const char *id, const char *hash, int place, const char *extra)
 {
@@ -525,7 +652,7 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     const char *strings, *english;
     size_t before, name_cap, i;
     char *name;
-    int owner, edits = 0, live = 1;
+    int owner, edits = 0, live = 1, own;
     (void)place;   /* the order already places maps' places after the root */
     if (!id) id = "";
     if (!extra || !sh_json_parse_object(extra, strlen(extra), STRIDS_BUNDLE_JSON_DEPTH, &root)) goto done;
@@ -553,19 +680,22 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
      * every map, any other mod's in maps that declare it). The mod's own
      * keys always apply. */
     for (i = 0; i < pairs.count; i++) edits |= sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
-    if (edits) {
-        LONG at = InterlockedCompareExchange(&g_edit_count, 0, 0);
-        live = sh_modserve_bundle_edits_live(hash);
-        if (at < STRIDS_EDIT_BUNDLES) {
-            strncpy_s(g_edit_bundles[at].hash, sizeof g_edit_bundles[at].hash, hash ? hash : "", _TRUNCATE);
-            g_edit_bundles[at].live = live;
-            InterlockedExchange(&g_edit_count, at + 1);
+    live = edits ? sh_modserve_bundle_edits_live(hash) : 0;
+    own = strids_own_live(hash);
+    {
+        LONG at = InterlockedCompareExchange(&g_scoped_count, 0, 0);
+        if (at < STRIDS_SCOPED_BUNDLES) {
+            strncpy_s(g_scoped[at].hash, sizeof g_scoped[at].hash, hash ? hash : "", _TRUNCATE);
+            g_scoped[at].own_live = own;
+            g_scoped[at].edits_live = edits ? live : -1;
+            InterlockedExchange(&g_scoped_count, at + 1);
         }
     }
     for (i = 0; i < pairs.count; i++) {
-        if (!live && sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length)) continue;
-        inject_row_owned(pairs.members[i].key, pairs.members[i].value_json, strlen(pairs.members[i].value_json), owner,
-                         STRIDS_LAYER_BUNDLE);
+        int edit = sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
+        if (edit ? !live : !own) continue;
+        want_row(pairs.members[i].key, pairs.members[i].value_json, strlen(pairs.members[i].value_json), owner,
+                 STRIDS_LAYER_BUNDLE);
     }
     if (pass && pass->debug) {
         char line[256];
@@ -617,7 +747,8 @@ static long inject_layers(void)
         return 0;
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
-    InterlockedExchange(&g_edit_count, 0);
+    wants_free();
+    InterlockedExchange(&g_scoped_count, 0);
     free_bundle_names();
     memset(g_layer_rows, 0, sizeof g_layer_rows);
 
@@ -626,9 +757,11 @@ static long inject_layers(void)
 
     /* Baked defaults fill remaining keys. */
     for (size_t bi = 0; bi < B1_STRIDS_BAKED_COUNT; bi++)
-        inject_row(g_strids_baked[bi].id, g_strids_baked[bi].text, strlen(g_strids_baked[bi].text));
+        want_row(g_strids_baked[bi].id, g_strids_baked[bi].text, strlen(g_strids_baked[bi].text), STRIDS_OWNER_NONE,
+                 STRIDS_LAYER_BAKED);
 
-    retire_absent_rows();
+    /* The table changes only now, and only when the whole pass is planned. */
+    if (!strids_commit()) g_pass_failed = 1;
     return (long)InterlockedCompareExchange(&g_inject_count, 0, 0);
 }
 
@@ -798,9 +931,10 @@ int sh_strids_rearm(void)
     g_pass_failed = 0;
     __try {
         __try { do_inject(); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; }
-        /* Even a partial native append must leave the lookup table sorted. */
-        resort_table();
+        __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; g_table_changed = 1; }
+        /* A pass that wrote to the table leaves it sorted, a partial one
+         * included; one that could not be planned left it exactly as it was. */
+        if (g_table_changed) resort_table();
         ok = !g_pass_failed;
     } __finally {
         InterlockedExchange(&g_refresh_busy, 0);
@@ -819,9 +953,10 @@ void sh_strids_request_refresh(void)
 
 int sh_strids_scope_check(void)
 {
-    LONG i, n = InterlockedCompareExchange(&g_edit_count, 0, 0);
+    LONG i, n = InterlockedCompareExchange(&g_scoped_count, 0, 0);
     for (i = 0; i < n; i++)
-        if (sh_modserve_bundle_edits_live(g_edit_bundles[i].hash) != g_edit_bundles[i].live) {
+        if (strids_own_live(g_scoped[i].hash) != g_scoped[i].own_live ||
+            (g_scoped[i].edits_live >= 0 && sh_modserve_bundle_edits_live(g_scoped[i].hash) != g_scoped[i].edits_live)) {
             sh_strids_request_refresh();
             return 1;
         }
@@ -850,6 +985,7 @@ int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idst
         free(g_owned_rows[i].id);
     }
     free(g_owned_rows); g_owned_rows = NULL; g_owned_capacity = 0;
+    wants_free();
     free(g_injected_ids); g_injected_ids = NULL; g_injected_capacity = 0;
     g_owned_n = 0;
     g_pass_failed = 0;

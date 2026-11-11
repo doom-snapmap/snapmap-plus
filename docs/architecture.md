@@ -1364,14 +1364,17 @@ two layers and keeps the first writer of each key (case-insensitive): the
 before maps' places, then by salt, then folder, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
 `#str_` prefix decls use (a mod's own keys are `<salt>_<name>`, which the
-builder enforces), and only `en` is read. A string edit (a key the game or the
+builder enforces), and only `en` is read. A mod's own keys come only from a
+build that serves its names for the open map (`sh_modserve_bundle_scope`
+`names_live`), so the root's build and a downloaded map's build of one salt
+never compete: the map shows its own build's text. A string edit (a key the game or the
 product defines, `strkeys.h`) applies only where its mod's edits apply
 (`sh_modserve_bundle_edits_live`: map scope off, the open map declares the
 build, or it is the editor-tweak class), so an editor-tweaks mod's string edits
 apply in this machine's editor and a map-declared mod's in the maps that use it;
-`sh_strids_scope_check` marks a refresh when that changes for a bundle that
-carries one (each editor pass and map activation). When two bundles give one key
-different text the first stands and one `B1: strids REFUSED` line names both;
+`sh_strids_scope_check` marks a refresh when either changes for a bundle with
+strings (each editor pass and map activation). When two bundles give one key
+different text the first stands and one `STRINGS: REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
 (bundles B, baked D)`. The player's own document of earlier releases,
 `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
@@ -1382,8 +1385,16 @@ is built, so it already carries bundle strings. Every later index build
 (`sh_mods rescan`, an install, a migration, a fetched bundle) requests a
 refresh that re-reads the layers and re-sorts the table on the main thread: at
 once when the build ran there, otherwise through the apply call slot or at the
-next editor palette build or map activation. A refresh updates changed text in
-place and retires keys no layer supplies any more.
+next editor palette build or map activation. A pass first gathers every row
+and plans the whole change (update a row it owns in place, adopt an existing
+game row keeping its original record, append a new one, retire one no layer
+supplies any more, restoring an adopted row's record) with all its memory;
+only then does it touch the table, so a pass that cannot complete leaves the
+previous table whole and is logged `STRINGS: runtime refresh FAILED`. The
+engine rebuilds its dictionary on its own (a language reload), which drops
+every row the injector added: a row it owns that the table no longer holds is
+added again by the next pass (`STRINGS: the game rebuilt its string table`)
+instead of failing it.
 
 ### Mod sounds
 

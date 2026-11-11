@@ -1,17 +1,21 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
  * extra.strings.en object of every admitted mod bundle (sh_modserve_each_bundle_extra: root folders
- * before maps' places, then salt, then folder), then baked defaults. Keys are
- * case-insensitive and first-writer-wins; two bundles giving one key
- * different text log one REFUSED line naming both. Use the native
- * hash, string pool and list append functions, then re-sort the table.
+ * before maps' places, then salt, then folder), then baked defaults. A mod's
+ * own keys come only from a build that serves its names for the open map
+ * (another build of its salt is inert there), its string edits only where its
+ * edits apply. Keys are case-insensitive and first-writer-wins; two bundles
+ * giving one key different text log one REFUSED line naming both. Use the
+ * native hash, string pool and list append functions, then re-sort the table.
  *
- * Installation supplies the text; a rearm re-reads it, updates keys owned by
- * this injector and appends new keys before sorting. Existing vanilla keys are
- * replaced in place with their original records retained. Removing a mapping
- * restores that record or removes a newly introduced row; engine-pool text is
- * never freed. Complete input and ownership validation precedes retirement.
- * IDs and bookkeeping grow dynamically; native signed count/length fields
- * and successful allocation bound injection, not fixed application quotas.
+ * Installation supplies the text; a rearm re-reads it. Each pass gathers
+ * every row first and plans the whole change (update a row this injector
+ * owns, adopt an existing game row keeping its original record, append a new
+ * one, retire one no layer wants) with all its memory before touching the
+ * table, so a pass that cannot complete leaves the previous table whole. A
+ * row the table no longer holds went with the engine's own rebuild of its
+ * dictionary and is added again. Engine-pool text is never freed. IDs and
+ * bookkeeping grow dynamically; native signed count/length fields and
+ * successful allocation bound injection, not fixed application quotas.
  */
 #ifndef BACKEND_STRIDS_H
 #define BACKEND_STRIDS_H
@@ -37,10 +41,11 @@ int sh_strids_rearm(void);
  * so the bundle layer may have changed. Only marks the refresh pending. */
 void sh_strids_request_refresh(void);
 
-/* Any thread: a mod's string edits apply only where its edits apply
- * (sh_modserve_bundle_edits_live). When that changed for a bundle whose
- * strings carry string edits since the last pass (a map opened or closed,
- * another map declared), mark the refresh pending. Returns 1 when marked. */
+/* Any thread: a mod's own keys apply only where its build serves its names
+ * and its string edits only where its edits apply
+ * (sh_modserve_bundle_edits_live). When either changed for a bundle with
+ * strings since the last pass (a map opened or closed, another map
+ * declared), mark the refresh pending. Returns 1 when marked. */
 int sh_strids_scope_check(void);
 
 /* Engine main thread: when a refresh is pending and the first injection has
