@@ -1155,6 +1155,14 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     if (cause && cap) cause[0] = 0;
     if (!prefab || !path || !path[0]) return me_cause(cause, cap, "nothing to read");
     if (!me_open(&im, path, ME_KIND_PREFAB, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return 0; }
+    /* The placement's context (prefab_mods.c): the player's own root folders
+     * first, then the prefab's place, so a carried folder installs only when
+     * nothing serves its row there. */
+    {
+        char dir[MAX_PATH];
+        me_place_dir(&im, dir, sizeof dir);
+        (void)sh_modserve_scope_set_place(dir, 1);
+    }
     if (name && name_cap) {
         size_t nl = strlen(im.zr.e[idx].name) - 5;
         if (nl >= name_cap) nl = name_cap - 1;

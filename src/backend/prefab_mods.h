@@ -5,32 +5,35 @@
  * "snapmapPlus" block after the engine's own members (prefab_block.h):
  *
  *   "snapmapPlus":{"format":1,"description":"","tags":[],
- *                  "mods":[{"id","version","bundle","size","names"}...],
+ *                  "mods":[{"mod":"<salt>@<build hash>","name","version","size","names"}...],
  *                  "summary":{...}}            (module prefabs only)
  *
  * The mods are found exactly as a map's save finds them (modmanifest.h): the
  * placed names of the prefab text (every "inherit", "moduleName" and string
  * inside an "edit" object) go through the serving layer's save-time closure,
- * which names every admitted bundle that provides one, with the bundles its
- * needs reach. Each bundle becomes one row in the map manifest's form
- * (aliases resolve through the store as for a map). Create writes the block
+ * which names every admitted build that provides one, with the builds its
+ * needs reach. Each build becomes one row in the map manifest's form
+ * (modmanifest.h), its name and version from the build. Create writes the block
  * once the engine has serialized the prefab, a module prefab's save writes it
  * with the file, and the Prefabs tab's description and tag edits rewrite it in
  * place. The engine never re-saves a prefab file, so the block persists; every
  * reader strips it before the engine or the module merge sees the text.
  *
- * A prefab saved before this has no block. When a <name>.meta.json sidecar
- * sits beside it, its description, tags, summary and "mods" rows are read
- * instead, read-only: the first description or tag edit writes the block into
- * the file and leaves the sidecar on disk as it was. No sidecar is written.
+ * A prefab with a <name>.meta.json sidecar and no block, or a block whose
+ * rows name "id" and "bundle", was saved by an earlier version (ONE-SHAPE
+ * rule 6). Nothing of it is read: its details show nothing, its placement and
+ * export are refused with SH_PREFAB_EARLIER_TEXT, and a description edit
+ * writes nothing. No sidecar is ever written.
  *
- * The page and the slot see the details as one flat object, the "view": the
- * sidecar's shape, {"desc","tags",...summary members...,"mods"}. A block reads
- * as a view and a view composes into a block.
+ * The page and the slot see the details as one flat object, the "view":
+ * {"desc","tags",...summary members...,"mods"}. A block reads as a view and a
+ * view composes into a block.
  *
  * Load and Place resolve the rows before the engine sees the prefab:
- *   every row served      (the asset rule, modserve.h sh_modserve_row_served:
- *                         a folder of the row's id provides its names) the
+ *   every row served      (the asset rule, modserve.h sh_modserve_row_served,
+ *                         in the placement's context: the open map's root
+ *                         folders first, then the place the prefab's ZIP
+ *                         import filled, mods\maps\<prefab name>\) the
  *                         mods are activated for the open map, a mod the
  *                         open map does not list is attached to it (a
  *                         map-level row, as the Mods tab's Use in this map)
@@ -49,12 +52,11 @@
  * (module_prefab_map.h): nothing can install it.
  *
  * Export always writes one ZIP (modexport.h): <name>.json, the prefab file
- * with its block, and every mod its rows name as its installed folder
- * (mods/<folder>/mod.json and assets/). Import takes that ZIP, or a .json
- * inside an extracted export folder, installs each carried folder the store
- * does not serve as the ordinary install does, and adds the prefab to the
- * library. Importing an export whose mods and prefab are already there
- * writes nothing.
+ * with its block, and every mod its rows name as its folder
+ * (mods/<folder name>/mod.json and assets/). Import takes that ZIP, or a .json
+ * inside an extracted export folder, installs each carried folder nothing
+ * serves into mods\maps\<prefab name>\, and adds the prefab to the library.
+ * Importing an export whose mods and prefab are already there writes nothing.
  *
  * Paths: prefab and sidecar paths are ANSI, as the Prefabs tab resolves them;
  * ZIP paths and prefab names given to export are UTF-8 (the file dialog's),
@@ -81,37 +83,44 @@ extern "C" {
 #define SH_PREFAB_MODS_NEEDS_MODULE (-6)
 #define SH_PREFAB_MODS_REFUSED      (-7)
 
-/* Where a prefab's details came from (META_READ's answer). */
+/* Where a prefab's details came from (META_READ's answer): its block, none,
+ * or an earlier version's sidecar beside a file with no block (not read). */
 #define SH_PREFAB_META_NONE    0
 #define SH_PREFAB_META_BLOCK   1
-#define SH_PREFAB_META_SIDECAR 2
+#define SH_PREFAB_META_EARLIER 2
+
+/* A prefab saved by an earlier version: the rows functions return this. */
+#define SH_PREFAB_ROWS_EARLIER (-2)
+#define SH_PREFAB_EARLIER_TEXT "This prefab was saved in a format this version does not read."
 
 /* ------------------------------------------------------------ rows */
 
 /* The rows a prefab text needs (its block ignored): the map manifest's
- * save-time closure over its placed names, sorted by id. Returns the row
+ * save-time closure over its placed names, sorted by salt. Returns the row
  * count, -1 when the text does not read or the serving layer reported an
  * invalid bundle. */
 int   sh_prefab_mods_closure(const char *text, size_t len, sh_modmanifest_list *out);
 
-/* The rows of a view's or a block's "mods" array (duplicates by hash merged).
- * Returns the count (0 for no body or no "mods"), -1 when the body is not a
- * JSON object or "mods" is not an array; rows that do not read are skipped. */
-int   sh_prefab_mods_sidecar_rows(const char *side, size_t len, sh_modmanifest_list *out);
+/* The rows of a view's or a block's "mods" array (duplicates by salt and
+ * build merged). Returns the count (0 for no body or no "mods"), -1 when the
+ * body is not a JSON object or "mods" is not an array, SH_PREFAB_ROWS_EARLIER
+ * when a row names "id" or "bundle"; other rows that do not read are skipped. */
+int   sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *out);
 
 /* A view with "mods" set to `rows` (removed when there are none), every other
  * member kept as it was. A NULL or empty body starts from {"desc":"","tags":[]}.
  * malloc'd, NUL-terminated; NULL when the body is not a JSON object. */
-char *sh_prefab_mods_sidecar_set(const char *side, size_t len, const sh_modmanifest_list *rows, size_t *out_len);
+char *sh_prefab_mods_view_set(const char *view, size_t len, const sh_modmanifest_list *rows, size_t *out_len);
 
 /* 1 when a row names `name` among the names it provides (case-insensitive). */
 int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *name);
 
-/* "id version" for a row (the refusal's label). */
+/* "name version" for a row, the salt when it has no name (the refusal's label). */
 void  sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap);
 
-/* {"count":N,"missing":M,"mods":[{"id","version","bundle","size","installed",
- * "state","cause"}...]} with each row's state under the asset rule
+/* {"count":N,"missing":M,"mods":[{"id","salt","version","build","size",
+ * "installed","state","cause"}...]}, "id" the row's name (else its salt),
+ * with each row's state under the asset rule
  * (row_state): "served", "missing" or "incomplete", and the refusal sentence
  * for the last two. malloc'd. */
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing);
@@ -129,13 +138,14 @@ char *sh_prefab_mods_block_compose(const char *view, size_t len, const sh_modman
 char *sh_prefab_mods_block_view(const char *block, size_t len, size_t *out_len);
 
 /* A prefab's details as a view: its block when the text has one (tail: the
- * text is the end of a larger file), else the sidecar at meta_path (may be
- * NULL), else NULL. *source receives an SH_PREFAB_META_* value. malloc'd. */
+ * text is the end of a larger file), else NULL, with *source
+ * SH_PREFAB_META_EARLIER when a sidecar exists at meta_path (may be NULL).
+ * *source receives an SH_PREFAB_META_* value. malloc'd. */
 char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *meta_path, int *source,
                              size_t *out_len);
 
-/* The rows a prefab names: its block's, else its sidecar's. Returns the count,
- * -1 unreadable. */
+/* The rows a prefab names: its block's. Returns the count, -1 unreadable,
+ * SH_PREFAB_ROWS_EARLIER for a prefab an earlier version saved. */
 int   sh_prefab_mods_rows_of(const char *text, size_t len, const char *meta_path, sh_modmanifest_list *out);
 
 /* The prefab text with the block composed from `view` and `rows` (NULL keeps
@@ -171,8 +181,9 @@ char *sh_prefab_mods_module_file(const char *prefab, size_t len, const char *sum
 
 /* The Prefabs tab's description and tag edit: `body` is a view ("" clears
  * both); only its "desc" and "tags" are taken. The block of the prefab at
- * `path` is rewritten in place (from its sidecar at meta_path when it has no
- * block yet; the sidecar is left as it is). 1 written, -1 failed. */
+ * `path` is rewritten in place (written fresh when it has none). A prefab an
+ * earlier version saved (a sidecar at meta_path and no block) is not
+ * written. 1 written, -1 failed. */
 int   sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, const char *meta_path);
 
 /* ------------------------------------------------------------ resolve */
@@ -191,9 +202,9 @@ int   sh_prefab_mods_poll(int seq);
 
 /* ------------------------------------------------------------ export, import */
 
-/* Export the prefab at prefab_path (sidecar at meta_path, may be absent) as
- * `name` (UTF-8) to zip_path (UTF-8). Rows come from its block (else the
- * sidecar), else from the closure over the prefab. The ZIP carries the file's
+/* Export the prefab at prefab_path (an earlier version's sidecar at
+ * meta_path refuses it) as `name` (UTF-8) to zip_path (UTF-8). Rows come from
+ * its block, else from the closure over the prefab. The ZIP carries the file's
  * bytes as they are on disk; a prefab with no block, or whose rows had to be
  * found or moved to the current builds, is carried with its block written for
  * the rows the ZIP carries (the file on disk is not changed). 1 written, -1
@@ -203,8 +214,8 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export
  * folder; UTF-8) into prefabs_dir (ANSI, with or without a trailing
- * separator): install the carried mod folders the store does not serve
- * (modexport_read_prefab), then add the prefab under
+ * separator): install the carried mod folders nothing serves into the
+ * prefab's place (modexport_read_prefab), then add the prefab under
  * the .json's file name. A prefab of that name with the same bytes is left
  * alone; one with other bytes gets the next free "<name> (N)". 1 added, 0
  * already there (nothing written), -1 refused. name_out receives the name it
@@ -234,6 +245,11 @@ typedef struct sh_prefab_mods_ops {
     void (*toast)(const char *text);                               /* one editor toast */
     int  (*refresh)(void);                                         /* after an import installed bundles */
     int  (*call_main)(int (*fn)(void *), void *ctx);               /* run fn on the game thread; 1 ran */
+    /* The placement's serving context (sh_modserve_scope_set_place): the
+     * player's own (root folders first), with the place the prefab's import
+     * filled, mods\maps\<name>\. */
+    void (*scope_place)(const char *name);
+
 } sh_prefab_mods_ops;
 void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 

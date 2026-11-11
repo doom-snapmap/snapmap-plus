@@ -11,6 +11,8 @@
 #include "modpublished.h"
 #include "modexport.h"
 #include "modserve.h"
+#include "modsalt.h"
+#include "modstore.h"
 #include "module_prefab_map.h"
 #include "mp_json.h"
 #include "backend_log.h"
@@ -19,6 +21,7 @@
 #define PM_MSG_CAP  600
 #define PM_LINE_CAP 1200
 #define PM_NAME_MAX 120
+#define PM_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + SH_MODMANIFEST_VERSION_CAP + 4)   /* "name version" */
 
 static sh_prefab_mods_ops g_ops;
 static int g_ops_bound;
@@ -67,33 +70,34 @@ static void pm_msg(char *out, size_t cap, const char *fmt, ...)
 
 typedef struct pm_closure { sh_modmanifest_list list; int failed; } pm_closure;
 
-static sh_modmanifest_row *pm_find(sh_modmanifest_list *list, const char *bundle)
+static sh_modmanifest_row *pm_find(sh_modmanifest_list *list, const char *salt, const char *build)
 {
     size_t i;
-    for (i = 0; i < list->count; i++) if (!strcmp(list->rows[i].bundle, bundle)) return &list->rows[i];
+    for (i = 0; i < list->count; i++)
+        if (!strcmp(list->rows[i].salt, salt) && !strcmp(list->rows[i].build, build)) return &list->rows[i];
     return NULL;
 }
 
-/* The save step's visitor (modmanifest.c, mm_save_visit): one row per bundle,
- * the placed names it provides on it. */
-static void pm_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
+/* The save step's visitor (modmanifest.c, mm_save_visit): one row per build
+ * ("<salt>@<hash>"), the placed names it provides on it. */
+static void pm_visit(void *context, const char *salt, const char *version, const char *build,
                      unsigned long long size, const char *name)
 {
     pm_closure *c = (pm_closure *)context;
     sh_modmanifest_row *row;
-    if (!c || c->failed || !bundle_id || !bundle_hash) return;
-    if (!sh_modmanifest_valid_id(bundle_id) || !sh_modmanifest_valid_hash(bundle_hash, strlen(bundle_hash)) ||
+    if (!c || c->failed || !salt || !build) return;
+    if (!sh_salt_valid(salt, strlen(salt)) || !sh_modmanifest_valid_hash(build, strlen(build)) ||
         (version && strlen(version) >= SH_MODMANIFEST_VERSION_CAP)) {
         c->failed = 1;
         return;
     }
-    row = pm_find(&c->list, bundle_hash);
+    row = pm_find(&c->list, salt, build);
     if (!row) {
         sh_modmanifest_row fresh;
         memset(&fresh, 0, sizeof fresh);
-        strcpy_s(fresh.id, sizeof fresh.id, bundle_id);
+        strcpy_s(fresh.salt, sizeof fresh.salt, salt);
         strcpy_s(fresh.version, sizeof fresh.version, version ? version : "");
-        strcpy_s(fresh.bundle, sizeof fresh.bundle, bundle_hash);
+        strcpy_s(fresh.build, sizeof fresh.build, build);
         fresh.size = size;
         if (!sh_modmanifest_list_add(&c->list, &fresh)) { c->failed = 1; return; }
         row = &c->list.rows[c->list.count - 1];
@@ -104,8 +108,22 @@ static void pm_visit(void *context, const char *bundle_id, const char *version, 
 static int pm_row_order(const void *a, const void *b)
 {
     const sh_modmanifest_row *x = (const sh_modmanifest_row *)a, *y = (const sh_modmanifest_row *)b;
-    int c = strcmp(x->id, y->id);
-    return c ? c : strcmp(x->bundle, y->bundle);
+    int c = strcmp(x->salt, y->salt);
+    return c ? c : strcmp(x->build, y->build);
+}
+
+/* The display name and version of each row, from the build that serves it
+ * (the closure names salts and builds only). */
+static void pm_names(sh_modmanifest_list *list)
+{
+    size_t i;
+    for (i = 0; i < list->count; i++) {
+        sh_modmanifest_row *r = &list->rows[i];
+        sh_modserve_bundle_ref ref;
+        if (r->name[0] || !sh_modserve_row_build(r, &ref) || strcmp(ref.hash, r->build)) continue;
+        strncpy_s(r->name, sizeof r->name, ref.name, _TRUNCATE);
+        if (!r->version[0]) strncpy_s(r->version, sizeof r->version, ref.version, _TRUNCATE);
+    }
 }
 
 static int pm_cstr_cmp(const void *a, const void *b)
@@ -141,24 +159,34 @@ int sh_prefab_mods_closure(const char *text, size_t len, sh_modmanifest_list *ou
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, pm_visit, &c);
     sh_modmanifest_names_free(names, count);
     if (c.failed) { sh_modmanifest_list_free(&c.list); return -1; }
+    pm_names(&c.list);
     pm_sort(&c.list);
     *out = c.list;
     return (int)out->count;
 }
 
-int sh_prefab_mods_sidecar_rows(const char *side, size_t len, sh_modmanifest_list *out)
+int sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *out)
 {
     mpj *root;
     const mpj *arr;
     int i;
     if (!out) return -1;
     memset(out, 0, sizeof *out);
-    if (!side || !len) return 0;
-    root = mpj_parse(side, len);
+    if (!view || !len) return 0;
+    root = mpj_parse(view, len);
     if (!root || root->type != MPJ_OBJ) { mpj_free(root); return -1; }
     arr = mpj_get(root, SH_PREFAB_MODS_KEY);
     if (!arr) { mpj_free(root); return 0; }
     if (arr->type != MPJ_ARR) { mpj_free(root); return -1; }
+    /* A row in an earlier shape ({"id", "bundle"}) is not read: the prefab is
+     * refused whole, with its plain reason. */
+    for (i = 0; i < arr->n; i++) {
+        const mpj *r = arr->items[i];
+        if (r && r->type == MPJ_OBJ && (mpj_get(r, "id") || mpj_get(r, "bundle"))) {
+            mpj_free(root);
+            return SH_PREFAB_ROWS_EARLIER;
+        }
+    }
     for (i = 0; i < arr->n; i++) {
         sh_modmanifest_row row;
         char err[160];
@@ -167,7 +195,7 @@ int sh_prefab_mods_sidecar_rows(const char *side, size_t len, sh_modmanifest_lis
         if (!arr->items[i] || arr->items[i]->type != MPJ_OBJ) continue;
         text = mpj_dump(arr->items[i], &tl);
         if (text && sh_modmanifest_parse_value(text, tl, &row, err, sizeof err)) {
-            sh_modmanifest_row *have = pm_find(out, row.bundle);
+            sh_modmanifest_row *have = pm_find(out, row.salt, row.build);
             if (!have) (void)sh_modmanifest_list_add(out, &row);
             else {
                 size_t k;
@@ -196,15 +224,15 @@ static void pm_obj_remove(mpj *obj, const char *key)
     }
 }
 
-char *sh_prefab_mods_sidecar_set(const char *side, size_t len, const sh_modmanifest_list *rows, size_t *out_len)
+char *sh_prefab_mods_view_set(const char *view, size_t len, const sh_modmanifest_list *rows, size_t *out_len)
 {
     static const char FRESH[] = "{\"desc\":\"\",\"tags\":[]}";
     mpj *root, *arr;
     char *out;
     size_t i;
     if (out_len) *out_len = 0;
-    if (!side || !len) { side = FRESH; len = sizeof FRESH - 1; }
-    root = mpj_parse(side, len);
+    if (!view || !len) { view = FRESH; len = sizeof FRESH - 1; }
+    root = mpj_parse(view, len);
     if (!root || root->type != MPJ_OBJ) { mpj_free(root); return NULL; }
     if (!rows || !rows->count) pm_obj_remove(root, SH_PREFAB_MODS_KEY);
     else {
@@ -236,11 +264,12 @@ int sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *nam
 
 void sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap)
 {
+    const char *name;
     if (!out || !cap) return;
     if (!row) { out[0] = 0; return; }
-    if (row->id[0] && row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", row->id, row->version);
-    else if (row->id[0]) _snprintf_s(out, cap, _TRUNCATE, "%s", row->id);
-    else _snprintf_s(out, cap, _TRUNCATE, "bundle %.16s", row->bundle);
+    name = row->name[0] ? row->name : row->salt;
+    if (row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", name, row->version);
+    else _snprintf_s(out, cap, _TRUNCATE, "%s", name);
 }
 
 typedef struct pm_buf { char *p; size_t n, cap; int bad; } pm_buf;
@@ -282,11 +311,11 @@ static int pm_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
     return o->row_state ? o->row_state(row, cause, cap) : SH_MODPUB_ROW_MISSING;
 }
 
-/* Served, or served by the installed build of its key that the gate
- * substituted for it this session (modpublished.h, SUBSTITUTE). */
+/* Served in the placement's context (the open map's root folders, else the
+ * place the prefab's import filled). */
 static int pm_installed(const sh_modmanifest_row *row)
 {
-    return pm_row_state(row, NULL, 0) == SH_MODPUB_ROW_SERVED || sh_modpub_row_substitute(row, NULL, 0);
+    return pm_row_state(row, NULL, 0) == SH_MODPUB_ROW_SERVED;
 }
 
 static const char *pm_state_word(int state)
@@ -307,9 +336,11 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
     for (i = 0; rows && i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
         if (i) pm_puts(&b, ",");
-        pm_puts(&b, "{\"id\":"); pm_put_str(&b, r->id);
+        /* "id" is what the page names the mod by: the row's name, else its salt. */
+        pm_puts(&b, "{\"id\":"); pm_put_str(&b, r->name[0] ? r->name : r->salt);
+        pm_puts(&b, ",\"salt\":"); pm_put_str(&b, r->salt);
         pm_puts(&b, ",\"version\":"); pm_put_str(&b, r->version);
-        pm_puts(&b, ",\"bundle\":"); pm_put_str(&b, r->bundle);
+        pm_puts(&b, ",\"build\":"); pm_put_str(&b, r->build);
         _snprintf_s(num, sizeof num, _TRUNCATE, ",\"size\":%llu", r->size);
         pm_puts(&b, num);
         {
@@ -370,7 +401,7 @@ static void pm_rows_text(const sh_modmanifest_list *rows, char *out, size_t cap)
     size_t i;
     out[0] = 0;
     for (i = 0; rows && i < rows->count; i++) {
-        char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
+        char label[PM_LABEL_CAP];
         sh_prefab_mods_label(&rows->rows[i], label, sizeof label);
         if (i) strncat_s(out, cap, ", ", _TRUNCATE);
         strncat_s(out, cap, label, _TRUNCATE);
@@ -420,7 +451,7 @@ char *sh_prefab_mods_block_compose(const char *view, size_t len, const sh_modman
     ok = ok && node && mpj_set(b, "description", node);
     m = v ? mpj_get(v, "tags") : NULL;
     if (m && m->type == MPJ_ARR) {
-        /* Tags are strings; anything else in a hand-edited sidecar is left out. */
+        /* Tags are strings; anything else in a hand-edited view is left out. */
         node = mpj_new(MPJ_ARR);
         for (i = 0; node && i < m->n; i++)
             if (m->items[i] && m->items[i]->type == MPJ_STR && !mpj_push(node, mpj_clone(m->items[i]))) node = NULL;
@@ -485,16 +516,11 @@ char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char 
         if (source) *source = SH_PREFAB_META_BLOCK;
         return view;
     }
-    /* A prefab saved before the block: its sidecar, read-only. */
-    if (meta_path && meta_path[0]) {
-        size_t slen = 0;
-        view = sh_prefab_mods_read_file(meta_path, &slen);
-        if (view && slen) {
-            if (source) *source = SH_PREFAB_META_SIDECAR;
-            if (out_len) *out_len = slen;
-            return view;
-        }
-        free(view);
+    /* A prefab with a <name>.meta.json sidecar and no block was saved by an
+     * earlier version (ONE-SHAPE rule 6): the sidecar is not read. */
+    if (found != 1 && meta_path && meta_path[0] && GetFileAttributesA(meta_path) != INVALID_FILE_ATTRIBUTES) {
+        if (source) *source = SH_PREFAB_META_EARLIER;
+        pm_logf("PREFABS: %s: " SH_PREFAB_EARLIER_TEXT, meta_path);
     }
     return NULL;
 }
@@ -502,8 +528,11 @@ char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char 
 int sh_prefab_mods_rows_of(const char *text, size_t len, const char *meta_path, sh_modmanifest_list *out)
 {
     size_t vlen = 0;
-    char *view = sh_prefab_mods_view_of(text, len, 0, meta_path, NULL, &vlen);
-    int n = sh_prefab_mods_sidecar_rows(view, vlen, out);
+    int source = SH_PREFAB_META_NONE, n;
+    char *view = sh_prefab_mods_view_of(text, len, 0, meta_path, &source, &vlen);
+    if (out) memset(out, 0, sizeof *out);
+    if (source == SH_PREFAB_META_EARLIER) { free(view); return SH_PREFAB_ROWS_EARLIER; }
+    n = sh_prefab_mods_view_rows(view, vlen, out);
     free(view);
     return n;
 }
@@ -607,6 +636,13 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
     text = sh_prefab_mods_read_file(path, &tlen);
     if (!text || !tlen) { free(text); return -1; }
     view = sh_prefab_mods_view_of(text, tlen, 0, meta_path, &source, &vlen);
+    if (source == SH_PREFAB_META_EARLIER) {
+        /* Its details live in a sidecar this version does not read: nothing is
+         * written, so they are not lost. */
+        free(text);
+        free(view);
+        return -1;
+    }
     v = view ? mpj_parse(view, vlen) : NULL;
     if (!v || v->type != MPJ_OBJ) { mpj_free(v); v = mpj_new(MPJ_OBJ); }
     if (body && len) b = mpj_parse(body, len);
@@ -624,8 +660,6 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
     }
     if (nview) next = sh_prefab_mods_embed(text, tlen, nview, nvlen, NULL, &nlen);
     ok = next && sh_prefab_mods_write_file(path, next, nlen);
-    if (ok && source == SH_PREFAB_META_SIDECAR)
-        pm_logf("PREFABS: %s: its details moved from its sidecar into the file; the sidecar is left as it was", path);
     mpj_free(b);
     mpj_free(v);
     free(text); free(view); free(nview); free(next);
@@ -662,18 +696,8 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
     if (o->activate) (void)o->activate(rows);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
-        char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4], note[256] = "", line[PM_LINE_CAP];
-        char sub[SH_MODMANIFEST_HASH_CAP];
-        sh_modmanifest_row served;
+        char label[PM_LABEL_CAP], note[256] = "", line[PM_LINE_CAP];
         int a;
-        /* A row the gate substituted joins the map at the installed build, so
-         * the map pins what serves it (the next save fills its version and
-         * size from that build). */
-        if (pm_row_state(r, NULL, 0) != SH_MODPUB_ROW_SERVED && sh_modpub_row_substitute(r, sub, sizeof sub)) {
-            served = *r;
-            strcpy_s(served.bundle, sizeof served.bundle, sub);
-            r = &served;
-        }
         if (o->listed && o->listed(r) > 0) continue;
         if (!o->attach) continue;
         sh_prefab_mods_label(r, label, sizeof label);
@@ -728,8 +752,7 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
     const sh_prefab_mods_ops *o = pm_ops();
     char line[PM_LINE_CAP], notice[256];
     const char **labels = (const char **)calloc(rows->count ? rows->count : 1, sizeof *labels);
-    char (*store)[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4] =
-        calloc(rows->count ? rows->count : 1, sizeof *store);
+    char (*store)[PM_LABEL_CAP] = calloc(rows->count ? rows->count : 1, sizeof *store);
     size_t i, n = 0;
     if (!labels || !store) {
         free((void *)labels); free(store);
@@ -763,6 +786,9 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
     if (seq) *seq = 0;
     if (msg && cap) msg[0] = 0;
     if (!rows || !rows->count) return SH_PREFAB_MODS_PLACE;
+    /* The placement's context: the open map's root folders first (the
+     * author's own map), else the place the prefab's import filled. */
+    if (o->scope_place) o->scope_place(name);
     /* A module prefab: a room no row provides and the palette lacks is DLC
      * the player does not own. Nothing can install it, so nothing is fetched. */
     if (text && sh_mp_is_module_file(text, len)) {
@@ -911,7 +937,16 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
     text = sh_prefab_mods_read_file(prefab_path, &len);
     if (!text || !len) { free(text); pm_msg(msg, cap, "Prefab %s was not exported: its file could not be read.", nm); return -1; }
     view = sh_prefab_mods_view_of(text, len, 0, meta_path, &source, &vlen);
-    n = sh_prefab_mods_sidecar_rows(view, vlen, &rows);
+    memset(&rows, 0, sizeof rows);
+    n = source == SH_PREFAB_META_EARLIER ? SH_PREFAB_ROWS_EARLIER : sh_prefab_mods_view_rows(view, vlen, &rows);
+    if (n == SH_PREFAB_ROWS_EARLIER) {
+        sh_modmanifest_list_free(&rows);
+        free(text);
+        free(view);
+        pm_msg(msg, cap, "Prefab %s was not exported. " SH_PREFAB_EARLIER_TEXT, nm);
+        pm_logf("PREFABS: export %s refused: %s", zip_utf8, msg);
+        return -1;
+    }
     memset(&x, 0, sizeof x);
     x.text = text;
     x.len = len;
@@ -935,7 +970,9 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
                 zip_utf8, st.bundles, st.files, st.entries, st.zip_bytes,
                 x.rewrite ? " (its block written for the export)" : "", st.ms);
     } else {
-        pm_msg(msg, cap, "Prefab %s was not exported: %s.", nm, cause);
+        /* A sentence of its own (an earlier shape) follows a full stop. */
+        if (cause[0] >= 'A' && cause[0] <= 'Z') pm_msg(msg, cap, "Prefab %s was not exported. %s", nm, cause);
+        else pm_msg(msg, cap, "Prefab %s was not exported: %s.", nm, cause);
         pm_logf("PREFABS: export %s refused: %s", zip_utf8, cause);
     }
     sh_modmanifest_list_free(&rows);
@@ -967,12 +1004,14 @@ static int pm_same_bytes(const char *path, const char *data, size_t len)
     return same;
 }
 
-/* The importer's rows: the block's (an export carries no sidecar). */
+/* The importer's rows: the block's. Rows in an earlier shape refuse the
+ * import (modexport.h: an export in an earlier format). */
 static int pm_import_rows(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows)
 {
     int n;
     (void)ctx;
     n = sh_prefab_mods_rows_of(prefab, len, NULL, rows);
+    if (n == SH_PREFAB_ROWS_EARLIER) return -2;
     return n < 0 ? 0 : n;
 }
 
@@ -990,7 +1029,8 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
     if (msg && cap) msg[0] = 0;
     if (!src_utf8 || !src_utf8[0] || !prefabs_dir || !prefabs_dir[0]) { pm_msg(msg, cap, "No file was named."); return -1; }
     if (!modexport_read_prefab(src_utf8, pm_import_rows, NULL, &text, &len, given, sizeof given, &st, cause, sizeof cause)) {
-        pm_msg(msg, cap, "The prefab was not imported: %s.", cause);
+        if (cause[0] >= 'A' && cause[0] <= 'Z') pm_msg(msg, cap, "The prefab was not imported. %s", cause);
+        else pm_msg(msg, cap, "The prefab was not imported: %s.", cause);
         pm_logf("PREFABS: import %s refused: %s", src_utf8, cause);
         return -1;
     }
@@ -1021,10 +1061,23 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
         return -1;
     }
     if (name_out && name_cap) strncpy_s(name_out, name_cap, name, _TRUNCATE);
+    /* The library gave it another name ("<name> (2)"): its placements find
+     * the place its import filled, mods\maps\<given name>\, under that name
+     * too. */
+    if (result == 1 && k > 1) {
+        char final8[sizeof given + 16], dir[MAX_PATH];
+        sh_ms_place from, to;
+        _snprintf_s(final8, sizeof final8, _TRUNCATE, "%s (%d)", given, k);
+        from.title = given;
+        from.map_id = NULL;
+        to.title = final8;
+        to.map_id = NULL;
+        if (sh_ms_place_dir(&from, dir, sizeof dir)) (void)sh_ms_place_note(&to, dir);
+    }
     /* Rows the export names but does not carry: the placement asks for them. */
     if (sh_prefab_mods_rows_of(text, len, NULL, &rows) > 0) {
         for (i = 0; i < rows.count; i++) {
-            char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
+            char label[PM_LABEL_CAP];
             if (pm_installed(&rows.rows[i])) continue;
             sh_prefab_mods_label(&rows.rows[i], label, sizeof label);
             strncat_s(extra, sizeof extra, absent ? ", " : " It also needs ", _TRUNCATE);
@@ -1105,7 +1158,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         sh_modmanifest_list rows;
         size_t missing = 0;
         char *json;
-        int n = sh_prefab_mods_sidecar_rows(call->text, call->text_len, &rows);
+        int n = sh_prefab_mods_view_rows(call->text, call->text_len, &rows);
         if (n < 0) { pm_out(call, "{\"count\":0,\"missing\":0,\"mods\":[]}"); return -1; }
         json = sh_prefab_mods_status_json(&rows, &missing);
         pm_out(call, json ? json : "{\"count\":0,\"missing\":0,\"mods\":[]}");
@@ -1119,8 +1172,17 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         int n;
         pm_out(call, "");
         call->seq = 0;
-        /* The block's rows, else a sidecar's (a prefab saved before the block). */
+        /* The block's rows. A prefab saved by an earlier version (a sidecar
+         * and no block, or rows naming "id" and "bundle") is refused. */
         n = sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows);
+        if (n == SH_PREFAB_ROWS_EARLIER) {
+            char line[PM_MSG_CAP];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "Prefab %s was not placed. " SH_PREFAB_EARLIER_TEXT,
+                        call->name && call->name[0] ? call->name : "prefab");
+            pm_print(line);
+            pm_out(call, SH_PREFAB_EARLIER_TEXT);
+            return SH_PREFAB_MODS_REFUSED;
+        }
         /* No rows: the placement goes on exactly as before. */
         if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
         memset(&job, 0, sizeof job);
@@ -1257,15 +1319,19 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
         if (!text) { pm_linef("Prefab %s: its file cannot be read.", name); return; }
         n = sh_prefab_mods_rows_of(text, tlen, meta, &rows);
         free(text);
+        if (n == SH_PREFAB_ROWS_EARLIER) { pm_linef("Prefab %s: " SH_PREFAB_EARLIER_TEXT, name); return; }
+        /* Each row as its placement would see it. */
+        if (pm_ops()->scope_place) pm_ops()->scope_place(name);
         if (n < 0) { pm_linef("Prefab %s: its details are not JSON, so its mods cannot be read.", name); return; }
         if (!n) pm_linef("Prefab %s records no mods.", name);
         else pm_linef("Prefab %s needs %d mod%s:", name, n, n == 1 ? "" : "s");
         for (i = 0; i < rows.count; i++) {
-            char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
-            sh_prefab_mods_label(&rows.rows[i], label, sizeof label);
+            char label[PM_LABEL_CAP];
             char cause[400];
-            int st = pm_row_state(&rows.rows[i], cause, sizeof cause);
-            pm_linef("  %s (bundle %.16s): %s", label, rows.rows[i].bundle,
+            int st;
+            sh_prefab_mods_label(&rows.rows[i], label, sizeof label);
+            st = pm_row_state(&rows.rows[i], cause, sizeof cause);
+            pm_linef("  %s (%s@%.16s): %s", label, rows.rows[i].salt, rows.rows[i].build,
                      st == SH_MODPUB_ROW_SERVED ? "installed" : cause[0] ? cause : "not installed");
         }
         sh_modmanifest_list_free(&rows);
@@ -1326,51 +1392,35 @@ static int eng_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
     return sh_modserve_row_served_for(row, "prefab", cause, cap);
 }
 
-/* Does the open map list this bundle (its manifest rows, or the map scope's
+/* Does the open map list this mod (its manifest rows, or the map scope's
  * listing, which adds the placed entities)? */
 static int eng_listed(const sh_modmanifest_row *row)
 {
     sh_modserve_scope_info info;
-    sh_modserve_bundle_ref want, have;
+    sh_modserve_bundle_ref want;
     sh_modmanifest_list cur;
-    const char *hash = row->bundle;
     size_t i;
     int listed = 0;
-    /* The build that serves the row (the asset rule: its id when its hash is
-     * not installed). */
-    if (!sh_modserve_bundle_serving(row->bundle, row->id, &want)) memset(&want, 0, sizeof want);
-    if (sh_modserve_scope_enabled() && sh_modserve_bundle_scope(want.hash[0] ? want.hash : hash, &info) && info.listed)
+    /* The build that serves the row in the placement's context. */
+    if (!sh_modserve_row_build(row, &want)) memset(&want, 0, sizeof want);
+    if (sh_modserve_scope_enabled() && sh_modserve_bundle_scope(want.hash[0] ? want.hash : row->build, &info) &&
+        info.listed)
         return 1;
     (void)sh_modmanifest_current(&cur);
-    for (i = 0; i < cur.count && !listed; i++) {
-        if (!strcmp(cur.rows[i].bundle, hash)) listed = 1;
-        else if (want.hash[0] && sh_modserve_bundle_serving(cur.rows[i].bundle, NULL, &have) && !strcmp(have.hash, want.hash))
-            listed = 1;
-    }
+    for (i = 0; i < cur.count && !listed; i++)
+        if (!strcmp(cur.rows[i].salt, row->salt)) listed = 1;   /* one build per salt serves a map */
     sh_modmanifest_list_free(&cur);
     return listed;
 }
 
-/* The Mods tab's Use in this map, for the build the prefab pins: the Mods
- * tab names a build by its folder, so the folder at the row's hash (or the
- * one an alias of it names) is passed, never the key alone, which would
- * declare the newest build of the key when two are installed
- * (DESIGN-additive 2.5). */
+/* The Mods tab's Use in this map, for the build that serves the prefab's
+ * row: the Mods tab names a mod by its folder (below the store root) or its
+ * salt. */
 static int eng_attach(const sh_modmanifest_row *row, char *note, size_t cap)
 {
     sh_modserve_bundle_ref ref;
-    sh_ms_list l;
-    char folder[SH_MS_NAME_MAX + 1] = "";
-    const char *key = row->id;
-    if (sh_modserve_bundle_serving(row->bundle, row->id, &ref) && ref.id[0]) key = ref.id;
-    modstore_lock();
-    if (sh_ms_enumerate(&l)) {
-        const sh_ms_entry *e = sh_ms_resolve(&l, row->bundle);
-        if (e && sh_ms_entry_usable(e)) strncpy_s(folder, sizeof folder, e->name, _TRUNCATE);
-        sh_ms_list_free(&l);
-    }
-    modstore_unlock();
-    if (folder[0]) key = folder;
+    const char *key = row->salt;
+    if (sh_modserve_row_build(row, &ref) && ref.folder[0]) key = ref.folder;
     (void)sh_modui_run(SH_MODS_ACT_MAP_ADD, key);
     if (eng_listed(row)) return 1;
     if (note && cap) strncpy_s(note, cap, "the Mods tab can add it with Use in this map", _TRUNCATE);
@@ -1402,6 +1452,18 @@ static int eng_refresh_main(void *ctx)
 }
 static int eng_refresh(void) { return eng_call_main(eng_refresh_main, NULL); }
 
+/* A placement's context: the place the record gives the prefab's import
+ * (mods\maps\<prefab name>\, modexport.h), the author's own root first. */
+static void eng_scope_place(const char *name)
+{
+    char dir[SH_MODSERVE_PLACE_CAP] = "";
+    sh_ms_place place;
+    place.title = name && name[0] ? name : NULL;
+    place.map_id = NULL;
+    if (!place.title || !sh_ms_place_dir(&place, dir, sizeof dir)) dir[0] = 0;
+    (void)sh_modserve_scope_set_place(dir, 1);
+}
+
 static void pm_bind_defaults(void)
 {
     sh_prefab_mods_ops o;
@@ -1415,6 +1477,8 @@ static void pm_bind_defaults(void)
     o.toast = eng_toast;
     o.refresh = eng_refresh;
     o.call_main = eng_call_main;
+    o.scope_place = eng_scope_place;
+
     g_ops = o;
     g_ops_bound = 1;
 }
