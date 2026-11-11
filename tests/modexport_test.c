@@ -510,7 +510,15 @@ int main(int argc, char **argv)
         CHECK(strstr(names, "Door Kit.json\n") && strstr(names, "mods/pink/mod.json\n") && !strstr(names, "room"));
         _snprintf_s(g, sizeof g, _TRUNCATE, "%s\\g", tmp);
         store_at(g);
+        /* The open map has a place; a prefab import never changes it. */
+        CHECK(sh_modserve_place_set("maps\\Open map") >= 0);
         CHECK(modexport_read_prefab(pz, NULL, NULL, &text, &tl, pname, sizeof pname, &st, cause, sizeof cause));
+        {
+            char now[SH_MODSERVE_PLACE_CAP];
+            sh_modserve_place_get(now, sizeof now);
+            CHECK(!strcmp(now, "maps\\Open map"));
+            CHECK(sh_modserve_place_set(NULL) >= 0);
+        }
         CHECK(text && !strcmp(pname, "Door Kit") && st.bundles_installed == 1);
         CHECK(!entry_at("maps\\Door Kit\\Pink Imp", rows[0].build) && count_entries() == 1);
         {
