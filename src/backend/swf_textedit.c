@@ -10,6 +10,7 @@
 #include "signatures.h"
 #include "patch.h"
 #include "clipboard.h"
+#include "ui_bridge.h"
 #include "backend_log.h"
 
 #define SIG_SWF_ONKEY     "SwfTextOnKeyCall"
@@ -64,6 +65,9 @@ static const uint8_t TF_STRPTR_INSN[3] = { 0x48, 0x8B, 0x15 };
 typedef void *(*onkey_fn)(void *self, void *retbuf, void *thisObject, void *parms);
 typedef char  (*is_type_fn)(void *obj, const void *interned_name);
 typedef void  (*idstr_assign_fn)(void *dst_idstr, const void *src_idstr);
+
+/* A paste the field's limit cut short, told to the player once the key has been handled. */
+static int             g_cut_limit    = 0;
 
 static onkey_fn        g_orig_onkey   = NULL;
 static const void     *g_textfield_id = NULL;   /* the engine's interned "TextField" string pointer */
@@ -179,16 +183,21 @@ static int paste_at_selection(const uint8_t *ti)
     if (hi < lo) hi = lo;
     if (hi > len) hi = len;
 
-    /* Nonpositive maxchars means no cap. */
+    /* Nonpositive maxchars means no cap. A cut never splits a UTF-8 character. */
     int maxchars = *(const int *)(ti + TI_MAXCHARS_OFF);
     int keep = lo + (len - hi);
     int ins  = co;
-    if (maxchars > 0 && keep + ins > maxchars) ins = maxchars - keep;
+    if (maxchars > 0 && keep + ins > maxchars)
+        ins = maxchars > keep ? sh_clipboard_utf8_fit(clip, co, maxchars - keep) : 0;
     int total = keep + ins;
     char *buf = NULL;
     if (ins > 0 && total >= 0 && total < TEXT_SANE_MAX)
         buf = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)total + 1);
-    if (buf == NULL) { HeapFree(GetProcessHeap(), 0, clip); return 0; }
+    if (buf == NULL) {
+        if (ins <= 0 && co > 0 && maxchars > 0) g_cut_limit = maxchars;   /* the field is already full */
+        HeapFree(GetProcessHeap(), 0, clip);
+        return 0;
+    }
     memcpy(buf, data, (size_t)lo);
     memcpy(buf + lo, clip, (size_t)ins);
     memcpy(buf + lo + ins, data + hi, (size_t)(len - hi));
@@ -211,10 +220,24 @@ static int paste_at_selection(const uint8_t *ti)
 
     char msg[96];
     _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                "swf-textedit: pasted %d char%s%s", ins, ins == 1 ? "" : "s",
-                (ins < co) ? " (truncated to the field's limit)" : "");
+                "swf-textedit: pasted %d byte%s%s", ins, ins == 1 ? "" : "s",
+                (ins < co) ? " (cut to the field's limit)" : "");
     backend_log(msg);
+    if (ins < co) g_cut_limit = maxchars;
     return 1;
+}
+
+/* Say a paste was cut short. Raised after the stock handler has run, outside the key event. */
+static void tell_cut(void)
+{
+    sh_iface *iface = sh_ui_get_iface();
+    char text[96];
+    int limit = g_cut_limit;
+    g_cut_limit = 0;
+    if (!limit || !iface || !iface->vtbl || !iface->vtbl->toast) return;
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "Pasted text was cut to the field's %d-character limit.", limit);
+    iface->vtbl->toast(iface, "Paste", text);
 }
 
 /* Query physical Ctrl state for each chord. SWF focus changes can lose key-up
@@ -242,7 +265,9 @@ static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* Continue stock input handling if clipboard access faults. */
     }
-    return g_orig_onkey(self, retbuf, thisObject, parms);
+    void *ret = g_orig_onkey(self, retbuf, thisObject, parms);
+    if (g_cut_limit) tell_cut();
+    return ret;
 }
 
 void sh_swf_textedit_install(const uint8_t *module_base)
