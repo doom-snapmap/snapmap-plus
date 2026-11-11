@@ -57,7 +57,8 @@
   .rz-br { bottom: 0; right: 0; width: 9px; height: 9px; cursor: nwse-resize; }
 
   .tabstrip { display: flex; align-items: center; min-width: 0; background: var(--chrome); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 6px; gap: 2px; }
-  .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: none; font: inherit; }
+  .tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
 
@@ -339,7 +340,7 @@
   .combo-opt { padding: 3px 7px; border-radius: 4px; cursor: default; white-space: nowrap; }
   .combo-opt:hover, .combo-opt.active { background: var(--sel); color: var(--selText); }
   .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
-  /* blank / not-in-the-enumerated-list Inherit or Classname -- same red as .toast.err, so it reads as the same "this will be refused" signal */
+  /* blank / not-in-the-enumerated-list Inherit or Classname -- the danger colour, the same "this will be refused" signal as an error toast */
   .combo.invalid input, .combo.invalid .combo-arrow { border-color: var(--danger); }
 
   .tl-head { color: var(--muted); flex-shrink: 0; padding-bottom: 6px; }
@@ -548,8 +549,8 @@
   .crash-attach input { width: auto; margin-top: 2px; flex-shrink: 0; }
 
   .ctxmenu { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 2px 4px 12px rgba(0,0,0,0.22); min-width: 140px; padding: 4px; display: none; }
-  .ctxmenu div { padding: 5px 12px; border-radius: 4px; cursor: default; }
-  .ctxmenu div:hover { background: var(--sel); color: var(--selText); }
+  .ctxmenu [role="menuitem"] { display: block; width: 100%; padding: 5px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
+  .ctxmenu [role="menuitem"]:hover, .ctxmenu [role="menuitem"]:focus-visible { background: var(--sel); color: var(--selText); outline: 0; }
 
   .statusbar { flex-shrink: 0; display: flex; align-items: center; min-width: 0; max-width: 100%; overflow: hidden; background: var(--panel2); border-top: 1px solid var(--border); color: var(--muted); padding: 6px 10px; font-size: 11px; }
   .status-group { display: flex; align-items: center; gap: 14px; white-space: nowrap; }
@@ -602,11 +603,15 @@
   }
 
   #toastHost { position: fixed; top: 40px; right: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 4000; pointer-events: none; }
-  .toast { min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 6px; font-size: 11px; box-shadow: 0 4px 14px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
+  .toast { display: flex; align-items: flex-start; gap: 8px; min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 6px; font-size: 11px; box-shadow: 0 4px 14px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
   .toast.show { opacity: 1; transform: translateX(0); }
   .toast.ok   { background: #2e7d46; }
   .toast.warn { background: #9a6a1a; }
-  .toast.err  { background: var(--danger); }
+  .toast.err  { background: var(--danger); pointer-events: auto; }
+  .toast span { flex: 1; }
+  .toast-close { flex: none; width: 16px; height: 16px; margin: -1px -4px 0 0; border: 0; border-radius: 3px; background: transparent; color: inherit; cursor: pointer; }
+  .toast-close .ui-icon { width: 12px; height: 12px; }
+  .toast-close:hover, .toast-close:focus-visible { background: rgba(255,255,255,.18); outline: 0; }
 
 /* File menu: disabled items stay readable, the arm toggle shares the tick
    gutter with the theme radios, and the staged-path readout sizes the popup. */

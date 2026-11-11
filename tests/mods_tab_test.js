@@ -1209,8 +1209,8 @@ test('the header fits at the minimum pane width', () => {
             'six buttons fit in a ' + min + ' px pane');
 });
 test('page contract', () => {
-  assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));
-  assert.ok(html.includes('<div class="content" id="panel-mods" style="display:none;">'));
+  assert.ok(html.includes('<button type="button" class="tab" role="tab" id="tab-mods" data-tab="mods" aria-controls="panel-mods" aria-selected="false" tabindex="-1">Mods</button>'));
+  assert.ok(html.includes('<div class="content" id="panel-mods" role="tabpanel" aria-labelledby="tab-mods" style="display:none;">'));
   IDS.forEach(id => assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id));
   GONE.forEach(id => assert.ok(!html.includes('id="' + id + '"'), 'mockup.html no longer has #' + id));
   const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<div class="statusbar">'));

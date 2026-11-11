@@ -136,16 +136,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
-  <div class="tabstrip">
+  <div class="tabstrip" role="tablist" aria-label="Snapmap+">
     <!-- Tab order and the initially active Entities tab are independent. -->
-    <div class="tab" data-tab="assets">Assets</div>
-    <div class="tab active" data-tab="entities">Entities</div>
-    <div class="tab" data-tab="timelines">Timelines</div>
-    <div class="tab" data-tab="prefabs">Prefabs</div>
-    <div class="tab" data-tab="mods">Mods</div>
+    <button type="button" class="tab" role="tab" id="tab-assets" data-tab="assets" aria-controls="panel-assets" aria-selected="false" tabindex="-1">Assets</button>
+    <button type="button" class="tab active" role="tab" id="tab-entities" data-tab="entities" aria-controls="panel-entities" aria-selected="true" tabindex="0">Entities</button>
+    <button type="button" class="tab" role="tab" id="tab-timelines" data-tab="timelines" aria-controls="panel-timelines" aria-selected="false" tabindex="-1">Timelines</button>
+    <button type="button" class="tab" role="tab" id="tab-prefabs" data-tab="prefabs" aria-controls="panel-prefabs" aria-selected="false" tabindex="-1">Prefabs</button>
+    <button type="button" class="tab" role="tab" id="tab-mods" data-tab="mods" aria-controls="panel-mods" aria-selected="false" tabindex="-1">Mods</button>
   </div>
 
-  <div class="content" id="panel-entities">
+  <div class="content" id="panel-entities" role="tabpanel" aria-labelledby="tab-entities">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
       <div class="panel-head">
@@ -220,7 +220,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
-  <div class="content" id="panel-prefabs" style="display:none;">
+  <div class="content" id="panel-prefabs" role="tabpanel" aria-labelledby="tab-prefabs" style="display:none;">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
       <div class="panel-head">
@@ -309,11 +309,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   <!-- Assets tab: open browsing. The same three-column browser is mounted again inside
        #assetModal, scoped to the Entities-tab selection. See abMount(). -->
-  <div class="content" id="panel-assets" style="display:none;">
+  <div class="content" id="panel-assets" role="tabpanel" aria-labelledby="tab-assets" style="display:none;">
     <div class="ab-grid" id="abTabHost"></div>
   </div>
 
-  <div class="content" id="panel-timelines" style="display:none;">
+  <div class="content" id="panel-timelines" role="tabpanel" aria-labelledby="tab-timelines" style="display:none;">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
       <div class="panel-head">
@@ -354,7 +354,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   <!-- Mods tab (mods_tab.js): the installed mods grouped by origin, the selected mod's details, and the
        player's actions. The host runs modsAction on the game thread and follows each with a fresh list;
        showing the tab asks for a rescan. Nothing polls. Diagnostics are the console's sh_mods doctor. -->
-  <div class="content" id="panel-mods" style="display:none;">
+  <div class="content" id="panel-mods" role="tabpanel" aria-labelledby="tab-mods" style="display:none;">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
       <div class="panel-head">
@@ -418,8 +418,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 </div>
 
-<div class="ctxmenu" id="ctxmenu"></div>
-<div id="toastHost"></div>
+<div class="ctxmenu" id="ctxmenu" role="menu" aria-label="Actions"></div>
+<div id="toastHost" role="status" aria-live="polite"></div>
 <div class="rz rz-t"></div><div class="rz rz-b"></div><div class="rz rz-l"></div><div class="rz rz-r"></div>
 <div class="rz rz-tl"></div><div class="rz rz-tr"></div><div class="rz rz-bl"></div><div class="rz rz-br"></div>
 <!-- Expanded Decl Text reuses the live #editor node inside this standard modal host. -->
@@ -458,8 +458,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 <!-- Asset browser opened from the Entities tab. Same browser as the Assets tab, mounted a second
      time into #abModalHost, plus a header/footer that name the entity it is scoped to. -->
-<div class="modal-overlay" id="assetModal" style="display:none;">
-  <div class="modal assets">
+<div class="modal-overlay" id="assetModal" style="display:none;" aria-hidden="true">
+  <div class="modal assets" role="dialog" aria-modal="true" aria-label="Browse assets">
     <div class="modal-head">
       <span class="modal-title" style="margin:0">Browse assets</span>
       <span class="muted" id="amFor" style="font-family:Consolas,'Courier New',monospace"></span>
@@ -473,9 +473,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 </div>
 
-<div class="modal-overlay" id="prefabCreateModal" style="display:none;">
-  <div class="modal">
-    <div class="modal-title">Create prefab from selection</div>
+<div class="modal-overlay" id="prefabCreateModal" style="display:none;" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="npTitle">
+    <div class="modal-title" id="npTitle">Create prefab from selection</div>
     <div class="muted" id="npSelInfo" style="margin-bottom:4px;">From 5 selected entities</div>
     <div class="muted" style="margin-bottom:8px;font-size:0.9em;">Tip: hover your mouse over one of the selected entities in the 3D view before clicking Create -- the editor requires it.</div>
     <label>Name</label><input type="text" id="npName" placeholder="e.g. AirLock Door">
@@ -484,17 +484,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <div class="modal-actions"><button class="btn" id="npCancel">Cancel</button><button class="btn primary" id="npCreate">Create</button></div>
   </div>
 </div>
-<div class="modal-overlay" id="confirmModal" style="display:none;">
-  <div class="modal">
-    <div class="modal-title">Confirm</div>
+<div class="modal-overlay" id="confirmModal" style="display:none;" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMsg">
+    <div class="modal-title" id="confirmTitle">Are you sure?</div>
     <div class="muted" id="confirmMsg" style="margin-bottom:4px;white-space:pre-line;"></div>
     <div class="modal-actions"><button class="btn" id="confirmCancel">Cancel</button><button class="btn primary" id="confirmOk">OK</button></div>
   </div>
 </div>
 
-<div class="modal-overlay" id="reportModal" style="display:none;">
-  <div class="modal report">
-    <div class="modal-title">Send feedback</div>
+<div class="modal-overlay" id="reportModal" style="display:none;" aria-hidden="true">
+  <div class="modal report" role="dialog" aria-modal="true" aria-labelledby="rpTitleHead">
+    <div class="modal-title" id="rpTitleHead">Send feedback</div>
     <div class="muted" style="margin-bottom:4px;">Goes straight to the developers as a public issue on the project's tracker. No account needed.</div>
     <label>Category</label>
     <select id="rpCategory">
@@ -511,8 +511,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 </div>
 
-<div class="modal-overlay" id="crashModal" style="display:none;">
-  <div class="modal crash">
+<div class="modal-overlay" id="crashModal" style="display:none;" aria-hidden="true">
+  <div class="modal crash" role="dialog" aria-modal="true" aria-labelledby="crashTitle">
     <div class="crash-brandbar"><img id="crashLogo" alt=""><span class="cb-name">Snapmap+</span></div>
     <div class="modal-title" id="crashTitle">Snapmap+ crashed last session</div>
     <div class="muted" id="crashSub" style="margin-bottom:4px;"></div>
@@ -537,6 +537,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 <script src="prefab_viewport.js"></script>
 <script src="prefab_budget.js"></script>
 <script src="mods_tab.js"></script>
+<script src="page_keys.js"></script>
 <script src="preview_standin.js" data-preview-only></script>
 <script>
   var allEntities = [];      // last list from backend
@@ -628,7 +629,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     input.addEventListener('focus', show);
     input.addEventListener('input', function(){ active = -1; if (!open) show(); else render(); if (onType) onType(); });
     input.addEventListener('keydown', function(e){
-      if (e.key === 'Escape') { hide(); return; }
+      if (e.key === 'Escape') { if (open) { e.preventDefault(); hide(); } return; }
       if (!open) return;
       if (e.key === 'ArrowDown') { e.preventDefault(); if (currentOut.length) { active = Math.min(currentOut.length - 1, active + 1); render(); } }
       else if (e.key === 'ArrowUp') { e.preventDefault(); if (currentOut.length) { active = Math.max(0, active - 1); render(); } }
@@ -649,6 +650,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
 
   function post(o) { window.chrome.webview.postMessage(o); }
+  // Every dialog opens and closes through this stack (page_keys.js): Escape, Tab and focus.
+  var dialogs = pageKeys.createDialogs(document);
+  document.addEventListener('keydown', dialogs.onKeyDown);
   function iconSvg(name) {
     return '<svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-' + name + '"></use></svg>';
   }
@@ -910,7 +914,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (e.key === 'ArrowDown') { e.preventDefault(); acActive = Math.min(acItems.length - 1, acActive + 1); acRender(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); acActive = Math.max(0, acActive - 1); acRender(); }
     else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acAccept(); }
-    else if (e.key === 'Escape') { acClose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); acClose(); }
   });
 
 
@@ -1941,13 +1945,50 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (n === 1) addCtx('Fly to entity', function(){ flyToEntity(ids[0]); });
     addCtx('Delete' + (n>1?' ('+n+')':''), function(){ requestDelete(ids); });
     addCtx('Push to stack 0' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
-    addCtx('Clear stack 0', function(){ post({cmd:'clearStack'}); });   // not scoped to the current selection -- empties the whole stack, same as `sh cstk 0`
-    ctx.style.left = x+'px'; ctx.style.top = y+'px'; ctx.style.display = 'block';
+    addCtx('Clear SnapStack (stack 0)', function(){ post({cmd:'clearStack'}); });   // the whole stack, not just this selection
+    openCtx(x, y);
   }
-  function addCtx(label, fn) { var d=document.createElement('div'); d.textContent=label; d.addEventListener('click', function(){ hideCtx(); fn(); }); ctx.appendChild(d); }
-  function hideCtx() { ctx.style.display = 'none'; }
+  function addCtx(label, fn) {
+    var d = document.createElement('button');
+    d.type = 'button';
+    d.setAttribute('role', 'menuitem');
+    d.textContent = label;
+    d.addEventListener('click', function(){ hideCtx(); fn(); });
+    ctx.appendChild(d);
+  }
+  // Show the menu built into #ctxmenu at (x, y) and put the keyboard on its first item.
+  var ctxReturn = null;
+  function openCtx(x, y) {
+    ctxReturn = document.activeElement;
+    ctx.style.left = x + 'px'; ctx.style.top = y + 'px'; ctx.style.display = 'block';
+    var first = ctx.querySelector('[role="menuitem"]');
+    if (first) first.focus();
+  }
+  function hideCtx() {
+    if (ctx.style.display === 'none' || ctx.style.display === '') return;
+    ctx.style.display = 'none';
+    if (ctxReturn && ctxReturn.focus && document.contains(ctxReturn)) ctxReturn.focus();
+    ctxReturn = null;
+  }
   document.addEventListener('mousedown', function(e){ if (!ctx.contains(e.target)) hideCtx(); });
-  document.addEventListener('keydown', function(e){ if (e.key==='Escape') hideCtx(); });
+  ctx.addEventListener('keydown', function(e){
+    if (pageKeys.menuKey(ctx, e, document)) { e.preventDefault(); return; }
+    if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); hideCtx(); }
+  });
+  // Shift+F10 or the menu key opens the right-click menu of the visible list's selected row.
+  var CTX_ROWS = { entities: '#entityList .entity-item.selected', timelines: '#timelineList .tl-item.selected, #timelineList .pf-folder-head.selected',
+                   prefabs: '#prefabTree .pf-item.selected, #prefabTree .pf-folder-head.selected' };
+  document.addEventListener('keydown', function(e){
+    if (!(e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) return;
+    if (dialogs.count()) return;
+    var tab = document.querySelector('.tabstrip .tab.active');
+    var sel = tab && CTX_ROWS[tab.getAttribute('data-tab')];
+    var row = sel && document.querySelector(sel);
+    if (!row) return;
+    e.preventDefault();
+    var r = row.getBoundingClientRect();
+    row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: r.left + 24, clientY: r.bottom}));
+  });
   /* Entity rows are replaced as the virtual window moves. Delegate once from the stable scroller
      instead of allocating two listeners for every entity on every list publication. */
   var entityListEl = document.getElementById('entityList');
@@ -2133,15 +2174,33 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   function flash(t) { document.getElementById('stamp').textContent = t; }
 
-  // sliding toast for user-action confirmations (kind: '', 'ok', 'warn', 'err')
+  // Sliding toast for the outcome of an action (kind: '', 'ok', 'warn', 'err'). The host is a polite
+  // live region, so each toast is read out; an error is an alert and stays until it is dismissed.
   function toast(text, kind) {
     var host = document.getElementById('toastHost');
     var el = document.createElement('div');
     el.className = 'toast' + (kind ? (' ' + kind) : '');
-    el.textContent = text;
+    var msg = document.createElement('span');
+    msg.textContent = text;
+    el.appendChild(msg);
+    function dismiss() {
+      el.classList.remove('show');
+      setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 320);
+    }
+    if (kind === 'err') {
+      el.setAttribute('role', 'alert');
+      var close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'toast-close icon-button';
+      close.setAttribute('aria-label', 'Dismiss');
+      close.title = 'Dismiss';
+      close.innerHTML = iconSvg('x');
+      close.addEventListener('click', dismiss);
+      el.appendChild(close);
+    }
     host.appendChild(el);
     requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('show'); }); });
-    setTimeout(function(){ el.classList.remove('show'); setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 320); }, 2800);
+    if (kind !== 'err') setTimeout(dismiss, 4000);
   }
 
   // ---- messages from native ----
@@ -3203,35 +3262,34 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   document.getElementById('refreshBtn').addEventListener('click', function(){ post({cmd:'refresh'}); });
   document.getElementById('filterBox').addEventListener('input', renderList);
-  // Route entity arrow navigation at document level, including when no row is focused.
-  // Leave text editors and combo inputs their own arrow behavior.
-  document.addEventListener('keydown', function(e){
+  // Arrow keys move the entity selection from the list's filter box or when nothing owns them;
+  // a text field, list box, dialog or menu keeps its own keys.
+  function entityArrows(e){
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     if (document.getElementById('panel-entities').style.display === 'none') return;
-    if (assetModalOpen()) return;   // the modal owns the arrow keys while it is up
-    var ae = document.activeElement;
-    if (ae && (ae.closest('#editor') || ae.closest('.combo'))) return;
     e.preventDefault();
     moveEntitySelection(e.key === 'ArrowDown' ? 1 : -1);
+  }
+  document.getElementById('filterBox').addEventListener('keydown', entityArrows);
+  document.addEventListener('keydown', function(e){
+    if (dialogs.count() || pageKeys.belongsToControl(e.target)) return;
+    entityArrows(e);
   });
   var prefabFilterEl = document.getElementById('prefabFilter');
   if (prefabFilterEl) prefabFilterEl.addEventListener('input', renderPrefabTree);
-  // Route prefab arrows at document level; description and rename inputs keep native behavior.
-  document.addEventListener('keydown', function(e){
+  // Prefab arrows: from the filter box, or when nothing owns them.
+  function prefabArrows(e){
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     if (document.getElementById('panel-prefabs').style.display === 'none') return;
-    if (assetModalOpen()) return;
-    var ae = document.activeElement;
-    if (ae && (ae.closest('#prefabCard') || ae.classList.contains('pf-folder-name'))) return;
     e.preventDefault();
     movePrefabSelection(e.key === 'ArrowDown' ? 1 : -1);
-  });
+  }
+  if (prefabFilterEl) prefabFilterEl.addEventListener('keydown', prefabArrows);
   document.addEventListener('keydown', function(e){
-    if (e.key !== 'Delete' && e.key !== 'Escape') return;
-    if (document.getElementById('panel-prefabs').style.display === 'none') return;
-    if (assetModalOpen() || !pfSel.length) return;
-    var ae = document.activeElement;
-    if (ae && (ae.closest('#prefabCard') || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+    if (dialogs.count() || pageKeys.belongsToControl(e.target)) return;
+    prefabArrows(e);
+    if (e.defaultPrevented || (e.key !== 'Delete' && e.key !== 'Escape')) return;
+    if (document.getElementById('panel-prefabs').style.display === 'none' || !pfSel.length) return;
     e.preventDefault();
     if (e.key === 'Escape') clearPrefabSelection(); else pfDeleteSelection();
   });
@@ -3301,16 +3359,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       revertBtn.removeAttribute('aria-label'); saveBtn.removeAttribute('aria-label');
     }
     if (on) {
-      declFocusOverlay.style.display = 'flex';
-      declFocusOverlay.setAttribute('aria-hidden', 'false');
+      dialogs.open(declFocusOverlay, {onEscape: function(){ setDeclFocus(false); }, focus: document.getElementById('declText')});
     } else {
       if (declFocusAnchor && declFocusAnchor.parentNode) {
         declFocusAnchor.parentNode.insertBefore(col, declFocusAnchor);
         declFocusAnchor.parentNode.removeChild(declFocusAnchor);
       }
       declFocusAnchor = null;
-      declFocusOverlay.style.display = 'none';
-      declFocusOverlay.setAttribute('aria-hidden', 'true');
+      dialogs.close(declFocusOverlay);
     }
     requestAnimationFrame(refreshDeclScroll);
   }
@@ -3334,8 +3390,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         && document.getElementById('editor').contains(document.activeElement)) {
       e.preventDefault();
       doSave();
-    } else if (e.key === 'Escape' && document.getElementById('editor').classList.contains('focus-mode')) {
-      setDeclFocus(false);
     }
   });
   ['declText','fDisplayname'].forEach(function(id){ document.getElementById(id).addEventListener('input', updateDirty); });
@@ -3398,6 +3452,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     popup.hidden = false;
     OPEN_MENU = name;
     if (name === 'view') post({cmd: 'navmeshState'});
+    if (name === 'file') post({cmd: 'rawmapStatus'});
     if (focusFirst) {
       var first = popup.querySelector('button:not(:disabled)');
       if (first) first.focus();
@@ -3425,8 +3480,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.addEventListener('pointerdown', function(e) {
       if (OPEN_MENU && !e.target.closest('.menu')) closeMenus();
     });
+    var popups = document.querySelectorAll('.menu-popup');
+    for (i = 0; i < popups.length; i++) popups[i].addEventListener('keydown', function(e) {
+      if (pageKeys.menuKey(this, e, document)) { e.preventDefault(); return; }
+      if (e.key === 'Escape' || e.key === 'Tab') {
+        var label = document.querySelector('.menu-label[data-menu="' + OPEN_MENU + '"]');
+        if (e.key === 'Escape') e.preventDefault();
+        closeMenus();
+        if (label && e.key === 'Escape') label.focus();
+      }
+    });
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && OPEN_MENU) closeMenus();
+      if (e.key === 'Escape' && OPEN_MENU && !e.defaultPrevented) closeMenus();
     });
   }
   initMenus();
@@ -3824,17 +3889,29 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     menu: function(x, y, items){
       ctx.innerHTML = '';
       items.forEach(function(it){ addCtx(it.label, it.run); });
-      ctx.style.left = x + 'px'; ctx.style.top = y + 'px'; ctx.style.display = 'block';
+      openCtx(x, y);
     }
   });
   modsUi.bind();
 
   // top-level tab switching (Entities / Prefabs / Timelines / Assets / Mods)
-  document.querySelectorAll('.tabstrip .tab').forEach(function(tab){
+  var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabstrip .tab'));
+  document.querySelector('.tabstrip').addEventListener('keydown', function(e){
+    var next = pageKeys.tabKey(tabButtons, document.activeElement, e.key);
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+    next.click();
+  });
+  tabButtons.forEach(function(tab){
     tab.addEventListener('click', function(){
       acClose();   // the decl editor's completion popup shouldn't survive a tab switch
-      document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
-      this.classList.add('active');
+      tabButtons.forEach(function(t){
+        var on = t === tab;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.setAttribute('tabindex', on ? '0' : '-1');
+      });
       var which = this.getAttribute('data-tab');
       ['entities','prefabs','timelines','assets','mods'].forEach(function(name){
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
@@ -5160,6 +5237,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function abOnKey(m, e) {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     var t = e.target || {}, tag = (t.tagName || '').toUpperCase();
+    if (e.defaultPrevented || tag === 'TEXTAREA' || (tag === 'INPUT' && t.type === 'text' && t !== m.el('q'))) return;
+    if (t.closest && t.closest('[role="menu"]')) return;
     var isBtn  = tag === 'BUTTON' || tag === 'SELECT' || (tag === 'INPUT' && t.type !== 'text');
     var isText = tag === 'INPUT' && t.type === 'text';
     var k = e.key;
@@ -5769,10 +5848,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
 
   /* An open modal owns arrows; document-level handlers must not navigate hidden lists. */
-  function assetModalOpen() {
-    var o = document.getElementById('assetModal');
-    return !!o && o.style.display !== 'none' && o.style.display !== '';
-  }
+  function assetModalOpen() { return dialogs.isOpen(document.getElementById('assetModal')); }
 
   document.addEventListener('keydown', function(e){
     var m = abKeyMount();
@@ -5785,14 +5861,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var label = nameEl && nameEl.value ? nameEl.value : ('entity ' + primaryEid);
     document.getElementById('amFor').textContent = 'for ' + label;
     document.getElementById('amPath').textContent = abModalMount.sel || 'Nothing selected.';
-    amOverlay.style.display = 'flex';
+    dialogs.open(amOverlay, {onEscape: abCloseModal, focus: abModalMount.el('q')});
     abActive = abModalMount;
     abOpenCatalog(abModalMount);
     abSyncSoundSession();   /* the modal is the browser too -- same mode, same one decision */
-    var q = abModalMount.el('q'); if (q) q.focus();
   }
   function abCloseModal() {
-    amOverlay.style.display = 'none';
+    dialogs.close(amOverlay);
     abForgetPreview(abModalMount);
     abRenderTree(abModalMount); abRenderInsp(abModalMount);
     abActive = abTabMount;
@@ -5805,9 +5880,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   document.getElementById('amCancel').addEventListener('click', abCloseModal);
   /* Copy remains available in the row and inspector. */
   amOverlay.addEventListener('mousedown', function(e){ if (e.target === amOverlay) abCloseModal(); });
-  document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape' && amOverlay.style.display !== 'none') abCloseModal();
-  });
   // Also refresh on regained focus/visibility, subject to the normal dirty/save gates.
   window.addEventListener('focus', function(){
     if (document.getElementById('panel-timelines').style.display !== 'none') tlMaybeAutoRefresh();
@@ -5917,7 +5989,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         ctx.innerHTML = '';
         addCtx('Rename', function(){ tlRenameFolderInline(head.parentNode); });
         addCtx('Delete', function(){ tlDeleteFolder(fname); });
-        ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+        openCtx(e.pageX, e.pageY);
         return;
       }
       var item = e.target.closest('.tl-item'); if (!item) return;
@@ -5935,14 +6007,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         if (tlSel.every(function(r){ return r.folder === fname2; })) return;
         addCtx('Move to "' + fname2 + '"' + (n > 1 ? ' (' + n + ')' : ''), function(){ tlMoveSelection(fname2); });
       })(data.folders[f].name);
-      ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+      openCtx(e.pageX, e.pageY);
     });
     document.addEventListener('keydown', function(e){
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
       if (document.getElementById('panel-timelines').style.display === 'none') return;
       if (!tlSel.length || tlSel.length === 1 && tlSel[0].name) return;
-      var ae = document.activeElement;
-      if (ae && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' && ae.id !== 'timelineFilter'))) return;
+      if (dialogs.count() || (pageKeys.belongsToControl(e.target) && e.target.id !== 'timelineFilter')) return;
       tlSel = []; tlAnchor = null; tlPaintSelection();
     });
   })();
@@ -6444,15 +6515,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // reusable confirm modal
   var confirmModal = document.getElementById('confirmModal');
   var confirmCb = null;
-  function showConfirm(msg, onOk){
-    if (!confirmModal) { onOk(); return; }
+  // A confirmation titled by its action, with the action as its button ("Delete prefab" / "Delete").
+  function showConfirm(msg, onOk, title, verb){
+    document.getElementById('confirmTitle').textContent = title || 'Are you sure?';
     document.getElementById('confirmMsg').textContent = msg;
-    confirmCb = onOk; confirmModal.style.display = 'flex';
+    document.getElementById('confirmOk').textContent = verb || 'OK';
+    confirmCb = onOk;
+    dialogs.open(confirmModal, {onEscape: confirmCancel, focus: document.getElementById('confirmCancel')});
   }
-  if (confirmModal) {
-    document.getElementById('confirmCancel').addEventListener('click', function(){ confirmModal.style.display='none'; confirmCb=null; });
-    document.getElementById('confirmOk').addEventListener('click', function(){ confirmModal.style.display='none'; var cb=confirmCb; confirmCb=null; if (cb) cb(); });
-  }
+  function confirmCancel(){ dialogs.close(confirmModal); confirmCb = null; }
+  document.getElementById('confirmCancel').addEventListener('click', confirmCancel);
+  document.getElementById('confirmOk').addEventListener('click', function(){ dialogs.close(confirmModal); var cb=confirmCb; confirmCb=null; if (cb) cb(); });
   // Rename only on a changed, noncolliding name; the successful host refresh owns the final DOM.
   // The row's text node is the file name; its Blueprint and Mods pills are not, and stay on revert.
   function renamePrefabItem(item){
@@ -6618,7 +6691,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       ctx.innerHTML = '';
       addCtx('Rename', function(){ renameFolder(folder); });
       addCtx('Delete', function(){ deleteFolder(folder); });
-      ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+      openCtx(e.pageX, e.pageY);
       return;
     }
     var item = e.target.closest('.pf-item'); if (!item) return;
@@ -6628,7 +6701,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var cn = 0; for (var ci = 0; ci < pfSel.length; ci++) cn += pfSel[ci].name ? 1 : allPrefabNamesInFolder(pfSel[ci].folder).length;
       ctx.innerHTML = '';
       addCtx('Delete ' + cn + ' prefabs', pfDeleteSelection);
-      ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+      openCtx(e.pageX, e.pageY);
       return;
     }
     pfSelectRow(crow, null);
@@ -6638,7 +6711,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     addCtx('Load / Place', function(){ post({cmd:'loadPrefab', name: nm, folder: folder}); });
     addCtx('Rename', function(){ renamePrefabItem(item); });
     addCtx('Delete', function(){ showConfirm('Delete "' + nm + '"? This removes the file from disk.', function(){ post({cmd:'deletePrefab', name: nm, folder: folder}); }); });
-    ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+    openCtx(e.pageX, e.pageY);
   });
 
   // suppress WebView2's / the browser's default right-click menu everywhere (our own menus still show
@@ -6646,7 +6719,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
   // create-from-selection prompt (mockup)
   var pcModal = document.getElementById('prefabCreateModal');
-  function showPrefabModal(s){ if (pcModal) pcModal.style.display = s ? 'flex' : 'none'; }
+  function showPrefabModal(s){
+    if (s) dialogs.open(pcModal, {onEscape: function(){ showPrefabModal(false); }, focus: document.getElementById('npName')});
+    else dialogs.close(pcModal);
+  }
 
   // ---- feedback report dialog (the bottom-right "?") ----
   var appVersion = '';          // from the list message; "" until the first list arrives
@@ -6654,7 +6730,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var appGame = '';             // "DOOM 2016 build ... (binary, renderer, hash)", from the same message
   var reportInFlight = false;   // one submit at a time (the host guards too)
   var rpModal = document.getElementById('reportModal');
-  function showReportModal(s){ if (rpModal) rpModal.style.display = s ? 'flex' : 'none'; }
+  function showReportModal(s){
+    if (s) dialogs.open(rpModal, {onEscape: function(){ showReportModal(false); }, focus: document.getElementById('rpTitle')});
+    else dialogs.close(rpModal);
+  }
   function reportSendDone(){
     reportInFlight = false;
     var b = document.getElementById('rpSend');
@@ -6662,7 +6741,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   document.getElementById('reportBtn').addEventListener('click', function(){
     showReportModal(true);
-    document.getElementById('rpTitle').focus();
   });
   document.getElementById('rpCancel').addEventListener('click', function(){ showReportModal(false); });
   document.getElementById('rpSend').addEventListener('click', function(){
@@ -6696,7 +6774,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var mb = document.querySelector('.menubar .icon'), cl = document.getElementById('crashLogo');
     if (mb && cl) cl.src = mb.src;
   })();
-  function showCrashModal(s){ if (crModal) crModal.style.display = s ? 'flex' : 'none'; }
+  function showCrashModal(s){
+    if (s) dialogs.open(crModal, {onEscape: function(){ document.getElementById('crDismiss').click(); }, focus: document.getElementById('crDesc')});
+    else dialogs.close(crModal);
+  }
   function crashSendDone(d){
     crashInFlight = false;
     var b = document.getElementById('crSend');
@@ -6779,7 +6860,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!pfCreateGate(edMode, editorSelCount).enabled) return;
     npModuleMode = !!(edMode.known && edMode.blueprint);
     if (npSelInfo) npSelInfo.textContent = pfCreateSelText();
-    showPrefabModal(true); updateCreateBtn(); document.getElementById('npName').focus();
+    showPrefabModal(true); updateCreateBtn();
   });
   var npCancel = document.getElementById('npCancel');
   if (npCancel) npCancel.addEventListener('click', function(){ showPrefabModal(false); });

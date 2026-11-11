@@ -24,7 +24,7 @@ $html = Replace-Asset $html '<script src="preview_standin.js" data-preview-only>
 $css = Read-PageAsset 'studio.css'
 if ($css -match '</style') { throw 'studio.css contains a closing style tag' }
 $html = Replace-Asset $html '<link rel="stylesheet" href="studio.css">' "<style>`n$css</style>"
-foreach ($name in @('schema_slice.js', 'decl_language.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js', 'mods_tab.js')) {
+foreach ($name in @('schema_slice.js', 'decl_language.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js', 'mods_tab.js', 'page_keys.js')) {
     $script = Read-PageAsset $name
     if ($script -match '</script') { throw "$name contains a closing script tag" }
     $tag = '<script src="' + $name + '"></script>'
