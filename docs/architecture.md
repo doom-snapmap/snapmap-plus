@@ -1617,8 +1617,8 @@ feature.
   `scripts/lib/<name>.lua`, `<name>` of `[A-Za-z0-9_-]`; a `.lua` anywhere else
   is refused. It is hashed into the build like every file and the engine never
   opens it. `modbundle.c` checks each one: UTF-8 text without a NUL byte, not
-  compiled Lua, at most 256 KB; at most 64 files and 1 MB per mod (the mod
-  store's Worker refuses the same); then the compile check the product
+  compiled Lua (no count or size: a mod carries as many scripts as it has, of
+  any size); then the compile check the product
   registers (`sh_mb_set_script_check`, `script/script_compile.c`: parse only,
   nothing runs; an entry file must start with `api = 1`). A failure is the
   row's cause, worded as the stop line words it:
@@ -1654,7 +1654,7 @@ feature.
   the `on.map_start` handlers. Each entry file must start with `api = 1`
   (comments and a byte order mark may precede it); a missing or newer version
   is refused before the file runs. Chunks load with mode `"t"`: compiled Lua
-  is refused. At most 256 KB per file, 1 MB and 64 files per mod.
+  is refused. A mod's scripts have no count or size limit.
 - **Sandbox.** Base, string, table, math, utf8 and coroutine only; no `io`,
   `os`, `debug`, `package`, `load`, `loadfile`, `dofile`, `string.dump` or
   `math.randomseed` (`math.random` is seeded from the map seed);
@@ -1663,18 +1663,31 @@ feature.
   hooks off). `require(name)` loads `scripts/lib/<name>.lua` of the same mod
   once. The registration table `on` and the runtime's own objects cannot be
   edited.
-- **Bounds.** Memory: 32 MB per mod through the state's allocator. Steps: the
-  count hook adds 1,000 per 1,000 VM instructions; every 256 bytes allocated
-  inside a call, sorting, moving or shifting table elements and scanning UTF-8
-  add steps too, because that work never reaches the hook. A call (one handler,
-  one timer, one coroutine resume) may take 2 million steps and one mod's frame
-  5 million. Pattern functions refuse a subject or pattern over 4,096 bytes,
-  and every matching step is counted (`l_matchstep` in `lstrlib.c`); one call
-  may take 1 million. A call still running after 1 second of wall time (long
-  string comparisons are one instruction each) is stopped as well. `pcall`,
-  `xpcall`, `coroutine.resume` and `coroutine.close` cannot catch a stop, and
-  an `xpcall` handler is not run after one (Lua calls it from inside the hook,
-  with hooks off).
+- **Bounds.** The product imposes none of its own (DECISIONS 26): a state's
+  memory, the work of a call or a frame, timers, log lines, the size of a
+  text a pattern searches, entities spawned, projectiles launched, remembered
+  or steered, and every table of the script layer grow as far as the process
+  allows. One protection is not a limit: a call (one handler, one timer, one
+  coroutine resume) still running after 5 seconds of wall time is stopped, so
+  a script that never returns cannot hang the game. The clock is read by the
+  count hook every 1,000 VM instructions, every 1,024 pattern steps
+  (`l_matchstep` in `lstrlib.c`, since one pattern can run inside one
+  instruction), and before sorting, moving or shifting table elements and
+  scanning UTF-8 (work that never reaches the hook). `pcall`, `xpcall`,
+  `coroutine.resume` and `coroutine.close` cannot catch a stop, and an
+  `xpcall` handler is not run after one (Lua calls it from inside the hook,
+  with hooks off). What remains is the engine's: the game holds at most
+  16,382 entities at once and one more is a fatal engine error, so `spawn`,
+  `fx(effect, pos)`, `explode` with an effect and `ai:fire` refuse ("cannot
+  add an entity now: the game holds at most 16382 entities at once and nearly
+  all are in use; remove some first") when fewer than 256 slots are free (the
+  free count is read once a frame; each script spawn or launch takes one);
+  the per-demon tables the engine's own threads read without a lock (the
+  demons parked, their pain strings and blocks) have that many slots and
+  reuse a gone demon's. A projectile the engine launches (weapon fire, an md6
+  row) lives as long as the engine keeps it. The handle's 18-bit slot number
+  is the format's range (262,143 records at once), far above what the engine
+  can hold. Running out of memory stops the mod ("ran out of memory").
 - **Errors.** Every call into Lua is a protected call of a C job, so a failing
   allocation while arguments are built is an ordinary error and Lua's panic is
   never reached. Any error stops that mod's scripts for the rest of the map: its
@@ -1682,7 +1695,8 @@ feature.
   written: `Script stopped: <mod>, scripts\<file>.lua line <n>: <what>. <what
   to do>.` `script_reason.c` rewrites Lua's wording by one table (nothing says
   "attempt to index a nil value"; an author's own `error("...")` text is kept).
-  The mod's log (prints, warnings, the stop line; 200 lines a map) stays
+  The mod's log (prints, warnings, the stop line; every line of the map,
+  whole; the Mods tab shows the newest 1,000 and Copy log copies all) stays
   readable after the map until the mod's next map start:
   `sh_script_log_read`, `sh_script_stop_line`, `sh_script_status`,
   `sh_script_mods`.
@@ -1811,13 +1825,18 @@ No script code runs anywhere else.
   table: a new entity whose chain the mod binds gets `spawn(self)` and is
   driven from then on, a vanished one gets `remove(self)` once. An entity no
   mod owns (a player, an attacker) gets a foreign handle
-  (`sh_script_handles_ref`) that resolves the same way and is never swept.
-  8,192 entities per map.
+  (`sh_script_handles_ref`) that resolves the same way. A record lives exactly
+  as long as its entity: the sweep releases a removed or gone entity's record
+  and tells the other tables (`sh_script_handles_on_gone`: the combat records,
+  each state's entity object), and the slot is reused under a new generation,
+  so a handle a script keeps resolves to nothing, never to the slot's next
+  entity. The table grows with the entities alive; it has no count of its own.
 - **Queues.** Hooks on any thread (damage, death, pain, animation notify,
   projectile launch, Script node input) post fixed-size records with copied
-  strings and a vector into the owning mod's queue (`script_queue.c`, a spin lock per mod, 1,024 records, strings
-  of 127 bytes). Only the tick's thread drains; a full queue drops and counts,
-  and the mod's script log gets one line per map.
+  strings and a vector into the owning mod's queue (`script_queue.c`, a spin lock per mod, growing with what
+  arrives in a frame; strings of 127 bytes). Only the tick's thread drains; only a record the process has no
+  memory for is dropped, and the mod's script log then gets one line per map. The queues, the hooks' mod
+  table and the runtime's mods grow with the map's scripted mods.
 - **Console.** `sh_scripts` (`script_console.c`) prints each mod's state from
   `sh_script_mod_info_get`, `sh_scripts log [mod]` its script log, and
   `sh_scripts reload` either ends and prepares the open Play's mods again
@@ -1849,15 +1868,15 @@ Every argument is checked before the engine is touched, and every refusal is
 one plain sentence at the calling script line (it stops the mod's scripts for
 the map, as any error does).
 
-- **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; at most 64 live and
-  16 a second per mod), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
+- **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; no count or rate
+  of its own, only the engine's entity table, Bounds above), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
   `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
   `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
   `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
   `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
   `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
   `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
-  `entities_near(pos, radius)` (nearest first, at most 256),
+  `entities_near(pos, radius)` (every entity in range, nearest first),
   `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
   flat enough to stand on, normal at least 0.7 up; it does not consult the
@@ -2038,8 +2057,11 @@ trigger's does.
   steering); `ai:can_see_from(other, joint)`; `p:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
   `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
-  a projectile one of the mod's entities launched. `ai:fire` parks the demon
-  first (`sh_script_ai_park`), as a move does.
+  a projectile one of the mod's entities launched. A script may hold `p` for
+  as long as it likes: once the projectile is gone `p:steer`, `p:explode` and
+  `p:pos` answer nil and `p:alive` false, as every call on a removed entity
+  does, and the mod runs on. `ai:fire` parks the demon first
+  (`sh_script_ai_park`), as a move does.
 - **Events.** `on.damage(name, fn(self, hit))` with `hit.amount` (what the
   engine applied), `hit.attacker`, `hit.inflictor`, `hit.damage` (the decl),
   `hit.location` (the damage zone of the first hit) and `hit.direction`;
@@ -2064,8 +2086,11 @@ trigger's does.
   Each calls the engine's function and posts one record to the owning mod's
   queue; they may run on job threads and run no Lua. The combat module keeps
   what the hooks saw (each entity's last hit, the deaths reported, the
-  projectiles each mod's entities launched) for the calls and the pain event;
-  the Play gate clears it.
+  projectiles each mod's entities launched) for the calls and the pain event,
+  each record as long as its entity lives: the launch hook makes the
+  projectile's handle and its launch record together
+  (`sh_script_combat_launch`), and the handle table's release drops both. The
+  Play gate clears them.
 - **Tests.** `tests/script_api_combat_test.c` runs every call, refusal and
   event against a fake engine; `script_e2e_test` runs the brute example
   through the AI and combat calls.
