@@ -19,19 +19,17 @@
 #include "plain_reason.h"
 
 #include "modstore_internal.h"
-#include "modlock.h"
 /* ------------------------------------------------------------ lock ----- */
 
-/* The store lock: the named store lock of the mods folder (modlock.h), so
+/* The store lock: the mods folder's named lock (store_lock.h, opened and
+ * waited for by modbundle.c's sh_mb_store_mutex and sh_mb_store_wait), so
  * every writer of mods\ in this process and in any other (a second game, the
  * store tool) takes turns: installs, downloads, scans, builds, exports. It is
  * recursive on purpose: the install and verification below take it
  * themselves, and their callers (a download) already hold it around a larger
  * step. The counts below are this process's. */
-static volatile LONG    g_ms_lock_waits;
 static volatile LONG    g_ms_lock_depth;   /* nested holds of this process's owner; read from any thread */
 static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
-static volatile LONG    g_ms_lock_waiting; /* threads waiting for it now (the boot build yields to them) */
 static __declspec(thread) HANDLE t_ms_held;   /* the mutex this thread holds */
 static __declspec(thread) LONG   t_ms_depth;  /* this thread's nested holds */
 
@@ -39,35 +37,15 @@ void modstore_lock(void)
 {
     char root[MAX_PATH * 4];
     HANDLE h;
-    DWORD w;
     if (t_ms_depth > 0) {
         t_ms_depth++;
         InterlockedIncrement(&g_ms_lock_depth);
         return;
     }
     if (!sh_ms_root(root, sizeof root)) root[0] = 0;
-    h = sh_modlock_open(SH_MODLOCK_STORE, root);
-    if (!h) {
-        /* Windows is out of handles: nothing in the store can be written safely. */
-        backend_log("MODS: store: the mods folder's lock could not be created; the store operation goes ahead unguarded");
-        t_ms_depth = 1;
-        InterlockedIncrement(&g_ms_lock_depth);
-        return;
-    }
-    w = WaitForSingleObject(h, 0);
-    if (w == WAIT_TIMEOUT) {
-        /* Held by another thread or process: wait for it rather than fail.
-         * The waiting count is raised before the wait count, so a holder that
-         * sees a new wait always finds the waiter and yields to it
-         * (ms_lock_yield). */
-        InterlockedIncrement(&g_ms_lock_waiting);
-        InterlockedIncrement(&g_ms_lock_waits);
-        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or a build)");
-        w = WaitForSingleObject(h, INFINITE);
-        InterlockedDecrement(&g_ms_lock_waiting);
-    }
-    if (w == WAIT_ABANDONED)
-        backend_log("MODS: store: another Snapmap+ process ended while it was changing the mods folder; continuing");
+    h = sh_mb_store_mutex(root);
+    if (h) sh_mb_store_wait(h);
+    else backend_log("MODS: store: the mods folder's lock could not be opened; the store operation goes ahead unguarded");
     t_ms_held = h;
     t_ms_depth = 1;
     InterlockedIncrement(&g_ms_lock_depth);
@@ -92,7 +70,7 @@ int modstore_lock_busy(unsigned *generation)
 
 unsigned modstore_lock_waits(void)
 {
-    return (unsigned)InterlockedCompareExchange(&g_ms_lock_waits, 0, 0);
+    return sh_mb_store_waits();
 }
 
 /* The boot build's hand-over between folders: when another thread waits for
@@ -102,14 +80,14 @@ unsigned modstore_lock_waits(void)
 static int ms_lock_yield(void)
 {
     int i;
-    if (InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) <= 0 ||
+    if (sh_mb_store_waiting() <= 0 ||
         InterlockedCompareExchange(&g_ms_lock_depth, 0, 0) != 1)
         return 0;
     modstore_unlock();
     /* The waiter leaves the count once it holds the lock; until then this
-     * thread stays off it, so the critical section's unfair hand-over cannot
-     * give it straight back. */
-    for (i = 0; i < 2000 && InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) > 0; i++) Sleep(1);
+     * thread stays off it, so the mutex's unfair hand-over cannot give it
+     * straight back. */
+    for (i = 0; i < 2000 && sh_mb_store_waiting() > 0; i++) Sleep(1);
     modstore_lock();
     return 1;
 }

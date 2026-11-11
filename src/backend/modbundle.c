@@ -21,7 +21,7 @@
 #include "decl_tree.h"
 #include "json_pretty.h"
 #include "backend_log.h"
-#include "modlock.h"
+#include "store_lock.h"
 
 #define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
 
@@ -6619,8 +6619,57 @@ void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
 
 /* ---------------------------------------------------- product record ---- */
 
-/* The record lock: the named record lock of the mods folder (modlock.h),
- * shared with every other process on it; recursive per thread. */
+/* The mods folder's named lock (store_lock.h), shared by every process that
+ * writes the folder or its record. One mutex per folder serves both the
+ * store lock (modstore_lock) and the record lock below; it is recursive
+ * within a thread, so a store step that writes the record holds it once
+ * more. Handles are opened once per folder and kept. */
+static SRWLOCK g_lock_open = SRWLOCK_INIT;
+static struct { wchar_t name[64]; HANDLE h; } g_lock_handles[32];
+static unsigned g_lock_next;
+static volatile LONG g_lock_waiting;   /* threads of this process waiting for it now */
+static volatile LONG g_lock_waits;     /* waits so far */
+
+void *sh_mb_store_mutex(const char *mods_root)
+{
+    wchar_t *w = mods_root && mods_root[0] ? sh_mb_wpath(mods_root) : NULL, name[64];
+    HANDLE h = NULL;
+    unsigned i;
+    int named = w && sh_store_lock_name(w, name, 64);
+    free(w);
+    if (!named) return NULL;
+    AcquireSRWLockExclusive(&g_lock_open);
+    for (i = 0; i < 32 && !h; i++) if (g_lock_handles[i].h && !wcscmp(g_lock_handles[i].name, name)) h = g_lock_handles[i].h;
+    if (!h && (h = CreateMutexW(NULL, FALSE, name)) != NULL) {
+        /* Only a test walks more than 32 folders; an older handle stays open,
+         * since a thread may still hold it. */
+        i = g_lock_next++ % 32;
+        wcscpy_s(g_lock_handles[i].name, 64, name);
+        g_lock_handles[i].h = h;
+    }
+    ReleaseSRWLockExclusive(&g_lock_open);
+    return h;
+}
+
+void sh_mb_store_wait(void *h)
+{
+    DWORD w = WaitForSingleObject(h, 0);
+    if (w == WAIT_TIMEOUT) {
+        /* The waiting count is raised before the wait count, so a holder that
+         * sees a new wait always finds the waiter (modstore.c's yield). */
+        InterlockedIncrement(&g_lock_waiting);
+        InterlockedIncrement(&g_lock_waits);
+        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or a build)");
+        w = WaitForSingleObject(h, INFINITE);
+        InterlockedDecrement(&g_lock_waiting);
+    }
+    if (w == WAIT_ABANDONED)
+        backend_log("MODS: store: another Snapmap+ process ended while it was changing the mods folder; continuing");
+}
+
+long sh_mb_store_waiting(void) { return InterlockedCompareExchange(&g_lock_waiting, 0, 0); }
+unsigned sh_mb_store_waits(void) { return (unsigned)InterlockedCompareExchange(&g_lock_waits, 0, 0); }
+
 static __declspec(thread) HANDLE t_rec_held;
 static __declspec(thread) LONG   t_rec_depth;
 
@@ -6628,9 +6677,9 @@ void sh_mb_record_lock(const char *mods_root)
 {
     HANDLE h;
     if (t_rec_depth > 0) { t_rec_depth++; return; }
-    h = sh_modlock_open(SH_MODLOCK_RECORD, mods_root);
-    if (h && WaitForSingleObject(h, INFINITE) == WAIT_FAILED) h = NULL;
-    if (!h) backend_log("MODS: record: the record's lock could not be taken; the record is read and written unguarded");
+    h = sh_mb_store_mutex(mods_root);
+    if (h) sh_mb_store_wait(h);
+    else backend_log("MODS: record: the mods folder's lock could not be opened; the record is read and written unguarded");
     t_rec_held = h;
     t_rec_depth = 1;
 }
