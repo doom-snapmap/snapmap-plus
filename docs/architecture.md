@@ -502,6 +502,26 @@ These backend files share the work:
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
+  At the first build of a store folder under new rules (its block's `rules`,
+  `sh_mb_block_rules`, below `SH_MB_RULES`) the store cleans the author block
+  once (owner 2026-11-10; `sh_mb_author_retire`, `ms_author_clean`): `id`
+  leaves it, the key staying the product block's `key` (keys are not renamed),
+  and so does `shadows`; `stock` goes only when the product block already holds
+  every entry as a pointer with no file under `assets\`, which every later
+  build carries forward. `scope` stays where the author wrote it: it is kept in
+  the bundle's `extra`, so it is part of the canonical manifest and removing it
+  would change the hash; so does a `stock` an entry of which lies over a
+  carried file, since its source can decide that pointer's. Every other author
+  byte stays. The cleaned text must read back as the same bundle
+  (`sh_mb_load_text`) before anything is written; it is swapped in as the
+  first-build rename is (the folder staged beside itself with its files
+  hard-linked, then two renames, the first undone when the second fails), with
+  one `MODS: store: <folder>: mod.json cleaned once: ...` line. A folder that
+  cannot be swapped (a file of it held open, a read-only folder) keeps its
+  `mod.json` with one `... keeps its author key(s) ...: it could not be
+  rewritten (<why>); the folder is unchanged` line and is tried again at the
+  next rules bump. A legacy bundle keeps its author block, whose keys are build
+  inputs.
   The key is the author `id` when present (deprecated), else the product
   block's `key`, else (a folder outside the store, built with `sh_mods
   build`) the folder's own name. `sh_mods new "<name>"` makes a folder under

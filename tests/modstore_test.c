@@ -196,6 +196,94 @@ static void fb_names(const char *parent, char *out, size_t cap)
     FindClose(h);
 }
 
+/* Owner 2026-11-10: at the first build under the current rules the
+ * author block is cleaned once: the deprecated "id" (the key is the product
+ * block's) and the retired "shadows" leave mod.json, "scope" stays (it is
+ * part of the bundle's extra, so of its hash), every other author byte
+ * stays, the key and the folder name do not change, and the bundle hash is
+ * the one the uncleaned folder builds to. A folder that cannot be swapped
+ * (a file of it held open) is left as it is with one line. */
+static void test_author_clean(const char *tmp)
+{
+    static const char MODJSON[] =
+        "{\n  \"id\": \"local.clean\",\n  \"name\": \"Clean\",\n  \"version\": \"1.0.0\",\n"
+        "  \"shadows\": [\"generated/image/stock/rock.bimage\"],\n  \"scope\": \"map\",\n"
+        "  \"description\": \"Kept as written.\"\n}\n";
+    char root[MAX_PATH], dir[MAX_PATH], ref[MAX_PATH], ro[MAX_PATH], path[MAX_PATH * 2];
+    sh_ms_sync_stats ss;
+    sh_mb_bundle rb, b;
+    char *t, *author;
+    size_t n = 0, an = 0;
+    HANDLE held;
+    printf("-- the author block is cleaned once: id and shadows leave, the key, scope and the hash stay\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\authorclean\\mods", tmp);
+    _snprintf_s(ref, sizeof ref, _TRUNCATE, "%s\\authorclean\\ref", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\local.clean", root);
+    mt_write(dir, "mod.json", MODJSON);
+    mt_write(dir, "assets\\generated\\image\\mods\\local.clean\\a.bimage", "clean image bytes");
+    mt_write(ref, "mod.json", MODJSON);
+    mt_write(ref, "assets\\generated\\image\\mods\\local.clean\\a.bimage", "clean image bytes");
+    memset(&rb, 0, sizeof rb);
+    CHECK(sh_mb_build(ref, &RESOLVER, &rb));   /* the hash of the folder as the author wrote it */
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(log_has("MODS: store: local.clean: mod.json cleaned once: id, shadows left the author block (the key local.clean "
+                  "lives in the product block)"));
+    CHECK(log_has("; kept scope, part of what the mod builds"));
+    t = slurp(dir, "mod.json", &n);
+    author = t ? sh_mb_author_bytes(t, n, &an, NULL) : NULL;
+    CHECK(author && !strstr(author, "\"id\"") && !strstr(author, "\"shadows\"") && strstr(author, "\"scope\": \"map\"") &&
+          strstr(author, "\"name\": \"Clean\"") && strstr(author, "\"description\": \"Kept as written.\""));
+    CHECK(t && strstr(t, "\"key\": \"local.clean\""));
+    free(author);
+    free(t);
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, rb.hash) && !strcmp(b.id, "local.clean") &&
+          b.key_source == SH_MB_KEY_FROM_BLOCK);
+    sh_mb_free(&b);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s.old-%lu", dir, GetCurrentProcessId());
+    CHECK(!mt_exists(path));
+    /* Cleaned once: the next sync finds it current, a later rebuild leaves it as it is. */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    t = slurp(dir, "mod.json", NULL);
+    {
+        char *r = t ? strstr(t, "\"rules\": ") : NULL;
+        if (r) r[9] = '0' + SH_MB_RULES - 1;
+    }
+    if (t) mt_write(dir, "mod.json", t);
+    free(t);
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0 && !log_has("cleaned once"));
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, rb.hash));
+    sh_mb_free(&b);
+    sh_mb_free(&rb);
+
+    /* A folder with a file held open cannot be swapped: untouched, one line. */
+    _snprintf_s(ro, sizeof ro, _TRUNCATE, "%s\\local.held", root);
+    mt_write(ro, "mod.json", "{\"id\": \"local.held\", \"name\": \"Held\", \"version\": \"1.0.0\"}");
+    mt_write(ro, "assets\\generated\\image\\mods\\local.held\\a.bimage", "held image bytes");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\image\\mods\\local.held\\a.bimage", ro);
+    held = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(held != INVALID_HANDLE_VALUE);
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(log_has("MODS: store: local.held: mod.json keeps its author key(s) id: it could not be rewritten ("));
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    t = slurp(ro, "mod.json", &n);
+    author = t ? sh_mb_author_bytes(t, n, &an, NULL) : NULL;
+    CHECK(author && strstr(author, "\"id\": \"local.held\""));
+    CHECK(t && strstr(t, "\"key\": \"local.held\""));
+    free(author);
+    free(t);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s.staging-%lu", ro, GetCurrentProcessId());
+    CHECK(!mt_exists(path));
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(ro, &b) && b.validated);
+    sh_mb_free(&b);
+}
+
 static void test_first_build(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], got[MAX_PATH * 2], got2[MAX_PATH * 2], rel[MAX_PATH], from[300], cause[600];
@@ -1810,6 +1898,7 @@ int main(int argc, char **argv)
     test_work_folder_names(tmp);
     test_crash_leftovers(tmp);
     test_first_build(tmp);
+    test_author_clean(tmp);
 
     test_upgrade(fixture, tmp);
     test_boot_sync(fixture, tmp);

@@ -409,6 +409,22 @@ char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, si
  * NULL when the text is not a JSON object. */
 char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
 
+/* The author block cleaned once (DESIGN-additive A.4, owner 2026-11-10): the
+ * mod.json `text` of the built bundle `b` with the deprecated "id" (the key
+ * lives in the product block as "key", which b's block already records) and
+ * the retired "shadows" removed from its author block, and "stock" when the
+ * product block already holds every entry as a pointer with no file under
+ * assets/; every other byte stays. "scope" is kept: it is part of the
+ * bundle's extra, so removing it would change the bundle hash; so is a
+ * "stock" an entry of which lies over a carried file. A legacy bundle keeps
+ * everything (its author keys are build inputs). malloc'd, or NULL when
+ * nothing is to be removed; `removed` and `kept` (optional) list the keys. */
+char *sh_mb_author_retire(const char *text, size_t n, const sh_mb_bundle *b, size_t *out_len, char *removed, size_t cap,
+                          char *kept, size_t kept_cap);
+
+/* The "rules" its product block records (0 without one). */
+int  sh_mb_block_rules(const char *folder);
+
 /* The bundle.json form (pretty-printed, with "bundle"), as the retired
  * layout and earlier exports stored it (malloc'd, NUL-terminated), or NULL.
  * Exports now carry mod.json itself (modexport.h). */

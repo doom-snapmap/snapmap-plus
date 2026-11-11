@@ -5873,6 +5873,113 @@ char *sh_mb_author_bytes(const char *t, size_t n, size_t *out_len, int *had_bloc
     return out;
 }
 
+/* `t` without its top-level member `m` (the separator before or after it
+ * goes with it), malloc'd; *out_len its length. */
+static char *mb_cut_member(const char *t, size_t n, const mb_member *m, size_t i, size_t count, size_t open,
+                           size_t *out_len)
+{
+    size_t from, to;
+    char *out;
+    if (i + 1 < count) { from = m[i].key_at; to = m[i + 1].key_at; }
+    else if (i > 0) { from = m[i - 1].value_end; to = m[i].value_end; }
+    else { from = open + 1; to = m[i].value_end; }
+    out = (char *)malloc(n - (to - from) + 1);
+    if (!out) return NULL;
+    memcpy(out, t, from);
+    memcpy(out + from, t + to, n - to);
+    out[n - (to - from)] = 0;
+    *out_len = n - (to - from);
+    return out;
+}
+
+/* An author "stock" object every entry of which the product block already
+ * holds as a pointer with no file under assets/ (carried forward by every
+ * later build, DESIGN-additive A.3): removing it changes nothing. An entry
+ * over a carried file is not: its source can decide the pointer's. */
+static int mb_author_stock_redundant(const sh_mb_bundle *b)
+{
+    size_t k, i;
+    for (k = 0; k < b->stock_decl_count; k++) {
+        const sh_mb_stock_decl *d = &b->stock_decls[k];
+        int held = 0;
+        if (d->carried) continue;
+        for (i = 0; i < b->file_count && !held; i++) {
+            const sh_mb_file *f = &b->files[i];
+            held = f->stock && f->absent && f->request && d->request && !strcmp(f->request, d->request) &&
+                   f->stock_source && d->source && !_stricmp(f->stock_source, d->source);
+        }
+        if (!held) return 0;
+    }
+    return 1;
+}
+
+char *sh_mb_author_retire(const char *text, size_t n, const sh_mb_bundle *b, size_t *out_len, char *removed, size_t cap,
+                          char *kept, size_t kept_cap)
+{
+    static const char *const keys[] = { "id", "shadows", "stock", "scope", NULL };
+    char *cur = NULL;
+    size_t cur_len = n, k;
+    if (out_len) *out_len = 0;
+    if (removed && cap) removed[0] = 0;
+    if (kept && kept_cap) kept[0] = 0;
+    if (!text || !b || b->legacy || b->errors) return NULL;
+    for (k = 0; keys[k]; k++) {
+        const char *t = cur ? cur : text;
+        size_t count = 0, open = 0, i;
+        mb_member *m = mb_members(t, cur_len, &count, &open);
+        char *next;
+        if (!m) { free(cur); return NULL; }
+        for (i = 0; i < count && !mb_member_is(t, &m[i], keys[k]); i++) {}
+        if (i == count) { free(m); continue; }
+        /* "scope" is kept in the bundle's extra, so it is part of the
+         * canonical manifest and its hash; an author "stock" entry over a
+         * carried file can decide the pointer's source. Neither is removed:
+         * the key stays where the author wrote it. */
+        if (!strcmp(keys[k], "scope") || (!strcmp(keys[k], "stock") && !mb_author_stock_redundant(b))) {
+            if (kept && kept_cap) {
+                if (kept[0]) strncat_s(kept, kept_cap, ", ", _TRUNCATE);
+                strncat_s(kept, kept_cap, keys[k], _TRUNCATE);
+            }
+            free(m);
+            continue;
+        }
+        next = mb_cut_member(t, cur_len, m, i, count, open, &cur_len);
+        free(m);
+        free(cur);
+        if (!next) return NULL;
+        cur = next;
+        if (removed && cap) {
+            if (removed[0]) strncat_s(removed, cap, ", ", _TRUNCATE);
+            strncat_s(removed, cap, keys[k], _TRUNCATE);
+        }
+    }
+    if (cur && out_len) *out_len = cur_len;
+    return cur;
+}
+
+int sh_mb_block_rules(const char *folder)
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *p = NULL;
+    unsigned char *text = NULL;
+    size_t len = 0;
+    mbj *j;
+    const mbj *block, *rules;
+    int out = 0;
+    if (root) p = mb_wjoin(root, L"mod.json");
+    if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
+    free(p);
+    free(root);
+    if (!text) return 0;
+    j = mbj_parse((const char *)text, len, NULL, 0);
+    free(text);
+    block = j && j->t == MBJ_OBJ ? mbj_get(j, SH_MB_BLOCK_KEY) : NULL;
+    rules = block && block->t == MBJ_OBJ ? mbj_get(block, "rules") : NULL;
+    if (rules && rules->t == MBJ_NUM && mb_plain_integer(rules->s, rules->n) && rules->s[0] != '-')
+        out = atoi(rules->s);
+    mbj_free(j);
+    return out;
+}
+
 /* Insert ,NL NL "snapmap-plus": <block> after the last member of `own`. The
  * block text is json_pretty output; its lines are indented by two more
  * spaces. NL is CRLF when the author's file uses CRLF. */

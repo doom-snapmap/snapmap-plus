@@ -2456,6 +2456,119 @@ static void ms_chain_init(sh_mb_resolver *out, ms_chain *chain, const sh_mb_reso
     out->stock_context = user ? user->stock_context : NULL;
 }
 
+/* Stage a copy of the folder `src` at `staging`: every file hard-linked (or
+ * copied where a link cannot be made), mod.json written from `modjson`.
+ * A reparse point anywhere refuses (it is moved as itself by a rename, never
+ * entered). 1 on success, else 0 with the cause. */
+static int ms_hl_stage(const wchar_t *src, const wchar_t *staging, int top, const char *modjson, size_t mlen,
+                       char *cause, size_t cap)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(src, L"*");
+    HANDLE h;
+    int ok = 1;
+    if (!pattern || !ms_mkdirs(staging)) { free(pattern); return ms_cause(cause, cap, "cannot create a staging folder"); }
+    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return ms_cause(cause, cap, "cannot list the folder (%s)", ms_why(GetLastError(), NULL, 0, 0));
+    do {
+        wchar_t *from, *to;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ok = ms_cause(cause, cap, "it holds a link"); break; }
+        from = ms_wjoin(src, fd.cFileName);
+        to = ms_wjoin(staging, fd.cFileName);
+        if (!from || !to) ok = ms_cause(cause, cap, "out of memory");
+        else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = ms_hl_stage(from, to, 0, NULL, 0, cause, cap);
+        else if (top && !_wcsicmp(fd.cFileName, L"mod.json")) {
+            if (!ms_write_text(to, modjson, mlen))
+                ok = ms_cause(cause, cap, "cannot write the new mod.json (%s)", ms_why(GetLastError(), "mod.json", 1, mlen));
+        } else if (!CreateHardLinkW(to, from, NULL) && !sh_ms_copy_file(from, to)) {
+            ok = ms_cause(cause, cap, "cannot stage a file (%s)", ms_why(GetLastError(), NULL, 0, 0));
+        }
+        free(from);
+        free(to);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* The author block cleaned once, at the first build under the current rules
+ * (DESIGN-additive A.4, owner 2026-11-10): the retired author keys and the
+ * deprecated "id" leave mod.json (sh_mb_author_retire), the bundle hash
+ * unchanged (checked before anything is written), written with the swap the
+ * first-build rename uses: the folder staged beside itself with its files
+ * hard-linked, then two renames, the first undone when the second fails. A
+ * folder that cannot be rewritten (read-only, in use) is left as it is with
+ * one line, and the next rules bump tries again. */
+static void ms_author_clean(const char *folder, const sh_mb_bundle *b)
+{
+    wchar_t *root = ms_wroot(), *src = sh_mb_wpath(folder), *mj = NULL, *staging = NULL, *old = NULL;
+    char *text = NULL, *clean = NULL, removed[64], kept[64], why[300] = "";
+    size_t len = 0, clen = 0, n;
+    sh_mb_bundle chk;
+    memset(&chk, 0, sizeof chk);
+    if (!root || !src || !b || b->legacy) goto done;
+    mj = ms_wjoin(src, L"mod.json");
+    text = mj ? ms_read_text(mj, 16u << 20, &len) : NULL;
+    clean = text ? sh_mb_author_retire(text, len, b, &clen, removed, sizeof removed, kept, sizeof kept) : NULL;
+    if (!clean) {
+        if (text && kept[0])
+            ms_log("MODS: store: %s: mod.json keeps its author key(s) %s: they are part of what the mod builds", ms_rel(folder),
+                   kept);
+        goto done;
+    }
+    /* Proof before anything is written: the cleaned text builds to the same bundle. */
+    if (!sh_mb_load_text(clean, clen, &chk) || strcmp(chk.hash, b->hash)) {
+        ms_log("MODS: store: %s: mod.json keeps its author key(s) %s: without them it would not read as bundle %.16s",
+               ms_rel(folder), removed, b->hash);
+        goto done;
+    }
+    n = wcslen(src) + 32;
+    staging = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    old = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    if (!staging || !old) goto done;
+    _snwprintf_s(staging, n, _TRUNCATE, L"%s.staging-%lu", src, GetCurrentProcessId());
+    _snwprintf_s(old, n, _TRUNCATE, L"%s.old-%lu", src, GetCurrentProcessId());
+    if (ms_exists(staging)) ms_rmtree(staging, root);
+    if (ms_exists(old)) ms_rmtree(old, root);
+    if (!ms_hl_stage(src, staging, 1, clean, clen, why, sizeof why)) {
+        ms_rmtree(staging, root);
+        goto refused;
+    }
+    if (!ms_move_folder(src, old)) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "%s", ms_why(GetLastError(), ms_rel(folder), 1, 0));
+        ms_rmtree(staging, root);
+        goto refused;
+    }
+    if (!ms_move_folder(staging, src)) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "%s", ms_why(GetLastError(), ms_rel(folder), 1, 0));
+        if (!ms_move_folder(old, src))
+            ms_log("MODS: store: %s: the folder could not be put back from %ls (%s)", ms_rel(folder), old,
+                   ms_why(GetLastError(), ms_rel(folder), 1, 0));
+        ms_rmtree(staging, root);
+        goto refused;
+    }
+    if (!ms_rmtree(old, root))
+        ms_log("MODS: store: %s: the folder's old copy %ls could not be removed completely; it is not a mod (its name "
+               "ends in .old-)", ms_rel(folder), old);
+    ms_log("MODS: store: %s: mod.json cleaned once: %s left the author block (the key %s lives in the product block); "
+           "bundle %.16s unchanged%s%s%s", ms_rel(folder), removed, b->id, b->hash, kept[0] ? "; kept " : "", kept,
+           kept[0] ? ", part of what the mod builds" : "");
+    goto done;
+refused:
+    ms_log("MODS: store: %s: mod.json keeps its author key(s) %s: it could not be rewritten (%s); the folder is unchanged",
+           ms_rel(folder), removed, why[0] ? why : "unknown");
+done:
+    sh_mb_free(&chk);
+    free(text);
+    free(clean);
+    free(mj);
+    free(staging);
+    free(old);
+    free(src);
+    free(root);
+}
+
 /* Build a folder of the store in place and write its product block. A
  * hand-made folder first gets its key (sh_ms_first_key) and is built under
  * its new name, which `built` (optional) receives; a refused rename refuses
@@ -2467,6 +2580,7 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
     sh_mb_resolver chain_resolver;
     ms_chain chain;
     char one[SH_MB_CAUSE_MAX], renamed[MAX_PATH * 4];
+    int old_rules;
     memset(b, 0, sizeof *b);
     if (built && built_cap) strncpy_s(built, built_cap, folder, _TRUNCATE);
     switch (sh_ms_first_key(folder, renamed, sizeof renamed, one, sizeof one)) {
@@ -2477,6 +2591,7 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
         break;
     default: break;
     }
+    old_rules = sh_mb_block_rules(folder);
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
     if (!sh_mb_build(folder, &chain_resolver, b)) {
@@ -2494,6 +2609,7 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
         ms_note_cause(folder, one);
         return ms_cause(cause, cap, "%s", one);
     }
+    if (old_rules < SH_MB_RULES) ms_author_clean(folder, b);
     ms_note_cause(folder, NULL);
     sh_ms_note_build(folder, b);
     return 1;

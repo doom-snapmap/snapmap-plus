@@ -315,6 +315,11 @@ name". Mods you download or import are never refused on their files. A map whose
   `mods\downloads\<map title>\<key>\`, and a mod a rawmap or prefab ZIP brought in
   `mods\imports\<ZIP name>\<key>\`; the Mods tab shows those as organizing folders and says
   "Downloaded for <map title>".
+- At the first rebuild after an update that changes the build rules, each mod folder's `mod.json`
+  is tidied once: the old `id` moves into the product's block as its key (the key itself never
+  changes) and the retired `shadows` key goes, without changing the mod's hash; `scope` stays
+  because it is part of that hash. A folder that cannot be rewritten (a file held open) is left as
+  it is and says so in the log.
 - Playing your own published map uses your own mod folders, as opening it from My Maps does: a row
   whose mod one of your folders builds follows that folder's current build, and nothing is
   downloaded for it. A map someone else published plays exactly the builds it pins. Nothing installed is replaced, and
