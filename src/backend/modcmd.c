@@ -201,7 +201,7 @@ static void mc_build(const char *folder_in)
     r.installed_context = &list;
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
-    if (!sh_mb_build(folder, &r, &b)) {
+    if (!sh_mb_build(folder, NULL, &r, &b)) {
         if (b.id[0]) {
             mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.file_count,
                     b.total_size);
@@ -801,7 +801,7 @@ int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
     r.installed_context = &list;
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
-    if (!sh_mb_build(folder, &r, &b)) {
+    if (!sh_mb_build(folder, NULL, &r, &b)) {
         if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
         mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
     } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {

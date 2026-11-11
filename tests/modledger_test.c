@@ -221,8 +221,8 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"id\": \"%s\",\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n"
-                      "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\", \"built\": %d,\n"
+                      "{\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n"
+                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d,\n"
                       "    \"shadows\": [],\n    \"files\": [\n", id, id, hash64(hash_digit, h), built);
     for (i = 0; i < n; ++i) {
         char *p;
@@ -240,10 +240,10 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
     write_file(path, json, at);
 }
 
-#define AN_WALK "cooked/anim/md6/mods/k.anim/walk.bmd6anim"
-#define AN_IDLE "cooked/anim/md6/mods/k.anim/idle.bmd6anim"
-#define AN_SKEL "generated/skeleton/md6/mods/k.anim/body.bmd6skl"
-#define AN_DECL "generated/decls/md6def/mods/k.anim/body.md6.decl"
+#define AN_WALK "cooked/anim/md6/mods/kanim000/walk.bmd6anim"
+#define AN_IDLE "cooked/anim/md6/mods/kanim000/idle.bmd6anim"
+#define AN_SKEL "generated/skeleton/md6/mods/kanim000/body.bmd6skl"
+#define AN_DECL "generated/decls/md6def/mods/kanim000/body.md6.decl"
 
 typedef struct seen { int walk, idle, skel, decl, other, kinds_ok; } seen;
 static int on_refresh(void *context, const sh_modserve_refresh_item *it)
@@ -287,22 +287,22 @@ static int serve(const char *request)
 static void test_anim_kind(const char *top)
 {
     static const fx b1[] = {
-        { AN_WALK, "MA-walk-one", "anim", "md6/mods/k.anim/walk.md6anim", '1' },
-        { AN_IDLE, "MA-idle", "anim", "md6/mods/k.anim/idle.md6anim", '2' },
-        { AN_SKEL, "SK-one", "skeleton", "md6/mods/k.anim/body.md6skl", '5' },
-        { AN_DECL, "md6Def body { anim \"md6/mods/k.anim/walk.md6anim\" }", "md6Def", "mods/k.anim/body.md6", '7' },
+        { AN_WALK, "MA-walk-one", "anim", "md6/mods/kanim000/walk.md6anim", '1' },
+        { AN_IDLE, "MA-idle", "anim", "md6/mods/kanim000/idle.md6anim", '2' },
+        { AN_SKEL, "SK-one", "skeleton", "md6/mods/kanim000/body.md6skl", '5' },
+        { AN_DECL, "md6Def body { anim \"md6/mods/kanim000/walk.md6anim\" }", "md6Def", "mods/kanim000/body.md6", '7' },
     };
     static const fx b2[] = {
-        { AN_WALK, "MA-walk-two!", "anim", "md6/mods/k.anim/walk.md6anim", '3' },
-        { AN_IDLE, "MA-idle", "anim", "md6/mods/k.anim/idle.md6anim", '2' },
-        { AN_SKEL, "SK-one", "skeleton", "md6/mods/k.anim/body.md6skl", '5' },
-        { AN_DECL, "md6Def body { anim \"md6/mods/k.anim/walk.md6anim\" }", "md6Def", "mods/k.anim/body.md6", '7' },
+        { AN_WALK, "MA-walk-two!", "anim", "md6/mods/kanim000/walk.md6anim", '3' },
+        { AN_IDLE, "MA-idle", "anim", "md6/mods/kanim000/idle.md6anim", '2' },
+        { AN_SKEL, "SK-one", "skeleton", "md6/mods/kanim000/body.md6skl", '5' },
+        { AN_DECL, "md6Def body { anim \"md6/mods/kanim000/walk.md6anim\" }", "md6Def", "mods/kanim000/body.md6", '7' },
     };
     static const fx b3[] = {
-        { AN_WALK, "MA-walk-three", "anim", "md6/mods/k.anim/walk.md6anim", '4' },
-        { AN_IDLE, "MA-idle", "anim", "md6/mods/k.anim/idle.md6anim", '2' },
-        { AN_SKEL, "SK-two", "skeleton", "md6/mods/k.anim/body.md6skl", '6' },
-        { AN_DECL, "md6Def body { anim \"md6/mods/k.anim/walk.md6anim\" }", "md6Def", "mods/k.anim/body.md6", '7' },
+        { AN_WALK, "MA-walk-three", "anim", "md6/mods/kanim000/walk.md6anim", '4' },
+        { AN_IDLE, "MA-idle", "anim", "md6/mods/kanim000/idle.md6anim", '2' },
+        { AN_SKEL, "SK-two", "skeleton", "md6/mods/kanim000/body.md6skl", '6' },
+        { AN_DECL, "md6Def body { anim \"md6/mods/kanim000/walk.md6anim\" }", "md6Def", "mods/kanim000/body.md6", '7' },
     };
     char root[MAX_PATH], h1[65], h2[65];
     const char *list[1];
@@ -311,11 +311,11 @@ static void test_anim_kind(const char *top)
     sh_modledger_rec rec;
     sh_modledger_ident now;
     seen s;
-    printf("-- refresh: the anim kind, one key at two hashes\n");
+    printf("-- refresh: the anim kind, one salt at two hashes (a map's place and the root)\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\anims\\mods", top);
     mkdirs(root);
-    make_bundle(root, "anim-a", "k.anim", 'a', 100, b1, 4);
-    make_bundle(root, "anim-b", "k.anim", 'b', 200, b2, 4);
+    make_bundle(root, "maps\\Anim map\\anim-a", "kanim000", 'a', 100, b1, 4);
+    make_bundle(root, "anim-b", "kanim000", 'b', 200, b2, 4);
     hash64('a', h1);
     hash64('b', h2);
     sh_modledger_reset();
@@ -325,15 +325,15 @@ static void test_anim_kind(const char *top)
     memset(&s, 0, sizeof s);
     sh_modserve_each_refresh(on_refresh, &s);
     sh_modserve_scope_enable(1);
-    CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h2));   /* no map: the newest build */
+    CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h2));   /* no map: the root build */
 
-    /* Served once with no map open: the ledger holds the newest build's bytes. */
+    /* Served once with no map open: the ledger holds the root build's bytes. */
     CHECK(serve(AN_WALK) == 1 && serve(AN_IDLE) == 1);
     CHECK(sh_modledger_find(AN_WALK, &rec) && now_ident(AN_WALK, &now));
     CHECK(sh_modledger_decide(&rec, &now, 0, 1) == SH_MODLEDGER_KEEP);
     CHECK(rec.id.bundle == 0xbbbbbbbbbbbbbbbbull && rec.id.file == 0x3333333333333333ull);
 
-    /* A map pinning the first build: the anim whose bytes differ is marked,
+    /* A map pinning its place's build: the anim whose bytes differ is marked,
      * as an anim; the one both builds carry is not. */
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
@@ -371,12 +371,12 @@ static void test_anim_kind(const char *top)
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
 
-    /* A rescan that changes the newest build's anim and skeleton: the anim is
+    /* A rescan that changes the root build's anim and skeleton: the anim is
      * a pending reload, the skeleton a restart. */
     {
         char dir[MAX_PATH];
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\anim-b", root);
-        make_bundle(root, "anim-b", "k.anim", 'c', 300, b3, 4);
+        make_bundle(root, "anim-b", "kanim000", 'c', 300, b3, 4);
         (void)dir;
     }
     memset(&s, 0, sizeof s);
