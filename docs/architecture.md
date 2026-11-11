@@ -792,11 +792,17 @@ These backend files share the work:
 - `modzip.c` is the product's ZIP form, shared by those exports and the mod
   store's build archives: the writer stores every entry (method 0) with its
   CRC-32 and a fixed 1980-01-01 time, so the same content is byte-identical;
-  the reader accepts stored and deflate entries, refuses ZIP64, split and
-  encrypted archives, duplicate names and unsafe names (an absolute path, a
-  `..` step, a backslash, a colon or a control character), checks each
-  entry's CRC-32 when it reads it, and can stand over a plain folder (a
-  prefab file and its `mods\` beside it). At most 65535 entries and 4 GiB.
+  the reader trusts no field of an archive: at open it checks the end record,
+  the directory's bounds and, for every entry, the method (stored or deflate
+  only), the encryption flag, ZIP64 size markers, a stored entry's equal
+  sizes, a local record and data lying before the directory, a name without
+  NUL that is safe (no absolute path, `..` step, backslash, colon or control
+  character) and no two names that differ only in case; anything else
+  refuses the whole archive in one sentence ending "Ask whoever shared it to
+  export it again". A read bounds its allocation by the caller's limit and
+  checks the CRC-32. It can stand over a plain folder (a prefab file and its
+  `mods\` beside it). At most 65535 entries and 4 GiB. `modzip_test` fuzzes
+  it with every truncation and one-byte change of an archive.
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
   inserts and strips it, and removes the serializer's comments so the file is
@@ -3053,10 +3059,22 @@ No and a failed download behave as for a published map. The gate is bound with t
 build where they did not install, nothing is counted missing and rawmaps load as
 before.
 
+Transport off the game's thread. A ZIP's import (File > Load Rawmap,
+`sh_rawmaps load`, `sh_mods import`), a save to a `.zip` and the companion
+`.zip` beside a `.json` save read and write every file of the map's mods, so
+each runs on a thread of its own (`rawmap.c`, one at a time; another request
+meanwhile is refused with "Snapmap+ is still importing or exporting another
+map; try again when it is done"). An import says "Importing <file> and its
+mods; it opens when that is done."; the main tick (`sh_rawmap_poll_main`) then
+holds the imported text and asks the editor to open the map again, which parses
+exactly those bytes. The store lock is taken only to choose and install
+builds, never while files are copied or read. Every path is UTF-8 and opened
+through the wide calls (`SH_RAWMAP_PATH_MAX`).
+
 Saving. After every rawmap write of a map with at least one row (the File menu's
 Save Rawmap and Save Rawmap As, and `sh_rawmaps save`), the export is written beside the JSON at the same path with `.zip`
-(`rawmap.json` becomes `rawmap.zip`), through `modexport_write_text_report`. The
-next main tick (`sh_rawmap_poll_main`) shows one toast and one console line:
+(`rawmap.json` becomes `rawmap.zip`), through `modexport_write_text_report` on
+the transport thread. The main tick that takes its result shows one toast and one console line:
 "This map uses N mod(s); share <name>.zip, the .json alone will not load for
 others." A save whose own path ends in `.zip` is the export already; a map with no
 rows writes only the JSON. `sh_rawmaps status` and the File menu's status
