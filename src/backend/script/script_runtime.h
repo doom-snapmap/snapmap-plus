@@ -64,8 +64,9 @@ extern "C" {
 
 #define SH_SCRIPT_API_VERSION   1
 #define SH_SCRIPT_SALT_CAP      16
-#define SH_SCRIPT_MODNAME_CAP   96
-#define SH_SCRIPT_DEFNAME_CAP   192        /* a full entityDef name, mods/<salt>/... */
+/* A mod's display name: the map row holds it in 320 bytes and the builder
+ * refuses a longer one with a sentence, so every name a mod can have fits. */
+#define SH_SCRIPT_MODNAME_CAP   321
 
 #define SH_SCRIPT_HOOK_STRIDE   1000       /* VM instructions between clock reads */
 #define SH_SCRIPT_WALL_MS       5000       /* wall time one delivery may run before it is stopped */
@@ -158,7 +159,6 @@ int sh_script_started(void);
 
 /* An entityDef chain (the entityDef's name, then its inherits, a newline
  * between them) fits in this many bytes. */
-#define SH_SCRIPT_NAMES_CAP  512
 
 /* Records come in through the mod's queue (script_queue.h), posted by the
  * engine hooks with handles from the handle table:
@@ -238,14 +238,14 @@ uint64_t sh_script_check_entity(lua_State *L, int arg, const char *call);
  * subscriber records the same way) and not yet removed. */
 int sh_script_owns_entity(lua_State *L, uint64_t handle);
 
-/* The mod-relative naming rule. Resolve the name at `arg` into out:
- * "ai/tyrant" -> "mods/<salt>/ai/tyrant"; "mods/<salt>/..." with this mod's
- * own salt is accepted as written. Any other "mods/..." name is refused. A
- * game("...") reference resolves to the game name when allow_game (then
- * *is_game = 1) and is refused otherwise. Raises a plain error naming `call`
- * on any refusal, before the caller touches the engine. */
-void sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game,
-                          char *out, size_t cap, int *is_game);
+/* The mod-relative naming rule. Resolve the name at `arg` (any length) and
+ * return the full name, valid for the next seven resolutions of this state
+ * (the stack is left as it was): "ai/tyrant" -> "mods/<salt>/ai/tyrant"; "mods/<salt>/..." with this
+ * mod's own salt is accepted as written. Any other "mods/..." name is
+ * refused. A game("...") reference resolves to the game name when allow_game
+ * (then *is_game = 1) and is refused otherwise. Raises a plain error naming
+ * `call` on any refusal, before the caller touches the engine. */
+const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game);
 
 /* Raise a plain error at the calling script line: `fmt` is one sentence the
  * stop line shows as written ("\"spawn\" can only spawn this mod's

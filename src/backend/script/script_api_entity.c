@@ -255,14 +255,22 @@ static int l_alive(lua_State *L)
 static int l_def(lua_State *L)
 {
     const sh_script_engine *e = eng();
-    char name[SH_SCRIPT_DEFNAME_CAP], own[SH_SCRIPT_SALT_CAP + 8];
+    char own[SH_SCRIPT_SALT_CAP + 8], *name = NULL;
     void *ent = sh_script_api_entity(L, 1, "def", NULL);
-    size_t n;
-    if (!ent || !e || !e->def_name || !e->def_name(ent, name, sizeof name)) return nil1(L);
+    size_t n, cap;
+    if (!ent || !e || !e->def_name) return nil1(L);
+    /* the engine's name whole: read again with twice the room while it fills the buffer */
+    for (cap = 256;; cap *= 2) {
+        char *grown = (char *)realloc(name, cap);
+        if (!grown) { free(name); return luaL_error(L, "not enough memory"); }
+        name = grown;
+        if (!e->def_name(ent, name, cap)) { free(name); return nil1(L); }
+        if (strlen(name) + 1 < cap) break;
+    }
     _snprintf_s(own, sizeof own, _TRUNCATE, "mods/%s/", sh_script_salt(L));
     n = strlen(own);
-    if (!_strnicmp(name, own, n) && name[n]) lua_pushstring(L, name + n);   /* the mod's own name, as the script writes it */
-    else lua_pushstring(L, name);
+    lua_pushstring(L, !_strnicmp(name, own, n) && name[n] ? name + n : name);   /* the mod's own name, as the script writes it */
+    free(name);
     return 1;
 }
 
@@ -503,14 +511,14 @@ static int l_anim_finished(lua_State *L)
 static int l_spawn(lua_State *L)
 {
     const sh_script_engine *e = eng();
-    char def[SH_SCRIPT_DEFNAME_CAP];
+    const char *def;
     float pos[3];
     double yaw = 0;
     const char *why = NULL;
     void *ent;
     int mod = -1;
     sh_script_handle h;
-    sh_script_check_name(L, 1, "spawn", 0, def, sizeof def, NULL);
+    def = sh_script_check_name(L, 1, "spawn", 0, NULL);
     sh_script_api_check_vec(L, 2, "spawn", "where to spawn", pos);
     sh_script_api_opt_number(L, 3, "spawn", "the facing in degrees", &yaw);
     sh_script_api_check_room(L, "spawn");

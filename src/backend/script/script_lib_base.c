@@ -219,7 +219,7 @@ static int sb_game(lua_State *L)
 {
     size_t n, i;
     const char *s = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
-    if (!s || !n || n >= SH_SCRIPT_DEFNAME_CAP)
+    if (!s || !n)
         return sh_script_refuse(L, "\"game\" needs the name of a game decl, as game(\"fx/impacts/rocket\")");
     for (i = 0; i < n; i++) {
         char c = s[i];

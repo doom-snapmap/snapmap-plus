@@ -487,53 +487,68 @@ int sh_script_refuse(lua_State *L, const char *fmt, ...)
     return lua_error(L);
 }
 
-void sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game,
-                          char *out, size_t cap, int *is_game)
+/* Keep the string on top of the stack alive in one of the state's eight
+ * name slots and pop it: the stack is as the call found it, so a caller's
+ * argument positions (and their nils) stay as they were. */
+static const char *anchor_name(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
-    const char *name;
-    char buf[SH_SCRIPT_DEFNAME_CAP];
-    size_t n, i, prefix;
+    const char *p = lua_tostring(L, -1);
+    if (lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_NAMES) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_createtable(L, SHS_NAME_SLOTS, 0);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, SHS_REG_NAMES);
+    }
+    lua_pushvalue(L, -2);
+    lua_rawseti(L, -2, (lua_Integer)(m->name_slot++ % SHS_NAME_SLOTS) + 1);
+    lua_pop(L, 2);
+    return p;
+}
+
+const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game)
+{
+    shs_mod *m = shs_mod_of(L);
+    const char *name, *buf;
+    luaL_Buffer b;
+    size_t n, i, sl;
     if (is_game) *is_game = 0;
     if (luaL_testudata(L, arg, SHS_MT_GAME)) {
         lua_getiuservalue(L, arg, 1);
         name = lua_tostring(L, -1);
         if (!allow_game)
             sh_script_refuse(L, "\"%s\" can only use this mod's own content, not the game's \"%s\"", call, name ? name : "");
-        copyz(out, cap, name);
-        lua_pop(L, 1);
+        if (!name) { lua_pop(L, 1); lua_pushstring(L, ""); }
         if (is_game) *is_game = 1;
-        return;
+        return anchor_name(L);
     }
     if (lua_type(L, arg) != LUA_TSTRING)
         sh_script_refuse(L, "\"%s\" needs a name here, got %s", call,
                          lua_isnoneornil(L, arg) ? "nothing" : luaL_typename(L, arg));
     name = lua_tolstring(L, arg, &n);
-    if (n == 0 || n >= sizeof buf)
-        sh_script_refuse(L, "\"%s\" was given a name that is %s", call, n ? "too long" : "empty");
+    if (n == 0) sh_script_refuse(L, "\"%s\" was given a name that is empty", call);
+    luaL_buffinit(L, &b);
     for (i = 0; i < n; i++) {
         char c = name[i];
         if (c == '\\') c = '/';
         if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/'))
             sh_script_refuse(L, "\"%s\" was given \"%s\", which is not a usable name (use letters, digits, _ - . and /)", call, name);
-        buf[i] = c;
+        luaL_addchar(&b, c);
     }
-    buf[n] = 0;
+    luaL_pushresult(&b);
+    buf = lua_tostring(L, -1);
     if (buf[0] == '/' || buf[n - 1] == '/' || strstr(buf, "//") || strstr(buf, ".."))
         sh_script_refuse(L, "\"%s\" was given \"%s\", which is not a usable name", call, name);
+    sl = strlen(m->salt);
     if (strncmp(buf, "mods/", 5) == 0) {
-        size_t sl = strlen(m->salt);
         if (strncmp(buf + 5, m->salt, sl) != 0 || buf[5 + sl] != '/' || !buf[6 + sl])
             sh_script_refuse(L, "\"%s\" can only use this mod's own content; \"%s\" belongs to another mod", call, name);
-        copyz(out, cap, buf);
-        return;
+        return anchor_name(L);                         /* already the full name */
     }
-    prefix = 6 + strlen(m->salt);
-    if (prefix + n >= cap)
-        sh_script_refuse(L, "\"%s\" was given a name that is too long", call);
-    _snprintf_s(out, cap, _TRUNCATE, "mods/%s/%s", m->salt, buf);
-    out[cap - 1] = 0;
+    lua_pushfstring(L, "mods/%s/%s", m->salt, buf);
+    lua_remove(L, -2);
+    return anchor_name(L);
 }
 
 /* --------------------------------------------------------- registration */
@@ -561,7 +576,8 @@ static int add_bind(shs_mod *m, const char *full, unsigned bit)
             if (!b) ok = 0;
             else { m->binds = b; m->cbinds = c; }
         }
-        if (ok) { copyz(m->binds[i].name, sizeof m->binds[i].name, full); m->binds[i].kinds = 0; m->nbinds++; }
+        if (ok && !(m->binds[i].name = _strdup(full))) ok = 0;
+        if (ok) { m->binds[i].kinds = 0; m->nbinds++; }
     }
     if (ok) m->binds[i].kinds |= bit;
     ReleaseSRWLockExclusive(&g_lock);
@@ -598,12 +614,12 @@ static int on_entity(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
     int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
-    char call[24], full[SH_SCRIPT_DEFNAME_CAP];
-    const char *notify = NULL;
+    char call[24];
+    const char *full, *notify = NULL;
     int fn = SHS_KEYED(kind) ? 3 : 2;
     _snprintf_s(call, sizeof call, _TRUNCATE, "on.%s", k_kinds[kind]);
     call[sizeof call - 1] = 0;
-    sh_script_check_name(L, 1, call, 0, full, sizeof full, NULL);
+    full = sh_script_check_name(L, 1, call, 0, NULL);
     if (kind == SHS_KIND_FRAME) {
         size_t n;
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
@@ -944,6 +960,10 @@ static void close_mod(shs_mod *m, int status)
     AcquireSRWLockExclusive(&g_lock);
     m->status = status;
     m->prepared = 0;
+    {
+        int k;
+        for (k = 0; k < m->nbinds; k++) free(m->binds[k].name);
+    }
     free(m->binds);
     m->binds = NULL;
     m->nbinds = m->cbinds = 0;
@@ -1264,14 +1284,12 @@ static void call_chain(lua_State *L, const char *kind, const char *chain, int ar
 {
     const char *p = chain;
     while (p && *p) {
-        char name[SH_SCRIPT_DEFNAME_CAP];
         const char *e = strchr(p, '\n');
         size_t n = e ? (size_t)(e - p) : strlen(p);
-        if (n && n < sizeof name) {
-            memcpy(name, p, n);
-            name[n] = 0;
-            if (push_handlers(L, kind, name)) call_list(L, lua_gettop(L), args, nargs);
-            lua_pop(L, 1);
+        if (n) {
+            lua_pushlstring(L, p, n);              /* the name, whatever its length */
+            if (push_handlers(L, kind, lua_tostring(L, -1))) call_list(L, lua_gettop(L), args, nargs);
+            lua_pop(L, 2);
         }
         p = e ? e + 1 : NULL;
     }
@@ -1328,17 +1346,15 @@ static void call_chain_keyed(lua_State *L, const char *kind, const char *chain, 
 {
     const char *p = chain;
     while (p && *p) {
-        char name[SH_SCRIPT_DEFNAME_CAP];
         const char *e = strchr(p, '\n');
         size_t n = e ? (size_t)(e - p) : strlen(p);
-        if (n && n < sizeof name) {
-            memcpy(name, p, n);
-            name[n] = 0;
-            if (push_handlers(L, kind, name)) {
+        if (n) {
+            lua_pushlstring(L, p, n);              /* the name, whatever its length */
+            if (push_handlers(L, kind, lua_tostring(L, -1))) {
                 if (lua_getfield(L, -1, key) == LUA_TTABLE) call_list(L, lua_gettop(L), args, nargs);
                 lua_pop(L, 1);
             }
-            lua_pop(L, 1);
+            lua_pop(L, 2);
         }
         p = e ? e + 1 : NULL;
     }
@@ -1491,14 +1507,18 @@ static int job_remove(lua_State *L)
 
 static void spawn_one(shs_mod *m, sh_script_handle h)
 {
-    char chain[SH_SCRIPT_NAMES_CAP];
+    char *chain;
     shs_ent_job j;
-    if (sh_script_handle_names(h, chain, sizeof chain) <= 0) return;
+    int n = sh_script_handle_names(h, NULL, 0);
+    if (n <= 0 || !(chain = (char *)malloc((size_t)n + 1))) return;
+    sh_script_handle_names(h, chain, (size_t)n + 1);   /* the chain whole */
     lower(chain);
-    if (!chain_bound(m, chain)) return;            /* none of its names is bound: not driven */
-    j.handle = h;
-    j.chain = chain;
-    run_job(m, job_spawn, &j);
+    if (chain_bound(m, chain)) {                   /* else none of its names is bound: not driven */
+        j.handle = h;
+        j.chain = chain;
+        run_job(m, job_spawn, &j);
+    }
+    free(chain);
 }
 
 static void remove_one(shs_mod *m, sh_script_handle h)

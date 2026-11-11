@@ -14,6 +14,8 @@
 #define SHS_REG_RUNS     "snapmap-plus.runs"       /* coroutine -> true, weak keys */
 #define SHS_REG_LOADED   "snapmap-plus.loaded"     /* require name -> value */
 #define SHS_REG_METHODS  "snapmap-plus.methods"    /* entity method name -> function */
+#define SHS_REG_NAMES    "snapmap-plus.names"      /* the last names sh_script_check_name resolved */
+#define SHS_NAME_SLOTS   8
 
 /* A script's path as the log names it (scripts, lib, the file name): a
  * file name is at most 255 characters on Windows file systems. */
@@ -29,7 +31,7 @@ typedef struct shs_ent {
 } shs_ent;
 
 typedef struct shs_bind {
-    char     name[SH_SCRIPT_DEFNAME_CAP];
+    char    *name;           /* malloc'd, a full entityDef name of any length */
     unsigned kinds;
 } shs_bind;
 
@@ -69,6 +71,7 @@ typedef struct shs_mod {
     int       nfiles;
     int       files_found;   /* entry files listed for this map (kept after the list is freed) */
     int       files_run;
+    unsigned  name_slot;     /* the next of the SHS_NAME_SLOTS resolved names to reuse */
     int       handlers;
     uint64_t  seed;
 

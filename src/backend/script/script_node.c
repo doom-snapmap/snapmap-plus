@@ -654,11 +654,15 @@ static int entity_uid(void *entity)
 /* 1 when the recorded entityDef chain's first name is a Script node's. */
 static int handle_is_node(sh_script_handle h)
 {
-    char names[SH_SCRIPT_NAMES_CAP], *nl;
-    if (sh_script_handle_names(h, names, sizeof names) <= 0) return 0;
+    char *names, *nl;
+    int n = sh_script_handle_names(h, NULL, 0), is;
+    if (n <= 0 || !(names = (char *)malloc((size_t)n + 1))) return 0;
+    sh_script_handle_names(h, names, (size_t)n + 1);   /* the chain whole */
     nl = strchr(names, '\n');
     if (nl) *nl = 0;
-    return sh_script_node_is_def(names, NULL, 0);
+    is = sh_script_node_is_def(names, NULL, 0);
+    free(names);
+    return is;
 }
 
 /* ---- the Relay DoAction detour (main thread, the game frame) ---- */

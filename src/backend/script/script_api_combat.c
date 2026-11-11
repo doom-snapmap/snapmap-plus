@@ -317,12 +317,12 @@ static const sh_script_engine *eng(void)
  * decl. */
 static void *check_decl(lua_State *L, int arg, const char *call, const char *type, const char *what)
 {
-    char full[SH_SCRIPT_DEFNAME_CAP];
+    const char *full;
     void *decl;
     if (lua_type(L, arg) != LUA_TSTRING && !lua_isuserdata(L, arg))
         sh_script_refuse(L, "\"%s\" needs %s (the name of one of this mod's %s decls), got %s", call, what, type,
                          lua_isnoneornil(L, arg) ? "nothing" : luaL_typename(L, arg));
-    sh_script_check_name(L, arg, call, 0, full, sizeof full, NULL);
+    full = sh_script_check_name(L, arg, call, 0, NULL);
     if (!CE(decl)) return NULL;
     decl = g_ce.decl(type, full);
     if (!decl)

@@ -117,7 +117,7 @@ typedef struct {
     int      kind;
     uint64_t entity, other, inflictor;
     double   amount;
-    char     names[SH_SCRIPT_NAMES_CAP];
+    char     names[4096];
     char     text[4096];
     char     location[4096];
 } tev;
@@ -141,7 +141,7 @@ static int t_enqueue(const char *salt, const tev *ev)
     if (slot < 0 || sh_script_status(salt) != SH_SCRIPT_RUNNING || ev->kind < TEV_SPAWN || ev->kind > TEV_INPUT) return 0;
     if (ev->kind == TEV_SPAWN) {
         const char *names[16];
-        char buf[SH_SCRIPT_NAMES_CAP], *p, *next = NULL;
+        char buf[4096], *p, *next = NULL;
         int n = 0;
         strcpy_s(buf, sizeof buf, ev->names);
         for (p = strtok_s(buf, "\n", &next); p && n < 16; p = strtok_s(NULL, "\n", &next)) names[n++] = p;
@@ -200,10 +200,8 @@ static int run_one(const char *body)
 
 static int t_resolve(lua_State *L)
 {
-    char out[SH_SCRIPT_DEFNAME_CAP];
     int game = 0;
-    sh_script_check_name(L, 1, "resolve", lua_toboolean(L, 2), out, sizeof out, &game);
-    lua_pushstring(L, out);
+    lua_pushstring(L, sh_script_check_name(L, 1, "resolve", lua_toboolean(L, 2), &game));
     lua_pushboolean(L, game);
     return 2;
 }
@@ -919,6 +917,46 @@ static void test_long_stop_line(void)
     sh_script_map_end();
 }
 
+/* entityDef names past the old 191 characters, and a mod display name past
+ * the old 95: carried whole through registration, the spawn chain, the
+ * handlers and the stop line. */
+static void test_long_names(void)
+{
+    static char body[2048], name[400], modname[320], want[600];
+    char *line;
+    tev ev;
+    memset(name, 'q', 300);
+    name[300] = 0;
+    memset(modname, 'M', 300);
+    modname[300] = 0;
+    _snprintf_s(body, sizeof body, _TRUNCATE,
+                "api = 1\n"
+                "on.spawn('ai/%s', function(self) print('long spawn', #resolve('ai/%s')) end)\n"
+                "on.input('stop', function() error('done') end)\n", name, name);
+    files_clear();
+    file_add("aaaaaaaa", "main.lua", body);
+    CHECK(start1("aaaaaaaa", modname, 7) == 1);
+    memset(&ev, 0, sizeof ev);
+    ev.kind = TEV_SPAWN;
+    ev.entity = 77;
+    _snprintf_s(ev.names, sizeof ev.names, _TRUNCATE, "mods/aaaaaaaa/ai/%s", name);
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    sh_script_tick(0.1, 0.1);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "long spawn\t%d", (int)(strlen("mods/aaaaaaaa/ai/") + 300));
+    CHECK(strstr(log_of("aaaaaaaa"), want) != NULL);   /* the 317-character name resolved, bound and driven */
+    memset(&ev, 0, sizeof ev);
+    ev.kind = TEV_INPUT;
+    ev.entity = 1;
+    strcpy(ev.names, "stop");
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    sh_script_tick(0.2, 0.1);
+    line = sh_script_stop_line_dup("aaaaaaaa");
+    _snprintf_s(want, sizeof want, _TRUNCATE, "Script stopped: %s, scripts\\main.lua line 3", modname);
+    CHECK(line && strstr(line, want) == line);   /* the whole display name */
+    free(line);
+    sh_script_map_end();
+}
+
 static void test_log_whole(void)
 {
     int n;
@@ -1054,6 +1092,7 @@ int main(void)
     test_teardown();
     test_log_whole();
     test_long_stop_line();
+    test_long_names();
     test_fuzz();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
