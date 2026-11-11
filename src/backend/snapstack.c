@@ -84,9 +84,10 @@ static int ss_ids_copy_out(const ss_ids *v, int **out)
 }
 static void ss_ids_free(ss_ids *v) { free(v->items); v->items = NULL; v->count = 0; v->cap = 0; }
 
-/* Numbered stacks. */
-#define SS_MAX_STACKS 256   /* Stack indices clamp into this fixed range. */
-static ss_ids g_stacks[SS_MAX_STACKS];
+/* Numbered stacks: any non-negative index, each made the first time it is named. The
+ * pointer table grows; a stack itself never moves, so a pointer to it stays good. */
+static ss_ids **g_stacks;
+static int      g_stack_count;
 
 /* Main-thread handlers and frontend push/clear slots can mutate numbered stacks.
  * Lock mutations and snapshots so realloc cannot invalidate an active reader.
@@ -109,36 +110,70 @@ static void ss_unlock(void) { LeaveCriticalSection(&g_ss_lock); }
 
 static int ss_clamp_index(int index)
 {
-    if (index < 0) return 0;
-    if (index >= SS_MAX_STACKS) return SS_MAX_STACKS - 1;   /* clamp, never index OOB */
-    return index;
+    return index < 0 ? 0 : index;
 }
-static ss_ids *stack_get(int index) { return &g_stacks[ss_clamp_index(index)]; }
+/* The stack at `index`, made when first named; NULL only when memory runs out. */
+static ss_ids *stack_get(int index)
+{
+    ss_ids *s = NULL;
+    index = ss_clamp_index(index);
+    ss_lock();
+    if (index >= g_stack_count) {
+        int count = g_stack_count ? g_stack_count : 16;
+        ss_ids **grown;
+        while (count <= index) count = count > INT_MAX / 2 ? INT_MAX : count * 2;
+        grown = (ss_ids **)realloc(g_stacks, (size_t)count * sizeof *grown);
+        if (grown) {
+            memset(grown + g_stack_count, 0, (size_t)(count - g_stack_count) * sizeof *grown);
+            g_stacks = grown;
+            g_stack_count = count;
+        }
+    }
+    if (index < g_stack_count) {
+        if (!g_stacks[index]) g_stacks[index] = (ss_ids *)calloc(1, sizeof **g_stacks);
+        s = g_stacks[index];
+    }
+    ss_unlock();
+    return s;
+}
+static int stack_count_of(int index)
+{
+    ss_ids *s = stack_get(index);
+    return s ? s->count : 0;
+}
 /* Centralize locked stack mutations. */
 static int stack_push(int index, const int *ids, int n)
 {
+    ss_ids *s = stack_get(index);
+    int pushed = 0;
+    if (!s) return 0;
     ss_lock();
-    int pushed = ss_ids_push_dedup(stack_get(index), ids, n);
+    pushed = ss_ids_push_dedup(s, ids, n);
     ss_unlock();
     return pushed;
 }
 static void stack_clear(int index)
 {
+    ss_ids *s = stack_get(index);
+    if (!s) return;
     ss_lock();
-    ss_ids_clear(stack_get(index));
+    ss_ids_clear(s);
     ss_unlock();
 }
 static int stack_move_out(int index, int **out)
 {
+    ss_ids *s = stack_get(index);
+    int n = 0;
+    *out = NULL;
+    if (!s) return 0;
     ss_lock();
-    int n = ss_ids_move_out(stack_get(index), out);
+    n = ss_ids_move_out(s, out);
     ss_unlock();
     return n;
 }
 
-/* Named groups. */
-#define SS_GROUP_NAME_CAP 64
-typedef struct ss_group { char name[SS_GROUP_NAME_CAP]; ss_ids ids; } ss_group;
+/* Named groups, each name whole. */
+typedef struct ss_group { char *name; ss_ids ids; } ss_group;
 static ss_group *g_groups = NULL;
 static int        g_group_count = 0, g_group_cap = 0;
 
@@ -153,9 +188,10 @@ static ss_ids *group_get(const char *name)
         g_groups = ni;
         g_group_cap = ncap;
     }
-    ss_group *g = &g_groups[g_group_count++];
+    ss_group *g = &g_groups[g_group_count];
     memset(g, 0, sizeof *g);
-    _snprintf_s(g->name, sizeof g->name, _TRUNCATE, "%s", name);
+    if ((g->name = _strdup(name)) == NULL) return NULL;
+    g_group_count++;
     return &g->ids;
 }
 static int group_has(const char *name)
@@ -178,6 +214,7 @@ static int group_remove(const char *name)
         if (strcmp(g_groups[i].name, name) != 0) continue;
         int had = g_groups[i].ids.count;
         ss_ids_free(&g_groups[i].ids);
+        free(g_groups[i].name);
         for (int j = i; j < g_group_count - 1; j++)
             g_groups[j] = g_groups[j + 1];
         g_group_count--;                                /* The shifted duplicate no longer owns its buffer. */
@@ -188,7 +225,7 @@ static int group_remove(const char *name)
 
 static void group_remove_all(void)
 {
-    for (int i = 0; i < g_group_count; i++) ss_ids_free(&g_groups[i].ids);
+    for (int i = 0; i < g_group_count; i++) { ss_ids_free(&g_groups[i].ids); free(g_groups[i].name); }
     g_group_count = 0;
 }
 
@@ -230,6 +267,12 @@ static int ic_hovered_id(sh_iface *iface)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->hovered_id) return -1;
     return iface->vtbl->hovered_id(iface);
+}
+static int ic_entity_count(sh_iface *iface)
+{
+    int n = 0;
+    if (iface && iface->vtbl && iface->vtbl->entity_count) n = iface->vtbl->entity_count(iface);
+    return n > 0 ? n : 0;
 }
 static int ic_is_valid_id(sh_iface *iface, int id)
 {
@@ -425,7 +468,7 @@ static void ss_sync_stacks(void)
         g_ss_stack_generation = g_ss_group_generation = now;
         g_ss_generation_known = 1;
     } else if (g_ss_stack_generation != now) {
-        for (int i = 0; i < SS_MAX_STACKS; i++) ss_ids_clear(&g_stacks[i]);
+        for (int i = 0; i < g_stack_count; i++) if (g_stacks[i]) ss_ids_clear(g_stacks[i]);
         g_ss_stack_generation = now;
     }
     ss_unlock();
@@ -441,9 +484,6 @@ static void ss_sync(void)
     }
 }
 
-/* Bulk edits change at most this many entities in one command; more is refused before anything
- * changes, with the ids left where they were. */
-#define SS_BULK_MAX 512
 
 /* The operand's ids, caller-owned: a group is copied; a stack is consumed and its index is
  * written to *stack (-1 for a group), so a refused command can put them back. */
@@ -473,16 +513,6 @@ static void ss_toastf(sh_iface *iface, const char *fmt, ...)
     free(text);
 }
 
-/* Refuse an operand over the bulk limit, putting a consumed stack back. 1 = refused. */
-static int ss_over_limit(sh_iface *iface, const char *op, int *ids, int n, int stack)
-{
-    if (n <= SS_BULK_MAX) return 0;
-    ss_put_back(stack, ids, n);
-    free(ids);
-    ss_toastf(iface, "%s changes at most %d entities at once and this has %d; split it and run it again. "
-              "Nothing was changed.", op, SS_BULK_MAX, n);
-    return 1;
-}
 
 /* One bulk edit: serialize each entity, set `prop` to the JSON `leaf`, and apply the batch.
  * Entities without the property are counted in *missing. */
@@ -531,17 +561,18 @@ static void h_psel(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
     int index = ss_clamp_index(parse_stack_index(arg_at(argc, argv, 1)));
-    enum { SEL_CAP = 4096 };
     ss_sync();
-    int *sel = (int *)malloc((size_t)SEL_CAP * sizeof(int));
-    int *valid = (int *)malloc((size_t)SEL_CAP * sizeof(int));
+    /* The selection never holds more ids than the editor has entities (the engine's own table). */
+    int room = ic_entity_count(iface) + 1;
+    int *sel = (int *)malloc((size_t)room * sizeof(int));
+    int *valid = (int *)malloc((size_t)room * sizeof(int));
     if (!sel || !valid) { free(sel); free(valid); ic_toast(iface, "SnapStack", "psel: not enough memory."); return; }
-    int sel_n = ic_get_selection(iface, sel, SEL_CAP);
+    int sel_n = ic_get_selection(iface, sel, room);
     int valid_n = 0;
     for (int i = 0; i < sel_n; i++)
         if (ic_is_valid_id(iface, sel[i])) valid[valid_n++] = sel[i];
     int pushed = stack_push(index, valid, valid_n);
-    int now = stack_get(index)->count;
+    int now = stack_count_of(index);
     free(sel);
     free(valid);
     ic_clear_selection(iface);
@@ -568,7 +599,7 @@ static void h_phov(void *ctx, int argc, const char **argv)
     int hovered = ic_hovered_id(iface);
     if (hovered < 0) { ic_toast(iface, "SnapStack", "phov: nothing hovered (point at an entity in the 3D view)"); return; }
     int pushed = stack_push(index, &hovered, 1);
-    int now = stack_get(index)->count;
+    int now = stack_count_of(index);
     char *idstr = ic_id_string(iface, hovered);
     ss_toastf(iface, "phov: %s id %d \"%s\" onto stack %d (now %d)",
               pushed ? "pushed" : "already on --", hovered, idstr ? idstr : "", index, now);
@@ -594,13 +625,16 @@ static void h_pr(void *ctx, int argc, const char **argv)
     const char *hi_s = arg_at(argc, argv, 3);
     int lo = lo_s ? atoi(lo_s) : 0;
     int hi = hi_s ? atoi(hi_s) : 0;
-    enum { RANGE_CAP = 65536 };
     ss_sync();
     if (hi < lo) { int t = lo; lo = hi; hi = t; }
-    int *in_range = (int *)malloc((size_t)RANGE_CAP * sizeof(int));
+    /* Valid ids are below the editor's entity count (the engine's own table). */
+    int count = ic_entity_count(iface);
+    if (lo < 0) lo = 0;
+    if (hi >= count) hi = count - 1;
+    int *in_range = (int *)malloc((size_t)(hi >= lo ? hi - lo + 1 : 1) * sizeof(int));
     if (!in_range) { ic_toast(iface, "SnapStack", "pr: not enough memory."); return; }
     int n = 0;
-    for (int id = lo; id <= hi && n < RANGE_CAP; id++)
+    for (int id = lo; id <= hi; id++)
         if (ic_is_valid_id(iface, id)) in_range[n++] = id;
     int pushed = stack_push(index, in_range, n);
     free(in_range);
@@ -706,7 +740,6 @@ static void do_bulkset(sh_iface *iface, const char *op, int argc, const char **a
     }
     int n = ss_take(argc, argv, &ids, &stack);
     if (n <= 0) { free(ids); ss_toastf(iface, "%s: no entities on the stack.", op); return; }
-    if (ss_over_limit(iface, op, ids, n, stack)) return;
     ss_bulk_set(iface, op, ids, n, prop, leaf);
     free(ids);
 }
@@ -739,7 +772,6 @@ static void h_bse(void *ctx, int argc, const char **argv)
     if (!prop) { ic_toast(iface, "SnapStack", "usage: bse <stack> <path>"); return; }
     int n = ss_take_targets(iface, "bse", index, &ids);
     if (n == 0) return;
-    if (ss_over_limit(iface, "bse", ids, n, index)) return;
     char *receiver = ic_id_string(iface, ids[n - 1]);
     /* A quoted, escaped string: every byte escapes to at most six. */
     size_t room = receiver ? strlen(receiver) * 6 + 3 : 0;
@@ -766,7 +798,6 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
     if (!hardcoded_targets && !userPath) { ic_toast(iface, "SnapStack", "usage: accl <stack> <path>"); return; }
     int n = ss_take_targets(iface, op, index, &ids);
     if (n == 0) return;
-    if (ss_over_limit(iface, op, ids, n, index)) return;
     int receiver = ids[n - 1];
     int targets = n - 1;
     const char *path = hardcoded_targets ? "targets" : userPath;
@@ -893,7 +924,6 @@ static void do_class_inherit(sh_iface *iface, const char *op, int argc, const ch
     ss_sync();
     int n = ss_take(argc, argv, &ids, &stack);
     if (n <= 0) { free(ids); ss_toastf(iface, "%s: no entities on the stack.", op); return; }
-    if (ss_over_limit(iface, op, ids, n, stack)) return;
     for (int i = 0; i < n; i++) {
         if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit ||
             !iface->vtbl->get_declsource_copy || !iface->vtbl->rebuild_set_declsource) {
@@ -950,7 +980,8 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
         /* Snapshot under the lock before engine reads; frontend pushes may reallocate. */
         int *ids = NULL;
         ss_lock();
-        int n = ss_ids_copy_out(stack_get(index), &ids);
+        ss_ids *s = stack_get(index);
+        int n = s ? ss_ids_copy_out(s, &ids) : 0;
         ss_unlock();
         sh_printf("chkstk: stack %d holds %d id(s):\n", index, n);
         for (int i = 0; i < n; i++) {
@@ -964,13 +995,13 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
         int nonempty = 0, total = 0;
         sh_printf("chkstk: non-empty stacks:\n");
         ss_lock();
-        for (int i = 0; i < SS_MAX_STACKS; i++) {
-            if (g_stacks[i].count == 0) continue;
-            sh_printf("  stack %d: %d id(s)\n", i, g_stacks[i].count);
-            nonempty++; total += g_stacks[i].count;
+        for (int i = 0; i < g_stack_count; i++) {
+            if (!g_stacks[i] || g_stacks[i]->count == 0) continue;
+            sh_printf("  stack %d: %d id(s)\n", i, g_stacks[i]->count);
+            nonempty++; total += g_stacks[i]->count;
         }
         ss_unlock();
-        if (nonempty == 0) sh_printf("  (all %d stacks empty)\n", SS_MAX_STACKS);
+        if (nonempty == 0) sh_printf("  (every stack is empty)\n");
         ss_toastf(iface, "%d non-empty stack(s), %d id(s) total", nonempty, total);
     }
 }
@@ -1070,9 +1101,11 @@ void sh_snapstack_push_ids_backend(int index, const int *ids, int count)
 int sh_snapstack_clear_stack_backend(int index)
 {
     ss_sync_stacks();
-    ss_lock();
     ss_ids *s = stack_get(index);
-    int had = s->count;
+    int had = 0;
+    if (!s) return 0;
+    ss_lock();
+    had = s->count;
     ss_ids_clear(s);
     ss_unlock();
     return had;

@@ -71,8 +71,6 @@ static bool                     g_config_status_posted = false;
  * the window shows one refusal and touches nothing else. */
 static bool                     g_pair_mismatch = false;
 
-#define UI_CONFIG_KEY_CAP 128u
-#define UI_CONFIG_VALUE_CAP (64u * 1024u)
 
 static bool          g_sync_on       = false;   /* "Synchronize with editor" checkbox */
 static int           g_displayed_eid = -1;      /* entity the state panel is showing */
@@ -300,7 +298,20 @@ static void ui_log(const char *msg)
         fclose(f);
     }
 }
-static void ui_logf(const char *fmt, unsigned long a) { char l[256]; _snprintf_s(l, sizeof l, _TRUNCATE, fmt, a); ui_log(l); }
+/* A formatted line, whole: sized to what it holds. */
+static void ui_logp(const char *fmt, ...)
+{
+    va_list ap, copy;
+    va_start(ap, fmt);
+    va_copy(copy, ap);
+    int n = _vscprintf(fmt, copy);
+    va_end(copy);
+    std::string line(n > 0 ? (size_t)n : 0, '\0');
+    if (n > 0) vsnprintf(&line[0], (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    ui_log(line.c_str());
+}
+static void ui_logf(const char *fmt, unsigned long a) { ui_logp(fmt, a); }
 
 static unsigned long long ui_perf_now_us()
 {
@@ -315,9 +326,7 @@ static unsigned long long ui_perf_now_us()
 static void ui_perf_flush_collect(const char *reason)
 {
     if (g_collect_perf.calls == 0) return;
-    char l[512];
-    _snprintf_s(l, sizeof l, _TRUNCATE,
-                "perf poll-window: end=%s calls=%u entities=%d..%d selected_max=%d total_avg_us=%llu total_max_us=%llu collect_avg_us=%llu collect_max_us=%llu selection_avg_us=%llu selection_max_us=%llu state_calls=%u state_avg_us=%llu state_max_us=%llu",
+    ui_logp("perf poll-window: end=%s calls=%u entities=%d..%d selected_max=%d total_avg_us=%llu total_max_us=%llu collect_avg_us=%llu collect_max_us=%llu selection_avg_us=%llu selection_max_us=%llu state_calls=%u state_avg_us=%llu state_max_us=%llu",
                 reason ? reason : "unknown", g_collect_perf.calls,
                 g_collect_perf.min_entities, g_collect_perf.max_entities,
                 g_collect_perf.max_selection_count,
@@ -327,18 +336,14 @@ static void ui_perf_flush_collect(const char *reason)
                 g_collect_perf.state_calls,
                 g_collect_perf.state_calls ? g_collect_perf.state_total_us / g_collect_perf.state_calls : 0,
                 g_collect_perf.state_max_us);
-    ui_log(l);
     g_collect_perf = {};
 }
 
 static void ui_perf_note_collect(unsigned long long us, int entities, const char *reason)
 {
     if (!reason || strcmp(reason, "poll") != 0) {
-        char l[192];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "perf collect: reason=%s entities=%d duration_us=%llu",
+        ui_logp("perf collect: reason=%s entities=%d duration_us=%llu",
                     reason ? reason : "unknown", entities, us);
-        ui_log(l);
         return;
     }
 
@@ -353,10 +358,7 @@ static void ui_perf_note_collect(unsigned long long us, int entities, const char
     g_collect_perf.collect_total_us += us;
     if (us > g_collect_perf.collect_max_us) g_collect_perf.collect_max_us = us;
     if (us >= 5000) {
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "perf collect-slow: entities=%d duration_us=%llu", entities, us);
-        ui_log(l);
+        ui_logp("perf collect-slow: entities=%d duration_us=%llu", entities, us);
     }
 }
 
@@ -376,12 +378,9 @@ static void ui_perf_note_poll(unsigned long long total_us, unsigned long long co
     if (selection_count > g_collect_perf.max_selection_count)
         g_collect_perf.max_selection_count = selection_count;
     if (total_us >= 10000) {
-        char l[256];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "perf poll-slow: entities=%d selected=%d total_us=%llu collect_us=%llu selection_us=%llu state_us=%llu",
+        ui_logp("perf poll-slow: entities=%d selected=%d total_us=%llu collect_us=%llu selection_us=%llu state_us=%llu",
                     entities, selection_count, total_us, collect_us, selection_us,
                     state_called ? state_us : 0);
-        ui_log(l);
     }
     if (g_collect_perf.calls >= 90) ui_perf_flush_collect("30-second-window");
 }
@@ -415,6 +414,15 @@ static std::wstring ui_wpath(const char *utf8)
     if (w.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + w.substr(2);
     return w;
 }
+/* %LOCALAPPDATA%\snapmap-plus, whole, or "" when the folder is unknown. */
+static std::wstring ui_local_snapmap_dir()
+{
+    PWSTR p = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) dir = std::wstring(p) + L"\\snapmap-plus";
+    if (p) CoTaskMemFree(p);
+    return dir;
+}
 static FILE *ui_open(const char *utf8_path, const wchar_t *mode)
 {
     FILE *f = nullptr;
@@ -435,9 +443,7 @@ static const wchar_t *ui_fs_reason()
     case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: return L"missing";
     case ERROR_DIR_NOT_EMPTY: return L"notEmpty";
     default: {
-        char l[96];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "file operation failed: Windows error %lu", (unsigned long)e);
-        ui_log(l);
+        ui_logp("file operation failed: Windows error %lu", (unsigned long)e);
         return L"";
     }
     }
@@ -621,12 +627,9 @@ static void ui_rescan_timelines_timed(int n, const char *reason)
     unsigned long long started = ui_perf_now_us();
     ui_rescan_timelines(n);
     unsigned long long finished = ui_perf_now_us();
-    char l[224];
-    _snprintf_s(l, sizeof l, _TRUNCATE,
-                "perf timeline-rescan: reason=%s entities=%d timelines=%d duration_us=%llu",
+    ui_logp("perf timeline-rescan: reason=%s entities=%d timelines=%d duration_us=%llu",
                 reason ? reason : "unknown", n, g_tl_count,
                 finished >= started ? finished - started : 0);
-    ui_log(l);
 }
 /* The state panel's four texts, whole. */
 static bool ui_collect_state(int id, std::string &decl, std::string &cls, std::string &inh, std::string &dnm)
@@ -779,9 +782,7 @@ static int ui_serialize_entity_on_main(int id, std::string &buf, const char *wha
 {
     UiSerializeMain m = { id, &buf, what, 0 };
     if (!ui_on_main(ui_serialize_entity_main, &m, UI_MAIN_WAIT_MS)) {
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d not read -- the game did not run the request within the wait", what, id);
-        ui_log(l);
+        ui_logp("%s: entity %d not read -- the game did not run the request within the wait", what, id);
         return 0;
     }
     return m.n;
@@ -986,7 +987,7 @@ static int ui_create_prefab_main(void *ctx)
 static void ui_apply_create_prefab()
 {
     g_create_result = -1;
-    { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); ui_log(l); }
+    { ui_logp("create-prefab: START name='%s'", g_create_prefab_name.c_str()); }
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
         ui_log("create-prefab: ABORT (iface/slot/name missing)");
         return;
@@ -1010,12 +1011,10 @@ static void ui_apply_create_prefab()
         return;
     }
     if (cm.pre != sh_prefab_host::CREATE_GO) {
-        char l[200];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
+        ui_logp("create-prefab: ABORT (%s; %d selected, hovered %d)",
                     cm.pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
                     : cm.pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
                     : "hovering an entity that is not selected", cm.count, cm.hovered);
-        ui_log(l);
         g_create_result = cm.pre;
         return;
     }
@@ -1037,20 +1036,14 @@ static void ui_apply_create_prefab()
         return;
     }
     if (grab_status == SH_PREFAB_GRAB_CORRECTED) {
-        char l[256];
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "create-prefab: grab point corrected -- the view-centre line missed the hovered entity "
+        ui_logp("create-prefab: grab point corrected -- the view-centre line missed the hovered entity "
                     "(native grabDistance=%g, %g units outside it); saved grabDistance=%g from its centre",
                     (double)grab.native_distance, (double)grab.outside, (double)grab.distance);
-        ui_log(l);
     } else if (grab_status == SH_PREFAB_GRAB_UNCHECKED) {
         double d = 0.0;
         if (sh_prefab_grab_json_check(buf.c_str(), (size_t)n, &d) == 0) {
-            char l[200];
-            _snprintf_s(l, sizeof l, _TRUNCATE,
-                        "create-prefab: ABORT (grabDistance=%g: the view-centre line missed the hovered entity and "
+            ui_logp("create-prefab: ABORT (grabDistance=%g: the view-centre line missed the hovered entity and "
                         "this backend cannot rebuild the frame)", d);
-            ui_log(l);
             g_create_result = 3;
             return;
         }
@@ -1061,10 +1054,8 @@ static void ui_apply_create_prefab()
         size_t before = (size_t)n;
         n = (int)sh_prefab_block_strip_comments(&buf[0], before);
         buf.resize((size_t)n);
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: comments removed, %lu byte(s) -> %lu",
+        ui_logp("create-prefab: comments removed, %lu byte(s) -> %lu",
                     (unsigned long)before, (unsigned long)n);
-        ui_log(l);
     }
     FILE *fp = ui_open(path.c_str(), L"wb");
     if (!fp) { ui_log("create-prefab: ABORT (the file could not be opened for writing)"); return; }
@@ -1358,10 +1349,8 @@ static void ui_apply_new_entity()
     }
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = g_new_entity_json.c_str();
     g_new_entity_result = ui_apply_edit_seh(&it, 1, "new-entity");
-    char l[320];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "new-entity: '%s' staged=%d (kind=2: stage + auto pick-up), %zu bytes",
+    ui_logp("new-entity: '%s' staged=%d (kind=2: stage + auto pick-up), %zu bytes",
                 g_new_entity_label.c_str(), g_new_entity_result, g_new_entity_json.size());
-    ui_log(l);
 }
 
 /* Sound names are validated by the backend catalog before live playback. */
@@ -1483,10 +1472,8 @@ static void ui_poll_prefab_mods()
     call.seq = g_mods_wait_seq;
     int r = ui_module_prefab_call(&call);
     if (r == 2) return;
-    char l[400];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' (placement %d) finished %d", g_mods_wait_name.c_str(),
+    ui_logp("load-prefab: mods of '%s' (placement %d) finished %d", g_mods_wait_name.c_str(),
                 g_mods_wait_seq, r);
-    ui_log(l);
     g_mods_wait_seq = 0;
     if (r == 1) {
         /* Placed through the ordinary Load/Place, which now finds every mod installed. */
@@ -1551,9 +1538,8 @@ static void ui_apply_load_prefab()
     sh_prefab_watch watch;
     bool watched = ui_prefab_watch(&watch) >= 0;
     g_load_result = ui_apply_edit_seh(&it, 1, "load-prefab");
-    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
+    ui_logp("load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
-    ui_log(l);
     /* The game thread decides on its next frame whether the paste was queued (the prefab arrives
      * in hand) or only staged; the page is told once it has (ui_poll_place_outcome). */
     if (g_load_result == 1 && watched) {
@@ -1604,8 +1590,7 @@ static void ui_apply_save_timeline()
     }
     sh_apply_item it; it.kind = 0; it.id = g_save_timeline_eid; it.text = g_save_timeline_json.c_str();
     g_save_timeline_result = ui_apply_sync_seh(&it, 1, "save-timeline");
-    char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
-    ui_log(l);
+    ui_logp("save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
 }
 /* Move a prefab from one folder to another (drag-and-drop target): a move across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
@@ -1751,13 +1736,10 @@ static void ui_emit_list(int n, int ready, const char *reason)
     unsigned long long built = ui_perf_now_us();
     HRESULT hr = g_webview->PostWebMessageAsJson(json.c_str());
     unsigned long long posted = ui_perf_now_us();
-    char l[320];
-    _snprintf_s(l, sizeof l, _TRUNCATE,
-                "perf list-emit: seq=%lu reason=%s entities=%d timelines=%d json_chars=%llu build_us=%llu post_us=%llu hr=0x%08lx",
+    ui_logp("perf list-emit: seq=%lu reason=%s entities=%d timelines=%d json_chars=%llu build_us=%llu post_us=%llu hr=0x%08lx",
                 seq, reason ? reason : "unknown", n, g_tl_count,
                 (unsigned long long)json.size(), built >= started ? built - started : 0,
                 posted >= built ? posted - built : 0, (unsigned long)hr);
-    ui_log(l);
 }
 static void ui_send_list(const char *reason)
 {
@@ -2085,13 +2067,9 @@ static std::wstring ui_pick_start_folder(int kind)
         if (p) CoTaskMemFree(p);
         if (ui_is_dir(dl)) return dl;
     }
-    wchar_t dir[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
-        wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
-        CreateDirectoryW(dir, nullptr);        /* harmless if it already exists */
-        return dir;
-    }
-    return std::wstring();
+    std::wstring dir = ui_local_snapmap_dir();
+    if (!dir.empty()) CreateDirectoryW(dir.c_str(), nullptr);        /* harmless if it already exists */
+    return dir;
 }
 /* Keep the folder of a file the player picked, for that dialog kind's next open. UI thread. */
 static void ui_pick_keep_folder(int kind, const std::wstring &picked)
@@ -2102,9 +2080,7 @@ static void ui_pick_keep_folder(int kind, const std::wstring &picked)
     std::string value = sh_rawmap_picker::folder_to_config(folder);
     int r = g_iface->vtbl->config_set_json(g_iface, key, value.c_str());
     if (r == SH_CONFIG_SET_REJECTED) {
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "dialogs: could not keep the folder for %s", key);
-        ui_log(l);
+        ui_logp("dialogs: could not keep the folder for %s", key);
     }
 }
 /* Open a picker, unless one is already open. Returns with the dialog still to come -- the caller has
@@ -2513,21 +2489,21 @@ static int ui_count_prefab_entities(const std::string &body)
 }
 /* Read a single prefab file (resolved via +0xc0) and push its scene plus aggregate entity count.
  * folder="" selects the prefab root. */
-/* Read a bounded auxiliary file; return false for missing, oversized, or unreadable data. */
+/* Read a whole auxiliary file; return false for a missing, empty or unreadable one. */
 static bool ui_read_small_file(const char *path, std::string &body)
 {
     FILE *fp = ui_open(path, L"rb");
     if (!fp) return false;
-    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+    _fseeki64(fp, 0, SEEK_END); long long sz = _ftelli64(fp); _fseeki64(fp, 0, SEEK_SET);
     bool ok = false;
-    /* A module prefab's sidecar lists every module, so allow more than tags need. */
-    if (sz > 0 && sz <= 1024 * 1024) {
+    if (sz > 0) {
         body.resize((size_t)sz);
         size_t got = fread(&body[0], 1, (size_t)sz, fp);
         body.resize(got);
-        ok = true;
+        ok = got == (size_t)sz;
     }
     fclose(fp);
+    if (!ok) body.clear();
     return ok;
 }
 /* A view's top-level "kind" string, or "" (object prefabs have none). */
@@ -2589,8 +2565,8 @@ static bool ui_read_prefab_scene(const char *path, std::string &body)
     bool ok = false;
     body.clear();
     if (!fp) return false;
-    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-    if (sz > 0 && sz <= 8 * 1024 * 1024) {
+    _fseeki64(fp, 0, SEEK_END); long long sz = _ftelli64(fp); _fseeki64(fp, 0, SEEK_SET);
+    if (sz > 0) {
         body.resize((size_t)sz);
         size_t got = fread(&body[0], 1, (size_t)sz, fp);
         body.resize(got);
@@ -2602,8 +2578,9 @@ static bool ui_read_prefab_scene(const char *path, std::string &body)
 }
 /* A prefab's details as the view the page reads (SH_MODULE_PREFAB_META_READ): from the
  * file's snapmapPlus block, else (a prefab saved before the block) its sidecar. `text` is
- * the whole file when the caller has read it; otherwise at most the last 1 MB is read,
- * where the block sits. Empty when there are none or this backend cannot answer. */
+ * the whole file when the caller has read it; otherwise the file is read from the end, a
+ * window at a time and doubling, until the block's start is in it (or the whole file is).
+ * Empty when there are none or this backend cannot answer. */
 static std::string ui_prefab_view(const char *path, const char *meta_path, const std::string *text)
 {
     std::string tail, out;
@@ -2611,14 +2588,19 @@ static std::string ui_prefab_view(const char *path, const char *meta_path, const
     if (!text) {
         FILE *fp = ui_open(path, L"rb");
         if (fp) {
-            fseek(fp, 0, SEEK_END); long sz = ftell(fp);
-            long take = sz < 1024 * 1024 ? sz : 1024 * 1024;
-            if (take > 0) {
-                tail.resize((size_t)take);
-                fseek(fp, sz - take, SEEK_SET);
-                tail.resize(fread(&tail[0], 1, (size_t)take, fp));
+            _fseeki64(fp, 0, SEEK_END); long long sz = _ftelli64(fp);
+            /* The block is the file's last member: read from the end until its key is in the
+             * window, so a block of any size is read whole without reading the scene before it. */
+            for (long long take = 1024 * 1024;; take *= 2) {
+                if (take > sz) take = sz;
+                tail.assign((size_t)(take > 0 ? take : 0), '\0');
+                if (take > 0) {
+                    _fseeki64(fp, sz - take, SEEK_SET);
+                    tail.resize(fread(&tail[0], 1, (size_t)take, fp));
+                }
+                is_tail = take < sz;
+                if (!is_tail || tail.find("\"snapmapPlus\"") != std::string::npos) break;
             }
-            is_tail = take < sz;
             fclose(fp);
         }
         text = &tail;
@@ -2842,7 +2824,6 @@ static void ui_budget_poll()
  * the think loop posts (ui_mods_finish), the same handoff as the rawmap picker. Each job ends with
  * a fresh document, so the list follows every action without being asked. */
 #define UI_MODS_START_MS   8000   /* how long a job waits for the game to start a main-thread call */
-#define UI_MODS_DOC_MAX    (64 * 1024 * 1024)
 
 struct UiModsJob {
     int         action;    /* SH_MODS_ACT_*, or 0 for the document only */
@@ -2950,11 +2931,10 @@ static bool ui_pick_mods(bool zip, std::wstring &out)
         dlg->SetClientGuid(kModFolderPickerGuid);
     }
     {
-        wchar_t dir[MAX_PATH];
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
-            wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
+        std::wstring dir = ui_local_snapmap_dir();
+        if (!dir.empty()) {
             IShellItem *folder = nullptr;
-            if (SUCCEEDED(SHCreateItemFromParsingName(dir, nullptr, IID_PPV_ARGS(&folder))) && folder) {
+            if (SUCCEEDED(SHCreateItemFromParsingName(dir.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
                 dlg->SetDefaultFolder(folder);
                 folder->Release();
             }
@@ -3144,9 +3124,7 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
     }
     CloseHandle(h);
     if (action) {
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls started", name);
-        ui_log(l);
+        ui_logp("mods: %ls started", name);
     }
     return true;
 }
@@ -3181,9 +3159,7 @@ static void ui_mods_finish()
             ui_mods_post_result(name, false, L"The game did not take the request. Try again with the editor open.", nullptr);
         else
             ui_mods_post_result(name, false, L"Snapmap+ could not do that. Try again; if it keeps failing, use Send feedback.", nullptr);
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
-        ui_log(l);
+        ui_logp("mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
     }
     if (job.list_rc == 1) {
         g_mods_doc_gen = job.list_gen;
@@ -3321,10 +3297,8 @@ static void ui_mods_push_tick()
     if (!call.generation || call.generation == g_mods_doc_gen) return;
     if (!ui_mods_begin(0, false, std::string())) return;
     g_mods_job.pushed = true;   /* the worker reads only action, pick and arg; finish reads this */
-    char l[160];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "mods: the backend changed outside the window (generation %u, page has %u); "
+    ui_logp("mods: the backend changed outside the window (generation %u, page has %u); "
                 "pushing a fresh document", call.generation, g_mods_doc_gen);
-    ui_log(l);
 }
 
 /* The think loop's part, on the UI thread. */
@@ -3341,9 +3315,7 @@ static void ui_watch_tick()
     if (sh_fw_due(&g_fw_prefabs, now)) { covered = sh_fw_done(&g_fw_prefabs); prefabs = true; }
     LeaveCriticalSection(&g_watch_lock);
     if (prefabs) {
-        char l[160];
-        _snprintf_s(l, sizeof l, _TRUNCATE, "watch: the prefabs folder changed (%u change(s)); list refreshed", covered);
-        ui_log(l);
+        ui_logp("watch: the prefabs folder changed (%u change(s)); list refreshed", covered);
         ui_send_prefabs();
     }
 }
@@ -3412,7 +3384,7 @@ static void ui_mods_open_folder(const std::wstring &folder)
  * or ".." part. */
 static bool ui_mods_relative_file(const std::wstring &path)
 {
-    if (path.empty() || path.size() > 1000) return false;
+    if (path.empty()) return false;
     size_t at = 0;
     for (;;) {
         size_t cut = path.find(L'/', at);
@@ -3867,7 +3839,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
     LPWSTR jp = nullptr;
     if (SUCCEEDED(args->get_WebMessageAsJson(&jp)) && jp) {
         sh_config_message config_message = sh_extract_config_message(
-            jp, UI_CONFIG_KEY_CAP, UI_CONFIG_VALUE_CAP);
+            jp, SIZE_MAX, SIZE_MAX);   /* a setting's key and value have no size of their own */
         if (config_message.kind != SH_CONFIG_MESSAGE_OTHER) {
             CoTaskMemFree(jp);
             std::string key, value;
@@ -3877,12 +3849,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (config_message.kind == SH_CONFIG_MESSAGE_SET)
                     value = sh_webview_json::to_utf8(config_message.value_json);
                 fields_valid =
-                    !key.empty() && key.size() <= UI_CONFIG_KEY_CAP &&
+                    !key.empty() &&
                     key.find('\0') == std::string::npos;
                 if (config_message.kind == SH_CONFIG_MESSAGE_SET)
                     fields_valid =
                         fields_valid &&
-                        value.size() <= UI_CONFIG_VALUE_CAP &&
                         value.find('\0') == std::string::npos;
             }
 
@@ -3920,11 +3891,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     std::isfinite(render_ms) && std::isfinite(handler_ms) &&
                     render_ms >= 0.0 && render_ms <= 600000.0 &&
                     handler_ms >= 0.0 && handler_ms <= 600000.0) {
-                    char l[256];
-                    _snprintf_s(l, sizeof l, _TRUNCATE,
-                                "perf ui-list: seq=%d entities=%d matched=%d mounted=%d render_ms=%.3f handler_ms=%.3f",
+                    ui_logp("perf ui-list: seq=%d entities=%d matched=%d mounted=%d render_ms=%.3f handler_ms=%.3f",
                                 seq, entities, matched, mounted, render_ms, handler_ms);
-                    ui_log(l);
                 }
             } else if (cmd == L"listPrefabs") {
                 ui_send_prefabs();
@@ -4462,8 +4430,13 @@ static int ui_devtools_port(const wchar_t *local)
 
 static void ui_start_webview()
 {
-    wchar_t local[MAX_PATH] = {}; std::wstring udf = L".";
-    bool have_local = SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local));
+    std::wstring local, udf = L".";
+    {
+        PWSTR known = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &known)) && known) local = known;
+        if (known) CoTaskMemFree(known);
+    }
+    bool have_local = !local.empty();
     if (have_local) {
         /* %LOCALAPPDATA%\snapmap-plus\cache\webview2; an older snapmap-plus\webview2 folder is renamed into
          * cache\ once (webview_profile.h). */
@@ -4475,7 +4448,7 @@ static void ui_start_webview()
     }
     ComPtr<ICoreWebView2EnvironmentOptions> options;
 #ifdef SH_DIAG
-    int devtools_port = have_local ? ui_devtools_port(local) : 0;
+    int devtools_port = have_local ? ui_devtools_port(local.c_str()) : 0;
     if (devtools_port) {
         auto opts = Make<CoreWebView2EnvironmentOptions>();
         wchar_t args[64]; _snwprintf_s(args, _countof(args), _TRUNCATE, L"--remote-debugging-port=%d", devtools_port);
@@ -4586,9 +4559,7 @@ static void ui_think_loop()
             _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"setDisplayNamesResult\",\"applied\":%d,\"failed\":%d}",
                          g_set_names_applied, g_set_names_failed);
             ui_post_json(m);
-            char l[160];
-            _snprintf_s(l, sizeof l, _TRUNCATE, "set-display-names: applied=%d failed=%d", g_set_names_applied, g_set_names_failed);
-            ui_log(l);
+            ui_logp("set-display-names: applied=%d failed=%d", g_set_names_applied, g_set_names_failed);
             g_set_names_eids.clear(); g_set_names_names.clear();
             g_last_list_sig = 0;            /* names changed: rebuild the Timelines list */
             ui_send_list("set-names");
@@ -4762,11 +4733,8 @@ static void ui_think_loop()
                         std::wstring wm; wm.resize(wl - 1);
                         if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, &wm[0], wl);
                         ui_post_json(wm.c_str());
-                        char l[160];
-                        _snprintf_s(l, sizeof l, _TRUNCATE,
-                                    "crash: terminal record announced (terminal=%d, survived=%d)",
+                        ui_logp("crash: terminal record announced (terminal=%d, survived=%d)",
                                     terminal, survived);
-                        ui_log(l);
                     }
                 } else if (survived > 0 && terminal == 0 && !startup) {
                     /* nonterminal record observed this session: notice only */
@@ -4782,10 +4750,7 @@ static void ui_think_loop()
         if (g_webview_ready) {
             bool ready = ui_editor_ready() != 0;
             if (ready && !was_visible) {
-                char l[128];
-                _snprintf_s(l, sizeof l, _TRUNCATE,
-                            "perf lifecycle: editor-visible frame=%u", frame);
-                ui_log(l);
+                ui_logp("perf lifecycle: editor-visible frame=%u", frame);
                 ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
                 ui_send_list("editor-visible");
                 /* The DOM survives Play and map reloads. Close any open timeline when the
@@ -4889,14 +4854,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     ui_log("=== sh_ui_init: the Snapmap+ window is starting ===");
     ui_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
     if (g_pair_mismatch) {
-        char v[320];
-        _snprintf_s(v, sizeof v, _TRUNCATE, "install mismatch: the backend is %s with a %u-byte interface, this window "
+        ui_logp("install mismatch: the backend is %s with a %u-byte interface, this window "
                     "%s with %u; showing the reinstall notice only", backend_version.empty() ? "(unnamed)" : backend_version.c_str(),
                     (unsigned)sh_iface_vtbl_bytes(g_iface), g_version.c_str(), (unsigned)sizeof(sh_iface_vtbl));
-        ui_log(v);
     }
-    { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "window version: %s", g_version.c_str()); ui_log(v); }
-    { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); ui_log(v); }
+    { ui_logp("window version: %s", g_version.c_str()); }
+    { ui_logp("game: %s", g_game.empty() ? "not attached" : g_game.c_str()); }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int n = MultiByteToWideChar(CP_UTF8, 0, kMockupHtml, -1, nullptr, 0);

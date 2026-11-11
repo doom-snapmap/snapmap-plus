@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,18 +48,28 @@ func carriesOurMarker(path string) bool {
 		return false
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 256<<20))
-	if err != nil {
-		return false
-	}
-	if bytes.Contains(data, ourMarker) {
-		return true
-	}
 	wide := make([]byte, 0, 2*len(ourMarker))
 	for _, c := range ourMarker {
 		wide = append(wide, c, 0)
 	}
-	return bytes.Contains(data, wide)
+	// The whole file, a window at a time; each window keeps the previous one's last bytes so a
+	// marker split across two reads is still found.
+	keep := len(wide) - 1
+	buf := make([]byte, 0, keep+1<<20)
+	chunk := make([]byte, 1<<20)
+	for {
+		n, err := f.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if bytes.Contains(buf, ourMarker) || bytes.Contains(buf, wide) {
+			return true
+		}
+		if len(buf) > keep {
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+		if err != nil {
+			return false
+		}
+	}
 }
 
 // doomOwnership decides which files in a DOOM folder are ours: one the install record for this
