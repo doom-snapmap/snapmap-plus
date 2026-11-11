@@ -1450,6 +1450,25 @@ int main(int argc, char **argv)
         free(doc);
     }
 
+    printf("-- an unnamed mod is named by its folder, never by its salt\n");
+    {
+        char nn[MAX_PATH * 2], s[16] = "";
+        _snprintf_s(nn, sizeof nn, _TRUNCATE, "%s\\noname", g_root);
+        CreateDirectoryA(nn, NULL);
+        mt_write(nn, "mod.json", "{\"name\":\"\"}");
+        mt_write(nn, "assets\\generated\\decls\\entitydef\\mods\\noname\\nn.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}\r\n");
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        doc = list_doc();
+        row_salt(doc, "noname", s, sizeof s);
+        note_salt(s);
+        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: mod mods\\noname (noname)"));
+        CHECK(lines_prose_ok(dr));
+        mt_remove_tree(nn);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+    }
+
     printf("-- the doctor: every folder, plainly\n");
     dr = doctor(1);
     CHECK(has(dr, "MODS: doctor: mod mods\\twin_b (Twin B): ready\n"));

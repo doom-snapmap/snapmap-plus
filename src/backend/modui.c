@@ -1889,10 +1889,15 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_puts(b, ",\"providers\":[");
         for (k = 0; k < s->n; k++) {
             int at = mu_find_salt(m, s->keys[k], -1);
+            const char *name = at >= 0 ? mu_entry_title(&m->list.items[at]) : "";
+            size_t q;
+            /* Not installed: the name the map saved for it. */
+            for (q = 0; !name[0] && q < mp->rows.count; q++)
+                if (!_stricmp(mp->rows.rows[q].salt, s->keys[k])) name = mp->rows.rows[q].name;
             if (k) mu_putn(b, ",", 1);
             mu_putn(b, "{", 1);
             mu_kstr(b, "id", s->keys[k], 1);
-            mu_kstr(b, "name", at >= 0 ? mu_entry_title(&m->list.items[at]) : s->keys[k], 0);
+            mu_kstr(b, "name", name[0] ? name : "a mod that is not installed", 0);
             mu_putn(b, "}", 1);
         }
         mu_putn(b, "]", 1);
@@ -3639,9 +3644,11 @@ static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, co
     if (p->published) mu_line(o, "%s: the published copy on the server is unaffected until you publish the map again", verb);
 }
 
+/* A mod's name where a sentence names it: its build's name, else (an unnamed
+ * mod) its folder's own name, never its salt. */
 static const char *mu_entry_title(const sh_ms_entry *s)
 {
-    return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
+    return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : mu_leaf(s->name);
 }
 
 /* The one folder an uninstall of `key` removes, in the tab and the console

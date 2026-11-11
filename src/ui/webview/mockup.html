@@ -2804,14 +2804,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var i = 0; i < mods.length; i++) if (mods[i].installed !== true) missing++;
     return {count: mods.length, missing: missing, mods: mods};
   }
-  function pfModLabel(m) { return m.id; }
+  // A mod by the name it was recorded with; a mod recorded without one is never named by its salt.
+  function pfModLabel(m) { return m.id && m.id !== m.salt ? m.id : 'an unnamed mod'; }
   // The list row's pill: null without mods; "Needs mods: <id> +N" naming the missing ones when any
   // is not installed, else "Mods: <id> +N". The title lists every mod with its state.
   function pfModsBadge(st) {
     if (!st || !st.count) return null;
     var missing = st.mods.filter(function(m){ return m.installed !== true; });
     var shown = missing.length ? missing : st.mods;
-    var first = shown[0].id + (shown.length > 1 ? ' +' + (shown.length - 1) : '');
+    var first = pfModLabel(shown[0]) + (shown.length > 1 ? ' +' + (shown.length - 1) : '');
     var title = st.mods.map(function(m){ return pfModLabel(m) + (m.installed === true ? ' (installed)' : ' (not installed)'); }).join('\n');
     return missing.length ? {text: 'Needs mods: ' + first, cls: 'pf-mods pf-mods-missing', title: title}
                           : {text: 'Mods: ' + first, cls: 'pf-mods', title: title};
@@ -3835,8 +3836,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     byId: function(id){ return document.getElementById(id); },
     // Organizing folders close for the session only: the retired mods.collapsed_groups setting is neither read nor written.
     post: post, toast: toast,
-    // Copy mod id, for authors.
-    copy: copyText,
     // The Files view highlights a file's text with the Decl Text editor's tokens.
     tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; },
     // New mod's right-click entry on the list, in the page's context menu.

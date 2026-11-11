@@ -16,7 +16,7 @@
    used, the backend's one plain sentence saying what is wrong and what to do. A mod carrying the
    same files as another shows an informational hint. Nothing a player reads names a salt, a hash,
    a build number or the internal words; the salt reaches the page only for the Files view's
-   paths and the Copy mod id action. There is no folder watcher: Refresh rereads the folder, and
+   paths, and an author never needs it. There is no folder watcher: Refresh rereads the folder, and
    the empty state and New mod say so. The host posts the document as {kind:'mods', data} after
    every action; showing the tab asks for a Refresh. Nothing polls. All text goes through
    textContent. */
@@ -78,6 +78,12 @@ var modsTab = (function () {
   };
   /* The quiet line above a new mod's example: its first steps. */
   var NEW_MOD_HINT = "Place Example crate from the Toybox in your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods tab.";
+  /* How an author names their own files and strings: by the mod's folder name, never its salt
+     (Refresh files them under the mod). One sentence, where the author sees it. */
+  function folderRuleText(folder) {
+    var f = str(folder) || "<the mod's folder name>";
+    return 'Put new files under assets\\mods\\' + f + '\\, and in your files write mods/' + f + '/ and plain string names.';
+  }
   var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.';
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
@@ -119,7 +125,6 @@ var modsTab = (function () {
      records them and Play never sees them. */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var NOTHING_CHANGED_TEXT = 'Changes nothing of the game; it only adds.';
-  var COPY_ID_TITLE = "Copy this mod's id: the name its own files and strings sit under, which the Files view shows in their paths";
   /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
      path starts at the first top-level decl member the slot names. */
   var TOP_MEMBERS = ['edit', 'editorVars', 'inherit', 'events', 'aliases', 'init', 'class'];
@@ -880,21 +885,12 @@ var modsTab = (function () {
       var card = el('div', 'mods-howto');
       card.appendChild(el('div', 'mods-howto-head', 'How mods work'));
       card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and an assets\\ folder.'));
+      card.appendChild(el('p', '', folderRuleText('')));
       card.appendChild(el('p', '', 'Maps record which mods they use. Players who open one are offered the download, which is listed under the map\'s name.'));
       card.appendChild(el('p', '', REFRESH_TEXT));
       card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod, or add a mod folder or ZIP with Install.'
                                          : 'Select a mod to see what it adds.'));
       box.appendChild(card);
-    }
-    function copyId(b) {
-      if (!b || !b.salt) return;
-      var done = function () { env.toast('Copied the mod id of ' + title(b) + '.', 'ok'); };
-      try {
-        if (env.copy) { env.copy(b.salt); done(); return; }
-        var nav = typeof navigator !== 'undefined' ? navigator : null;
-        if (nav && nav.clipboard && nav.clipboard.writeText) { nav.clipboard.writeText(b.salt); done(); return; }
-      } catch (err) { /* below */ }
-      env.toast('The mod id could not be copied here.', 'warn');
     }
     /* A list line that opens to show its names. */
     function listLine(box, text, items, item) {
@@ -939,13 +935,6 @@ var modsTab = (function () {
       link.title = 'Open this folder in Explorer';
       link.addEventListener('click', function () { act('openFolder', folderArg(b)); });
       field(about, 'Folder', link);
-      if (b.salt) {
-        var cp = el('button', 'mods-link mods-copy-id', 'Copy mod id');
-        cp.type = 'button';
-        cp.title = COPY_ID_TITLE;
-        cp.addEventListener('click', function () { copyId(b); });
-        about.appendChild(cp);
-      }
 
       var adds = section(box, 'adds', 'What it adds');
       if (b.editorRowNames.length) {
@@ -1697,7 +1686,8 @@ var modsTab = (function () {
       /* A new mod: selected, and the Files modal opens on its example's Toybox row. */
       if (action === 'newMod' && ok && data.key) {
         reveal = selectedKey = str(data.key);
-        openFiles(selectedKey, byId('modsFilesBtn'), str(data.file), NEW_MOD_HINT);
+        var made = selectedKey.slice(selectedKey.lastIndexOf('\\') + 1);
+        openFiles(selectedKey, byId('modsFilesBtn'), str(data.file), NEW_MOD_HINT + ' ' + folderRuleText(made));
       }
       if (action === 'uninstall' && ok) selectedKey = '';
       /* After the real action the modal shows the next document: the list, or nothing after an
@@ -1802,7 +1792,7 @@ var modsTab = (function () {
           APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
           IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
-          sameFilesText: sameFilesText, bareName: bareName, PLACE_CLEANUP_TEXT: PLACE_CLEANUP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, COPY_ID_TITLE: COPY_ID_TITLE,
+          sameFilesText: sameFilesText, bareName: bareName, PLACE_CLEANUP_TEXT: PLACE_CLEANUP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,

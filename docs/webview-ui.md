@@ -324,7 +324,7 @@ bookkeeping. Every folder's state, conflicts, replaced game files and verificati
 "pointer", "surface", "legacy" or "migrate". The backend says every cause, warning and result as
 plain sentences (`mu_plain_cause`, `mu_plain`: the builder's shape and build causes are rewritten,
 a salt in a path becomes `<mod id>`); the mod's salt reaches the page only as `salt`, which the
-Files view's paths show and **Copy mod id** copies (for authors writing paths and strings by hand).
+Files view's paths show; an author never needs it.
 `tests/mods_tab_test.js` and `tests/modui_test.c` check every text a player reads against that list.
 
 **List pane.** The panel head is the Prefabs tab's: the title, the mod count badge, and six icon
@@ -359,7 +359,7 @@ informational hint "Carries N files that <name> also carries. They stay two sepa
 (`sameFilesAs`); nothing is merged and it is never attention. Then the sections:
 
 - **About**: Description, Version, Author, Came with (a downloaded map's name), Folder (opens it in
-  Explorer: `openFolder` with the row's `key`) and the Copy mod id link.
+  Explorer: `openFolder` with the row's `key`).
 - **What it adds**: its Toybox rows by name (`editorRowNames`), or "Adds no Toybox rows.".
 - **What it changes in the game** (`facts`, only for a built mod): the game files it edits, in
   words ("Edits 2 game files; a map that uses this mod gets the game's text with these edits.", one
@@ -509,6 +509,7 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |
 | `uninstallPreview`, `uninstall` | The dry run and the uninstall: the open map cleaned of the mod, its undo history cleared, the folder moved to the Recycle Bin, the rescan. |
 | `modFiles`, `modFileText` | The Files view's reads (no fresh document follows). |
+| `openFile` | `"<folder>\t<path below it>"`: the host opens one file of the mod folder in the program Windows opens it with (Windows' Open with dialog for a kind with none); answered by the host, nothing reaches the backend. |
 | `addToMine` | A downloaded map's mod (a folder under `mods\maps\`): copied to the root of `mods\` as one of the player's own mods under the same salt, which their own maps then use; `data` is `{key}`, the new folder. A mod already at the root answers its folder. File work off the game's thread, like Install. |
 | `newMod` | `arg` is a display name: `mods\<name>\` with `mod.json`, a new salt and a working example (an entityDef and its Toybox row), built at once; `data` is `{key, file}`. |
 

@@ -36,6 +36,9 @@ check(api.parse('').count === 0 && api.parse('{not json').count === 0 && api.par
 check(api.parse({mods: [{id: ''}, null, {salt: 'x'}]}).count === 0, 'rows without an id are dropped');
 check(api.parse({mods: [{id: 'x'}]}).missing === 1, 'a row without installed:true counts as missing');
 check(api.label(door) === 'test.door' && api.label({id: 'x'}) === 'x', 'a label is the mod\'s name (a mod has no version)');
+check(api.label({id: 'abcd1234', salt: 'abcd1234'}) === 'an unnamed mod', 'a mod recorded without a name is never named by its salt');
+check(api.badge({count: 1, missing: 1, mods: [{id: 'abcd1234', salt: 'abcd1234', installed: false}]}).text === 'Needs mods: an unnamed mod',
+      'nor in its pill');
 
 /* The list pill. */
 check(api.badge(api.parse('')) === null, 'no mods, no pill');

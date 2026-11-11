@@ -1,7 +1,7 @@
 /* The Mods tab (mods_tab.js): the payload model (v4), the two row states, the two kinds of groups
    (Your mods with its organizing folders, one group per downloaded map), the one glyph per row, the
    filter and the attention filter, the details sections (what a mod adds, changes and borrows, its
-   console settings and files, the plain cause, the same-files hint, Copy mod id), the vocabulary rule
+   console settings and files, the plain cause, the same-files hint), the vocabulary rule
    over every text a player reads, the empty state and New mod saying Refresh picks up edits, the map
    modal and the dry-run-driven confirmations, the Files view, and the page and host contract around
    it. tests/fixtures/mods_tab_payload_v4.json is the
@@ -424,7 +424,7 @@ test('the vocabulary: no salt, hash, bundle, key, pointer, surface, legacy, migr
   check('after Refresh');
   /* the page's own texts */
   const own = [modsTab.READY_TEXT, modsTab.REFRESH_TEXT, modsTab.EMPTY_TEXT, modsTab.BORROWS_NOTE, modsTab.NEEDS_NOTE,
-               modsTab.EDITOR_ONLY_NOTE, modsTab.NEW_MOD_HINT, modsTab.COPY_ID_TITLE, modsTab.NOTHING_CHANGED_TEXT,
+               modsTab.EDITOR_ONLY_NOTE, modsTab.NEW_MOD_HINT, modsTab.folderRuleText('Crate Pack'), modsTab.NOTHING_CHANGED_TEXT,
                modsTab.EDITOR_TWEAKS_TEXT, modsTab.MAP_LEVEL_TEXT, modsTab.NOTHING_PLACED_TEXT]
     .concat(Object.values(modsTab.FILE_CLASSES), Object.values(modsTab.FILE_SOURCES), Object.values(modsTab.SCOPE),
             Object.values(modsTab.UNINSTALL_HEAD));
@@ -546,7 +546,7 @@ test('details: description, what it adds, what it changes, what it borrows, cons
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')),
                    ['about', 'adds', 'changes', 'borrows', 'requirements', 'files', 'sharing']);
   assert.match(section(h, 'about').textContent, /^About Description A copy of the Imp/);
-  assert.match(section(h, 'about').textContent, /Folder alex\.r2-imp Copy mod id$/);
+  assert.match(section(h, 'about').textContent, /Folder alex\.r2-imp$/);
   assert.equal(section(h, 'adds').textContent, 'What it adds 2 Toybox rows Imp (R2) Imp (R2, caged)');
   const ch = section(h, 'changes');
   assert.match(ch.textContent, /^What it changes in the game Edits 2 game files; a map that uses this mod gets the game's text with these edits\./);
@@ -619,17 +619,16 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
-test('details: Copy mod id hands the id to the page, for authors', () => {
-  const copied = [];
-  const h = harness({copy: t => copied.push(t)});
+test('an author never needs the salt: no Copy mod id, and the folder rule said where they look', () => {
+  const h = harness();
   shown(h);
   h.ui.select('alex.r2-imp');
-  const b = h.nodes.modsDetail.all('mods-copy-id')[0];
-  assert.equal(b.textContent, 'Copy mod id');
-  assert.equal(b.title, modsTab.COPY_ID_TITLE);
-  b.click();
-  assert.deepEqual(copied, ['alexrimp']);
-  assert.deepEqual(h.toasts.pop(), {text: 'Copied the mod id of R2 Imp copy.', kind: 'ok'});
+  assert.equal(h.nodes.modsDetail.all('mods-copy-id').length, 0);
+  assert.ok(!/Copy mod id|mod id/i.test(source), 'no Copy mod id and no "mod id" anywhere in the page code');
+  assert.equal(modsTab.folderRuleText('Crate Pack'),
+               'Put new files under assets\\mods\\Crate Pack\\, and in your files write mods/Crate Pack/ and plain string names.');
+  h.ui.select('');
+  assert.ok(h.nodes.modsDetail.textContent.indexOf(modsTab.folderRuleText('')) >= 0, 'How mods work says it too');
 });
 test('details: a folder of editor tweaks only has no map action', () => {
   const h = live();
@@ -838,7 +837,7 @@ test('New mod: a name, the folder made with its example, Refresh named as the wa
   assert.equal(st.files.open, true);
   assert.match(st.files.selected, /^assets\/generated\/decls\/snapeditorentitydef\/mods\/[a-z0-9]+\/example_crate\.decl$/);
   const pane = h.nodes.modsFilesHost.all('mf-file')[0];
-  assert.equal(pane.all('mf-hint')[0].textContent, modsTab.NEW_MOD_HINT);
+  assert.equal(pane.all('mf-hint')[0].textContent, modsTab.NEW_MOD_HINT + ' ' + modsTab.folderRuleText('Crate Pack'));
   assert.match(modsTab.NEW_MOD_HINT, /press Refresh in the Mods tab/);
   /* the list's right-click entry */
   const e = h.nodes.modsList.dispatch('contextmenu', {pageX: 40, pageY: 90});
@@ -954,7 +953,6 @@ test('page contract', () => {
   assert.match(html, /id="modsList" role="listbox" tabindex="0"/);
   assert.equal(html.split('<script src="mods_tab.js"></script>').length, 2, 'one module tag');
   assert.match(html, /if \(which === 'mods'\) modsUi\.show\(\);/);
-  assert.match(html, /copy: copyText,/, 'the page hands Copy mod id its clipboard helper');
   /* the browser preview's data is the v4 fixture; the release page carries no stand-in */
   const m = standin.match(/\nvar PREVIEW_MODS = (\{.*\});\r?\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
@@ -970,7 +968,7 @@ test('page contract', () => {
   /* the payload spec */
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
-                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'Copy mod id'])
+                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {
