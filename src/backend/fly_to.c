@@ -178,7 +178,7 @@ void sh_fly_to_tick(void *editor)
         if (phase == FLY_SWITCH) {
             float radius;
             if (!*(unsigned char **)(ed + ED_MAP_OFF)) { fly_fail("No map is open."); return; }
-            if (!fly_read_target(ed, id, &g_centre, &radius)) { fly_fail("That entity could not be located."); return; }
+            if (!fly_read_target(ed, id, &g_centre, &radius)) { fly_fail("That entity is no longer in the map (deleted or undone)."); return; }
             if (state == 2) {
                 int sub = *(int *)(ed + ED_ENTITY_MODE_OFF + EM_SUBSTATE_OFF);
                 if (sub != 1 && sub != 2) { fly_fail("Finish what you are holding or placing first."); return; }
@@ -200,7 +200,7 @@ void sh_fly_to_tick(void *editor)
             }
         }
         if (phase == FLY_VERIFY) {
-            if (state != 2 || cam_mode != 2) { fly_fail("Object Mode did not open."); return; }
+            if (state != 2 || cam_mode != 2) { fly_fail("Object Mode did not open. Press Tab, then choose Fly to again."); return; }
             InterlockedExchange(&g_phase, FLY_PLACE);
         }
         phase = InterlockedCompareExchange(&g_phase, 0, 0);
@@ -208,8 +208,8 @@ void sh_fly_to_tick(void *editor)
             float radius = 0.0f;
             sh_fly_vec3 eye;
             float yaw = cam[4];
-            if (state != 2) { fly_fail("Object Mode did not open."); return; }
-            if (!fly_read_target(ed, id, &g_centre, &radius)) { fly_fail("That entity could not be located."); return; }
+            if (state != 2) { fly_fail("Object Mode did not open. Press Tab, then choose Fly to again."); return; }
+            if (!fly_read_target(ed, id, &g_centre, &radius)) { fly_fail("That entity is no longer in the map (deleted or undone)."); return; }
             eye = sh_fly_eye(g_centre, sh_fly_distance(radius), SH_FLY_PITCH_DEG, yaw);
             cam[0] = eye.x; cam[1] = eye.y; cam[2] = eye.z;
             cam[3] = SH_FLY_PITCH_DEG; cam[4] = yaw; cam[5] = 0.0f;

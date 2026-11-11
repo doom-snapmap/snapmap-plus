@@ -21,6 +21,7 @@
 #include "nav_traversal.h"
 #include "navmesh.h"
 #include "nav_overlay.h"
+#include "module_orientation.h"
 #include "config.h"
 
 #ifndef SH_NAV_BAKE_NO_LOG
@@ -1671,12 +1672,10 @@ static void bake_one(const char *name, const bake_module *m, int ci,
 
 static void bake_world_point(const sh_nav_instance *in,const float p[3],float out[3])
 {
-    static const int xy[8][4]={{1,0,0,1},{0,-1,1,0},{-1,0,0,-1},{0,1,-1,0},
-                             {-1,0,0,1},{0,1,1,0},{1,0,0,-1},{0,-1,-1,0}};
-    int o=in->orientation;
-    if(o<0||o>7)o=0;
-    out[0]=in->origin[0]+xy[o][0]*p[0]+xy[o][1]*p[1];
-    out[1]=in->origin[1]+xy[o][2]*p[0]+xy[o][3]*p[1];
+    float x,y;
+    sh_module_orient(in->orientation,p[0],p[1],&x,&y);
+    out[0]=in->origin[0]+x;
+    out[1]=in->origin[1]+y;
     out[2]=in->origin[2]+p[2]+2.0f;
 }
 
