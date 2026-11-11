@@ -30,6 +30,9 @@
 #include "modstock.h"
 #include "editor_undo.h"
 #include "map_settings.h"
+#include "config.h"
+#include "modsound.h"
+#include "script/script_runtime.h"
 #endif
 
 /* A stock resource every 13954591 SnapMap install ships (as modcmd.c probes):
@@ -116,10 +119,49 @@ static void mu_settings_close(void) {}
 static void mu_settings_restore(void) {}
 #endif
 
+#ifndef SH_MODUI_PURE
+/* The product's script runtime, as the tab reads it (any thread). */
+static int mu_default_script_info(const char *salt, sh_modui_script_info *out)
+{
+    sh_script_mod_info i;
+    if (!out || !sh_script_mod_info_get(salt, &i)) return 0;
+    memset(out, 0, sizeof *out);
+    out->status = i.status == SH_SCRIPT_STOPPED ? SH_MODUI_SCRIPT_STOPPED
+                : i.waiting ? SH_MODUI_SCRIPT_WAITING
+                : i.status == SH_SCRIPT_RUNNING ? SH_MODUI_SCRIPT_RUNNING
+                : i.status == SH_SCRIPT_ENDED ? SH_MODUI_SCRIPT_ENDED : SH_MODUI_SCRIPT_NONE;
+    out->lines = i.log_lines;
+    strncpy_s(out->stop, sizeof out->stop, i.stop_line, _TRUNCATE);
+    return 1;
+}
+static int mu_default_script_log(const char *salt, sh_modui_line_fn fn, void *context)
+{
+    return sh_script_log_read(salt, (sh_script_line_fn)fn, context);
+}
+typedef struct mu_salt_visit { sh_modui_name_fn fn; void *context; } mu_salt_visit;
+static void mu_salt_visit_one(void *context, const char *salt, const char *name)
+{
+    mu_salt_visit *v = (mu_salt_visit *)context;
+    (void)name;
+    v->fn(v->context, salt);
+}
+static int mu_default_script_mods(sh_modui_name_fn fn, void *context)
+{
+    mu_salt_visit v;
+    v.fn = fn;
+    v.context = context;
+    return sh_script_mods(mu_salt_visit_one, &v);
+}
+#endif
+
 static void mu_defaults(sh_modui_engine *e)
 {
     memset(e, 0, sizeof *e);
 #ifndef SH_MODUI_PURE
+    e->script_info = mu_default_script_info;
+    e->script_log = mu_default_script_log;
+    e->script_mods = mu_default_script_mods;
+    e->restart_banks = sh_modsound_restart_banks;
     e->rescan = sh_modserve_index_rescan;
     e->refresh = sh_modserve_refresh_after_rescan;
     e->palette_rebuild = modserve_palette_rebuild_requested;
@@ -165,6 +207,10 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->mark_modified) g_engine.mark_modified = engine->mark_modified;
         if (engine->undo_pending) g_engine.undo_pending = engine->undo_pending;
         if (engine->launch_preload) g_engine.launch_preload = engine->launch_preload;
+        if (engine->script_info) g_engine.script_info = engine->script_info;
+        if (engine->script_log) g_engine.script_log = engine->script_log;
+        if (engine->script_mods) g_engine.script_mods = engine->script_mods;
+        if (engine->restart_banks) g_engine.restart_banks = engine->restart_banks;
     }
     g_engine_bound = 1;
     /* The map scope: what the open map lists, and the build a map-level row names. */
@@ -293,6 +339,150 @@ unsigned sh_modui_generation(void) { return (unsigned)g_gen; }
 
 void sh_modui_note_changed(void) { InterlockedIncrement(&g_gen); }
 
+/* ------------------------------------------------------------------ mod scripts */
+
+static const char *mu_script_status_name(int status)
+{
+    switch (status) {
+    case SH_MODUI_SCRIPT_RUNNING: return "running";
+    case SH_MODUI_SCRIPT_STOPPED: return "stopped";
+    case SH_MODUI_SCRIPT_ENDED:   return "ended";
+    case SH_MODUI_SCRIPT_WAITING: return "waiting";
+    default:                      return "none";
+    }
+}
+
+/* {"status","stop","lines"} of `salt`'s scripts in the current or last Play,
+ * after a key; nothing when no Play has run them. */
+static void mu_put_script_run(mu_buf *b, const char *key, const char *salt)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_modui_script_info info;
+    memset(&info, 0, sizeof info);
+    if (!e->script_info || !salt || !salt[0] || e->script_info(salt, &info) != 1) return;
+    mu_key(b, key, 0);
+    mu_putn(b, "{", 1);
+    mu_kstr(b, "status", mu_script_status_name(info.status), 1);
+    mu_kstr(b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED ? info.stop : "", 0);
+    mu_knum(b, "lines", (unsigned)(info.lines < 0 ? 0 : info.lines), 0);
+    mu_putn(b, "}", 1);
+}
+
+/* ------------------------------------------------------------------ sound banks a restart brings in */
+
+typedef struct mu_banks { mu_buf *b; const char *owner; int count; char *line; size_t cap; } mu_banks;
+
+static void mu_bank_row(void *context, const char *bank, const char *owner)
+{
+    mu_banks *v = (mu_banks *)context;
+    if (!bank || !bank[0] || (v->owner && (!owner || _stricmp(owner, v->owner)))) return;
+    if (v->b) {
+        if (v->count) mu_putn(v->b, ",", 1);
+        mu_str(v->b, bank);
+    } else if (v->line) {
+        if (v->count) strncat_s(v->line, v->cap, ", ", _TRUNCATE);
+        strncat_s(v->line, v->cap, bank, _TRUNCATE);
+    }
+    v->count++;
+}
+
+/* "restartBanks": the mod's sound banks whose new bytes the game hears only
+ * after a restart (Wwise keeps the bank it loaded first under a name). */
+static void mu_put_restart_banks(mu_buf *b, const char *salt)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_banks v;
+    memset(&v, 0, sizeof v);
+    if (!e->restart_banks || !salt || !salt[0]) return;
+    mu_puts(b, ",\"restartBanks\":[");
+    v.b = b;
+    v.owner = salt;
+    (void)e->restart_banks(mu_bank_row, &v);
+    mu_putn(b, "]", 1);
+}
+
+/* "Restart DOOM to hear the new <bank>, <bank>.", or "" when no bank waits. */
+static void mu_restart_sentence(char *out, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    char names[400] = "";
+    mu_banks v;
+    out[0] = 0;
+    memset(&v, 0, sizeof v);
+    v.line = names;
+    v.cap = sizeof names;
+    if (!e->restart_banks || e->restart_banks(mu_bank_row, &v) <= 0 || !names[0]) return;
+    _snprintf_s(out, cap, _TRUNCATE, "Restart DOOM to hear the new %s.", names);
+}
+
+typedef struct mu_script_list { mu_buf *b; int count; } mu_script_list;
+
+static void mu_script_mod(void *context, const char *salt)
+{
+    mu_script_list *l = (mu_script_list *)context;
+    const sh_modui_engine *e = mu_engine();
+    sh_modui_script_info info;
+    memset(&info, 0, sizeof info);
+    if (!salt || !salt[0] || !e->script_info || e->script_info(salt, &info) != 1) return;
+    if (l->count++) mu_putn(l->b, ",", 1);
+    mu_putn(l->b, "{", 1);
+    mu_kstr(l->b, "salt", salt, 1);
+    mu_kstr(l->b, "status", mu_script_status_name(info.status), 0);
+    mu_kstr(l->b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED ? info.stop : "", 0);
+    mu_knum(l->b, "lines", (unsigned)(info.lines < 0 ? 0 : info.lines), 0);
+    mu_putn(l->b, "}", 1);
+}
+
+static void mu_script_line(void *context, const char *line)
+{
+    mu_script_list *l = (mu_script_list *)context;
+    if (l->count++) mu_putn(l->b, ",", 1);
+    mu_str(l->b, line);
+}
+
+int sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_buf b;
+    mu_script_list l;
+    int r;
+    memset(&b, 0, sizeof b);
+    l.b = &b;
+    l.count = 0;
+    mu_puts(&b, "{\"mods\":[");
+    if (e->script_mods) (void)e->script_mods(mu_script_mod, &l);
+    mu_putn(&b, "]", 1);
+    mu_kstr(&b, "salt", salt ? salt : "", 0);
+    mu_puts(&b, ",\"log\":[");
+    l.count = 0;
+    if (salt && salt[0] && e->script_log) (void)e->script_log(salt, mu_script_line, &l);
+    mu_puts(&b, "]}");
+    if (needed) *needed = b.oom ? 0 : (int)b.len;
+    if (b.oom || !b.p) r = 0;
+    else if (!out || out_cap <= (int)b.len) r = -1;
+    else { memcpy(out, b.p, b.len + 1); r = 1; }
+    free(b.p);
+    return r;
+}
+
+/* The design's sentence for the one download approval of a map whose mods
+ * carry scripts. */
+void sh_modui_scripts_approval(unsigned files, char *out, size_t cap)
+{
+    if (!out || !cap) return;
+    _snprintf_s(out, cap, _TRUNCATE, "These mods include scripts (%u file%s). Scripts run only inside this map and cannot "
+                "read or change your files.", files, files == 1 ? "" : "s");
+}
+
+#ifndef SH_MODUI_PURE
+int sh_modui_scripted_maps_allowed(void)
+{
+    int on = 1;
+    if (sh_config_get_bool("mods.scripted_maps", &on, NULL) != 1) return 1;
+    return on != 0;
+}
+#endif
+
 /* ------------------------------------------------------------------ store model */
 
 /* What the document says about one store entry. */
@@ -406,6 +596,12 @@ static void mu_plain_cause(const sh_ms_entry *e, const char *cause, char *out, s
     if (mu_starts(c, "not built: ")) c += 11;
     if (!strcmp(c, SH_MB_EARLIER)) {   /* already the one plain sentence (DECISIONS 21) */
         strncpy_s(out, cap, c, _TRUNCATE);
+        return;
+    }
+    if (mu_starts(c, "scripts\\")) {
+        /* A script's own message names its file and line, what is wrong and what to do. */
+        strncpy_s(out, cap, c, _TRUNCATE);
+        mu_sentence_end(out, cap);
         return;
     }
     if (!_strnicmp(c, SH_MB_SHAPE, shape)) {
@@ -1064,6 +1260,14 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
         mu_str(b, plain);
     }
     mu_putn(b, "]", 1);
+    /* Its scripts: what the builder's static pass read ("scripts", the block's member as
+     * built), and how they ran in the current or last Play ("scriptRun"). */
+    if (e->loaded && bd->scripts && bd->scripts[0] == '{') {
+        mu_puts(b, ",\"scripts\":");
+        mu_puts(b, bd->scripts);
+    }
+    mu_put_script_run(b, "scriptRun", e->salt);
+    mu_put_restart_banks(b, e->salt);
     if (u->same_as >= 0) {
         /* Informational: another of the player's mods carries the same files. */
         const sh_ms_entry *o = &m->list.items[u->same_as];
@@ -2167,10 +2371,20 @@ static int mu_rescan(sh_modserve_refresh *rf, char *why, size_t cap)
 
 /* What the player must still do for a change to show, as one sentence, or
  * "" when it shows now. */
+static int g_restart_said;   /* banks waiting for a restart that a result has named */
+
 static void mu_refresh_sentence(const sh_modserve_refresh *rf, char *out, size_t cap)
 {
+    const sh_modui_engine *e = mu_engine();
+    int waiting = e->restart_banks ? e->restart_banks(NULL, NULL) : 0;
     out[0] = 0;
     if (!rf || rf->state < 0) return;
+    if (waiting > g_restart_said) {
+        /* A sound bank this change replaced: the one thing it needs is named. */
+        g_restart_said = waiting;
+        mu_restart_sentence(out, cap);
+        if (out[0]) return;
+    }
     if (rf->needs_restart > 0)
         strncpy_s(out, cap, "Some of the changes take effect only after you restart DOOM.", _TRUNCATE);
     else if (rf->needs_map_reload > 0)
@@ -4062,7 +4276,7 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
 /* The kinds the view shows as text; every other file is binary. */
 static int mu_text_kind(const char *path)
 {
-    static const char *const ext[] = { ".decl", ".json", ".txt", ".md", ".cfg", ".entities", NULL };
+    static const char *const ext[] = { ".decl", ".json", ".txt", ".md", ".cfg", ".entities", ".lua", NULL };
     int i;
     for (i = 0; ext[i]; i++) if (mu_suffix(path, ext[i])) return 1;
     return 0;
@@ -4147,7 +4361,18 @@ static int mu_cause_names(const char *cause, const char *path)
 static const char *mu_file_cause(const char *cause, const char *path)
 {
     if (mu_cause_names(cause, path)) return cause;
-    if (!_strnicmp(path, "assets/", 7) && mu_cause_names(cause, path + 7)) return cause;
+    if (!_strnicmp(path, "assets/", 7)) {
+        char request[MAX_PATH * 2], spelled[MAX_PATH * 2];
+        char *c;
+        if (mu_cause_names(cause, path + 7)) return cause;
+        /* A script's messages name it as the author does: scripts\<name>.lua. */
+        strncpy_s(request, sizeof request, path + 7, _TRUNCATE);
+        for (c = request; *c; c++) *c = *c == '\\' ? '/' : (char)tolower((unsigned char)*c);
+        if (sh_mb_script_request(request, NULL, NULL) > 0) {
+            sh_mb_script_file_name(request, spelled, sizeof spelled);
+            if (spelled[0] && mu_cause_names(cause, spelled)) return cause;
+        }
+    }
     return "";
 }
 
@@ -4861,6 +5086,9 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
         return n >= 0;
     case SH_MODS_FETCH:
         return sh_modui_fetch(call->out, call->out_cap, &call->needed, &call->generation);
+    case SH_MODS_SCRIPTS:
+        /* Read only and on any thread: the runtime's own state, straight into out. */
+        return sh_modui_scripts(call->arg, call->out, call->out_cap, &call->needed);
     case SH_MODS_STORE: {
         unsigned gen = 0;
         call->needed = modstore_lock_busy(&gen) ? 1 : 0;

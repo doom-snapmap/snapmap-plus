@@ -176,6 +176,7 @@ static volatile bool g_pending_create_module = false;
 static std::string   g_create_module_name;
 static int           g_create_module_result = 0;  /* 1 ok; 0 name exists; -1 failed; -2 not in Blueprint; -3 no module selected */
 static std::string   g_create_module_summary;     /* the view of the block the backend wrote */
+static std::string   g_create_module_message;     /* the backend's text for a refused save */
 static bool          g_load_prefab_modules = false;  /* the last Load/Place read a module prefab */
 static int           g_module_place_seq = 0;      /* placement being followed, 0 = none */
 static std::string   g_load_message;              /* the backend's text for a refused module placement */
@@ -1098,6 +1099,7 @@ static void ui_apply_create_module_prefab()
 {
     g_create_module_result = -1;
     g_create_module_summary.clear();
+    g_create_module_message.clear();
     if (g_create_module_name.empty() || !ui_valid_name(g_create_module_name)) {
         ui_log("create-module-prefab: ABORT (name rejected)");
         return;
@@ -1123,6 +1125,7 @@ static void ui_apply_create_module_prefab()
     int r = ui_module_prefab_call(&call);
     g_create_module_result = (r == 1 || r == -2 || r == -3) ? r : -1;
     if (r == 1) g_create_module_summary = out;
+    else g_create_module_message.assign(out, strnlen(out, 1024));   /* the page shows it when it is a sentence */
     char l[512];
     _snprintf_s(l, sizeof l, _TRUNCATE, "create-module-prefab: name='%s' result=%d %s", g_create_module_name.c_str(), r,
                 r == 1 ? "" : out);
@@ -1401,6 +1404,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
         return;
     }
     g_load_result = (r == -1 || r == -4) ? r : 0;
+    g_load_message = msg;           /* the page shows it when it is the backend's sentence */
 }
 /* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
  * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
@@ -2913,7 +2917,8 @@ static void ui_budget_poll()
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
  * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
- * mockup), and for an action (modsAction); nothing polls. Each job runs on a short-lived worker
+ * mockup), and for an action (modsAction); the document is never polled (the script log's
+ * modsScripts is, by the page, and answered at once: ui_mods_send_scripts). Each job runs on a short-lived worker
  * thread rather than this one. Install, New mod and Refresh do their file work (copies, salts,
  * builds, which can take minutes) on that worker, off DOOM's main thread, with no time limit; only
  * their game part (APPLY) and every other operation run on DOOM's main thread through
@@ -3225,6 +3230,29 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
         ui_log(l);
     }
     return true;
+}
+
+/* The mod scripts' state and one mod's script log (SH_MODS_SCRIPTS), on the UI thread: the op
+ * reads the script runtime on any thread and never touches the job's shared document, so the
+ * page may ask while a job runs and while a Play is on. The page asks while the Mods tab shows
+ * a mod with scripts. */
+static void ui_mods_send_scripts(const std::string &salt)
+{
+    std::string doc;
+    if (salt.size() <= 64) {
+        for (int attempt = 0; attempt < 3 && doc.empty(); attempt++) {
+            sh_mods_call call;
+            memset(&call, 0, sizeof call);
+            call.op = SH_MODS_SCRIPTS;
+            call.arg = salt.c_str();
+            if (ui_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > UI_MODS_DOC_MAX) break;
+            std::vector<char> buf((size_t)call.needed + 1);
+            call.out = buf.data();
+            call.out_cap = (int)buf.size();
+            if (ui_mods_slot(&call) == 1) doc.assign(buf.data());   /* -1: the log grew; ask again */
+        }
+    }
+    ui_mods_post(L"{\"kind\":\"modsScripts\",\"data\":", doc, L"}");
 }
 
 /* A finished job, on the UI thread. */
@@ -4006,6 +4034,10 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"modsList") {
                 g_mods_page_seen = true;
                 ui_mods_begin(0, false, std::string());
+            } else if (cmd == L"modsScripts") {
+                std::wstring salt;
+                sh_webview_json::get_string(json, L"salt", salt);
+                ui_mods_send_scripts(sh_webview_json::to_utf8(salt));
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its folders or ZIPs here, in the native picker: the page
@@ -4658,6 +4690,9 @@ static void ui_think_loop()
                 std::wstring w(g_create_module_summary.begin(), g_create_module_summary.end());
                 m += w;
             } else m += L"{}";
+            if (g_create_module_result != 1 && !g_create_module_message.empty()) {
+                m += L",\"message\":\""; m += sh_webview_json::escape_wide(g_create_module_message.c_str()); m += L"\"";
+            }
             m += L"}";
             ui_post_json(m.c_str());
             if (g_create_module_result == 1) ui_send_prefabs();

@@ -659,6 +659,34 @@ static void __fastcall ms_loadbanks(void *hardware)
 /* Carry the submitted generation to a rebuilt table: a bank already given to
  * Wwise under that name is not given again (Wwise keeps the first bytes for
  * a bank id until it restarts). */
+typedef struct ms_restart { char leaf[SH_MODSOUND_LEAF_MAX]; char owner[80]; } ms_restart;
+static ms_restart g_restart[SH_MODSOUND_MAX_BANKS];
+static int        g_restart_count;
+static SRWLOCK    g_restart_lock = SRWLOCK_INIT;
+
+static void ms_restart_note(const char *leaf, const char *owner)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_restart_lock);
+    for (i = 0; i < g_restart_count && strcmp(g_restart[i].leaf, leaf); i++) {}
+    if (i < SH_MODSOUND_MAX_BANKS) {
+        strncpy_s(g_restart[i].leaf, sizeof g_restart[i].leaf, leaf, _TRUNCATE);
+        strncpy_s(g_restart[i].owner, sizeof g_restart[i].owner, owner ? owner : "", _TRUNCATE);
+        if (i == g_restart_count) g_restart_count++;
+    }
+    ReleaseSRWLockExclusive(&g_restart_lock);
+}
+
+int sh_modsound_restart_banks(void (*fn)(void *context, const char *bank, const char *owner), void *context)
+{
+    int i, n;
+    AcquireSRWLockShared(&g_restart_lock);
+    n = g_restart_count;
+    for (i = 0; fn && i < n; i++) fn(context, g_restart[i].leaf, g_restart[i].owner);
+    ReleaseSRWLockShared(&g_restart_lock);
+    return n;
+}
+
 static void ms_carry(sh_modsound_table *nt, const sh_modsound_table *old)
 {
     int i, j;
@@ -667,8 +695,10 @@ static void ms_carry(sh_modsound_table *nt, const sh_modsound_table *old)
         for (j = 0; j < old->count; j++)
             if (!strcmp(nt->banks[i].leaf, old->banks[j].leaf) && old->banks[j].submitted_gen) {
                 nt->banks[i].submitted_gen = old->banks[j].submitted_gen;
-                if (strcmp(nt->banks[i].disk_path, old->banks[j].disk_path) || nt->banks[i].size != old->banks[j].size)
+                if (strcmp(nt->banks[i].disk_path, old->banks[j].disk_path) || nt->banks[i].size != old->banks[j].size) {
+                    ms_restart_note(nt->banks[i].leaf, nt->banks[i].bundle);
                     ms_log("Restart DOOM to hear the new %s: Wwise keeps the bank it loaded first", nt->banks[i].leaf);
+                }
             }
     for (j = 0; j < old->count; j++) {
         int kept = 0;

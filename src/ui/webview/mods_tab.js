@@ -14,12 +14,14 @@
    name), what it changes in the game (its edits, in words), what it borrows from the game (a
    count, expandable), the console settings it needs, its files, and, for a mod that cannot be
    used, the backend's one plain sentence saying what is wrong and what to do. A mod carrying the
-   same files as another shows an informational hint. Nothing a player reads names a salt, a hash,
-   a build number or the internal words; the salt reaches the page only for the Files view's
-   paths, and an author never needs it. There is no folder watcher: Refresh rereads the folder, and
-   the empty state and New mod say so. The host posts the document as {kind:'mods', data} after
-   every action; showing the tab asks for a Refresh. Nothing polls. All text goes through
-   textContent. */
+   same files as another shows an informational hint. A mod with scripts says what they drive and
+   which Script nodes they answer and fire, shows its script log, and while a script stopped shows
+   the stop line as its state. Nothing a player reads names a salt, a hash, a build number or the
+   internal words; the salt reaches the page only for the Files view's paths, and an author never
+   needs it. There is no folder watcher: Refresh rereads the folder, and the empty state and New mod
+   say so. The host posts the document as {kind:'mods', data} after every action; showing the tab
+   asks for a Refresh. The one repeating request is the script log's (modsScripts, read only), each
+   second while the tab shows a mod with scripts. All text goes through textContent. */
 var modsTab = (function () {
   var STATES = {
     ready: {label: 'Ready', tone: 'ok'},
@@ -61,6 +63,7 @@ var modsTab = (function () {
   var FILE_CLASSES = {
     descriptor: 'About the mod: its name, requirements and Toybox text',
     add: 'New file',
+    script: 'A script; it runs in the maps that use this mod',
     borrow: "A game file under this mod's own name",
     edit: 'Your edit of a game file',
     replace: 'Replaces a game file',
@@ -127,6 +130,154 @@ var modsTab = (function () {
      records them and Play never sees them. */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var NOTHING_CHANGED_TEXT = 'Changes nothing of the game; it only adds.';
+
+  /* ---- mod scripts (docs/webview-ui.md "Scripts"): what a mod's scripts drive, read by the
+     builder without running them (the row's "scripts"), and how they ran in the current or last
+     Play (the row's "scriptRun", then the host's modsScripts answers while the tab shows). */
+  /* The events a script binds on an object, as a player says them (the static pass's words). */
+  var SCRIPT_EVENTS = {spawn: 'when it spawns', think: 'every frame', remove: 'when it is removed',
+                       damage: 'when it takes damage', death: 'when it dies', anim: 'on its animation events'};
+  var SCRIPT_EVENT_ORDER = ['spawn', 'think', 'damage', 'death', 'anim', 'remove'];
+  /* The row's state while a Play's script stopped: the stop line itself, until the next Play. */
+  var SCRIPT_STOP = {tone: 'stop', icon: 'triangle-alert', label: 'Script stopped'};
+  var SCRIPT_RUN_TEXT = {
+    running: 'Running in this Play.',
+    waiting: 'They start when the Play begins.',
+    ended: 'They ran in the last Play.',
+    none: 'They run when you play a map that uses this mod.'
+  };
+  var SCRIPT_LOG_NOTE = "The log keeps the last 200 lines of the current or last Play: the scripts' print and warn lines, " +
+                        'and the line that says why they stopped. The next Play starts it again.';
+  var SCRIPT_LOG_EMPTY = 'Nothing logged yet.';
+  var SCRIPT_DYNAMIC_TEXT = 'Some names are set while the map runs, so they are not listed here.';
+  /* The player's setting (design: scripts download with maps): on by default. */
+  var SCRIPTED_MAPS_KEY = 'mods.scripted_maps';
+  var SCRIPTED_MAPS_LABEL = 'Play maps whose mods include scripts';
+  var SCRIPTED_MAPS_NOTE = 'When this is off, Snapmap+ refuses a map whose mods include scripts before it downloads anything.';
+  /* How often the tab asks for the script log while it shows a mod with scripts. */
+  var SCRIPT_POLL_MS = 1000;
+  /* A downloaded map's mod that carries scripts: the short view says so before anyone plays. */
+  function scriptsShortText(files) {
+    return 'Runs scripts (' + plural(files, 'file') + '). Scripts run only inside this map and cannot read or change your files.';
+  }
+  /* "a", "a and b", "a, b and c". */
+  function joinWords(list) {
+    if (list.length < 2) return list.join('');
+    return list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
+  }
+  function quoted(list) { return list.map(function (n) { return '"' + n + '"'; }); }
+  /* The scripts' plain lines, in the details pane's order: the objects they drive and when, the
+     Script nodes they answer and fire, and whether some names are only known while running. */
+  function scriptLines(s) {
+    var out = [];
+    if (!s) return out;
+    s.entities.forEach(function (e) {
+      var words = SCRIPT_EVENT_ORDER.filter(function (k) { return e.events.indexOf(k) >= 0; }).map(function (k) { return SCRIPT_EVENTS[k]; });
+      out.push({text: 'Drives ' + e.name + (words.length ? ' ' + joinWords(words) : '') + '.', kind: 'drives', name: e.name});
+    });
+    if (s.inputs.length)
+      out.push({text: 'Answers the Script ' + (s.inputs.length === 1 ? 'node' : 'nodes') + ' named ' + joinWords(quoted(s.inputs)) +
+                      ': a wire into one runs the script.', kind: 'inputs'});
+    if (s.outputs.length)
+      out.push({text: 'Fires the Script ' + (s.outputs.length === 1 ? 'node' : 'nodes') + ' named ' + joinWords(quoted(s.outputs)) +
+                      '; wire what should happen to its On Fired.', kind: 'outputs'});
+    if (s.dynamic > 0) out.push({text: SCRIPT_DYNAMIC_TEXT, kind: 'dynamic'});
+    if (!out.length) out.push({text: 'Drives no object and no Script node; the scripts run when the map starts.', kind: 'none'});
+    return out;
+  }
+  /* The scripts' run in a sentence: the stop line while stopped, else the state. */
+  function scriptRunText(run) {
+    if (run && run.status === 'stopped' && run.stop) return run.stop;
+    return SCRIPT_RUN_TEXT[run && has(SCRIPT_RUN_TEXT, run.status) ? run.status : 'none'];
+  }
+  /* A script's text for the Files view's highlighting, in the decl tokens' shape ({start, end,
+     type: cmt | str | num | ident | punc, isKey, isBool}): Lua comments (-- and --[[ ]]), strings
+     ('', "", [[ ]]), numbers, its keywords and true, false and nil. */
+  var LUA_KEYWORDS = {'and': 1, 'break': 1, 'do': 1, 'else': 1, 'elseif': 1, 'end': 1, 'for': 1, 'function': 1, 'goto': 1,
+                      'if': 1, 'in': 1, 'local': 1, 'not': 1, 'or': 1, 'repeat': 1, 'return': 1, 'then': 1, 'until': 1, 'while': 1};
+  var LUA_BOOLS = {'true': 1, 'false': 1, 'nil': 1};
+  function luaLongEnd(t, i) {
+    /* at "[", "[=", ...: the index after the matching closing bracket, or -1 when this is no long bracket */
+    var m = /^\[(=*)\[/.exec(t.slice(i, i + 64));
+    if (!m) return -1;
+    var close = ']' + m[1] + ']', at = t.indexOf(close, i + m[0].length);
+    return at < 0 ? t.length : at + close.length;
+  }
+  function luaTokens(text) {
+    var t = str(text), out = [], i = 0, n = t.length, c, j, e;
+    while (i < n) {
+      c = t[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '-' && t[i + 1] === '-') {
+        e = t[i + 2] === '[' ? luaLongEnd(t, i + 2) : -1;
+        if (e < 0) { e = t.indexOf('\n', i); if (e < 0) e = n; }
+        out.push({start: i, end: e, type: 'cmt'});
+        i = e;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        for (j = i + 1; j < n && t[j] !== c && t[j] !== '\n'; j++) if (t[j] === '\\') j++;
+        e = Math.min(n, j + 1);
+        out.push({start: i, end: e, type: 'str'});
+        i = e;
+        continue;
+      }
+      if (c === '[' && (e = luaLongEnd(t, i)) > 0) { out.push({start: i, end: e, type: 'str'}); i = e; continue; }
+      var num = /^(0[xX][0-9a-fA-F.]+([pP][+-]?\d+)?|\d+\.?\d*([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?)/.exec(t.slice(i, i + 80));
+      if (num) { out.push({start: i, end: i + num[0].length, type: 'num'}); i += num[0].length; continue; }
+      var id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(t.slice(i, i + 256));
+      if (id) {
+        out.push({start: i, end: i + id[0].length, type: 'ident', isKey: has(LUA_KEYWORDS, id[0]), isBool: has(LUA_BOOLS, id[0])});
+        i += id[0].length;
+        continue;
+      }
+      out.push({start: i, end: i + 1, type: 'punc'});
+      i++;
+    }
+    return out;
+  }
+  function isScript(path) { return /\.lua$/i.test(str(path)); }
+
+  /* What the editor says about a placed entity a mod's scripts use (the Entities tab): a Script
+     node (entityDef mods/<salt>/script) with the names its mod's scripts answer and fire, or an
+     object a script drives (its entityDef bound by name). null when no script uses it. `mods` is the
+     tab's model. */
+  var SCRIPT_NODE_RE = /^mods\/([^\/]+)\/script$/i;
+  function scriptModFor(mods, salt) {
+    var found = null;
+    arr(mods).forEach(function (b) {
+      if (b.salt.toLowerCase() !== salt.toLowerCase() || !b.scripts) return;
+      if (!found || (found.place && !b.place)) found = b;   /* your own copy first */
+    });
+    return found;
+  }
+  function scriptEntityInfo(mods, inherit, name) {
+    var inh = str(inherit).replace(/\\/g, '/'), nm = str(name), m = SCRIPT_NODE_RE.exec(inh);
+    if (m) {
+      var b = scriptModFor(mods, m[1]);
+      if (!b) return null;
+      var s = b.scripts, mod = title(b), choices = [];
+      s.inputs.forEach(function (n) { choices.push({name: n, what: 'a wire into it runs the script'}); });
+      s.outputs.forEach(function (n) { if (s.inputs.indexOf(n) < 0) choices.push({name: n, what: 'the script fires it'}); });
+      var text;
+      if (s.inputs.indexOf(nm) >= 0) text = 'Script node: runs "' + nm + '" in ' + mod + '.';
+      else if (s.outputs.indexOf(nm) >= 0) text = 'Script node: the scripts of ' + mod + ' fire it as "' + nm + '"; wire its On Fired.';
+      else if (!nm) text = 'Script node of ' + mod + ': give it the name of something its scripts handle or fire.';
+      else text = 'No script in ' + mod + ' uses the name "' + nm + '"; pick a name its scripts use.';
+      if (s.inputs.indexOf(nm) < 0 && s.outputs.indexOf(nm) < 0 && s.dynamic > 0)
+        text += ' Names its scripts set while running are not listed.';
+      return {kind: 'node', mod: mod, used: s.inputs.indexOf(nm) >= 0 || s.outputs.indexOf(nm) >= 0, text: text, choices: choices};
+    }
+    var own = /^mods\/([^\/]+)\/(.+)$/i.exec(inh);
+    if (!own) return null;
+    var d = scriptModFor(mods, own[1]);
+    if (!d) return null;
+    var rel = own[2].toLowerCase();
+    for (var i = 0; i < d.scripts.entities.length; i++)
+      if (d.scripts.entities[i].name.toLowerCase() === rel)
+        return {kind: 'driven', mod: title(d), used: true, text: 'Driven by a script in ' + title(d) + '.', choices: []};
+    return null;
+  }
   /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
      path starts at the first top-level decl member the slot names. */
   var TOP_MEMBERS = ['edit', 'editorVars', 'inherit', 'events', 'aliases', 'init', 'class'];
@@ -208,7 +359,26 @@ var modsTab = (function () {
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
             facts: normFacts(b.facts), borrows: normBorrows(b.borrows), sameFilesAs: normSame(b.sameFilesAs),
             /* the builder's warnings in plain words; a warning is not attention */
-            warnings: normNames(b.warnings)};
+            warnings: normNames(b.warnings),
+            scripts: normScripts(b.scripts), scriptRun: normRun(b.scriptRun),
+            /* its sound banks whose new bytes the game hears only after a restart */
+            restartBanks: normNames(b.restartBanks)};
+  }
+  /* The block's "scripts" member: null for a mod without scripts. */
+  function normScripts(v) {
+    v = obj(v);
+    if (!v) return null;
+    return {files: num(v.files),
+            entities: arr(v.entities).map(function (e) { e = obj(e) || {}; return {name: str(e.name), events: normNames(e.events)}; })
+              .filter(function (e) { return e.name.length > 0; }),
+            inputs: normNames(v.inputs), outputs: normNames(v.outputs), dynamic: num(v.dynamic), node: bool(v.node)};
+  }
+  var RUN_STATES = {none: 1, running: 1, stopped: 1, ended: 1, waiting: 1};
+  /* A mod's scripts in the current or last Play: null when no Play has run them. */
+  function normRun(v) {
+    v = obj(v);
+    if (!v) return null;
+    return {status: has(RUN_STATES, v.status) ? str(v.status) : 'none', stop: str(v.stop), lines: num(v.lines)};
   }
   function title(b) { return b.name || b.folder || b.key; }
   function cmp(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
@@ -324,17 +494,21 @@ var modsTab = (function () {
     var d = new Date(s * 1000);
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
-  /* The row's second line: the size. */
+  /* The row's second line: the size, and whether the mod runs scripts. */
   function subText(b) {
-    return formatSize(b.size);
+    return formatSize(b.size) + (b.scripts ? ', runs scripts' : '');
   }
 
-  /* One of the two states, its one-line cause (the icon's hover title) and the details sentence. */
+  /* One of the two states, its one-line cause (the icon's hover title) and the details sentence.
+     A ready mod whose script stopped in the current or last Play shows the stop line as its state
+     until the next Play; it is still usable, so it is not attention. */
   function statusInfo(b) {
     if (b.state !== 'ready') {
       var cause = b.cause || UNUSABLE_TEXT;
       return {tone: 'warn', icon: STATUS.warn.icon, label: STATUS.warn.label, cause: cause, sentence: cause};
     }
+    if (b.scriptRun && b.scriptRun.status === 'stopped' && b.scriptRun.stop)
+      return {tone: SCRIPT_STOP.tone, icon: SCRIPT_STOP.icon, label: SCRIPT_STOP.label, cause: b.scriptRun.stop, sentence: b.scriptRun.stop};
     var ok = b.place ? placeText(b) : READY_TEXT;
     return {tone: 'ok', icon: STATUS.ok.icon, label: STATUS.ok.label, cause: ok, sentence: ok};
   }
@@ -463,6 +637,8 @@ var modsTab = (function () {
   function normFile(f) {
     f = obj(f) || {};
     var cls = typeof f['class'] === 'string' && has(FILE_CLASSES, f['class']) ? f['class'] : '';
+    /* the mod's own .lua is one of its scripts (the builder files them as new files) */
+    if (cls === 'add' && isScript(f.path)) cls = 'script';
     var where = str(f.container);
     return {path: str(f.path).replace(/\\/g, '/'), size: num(f.size), text: f.kind === 'text', cls: cls, game: bool(f.game),
             container: has(FILE_SOURCES, where) ? where : '', inFolder: f.inFolder !== false, cause: str(f.cause)};
@@ -819,9 +995,10 @@ var modsTab = (function () {
       row.setAttribute('data-key', b.key);
       row.setAttribute('aria-selected', on ? 'true' : 'false');
       if (used) row.setAttribute('data-in-map', 'true');
-      /* One glyph: needs attention wins, then in this map, then installed; the cause is the hover. */
-      row.title = info.cause + (used ? '. ' + IN_MAP_TITLE + '.' : '');
-      row.appendChild(statusIcon(info.tone !== 'warn' && used ? IN_MAP_GLYPH : info));
+      /* One glyph: needs attention wins, then a stopped script, then in this map, then installed;
+         the cause is the hover. */
+      row.title = info.cause + (used ? (/\.$/.test(info.cause) ? ' ' : '. ') + IN_MAP_TITLE + '.' : '');
+      row.appendChild(statusIcon(info.tone === 'ok' && used ? IN_MAP_GLYPH : info));
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', title(b)));
       text.appendChild(el('div', 'mods-row-sub', subText(b)));
@@ -908,6 +1085,7 @@ var modsTab = (function () {
       var box = byId('modsDetail');
       if (!box) return;
       clear(box);
+      sl.box = sl.stateNode = sl.copy = null;
       var b = selectedMod();
       if (!b) { if (loaded && !lastError) howTo(box, !model.mods.length); return; }
       var info = statusInfo(b);
@@ -919,12 +1097,19 @@ var modsTab = (function () {
       head.appendChild(el('span', 'mods-detail-name', title(b)));
       box.appendChild(head);
       box.appendChild(el('div', 'mods-detail-sentence ' + info.tone, info.sentence));
+      /* A sound bank the game loaded before this change keeps its first bytes until a restart. */
+      b.restartBanks.forEach(function (bank) {
+        box.appendChild(el('div', 'mods-note mods-same', 'Restart DOOM to hear the new ' + bank + '.'));
+      });
       /* A downloaded map's mod: the short view. A player who only plays maps needs its name, its
-         map and Remove; Add to my mods (the head) makes it one of their own. */
+         map and Remove; Add to my mods (the head) makes it one of their own. Scripts are said
+         here, before anyone plays. */
       if (b.place) {
         var shortAbout = section(box, 'about', 'About');
         field(shortAbout, 'Came with', b.placeTitle || 'a downloaded map');
+        if (b.scripts) field(shortAbout, 'Scripts', scriptsShortText(b.scripts.files)).className += ' mods-field-long';
         shortAbout.appendChild(el('div', 'mods-note', PLACE_CLEANUP_TEXT));
+        if (b.scripts) renderScriptLog(box, b);
         return;
       }
       if (b.sameFilesAs) box.appendChild(el('div', 'mods-note mods-same', sameFilesText(b.sameFilesAs)));
@@ -946,6 +1131,17 @@ var modsTab = (function () {
       } else if (b.editorRows > 0) {
         adds.appendChild(el('div', 'mods-line', plural(b.editorRows, 'Toybox row')));
       } else adds.appendChild(el('div', 'mods-line muted', 'Adds no Toybox rows.'));
+
+      if (b.scripts) {
+        var sc = section(box, 'scripts', 'Scripts');
+        var sf = el('button', 'mods-link', plural(b.scripts.files, 'file'));
+        sf.type = 'button';
+        sf.title = "Read this mod's scripts in the Files view";
+        sf.addEventListener('click', function () { openFiles(b.key, sf, firstScript(b)); });
+        field(sc, 'Files', sf);
+        scriptLines(b.scripts).forEach(function (l) { sc.appendChild(el('div', 'mods-line', l.text)); });
+        renderScriptLog(box, b);
+      }
 
       if (b.facts) {
         var changes = section(box, 'changes', 'What it changes in the game');
@@ -999,6 +1195,86 @@ var modsTab = (function () {
       if (b.publishedMaps >= 0) {
         var share = section(box, 'sharing', 'Sharing');
         field(share, 'Published maps', b.publishedMaps ? 'Used by ' + plural(b.publishedMaps, 'of your published maps', 'of your published maps') : 'Used by none of your published maps');
+      }
+    }
+
+    /* ---- the script log: the selected mod's lines of the current or last Play and its scripts'
+       state, asked for every SCRIPT_POLL_MS while the tab shows and a mod has scripts (the host's
+       modsScripts: read only, answered at once, during a Play too). The answer updates the rows'
+       states and the log in place; the details pane is drawn again only when the selected mod's
+       state changed. */
+    var sl = {visible: false, timer: null, salt: '', lines: [], box: null, stateNode: null, copy: null};
+    function firstScript(b) { return 'assets/mods/' + b.salt.toLowerCase() + '/scripts/'; }
+    function logLines(b) { return sl.salt && b && sl.salt.toLowerCase() === b.salt.toLowerCase() ? sl.lines : null; }
+    function renderScriptLog(box, b) {
+      var s = section(box, 'scriptLog', 'Script log');
+      var stopped = !!(b.scriptRun && b.scriptRun.status === 'stopped');
+      sl.stateNode = s.appendChild(el('div', 'mods-line mods-script-run' + (stopped ? ' stop' : ''), scriptRunText(b.scriptRun)));
+      var log = el('div', 'mods-log');
+      log.setAttribute('role', 'log');
+      log.setAttribute('aria-label', 'Script log of ' + title(b));
+      log.setAttribute('tabindex', '0');
+      sl.box = s.appendChild(log);
+      var copy = el('button', 'btn mods-log-copy', 'Copy log');
+      copy.type = 'button';
+      copy.title = 'Copy these lines to the clipboard, to keep them or send them with feedback';
+      copy.addEventListener('click', function () {
+        var lines = logLines(b);
+        if (!lines || !lines.length) return;
+        if (env.copy) env.copy(lines.join('\n') + '\n');
+        env.toast('Copied ' + plural(lines.length, 'line') + ' of the script log.', 'ok');
+      });
+      sl.copy = s.appendChild(copy);
+      s.appendChild(el('div', 'mods-note', SCRIPT_LOG_NOTE));
+      fillLog(b);
+      askScripts();
+    }
+    function fillLog(b) {
+      var box = sl.box;
+      if (!box) return;
+      var lines = logLines(b);
+      var atEnd = !box.scrollHeight || box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+      clear(box);
+      if (!lines) box.appendChild(el('div', 'muted', 'Reading the log...'));
+      else if (!lines.length) box.appendChild(el('div', 'muted', SCRIPT_LOG_EMPTY));
+      if (lines) lines.forEach(function (l) { box.appendChild(el('div', /^Script stopped: /.test(l) ? 'mods-log-stop' : '', l)); });
+      if (atEnd) box.scrollTop = box.scrollHeight;
+      if (sl.copy) sl.copy.disabled = !lines || !lines.length;
+    }
+    function selectedScriptSalt() { var b = selectedMod(); return b && b.scripts ? b.salt : ''; }
+    function askScripts() { if (sl.visible) env.post({cmd: 'modsScripts', salt: selectedScriptSalt()}); }
+    /* The page's timer (env.every / env.cancel): the one repeating request the tab makes. */
+    function every(ms, fn) { return env.every ? env.every(fn, ms) : null; }
+    function stopEvery(t) { if (env.cancel) env.cancel(t); }
+    /* Ask while the tab shows a mod with scripts; stop when it hides or none is left. */
+    function syncScriptPoll() {
+      var want = sl.visible && model.mods.some(function (b) { return !!b.scripts; });
+      if (want && sl.timer === null) sl.timer = every(SCRIPT_POLL_MS, askScripts);
+      else if (!want && sl.timer !== null) { stopEvery(sl.timer); sl.timer = null; }
+    }
+    function onScripts(d) {
+      var data = obj(d && d.data);
+      if (!data) return;
+      var runs = {}, sel = selectedMod(), changed = false, selChanged = false;
+      arr(data.mods).forEach(function (m) { m = obj(m) || {}; if (str(m.salt)) runs[str(m.salt).toLowerCase()] = normRun(m); });
+      model.mods.forEach(function (b) {
+        if (!b.scripts) return;
+        var k = b.salt.toLowerCase(), nr = has(runs, k) ? runs[k] : null;
+        if (JSON.stringify(nr) === JSON.stringify(b.scriptRun)) return;
+        b.scriptRun = nr;
+        changed = true;
+        if (b === sel) selChanged = true;
+      });
+      sl.salt = str(data.salt);
+      sl.lines = arr(data.log).map(str);
+      if (changed) renderList();
+      if (selChanged) renderDetail();
+      else if (sel && sel.scripts) {
+        if (sl.stateNode) {
+          sl.stateNode.textContent = scriptRunText(sel.scriptRun);
+          sl.stateNode.className = 'mods-line mods-script-run' + (sel.scriptRun && sel.scriptRun.status === 'stopped' ? ' stop' : '');
+        }
+        fillLog(sel);
       }
     }
 
@@ -1410,7 +1686,7 @@ var modsTab = (function () {
     }
     /* The Decl Text editor primitive, read-only: line numbers, the highlighted text, and a
        read-only textarea above it for selection and copy. */
-    function codeEditor(text, label) {
+    function codeEditor(text, label, script) {
       var t = str(text).replace(/\r\n?/g, '\n');
       var ed = el('div', 'code-editor mf-editor');
       /* a final line break ends the last line; it does not start another */
@@ -1426,7 +1702,7 @@ var modsTab = (function () {
       pre.setAttribute('aria-hidden', 'true');
       var code = el('code');
       var toks = null;
-      try { toks = env.tokens ? env.tokens(t) : null; } catch (err) { toks = null; }
+      try { toks = script ? luaTokens(t) : env.tokens ? env.tokens(t) : null; } catch (err) { toks = null; }
       if (toks && toks.length) {
         var last = 0;
         toks.forEach(function (tk) {
@@ -1505,7 +1781,7 @@ var modsTab = (function () {
       else if (tx.error) pane.appendChild(el('div', 'mf-binary mods-error', tx.error));
       else {
         if (tx.productBlock) pane.appendChild(el('div', 'mf-hint', 'Snapmap+ writes the rest of mod.json itself; that part is not shown.'));
-        pane.appendChild(codeEditor(tx.text, 'Text of ' + fileLeaf(f.path)));
+        pane.appendChild(codeEditor(tx.text, 'Text of ' + fileLeaf(f.path), isScript(f.path)));
       }
       problemStrip(pane, (tx && tx.cause) || f.cause);
     }
@@ -1517,6 +1793,12 @@ var modsTab = (function () {
         if (!ok) { fm.error = message || 'The files could not be read.'; renderFiles(); return; }
         fm.data = normFiles(data);
         var pick = fileOf(fm.want) ? fm.want : '';
+        /* a folder asked for ("assets/mods/<salt>/scripts/"): its file with a problem, else its first */
+        if (!pick && /\/$/.test(fm.want)) {
+          var under = fm.data.files.filter(function (f) { return f.path.toLowerCase().indexOf(fm.want.toLowerCase()) === 0; });
+          under.forEach(function (f) { if (!pick && f.cause) pick = f.path; });
+          if (!pick && under.length) pick = under[0].path;
+        }
         fm.data.files.forEach(function (f) { if (!pick && f.cause) pick = f.path; });
         if (!pick && fileOf('mod.json')) pick = 'mod.json';
         if (!pick && fm.data.files.length) pick = fm.data.files[0].path;
@@ -1651,6 +1933,9 @@ var modsTab = (function () {
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
       }
       renderAll();
+      syncScriptPoll();
+      /* The page's other parts that read the mods (the Entities tab's script labels). */
+      if (env.changed) env.changed();
     }
     function onResult(d) {
       var action = str(d.action), data = d.data && typeof d.data === 'object' ? d.data : {};
@@ -1755,14 +2040,45 @@ var modsTab = (function () {
       on('modsAttnBtn', 'click', function () { setAttnOnly(!attnOnly); });
       on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); renderList(); });
       on('modsList', 'keydown', onListKey);
+      /* The setting for scripts from downloaded maps: its label and its one sentence. */
+      var sm = byId('modsScriptedMaps'), smNote = byId('modsScriptedMapsNote'), smLabel = byId('modsScriptedMapsLabel');
+      if (smLabel) smLabel.textContent = SCRIPTED_MAPS_LABEL;
+      if (smNote) smNote.textContent = SCRIPTED_MAPS_NOTE;
+      if (sm) {
+        sm.checked = scriptedMaps;
+        sm.title = SCRIPTED_MAPS_NOTE;
+        sm.addEventListener('change', function () {
+          scriptedMaps = !!sm.checked;
+          if (env.saveSetting) env.saveSetting(SCRIPTED_MAPS_KEY, scriptedMaps);
+        });
+      }
       renderHead();
       renderButtons();
+    }
+    var scriptedMaps = true;
+    /* The saved setting, read by the page at start. */
+    function setScriptedMaps(on) {
+      scriptedMaps = on !== false;
+      var sm = byId('modsScriptedMaps');
+      if (sm) sm.checked = scriptedMaps;
     }
 
     return {
       bind: bind,
-      /* The tab became visible: reread the folder (explicit demand, never a timer; there is no watcher). */
-      show: function () { refresh(); },
+      /* The tab became visible: reread the folder (explicit demand, never a timer; there is no
+         watcher). While it shows, the script log of a mod with scripts is asked for each second. */
+      show: function () { sl.visible = true; refresh(); syncScriptPoll(); },
+      hide: function () { sl.visible = false; syncScriptPoll(); },
+      setScriptedMaps: setScriptedMaps,
+      /* The Entities tab: what a placed entity is to its mod's scripts (scriptEntityInfo), from the
+         last document; ensureLoaded asks for one (no rescan) when none came yet. */
+      scriptInfo: function (inherit, name) { return scriptEntityInfo(model.mods, inherit, name); },
+      ensureLoaded: function () {
+        if (loaded || waiting) return false;
+        waiting = true;
+        env.post({cmd: 'modsList'});
+        return true;
+      },
       refresh: refresh,
       act: act,
       select: select,
@@ -1778,10 +2094,12 @@ var modsTab = (function () {
         if (d.kind === 'mods') { onMods(d); return true; }
         if (d.kind === 'modsActionResult') { onResult(d); return true; }
         if (d.kind === 'modsProgress') { if (busy && d.phase === 'game') setStatus(GAME_PHASE_TEXT, 'busy'); return true; }
+        if (d.kind === 'modsScripts') { onScripts(d); return true; }
         return false;
       },
       state: function () {
         return {model: model, loaded: loaded, waiting: waiting, busy: busy, selectedKey: selectedKey, view: view, error: lastError,
+                scripts: {polling: sl.timer !== null, visible: sl.visible, salt: sl.salt, lines: sl.lines.slice()},
                 attentionOnly: attnOnly, closedGroups: Object.keys(closedGroups).filter(function (g) { return closedGroups[g]; }),
                 modal: {open: modal.open, page: modal.page, from: modal.from, preview: modal.preview},
                 files: {open: fm.open, key: fm.key, loading: fm.loading, error: fm.error, data: fm.data, selected: fm.sel,
@@ -1803,7 +2121,11 @@ var modsTab = (function () {
           changeLines: changeLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass, folderArg: folderArg,
           PATH_TITLES: PATH_TITLES,
           FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, NEW_MOD_HINT: NEW_MOD_HINT, normFiles: normFiles,
-          fileTree: fileTree, fileMeta: fileMeta};
+          fileTree: fileTree, fileMeta: fileMeta,
+          scriptLines: scriptLines, scriptRunText: scriptRunText, scriptEntityInfo: scriptEntityInfo, scriptsShortText: scriptsShortText,
+          luaTokens: luaTokens, SCRIPT_RUN_TEXT: SCRIPT_RUN_TEXT, SCRIPT_LOG_NOTE: SCRIPT_LOG_NOTE, SCRIPT_LOG_EMPTY: SCRIPT_LOG_EMPTY,
+          SCRIPT_DYNAMIC_TEXT: SCRIPT_DYNAMIC_TEXT, SCRIPT_POLL_MS: SCRIPT_POLL_MS,
+          SCRIPTED_MAPS_KEY: SCRIPTED_MAPS_KEY, SCRIPTED_MAPS_LABEL: SCRIPTED_MAPS_LABEL, SCRIPTED_MAPS_NOTE: SCRIPTED_MAPS_NOTE};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = modsTab;

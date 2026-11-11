@@ -178,8 +178,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="fields">
           <div class="field grow"><label>Inherit</label><div class="combo grow" id="cInherit"><input type="text" id="fInherit" autocomplete="off"><button type="button" class="combo-arrow icon-button" aria-label="Show inherit options"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-chevron-down"></use></svg></button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Classname</label><div class="combo grow" id="cClassname"><input type="text" id="fClassname" autocomplete="off"><button type="button" class="combo-arrow icon-button" aria-label="Show classname options"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-chevron-down"></use></svg></button><div class="combo-list"></div></div></div>
-          <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
+          <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname" list="fScriptNames"><datalist id="fScriptNames"></datalist></div>
         </div>
+        <div class="script-note" id="fScriptNote" role="note" hidden></div>
         <div class="section-label"><span>Declaration</span>
           <span class="prob-count" id="probCount"></span>
           <div class="focus-head" id="focusHead"></div>
@@ -357,6 +358,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-body list mods-list" id="modsList" role="listbox" tabindex="0" aria-label="Mods"><div class="list-empty">Open this tab to list your mods.</div></div>
       <div class="mods-foot">
         <div class="mods-status" id="modsStatus" role="status" aria-live="polite"></div>
+        <label class="mods-setting"><input type="checkbox" id="modsScriptedMaps" checked aria-describedby="modsScriptedMapsNote"><span id="modsScriptedMapsLabel">Play maps whose mods include scripts</span></label>
+        <div class="mods-setting-note" id="modsScriptedMapsNote"></div>
         <div class="mods-root" id="modsRoot"></div>
       </div>
     </div>
@@ -2096,6 +2099,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('fClassname').value = d.classname || '';
     document.getElementById('fDisplayname').value = d.displayname || '';
     loaded = { decl:decl, inherit:d.inherit||'', classname:d.classname||'', displayname:d.displayname||'' };
+    scriptNoteRefresh();   // a Script node, or an object a mod's script drives, says so
     refreshDecl();   // programmatic .value writes fire no 'input' event -- re-tokenize/lint/paint explicitly
     updateDirty();
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
@@ -2265,6 +2269,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         receivePrefabOpenFolders(d);
       } else if (d.key === TIMELINE_OPEN_FOLDERS_KEY) {
         receiveTimelineOpenFolders(d);
+      } else if (d.key === modsTab.SCRIPTED_MAPS_KEY) {
+        var scripted = true;
+        if (d.result === 1) { try { scripted = JSON.parse(d.valueJson) !== false; } catch (e) {} }
+        modsUi.setScriptedMaps(scripted);
       } else {
         receiveEntitySetting(d);
       }
@@ -2273,7 +2281,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         d.key === ENTITY_SHOW_HIDDEN_KEY ||
         d.key === ENTITY_SELECTION_MODE_KEY ||
         d.key === PREFAB_OPEN_FOLDERS_KEY ||
-        d.key === TIMELINE_OPEN_FOLDERS_KEY;
+        d.key === TIMELINE_OPEN_FOLDERS_KEY ||
+        d.key === modsTab.SCRIPTED_MAPS_KEY;
       if (knownSetting && d.result !== 1)
         toast("Setting changed for this session, but couldn't be saved.", 'warn');
     } else if (d.kind === 'configStatus') {
@@ -2460,10 +2469,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         if (cmMeta && cmMeta.name === d.name) post({cmd:'savePrefabMeta', name: d.name, folder: '', body: JSON.stringify(cmBody)});
         toast('Created module prefab "' + d.name + '"' + (d.summary && d.summary.moduleCount ? ' (' + d.summary.moduleCount + ' module' + (d.summary.moduleCount === 1 ? '' : 's') + ', ' + (d.summary.entityCount || 0) + ' object' + (d.summary.entityCount === 1 ? '' : 's') + ')' : ''), 'ok');
       }
-      else if (d.result === 0) toast('A prefab named "' + d.name + '" already exists', 'warn');
-      else if (d.result === -2) toast('Switch to Blueprint mode (Tab in the editor) to save modules as a prefab', 'warn');
-      else if (d.result === -3) toast('Select one or more modules in Blueprint first', 'warn');
-      else toast('Could not save the selected modules as "' + d.name + '". Try again; if it keeps failing, use Send feedback.', 'err');
+      else { var cmt = pfModuleCreateToast(d); toast(cmt.text, cmt.level); }
     } else if (d.kind === 'prefabDetail') {
       renderPrefabDetail(d);
     } else if (d.kind === 'budgetTable') {
@@ -2545,14 +2551,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
          are being fetched or were refused says so first (prefab_mods.c). */
       var pml = pfModsLoadToast(d);
       if (pml) toast(pml.text, pml.level);
-      else if (d.prefabKind === 'modules') {
-        if (d.result === 1) toast('"' + d.name + '" is under the cursor -- move it into place and press Space, or Esc to cancel', 'ok');
-        else if (d.result === -1) toast('"' + d.name + '" could not be read: the file is missing, damaged or in use.', 'err');
-        else if (d.result === -4) toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn');
-        else if (d.result === -5) toast('"' + d.name + '" does not fit: the map would exceed its module budget', 'warn');
-        else if (d.result === -6) toast(d.message || ('"' + d.name + '" needs modules that are not in your palette'), 'warn');
-        else toast('The editor did not place "' + d.name + '". Open the map in Blueprint mode and try again.', 'err');
-      }
+      else if (d.prefabKind === 'modules') { var mpt = pfModulePlaceToast(d); toast(mpt.text, mpt.level); }
       else { var plt = pfPlaceToast(d); toast(plt.text, plt.level); }
     } else if (d.kind === 'deletePrefabResult') {
       if (d.result === 1) {
@@ -3843,9 +3842,47 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       ctx.innerHTML = '';
       items.forEach(function(it){ addCtx(it.label, it.run); });
       openCtx(x, y);
-    }
+    },
+    // The script log's Copy log, and the setting for scripts from downloaded maps.
+    copy: copyText,
+    saveSetting: configSet,
+    // The script log is asked for each second while the tab shows a mod with scripts.
+    every: function(fn, ms){ return window.setInterval(fn, ms); },
+    cancel: function(t){ window.clearInterval(t); },
+    // A fresh mods document: the Entities tab's script label follows it.
+    changed: function(){ scriptNoteRefresh(); }
   });
   modsUi.bind();
+  configGet(modsTab.SCRIPTED_MAPS_KEY);
+
+  // The Entities tab's script label (mods_tab.js scriptEntityInfo): a Script node says which
+  // script its name runs, offers the names its mod's scripts handle and fire as the Displayname's
+  // choices, and says so when no script uses its name; an object a script drives says that.
+  function scriptNoteRefresh() {
+    var note = document.getElementById('fScriptNote'), list = document.getElementById('fScriptNames');
+    if (!note || !list) return;
+    var inherit = document.getElementById('fInherit').value, name = document.getElementById('fDisplayname').value;
+    var own = /^mods\//i.test(inherit);
+    var info = own ? modsUi.scriptInfo(inherit, name) : null;
+    list.innerHTML = '';
+    if (!info) {
+      note.hidden = true;
+      note.textContent = '';
+      // The mods list has not come yet: ask for it once, then this runs again.
+      if (own) modsUi.ensureLoaded();
+      return;
+    }
+    info.choices.forEach(function(c){
+      var o = document.createElement('option');
+      o.value = c.name;
+      o.label = c.what;
+      list.appendChild(o);
+    });
+    note.textContent = info.text;
+    note.className = 'script-note' + (info.kind === 'node' && !info.used ? ' warn' : '');
+    note.hidden = false;
+  }
+  document.getElementById('fDisplayname').addEventListener('input', scriptNoteRefresh);
 
   // top-level tab switching (Entities / Prefabs / Timelines / Assets / Mods)
   var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabstrip .tab'));
@@ -3878,6 +3915,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
       if (which === 'timelines') tlMaybeAutoRefresh();
       if (which === 'mods') modsUi.show();   // rescan on demand: tab open, Refresh, and after each action
+      else modsUi.hide();                     // the script log is asked for only while the tab shows
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
       else if (typeof abTabMount !== 'undefined') {
@@ -6611,6 +6649,30 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       return {text: q + ' is staged but not in hand' + why + ': ' + how, level: 'warn'};
     }
     return {text: q + ' was sent to the editor; if it is not in hand, press Ctrl+V in the 3D view to place it', level: 'ok'};
+  }
+  // A module prefab's save or placement that did not go as asked. The backend's message is shown when it
+  // is a whole sentence (it says which of several outcomes happened: over the limits and put back, or
+  // left as one undo step, or module prefabs off until a restart); a short internal phrase never is, and
+  // the page's own sentence for the result says what happened and what to do.
+  function pfModuleSentence(m) { return typeof m === 'string' && /^[A-Z"]/.test(m) && /[.?]$/.test(m) ? m : ''; }
+  function pfModulePlaceToast(d) {
+    var q = '"' + d.name + '"', own = pfModuleSentence(d.message);
+    if (d.result === 1) return {text: q + ' is under the cursor -- move it into place and press Space, or Esc to cancel', level: 'ok'};
+    if (d.result === -4) return {text: 'Switch to Blueprint mode (Tab in the editor) to place a module prefab', level: 'warn'};
+    /* the rooms it lacks are named by the backend, whatever its punctuation */
+    if (d.result === -6) return {text: d.message || (q + ' needs modules that are not in your palette'), level: 'warn'};
+    if (own) return {text: own, level: d.result === -5 ? 'warn' : 'err'};
+    if (d.result === -1) return {text: q + ' could not be read: the file is missing, damaged or in use.', level: 'err'};
+    if (d.result === -5) return {text: q + ' does not fit: the map would exceed its module budget', level: 'warn'};
+    return {text: 'The editor did not place ' + q + '. Open the map in Blueprint mode and try again.', level: 'err'};
+  }
+  function pfModuleCreateToast(d) {
+    var own = pfModuleSentence(d.message);
+    if (d.result === 0) return {text: 'A prefab named "' + d.name + '" already exists', level: 'warn'};
+    if (d.result === -2) return {text: 'Switch to Blueprint mode (Tab in the editor) to save modules as a prefab', level: 'warn'};
+    if (d.result === -3) return {text: 'Select one or more modules in Blueprint first', level: 'warn'};
+    if (own) return {text: own, level: 'err'};
+    return {text: 'Could not save the selected modules as "' + d.name + '". Try again; if it keeps failing, use Send feedback.', level: 'err'};
   }
   // --- place toast end ---
   function updateCreateBtn(){

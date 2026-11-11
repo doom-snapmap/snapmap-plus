@@ -63,6 +63,19 @@ typedef void (*sh_modui_line_fn)(void *context, const char *line);
 /* Called once per placed name the open map holds (duplicates allowed). */
 typedef void (*sh_modui_name_fn)(void *context, const char *name);
 
+/* A mod's scripts in the current or last Play (script_runtime.h
+ * sh_script_mod_info_get), as the tab shows them. */
+#define SH_MODUI_SCRIPT_NONE     0   /* no Play has run them yet */
+#define SH_MODUI_SCRIPT_RUNNING  1
+#define SH_MODUI_SCRIPT_STOPPED  2   /* stopped by an error: `stop` is the line */
+#define SH_MODUI_SCRIPT_ENDED    3   /* the last Play ended with them running */
+#define SH_MODUI_SCRIPT_WAITING  4   /* prepared for this map, waiting for Play */
+typedef struct sh_modui_script_info {
+    int  status;          /* SH_MODUI_SCRIPT_* */
+    int  lines;           /* lines in its log */
+    char stop[512];       /* the stop line while status is STOPPED, else "" */
+} sh_modui_script_info;
+
 /* Engine operations, bound by iface_engine.c in the product and by fakes in
  * tests. A NULL member takes the product default where there is one (rescan,
  * palette rebuild and the stock reader; none in a SH_MODUI_PURE build) and is
@@ -141,6 +154,19 @@ typedef struct sh_modui_engine {
      * map's listing and the PLAY mode are set, while the game is still at
      * the hub. Unbound: nothing (the level load's own passes parse). */
     int (*launch_preload)(const char *why);
+    /* Mod scripts (script_runtime.h; none in a SH_MODUI_PURE build). Any
+     * thread. script_info: 1 with *out when `salt` has scripts in the current
+     * or last Play, else 0. script_log: each line of `salt`'s log, oldest
+     * first (prints, warnings, the stop line); returns the count. script_mods:
+     * each salt with a log or a state, once; returns the count. */
+    int (*script_info)(const char *salt, sh_modui_script_info *out);
+    int (*script_log)(const char *salt, sh_modui_line_fn fn, void *context);
+    int (*script_mods)(sh_modui_name_fn fn, void *context);
+    /* The sound banks whose file changed after the game loaded them this
+     * session (modsound.h sh_modsound_restart_banks; none in a SH_MODUI_PURE
+     * build): fn(context, the bank's file name) once each, then `owner` the
+     * salt of the mod serving the new bytes. Returns the count. Main thread. */
+    int (*restart_banks)(void (*fn)(void *context, const char *bank, const char *owner), void *context);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {
@@ -279,6 +305,15 @@ int  sh_modui_doctor(int verify, sh_modui_line_fn line, void *context);
  * (*needed set), 0 when nothing has been built. */
 int  sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation);
 
+/* The script log op (SH_MODS_SCRIPTS), on any thread, read only: copies into
+ * out {"mods":[{"salt","status","stop","lines"}],"salt","log":[...]}: every
+ * mod whose scripts ran in the current or last Play with its state ("none",
+ * "running", "stopped", "ended", "waiting") and stop line, and the lines of
+ * `salt`'s log ("" or NULL: none). Returns 1 copied, -1 when out is NULL or
+ * too small (*needed set), 0 when out of memory. It never touches the shared
+ * buffer, so a page may ask while a job runs. */
+int  sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed);
+
 /* Bumped by every action that can change the store or the serving index. */
 unsigned sh_modui_generation(void);
 
@@ -324,6 +359,20 @@ int sh_ms_place_saved_maps(const char *place);
  * many places went, -1 when the store cannot be read. Store side, called at
  * boot; the window only describes it. */
 int sh_ms_places_prune(unsigned days);
+
+/* Scripts from downloaded maps (design: the one download approval and the
+ * player's setting). The download gate needs to know, before it asks,
+ * whether the map's missing builds carry scripts and how many files: the
+ * store's answer must say so (store and Worker side). Then it adds
+ * sh_modui_scripts_approval's sentence to its one question, and, while
+ * sh_modui_scripted_maps_allowed() is 0, refuses the map before any download
+ * with SH_MODUI_SCRIPTS_OFF. The Mods tab offers the setting
+ * ("mods.scripted_maps", on by default). */
+#define SH_MODUI_SCRIPTS_OFF \
+    "This map's mods include scripts, which you turned off in the Mods tab; turn on \"Play maps whose mods include " \
+    "scripts\" there to play it."
+void sh_modui_scripts_approval(unsigned files, char *out, size_t cap);
+int  sh_modui_scripted_maps_allowed(void);
 
 /* The published-map gate sets the launched map's place through
  * sh_modui_scope_launch_at today. Once the place is a fact of the map, set

@@ -1658,6 +1658,21 @@ feature.
   readable after the map until the mod's next map start:
   `sh_script_log_read`, `sh_script_stop_line`, `sh_script_status`,
   `sh_script_mods`.
+- **In the window.** The Mods tab reads these through `modui.c`'s engine
+  binding (`script_info`, `script_log`, `script_mods`, defaulting to
+  `sh_script_mod_info_get`, `sh_script_log_read` and `sh_script_mods`): each
+  row carries the block's `scripts` member and, once a Play ran them,
+  `scriptRun {status, stop, lines}`; the read-only `SH_MODS_SCRIPTS` op
+  (`sh_modui_scripts`) answers every mod's state and one mod's log on any
+  thread into the caller's buffer, never the tab's shared document, and the
+  page asks for it each second while the tab shows a mod with scripts. A
+  script build error is the row's cause as written, and the Files view matches
+  it to the file by the author's spelling (`sh_mb_script_file_name`). The
+  Entities tab names a Script node's script and offers its mod's input and
+  output names from the same member. The player's setting `mods.scripted_maps`
+  (`sh_modui_scripted_maps_allowed`) and the download approval's sentence
+  (`sh_modui_scripts_approval`) are for the download gate, which needs the
+  store to say which missing builds carry scripts before it asks.
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
   `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
@@ -2661,7 +2676,10 @@ restart; a stock decl no bundle serves that
 inherits a changed one cannot be found from the index. The log carries one `MODS: refresh:` line
 per category and a summary; the Mods tab's rescan result carries
 `refresh: {reparsed, reloaded, needsMapReload, needsRestart, pending,
-deferred, note}`, and `sh_mods rescan` (or `sh_mods refresh`) echoes the same
+deferred, note}`; a sound bank whose bytes changed under a name Wwise already
+loaded is recorded by `modsound.c` (`sh_modsound_restart_banks`), and the
+tab's result says "Restart DOOM to hear the new <bank>." once per bank while
+the mod's row keeps it in `restartBanks`; `sh_mods rescan` (or `sh_mods refresh`) echoes the same
 lines to the console; `sh_mods status` says when changes are pending.
 
 Served-bytes ledger (`modledger.c`): the engine records no byte identity for

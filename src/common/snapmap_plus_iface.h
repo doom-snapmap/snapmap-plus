@@ -460,13 +460,19 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *   STORE  any thread. 1 with needed = 1 while a store write holds the store
  *          lock (else 0) and generation = the store lock's released holds
  *          (not the document generation). An older backend answers 0.
+ *   SCRIPTS any thread, read only. arg: a mod's salt, or empty. Copies the
+ *          mod scripts' state of the current or last Play straight into out
+ *          (not the shared buffer): every mod whose scripts ran, with its
+ *          stop line, and arg's script log (modui.h sh_modui_scripts). 1, -1
+ *          a size query (needed set), 0 failed. An older backend answers 0.
  * generation is set by every op; it changes after each action that can change
  * the store or the serving index. */
-#define SH_MODS_LIST  1
-#define SH_MODS_RUN   2
-#define SH_MODS_FETCH 3
-#define SH_MODS_ROOT  4
-#define SH_MODS_STORE 6
+#define SH_MODS_LIST    1
+#define SH_MODS_RUN     2
+#define SH_MODS_FETCH   3
+#define SH_MODS_ROOT    4
+#define SH_MODS_STORE   6
+#define SH_MODS_SCRIPTS 7
 /* Op 5 and actions 2, 5 to 9, 14, 15, 17 and 19 are retired; the slot answers them "Unknown action.". */
 #define SH_MODS_ACT_INSTALL     1    /* arg: absolute folders, newline-separated: install them (any thread) */
 #define SH_MODS_ACT_RESCAN      3    /* Refresh: build every changed folder, then bring the changes into the game (any thread) */
@@ -485,7 +491,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */
-    const char  *arg;          /* RUN */
+    const char  *arg;          /* RUN, SCRIPTS */
     char        *out;
     int          out_cap;
     int          needed;       /* out: bytes excluding the NUL */

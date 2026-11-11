@@ -142,6 +142,13 @@ static void log_sink(const char *line)
     strncpy_s(g_log_last, sizeof g_log_last, line, _TRUNCATE);
 }
 
+static char g_restart_seen[160];
+static void restart_seen(void *context, const char *bank, const char *owner)
+{
+    (void)context;
+    _snprintf_s(g_restart_seen, sizeof g_restart_seen, _TRUNCATE, "%s from %s", bank, owner);
+}
+
 static void test_routes(void)
 
 {
@@ -217,6 +224,19 @@ static void test_routes(void)
     CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_more.bnk", path, sizeof bytes, "p6probe", 0) == 1);
     sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
     CHECK(sh_modsound_test_pass() == 1 && n_submit == 5 && !strcmp(last_submit, "p6probe_more.bnk"));
+
+    /* A submitted bank whose file changed keeps the bytes Wwise loaded first: the Mods tab says a
+     * restart brings in the new ones, once per bank, naming the mod serving them. */
+    CHECK(sh_modsound_restart_banks(NULL, NULL) == 0);
+    CHECK(!strcmp(t.banks[0].leaf, "p6probe_sfx.bnk"));
+    t.banks[0].size = sizeof bytes + 7;
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    g_restart_seen[0] = 0;
+    CHECK(sh_modsound_restart_banks(restart_seen, NULL) == 1 && !strcmp(g_restart_seen, "p6probe_sfx.bnk from p6probe"));
+    t.banks[0].size = sizeof bytes;
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    CHECK(sh_modsound_restart_banks(NULL, NULL) == 1);
+    CHECK(sh_modsound_test_pass() == 0 && n_submit == 5);   /* nothing is given to Wwise again */
 
     /* The file no longer has the indexed size: the engine answers. */
     f = fopen(path, "ab");
