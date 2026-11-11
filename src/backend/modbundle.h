@@ -105,9 +105,11 @@
 /* The builder's rules, written into the builder block as "rules". A root
  * folder whose block carries another number is built again once by the
  * rebuild rule, so a product update reclassifies every own folder. Raise it
- * when a build's classification, edits or manifest change. 10: mod scripts
- * (a folder that failed only on a .lua file builds now). */
-#define SH_MB_RULES           10
+ * when a build's classification, edits or manifest change. 11: files beside
+ * mod.json and assets are ignored, and campaign content derives its
+ * requirements. */
+#define SH_MB_RULES           11
+
 /* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
 #define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
 #define SH_MB_ID_MAX          64u

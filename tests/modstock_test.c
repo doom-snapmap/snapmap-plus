@@ -509,9 +509,26 @@ static void test_campaign_closure(const char *tmp)
     CHECK(f && f->need_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness") && has_note(&b, "(first " K_MD6 ")"));
     CHECK(b.canonical && strstr(b.canonical, "\"source\":\"" K_SKL "\"") != NULL);
+    /* Campaign content derives the blacklist requirement the author never
+     * writes (DECISIONS 17), and a load of the written block agrees. */
+    CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+    CHECK(has_note(&b, "derived: the mod brings campaign content"));
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && b.requirements && strstr(b.requirements, "g_useImageBlackList"));
+    sh_mb_free(&b);
+    /* An author value is replaced, with a warning; other requirements stay. */
+    {
+        char d2[MAX_PATH];
+        _snprintf_s(d2, sizeof d2, _TRUNCATE, "%s\\close1b", tmp);
+        mt_write(d2, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\","
+                 "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":1,\"r_fullscreen\":0}}}");
+        mt_write(d2, K_WEB, K_WEB_TEXT);
+        CHECK(sh_mb_build(d2, NULL, &RESOLVER, &b) && b.warnings == 1 && b.requirements &&
+              !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\",\"r_fullscreen\":\"0\"}}"));
+        sh_mb_free(&b);
+    }
     /* The builder block marks them as derived pointers; a rebuild derives
      * them again and keeps the hash and the note. */
     {

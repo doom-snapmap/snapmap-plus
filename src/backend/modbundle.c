@@ -4788,6 +4788,68 @@ done:
     free(outn);
 }
 
+/* Requirements the build can see (DECISIONS 17): a mod that brings campaign
+ * content (a closure pointer, or a surface restoring installed content
+ * SnapMap's provider cannot see) needs the game's cut-content blacklists off,
+ * g_useResourceBlackList 0 and g_useImageBlackList 0, so the author never
+ * writes them. An author value for either is replaced, with a warning
+ * (`report`: a build; a load derives the same silently, so the hash agrees). */
+static void mb_derive_requirements(sh_mb_bundle *b, int report)
+{
+    static const char *const gates[] = { "g_useResourceBlackList", "g_useImageBlackList" };
+    char cause[SH_MB_CAUSE_MAX], *canon;
+    mbj *req = NULL;
+    const mbj *cvars = NULL, *cmds = NULL;
+    mb_buf o = {0};
+    size_t i;
+    int need = 0, k;
+    for (i = 0; i < b->file_count && !need; i++)
+        need = b->files[i].closure || b->files[i].cls == SH_MB_CLASS_SURFACE;
+    if (!need) return;
+    if (b->requirements) {
+        req = mbj_parse(b->requirements, strlen(b->requirements), NULL, 0);
+        cvars = req ? mbj_get(req, "cvars") : NULL;
+        cmds = req ? mbj_get(req, "commands") : NULL;
+    }
+    mb_puts(&o, "{\"cvars\":{");
+    for (k = 0; k < 2; k++) {
+        if (k) mb_puts(&o, ",");
+        mb_put_jcstr(&o, gates[k]);
+        mb_puts(&o, ":\"0\"");
+    }
+    for (i = 0; cvars && cvars->t == MBJ_OBJ && i < cvars->count; i++) {
+        const mbj *v = cvars->items[i];
+        int gate = 0;
+        for (k = 0; k < 2; k++) if (mb_ieq_n(cvars->keys[i], cvars->klen[i], gates[k])) gate = 1;
+        if (gate) {
+            if (report && (v->t != MBJ_STR || strcmp(v->s, "0")))
+                mb_warn(b, "mod.json requirements set %.*s, but this mod brings campaign content, which needs it 0; "
+                        "Snapmap+ sets it 0, so remove it from requirements", (int)cvars->klen[i], cvars->keys[i]);
+            continue;
+        }
+        mb_puts(&o, ",");
+        mb_put_jstr(&o, cvars->keys[i], cvars->klen[i]);
+        mb_puts(&o, ":");
+        if (!mbj_canon(v, &o, NULL, 0)) o.oom = 1;
+    }
+    mb_puts(&o, "}");
+    if (cmds) {
+        mb_puts(&o, ",\"commands\":");
+        if (!mbj_canon(cmds, &o, NULL, 0)) o.oom = 1;
+    }
+    mb_puts(&o, "}");
+    canon = o.oom ? NULL : sh_mb_requirements_canonical(o.p, o.n, cause, sizeof cause);
+    if (!canon) mb_error(b, "the requirements this mod needs could not be recorded (%s)", o.oom ? "out of memory" : cause);
+    else {
+        free(b->requirements);
+        b->requirements = canon;
+        if (report) mb_note(b, "requirements: g_useResourceBlackList 0 and g_useImageBlackList 0, derived: the mod brings campaign "
+                "content");
+    }
+    free(o.p);
+    mbj_free(req);
+}
+
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
@@ -5487,6 +5549,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     }
     mb_classify_all(out);
     mb_mark_edited(out);
+    mb_derive_requirements(out, 0);
     mb_finish(out);
     if (!check) memcpy(out->prev_hash, bundle->s, SH_MB_HASH_HEX + 1);   /* the hash its block records */
     if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
@@ -6400,6 +6463,7 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
         if (!sh_mb_salt_paths_check(&names, cause, sizeof cause)) mb_error(out, "%s", cause);
     }
     if (!out->errors) mb_check_files(out, root, resolver);
+    if (!out->errors) mb_derive_requirements(out, 1);
     mb_finish(out);
     out->validated = out->errors == 0;
     if (out->validated && out->built <= 0) out->built = mb_now();
