@@ -160,12 +160,11 @@ func TestMigrateStoreWarnsWithoutTheTool(t *testing.T) {
 
 func TestMigrateStoreWarnsWhenMigrateFails(t *testing.T) {
 	printed, tool, calls := runMigrateStore(t, storeBundle(t, true, ""), "fail")
-	store := appDataDir()
 	if len(calls) != 2 {
 		t.Fatalf("calls = %q", calls)
 	}
-	for _, want := range []string{"snapmap-plus-store.exe did not finish migrating your mods folder (exit code 1); Snapmap+ itself is installed. " +
-		"To finish, close DOOM and run:", `  "` + filepath.Join(store, storeToolName) + `" migrate "` + store + `" --doom "D:\Games\DOOM"`} {
+	for _, want := range []string{"snapmap-plus-store.exe did not finish moving your mods (exit code 1); Snapmap+ itself is installed. " +
+		"Close DOOM and run: snapmap-plus migrate"} {
 		if !strings.Contains(printed, want) {
 			t.Errorf("printed %q, want %q", printed, want)
 		}
@@ -216,7 +215,7 @@ func TestMigrateStoreKeepsAChangedCopy(t *testing.T) {
 	if got := readF(t, filepath.Join(store, storeToolName)); got != "the player's own file" {
 		t.Errorf("the player's file was replaced: %q", got)
 	}
-	if !strings.Contains(printed, "the bundle's copy runs this time") {
+	if !strings.Contains(printed, "it is not the copy Snapmap+ placed there; the downloaded copy runs this time") {
 		t.Errorf("printed %q", printed)
 	}
 }

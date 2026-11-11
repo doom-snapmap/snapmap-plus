@@ -51,8 +51,8 @@ func migrateStore(bundleRoot, doom string) {
 func placeStoreTool(bundleRoot, dir string) (string, string) {
 	src := filepath.Join(bundleRoot, storeToolName)
 	if _, err := os.Stat(src); err != nil {
-		return "", "this Snapmap+ bundle has no " + storeToolName + ", so your mods folder was not checked for files of " +
-			"earlier releases. Snapmap+ itself is installed."
+		return "", "this Snapmap+ bundle has no " + storeToolName + ", so your mods were not checked for files of " +
+			"earlier releases; Snapmap+ itself is installed."
 	}
 	want, err := storeToolDigest(bundleRoot)
 	if err == nil {
@@ -62,15 +62,15 @@ func placeStoreTool(bundleRoot, dir string) (string, string) {
 		}
 	}
 	if err != nil {
-		return "", fmt.Sprintf("the bundle's %s was not run (%v), so your mods folder was not checked for files of "+
-			"earlier releases. Snapmap+ itself is installed.", storeToolName, err)
+		return "", fmt.Sprintf("the bundle's %s was not run (%v), so your mods were not checked for files of "+
+			"earlier releases; Snapmap+ itself is installed. To download it again, run: snapmap-plus update", storeToolName, err)
 	}
 	dst := filepath.Join(dir, storeToolName)
 	if err := os.MkdirAll(dir, 0o755); err == nil {
 		if err = installSelfCopy(src, dst); err == nil {
 			return dst, ""
 		}
-		return src, fmt.Sprintf("kept the existing %s (%v); the bundle's copy runs this time", dst, err)
+		return src, fmt.Sprintf("%v; the downloaded copy runs this time", err)
 	}
 	return src, ""
 }

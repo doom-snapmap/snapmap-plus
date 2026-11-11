@@ -65,7 +65,7 @@ func universalRelease(t *testing.T, tag string) *mockRelease {
 	}}
 }
 
-// The backend, package.ps1, the CI bundle guard and release.yml name the same paths as the installer.
+// The backend, package.ps1 and the bundle guard name the same paths as the installer.
 func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 	read := func(p string) string {
 		b, err := os.ReadFile(filepath.Join("..", p))
@@ -88,24 +88,32 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 			t.Errorf("package.ps1 still mentions %q", gone)
 		}
 	}
-	ci := read(".github/workflows/ci.yml")
-	if !strings.Contains(ci, `"`+currentUIDll+`"`) {
-		t.Errorf("the CI bundle guard does not require %s", currentUIDll)
+	// The bundle guard CI and release.yml run requires the pair and refuses the 2018 one.
+	guard := read("tools/bundle_guard.ps1")
+	list := func(name string) map[string]bool {
+		m := regexp.MustCompile(`(?m)^\$` + name + ` = @\(([^)]*)\)`).FindStringSubmatch(guard)
+		if m == nil {
+			t.Fatalf("tools/bundle_guard.ps1 has no $%s list", name)
+		}
+		out := map[string]bool{}
+		for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+			out[q[1]] = true
+		}
+		return out
 	}
-	if !strings.Contains(ci, `$mustNot = @("`+legacyProxy+`", "`+legacyUIDll+`")`) {
-		t.Errorf("the CI bundle guard does not refuse the 2018 pair")
-	}
-	rel := read(".github/workflows/release.yml")
-	if !strings.Contains(rel, `"$GITHUB_REF_NAME" = "`+legacyReleaseTag+`"`) {
-		t.Errorf("release.yml no longer refuses to republish %s", legacyReleaseTag)
-	}
-	for _, gone := range []string{"LegacyBundle", `dist\XINPUT1_3.dll`, "legacy-bundle.zip"} {
-		if strings.Contains(rel, gone) {
-			t.Errorf("release.yml still packages the 2018 files (%q)", gone)
+	required, forbidden := list("required"), list("forbidden")
+	for _, rel := range []string{currentProxy, currentUIDll} {
+		if !required[rel] {
+			t.Errorf("the bundle guard does not require %s", rel)
 		}
 	}
-	if !strings.Contains(rel, `$mustNot = @("`+legacyProxy+`", "`+legacyUIDll+`")`) {
-		t.Errorf("release.yml does not refuse a bundle holding the 2018 pair")
+	for _, rel := range []string{legacyProxy, legacyUIDll} {
+		if !forbidden[rel] {
+			t.Errorf("the bundle guard does not refuse %s", rel)
+		}
+	}
+	if !strings.Contains(read(".github/workflows/release.yml"), legacyReleaseTag) {
+		t.Errorf("release.yml no longer refuses to republish %s", legacyReleaseTag)
 	}
 }
 

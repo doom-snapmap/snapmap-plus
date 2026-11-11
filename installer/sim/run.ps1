@@ -212,7 +212,7 @@ try {
     $s = New-Scenario "a-snaphak" $binB
     Seed $s "snaphak"
     $keepA = @("prefabs\arena.snapmap.json", "strings\en.json", "rawmap.json")
-    Step $s "install" @("install", "--doom", $s.Doom, "--yes", "--plain") "installed" ($pair + $rollback) $keepA @("the original SnapHak", "Not ours, left in place")
+    Step $s "install" @("install", "--doom", $s.Doom, "--yes", "--plain") "installed" ($pair + $rollback) $keepA @("the original SnapHak", "Other programs' files (left in place)")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @($rollback) $keepA @()
 
     # b) v0.2.1-beta.19's 2018 pair in this April 2024 folder, overrides\ packages -> update, then uninstall.
@@ -226,7 +226,7 @@ try {
     $s = New-Scenario "c-beta20" $binB
     Seed $s "beta20"
     $keepC = @("config.json", "prefabs\corridor.snapmap.json", "mods\imp\mod.json")
-    Step $s "update" @("update", "--yes", "--plain") "installed" ($pair + $rollback) $keepC @("both DOOM builds' files", "installer-files.json (folded into install.json)", "Not ours, left in place")
+    Step $s "update" @("update", "--yes", "--plain") "installed" ($pair + $rollback) $keepC @("both DOOM builds' files", "installer-files.json (folded into install.json)", "Other programs' files (left in place)")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @($rollback) $keepC @()
 
     # d) The current release -> a newer release appears -> update (the installer updates itself

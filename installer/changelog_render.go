@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // changelogEntry is one release's notes, parsed out of its markdown body.
@@ -131,7 +132,7 @@ func wrap(text string, width int, indent, hanging string) string {
 	var b strings.Builder
 	line := indent + words[0]
 	for _, w := range words[1:] {
-		if len(line)+1+len(w) > width {
+		if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(w) > width {
 			b.WriteString(line)
 			b.WriteString("\n")
 			line = hanging + w
@@ -225,8 +226,9 @@ func renderIndex(b *strings.Builder, rows []indexRow, width int) {
 		if r.Installed {
 			suffix = "   <- installed"
 		}
-		if room := width - len(prefix) - len(suffix); room > 3 && len(headline) > room {
-			headline = headline[:room-3] + "..."
+		// Cut by characters, never inside one: a headline may hold non-ASCII text.
+		if room, rs := width-len(prefix)-len(suffix), []rune(headline); room > 3 && len(rs) > room {
+			headline = string(rs[:room-3]) + "..."
 		}
 		fmt.Fprintf(b, "%s%s%s\n", prefix, strings.TrimRight(headline, " "), suffix)
 	}
