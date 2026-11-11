@@ -5,7 +5,8 @@
  *
  * Without an argument: the member cell lookup (the
  * record decoding is modvt_test.c's). With the folder made by snaphak-re's
- * make_family.py (or SH_VT_RCTEST set to it): a copy is built by the
+ * make_family.py, in the one shape under the salt rctestvt (or SH_VT_RCTEST
+ * set to it): a copy is built by the
  * real bundle builder with a stock stand-in, admitted by the real serving
  * index, its request paths looked up, its family collected as modvt.c
  * registers it, and the editor plan's order checked (the material before the
@@ -89,17 +90,17 @@ static void fixture(const char *src)
     printf("    build: %u error(s) %s; %u warning(s) %s; %zu files, %llu bytes; needs %u (bundle %u, game %u, unresolved %u)\n",
            b.errors, b.errors ? b.first_cause : "", b.warnings, b.warnings ? b.first_warning : "", b.file_count,
            b.total_size, b.needs.total, b.needs.local, b.needs.stock, b.needs.unresolved);
-    CHECK(!strcmp(b.id, "rctest") && b.file_count == 4);
+    CHECK(!strcmp(b.id, "rctestvt") && b.file_count == 4);
     for (k = 0; k < b.file_count; ++k) {
         const sh_mb_file *f = &b.files[k];
         size_t n;
         printf("    file %s (%s %s) %llu bytes, %zu need(s)\n", f->request, f->ptype, f->pname, f->size, f->need_count);
         for (n = 0; n < f->need_count; ++n) printf("        needs %s %s\n", f->needs[n].type, f->needs[n].name);
-        if (!strcmp(f->request, "virtualtextures/mods/rctest/fam_sq1.mega2")) mega = 1;
-        if (!strcmp(f->request, "generated/decls/entitydef/mods/rctest/vtprop.decl")) {
+        if (!strcmp(f->request, "virtualtextures/mods/rctestvt/fam_sq1.mega2")) mega = 1;
+        if (!strcmp(f->request, "generated/decls/entitydef/mods/rctestvt/vtprop.decl")) {
             int named = 0;
             for (n = 0; n < f->need_count; ++n)
-                named |= !strcmp(f->needs[n].type, "material") && !strcmp(f->needs[n].name, "mods/rctest/vtprop");
+                named |= !strcmp(f->needs[n].type, "material") && !strcmp(f->needs[n].name, "mods/rctestvt/vtprop");
             CHECK(named);
         }
     }
@@ -109,17 +110,17 @@ static void fixture(const char *src)
 
     CHECK(sh_modserve_index_build(mods) == 1);
     CHECK(sh_modserve_bundle_state(b.hash, NULL, 0) == 1);
-    CHECK(sh_modserve_lookup("virtualtextures/mods/rctest/fam_sq1.mega2", &hit) == 1 && hit.size > 0x170);
-    CHECK(sh_modserve_lookup("VirtualTextures\\Mods\\RCTest\\fam_sq1.mega2", &hit) == 1);
-    CHECK(sh_modserve_lookup("virtualtextures/mods/rctest/fam_sq2.mega2", &hit) == 0);
-    CHECK(sh_modserve_lookup("virtualtextures/mods/rctest/fam.pages", &hit) == 0);
-    CHECK(sh_modserve_lookup("generated/decls/material/mods/rctest/vtprop.decl", &hit) == 1 && hit.is_decl);
+    CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq1.mega2", &hit) == 1 && hit.size > 0x170);
+    CHECK(sh_modserve_lookup("VirtualTextures\\Mods\\RCTestVT\\fam_sq1.mega2", &hit) == 1);
+    CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq2.mega2", &hit) == 0);
+    CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam.pages", &hit) == 0);
+    CHECK(sh_modserve_lookup("generated/decls/material/mods/rctestvt/vtprop.decl", &hit) == 1 && hit.is_decl);
     {
         sh_modvt_family fam[4];
         int nf = sh_modvt_collect(fam, 4);
-        CHECK(nf == 1 && !strcmp(fam[0].name, "mods/rctest/fam") && fam[0].members == 1u &&
-              !strcmp(fam[0].path, "virtualtextures/mods/rctest/fam.pages") &&
-              sh_modserve_lookup("virtualtextures/mods/rctest/fam_sq1.mega2", &hit) == 1 && fam[0].bytes == hit.size);
+        CHECK(nf == 1 && !strcmp(fam[0].name, "mods/rctestvt/fam") && fam[0].members == 1u &&
+              !strcmp(fam[0].path, "virtualtextures/mods/rctestvt/fam.pages") &&
+              sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq1.mega2", &hit) == 1 && fam[0].bytes == hit.size);
         if (nf == 1) printf("    family %s (%s): members 0x%X, %llu bytes\n", fam[0].name, fam[0].path, fam[0].members,
                             (unsigned long long)fam[0].bytes);
     }

@@ -1,20 +1,22 @@
 /* modshadow_test -- the shadow safety rules (modserve.c) measured against a
- * player's real retired overrides tree: the migration (modmigrate.c, with the
- * real builder and converter) builds every package into a scratch store, the
- * serving index resolves the conflicts between them (one provider serves,
- * list decls are composed), and the editor plan and every bundle's gameplay
- * plan run against a registry stand-in that knows exactly the decls the
- * game's SnapMap archive holds. The report names, per bundle, every conflict
+ * player's real mod store in the one shape (the store tool's conversion of
+ * their data, read in place and never written): the serving index resolves
+ * the conflicts between the mods (one provider serves, list decls are
+ * composed), and the editor plan and every bundle's gameplay plan run
+ * against a registry stand-in that knows exactly the decls the game's
+ * SnapMap archive holds. The report names, per bundle, every conflict
  * it takes part in and every animWeb a registration pass withdraws because its
  * models block names a model nothing provides.
  *
  * Inputs (the test is skipped without the first two; the tree holds game
  * files, so it is not in the repository):
- *   SH_MODSHADOW_DATA        a scratch data root holding overrides\ (a copy:
- *                            the pass writes mods\ next to it and removes it)
+ *   SH_MODSHADOW_DATA        a data root holding mods\ in the one shape (a copy
+ *                            the store tool converted; nothing is written)
  *   SH_MODSHADOW_GAME_NAMES  "type<TAB>name" lines, lower case, one per decl
  *                            and resource of snap_gameresources (the decl
  *                            registry a SnapMap session has)
+ *   SH_MODSHADOW_DOOM        the DOOM install the builds read the game's files
+ *                            from (default D:\SteamLibrary\steamapps\common\DOOM)
  *   SH_MODSHADOW_ECHO        set to echo every MODS: line */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -27,6 +29,7 @@
 #include "../src/backend/modlegacy.h"
 #include "../src/backend/modmigrate.h"
 #include "../src/backend/modstore.h"
+#include "../src/backend/modstock.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -111,10 +114,13 @@ static int game_has(const char *type, const char *name)
 
 /* ---- builder entry (modcmd.c in the product) and the registry stand-in ------------------------ */
 
+/* The game's files, from the install's resource reader (modstock.c), as the
+ * store tool's conversion builds against the DOOM folder. */
+static int stock_exists(void *ctx, const char *request) { (void)ctx; return sh_modstock_exists(request); }
+
 int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
 {
-    /* The product builds a delivered package without the game's reader too. */
-    sh_mb_resolver r = { NULL, NULL, NULL, NULL };
+    sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
     char cause[SH_MB_CAUSE_MAX];
     int ok = 0;
@@ -165,18 +171,17 @@ static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_loa
 
 /* ---- the report ---------------------------------------------------------------------------- */
 
-typedef struct mb_row { char id[80], version[48], hash[65]; int admitted, files, place; } mb_row;
+typedef struct mb_row { char id[80], hash[65]; int admitted, files, place; } mb_row;
 static mb_row g_rows[512];
 static int g_nrows;
-static void each_bundle(void *context, const char *id, const char *version, const char *hash, int admitted,
-                        const char *cause, int files, int place)
+static void each_bundle(void *context, const char *id, const char *hash, int admitted, const char *cause, int files,
+                        int place)
 {
     mb_row *r;
     (void)context; (void)cause;
     if (g_nrows >= 512) return;
     r = &g_rows[g_nrows++];
     strncpy_s(r->id, sizeof r->id, id ? id : "", _TRUNCATE);
-    strncpy_s(r->version, sizeof r->version, version ? version : "", _TRUNCATE);
     strncpy_s(r->hash, sizeof r->hash, hash ? hash : "", _TRUNCATE);
     r->admitted = admitted;
     r->files = files;
@@ -202,40 +207,16 @@ static int print_lines(size_t from, const char *a, const char *b, const char *pr
     return n;
 }
 
-/* Converted packages hold paths past MAX_PATH: the wide API with \\?\. */
-static void remove_tree_w(const wchar_t *dir)
+static int g_conductors;
+static void count_conductor(void *context, const char *id, const char *hash, const char *registries)
 {
-    wchar_t pattern[2048], path[2048];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    _snwprintf_s(pattern, 2048, _TRUNCATE, L"%s\\*", dir);
-    h = FindFirstFileW(pattern, &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-            _snwprintf_s(path, 2048, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) RemoveDirectoryW(path);
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree_w(path);
-            else { SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL); DeleteFileW(path); }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    RemoveDirectoryW(dir);
-}
-
-static void remove_tree(const char *dir)
-{
-    wchar_t wide[2048];
-    int n;
-    wcscpy_s(wide, 2048, L"\\\\?\\");
-    n = MultiByteToWideChar(CP_ACP, 0, dir, -1, wide + 4, 2040);
-    if (n > 0) remove_tree_w(wide);
+    (void)context; (void)id; (void)hash;
+    if (registries && strstr(registries, "\"conductor\"")) g_conductors++;
 }
 
 int main(void)
 {
-    char root[MAX_PATH], names[MAX_PATH], mods[MAX_PATH], ov[MAX_PATH * 2];
-    sh_modmigrate_stats st;
+    char root[MAX_PATH], names[MAX_PATH], mods[MAX_PATH];
     sh_modserve_stats ss;
     sh_modserve_plan plan;
     size_t at;
@@ -247,24 +228,20 @@ int main(void)
         printf("  [skip] SH_MODSHADOW_DATA and SH_MODSHADOW_GAME_NAMES do not name a data root and the game's names\n");
         return 0;
     }
-    _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    CHECK(GetFileAttributesA(ov) != INVALID_FILE_ATTRIBUTES);
+    CHECK(GetFileAttributesA(mods) != INVALID_FILE_ATTRIBUTES);
     CHECK(load_names(names) && g_nnames > 10000);
     printf("  game names: %zu\n", g_nnames);
-    remove_tree(mods);
-    CHECK(GetFileAttributesA(mods) == INVALID_FILE_ATTRIBUTES);   /* a fresh store every run */
-    sh_modmigrate_set_data_root(root);
-    sh_modlegacy_set_data_root(root);
+    {
+        char doom[MAX_PATH];
+        if (!GetEnvironmentVariableA("SH_MODSHADOW_DOOM", doom, sizeof doom))
+            strcpy_s(doom, sizeof doom, "D:\\SteamLibrary\\steamapps\\common\\DOOM");
+        sh_modstock_set_install(doom);
+        sh_modstock_register();
+    }
     sh_ms_set_root(mods);
-    sh_modlegacy_reset();
 
-    /* 1. The migration, as the first start of this build runs it. */
-    CHECK(sh_modmigrate_run(1, &st) == 1);
-    printf("  migration: %u entries, %u built, %u converted, %u skipped, %u refused, %u duplicate id(s); %llu ms\n",
-           st.entries, st.built, st.converted, st.skipped, st.refused, st.duplicates, st.ms);
-
-    /* 2. The serving index over the migrated store. */
+    /* 1. The serving index over the player's store, as the game reads it at boot. */
     log_mark(&at);
     admitted = sh_modserve_index_build(mods);
     sh_modserve_get_stats(&ss);
@@ -274,8 +251,13 @@ int main(void)
     CHECK(print_lines(at, "serving neither", NULL, NULL) == 0);
     printf("  conflicts:\n");
     print_lines(at, "MODS: conflict:", NULL, "    ");
-    CHECK(sh_modserve_lookup("generated/decls/animweb/zion/boss/cyberdemon_ai.decl", NULL));
-    CHECK(sh_modserve_lookup("generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl", NULL));
+    /* The boss mods list their encounters for the conductor the product
+     * generates per map (registries "conductor"), never as a shadow of it. */
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl", NULL));
+    g_conductors = 0;
+    sh_modserve_each_bundle_registries(count_conductor, NULL);
+    printf("  bundles listing encounters for the conductor: %d\n", g_conductors);
+    CHECK(g_conductors >= 2);
     {
         /* SH_MODSHADOW_DUMP: a folder that receives the served bytes of every conflicted decl. */
         static const char *const dump[] = {
@@ -302,6 +284,7 @@ int main(void)
     log_mark(&at);
     CHECK(sh_modserve_plan_editor(&plan) >= 0);
     printf("  editor plan: %d steps, %d blocked, %d ready\n", plan.count, plan.blocked, sh_modserve_plan_run(&plan, &OPS, "editor"));
+    CHECK(plan.count > 0 && plan.blocked == 0);
     sh_modserve_plan_free(&plan);
     printf("  boss rows:\n");
     print_lines(at, "snapEditorEntityDef 'demons/cyberdemon", NULL, "    ");
@@ -325,8 +308,8 @@ int main(void)
         refused = print_lines(at, "NOT READY: it names model", NULL, NULL);
         total_withdrawn += withdrawn;
         total_refused += refused;
-        printf("    %s%s@%s: %d steps, %d ready, %d blocked; %d stock animWeb shadow(s) withdrawn, %d new animWeb(s) refused\n",
-               g_rows[i].place ? "in a place: " : "", g_rows[i].id, g_rows[i].version, plan.count, ready, plan.blocked,
+        printf("    %s%s: %d steps, %d ready, %d blocked; %d stock animWeb shadow(s) withdrawn, %d new animWeb(s) refused\n",
+               g_rows[i].place ? "in a place: " : "", g_rows[i].id, plan.count, ready, plan.blocked,
                withdrawn, refused);
         print_lines(at, "shadow WITHDRAWN", NULL, "        ");
         print_lines(at, "NOT READY: it names model", NULL, "        ");
@@ -334,8 +317,6 @@ int main(void)
     }
     printf("  totals: %d stock animWeb shadow(s) withdrawn, %d new animWeb(s) refused\n", total_withdrawn, total_refused);
 
-    /* SH_MODSHADOW_KEEP leaves the scratch store for inspection. */
-    if (!GetEnvironmentVariableA("SH_MODSHADOW_KEEP", NULL, 0)) remove_tree(mods);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
