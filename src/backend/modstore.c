@@ -2153,12 +2153,14 @@ out:
     return ok;
 }
 
-int sh_ms_place_played(const char *dir_in)
+int sh_ms_place_played(const char *root, const char *dir_in)
 {
     char rootu[MAX_PATH * 4], dir[SH_MS_NAME_MAX + 1], f[SH_MS_NAME_MAX + 1], *c;
     mpj *doc;
     int i, hit = 0, ok = 1;
-    if (!dir_in || !dir_in[0] || !sh_ms_root(rootu, sizeof rootu)) return 0;
+    if (!dir_in || !dir_in[0]) return 0;
+    if (root && root[0]) strncpy_s(rootu, sizeof rootu, root, _TRUNCATE);
+    else if (!sh_ms_root(rootu, sizeof rootu)) return 0;
     strncpy_s(dir, sizeof dir, dir_in, _TRUNCATE);
     for (c = dir; *c; c++) if (*c == '/') *c = '\\';
     sh_mb_record_lock(rootu);

@@ -3653,12 +3653,24 @@ static int ms_place_apply(const char *norm, int remember)
     return changed;
 }
 
+/* The map of a place is being played: the start-up cleanup keeps it. The
+ * note goes to the record of the mods folder the index serves from, never
+ * another folder's. */
+static void ms_place_note_played(const char *norm)
+{
+    char root[MS_PATH_MAX] = "";
+    if (!norm[0]) return;
+    AcquireSRWLockShared(&g_build_lock);
+    if (g_index) strcpy_s(root, sizeof root, g_index->root);
+    ReleaseSRWLockShared(&g_build_lock);
+    if (root[0]) (void)sh_ms_place_played(root, norm);
+}
+
 int sh_modserve_place_set(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) return -1;
-    /* The map of a place is being played: the start-up cleanup keeps it. */
-    if (norm[0]) (void)sh_ms_place_played(norm);
+    ms_place_note_played(norm);
     return ms_place_apply(norm, 0);
 }
 
@@ -3666,7 +3678,7 @@ int sh_modserve_place_load(const char *place)
 {
     char norm[SH_MODSERVE_PLACE_CAP];
     if (!sh_modserve_place_norm(place, norm, sizeof norm)) norm[0] = 0;
-    if (norm[0]) (void)sh_ms_place_played(norm);
+    ms_place_note_played(norm);
     return ms_place_apply(norm, 1);
 }
 

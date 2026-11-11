@@ -933,7 +933,7 @@ static void test_places_prune(const char *tmp)
     /* New Keep arrived long ago too, but its map was played just now. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\New Keep", root);
     age_dir(dir, 40);
-    CHECK(sh_ms_place_played("maps\\New Keep") == 1);
+    CHECK(sh_ms_place_played(NULL, "maps\\New Keep") == 1);
     /* A saved map of the player records Kept Keep. */
     _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\prune\\saves", tmp);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPS0000000000000000PRUNE", saves);
