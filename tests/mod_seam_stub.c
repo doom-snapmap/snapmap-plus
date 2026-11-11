@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "../src/backend/modserve.h"
+#include "../src/backend/modmanifest.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modexport.h"
 
@@ -48,6 +49,14 @@ int sh_modserve_active(void) { return 0; }
 int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
 {
     (void)bundle_hash; (void)id;
+    if (out) memset(out, 0, sizeof *out);
+    return 0;
+}
+
+/* The build that serves a row (sh_modserve_row_build): none installed. */
+int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+{
+    (void)row;
     if (out) memset(out, 0, sizeof *out);
     return 0;
 }
