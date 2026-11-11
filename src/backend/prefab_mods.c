@@ -368,8 +368,12 @@ char *sh_prefab_mods_read_file(const char *path, size_t *len)
     long size;
     char *buf;
     size_t got;
+    wchar_t *w;
     if (len) *len = 0;
-    if (!path || !path[0] || fopen_s(&f, path, "rb") != 0 || !f) return NULL;
+    if (!path || !path[0] || !(w = sh_mb_wpath(path))) return NULL;
+    if (_wfopen_s(&f, w, L"rb") != 0) f = NULL;
+    free(w);
+    if (!f) return NULL;
     if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 || size > (long)SH_PREFAB_MODS_FILE_MAX ||
         fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
     buf = (char *)malloc((size_t)size + 1);
@@ -384,16 +388,32 @@ char *sh_prefab_mods_read_file(const char *path, size_t *len)
 
 int sh_prefab_mods_write_file(const char *path, const char *data, size_t len)
 {
-    char tmp[MAX_PATH * 2];
+    char tmp[MAX_PATH * 4];
     FILE *f = NULL;
     size_t put;
+    wchar_t *wt, *wp;
+    int ok = 0;
     if (!path || !path[0] || (!data && len)) return 0;
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.smp-%lu.tmp", path, GetCurrentProcessId());
-    if (fopen_s(&f, tmp, "wb") != 0 || !f) return 0;
-    put = len ? fwrite(data, 1, len, f) : 0;
-    if (fclose(f) != 0 || put != len) { DeleteFileA(tmp); return 0; }
-    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { DeleteFileA(tmp); return 0; }
-    return 1;
+    wt = sh_mb_wpath(tmp);
+    wp = sh_mb_wpath(path);
+    if (wt && wp && _wfopen_s(&f, wt, L"wb") == 0 && f) {
+        put = len ? fwrite(data, 1, len, f) : 0;
+        ok = fclose(f) == 0 && put == len && MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!ok) DeleteFileW(wt);
+    }
+    free(wt);
+    free(wp);
+    return ok;
+}
+
+/* Whether a file or folder exists at `path` (UTF-8). */
+static int pm_exists(const char *path)
+{
+    wchar_t *w = sh_mb_wpath(path);
+    int there = w && GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+    free(w);
+    return there;
 }
 
 static void pm_rows_text(const sh_modmanifest_list *rows, char *out, size_t cap)
@@ -518,7 +538,7 @@ char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char 
     }
     /* A prefab with a <name>.meta.json sidecar and no block was saved by an
      * earlier version (ONE-SHAPE rule 6): the sidecar is not read. */
-    if (found != 1 && meta_path && meta_path[0] && GetFileAttributesA(meta_path) != INVALID_FILE_ATTRIBUTES) {
+    if (found != 1 && meta_path && meta_path[0] && pm_exists(meta_path)) {
         if (source) *source = SH_PREFAB_META_EARLIER;
         pm_logf("PREFABS: %s: " SH_PREFAB_EARLIER_TEXT, meta_path);
     }
@@ -889,12 +909,7 @@ static int pm_acp_to_utf8(const char *acp, char *out, size_t cap)
     return WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)cap, NULL, NULL) > 0;
 }
 
-static int pm_utf8_to_acp(const char *utf8, char *out, size_t cap)
-{
-    wchar_t wide[MAX_PATH * 2];
-    if (!utf8 || !utf8[0] || !MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_PATH * 2)) return 0;
-    return WideCharToMultiByte(CP_ACP, 0, wide, -1, out, (int)cap, NULL, NULL) > 0;
-}
+
 
 /* What the ZIP carries as <name>.json: the file's bytes, unless its block has
  * to be written for the rows the ZIP carries. */
@@ -1021,7 +1036,7 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
     const sh_prefab_mods_ops *o = pm_ops();
     modexport_stats st;
     sh_modmanifest_list rows;
-    char *text = NULL, given[256] = "", name[PM_NAME_MAX + 16], acp[PM_NAME_MAX * 2 + 16];
+    char *text = NULL, given[256] = "", name[PM_NAME_MAX * 3 + 16];
     char dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[MODEXPORT_CAUSE_MAX], extra[400] = "";
     size_t len = 0, i, absent = 0, dl;
     int k, result = -1;
@@ -1037,25 +1052,28 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
     /* The name: the .json's, else the source's file name, else a plain one. */
     if (!sh_prefab_mods_valid_name(given)) pm_file_stem(src_utf8, given, sizeof given);
     if (!sh_prefab_mods_valid_name(given)) strcpy_s(given, sizeof given, "Imported prefab");
-    if (!pm_utf8_to_acp(given, acp, sizeof acp)) strcpy_s(acp, sizeof acp, "Imported prefab");
     strncpy_s(dir, sizeof dir, prefabs_dir, _TRUNCATE);
     dl = strlen(dir);
     if (dl && dir[dl - 1] != '\\' && dir[dl - 1] != '/') strncat_s(dir, sizeof dir, "\\", _TRUNCATE);
-    CreateDirectoryA(dir, NULL);
+    {
+        wchar_t *wd = sh_mb_wpath(dir);
+        if (wd) { CreateDirectoryW(wd, NULL); free(wd); }
+    }
     for (k = 1; k <= 99; k++) {
-        if (k == 1) strcpy_s(name, sizeof name, acp);
-        else _snprintf_s(name, sizeof name, _TRUNCATE, "%s (%d)", acp, k);
+        if (k == 1) strcpy_s(name, sizeof name, given);
+        else _snprintf_s(name, sizeof name, _TRUNCATE, "%s (%d)", given, k);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s%s.json", dir, name);
-        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { result = 1; break; }
+        if (!pm_exists(path)) { result = 1; break; }
         if (pm_same_bytes(path, text, len)) { result = 0; break; }
     }
     if (result < 0) {
-        pm_msg(msg, cap, "The prefab was not imported: every name from \"%s\" to \"%s (99)\" is taken.", acp, acp);
+        pm_msg(msg, cap, "The prefab was not imported: every name from \"%s\" to \"%s (99)\" is taken.", given, given);
         free(text);
         return -1;
     }
     if (result == 1 && !sh_prefab_mods_write_file(path, text, len)) {
-        DeleteFileA(path);
+        wchar_t *wp = sh_mb_wpath(path);
+        if (wp) { DeleteFileW(wp); free(wp); }
         pm_msg(msg, cap, "The prefab was not imported: %s could not be written.", path);
         free(text);
         return -1;
@@ -1252,12 +1270,13 @@ static int pm_root(char *out, size_t cap)
     return 1;
 }
 
-/* "<name>" or "<folder>/<name>": the root first, then each folder. */
+/* "<name>" or "<folder>/<name>" (UTF-8): the root first, then each folder. */
 static int pm_find_prefab(const char *key, char *path, size_t pcap, char *meta, size_t mcap, char *name, size_t ncap)
 {
-    char root[MAX_PATH * 2], folder[MAX_PATH], pattern[MAX_PATH * 2];
+    char root[MAX_PATH * 4], folder[MAX_PATH * 3], pattern[MAX_PATH * 4], leaf[MAX_PATH * 3];
     const char *slash = strchr(key, '/');
-    WIN32_FIND_DATAA fd;
+    WIN32_FIND_DATAW fd;
+    wchar_t *wpat;
     HANDLE h;
     if (!slash) slash = strchr(key, '\\');
     if (!pm_root(root, sizeof root)) return 0;
@@ -1267,26 +1286,30 @@ static int pm_find_prefab(const char *key, char *path, size_t pcap, char *meta, 
         if (!sh_prefab_mods_valid_name(folder) || !sh_prefab_mods_valid_name(name)) return 0;
         _snprintf_s(path, pcap, _TRUNCATE, "%s%s\\%s.json", root, folder, name);
         _snprintf_s(meta, mcap, _TRUNCATE, "%s%s\\%s.meta.json", root, folder, name);
-        return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+        return pm_exists(path);
     }
     strncpy_s(name, ncap, key, _TRUNCATE);
     if (!sh_prefab_mods_valid_name(name)) return 0;
     _snprintf_s(path, pcap, _TRUNCATE, "%s%s.json", root, name);
     _snprintf_s(meta, mcap, _TRUNCATE, "%s%s.meta.json", root, name);
-    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) return 1;
+    if (pm_exists(path)) return 1;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s*", root);
-    h = FindFirstFileA(pattern, &fd);
+    wpat = sh_mb_wpath(pattern);
+    h = wpat ? FindFirstFileW(wpat, &fd) : INVALID_HANDLE_VALUE;
+    free(wpat);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, ".."))
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
             continue;
-        _snprintf_s(path, pcap, _TRUNCATE, "%s%s\\%s.json", root, fd.cFileName, name);
-        _snprintf_s(meta, mcap, _TRUNCATE, "%s%s\\%s.meta.json", root, fd.cFileName, name);
-        if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) { FindClose(h); return 1; }
-    } while (FindNextFileA(h, &fd));
+        if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, leaf, (int)sizeof leaf, NULL, NULL)) continue;
+        _snprintf_s(path, pcap, _TRUNCATE, "%s%s\\%s.json", root, leaf, name);
+        _snprintf_s(meta, mcap, _TRUNCATE, "%s%s\\%s.meta.json", root, leaf, name);
+        if (pm_exists(path)) { FindClose(h); return 1; }
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     return 0;
 }
+
 
 static void pm_linef(const char *fmt, ...)
 {
@@ -1301,17 +1324,20 @@ static void pm_linef(const char *fmt, ...)
 void sh_prefab_mods_command(int argc, const char *const *argv)
 {
     const char *verb = argc > 0 ? argv[0] : NULL;
-    char path[MAX_PATH * 2], meta[MAX_PATH * 2], name[PM_NAME_MAX + 16], msg[PM_MSG_CAP], zip[MAX_PATH * 4];
+    char path[MAX_PATH * 4], meta[MAX_PATH * 4], name[PM_NAME_MAX * 3 + 16], msg[PM_MSG_CAP], zip[MAX_PATH * 4];
+    char key[PM_NAME_MAX * 3 + 16] = "";
     if (!verb || !verb[0] || !_stricmp(verb, "help") || !strcmp(verb, "?")) {
         pm_print(SH_PREFAB_CMD_HELP);
         return;
     }
+    /* The console's arguments are ANSI; every path below is UTF-8. */
+    if (argc > 1 && !pm_acp_to_utf8(argv[1], key, sizeof key)) key[0] = 0;
     if (!_stricmp(verb, "mods")) {
         sh_modmanifest_list rows;
         char *text;
         size_t tlen = 0, i;
         int n;
-        if (argc < 2 || !pm_find_prefab(argv[1], path, sizeof path, meta, sizeof meta, name, sizeof name)) {
+        if (argc < 2 || !pm_find_prefab(key, path, sizeof path, meta, sizeof meta, name, sizeof name)) {
             pm_linef("sh_prefab mods: no prefab named \"%s\".", argc > 1 ? argv[1] : "");
             return;
         }
@@ -1340,12 +1366,12 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
     if (!_stricmp(verb, "export")) {
         char name8[PM_NAME_MAX * 3 + 16];
         if (argc < 3) { pm_print("usage: sh_prefab export \"<name>\" \"<path.zip>\""); return; }
-        if (!pm_find_prefab(argv[1], path, sizeof path, meta, sizeof meta, name, sizeof name)) {
+        if (!pm_find_prefab(key, path, sizeof path, meta, sizeof meta, name, sizeof name)) {
             pm_linef("sh_prefab export: no prefab named \"%s\".", argv[1]);
             return;
         }
         if (!pm_acp_to_utf8(argv[2], zip, sizeof zip)) { pm_print("sh_prefab export: the ZIP path is not usable."); return; }
-        if (!pm_acp_to_utf8(name, name8, sizeof name8)) strncpy_s(name8, sizeof name8, name, _TRUNCATE);
+        strncpy_s(name8, sizeof name8, name, _TRUNCATE);
         (void)sh_prefab_mods_export(path, meta, name8, zip, msg, sizeof msg);
         pm_print(msg);
         return;
@@ -1485,8 +1511,11 @@ static void pm_bind_defaults(void)
 
 static int pm_default_root(char *out, size_t cap)
 {
-    char base[MAX_PATH];
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
+    wchar_t wbase[MAX_PATH];
+    char base[MAX_PATH * 3];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, wbase)) ||
+        !WideCharToMultiByte(CP_UTF8, 0, wbase, -1, base, (int)sizeof base, NULL, NULL))
+        return 0;
     _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\prefabs\\", base);
     return 1;
 }

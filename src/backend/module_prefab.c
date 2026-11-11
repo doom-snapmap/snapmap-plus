@@ -684,14 +684,10 @@ static int mp_capture_run(mp_capture *c)
     return 1;
 }
 
+/* `path` is UTF-8: written with the wide calls, through a temporary beside it. */
 static int mp_write_file(const char *path, const char *data, size_t len)
 {
-    FILE *f = NULL;
-    size_t put;
-    if (!path || !*path || fopen_s(&f, path, "wb") != 0 || !f) return 0;
-    put = fwrite(data, 1, len, f);
-    if (fclose(f) != 0) return 0;
-    return put == len;
+    return path && *path && sh_prefab_mods_write_file(path, data, len);
 }
 
 static void mp_out(sh_module_prefab_call *call, const char *text)

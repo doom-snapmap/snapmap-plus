@@ -58,9 +58,8 @@
  * serves into mods\maps\<prefab name>\, and adds the prefab to the library.
  * Importing an export whose mods and prefab are already there writes nothing.
  *
- * Paths: prefab and sidecar paths are ANSI, as the Prefabs tab resolves them;
- * ZIP paths and prefab names given to export are UTF-8 (the file dialog's),
- * except on the console, whose arguments are ANSI.
+ * Paths and prefab names are UTF-8 end to end, opened with the wide file
+ * calls; only the console's arguments are ANSI, converted on entry.
  */
 #ifndef SH_PREFAB_MODS_H
 #define SH_PREFAB_MODS_H
@@ -213,7 +212,7 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
                             char *msg, size_t cap);
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export
- * folder; UTF-8) into prefabs_dir (ANSI, with or without a trailing
+ * folder; UTF-8) into prefabs_dir (UTF-8, with or without a trailing
  * separator): install the carried mod folders nothing serves into the
  * prefab's place (modexport_read_prefab), then add the prefab under
  * the .json's file name. A prefab of that name with the same bytes is left
