@@ -296,9 +296,11 @@ static void decode_helpers(void)
     /* VirtualTextureForMaterial +0x61 (VK) / +0x81 (GL): MOV RAX,[R13+table+8]; JMP. */
     static const unsigned char tvk[] = { 0x75, 0x0C, 0x49, 0x8B, 0x85, 0x08, 0x8B, 0x00, 0x00, 0xE9, 0x38, 0x01 };
     static const unsigned char tgl[] = { 0x49, 0x8B, 0x85, 0x08, 0xA4, 0x00, 0x00, 0xE9, 0x38, 0x01, 0x00, 0x00 };
-    /* Its DeclFind(renderParm type, "landDimensions", 1) (VK +0x2C6). */
-    static const unsigned char dvk[] = { 0x41, 0xB0, 0x01, 0x48, 0x8D, 0x15, 0xC0, 0x4F, 0x07, 0x01, 0x48, 0x8D, 0x0D,
-                                         0xD9, 0xC1, 0xED, 0x04, 0xE8, 0x84, 0x29, 0xD7, 0xFF };
+    /* The per-view setter's two sites (VK 0x17B4578, 0x17B4643) and JobsWaitAll's LEA (VK 0x31BF7E). */
+    static const unsigned char pvk[] = { 0x4C, 0x8B, 0x05, 0x01, 0xCC, 0xF2, 0x04, 0x49, 0x8B, 0xCF, 0x48, 0x8B, 0x15,
+                                         0x2F, 0x0A, 0x09, 0x02, 0xE8, 0xC2, 0x25, 0x14, 0x00 };
+    static const unsigned char fvk[] = { 0x48, 0x8B, 0x1D, 0x8E, 0x0A, 0x09, 0x02, 0x48, 0x8D, 0x95, 0xE0, 0x00, 0x00,
+                                         0x00, 0x48, 0x8D, 0x0D, 0x40, 0xC7, 0xF2, 0x04, 0xE8, 0x23, 0x51, 0x0A, 0x00 };
     static const unsigned char rel[] = { 0x48, 0x8B, 0xC4, 0x55, 0x90, 0x83, 0xB9, 0xC0, 0x02, 0x00, 0x00, 0x00 };
     printf("-- decoding helpers\n");
     CHECK(sh_modvt_find_setsource_head(vk, sizeof vk) == 3);
@@ -310,7 +312,7 @@ static void decode_helpers(void)
     CHECK(sh_modvt_release_head_ok(rel, sizeof rel));
     CHECK(!sh_modvt_release_head_ok(rel, 8));
     {
-        static unsigned char ss[0xC0], vf[0x400], bd[0xC0], rb[0x70];
+        static unsigned char ss[0xC0], vf[0xC0], bd[0xC0], rb[0x70];
         sh_modvt_layout l;
         sh_modvt_binder b;
         sh_modvt_rebind r;
@@ -318,13 +320,24 @@ static void decode_helpers(void)
         memcpy(ss + 0x40, gl, sizeof gl);
         memset(vf, 0x90, sizeof vf);
         memcpy(vf + 0x81, tgl, sizeof tgl);
-        /* Without the DeclFind call the renderParm type is unknown: refused. */
-        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, &l) == 0);
-        memcpy(vf + 0x2C6, dvk, sizeof dvk);
         CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, &l) == 1);
         CHECK(l.table_off == 0xA400u && l.sys_rva == 0x1000u + 0x40 + 7 + 0x0378A43Bu &&
-              l.sync_rva == 0x1000u + 0x40 + 12 - 0x7547Au && l.release_rva == 0x1000u + 0x40 + 20 - 0x1892u &&
-              l.parmtype_rva == 0x8000u + 0x2C6 + 17 + 0x04EDC1D9u && l.declfind_rva == 0x8000u + 0x2C6 + 22 - 0x28D67Cu);
+              l.sync_rva == 0x1000u + 0x40 + 12 - 0x7547Au && l.release_rva == 0x1000u + 0x40 + 20 - 0x1892u);
+        /* The per-view sites decode to the handles, record 1 and the feedback function. */
+        {
+            sh_modvt_view v;
+            static unsigned char jb[0x40];
+            CHECK(sh_modvt_decode_view(pvk, sizeof pvk, 0x17B4578u, fvk, sizeof fvk, 0x17B4643u, &v) == 1 &&
+                  v.pagetable_src_rva == 0x66E1180u && v.pagetable_handle_rva == 0x3844FB8u &&
+                  v.feedback_handle_rva == 0x38450D8u && v.feedback_rec_rva == 0x66E0D98u &&
+                  v.feedback_fn_rva == 0x1859780u);
+            /* Read from another record than the one whose page table it sets: refused. */
+            CHECK(sh_modvt_decode_view(pvk, sizeof pvk, 0x17B4570u, fvk, sizeof fvk, 0x17B4643u, &v) == 0);
+            memset(jb, 0x90, sizeof jb);
+            CHECK(sh_modvt_decode_jobs(jb, sizeof jb, 0x31BF50u) == 0);
+            memcpy(jb + 0x2E, "\x48\x8D\x0D\xBB\x60\x52\x05\xE8", 8);
+            CHECK(sh_modvt_decode_jobs(jb, sizeof jb, 0x31BF50u) == 0x5842040u);
+        }
         /* Binder: CALL at +0x4E and +0x66, the texture setter after them. */
         memset(bd, 0x90, sizeof bd);
         CHECK(sh_modvt_decode_binder(bd, sizeof bd, 0x2000, &b) == 0);
@@ -681,10 +694,12 @@ static void image(const char *path)
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
     static sig_result results[SIG_RESULTS_MAX];
-    const sig_result *ss, *vf, *bd, *rb, *df;
+    const sig_result *ss, *vf, *bd, *rb, *vp, *vb, *jw;
     sh_modvt_layout l;
     sh_modvt_binder b;
     sh_modvt_rebind r;
+    sh_modvt_view v;
+    uint32_t jobs;
     int vk;
     printf("-- %s\n", path);
     CHECK(base != NULL);
@@ -700,32 +715,45 @@ static void image(const char *path)
     vf = find_sig(results, total, "VtForMaterial");
     bd = find_sig(results, total, "VtMaterialBind");
     rb = find_sig(results, total, "VtMaterialRebind");
-    df = find_sig(results, total, "DeclFind");
-    CHECK(ss && vf && bd && rb && df);
-    if (!ss || !vf || !bd || !rb || !df) { free(base); return; }
+    vp = find_sig(results, total, "VtViewPageTable");
+    vb = find_sig(results, total, "VtViewFeedback");
+    jw = find_sig(results, total, "JobsWaitAll");
+    CHECK(ss && vf && bd && rb && vp && vb && jw);
+    if (!ss || !vf || !bd || !rb || !vp || !vb || !jw) { free(base); return; }
+    CHECK(vp->rva == (vk ? 0x17B4578u : 0x17B5808u) && vb->rva == (vk ? 0x17B4643u : 0x17B58D3u) &&
+          jw->rva == (vk ? 0x31BF50u : 0x31BAE0u));
     CHECK(ss->rva == (vk ? 0x185AC30u : 0x185BC90u));
     CHECK(vf->rva == (vk ? 0x17E8230u : 0x17E9100u));
     CHECK(bd->rva == (vk ? 0x16CCCF0u : 0x16CD9A0u));
     CHECK(rb->rva == (vk ? 0x16CCC80u : 0x16CD930u));
-    CHECK(sh_modvt_decode_layout(base + ss->rva, 0xC0, ss->rva, base + vf->rva, 0x400, vf->rva, &l) == 1);
+    CHECK(sh_modvt_decode_layout(base + ss->rva, 0xC0, ss->rva, base + vf->rva, 0xC0, vf->rva, &l) == 1);
+    CHECK(sh_modvt_decode_view(base + vp->rva, 0x20, vp->rva, base + vb->rva, 0x20, vb->rva, &v) == 1);
+    jobs = sh_modvt_decode_jobs(base + jw->rva, 0x40, jw->rva);
     CHECK(l.release_rva + 0x50 <= sz && sh_modvt_release_head_ok(base + l.release_rva, 0x50));
     CHECK(sh_modvt_decode_binder(base + bd->rva, 0xC0, bd->rva, &b) == 1);
     CHECK(sh_modvt_decode_rebind(base + rb->rva, 0x70, rb->rva, &r) == 1);
-    printf("    %s: VT system 0x%X, sync 0x%X, Release 0x%X, table sys+0x%X, renderParm type 0x%X; binder feedback "
-           "0x%X, vec4 0x%X, texture 0x%X; rebind copy 0x%X, VT off 0x%X\n", vk ? "Vulkan" : "OpenGL", l.sys_rva,
-           l.sync_rva, l.release_rva, l.table_off, l.parmtype_rva, b.feedback_rva, b.set_vec4_rva, b.set_texture_rva,
-           r.copy_rva, r.vt_off_rva);
+    printf("    %s: VT system 0x%X, sync 0x%X, Release 0x%X, table sys+0x%X; binder feedback 0x%X, vec4 0x%X, "
+           "texture 0x%X; rebind copy 0x%X, VT off 0x%X; view handles 0x%X 0x%X, record 1 0x%X; jobs 0x%X\n",
+           vk ? "Vulkan" : "OpenGL", l.sys_rva, l.sync_rva, l.release_rva, l.table_off, b.feedback_rva, b.set_vec4_rva,
+           b.set_texture_rva, r.copy_rva, r.vt_off_rva, v.pagetable_handle_rva, v.feedback_handle_rva,
+           v.feedback_rec_rva, jobs);
     /* The cross-checks the install makes. */
-    CHECK(r.sys_rva == l.sys_rva && r.vf_rva == vf->rva && r.binder_rva == bd->rva && l.declfind_rva == df->rva);
+    CHECK(r.sys_rva == l.sys_rva && r.vf_rva == vf->rva && r.binder_rva == bd->rva && v.feedback_fn_rva == b.feedback_rva);
     if (vk) {
         CHECK(l.sys_rva == 0x66E0940u && l.sync_rva == 0x17E59F0u && l.release_rva == 0x1859480u && l.table_off == 0x8B00u);
-        CHECK(l.parmtype_rva == 0x66C46E0u && b.feedback_rva == 0x1859780u && b.set_vec4_rva == 0x15B9560u &&
-              b.set_texture_rva == 0x15B93C0u && r.copy_rva == 0x16C9BD0u && r.vt_off_rva == 0x5D490A0u);
+        CHECK(b.feedback_rva == 0x1859780u && b.set_vec4_rva == 0x15B9560u && b.set_texture_rva == 0x15B93C0u &&
+              r.copy_rva == 0x16C9BD0u && r.vt_off_rva == 0x5D490A0u);
+        CHECK(v.pagetable_handle_rva == 0x3844FB8u && v.feedback_handle_rva == 0x38450D8u &&
+              v.feedback_rec_rva == 0x66E0D98u && jobs == 0x5842040u);
     } else {
         CHECK(l.sys_rva == 0x4FE6120u && l.release_rva == 0x185A460u && l.table_off == 0xA400u);
-        CHECK(l.parmtype_rva == 0x4FC9CA0u && b.feedback_rva == 0x185A7E0u && b.set_vec4_rva == 0x15BA410u &&
-              b.set_texture_rva == 0x15BA270u && r.copy_rva == 0x16CA880u && r.vt_off_rva == 0x464E720u);
+        CHECK(b.feedback_rva == 0x185A7E0u && b.set_vec4_rva == 0x15BA410u && b.set_texture_rva == 0x15BA270u &&
+              r.copy_rva == 0x16CA880u && r.vt_off_rva == 0x464E720u);
+        CHECK(v.pagetable_handle_rva == 0x388CBD8u && v.feedback_handle_rva == 0x388CCF8u &&
+              v.feedback_rec_rva == 0x4FE6640u && jobs != 0);
     }
+    /* Record 1 is the record the table's first slot holds: VK sys+0x458, GL sys+0x520 (the strides). */
+    CHECK(v.feedback_rec_rva == l.sys_rva + (vk ? 0x458u : 0x520u));
     /* SetSource gives flavor 0 the material-format cache and flavor 2 UniqueVmtrs
      * (VK sys+0xFCA0 / +0xFEB0, GL sys+0x115A0 / +0x11870): record 1's cache,
      * which a board adopts, is the first. */

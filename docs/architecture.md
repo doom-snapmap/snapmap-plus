@@ -2269,7 +2269,12 @@ board three things, on both renderers:
   NULL)`. SetSource's mega2 loader opens the served members through the
   provider (no `.pages` file is needed) and allocates the board's host page
   table and page-table image; the board owns a whole 2048 x 2048-page address
-  space and its own feedback source (the record index).
+  space and its own feedback source (the record index). SetSource makes the
+  page-table image a resource of the current level (lifetime 1); the next map
+  load would purge it while the record and every material bound to the board
+  still point at it (live, the next page-table upload faulted in the Vulkan
+  driver, and a draw read a freed image from the material's block), so the
+  image is raised to the session lifetime (4) at once.
 - The record pointed at the material-format page cache, the pool of resident
   pages the game's own board uses (record 1's cache, flavor 0, VK sys+0xFCA0,
   GL sys+0x115A0): only that cache has the three-layer page array lit
@@ -2279,7 +2284,9 @@ board three things, on both renderers:
   writes, also sets `vmtrPageTableMap` (the board's page-table image) and
   `vmtrFeedbackFloat` (its feedback word) in the parameter block of a material
   bound to a board, so the material's draws read the board. The handles are
-  the renderParm decls of those names (`DeclFind`). VirtualTextureForMaterial
+  the ones the per-view setter fills from record 1, read from its own globals
+  (`VtViewPageTable`, `VtViewFeedback`, checked to read record 1 and to call
+  the binder's feedback function). VirtualTextureForMaterial
   (`VtForMaterial`, called by the material rebind) returns the board's record
   for a material whose `landpagefile` names it; the engine's own lookup also
   compares the record's cache flavor with the material's, which no longer agree.
@@ -2294,7 +2301,15 @@ its materials are parsed.
   each path is served from (`sh_modserve_each_served_here`): a map that brought
   its own copy of a salt pages that copy, never the root folder's; in the
   editor, the root folder's builds the Toybox shows.
-- When: DOOM's game thread only, once the VT start-up has built record 1.
+- When: DOOM's game thread only, once the VT start-up has built record 1, and
+  never while a job runs. The renderer's view jobs read the record table on
+  worker threads every frame (the per-view setter, and the per-cache pass that
+  reads each named record's cache), and SetSource writes a record's name long
+  before its cache; a change made from the frame tick while those jobs ran
+  faulted at boot reading a named record with no cache yet. So every change to
+  a record (SetSource, the cache pointer, Release, a rebind) is made after the
+  job manager has finished every job list (`JobsWaitAll`), as the engine does
+  before it releases records when a map unloads.
   Registration runs at the start of every decl registration pass (the editor
   palette build, a map's activation), before the pass parses any material.
   Release is queued to the next frame boundary (`sh_modvt_frame`, called after
@@ -2316,8 +2331,9 @@ its materials are parsed.
   that carry their own textures avoids this." Each board costs about 14 MB of
   host memory (11,184,810 bytes of host page table, the reader's index and the
   page-table image); its resident pages share the game's page pool.
-- Failure: any of the five engine sites (`VtSetSource`, `VtForMaterial`,
-  `VtMaterialBind`, `VtMaterialRebind`, `DeclFind`) that does not match its
+- Failure: any of the seven engine sites (`VtSetSource`, `VtForMaterial`,
+  `VtMaterialBind`, `VtMaterialRebind`, `VtViewPageTable`, `VtViewFeedback`,
+  `JobsWaitAll`) that does not match its
   signature, or a decode that does not cross-check (the rebind must call the
   signed lookup and binder), leaves every site as shipped and turns "mod
   virtual textures on lit materials" off in the features line.

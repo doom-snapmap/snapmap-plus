@@ -224,10 +224,11 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   their own page table and feedback word, a stock material's parameters and
   record 1 are byte-identical with and without boards, and a board served
   again binds its earlier materials again. With the executables, VtSetSource,
-  VtForMaterial, VtMaterialBind and VtMaterialRebind resolve at their recorded
-  addresses and the VT system, its synchronisation, Release, the record table,
-  the renderParm type, the binder's setters and the rebind's copy decode to
-  the recorded values and cross-check. `MODVT_ECHO=1` prints the log lines.
+  VtForMaterial, VtMaterialBind, VtMaterialRebind, VtViewPageTable,
+  VtViewFeedback and JobsWaitAll resolve at their recorded addresses and the
+  VT system, its synchronisation, Release, the record table, the binder's
+  setters, the rebind's copy, the per-view handle globals and record 1, and the
+  job manager decode to the recorded values and cross-check. `MODVT_ECHO=1` prints the log lines.
 - `vt_harness_test.c` checks the `sh_vt` decoder's page-header swap and member
   cell lookup; with `SH_VT_RCTEST` naming the reference family bundle (built
   by snaphak-re's lane RC `make_family.py`; it holds stock page bytes, so it is
