@@ -7,6 +7,7 @@
 
 #include "engine_dialog.h"
 #include "hook.h"
+#include "engine_globals.h"
 
 #define ED_DESC_STRIDE      0x1B0u
 #define ED_DESC_GDM_ID      0x00u
@@ -61,6 +62,16 @@ static int failed;
 
 void backend_log(const char *message) { (void)message; }
 
+/* The engine's shell slot, as engine_globals.c would resolve it. */
+static void *g_shell_cell;
+static int g_slot_missing;
+uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
+{
+    (void)base; (void)status;
+    if (g_slot_missing || strcmp(name, "shell_ptr_slot") != 0) return 0;
+    return (uintptr_t)&g_shell_cell;
+}
+
 typedef struct test_hook { void *target, *detour; int installed; } test_hook;
 static test_hook g_hooks[2];
 static int g_prepare_calls, g_commit_calls, g_fail_prepare, g_fail_commit, g_fail_unpatch;
@@ -69,10 +80,7 @@ static void fake_add_dialog(void *shell, void *params);
 
 static void invoke_hook(test_hook *hook)
 {
-    if (hook->target == (void *)fake_add_dialog)
-        ((void (*)(void *, void *))hook->detour)(g_shell_obj, NULL);
-    else
-        ((void (*)(void *, void *, int, void *, int))hook->detour)(NULL, NULL, 0, NULL, 0);
+    ((void (*)(void *, void *, int, void *, int))hook->detour)(NULL, NULL, 0, NULL, 0);
 }
 
 void *hook_prepare(void *target, void *detour, size_t stolen)
@@ -193,7 +201,7 @@ static void test_installation(void)
     /* Cancellation must resolve cleanly before any native hooks are prepared. */
     CHECK(!sh_engine_dialog_install(results, 3, base));
     CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
-    results[3].status = SIG_OK_HOOKED;
+    results[3].status = SIG_CHANGED;
     CHECK(!sh_engine_dialog_install(results, 4, base));
     CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
     results[3].status = SIG_OK;
@@ -202,33 +210,43 @@ static void test_installation(void)
     CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
     results[3].rva--;
 
-    /* A second preparation failure must leave neither hook active nor owned. */
-    g_fail_prepare = 2;
+    /* Without the shell slot nothing is prepared. */
+    g_slot_missing = 1;
     CHECK(!sh_engine_dialog_install(results, 4, base));
-    CHECK(!g_hooks[0].target && !g_hooks[1].target && !g_commit_calls);
-    CHECK(!sh_engine_dialog_ready() && !g_add_calls && !g_action_calls);
+    CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
+    g_slot_missing = 0;
 
-    /* A failed second commit and failed cleanup preserve both original callbacks. */
-    g_fail_prepare = 0; g_fail_commit = 2; g_fail_unpatch = 1;
+    /* A preparation failure leaves no hook active or owned. */
+    g_fail_prepare = 1;
     CHECK(!sh_engine_dialog_install(results, 4, base));
-    CHECK(g_hooks[0].target && g_hooks[1].target);
-    CHECK(g_add_calls == 1 && g_action_calls == 1 && !sh_engine_dialog_ready());
-    invoke_hook(&g_hooks[0]); invoke_hook(&g_hooks[1]);
-    CHECK(g_add_calls == 2 && g_action_calls == 2);
+    CHECK(!g_hooks[0].target && !g_commit_calls);
+    CHECK(!sh_engine_dialog_ready() && !g_action_calls);
+
+    /* A failed commit and failed cleanup preserve the original callback. */
+    g_fail_prepare = 0; g_fail_commit = 1; g_fail_unpatch = 1;
+    CHECK(!sh_engine_dialog_install(results, 4, base));
+    CHECK(g_hooks[0].target);
+    CHECK(g_action_calls == 1 && !sh_engine_dialog_ready());
+    invoke_hook(&g_hooks[0]);
+    CHECK(g_action_calls == 2);
     {
         int prepared = g_prepare_calls;
         CHECK(!sh_engine_dialog_install(results, 4, base));
         CHECK(prepared == g_prepare_calls && !sh_engine_dialog_ready());
     }
 
-    /* A later retry releases the retained records before installing anew. */
+    /* A later retry releases the retained record before installing anew; the
+     * surface is ready once the shell exists, and follows a rebuilt shell. */
     g_fail_commit = g_fail_unpatch = 0;
+    g_shell_cell = NULL;
     CHECK(sh_engine_dialog_install(results, 4, base));
-    CHECK(g_add_calls == 3 && g_action_calls == 3 && sh_engine_dialog_ready());
+    CHECK(g_action_calls == 3 && !sh_engine_dialog_ready());
+    g_shell_cell = g_shell_obj;
+    CHECK(sh_engine_dialog_ready());
     CHECK(sh_engine_dialog_install(NULL, 0, NULL));
-    g_hooks[0].installed = g_hooks[1].installed = 0;
+    g_hooks[0].installed = 0;
     CHECK(!sh_engine_dialog_install(NULL, 0, NULL));
-    CHECK(!g_hooks[0].target && !g_hooks[1].target);
+    CHECK(!g_hooks[0].target);
     g_swallow_raise = 0;
 }
 
