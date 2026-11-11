@@ -368,7 +368,7 @@ static void test_pending(void)
     sh_scene_pending got;
     sh_scene_spawn s[2];
     char longname[3000];
-    int a, b, i, nodes[SH_SCENE_PENDING_ROWS + 1];
+    int a, b, i, nodes[200];
     memset(s, 0, sizeof s);
     memset(&t, 0, sizeof t);
     s[0].entitydef = "mods/m/entrance/imp";
@@ -392,12 +392,30 @@ static void test_pending(void)
     CHECK(sh_scene_pending_set(&t, &a, longname, s, 1));
     CHECK(sh_scene_pending_take(&t, &a, &got) && !strcmp(got.node_name, longname));
     sh_scene_pending_release(&got);
-    for (i = 0; i <= SH_SCENE_PENDING_ROWS; i++) CHECK(sh_scene_pending_set(&t, &nodes[i], "n", s, 1));
-    CHECK(t.count == SH_SCENE_PENDING_ROWS);
-    CHECK(!sh_scene_pending_take(&t, &nodes[0], NULL));                          /* the oldest was evicted */
-    CHECK(sh_scene_pending_take(&t, &nodes[SH_SCENE_PENDING_ROWS], NULL));
+    /* 200 scenes activated at once: every node's spawns wait for its sync; nothing is dropped. */
+    for (i = 0; i < 200; i++) {
+        char name[32];
+        sprintf_s(name, sizeof name, "node%d", i);
+        s[0].at.x = (float)i;
+        CHECK(sh_scene_pending_set(&t, &nodes[i], name, s, 1));
+    }
+    CHECK(t.count == 200);
+    for (i = 0; i < 200; i += 3) {
+        char name[32];
+        sprintf_s(name, sizeof name, "node%d", i);
+        CHECK(sh_scene_pending_take(&t, &nodes[i], &got) && !strcmp(got.node_name, name) &&
+              approx(got.spawns[0].at.x, (float)i, 0));
+        sh_scene_pending_release(&got);
+    }
+    for (i = 0; i < 200; i++) {
+        if (i % 3 == 0) { CHECK(!sh_scene_pending_take(&t, &nodes[i], NULL)); continue; }
+        CHECK(sh_scene_pending_take(&t, &nodes[i], &got) && approx(got.spawns[0].at.x, (float)i, 0));
+        sh_scene_pending_release(&got);
+    }
+    CHECK(t.count == 0);
+    CHECK(sh_scene_pending_set(&t, &nodes[1], "n", s, 1));
     sh_scene_pending_clear(&t);
-    CHECK(t.count == 0 && !sh_scene_pending_take(&t, &nodes[1], NULL));
+    CHECK(t.count == 0 && !t.rows && !sh_scene_pending_take(&t, &nodes[1], NULL));
 }
 
 int main(int argc, char **argv)

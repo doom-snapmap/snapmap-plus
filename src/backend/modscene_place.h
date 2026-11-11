@@ -81,7 +81,6 @@
 
 #define SH_MODSCENE_PLACE_ROW_PREFIX "mods/"
 #define SH_MODSCENE_PLACE_ROW_SUFFIX "/actions/scene_play"
-#define SH_MODSCENE_PLACE_RECORDS    16
 
 /* 1 when an entityDef name is a mod's scene_play Activate row
  * (mods/<salt>/actions/scene_play), else 0. */
@@ -118,22 +117,24 @@ int sh_modscene_place_pose_ok(const float origin[3], const float angles[3]);
 
 /* The remembered player pose for one moved node. */
 typedef struct sh_modscene_place_record {
-    const void *node;         /* the interactable that was moved; NULL = free */
+    const void *node;         /* the interactable that was moved */
     char *player;             /* the player's entity name, whole (malloc'd), found again at return */
     float origin[3];          /* the player's feet origin at Activate */
     float angles[3];          /* pitch, yaw, roll at Activate */
-    unsigned stamp;           /* insertion order, for replacing the oldest */
 } sh_modscene_place_record;
 
+/* One row per moved node, as many as are moved: the table grows and nothing
+ * is dropped. */
 typedef struct sh_modscene_place_table {
-    sh_modscene_place_record rows[SH_MODSCENE_PLACE_RECORDS];
-    unsigned next_stamp;
+    sh_modscene_place_record *rows;   /* malloc'd, `capacity` of them; rows[0..count) in use */
+    size_t count, capacity;
 } sh_modscene_place_table;
 
 void sh_modscene_place_table_clear(sh_modscene_place_table *t);
 
-/* Remember a pose for node, replacing that node's earlier pose, else using a
- * free row, else the oldest row. Returns 1 when stored. */
+/* Remember a pose for node, replacing that node's earlier pose, else in a new
+ * row. Returns 1 when stored, 0 for a bad argument or when memory runs out
+ * (the table is then unchanged). */
 int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, const char *player,
                                const float origin[3], const float angles[3]);
 
