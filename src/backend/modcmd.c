@@ -13,6 +13,7 @@
 #include "backend_log.h"
 #include "modnet.h"
 #include "modsync.h"
+#include "modmanifest.h"
 #include "modexport.h"
 #include "rawmap.h"
 #include "editor_frame.h"
@@ -461,8 +462,8 @@ typedef enum { MC_JOB_PUSH, MC_JOB_PULL, MC_JOB_RELEASE, MC_JOB_RETRY, MC_JOB_IM
 typedef struct mc_job {
     mc_job_kind kind;
     char verb[16];
-    char hash[MODNET_HASH_HEX + 1];
-    char label[SH_MS_KEY_MAX + 1];
+    char mod[MODSYNC_MOD_MAX + 1];   /* push, pull: "<salt>@<build hash>" */
+    char label[SH_MS_NAME_MAX + 1];
     char ref[4 * MODNET_REF_MAX + 1];
     char path[MAX_PATH * 4];
     unsigned last_quarter;
@@ -470,6 +471,9 @@ typedef struct mc_job {
 } mc_job;
 
 static mc_job g_mc_job;
+
+/* The place a console pull lands in: mods\maps\<it>\<mod name>\. */
+#define MC_PULL_PLACE "Pulled mods"
 
 /* A progress line at each quarter of a transfer. */
 static void mc_job_progress(void *ctx, unsigned long long done, unsigned long long total)
@@ -491,28 +495,41 @@ static int mc_job_run(void *ctx, const modnet_io *io)
     int ok = 0;
     switch (j->kind) {
     case MC_JOB_PUSH: {
-        const char *h = j->hash;
-        ok = modsync_upload_bundles(&h, 1, j->ref, io, &st);
+        const char *m = j->mod;
+        ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
+        /* A release of this build raced the claim (409): its archive went,
+         * so it is uploaded again once. */
+        if (!ok && st.code == MODNET_E_CONFLICT) {
+            mc_async_line("MODS: push %s: the store released the build meanwhile; uploading it again", j->label);
+            memset(&st, 0, sizeof st);
+            ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
+        }
         if (ok)
-            mc_async_line("MODS: push %s: done in %.0f ms: %u of %u blob(s) were missing and sent, %llu byte(s) up, "
-                          "%llu down, bundle %s, claim %s%s", j->label, st.ms, st.blobs_transferred, st.blobs_total,
-                          st.bytes_up, st.bytes_down, st.bundles_created ? "uploaded" : "already stored", st.claim,
+            mc_async_line("MODS: push %s: done in %.0f ms: the archive %s, %llu byte(s) up, claim %s%s", j->label, st.ms,
+                          st.builds_sent ? "was sent" : "was already stored", st.bytes_up, st.claim,
                           st.reclaimed ? " (re-claimed with the stored secret)" : " (new)");
         else
             mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
                           st.cause, st.queued ? "; queued for 'sh_mods retry'" : "");
         break;
     }
-    case MC_JOB_PULL:
-        ok = modsync_fetch_bundle(j->hash, io, &st);
+    case MC_JOB_PULL: {
+        sh_modmanifest_row row;
+        sh_ms_place place;
+        memset(&row, 0, sizeof row);
+        (void)modsync_parse_mod(j->mod, row.salt, row.build);
+        place.title = MC_PULL_PLACE;
+        place.map_id = NULL;
+        ok = modsync_fetch_build_for(&row, &place, io, &st);
         if (ok && st.already_installed)
-            mc_async_line("MODS: pull %.16s: already installed; nothing fetched", j->hash);
+            mc_async_line("MODS: pull %s: already served by mods\\%s; nothing fetched", j->mod, st.folder);
         else if (ok)
-            mc_async_line("MODS: pull %.16s: installed as %s in %.0f ms: %u blob(s) fetched, %llu byte(s) down, %u request(s)",
-                          j->hash, st.key, st.ms, st.blobs_transferred, st.bytes_down, st.requests);
+            mc_async_line("MODS: pull %s: installed as mods\\%s in %.0f ms: %llu byte(s) down, %u request(s)", j->mod,
+                          st.folder, st.ms, st.bytes_down, st.requests);
         else
-            mc_async_line("MODS: pull %.16s: FAILED after %.0f ms (%llu byte(s) down): %s", j->hash, st.ms, st.bytes_down, st.cause);
+            mc_async_line("MODS: pull %s: FAILED after %.0f ms (%llu byte(s) down): %s", j->mod, st.ms, st.bytes_down, st.cause);
         break;
+    }
     case MC_JOB_RELEASE:
         ok = modsync_release(j->ref, io, &st);
         if (ok) mc_async_line("MODS: release: claim %s released in %.0f ms%s%s", st.claim, st.ms, st.cause[0] ? "; " : "", st.cause);
@@ -538,14 +555,13 @@ static int mc_job_run(void *ctx, const modnet_io *io)
         mc_async_line("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
                       "%llu byte(s) read in %.0f ms", j->path, es.bundles, es.bundles_installed, es.bundles_present,
                       es.files, es.map_bytes, es.zip_bytes, es.ms);
-        /* Stage it as 'sh_rawmaps load <path>' does: the next map open reads it. */
-        if (!sh_rawmap_validate_source(j->path, why, (int)sizeof why) || !sh_rawmap_swap_set_source(j->path)) {
-            mc_async_line("MODS: import %s: the mods are installed, but the map could not be staged: %s", j->path,
-                          why[0] ? why : "the path is not usable");
+        /* Open it in the editor now, as 'sh_rawmaps load <path>' does. */
+        if (!sh_rawmap_open_now(j->path, why, (int)sizeof why)) {
+            mc_async_line("MODS: import %s: the mods are installed, but the map could not be opened: %s", j->path,
+                          why[0] ? why : "the editor cannot open it now");
             break;
         }
-        sh_rawmap_load_arm_once();
-        mc_async_line("MODS: import %s: staged; open any map, or run 'sh_rawmaps load', and it opens as a new map", j->path);
+        mc_async_line("MODS: import %s: opening it in the editor", j->path);
         ok = 1;
         break;
     }
@@ -570,24 +586,27 @@ static void mc_job_launch(const mc_job *spec)
     else mc_line("MODS: %s: the worker thread could not be started", spec->verb);
 }
 
-/* A bundle named by id@version+build (or its 64-hex hash) among the usable
- * installed bundles. */
-static int mc_find_bundle(const char *name, char hash[MODNET_HASH_HEX + 1], char *label, size_t label_cap)
+/* A usable built mod named by its folder under mods\, its salt, or
+ * "<salt>@<build hash>": "<salt>@<hash>" in mod, its folder in label. A root
+ * folder answers first. */
+static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char *label, size_t label_cap)
 {
+    char salt[MODSYNC_SALT_HEX + 1], hash[MODNET_HASH_HEX + 1];
     sh_ms_list l;
     size_t i;
-    int found = 0;
+    int found = 0, pass, exact = modsync_parse_mod(name, salt, hash);
     modsync_store_lock();
     if (sh_ms_enumerate(&l)) {
-        for (i = 0; i < l.count && !found; i++) {
-            const sh_ms_entry *e = &l.items[i];
-            if (!sh_ms_entry_usable(e)) continue;
-            if (sh_ms_entry_matches(e, name) || strcmp(e->bundle.hash, name) == 0) {
-                strcpy_s(hash, MODNET_HASH_HEX + 1, e->bundle.hash);
-                strncpy_s(label, label_cap, e->key, _TRUNCATE);
-                found = 1;
+        for (pass = 0; pass < 2 && !found; pass++)
+            for (i = 0; i < l.count && !found; i++) {
+                const sh_ms_entry *e = &l.items[i];
+                if (!sh_ms_entry_usable(e) || (pass == 0) != (e->place[0] == 0)) continue;
+                if (exact ? (!strcmp(e->salt, salt) && !strcmp(e->bundle.hash, hash)) : sh_ms_entry_matches(e, name)) {
+                    _snprintf_s(mod, MODSYNC_MOD_MAX + 1, _TRUNCATE, "%s@%s", e->salt, e->bundle.hash);
+                    strncpy_s(label, label_cap, e->name, _TRUNCATE);
+                    found = 1;
+                }
             }
-        }
         sh_ms_list_free(&l);
     }
     modsync_store_unlock();
@@ -612,22 +631,26 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
     if (!_stricmp(verb, "push")) {
         const char *name = cmd_argv(a, 2);
         mc_join_args(a, 3, spec.ref, sizeof spec.ref);
-        if (!name || !name[0] || !spec.ref[0]) { sh_printf("usage: sh_mods push \"<id@version+build>\" \"<ref>\"\n"); return 1; }
+        if (!name || !name[0] || !spec.ref[0]) {
+            sh_printf("usage: sh_mods push \"<folder, salt, or salt@build hash>\" \"<ref>\"\n");
+            return 1;
+        }
         if (!modnet_valid_ref(spec.ref)) { mc_line("MODS: push: the ref must be 1-64 characters of text"); return 1; }
-        if (!mc_find_bundle(name, spec.hash, spec.label, sizeof spec.label)) {
-            mc_line("MODS: push %s: no installed, verified bundle has that name ('sh_mods list' shows them)", name);
+        if (!mc_find_build(name, spec.mod, spec.label, sizeof spec.label)) {
+            mc_line("MODS: push %s: no built mod has that name ('sh_mods list' shows them)", name);
             return 1;
         }
         spec.kind = MC_JOB_PUSH;
-        mc_line("MODS: push %s (bundle %.16s) under ref '%s'", spec.label, spec.hash, spec.ref);
+        mc_line("MODS: push mods\\%s (%.25s) under ref '%s'", spec.label, spec.mod, spec.ref);
         mc_job_launch(&spec);
         return 1;
     }
     if (!_stricmp(verb, "pull")) {
         mc_join_args(a, 2, arg, sizeof arg);
-        if (!modnet_valid_hash(arg)) { sh_printf("usage: sh_mods pull \"<64-hex bundle hash>\"\n"); return 1; }
-        strcpy_s(spec.hash, sizeof spec.hash, arg);
+        if (!modsync_parse_mod(arg, NULL, NULL)) { sh_printf("usage: sh_mods pull \"<salt>@<64-hex build hash>\"\n"); return 1; }
+        strcpy_s(spec.mod, sizeof spec.mod, arg);
         spec.kind = MC_JOB_PULL;
+
         mc_job_launch(&spec);
         return 1;
     }
