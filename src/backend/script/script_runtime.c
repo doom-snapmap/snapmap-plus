@@ -677,6 +677,20 @@ int sh_script_api_add(int kind, const char *name, lua_CFunction fn)
     return 1;
 }
 
+#define SHS_OPENERS_MAX 8
+static sh_script_opener_fn g_openers[SHS_OPENERS_MAX];
+static int g_nopeners;
+
+int sh_script_api_add_opener(sh_script_opener_fn fn)
+{
+    int i;
+    if (!fn) return 0;
+    for (i = 0; i < g_nopeners; i++) if (g_openers[i] == fn) return 1;
+    if (g_nopeners >= SHS_OPENERS_MAX) return 0;
+    g_openers[g_nopeners++] = fn;
+    return 1;
+}
+
 /* ------------------------------------------------------------- opening */
 
 static int job_open(lua_State *L)
@@ -715,6 +729,8 @@ static int job_open(lua_State *L)
         lua_pushcfunction(L, g_api[i].fn);
         lua_setglobal(L, g_api[i].name);
     }
+    /* globals other modules open themselves (sh_script_api_add_opener) */
+    for (i = 0; i < g_nopeners; i++) g_openers[i](L);
     /* on: a read-only table of the registration calls */
     lua_newtable(L);
     for (i = 0; i < 6; i++) {

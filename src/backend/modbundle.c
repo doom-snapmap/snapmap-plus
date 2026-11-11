@@ -21,6 +21,7 @@
 #include "decl_tree.h"
 #include "json_pretty.h"
 #include "backend_log.h"
+#include "script/script_node.h"   /* the Script node row: its reserved paths, which mods get it */
 
 #define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
 
@@ -2844,6 +2845,8 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
             } else if (sh_mb_script_request(req_lower, NULL, NULL) == SH_MB_SCRIPT_MISPLACED) {
                 mb_error(w->b, "%s: " SH_MB_SCRIPT_WHERE, child);
+            } else if (sh_script_node_reserved(w->b->id, req_lower)) {
+                mb_error(w->b, "%s: " SH_MB_SCRIPT_NODE_RESERVED, child);
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
                 if (sh_mb_pointer_only_kind(req_lower))
                     mb_error(w->b, "%s can only be a stock pointer to the installed game, never carried "
@@ -4544,6 +4547,7 @@ typedef struct mb_scripts {
     char cur[SH_MB_REQUEST_MAX + 16];   /* the file being scanned */
     unsigned files, dynamic;
     unsigned long long bytes;
+    int node;              /* a script registers an input: the mod gets its Script node row */
     int oom;
 } mb_scripts;
 
@@ -4655,6 +4659,7 @@ static void mb_script_file(sh_mb_bundle *b, size_t fi, const unsigned char *text
     }
     strcpy_s(s->cur, sizeof s->cur, file);
     sh_mb_script_scan((const char *)text, len, mb_script_use_cb, s);
+    if (sh_script_node_registers_input((const char *)text, len)) s->node = 1;
 }
 
 /* A use's name with this mod's own "mods/<salt>/" taken off: 1 with the
@@ -4809,6 +4814,7 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
     }
     mb_script_put_names(&o, "inputs", in, nin);
     mb_script_put_names(&o, "outputs", outn, nout);
+    if (s->node) mb_puts(&o, ",\"node\":true");
     if (s->dynamic) {
         _snprintf_s(num, sizeof num, _TRUNCATE, ",\"dynamic\":%u", s->dynamic);
         mb_puts(&o, num);

@@ -27,6 +27,7 @@
 #include "decl_tree.h"
 #include "config_json.h"
 #include "backend_log.h"
+#include "script/script_node.h"   /* a scripted mod's Script node row (ms_script_node_row) */
 
 #define MS_NAME_MAX      1024u
 #define MS_JSON_DEPTH    16u
@@ -196,6 +197,8 @@ static ms_index *volatile g_index;
 static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
+static int ms_write_served(const char *path, const unsigned char *bytes, size_t len);
+static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MS_PATH_MAX];
@@ -893,7 +896,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     const char *v, *ve, *files_v = NULL, *files_e = NULL, *stock_v = NULL, *stock_e = NULL, *req_v = NULL, *req_e = NULL;
     const char *block_v = NULL, *block_e = NULL, *shadows_v = NULL, *shadows_e = NULL, *retired = NULL;
     char **shadows = NULL, *salt = NULL, *name = NULL, *state_cause = NULL;
-    int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0;
+    int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0, script_node = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
@@ -964,6 +967,15 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
                 else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
+                else if (!strcmp(key, "scripts") && v < ve && *v == '{') {
+                    /* "node": true, a script registers an input: the mod gets its Script node row. */
+                    ms_json s = { v, ve };
+                    const char *sv, *sve;
+                    if (ms_jenter(&s, '{')) while (ms_jnext(&s, '}')) {
+                        if (!ms_jmember(&s, key, sizeof key, &sv, &sve)) break;
+                        if (!strcmp(key, "node") && sve - sv == 4 && !memcmp(sv, "true", 4)) script_node = 1;
+                    }
+                }
                 else if (!strcmp(key, "edits") && v < ve && *v == '[') {
                     b->edits = ms_strndup(x, v, (size_t)(ve - v));
                     b->edits_len = b->edits ? (size_t)(ve - v) : 0;
@@ -1057,6 +1069,204 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
+    if (script_node && !b->cause[0]) ms_script_node_row(x, b);
+}
+
+/* ------------------------------------------------------------------ the Script node row */
+
+/* The "categoryNameTag" of the first Toybox row the bundle adds, into out
+ * ("" when it adds none): the mod's Script node joins the mod's own category. */
+static void ms_row_category(const ms_index *x, const ms_bundle *b, char *out, size_t cap)
+{
+    int i;
+    out[0] = 0;
+    for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        unsigned char *text;
+        size_t len = 0;
+        const char *p, *q;
+        if (!f->is_sedef || f->is_shadow || f->stock) continue;
+        text = ms_read_whole(f->disk, 1u << 20, &len);
+        if (!text) continue;
+        p = strstr((const char *)text, "categoryNameTag");
+        if (p) p = strchr(p, '"');
+        q = p ? strchr(p + 1, '"') : NULL;
+        if (p && q && (size_t)(q - p - 1) < cap && !memchr(p + 1, '\n', (size_t)(q - p - 1))) {
+            memcpy(out, p + 1, (size_t)(q - p - 1));
+            out[q - p - 1] = 0;
+        }
+        HeapFree(GetProcessHeap(), 0, text);
+        if (out[0]) return;
+    }
+}
+
+/* Append `s` as the body of a JSON string (quotes not included). */
+static void ms_text_jstr(ms_text *t, const char *s)
+{
+    for (; *s; ++s) {
+        unsigned char c = (unsigned char)*s;
+        char esc[8];
+        if (c == '"' || c == '\\') { esc[0] = '\\'; esc[1] = (char)c; ms_text_put(t, esc, 2); }
+        else if (c < 0x20) { _snprintf_s(esc, sizeof esc, _TRUNCATE, "\\u%04x", c); ms_text_put(t, esc, 6); }
+        else ms_text_put(t, (const char *)&c, 1);
+    }
+}
+
+/* The row's English strings joined into the bundle's "extra" strings.en
+ * (strids.c reads them there), each only where the author has not written
+ * that key. */
+static void ms_extra_add_strings(ms_index *x, ms_bundle *b, const sh_script_node_row *row)
+{
+    ms_text ins = { NULL, 0, 0, 0 }, out = { NULL, 0, 0, 0 };
+    const char *e = b->extra, *at = NULL;
+    const char *pre = "", *post = "";
+    int i, n = 0;
+    char probe[80];
+    for (i = 0; i < row->nstrings; ++i) {
+        _snprintf_s(probe, sizeof probe, _TRUNCATE, "\"%s\"", row->string_key[i]);
+        if (e && strstr(e, probe)) continue;
+        if (n++) ms_text_put(&ins, ",", 1);
+        ms_text_put(&ins, "\"", 1);
+        ms_text_jstr(&ins, row->string_key[i]);
+        ms_text_put(&ins, "\":\"", 3);
+        ms_text_jstr(&ins, row->string_text[i]);
+        ms_text_put(&ins, "\"", 1);
+    }
+    if (!n || ins.oom) { free(ins.p); return; }
+    if (!e) {
+        ms_text_put(&out, "{\"strings\":{\"en\":{", 18);
+        ms_text_put(&out, ins.p, ins.n);
+        ms_text_put(&out, "}}}", 3);
+    } else {
+        ms_json c = { e, e + strlen(e) };
+        char key[64];
+        const char *v, *ve, *sv = NULL, *sve = NULL;
+        if (ms_jenter(&c, '{')) while (ms_jnext(&c, '}')) {
+            if (!ms_jmember(&c, key, sizeof key, &v, &ve)) break;
+            if (!strcmp(key, "strings")) { sv = v; sve = ve; }
+        }
+        if (!sv) {
+            /* No strings yet: a member of their own before the closing brace. */
+            const char *close = e + strlen(e);
+            while (close > e && close[-1] != '}') --close;
+            if (close <= e) { free(ins.p); return; }
+            at = close - 1;
+            pre = ms_jws(e + 1, at) < at ? ",\"strings\":{\"en\":{" : "\"strings\":{\"en\":{";
+            post = "}}";
+        } else if (*sv != '{') {
+            ms_log("bundle '%s': its \"strings\" is not an object, so its Script node has no title", b->id);
+            free(ins.p);
+            return;
+        } else {
+            ms_json s = { sv, sve };
+            const char *ev = NULL, *eve = NULL;
+            if (ms_jenter(&s, '{')) while (ms_jnext(&s, '}')) {
+                if (!ms_jmember(&s, key, sizeof key, &v, &ve)) break;
+                if (!strcmp(key, "en")) { ev = v; eve = ve; }
+            }
+            if (ev && *ev == '{') {
+                at = ev + 1;
+                post = *ms_jws(at, eve) == '}' ? "" : ",";
+            } else if (!ev) {
+                at = sv + 1;
+                pre = "\"en\":{";
+                post = *ms_jws(at, sve) == '}' ? "}" : "},";
+            } else {
+                ms_log("bundle '%s': its \"strings\".\"en\" is not an object, so its Script node has no title", b->id);
+                free(ins.p);
+                return;
+            }
+        }
+        ms_text_put(&out, e, (size_t)(at - e));
+        ms_text_put(&out, pre, strlen(pre));
+        ms_text_put(&out, ins.p, ins.n);
+        ms_text_put(&out, post, strlen(post));
+        ms_text_put(&out, at, strlen(at));
+    }
+    free(ins.p);
+    if (!out.oom && out.p) b->extra = ms_strndup(x, out.p, out.n);
+    else ms_log("bundle '%s': out of memory naming its Script node", b->id);
+    free(out.p);
+}
+
+/* One generated decl of the row as a served file of the bundle: its bytes
+ * written once under mods\.served\files\ by their own hash, as rewritten
+ * files are (ms_serve_rewritten), so every reader opens it from disk. */
+static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, const char *text, const char *need_type,
+                            const char *need_name)
+{
+    char path[MS_PATH_MAX], blob[SH_MB_HASH_HEX + 1], *p;
+    const char *rest = request + 16, *slash = strchr(rest, '/');
+    size_t len = strlen(text), n = strlen(rest);
+    const char *type;
+    ms_file *f;
+    if (strncmp(request, "generated/decls/", 16) || !slash || n < 6) return 0;
+    sh_mb_sha256_hex(text, len, blob);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.served\\files\\%.16s.decl", x->root, blob);
+    for (p = path; *p; ++p) if (*p == '/') *p = '\\';
+    if (!ms_write_served(path, (const unsigned char *)text, len)) return 0;
+    if (!ms_grow((void **)&x->files, &x->cfiles, x->nfiles + 1, sizeof(ms_file))) return 0;
+    f = &x->files[x->nfiles];
+    memset(f, 0, sizeof *f);
+    f->bundle = (int)(b - x->bundles);
+    f->request = ms_strdup(x, request);
+    f->disk = ms_strdup(x, path);
+    f->blob = ms_strdup(x, blob);
+    f->size = (uint64_t)len;
+    type = sh_mb_decl_type(rest, (size_t)(slash - rest));
+    f->ptype = type ? type : ms_strndup(x, rest, (size_t)(slash - rest));
+    f->pname = ms_strndup(x, slash + 1, n - (size_t)(slash - rest) - 6);
+    if (!f->request || !f->disk || !f->blob || !f->ptype || !f->pname) return 0;
+    f->reg = f->request + 16;
+    f->is_decl = 1;
+    f->rank = ms_rank(f->ptype);
+    f->is_sedef = f->rank == SH_MODSERVE_RANK_SEDEF;
+    f->alt_of = -1;
+    f->need_first = x->nneeds;
+    if (need_type) {
+        char *nn = ms_strdup(x, need_name);
+        if (!nn || !ms_grow((void **)&x->needs, &x->cneeds, x->nneeds + 1, sizeof(ms_need))) return 0;
+        ms_lower(nn);
+        x->needs[x->nneeds].type = need_type;
+        x->needs[x->nneeds].name = nn;
+        x->needs[x->nneeds].file = -1;
+        x->nneeds++;
+        f->need_count = 1;
+    }
+    x->nfiles++;
+    return 1;
+}
+
+/* A mod whose scripts register an input serves its Script node row
+ * (script_node.h): the entityDef mods/<salt>/script and its Toybox row, made
+ * by the product from the salt, the mod's name and its Toybox category, never
+ * written into the author's folder and never part of the build hash, so every
+ * machine that holds the build serves the same row. A placed node is then an
+ * entity of the mod's own entityDef, and a saved map records the mod. */
+static void ms_script_node_row(ms_index *x, ms_bundle *b)
+{
+    sh_script_node_row row;
+    char category[96], def_name[96];
+    int before = x->nfiles, needs_before = x->nneeds;
+    if (!x->root[0] || !b->id || !b->id[0]) return;
+    ms_row_category(x, b, category, sizeof category);
+    if (!sh_script_node_row_make(b->id, b->name, category, &row)) {
+        ms_log("bundle '%s': its Script node could not be made (out of memory)", b->id);
+        return;
+    }
+    _snprintf_s(def_name, sizeof def_name, _TRUNCATE, "mods/%s/" SH_SCRIPT_NODE_LEAF, b->id);
+    if (!ms_add_generated(x, b, row.def_path, row.def_text, NULL, NULL) ||
+        !ms_add_generated(x, b, row.row_path, row.row_text, "entityDef", def_name)) {
+        x->nfiles = before;
+        x->nneeds = needs_before;
+        ms_log("bundle '%s': its Script node could not be served (the mods folder's .served folder could not be "
+               "written)", b->id);
+    } else {
+        b->file_count = x->nfiles - b->first_file;
+        b->has_rows = 1;
+        ms_extra_add_strings(x, b, &row);
+    }
+    sh_script_node_row_free(&row);
 }
 
 /* "<name>.staging-<pid>" or "<name>.old-<pid>", the suffix last (modstore.c's

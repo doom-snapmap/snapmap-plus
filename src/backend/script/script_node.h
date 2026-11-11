@@ -200,13 +200,14 @@ int  sh_script_node_post_input(int mod, sh_script_handle node, sh_script_handle 
 
 /* ------------------------------------------------------------- the API */
 
-/* Add node(name) to every state opened from now on (sh_script_api_add).
- * Returns 1. Call once, before the first map. */
+/* Add node(name) and vars to every state opened from now on
+ * (sh_script_api_add, sh_script_api_add_opener). Returns 1. Call once,
+ * before the first map. */
 int  sh_script_node_api_register(void);
 
 /* Set the global `vars` (a read-only table of get and set) in a state that
- * is being opened. The runtime calls it for every new state through its
- * opener seam (the runtime's state-open list). */
+ * is being opened. The runtime calls it for every new state through
+ * sh_script_api_add_opener. */
 void sh_script_node_open_vars(lua_State *L);
 
 /* The C functions behind them, for the opener and the tests. */

@@ -218,6 +218,13 @@ void sh_script_set_console(sh_script_line_fn fn, void *context);
 #define SH_SCRIPT_API_METHOD 2
 int sh_script_api_add(int kind, const char *name, lua_CFunction fn);
 
+/* A function that adds a module's own globals to every state opened after
+ * the call (vars, a read-only table, is the Script node's). It runs inside
+ * the state's protected open, after the added functions and before "on".
+ * Same rules as sh_script_api_add; adding one twice adds it once. */
+typedef void (*sh_script_opener_fn)(lua_State *L);
+int sh_script_api_add_opener(sh_script_opener_fn fn);
+
 /* The mod a state (or any of its coroutines) belongs to. */
 const char *sh_script_salt(lua_State *L);
 const char *sh_script_mod_name(lua_State *L);
