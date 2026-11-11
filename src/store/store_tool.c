@@ -18,6 +18,7 @@
 #include "modbundle.h"
 #include "backend_log.h"
 #include "store_lock.h"
+#include "modbankinfo.h"
 
 #define ST_PATH_MAX (MAX_PATH * 4)
 
@@ -493,6 +494,8 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.cv.leftovers || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
+    /* Every build here records its stock-bank needs exactly as the game's own builds do. */
+    sh_mb_set_bank_need(sh_mbi_bundle_need);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
     else sh_ms_set_discard(sh_store_recycle, &g_rc, "moved to the Recycle Bin");
     com = SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
@@ -524,6 +527,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             int r;
             doom_u8 = st_utf8(doom, CP_UTF8, NULL);
             sh_modstock_set_install(doom_u8);
+            sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
             sh_modstock_register();
             st_say(0, "  overrides\\: moving into mods\\, reading game files from %s", doom_u8 ? doom_u8 : "?");
             r = sh_modmigrate_run(before.ov_due ? 0 : 1, &ms);
@@ -544,6 +548,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             if (doom && !doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
+                sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
                 sh_modstock_register();
             }
             if (sh_modmigrate_loose_run(&ls) > 0)
@@ -567,6 +572,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             if (!doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
+                sh_mbi_set_install(doom_u8);   /* the game's Wwise bank index, for the bank needs of a build */
                 sh_modstock_register();
             }
             ws->stock = 1;

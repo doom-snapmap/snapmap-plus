@@ -35,6 +35,7 @@
 #include "mod_stock_fixture.h"
 #include "store_lock.h"
 #include "modbundle_old.h"
+#include "modbankinfo.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -206,6 +207,17 @@ static void make_doom(const char *fixture, const char *doom)
         write_container(doom, "gameresources", e, 1);
     }
     mt_write(doom, "DOOMx64vk.exe", "");
+    /* The game's Wwise bank index: one event only the _sp bank (which SnapMap skips) files. */
+    mt_write(doom, "base\\sound\\soundbanks\\pc\\soundbanksinfo.xml",
+             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<SoundBanksInfo Platform=\"Windows\">\n\t<SoundBanks>\n"
+             "\t\t<SoundBank Id=\"332520835\" Language=\"SFX\">\n\t\t\t<ShortName>doom_weapon_mp</ShortName>\n"
+             "\t\t\t<Path>doom_weapon_mp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+             "\t\t\t\t<Event Id=\"11\" Name=\"Play_wpn_mp_plasma_flyby_lp\"/>\n"
+             "\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+             "\t\t<SoundBank Id=\"835849565\" Language=\"SFX\">\n\t\t\t<ShortName>doom_weapon_sp</ShortName>\n"
+             "\t\t\t<Path>doom_weapon_sp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+             "\t\t\t\t<Event Id=\"961946992\" Name=\"Play_wpn_sp_plasma_flyBy_LP\"/>\n"
+             "\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n\t</SoundBanks>\n</SoundBanksInfo>\n");
     free(bytes);
 }
 
@@ -899,6 +911,12 @@ static void test_beta26(const char *fixture, const char *tmp)
     sh_modstock_reset();
 }
 
+static int t_stock(void *context, const char *request)
+{
+    (void)context;
+    return sh_modstock_exists(request);
+}
+
 static char *record_section(const char *mods)
 {
     char *r = NULL;
@@ -1005,6 +1023,9 @@ static void test_interrupted(const char *fixture, const char *tmp)
     mt_write(path, "mod.json", "{\n  \"id\": \"alex.bank\",\n  \"name\": \"Bank\",\n  \"soundbank\": \"alex_bank_music\"\n}\n");
     mt_write(path, "assets\\generated\\decls\\sound\\mods\\alex.bank\\m.decl",
              "{\n\tbank = \"alex_bank_music\";\n\tother = \"alex_bank_musical\";\n}\n");
+    /* A sound decl whose event only a stock bank SnapMap skips files: the build records that bank. */
+    mt_write(path, "assets\\generated\\decls\\sound\\mods\\alex.bank\\wpn_sp_plasma_flyby_lp.decl",
+             "{\n\tinherit = \"default\";\n}\n");
     mt_write(path, "README.txt", "alex_bank_music is my bank\n");
     {
         unsigned char bnk[24] = { 'B', 'K', 'H', 'D', 16, 0, 0, 0, 0x71, 0, 0, 0 };
@@ -1049,6 +1070,37 @@ static void test_interrupted(const char *fixture, const char *tmp)
         free(bytes);
         _snprintf_s(bp, sizeof bp, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc\\alex_bank_music.bnk", path);
         CHECK(!mt_exists(bp));
+        /* The converted folder's bank needs are the ones the game's own build of it records. */
+        {
+            sh_mb_bundle conv, game;
+            sh_ms_list list;
+            sh_mb_resolver r;
+            memset(&conv, 0, sizeof conv);
+            memset(&game, 0, sizeof game);
+            memset(&list, 0, sizeof list);
+            CHECK(sh_mb_load_folder(path, &conv));
+            sh_ms_set_root(mods);
+            CHECK(sh_ms_enumerate(&list));
+            r.installed = sh_ms_request_exists;
+            r.installed_context = &list;
+            r.stock = t_stock;
+            r.stock_context = NULL;
+            sh_mb_set_bank_need(sh_mbi_bundle_need);
+            /* (a copy without the README: the builder lane's change that ignores files beside mod.json and
+             * assets\ is not on this branch) */
+            _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\gamecopy", tmp);
+            mt_remove_tree(p2);
+            CHECK(copy_all(path, p2));
+            mt_delete(p2, "README.txt");
+            CHECK(sh_mb_build(p2, NULL, &r, &game));
+            if (game.errors) fprintf(stderr, "  game-side build: %s\n", game.first_cause);
+            sh_mb_set_bank_need(NULL);
+            sh_ms_list_free(&list);
+            CHECK(conv.registries && strstr(conv.registries, "\"banks\":[\"doom_weapon_sp.bnk\"]"));
+            CHECK(conv.registries && game.registries && !strcmp(conv.registries, game.registries));
+            sh_mb_free(&conv);
+            sh_mb_free(&game);
+        }
         /* Every text of the mod naming the bank follows it; a longer word and a file beside the mod do not. */
         {
             char want[96], rel[MAX_PATH];

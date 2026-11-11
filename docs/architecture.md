@@ -1107,7 +1107,7 @@ salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
 `assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id and every text of the folder that names one (decls, mod.json),
 every other file beside them copied unchanged (DECISIONS 16), and built there
 by the real builder over the store's installed bundles and the game's archives
-(`sh_modstock_exists`, replacements kept). A build that fails, or a salting the
+(`sh_modstock_exists`, replacements kept, stock-bank needs recorded through `sh_mb_set_bank_need(sh_mbi_bundle_need)` as the game records them). A build that fails, or a salting the
 folder refuses (the folder is then copied as it is with a fresh salt), is
 written as a failed build (`sh_mb_write_failed`) with the builder's plain cause
 (DECISIONS 14). The work folder is swapped in under the folder's own name and
