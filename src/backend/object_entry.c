@@ -1,6 +1,6 @@
 /* Object Mode entry drop length (see object_entry.h).
  *
- * Build 13954591 evidence (snaphak-re editor-fixes-13954591 R-020):
+ * Build 13954591 evidence:
  *   TAB: the Module Mode focus ray (VK FUN_141257870 / GL FUN_141256d70, the
  *     ModulePickFocus reader) stores the nearest module hit as the FPS view's
  *     pending point (VK FUN_1412b48c0 / GL FUN_1412b3fa0: view+0x84 flag,
@@ -40,6 +40,7 @@ int sh_object_entry_disp(uintptr_t site,uintptr_t dest,int32_t *disp)
 
 #ifndef SH_OBJECT_ENTRY_PURE
 #include "patch.h"
+#include "near_page.h"
 #include <windows.h>
 #include <stdio.h>
 
@@ -56,24 +57,6 @@ static const sig_result *binding(const sig_result *r,size_t n,const char *name)
     size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
     return NULL;
 }
-/* One page within rip-relative reach of the site. */
-static drop_page *near_page(uintptr_t site)
-{
-    SYSTEM_INFO info;uintptr_t step,center,delta;
-    GetSystemInfo(&info);step=info.dwAllocationGranularity;center=site&~(step-1);
-    for(delta=step;delta<0x7fff0000u;delta+=step) {
-        uintptr_t candidates[2]={center>=delta?center-delta:0,center+delta};int i;
-        for(i=0;i<2;i++) {
-            MEMORY_BASIC_INFORMATION mbi;void *page;uintptr_t a=candidates[i];int32_t disp;
-            if(a<(uintptr_t)info.lpMinimumApplicationAddress||a>(uintptr_t)info.lpMaximumApplicationAddress)continue;
-            if(!sh_object_entry_disp(site,a,&disp)||!sh_object_entry_disp(site,a+0x1000,&disp))continue;
-            if(!VirtualQuery((void*)a,&mbi,sizeof mbi)||mbi.State!=MEM_FREE)continue;
-            page=VirtualAlloc((void*)a,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-            if(page)return (drop_page*)page;
-        }
-    }
-    return NULL;
-}
 static int read_float(uintptr_t at,float *out)
 {
     __try {*out=*(const volatile float*)at;return 1;}
@@ -88,7 +71,8 @@ int sh_object_entry_install(const sig_result *results,size_t count)
     if(!site){why="the entry drop load was not found";goto unavailable;}
     if(!sh_object_entry_site((const unsigned char*)site->addr,&constant)){why="the entry drop load has unexpected bytes";goto unavailable;}
     if(!read_float(constant,&native)||native!=SH_OBJECT_ENTRY_NATIVE_DROP){why="the entry drop constant is not 18364";goto unavailable;}
-    if(!g_page&&!(g_page=near_page(site->addr))){why="no page within reach of the entry drop load";goto unavailable;}
+    /* The load's disp32 is relative to the instruction's end, site + 9. */
+    if(!g_page&&!(g_page=(drop_page*)sh_near_page_alloc(site->addr+9))){why="no page within reach of the entry drop load";goto unavailable;}
     /* Written before the patch: the redirected load never reads an empty page. */
     g_page->drop=SH_OBJECT_ENTRY_DROP;
     memcpy(&old_disp,(const void*)(site->addr+5),4);

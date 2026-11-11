@@ -15,35 +15,7 @@
 #include "aas_edit.h"
 #include "navmesh.h"
 
-/* Lump order and record sizes mirror NAV_LUMPS in navmesh.c. These tables
- * must agree; both modules are independently linked by tests.
- */
-typedef struct aas_lump_def { const char *name; unsigned record; } aas_lump_def;
-
-static const aas_lump_def AAS_LUMPS[SH_AAS_L__COUNT] = {
-    { "planes",                  16 },
-    { "vertices",                12 },
-    { "edges",                   12 },
-    { "edgeIndex",                4 },
-    { "reachabilities",          40 },
-    { "areas",                   44 },
-    { "nodes",                   16 },
-    { "portals",                 12 },
-    { "portalIndex",              4 },
-    { "clusters",                16 },
-    { "obstaclePVS",              1 },
-    { "reachNames",             132 },
-    { "traversalAnimNames",     128 },
-    { "dependencyNames",        128 },
-    { "interactionEntityNames", 128 },
-    { "cover",                   56 },
-    { "areaCoverIndex",           4 },
-    { "touchingCoverIndex",       4 },
-    { "traversalPoints",         60 },
-    { "hintNodes",               24 },
-    { "trees",                   24 },
-    { "areaBounds",              12 }
-};
+#define AAS_LUMPS SH_AAS_LUMP_DEFS   /* aas_edit.h */
 
 /* Settings: u32 type, three length-prefixed strings, then 39 big-endian
  * words. Shipped strings each occupy 64 bytes: 4 + 3*(4+64) + 39*4 = 364.
@@ -427,6 +399,12 @@ float sh_aas_setting_f32(const sh_aas *a, unsigned off)
 {
     if (!a || off > SH_AAS_SETTINGS_BYTES - 4) return 0.0f;
     return sh_aas_get_f32(a->settings, off);
+}
+
+uint32_t sh_aas_setting_u32(const sh_aas *a, unsigned off)
+{
+    if (!a || off > SH_AAS_SETTINGS_BYTES - 4) return 0;
+    return sh_aas_get_u32(a->settings, off);
 }
 
 void sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v)

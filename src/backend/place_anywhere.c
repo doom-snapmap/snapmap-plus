@@ -1,6 +1,6 @@
 /* Unrestricted entity placement (see place_anywhere.h).
  *
- * Build 13954591 evidence (snaphak-re editor-fixes-13954591 R-025):
+ * Build 13954591 evidence:
  *   placementFlags is the dword at snapEditorEntityDef+0x1d0; its value table
  *     (name/value pairs, VK 0x143529f90 / GL 0x143560ba0) gives FLOOR 1, WALL 2, CEILING 4,
  *     SURFACE_ALIGNED 8, AIR 0x10, AIR_UNALIGNED 0x20.

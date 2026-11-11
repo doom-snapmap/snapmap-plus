@@ -12,8 +12,8 @@
 #include "backend_log.h"
 #include "apply_engine.h"
 
-#define SIG_CREATOR_BASE     "ConnectOutputCreator"   /* 0xcdbb40 -- base-entity-source connect creator */
-#define SIG_CREATOR_OUTNODE  "WireConnectCreator1"    /* 0xcdb990 -- output-node-source connect creator */
+#define SIG_CREATOR_BASE     "ConnectOutputCreator"   /* base-entity-source connect creator */
+#define SIG_CREATOR_OUTNODE  "WireConnectCreator1"    /* output-node-source connect creator */
 #define WIRING_STOLEN        15u
 
 /* Recheck these fields in the WireConnectCreator0/1 tool reads when porting. */
@@ -143,17 +143,17 @@ void sh_wiring_cleandirect_install(const uint8_t *module_base)
 
     sig_result rb, ro;
     if (!wcd_resolve_sig(SIG_CREATOR_BASE, &rb) || rb.status != SIG_OK) {
-        backend_log("B2: sh_target_any clean-direct NOT armed (base creator sig unresolved)");
+        backend_log("wiring: sh_target_any bare-target wiring off (base creator sig unresolved)");
         return;
     }
     if (!wcd_resolve_sig(SIG_CREATOR_OUTNODE, &ro) || ro.status != SIG_OK) {
-        backend_log("B2: sh_target_any clean-direct NOT armed (output-node creator sig unresolved)");
+        backend_log("wiring: sh_target_any bare-target wiring off (output-node creator sig unresolved)");
         return;
     }
 
     void *tb = sh_prepare_detour_sig(&rb, (void *)connect_creator_base_detour, WIRING_STOLEN);
     if (tb == NULL) {
-        backend_log("B2: sh_target_any clean-direct NOT armed (base creator detour install failed)");
+        backend_log("wiring: sh_target_any bare-target wiring off (base creator detour install failed)");
         return;
     }
     g_orig_base = (creator_fn)tb;
@@ -162,9 +162,9 @@ void sh_wiring_cleandirect_install(const uint8_t *module_base)
     if (!to || sh_commit_detour(tb) != B2_PATCH_OK || sh_commit_detour(to) != B2_PATCH_OK) {
         if (to && sh_uninstall_detour(to)) g_orig_outnode = NULL;
         if (sh_uninstall_detour(tb)) g_orig_base = NULL;
-        backend_log("B2: sh_target_any clean-direct commit failed; retained callbacks require restoration");
+        backend_log("wiring: sh_target_any bare-target wiring could not be committed; its detours are kept for restoration");
         return;
     }
     InterlockedExchange(&g_installed, 1);
-    backend_log("B2: sh_target_any clean-direct ready (off until reveal; cdbb40 + cdb990 detoured)");
+    backend_log("wiring: sh_target_any bare-target wiring ready (active while sh_target_any shows hidden entries)");
 }

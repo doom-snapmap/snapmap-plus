@@ -38,6 +38,34 @@ enum {
     SH_AAS_L__COUNT
 };
 
+/* Every lump's name and fixed record size, in lump order: the one table the
+ * editor (aas_edit.c) and the validator (navmesh.c) both read. */
+typedef struct sh_aas_lump_def { const char *name; unsigned record; } sh_aas_lump_def;
+static const sh_aas_lump_def SH_AAS_LUMP_DEFS[SH_AAS_L__COUNT] = {
+    { "planes",                  16 },
+    { "vertices",                12 },
+    { "edges",                   12 },
+    { "edgeIndex",                4 },
+    { "reachabilities",          40 },
+    { "areas",                   44 },
+    { "nodes",                   16 },
+    { "portals",                 12 },
+    { "portalIndex",              4 },
+    { "clusters",                16 },
+    { "obstaclePVS",              1 },
+    { "reachNames",             132 },
+    { "traversalAnimNames",     128 },
+    { "dependencyNames",        128 },
+    { "interactionEntityNames", 128 },
+    { "cover",                   56 },
+    { "areaCoverIndex",           4 },
+    { "touchingCoverIndex",       4 },
+    { "traversalPoints",         60 },
+    { "hintNodes",               24 },
+    { "trees",                   24 },
+    { "areaBounds",              12 }
+};
+
 typedef struct sh_aas sh_aas;
 
 /* ---- lifetime ---------------------------------------------------------- */
@@ -101,6 +129,8 @@ void sh_aas_put_f32(unsigned char *rec, unsigned off, float v);
  * limits walk links.
  */
 float sh_aas_setting_f32(const sh_aas *a, unsigned off);
+/* An integer setting, such as a tt_* travel time. */
+uint32_t sh_aas_setting_u32(const sh_aas *a, unsigned off);
 void  sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v);
 
 /* The nav class's agent box, decoded from the settings block. */

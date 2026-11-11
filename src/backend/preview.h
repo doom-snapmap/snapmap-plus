@@ -23,8 +23,8 @@ int  sh_preview_get(char *out, size_t cap);
  */
 void sh_preview_request(const char *name);
 
-/* Stage a request with its catalog kind when the caller has one. AUTO preserves the original
- * Material-first behavior; a typed Image request lets the producer bypass material/atlas lookup. */
+/* Stage a request with its catalog kind when the caller has one. AUTO looks the name up as a
+ * Material first; a typed Image request lets the producer bypass material/atlas lookup. */
 #define SH_PREVIEW_KIND_AUTO (-1)
 void sh_preview_request_kind(const char *name, int kind);
 
@@ -35,9 +35,8 @@ void sh_preview_cancel(void);
 /* ------------------------------------------------------------- producer side (whoever makes pixels) */
 
 /* Read the staged request. Copies the name and catalog kind into `out` / `kind`, and returns 1 if a
- * request is pending and has not been published for yet; returns 0 otherwise. Does NOT clear the
- * request -- a producer that fails may legitimately want to retry, and publishing is what marks it
- * served. `kind` is SH_PREVIEW_KIND_AUTO for an untyped legacy request. */
+ * request is pending: neither published nor failed. Does NOT clear the request; publishing or
+ * failing it is what ends it. `kind` is SH_PREVIEW_KIND_AUTO for an untyped request. */
 int  sh_preview_take_request(char *out, size_t cap, unsigned long *generation, int *kind);
 
 /* Encode `w` x `h` RGBA8 pixels (row-major, top row first, 4 bytes/pixel) and publish them as the
@@ -47,5 +46,16 @@ int  sh_preview_take_request(char *out, size_t cap, unsigned long *generation, i
 #define SH_PREVIEW_FAILED      0
 #define SH_PREVIEW_PUBLISHED   1
 int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsigned w, unsigned h);
+
+/* End request `generation` without a picture. `reason` is one plain sentence the Assets tab shows in
+ * place of the preview ("This material has no image to preview."). A stale generation is ignored.
+ * Returns SH_PREVIEW_STALE or SH_PREVIEW_FAILED. */
+#define SH_PREVIEW_REASON_CAP 160
+int sh_preview_fail(unsigned long generation, const char *reason);
+
+/* The reason the latest request failed: copies it into `out` and returns 1, or returns 0 while the
+ * request is pending, published or cancelled. Safe from any thread; the reason stays until the next
+ * request or cancel, so a poller that sees sh_preview_get return 0 can ask this to stop waiting. */
+int sh_preview_failure(char *out, size_t cap);
 
 #endif /* BACKEND_PREVIEW_H */

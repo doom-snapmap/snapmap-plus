@@ -19,11 +19,10 @@
  *
  * Chunk size (SH_SMNAV_CARRIER_CHUNK): the product strips the member before
  * the engine parses, so only a machine without Snapmap+ ever lexes it. String
- * variables failed native deserialization at 16384 characters. The
- * member was measured live on Vulkan (13954591, 2026-11-09, lane L17) with
- * Snapmap+ leaving an unknown root member to the engine: a single string of
- * 8192, 65536 and 1048576 characters and an array of 2048 strings of 4096
- * characters (8 MiB; 2048 x 8192 would pass the 10 MiB map read bound) all
+ * variables failed native deserialization at 16384 characters. The member
+ * was measured live on Vulkan (13954591) with Snapmap+ leaving an unknown
+ * root member to the engine: a single string of 8192, 65536 and 1048576
+ * characters and an array of 2048 strings of 4096 characters (8 MiB) all
  * loaded in the editor and played with no engine message above level 4, and
  * a 1048576-character string in a declared member came back intact through
  * an editor save. Chunks are therefore 1048576 characters, the largest size
@@ -77,6 +76,7 @@
 #define SH_AAS_MAX_DEPTH        0x80        /* the engine's own tree-depth limit */
 #define SH_AAS_MAX_AREAS        0xFFFEu     /* area indices are u16 everywhere */
 #define SH_AAS_MAX_RECORDS      0x1000000u  /* per-lump record cap */
+#define SH_AAS_MAX_TRAVERSAL_POINTS 0x10000u /* an area's first traversal point is a u16 */
 
 /* Log configured state. Serving uses the existing override-provider hook;
  * load/save handling uses the rawmap funnel.

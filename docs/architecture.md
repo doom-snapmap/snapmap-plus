@@ -385,6 +385,13 @@ player's installed game. The product does not embed DOOM assets. Resource
 caches need explicit reader lifetimes; a refresh must not invalidate storage a
 reader or native object still uses.
 
+One preview worker (`megapreview.c`) serves every Assets-tab picture: atlas
+materials through the game's own page decoder (`sh_mega2_decode_page`, the one
+place a stored page is prepared and decoded), and images and decl materials
+from their installed `.bimage`, decoded from the smallest mip that still covers
+the preview. A request ends published or failed; a failed one keeps a plain
+reason (`sh_preview_failure`) for the tab to show instead of waiting.
+
 Navigation snapshots and shipped resource reads run on the engine thread.
 The snapshot reader takes collision dimensions from each cloned entity's
 resolved declaration while the native snapshot is alive. It pairs declarations
@@ -1459,9 +1466,10 @@ provider; no `.pages` file is needed, and materials carry an explicit
 - Renderers: flavor 2 on Vulkan; on OpenGL, flavor 4 when the AMD sparse
   texture extension and its cvar are both set (the test the engine's own
   lookup makes), and no registration otherwise.
-- `sh_vt` (`vt_harness.c`) is the diagnostic on the same binding: `list`
-  marks the product's records `(product)`, `sync` runs a sync, and its manual
-  `register`/`release` never touch a product record. The member format is
+- `sh_vt` (`vt_harness.c`) is the diagnostic on the same binding, built only
+  into the diagnostic build (`build.ps1 -Diag`): `list` marks the product's
+  records `(product)`, `sync` runs a sync, and its manual `register`/`release`
+  never touch a product record. The member format is
   [vt-baker.md](vt-baker.md).
 
 A mod's `hud` key (the author block of `mod.json`) selects how

@@ -1,7 +1,7 @@
 /* Register the supported Snapmap+ cvars with process-lifetime backing storage.
  * Settings without implemented consumers are omitted. */
-#ifndef BACKEND_B2_CVARS_H
-#define BACKEND_B2_CVARS_H
+#ifndef BACKEND_CVARS_H
+#define BACKEND_CVARS_H
 
 /* Register each row once, then insert it into the full lookup list and hash.
  * Never rerun the engine static registration pass or grow its tables here.
@@ -21,4 +21,4 @@ int sh_cvar_value_int(int index, int def);
 int sh_cvar_table_count(void);
 int sh_cvar_table_row(int index, const char **name, const char **def, const char **desc);
 
-#endif /* BACKEND_B2_CVARS_H */
+#endif /* BACKEND_CVARS_H */

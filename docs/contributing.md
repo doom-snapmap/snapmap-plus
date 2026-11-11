@@ -265,7 +265,7 @@ exercise catalog parsing and metadata compaction against their own installed fil
 
 ```powershell
 tests\obj\imgpreview_index_test.exe --catalog-root "C:\path\to\DOOM\base"
-tests\obj\megapreview_io_test.exe --virtualtextures-root "C:\path\to\DOOM\virtualtextures"
+tests\obj\megapreview_test.exe --virtualtextures-root "C:\path\to\DOOM\virtualtextures"
 ```
 
 These optional checks print recognized-record counts, streamed and retained metadata sizes, and the

@@ -468,6 +468,9 @@ typedef struct aug_ctx {
     int floor_count;
     int *floor_parent;              /* indexed by area - original_areas */
     unsigned char *floor_closed;    /* per shipped area: wholly under boxes */
+    /* Hash indexes over vertices, edges and planes, so interning a value is
+     * not a scan of every record (aug_vertex, aug_edge, aug_plane). */
+    struct aug_intern { unsigned *slot; unsigned cap, used, indexed; } intern[3];
 } aug_ctx;
 
 /* Edge segments one generated area may examine per pass, and BSP nodes one
@@ -533,17 +536,119 @@ typedef struct aug_box { double v[6]; } aug_box;
 
 /* ---- interning --------------------------------------------------------- */
 
-/* Intern vertices, edges and planes by value to avoid duplicate geometry. */
+/* Intern vertices, edges and planes by value to avoid duplicate geometry. A
+ * value matches the lowest-indexed record equal to it: floats compare with ==
+ * (so 0 and -0 are one value and NaN matches nothing), and an edge matches its
+ * two vertices in either order. The hash index catches up with records any
+ * code appended since the last lookup, so it answers exactly as a scan of
+ * every record would. */
+enum { AUG_IN_VERTICES = 0, AUG_IN_EDGES, AUG_IN_PLANES };
+static const int AUG_IN_LUMP[3] = { SH_AAS_L_VERTICES, SH_AAS_L_EDGES, SH_AAS_L_PLANES };
+typedef struct aug_key { float f[4]; int v[2]; } aug_key;
+
+static unsigned aug_key_hash(int which, const aug_key *k)
+{
+    unsigned h = 2166136261u, i, n = which == AUG_IN_EDGES ? 2 : which == AUG_IN_PLANES ? 4 : 3;
+    for (i = 0; i < n; i++) {
+        uint32_t bits;
+        if (which == AUG_IN_EDGES) bits = (uint32_t)k->v[i];
+        else { float f = k->f[i] == 0.0f ? 0.0f : k->f[i]; memcpy(&bits, &f, 4); }
+        h = (h ^ bits) * 16777619u;
+        h ^= h >> 15;
+    }
+    return h;
+}
+
+static int aug_key_eq(int which, const aug_key *a, const aug_key *b)
+{
+    if (which == AUG_IN_EDGES) return a->v[0] == b->v[0] && a->v[1] == b->v[1];
+    return a->f[0] == b->f[0] && a->f[1] == b->f[1] && a->f[2] == b->f[2] &&
+           (which != AUG_IN_PLANES || a->f[3] == b->f[3]);
+}
+
+/* The key of record i; an edge's two vertices in ascending order. */
+static int aug_key_of(aug_ctx *c, int which, unsigned i, aug_key *k)
+{
+    const unsigned char *r = sh_aas_rec_const(c->a, AUG_IN_LUMP[which], i);
+    int j;
+    if (!r) return 0;
+    if (which == AUG_IN_EDGES) {
+        int v0 = sh_aas_get_i32(r, 0), v1 = sh_aas_get_i32(r, 4);
+        k->v[0] = v0 < v1 ? v0 : v1; k->v[1] = v0 < v1 ? v1 : v0;
+    } else for (j = 0; j < (which == AUG_IN_PLANES ? 4 : 3); j++) k->f[j] = sh_aas_get_f32(r, (unsigned)j * 4);
+    return 1;
+}
+
+/* The slot holding a record equal to k, or the empty slot where it belongs. */
+static unsigned aug_intern_probe(aug_ctx *c, int which, const aug_key *k, int *found)
+{
+    struct aug_intern *t = &c->intern[which];
+    unsigned at = aug_key_hash(which, k) & (t->cap - 1);
+    *found = 0;
+    while (t->slot[at]) {
+        aug_key have;
+        if (aug_key_of(c, which, t->slot[at] - 1, &have) && aug_key_eq(which, &have, k)) { *found = 1; break; }
+        at = (at + 1) & (t->cap - 1);
+    }
+    return at;
+}
+
+static void aug_intern_free(aug_ctx *c)
+{
+    int w;
+    for (w = 0; w < 3; w++) { free(c->intern[w].slot); memset(&c->intern[w], 0, sizeof c->intern[w]); }
+}
+
+/* Index every record appended since the last lookup; an earlier record keeps a
+ * value that a later one repeats. Returns 0 when out of memory. */
+static int aug_intern_sync(aug_ctx *c, int which)
+{
+    struct aug_intern *t = &c->intern[which];
+    unsigned n = sh_aas_count(c->a, AUG_IN_LUMP[which]), i;
+    if (n < t->indexed) { free(t->slot); memset(t, 0, sizeof *t); }
+    if ((size_t)n * 2 >= t->cap) {
+        unsigned cap = t->cap ? t->cap : 1024;
+        while ((size_t)n * 2 >= cap) cap *= 2;
+        free(t->slot);
+        t->slot = (unsigned *)calloc(cap, sizeof *t->slot);
+        t->cap = t->slot ? cap : 0;
+        t->used = t->indexed = 0;
+        if (!t->slot) return 0;
+    }
+    for (i = t->indexed; i < n; i++) {
+        aug_key k;
+        int found;
+        unsigned at;
+        if (!aug_key_of(c, which, i, &k)) continue;
+        at = aug_intern_probe(c, which, &k, &found);
+        if (!found) { t->slot[at] = i + 1; t->used++; }
+    }
+    t->indexed = n;
+    return 1;
+}
+
+/* The lowest-indexed record equal to k: its index, -1 for none, -2 when the
+ * index could not be built. */
+static int aug_intern_find(aug_ctx *c, int which, const aug_key *k)
+{
+    int found;
+    unsigned at;
+    if (!aug_intern_sync(c, which)) return -2;
+    at = aug_intern_probe(c, which, k, &found);
+    return found ? (int)(c->intern[which].slot[at] - 1) : -1;
+}
+
 static int aug_vertex(aug_ctx *c, float x, float y, float z)
 {
-    unsigned i, n = sh_aas_count(c->a, SH_AAS_L_VERTICES), first;
+    unsigned first;
     unsigned char *r;
-    for (i = 0; i < n; i++) {
-        const unsigned char *v = sh_aas_rec_const(c->a, SH_AAS_L_VERTICES, i);
-        if (v && sh_aas_get_f32(v, 0) == x && sh_aas_get_f32(v, 4) == y
-              && sh_aas_get_f32(v, 8) == z)
-            return (int)i;
-    }
+    aug_key k;
+    int i;
+    memset(&k, 0, sizeof k);
+    k.f[0] = x; k.f[1] = y; k.f[2] = z;
+    i = aug_intern_find(c, AUG_IN_VERTICES, &k);
+    if (i >= 0) return i;
+    if (i == -2) return -1;
     if (!sh_aas_append(c->a, SH_AAS_L_VERTICES, 1, &first)) return -1;
     r = sh_aas_rec(c->a, SH_AAS_L_VERTICES, first);
     if (!r) return -1;
@@ -556,21 +661,19 @@ static int aug_vertex(aug_ctx *c, float x, float y, float z)
  */
 static int aug_edge(aug_ctx *c, int v0, int v1)
 {
-    unsigned i, n = sh_aas_count(c->a, SH_AAS_L_EDGES), first;
+    unsigned first;
     unsigned char *r;
-    for (i = 0; i < n; i++) {
-        unsigned char *e = sh_aas_rec(c->a, SH_AAS_L_EDGES, i);
-        if (!e) continue;
-        if (sh_aas_get_i32(e, 0) == v0 && sh_aas_get_i32(e, 4) == v1) {
-            if (sh_aas_get_i32(e, 8) == EDGE_FLAGS_BOUNDARY)
-                sh_aas_put_i32(e, 8, EDGE_FLAGS_SHARED);
-            return (int)i;
-        }
-        if (sh_aas_get_i32(e, 0) == v1 && sh_aas_get_i32(e, 4) == v0) {
-            if (sh_aas_get_i32(e, 8) == EDGE_FLAGS_BOUNDARY)
-                sh_aas_put_i32(e, 8, EDGE_FLAGS_SHARED);
-            return -(int)i;
-        }
+    aug_key k;
+    int i;
+    memset(&k, 0, sizeof k);
+    k.v[0] = v0 < v1 ? v0 : v1; k.v[1] = v0 < v1 ? v1 : v0;
+    i = aug_intern_find(c, AUG_IN_EDGES, &k);
+    if (i == -2) return 0;
+    if (i >= 0) {
+        unsigned char *e = sh_aas_rec(c->a, SH_AAS_L_EDGES, (unsigned)i);
+        if (sh_aas_get_i32(e, 8) == EDGE_FLAGS_BOUNDARY)
+            sh_aas_put_i32(e, 8, EDGE_FLAGS_SHARED);
+        return sh_aas_get_i32(e, 0) == v0 && sh_aas_get_i32(e, 4) == v1 ? i : -i;
     }
     if (!sh_aas_append(c->a, SH_AAS_L_EDGES, 1, &first)) return 0;
     r = sh_aas_rec(c->a, SH_AAS_L_EDGES, first);
@@ -583,14 +686,15 @@ static int aug_edge(aug_ctx *c, int v0, int v1)
 
 static int aug_plane(aug_ctx *c, float pa, float pb, float pc, float dist)
 {
-    unsigned i, n = sh_aas_count(c->a, SH_AAS_L_PLANES), first;
+    unsigned first;
     unsigned char *r;
-    for (i = 0; i < n; i++) {
-        const unsigned char *p = sh_aas_rec_const(c->a, SH_AAS_L_PLANES, i);
-        if (p && sh_aas_get_f32(p, 0) == pa && sh_aas_get_f32(p, 4) == pb
-              && sh_aas_get_f32(p, 8) == pc && sh_aas_get_f32(p, 12) == dist)
-            return (int)i;
-    }
+    aug_key k;
+    int i;
+    memset(&k, 0, sizeof k);
+    k.f[0] = pa; k.f[1] = pb; k.f[2] = pc; k.f[3] = dist;
+    i = aug_intern_find(c, AUG_IN_PLANES, &k);
+    if (i >= 0) return i;
+    if (i == -2) return -1;
     if (!sh_aas_append(c->a, SH_AAS_L_PLANES, 1, &first)) return -1;
     r = sh_aas_rec(c->a, SH_AAS_L_PLANES, first);
     if (!r) return -1;
@@ -1572,13 +1676,15 @@ static int aug_floor_span(const sh_aas *a,int area,const double start[3],
 static int aug_floor_wall_at(const sh_aas *a,int area,double x,double y)
 {
     const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,(unsigned)area);unsigned i;
+    if(!ar)return 0;
     for(i=0;i<sh_aas_get_u16(ar,AR_NUM_EDGES);i++) {
         const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,sh_aas_get_u32(ar,AR_FIRST_EDGE_INDEX)+i);
-        const unsigned char *ed=sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(sh_aas_get_i32(ix,0)));
+        const unsigned char *ed=ix?sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(sh_aas_get_i32(ix,0))):NULL;
         const unsigned char *v,*w;double dx,dy,len,along,vx,vy;
-        if(!(sh_aas_get_u32(ed,8)&1))continue;
+        if(!ed||!(sh_aas_get_u32(ed,8)&1))continue;
         v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,0));
         w=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,4));
+        if(!v||!w)continue;
         vx=sh_aas_get_f32(v,0);vy=sh_aas_get_f32(v,4);
         dx=sh_aas_get_f32(w,0)-vx;dy=sh_aas_get_f32(w,4)-vy;len=hypot(dx,dy);
         if(len<1e-8)continue;
@@ -2215,30 +2321,6 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
     return added;
 }
 
-/* Barrier jumps: AAS_TFL_BARRIERJUMP up and AAS_TFL_WALKOFFBARRIER down, the
- * engine's only animation-free vertical link (e2m8.aas_monster128 carries 24
- * pairs, 26 units high, travel time tt_barrierJump, no traversal point). One
- * pair per anchor serves every demon of the class for rises above step height
- * up to maxBarrierHeight (64), with a unit of tolerance so a box standing a
- * quarter unit up still qualifies. Off unless built with SH_AUG_BARRIER_JUMPS:
- * SnapMap demons have not been shown to take them. SH_AUG_BARRIER_ONLY also
- * leaves the animated climbs out, to test the barrier jump on its own. */
-#define REACH_BARRIER_JUMP      0x00000100u
-#define REACH_WALK_OFF_BARRIER  0x00000080u
-#define AUG_MAX_BARRIER_HEIGHT  64.0
-#define AUG_BARRIER_TOLERANCE   1.0
-#define SET_MAX_BARRIER_HEIGHT  SET_W(13)
-#define SET_TT_BARRIER_JUMP     SET_W(35)
-#define TRAV_ANCHOR_GAP     128.0
-#if defined(SH_AUG_BARRIER_JUMPS) || defined(SH_AUG_BARRIER_ONLY)
-static int g_aug_barrier = 1;
-#else
-static int g_aug_barrier = 0;
-#endif
-#ifdef SH_AUG_TESTING
-int sh_aug_test_set_barrier(int on) { int was = g_aug_barrier; g_aug_barrier = on; return was; }
-#endif
-
 static int aug_trav_anchors(double lo, double hi, double *out, int cap);
 static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
     const aug_side *side,double x,double y,double offset,double point[3]);
@@ -2251,75 +2333,6 @@ static int aug_settle_traversal(aug_ctx *c, const aug_peer *peers, int npeers,
                                 const aug_quad *eff, int ai, int far_area,
                                 double inner[3], double outer[3], int *moved, int *why);
 
-static int aug_barrier_links(aug_ctx *c, int ai, const aug_quad *eff,
-                             const aug_quad *req, const aug_peer *peers, int npeers)
-{
-    aug_side *sides = c->sides;
-    const aug_peer *owner = aug_owner(peers, npeers, ai);
-    int n, i, k, added = 0, time;
-    float tf = sh_aas_setting_f32(c->a, SET_TT_BARRIER_JUMP);
-    unsigned tu;
-    memcpy(&tu, &tf, sizeof tu);
-    time = tu > 0 && tu < 10000 ? (int)tu : 100;
-    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
-    for (i = 0; i < n; i++) {
-        double anchors[24], used[24], seglen, rise;
-        int na, placed = 0, regime = aug_regime(&sides[i], (double)c->step);
-        if (regime != REGIME_UP && regime != REGIME_DOWN) continue;
-        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
-        if (!aug_floor_side_usable(c, owner, &sides[i])) continue;
-        rise = fabs(sides[i].drop);
-        if (rise <= c->step || rise > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
-        seglen = hypot(sides[i].p1[0] - sides[i].p0[0], sides[i].p1[1] - sides[i].p0[1]);
-        na = aug_trav_anchors(0.0, seglen, anchors, 24);
-        for (k = 0; k < na; k++) {
-            double t = seglen > 1e-9 ? anchors[k] / seglen : 0.5, inner[3], outer[3], dz;
-            double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
-            double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
-            int q, crowded = 0, far_area, low_is_inner;
-            for (q = 0; q < placed; q++) if (fabs(t - used[q]) * seglen < TRAV_ANCHOR_GAP) crowded = 1;
-            if (crowded) continue;
-            inner[0] = bx - sides[i].out[0] * REACH_SIDE_OFFSET;
-            inner[1] = by - sides[i].out[1] * REACH_SIDE_OFFSET;
-            inner[2] = aug_z_at(eff, inner[0], inner[1]);
-            if (sides[i].generated && sides[i].peer >= 0) {
-                const aug_quad *pe = peers[sides[i].peer].eff;
-                double distance, land[2];
-                if (!aug_ray_entry(pe, inner[0], inner[1], sides[i].out[0], sides[i].out[1],
-                                   SH_TRAV_LEAP_MAX_SPAN, &distance, land)) continue;
-                outer[0] = land[0]; outer[1] = land[1]; outer[2] = aug_z_at(pe, land[0], land[1]);
-            } else if (!aug_floor_traversal_point(c, owner, &sides[i], bx, by, 0.0, outer)) continue;
-            dz = fabs(inner[2] - outer[2]);
-            if (dz <= c->step || dz > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
-            if (sh_aas_point_area(c->a, (float)inner[0], (float)inner[1], (float)(inner[2] + 2.0)) != ai) continue;
-            far_area = sh_aas_point_area(c->a, (float)outer[0], (float)outer[1], (float)(outer[2] + 2.0));
-            if (far_area != sides[i].floor_area &&
-                (sides[i].generated || !aug_floor_accepts(c, far_area, outer))) continue;
-            {
-                int moved = 0, why = -1;
-                if (!aug_settle_traversal(c, peers, npeers, owner, &sides[i], 0, eff, ai, far_area,
-                                          inner, outer, &moved, &why)) {
-                    c->rep->through_solids++;
-                    continue;
-                }
-                dz = fabs(inner[2] - outer[2]);
-                if (dz <= c->step || dz > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
-            }
-            if (!c->prepared_geometry &&
-                !aug_path_is_clear(c, peers, npeers, ai, far_area, inner, outer)) continue;
-            low_is_inner = inner[2] < outer[2];
-            if (aug_reach(c, REACH_BARRIER_JUMP, time, low_is_inner ? ai : far_area,
-                          low_is_inner ? far_area : ai, low_is_inner ? inner : outer,
-                          low_is_inner ? outer : inner)) added++;
-            if (aug_reach(c, REACH_WALK_OFF_BARRIER, time, low_is_inner ? far_area : ai,
-                          low_is_inner ? ai : far_area, low_is_inner ? outer : inner,
-                          low_is_inner ? inner : outer)) added++;
-            used[placed++] = t;
-        }
-    }
-    return added;
-}
-
 /* Emit downward walk-off links only under the selected fall policy. AUTO
  * follows maxFallHeight, zero in shipped monster modules.
  */
@@ -2329,7 +2342,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
     aug_side *sides = c->sides;
     int n, i, added = 0;
     double max_fall = sh_aas_setting_f32(c->a, SET_MAX_FALL_HEIGHT);
-    double tt = sh_aas_setting_f32(c->a, SET_TT_WALK_OFF_LEDGE);
+    int tt = (int)sh_aas_setting_u32(c->a, SET_TT_WALK_OFF_LEDGE);   /* an integer, like every tt_ */
 
     if (c->o->fall == SH_AUG_FALL_NEVER) return 0;
     n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
@@ -2349,7 +2362,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
         e3[0] = bx + sides[i].out[0] * REACH_SIDE_OFFSET;
         e3[1] = by + sides[i].out[1] * REACH_SIDE_OFFSET;
         e3[2] = sides[i].far_z;
-        time = (int)tt + aug_round((float)(sides[i].drop * REACH_FALL_PER_UNIT));
+        time = tt + aug_round((float)(sides[i].drop * REACH_FALL_PER_UNIT));
         if (aug_reach(c, REACH_FALL, time, ai, sides[i].floor_area, s3, e3)) added++;
     }
     return added;
@@ -3441,6 +3454,9 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
     base = sh_aas_count(c->a, SH_AAS_L_REACHABILITIES);
     for (k = 0; k < n; k++) {
         unsigned char *tp;
+        /* An area's first traversal point is a u16: the table stops at 65536
+         * records rather than wrap an index. */
+        if (sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS) >= SH_AAS_MAX_TRAVERSAL_POINTS) break;
         if (!aug_reach(c, specs[k].travel_flags, specs[k].travel_time,
                        specs[k].from_area, specs[k].to_area,
                        specs[k].start, specs[k].end)) break;
@@ -4201,6 +4217,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->faces = (sh_aug_face *)calloc((size_t)(n > 0 ? n : 1) * 4, sizeof *out->faces);
     if (!out->faces) { free(out->platforms); out->platforms = NULL; return 0; }
 
+    memset(c.intern, 0, sizeof c.intern);
     c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
     c.floor_quads=NULL;c.floor_ids=NULL;c.floor_count=0;c.floor_parent=NULL;c.floor_closed=NULL;
     c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);c.original_nodes=sh_aas_count(a,SH_AAS_L_NODES);
@@ -4229,7 +4246,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         c.sides = (aug_side *)malloc(AUG_MAX_SIDES * sizeof *c.sides);
         if (!block || !c.sides) {      /* nothing has been written yet */
             if (block) HeapFree(GetProcessHeap(), 0, block);
-            free(c.sides);
+            free(c.sides);aug_intern_free(&c);
             return 0;
         }
         at = block;
@@ -4254,7 +4271,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             sh_nav_geometry_stats stats;
             unsigned area;int ns=0,input=n;
             floor_area_of=(int*)calloc(c.original_areas+1,sizeof *floor_area_of);
-            if(!support||!lost||!floor_area_of){free(support);free(lost);free(floor_area_of);free(c.sides);
+            if(!support||!lost||!floor_area_of){free(support);free(lost);free(floor_area_of);free(c.sides);aug_intern_free(&c);
                 HeapFree(GetProcessHeap(),0,block);return 0;}
             for(area=1;area<c.original_areas;area++) {
                 aug_quad floor;
@@ -4280,7 +4297,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 out->sources_dropped++;
             }
             free(lost);
-            if(n<0){out->pieces_truncated=1;free(c.sides);free(floor_support);free(floor_area_of);
+            if(n<0){out->pieces_truncated=1;free(c.sides);aug_intern_free(&c);free(floor_support);free(floor_area_of);
                 HeapFree(GetProcessHeap(),0,block);return 0;}
         } else for(i=0;i<n;i++){
             work[i]=plats[i];wsrc[i]=i;wpieces[i]=1;wburied[i]=0;
@@ -4487,15 +4504,6 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             aug_step_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
         for (i = 0; i < nmade; i++)
             aug_fall_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
-        if (g_aug_barrier) {
-            int barriers = 0;
-            for (i = 0; i < nmade; i++)
-                barriers += aug_barrier_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
-            /* SnapMap modules declare 0; the native rule admits rises up to it. */
-            if (barriers && sh_aas_setting_f32(a, SET_MAX_BARRIER_HEIGHT) < AUG_MAX_BARRIER_HEIGHT)
-                sh_aas_set_setting_f32(a, SET_MAX_BARRIER_HEIGHT, (float)AUG_MAX_BARRIER_HEIGHT);
-            out->barrier_links = barriers;
-        }
 
         /* Append traversals last to keep their reachabilities in one tail. */
         {
@@ -4503,10 +4511,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             {
                 int total = 0;
                 aug_trav_spec *specs;
-#ifndef SH_AUG_BARRIER_ONLY
                 for (i = 0; i < nmade && !c.failed; i++)
                     aug_traversal_specs(&c, made[i], &effs[i], &reqs[i], peers, nmade, &buffer);
-#endif
                 specs = buffer.data;
                 total = buffer.count;
                 /* Farther leaps go before the 256 budget sees them. */
@@ -4637,7 +4643,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->depth_exceeded = out->depth_after > g_aug_depth_limit;
 
     rc = c.failed ? 0 : 1;
-    free(c.sides);
+    free(c.sides);aug_intern_free(&c);
     free(c.floor_quads); free(c.floor_ids); free(c.floor_parent); free(c.floor_closed);
     HeapFree(GetProcessHeap(), 0, block);
     return rc;

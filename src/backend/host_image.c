@@ -3,15 +3,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
 
 #include "host_image.h"
 
 /* Names admit portable signature scanning; they do not authorize raw RVAs. */
-static const char *const k_doom_names[] = {
-    "DOOMx64vk.exe",   /* Vulkan  */
-    "DOOMx64.exe",     /* OpenGL  */
+static const wchar_t *const k_doom_names[] = {
+    L"DOOMx64vk.exe",   /* Vulkan  */
+    L"DOOMx64.exe",     /* OpenGL  */
 };
 
 static const uint8_t *g_base = NULL;
@@ -21,37 +22,45 @@ static INIT_ONCE      g_resolved = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE      g_fingerprinted = INIT_ONCE_STATIC_INIT;
 static const char * volatile g_renderer = NULL;   /* "vulkan"/"opengl" once definite; NULL until then */
 
-static const char *basename_of(const char *path)
+static const wchar_t *basename_of(const wchar_t *path)
 {
-    const char *p = path, *last = path;
+    const wchar_t *p = path, *last = path;
     for (; *p; p++) {
-        if (*p == '\\' || *p == '/') last = p + 1;
+        if (*p == L'\\' || *p == L'/') last = p + 1;
     }
     return last;
 }
 
+/* The host executable's full path, and its directory. A long path is the
+ * executable's own, so it is held whole rather than cut at MAX_PATH. */
+static wchar_t g_path[32768];
+static wchar_t g_dir[32768];
+
 static BOOL CALLBACK resolve_host(PINIT_ONCE once, PVOID arg, PVOID *context)
 {
-    char path[MAX_PATH];
     DWORD n;
-    const char *leaf;
+    const wchar_t *leaf;
     size_t i;
     HMODULE h;
 
     (void)once; (void)arg; (void)context;
 
     /* The process image is the host; its basename gates supported executable names. */
-    h = GetModuleHandleA(NULL);
+    h = GetModuleHandleW(NULL);
     if (h == NULL)
         return TRUE;
 
-    n = GetModuleFileNameA(NULL, path, (DWORD)sizeof path);
-    if (n == 0 || n >= sizeof path)
+    n = GetModuleFileNameW(NULL, g_path, (DWORD)(sizeof g_path / sizeof g_path[0]));
+    if (n == 0 || n >= sizeof g_path / sizeof g_path[0]) {
+        g_path[0] = L'\0';
         return TRUE;
+    }
+    leaf = basename_of(g_path);
+    wmemcpy(g_dir, g_path, (size_t)(leaf - g_path));
+    g_dir[leaf > g_path ? (size_t)(leaf - g_path) - 1 : 0] = L'\0';
 
-    leaf = basename_of(path);
     for (i = 0; i < sizeof k_doom_names / sizeof k_doom_names[0]; i++) {
-        if (_stricmp(leaf, k_doom_names[i]) == 0) {
+        if (_wcsicmp(leaf, k_doom_names[i]) == 0) {
             IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)h;
             IMAGE_NT_HEADERS *nt;
             if (dos->e_magic != IMAGE_DOS_SIGNATURE)
@@ -61,7 +70,7 @@ static BOOL CALLBACK resolve_host(PINIT_ONCE once, PVOID arg, PVOID *context)
                 return TRUE;
             g_size = (size_t)nt->OptionalHeader.SizeOfImage;
             g_base = (const uint8_t *)h;
-            strncpy_s(g_name, sizeof g_name, leaf, _TRUNCATE);
+            WideCharToMultiByte(CP_UTF8, 0, leaf, -1, g_name, (int)sizeof g_name, NULL, NULL);
             return TRUE;
         }
     }
@@ -136,24 +145,19 @@ static const sh_build_identity *identity_of_file(const wchar_t *path)
 
 static BOOL CALLBACK fingerprint_host(PINIT_ONCE once, PVOID arg, PVOID *context)
 {
-    static wchar_t path[32768];
-    DWORD count;
+    unsigned char digest[32];
     (void)once; (void)arg; (void)context;
     resolve_once();
-    if (!g_base) return TRUE;
-    count = GetModuleFileNameW(NULL, path, (DWORD)(sizeof path / sizeof path[0]));
-    if (count && count < sizeof path / sizeof path[0]) {
-        unsigned char digest[32];
-        if (sh_host_file_sha256(path, digest)) {
-            static const char hex[] = "0123456789abcdef";
-            int i;
-            for (i = 0; i < 4; i++) {
-                g_host_hash8[2 * i] = hex[digest[i] >> 4];
-                g_host_hash8[2 * i + 1] = hex[digest[i] & 15];
-            }
-            g_host_hash8[8] = '\0';
-            g_identity = sh_host_identity_for_digest(digest);
+    if (!g_base || !g_path[0]) return TRUE;
+    if (sh_host_file_sha256(g_path, digest)) {
+        static const char hex[] = "0123456789abcdef";
+        int i;
+        for (i = 0; i < 4; i++) {
+            g_host_hash8[2 * i] = hex[digest[i] >> 4];
+            g_host_hash8[2 * i + 1] = hex[digest[i] & 15];
         }
+        g_host_hash8[8] = '\0';
+        g_identity = sh_host_identity_for_digest(digest);
     }
     return TRUE;
 }
@@ -174,6 +178,12 @@ const char *sh_host_image_name(void)
 {
     resolve_once();
     return g_name;
+}
+
+const wchar_t *sh_host_dir(void)
+{
+    resolve_once();
+    return g_dir;
 }
 
 const sh_build_identity *sh_host_identity(void)

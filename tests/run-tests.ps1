@@ -121,13 +121,18 @@ $tests = @(
     @{ name = "prefab_host_test"; src = 'prefab_host_test.cpp ..\src\backend\prefab_block.c'; cxx = $true; arg = "" }
     @{ name = "player_text_test"; src = 'player_text_test.cpp'; cxx = $true; arg = "" }
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
+    @{ name = "clipboard_test";   src = 'clipboard_test.c ..\src\backend\clipboard.c';          arg = "" }
+    @{ name = "swf_textedit_test"; src = 'swf_textedit_test.c';                                   arg = "" }
+    @{ name = "target_any_test";  src = 'target_any_test.c';                                      arg = "" }
+    @{ name = "smoke_test";       src = 'smoke_test.c ..\src\backend\smoke.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\hook.c ..\src\backend\patch.c'; arg = "" }
+    @{ name = "backend_log_test"; src = 'backend_log_test.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
     @{ name = "imgpreview_index_test"; src = 'imgpreview_index_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';      arg = "" }
     @{ name = "imgpreview_catalog_test"; src = 'imgpreview_catalog_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';  arg = "" }
     @{ name = "prefabpreview_test"; src = 'prefabpreview_test.c';                                  arg = "" }
     @{ name = "prefab_grab_test"; src = 'prefab_grab_test.c ..\src\backend\prefab_grab.c';          arg = "" }
-    @{ name = "megapreview_io_test"; src = 'megapreview_io_test.c';                                 arg = "" }
+    @{ name = "megapreview_test";  src = 'megapreview_test.c';                                    arg = "" }
     @{ name = "decltree_test"; src = 'decltree_test.c ..\src\backend\decl_tree.c ..\src\backend\modstock.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\raw_deflate.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c'; libs = 'shell32.lib ole32.lib'; arg = @($(if ($Doom) { "doom=" + (Split-Path -Parent $Doom) } else { "nodoom" }), $(if ($env:LOCALAPPDATA) { "mods=" + (Join-Path $env:LOCALAPPDATA 'snapmap-plus\mods') } else { "nomods" })) }
     @{ name = "modbundle_test"; src = 'modbundle_test.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\modbundle_old.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c'; arg = (Join-Path $here 'fixtures\mods\alex.r2-imp') }
     @{ name = "modstore_test"; src = 'modstore_test.c ..\src\backend\modstore.c ..\src\backend\modstore_upgrade.c ..\src\backend\modbundle_old.c ..\src\backend\mp_json.c ..\src\backend\modbundle.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c'; defs = '/DSH_MODSTORE_TESTING'; libs = 'shell32.lib ole32.lib'; arg = (Join-Path $here 'fixtures\mods\alex.r2-imp') }

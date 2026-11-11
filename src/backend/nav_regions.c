@@ -541,53 +541,6 @@ int sh_nav_regions_decl_size(const char *text, size_t len, float size[3])
     memcpy(size, result, sizeof result); return 1;
 }
 
-int sh_nav_regions_decl_level(const char *text, size_t len, float size[3],
-                              unsigned *have, int *type, char *inherit, size_t cap)
-{
-    static const char *axis[3] = { "x", "y", "z" };
-    navr_decl_span scope = { text, len }, probe, token, edit, clip, box, value;
-    int i;
-    if (!text || !size || !have || !type) return 0;
-    *have = 0; *type = 0;
-    if (inherit && cap) inherit[0] = 0;
-    /* A decl file wraps its members in one pair of braces. */
-    probe = scope;
-    if (navr_decl_token(&probe, &token) && navr_decl_equal(token, "{")) {
-        const char *start = probe.p;
-        int depth = 1;
-        while (depth && navr_decl_token(&probe, &token)) {
-            if (navr_decl_equal(token, "{")) depth++;
-            else if (navr_decl_equal(token, "}") && --depth == 0) {
-                scope.p = start; scope.n = (size_t)(token.p - start);
-            }
-        }
-        if (depth) return 0;
-    }
-    if (inherit && cap && navr_decl_member(scope, "inherit", &value) &&
-        value.n >= 2 && value.p[0] == '"' && value.p[value.n - 1] == '"' &&
-        value.n - 2 < cap) {
-        memcpy(inherit, value.p + 1, value.n - 2);
-        inherit[value.n - 2] = 0;
-    }
-    if (!navr_decl_member(scope, "edit", &edit) ||
-        !navr_decl_member(edit, "clipModelInfo", &clip)) return 1;
-    if (navr_decl_member(clip, "type", &token))
-        *type = navr_decl_equal(token, "\"CLIPMODEL_BOX\"") ? 1 : -1;
-    if (!navr_decl_member(clip, "size", &box)) return 1;
-    for (i = 0; i < 3; i++) {
-        char number[NAVR_NUM_MAX + 1], *end;
-        double d;
-        if (!navr_decl_member(box, axis[i], &token)) continue;
-        if (!token.n || token.n > NAVR_NUM_MAX) return 0;
-        memcpy(number, token.p, token.n); number[token.n] = 0;
-        d = strtod(number, &end);
-        if (end != number + token.n || !_finite(d) || d <= 0 || d > FLT_MAX) return 0;
-        size[i] = (float)d;
-        *have |= 1u << i;
-    }
-    return 1;
-}
-
 /* Absent flags.noFlood and blockDemons members default to false. */
 static int navr_bool(const char *json, size_t len, const sh_shard_doc *doc,
                      int parent, const char *key)
@@ -1002,16 +955,6 @@ int sh_nav_regions_knows_volume(int uid)
     return v && (v->marked || v->block_demons);
 }
 
-/* Look up ownership by uniqueId, which indexes both the sparse live entity
- * table and instanceEntities. The position in the JSON entities array is a
- * different identifier.
- */
-static int navr_loaded_owner(int uid)
-{
-    const navr_volume *v = navr_vfind(uid);
-    return v ? v->instance : -1;
-}
-
 /* ==================================================================== */
 /* attribution                                                           */
 /* ==================================================================== */
@@ -1395,129 +1338,12 @@ int sh_nav_regions_read_defaults(const char *json, size_t len, sh_nav_map *out,
 /* Bound serialized live-entity JSON; oversized entities are skipped. */
 #define NAVR_LIVE_JSON_CAP  (16 * 1024)
 
-/* Cap the live id scan so refresh cannot block Play indefinitely. */
+/* The highest uniqueId a refresh reads. */
 #define NAVR_LIVE_SCAN_MAX  65536
-
-/* Build a temporary region set and commit only after the scan succeeds. */
-typedef struct navr_live {
-    char          json[NAVR_LIVE_JSON_CAP];
-    sh_nav_region *regions;
-    int           count, cap;
-    int           capped;
-} navr_live;
-
-/* Read one reflected entity document as a marked box. Its root is the entity
- * object; geometry parsing is shared with the map reader.
- */
-static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
-{
-    sh_shard_doc doc;
-    char text[64];
-    int ed, edit, ok = 0;
-
-    if (!sh_shard_doc_build(json, len, &doc)) return 0;
-    if (doc.c[0].kind == '{') {
-        ed = navr_member(json, len, &doc, 0, "entityDef", '{');
-        if (ed >= 0 && navr_str(json, len, &doc, ed, "inherit", text, sizeof text) &&
-            strcmp(text, NAVR_VOLUME_INHERIT) == 0) {
-            edit = navr_member(json, len, &doc,
-                               navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
-            /* ABSENT IS FALSE here exactly as it is in the map: an untouched
-             * volume simply has no `flags.noFlood` member to read. */
-            if (edit >= 0 && navr_marked(json, len, &doc, edit) &&
-                navr_volume_face(json, len, &doc, edit, r, NULL)) {
-                r->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
-                ok = 1;
-            }
-        }
-    }
-    sh_shard_doc_free(&doc);
-    return ok;
-}
-
-static int navr_live_commit(sh_nav_map *m, navr_live *w,
-                            int answered, int volumes, int marked);
 
 void sh_nav_regions_adopt(sh_nav_map *m)
 {
     if (m && g_loaded.owner) g_loaded.owner = m;
-}
-
-/* One entity id, folded into the work-in-progress refresh. Returns -1 when the
- * region table is full and the scan must stop, 0 otherwise. */
-static int navr_live_one(sh_nav_map *m, navr_live *w, int id,
-                         sh_navr_entity_valid valid, sh_navr_entity_json get_json,
-                         void *ctx, int *answered, int *volumes, int *marked)
-{
-    sh_nav_region r, *slot;
-    int n, owner;
-
-    if (!valid(id, ctx)) return 0;
-    n = get_json(id, w->json, (int)sizeof w->json, ctx);
-    if (n <= 0) return 0;
-    (*answered)++;
-    /* A full buffer may be truncated; refuse it before parsing. */
-    if (n >= (int)sizeof w->json) return 0;
-
-    /* Cheap text prefilter before the more expensive container walk. */
-    if (!sh_shard_find(w->json, (size_t)n, NAVR_VOLUME_INHERIT,
-                       sizeof NAVR_VOLUME_INHERIT - 1)) return 0;
-    /* Count boxes before markers to distinguish unticked boxes from the
-     * wrong live surface.
-     */
-    (*volumes)++;
-    if (!sh_shard_find(w->json, (size_t)n, NAVR_MARKER,
-                       sizeof NAVR_MARKER - 1)) return 0;
-
-    memset(&r, 0, sizeof r);
-    if (!navr_live_region(w->json, (size_t)n, &r)) return 0;
-    /* Stop at capacity so reported counts match stored regions. */
-    if (w->count >= g_navr_max_regions) { w->capped = 1; return -1; }
-    (*marked)++;
-
-    /* A per-entity refresh cannot place ids absent from its ownership cache.
-     * Skip them; complete-map snapshots handle newly created boxes.
-     */
-    owner = navr_loaded_owner(id);
-    if (owner < 0 || owner >= m->instance_count) return 0;
-    if (m->instances[owner].module[0] == '\0') return 0;
-
-    r.instance = owner;
-    r.entity = (unsigned)id;
-    slot = (sh_nav_region *)NAVR_PUSH(w->regions, w->count, w->cap);
-    if (!slot) { w->capped = 1; return -1; }
-    *slot = r;
-    return 0;
-}
-
-int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
-                                sh_navr_entity_valid valid,
-                                sh_navr_entity_json get_json, void *ctx)
-{
-    navr_live *w;
-    int id, top, answered = 0, volumes = 0, marked = 0;
-
-    /* Missing callbacks or mismatched attribution refuse the refresh without
-     * clearing the map.
-     */
-    if (!m || !valid || !get_json) return -1;
-    if (m != g_loaded.owner) return -1;
-    /* Without cached volumes, every ownership lookup would fail; skip engine
-     * serialization.
-     */
-    if (g_loaded.count == 0 || g_loaded.ids_unusable) return -1;
-
-    top = highest_id;
-    if (top > NAVR_LIVE_SCAN_MAX) top = NAVR_LIVE_SCAN_MAX;
-
-    w = (navr_live *)calloc(1, sizeof *w);
-    if (!w) return -1;
-
-    for (id = 0; id <= top; id++)
-        if (navr_live_one(m, w, id, valid, get_json, ctx,
-                          &answered, &volumes, &marked) < 0) break;
-
-    return navr_live_commit(m, w, answered, volumes, marked);
 }
 
 /* The shape a complete snapshot recorded for this box.
@@ -1698,53 +1524,6 @@ done:
     if (next) sh_nav_map_free(next);
     free(next);
     return ok;
-}
-
-/* Refuse or commit a finished per-entity scan. A refusal leaves the map as it
- * was; the caller answers it with a complete snapshot. */
-static int navr_live_commit(sh_nav_map *m, navr_live *w,
-                            int answered, int volumes, int marked)
-{
-    int i;
-
-    /* No readable entities means no trustworthy refresh; retain the prior map. */
-    if (answered == 0) {
-        free(w->regions); free(w);
-        return -1;
-    }
-
-    /* No Blocking Boxes means this may be the Play entity table, not the
-     * editor's. Unticking markers leaves boxes present, so retain the prior
-     * map on refusal.
-     */
-    if (volumes == 0) {
-        free(w->regions); free(w);
-        return -1;
-    }
-
-    /* Found markers with no attributable owners indicate a mismatched id set.
-     * Refuse the refresh instead of committing an empty plan.
-     */
-    if (marked > 0 && w->count == 0) {
-        free(w->regions); free(w);
-        return -1;
-    }
-
-    /* Commit only regions. Preserve instance positions because ownership uses
-     * their array indices.
-     */
-    for (i = 0; i < m->instance_count; i++)
-        m->instances[i].region_count = 0;
-    for (i = 0; i < w->count; i++)
-        m->instances[w->regions[i].instance].region_count++;
-    free(m->regions);
-    m->regions = w->regions;
-    m->region_cap = w->cap;
-    m->region_count = w->count;
-    if (w->capped) m->truncated = 1;
-
-    free(w);
-    return marked;
 }
 
 int sh_nav_regions_nth_instance(const sh_nav_map *m, const char *module, int n)

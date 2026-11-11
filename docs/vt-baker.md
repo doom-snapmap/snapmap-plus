@@ -222,7 +222,7 @@ writes the bundle:
    bytes; flag 0x80 never set.
 3. Round trip: each page decodes through the game's own page decoder (swap the
    five big-endian lengths first, as the game does) and each plane's 120 x 120
-   core matches the source within the tool's PSNR threshold. `sh_vt decode`
+   core matches the source within the tool's PSNR threshold. `sh_vt decode` (in the diagnostic build)
    runs exactly that decoder in game and writes the five planes.
 4. Coverage: every material rectangle's cells non-empty at all 12 levels, no
    rectangle outside the family or crossing a square, no two overlapping, every

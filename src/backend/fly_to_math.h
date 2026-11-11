@@ -6,6 +6,7 @@
 #define SH_FLY_TO_MATH_H
 
 #include <math.h>
+#include "module_orientation.h"
 
 #define SH_FLY_PI 3.14159265358979323846f
 #define SH_FLY_PITCH_DEG   20.0f   /* looking slightly down keeps the pitch far from the +/-89 clamp */
@@ -40,22 +41,12 @@ static float sh_fly_radius(const float bmin[3], const float bmax[3])
     return 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-/* A module frame: one of eight orientation codes (four quarter turns, four
- * reflections) then a translation. Code order follows the engine's table. */
+/* A module frame: one of eight orientation codes (module_orientation.h) then
+ * a translation. */
 static sh_fly_vec3 sh_fly_module_to_world(sh_fly_vec3 p, int rotation, const float translation[3])
 {
-    float x = p.x, y = p.y, rx, ry;
-    switch (rotation & 7) {
-    default:
-    case 0: rx = x;  ry = y;  break;
-    case 1: rx = -y; ry = x;  break;
-    case 2: rx = -x; ry = -y; break;
-    case 3: rx = y;  ry = -x; break;
-    case 4: rx = -x; ry = y;  break;
-    case 5: rx = y;  ry = x;  break;
-    case 6: rx = x;  ry = -y; break;
-    case 7: rx = -y; ry = -x; break;
-    }
+    float rx, ry;
+    sh_module_orient(rotation & 7, p.x, p.y, &rx, &ry);
     return sh_fly_v3(rx + translation[0], ry + translation[1], p.z + translation[2]);
 }
 

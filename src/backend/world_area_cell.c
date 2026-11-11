@@ -1,6 +1,6 @@
 /* Play's SnapMap world-area cell size (see world_area_cell.h).
  *
- * Build 13954591 evidence (snaphak-re editor-fixes-13954591 R-017, R-018, R-019):
+ * Build 13954591 evidence:
  *   BuildRenderWorld VK 0x14114fd60 / GL 0x14114ef60 is called only from
  *     SnapMapEditToSnapBuild (VK 0x141153590), which is called only from
  *     VK 0x14114efb0; neither has a data reference. It calls the subdivision
@@ -40,6 +40,8 @@ int sh_world_area_cell_disp(uintptr_t site,uintptr_t dest,int32_t *disp)
 #include "grid_room_areas.h"
 #include "grid_room_native.h"
 #include "patch.h"
+#include "near_page.h"
+#include "ui_bridge.h"
 #include <windows.h>
 #include <stdio.h>
 
@@ -50,30 +52,16 @@ typedef struct cell_page {volatile float cell;} cell_page;
 static cell_page *g_page;
 static sh_patch_handle g_patch;
 static int g_live;
-static volatile LONG g_pending;
-static int g_settle,g_waited,g_last_n;
+/* The open map, followed through its module count: settle counts the frames
+ * one count has held (-1 once that count is told), opened says the first
+ * answer is still owed to the log, warned is the count already told. */
+static volatile LONG g_watch;
+static int g_settle,g_last_n,g_opened;
+static long long g_warned;
 
 static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 {
     size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
-/* One page within rip-relative reach of the site. */
-static cell_page *near_page(uintptr_t site)
-{
-    SYSTEM_INFO info;uintptr_t step,center,delta;
-    GetSystemInfo(&info);step=info.dwAllocationGranularity;center=site&~(step-1);
-    for(delta=step;delta<0x7fff0000u;delta+=step) {
-        uintptr_t candidates[2]={center>=delta?center-delta:0,center+delta};int i;
-        for(i=0;i<2;i++) {
-            MEMORY_BASIC_INFORMATION mbi;void *page;uintptr_t a=candidates[i];int32_t disp;
-            if(a<(uintptr_t)info.lpMinimumApplicationAddress||a>(uintptr_t)info.lpMaximumApplicationAddress)continue;
-            if(!sh_world_area_cell_disp(site,a,&disp)||!sh_world_area_cell_disp(site,a+0x1000,&disp))continue;
-            if(!VirtualQuery((void*)a,&mbi,sizeof mbi)||mbi.State!=MEM_FREE)continue;
-            page=VirtualAlloc((void*)a,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-            if(page)return (cell_page*)page;
-        }
-    }
     return NULL;
 }
 static int read_float(uintptr_t at,float *out)
@@ -91,7 +79,8 @@ int sh_world_area_cell_install(const sig_result *results,size_t count,const uint
     if(!site){why="the cell-size load was not found";goto unavailable;}
     if(!sh_world_area_cell_site((const unsigned char*)site->addr,&constant)){why="the cell-size load has unexpected bytes";goto unavailable;}
     if(!read_float(constant,&native)||native!=SH_RENDER_AREA_CELL){why="the cell-size constant is not 512";goto unavailable;}
-    if(!g_page&&!(g_page=near_page(site->addr))){why="no page within reach of the cell-size load";goto unavailable;}
+    /* The load's disp32 is relative to the instruction's end, site + 8. */
+    if(!g_page&&!(g_page=(cell_page*)sh_near_page_alloc(site->addr+8))){why="no page within reach of the cell-size load";goto unavailable;}
     /* Written before the patch: the redirected load reads 512 from the start. */
     g_page->cell=SH_RENDER_AREA_CELL;
     memcpy(&old_disp,(const void*)(site->addr+4),4);
@@ -127,6 +116,25 @@ static void describe(char *line,size_t cap,const char *prefix,const sh_render_ce
             sh_render_areas_fit(&c->count)?"close to":"over",SH_RENDER_AREA_MAX,
             sh_render_areas_fit(&c->count)?"":"; this map cannot load");
 }
+/* The world areas the map needs at the coarsest size: the larger of areas and nodes. */
+static long long needed(const sh_render_cell_choice *c)
+{
+    return c->count.areas>c->count.nodes?c->count.areas:c->count.nodes;
+}
+/* Tell the player, before Play, that the map is too large to load. Once per
+ * size: an edit that changes the count tells again. */
+static void warn_if_over(const sh_render_cell_choice *c)
+{
+    sh_iface *iface;char text[200];long long n=needed(c);
+    if(sh_render_areas_fit(&c->count)){g_warned=0;return;}
+    if(n==g_warned)return;
+    g_warned=n;
+    snprintf(text,sizeof text,"This map needs %lld world areas and Play loads at most %d, so it would "
+        "stop on the loading screen. Make the map smaller before choosing Play.",n,SH_RENDER_AREA_MAX);
+    backend_log(text);
+    iface=sh_ui_get_iface();
+    if(iface&&iface->vtbl&&iface->vtbl->toast)iface->vtbl->toast(iface,"Map Too Large",text);
+}
 void sh_world_area_cell_build(void *map)
 {
     sh_render_cell_choice c;char line[320];
@@ -146,24 +154,28 @@ void sh_world_area_cell_build_end(void)
 }
 void sh_world_area_cell_map_opened(void)
 {
-    g_settle=g_waited=g_last_n=0;
-    InterlockedExchange(&g_pending,1);
+    g_settle=g_last_n=0;g_opened=1;g_warned=0;
+    InterlockedExchange(&g_watch,1);
 }
-/* Engine thread, every editor frame: once the opened map's module count has
- * held for a second's worth of frames, log the cell size Play will use. */
+/* Engine thread, every editor frame: once the open map's module count has held
+ * for a second's worth of frames, count its world areas -- logging the cell
+ * size Play will use the first time, and telling the player when the map is
+ * too large to load. Each new count is counted once. */
 void sh_world_area_cell_editor_tick(void)
 {
     sh_render_cell_choice c;void *map;int n=0;char line[320];
-    if(!InterlockedCompareExchange(&g_pending,0,0))return;
-    if(++g_waited>36000){InterlockedExchange(&g_pending,0);return;}
+    if(!InterlockedCompareExchange(&g_watch,0,0))return;
     map=sh_grid_native_editor_map();
     if(map){__try {n=*(int*)((unsigned char*)map+0x758);} __except(EXCEPTION_EXECUTE_HANDLER) {n=0;}}
     if(!map||n<1||n!=g_last_n){g_last_n=n;g_settle=0;return;}
-    if(++g_settle<60)return;
-    InterlockedExchange(&g_pending,0);
+    if(g_settle<0||++g_settle<60)return;
+    g_settle=-1;
     if(!sh_grid_native_render_cell(map,&c))return;
-    if(!g_live&&c.fits)return;
-    describe(line,sizeof line,g_live?"RENDER: map opened; Play will use ":"RENDER: map opened; without the adaptive cell size Play uses ",&c);
-    backend_log(line);
+    if(g_opened&&(g_live||!c.fits)) {
+        describe(line,sizeof line,g_live?"RENDER: map opened; Play will use ":"RENDER: map opened; without the adaptive cell size Play uses ",&c);
+        backend_log(line);
+    }
+    g_opened=0;
+    warn_if_over(&c);
 }
 #endif
