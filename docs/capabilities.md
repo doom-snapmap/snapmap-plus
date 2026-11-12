@@ -965,10 +965,15 @@ API version 1 registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damag
 `on.pain`, `on.anim`, `on.frame_event`, `on.projectile`, `on.input`, `on.map_start`, `on.map_end`),
 keeps game time
 (`now`, `after`, `every`, `run`, `wait`) and writes the mod's script log (`print`, `warn`). With
-entities and the world it can `spawn` its own entities, read any entity's position, facing,
-velocity, health and animation, move, turn, push, heal, animate and remove its own, heal players,
-find `players()` and `entities_near`, and `trace` lines through the world. It drives the mod's own
-demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
+entities and the world it can `spawn` its own entities and the game's (`game("...")` names the
+game's own content wherever a name is taken), read any entity's position, facing, velocity, health
+and animation, move, turn, push, heal, animate and remove any entity of the map, find `players()`,
+`entities()` and `entities_near`, and `trace` lines through the world. Beyond the purpose-built
+calls it reaches the whole game by name: `e:get`, `e:set` and `e:fields` read and write any field
+the game describes on any entity (a placed demon's team, spawn behaviour and health modifier among
+them), `e:event` and `e:post` run any engine event, `e:signal` fires and `on.signal` hears
+SnapMap's own events on any object, `cvar` reads and sets cvars and `decl` opens any decl; what a
+script sets in a cvar or a decl is put back when the map ends. It drives demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
 `path_length`, `path_points`, `find_position`, `firing_position`, `trigger`, `weapon_ready`,
 `recoil`, `aim_point`, `equip`, `laser`, `focus_tag`, `anim_valid`, `anim_force_via`,
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on

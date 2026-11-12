@@ -1921,10 +1921,13 @@ faked engine table.
 ### Mod scripts: entity, animation and world calls
 
 `script_api_entity.c` and `script_api_world.c` add the version 1 calls;
-`script_api_common.{c,h}` holds what every API module shares. Reads work on any
-entity; a call that changes an entity works only on the mod's own (the handle
-table records it under the mod: placed from its entityDefs or spawned by its
-scripts), except that any mod may heal a player. A removed entity answers nil.
+`script_api_common.{c,h}` holds what every API module shares. A script is the
+map's own logic, as wired logic is, so every call works on any entity of the
+map: the mod's own (placed from its entityDefs or spawned by its scripts, which
+the handle table records under the mod and its `on.spawn` and other entity
+handlers hear), the game's and another mod's. A name is the mod's own content;
+`game("...")` names the game's wherever a name is taken (`spawn`, the damage,
+projectile and sound decls, `decl`). A removed entity answers nil.
 Every argument is checked before the engine is touched, and every refusal is
 one plain sentence at the calling script line (it stops the mod's scripts for
 the map, as any error does).
@@ -2113,14 +2116,56 @@ detour windows, the path site, the call targets and slot table the new calls
 read, the pain request's compare and the monster type table on both
 executables.
 
+### Mod scripts: the whole game by name
+
+Five general calls stand beside the purpose-built ones, so a script reaches
+what the game's own code and SnapMap's wired logic reach, and an SDK written
+in Lua (a demon's brain, a player's suit) needs no private path into the
+engine.
+
+- **Fields** (`script_reflect.{c,h}`, `script_api_reflect.{c,h}`). `e:get(path)`,
+  `e:set(path, value)`, `e:fields([path])`, `e:class()` and `enum(name)` walk
+  the game's own type tables (`typeinfo.c`: a class's size, superclass and
+  fields; an enum's members), so any reflected field of any entity is read
+  and written by name and Snapmap+ holds no offset for it. A path is names
+  joined by dots with `[n]` after a list or array (the first is `[1]`); a
+  pointer or an entity reference met in a path is followed. Numbers,
+  true/false and text are themselves; an enum is its member's name; an
+  object is a table of its fields; a list is a list; a decl pointer is the
+  decl's name; an entity pointer or reference is the entity. A placed demon's
+  editor properties are fields of its `idPlaceableSnapAIEncounter`
+  (`spawnBehavior`, `gameTeam`, `encounterMods.healthMod`, `staggerEnabled`,
+  `entity` for the demon it spawned).
+- **Engine events** (`script_api_game.c`). `e:event(name, ...)` runs any of the
+  game's events on an entity and returns its result; `e:post(name, ...)`
+  queues it; `event_args(name)` lists what it takes. The argument format is
+  the game's own, read from the live registry at the call (whole numbers,
+  true/false, numbers, positions, angles, colors, text, entities, decls); the
+  leading "animation" argument of an `ae_` event is filled in. Only the few
+  events that carry a kill record (`notice_` events with a `7`) cannot be
+  sent.
+- **SnapMap events.** `e:signal(event[, activator])` fires one of SnapMap's
+  own events on an object, so everything wired to that output runs
+  (`FireOutput`); `on.signal(event, fn)` hears every object of the map fire
+  it (one detour on the walk over an object's listeners, placed when a script
+  first asks). Event names are the editor's (`ai_killed`, `trigger_touched`,
+  `logic_fired`: the `snapListenerEvent_t` enum, any case, with or without
+  `SNAP_EVENT_`).
+- **Cvars and decls.** `cvar(name)` reads and `cvar(name, value)` sets a cvar;
+  `decl(type, name)` gives a decl object with `get`, `set`, `fields`, `name`
+  and `type` (its class is the game's `idDecl<Type>`). Both outlive a map, so
+  what a script sets is put back when the map ends (the runtime runs each
+  module's closer after the states close).
+- **`entities()`** lists every entity of the map, players first.
+
 ### Mod scripts: combat calls and the events of damage, death, pain and animation
 
 `script_api_combat.{c,h}` adds the combat calls; the hooks that deliver what
-happens to a mod's entities are in `script_hooks.c` (below). Every decl a call
-names is the mod's own (`sh_script_check_name`), looked up by type; a name the
-mod does not have is refused with one plain sentence. An attacker is one of the
-mod's own entities; without one the damage comes from the world entity, as a
-trigger's does.
+happens to a mod's entities are in `script_hooks.c` (below). A decl a call
+names is the mod's own, or the game's through `game("...")`
+(`sh_script_check_name`), looked up by type; a name that does not exist is
+refused with one plain sentence. An attacker is any entity; without one the
+damage comes from the world entity, as a trigger's does.
 
 - **Calls.** `damage(e, damage, [attacker], [from])` and `e:damage(...)` (the
   entity's own `damage` event: decl, direction angles, activator);
