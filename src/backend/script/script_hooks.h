@@ -228,6 +228,8 @@ void sh_script_hooks_map_cancel(int during_load);
  * under, or 0 when scripts do not run here (no states, a client, or not one of
  * a scripted mod's entities). Reads the entity's spawn id; never resolves. */
 sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod);
+/* 1 on DOOM's main thread, the only thread scripts run on. */
+int sh_script_hooks_on_game_thread(void);
 
 #ifdef SH_SCRIPT_PURE
 /* Tests only: empty the mod table. */

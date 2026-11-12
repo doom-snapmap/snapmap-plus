@@ -1819,6 +1819,27 @@ feature.
 
 Registration also covers `on.pain`, `on.frame_event` and `on.projectile`
 (the combat part). Not built in version 1: `e:pain_anim`.
+
+**State-machine classes.** The game runs each demon on state machines read from
+`aifsmmanager` decls; every state, transition, condition and snippet of a graph names a
+class the engine finds by name in its type registry. A mod supplies the classes the game
+lacks from its script: `fsm.condition(name, fn)`, `fsm.snippet(name, fn)`,
+`fsm.transition(name, fn)` and `fsm.state(name, { enter, update, exit })`, each called with
+the demon and the node's parameter-set number. A condition answers true or false, a
+transition the code of the link it fires or false, a state's `enter` or `update` a code for
+its machine or nothing. The mod's decl names such a class
+`smp.<kind>.<salt>.<class>.<n>`. The type lookup (`TypeInfoByName`, VK 0x141583B20 / GL
+0x141584BB0, `script_fsm_sigs.c`) is detoured at boot: that name answers a record copied
+from a stock class of the same kind, whose create and clone build the stock object and give
+it a copy of the stock vtable in which the kind's one virtual calls the script
+(`script_fsm.c`; conditions and snippets slot 2, transitions slot 12, states slots 25, 26
+and 28). The engine does not read the `object` block of a class it has no reflection
+record for, so a node's parameters are the script's own data, chosen by `<n>`. Scripts run
+on the game thread only: a class asked from another thread answers no, and one log line
+says so. `tests/script_fsm_test.c` covers the bridge against an engine made in the test,
+`tests/script_sandbox_test.c` the registration and the call, and
+`tests/script_combat_sigs_test.c` the lookup's signature and detour window on both
+executables.
 `tests/script_sandbox_test.c` covers the runtime without the game;
 `tests/modscript_test.c` the builder's checks, the static pass, the serving
 index (scripts and the Script node row), the archives and the fixture mods.

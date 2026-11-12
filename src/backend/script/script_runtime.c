@@ -12,6 +12,7 @@
  * map start or map end, never from inside a call into Lua. */
 #include "../../common/text.h"
 #include "script_internal.h"
+#include "script_fsm.h"
 #include "script_reason.h"
 #include "script_compile.h"
 #include "script_hooks.h"
@@ -772,6 +773,90 @@ static int on_signal(lua_State *L)
     return 0;
 }
 
+/* ------------------------------------------- state-machine classes (script_fsm.h) */
+
+#define SHS_REG_FSM "snapmap-plus.fsm"          /* "<kind>:<class>" -> function, or a state's table */
+static const char *const k_fsm_kinds[] = { "condition", "snippet", "transition", "state" };
+
+/* fsm.condition(name, fn), fsm.snippet(name, fn), fsm.transition(name, fn),
+ * fsm.state(name, { enter = fn, update = fn, exit = fn }): a class the game's own AI state
+ * machines ask for by name (smp.<kind>.<salt>.<name>.<n> in the mod's aifsmmanager decl).
+ * fn(demon, n): a condition answers true or false, a transition the code of the link it fires
+ * or false, a state's update or enter a code for its machine or nothing. */
+static int fsm_register(lua_State *L)
+{
+    int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
+    const char *call = k_fsm_kinds[kind];
+    size_t n = 0, i;
+    const char *name = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
+    if (!name || !n)
+        sh_script_refuse(L, "\"fsm.%s\" needs the class name as its first value, such as \"ATRON_UseGrenades\"", call);
+    if (n >= SH_FSM_CLASS_CAP)
+        sh_script_refuse(L, "\"fsm.%s\" takes a class name of at most %d characters; %s has %d", call,
+                         SH_FSM_CLASS_CAP - 1, name, (int)n);
+    for (i = 0; i < n; i++) {
+        int c = (unsigned char)name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            sh_script_refuse(L, "\"fsm.%s\" takes a class name of letters, digits and _ only; %s has another character",
+                             call, name);
+    }
+    if (kind == SH_FSM_STATE) {
+        if (lua_type(L, 2) != LUA_TTABLE)
+            sh_script_refuse(L, "\"fsm.state\" needs a table with enter, update or exit functions as its second "
+                                "value, got %s", lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    } else if (lua_type(L, 2) != LUA_TFUNCTION) {
+        sh_script_refuse(L, "\"fsm.%s\" needs a function as its second value, got %s", call,
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    }
+    if (lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_FSM) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, SHS_REG_FSM);
+    }
+    lua_pushfstring(L, "%s:%s", call, name);
+    lua_pushvalue(L, -1);
+    if (lua_rawget(L, -3) != LUA_TNIL)
+        sh_script_refuse(L, "\"fsm.%s\" was already given the class %s in this mod; a class is registered once", call,
+                         name);
+    lua_pop(L, 1);
+    lua_pushvalue(L, 2);
+    lua_rawset(L, -3);
+    shs_mod_of(L)->handlers++;
+    return 0;
+}
+
+static int fsm_job(lua_State *L)
+{
+    sh_script_fsm_request *rq = (sh_script_fsm_request *)lua_touserdata(L, 1);
+    if (lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_FSM) != LUA_TTABLE) return 0;
+    lua_pushfstring(L, "%s:%s", k_fsm_kinds[rq->kind], rq->name);
+    lua_rawget(L, -2);
+    if (rq->kind == SH_FSM_STATE) {
+        if (lua_type(L, -1) != LUA_TTABLE) return 0;
+        lua_getfield(L, -1, rq->hook ? rq->hook : "update");
+        if (lua_type(L, -1) != LUA_TFUNCTION) {      /* a state need not have every hook */
+            rq->found = lua_isnil(L, -1);
+            return 0;
+        }
+    } else if (lua_type(L, -1) != LUA_TFUNCTION) {
+        return 0;
+    }
+    rq->found = 1;
+    sh_script_push_entity(L, rq->self);
+    lua_pushinteger(L, rq->index);
+    shs_call_reset(shs_mod_of(L));
+    lua_call(L, 2, 1);
+    if (lua_type(L, -1) == LUA_TBOOLEAN) {
+        rq->truth = lua_toboolean(L, -1);
+    } else if (lua_type(L, -1) == LUA_TNUMBER) {
+        rq->has_code = 1;
+        rq->code = (int)lua_tonumber(L, -1);
+        rq->truth = rq->code != 0;
+    }
+    return 0;
+}
+
 int sh_script_signal_post(const char *event, sh_script_handle self, sh_script_handle activator)
 {
     int hooks[64], n = 0, i, j;
@@ -910,6 +995,14 @@ static int job_open(lua_State *L)
     }
     /* globals other modules open themselves (sh_script_api_add_opener) */
     for (i = 0; i < g_nopeners; i++) g_openers[i](L);
+    /* fsm: the registration calls for state-machine classes */
+    lua_newtable(L);
+    for (i = 0; i < SH_FSM_KINDS; i++) {
+        lua_pushinteger(L, i);
+        lua_pushcclosure(L, fsm_register, 1);
+        lua_setfield(L, -2, k_fsm_kinds[i]);
+    }
+    lua_setglobal(L, "fsm");
     /* on: a read-only table of the registration calls */
     lua_newtable(L);
     for (i = 0; i < SHS_KINDS; i++) {
@@ -1812,6 +1905,22 @@ void sh_script_tick(double now, double dt)
     for (i = 0; i < g_nmods && !g_end_pending; i++)
         if ((*g_modv[i]).in_map && (*g_modv[i]).status == SH_SCRIPT_RUNNING && (*g_modv[i]).L) tick_mod(&(*g_modv[i]));
     leave_run();
+}
+
+int sh_script_fsm_call(const char *salt, sh_script_fsm_request *rq)
+{
+    shs_mod *m = NULL;
+    int i, ok = 0;
+    if (!salt || !rq || !rq->name || rq->kind < 0 || rq->kind >= SH_FSM_KINDS) return 0;
+    /* A script call that made the engine ask this class: Lua cannot be entered again. */
+    if (!enter_run()) return 0;
+    for (i = 0; i < g_nmods; i++) {
+        shs_mod *c = &(*g_modv[i]);
+        if (c->in_map && c->status == SH_SCRIPT_RUNNING && c->L && !_stricmp(c->salt, salt)) { m = c; break; }
+    }
+    if (m) ok = run_job(m, fsm_job, rq);
+    leave_run();
+    return ok && rq->found;
 }
 
 int shs_run_job(shs_mod *m, lua_CFunction job, void *ud) { return run_job(m, job, ud); }

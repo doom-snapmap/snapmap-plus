@@ -708,6 +708,8 @@ void sh_script_hooks_map_cancel(int during_load)
     map_close(!during_load && g_started);
 }
 
+int sh_script_hooks_on_game_thread(void) { return on_main() == 1; }
+
 sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod)
 {
     if (mod) *mod = -1;

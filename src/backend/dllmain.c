@@ -80,6 +80,7 @@
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
 #include "script/script_node.h"
+#include "script/script_fsm.h"
 #include "script/script_api_ai.h"
 #include "modcontent.h"
 #include "../fault_shield/fault_shield.h"
@@ -373,6 +374,8 @@ static void install_features(const sig_result *results, size_t db)
      * hook is committed only at a Play whose mods carry scripts. An install that
      * fails records mod scripts off with its reason (feature_health.h). */
     if (overrides_installed) (void)sh_script_hooks_install(results, db, g_doom_base);
+    /* before any mod decl is parsed: a graph's script classes resolve at its parse */
+    if (overrides_installed) (void)sh_script_fsm_install(g_doom_base);
     else sh_feature_off(SH_FEATURE_MOD_SCRIPTS, "mods are not served");
     /* Script nodes (script/script_node.h): node():fire, vars and the Relay
      * hook committed at the first Play with scripts. A mod's Script node row

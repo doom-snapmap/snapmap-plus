@@ -46,6 +46,8 @@ param(
                            # the served folders' file source and the sh_scripts console command.
                            "script/script_hooks.c", "script/script_sigs.c", "script/script_queue.c", "script/script_handles.c",
                            "script/script_source.c", "script/script_console.c",
+                           # Classes a mod's script supplies to the game's AI state machines.
+                           "script/script_fsm.c", "script/script_fsm_sigs.c",
                            # Mod scripts: the entity, animation, world and time calls and their engine side.
                            "script/script_api_common.c", "script/script_api_sigs.c", "script/script_api_entity.c", "script/script_api_world.c",
                            # Mod scripts: the Script node (its row, the Relay hook, node():fire and vars).

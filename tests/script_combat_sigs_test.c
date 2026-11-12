@@ -23,6 +23,9 @@
 #include "host_image.h"
 #include "x64_len.h"
 #include "script/script_api_combat.h"
+#include "script/script_fsm.h"
+
+extern const sig_entry SH_SCRIPT_FSM_SIGNATURE;
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -142,6 +145,21 @@ static void check_image(const char *path)
         if (!rva[i]) continue;
         CHECK(sh_x64_stolen_boundary(base + rva[i], 64, 14, 48, &flags) == windows[i]);
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+    }
+
+    /* the type lookup the state-machine class bridge detours */
+    {
+        sig_result r;
+        unsigned flags = 0;
+        if (sig_resolve_one(base, &SH_SCRIPT_FSM_SIGNATURE, &r) != SIG_OK || !r.addr) {
+            printf("FAIL %s did not resolve to a unique match\n", SH_SCRIPT_FSM_SIGNATURE.name);
+            g_fail = 1;
+        } else {
+            CHECK(r.rva == (vk ? SH_SCRIPT_FSM_SIGNATURE.rva_vk : SH_SCRIPT_FSM_SIGNATURE.rva_gl));
+            CHECK(sh_x64_stolen_boundary(base + r.rva, 64, 14, 48, &flags) == SH_FSM_LOOKUP_STOLEN);
+            CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+            printf("  %-22s rva=0x%X\n", SH_SCRIPT_FSM_SIGNATURE.name, r.rva);
+        }
     }
 
     /* the call graph */

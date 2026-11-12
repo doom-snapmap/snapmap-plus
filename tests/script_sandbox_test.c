@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "script/script_runtime.h"
+#include "script/script_fsm.h"
 #include "script/script_reason.h"
 #include "script/script_hooks.h"
 #include "../src/third_party/lua/lauxlib.h"
@@ -304,6 +305,67 @@ static void test_bytecode(void)
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
     CHECK(strstr(stop_of("aaaaaaaa"), "compiled Lua, not script text") != NULL);
     CHECK(strstr(log_of("aaaaaaaa"), "compiled ran") == NULL);
+    sh_script_map_end();
+}
+
+/* Classes for the game's AI state machines: registered by name, asked through one call. */
+static void test_fsm_classes(void)
+{
+    sh_script_fsm_request rq;
+    files_clear();
+    file_add("aaaaaaaa", "main.lua",
+             "api = 1\n"
+             "fsm.condition('Sees', function(e, n) print('cond', e, n) return n == 2 end)\n"
+             "fsm.transition('Turn', function(e, n) if n == 1 then return 44 end return false end)\n"
+             "fsm.snippet('Pick', function(e, n) print('snip', n) end)\n"
+             "fsm.state('Hang', { enter = function(e, n) print('enter', n) end, update = function(e, n) return 15 end })\n");
+    start1("aaaaaaaa", "Test Mod", 1);
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_CONDITION; rq.name = "Sees"; rq.index = 2;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && rq.found && rq.truth == 1 && !rq.has_code);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_CONDITION; rq.name = "Sees"; rq.index = 1;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && rq.truth == 0);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_TRANSITION; rq.name = "Turn"; rq.index = 1;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && rq.has_code && rq.code == 44);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_TRANSITION; rq.name = "Turn"; rq.index = 2;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && !rq.has_code && !rq.truth);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_SNIPPET; rq.name = "Pick"; rq.index = 3;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_STATE; rq.name = "Hang"; rq.hook = "enter"; rq.index = 5;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && !rq.has_code);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_STATE; rq.name = "Hang"; rq.hook = "update"; rq.index = 5;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && rq.has_code && rq.code == 15);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_STATE; rq.name = "Hang"; rq.hook = "exit"; rq.index = 5;
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 1 && !rq.has_code);          /* a state need not have every hook */
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_CONDITION; rq.name = "Nope";
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 0);                           /* a class the mod never gave */
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_SNIPPET; rq.name = "Sees";
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 0);                           /* another kind's class is another class */
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_CONDITION; rq.name = "Sees";
+    CHECK(sh_script_fsm_call("bbbbbbbb", &rq) == 0);                           /* a mod the map does not run */
+    CHECK(strstr(log_of("aaaaaaaa"), "cond\tnil\t2\n") != NULL);              /* a demon the script does not know is nil */
+    CHECK(strstr(log_of("aaaaaaaa"), "snip\t3\n") != NULL && strstr(log_of("aaaaaaaa"), "enter\t5\n") != NULL);
+    sh_script_map_end();
+
+    CHECK(run_one("api = 1\nfsm.condition('Sees', function() end)\nfsm.condition('Sees', function() end)\n") == SH_SCRIPT_STOPPED);
+    CHECK(strstr(stop_of("aaaaaaaa"), "was already given the class Sees") != NULL);
+    sh_script_map_end();
+    CHECK(run_one("api = 1\nfsm.state('Hang', function() end)\n") == SH_SCRIPT_STOPPED);
+    CHECK(strstr(stop_of("aaaaaaaa"), "\"fsm.state\" needs a table with enter, update or exit functions") != NULL);
+    sh_script_map_end();
+    CHECK(run_one("api = 1\nfsm.condition('a-b', function() end)\n") == SH_SCRIPT_STOPPED);
+    CHECK(strstr(stop_of("aaaaaaaa"), "letters, digits and _ only") != NULL);
+    sh_script_map_end();
+    CHECK(run_one("api = 1\nfsm.transition('T')\n") == SH_SCRIPT_STOPPED);
+    CHECK(strstr(stop_of("aaaaaaaa"), "\"fsm.transition\" needs a function as its second value, got nothing") != NULL);
+    sh_script_map_end();
+
+    /* an error inside a class stops the mod with its line, as any handler's does */
+    CHECK(run_one("api = 1\nfsm.condition('Bad', function() error('boom') end)\n") == SH_SCRIPT_RUNNING);
+    memset(&rq, 0, sizeof rq); rq.kind = SH_FSM_CONDITION; rq.name = "Bad";
+    CHECK(sh_script_fsm_call("aaaaaaaa", &rq) == 0);
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
+    CHECK(strstr(stop_of("aaaaaaaa"), "main.lua") != NULL);
     sh_script_map_end();
 }
 
@@ -1111,6 +1173,7 @@ int main(void)
     test_reason_table();
     test_absent();
     test_bytecode();
+    test_fsm_classes();
     test_never_returns();
     test_growth();
     test_api_declaration();
