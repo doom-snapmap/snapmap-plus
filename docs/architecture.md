@@ -2103,6 +2103,32 @@ is touched, and a removed demon answers nil.
   pull, the burst, the release and every shot are the engine's, as its header
   lists. `enemy_probe` logs `probe fire` at each shot: the fire modes, trigger,
   wait, focus, the engine's muzzle test and the muzzle sphere.
+- **The Enemy SDK's locomotion library.** `enemy_locomotion` has a `ground`
+  mode, the engine's own navigation, and a `perch` mode that holds a demon on
+  a wall or a ceiling. DOOM 2016 has no body physics for either, so the
+  library holds the demon itself: it places the demon every frame with its up
+  along the surface's normal, and `surface_hold` takes it off the ground
+  physics meanwhile. The brain drives the sequence Eternal's hangout follows
+  and the library serves each step. `find_all` returns every valid candidate
+  spot, found by tracing round the demon (and from any Perch object the map's
+  author placed), each with its position, surface normal, wall or ceiling, the
+  ground point the demon walks to, the length of the engine's path to it, the
+  share of the target's sample points it sees and its distance from the
+  target; the caller's distance band, `minVisibility`, `maxTravelTime`
+  (needs a walk speed), detour limit, body clearance and search radius decide
+  which are returned. `reserve` gives a demon one spot (one demon per spot; a
+  dead or forgotten holder holds nothing); the demon walks to the spot's
+  ground point with the ordinary move; `at_node` answers whether it has
+  arrived and `spot_valid` whether the spot still has room, a free jump and a
+  view. `mount` jumps from where the demon stands with no second walk;
+  `facing_index`, `facing` and `set_facing_index` name the wall idle's
+  discrete facings (index 0 faces up a wall and along +x on a ceiling);
+  `leave` takes a callback for the frame the demon is on the ground again, and
+  `grounded` says whether the library is placing it. The library owns the
+  cooldown (`cooldown_left`, from the mount and again from the leave) and
+  never ends a perch on its own. The jump, the pose and the hold are the
+  script's and unproven in the game; the walk and the blocking volumes are the
+  engine's. The contract is at the top of the file.
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
