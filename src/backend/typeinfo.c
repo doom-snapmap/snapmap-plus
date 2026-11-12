@@ -500,19 +500,38 @@ int sh_typeinfo_collect_records(sh_ti_record **out)
 /* ---- classes and enums by name (the script layer's reflection) ---- */
 #define REC_SIZE_OFF        0x10    /* type record -> the class's size in bytes (int) */
 
-/* The last class looked up: a field walk asks for the same record many times. */
-static char  g_rec_name[256];
-static void *g_rec_cached;
+/* The classes looked up lately: a field walk asks for the same records many
+ * times, and for the records of its fields' types between them. Each entry
+ * counts the leading fields already seen to have a name, so a walk checks
+ * each field once. */
+#define REC_CACHE 64
+typedef struct ti_rec_entry { char name[160]; void *rec; uint32_t named; } ti_rec_entry;
+static ti_rec_entry g_recs[REC_CACHE];
+static unsigned g_rec_next;
+
+static ti_rec_entry *ti_class_entry(const char *name)
+{
+    void *reflect, *rec;
+    ti_rec_entry *e;
+    unsigned i;
+    if (!name || !name[0]) return NULL;
+    for (i = 0; i < REC_CACHE; i++)
+        if (g_recs[i].rec && !strcmp(g_recs[i].name, name)) return &g_recs[i];
+    if (strlen(name) >= sizeof g_recs[0].name) return NULL;
+    reflect = ti_get_reflect();
+    rec = reflect ? ti_find_type(reflect, name) : NULL;
+    if (!rec) return NULL;
+    e = &g_recs[g_rec_next++ % REC_CACHE];
+    strcpy_s(e->name, sizeof e->name, name);
+    e->rec = rec;
+    e->named = 0;
+    return e;
+}
 
 static void *ti_class_record(const char *name)
 {
-    void *reflect, *rec;
-    if (!name || !name[0]) return NULL;
-    if (g_rec_cached && !strcmp(g_rec_name, name)) return g_rec_cached;
-    reflect = ti_get_reflect();
-    rec = reflect ? ti_find_type(reflect, name) : NULL;
-    if (rec && strlen(name) < sizeof g_rec_name) { strcpy_s(g_rec_name, sizeof g_rec_name, name); g_rec_cached = rec; }
-    return rec;
+    ti_rec_entry *e = ti_class_entry(name);
+    return e ? e->rec : NULL;
 }
 
 int sh_typeinfo_class(const char *name, uint32_t *size, const char **super)
@@ -527,16 +546,18 @@ int sh_typeinfo_class(const char *name, uint32_t *size, const char **super)
 
 int sh_typeinfo_class_field(const char *name, uint32_t index, sh_ti_field *out)
 {
-    void *rec = ti_class_record(name);
+    ti_rec_entry *e = ti_class_entry(name);
+    void *rec = e ? e->rec : NULL;
     const uint8_t *fields, *f;
     uint32_t i;
     if (!rec || !out) return 0;
     fields = (const uint8_t *)ti_read_ptr(rec, REC_FIELDS_OFF);
     if (!fields) return 0;
     /* the array ends at the first field without a name: never read past it */
-    for (i = 0; i <= index; i++) {
+    for (i = e->named; i <= index; i++) {
         const char *fname = ti_read_cstr(fields + (size_t)i * FIELD_STRIDE, FIELD_NAME_OFF);
         if (!fname || !fname[0]) return 0;
+        e->named = i + 1;
     }
     f = fields + (size_t)index * FIELD_STRIDE;
     out->name = ti_read_cstr(f, FIELD_NAME_OFF);
