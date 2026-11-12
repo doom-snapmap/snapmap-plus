@@ -536,6 +536,7 @@ enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRA
 #define EV_NUMARGS          0x2Cu
 /* traces */
 #define TRACE_CONTENTS      0x103085u   /* the SnapMap laser hazard's mask: the world, players and demons */
+#define TRACE_BLOCKS_DEMONS 0x20010u    /* what a Blocking Box adds to its contents when Block Demons is ticked */
 #define TRACE_RESULT_SIZE   0x80u
 #define TRACE_END           0x04u
 #define TRACE_NORMAL        0x44u
@@ -1057,7 +1058,8 @@ static void *e_spawn(const char *def, const float origin[3], float yaw, const ch
     return obj;
 }
 
-static int e_trace(const float from[3], const float to[3], uint32_t ignore, sh_script_trace *out)
+static int e_trace_contents(const float from[3], const float to[3], uint32_t ignore, sh_script_trace *out,
+                            uint32_t contents)
 {
     void *gm = sh_entity_gamemgr();
     uint8_t result[TRACE_RESULT_SIZE];
@@ -1066,7 +1068,7 @@ static int e_trace(const float from[3], const float to[3], uint32_t ignore, sh_s
     if (!gm || !g_trace) return 0;
     memset(result, 0, sizeof result);
     __try {
-        g_trace((uint8_t *)gm + GAME_TRACES, &handle, result, from, to, NULL, k_identity, TRACE_CONTENTS, ignore, 0,
+        g_trace((uint8_t *)gm + GAME_TRACES, &handle, result, from, to, NULL, k_identity, contents, ignore, 0,
                 "script trace", SH_SCRIPT_SPAWN_ID_NONE);
         ok = 1;
     } __except (av_only(GetExceptionCode())) { ok = 0; }
@@ -1076,6 +1078,16 @@ static int e_trace(const float from[3], const float to[3], uint32_t ignore, sh_s
     memcpy(out->normal, result + TRACE_NORMAL, sizeof out->normal);
     memcpy(&out->hit_spawn_id, result + TRACE_HIT_ID, sizeof out->hit_spawn_id);
     return out->fraction == out->fraction;
+}
+
+static int e_trace(const float from[3], const float to[3], uint32_t ignore, sh_script_trace *out)
+{
+    return e_trace_contents(from, to, ignore, out, TRACE_CONTENTS);
+}
+
+static int e_trace_as_demon(const float from[3], const float to[3], uint32_t ignore, sh_script_trace *out)
+{
+    return e_trace_contents(from, to, ignore, out, TRACE_CONTENTS | TRACE_BLOCKS_DEMONS);
 }
 
 static int e_game_time_ms(int *ms)
@@ -1119,7 +1131,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

@@ -657,6 +657,40 @@ static void test_view_angle(void)
     CHECK(has(g_log, "facing\t0\t90"));
 }
 
+/* What stops a demon and not a shot (a Blocking Box with Block Demons): a box face at x = 50 the
+ * plain trace passes through. */
+static int f_trace_demon(const float a[3], const float b[3], uint32_t ignore, sh_script_trace *t)
+{
+    (void)ignore;
+    memset(t, 0, sizeof *t);
+    t->fraction = 1.0f;
+    t->hit_spawn_id = SH_SCRIPT_SPAWN_ID_NONE;
+    if (a[0] < 50.0f && b[0] > 50.0f) {
+        t->fraction = (50.0f - a[0]) / (b[0] - a[0]);
+        t->normal[0] = -1;
+    }
+    return 1;
+}
+
+static void test_trace_as_demon(void)
+{
+    sh_script_engine with = k_engine;
+    with.trace_as_demon = f_trace_demon;
+    sh_script_api_set_engine(&with);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local a, b = {x = 0, y = 0, z = 10}, {x = 200, y = 0, z = 10}\n"
+        "  print('shot', trace(a, b).pos.x)\n"
+        "  print('demon', trace(a, b, nil, nil, 'demon').pos.x, trace(a, b, 0, nil, 'demon').normal.x)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "shot\t100.0"));
+    CHECK(has(g_log, "demon\t50.0\t-1.0"));
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  trace({x = 0, y = 0, z = 0}, {x = 9, y = 0, z = 0}, nil, nil, 'player')\nend)\n",
+            "3", "\"trace\" takes \"demon\" as its fifth value");
+    sh_script_api_set_engine(&k_engine);
+}
+
 int main(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
@@ -673,6 +707,7 @@ int main(void)
     test_spawn();
     test_world();
     test_ground_and_difficulty();
+    test_trace_as_demon();
     test_animation();
     test_view_angle();
     sh_script_map_end();

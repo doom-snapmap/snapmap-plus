@@ -13,7 +13,10 @@
  *   trace           the game's trace query run at once (the SnapMap laser hazard's call shape: a point
  *                   trace against the world, players and demons, contents 0x103085). With a radius the
  *                   line is thick: nine parallel traces, one on the line and eight around it at that
- *                   radius, and the nearest hit is the answer.
+ *                   radius, and the nearest hit is the answer. With "demon" as the fifth value the
+ *                   line is also stopped by what stops a demon and not a shot: a Blocking Box with
+ *                   Block Demons ticked (its contents gain 0x20010), so a script that places or flies
+ *                   a demon itself honours the map's blocking volumes.
  *   nav_ground      the same trace straight down from 16 inches above pos for 4,096 inches; the first
  *                   surface hit counts when it is flat enough to stand on (normal at least 0.7 up),
  *                   sh_script_api_ground_trace. It does not consult the navigation areas.
@@ -99,7 +102,7 @@ static int l_trace(lua_State *L)
     double radius = 0;
     uint32_t ignore = SH_SCRIPT_SPAWN_ID_NONE;
     sh_script_trace best, t;
-    int have_from, have_to, rays, k, have = 0;
+    int have_from, have_to, rays, k, have = 0, as_demon = 0;
     double dir[3], u[3], v[3], len, up[3] = { 0, 0, 1 }, side[3] = { 1, 0, 0 };
     have_from = sh_script_api_check_point(L, 1, "trace", "where the line starts", from);
     have_to = sh_script_api_check_point(L, 2, "trace", "where the line ends", to);
@@ -111,6 +114,13 @@ static int l_trace(lua_State *L)
     } else if (luaL_testudata(L, 1, "entity")) {
         void *ent = sh_script_api_entity(L, 1, "trace", NULL);   /* a line from an entity does not hit it */
         if (ent && e && e->spawn_id) ignore = e->spawn_id(ent);
+    }
+    if (!lua_isnoneornil(L, 5)) {
+        const char *as = lua_type(L, 5) == LUA_TSTRING ? lua_tostring(L, 5) : NULL;
+        if (!as || strcmp(as, "demon"))
+            sh_script_refuse(L, "\"trace\" takes \"demon\" as its fifth value (a line stopped by what stops a demon), "
+                                "or nothing");
+        as_demon = 1;
     }
     if (!have_from || !have_to || !e || !e->trace) { lua_pushnil(L); return 1; }
     dir[0] = (double)to[0] - from[0]; dir[1] = (double)to[1] - from[1]; dir[2] = (double)to[2] - from[2];
@@ -134,7 +144,7 @@ static int l_trace(lua_State *L)
             for (j = 0; j < 3; j++) off[j] = radius * (cos(ang) * u[j] + sin(ang) * v[j]);
         }
         for (j = 0; j < 3; j++) { a[j] = (float)(from[j] + off[j]); b[j] = (float)(to[j] + off[j]); }
-        if (!e->trace(a, b, ignore, &t)) continue;
+        if (!(as_demon && e->trace_as_demon ? e->trace_as_demon(a, b, ignore, &t) : e->trace(a, b, ignore, &t))) continue;
         have = 1;
         if (t.fraction < best.fraction) {
             best = t;
