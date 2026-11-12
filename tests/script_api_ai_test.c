@@ -132,6 +132,9 @@ typedef struct fent {
     int   gate;            /* the fire gate passes for a checked pull */
     int   clear_moves;
     unsigned no_turn_entry; /* bit per idle turn type: no turnParms entry */
+    /* a step of the engine's: the animFSM's stage and the command it waits on */
+    int   moving, stage, waiting, idle_turn_on, idle_turn;
+    int   interrupts;
 } fent;
 
 /* The world: a wall across x = g_wall_x (0: none) up to g_wall_top, and no
@@ -355,6 +358,22 @@ static int f_spline(void *ai, const sh_ai_spline_query *q, float (*out)[3], int 
 static int f_pain_string(void *ai, const char *t) { strcpy(((fent *)ai)->pain, t ? t : "(engine)"); return 1; }
 static int f_block_pain(void *ai, int r, int ms) { ((fent *)ai)->block_reaction = r; ((fent *)ai)->block_ms = ms; return 1; }
 
+static int f_step_state(void *ai, sh_ai_step_state *out)
+{
+    fent *f = (fent *)ai;
+    out->moving = f->moving; out->stage = f->stage; out->waiting = f->waiting;
+    out->idle_turn = f->idle_turn_on ? f->idle_turn : -1;
+    return 1;
+}
+static int f_step_interrupt(void *ai)
+{
+    fent *f = (fent *)ai;
+    int was = f->waiting;
+    f->interrupts++; f->waiting = 0;
+    ev_cat("step_interrupt\n");
+    return was;
+}
+
 static const sh_script_ai_engine g_fake = {
     f_entity, f_handle_of, f_is_ai, f_origin, f_yaw, f_event, f_park, f_enemy, f_awareness,
     f_move_status, f_trigger, f_path, f_frame,
@@ -362,7 +381,8 @@ static const sh_script_ai_engine g_fake = {
     f_set_recoil, f_weapon_ready, f_aim_point, f_anim_valid, f_path_points, f_firing, f_spline,
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
-    f_laser_add, f_laser_remove, f_rear_footsteps
+    f_laser_add, f_laser_remove, f_rear_footsteps,
+    f_step_state, f_step_interrupt
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1595,6 +1615,78 @@ static void test_anim_force_via(void)
     sh_script_map_end();
 }
 
+/* An order given while a step of the engine's is in flight (a turn in place):
+ * the engine ends the step's stage when its own animWeb command ends, and a
+ * script's order goes round that command. */
+static void test_orders_around_a_step(void)
+{
+    sh_ai_step_state s = { 1, SH_AI_STAGE_MOVE_STEP, 1, -1 };
+    printf("-- orders around a step of the engine's\n");
+    CHECK(sh_ai_step_in_flight(&s) == 1);
+    s.stage = SH_AI_STAGE_ARRIVAL; CHECK(sh_ai_step_in_flight(&s) == 1);
+    s.stage = SH_AI_STAGE_ARRIVAL_SOFT; CHECK(sh_ai_step_in_flight(&s) == 1);
+    s.stage = 1; CHECK(sh_ai_step_in_flight(&s) == 0);            /* walking: no step */
+    s.stage = SH_AI_STAGE_MOVE_STEP; s.waiting = 0; CHECK(sh_ai_step_in_flight(&s) == 0);   /* the command ended */
+    s.waiting = 1; s.moving = 0; CHECK(sh_ai_step_in_flight(&s) == 0);                      /* not in the move state */
+    CHECK(sh_ai_step_in_flight(NULL) == 0);
+
+    /* an animation order waits for the turn; a hold with the standing turn type leaves the turn alone */
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then self:hold() end\n"
+        "  if step == 2 then print('hold ' .. tostring(self:hold())); self:anim_state('shoot/combo_cycle') end\n"
+        "  if step == 3 then self:anim_state('shoot/combo_hold', 'shoot/combo_fire') end\n"
+        "end)\n"));
+    g_ent[1].body_rot = 1;
+    tick();                                              /* held: clear_move, idle order */
+    g_ent[1].moving = 1; g_ent[1].stage = SH_AI_STAGE_MOVE_STEP; g_ent[1].waiting = 1;
+    g_ent[1].idle_turn_on = 1; g_ent[1].idle_turn = SH_AI_IDLETURN_COMBAT;   /* the engine turns it in place */
+    g_events[0] = 0;
+    tick();                                              /* hold and an order during the turn */
+    CHECK(strstr(log_of("aaaaaaaa"), "hold true\n") != NULL);
+    CHECK(g_events[0] == 0);                             /* nothing reached the engine */
+    tick();                                              /* a newer order takes the held one's place */
+    CHECK(g_events[0] == 0);
+    g_ent[1].waiting = 0; g_ent[1].stage = 1;            /* the turn ended; the engine may ask for another */
+    tick();
+    CHECK(!strcmp(g_events, "clear_move\n1:ssaction_ChangeAnimStateVia(0,shoot/combo_hold,shoot/combo_fire,0)\n"));
+    g_events[0] = 0;
+    tick();                                              /* given once */
+    CHECK(g_events[0] == 0);
+    sh_script_map_end();
+
+    /* a forced order is given at once and the step's command is ended the engine's way; a move drops a held order */
+    memset(&g_ent[1].moving, 0, sizeof(int) * 5);
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then self:anim_state('rocket_combat/idle'); self:anim_force('pain/left', 0.1) end\n"
+        "  if step == 2 then self:anim_state('rocket_combat/idle'); self:move_to({x = 100, y = 0, z = 0}) end\n"
+        "end)\n"));
+    g_ent[1].moving = 1; g_ent[1].stage = SH_AI_STAGE_MOVE_STEP; g_ent[1].waiting = 1;
+    g_ent[1].interrupts = 0;
+    g_events[0] = 0;
+    tick();
+    CHECK(strstr(g_events, "ssaction_ChangeAnimState(") == NULL);
+    CHECK(strstr(g_events, "1:ssaction_ForceAnimState(0,pain/left,100,0)\nstep_interrupt\n") != NULL);
+    CHECK(g_ent[1].interrupts == 1);
+    g_ent[1].waiting = 1;                                /* another step in flight */
+    g_events[0] = 0;
+    tick();                                              /* the order is held, then the move takes the web */
+    CHECK(strstr(g_events, "ssaction_MoveToPoint(") != NULL && strstr(g_events, "ssaction_ChangeAnimState(") == NULL);
+    g_ent[1].waiting = 0;
+    g_events[0] = 0;
+    tick();
+    CHECK(strstr(g_events, "ssaction_ChangeAnimState(") == NULL);   /* dropped with the move */
+    sh_script_map_end();
+    memset(&g_ent[1].moving, 0, sizeof(int) * 5);
+}
+
 static void test_pain_records(void)
 {
     int a, b;
@@ -1712,6 +1804,7 @@ int main(int argc, char **argv)
     test_lasers_and_rear_feet();
     test_enemy_weapon_sdk();
     test_anim_force_via();
+    test_orders_around_a_step();
     test_pain_records();
     test_pain_stub();
     files_clear();

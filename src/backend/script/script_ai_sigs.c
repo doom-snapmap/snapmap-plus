@@ -77,7 +77,14 @@
  *                      the component in an idAI2 (+0x2CD90).
  *   AiFootTable        VK 0x14074B790  GL 0x14074B0A0  the footstep table of a foot (actor, foot index): the
  *                      actor's footstepEffectTable by gait (walk, slow walk, crouch, sprint, landing), never by
- *                      foot. Detoured; 15-byte window (snaphak-re reports/R-M7-engine-wave-laser-foot.md). */
+ *                      foot. Detoured; 15-byte window (snaphak-re reports/R-M7-engine-wave-laser-foot.md).
+ *   AiCmdSetWait       VK 0x1405223F0  GL 0x140521120  the animWeb command context's set-active-wait-handle
+ *                      (context, handle): a handle it still holds (context +0x18) gets its done event, the
+ *                      status AWCMD_STATUS_INTERRUPTED (handle +0x18 = 9) and gives way to the new one. Every
+ *                      command sent through the context ends the one before it this way.
+ *   AiMoveStage        VK 0x14051A660  GL 0x140519390  the animFSM's move update: it switches on the stage
+ *                      (animFSM +0x2A9C); stages 2, 7 and 8 (a step, an arrival) end when the context's active
+ *                      command is no longer waiting. Present for that offset. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -188,6 +195,16 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 89 5C 24 18 48 89 6C 24 20 56 41 56 41 57 48 83 EC 40 33 F6 8B EA 4C 8B F1 40 38 B1 F8 43 00 00 74 45 "
       "39 35 ?? ?? ?? ??",
       0x74B790u, 0x74B0A0u },
+    { "AiCmdSetWait",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 79 18 48 8B F2 48 8B D9 48 85 FF 74 5E 48 3B D7 74 59 "
+      "48 8B 09 48 85 C9 74 24 48 8B 97 E0 00 00 00 48 85 D2 74 18 F6 87 E9 00 00 00 01 75 0F 45 33 C0 "
+      "E8 ?? ?? ?? ?? 80 8F E9 00 00 00 01 48 8B 4B 18 BA 09 00 00 00 E8 ?? ?? ?? ?? 48 8B 43 18 "
+      "C7 40 18 09 00 00 00 48 89 73 18",
+      0x5223F0u, 0x521120u },
+    { "AiMoveStage",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 83 3D ?? ?? ?? ?? 00 49 8B D8 48 8B F2 48 8B F9 0F 85 ?? ?? ?? ?? "
+      "41 83 48 08 04 4C 8B C2 48 8B D3 E8 ?? ?? ?? ?? 8B 87 9C 2A 00 00 FF C8 83 F8 12",
+      0x51A660u, 0x519390u },
     { NULL, NULL, 0, 0 }
 };
 

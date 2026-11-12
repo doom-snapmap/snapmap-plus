@@ -2240,6 +2240,27 @@ is touched, and a removed demon answers nil.
 - **Shared with the entity calls.** `distance`, `anim_state` and `anim_force`
   are the entity calls' and work on any entity; on a demon the two animation
   calls come back here (`sh_script_ai_anim`), which parks it first.
+- **Orders around a step of the engine's.** A turn in place, a step and an
+  arrival are stages of the animFSM's move state (stages 2, 7 and 8 of the
+  int at animFSM +0x2A9C, switched on by the move update, VK 0x14051A660),
+  and such a stage ends only when the animWeb command the engine gave for it
+  is no longer waiting (the command context is the object the demon's vtable
+  +0x2C8 returns, its active wait handle at +0x18, the status at +0x18 of
+  that). A script's `ssaction_ChangeAnimState` goes to the web round that
+  command: the web leaves for the script's node, the command waits for good
+  and the animFSM stays in the stage, starting no turn and no move, until the
+  engine's idle watchdog restarts it after a second in the idle node
+  (measured on a ported demon: four to seven restarts in 100 s of a fight,
+  every turn after the first late, and moves that never began). So an
+  `anim_state` given while such a stage waits is held back and given the
+  frame the stage has ended, the web having played the step out first in any
+  case; a move order drops a held one. `anim_force` is given at once and the
+  step's command is then ended the engine's way, with the context's own
+  set-active-wait-handle (VK 0x1405223F0), which gives the command its done
+  event and the status INTERRUPTED as every command sent through the context
+  does to the one before it. `hold` leaves a turn in place alone when the idle
+  order it asks for already stands (the idle turn flag and type in the
+  animFSM): ending the turn's move there would leave its step without one.
 - **Install.** `sh_script_ai_install` runs after the entity calls' engine
   side and is the "demons driven by scripts" row of the feature registry.
 

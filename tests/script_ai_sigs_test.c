@@ -320,6 +320,16 @@ static void check_image(const char *path)
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
         CHECK(!memcmp(base + rva[SH_AI_SIG_FOOT_TABLE], k_ai_foot_prologue, SH_AI_FOOT_STOLEN));
     }
+    if (rva[SH_AI_SIG_CMD_SET_WAIT]) {
+        uint32_t w = rva[SH_AI_SIG_CMD_SET_WAIT];
+        /* the active handle at context +0x18, the status written at handle +0x18: 9, INTERRUPTED */
+        CHECK(window_has(base, w, 0x20, "\x48\x8B\x79\x18", 4));
+        CHECK(window_has(base, w, 0x70, "\xC7\x40\x18\x09\x00\x00\x00\x48\x89\x73\x18", 11));
+    }
+    if (rva[SH_AI_SIG_MOVE_STAGE]) {
+        /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
+        CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));
+    }
     printf("  aiFireMode_t table %s, aiIdleTurn_t table %s\n",
            enum_table_found(base, size, image_base, SH_AI_FIREMODE_NAMES, SH_AI_FIREMODE_MAX + 1) ? "found" : "MISSING",
            enum_table_found(base, size, image_base, SH_AI_IDLETURN_NAMES, SH_AI_IDLETURN_MAX + 1) ? "found" : "MISSING");

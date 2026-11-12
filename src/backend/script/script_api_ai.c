@@ -241,6 +241,8 @@ typedef struct ai_rec {
     float      face_pos[3];
     unsigned   hand_noted;       /* equip told the author of a weapon outside the weapon hand (a bit per hand) */
     unsigned   turn_noted;       /* hold told the author of an idle turn with no turnParms entry (a bit per turn type) */
+    char      *wait_dest;        /* an animation order held back while a step of the engine's is in flight */
+    char      *wait_via;         /* (malloc'd node names; wait_dest NULL: none) */
 } ai_rec;
 
 #define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
@@ -255,10 +257,20 @@ static const sh_script_ai_engine *g_engine;
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = engine; }
 
 static void force_via_reset(void);
+static void anim_wait_drop(ai_rec *r)
+{
+    free(r->wait_dest);
+    free(r->wait_via);
+    r->wait_dest = r->wait_via = NULL;
+}
+
 void sh_script_ai_reset(void)
 {
     int i;
-    for (i = 0; i < g_nrecs; i++) memset(g_recs[i], 0, sizeof *g_recs[i]);
+    for (i = 0; i < g_nrecs; i++) {
+        anim_wait_drop(g_recs[i]);
+        memset(g_recs[i], 0, sizeof *g_recs[i]);
+    }
     force_via_reset();
     sh_ai_pain_records_reset();
 }
@@ -286,6 +298,7 @@ static int rec_slot(sh_script_handle h)
         g_recs[g_nrecs] = r;
         free_slot = g_nrecs++;
     }
+    anim_wait_drop(g_recs[free_slot]);
     memset(g_recs[free_slot], 0, sizeof *g_recs[free_slot]);
     g_recs[free_slot]->handle = h;
     return free_slot;
@@ -478,6 +491,25 @@ static move_flags check_flags(lua_State *L, int idx, const char *call)
     return f;
 }
 
+/* ------------------------------------------------- a step of the engine's */
+
+int sh_ai_step_in_flight(const sh_ai_step_state *s)
+{
+    return s && s->moving && s->waiting &&
+           (s->stage == SH_AI_STAGE_MOVE_STEP || s->stage == SH_AI_STAGE_ARRIVAL ||
+            s->stage == SH_AI_STAGE_ARRIVAL_SOFT);
+}
+
+/* 1 with the state when a step animation of the engine's is in flight on the
+ * demon (a turn in place, a step or an arrival of a move). */
+static int step_in_flight(void *ai, sh_ai_step_state *st)
+{
+    memset(st, 0, sizeof *st);
+    st->idle_turn = -1;
+    if (!g_engine->step_state || g_engine->step_state(ai, st) != 1) return 0;
+    return sh_ai_step_in_flight(st);
+}
+
 /* ----------------------------------------------------------- the park */
 
 /* Park the demon for script control: the engine side marks it, and the
@@ -524,6 +556,7 @@ static int issue_move(void *ai, ai_rec *r, const float dest[3], float tol, move_
     a[0] = arg_v(dest); a[1] = arg_i(SH_AI_ARRIVAL_STOP); a[2] = arg_f(tol > 0 ? tol : 0.1f);
     a[3] = arg_b(0); a[4] = arg_v(zero);
     if (!run(ai, SH_AI_EV_MOVE_TO_POINT, a, 5, NULL)) return 0;
+    anim_wait_drop(r);     /* the move's own animations take the web: an order still held back is over */
     sh_ai_move_issue(&r->move, g_engine->frame());
     r->has_dest = 1;
     memcpy(r->dest, dest, sizeof r->dest);
@@ -1881,6 +1914,7 @@ static int l_hold(lua_State *L)
     ai_rec *r;
     sh_ai_arg a[2];
     sh_ai_focus_state fs;
+    sh_ai_step_state st;
     int turn = SH_AI_IDLETURN_COMBAT, ran, entry = -1, body = 1;
     if (!lua_isnoneornil(L, 2)) {
         if (lua_type(L, 2) == LUA_TSTRING) turn = sh_ai_idle_turn_parse(lua_tostring(L, 2));
@@ -1892,9 +1926,16 @@ static int l_hold(lua_State *L)
     }
     ai = self_ai(L, "hold", &h);
     if (!ai || !(r = park(ai, h))) { lua_pushnil(L); return 1; }
-    if (g_engine->clear_move) g_engine->clear_move(ai);
-    a[0] = arg_i(-1); a[1] = arg_i(turn);
-    ran = run(ai, SH_AI_EV_IDLE, a, 2, NULL);
+    if (step_in_flight(ai, &st) && st.idle_turn == turn) {
+        /* The demon is held with this turn type already and the engine's own
+         * turn in place is in flight: the order stands. Ending the turn's
+         * move here would leave its step without one. */
+        ran = 1;
+    } else {
+        if (g_engine->clear_move) g_engine->clear_move(ai);
+        a[0] = arg_i(-1); a[1] = arg_i(turn);
+        ran = run(ai, SH_AI_EV_IDLE, a, 2, NULL);
+    }
     if (ran) {
         r->move.state = SH_AI_MOVE_NONE;
         r->has_dest = 0;
@@ -2565,10 +2606,10 @@ int sh_script_ai_park(void *ai, sh_script_handle h)
     return g_engine && ai && park(ai, h) != NULL;
 }
 
-int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms)
+/* The order as the engine's event. */
+static int anim_send(void *ai, const char *dest, const char *via, int force, int blend_ms)
 {
     sh_ai_arg a[4];
-    if (!g_engine || !ai || !dest || !park(ai, h)) return 0;
     a[0] = arg_i(SH_AI_ANIMWEB_BODY);
     a[1] = arg_s('1', dest);
     if (force) {
@@ -2583,6 +2624,71 @@ int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char
     }
     a[2] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
     return run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL);
+}
+
+/* An order that is not forced, given now. An idle order that stands ends
+ * with it; a turn in place the engine has asked for under that order and
+ * not begun is ended first, so that no step begins behind the order. */
+static int anim_give(void *ai, const char *dest, const char *via)
+{
+    sh_ai_step_state st;
+    memset(&st, 0, sizeof st);
+    st.idle_turn = -1;
+    if (g_engine->step_state && g_engine->step_state(ai, &st) == 1 && st.moving && st.idle_turn >= 0 &&
+        g_engine->clear_move)
+        g_engine->clear_move(ai);
+    return anim_send(ai, dest, via, 0, 0);
+}
+
+/* The engine ends a step stage of its animFSM (a turn in place, a step or an
+ * arrival of a move) when the animWeb command it gave for it ends. A
+ * script's order goes to the web round that command: the web leaves for the
+ * script's node, the command never ends, and the animFSM waits in the stage,
+ * starting no turn and no move, until the engine restarts it after a second
+ * in its idle. So an order is held back while such a step is in flight and
+ * given when it has ended (the web plays the step out before it follows a
+ * new order in any case); a forced order is given at once and the step's
+ * command is ended the engine's way. */
+int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms)
+{
+    ai_rec *r;
+    sh_ai_step_state st;
+    if (!g_engine || !ai || !dest || !(r = park(ai, h))) return 0;
+    if (force) {
+        int in_flight = step_in_flight(ai, &st);
+        anim_wait_drop(r);
+        if (!anim_send(ai, dest, NULL, 1, blend_ms)) return 0;
+        if (in_flight && g_engine->step_interrupt) (void)g_engine->step_interrupt(ai);
+        return 1;
+    }
+    if (step_in_flight(ai, &st)) {
+        char *d = _strdup(dest), *v = via ? _strdup(via) : NULL;
+        if (!d || (via && !v)) { free(d); free(v); return 0; }
+        anim_wait_drop(r);
+        r->wait_dest = d;
+        r->wait_via = v;
+        return 1;
+    }
+    anim_wait_drop(r);
+    return anim_give(ai, dest, via);
+}
+
+/* Every frame: an order held back is given once its step has ended. */
+static void anim_wait_step(void)
+{
+    int i;
+    if (!g_engine) return;
+    for (i = 0; i < g_nrecs; i++) {
+        ai_rec *r = g_recs[i];
+        sh_ai_step_state st;
+        void *ai;
+        if (!r->wait_dest) continue;
+        ai = r->handle ? g_engine->entity(r->handle) : NULL;
+        if (!ai || !park(ai, r->handle)) { anim_wait_drop(r); continue; }
+        if (step_in_flight(ai, &st)) continue;
+        (void)anim_give(ai, r->wait_dest, r->wait_via);
+        anim_wait_drop(r);
+    }
 }
 
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
@@ -2619,6 +2725,7 @@ int sh_script_ai_register(void)
     if (done) return 0;
     done = 1;
     sh_script_api_on_frame(force_via_step);
+    sh_script_api_on_frame(anim_wait_step);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     return n;
@@ -2919,6 +3026,52 @@ static int e_clear_move(void *ai)
     __try {
         void *fsm = *(void * const *)((const uint8_t *)ai + SH_AI_OFF_MOVE_FSM);
         if (fsm) { g_clear_move(fsm, 0); v = 1; }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The animWeb command context of a demon (its vtable's accessor). */
+static void (*g_cmd_set_wait)(void *ctx, void *handle);
+static uint8_t *cmd_ctx(void *ai)
+{
+    typedef void *(*ai_ctx_fn)(void *self);
+    ai_ctx_fn f = (ai_ctx_fn)vfn(ai, SH_AI_VSLOT_CMD_CTX);
+    return f ? (uint8_t *)f(ai) : NULL;
+}
+
+static int e_step_state(void *ai, sh_ai_step_state *out)
+{
+    int v = -1;
+    __try {
+        const uint8_t *fsm = *(const uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_MOVE_FSM);
+        const uint8_t *ctx = cmd_ctx(ai);
+        if (fsm && ctx) {
+            const uint8_t *wait = *(const uint8_t * const *)(ctx + SH_AI_CMDCTX_ACTIVE);
+            int status = wait ? *(const int *)(wait + SH_AI_WAIT_STATUS) : -1;
+            out->moving = *(const int *)(fsm + SH_AI_FSM_STATE) == SH_AI_FSM_STATE_MOVE;
+            out->stage = *(const int *)(fsm + SH_AI_FSM_STAGE);
+            out->waiting = status == SH_AI_AWCMD_WAITING || status == SH_AI_AWCMD_READY;
+            out->idle_turn = (*(const int *)(fsm + SH_AI_FSM_MOVE_FLAGS) & SH_AI_FSM_IDLE_TURN_FLAG)
+                                 ? *(const int *)(fsm + SH_AI_FSM_IDLE_TURN) : -1;
+            v = 1;
+        }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The context's set-active-wait-handle with no handle: the command it holds
+ * gets its done event and the status INTERRUPTED, as when another command
+ * takes its place. */
+static int e_step_interrupt(void *ai)
+{
+    int v = -1;
+    if (!g_cmd_set_wait) return -1;
+    __try {
+        uint8_t *ctx = cmd_ctx(ai);
+        if (ctx) {
+            v = *(void * const *)(ctx + SH_AI_CMDCTX_ACTIVE) != NULL;
+            if (v) g_cmd_set_wait(ctx, NULL);
+        }
     } __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
 }
@@ -3653,7 +3806,8 @@ static const sh_script_ai_engine k_engine = {
     e_set_recoil, e_weapon_ready, e_aim_point, e_anim_valid, e_path_points, e_firing_position, e_spline_clear,
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
-    e_laser_add, e_laser_remove, e_rear_footsteps
+    e_laser_add, e_laser_remove, e_rear_footsteps,
+    e_step_state, e_step_interrupt
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -3760,6 +3914,15 @@ int sh_script_ai_install(const uint8_t *module_base)
     }
     if (r[SH_AI_SIG_FOOT_TABLE].addr) g_foot_target = (ai_foot_table_fn)r[SH_AI_SIG_FOOT_TABLE].addr;
     else g_live.rear_footsteps = NULL;
+    /* The step calls read the stage where the move update reads it and end a
+     * command with the context's own call; without either an order is given
+     * as it comes. */
+    if (r[SH_AI_SIG_CMD_SET_WAIT].addr && r[SH_AI_SIG_MOVE_STAGE].addr && r[SH_AI_SIG_IDLE_ACTION].addr)
+        g_cmd_set_wait = (void (*)(void *, void *))r[SH_AI_SIG_CMD_SET_WAIT].addr;
+    else {
+        g_live.step_state = NULL;
+        g_live.step_interrupt = NULL;
+    }
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

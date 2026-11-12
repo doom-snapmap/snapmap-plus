@@ -311,6 +311,24 @@ typedef struct sh_ai_focus_state {
     int   body_rotation;    /* focus.enableBodyRotation */
 } sh_ai_focus_state;
 
+/* Where the demon's animFSM stands with a step animation of its own (a turn
+ * in place, a step or an arrival of a move). The engine ends such a stage
+ * when the animWeb command it gave ends; a script's own animation order goes
+ * round that command, so the stage would wait for good (the engine then
+ * restarts the animFSM after a second in its idle, and until then starts no
+ * turn and no move). */
+typedef struct sh_ai_step_state {
+    int moving;             /* the animFSM is in its move state */
+    int stage;              /* its move stage (SH_AI_STAGE_*) */
+    int waiting;            /* the command context's active command has not ended */
+    int idle_turn;          /* the turn type of a standing idle order (ssaction_Idle), -1 with none */
+} sh_ai_step_state;
+#define SH_AI_STAGE_MOVE_STEP     2    /* STAGE_MOVE_STEP: a step or a turn in place */
+#define SH_AI_STAGE_ARRIVAL       7    /* STAGE_ARRIVAL */
+#define SH_AI_STAGE_ARRIVAL_SOFT  8    /* STAGE_ARRIVAL_SOFT */
+/* 1 when the state says a step animation is in flight. */
+int sh_ai_step_in_flight(const sh_ai_step_state *s);
+
 typedef struct sh_script_ai_engine {
     void    *(*entity)(sh_script_handle h);          /* the live entity, NULL when gone */
     sh_script_handle (*handle_of)(void *entity);      /* a handle a script can hold, 0 for none */
@@ -398,6 +416,14 @@ typedef struct sh_script_ai_engine {
      * wherever the game picks `front` (whole projectileImpactEffect decl
      * names). 1 set, -2 one of the decls is not loaded, -1 unavailable. */
     int      (*rear_footsteps)(void *ai, const char *front, const char *rear);
+    /* The animFSM's stage and the command it waits on (sh_ai_step_state).
+     * 1 read, -1 unreadable. */
+    int      (*step_state)(void *ai, sh_ai_step_state *out);
+    /* End the animWeb command the demon's command context waits on, as the
+     * engine does itself when another command takes its place; the stage of
+     * the animFSM that waits on it then ends at its next update. 1 done, 0
+     * none was waiting, -1 unavailable. */
+    int      (*step_interrupt)(void *ai);
 } sh_script_ai_engine;
 
 /* equipSlot_t: the two hands a demon holds a weapon in. */
@@ -487,6 +513,8 @@ enum sh_ai_sig {
     SH_AI_SIG_LASER_REMOVE,        /* its remove (component, atom*) */
     SH_AI_SIG_LASER_STATE,         /* the ae_setLaserState handler (reads the component at ai +0x2CD90) */
     SH_AI_SIG_FOOT_TABLE,          /* the footstep table selector (actor, foot) (detoured) */
+    SH_AI_SIG_CMD_SET_WAIT,        /* the command context's set-active-wait-handle (context, handle) */
+    SH_AI_SIG_MOVE_STAGE,          /* the animFSM's move update (reads the stage) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -583,6 +611,22 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 #define SH_AI_OFF_BEHAVIOR_DECL   0xC120u   /* [aiEditable.behaviors.decl]: turnParms list +0x528, count +0x530 */
 #define SH_AI_BEHAVIOR_TURNPARMS  0x528u
 #define SH_AI_BEHAVIOR_TURNCOUNT  0x530u
+
+/* The animFSM's stage and the animWeb command it waits on (both renderers,
+ * 13954591; reflected paths in brackets; tests/script_ai_sigs_test.c checks
+ * the code that uses each). The command context is the object the demon's
+ * vtable +0x2C8 returns [aiVolatile.animation.awCmdCtx]. */
+#define SH_AI_VSLOT_CMD_CTX       0x2C8u    /* the animWeb command context */
+#define SH_AI_CMDCTX_ACTIVE       0x18u     /* context: [activeWaitHandle], the command it waits on (NULL: none) */
+#define SH_AI_WAIT_STATUS         0x18u     /* wait handle: [status], an awCmdStatus_t */
+#define SH_AI_AWCMD_WAITING       8         /* AWCMD_STATUS_WAITING */
+#define SH_AI_AWCMD_READY         11        /* AWCMD_STATUS_READY_TO_COMPLETE */
+#define SH_AI_FSM_STATE           0x2A98u   /* animFSM: [state], 1 while it moves */
+#define SH_AI_FSM_STAGE           0x2A9Cu   /* animFSM: [subState], the move stage */
+#define SH_AI_FSM_STATE_MOVE      1
+#define SH_AI_FSM_MOVE_FLAGS      0xB6Cu    /* animFSM: [overrideMoveFlags]; ssaction_Idle sets bit 8 */
+#define SH_AI_FSM_IDLE_TURN_FLAG  8
+#define SH_AI_FSM_IDLE_TURN       0xBF0u    /* animFSM: [idleTurnType] */
 
 /* idAI2 offsets the calls read (both renderers, 13954591). */
 #define SH_AI_OFF_MOVE_FSM        0x23198u  /* move FSM pointer; status int at +0xD20 */
