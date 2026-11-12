@@ -4214,8 +4214,12 @@ a part, and `POST /mods/asked {"claim","secret"}` (`modnet_list_asked`) lists
 those reports for the claim's holder.
 
 Nothing limits a build (DECISIONS 26). One request body is the platform's
-limit (100 MB on the Worker's plan), so an archive larger than one part
-(`MODNET_PART_SIZE`, 95 MiB, the Worker's `PART_SIZE`) goes up in parts:
+limit (100 MB on the Worker's plan) and one connection is slower than several,
+so an archive larger than `MODNET_PART_SIZE` (32 MiB) goes up in parts of the
+size the store names (the Worker's `PART_SIZE`, 16 MiB), four at a time
+(`MODNET_PART_WORKERS`), each on its own connection and in any order
+(`mn_send_parts`: a failed part stops the taking of new parts, the ones on
+their way finish, and the next start sends only what the store lacks):
 `POST /mods/build/<hash>/parts {"size"}` starts the upload or resumes the one
 of that build and size and answers `{"partSize", "parts", "have"}`; `PUT
 /mods/build/<hash>/parts/<n>` (`application/octet-stream`, `X-Build-Size`)

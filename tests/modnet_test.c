@@ -221,13 +221,14 @@ int main(void)
         _snprintf_s(zip3, sizeof zip3, _TRUNCATE, "%s\c.zip", tmp);
         CHECK(make_build(dir, "netcccc3", (size_t)MODNET_PART_SIZE + 4096, zip3, hc, &size_c));
         CHECK(size_c > MODNET_PART_SIZE);
-        /* Part 2 fails once: the upload starts again and sends only part 2. */
+        /* Three parts, sent at once. Part 2 fails once: the upload starts again and sends only part 2. */
         g_stub.fail_part = 2;
         memset(g_stub.part_sent, 0, sizeof g_stub.part_sent);
         g_pr_calls = 0;
         code = modnet_put_build(hc, zip3, size_c, &io, &r);
         CHECK(code == MODNET_OK && r.created == 1);
-        CHECK(g_stub.part_starts == 2 && g_stub.part_sent[1] == 1 && g_stub.part_sent[2] == 2 && g_stub.part_completes == 1);
+        CHECK(g_stub.part_starts == 2 && g_stub.part_sent[1] == 1 && g_stub.part_sent[2] == 2 && g_stub.part_sent[3] == 1 &&
+              g_stub.part_completes == 1 && r.parts == 3);
         CHECK(strcmp(g_stub.last_ctype, "application/json") == 0);   /* the last request: complete */
         CHECK(g_pr_done == size_c && g_pr_total == size_c);
         /* Sent again: the store holds it, nothing is uploaded. */

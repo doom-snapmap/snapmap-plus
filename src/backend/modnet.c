@@ -754,15 +754,6 @@ int modnet_head_build(const char *hash, unsigned long long *size, unsigned *scri
 
 /* Progress of one request of an upload in parts, as progress of the whole
  * archive: `base` bytes are already at the store. */
-typedef struct mn_part_progress { const modnet_io *outer; unsigned long long base, total; } mn_part_progress;
-
-static void mn_part_progress_cb(void *ctx, unsigned long long done, unsigned long long total)
-{
-    mn_part_progress *p = (mn_part_progress *)ctx;
-    (void)total;
-    p->outer->progress(p->outer->context, p->base + done, p->total);
-}
-
 /* One small JSON request of an upload in parts ({"size":N} to `route`). */
 static int mn_parts_post(const char *route, unsigned long long size, DWORD receive_ms, unsigned char **resp, size_t *rlen,
                          const modnet_io *io, modnet_result *r)
@@ -819,6 +810,167 @@ done:
     return ok;
 }
 
+/* The parts of one upload, sent by several workers at once. */
+typedef struct mn_parts_job {
+    const char *hash;
+    HANDLE file;                    /* the caller's handle; each worker reopens it for its own position */
+    unsigned long long size, part_size;
+    unsigned parts;
+    const unsigned char *have;      /* parts the store held when the upload started */
+    const modnet_io *outer;
+    CRITICAL_SECTION lock;
+    unsigned next;                  /* the next part to consider */
+    unsigned long long held;        /* bytes of the parts the store holds now */
+    unsigned long long inflight[MODNET_PART_WORKERS];
+    volatile long stop;             /* the caller cancelled */
+    int code;                       /* the first failure, MODNET_OK when none */
+    int status;
+    char message[512];
+    unsigned long long sent;
+    unsigned requests, parts_sent;
+} mn_parts_job;
+
+typedef struct mn_parts_worker { mn_parts_job *job; unsigned slot; } mn_parts_worker;
+
+static void mn_parts_progress(void *ctx, unsigned long long done, unsigned long long total)
+{
+    mn_parts_worker *w = (mn_parts_worker *)ctx;
+    mn_parts_job *j = w->job;
+    unsigned long long sum;
+    unsigned i;
+    (void)total;
+    if (j->outer && j->outer->cancel && *j->outer->cancel) InterlockedExchange(&j->stop, 1);
+    if (!j->outer || !j->outer->progress) return;
+    EnterCriticalSection(&j->lock);          /* the caller's progress is called by one thread at a time */
+    j->inflight[w->slot] = done;
+    sum = j->held;
+    for (i = 0; i < MODNET_PART_WORKERS; i++) sum += j->inflight[i];
+    j->outer->progress(j->outer->context, sum, j->size);
+    LeaveCriticalSection(&j->lock);
+}
+
+static void mn_parts_failed(mn_parts_job *j, int code, const char *message)
+{
+    EnterCriticalSection(&j->lock);
+    if (j->code == MODNET_OK) {
+        j->code = code;
+        strncpy_s(j->message, sizeof j->message, message ? message : "", _TRUNCATE);
+    }
+    LeaveCriticalSection(&j->lock);
+}
+
+/* One worker: take the next part the store lacks and send it, until none is
+ * left, a part fails or the caller cancels. A failure stops only the taking
+ * of new parts: the parts already on their way finish, and the store keeps
+ * them for the next start. */
+static DWORD WINAPI mn_parts_worker_proc(void *ctx)
+{
+    mn_parts_worker *w = (mn_parts_worker *)ctx;
+    mn_parts_job *j = w->job;
+    HANDLE h = ReOpenFile(j->file, GENERIC_READ, FILE_SHARE_READ, FILE_FLAG_SEQUENTIAL_SCAN);
+    if (h == INVALID_HANDLE_VALUE) {
+        mn_parts_failed(j, MODNET_E_ARG, "the archive file cannot be read");
+        return 0;
+    }
+    for (;;) {
+        char route[160];
+        wchar_t extra[64];
+        modnet_io sub;
+        modnet_result r;
+        mn_req q;
+        unsigned char *resp = NULL;
+        size_t rlen = 0;
+        unsigned n = 0;
+        unsigned long long at, len;
+        int code, more = 0;
+        EnterCriticalSection(&j->lock);
+        while (j->next < j->parts && j->have[j->next]) j->next++;
+        if (j->next < j->parts && j->code == MODNET_OK && !j->stop) { n = j->next++; more = 1; }
+        LeaveCriticalSection(&j->lock);
+        if (!more) break;
+        at = j->part_size * n;
+        len = n + 1 < j->parts ? j->part_size : j->size - at;
+        _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s/parts/%u", j->hash, n + 1);
+        _snwprintf_s(extra, 64, _TRUNCATE, L"X-Build-Size: %llu\r\n", j->size);
+        sub.cancel = &j->stop;
+        sub.progress = mn_parts_progress;
+        sub.context = w;
+        memset(&r, 0, sizeof r);
+        memset(&q, 0, sizeof q);
+        q.verb = L"PUT";
+        q.route = route;
+        q.content_type = "application/octet-stream";
+        q.headers = extra;
+        q.body_file = h;
+        q.body_offset = at;
+        q.body_len = (size_t)len;
+        q.max_response = MN_SMALL_BODY;
+        code = mn_exchange(&q, &resp, &rlen, &sub, &r);
+        if (code == MODNET_OK && r.status != 200) code = mn_status_fail(&r, resp, rlen, "part");
+        free(resp);
+        EnterCriticalSection(&j->lock);
+        j->sent += r.sent;
+        j->requests += r.requests;
+        j->status = r.status;
+        j->inflight[w->slot] = 0;
+        if (code == MODNET_OK) { j->held += len; j->parts_sent++; }
+        LeaveCriticalSection(&j->lock);
+        if (code != MODNET_OK) { mn_parts_failed(j, code, r.message); break; }
+    }
+    CloseHandle(h);
+    free(t_mn_message);                      /* this thread's last message, kept in the job when it mattered */
+    t_mn_message = NULL;
+    return 0;
+}
+
+/* Send every part the store lacks, MODNET_PART_WORKERS at a time. */
+static int mn_send_parts(const char *hash, HANDLE file, unsigned long long size, unsigned long long part_size,
+                         unsigned parts, const unsigned char *have, unsigned long long held, const modnet_io *io,
+                         modnet_result *r)
+{
+    mn_parts_job j;
+    mn_parts_worker workers[MODNET_PART_WORKERS];
+    HANDLE threads[MODNET_PART_WORKERS];
+    unsigned missing = 0, n, count, started = 0;
+    int code;
+    for (n = 0; n < parts; n++) if (!have[n]) missing++;
+    if (!missing) return MODNET_OK;
+    memset(&j, 0, sizeof j);
+    j.hash = hash;
+    j.file = file;
+    j.size = size;
+    j.part_size = part_size;
+    j.parts = parts;
+    j.have = have;
+    j.outer = io;
+    j.held = held;
+    j.code = MODNET_OK;
+    InitializeCriticalSection(&j.lock);
+    count = missing < MODNET_PART_WORKERS ? missing : MODNET_PART_WORKERS;
+    for (n = 0; n < count; n++) { workers[n].job = &j; workers[n].slot = n; }
+    for (n = 1; n < count; n++) {            /* the caller's thread is the first worker */
+        threads[started] = CreateThread(NULL, 0, mn_parts_worker_proc, &workers[n], 0, NULL);
+        if (threads[started]) started++;
+    }
+    {
+        char *mine = t_mn_message;           /* the worker frees its thread's message: keep the caller's */
+        t_mn_message = NULL;
+        mn_parts_worker_proc(&workers[0]);
+        t_mn_message = mine;
+    }
+    if (started) WaitForMultipleObjects(started, threads, TRUE, INFINITE);
+    for (n = 0; n < started; n++) CloseHandle(threads[n]);
+    DeleteCriticalSection(&j.lock);
+    r->sent += j.sent;
+    r->requests += j.requests;
+    r->parts += j.parts_sent;
+    if (j.status) r->status = j.status;
+    if (mn_cancelled(io)) code = mn_fail(r, MODNET_E_CANCELLED, NULL);
+    else if (j.code != MODNET_OK) code = mn_fail(r, j.code, "%s", j.message[0] ? j.message : modnet_code_text(j.code));
+    else code = MODNET_OK;
+    return code;
+}
+
 /* An archive larger than one request, in parts: start (or resume), send the
  * parts the store does not hold, complete. A failure a retry could fix
  * starts again, and the store's answer then names the parts already held. */
@@ -842,37 +994,7 @@ static int mn_put_parts(const char *hash, HANDLE h, unsigned long long size, con
         if (code != MODNET_OK) { free(have); if (code == MODNET_E_CANCELLED || !modnet_transient(code)) return code; continue; }
         if (stored) { r->created = 0; return MODNET_OK; }
         for (n = 0; n < parts; n++) if (have[n]) held += n + 1 < parts ? part_size : size - part_size * n;
-        for (n = 0; n < parts && code == MODNET_OK; n++) {
-            char route[160];
-            wchar_t extra[64];
-            mn_part_progress pp;
-            modnet_io sub;
-            mn_req q;
-            unsigned long long at = part_size * n, len = n + 1 < parts ? part_size : size - at;
-            if (have[n]) continue;
-            _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s/parts/%u", hash, n + 1);
-            _snwprintf_s(extra, 64, _TRUNCATE, L"X-Build-Size: %llu\r\n", size);
-            pp.outer = io;
-            pp.base = held;
-            pp.total = size;
-            sub.cancel = io ? io->cancel : NULL;
-            sub.progress = io && io->progress ? mn_part_progress_cb : NULL;
-            sub.context = &pp;
-            memset(&q, 0, sizeof q);
-            q.verb = L"PUT";
-            q.route = route;
-            q.content_type = "application/octet-stream";
-            q.headers = extra;
-            q.body_file = h;
-            q.body_offset = at;
-            q.body_len = (size_t)len;
-            q.max_response = MN_SMALL_BODY;
-            resp = NULL;
-            code = mn_exchange(&q, &resp, &rlen, &sub, r);
-            if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "part");
-            free(resp);
-            if (code == MODNET_OK) { held += len; r->parts++; }
-        }
+        code = mn_send_parts(hash, h, size, part_size, parts, have, held, io, r);
         free(have);
         if (code == MODNET_OK) {
             double t0 = mn_now_ms();

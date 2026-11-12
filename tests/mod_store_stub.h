@@ -38,7 +38,8 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #define STUB_MAX_BODY    (100u * 1000u * 1000u)          /* the platform's request body limit */
-#define STUB_PART_SIZE   (95ull * 1024u * 1024u)          /* the Worker's PART_SIZE */
+#define STUB_PART_SIZE   (16ull * 1024u * 1024u)          /* the Worker's PART_SIZE */
+#define STUB_ONE_REQUEST (95ull * 1024u * 1024u)          /* the Worker's ONE_REQUEST_MAX */
 
 typedef struct stub_obj { char hash[65]; unsigned char *bytes; size_t len; unsigned scripts; } stub_obj;
 typedef struct stub_claim { char id[33], ref[260], secret[65]; char (*builds)[65]; int nb; int live; } stub_claim;
@@ -459,7 +460,7 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             g_stub.build_puts++;
             if (_stricmp(ctype, "application/zip") != 0) { stub_json(s, 415, "{\"error\":\"content-type must be application/zip\"}"); return; }
             if (cl_headers == 0) { stub_json(s, 411, "{\"error\":\"content-length required\"}"); return; }
-            if (blen > STUB_PART_SIZE) { stub_json(s, 413, "{\"error\":\"An archive over 95 MiB goes to the mod store in parts.\"}"); return; }
+            if (blen > STUB_ONE_REQUEST) { stub_json(s, 413, "{\"error\":\"An archive over 95 MiB goes to the mod store in parts.\"}"); return; }
             if (o) {
                 _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu,\"scripts\":%u}", hash, o->len, o->scripts);
                 stub_json(s, 200, out);

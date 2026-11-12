@@ -9,8 +9,10 @@
  * anything is installed.
  *
  * Nothing here limits a build's size or how many builds a claim names. One
- * request body is the platform's limit (100 MB on the Worker's plan), so an
- * archive larger than one part (MODNET_PART_SIZE) goes up in parts:
+ * request body is the platform's limit (100 MB on the Worker's plan), and one
+ * connection is slower than several, so an archive larger than
+ * MODNET_PART_SIZE goes up in parts, MODNET_PART_WORKERS of them at a time,
+ * each on its own connection:
  *   POST /mods/build/<hash>/parts {"size"} starts the upload, or resumes the
  *        one of that build and size, answering {"partSize","parts","have"};
  *   PUT  /mods/build/<hash>/parts/<n> (application/octet-stream, X-Build-Size)
@@ -49,10 +51,11 @@
 #define MODNET_HASH_HEX       64
 #define MODNET_CLAIM_HEX      32
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
-/* One part, and the largest archive one request sends: the Worker's part
- * size (api/mods_store.js PART_SIZE), under the platform's 100 MB (decimal)
- * request body limit. The store's own answer names the part size it uses. */
-#define MODNET_PART_SIZE      (95ull * 1024u * 1024u)
+/* The largest archive one request sends; a larger one goes up in parts of
+ * the size the store's own answer names (api/mods_store.js PART_SIZE, 16
+ * MiB), several at a time. Two parts' worth: below that, parts gain nothing. */
+#define MODNET_PART_SIZE      (32ull * 1024u * 1024u)
+#define MODNET_PART_WORKERS   4
 #define MODNET_ARCHIVE_TYPE   "application/zip"
 /* A claim reference (the published item a claim names) has no length of the
  * product's or the store's: any text without control characters. */

@@ -720,7 +720,8 @@ int main(void)
         list[0] = mbig;
         before = g_stub.part_puts;
         CHECK(modsync_upload_builds(list, 1, "item-huge", NULL, &st));
-        CHECK(st.code == MODNET_OK && g_stub.part_puts == before + 2 && stub_has_build(hbig) && st.builds_sent == 1);
+        CHECK(st.code == MODNET_OK && st.parts > 1 && g_stub.part_puts == before + (int)st.parts && stub_has_build(hbig) &&
+              st.builds_sent == 1);
         CHECK(modsync_release("item-huge", NULL, &st) && !stub_has_build(hbig));
         mt_remove_tree(dir);
     }
