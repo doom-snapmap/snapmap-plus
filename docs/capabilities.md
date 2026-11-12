@@ -977,7 +977,11 @@ them), `e:event` and `e:post` run any engine event, `e:signal` fires and `on.sig
 SnapMap's own events on any object, `cvar` reads and sets cvars and `decl` opens any decl; what a
 script sets in a cvar or a decl is put back when the map ends. It drives demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
 `path_length`, `path_points`, `find_position`, `firing_position`, `trigger`, `weapon_ready`,
-`recoil`, `aim_point`, `equip`, `laser`, `focus_tag`, `anim_valid`, `anim_force_via`,
+`recoil`, `aim_point`, `equip`, `laser`, `focus_tag`, `anim_valid`, `anim_force_via`, the game's
+own fire control (`fire_mode` sets the engine's fire mode so it pulls, holds and releases the
+trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `muzzle_on_target`, `focus`,
+`tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
+toward its focus),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
 demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state

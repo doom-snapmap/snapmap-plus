@@ -93,6 +93,10 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "getMonsterType",              "" },
     { "pullTriggerLeft",             "" },
     { "releaseTriggerLeft",          "" },
+    { "setFireMode",                 "i" },
+    { "ae_aIPullTrigger",            "4sb" },
+    { "enableBodyRotation",          "b" },
+    { "enableHeadTracking",          "b" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -186,6 +190,39 @@ float sh_ai_position_score(float dist_to_target, float ideal, float path_len, fl
     return fabsf(dist_to_target - ideal) + path_len * path_weight;
 }
 
+/* The index of `word` in `names` (n entries, the first `prefix` characters
+ * of each optional), -1 for none. */
+static int enum_parse(const char *const *names, int n, size_t prefix, const char *word)
+{
+    int i;
+    if (!word || !*word) return -1;
+    for (i = 0; i < n; i++)
+        if (!_stricmp(word, names[i]) || !_stricmp(word, names[i] + prefix)) return i;
+    return -1;
+}
+
+int sh_ai_fire_mode_parse(const char *word) { return enum_parse(SH_AI_FIREMODE_NAMES, SH_AI_FIREMODE_MAX, 11, word); }
+int sh_ai_idle_turn_parse(const char *word) { return enum_parse(SH_AI_IDLETURN_NAMES, SH_AI_IDLETURN_MAX, 11, word); }
+
+const char *sh_ai_fire_mode_name(int mode)
+{
+    return mode >= 0 && mode <= SH_AI_FIREMODE_MAX ? SH_AI_FIREMODE_NAMES[mode] : NULL;
+}
+
+const char *sh_ai_idle_turn_name(int turn)
+{
+    return turn >= 0 && turn <= SH_AI_IDLETURN_MAX ? SH_AI_IDLETURN_NAMES[turn] : NULL;
+}
+
+int sh_ai_muzzle_mode_parse(const char *word)
+{
+    if (!word) return -1;
+    if (!_stricmp(word, "pull")) return SH_AI_MUZZLE_PULL;
+    if (!_stricmp(word, "firing")) return SH_AI_MUZZLE_FIRING;
+    if (!_stricmp(word, "plain")) return SH_AI_MUZZLE_PLAIN;
+    return -1;
+}
+
 /* ------------------------------------------------------------- per demon */
 
 #define AI_ANY         3.0e38f   /* no upper bound: a setting may be as large as the script asks */
@@ -203,6 +240,7 @@ typedef struct ai_rec {
     sh_script_handle face_ent;
     float      face_pos[3];
     unsigned   hand_noted;       /* equip told the author of a weapon outside the weapon hand (a bit per hand) */
+    unsigned   turn_noted;       /* hold told the author of an idle turn with no turnParms entry (a bit per turn type) */
 } ai_rec;
 
 #define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
@@ -1636,6 +1674,280 @@ static int l_aim_point(lua_State *L)
     return 0;
 }
 
+/* ---- the engine's own fire control, aim focus and idle
+ *
+ * The game fires a demon's weapon by itself: its fire control (per frame, per
+ * weapon) pulls the trigger when the fire mode asks for it and the fire
+ * check passes, holds it for a burst whose length and pauses come from the
+ * weapon decl's skillSettings, and releases it. These calls set and read
+ * that machine's own state; none of them keeps a copy of it or decides
+ * anything the engine decides. */
+
+/* ai:fire_mode(mode): the fire control's mode, by the game's aiFireMode_t
+ * name ("FIREWHENREADY" or "AIFIREMODE_FIREWHENREADY": HOLDFIRE,
+ * WEAPON_EXPLICIT_RELEASE, WEAPON, FIREWHENREADY, SPRAYWHENREADY) or number.
+ * Sets it with the game's setFireMode event and answers true when the engine
+ * ran it. ai:fire_mode() reads it: the mode the script events set and the
+ * mode the animation events set, as enum names. */
+static int l_fire_mode(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    int mode = -1, state = 0, anim = 0;
+    sh_ai_arg a;
+    if (lua_isnoneornil(L, 2)) {
+        NEED_OP(L, fire_modes, "fire_mode");
+        ai = self_ai(L, "fire_mode", NULL);
+        if (!ai || g_engine->fire_modes(ai, &state, &anim) < 0) { lua_pushnil(L); return 1; }
+        lua_pushstring(L, sh_ai_fire_mode_name(state) ? sh_ai_fire_mode_name(state) : "?");
+        lua_pushstring(L, sh_ai_fire_mode_name(anim) ? sh_ai_fire_mode_name(anim) : "?");
+        return 2;
+    }
+    if (lua_type(L, 2) == LUA_TSTRING) {
+        mode = sh_ai_fire_mode_parse(lua_tostring(L, 2));
+        if (mode < 0)
+            sh_script_refuse(L, "\"fire_mode\" does not know the fire mode \"%s\" (the game's AIFIREMODE_ names: "
+                             "HOLDFIRE, WEAPON_EXPLICIT_RELEASE, WEAPON, FIREWHENREADY, SPRAYWHENREADY)",
+                             lua_tostring(L, 2));
+    } else if (lua_isinteger(L, 2)) {
+        lua_Integer v = lua_tointeger(L, 2);
+        if (v < 0 || v >= SH_AI_FIREMODE_MAX)
+            sh_script_refuse(L, "\"fire_mode\" needs a fire mode from 0 (HOLDFIRE) to 4 (SPRAYWHENREADY), got %s",
+                             lua_tostring(L, 2));
+        mode = (int)v;
+    } else {
+        sh_script_refuse(L, "\"fire_mode\" needs a fire mode name such as \"FIREWHENREADY\", got %s",
+                         luaL_typename(L, 2));
+    }
+    ai = self_ai(L, "fire_mode", &h);
+    if (!ai || !park(ai, h)) { lua_pushnil(L); return 1; }
+    a = arg_i(mode);
+    lua_pushboolean(L, run(ai, SH_AI_EV_SET_FIRE_MODE, &a, 1, NULL));
+    return 1;
+}
+
+static int refuse_no_hand(lua_State *L, const char *call)
+{
+    return sh_script_refuse(L, "\"%s\": this demon's weapon hand (weaponSlot in its aibehavior decl) is not a hand; "
+                            "name the hand, \"left\" or \"right\"", call);
+}
+
+/* ai:pull_trigger([check], [hand]): the engine pulls the trigger of the
+ * weapon in `hand`. Without check it is the game's pullTrigger event; with
+ * check = true it is the animation event ae_aIPullTrigger with its checkValid
+ * set, which runs the fire gate first (the sight, cooldown, range and muzzle
+ * tests of CheckPullTrigger) and pulls only when the gate passes. Answers
+ * whether the trigger is held afterwards (nil when the hand holds no weapon). */
+static int l_pull_trigger(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    int check = 0, hand, st = -1;
+    if (!lua_isnoneornil(L, 2)) {
+        if (lua_type(L, 2) != LUA_TBOOLEAN)
+            sh_script_refuse(L, "\"pull_trigger\" needs true or false for whether the game's fire check must pass "
+                             "first, got %s", luaL_typename(L, 2));
+        check = lua_toboolean(L, 2);
+    }
+    hand = check_hand(L, 3, "pull_trigger");
+    ai = self_ai(L, "pull_trigger", &h);
+    if (!ai) { lua_pushnil(L); return 1; }
+    if (!(hand = hand_of(ai, hand))) return refuse_no_hand(L, "pull_trigger");
+    if (!park(ai, h)) { lua_pushnil(L); return 1; }
+    if (check) {
+        sh_ai_arg a[3];
+        a[0] = arg_anim();
+        a[1] = arg_s('s', hand == SH_AI_HAND_LEFT ? "EQUIP_LEFT_HAND" : "EQUIP_RIGHT_HAND");
+        a[2] = arg_b(1);
+        run(ai, SH_AI_EV_AE_PULL_TRIGGER, a, 3, NULL);
+    } else if (hand == SH_AI_HAND_LEFT) {
+        run(ai, SH_AI_EV_PULL_TRIGGER_LEFT, NULL, 0, NULL);
+    } else {
+        run(ai, SH_AI_EV_PULL_TRIGGER, NULL, 0, NULL);
+    }
+    if (g_engine->trigger_state) st = g_engine->trigger_state(ai, hand);
+    if (st < 0) lua_pushnil(L); else lua_pushboolean(L, st == 1);
+    return 1;
+}
+
+/* ai:release_trigger([hand]): the engine releases the trigger of the weapon in `hand`. */
+static int l_release_trigger(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    int hand = check_hand(L, 2, "release_trigger");
+    ai = self_ai(L, "release_trigger", &h);
+    if (!ai) return 0;
+    if (!(hand = hand_of(ai, hand))) return refuse_no_hand(L, "release_trigger");
+    if (!park(ai, h)) return 0;
+    run(ai, hand == SH_AI_HAND_LEFT ? SH_AI_EV_RELEASE_TRIGGER_LEFT : SH_AI_EV_RELEASE_TRIGGER, NULL, 0, NULL);
+    return 0;
+}
+
+/* ai:muzzle_on_target([test], [hand]) -> on_target, info. The engine's own
+ * muzzle test (the one the fire gate and the burst's keep-firing check run: a
+ * ray from the weapon's muzzle tag against a sphere at the aim focus point),
+ * with `test` "pull" (the default), "firing" or "plain" for its three radius
+ * weights. info holds what the test reads: focus_valid (false when the demon
+ * has no aim focus: the test then fails), point, radius (the sphere's, before
+ * the weight), precision ("NORMAL", "PRECISE" or "MAX"), require_muzzle
+ * (whether the fire gate asks the test at all), and the two switches
+ * tracking and body_rotation. on_target is nil when the engine's test cannot
+ * be called in this session. */
+static int l_muzzle_on_target(lua_State *L)
+{
+    static const char *const precision[3] = { "NORMAL", "PRECISE", "MAX" };
+    void *ai;
+    sh_ai_focus_state fs;
+    int mode = SH_AI_MUZZLE_PULL, hand, on = -1;
+    if (!lua_isnoneornil(L, 2)) {
+        mode = lua_type(L, 2) == LUA_TSTRING ? sh_ai_muzzle_mode_parse(lua_tostring(L, 2)) : -1;
+        if (mode < 0)
+            sh_script_refuse(L, "\"muzzle_on_target\" needs the test as \"pull\", \"firing\" or \"plain\", got %s",
+                             lua_type(L, 2) == LUA_TSTRING ? lua_tostring(L, 2) : luaL_typename(L, 2));
+    }
+    hand = check_hand(L, 3, "muzzle_on_target");
+    NEED_OP(L, focus_state, "muzzle_on_target");
+    ai = self_ai(L, "muzzle_on_target", NULL);
+    memset(&fs, 0, sizeof fs);
+    if (!ai || g_engine->focus_state(ai, &fs) < 0) { lua_pushnil(L); return 1; }
+    hand = hand_of(ai, hand);
+    if (g_engine->muzzle_test && hand) on = g_engine->muzzle_test(ai, hand, mode);
+    if (on < 0) lua_pushnil(L); else lua_pushboolean(L, on == 1);
+    lua_createtable(L, 0, 7);
+    lua_pushboolean(L, fs.valid); lua_setfield(L, -2, "focus_valid");
+    push_vec(L, fs.point); lua_setfield(L, -2, "point");
+    lua_pushnumber(L, fs.radius); lua_setfield(L, -2, "radius");
+    lua_pushstring(L, fs.precision >= 0 && fs.precision < 3 ? precision[fs.precision] : "?");
+    lua_setfield(L, -2, "precision");
+    if (fs.require_muzzle >= 0) { lua_pushboolean(L, fs.require_muzzle); lua_setfield(L, -2, "require_muzzle"); }
+    lua_pushboolean(L, fs.tracking); lua_setfield(L, -2, "tracking");
+    lua_pushboolean(L, fs.body_rotation); lua_setfield(L, -2, "body_rotation");
+    return 2;
+}
+
+/* ai:focus(target): the engine's aim focus, which the fire gate needs (with
+ * no valid focus the muzzle test fails and a parked demon fires nothing).
+ * An entity is tracked (setFocus, aiming, kept in view); a position is a
+ * fixed aim point (the game's set-focus-to-position); nil clears the aim
+ * focus. ai:aim_at (entity or nil) and ai:aim_point (position or nil) are
+ * the same two orders under their older names. */
+static int l_focus(lua_State *L)
+{
+    sh_script_handle h = 0;
+    float p[3];
+    void *ai, *ent = NULL;
+    int kind = 0;
+    if (!lua_isnoneornil(L, 2)) {
+        if (is_entity(L, 2)) { sh_script_check_entity(L, 2, "focus"); kind = 1; }
+        else if (lua_type(L, 2) == LUA_TTABLE) { check_vec(L, 2, "focus", p); kind = 2; }
+        else sh_script_refuse(L, "\"focus\" needs an entity, a position or nil, got %s", luaL_typename(L, 2));
+    }
+    if (kind == 2) NEED_OP(L, aim_point, "focus");
+    ai = self_ai(L, "focus", &h);
+    if (!ai) return 0;
+    if (kind == 1 && !(ent = other_entity(L, 2, "focus"))) return 0;
+    if (!park(ai, h)) return 0;
+    if (kind == 1) {
+        sh_ai_arg a[4];
+        a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(SH_AI_AIMPOINT_CENTER);
+        run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
+    } else if (kind == 2) {
+        g_engine->aim_point(ai, p);
+    } else {
+        run(ai, SH_AI_EV_CLEAR_AIM_FOCUS, NULL, 0, NULL);
+    }
+    return 0;
+}
+
+/* ai:hold([turn]): stand the demon still the engine's way. Its pending move
+ * request is ended with the engine's ClearMove (the call every scripted
+ * action starts with, so the idle watchdog that trips on a request nobody
+ * finishes has none to count), and the engine's idle is ordered with a turn
+ * in place type: AIIDLETURN_ "RELAXED", "COMBAT" (the default, the one stock
+ * demons use in combat) or "INCOVER". The engine then turns the body toward
+ * the aim focus itself when the focus leaves the aim tracker's yaw limit. The
+ * turn needs a turnParms entry for that type in the demon's aibehavior decl
+ * and body rotation on: hold answers true when both hold, else false and a
+ * sentence saying which fails (the demon still stands). */
+static int l_hold(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    ai_rec *r;
+    sh_ai_arg a[2];
+    sh_ai_focus_state fs;
+    int turn = SH_AI_IDLETURN_COMBAT, ran, entry = -1, body = 1;
+    if (!lua_isnoneornil(L, 2)) {
+        if (lua_type(L, 2) == LUA_TSTRING) turn = sh_ai_idle_turn_parse(lua_tostring(L, 2));
+        else turn = -1;
+        if (turn < 0)
+            sh_script_refuse(L, "\"hold\" needs the turn as \"RELAXED\", \"COMBAT\" or \"INCOVER\" (the game's "
+                             "AIIDLETURN_ names), got %s",
+                             lua_type(L, 2) == LUA_TSTRING ? lua_tostring(L, 2) : luaL_typename(L, 2));
+    }
+    ai = self_ai(L, "hold", &h);
+    if (!ai || !(r = park(ai, h))) { lua_pushnil(L); return 1; }
+    if (g_engine->clear_move) g_engine->clear_move(ai);
+    a[0] = arg_i(0); a[1] = arg_i(turn);
+    ran = run(ai, SH_AI_EV_IDLE, a, 2, NULL);
+    if (ran) {
+        r->move.state = SH_AI_MOVE_NONE;
+        r->has_dest = 0;
+        r->facing = 0;
+    }
+    if (g_engine->idle_turn_entry) entry = g_engine->idle_turn_entry(ai, turn);
+    if (g_engine->focus_state) {
+        memset(&fs, 0, sizeof fs);
+        if (g_engine->focus_state(ai, &fs) >= 0) body = fs.body_rotation != 0;
+    }
+    if (entry == 0 && !(r->turn_noted & (1u << turn))) {
+        char line[512];
+        r->turn_noted |= 1u << turn;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "\"hold\": the demon's aibehavior decl has no turnParms entry for %s, so the game stands it "
+                    "still but never turns it in place; add one (turnParms item[%d]) for it to turn.",
+                    sh_ai_idle_turn_name(turn), turn);
+        shs_log(shs_mod_of(L), line);
+    }
+    lua_pushboolean(L, ran && entry != 0 && body);
+    if (ran && entry != 0 && body) return 1;
+    lua_pushstring(L, !ran ? "the idle order did not run"
+                           : entry == 0 ? "the demon's aibehavior decl has no turnParms entry for that turn"
+                                        : "body rotation is off");
+    return 2;
+}
+
+/* ai:tracking([on]) and ai:body_rotation([on]): the aim focus's head and
+ * aim tracking switch (the aim point is valid only while it is on) and the
+ * body rotation switch (the engine's turn in place needs it); the game's
+ * enableHeadTracking and enableBodyRotation events. With no argument they
+ * answer the switch. */
+static int switch_call(lua_State *L, const char *call, int ev, int body)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    sh_ai_focus_state fs;
+    sh_ai_arg a;
+    if (lua_isnoneornil(L, 2)) {
+        NEED_OP(L, focus_state, call);
+        ai = self_ai(L, call, NULL);
+        memset(&fs, 0, sizeof fs);
+        if (!ai || g_engine->focus_state(ai, &fs) < 0) { lua_pushnil(L); return 1; }
+        lua_pushboolean(L, body ? fs.body_rotation : fs.tracking);
+        return 1;
+    }
+    if (lua_type(L, 2) != LUA_TBOOLEAN)
+        sh_script_refuse(L, "\"%s\" needs true or false, got %s", call, luaL_typename(L, 2));
+    ai = self_ai(L, call, &h);
+    if (!ai || !park(ai, h)) { lua_pushnil(L); return 1; }
+    a = arg_b(lua_toboolean(L, 2));
+    lua_pushboolean(L, run(ai, ev, &a, 1, NULL));
+    return 1;
+}
+static int l_tracking(lua_State *L) { return switch_call(L, "tracking", SH_AI_EV_ENABLE_HEAD_TRACKING, 0); }
+static int l_body_rotation(lua_State *L) { return switch_call(L, "body_rotation", SH_AI_EV_ENABLE_BODY_ROTATION, 1); }
+
 static const char *check_node(lua_State *L, int idx, const char *call, const char *what)
 {
     size_t n = 0, i;
@@ -2218,6 +2530,10 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
     { "monster_type", l_monster_type }, { "pain_string", l_pain_string },
     { "block_pain", l_block_pain },
+    { "fire_mode", l_fire_mode },       { "pull_trigger", l_pull_trigger },
+    { "release_trigger", l_release_trigger }, { "muzzle_on_target", l_muzzle_on_target },
+    { "focus", l_focus },               { "hold", l_hold },
+    { "tracking", l_tracking },         { "body_rotation", l_body_rotation },
 };
 
 int sh_script_ai_register(void)
@@ -2468,6 +2784,78 @@ static int e_trigger_state(void *ai, int hand)
         if (w) {
             int slot = *(const int *)(w + SH_AI_OFF_WEAPON_SLOT);
             if (slot >= 0 && slot < 4) v = *(const int *)(w + SH_AI_OFF_WEAPON_TRIGGER + 4 * slot) == 0;
+        }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The engine's fire control (the object at ai +0x22278), the aim focus and the
+ * muzzle test's inputs, read at the reflected paths of script_api_ai.h. */
+static int e_fire_modes(void *ai, int *state, int *anim)
+{
+    int v = -1;
+    __try {
+        const uint8_t *fc = *(const uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_WEAPON_HOLDER);
+        if (fc) {
+            *state = *(const int *)(fc + SH_AI_FC_MODE_STATE);
+            *anim = *(const int *)(fc + SH_AI_FC_MODE_ANIM);
+            v = 1;
+        }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_focus_state(void *ai, sh_ai_focus_state *out)
+{
+    int v = -1;
+    __try {
+        const uint8_t *a = (const uint8_t *)ai;
+        const uint8_t *fc = *(const uint8_t * const *)(a + SH_AI_OFF_WEAPON_HOLDER);
+        out->valid = a[SH_AI_OFF_FOCUS_VALID] != 0;
+        memcpy(out->point, a + SH_AI_OFF_FOCUS_FINAL, 12);
+        out->radius = *(const float *)(a + SH_AI_OFF_FOCUS_RADIUS);
+        out->precision = *(const int *)(a + SH_AI_OFF_FOCUS_PRECISION);
+        out->tracking = a[SH_AI_OFF_FOCUS_TRACKING] != 0;
+        out->body_rotation = a[SH_AI_OFF_FOCUS_BODY_ROT] != 0;
+        out->require_muzzle = fc ? fc[SH_AI_FC_REQUIRE_MUZZLE] != 0 : -1;
+        v = 1;
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The engine's muzzle test (ai, weights, weapon) -> its bool in al. */
+static uint64_t (*g_muzzle)(void *ai, int mode, void *weapon);
+static void (*g_clear_move)(void *anim_fsm, int result_code);
+
+static int e_muzzle_test(void *ai, int hand, int mode)
+{
+    int v = -1;
+    uint8_t *w = weapon_in(ai, hand);
+    if (!g_muzzle || !w) return -1;
+    __try { v = (g_muzzle(ai, mode, w) & 0xFF) != 0; } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_clear_move(void *ai)
+{
+    int v = -1;
+    if (!g_clear_move) return -1;
+    __try {
+        void *fsm = *(void * const *)((const uint8_t *)ai + SH_AI_OFF_MOVE_FSM);
+        if (fsm) { g_clear_move(fsm, 0); v = 1; }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_idle_turn_entry(void *ai, int turn)
+{
+    int v = -1;
+    __try {
+        const uint8_t *decl = *(const uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_BEHAVIOR_DECL);
+        if (decl) {
+            const uint8_t *list = *(const uint8_t * const *)(decl + SH_AI_BEHAVIOR_TURNPARMS);
+            int count = *(const int *)(decl + SH_AI_BEHAVIOR_TURNCOUNT);
+            v = (list && turn >= 0 && turn < count && *(const void * const *)(list + (size_t)turn * 8) != NULL) ? 1 : 0;
         }
     } __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
@@ -3060,7 +3448,8 @@ static const sh_script_ai_engine k_engine = {
     e_move_status, e_trigger_state, e_path, e_frame,
     e_eye, e_sight, e_ground, e_anim_delta,
     e_set_recoil, e_weapon_ready, e_aim_point, e_anim_valid, e_path_points, e_firing_position, e_spline_clear,
-    e_pain_string, e_block_pain, e_weapon_hand, e_item
+    e_pain_string, e_block_pain, e_weapon_hand, e_item,
+    e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -3142,6 +3531,16 @@ int sh_script_ai_install(const uint8_t *module_base)
     else { g_live.trigger_state = NULL; g_live.weapon_ready = NULL; }
     if (r[SH_AI_SIG_INVENTORY_ITEM].addr) g_inventory_item = (void *(*)(void *, int))r[SH_AI_SIG_INVENTORY_ITEM].addr;
     else g_live.item = NULL;
+    /* The fire calls read engine memory at offsets the code they come from
+     * proves (each signature below contains them); a missing one takes only
+     * its own calls away. */
+    if (!r[SH_AI_SIG_FIRE_THINK].addr) g_live.fire_modes = NULL;
+    if (!r[SH_AI_SIG_MUZZLE_TEST].addr || !r[SH_AI_SIG_CHECK_PULL].addr) g_live.focus_state = NULL;
+    if (r[SH_AI_SIG_MUZZLE_TEST].addr) g_muzzle = (uint64_t (*)(void *, int, void *))r[SH_AI_SIG_MUZZLE_TEST].addr;
+    else g_live.muzzle_test = NULL;
+    if (r[SH_AI_SIG_CLEAR_MOVE].addr) g_clear_move = (void (*)(void *, int))r[SH_AI_SIG_CLEAR_MOVE].addr;
+    else g_live.clear_move = NULL;
+    if (!r[SH_AI_SIG_IDLE_ACTION].addr) g_live.idle_turn_entry = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

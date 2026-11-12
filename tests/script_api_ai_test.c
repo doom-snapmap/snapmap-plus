@@ -21,7 +21,13 @@
  * (sh_ai_firing_run, sh_ai_spline_run, sh_ai_anim_valid_run) over fake
  * primitives with a wall in the world; can_see and find_position against
  * that wall (the trace half of the sight); the pain-string stub run on a
- * synthetic pain request; the per-demon pain records. */
+ * synthetic pain request; the per-demon pain records.
+ *
+ * The engine's fire control calls (fire_mode, pull_trigger, release_trigger,
+ * muzzle_on_target, focus, hold, tracking, body_rotation): the engine traffic
+ * each one sends (the events, in order, with their arguments), what each reads
+ * back from the engine's state, every refusal sentence, and the calls an
+ * engine without the game parts refuses plainly. */
 #include "heap_out.h"
 #include <windows.h>
 #include <math.h>
@@ -115,6 +121,17 @@ typedef struct fent {
     const char *item[4];
     int   item_hand[4];
     int   asked_hand;
+    /* the engine's fire control and aim focus (the fire calls) */
+    int   sim;             /* the events change this state as the engine would */
+    int   fire_state, fire_anim;
+    int   focus_valid;
+    float focus_point[3], focus_radius;
+    int   precision, require, tracking, body_rot;
+    int   muzzle;          /* the engine's muzzle test answer (-1: unavailable) */
+    int   muzzle_mode, muzzle_hand;
+    int   gate;            /* the fire gate passes for a checked pull */
+    int   clear_moves;
+    unsigned no_turn_entry; /* bit per idle turn type: no turnParms entry */
 } fent;
 
 /* The world: a wall across x = g_wall_x (0: none) up to g_wall_top, and no
@@ -168,6 +185,20 @@ static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
         ev_cat(line);
     }
     ev_cat(")\n");
+    if (((fent *)e)->sim) {
+        fent *f = (fent *)e;
+        switch (ev) {
+        case SH_AI_EV_SET_FIRE_MODE: f->fire_state = args[0].i; break;
+        case SH_AI_EV_PULL_TRIGGER: case SH_AI_EV_PULL_TRIGGER_LEFT: f->trigger = 1; break;
+        case SH_AI_EV_RELEASE_TRIGGER: case SH_AI_EV_RELEASE_TRIGGER_LEFT: f->trigger = 0; break;
+        case SH_AI_EV_AE_PULL_TRIGGER: f->trigger = args[2].i ? f->gate : 1; break;
+        case SH_AI_EV_ENABLE_HEAD_TRACKING: f->tracking = args[0].i; break;
+        case SH_AI_EV_ENABLE_BODY_ROTATION: f->body_rot = args[0].i; break;
+        case SH_AI_EV_CLEAR_AIM_FOCUS: f->focus_valid = 0; break;
+        case SH_AI_EV_SET_FOCUS: f->focus_valid = 1; break;
+        default: break;
+        }
+    }
     if (ret) {
         if (ev == SH_AI_EV_IS_ENTITY_VISIBLE) *ret = ((fent *)e)->visible;
         else if (ev == SH_AI_EV_HAS_AWARENESS_OF_ENEMY) *ret = ((fent *)e)->enemy != 0;
@@ -234,6 +265,31 @@ static int f_item(void *ai, int index, char *decl, size_t cap, int *hand)
     return 1;
 }
 static int f_aim_point(void *ai, const float p[3]) { memcpy(((fent *)ai)->aim, p, 12); ((fent *)ai)->aimed = 1; return 1; }
+static int f_fire_modes(void *ai, int *state, int *anim)
+{
+    *state = ((fent *)ai)->fire_state; *anim = ((fent *)ai)->fire_anim;
+    return 1;
+}
+static int f_focus_state(void *ai, sh_ai_focus_state *out)
+{
+    fent *f = (fent *)ai;
+    out->valid = f->focus_valid;
+    memcpy(out->point, f->focus_point, 12);
+    out->radius = f->focus_radius;
+    out->precision = f->precision;
+    out->require_muzzle = f->require;
+    out->tracking = f->tracking;
+    out->body_rotation = f->body_rot;
+    return 1;
+}
+static int f_muzzle_test(void *ai, int hand, int mode)
+{
+    fent *f = (fent *)ai;
+    f->muzzle_hand = hand; f->muzzle_mode = mode;
+    return f->muzzle;
+}
+static int f_clear_move(void *ai) { ((fent *)ai)->clear_moves++; ev_cat("clear_move\n"); return 1; }
+static int f_idle_turn_entry(void *ai, int turn) { return !(((fent *)ai)->no_turn_entry & (1u << turn)); }
 static const sh_script_ai_engine g_fake;
 static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
 {
@@ -274,7 +330,8 @@ static const sh_script_ai_engine g_fake = {
     f_move_status, f_trigger, f_path, f_frame,
     f_eye, f_sight, f_ground, f_anim_delta,
     f_set_recoil, f_weapon_ready, f_aim_point, f_anim_valid, f_path_points, f_firing, f_spline,
-    f_pain_string, f_block_pain, f_weapon_hand, f_item
+    f_pain_string, f_block_pain, f_weapon_hand, f_item,
+    f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1111,6 +1168,279 @@ static void test_long_path(void)
     sh_script_map_end();
 }
 
+/* The engine's fire control through scripts: what each call sends and reads. */
+static void test_fire_calls(void)
+{
+    const char *log;
+    printf("-- the fire control calls send the engine's events and read its state\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('mode0 ' .. table.concat({self:fire_mode()}, ' '))\n"
+        "  print('set ' .. tostring(self:fire_mode('FIREWHENREADY')))\n"
+        "  print('mode1 ' .. table.concat({self:fire_mode()}, ' '))\n"
+        "  self:fire_mode('aifiremode_sprayWhenReady')\n"
+        "  self:fire_mode(0)\n"
+        "  print('mode2 ' .. table.concat({self:fire_mode()}, ' '))\n"
+        "  print('pull ' .. tostring(self:pull_trigger()))\n"
+        "  print('pulled ' .. tostring(self:trigger_pulled()))\n"
+        "  self:release_trigger()\n"
+        "  print('released ' .. tostring(self:trigger_pulled()))\n"
+        "  print('gated ' .. tostring(self:pull_trigger(true)))\n"
+        "  print('gated left ' .. tostring(self:pull_trigger(true, 'left')))\n"
+        "  self:release_trigger('left')\n"
+        "  print('plain left ' .. tostring(self:pull_trigger(false, 'left')))\n"
+        "  local on, info = self:muzzle_on_target()\n"
+        "  print(('muzzle %s %s %s %.1f %s %s %s %s'):format(tostring(on), tostring(info.focus_valid),\n"
+        "    info.point.x, info.radius, info.precision, tostring(info.require_muzzle), tostring(info.tracking),\n"
+        "    tostring(info.body_rotation)))\n"
+        "  print('firing ' .. tostring(self:muzzle_on_target('firing', 'left')))\n"
+        "  self:focus(ent(2))\n"
+        "  self:focus({x = 1, y = 2, z = 3})\n"
+        "  self:focus(nil)\n"
+        "  print('hold ' .. tostring(self:hold()))\n"
+        "  print('hold2 ' .. tostring(self:hold('RELAXED')))\n"
+        "  print('hold3 ' .. table.concat({tostring(self:hold('AIIDLETURN_INCOVER'))}, ' '))\n"
+        "  local h4, why4 = self:hold('incover')\n"
+        "  print('hold4 ' .. tostring(h4) .. ' | ' .. tostring(why4))\n"
+        "  print('track ' .. tostring(self:tracking()) .. ' ' .. tostring(self:body_rotation()))\n"
+        "  print('set tracking ' .. tostring(self:tracking(false)) .. ' ' .. tostring(self:body_rotation(true)))\n"
+        "  print('track2 ' .. tostring(self:tracking()) .. ' ' .. tostring(self:body_rotation()))\n"
+        "end)\n"));
+    g_ent[1].sim = 1;
+    g_ent[1].ready = 1;
+    g_ent[1].gate = 0;
+    g_ent[1].focus_valid = 1;
+    g_ent[1].focus_point[0] = 12; g_ent[1].focus_point[1] = 3; g_ent[1].focus_point[2] = 4;
+    g_ent[1].focus_radius = 24.5f;
+    g_ent[1].precision = 1;
+    g_ent[1].require = 1;
+    g_ent[1].tracking = 1;
+    g_ent[1].body_rot = 1;
+    g_ent[1].muzzle = 1;
+    g_ent[1].no_turn_entry = 1u << SH_AI_IDLETURN_INCOVER;
+    tick();
+    log = log_of("aaaaaaaa");
+    if (g_fail) printf("fire log:\n%s\nevents:\n%s", log, g_events);
+    if (sh_script_status("aaaaaaaa") != SH_SCRIPT_RUNNING) printf("stop: %s\nlog:\n%s\n", stop_of("aaaaaaaa"), log);
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    /* the fire mode: read, set by the engine's event, read back (the animation event's mode apart) */
+    CHECK(strstr(log, "mode0 AIFIREMODE_HOLDFIRE AIFIREMODE_HOLDFIRE\n") != NULL);
+    CHECK(strstr(log, "set true\n") != NULL);
+    CHECK(strstr(log, "mode1 AIFIREMODE_FIREWHENREADY AIFIREMODE_HOLDFIRE\n") != NULL);
+    CHECK(strstr(log, "mode2 AIFIREMODE_HOLDFIRE AIFIREMODE_HOLDFIRE\n") != NULL);
+    CHECK(strstr(g_events, "park\n1:ssaction") == NULL);   /* the park comes first, once */
+    CHECK(strstr(g_events, "1:setFireMode(3)\n1:setFireMode(4)\n1:setFireMode(0)\n1:pullTriggerRight()\n"
+                           "1:releaseTriggerRight()\n") != NULL);
+    /* the trigger: the engine's own state is read back after each order */
+    CHECK(strstr(log, "pull true\npulled true\nreleased false\n") != NULL);
+    CHECK(strstr(g_events, "1:ae_aIPullTrigger(noanim,EQUIP_RIGHT_HAND,1)\n"
+                           "1:ae_aIPullTrigger(noanim,EQUIP_LEFT_HAND,1)\n1:releaseTriggerLeft()\n"
+                           "1:pullTriggerLeft()\n") != NULL);
+    CHECK(strstr(log, "gated false\ngated left false\nplain left true\n") != NULL);
+    /* the muzzle test: the engine's answer and the inputs it read */
+    CHECK(strstr(log, "muzzle true true 12.0 24.5 PRECISE true true true\n") != NULL);
+    CHECK(g_ent[1].muzzle_mode == SH_AI_MUZZLE_FIRING && g_ent[1].muzzle_hand == SH_AI_HAND_LEFT);
+    CHECK(strstr(log, "firing true\n") != NULL);
+    /* the focus: an entity, a point, nothing */
+    CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n") != NULL);
+    CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 1 && g_ent[1].aim[1] == 2 && g_ent[1].aim[2] == 3);
+    CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
+    /* hold: the engine's ClearMove, then its idle with the turn type; the default is COMBAT */
+    CHECK(strstr(g_events, "clear_move\n1:ssaction_Idle(0,1)\nclear_move\n1:ssaction_Idle(0,0)\n"
+                           "clear_move\n1:ssaction_Idle(0,2)\nclear_move\n1:ssaction_Idle(0,2)\n") != NULL);
+    CHECK(g_ent[1].clear_moves == 4);
+    CHECK(strstr(log, "hold true\nhold2 true\n") != NULL && strstr(log, "hold3 false\n") != NULL);
+    CHECK(strstr(log, "hold4 false | the demon's aibehavior decl has no turnParms entry for that turn\n") != NULL);
+    CHECK(strstr(log, "\"hold\": the demon's aibehavior decl has no turnParms entry for AIIDLETURN_INCOVER, so the "
+                      "game stands it still but never turns it in place; add one (turnParms item[2]) for it to "
+                      "turn.") != NULL);
+    CHECK(strstr(log, "no turnParms entry for AIIDLETURN_INCOVER") != NULL &&
+          strstr(strstr(log, "no turnParms entry for AIIDLETURN_INCOVER") + 1, "no turnParms entry for AIIDLETURN_INCOVER") == NULL);   /* said once */
+    /* the two switches */
+    CHECK(strstr(log, "track true true\nset tracking true true\ntrack2 false true\n") != NULL);
+    CHECK(strstr(g_events, "1:enableHeadTracking(0)\n1:enableBodyRotation(1)\n") != NULL);
+    /* hold clears the script's record of its move */
+    sh_script_map_end();
+
+    /* body rotation off: the engine will not turn the demon; hold says so */
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print('hold ' .. table.concat({tostring(self:hold())}, ' '))\n"
+        "  local a, b = self:hold('COMBAT')\n"
+        "  print('why ' .. tostring(a) .. ' ' .. tostring(b))\n"
+        "end)\n"));
+    g_ent[1].body_rot = 0;
+    g_ent[1].focus_valid = 1;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "why false body rotation is off\n") != NULL);
+    sh_script_map_end();
+
+    /* a hold ends a move the script was waiting on */
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then self:face({x = 500, y = 0, z = 0}) end\n"
+        "  if step == 2 then self:hold() end\n"
+        "  local d = self:move_done()\n"
+        "  print('d ' .. step .. ' ' .. tostring(d) .. ' ' .. tostring(self:turn_done()))\n"
+        "end)\n"));
+    g_ent[1].move_status = 3;
+    g_ent[1].yaw = 90;   /* facing away from the face target until the hold */
+    tick(); tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "d 1 false false\nd 2 true true\n") != NULL);
+    sh_script_map_end();
+}
+
+/* A hand that is no hand, a muzzle test the session lacks, and the fire calls
+ * with no engine function behind them: each answers with one plain sentence. */
+static void test_fire_refusals(void)
+{
+    const char *log;
+    printf("-- the fire control calls refuse plainly\n");
+    expect_stop("self:fire_mode('BURST')", "\"fire_mode\" does not know the fire mode \"BURST\" (the game's AIFIREMODE_ "
+                "names: HOLDFIRE, WEAPON_EXPLICIT_RELEASE, WEAPON, FIREWHENREADY, SPRAYWHENREADY)");
+    expect_stop("self:fire_mode('AIFIREMODE_MAX')", "\"fire_mode\" does not know the fire mode \"AIFIREMODE_MAX\"");
+    expect_stop("self:fire_mode(9)", "\"fire_mode\" needs a fire mode from 0 (HOLDFIRE) to 4 (SPRAYWHENREADY), got 9");
+    expect_stop("self:fire_mode(true)", "\"fire_mode\" needs a fire mode name such as \"FIREWHENREADY\", got boolean");
+    expect_stop("ent(3):fire_mode('HOLDFIRE')", "\"fire_mode\" works only on a demon, and this entity is not one");
+    expect_stop("self:pull_trigger('yes')", "\"pull_trigger\" needs true or false for whether the game's fire check must "
+                "pass first, got string");
+    expect_stop("self:pull_trigger(true, 'third')", "\"pull_trigger\" needs the hand as \"left\" or \"right\"");
+    expect_stop("self:release_trigger('third')", "\"release_trigger\" needs the hand as \"left\" or \"right\"");
+    expect_stop("self:muzzle_on_target('hard')", "\"muzzle_on_target\" needs the test as \"pull\", \"firing\" or \"plain\", "
+                "got hard");
+    expect_stop("self:muzzle_on_target(5)", "\"muzzle_on_target\" needs the test as \"pull\", \"firing\" or \"plain\", got number");
+    expect_stop("self:focus(5)", "\"focus\" needs an entity, a position or nil, got number");
+    expect_stop("self:focus({x = 1, y = 'a', z = 3})", "\"focus\" needs a position with a number for y");
+    expect_stop("self:hold('SPRINT')", "\"hold\" needs the turn as \"RELAXED\", \"COMBAT\" or \"INCOVER\" (the game's "
+                "AIIDLETURN_ names), got SPRINT");
+    expect_stop("self:hold(1)", "\"hold\" needs the turn as \"RELAXED\", \"COMBAT\" or \"INCOVER\" (the game's "
+                "AIIDLETURN_ names), got number");
+    expect_stop("self:tracking('on')", "\"tracking\" needs true or false, got string");
+    expect_stop("self:body_rotation(1)", "\"body_rotation\" needs true or false, got number");
+
+    /* a demon whose weapon hand is not a hand */
+    CHECK(start("api = 1\non.think('ai/brute', function(self) self:pull_trigger() end)\n"));
+    g_ent[1].weapon_hand = 7;
+    tick();
+    CHECK(strstr(stop_of("aaaaaaaa"), "\"pull_trigger\": this demon's weapon hand (weaponSlot in its aibehavior decl) "
+                                      "is not a hand; name the hand, \"left\" or \"right\"") != NULL);
+    sh_script_map_end();
+    CHECK(start("api = 1\non.think('ai/brute', function(self) self:release_trigger() end)\n"));
+    g_ent[1].weapon_hand = 7;
+    tick();
+    CHECK(strstr(stop_of("aaaaaaaa"), "\"release_trigger\": this demon's weapon hand") != NULL);
+    sh_script_map_end();
+
+    /* an engine without the game parts: the reads refuse, the hold still stands the demon, and the muzzle
+     * test answers nil beside the inputs it could read */
+    {
+        sh_script_ai_engine bare = g_fake;
+        bare.fire_modes = NULL; bare.focus_state = NULL; bare.muzzle_test = NULL; bare.clear_move = NULL;
+        bare.idle_turn_entry = NULL;
+        sh_script_ai_set_engine(&bare);
+        expect_stop("self:fire_mode()", "\"fire_mode\" is not available in this session (Snapmap+ could not find the game "
+                    "function it needs; see the backend log)");
+        expect_stop("self:muzzle_on_target()", "\"muzzle_on_target\" is not available in this session");
+        expect_stop("self:tracking()", "\"tracking\" is not available in this session");
+        expect_stop("self:body_rotation()", "\"body_rotation\" is not available in this session");
+        CHECK(start("api = 1\non.think('ai/brute', function(self) print('hold ' .. tostring(self:hold())) end)\n"));
+        tick();
+        CHECK(strstr(log_of("aaaaaaaa"), "hold true\n") != NULL);   /* nothing to say it will not turn */
+        CHECK(strstr(g_events, "1:ssaction_Idle(0,1)\n") != NULL && strstr(g_events, "clear_move") == NULL);
+        sh_script_map_end();
+        bare = g_fake;
+        bare.muzzle_test = NULL;
+        sh_script_ai_set_engine(&bare);
+        CHECK(start("api = 1\non.think('ai/brute', function(self) local on, i = self:muzzle_on_target() "
+                    "print('muzzle ' .. tostring(on) .. ' ' .. tostring(i.focus_valid)) end)\n"));
+        g_ent[1].focus_valid = 1;
+        tick();
+        log = log_of("aaaaaaaa");
+        CHECK(strstr(log, "muzzle nil true\n") != NULL);
+        sh_script_map_end();
+        sh_script_ai_set_engine(&g_fake);
+    }
+    /* the engine's muzzle answer unavailable for this weapon (no weapon in the hand): nil */
+    CHECK(start("api = 1\non.think('ai/brute', function(self) print('muzzle ' .. tostring((self:muzzle_on_target()))) end)\n"));
+    g_ent[1].muzzle = -1;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "muzzle nil\n") != NULL);
+    sh_script_map_end();
+}
+
+/* The SDK's weapon library and the probe's fire line, on the same calls. */
+static void test_enemy_weapon_sdk(void)
+{
+    const char *log;
+    printf("-- enemy_weapon and the probe's fire line\n");
+    CHECK(start(
+        "api = 1\n"
+        "local W = require('enemy_weapon')\n"
+        "local probe = require('enemy_probe')\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then\n"
+        "    print('equip ' .. tostring(W.equip(self, 'weapon/ai/brute/claw')))\n"
+        "    W.fire_mode(self, 'FIREWHENREADY')\n"
+        "    W.tick(self, 0.1)\n"
+        "    W.tick(self, 0.1)\n"
+        "    print('pull ' .. tostring(W.trigger(self, true, true)))\n"
+        "    W.trigger(self, false)\n"
+        "    print('ready ' .. tostring(W.ready(self)) .. ' pulled ' .. tostring(W.pulled(self)))\n"
+        "    print('hold ' .. tostring(W.hold(self, 'COMBAT')))\n"
+        "    local on, info = W.on_target(self, 'firing')\n"
+        "    print('on ' .. tostring(on) .. ' ' .. tostring(info.focus_valid))\n"
+        "    local st = W.state(self)\n"
+        "    print('state ' .. st.mode .. ' ' .. st.anim_mode .. ' ' .. tostring(st.pulled) .. ' ' .. tostring(st.require_muzzle))\n"
+        "    local w = probe.wrap({ projectile = function() end }, { print = print })\n"
+        "    pcall(w.projectile, self, nil, 'rocket', {x = 0, y = 0, z = 0}, nil)\n"
+        "    W.focus(self, {x = 5, y = 6, z = 7})\n"
+        "  elseif step == 2 then\n"
+        "    W.tick(self, 0.1)\n"
+        "    W.focus(self, nil)\n"
+        "    W.tick(self, 0.1)\n"
+        "  end\n"
+        "end)\n"));
+    g_ent[1].sim = 1; g_ent[1].ready = 1; g_ent[1].gate = 1; g_ent[1].enemy = 2;
+    g_ent[1].focus_valid = 1; g_ent[1].muzzle = 1; g_ent[1].require = 1; g_ent[1].focus_radius = 20.0f;
+    g_ent[1].tracking = 1; g_ent[1].body_rot = 1;
+    tick();
+    g_ent[1].enemy = 3;
+    tick();
+    log = log_of("aaaaaaaa");
+    if (g_fail) printf("sdk log:\n%s\nevents:\n%s\nstop: %s\n", log, g_events, stop_of("aaaaaaaa"));
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    CHECK(strstr(log, "equip right\n") != NULL);
+    CHECK(strstr(log, "pull true\nready true pulled false\nhold true\non true true\n") != NULL);
+    CHECK(strstr(log, "state AIFIREMODE_FIREWHENREADY AIFIREMODE_HOLDFIRE false true\n") != NULL);
+    CHECK(strstr(log, "probe fire AIFIREMODE_FIREWHENREADY AIFIREMODE_HOLDFIRE pulled=false ready=true focus=true "
+                      "muzzle=true radius=20.0 precision=NORMAL require=true\n") != NULL);
+    /* the library asks the engine and keeps no fire state: the focus follows the enemy once per enemy, a fixed
+     * point is left alone, and nil gives the enemy back */
+    CHECK(strstr(g_events, "1:equipInventoryItemByIndex(0)\n1:setFireMode(3)\n1:setFocus(e2,1,1,3)\n"
+                           "1:ae_aIPullTrigger(noanim,EQUIP_RIGHT_HAND,1)\n1:releaseTriggerRight()\n"
+                           "clear_move\n1:ssaction_Idle(0,1)\n") != NULL);
+    CHECK(strstr(g_events, "1:releaseTriggerRight()\nclear_move") != NULL);
+    {
+        const char *a = strstr(g_events, "1:setFocus(e2,1,1,3)\n");
+        CHECK(a != NULL && strstr(a + 1, "1:setFocus(e2,1,1,3)\n") == NULL);
+        CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 5);   /* the fixed point went to the engine's aim-point call */
+        CHECK(strstr(g_events, "1:clearAimFocus()\n1:setFocus(e3,1,1,3)\n") != NULL);   /* nil, then the enemy again */
+    }
+    sh_script_map_end();
+}
+
 static void test_brain_refusals(void)
 {
     printf("-- the brain's calls refuse plainly\n");
@@ -1247,7 +1577,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 34);
+    CHECK(sh_script_ai_register() == 42);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -1272,6 +1602,9 @@ int main(int argc, char **argv)
     test_sight_against_a_wall();
     test_brain_calls();
     test_brain_refusals();
+    test_fire_calls();
+    test_fire_refusals();
+    test_enemy_weapon_sdk();
     test_anim_force_via();
     test_pain_records();
     test_pain_stub();

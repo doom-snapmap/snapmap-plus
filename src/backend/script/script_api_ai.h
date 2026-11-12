@@ -78,6 +78,10 @@ enum sh_ai_ev {
     SH_AI_EV_GET_MONSTER_TYPE,       /* getMonsterType             -> i  */
     SH_AI_EV_PULL_TRIGGER_LEFT,      /* pullTriggerLeft                  */
     SH_AI_EV_RELEASE_TRIGGER_LEFT,   /* releaseTriggerLeft               */
+    SH_AI_EV_SET_FIRE_MODE,          /* setFireMode                i     */
+    SH_AI_EV_AE_PULL_TRIGGER,        /* ae_aIPullTrigger           4sb   */
+    SH_AI_EV_ENABLE_BODY_ROTATION,   /* enableBodyRotation         b     */
+    SH_AI_EV_ENABLE_HEAD_TRACKING,   /* enableHeadTracking         b     */
     SH_AI_EV_COUNT
 };
 
@@ -101,6 +105,32 @@ extern const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT];
 #define SH_AI_AWARE_LOST            1
 #define SH_AI_AWARE_SUSPECTED       2
 #define SH_AI_AWARE_CONFIRMED       3
+
+/* aiFireMode_t (the fire control's modes) and aiIdleTurn_t (the turn in place
+ * an idle order asks for), 13954591; tests/script_ai_sigs_test.c compares both
+ * name tables with the executables' own enum tables. */
+#define SH_AI_FIREMODE_HOLDFIRE              0
+#define SH_AI_FIREMODE_WEAPON_EXPLICIT_RELEASE 1
+#define SH_AI_FIREMODE_WEAPON                2
+#define SH_AI_FIREMODE_FIREWHENREADY         3
+#define SH_AI_FIREMODE_SPRAYWHENREADY        4
+#define SH_AI_FIREMODE_MAX                   5   /* the end of the list, not a mode */
+#define SH_AI_IDLETURN_RELAXED               0
+#define SH_AI_IDLETURN_INCOVER               2
+#define SH_AI_IDLETURN_MAX                   3
+extern const char *const SH_AI_FIREMODE_NAMES[SH_AI_FIREMODE_MAX + 1];
+extern const char *const SH_AI_IDLETURN_NAMES[SH_AI_IDLETURN_MAX + 1];
+/* The value of a mode or turn named by its whole enum name or without its
+ * prefix ("AIFIREMODE_FIREWHENREADY" or "FIREWHENREADY", any case); -1 for a
+ * word that is none (SH_AI_FIREMODE_MAX is not a mode: -1 too). Pure. */
+int sh_ai_fire_mode_parse(const char *word);
+int sh_ai_idle_turn_parse(const char *word);
+/* The enum name of a value, NULL past the table. Pure. */
+const char *sh_ai_fire_mode_name(int mode);
+const char *sh_ai_idle_turn_name(int turn);
+/* The muzzle test's three weights (CheckPullTrigger asks 0, the burst's
+ * keep-firing check 1): "pull", "firing" or "plain"; -1 for another word. */
+int sh_ai_muzzle_mode_parse(const char *word);
 
 /* One event argument as the calls build it (the engine side turns it into
  * the engine's 0x18-byte argument record). */
@@ -263,6 +293,24 @@ int         sh_ai_blocked(void *ai, uint32_t spawn_id, int reaction, int now_ms)
 
 /* ------------------------------------------------------------ engine seam */
 
+/* The muzzle test's weights (the ray against a sphere of the focus radius:
+ * the radius is halved at the pull, 1.5 times while the burst runs). */
+#define SH_AI_MUZZLE_PULL   0
+#define SH_AI_MUZZLE_FIRING 1
+#define SH_AI_MUZZLE_PLAIN  2
+
+/* What the engine holds about the aim focus (idAI2.aiVolatile.focus): the
+ * muzzle test reads valid, point and radius and nothing else. */
+typedef struct sh_ai_focus_state {
+    int   valid;            /* foci[AIM].finalFocusPointIsValid */
+    float point[3];         /* foci[AIM].finalFocusPoint: the sphere's centre */
+    float radius;           /* focus.aimFocusTargetRadius */
+    int   precision;        /* focus.muzzleAimPrecision: 0 NORMAL, 1 PRECISE, 2 MAX */
+    int   require_muzzle;   /* fireControl.requireMuzzleOnTarget, -1 unreadable */
+    int   tracking;         /* focus.enableHeadTracking */
+    int   body_rotation;    /* focus.enableBodyRotation */
+} sh_ai_focus_state;
+
 typedef struct sh_script_ai_engine {
     void    *(*entity)(sh_script_handle h);          /* the live entity, NULL when gone */
     sh_script_handle (*handle_of)(void *entity);      /* a handle a script can hold, 0 for none */
@@ -319,6 +367,24 @@ typedef struct sh_script_ai_engine {
      * and the equipSlot_t its decl puts it in; 0 past the last item; -1
      * unreadable. */
     int      (*item)(void *ai, int index, char *decl, size_t cap, int *hand);
+    /* The engine's fire control: the fire mode the script events write
+     * (aiVolatile.fireControl.fireMode_state) and the one the animation
+     * events write (fireMode_anim). 1 read, -1 unreadable. */
+    int      (*fire_modes)(void *ai, int *state, int *anim);
+    /* The aim focus and the muzzle test's inputs (reflected paths in
+     * sh_ai_focus_state). 1 read, -1 unreadable. */
+    int      (*focus_state)(void *ai, sh_ai_focus_state *out);
+    /* The engine's own muzzle test (the one CheckPullTrigger runs) for the
+     * weapon in `hand`, with weights mode (SH_AI_MUZZLE_*): 1 on target, 0
+     * not, -1 unavailable (no such weapon or the function is missing). */
+    int      (*muzzle_test)(void *ai, int hand, int mode);
+    /* The engine's ClearMove on the demon's animFSM (the call the scripted
+     * actions start with): 1 done, -1 unavailable. */
+    int      (*clear_move)(void *ai);
+    /* Whether the demon's aibehavior decl has a turnParms entry for idle
+     * turn type `turn` (the entry the engine's idle turn reads): 1 yes, 0 no,
+     * -1 unreadable. */
+    int      (*idle_turn_entry)(void *ai, int turn);
 } sh_script_ai_engine;
 
 /* equipSlot_t: the two hands a demon holds a weapon in. */
@@ -399,6 +465,11 @@ enum sh_ai_sig {
     SH_AI_SIG_WEAPON_IN_SLOT,      /* the weapon in an equip slot (the demon, equipSlot_t) */
     SH_AI_SIG_INVENTORY_ITEM,      /* inventory item by index (the inventory list, index) */
     SH_AI_SIG_MOVE_TRANSITION,     /* the move system's transition query (detoured) */
+    SH_AI_SIG_MUZZLE_TEST,         /* the muzzle test (ai, mode, weapon): ray against the focus sphere */
+    SH_AI_SIG_CLEAR_MOVE,          /* ClearMove(animFSM, result code) */
+    SH_AI_SIG_FIRE_THINK,          /* the fire control's per-frame think (reads the two fire modes) */
+    SH_AI_SIG_IDLE_ACTION,         /* the ssaction_Idle handler (writes idleTurnType, reads turnParms) */
+    SH_AI_SIG_CHECK_PULL,          /* CheckPullTrigger (the gate; reads requireMuzzleOnTarget) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -465,6 +536,22 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 };
 #define SH_AI_MOVE_KIND_TURN       3
 #define SH_AI_MOVE_REQ_OVERSHOOT   0x102u
+
+/* idAI2 offsets the fire calls read (both renderers, 13954591; reflected
+ * paths in brackets; tests/script_ai_sigs_test.c checks the code that uses
+ * each). The fire control is the object at ai +0x22278. */
+#define SH_AI_FC_MODE_ANIM        0x1Cu     /* fireControl: [fireMode_anim] set by ae_setFireMode */
+#define SH_AI_FC_MODE_STATE       0x20u     /* fireControl: [fireMode_state] set by setFireMode */
+#define SH_AI_FC_REQUIRE_MUZZLE   0x27u     /* fireControl: [requireMuzzleOnTarget], a byte */
+#define SH_AI_OFF_FOCUS_VALID     0xEE9Bu   /* [aiVolatile.focus.foci[0].finalFocusPointIsValid] */
+#define SH_AI_OFF_FOCUS_FINAL     0xE020u   /* [...foci[0].finalFocusPoint] three floats */
+#define SH_AI_OFF_FOCUS_TRACKING  0x11AE0u  /* [aiVolatile.focus.enableHeadTracking] */
+#define SH_AI_OFF_FOCUS_BODY_ROT  0x11AE1u  /* [aiVolatile.focus.enableBodyRotation] */
+#define SH_AI_OFF_FOCUS_RADIUS    0x11AE4u  /* [aiVolatile.focus.aimFocusTargetRadius] */
+#define SH_AI_OFF_FOCUS_PRECISION 0x11AE8u  /* [aiVolatile.focus.muzzleAimPrecision] */
+#define SH_AI_OFF_BEHAVIOR_DECL   0xC120u   /* [aiEditable.behaviors.decl]: turnParms list +0x528, count +0x530 */
+#define SH_AI_BEHAVIOR_TURNPARMS  0x528u
+#define SH_AI_BEHAVIOR_TURNCOUNT  0x530u
 
 /* idAI2 offsets the calls read (both renderers, 13954591). */
 #define SH_AI_OFF_MOVE_FSM        0x23198u  /* move FSM pointer; status int at +0xD20 */

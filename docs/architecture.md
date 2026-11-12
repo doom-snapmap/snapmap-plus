@@ -2052,6 +2052,57 @@ is touched, and a removed demon answers nil.
   the weapon hand, read through the engine's own per-hand read (VK
   0x14074AB30 / GL 0x14074A440); `equip` by name reads the inventory (vtable
   +0x660, item VK 0x140EEDC50 / GL 0x140EED200).
+- **The engine's fire control.** A demon in a firing fire mode fires by
+  itself: the fire control (VK 0x1404456E0) asks the fire gate
+  (`CheckPullTrigger`, VK 0x1404439D0) every frame the trigger is released,
+  pulls when it passes, holds the trigger for a burst drawn from the weapon
+  decl's skillSettings (and the aibehavior's weaponUseBehaviorList hold
+  times), releases it, and waits the skillSettings' repull interval. The gate
+  checks the attack token, the weapon's wait, awareness and recent sight of the
+  aim focus' target, the weapon's range, that the aim tracker has caught up
+  with the target, and the muzzle test (VK 0x140436460): a ray from the
+  `muzzlereference` tag against a sphere at the aim focus point
+  (`foci[0].finalFocusPoint`) whose radius is `aimFocusTargetRadius` times 3
+  (`muzzleAimPrecision` PRECISE drops the 3), halved at the pull and 1.5 times
+  while a burst runs; with no valid aim focus (`finalFocusPointIsValid`) it
+  fails. The calls set and read that machine and keep no copy of it:
+  `fire_mode(mode)` sends `setFireMode` with an `AIFIREMODE_` name or number
+  (`FIREWHENREADY` and `SPRAYWHENREADY` are the self-firing modes) and
+  `fire_mode()` answers the mode the script events set and the one the
+  animation events set (`fireControl` +0x20 and +0x1C); `pull_trigger([check],
+  [hand])` is `pullTrigger`, or with `check` the animation event
+  `ae_aIPullTrigger` with `checkValid`, which runs the fire gate first, and
+  answers the trigger state read back; `release_trigger([hand])` is
+  `releaseTrigger`; `trigger_pulled` and `weapon_ready` read the engine's own
+  trigger word and next-pull time; `muzzle_on_target([test], [hand])` calls the
+  engine's muzzle test with the weapon in the hand (weights `"pull"`,
+  `"firing"` or `"plain"`) and answers it with what it read: `focus_valid`,
+  `point`, `radius`, `precision`, `require_muzzle` (whether the gate asks the
+  test, the fire control's +0x27 byte), `tracking` and `body_rotation`;
+  `focus(entity | position | nil)` sets the aim focus (`setFocus` for an
+  entity, the set-focus-to-position call for a point, `clearAimFocus` for nil;
+  `aim_at` and `aim_point` are the same two orders); `tracking([on])` and
+  `body_rotation([on])` are the `enableHeadTracking` and `enableBodyRotation`
+  switches the aim point and the turn in place need. `hold([turn])` stands
+  the demon the engine's way: the engine's `ClearMove` (VK 0x1404EA6F0, on the
+  animFSM at ai+0x23198) ends the pending move request, so the idle watchdog
+  has none to count, and `ssaction_Idle` is ordered with an `AIIDLETURN_` type
+  (`"RELAXED"`, `"COMBAT"` by default, `"INCOVER"`), which the idle action
+  (VK 0x1405DCDD0) stores in the animFSM only when the demon's aibehavior decl
+  has a turnParms entry for it. The engine then turns the body itself when the
+  aim focus leaves the aim tracker's yaw range. `hold` answers whether that
+  turn can happen (a turnParms entry for the type and body rotation on) and,
+  when not, why. The fire modes and idle turn types are the engine's enums,
+  checked against both executables.
+- **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
+  `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
+  from the DLL) is the interface a demon's behaviour layer uses for weapons:
+  `equip`, `fire_mode`, `pull`, `release`, `trigger`, `pulled`, `ready`,
+  `on_target`, `focus`, `hold`, `state` and `tick`, each one of the calls
+  above. Its `tick` only keeps the aim focus on the demon's current enemy; the
+  pull, the burst, the release and every shot are the engine's, as its header
+  lists. `enemy_probe` logs `probe fire` at each shot: the fire modes, trigger,
+  wait, focus, the engine's muzzle test and the muzzle sphere.
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
@@ -2130,7 +2181,13 @@ primitives with a wall and a hole in the world, `can_see` and
 pain request. `tests/script_ai_sigs_test.c` checks the signatures, the
 detour windows, the path site, the call targets and slot table the new calls
 read, the pain request's compare and the monster type table on both
-executables.
+executables. The fire control calls are tested the same way: every event each
+sends, in order, with its arguments, the state each reads back, each refusal
+sentence, and the answers of an engine that lacks the game parts; the
+signatures of the muzzle test, `ClearMove`, the fire control think, the idle
+action and the fire gate are checked on both executables with the offsets the
+calls read from them, and the fire mode and idle turn name tables against the
+executables' own enum tables.
 
 ### Mod scripts: the whole game by name
 

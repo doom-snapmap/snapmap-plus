@@ -48,7 +48,24 @@
  *                      equip handlers and the fire control's per-hand loop read hands through it (evidence
  *                      snaphak-re logs/shared-ghidra/SCF2-*).
  *   AiInventoryItem    VK 0x140EEDC50  GL 0x140EED200  the inventory list's item `index` (the list the demon's
- *                      vtable +0x660 returns, ai +0x9900), as EquipInventoryItem (VK 0x14040CB00) reads it. */
+ *                      vtable +0x660 returns, ai +0x9900), as EquipInventoryItem (VK 0x14040CB00) reads it.
+ *   AiMuzzleTest       VK 0x140436460  GL 0x1404353D0  the muzzle test (ai, mode, weapon): false while the aim
+ *                      focus is not valid (ai +0xEE9B), else a ray from the muzzle tag (the weapon's muzzle when
+ *                      the model has none) against a sphere at the focus point (ai +0xE020) of radius
+ *                      ai +0x11AE4, times 3 unless ai +0x11AE8 is PRECISE, times 0.5 for mode 0 and 1.5 for
+ *                      mode 1. CheckPullTrigger asks it with mode 0; called directly it is the engine's answer
+ *                      (shared Ghidra m5-fire FUN_140436460; GL by the same bytes).
+ *   AiClearMove        VK 0x1404EA6F0  GL 0x1404E9260  ClearMove(animFSM, result code): the call the scripted
+ *                      actions start with (animFSM = *(ai+0x23198), code 0); it ends the move request, the path
+ *                      state and the flight path. The GL address is the one place those bytes match.
+ *   AiFireThink        VK 0x1404456E0  GL 0x140444600  the fire control's per-frame think: its two fire modes at
+ *                      the fire control +0x1C (animation events) and +0x20 (script events), the control at
+ *                      ai +0x22278. Present for the offsets the test reads from it.
+ *   AiIdleAction       VK 0x1405DCDD0  GL 0x1405DC0A0  the ssaction_Idle handler: stores the idle turn type in
+ *                      the animFSM when the aibehavior decl (ai +0xC120) has a turnParms entry (list +0x528,
+ *                      count +0x530) for it. Present for those offsets.
+ *   AiCheckPull        VK 0x1404439D0  GL 0x1404428F0  CheckPullTrigger, the fire gate: asks the muzzle test only
+ *                      when the fire control's requireMuzzleOnTarget byte (+0x27) is set (cmp at +0x25A). */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -118,6 +135,31 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C0 E9 FF FF B8 40 17 00 00 E8 ?? ?? ?? ?? 48 2B E0 "
       "48 C7 45 08 FE FF FF FF",
       0x4FC0B0u, 0x4FADE0u },
+    { "AiMuzzleTest",
+      "48 81 EC A8 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 00 00 00 80 B9 9B EE 00 00 00 75 1A 32 C0 "
+      "48 8B 8C 24 80 00 00 00 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 A8 00 00 00 C3 83 B9 E8 1A 01 00 01 F2 0F 10 81 "
+      "20 E0 00 00 8B 81 28 E0 00 00",
+      0x436460u, 0x4353D0u },
+    { "AiClearMove",
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC E0 01 00 00 48 C7 44 24 60 FE FF FF FF 48 89 9C 24 30 02 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 D0 01 00 00 44 8B E2 4C 8B F9 48 8B 09 48 83 B9 40 CD 02 00 00 "
+      "74 11",
+      0x4EA6F0u, 0x4E9260u },
+    { "AiFireThink",
+      "48 89 5C 24 08 48 89 74 24 10 44 89 44 24 18 57 48 83 EC 20 48 8B FA 48 8B D9 8B 51 10 85 D2 74 11 48 8B CF "
+      "E8 ?? ?? ?? ?? 44 8B 44 24 40 48 89 43 08 48 8B D7 48 8B CB E8 ?? ?? ?? ?? 8B 43 20 85 C0 74 58 8B 4B 1C "
+      "85 C9 74 51 83 F9 05 0F 45 C1 85 C0 74 47 7E 55 83 F8 02 7E 2E 83 F8 03 74",
+      0x4456E0u, 0x444600u },
+    { "AiIdleAction",
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 8B F1 45 8B F1 49 8B C8 "
+      "49 8B F8 48 8B DA E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 63 54 24 50 48 8B E8 89 96 08 01 00 00 85 D2 "
+      "78 7E 48 8B 8F 20 C1 00 00 3B 91 30 05 00 00 7D 6F 48 8B 89 28 05 00 00 48 83",
+      0x5DCDD0u, 0x5DC0A0u },
+    { "AiCheckPull",
+      "40 56 57 41 55 41 56 48 83 EC 48 4D 8B F1 49 8B F0 48 8B FA 4C 8B E9 4D 85 C0 75 0D 32 C0 48 83 C4 48 41 5E "
+      "41 5D 5F 5E C3 48 8B CE E8 ?? ?? ?? ?? 84 C0 74 E7 4D 85 F6 74 10 49 8B 06 49 8B CE FF 90 80 05 00 00 84 C0 "
+      "75 D2 4C 89 7C 24 40 4C 8B BC 24 98 00 00 00 41 8B 07",
+      0x4439D0u, 0x4428F0u },
     { NULL, NULL, 0, 0 }
 };
 
@@ -130,6 +172,16 @@ const char *const SH_AI_MONSTER_NAMES[SH_AI_MONSTER_TYPES] = {
     "AI_MONSTER_PINKY_SPECTRE", "AI_MONSTER_NPC", "AI_MONSTER_CACODEMON", "AI_MONSTER_REVENANT", "AI_MONSTER_BARON",
     "AI_MONSTER_MAX_HEAVY", "AI_MONSTER_CYBERDEMON", "AI_MONSTER_OLIVIASGUARD", "AI_MONSTER_TALISMANGUARD",
     "AI_MONSTER_CYBERDEMON_HELL", "AI_MONSTER_SPIDER_MASTERMIND"
+};
+
+/* aiFireMode_t and aiIdleTurn_t, in the engine's order (13954591; the sigs test compares them
+ * with the executables' own enum tables). */
+const char *const SH_AI_FIREMODE_NAMES[SH_AI_FIREMODE_MAX + 1] = {
+    "AIFIREMODE_HOLDFIRE", "AIFIREMODE_WEAPON_EXPLICIT_RELEASE", "AIFIREMODE_WEAPON", "AIFIREMODE_FIREWHENREADY",
+    "AIFIREMODE_SPRAYWHENREADY", "AIFIREMODE_MAX"
+};
+const char *const SH_AI_IDLETURN_NAMES[SH_AI_IDLETURN_MAX + 1] = {
+    "AIIDLETURN_RELAXED", "AIIDLETURN_COMBAT", "AIIDLETURN_INCOVER", "AIIDLETURN_MAX"
 };
 
 /* The pain-string stub (script_api_ai.h). Entered by the 14-byte jump that

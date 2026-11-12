@@ -16,7 +16,14 @@
  *     atomic-string set and its later compare of each anim's +0x48 string
  *     with [rbp+0x88]; the threat row and path length detour windows; the
  *     animation and root-motion functions; the monster type names against
- *     the executable's own enum table.
+ *     the executable's own enum table;
+ *   - the fire calls: the muzzle test reads the focus fields the calls read
+ *     (+0xEE9B, +0xE020, +0x11AE4, +0x11AE8), ClearMove takes the animFSM,
+ *     the fire control's think reads its two fire modes at +0x1C and +0x20,
+ *     the idle action stores idleTurnType at animFSM +0xBF0 after reading
+ *     the behaviour decl's turnParms (+0xC120, +0x528, +0x530), the fire gate
+ *     asks requireMuzzleOnTarget at +0x27, and the fire mode and idle turn
+ *     names against the executable's own enum tables.
  * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
@@ -79,6 +86,26 @@ static int window_has(const uint8_t *base, uint32_t from, uint32_t len, const ch
 {
     uint32_t k;
     for (k = from; k + n <= from + len; k++) if (!memcmp(base + k, bytes, n)) return 1;
+    return 0;
+}
+
+/* An enum table of the executable: {name pointer, value qword} entries 0x10 apart, the first
+ * named names[0] with value 0, then names[j] with value j. 1 when found. */
+static int enum_table_found(const uint8_t *base, uint32_t size, uint64_t image_base, const char *const *names, int n)
+{
+    uint32_t k;
+    for (k = 0x1000; k + 0x10u * (uint32_t)n < size; k += 8) {
+        uint64_t p0 = qword_at(base, k), v0 = qword_at(base, k + 8);
+        int j, ok = 1;
+        if (v0 != 0 || p0 < image_base || p0 - image_base >= size) continue;
+        if (strcmp((const char *)base + (p0 - image_base), names[0])) continue;
+        for (j = 0; j < n && ok; j++) {
+            uint64_t pn = qword_at(base, k + 0x10u * (uint32_t)j), vn = qword_at(base, k + 0x10u * (uint32_t)j + 8);
+            if (pn < image_base || pn - image_base >= size) { ok = 0; break; }
+            if (strcmp((const char *)base + (pn - image_base), names[j]) || vn != (uint64_t)j) ok = 0;
+        }
+        if (ok) return 1;
+    }
     return 0;
 }
 
@@ -237,6 +264,47 @@ static void check_image(const char *path)
         printf("  aiMonsterType_t table 0x%X\n", found);
         CHECK(found != 0);
     }
+
+    /* The fire calls. */
+    if (rva[SH_AI_SIG_MUZZLE_TEST]) {
+        uint32_t m = rva[SH_AI_SIG_MUZZLE_TEST];
+        /* the sphere's radius (ai+0x11AE4) and its precision word (ai+0x11AE8), the weights 3.0, 0.5 and 1.5 */
+        CHECK(window_has(base, m, 0x90, "\x83\xB9\xE8\x1A\x01\x00\x01", 7));
+        CHECK(window_has(base, m, 0x90, "\xE4\x1A\x01\x00", 4));
+        CHECK(window_has(base, m, 0x90, "\x80\xB9\x9B\xEE\x00\x00\x00", 7));
+        CHECK(window_has(base, m, 0x90, "\x20\xE0\x00\x00", 4));
+    }
+    if (rva[SH_AI_SIG_CLEAR_MOVE]) {
+        uint32_t c = rva[SH_AI_SIG_CLEAR_MOVE];
+        /* ClearMove(fsm, code): the code in r12d, the fsm in r15, the demon is [fsm] */
+        CHECK(window_has(base, c, 0x60, "\x44\x8B\xE2\x4C\x8B\xF9\x48\x8B\x09", 9));
+    }
+    if (rva[SH_AI_SIG_FIRE_THINK]) {
+        uint32_t t = rva[SH_AI_SIG_FIRE_THINK];
+        /* the state mode at +0x20, the animation event's mode at +0x1C; mode 5 (MAX) is skipped */
+        CHECK(window_has(base, t, 0x60, "\x8B\x43\x20\x85\xC0\x74", 6));
+        CHECK(window_has(base, t, 0x60, "\x8B\x4B\x1C\x85\xC9\x74", 6));
+        CHECK(window_has(base, t, 0x60, "\x83\xF9\x05", 3));
+    }
+    if (rva[SH_AI_SIG_IDLE_ACTION]) {
+        uint32_t a = rva[SH_AI_SIG_IDLE_ACTION];
+        /* turnParms count (+0x530) and list (+0x528) of the behaviour decl at ai+0xC120, then the idle
+         * turn type stored at animFSM +0xBF0 (animFSM at ai+0x23198) and the move flag 8 at +0xB6C */
+        CHECK(window_has(base, a, 0x60, "\x48\x8B\x8F\x20\xC1\x00\x00\x3B\x91\x30\x05\x00\x00", 13));
+        CHECK(window_has(base, a, 0x60, "\x48\x8B\x89\x28\x05\x00\x00", 7));
+        CHECK(window_has(base, a, 0x100, "\x89\x81\xF0\x0B\x00\x00", 6));
+        CHECK(window_has(base, a, 0x100, "\x48\x8B\x8F\x98\x31\x02\x00", 7));
+        CHECK(window_has(base, a, 0x100, "\x83\x88\x6C\x0B\x00\x00\x08", 7));
+    }
+    if (rva[SH_AI_SIG_CHECK_PULL]) {
+        /* the muzzle test is asked only when the fire control's byte +0x27 is set: cmp byte [r13+0x27], 0 */
+        CHECK(window_has(base, rva[SH_AI_SIG_CHECK_PULL] + 0x25A, 5, "\x41\x80\x7D\x27\x00", 5));
+    }
+    printf("  aiFireMode_t table %s, aiIdleTurn_t table %s\n",
+           enum_table_found(base, size, image_base, SH_AI_FIREMODE_NAMES, SH_AI_FIREMODE_MAX + 1) ? "found" : "MISSING",
+           enum_table_found(base, size, image_base, SH_AI_IDLETURN_NAMES, SH_AI_IDLETURN_MAX + 1) ? "found" : "MISSING");
+    CHECK(enum_table_found(base, size, image_base, SH_AI_FIREMODE_NAMES, SH_AI_FIREMODE_MAX + 1));
+    CHECK(enum_table_found(base, size, image_base, SH_AI_IDLETURN_NAMES, SH_AI_IDLETURN_MAX + 1));
 
     /* Offsets: Shared_MoveFailedAny reads *(ai+0x23198)+0xD20 against 5;
      * Shared_TriggerPulled reads ai+0x22278, weapon +0x8D4 and +0x8F8. */
