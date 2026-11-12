@@ -385,6 +385,19 @@ typedef struct sh_script_ai_engine {
      * turn type `turn` (the entry the engine's idle turn reads): 1 yes, 0 no,
      * -1 unreadable. */
     int      (*idle_turn_entry)(void *ai, int turn);
+    /* A laser of the demon's laser targeter component on model tag `tag`,
+     * drawn with ribbon decl `ribbon` (its whole name; NULL: the component
+     * decl's laserPinpoint_ribbonDecl), off until it is switched on. 1 added,
+     * 0 the demon has no laser targeter, -2 no such ribbon decl is loaded,
+     * -1 unavailable. */
+    int      (*laser_add)(void *ai, const char *tag, const char *ribbon);
+    /* Take it away again. 1 done, 0 no laser targeter, -1 unavailable. */
+    int      (*laser_remove)(void *ai, const char *tag);
+    /* For the demon's rear feet (the game's foot indices 2 and 3: the
+     * ae_leftRearFoot and ae_rightRearFoot events) play footstep table `rear`
+     * wherever the game picks `front` (whole projectileImpactEffect decl
+     * names). 1 set, -2 one of the decls is not loaded, -1 unavailable. */
+    int      (*rear_footsteps)(void *ai, const char *front, const char *rear);
 } sh_script_ai_engine;
 
 /* equipSlot_t: the two hands a demon holds a weapon in. */
@@ -470,6 +483,10 @@ enum sh_ai_sig {
     SH_AI_SIG_FIRE_THINK,          /* the fire control's per-frame think (reads the two fire modes) */
     SH_AI_SIG_IDLE_ACTION,         /* the ssaction_Idle handler (writes idleTurnType, reads turnParms) */
     SH_AI_SIG_CHECK_PULL,          /* CheckPullTrigger (the gate; reads requireMuzzleOnTarget) */
+    SH_AI_SIG_LASER_ADD,           /* the laser targeter's add-laser-by-tag (component, atom*) */
+    SH_AI_SIG_LASER_REMOVE,        /* its remove (component, atom*) */
+    SH_AI_SIG_LASER_STATE,         /* the ae_setLaserState handler (reads the component at ai +0x2CD90) */
+    SH_AI_SIG_FOOT_TABLE,          /* the footstep table selector (actor, foot) (detoured) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -509,6 +526,20 @@ size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const
 /* Detour windows, whole and position-independent. */
 #define SH_AI_THREAT_STOLEN 15
 #define SH_AI_PATH_LENGTH_STOLEN 14
+/* The footstep table selector's window: two register saves and push rsi,
+ * r14, r15 (whole, position-independent). */
+#define SH_AI_FOOT_STOLEN 15
+static const unsigned char k_ai_foot_prologue[SH_AI_FOOT_STOLEN] = {
+    0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x41, 0x56, 0x41, 0x57
+};
+/* The laser targeter: the component of an idAI2, its decl, the decl's
+ * laserPinpoint_ribbonDecl; and where the add-laser function reads the last
+ * two (mov rdx,[rsi+0x10] ... mov rdx,[rdx+0x108]). */
+#define SH_AI_OFF_LASER_COMPONENT  0x2CD90u
+#define SH_AI_LASER_COMP_DECL      0x10u
+#define SH_AI_LASER_DECL_RIBBON    0x108u
+#define SH_AI_LASER_ADD_DECL_AT    0x193u
+#define SH_AI_LASER_ADD_RIBBON_AT  0x1B2u
 /* idAI2 offsets of the new calls (both renderers). */
 #define SH_AI_OFF_RECOIL          0x24EB0u  /* float recoil strength (FSM states write recoilStrength here) */
 #define SH_AI_OFF_ANIMWEB         0x225C8u  /* the animWeb decl */

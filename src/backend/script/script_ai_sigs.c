@@ -65,7 +65,19 @@
  *                      the animFSM when the aibehavior decl (ai +0xC120) has a turnParms entry (list +0x528,
  *                      count +0x530) for it. Present for those offsets.
  *   AiCheckPull        VK 0x1404439D0  GL 0x1404428F0  CheckPullTrigger, the fire gate: asks the muzzle test only
- *                      when the fire control's requireMuzzleOnTarget byte (+0x27) is set (cmp at +0x25A). */
+ *                      when the fire control's requireMuzzleOnTarget byte (+0x27) is set (cmp at +0x25A).
+ *   AiLaserAdd         VK 0x140551940  GL 0x1405509D0  the laser targeter component's add-laser (component,
+ *                      idAtomicString*): an entry of that name is reset, else one is appended, drawn with the
+ *                      ribbon the component's decl (+0x10) names in laserPinpoint_ribbonDecl (+0x108; read at
+ *                      +0x193 and +0x1B2 of the function), and left off. The engine calls it only from the
+ *                      enter of two stock state classes (the Revenant's hover attack, the laser soldier's beam);
+ *                      ae_setLaserState only switches entries that exist.
+ *   AiLaserRemove      VK 0x1405517A0  GL 0x140550830  the component's remove (component, idAtomicString*).
+ *   AiLaserState       VK 0x1403ED2B0  GL 0x1403EC780  the ae_setLaserState handler. Present for the offset of
+ *                      the component in an idAI2 (+0x2CD90).
+ *   AiFootTable        VK 0x14074B790  GL 0x14074B0A0  the footstep table of a foot (actor, foot index): the
+ *                      actor's footstepEffectTable by gait (walk, slow walk, crouch, sprint, landing), never by
+ *                      foot. Detoured; 15-byte window (snaphak-re reports/R-M7-engine-wave-laser-foot.md). */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -160,6 +172,22 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "41 5D 5F 5E C3 48 8B CE E8 ?? ?? ?? ?? 84 C0 74 E7 4D 85 F6 74 10 49 8B 06 49 8B CE FF 90 80 05 00 00 84 C0 "
       "75 D2 4C 89 7C 24 40 4C 8B BC 24 98 00 00 00 41 8B 07",
       0x4439D0u, 0x4428F0u },
+    { "AiLaserAdd",
+      "48 89 74 24 20 41 56 48 83 EC 20 4C 8B F2 48 8B F1 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 44 8B 86 08 01 00 00 "
+      "33 C0 48 89 5C 24 30 45 85 C0 7E 23",
+      0x551940u, 0x5509D0u },
+    { "AiLaserRemove",
+      "48 89 74 24 20 41 57 48 83 EC 20 4C 8B FA 48 8B F1 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
+      "48 89 5C 24 30",
+      0x5517A0u, 0x550830u },
+    { "AiLaserState",
+      "48 89 5C 24 10 57 48 83 EC 20 48 83 B9 90 CD 02 00 00 48 8B DA 48 8B F9 74 50 48 8B 54 24 50 48 8D 4C 24 30 "
+      "45 84 C9 41 B1 01",
+      0x3ED2B0u, 0x3EC780u },
+    { "AiFootTable",
+      "48 89 5C 24 18 48 89 6C 24 20 56 41 56 41 57 48 83 EC 40 33 F6 8B EA 4C 8B F1 40 38 B1 F8 43 00 00 74 45 "
+      "39 35 ?? ?? ?? ??",
+      0x74B790u, 0x74B0A0u },
     { NULL, NULL, 0, 0 }
 };
 

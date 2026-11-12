@@ -290,6 +290,36 @@ static int f_muzzle_test(void *ai, int hand, int mode)
 }
 static int f_clear_move(void *ai) { ((fent *)ai)->clear_moves++; ev_cat("clear_move\n"); return 1; }
 static int f_idle_turn_entry(void *ai, int turn) { return !(((fent *)ai)->no_turn_entry & (1u << turn)); }
+/* the laser targeter and the rear footsteps: the engine side is asked with the tag and the whole decl names */
+static int g_no_targeter, g_no_ribbon, g_no_table;
+static int f_laser_add(void *ai, const char *tag, const char *ribbon)
+{
+    char line[256];
+    (void)ai;
+    if (g_no_targeter) return 0;
+    if (ribbon && g_no_ribbon) return -2;
+    snprintf(line, sizeof line, "laser_add %s %s\n", tag, ribbon ? ribbon : "(decl)");
+    ev_cat(line);
+    return 1;
+}
+static int f_laser_remove(void *ai, const char *tag)
+{
+    char line[160];
+    (void)ai;
+    if (g_no_targeter) return 0;
+    snprintf(line, sizeof line, "laser_remove %s\n", tag);
+    ev_cat(line);
+    return 1;
+}
+static int f_rear_footsteps(void *ai, const char *front, const char *rear)
+{
+    char line[400];
+    (void)ai;
+    if (g_no_table) return -2;
+    snprintf(line, sizeof line, "rear_footsteps %s -> %s\n", front, rear);
+    ev_cat(line);
+    return 1;
+}
 static const sh_script_ai_engine g_fake;
 static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
 {
@@ -331,7 +361,8 @@ static const sh_script_ai_engine g_fake = {
     f_eye, f_sight, f_ground, f_anim_delta,
     f_set_recoil, f_weapon_ready, f_aim_point, f_anim_valid, f_path_points, f_firing, f_spline,
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
-    f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry
+    f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
+    f_laser_add, f_laser_remove, f_rear_footsteps
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1250,8 +1281,8 @@ static void test_fire_calls(void)
     CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 1 && g_ent[1].aim[1] == 2 && g_ent[1].aim[2] == 3);
     CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
     /* hold: the engine's ClearMove, then its idle with the turn type; the default is COMBAT */
-    CHECK(strstr(g_events, "clear_move\n1:ssaction_Idle(0,1)\nclear_move\n1:ssaction_Idle(0,0)\n"
-                           "clear_move\n1:ssaction_Idle(0,2)\nclear_move\n1:ssaction_Idle(0,2)\n") != NULL);
+    CHECK(strstr(g_events, "clear_move\n1:ssaction_Idle(-1,1)\nclear_move\n1:ssaction_Idle(-1,0)\n"
+                           "clear_move\n1:ssaction_Idle(-1,2)\nclear_move\n1:ssaction_Idle(-1,2)\n") != NULL);
     CHECK(g_ent[1].clear_moves == 4);
     CHECK(strstr(log, "hold true\nhold2 true\n") != NULL && strstr(log, "hold3 false\n") != NULL);
     CHECK(strstr(log, "hold4 false | the demon's aibehavior decl has no turnParms entry for that turn\n") != NULL);
@@ -1356,7 +1387,7 @@ static void test_fire_refusals(void)
         CHECK(start("api = 1\non.think('ai/brute', function(self) print('hold ' .. tostring(self:hold())) end)\n"));
         tick();
         CHECK(strstr(log_of("aaaaaaaa"), "hold true\n") != NULL);   /* nothing to say it will not turn */
-        CHECK(strstr(g_events, "1:ssaction_Idle(0,1)\n") != NULL && strstr(g_events, "clear_move") == NULL);
+        CHECK(strstr(g_events, "1:ssaction_Idle(-1,1)\n") != NULL && strstr(g_events, "clear_move") == NULL);
         sh_script_map_end();
         bare = g_fake;
         bare.muzzle_test = NULL;
@@ -1430,7 +1461,7 @@ static void test_enemy_weapon_sdk(void)
      * point is left alone, and nil gives the enemy back */
     CHECK(strstr(g_events, "1:equipInventoryItemByIndex(0)\n1:setFireMode(3)\n1:setFocus(e2,1,1,3)\n"
                            "1:ae_aIPullTrigger(noanim,EQUIP_RIGHT_HAND,1)\n1:releaseTriggerRight()\n"
-                           "clear_move\n1:ssaction_Idle(0,1)\n") != NULL);
+                           "clear_move\n1:ssaction_Idle(-1,1)\n") != NULL);
     CHECK(strstr(g_events, "1:releaseTriggerRight()\nclear_move") != NULL);
     {
         const char *a = strstr(g_events, "1:setFocus(e2,1,1,3)\n");
@@ -1439,6 +1470,80 @@ static void test_enemy_weapon_sdk(void)
         CHECK(strstr(g_events, "1:clearAimFocus()\n1:setFocus(e3,1,1,3)\n") != NULL);   /* nil, then the enemy again */
     }
     sh_script_map_end();
+}
+
+/* A demon's own lasers and rear footsteps: the engine is asked by tag and by the mod's whole decl names. */
+static void test_lasers_and_rear_feet(void)
+{
+    const char *log;
+    printf("-- laser_add, laser_remove and rear_footsteps ask the engine by tag and whole decl name\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('add ' .. tostring(self:laser_add('laser_source_1')))\n"
+        "  print('add2 ' .. tostring(self:laser_add('muzzlereference', 'ai/tyrant/main_beam')))\n"
+        "  print('add3 ' .. tostring(self:laser_add('muzzlereference', game('revenant/laser1'))))\n"
+        "  print('remove ' .. tostring(self:laser_remove('laser_source_1')))\n"
+        "  print('feet ' .. tostring(self:rear_footsteps('impacteffect/footsteps/ai_tyrant', 'impacteffect/footsteps/ai_tyrant_metal')))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "add true\nadd2 true\nadd3 true\nremove true\nfeet true\n") != NULL);
+    CHECK(strstr(g_events, "laser_add laser_source_1 (decl)\n"
+                           "laser_add muzzlereference mods/aaaaaaaa/ai/tyrant/main_beam\n"
+                           "laser_add muzzlereference revenant/laser1\n"
+                           "laser_remove laser_source_1\n"
+                           "rear_footsteps mods/aaaaaaaa/impacteffect/footsteps/ai_tyrant -> "
+                           "mods/aaaaaaaa/impacteffect/footsteps/ai_tyrant_metal\n") != NULL);
+    sh_script_map_end();
+
+    /* what the engine cannot do is answered with the reason, not an error */
+    g_no_targeter = 1; g_no_ribbon = 1; g_no_table = 1;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('add ' .. table.concat({tostring(self:laser_add('laser_source_1'))}, ' '))\n"
+        "  local a, why = self:laser_add('laser_source_1')\n"
+        "  print('why ' .. tostring(why))\n"
+        "  local b, why2 = self:rear_footsteps('a', 'b')\n"
+        "  print('feet ' .. tostring(b) .. ' ' .. tostring(why2))\n"
+        "  print('remove ' .. tostring(self:laser_remove('laser_source_1')))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "add false\n") != NULL);
+    CHECK(strstr(log, "why the demon has no laser targeter (its entityDef names no aicomponent_lasertargeter decl)\n") != NULL);
+    CHECK(strstr(log, "feet false one of the two footstep tables is not a loaded projectileImpactEffect decl\n") != NULL);
+    CHECK(strstr(log, "remove false\n") != NULL);
+    sh_script_map_end();
+    g_no_targeter = 0;
+    CHECK(start("api = 1\non.think('ai/brute', function(self)\n"
+                "  local a, why = self:laser_add('muzzlereference', 'ai/none')\n  print('ribbon ' .. tostring(a) .. ' ' .. why)\nend)\n"));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "ribbon false no ribbon decl of that name is loaded\n") != NULL);
+    sh_script_map_end();
+    g_no_ribbon = 0; g_no_table = 0;
+
+    expect_stop("self:laser_add()", "\"laser_add\" needs a model tag");
+    expect_stop("self:laser_add('a b')", "is not a usable name");
+    expect_stop("self:rear_footsteps('x')", "\"rear_footsteps\" needs a name here, got nothing");
+    {
+        sh_script_ai_engine bare = g_fake;
+        bare.laser_add = NULL;
+        bare.laser_remove = NULL;
+        bare.rear_footsteps = NULL;
+        sh_script_ai_set_engine(&bare);
+        expect_stop("self:laser_add('t')", "\"laser_add\" is not available in this session");
+        expect_stop("self:laser_remove('t')", "\"laser_remove\" is not available in this session");
+        expect_stop("self:rear_footsteps('a', 'b')", "\"rear_footsteps\" is not available in this session");
+        sh_script_ai_set_engine(&g_fake);
+    }
 }
 
 static void test_brain_refusals(void)
@@ -1577,7 +1682,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 42);
+    CHECK(sh_script_ai_register() == 45);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -1604,6 +1709,7 @@ int main(int argc, char **argv)
     test_brain_refusals();
     test_fire_calls();
     test_fire_refusals();
+    test_lasers_and_rear_feet();
     test_enemy_weapon_sdk();
     test_anim_force_via();
     test_pain_records();

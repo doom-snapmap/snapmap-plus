@@ -300,6 +300,26 @@ static void check_image(const char *path)
         /* the muzzle test is asked only when the fire control's byte +0x27 is set: cmp byte [r13+0x27], 0 */
         CHECK(window_has(base, rva[SH_AI_SIG_CHECK_PULL] + 0x25A, 5, "\x41\x80\x7D\x27\x00", 5));
     }
+    if (rva[SH_AI_SIG_LASER_ADD]) {
+        uint32_t a = rva[SH_AI_SIG_LASER_ADD];
+        /* the list's count at component +0x108, the entry's name at +0x60 of a 0x80 entry; the ribbon comes from
+         * the component's decl (+0x10) field +0x108, read where the product checks it */
+        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_DECL_AT, "\x48\x8B\x56\x10", 4));
+        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_RIBBON_AT, "\x48\x8B\x92\x08\x01\x00\x00", 7));
+        CHECK(base[a + SH_AI_LASER_ADD_RIBBON_AT + 7] == 0xE8);
+        CHECK(window_has(base, a, 0x60, "\x44\x8B\x86\x08\x01\x00\x00", 7));
+    }
+    if (rva[SH_AI_SIG_LASER_STATE]) {
+        /* cmp qword [rcx+0x2CD90], 0: the laser targeter component of an idAI2 */
+        CHECK(window_has(base, rva[SH_AI_SIG_LASER_STATE], 0x20, "\x48\x83\xB9\x90\xCD\x02\x00\x00", 8));
+    }
+    if (rva[SH_AI_SIG_FOOT_TABLE]) {
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + rva[SH_AI_SIG_FOOT_TABLE], 64, 14, 48, &flags);
+        CHECK(b == SH_AI_FOOT_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + rva[SH_AI_SIG_FOOT_TABLE], k_ai_foot_prologue, SH_AI_FOOT_STOLEN));
+    }
     printf("  aiFireMode_t table %s, aiIdleTurn_t table %s\n",
            enum_table_found(base, size, image_base, SH_AI_FIREMODE_NAMES, SH_AI_FIREMODE_MAX + 1) ? "found" : "MISSING",
            enum_table_found(base, size, image_base, SH_AI_IDLETURN_NAMES, SH_AI_IDLETURN_MAX + 1) ? "found" : "MISSING");

@@ -2110,11 +2110,34 @@ is touched, and a removed demon answers nil.
   has none to count, and `ssaction_Idle` is ordered with an `AIIDLETURN_` type
   (`"RELAXED"`, `"COMBAT"` by default, `"INCOVER"`), which the idle action
   (VK 0x1405DCDD0) stores in the animFSM only when the demon's aibehavior decl
-  has a turnParms entry for it. The engine then turns the body itself when the
+  has a turnParms entry for it. The idle is ordered without an end (time
+  -1): the idle action (update VK 0x1405DF660) expires at its first update
+  when its time is 0, and its end (VK 0x1405DC140) clears the move flag the
+  order set, so a timed idle of 0 never turns the body (measured: the flag
+  read 8 for one frame, the body stood 9 s with its enemy at 96 degrees). The
+  demon's next order ends it. The engine then turns the body itself when the
   aim focus leaves the aim tracker's yaw range. `hold` answers whether that
   turn can happen (a turnParms entry for the type and body rotation on) and,
   when not, why. The fire modes and idle turn types are the engine's enums,
   checked against both executables.
+- **A demon's own lasers and rear footsteps.** The game draws a laser only
+  for an entry of the laser targeter component's list (the component at
+  ai+0x2CD90, entries of 0x80 bytes at +0x100, the name at +0x60), and makes
+  entries only in the enter of two stock state classes; `ae_setLaserState`
+  switches entries that exist and adds none. `laser_add(tag, [ribbon])` calls
+  the component's own add (VK 0x140551940) with the engine's atom of the tag,
+  so the laser is the engine's: a ribbon from the model tag along its
+  direction to the trace hit, switched by the clip's own rows. The add reads
+  the ribbon from the component decl's `laserPinpoint_ribbonDecl` (decl
+  +0x108); for a laser with a ribbon of its own the call puts that ribbon
+  decl there for the length of the add and puts the decl's own back.
+  `laser_remove(tag)` is the component's remove (VK 0x1405517A0).
+  `rear_footsteps(front, rear)` serves a demon whose rear feet sound
+  different: the game picks the footstep table by gait in one function (VK
+  0x14074B790, actor and foot index) and never by foot, so that function is
+  detoured (at the first call, 15 whole bytes) and, for foot indices 2 and 3
+  of a demon that named a pair, answers `rear` where the game answered
+  `front`. Records are per demon and spawn id; the tables are decl pointers.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

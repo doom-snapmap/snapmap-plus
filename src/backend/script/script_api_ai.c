@@ -1867,9 +1867,13 @@ static int l_focus(lua_State *L)
  * in place type: AIIDLETURN_ "RELAXED", "COMBAT" (the default, the one stock
  * demons use in combat) or "INCOVER". The engine then turns the body toward
  * the aim focus itself when the focus leaves the aim tracker's yaw limit. The
- * turn needs a turnParms entry for that type in the demon's aibehavior decl
- * and body rotation on: hold answers true when both hold, else false and a
- * sentence saying which fails (the demon still stands). */
+ * idle is ordered without an end (time -1): the engine's idle action expires
+ * at its first update when its time is 0, and its end clears the turn flag
+ * the order set, so a timed idle of 0 never turns the body. The demon's next
+ * order (a move, an animation, another hold) ends it. The turn needs a
+ * turnParms entry for that type in the demon's aibehavior decl and body
+ * rotation on: hold answers true when both hold, else false and a sentence
+ * saying which fails (the demon still stands). */
 static int l_hold(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -1889,7 +1893,7 @@ static int l_hold(lua_State *L)
     ai = self_ai(L, "hold", &h);
     if (!ai || !(r = park(ai, h))) { lua_pushnil(L); return 1; }
     if (g_engine->clear_move) g_engine->clear_move(ai);
-    a[0] = arg_i(0); a[1] = arg_i(turn);
+    a[0] = arg_i(-1); a[1] = arg_i(turn);
     ran = run(ai, SH_AI_EV_IDLE, a, 2, NULL);
     if (ran) {
         r->move.state = SH_AI_MOVE_NONE;
@@ -1947,6 +1951,76 @@ static int switch_call(lua_State *L, const char *call, int ev, int body)
 }
 static int l_tracking(lua_State *L) { return switch_call(L, "tracking", SH_AI_EV_ENABLE_HEAD_TRACKING, 0); }
 static int l_body_rotation(lua_State *L) { return switch_call(L, "body_rotation", SH_AI_EV_ENABLE_BODY_ROTATION, 1); }
+
+/* ai:laser_add(tag, [ribbon]): give the demon's laser targeter a laser on
+ * model tag `tag`. The game draws a laser only for an entry of its laser
+ * list, and makes entries only inside two stock state classes; a demon that
+ * never runs those has none, so its ae_setLaserState rows and ai:laser
+ * switch nothing. The laser is drawn as a ribbon from the tag along the tag's
+ * direction to what it hits: the ribbon decl of the demon's
+ * aicomponent_lasertargeter decl (laserPinpoint_ribbonDecl), or `ribbon`, a
+ * ribbon decl of this mod. It starts off; ai:laser, ai:laser_state and the
+ * clips' ae_setLaserState rows switch it by the tag's name. Answers true, or
+ * false and why. */
+static int l_laser_add(lua_State *L)
+{
+    const char *tag = check_tag(L, 2, "laser_add", "a model tag");
+    const char *ribbon = NULL;
+    void *ai;
+    int st;
+    if (!lua_isnoneornil(L, 3)) ribbon = sh_script_check_name(L, 3, "laser_add", 1, NULL);
+    NEED_OP(L, laser_add, "laser_add");
+    ai = self_ai(L, "laser_add", NULL);
+    st = ai ? g_engine->laser_add(ai, tag, ribbon) : -1;
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, st == 0 ? "the demon has no laser targeter (its entityDef names no aicomponent_lasertargeter decl)"
+                     : st == -2 ? "no ribbon decl of that name is loaded"
+                                : "the game's laser list could not be reached");
+    return 2;
+}
+
+/* ai:laser_remove(tag): take the laser on `tag` away again. */
+static int l_laser_remove(lua_State *L)
+{
+    const char *tag = check_tag(L, 2, "laser_remove", "a model tag");
+    void *ai;
+    NEED_OP(L, laser_remove, "laser_remove");
+    ai = self_ai(L, "laser_remove", NULL);
+    lua_pushboolean(L, ai && g_engine->laser_remove(ai, tag) == 1);
+    return 1;
+}
+
+/* ai:rear_footsteps(front, rear): the footstep table of the demon's rear
+ * feet. The game picks a demon's footstep table by its gait (the entityDef's
+ * footstepEffectTable, _SlowWalk, _Sprint, ...) and plays the same one for
+ * all four foot events; a demon whose rear feet sound different (a metal
+ * leg, hooves behind paws) names the pair here: where the game would play
+ * `front` for ae_leftRearFoot or ae_rightRearFoot it plays `rear`. Both are
+ * footstep tables (projectileImpactEffect decls) of this mod or the game.
+ * Call it once per gait table. Answers true, or false and why. */
+static int l_rear_footsteps(lua_State *L)
+{
+    const char *front, *rear;
+    char *keep;
+    void *ai;
+    int st;
+    front = sh_script_check_name(L, 2, "rear_footsteps", 1, NULL);
+    keep = _strdup(front);                 /* the next name may reuse the buffer */
+    rear = sh_script_check_name(L, 3, "rear_footsteps", 1, NULL);
+    if (g_engine && !g_engine->rear_footsteps) {
+        free(keep);
+        NEED_OP(L, rear_footsteps, "rear_footsteps");
+    }
+    ai = self_ai(L, "rear_footsteps", NULL);
+    st = (ai && keep) ? g_engine->rear_footsteps(ai, keep, rear) : -1;
+    free(keep);
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, st == -2 ? "one of the two footstep tables is not a loaded projectileImpactEffect decl"
+                               : "the game's footstep table choice could not be reached");
+    return 2;
+}
 
 static const char *check_node(lua_State *L, int idx, const char *call, const char *what)
 {
@@ -2534,6 +2608,8 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "release_trigger", l_release_trigger }, { "muzzle_on_target", l_muzzle_on_target },
     { "focus", l_focus },               { "hold", l_hold },
     { "tracking", l_tracking },         { "body_rotation", l_body_rotation },
+    { "laser_add", l_laser_add },       { "laser_remove", l_laser_remove },
+    { "rear_footsteps", l_rear_footsteps },
 };
 
 int sh_script_ai_register(void)
@@ -3271,10 +3347,10 @@ static const uint8_t k_plen_prologue[SH_AI_PATH_LENGTH_STOLEN] = {
     0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0x4A, 0x70, 0x0F, 0x57, 0xE4, 0x48, 0x85, 0xC9
 };
 
-static int commit_hook(void *target, void *detour, size_t stolen, void **orig, int *failed, const char *what)
+static int commit_hook(void *target, void *detour, const uint8_t *want, size_t stolen, void **orig, int *failed,
+                       const char *what)
 {
     void *tramp;
-    const uint8_t *want = stolen == SH_AI_THREAT_STOLEN ? k_threat_prologue : k_plen_prologue;
     if (*orig && hook_is_installed(*orig)) return 1;
     if (*failed || !target) return 0;
     if (memcmp(target, want, stolen)) {
@@ -3307,7 +3383,7 @@ static int e_path_points(void *ai, const float goal[3], int key, float (**out)[3
     int st;
     *n = 0;
     *out = NULL;
-    if (!commit_hook((void *)g_plen_target, (void *)plen_detour, SH_AI_PATH_LENGTH_STOLEN, (void **)&g_plen_orig,
+    if (!commit_hook((void *)g_plen_target, (void *)plen_detour, k_plen_prologue, SH_AI_PATH_LENGTH_STOLEN, (void **)&g_plen_orig,
                      &g_plen_failed, "path_points"))
         return -1;
     g_capture.out = NULL;
@@ -3337,7 +3413,8 @@ static uint64_t threat_row_detour(void *threat, void *actor, const uint8_t *row,
 static int e_block_pain(void *ai, int reaction, int ms)
 {
     int now;
-    if (!commit_hook((void *)g_threat_target, (void *)threat_row_detour, SH_AI_THREAT_STOLEN, (void **)&g_threat_orig,
+    if (!commit_hook((void *)g_threat_target, (void *)threat_row_detour, k_threat_prologue, SH_AI_THREAT_STOLEN,
+                     (void **)&g_threat_orig,
                      &g_threat_failed, "block_pain"))
         return 0;
     if (!gm_clock(&now)) return 0;
@@ -3390,18 +3467,19 @@ static int commit_pain_stub(void)
     return 1;
 }
 
-static int e_pain_string(void *ai, const char *text)
+/* The engine's atom of `text` (its interned string: the engine compares names
+ * by this pointer), or NULL. */
+static const char *atom_of(const char *text)
 {
     const char *atom = NULL;
     int i;
-    if (!text) return sh_ai_pain_string_set(ai, spawn_id_of(ai), NULL);
-    if (!commit_pain_stub()) return 0;
+    if (!g_intern || !text) return NULL;
     for (i = 0; i < g_ninterned; i++)
         if (!strcmp(g_interned[i].text, text)) { atom = g_interned[i].atom; break; }
     if (!atom) {
         char *copy = _strdup(text);
         __try { g_intern(&atom, text); } __except (av_only(GetExceptionCode())) { atom = NULL; }
-        if (!atom) { free(copy); return 0; }
+        if (!atom) { free(copy); return NULL; }
         if (copy && g_ninterned == g_cinterned) {
             int cap = g_cinterned ? g_cinterned * 2 : 16;
             void *grown = realloc(g_interned, (size_t)cap * sizeof *g_interned);
@@ -3415,7 +3493,132 @@ static int e_pain_string(void *ai, const char *text)
             free(copy);   /* not kept: the next call interns it again, as the engine allows */
         }
     }
+    return atom;
+}
+
+static int e_pain_string(void *ai, const char *text)
+{
+    const char *atom;
+    if (!text) return sh_ai_pain_string_set(ai, spawn_id_of(ai), NULL);
+    if (!commit_pain_stub()) return 0;
+    atom = atom_of(text);
+    if (!atom) return 0;
     return sh_ai_pain_string_set(ai, spawn_id_of(ai), atom);
+}
+
+/* ---- the laser targeter's lasers */
+
+void *sh_script_combat_decl(const char *type, const char *name);   /* script_api_combat.c: a loaded decl by type and name */
+
+typedef void (*ai_laser_fn)(void *component, const char **name);
+static ai_laser_fn g_laser_add, g_laser_remove;
+
+static int laser_call(ai_laser_fn fn, uint8_t *comp, const char *atom, void **slot, void *ribbon)
+{
+    void *own = slot ? *slot : NULL;
+    int v = -1;
+    if (ribbon && slot) *slot = ribbon;       /* the add reads the ribbon from the decl */
+    __try { fn(comp, &atom); v = 1; } __except (av_only(GetExceptionCode())) { v = -1; }
+    if (ribbon && slot) *slot = own;
+    return v;
+}
+
+static int e_laser_add(void *ai, const char *tag, const char *ribbon)
+{
+    const char *atom;
+    void *decl = NULL;
+    uint8_t *comp = NULL, *cdecl_ = NULL;
+    if (!g_laser_add) return -1;
+    if (ribbon && !(decl = sh_script_combat_decl("ribbon", ribbon))) return -2;
+    if (!(atom = atom_of(tag))) return -1;
+    __try {
+        comp = *(uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_LASER_COMPONENT);
+        if (comp) cdecl_ = *(uint8_t * const *)(comp + SH_AI_LASER_COMP_DECL);
+    } __except (av_only(GetExceptionCode())) { return -1; }
+    if (!comp) return 0;
+    if (!cdecl_) return -1;
+    /* an entry of this name keeps its ribbon through the add, so it is made anew */
+    if (g_laser_remove) laser_call(g_laser_remove, comp, atom, NULL, NULL);
+    return laser_call(g_laser_add, comp, atom, (void **)(cdecl_ + SH_AI_LASER_DECL_RIBBON), decl);
+}
+
+static int e_laser_remove(void *ai, const char *tag)
+{
+    const char *atom;
+    uint8_t *comp = NULL;
+    if (!g_laser_remove || !(atom = atom_of(tag))) return -1;
+    __try { comp = *(uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_LASER_COMPONENT); }
+    __except (av_only(GetExceptionCode())) { return -1; }
+    if (!comp) return 0;
+    return laser_call(g_laser_remove, comp, atom, NULL, NULL);
+}
+
+/* ---- rear footsteps: the table of a rear foot */
+
+typedef void *(*ai_foot_table_fn)(void *actor, int foot);
+static ai_foot_table_fn g_foot_target, g_foot_orig;
+static int g_foot_failed;
+
+/* One record per demon that named rear tables, found by the demon and its
+ * spawn id; the pairs are decl pointers (decls outlive the map). The detour
+ * reads it on the game's threads without a lock, so it never moves: the
+ * engine's own size, as the parked list. */
+#define AI_FOOT_PAIRS 8      /* the gait tables an actor has: walk, slow walk, crouch, sprint and their friendly forms */
+typedef struct {
+    void *volatile ai;
+    volatile LONG spawn_id;
+    void *volatile front[AI_FOOT_PAIRS];
+    void *volatile rear[AI_FOOT_PAIRS];
+} ai_foot_rec;
+static ai_foot_rec g_foot[AI_PARKED_MAX];
+static volatile LONG g_foot_used;
+
+static void *foot_table_detour(void *actor, int foot)
+{
+    void *table = g_foot_orig(actor, foot);
+    if (table && (foot == 2 || foot == 3)) {
+        int i, k, used = (int)g_foot_used;
+        for (i = 0; i < used; i++) {
+            if (g_foot[i].ai != actor) continue;
+            if (spawn_id_of(actor) != (uint32_t)g_foot[i].spawn_id) break;
+            for (k = 0; k < AI_FOOT_PAIRS; k++)
+                if (g_foot[i].front[k] == table && g_foot[i].rear[k]) return g_foot[i].rear[k];
+            break;
+        }
+    }
+    return table;
+}
+
+static int e_rear_footsteps(void *ai, const char *front, const char *rear)
+{
+    void *f = sh_script_combat_decl("projectileImpactEffect", front);
+    void *r = sh_script_combat_decl("projectileImpactEffect", rear);
+    uint32_t id = spawn_id_of(ai);
+    int i, k, slot = -1, used = (int)g_foot_used;
+    if (!f || !r) return -2;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE) return -1;
+    if (!commit_hook((void *)g_foot_target, (void *)foot_table_detour, k_ai_foot_prologue, SH_AI_FOOT_STOLEN,
+                     (void **)&g_foot_orig, &g_foot_failed, "rear_footsteps"))
+        return -1;
+    for (i = 0; i < used; i++) {
+        void *p = g_foot[i].ai;
+        if (p == ai && (uint32_t)g_foot[i].spawn_id == id) { slot = i; break; }
+        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_foot[i].spawn_id)) slot = i;
+    }
+    if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
+    if (slot < 0) return -1;
+    if (g_foot[slot].ai != ai || (uint32_t)g_foot[slot].spawn_id != id) {
+        g_foot[slot].ai = NULL;
+        for (k = 0; k < AI_FOOT_PAIRS; k++) { g_foot[slot].front[k] = NULL; g_foot[slot].rear[k] = NULL; }
+        InterlockedExchange(&g_foot[slot].spawn_id, (LONG)id);
+    }
+    for (k = 0; k < AI_FOOT_PAIRS; k++) if (g_foot[slot].front[k] == f || !g_foot[slot].front[k]) break;
+    if (k == AI_FOOT_PAIRS) return -1;
+    InterlockedExchangePointer((PVOID volatile *)&g_foot[slot].rear[k], r);
+    InterlockedExchangePointer((PVOID volatile *)&g_foot[slot].front[k], f);
+    InterlockedExchangePointer((PVOID volatile *)&g_foot[slot].ai, ai);
+    if (slot >= used) InterlockedExchange(&g_foot_used, slot + 1);
+    return 1;
 }
 
 /* ---- the compositions */
@@ -3449,7 +3652,8 @@ static const sh_script_ai_engine k_engine = {
     e_eye, e_sight, e_ground, e_anim_delta,
     e_set_recoil, e_weapon_ready, e_aim_point, e_anim_valid, e_path_points, e_firing_position, e_spline_clear,
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
-    e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry
+    e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
+    e_laser_add, e_laser_remove, e_rear_footsteps
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -3541,6 +3745,21 @@ int sh_script_ai_install(const uint8_t *module_base)
     if (r[SH_AI_SIG_CLEAR_MOVE].addr) g_clear_move = (void (*)(void *, int))r[SH_AI_SIG_CLEAR_MOVE].addr;
     else g_live.clear_move = NULL;
     if (!r[SH_AI_SIG_IDLE_ACTION].addr) g_live.idle_turn_entry = NULL;
+    /* The lasers: the add and remove, the component's place in an idAI2 (the
+     * ae_setLaserState handler holds it), the two reads of the add that prove
+     * where the ribbon decl sits, and the engine's atom call (the pain site). */
+    site = (const uint8_t *)r[SH_AI_SIG_LASER_ADD].addr;
+    if (site && r[SH_AI_SIG_LASER_REMOVE].addr && r[SH_AI_SIG_LASER_STATE].addr && r[SH_AI_SIG_PAIN_STRING_SITE].addr &&
+        !memcmp(site + SH_AI_LASER_ADD_DECL_AT, "\x48\x8B\x56\x10", 4) &&
+        !memcmp(site + SH_AI_LASER_ADD_RIBBON_AT, "\x48\x8B\x92\x08\x01\x00\x00", 7)) {
+        g_laser_add = (ai_laser_fn)site;
+        g_laser_remove = (ai_laser_fn)r[SH_AI_SIG_LASER_REMOVE].addr;
+    } else {
+        g_live.laser_add = NULL;
+        g_live.laser_remove = NULL;
+    }
+    if (r[SH_AI_SIG_FOOT_TABLE].addr) g_foot_target = (ai_foot_table_fn)r[SH_AI_SIG_FOOT_TABLE].addr;
+    else g_live.rear_footsteps = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

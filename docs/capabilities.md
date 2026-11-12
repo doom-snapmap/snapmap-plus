@@ -981,7 +981,8 @@ script sets in a cvar or a decl is put back when the map ends. It drives demons 
 own fire control (`fire_mode` sets the engine's fire mode so it pulls, holds and releases the
 trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `muzzle_on_target`, `focus`,
 `tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
-toward its focus),
+toward its focus), gives a demon lasers of its own on the game's laser targeter (`laser_add`,
+`laser_remove`) and a footstep table of their own to its rear feet (`rear_footsteps`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
 demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
