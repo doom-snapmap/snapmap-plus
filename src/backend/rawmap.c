@@ -329,6 +329,30 @@ static int old_shape_refused(const char *json, size_t len)
     return 1;
 }
 
+/* A map whose mod list has a row this version cannot read (one a newer
+ * Snapmap+ wrote, or a damaged one) is refused too. Dropping the row and
+ * opening the map would hand the engine entities whose mod was never
+ * activated: models that do not exist, and DOOM's fatal error for them. */
+#define RAWMAP_ROWS_UNREAD "This map's mod list has an entry this version of Snapmap+ cannot read, so the map was not "                            "opened. Update Snapmap+ and open it again."
+
+static int unread_rows_refused(const char *json, size_t len)
+{
+    sh_modmanifest_list rows = {0};
+    unsigned rejected = 0;
+    __try {
+        (void)sh_modmanifest_read(json, len, &rows, &rejected);
+        sh_modmanifest_list_free(&rows);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("CARRIER: the mod list check FAULTED; the map is refused");
+        sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
+        return 1;
+    }
+    if (!rejected) return 0;
+    backend_log("CARRIER: map refused: its mod list has a row this version cannot read; nothing was activated");
+    sh_modmanifest_load_refuse(RAWMAP_ROWS_UNREAD);
+    return 1;
+}
+
 /* Read the map manifest, keep it for the load, strip its rows before the
  * engine parses and activate the bundles it names. Runs on every parse.
  * Returns an owned process-heap buffer, or NULL to keep the input; a read
@@ -633,6 +657,7 @@ static char *prepare_map_buffer(const char *json, int *refused)
     *refused = 0;
     if (len == 0) return NULL;
     if (old_shape_refused(json, len)) { *refused = 1; return NULL; }
+    if (unread_rows_refused(json, len)) { *refused = 1; return NULL; }
     carrier_describe_guarded(json, len);
 
     sh_navmesh_build_from_map(json, len);
