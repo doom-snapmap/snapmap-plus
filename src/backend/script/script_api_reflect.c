@@ -61,9 +61,54 @@ static int rd(const void *addr, void *out, size_t n)
     return g_host.read && g_host.read(g_host.ctx, addr, out, n);
 }
 
+/* What a script changed in an object that outlives the map (a decl): the
+ * bytes or the text as they were, put back at map end, newest first. */
+typedef struct undo { void *addr; uint32_t n; uint8_t old[8]; char *text; } undo;
+static undo *g_undo;
+static int g_nundo, g_cundo, g_keep_undo;
+
+static undo *undo_add(void *addr)
+{
+    undo *u;
+    if (g_nundo == g_cundo) {
+        int cap = g_cundo ? g_cundo * 2 : 32;
+        undo *grown = (undo *)realloc(g_undo, (size_t)cap * sizeof *grown);
+        if (!grown) return NULL;
+        g_undo = grown;
+        g_cundo = cap;
+    }
+    u = &g_undo[g_nundo++];
+    memset(u, 0, sizeof *u);
+    u->addr = addr;
+    return u;
+}
+
+void sh_script_reflect_restore(void)
+{
+    while (g_nundo > 0) {
+        undo *u = &g_undo[--g_nundo];
+        if (u->text) {
+            if (g_ops.str_assign) g_ops.str_assign(g_ops.ctx, u->addr, u->text);
+            free(u->text);
+        } else if (g_ops.write) {
+            g_ops.write(g_ops.ctx, u->addr, u->old, u->n);
+        }
+    }
+}
+
 static int wr(const void *addr, const void *in, size_t n)
 {
-    return g_ops.write && g_ops.write(g_ops.ctx, (void *)addr, in, n);
+    if (!g_ops.write) return 0;
+    if (g_keep_undo) {
+        undo *u;
+        uint8_t old[8];
+        if (n > sizeof old || !rd(addr, old, n)) return 0;
+        u = undo_add((void *)addr);
+        if (!u) return 0;
+        u->n = (uint32_t)n;
+        memcpy(u->old, old, n);
+    }
+    return g_ops.write(g_ops.ctx, (void *)addr, in, n);
 }
 
 static int read_int(const sh_rf_loc *loc, int is_signed, long long *out)
@@ -277,6 +322,13 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
     }
     case SH_RF_STR:
         if (lua_type(L, idx) != LUA_TSTRING) { say(err, cap, "it takes text, not %s", lua_kind(L, idx)); return 0; }
+        if (g_keep_undo) {
+            size_t len = 0;
+            char *was = g_ops.str_read ? g_ops.str_read(g_ops.ctx, loc->addr, &len) : NULL;
+            undo *u = was ? undo_add((void *)loc->addr) : NULL;
+            if (!u) { free(was); say(err, cap, "the game's text there could not be read"); return 0; }
+            u->text = was;
+        }
         if (!g_ops.str_assign || !g_ops.str_assign(g_ops.ctx, (void *)loc->addr, lua_tostring(L, idx))) {
             say(err, cap, "the game's text could not be changed in this session");
             return 0;
@@ -381,53 +433,51 @@ static void *subject(lua_State *L, const char *call, const char **cls)
     return ent;
 }
 
-static int l_get(lua_State *L)
+int sh_script_reflect_ready(void)
 {
-    const char *cls = NULL, *path = luaL_optstring(L, 2, "");
-    void *ent = subject(L, "get", &cls);
+    return ready();
+}
+
+int sh_script_reflect_get(lua_State *L, const void *object, const char *cls, const char *path, const char *call)
+{
     sh_rf_loc loc;
     char err[320];
     int ok;
-    if (!ent) { lua_pushnil(L); return 1; }
-    if (!sh_rf_resolve(&g_host, ent, cls, path, &loc, err, sizeof err))
-        return sh_script_refuse(L, "\"get\" could not read \"%s\": %s", path, err);
+    if (!sh_rf_resolve(&g_host, object, cls, path, &loc, err, sizeof err))
+        return sh_script_refuse(L, "\"%s\" could not read \"%s\": %s", call, path, err);
     ok = sh_script_reflect_push(L, &loc, err, sizeof err);
     sh_rf_loc_free(&loc);
-    if (!ok) return sh_script_refuse(L, "\"get\" could not read \"%s\": %s", path, err);
+    if (!ok) return sh_script_refuse(L, "\"%s\" could not read \"%s\": %s", call, path, err);
     return 1;
 }
 
-static int l_set(lua_State *L)
+int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const char *path, int idx, const char *call,
+                          int restore_at_map_end)
 {
-    const char *cls = NULL, *path = luaL_checkstring(L, 2);
-    void *ent = subject(L, "set", &cls);
     sh_rf_loc loc;
     char err[320];
     int ok;
-    luaL_checkany(L, 3);
-    if (!ent) { lua_pushboolean(L, 0); return 1; }
-    if (!path[0]) return sh_script_refuse(L, "\"set\" needs the field to write, such as \"team\"");
-    if (!sh_rf_resolve(&g_host, ent, cls, path, &loc, err, sizeof err))
-        return sh_script_refuse(L, "\"set\" could not write \"%s\": %s", path, err);
-    ok = sh_script_reflect_store(L, &loc, 3, err, sizeof err);
+    if (!path[0]) return sh_script_refuse(L, "\"%s\" needs the field to write, such as \"team\"", call);
+    if (!sh_rf_resolve(&g_host, object, cls, path, &loc, err, sizeof err))
+        return sh_script_refuse(L, "\"%s\" could not write \"%s\": %s", call, path, err);
+    g_keep_undo = restore_at_map_end;
+    ok = sh_script_reflect_store(L, &loc, idx, err, sizeof err);
+    g_keep_undo = 0;
     sh_rf_loc_free(&loc);
-    if (!ok) return sh_script_refuse(L, "\"set\" could not write \"%s\": %s", path, err);
+    if (!ok) return sh_script_refuse(L, "\"%s\" could not write \"%s\": %s", call, path, err);
     lua_pushboolean(L, 1);
     return 1;
 }
 
-static int l_fields(lua_State *L)
+int sh_script_reflect_fields(lua_State *L, const void *object, const char *cls, const char *path, const char *call)
 {
-    const char *cls = NULL, *path = luaL_optstring(L, 2, "");
-    void *ent = subject(L, "fields", &cls);
     sh_rf_loc loc;
     char err[320];
     const char *chain[512];
     int depth = 0, d, n = 0;
     const char *c;
-    if (!ent) { lua_pushnil(L); return 1; }
-    if (!sh_rf_resolve(&g_host, ent, cls, path, &loc, err, sizeof err))
-        return sh_script_refuse(L, "\"fields\" could not read \"%s\": %s", path, err);
+    if (!sh_rf_resolve(&g_host, object, cls, path, &loc, err, sizeof err))
+        return sh_script_refuse(L, "\"%s\" could not read \"%s\": %s", call, path, err);
     if (loc.kind != SH_RF_STRUCT) {
         lua_newtable(L);
         lua_pushstring(L, kind_name(loc.kind)); lua_setfield(L, -2, "kind");
@@ -461,6 +511,31 @@ static int l_fields(lua_State *L)
     }
     sh_rf_loc_free(&loc);
     return 1;
+}
+
+static int l_get(lua_State *L)
+{
+    const char *cls = NULL, *path = luaL_optstring(L, 2, "");
+    void *ent = subject(L, "get", &cls);
+    if (!ent) { lua_pushnil(L); return 1; }
+    return sh_script_reflect_get(L, ent, cls, path, "get");
+}
+
+static int l_set(lua_State *L)
+{
+    const char *cls = NULL, *path = luaL_checkstring(L, 2);
+    void *ent = subject(L, "set", &cls);
+    luaL_checkany(L, 3);
+    if (!ent) { lua_pushboolean(L, 0); return 1; }
+    return sh_script_reflect_set(L, ent, cls, path, 3, "set", 0);
+}
+
+static int l_fields(lua_State *L)
+{
+    const char *cls = NULL, *path = luaL_optstring(L, 2, "");
+    void *ent = subject(L, "fields", &cls);
+    if (!ent) { lua_pushnil(L); return 1; }
+    return sh_script_reflect_fields(L, ent, cls, path, "fields");
 }
 
 static int l_class(lua_State *L)
@@ -499,6 +574,7 @@ void sh_script_api_reflect_register(void)
     sh_script_api_add(SH_SCRIPT_API_METHOD, "fields", l_fields);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "class", l_class);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "enum", l_enum);
+    sh_script_api_add_closer(sh_script_reflect_restore);
 }
 
 #ifndef SH_SCRIPT_PURE

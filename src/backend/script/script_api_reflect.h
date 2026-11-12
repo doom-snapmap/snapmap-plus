@@ -61,6 +61,18 @@ int sh_script_reflect_push(lua_State *L, const sh_rf_loc *loc, char *err, size_t
 /* Store the value at stack index idx into `loc`; 1, or 0 with a sentence in err. */
 int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *err, size_t err_cap);
 
+/* The same reads and writes for any object of a class the game describes (a
+ * decl, the player's inventory): `call` names the script call in a refusal.
+ * Each pushes its result or raises. A write with restore_at_map_end is put
+ * back when the map ends (for objects that outlive the map). */
+int sh_script_reflect_ready(void);
+int sh_script_reflect_get(lua_State *L, const void *object, const char *cls, const char *path, const char *call);
+int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const char *path, int idx, const char *call,
+                          int restore_at_map_end);
+int sh_script_reflect_fields(lua_State *L, const void *object, const char *cls, const char *path, const char *call);
+/* Put back every write kept for the map's end, newest first. */
+void sh_script_reflect_restore(void);
+
 #ifndef SH_SCRIPT_PURE
 /* Bind the calls to the game (after the typeinfo and script signatures are
  * resolved). The game's types are asked at each call: they answer once a

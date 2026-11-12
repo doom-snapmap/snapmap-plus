@@ -929,6 +929,19 @@ void sh_script_node_play_begin(const char *json, size_t len)
     (void)commit_relay();
 }
 
+int sh_script_node_fire_output(void *ent, int event, void *activator)
+{
+    if (!ent || !g_fire) return 0;
+    __try { g_fire(ent, event, activator); }
+    __except (av_only(GetExceptionCode())) { return 0; }
+    return 1;
+}
+
+void *sh_script_node_fire_address(void)
+{
+    return (void *)g_fire;
+}
+
 int sh_script_node_idstr_assign(void *str, const char *text)
 {
     int ok = 1;

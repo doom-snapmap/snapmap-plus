@@ -290,6 +290,7 @@ int sh_script_hooks_reload(void)
 #include "script_api_common.h"
 #include "script_api_combat.h"
 #include "script_api_reflect.h"
+#include "script_api_game.h"
 
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
 #define EDITOR_ACTIVE_BYTE       0x09    /* idSnapEditorLocal: set while editing, clear during every SnapMap Play */
@@ -1086,6 +1087,7 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     (void)sh_script_api_install(results, count, module_base);   /* logs its own line when it cannot */
     (void)sh_script_combat_install(results, count, module_base);   /* a missing part is its own registry row */
     (void)sh_script_api_reflect_install();
+    (void)sh_script_api_game_install(results, count, module_base);
     resolve_combat_hooks(r, module_base);
     /* Spawns during Play reach scripts through the companions' CallSpawn
      * detour, resolved and checked at their install (before this one). */

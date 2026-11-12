@@ -728,6 +728,91 @@ static int on_input(lua_State *L)
     return 0;
 }
 
+static int (*g_signal_known)(const char *event);
+static void (*g_signal_wanted)(void);
+
+void sh_script_set_signal_ops(int (*known)(const char *event), void (*wanted)(void))
+{
+    g_signal_known = known;
+    g_signal_wanted = wanted;
+}
+
+/* Push the event's key (lower case, without snap_event_) and return it. */
+static const char *push_signal_key(lua_State *L, const char *s)
+{
+    const char *low = push_lower(L, s);
+    if (!strncmp(low, "snap_event_", 11)) {
+        lua_pushstring(L, low + 11);
+        lua_remove(L, -2);
+        low = lua_tostring(L, -1);
+    }
+    return low;
+}
+
+static int on_signal(lua_State *L)
+{
+    const char *name;
+    size_t n = 0;
+    const char *s = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
+    if (!s || !n)
+        sh_script_refuse(L, "\"on.signal\" needs the name of a SnapMap event as its first value, such as \"ai_killed\"");
+    if (lua_type(L, 2) != LUA_TFUNCTION)
+        sh_script_refuse(L, "\"on.signal\" needs a function as its second value, got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    name = push_signal_key(L, s);
+    if (g_signal_known && !g_signal_known(name))
+        sh_script_refuse(L, "\"on.signal\" found no SnapMap event named %s in the game", s);
+    lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_HANDLERS);
+    lua_getfield(L, -1, "signal");
+    list_append(L, lua_gettop(L), name, 2);
+    lua_pushfstring(L, "signal:%s", name);
+    if (!add_bind(shs_mod_of(L), lua_tostring(L, -1), SH_SCRIPT_BIND_SIGNAL)) luaL_error(L, "not enough memory");
+    shs_mod_of(L)->handlers++;
+    if (g_signal_wanted) g_signal_wanted();
+    return 0;
+}
+
+int sh_script_signal_post(const char *event, sh_script_handle self, sh_script_handle activator)
+{
+    int hooks[64], n = 0, i, j;
+    size_t len = event ? strlen(event) : 0;
+    if (!len) return 0;
+    AcquireSRWLockShared(&g_lock);
+    for (i = 0; i < g_nmods && n < 64; i++) {
+        shs_mod *m = &(*g_modv[i]);
+        if (m->status != SH_SCRIPT_RUNNING || m->hook < 0) continue;
+        for (j = 0; j < m->nbinds; j++) {
+            const char *b = m->binds[j].name;
+            if ((m->binds[j].kinds & SH_SCRIPT_BIND_SIGNAL) && !strncmp(b, "signal:", 7) && !strcmp(b + 7, event)) {
+                hooks[n++] = m->hook;
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_lock);
+    for (i = 0; i < n; i++) sh_script_queue_post(hooks[i], SH_SCRIPT_EV_SIGNAL, self, activator, 0, 0.0f, event, NULL);
+    return n;
+}
+
+static sh_script_closer_fn *g_closers;
+static int g_nclosers, g_cclosers;
+
+int sh_script_api_add_closer(sh_script_closer_fn fn)
+{
+    int i;
+    if (!fn) return 0;
+    for (i = 0; i < g_nclosers; i++) if (g_closers[i] == fn) return 1;
+    if (g_nclosers == g_cclosers) {
+        int cap = g_cclosers ? g_cclosers * 2 : 8;
+        sh_script_closer_fn *grown = (sh_script_closer_fn *)realloc(g_closers, (size_t)cap * sizeof *grown);
+        if (!grown) return 0;
+        g_closers = grown;
+        g_cclosers = cap;
+    }
+    g_closers[g_nclosers++] = fn;
+    return 1;
+}
+
 static int on_map(lua_State *L)
 {
     const char *kind = lua_tostring(L, lua_upvalueindex(1));
@@ -795,6 +880,7 @@ static int job_open(lua_State *L)
     lua_newtable(L);
     for (i = 0; i < SHS_KINDS; i++) { lua_newtable(L); lua_setfield(L, -2, k_kinds[i]); }
     lua_newtable(L); lua_setfield(L, -2, "input");
+    lua_newtable(L); lua_setfield(L, -2, "signal");
     lua_newtable(L); lua_setfield(L, -2, "map_start");
     lua_newtable(L); lua_setfield(L, -2, "map_end");
     lua_newtable(L); lua_setfield(L, -2, "missed");
@@ -832,6 +918,7 @@ static int job_open(lua_State *L)
         lua_setfield(L, -2, k_kinds[i]);
     }
     lua_pushcfunction(L, on_input); lua_setfield(L, -2, "input");
+    lua_pushcfunction(L, on_signal); lua_setfield(L, -2, "signal");
     lua_pushstring(L, "map_start"); lua_pushcclosure(L, on_map, 1); lua_setfield(L, -2, "map_start");
     lua_pushstring(L, "map_end"); lua_pushcclosure(L, on_map, 1); lua_setfield(L, -2, "map_end");
     lua_newtable(L);                                 /* a proxy, so "on" itself cannot be edited */
@@ -1291,6 +1378,7 @@ static void end_all(int run_end_handlers)
     }
     g_active = 0;
     g_started = 0;
+    for (i = 0; i < g_nclosers; i++) g_closers[i]();
 }
 
 void sh_script_map_close(int run_end_handlers)
@@ -1482,6 +1570,15 @@ static int job_event(lua_State *L)
         at = lua_gettop(L) - 1;
         if (push_handlers(L, "input", node)) call_list(L, lua_gettop(L), at, 2);
         else { lua_pop(L, 1); input_missed(L, m, node); }
+        lua_settop(L, base);
+        return 0;
+    }
+    if (ev->kind == SH_SCRIPT_EV_SIGNAL) {
+        const char *event = push_lower(L, ev->text);
+        sh_script_push_entity(L, ev->self);
+        sh_script_push_entity(L, ev->other);
+        at = lua_gettop(L) - 1;
+        if (push_handlers(L, "signal", event)) call_list(L, lua_gettop(L), at, 2);
         lua_settop(L, base);
         return 0;
     }

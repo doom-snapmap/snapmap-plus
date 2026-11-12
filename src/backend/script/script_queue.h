@@ -39,6 +39,7 @@ typedef enum sh_script_event_kind {
                                (PAIN_FALTER ...), text2 = that hit's damage decl */
     SH_SCRIPT_EV_PROJECTILE,/* self launched projectile other; text = the projectile decl, vec = origin then
                                direction (SH_SCRIPT_EVF_VEC) */
+    SH_SCRIPT_EV_SIGNAL,    /* self fired the SnapMap event `text` (lower case, without SNAP_EVENT_); other = activator */
     SH_SCRIPT_EV_KINDS
 } sh_script_event_kind;
 

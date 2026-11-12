@@ -819,11 +819,23 @@ static void *find_event(const char *name, const sh_script_earg *args, int n)
     }
     for (i = 0; i < n; i++) {
         char want = format[i], have = args[i].type;
-        if (want == have || (want == 'b' && have == 'i')) continue;
+        if (want == have || (want == 'b' && have == 'i') || (want == 'e' && have == 'E')) continue;
         api_log("Mod scripts: the game's event %s takes '%c' as argument %d, not '%c'.", name, want, i + 1, have);
         return NULL;
     }
     return def;
+}
+
+static int e_event_format(const char *name, char *format, size_t cap)
+{
+    void *m = evmgr(), *def = NULL;
+    vfn_name_fn find = (vfn_name_fn)vfn(m, EV_FIND_VSLOT);
+    if (!find || !name || !format || !cap) return 0;
+    __try { def = find(m, name); } __except (av_only(GetExceptionCode())) { def = NULL; }
+    if (!def) return 0;
+    format[0] = 0;
+    if (read_ptr(def, EV_FORMAT) && !read_cstr((const char *)read_ptr(def, EV_FORMAT), format, cap)) return 0;
+    return 1;
 }
 
 /* Build engine arguments; 0 when an entity argument could not be built. */
@@ -837,8 +849,21 @@ static int build_args(const sh_script_earg *args, int n, eng_arg *a)
         case 'f': { uint32_t bits; memcpy(&bits, &args[i].f, 4); a[i].type = 'f'; a[i].value = bits; break; }
         case 'v': case 'a': a[i].type = args[i].type; memcpy(&a[i].value, args[i].v, 3 * sizeof(float)); break;
         case 's': case '1': case '2': a[i].type = args[i].type; a[i].value = (uint64_t)(uintptr_t)args[i].s; break;
-        case 'd': a[i].type = 'd'; a[i].value = (uint64_t)(uintptr_t)args[i].p; break;
+        case 'd': case 'r': a[i].type = args[i].type; a[i].value = (uint64_t)(uintptr_t)args[i].p; break;
+        case 'c':
+            a[i].type = 'c';
+            memcpy(&a[i].value, args[i].v, 3 * sizeof(float));
+            memcpy((uint8_t *)&a[i].value + 3 * sizeof(float), &args[i].w, sizeof(float));
+            break;
         case '4': a[i].type = '4'; a[i].value = 0; break;
+        case 'E':                                 /* an entity, or none */
+            if (!args[i].p) { a[i].type = 'e'; a[i].value = SH_SCRIPT_SPAWN_ID_NONE; break; }
+            {
+                int ok = 0;
+                __try { g_arg_entity(&a[i], args[i].p); ok = 1; } __except (av_only(GetExceptionCode())) { ok = 0; }
+                if (!ok) return 0;
+            }
+            break;
         case 'e': {
             int ok = 0;
             if (!args[i].p) return 0;
@@ -889,6 +914,7 @@ static int e_event(void *ent, const char *name, const sh_script_earg *args, int 
                 memcpy(&ret->f, r + 8, 4);
                 memcpy(ret->v, r + 8, 3 * sizeof(float));
                 memcpy(&ret->p, r + 8, sizeof ret->p);   /* a 'd' decl; an 'e' return is not a pointer */
+                if (ret->type == 's' || ret->type == '1' || ret->type == '2') ret->s = (const char *)ret->p;
             }
         }
         __try { g_clear(r); } __except (av_only(GetExceptionCode())) { }
@@ -1097,7 +1123,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag
+        e_difficulty, e_tag, e_event_format
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

@@ -56,6 +56,8 @@ param(
                            "script/script_api_combat.c", "script/script_combat_sigs.c",
                            # Mod scripts: any field of any entity by name (get, set, fields, enum).
                            "script/script_reflect.c", "script/script_api_reflect.c",
+                           # Mod scripts: every engine event, SnapMap event, cvar and decl.
+                           "script/script_api_game.c",
                            "../third_party/lua/lapi.c", "../third_party/lua/lauxlib.c", "../third_party/lua/lbaselib.c", "../third_party/lua/lcode.c", "../third_party/lua/lcorolib.c", "../third_party/lua/lctype.c", "../third_party/lua/ldebug.c", "../third_party/lua/ldo.c", "../third_party/lua/ldump.c", "../third_party/lua/lfunc.c", "../third_party/lua/lgc.c", "../third_party/lua/llex.c", "../third_party/lua/lmathlib.c", "../third_party/lua/lmem.c", "../third_party/lua/lobject.c", "../third_party/lua/lopcodes.c", "../third_party/lua/lparser.c", "../third_party/lua/lstate.c", "../third_party/lua/lstring.c", "../third_party/lua/ltable.c", "../third_party/lua/ltablib.c", "../third_party/lua/ltm.c", "../third_party/lua/lundump.c", "../third_party/lua/lutf8lib.c", "../third_party/lua/lvm.c", "../third_party/lua/lzio.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.

@@ -57,13 +57,16 @@ extern "C" {
  *   'f' float, 'v' vector (v), 'a' angles (v: pitch, yaw, roll in degrees),
  *   's' text (s, copied by the engine), 'e' entity (p, an engine entity),
  *   'd' decl (p), '1' animWeb path text (s), '2' joint name text (s),
- *   '4' no animation (always NULL).
+ *   'E' entity or none (p, NULL for none; sent as 'e'),
+ *   '4' no animation (always NULL), 'c' a color (v and w: red, green, blue,
+ *   alpha), 'r' any game object (p).
  * A return of type 0 means the receiver did not handle the event. */
 typedef struct sh_script_earg {
     char        type;
     int         i;
     float       f;
     float       v[3];
+    float       w;
     const char *s;
     void       *p;
 } sh_script_earg;
@@ -109,6 +112,9 @@ typedef struct sh_script_engine {
      * axis (rows forward, left, up), 0 when the demon's model has no such
      * tag (or the entity is not a demon), -1 unreadable. */
     int      (*tag)(void *ent, const char *name, float pos[3], float axis[9]);
+    /* The argument format of the engine event `name` ("" when it takes
+     * none): 1, or 0 when the game has no such event. */
+    int      (*event_format)(const char *name, char *format, size_t cap);
 } sh_script_engine;
 
 /* The floor under pos made of the engine's world trace: straight down from

@@ -167,6 +167,9 @@ int sh_script_started(void);
  *   SH_SCRIPT_EV_INPUT   self = the Script node, other = activator, text = the node's name
  *   SH_SCRIPT_EV_PAIN    self, other = attacker, text = the pain reaction, text2 = damage decl:
  *                        on.pain(name, fn(self, reaction, damage, attacker))
+ *   SH_SCRIPT_EV_SIGNAL  self fired a SnapMap event, other = activator, text = the event
+ *                        (lower case, without SNAP_EVENT_): on.signal(event, fn(entity, activator)),
+ *                        for any entity of the map
  *   SH_SCRIPT_EV_PROJECTILE self, other = the projectile, text = its decl, vec = origin and direction:
  *                        on.projectile(name, fn(self, p, decl, origin, dir))
  * A damage record's vec is the hit direction (hit.direction).
@@ -186,6 +189,7 @@ int sh_script_started(void);
 #define SH_SCRIPT_BIND_PAIN   0x40u
 #define SH_SCRIPT_BIND_PROJECTILE 0x80u
 #define SH_SCRIPT_BIND_FRAME  0x100u
+#define SH_SCRIPT_BIND_SIGNAL 0x200u   /* bound as "signal:<event>" */
 int sh_script_binds(const char *full_name, char *salt_out, size_t cap, unsigned *kinds);
 
 /* 1 when `handle` is an entity of a running mod (placed from its entityDefs
@@ -216,6 +220,21 @@ int sh_script_api_add(int kind, const char *name, lua_CFunction fn);
  * Same rules as sh_script_api_add; adding one twice adds it once. */
 typedef void (*sh_script_opener_fn)(lua_State *L);
 int sh_script_api_add_opener(sh_script_opener_fn fn);
+
+/* SnapMap events (the outputs wired logic listens to). `known` answers 1 for
+ * an event name the game has (lower case, without SNAP_EVENT_; NULL accepts
+ * any); `wanted` runs when a script registers on.signal (the engine side
+ * installs its hook then). */
+void sh_script_set_signal_ops(int (*known)(const char *event), void (*wanted)(void));
+/* Queue a SnapMap event for every running mod that handles it: the number of
+ * mods it reached. Any thread. */
+int sh_script_signal_post(const char *event, sh_script_handle self, sh_script_handle activator);
+
+/* A function run at every map end, after every state closed (a module undoes
+ * what its calls changed in the game for the map). Adding one twice adds it
+ * once. */
+typedef void (*sh_script_closer_fn)(void);
+int sh_script_api_add_closer(sh_script_closer_fn fn);
 
 /* The mod a state (or any of its coroutines) belongs to. */
 const char *sh_script_salt(lua_State *L);
