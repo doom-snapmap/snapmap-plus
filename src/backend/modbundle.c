@@ -23,6 +23,7 @@
 #include "json_pretty.h"
 #include "backend_log.h"
 #include "sha256.h"
+#include "script/script_sdk.h"    /* the libraries a script may require without carrying them */
 #include "script/script_node.h"   /* the Script node row: its reserved paths, which mods get it */
 #include "store_lock.h"
 #include "text.h"
@@ -860,6 +861,14 @@ int sh_mb_pointer_only_kind(const char *request)
 }
 
 /* ------------------------------------------------------- mod scripts ---- */
+
+static int mb_sdk_lib(const char *name)
+{
+    const sh_script_sdk_lib *lib;
+    for (lib = SH_SCRIPT_SDK_LIBS; lib->name; lib++)
+        if (!strcmp(lib->name, name)) return 1;
+    return 0;
+}
 
 static int mb_script_name_char(char c)
 {
@@ -4720,7 +4729,8 @@ static void mb_scripts_finish(sh_mb_bundle *b, const mb_req_index *own, mb_scrip
             }
             if (!(req = sh_textf("mods/%s/scripts/lib/%s.lua", b->id, u->name))) { mb_error(b, "out of memory"); goto done; }
             mb_lower(req);
-            if (!mb_req_has(own, req)) {
+            /* one of the mod's own files, else one of the libraries Snapmap+ ships (script_sdk.h) */
+            if (!mb_req_has(own, req) && !mb_sdk_lib(u->name)) {
                 what = sh_textf("\"require\" found no scripts\\lib\\%s.lua in this mod", u->name);
                 mb_script_error(b, file, u->line, what ? what : "out of memory", "add the file to scripts\\lib or "
                                 "correct the name; a script loads only its own mod's files");
