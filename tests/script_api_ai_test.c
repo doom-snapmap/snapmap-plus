@@ -673,7 +673,6 @@ static void expect_stop(const char *body, const char *phrase)
 
 static void test_refusals(void)
 {
-    expect_stop("ent(4):move_to({x = 1, y = 2, z = 3})", "\"move_to\" works only on this mod's own demons");
     expect_stop("ent(3):move_to({x = 1, y = 2, z = 3})", "\"move_to\" works only on a demon, and this entity is not one");
     expect_stop("self:move_to(nil)", "\"move_to\" needs a position (a table with x, y and z), got nothing");
     expect_stop("self:move_to({x = 1, y = 'a', z = 3})", "\"move_to\" needs a position with a number for y");
@@ -685,7 +684,6 @@ static void test_refusals(void)
     expect_stop("self:equip(-1)", "\"equip\" needs an inventory index of 0 or more, got -1");
     expect_stop("self:laser('a b', true)", "\"laser\": \"a b\" is not a usable name");
     expect_stop("self:find_position({ min = 10, max = 5 })", "\"find_position\": max must not be less than min");
-    expect_stop("ent(2):enemy()", "\"enemy\" works only on this mod's own demons");
 }
 
 /* A tag, laser or pain string name is any length the decl gives it: it reaches the engine whole. */
@@ -1117,7 +1115,6 @@ static void test_brain_refusals(void)
 {
     printf("-- the brain's calls refuse plainly\n");
     expect_stop("self:recoil(2)", "\"recoil\" needs a weight from 0 (no recoil) to 1 (full), got 2");
-    expect_stop("ent(4):recoil(0.5)", "\"recoil\" works only on this mod's own demons");
     expect_stop("self:aim_point(5)", "\"aim_point\" needs a position");
     expect_stop("self:anim_valid('evade/side', 'TF_FLY')", "\"anim_valid\" does not know the test \"TF_FLY\"");
     expect_stop("self:anim_valid('a b')", "\"anim_valid\": \"a b\" is not an animWeb node name");

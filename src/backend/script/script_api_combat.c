@@ -320,12 +320,15 @@ static void *check_decl(lua_State *L, int arg, const char *call, const char *typ
 {
     const char *full;
     void *decl;
+    int is_game = 0;
     if (lua_type(L, arg) != LUA_TSTRING && !lua_isuserdata(L, arg))
-        sh_script_refuse(L, "\"%s\" needs %s (the name of one of this mod's %s decls), got %s", call, what, type,
-                         lua_isnoneornil(L, arg) ? "nothing" : luaL_typename(L, arg));
-    full = sh_script_check_name(L, arg, call, 0, NULL);
+        sh_script_refuse(L, "\"%s\" needs %s (the name of a %s decl of this mod, or of the game with game(name)), "
+                            "got %s", call, what, type, lua_isnoneornil(L, arg) ? "nothing" : luaL_typename(L, arg));
+    full = sh_script_check_name(L, arg, call, 1, &is_game);
     if (!CE(decl)) return NULL;
     decl = g_ce.decl(type, full);
+    if (!decl && is_game)
+        sh_script_refuse(L, "\"%s\" found no %s decl named %s in the game", call, type, full);
     if (!decl)
         sh_script_refuse(L, "\"%s\" found no %s decl \"%s\" in this mod; check the name and that the file is under "
                             "decls\\%s", call, type, lua_tostring(L, arg), type);
@@ -338,7 +341,7 @@ static void *opt_attacker(lua_State *L, int arg, const char *call)
 {
     if (lua_isnoneornil(L, arg)) return CE(world) ? g_ce.world() : NULL;
     if (!luaL_testudata(L, arg, "entity"))
-        sh_script_refuse(L, "\"%s\" needs the attacker as one of this mod's entities, got %s", call,
+        sh_script_refuse(L, "\"%s\" needs the attacker as an entity, got %s", call,
                          lua_type(L, arg) == LUA_TSTRING ? "text" : luaL_typename(L, arg));
     return sh_script_api_owned(L, arg, call, "attack with", NULL);
 }

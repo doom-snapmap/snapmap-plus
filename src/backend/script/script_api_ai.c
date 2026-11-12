@@ -325,8 +325,8 @@ static int is_entity(lua_State *L, int idx)
     return lua_type(L, idx) == LUA_TUSERDATA && luaL_testudata(L, idx, "entity") != NULL;
 }
 
-/* The demon a call acts on: argument 1 must be an entity of this mod that
- * is an idAI2. Returns NULL when the entity was removed (the call then
+/* The demon a call acts on: argument 1 must be an idAI2 (any demon of
+ * the map). Returns NULL when the entity was removed (the call then
  * answers nil). Raises a plain error otherwise. */
 static void *self_ai(lua_State *L, const char *call, sh_script_handle *h_out)
 {
@@ -336,8 +336,6 @@ static void *self_ai(lua_State *L, const char *call, sh_script_handle *h_out)
         sh_script_refuse(L, "\"%s\" is not available in this session (Snapmap+ could not find the game's AI "
                          "functions; see the backend log)", call);
     if (!h) return NULL;
-    if (!sh_script_owns_entity(L, h))
-        sh_script_refuse(L, "\"%s\" works only on this mod's own demons", call);
     ent = g_engine->entity((sh_script_handle)h);
     if (!ent) return NULL;
     if (!g_engine->is_ai(ent))

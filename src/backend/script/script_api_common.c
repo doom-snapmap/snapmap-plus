@@ -101,12 +101,8 @@ int sh_script_api_owns(lua_State *L, sh_script_handle h)
 
 void *sh_script_api_owned(lua_State *L, int arg, const char *call, const char *verb, sh_script_handle *h)
 {
-    sh_script_handle own = 0;
-    void *ent = sh_script_api_entity(L, arg, call, &own);
-    if (h) *h = own;
-    if (own && !sh_script_api_owns(L, own))
-        sh_script_refuse(L, "\"%s\" can only %s this mod's own entities; this one is not", call, verb);
-    return ent;
+    (void)verb;
+    return sh_script_api_entity(L, arg, call, h);
 }
 
 sh_script_handle sh_script_api_handle_of(void *ent)

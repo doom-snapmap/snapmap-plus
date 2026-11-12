@@ -226,9 +226,6 @@ static int l_set_health(lua_State *L)
         sh_script_api_event(ent, "increaseHealth", &a, 1, NULL);
         return 0;
     }
-    if (!sh_script_api_owns(L, h))
-        sh_script_refuse(L, "\"set_health\" can only change the health of this mod's own entities and heal players; "
-                            "this one is neither");
     if (kind != SH_SCRIPT_KIND_AI || !health_of(ent, &cur, &max))
         sh_script_refuse(L, "\"set_health\" was given an entity that has no health");
     if (n < 1)
@@ -517,7 +514,8 @@ static int l_spawn(lua_State *L)
     void *ent;
     int mod = -1;
     sh_script_handle h;
-    def = sh_script_check_name(L, 1, "spawn", 0, NULL);
+    int is_game = 0;
+    def = sh_script_check_name(L, 1, "spawn", 1, &is_game);
     sh_script_api_check_vec(L, 2, "spawn", "where to spawn", pos);
     sh_script_api_opt_number(L, 3, "spawn", "the facing in degrees", &yaw);
     sh_script_api_check_room(L, "spawn");
@@ -528,6 +526,11 @@ static int l_spawn(lua_State *L)
         return nil1(L);
     }
     h = e->spawn_id ? sh_script_handles_find(e->spawn_id(ent), &mod) : 0;
+    if (is_game && e->spawn_id && (!h || mod != sh_script_hooks_mod_find(sh_script_salt(L)))) {
+        /* one of the game's own entityDefs: the script that spawned it owns it */
+        mod = sh_script_hooks_mod_find(sh_script_salt(L));
+        h = mod >= 0 ? sh_script_handles_add_named(mod, e->spawn_id(ent), def, NULL) : 0;
+    }
     if (!h || mod != sh_script_hooks_mod_find(sh_script_salt(L))) {
         /* the spawn hook could not record it for this mod (no memory) */
         sh_script_api_post(ent, "remove", NULL, 0);

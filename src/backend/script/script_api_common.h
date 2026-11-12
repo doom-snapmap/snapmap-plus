@@ -184,9 +184,9 @@ int sh_script_api_now_ms(int *ms);
  * An entity this frame's spawn just made (not yet delivered) resolves too. */
 void *sh_script_api_entity(lua_State *L, int arg, const char *call, sh_script_handle *h);
 
-/* The same, and the entity must be this mod's own (placed from its
- * entityDefs or spawned by its scripts): another entity raises
- * "<call> can only <verb> this mod's own entities; this one is not". */
+/* The entity a call changes. A script is the map's own logic, as wired
+ * logic is, so it may change any entity of the map: this is
+ * sh_script_api_entity (`verb` names what the call does, for readers). */
 void *sh_script_api_owned(lua_State *L, int arg, const char *call, const char *verb, sh_script_handle *h);
 
 /* 1 when `h` is this mod's own entity. */

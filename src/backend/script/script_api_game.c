@@ -491,6 +491,28 @@ static int l_cvar(lua_State *L)
     }
 }
 
+/* entities() -> every entity of the map now, players first */
+static int l_entities(lua_State *L)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    int num, n = 0, slots;
+    lua_newtable(L);
+    if (!e || !e->slot_spawn_id || !e->resolve || !e->slots) return 1;
+    slots = e->slots();
+    for (num = 0; num < slots; num++) {
+        uint32_t id = e->slot_spawn_id(num);
+        void *ent;
+        sh_script_handle h;
+        if (id == SH_SCRIPT_SPAWN_ID_NONE || id == SH_SCRIPT_SPAWN_ID_WORLD) continue;
+        ent = e->resolve(id);
+        h = ent ? sh_script_api_handle_of(ent) : 0;
+        if (!h) continue;
+        sh_script_push_entity(L, h);
+        lua_rawseti(L, -2, (lua_Integer)++n);
+    }
+    return 1;
+}
+
 void sh_script_api_game_register(void)
 {
     static int done;
@@ -502,6 +524,7 @@ void sh_script_api_game_register(void)
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "event_args", l_event_args);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "cvar", l_cvar);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "decl", l_decl);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities", l_entities);
     sh_script_api_add_opener(open_decl);
     sh_script_api_add_closer(map_ended);
     sh_script_set_signal_ops(signal_known, signals_wanted);

@@ -23,6 +23,8 @@
  *   cvar(name)             a cvar's value (a number when it reads as one).
  *   cvar(name, value)      set it for this map; it is put back when the map
  *                          ends.
+ *   entities()             every entity of the map now, players first (filter
+ *                          with e:def(), e:class() or e:get(...)).
  *   decl(type, name)       a decl of the mod, or of the game with
  *                          game("..."): d:get(path), d:set(path, value),
  *                          d:fields([path]), d:name(), d:type(). What a

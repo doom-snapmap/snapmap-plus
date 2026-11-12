@@ -4,9 +4,8 @@
  * prop of the mod, a wall), the runtime and the hooks' handle table as the
  * game uses them.
  *
- * Covers: every read on own and foreign entities; every write on the mod's
- * own entities and its refusal on another's, with the plain stop line naming
- * the file and line; the player heal exception; argument refusals worded for
+ * Covers: every read and write on the mod's own and on other entities;
+ * the plain stop line naming the file and line; the player heal exception; argument refusals worded for
  * an author; removed entities answer nil; spawn and its two caps; players();
  * entities_near order and radius; trace hits, misses, the thick line and the
  * ignored entity; animation requests on an AI (the ssaction events and the
@@ -427,12 +426,25 @@ static void refused(const char *body, const char *line, const char *words)
     CHECK(has(g_stop, words));
 }
 
+/* A script is the map's logic: it changes any entity, not only its mod's. */
+static void test_any_entity(void)
+{
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local imp = ent(1)\n"
+        "  imp:set_pos({x = 7, y = 8, z = 9})\n"
+        "  imp:set_health(10)\n"
+        "  local p = imp:pos()\n"
+        "  print('stock moved', p.x, p.y, p.z, imp:health())\n"
+        "  ent(4):remove()\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "stock moved\t7.0\t8.0\t9.0\t10.0"));
+    CHECK(has(g_events, "post remove();"));
+}
+
 static void test_refusals(void)
 {
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):set_pos({x = 1, y = 2, z = 3})\nend)\n",
-            "3", "\"set_pos\" can only move this mod's own entities; this one is not");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):remove()\nend)\n",
-            "3", "\"remove\" can only remove this mod's own entities");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_pos(nil)\nend)\n",
             "3", "\"set_pos\" needs the new position (a position with x, y and z), got nothing");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_pos({x = 1, y = 'up'})\nend)\n",
@@ -441,16 +453,12 @@ static void test_refusals(void)
             "4", "\"set_health\" cannot take health to 0; kill with damage(...) so the death plays");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(2):set_health(10)\nend)\n",
             "3", "\"set_health\" can only heal a player");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):set_health(10)\nend)\n",
-            "3", "can only change the health of this mod's own entities and heal players");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):set_health(10)\nend)\n",
             "3", "\"set_health\" was given an entity that has no health");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:distance('ai/imp')\nend)\n",
             "3", "\"distance\" needs what to measure to (an entity, or a position with x, y and z), got text");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:pos(5)\n  print(5):pos()\nend)\n",
             "4", "");   /* a method on nothing: the runtime's own wording */
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):anim_state('melee')\nend)\n",
-            "3", "\"anim_state\" can only animate this mod's own entities");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:anim_event('DEST_BLEND_END')\nend)\n",
             "3", "\"anim_event\" knows DEST_BLEND_START, DEST_REACHED, VIA_BLEND_IN_START, VIA_BLEND_OUT_START and FINISHED, not \"DEST_BLEND_END\"");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_yaw(0/0)\nend)\n",
@@ -660,6 +668,7 @@ int main(void)
 
     test_reads();
     test_writes();
+    test_any_entity();
     test_refusals();
     test_spawn();
     test_world();

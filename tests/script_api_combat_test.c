@@ -548,20 +548,16 @@ static void test_refusals(void)
             "3", "\"damage\" found no damage decl \"damage/nosuch\" in this mod; check the name and that the file is under decls\\damage");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1), 'mods/othermod/damage/rock')\nend)\n",
             "3", "\"damage\" can only use this mod's own content; \"mods/othermod/damage/rock\" belongs to another mod");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1), 'damage/rock', ent(1))\nend)\n",
-            "3", "\"damage\" can only attack with this mod's own entities; this one is not");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1), 'damage/rock', 'self')\nend)\n",
-            "3", "\"damage\" needs the attacker as one of this mod's entities, got text");
+            "3", "\"damage\" needs the attacker as an entity, got text");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1))\nend)\n",
-            "3", "\"damage\" needs the damage (the name of one of this mod's damage decls), got nothing");
+            "3", "\"damage\" needs the damage (the name of a damage decl of this mod, or of the game with game(name)), got nothing");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 0, y = 0, z = 0}, 'damage/rock')\nend)\n",
             "3", "\"hitscan\" needs a direction that is not zero");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 1, y = 0, z = 0}, 'damage/rock', 0)\nend)\n",
             "3", "\"hitscan\" needs a range of at least 1, got 0");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(self, 'FX_NOPE')\nend)\n",
             "3", "\"fx\" knows no effect condition \"FX_NOPE\"; use one of the FX_ conditions the entity's fx decl lists");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(ent(1), 'FX_CINEMATIC_8')\nend)\n",
-            "3", "\"fx\" can only start effects on this mod's own entities; this one is not");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(42)\nend)\n",
             "3", "\"fx\" needs an entity and an effect condition, or the name of one of this mod's effect entities and a position; got number");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_stop(self)\nend)\n",
@@ -570,12 +566,8 @@ static void test_refusals(void)
             "3", "\"fx_move\" moves an effect made by fx(effect, pos); this entity is not one");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  sound(self, 'brute/roar', 'loud')\nend)\n",
             "3", "\"sound\" knows no channel \"loud\"; use any, voice, body, weapon or item");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  sound(ent(2), 'brute/roar')\nend)\n",
-            "3", "\"sound\" can only play sounds on this mod's own entities; this one is not");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):fire('rocket', 'muzzle', ent(2))\nend)\n",
             "3", "\"fire\" works on demons; this entity is not one");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):fire('rocket', 'muzzle', ent(2))\nend)\n",
-            "3", "\"fire\" can only fire from this mod's own entities; this one is not");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:fire('damage/rock', 'muzzle', ent(2))\nend)\n",
             "3", "\"fire\" found no projectile decl \"damage/rock\" in this mod");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:fire('rocket', 'muzzle')\nend)\n",
