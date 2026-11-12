@@ -4912,6 +4912,27 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     return r;
 }
 
+int sh_modserve_open_disk(const char *request, unsigned char **bytes, size_t *length)
+{
+    const ms_index *x = NULL;
+    const ms_file *f;
+    unsigned char *buf;
+    size_t len = 0;
+    int r = 0;
+    if (bytes) *bytes = NULL;
+    if (length) *length = 0;
+    if (!bytes || !length) return 0;
+    InterlockedIncrement(&g_readers);
+    f = ms_lookup_file(&x, request);
+    if (f && !f->stock && f->disk && !ms_body_of(f, &len)) {
+        buf = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+        if (buf) { *bytes = buf; *length = len; r = 1; }
+        else r = -1;
+    }
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
 int sh_modserve_probe_claims(const char *path)
 {
     const ms_file *f;

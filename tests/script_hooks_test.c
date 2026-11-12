@@ -18,6 +18,10 @@
 #include <string.h>
 #include "script/script_hooks.h"
 
+/* The runtime is not linked: the hooks' test-only reload (a console test's seam) is not used here. */
+int sh_script_map_open(void) { return 0; }
+void sh_script_map_close(int run_end_handlers) { (void)run_end_handlers; }
+
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 

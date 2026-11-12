@@ -1285,6 +1285,29 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
     sh_modmanifest_names_free(names, count);
 }
 
+/* At every load: one line for each row whose build the place resolver replaces
+ * with another build of its salt (the player's own map follows the root, so
+ * the root's build serves the row and the next save records it). A stranger's
+ * map resolves a row only at its own build, so it logs nothing here. */
+static void mm_note_followed(const sh_modmanifest_list *list)
+{
+    size_t i;
+    if (!list) return;
+    for (i = 0; i < list->count; i++) {
+        const sh_modmanifest_row *r = &list->rows[i];
+        sh_modserve_bundle_ref ref;
+        char *line;
+        memset(&ref, 0, sizeof ref);
+        if (sh_modserve_row_build(r, &ref) && _stricmp(ref.hash, r->build)) {
+            line = sh_textf("MODS: map: %s: saved with build %.16s; the root's build %.16s serves it and the next save "
+                            "records that one", r->salt, r->build, ref.hash);
+            backend_log(line ? line : "MODS: map: the root's build of a mod serves a row saved with another build");
+            free(line);
+        }
+        sh_modserve_bundle_ref_free(&ref);
+    }
+}
+
 /* The map scope's hook and its arming (sh_modmanifest_set_scope). */
 static sh_modmanifest_scope_fn volatile g_scope;
 static int (*volatile g_scope_armed)(void);
@@ -1524,6 +1547,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
     mm_subst_load(&list, json, length);
+    mm_note_followed(&list);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);
     active = mm_activate_load(&list);

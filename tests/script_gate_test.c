@@ -109,6 +109,10 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     *length = sizeof k_script - 1;
     return 1;
 }
+int sh_modserve_open_disk(const char *request, unsigned char **bytes, size_t *length)
+{
+    return sh_modserve_open(request, bytes, length);
+}
 void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1])
 { (void)data; (void)len; strcpy_s(out, SH_MB_HASH_HEX + 1, "sum"); }
 

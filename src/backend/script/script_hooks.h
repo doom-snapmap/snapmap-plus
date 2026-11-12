@@ -232,6 +232,10 @@ sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod);
 #ifdef SH_SCRIPT_PURE
 /* Tests only: empty the mod table. */
 void sh_script_hooks_test_reset(void);
+/* Tests only: pretend a Play runs the mods (1) or not (0): sh_script_hooks_open
+ * answers it and sh_script_hooks_reload prepares the mods again from the
+ * provider, as the engine side does. */
+void sh_script_hooks_test_play(int on);
 #endif
 
 /* Game frames the tick has run scripts in this map. */

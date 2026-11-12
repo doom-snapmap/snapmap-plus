@@ -42,6 +42,30 @@ static const char *plural(int n, const char *one, const char *many)
     return n == 1 ? one : many;
 }
 
+/* A mod whose script files no longer match its build (edited since the last
+ * Refresh) cannot start: one sentence naming the first file and what to do.
+ * 1 when said. The mod is rebuilt by 'sh_mods rescan' or the Mods tab's
+ * Refresh and by DOOM's start; the next Play then runs the new files. */
+static int say_stale(con *c, const char *salt, const char *name)
+{
+    int count = 0;
+    const char *file = sh_script_source_stale(salt, &count);
+    char shown[260];
+    size_t k;
+    if (!file) return 0;
+    _snprintf_s(shown, sizeof shown, _TRUNCATE, "scripts\\%s", file);
+    for (k = 0; shown[k]; k++) if (shown[k] == '/') shown[k] = '\\';
+    if (count > 1)
+        say(c, "%s: %s and %d more %s no longer match the mod's last build, so its scripts will not start; run "
+               "'sh_mods rescan' (or press Refresh in the Mods tab) to rebuild it, then play the map again.",
+            name && name[0] ? name : salt, shown, count - 1, plural(count - 1, "file", "files"));
+    else
+        say(c, "%s: %s no longer matches the mod's last build, so its scripts will not start; run 'sh_mods rescan' "
+               "(or press Refresh in the Mods tab) to rebuild it, then play the map again.",
+            name && name[0] ? name : salt, shown);
+    return 1;
+}
+
 static void status_one(void *context, const char *salt, const char *name)
 {
     con *c = (con *)context;
@@ -49,7 +73,9 @@ static void status_one(void *context, const char *salt, const char *name)
     (void)name;
     if (!sh_script_mod_info_get(salt, &i)) return;
     c->shown++;
-    if (i.waiting) {
+    if (i.waiting && say_stale(c, salt, i.name)) {
+        /* said: the files on disk are not the built ones */
+    } else if (i.waiting) {
         say(c, "%s: %d script %s ready; %s at the first frame of Play.", i.name, i.files, plural(i.files, "file", "files"),
             plural(i.files, "it runs", "they run"));
     } else if (i.status == SH_SCRIPT_RUNNING) {
@@ -104,15 +130,34 @@ static void check_line(void *context, const char *line)
     say(c, "%s", line);
 }
 
+typedef struct { con *c; int stale; } stale_ctx;
+
+static void stale_one(void *context, const char *salt, const char *name)
+{
+    stale_ctx *s = (stale_ctx *)context;
+    sh_script_mod_info i;
+    if (!sh_script_mod_info_get(salt, &i)) return;
+    if (i.waiting && say_stale(s->c, salt, name && name[0] ? name : i.name)) s->stale++;
+    sh_script_mod_info_free(&i);
+}
+
 static void reload(con *c)
 {
     sh_script_mod_desc *mods = NULL;
     int n, i;
     if (sh_script_hooks_open()) {
         n = sh_script_hooks_reload();
-        if (n > 0) say(c, "Reloaded the scripts of %d %s from their files; they start again at the next frame.", n,
-                       plural(n, "mod", "mods"));
-        else say(c, "No scripts were reloaded: this map's mods carry none now.");
+        if (n > 0) {
+            stale_ctx s;
+            s.c = c;
+            s.stale = 0;
+            sh_script_mods(stale_one, &s);   /* each mod whose files are not its build's says so */
+            if (n > s.stale) {
+                n -= s.stale;
+                say(c, "Reloaded the scripts of %d %s from their files; they start again at the next frame.", n,
+                    plural(n, "mod", "mods"));
+            }
+        } else say(c, "No scripts were reloaded: this map's mods carry none now.");
         return;
     }
     n = sh_script_source_map_mods(NULL, 0);           /* the count, then the mods */
@@ -124,7 +169,10 @@ static void reload(con *c)
     if (n < 0) { free(mods); say(c, "The open map's mods could not be read; open the map again and retry."); return; }
     if (!n) { free(mods); say(c, "The open map's mods carry no scripts."); return; }
     for (i = 0; i < n; i++) {
-        int before = c->shown, ok = sh_script_check_files(mods[i].salt, mods[i].name, sh_script_source_files(), check_line, c);
+        int before, ok;
+        if (say_stale(c, mods[i].salt, mods[i].name)) continue;
+        before = c->shown;
+        ok = sh_script_check_files(mods[i].salt, mods[i].name, sh_script_source_files(), check_line, c);
         if (ok < 0) say(c, "%s: its scripts could not be read; press Refresh in the Mods tab.", mods[i].name);
         else if (c->shown == before)
             say(c, "%s: %d script %s compiled without errors; %s at the next Play.", mods[i].name, ok,

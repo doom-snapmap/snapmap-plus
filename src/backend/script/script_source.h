@@ -7,7 +7,8 @@
  * mod's scripts as the index serves them for the open map
  * (sh_modserve_script_files: the map's own place for a stranger's map, the
  * root folder for the author's own). Every script is read then, once, through
- * sh_modserve_open and kept in memory with the SHA-256 its build recorded; a
+ * sh_modserve_open_disk (the folder's bytes now, not the index's cache) and
+ * kept in memory with the SHA-256 its build recorded; a
  * file whose bytes are not the built ones (edited since the last Refresh) is
  * not kept, so the runtime refuses it by name ("could not be read ... Press
  * Refresh"). The file source then answers lists and reads, require included,
@@ -40,6 +41,13 @@ int sh_script_source_map_mods(sh_script_mod_desc *out, int cap);
  * request order, read a malloc'd copy (release frees it); read answers -1 for
  * a file whose built bytes could not be read. */
 const sh_script_source *sh_script_source_files(void);
+
+/* The first script file of `salt` (as listed: "x.lua", "lib/x.lua") whose
+ * built bytes were not kept because they are not the bytes its build recorded
+ * (edited since the last Refresh) or could not be read, NULL when every file
+ * was kept. *count (optional) receives how many files are so. The text is
+ * valid until the next read of the map's scripts. Main thread. */
+const char *sh_script_source_stale(const char *salt, int *count);
 
 /* Forget every mod's scripts. */
 void sh_script_source_clear(void);

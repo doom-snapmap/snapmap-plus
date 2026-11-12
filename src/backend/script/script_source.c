@@ -158,6 +158,20 @@ const sh_script_source *sh_script_source_files(void)
     return &k_files;
 }
 
+const char *sh_script_source_stale(const char *salt, int *count)
+{
+    const src_mod *m = find_src(salt);
+    const char *first = NULL;
+    int i, n = 0;
+    for (i = 0; m && i < m->n; i++)
+        if (!m->f[i].text) {
+            if (!first) first = m->f[i].rel;
+            n++;
+        }
+    if (count) *count = n;
+    return first;
+}
+
 /* Every mod with scripts: up to cap written, the whole count returned. */
 static int fill(sh_script_mod_desc *out, int cap)
 {
@@ -274,8 +288,9 @@ static void salt_of_hash(void *context, const char *id, const char *hash, int ad
     strncpy_s(h->salt, sizeof h->salt, id, _TRUNCATE);
 }
 
-/* One served script: its bytes through the index, kept only when they are
- * the bytes its build recorded. */
+/* One served script: its bytes as the mod's folder holds them now (never the
+ * index's cache of the bytes first read, which would hide an edit), kept only
+ * when they are the bytes its build recorded. */
 static void keep_script(void *context, const char *relpath, const char *request, uint64_t size, const char *sha256,
                         const char *bundle_hash)
 {
@@ -284,7 +299,7 @@ static void keep_script(void *context, const char *relpath, const char *request,
     size_t len = 0;
     char *text = NULL, actual[SH_MB_HASH_HEX + 1];
     (void)bundle_hash;
-    if (sh_modserve_open(request, &bytes, &len) == 1) {
+    if (sh_modserve_open_disk(request, &bytes, &len) == 1) {
         sh_mb_sha256_hex(bytes, len, actual);
         if (len == size && sha256 && !_stricmp(actual, sha256) && (text = (char *)malloc(len + 1)) != NULL) {
             memcpy(text, bytes, len);

@@ -157,6 +157,14 @@ int sh_modserve_module_served(const char *module_name);
  * serve. */
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length);
 
+/* A served file's bytes as the file holds them on disk now, never from the
+ * cache: 1 with a HeapFree-able copy (whatever its size), 0 when no bundle
+ * serves the name or the file is not a plain file of a folder (a stock
+ * pointer, a composed text), -1 when it cannot be read. For the question
+ * whether a file still is what its build recorded (script_source.c): the open
+ * above may answer from the cache, which keeps the bytes first read. */
+int sh_modserve_open_disk(const char *request, unsigned char **bytes, size_t *length);
+
 /* Whether the decl existence probe should answer true for `path`: a served
  * decl request (generated/decls/... or decltree/...). Counts the claim. */
 int sh_modserve_probe_claims(const char *path);

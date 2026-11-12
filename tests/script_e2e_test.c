@@ -226,6 +226,79 @@ static void test_examples_compile(void)
     CHECK(sh_script_check_files("scrunaw1", "Script Runaway", sh_script_source_files(), cat_line, NULL) == 1);
 }
 
+/* A script file that is not the bytes its build recorded (edited since the
+ * last Refresh; here a file another handle holds, which reads the same way:
+ * kept as listed, without its text): the reload says which file and what to
+ * do, in Play and outside it, and the status says it instead of "ready". */
+static void test_stale_reload(void)
+{
+    char tmp[MAX_PATH], dir[MAX_PATH], file[MAX_PATH], *p;
+    HANDLE hold, h;
+    DWORD put = 0;
+    int stale = 0;
+    static const char k_text[] = "api = 1\n";
+    GetTempPathA(sizeof tmp, tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssnapmap_stale_%lu", tmp, (unsigned long)GetCurrentProcessId());
+    CreateDirectoryA(dir, NULL);
+    strcat_s(dir, sizeof dir, "\\scripts");
+    CreateDirectoryA(dir, NULL);
+    _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\door.lua", dir);
+    h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    WriteFile(h, k_text, (DWORD)(sizeof k_text - 1), &put, NULL);
+    CloseHandle(h);
+    hold = CreateFileA(file, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(hold != INVALID_HANDLE_VALUE);
+    sh_script_source_clear();
+    CHECK(sh_script_source_set_folder("stalemod", "Stale Door", dir));
+    set_folder("scprobe1", "Script Probe", "script-probe");
+    CHECK(sh_script_source_stale("stalemod", &stale) != NULL && stale == 1);
+    CHECK(!strcmp(sh_script_source_stale("stalemod", NULL), "door.lua"));
+    CHECK(sh_script_source_stale("scprobe1", &stale) == NULL && stale == 0);
+
+    /* outside Play */
+    sh_script_hooks_test_play(0);
+    console(1, "reload", NULL);
+    CHECK(strstr(g_out, "Stale Door: scripts\\door.lua no longer matches the mod's last build, so its scripts will not "
+                        "start; run 'sh_mods rescan' (or press Refresh in the Mods tab) to rebuild it, then play the "
+                        "map again.") != NULL);
+    CHECK(strstr(g_out, "Script Probe: 1 script file compiled without errors") != NULL);
+    CHECK(strstr(g_out, "Stale Door: 1 script file compiled") == NULL);
+
+    /* during Play: the mod that can start is reloaded, the one that cannot says why */
+    sh_script_hooks_test_play(1);
+    CHECK(sh_script_map_open() == 2);
+    console(1, "reload", NULL);
+    CHECK(strstr(g_out, "Stale Door: scripts\\door.lua no longer matches the mod's last build") != NULL);
+    CHECK(strstr(g_out, "Reloaded the scripts of 1 mod from their files; they start again at the next frame.") != NULL);
+    CHECK(strstr(g_out, "Reloaded the scripts of 2 mods") == NULL);
+    console(0, NULL, NULL);
+    CHECK(strstr(g_out, "Stale Door: scripts\\door.lua no longer matches the mod's last build") != NULL);
+    CHECK(strstr(g_out, "Stale Door: 1 script file ready") == NULL);
+    CHECK(strstr(g_out, "Script Probe: 1 script file ready; it runs at the first frame of Play.") != NULL);
+    sh_script_hooks_test_play(0);
+    sh_script_map_end();
+    CloseHandle(hold);
+
+    /* the file readable again (the mod rebuilt): nothing says it, the reload is whole */
+    sh_script_source_clear();
+    CHECK(sh_script_source_set_folder("stalemod", "Stale Door", dir));
+    CHECK(sh_script_source_stale("stalemod", NULL) == NULL);
+    sh_script_hooks_test_play(1);
+    CHECK(sh_script_map_open() == 1);
+    console(1, "reload", NULL);
+    CHECK(strstr(g_out, "no longer matches") == NULL);
+    CHECK(strstr(g_out, "Reloaded the scripts of 1 mod from their files; they start again at the next frame.") != NULL);
+    sh_script_hooks_test_play(0);
+    sh_script_map_end();
+
+    sh_script_source_clear();
+    DeleteFileA(file);
+    RemoveDirectoryA(dir);
+    p = strrchr(dir, '\\');
+    if (p) { *p = 0; RemoveDirectoryA(dir); }
+}
+
 /* ------------------------------------------- the door, through Script nodes */
 
 #define NODE(uid, name) \

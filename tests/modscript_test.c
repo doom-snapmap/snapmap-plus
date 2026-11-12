@@ -36,6 +36,7 @@
 #include "../src/backend/modui.h"
 #include "../src/backend/modzip.h"
 #include "../src/backend/script/script_compile.h"
+#include "../src/backend/script/script_source.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -521,6 +522,79 @@ static void test_store(void)
     sh_mb_free(&b);
 }
 
+/* ---- the played map's scripts follow the scope's builds (script_source.c) */
+
+/* The serving layer's side of the provider is not used here. */
+void sh_script_set_map_provider(sh_script_map_mods_fn fn, void *context) { (void)fn; (void)context; }
+
+/* The scope lists the builds a map declares; a mod's scripts are read for the
+ * build the listing names. The listing of the player's own map names the root's
+ * build, whatever build its row recorded (modui.c); a stranger's names the
+ * row's own, which nothing holds when the root's mod was rebuilt. A script
+ * file edited since the build is not kept and is named, not run. */
+static void test_map_scripts(void)
+{
+    static const char OLD[] = "00000000000000000000000000000000000000000000000000000000000000aa";
+    char src[MAX_PATH], root[MAX_PATH], name[HO_TEXT + 1], cause[HO_TEXT] = "", path[MAX_PATH * 2];
+    const char *hashes[2];
+    sh_script_mod_desc mods[4];
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    const char *stale;
+    int count = 0;
+    printf("-- the played map's scripts: the root's build for an own map, strict for a stranger's, a changed file named\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\own-door", g_tmp);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\storeScope", g_tmp);
+    mt_write(src, "mod.json", MOD_JSON);
+    mt_write(src, DEF, "{\r\n}");
+    mt_write(src, ENTRY, GOOD_ENTRY);
+    mt_write(src, LIB, "return { name = \"door_input\" }\n");
+    CreateDirectoryA(root, NULL);
+    CHECK(sh_ms_set_root(root));
+    memset(&b, 0, sizeof b);
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
+    CHECK(sh_modserve_index_build(root) > 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
+    sh_modserve_scope_enable(1);
+
+    /* Own map: the scope lists the root's build (the row recorded OLD). */
+    hashes[0] = b.hash;
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    CHECK(sh_script_source_map_mods(mods, 4) == 1 && !strcmp(mods[0].salt, SALT));
+    CHECK(sh_script_source_stale(SALT, &count) == NULL && count == 0);
+    CHECK(sh_script_source_files()->read != NULL);
+
+    /* A stranger's map: the scope lists the row's own build, which nothing holds. */
+    hashes[0] = OLD;
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    CHECK(sh_script_source_map_mods(mods, 4) == 0);
+
+    /* A script edited after the build: listed, not kept, named; the other file is kept. */
+    hashes[0] = b.hash;
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\" SALT "\\scripts\\door.lua", root, name);
+    {
+        FILE *f = NULL;
+        CHECK(!fopen_s(&f, path, "ab") && f != NULL);
+        if (f) { fputs("-- edited after the build\n", f); fclose(f); }
+    }
+    CHECK(sh_script_source_map_mods(mods, 4) == 1);
+    stale = sh_script_source_stale(SALT, &count);
+    CHECK(stale != NULL && !strcmp(stale, "door.lua") && count == 1);
+    {
+        char *text = NULL;
+        size_t len = 0;
+        const sh_script_source *s = sh_script_source_files();
+        CHECK(s->read(s->context, SALT, "door.lua", &text, &len) == -1);
+        CHECK(s->read(s->context, SALT, "lib/fsm.lua", &text, &len) == 1 && text != NULL);
+        if (text) s->release(s->context, text);
+    }
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    sh_script_source_clear();
+    sh_mb_free(&b);
+}
+
 /* ------------------------------------------- fixtures and the Script node */
 
 static char g_fixtures[MAX_PATH];
@@ -602,6 +676,7 @@ int main(int argc, char **argv)
     test_scan();
     test_builds();
     test_store();
+    test_map_scripts();
     test_fixtures();
     mt_remove_tree(g_tmp);
     printf("modscript_test: %d checks, %d failed\n", g_checks, g_failed);

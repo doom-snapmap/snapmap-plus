@@ -177,6 +177,7 @@ static int mu_scope_armed(void);
 static int mu_scope_source(int when);
 static int mu_resolve_row(const char *build, const char *salt, sh_modmanifest_row *out);
 static int mu_scope_now(const char *phase);
+static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap);
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 static void mu_mark_modified(const char *label);
 
@@ -3142,7 +3143,8 @@ static void mu_say_substitutions(const mu_out *o, const mu_model *m, const char 
     if (!sh_modmanifest_current(&rows)) return;
     for (i = 0; i < rows.count; i++) {
         char sub[SH_MODMANIFEST_HASH_CAP];
-        if (sh_modmanifest_substituted(rows.rows[i].build, sub, sizeof sub))
+        if (sh_modmanifest_substituted(rows.rows[i].build, sub, sizeof sub) ||
+            mu_row_served_by(&rows.rows[i], sub, sizeof sub))
             mu_say_substituted(o, m, prefix, rows.rows[i].salt, rows.rows[i].build, sub);
     }
     sh_modmanifest_list_free(&rows);
@@ -3448,6 +3450,20 @@ static void mu_listing_visit(void *context, const char *bundle_id, const char *b
     mu_listing_push(&l->hashes, &l->nh, &l->ch, bundle_hash);
 }
 
+/* The build the loaded map's place resolver (sh_modserve_row_build) names for
+ * `row` when it is not the row's own: 1 with its hash in `out`. */
+static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap)
+{
+    sh_modserve_bundle_ref ref;
+    int other;
+    memset(&ref, 0, sizeof ref);
+    other = sh_modserve_row_build(row, &ref) && strlen(ref.hash) == SH_MODSERVE_HASH_HEX && _stricmp(ref.hash, row->build) &&
+            strlen(ref.hash) < cap;
+    if (other) strcpy_s(out, cap, ref.hash);
+    sh_modserve_bundle_ref_free(&ref);
+    return other;
+}
+
 /* The listing from manifest rows and placed names, set on the serving layer.
  * Returns the bundles that changed. */
 static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int map_open)
@@ -3459,8 +3475,14 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     memset(&l, 0, sizeof l);
     if (rows && rows->count) sub = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(rows->count, sizeof *sub);
     for (i = 0; rows && i < rows->count; i++) {
-        /* A declared build the editor serves through another (2.5). */
+        /* The build that serves the row: the one the editor substituted
+         * (2.5), else the one the place resolver names, which for the
+         * player's own map is the root folder's build of the salt whatever
+         * build the row records (a stranger's map keeps the row's own
+         * build). The scope declares the served build. */
         if (sub && sh_modmanifest_substituted(rows->rows[i].build, sub[i], sizeof sub[i]))
+            mu_listing_push(&l.hashes, &l.nh, &l.ch, sub[i]);
+        else if (sub && mu_row_served_by(&rows->rows[i], sub[i], sizeof sub[i]))
             mu_listing_push(&l.hashes, &l.nh, &l.ch, sub[i]);
         else mu_listing_push(&l.hashes, &l.nh, &l.ch, rows->rows[i].build);
         mu_listing_push(&l.ids, &l.ni, &l.ci, rows->rows[i].salt);

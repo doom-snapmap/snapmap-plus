@@ -1017,7 +1017,16 @@ replaces. A map without a place (the player's own) follows the root folders with
 prompt: every row is activated through the build the resolver below answers,
 the root folder of the row's salt whatever hash the row pins, and the next save
 writes that build's hash, as the save already writes rows from the serving
-index. There is no upgrade action and there are no aliases.
+index. The map scope's listing holds that served build, not the hash the row
+recorded (`mu_listing_set` asks `sh_modserve_row_build`), so everything the
+scope declares comes from the root's build: its decls, registries, scripts,
+virtual-texture boards, strings and banks. A load logs one line for each such
+row (`MODS: map: <salt>: saved with build <hash>; the root's build <hash>
+serves it and the next save records that one`) and the Mods tab's doctor says
+the same; no notice interrupts an author who rebuilds a mod while iterating.
+A stranger's map has a place, so its rows are listed at their own build and a
+different build at the root never stands in for one. There is no upgrade action
+and there are no aliases.
 
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
@@ -1837,9 +1846,11 @@ No script code runs anywhere else.
   map's rows, then the placed names' closure), and for each mod the scripts
   the serving index serves for the open map (`sh_modserve_script_files`: a
   stranger's map's own place, the author's root folder). At the gate every
-  script is read once through `sh_modserve_open` and kept only when its bytes
-  hash to the SHA-256 its build recorded; one edited since the last Refresh
-  reads as "could not be read" and stops its mod with that line. Lists, reads
+  script is read once, as the mod's folder holds it at that moment
+  (`sh_modserve_open_disk`, never the index's cache of the bytes first read),
+  and kept only when its bytes hash to the SHA-256 its build recorded; one
+  edited since the last Refresh is not kept (`sh_script_source_stale` names
+  it), reads as "could not be read" and stops its mod with that line. Lists, reads
   and `require` are then answered from that copy, so a Play runs the built
   scripts it started with and nothing reads a mod folder while it runs. A
   Refresh that changes scripts reports them as running from the next Play
@@ -1903,7 +1914,12 @@ No script code runs anywhere else.
   `sh_scripts reload` either ends and prepares the open Play's mods again
   (they start at the next frame) or, outside Play, compiles every script of
   the open map's mods (`sh_script_check_files`) and prints each error in the
-  stop line's words.
+  stop line's words. A mod with a script file that no longer matches its build
+  is not started; the reload and the status say so in one sentence naming the
+  file ("<mod>: scripts\door.lua no longer matches the mod's last build, so its
+  scripts will not start; run 'sh_mods rescan' (or press Refresh in the Mods
+  tab) to rebuild it, then play the map again."), and the reload counts only
+  the mods that can start. DOOM also rebuilds a changed mod when it starts.
 
 The signatures are private to `script_sigs.c` (the tick, the spawn-id lookup,
 IsClient, and the OnDamage, Killed and Relay DoAction sites for the event

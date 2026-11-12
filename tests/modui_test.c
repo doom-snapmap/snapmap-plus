@@ -1420,6 +1420,46 @@ int main(int argc, char **argv)
     sh_modmanifest_reset();
     g_placed_count = -1;
 
+    printf("-- the map scope: an own map follows the root's build, a stranger's map keeps its row's\n");
+    {
+        /* The root holds alexrimp at hash1; the map's row names a build nothing holds. */
+        static const char OLD[] = "00000000000000000000000000000000000000000000000000000000000000aa";
+        char listed[4][SH_MODSERVE_HASH_HEX + 1];
+        int n;
+        sh_modserve_scope_enable(1);
+
+        /* The player's own map (no place): the scope declares the root's build, and the log says so. */
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        log_clear();
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1));
+        CHECK(strstr(g_logbuf, "MODS: map: alexrimp: saved with build 0000000000000000; the root's build") != NULL);
+        CHECK(strstr(g_logbuf, "records that one") != NULL);
+
+        /* A stranger's map (its place): the row's own build, strictly; nothing at the root stands in. */
+        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+        log_clear();
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD));
+        CHECK(strstr(g_logbuf, "the root's build") == NULL);
+
+        /* The same stranger's map naming the root's own build: that build. */
+        load_map_naming("alexrimp", hash1, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1));
+
+        /* Back to an own map: it follows the root again. */
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1));
+        (void)sh_modserve_scope_set(NULL, 0, 0);
+        sh_modserve_scope_enable(0);
+        sh_modmanifest_reset();
+    }
+
     printf("-- Use in this map, Remove from map, Uninstall: dry runs drive the confirmations\n");
     _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\saves", tmp);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPSABCDEF0123456789ABCD", saves);

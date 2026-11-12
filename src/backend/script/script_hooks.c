@@ -266,15 +266,27 @@ void sh_script_hooks_test_reset(void)
     mods_clear();
 }
 
-/* Without the engine there is no Play: nothing is open and nothing reloads. */
+/* Without the engine there is no Play: nothing is open and nothing reloads,
+ * unless a test says a Play runs. */
+static int g_test_play;
+
+void sh_script_hooks_test_play(int on)
+{
+    g_test_play = on != 0;
+}
+
 int sh_script_hooks_open(void)
 {
-    return 0;
+    return g_test_play;
 }
 
 int sh_script_hooks_reload(void)
 {
-    return 0;
+    int n;
+    if (!g_test_play) return 0;
+    sh_script_map_close(0);
+    n = sh_script_map_open();
+    return n > 0 ? n : 0;
 }
 
 #else /* the engine side ------------------------------------------------- */
