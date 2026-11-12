@@ -2718,12 +2718,19 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "rear_footsteps", l_rear_footsteps },
 };
 
+void sh_script_ai_spawned(void *ent)
+{
+    if (!ent || !g_engine || !g_engine->gore_init || !g_engine->is_ai || !g_engine->is_ai(ent)) return;
+    (void)g_engine->gore_init(ent);
+}
+
 int sh_script_ai_register(void)
 {
     static int done;
     int i, n = 0;
     if (done) return 0;
     done = 1;
+    sh_script_api_on_spawn(sh_script_ai_spawned);
     sh_script_api_on_frame(force_via_step);
     sh_script_api_on_frame(anim_wait_step);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
@@ -3071,6 +3078,36 @@ static int e_step_interrupt(void *ai)
         if (ctx) {
             v = *(void * const *)(ctx + SH_AI_CMDCTX_ACTIVE) != NULL;
             if (v) g_cmd_set_wait(ctx, NULL);
+        }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The game's spawn inits the gore component unless the behaviour decl's
+ * monster type is the generic one; a mod's demon has no type of its own in
+ * the game's list, so it is generic. The same call, with the same values. */
+typedef void (*ai_gore_init_fn)(void *gore, void *ai, void *damage, void *a, void *graph, void *b, void *c);
+static ai_gore_init_fn g_gore_init;
+static const int32_t *g_gore_cvar;
+static uint32_t g_gore_comp, g_gore_damage;
+
+static int e_gore_init(void *ai)
+{
+    int v = 0;
+    if (!g_gore_init) return -1;
+    __try {
+        uint8_t *a = (uint8_t *)ai;
+        const uint8_t *beh = *(const uint8_t * const *)(a + SH_AI_OFF_BEHAVIOR_DECL);
+        uint8_t *gore = a + g_gore_comp;
+        void *graph = *(void * const *)(gore + SH_AI_GORE_GRAPH);
+        if (beh && *(const int32_t *)(beh + SH_AI_BEHAVIOR_MONSTER) == SH_AI_MONSTER_GENERIC && graph &&
+            !*(void * const *)(gore + SH_AI_GORE_OWNER) && *g_gore_cvar != 0) {
+            static int logged;
+            g_gore_init(gore, ai, a + g_gore_damage, NULL, graph, NULL, NULL);
+            v = 1;
+            if (!logged++)
+                backend_log("SCRIPTS: a demon of the generic monster type was given its gore component "
+                            "(the game's spawn leaves it out)");
         }
     } __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
@@ -3807,7 +3844,7 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt
+    e_step_state, e_step_interrupt, e_gore_init
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -3923,6 +3960,12 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_live.step_state = NULL;
         g_live.step_interrupt = NULL;
     }
+    if ((site = (const uint8_t *)r[SH_AI_SIG_GORE_INIT_SITE].addr) != NULL) {
+        g_gore_cvar = (const int32_t *)(site + SH_AI_GORE_SITE_CVAR + 7 + rel32_at(site + SH_AI_GORE_SITE_CVAR + 2));
+        g_gore_damage = (uint32_t)rel32_at(site + SH_AI_GORE_SITE_DAMAGE + 3);
+        g_gore_comp = (uint32_t)rel32_at(site + SH_AI_GORE_SITE_COMP + 3);
+        g_gore_init = (ai_gore_init_fn)(site + SH_AI_GORE_SITE_CALL + 5 + rel32_at(site + SH_AI_GORE_SITE_CALL + 1));
+    } else g_live.gore_init = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

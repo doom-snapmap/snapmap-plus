@@ -161,6 +161,11 @@ void sh_script_api_frame(void);
 /* Run fn at the end of every sh_script_api_frame (the AI calls finish a
  * forced animation through a via node there). Up to 4; idempotent. */
 void sh_script_api_on_frame(void (*fn)(void));
+/* Run fn for every entity of a mod the handle table reports spawned, before
+ * the mod's spawn handler (sh_script_api_spawned, from the runtime). Up to 4;
+ * idempotent. */
+void sh_script_api_on_spawn(void (*fn)(void *ent));
+void sh_script_api_spawned(void *ent);
 
 /* The engine's own entity table: the game holds at most
  * SH_SCRIPT_ENGINE_ENTITIES entities at once (MAX_GENTITIES less the world

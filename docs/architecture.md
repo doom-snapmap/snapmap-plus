@@ -2261,6 +2261,20 @@ is touched, and a removed demon answers nil.
   does to the one before it. `hold` leaves a turn in place alone when the idle
   order it asks for already stands (the idle turn flag and type in the
   animFSM): ending the turn's move there would leave its step without one.
+- **Gore for a demon of the generic type.** The game's demon spawn inits the
+  gore component unless the behaviour decl's `monsterType` is
+  `AI_MONSTER_GENERIC` (the test at VK 0x14042A7AA; the init is VK
+  0x1408FF0B0 with the component at ai +0x2B3D8, the demon, its entity damage
+  component at ai +0x4E08 and the gore graph the entityDef names, already at
+  component +0x630). A mod's demon has no type of its own in the game's list
+  and takes the generic one so that no stock demon's hard-coded behaviour or
+  decl rows reach it; without the init its gore component has no owner: hits
+  are not recorded, no wound opens, no full body gib is tried, and the body
+  is never faded out and removed (it stays, hidden, casting its shadow). The
+  runtime tells the AI calls of every mod entity the handle table reports
+  spawned (`sh_script_api_on_spawn`), and a generic-type demon with a gore
+  graph and no owner on its component then gets the game's own init with the
+  spawn's own values, when `g_EnableGore` allows it.
 - **Install.** `sh_script_ai_install` runs after the entity calls' engine
   side and is the "demons driven by scripts" row of the feature registry.
 

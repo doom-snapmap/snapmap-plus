@@ -374,6 +374,14 @@ static int f_step_interrupt(void *ai)
     return was;
 }
 
+static int g_gore_calls;
+static int f_gore_init(void *ai)
+{
+    (void)ai;
+    g_gore_calls++;
+    return 1;
+}
+
 static const sh_script_ai_engine g_fake = {
     f_entity, f_handle_of, f_is_ai, f_origin, f_yaw, f_event, f_park, f_enemy, f_awareness,
     f_move_status, f_trigger, f_path, f_frame,
@@ -382,7 +390,7 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt
+    f_step_state, f_step_interrupt, f_gore_init
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1618,6 +1626,22 @@ static void test_anim_force_via(void)
 /* An order given while a step of the engine's is in flight (a turn in place):
  * the engine ends the step's stage when its own animWeb command ends, and a
  * script's order goes round that command. */
+/* A mod's demon is given its gore component when it spawns; another entity is left alone. */
+static void test_a_spawned_demon_gets_its_gore(void)
+{
+    int was;
+    g_gore_calls = 0;
+    was = g_ent[1].is_ai;
+    g_ent[1].is_ai = 1;
+    sh_script_ai_spawned(&g_ent[1]);
+    CHECK(g_gore_calls == 1);
+    g_ent[1].is_ai = 0;
+    sh_script_ai_spawned(&g_ent[1]);
+    sh_script_ai_spawned(NULL);
+    CHECK(g_gore_calls == 1);
+    g_ent[1].is_ai = was;
+}
+
 static void test_orders_around_a_step(void)
 {
     sh_ai_step_state s = { 1, SH_AI_STAGE_MOVE_STEP, 1, -1 };
@@ -1805,6 +1829,7 @@ int main(int argc, char **argv)
     test_enemy_weapon_sdk();
     test_anim_force_via();
     test_orders_around_a_step();
+    test_a_spawned_demon_gets_its_gore();
     test_pain_records();
     test_pain_stub();
     files_clear();

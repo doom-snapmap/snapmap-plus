@@ -1834,7 +1834,10 @@ static void deliver_changes(void)
             shs_mod *m;
             m = ch[i].kind == SH_SCRIPT_HANDLE_GONE ? NULL : mod_by_hook(ch[i].mod);
             if (m && m->status == SH_SCRIPT_RUNNING && m->L) {
-                if (ch[i].kind == SH_SCRIPT_HANDLE_SPAWNED) spawn_one(m, ch[i].handle);
+                if (ch[i].kind == SH_SCRIPT_HANDLE_SPAWNED) {
+                    sh_script_api_spawned(sh_script_handle_entity(ch[i].handle));
+                    spawn_one(m, ch[i].handle);
+                }
                 else remove_one(m, ch[i].handle);
                 if (g_end_pending) return;
             }

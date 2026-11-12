@@ -424,7 +424,27 @@ typedef struct sh_script_ai_engine {
      * the animFSM that waits on it then ends at its next update. 1 done, 0
      * none was waiting, -1 unavailable. */
     int      (*step_interrupt)(void *ai);
+    /* Give a demon of the generic monster type the gore component the game's
+     * spawn gives every other type (the game's own init with the gore graph
+     * its entityDef names). 1 done, 0 nothing to do (another type, no gore
+     * graph, already done, gore off), -1 unavailable. */
+    int      (*gore_init)(void *ai);
 } sh_script_ai_engine;
+
+/* The gore init site (SH_AI_SIG_GORE_INIT_SITE): the cvar test, the two
+ * component offsets and the call. */
+#define SH_AI_GORE_SITE_CVAR      9u      /* cmp dword [rip+d32], 0 (7 bytes): g_EnableGore's integer */
+#define SH_AI_GORE_SITE_DAMAGE    37u     /* lea r8, [ai+d32]: the entity damage component */
+#define SH_AI_GORE_SITE_COMP      44u     /* lea rcx, [ai+d32]: the gore component */
+#define SH_AI_GORE_SITE_CALL      72u     /* call init */
+#define SH_AI_GORE_GRAPH          0x630u  /* component: the gore graph decl */
+#define SH_AI_GORE_OWNER          0x610u  /* component: its owner, NULL until the init */
+#define SH_AI_BEHAVIOR_MONSTER    0x120u  /* behaviour decl: aiMonsterType_t */
+#define SH_AI_MONSTER_GENERIC     1
+
+/* A mod's entity has spawned (the runtime, once per entity, before the
+ * mod's spawn handler): a demon gets what the game's spawn left out. */
+void sh_script_ai_spawned(void *ent);
 
 /* equipSlot_t: the two hands a demon holds a weapon in. */
 #define SH_AI_HAND_LEFT  1
@@ -515,6 +535,7 @@ enum sh_ai_sig {
     SH_AI_SIG_FOOT_TABLE,          /* the footstep table selector (actor, foot) (detoured) */
     SH_AI_SIG_CMD_SET_WAIT,        /* the command context's set-active-wait-handle (context, handle) */
     SH_AI_SIG_MOVE_STAGE,          /* the animFSM's move update (reads the stage) */
+    SH_AI_SIG_GORE_INIT_SITE,      /* the demon spawn's gore component init (skipped for the generic type) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

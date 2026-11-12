@@ -326,6 +326,22 @@ static void check_image(const char *path)
         CHECK(window_has(base, w, 0x20, "\x48\x8B\x79\x18", 4));
         CHECK(window_has(base, w, 0x70, "\xC7\x40\x18\x09\x00\x00\x00\x48\x89\x73\x18", 11));
     }
+    if (rva[SH_AI_SIG_GORE_INIT_SITE]) {
+        uint32_t s = rva[SH_AI_SIG_GORE_INIT_SITE];
+        uint32_t f = rel_target(base, s + SH_AI_GORE_SITE_CALL, 5, 1);
+        int32_t damage, comp;
+        memcpy(&damage, base + s + SH_AI_GORE_SITE_DAMAGE + 3, 4);
+        memcpy(&comp, base + s + SH_AI_GORE_SITE_COMP + 3, 4);
+        printf("  gore init 0x%X, component ai +0x%X, entity damage ai +0x%X\n", f, comp, damage);
+        if (vk) CHECK(f == 0x8FF0B0u);
+        CHECK(comp == 0x2B3D8 && damage == 0x4E08);
+        /* the 12 bytes before the site load the behaviour decl (ai +0xC120) whose monster type it tests */
+        CHECK(!memcmp(base + s - 12, "\x49\x8B\x86\x20\xC1\x00\x00", 7));
+        CHECK(!memcmp(base + s + SH_AI_GORE_SITE_CVAR, "\x83\x3D", 2));
+        /* the init keeps the graph at component +0x630 and reads the owner's model at +0x3DB0 */
+        CHECK(window_has(base, f, 0x100, "\x30\x06\x00\x00", 4));
+        CHECK(window_has(base, f, 0x200, "\xB0\x3D\x00\x00", 4));
+    }
     if (rva[SH_AI_SIG_MOVE_STAGE]) {
         /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
         CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));

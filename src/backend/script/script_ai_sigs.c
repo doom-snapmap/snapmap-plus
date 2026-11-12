@@ -35,6 +35,12 @@
  *                      0x1403F4920): the second accessor branch of the painString, the atomic-string set
  *                      (VK 0x14032B3D0 / GL 0x14032B040) into [rbp+0x88], then the 14 bytes where the string
  *                      is final; the request later compares each pain anim's +0x48 string with [rbp+0x88].
+ *   AiGoreInitSite     VK 0x14042A7AA  GL 0x1404299FA  inside the demon's spawn: the test of its behaviour
+ *                      decl's monster type against AI_MONSTER_GENERIC (1) and of g_EnableGore, then the gore
+ *                      component's init (VK 0x1408FF0B0; component ai +0x2B3D8, the demon, its entity damage
+ *                      component ai +0x4E08, 0, the gore graph at component +0x630, 0, 0). A demon of the
+ *                      generic type is spawned without it: no hit is recorded, no wound opens, no full body
+ *                      gib is tried, and the body is never faded out and removed.
  *   AiThreatRow        VK 0x1406E08D0  GL 0x1406DFD00  the threat table's check of one SDPSReaction_t row
  *                      (threat, actor, row, ...), called for every row by the evaluator (VK 0x1406DFE70);
  *                      the row's reaction is at +0x1C. Detoured; 15-byte window.
@@ -205,6 +211,11 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 83 3D ?? ?? ?? ?? 00 49 8B D8 48 8B F2 48 8B F9 0F 85 ?? ?? ?? ?? "
       "41 83 48 08 04 4C 8B C2 48 8B D3 E8 ?? ?? ?? ?? 8B 87 9C 2A 00 00 FF C8 83 F8 12",
       0x51A660u, 0x519390u },
+    { "AiGoreInitSite",
+      "83 B8 20 01 00 00 01 74 44 83 3D ?? ?? ?? ?? 00 74 3B 49 8B 06 49 8B CE FF 90 E0 06 00 00 48 8B 90 30 06 00 00 "
+      "4D 8D 86 08 4E 00 00 49 8D 8E D8 B3 02 00 4C 89 7C 24 30 4C 89 7C 24 28 48 89 54 24 20 45 33 C9 49 8B D6 "
+      "E8 ?? ?? ?? ??",
+      0x42A7AAu, 0x4299FAu },
     { NULL, NULL, 0, 0 }
 };
 
