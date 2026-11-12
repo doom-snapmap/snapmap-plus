@@ -795,6 +795,20 @@ static int l_p_explode(lua_State *L)
     return bool1(L, g_ce.explode(p));
 }
 
+/* The axis (rows forward, left, up) of something at `from` heading for `to`; 0 when they coincide. */
+static int aim_axis(const float from[3], const float to[3], float ax[9])
+{
+    float f[3] = { to[0] - from[0], to[1] - from[1], to[2] - from[2] }, l[3], u[3];
+    if (!normalize(f)) return 0;
+    l[0] = -f[1]; l[1] = f[0]; l[2] = 0;             /* up (0 0 1) x forward */
+    if (!normalize(l)) { l[0] = 0; l[1] = 1; l[2] = 0; }
+    u[0] = f[1] * l[2] - f[2] * l[1];
+    u[1] = f[2] * l[0] - f[0] * l[2];
+    u[2] = f[0] * l[1] - f[1] * l[0];
+    memcpy(ax, f, sizeof f); memcpy(ax + 3, l, sizeof l); memcpy(ax + 6, u, sizeof u);
+    return 1;
+}
+
 /* ai:fire(projectile, tag or joint, target) -> p. The engine's launch
  * event fires from a joint; from a tag the projectile is then placed on the
  * tag and sent on to the target. */
@@ -843,8 +857,12 @@ static int l_fire(lua_State *L)
         void *p = e->resolve(id);
         if (!p) return nil1(L);
         if (from_tag && e->place) {
-            (void)e->place(p, tag_pos, NULL);
+            float ax[9];
             if (!at_point) origin_of(target, point);
+            /* on the tag and facing where it flies: the engine launched it from the demon's origin
+             * (its event takes a joint, and a tag is not one), so its model and trail would keep
+             * that first heading */
+            (void)e->place(p, tag_pos, aim_axis(tag_pos, point, ax) ? ax : NULL);
             at_point = 1;
         }
         if (at_point) steer_to(p, point, 0);

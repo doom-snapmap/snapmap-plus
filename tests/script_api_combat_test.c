@@ -504,6 +504,8 @@ static void test_tags(void)
         "  local p = self:fire('rocket', 'laser_source_1', ent(2))\n"
         "  local v = p:velocity()\n"
         "  print('from tag', p:pos().x, p:pos().z, math.floor(v.y + 0.5), math.floor(v.z + 0.5))\n"
+        "  local f = p:axis().forward\n"
+        "  print('faces', (f.x * v.x + f.y * v.y + f.z * v.z) > 0.99 * math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z))\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "tag\t20.0\t80.0\t0.0\t1.0"));
@@ -513,6 +515,7 @@ static void test_tags(void)
     /* launched by the engine's event, then placed on the tag and sent to the player at (0, 200, 0) */
     CHECK(has(g_events, "ae_launchProjectileAtTarget@mods/" SALT "/ai/brute(NULL,d:mods/" SALT "/rocket,'laser_source_1','ent2',0);"));
     CHECK(has(g_log, "from tag\t20.0\t80.0\t555\t-222"));
+    CHECK(has(g_log, "faces\ttrue"));              /* and turned to where it flies */
 }
 
 static void test_fire(void)
