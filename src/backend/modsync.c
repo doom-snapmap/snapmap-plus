@@ -1609,6 +1609,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
 {
     msy_up_build *u = NULL;
     int nb = 0, i, code, ok = 0, have_secret;
+    double t;
     msy_prog prog;
     modnet_result r;
     char claim[MODNET_CLAIM_HEX + 1], secret[MODNET_HASH_HEX + 1], stored_claim[MODNET_CLAIM_HEX + 1],
@@ -1625,6 +1626,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
     prog.outer = io;
 
     /* The store keeps one archive per build: ask before writing one. */
+    t = msy_now_ms();
     for (i = 0; i < nb; i++) {
         if (msy_cancelled(io)) { msy_stats_fail(st, MODNET_E_CANCELLED, "cancelled"); goto done; }
         code = modnet_head_build(u[i].hash, NULL, NULL, io, &r);
@@ -1632,6 +1634,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         if (code == MODNET_OK) { u[i].present = 1; st->builds_present++; continue; }
         if (code != MODNET_E_NOT_FOUND) { msy_stats_fail(st, code, "%s: %s", u[i].label, r.message); goto done; }
     }
+    st->ask_ms += msy_now_ms() - t;
     for (i = 0; i < nb; i++) {
         char *path;
         unsigned long long size = 0;
@@ -1644,16 +1647,22 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
             msy_stats_fail(st, MODNET_E_ARG, "the temporary folder cannot be found");
             goto done;
         }
+        t = msy_now_ms();
         if (!modsync_write_archive(u[i].folder, u[i].hash, path, &size, &pointers, &wcode, &cause)) {
             msy_delete_utf8(path);
             free(path);
             msy_stats_fail(st, wcode, "%s", cause ? cause : "out of memory");
             goto done;
         }
+        st->archive_ms += msy_now_ms() - t;
         st->stock_files += pointers;
         prog.total += size;
         sub = msy_sub_io(io, &prog);
+        t = msy_now_ms();
         code = modnet_put_build(u[i].hash, path, size, &sub, &r);
+        st->send_ms += msy_now_ms() - t - r.check_ms;
+        st->check_ms += r.check_ms;
+        st->parts += r.parts;
         msy_delete_utf8(path);
         free(path);
         msy_absorb(st, &r);
@@ -1676,6 +1685,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
     if (!bh) { msy_stats_fail(st, MODNET_E_NOMEM, "out of memory"); goto done; }
     for (i = 0; i < nb; i++) bh[i] = u[i].hash;
     have_secret = modsync_claim_lookup(ref, stored_claim, stored_secret);
+    t = msy_now_ms();
     code = modnet_claim(ref, bh, nb, have_secret ? stored_secret : NULL, claim, secret, io, &r);
     msy_absorb(st, &r);
     if (code == MODNET_E_FORBIDDEN && have_secret) {
@@ -1684,6 +1694,7 @@ static int msy_upload_build(const char *const *mods, int n, const char *ref, con
         msy_absorb(st, &r);
         have_secret = 0;
     }
+    st->claim_ms += msy_now_ms() - t;
     if (code == MODNET_OK) {
         st->reclaimed = have_secret && strcmp(claim, stored_claim) == 0;
         strcpy_s(st->claim, sizeof st->claim, claim);

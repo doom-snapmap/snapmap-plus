@@ -98,6 +98,8 @@ typedef struct modnet_result {
     unsigned long long received;  /* response body bytes read, summed over the call */
     unsigned requests;            /* HTTP exchanges made */
     double ms;                    /* wall time of the call */
+    double check_ms;              /* an upload in parts: the wait for the store to join and check the archive */
+    unsigned parts;               /* an upload in parts: parts sent by this call */
     const char *message;          /* the cause, whole (the store's own sentence when it gave one), never a
                                      body; valid until this thread's next modnet call */
 } modnet_result;

@@ -63,6 +63,10 @@ typedef struct modsync_stats {
     unsigned long long bytes_up, bytes_down;
     unsigned requests;
     double ms;
+    /* upload: where the time went (asking what the store holds, writing the archives, sending
+     * them, the store's check of an archive sent in parts, the claim) */
+    double ask_ms, archive_ms, send_ms, check_ms, claim_ms;
+    unsigned parts;                 /* upload: parts sent of archives larger than one request */
     char claim[MODNET_CLAIM_HEX + 1];   /* upload: the claim id */
     int reclaimed;                  /* upload: the stored secret replaced the ref's build set */
     int queued;                     /* upload or release: the failure was queued for retry */

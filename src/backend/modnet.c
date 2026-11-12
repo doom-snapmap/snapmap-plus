@@ -871,12 +871,14 @@ static int mn_put_parts(const char *hash, HANDLE h, unsigned long long size, con
             code = mn_exchange(&q, &resp, &rlen, &sub, r);
             if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "part");
             free(resp);
-            if (code == MODNET_OK) held += len;
+            if (code == MODNET_OK) { held += len; r->parts++; }
         }
         free(have);
         if (code == MODNET_OK) {
+            double t0 = mn_now_ms();
             resp = NULL;
             code = mn_parts_post(complete, size, MN_COMPLETE_MS, &resp, &rlen, io, r);
+            r->check_ms += mn_now_ms() - t0;
             if (code == MODNET_OK) {
                 if (r->status == 201) r->created = 1;
                 else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "complete");

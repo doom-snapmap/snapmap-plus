@@ -526,10 +526,14 @@ static int mc_job_run(void *ctx, const modnet_io *io)
             memset(&st, 0, sizeof st);
             ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
         }
-        if (ok)
+        if (ok) {
             mc_async_line("MODS: push %s: done in %.0f ms: the archive %s, %llu byte(s) up, %s", j->label, st.ms,
                           st.builds_sent ? "was sent" : "was already stored", st.bytes_up,
                           st.reclaimed ? "its claim renewed" : "claimed");
+            mc_async_line("MODS: push %s: the time: asking the store %.0f ms, writing the archive %.0f ms, sending it "
+                          "%.0f ms (%u part(s)), the store's check %.0f ms, the claim %.0f ms", j->label, st.ask_ms,
+                          st.archive_ms, st.send_ms, st.parts, st.check_ms, st.claim_ms);
+        }
         else
             mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
                           modsync_cause(&st), st.queued ? "; queued for 'sh_mods retry'" : "");

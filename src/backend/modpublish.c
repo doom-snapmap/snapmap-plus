@@ -1301,6 +1301,9 @@ static void mp_upload_finished(void)
     mp_logf("MODS: publish: uploaded %d build(s): %u archive(s) sent, %u already stored, %llu bytes, %u request(s), "
             "%.0f ms; resuming the publish", h->count, job->st.builds_sent, job->st.builds_present, job->st.bytes_up,
             job->st.requests, job->st.ms);
+    mp_logf("MODS: publish: the upload's time: asking the store %.0f ms, writing the archive(s) %.0f ms, sending "
+            "%.0f ms (%u part(s)), the store's check %.0f ms, the claim %.0f ms", job->st.ask_ms, job->st.archive_ms,
+            job->st.send_ms, job->st.parts, job->st.check_ms, job->st.claim_ms);
     /* The context the feed post claims from. */
     g_ctx.kind = CTX_ROWS;
     g_ctx.editor = editor;
