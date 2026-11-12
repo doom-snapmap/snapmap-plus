@@ -7,7 +7,7 @@
 -- given in the demon's own frame (forward, left, up from its origin, in game units), so a line reads
 -- the same wherever the demon stands and whichever way it faces:
 --
---   probe pose  t yaw enemy_bearing(deg off the demon's forward) enemy_dist anim
+--   probe pose  t yaw enemy_bearing(deg off the demon's forward) enemy_dist anim fire(the engine's fire state)
 --   probe tag   name fwd left up            (each tag in opts.tags, every opts.every seconds)
 --   probe shot  decl fwd left up | nearest tag and distance | aim error (deg between the launch
 --               direction and the enemy) | enemy_bearing at the launch
@@ -81,9 +81,16 @@ function P.wrap(brain, opts)
       e.state.probe_next = t + period
       local en = enemy_of(e)
       local ok, anim = pcall(e.anim_current, e)
-      out(("probe pose t=%.2f yaw=%.1f enemy_bearing=%s enemy_dist=%s anim=%s"):format(t, e:yaw(),
+      -- the engine's fire state rides on the pose line, so a state that should fire and does not shows why
+      local fok, fs = pcall(weapon.state, e)
+      local fire = "?"
+      if fok and fs then
+        fire = ("%s/%s/pulled=%s/ready=%s/focus=%s/muzzle=%s"):format(tostring(fs.mode), tostring(fs.anim_mode),
+          tostring(fs.pulled), tostring(fs.ready), tostring(fs.focus_valid), tostring(fs.on_target))
+      end
+      out(("probe pose t=%.2f yaw=%.1f enemy_bearing=%s enemy_dist=%s anim=%s fire=%s"):format(t, e:yaw(),
         en and ("%.1f"):format(bearing(e, en:pos())) or "none",
-        en and ("%.0f"):format(e:distance(en)) or "none", ok and tostring(anim) or "?"))
+        en and ("%.0f"):format(e:distance(en)) or "none", ok and tostring(anim) or "?", fire))
       for _, name in ipairs(tags) do
         local p = tag_of(e, name)
         if p then
