@@ -938,8 +938,11 @@ static void launch_detour(void *projectile, void *owner, const float *origin, co
     int mod = -1;
     uint32_t id;
     sh_script_handle self;
-    ((launch_fn)g_ch[CH_LAUNCH].tramp)(projectile, owner, origin, axis, a5, a6, a7, a8);
+    float from[3], heading[9];
     self = owner ? sh_script_hooks_handle_of(owner, &mod) : 0;
+    /* a script's ai:fire from a tag: the launch starts there (the engine's event gave the origin) */
+    if (self && mod >= 0 && sh_script_combat_launch_from(self, from, heading)) { origin = from; axis = heading; }
+    ((launch_fn)g_ch[CH_LAUNCH].tramp)(projectile, owner, origin, axis, a5, a6, a7, a8);
     if (!self || mod < 0) return;
     id = spawn_id_of(projectile);
     if (id == SH_SCRIPT_SPAWN_ID_NONE) return;

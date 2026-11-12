@@ -55,6 +55,8 @@ static rec_map g_hits = { NULL, NULL, sizeof(hit_val), 0, 0 };
 static rec_map g_dead = { NULL, NULL, 1, 0, 0 };
 static sh_script_handle g_fire_owner;    /* ai:fire waiting for its own launch, 0 none */
 static uint32_t g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
+static int   g_fire_from;                /* 1: that launch starts at g_fire_origin, heading along g_fire_axis */
+static float g_fire_origin[3], g_fire_axis[9];
 
 static uint32_t rec_slot(const rec_map *m, uint32_t key)
 {
@@ -227,21 +229,45 @@ int sh_script_combat_launches(void)
     return n;
 }
 
+/* The launch hook asks before it lets the engine launch: 1 with the place and
+ * axis ai:fire wants its own launch to start from (a tag of the model; the
+ * engine's event knows joints only and would start at the demon's origin). */
+int sh_script_combat_launch_from(sh_script_handle owner, float origin[3], float axis[9])
+{
+    int have;
+    AcquireSRWLockExclusive(&g_rec_lock);
+    have = owner && owner == g_fire_owner && g_fire_from == 1;
+    if (have) {
+        memcpy(origin, g_fire_origin, sizeof g_fire_origin);
+        memcpy(axis, g_fire_axis, sizeof g_fire_axis);
+        g_fire_from = 2;                 /* taken: the projectile started there */
+    }
+    ReleaseSRWLockExclusive(&g_rec_lock);
+    return have;
+}
+
 /* ai:fire: catch the launch its own event makes (the event runs at once on
  * this thread, and the launch hook reports it before the event returns). */
-static void fire_begin(sh_script_handle owner)
+static void fire_begin(sh_script_handle owner, const float *origin, const float *axis)
 {
     AcquireSRWLockExclusive(&g_rec_lock);
     g_fire_owner = owner;
     g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
+    g_fire_from = origin && axis;
+    if (g_fire_from) {
+        memcpy(g_fire_origin, origin, sizeof g_fire_origin);
+        memcpy(g_fire_axis, axis, sizeof g_fire_axis);
+    }
     ReleaseSRWLockExclusive(&g_rec_lock);
 }
 
-static uint32_t fire_end(void)
+static uint32_t fire_end(int *started_there)
 {
     uint32_t id;
     AcquireSRWLockExclusive(&g_rec_lock);
     id = g_fire_id;
+    if (started_there) *started_there = g_fire_from == 2;
+    g_fire_from = 0;
     g_fire_owner = 0;
     g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
     ReleaseSRWLockExclusive(&g_rec_lock);
@@ -809,9 +835,11 @@ static int aim_axis(const float from[3], const float to[3], float ax[9])
     return 1;
 }
 
-/* ai:fire(projectile, tag or joint, target) -> p. The engine's launch
- * event fires from a joint; from a tag the projectile is then placed on the
- * tag and sent on to the target. */
+/* ai:fire(projectile, tag or joint, target) -> p. The engine's launch event
+ * fires from a joint and takes any other name for the demon's origin
+ * (VK 0x14076E780), so for a tag the launch hook hands idProjectile::Launch
+ * the tag's place and the axis toward the target: the projectile, its launch
+ * effects and its trail start on the tag. */
 static int l_fire(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -822,8 +850,8 @@ static int l_fire(lua_State *L)
     void *self, *decl, *target = NULL;
     const char *joint;
     uint32_t id;
-    int at_point, from_tag = 0;
-    float tag_pos[3];
+    int at_point, from_tag = 0, started_there = 0;
+    float tag_pos[3], tag_axis[9], aim[3];
     self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
     decl = check_decl(L, 2, "fire", "projectile", "the projectile");
     joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", NAME_ANY);
@@ -842,27 +870,27 @@ static int l_fire(lua_State *L)
     if (!self || !decl || !CE(entity_name) || (!at_point && !target)) return nil1(L);
     sh_script_api_check_room(L, "fire");
     if (!g_ce.entity_name(at_point ? self : target, name, sizeof name) || !name[0]) return nil1(L);
-    if (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1) from_tag = 1;
+    if (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1) {
+        if (at_point) memcpy(aim, point, sizeof aim); else origin_of(target, aim);
+        from_tag = aim_axis(tag_pos, aim, tag_axis);
+    }
     (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
     a[0] = sh_script_earg_no_anim();
     memset(&a[1], 0, sizeof a[1]); a[1].type = 'd'; a[1].p = decl;
     memset(&a[2], 0, sizeof a[2]); a[2].type = '2'; a[2].s = joint;
     a[3] = sh_script_earg_text('s', name);
     a[4] = sh_script_earg_int(0);
-    fire_begin(self_h);
-    if (!sh_script_api_event(self, "ae_launchProjectileAtTarget", a, 5, NULL)) { (void)fire_end(); return nil1(L); }
-    id = fire_end();
+    fire_begin(self_h, from_tag ? tag_pos : NULL, from_tag ? tag_axis : NULL);
+    if (!sh_script_api_event(self, "ae_launchProjectileAtTarget", a, 5, NULL)) { (void)fire_end(NULL); return nil1(L); }
+    id = fire_end(&started_there);
     if (id == SH_SCRIPT_SPAWN_ID_NONE || !e || !e->resolve) return nil1(L);
     {
         void *p = e->resolve(id);
         if (!p) return nil1(L);
-        if (from_tag && e->place) {
-            float ax[9];
-            if (!at_point) origin_of(target, point);
-            /* on the tag and facing where it flies: the engine launched it from the demon's origin
-             * (its event takes a joint, and a tag is not one), so its model and trail would keep
-             * that first heading */
-            (void)e->place(p, tag_pos, aim_axis(tag_pos, point, ax) ? ax : NULL);
+        if (from_tag) {
+            /* without the launch hook the projectile started at the origin: put it on the tag */
+            if (!started_there && e->place) (void)e->place(p, tag_pos, tag_axis);
+            memcpy(point, aim, sizeof point);
             at_point = 1;
         }
         if (at_point) steer_to(p, point, 0);

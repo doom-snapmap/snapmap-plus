@@ -131,6 +131,7 @@ static fent *by_name(const char *name)
     return &g_ents[n];
 }
 
+static int g_launch_from;   /* launches the hook started on a tag */
 static void *f_resolve(uint32_t id) { return by_id(id); }
 static uint32_t f_spawn_id(void *ent) { return ent ? ((fent *)ent)->id : SH_SCRIPT_SPAWN_ID_NONE; }
 static int f_slots(void) { return g_nents; }
@@ -196,7 +197,11 @@ static int f_event(void *ent, const char *name, const sh_script_earg *a, int n, 
             float l = (float)sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
             if (l > 0) { p->vel[0] = d[0] / l * 600; p->vel[1] = d[1] / l * 600; p->vel[2] = d[2] / l * 600; }
         }
-        sh_script_combat_launch(p->id, owner, mod);   /* as the launch hook does */
+        {   /* as the launch hook does: a launch ai:fire asked to start on a tag starts there */
+            float o[3], ax[9];
+            if (sh_script_combat_launch_from(owner, o, ax)) { memcpy(p->pos, o, 12); memcpy(p->ax, ax, 36); g_launch_from++; }
+        }
+        sh_script_combat_launch(p->id, owner, mod);
     }
     return 1;
 }
@@ -515,6 +520,7 @@ static void test_tags(void)
     /* launched by the engine's event, then placed on the tag and sent to the player at (0, 200, 0) */
     CHECK(has(g_events, "ae_launchProjectileAtTarget@mods/" SALT "/ai/brute(NULL,d:mods/" SALT "/rocket,'laser_source_1','ent2',0);"));
     CHECK(has(g_log, "from tag\t20.0\t80.0\t555\t-222"));
+    CHECK(g_launch_from == 1);                              /* started on the tag, not moved there */
     CHECK(has(g_log, "faces\ttrue"));              /* and turned to where it flies */
 }
 

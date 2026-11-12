@@ -61,6 +61,8 @@ int sh_script_api_now_ms(int *ms) { if (ms) *ms = 0; return 0; }
 const char *sh_script_combat_pain_name(int reaction) { (void)reaction; return ""; }
 sh_script_handle sh_script_combat_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod)
 { (void)projectile_spawn_id; (void)owner; (void)mod; return 0; }
+int sh_script_combat_launch_from(sh_script_handle owner, float origin[3], float axis[9])
+{ (void)owner; (void)origin; (void)axis; return 0; }
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker)
 { (void)victim; (void)decl; (void)attacker; }
 int sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker)

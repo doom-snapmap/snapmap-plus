@@ -116,6 +116,9 @@ void sh_script_combat_reset(void);
  * Records the projectile's handle and its launch together and returns the
  * handle (0 without memory: then nothing is recorded). Any thread. */
 sh_script_handle sh_script_combat_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod);
+/* Before the engine launches a projectile of `owner`: 1 with the origin and
+ * axis (rows forward, left, up) ai:fire asked this launch to start from. */
+int sh_script_combat_launch_from(sh_script_handle owner, float origin[3], float axis[9]);
 
 /* The launch record alone, for a projectile whose handle exists. Any thread. */
 void sh_script_combat_note_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod);

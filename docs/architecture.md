@@ -2205,8 +2205,11 @@ damage comes from the world entity, as a trigger's does.
   engine's pain state clears it); `ai:fire(projectile, tag or joint, target)`
   (`ae_launchProjectileAtTarget` run at once with no animation; answers the
   projectile, caught by the launch hook; a position target is reached by
-  steering; from a tag the projectile is placed on the tag and steered at the
-  target); `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
+  steering; the event takes a joint and launches from the demon's origin for
+  any other name (VK 0x14076E780), so for a tag the launch hook gives
+  `idProjectile::Launch` the tag's place and the axis toward the target: the
+  projectile, its launch effects and its trail start on the tag);
+  `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
   name that is not a tag, since the engine aims only at tags; `p:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
   `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
