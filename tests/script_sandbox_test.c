@@ -469,6 +469,23 @@ static void test_api_declaration(void)
                                        "scripts\\lib\\missing.lua in this mod."));
     sh_script_map_end();
 
+    /* The SDK's libraries come with Snapmap+: a mod requires one by name without carrying the
+     * file, gets the same module each time, and a mod's own file of that name is used instead. */
+    files_clear();
+    file_add("aaaaaaaa", "main.lua", "api = 1\nlocal L = require('enemy_locomotion')\n"
+                                     "print('sdk ' .. type(L.register) .. ' ' .. tostring(require('enemy_locomotion') == L))\n"
+                                     "print(type(require('enemy_placement').acquire), type(require('enemy_sdk').bind))\n");
+    start1("aaaaaaaa", "Test Mod", 1);
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    CHECK(!strcmp(log_of("aaaaaaaa"), "sdk function true\nfunction\tfunction\n"));
+    sh_script_map_end();
+    files_clear();
+    file_add("aaaaaaaa", "main.lua", "api = 1\nprint(require('enemy_sdk').mine)\n");
+    file_add("aaaaaaaa", "lib/enemy_sdk.lua", "return { mine = true }\n");
+    start1("aaaaaaaa", "Test Mod", 1);
+    CHECK(!strcmp(log_of("aaaaaaaa"), "true\n"));
+    sh_script_map_end();
+
     files_clear();
     file_add("aaaaaaaa", "main.lua", "api = 1\nrequire('a')\n");
     file_add("aaaaaaaa", "lib/a.lua", "require('b')\n");

@@ -9,6 +9,7 @@
  * refuses "__gc" because Lua runs finalizers with hooks off, so a finalizer
  * could never be stopped. */
 #include "script_internal.h"
+#include "script_sdk.h"
 #include "script_reason.h"
 #include "../../third_party/lua/lualib.h"
 
@@ -235,6 +236,15 @@ static int sb_game(lua_State *L)
 
 /* ------------------------------------------------------------- require */
 
+const sh_script_sdk_lib *sh_script_sdk_find(const char *name)
+{
+    const sh_script_sdk_lib *lib;
+    if (!name) return NULL;
+    for (lib = SH_SCRIPT_SDK_LIBS; lib->name; lib++)
+        if (!strcmp(lib->name, name)) return lib;
+    return NULL;
+}
+
 static int sb_require(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
@@ -265,6 +275,17 @@ static int sb_require(lua_State *L)
     rel = (char *)lua_tostring(L, -1);
     status = shs_load_file(L, m, rel);
     lua_remove(L, -2);
+    if (status == LUA_ERRFILE) {
+        /* Not a file of this mod: one of the SDK's libraries Snapmap+ ships (script_sdk.h). */
+        const char *msg = lua_tostring(L, -1);
+        const sh_script_sdk_lib *lib = msg && strstr(msg, "is not in this mod") ? sh_script_sdk_find(name) : NULL;
+        if (lib) {
+            lua_pop(L, 1);
+            lua_pushfstring(L, "=Snapmap+ SDK %s.lua", name);
+            status = luaL_loadbufferx(L, lib->text, lib->length, lua_tostring(L, -1), "t");
+            lua_remove(L, -2);
+        }
+    }
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
         lua_pushvalue(L, 1); lua_pushnil(L); lua_rawset(L, 2);
