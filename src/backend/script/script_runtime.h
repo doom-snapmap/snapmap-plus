@@ -235,6 +235,10 @@ int sh_script_signal_post(const char *event, sh_script_handle self, sh_script_ha
  * once. */
 typedef void (*sh_script_closer_fn)(void);
 int sh_script_api_add_closer(sh_script_closer_fn fn);
+/* Run fn for every entity of a mod the handle table reports spawned, before
+ * the mod's spawn handler: what an API module gives an entity the game's own
+ * spawn left out. Up to 4; idempotent. */
+void sh_script_api_on_spawn(void (*fn)(void *ent));
 
 /* The mod a state (or any of its coroutines) belongs to. */
 const char *sh_script_salt(lua_State *L);

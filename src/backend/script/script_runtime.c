@@ -1822,6 +1822,26 @@ static void forget_object(sh_script_handle h)
     }
 }
 
+#define SPAWN_FNS 4
+static void (*g_spawn_fns[SPAWN_FNS])(void *ent);
+
+void sh_script_api_on_spawn(void (*fn)(void *ent))
+{
+    int i;
+    for (i = 0; i < SPAWN_FNS; i++) {
+        if (g_spawn_fns[i] == fn) return;
+        if (!g_spawn_fns[i]) { g_spawn_fns[i] = fn; return; }
+    }
+}
+
+static void spawned(sh_script_handle h)
+{
+    void *ent = sh_script_handle_entity(h);
+    int i;
+    if (!ent) return;
+    for (i = 0; i < SPAWN_FNS; i++) if (g_spawn_fns[i]) g_spawn_fns[i](ent);
+}
+
 /* The handle table's spawns and removals since the last frame. */
 static void deliver_changes(void)
 {
@@ -1835,7 +1855,7 @@ static void deliver_changes(void)
             m = ch[i].kind == SH_SCRIPT_HANDLE_GONE ? NULL : mod_by_hook(ch[i].mod);
             if (m && m->status == SH_SCRIPT_RUNNING && m->L) {
                 if (ch[i].kind == SH_SCRIPT_HANDLE_SPAWNED) {
-                    sh_script_api_spawned(sh_script_handle_entity(ch[i].handle));
+                    spawned(ch[i].handle);
                     spawn_one(m, ch[i].handle);
                 }
                 else remove_one(m, ch[i].handle);

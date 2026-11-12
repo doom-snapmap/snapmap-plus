@@ -430,25 +430,6 @@ void sh_script_api_on_frame(void (*fn)(void))
     }
 }
 
-#define SPAWN_FNS 4
-static void (*g_spawn_fns[SPAWN_FNS])(void *ent);
-
-void sh_script_api_on_spawn(void (*fn)(void *ent))
-{
-    int i;
-    for (i = 0; i < SPAWN_FNS; i++) {
-        if (g_spawn_fns[i] == fn) return;
-        if (!g_spawn_fns[i]) { g_spawn_fns[i] = fn; return; }
-    }
-}
-
-void sh_script_api_spawned(void *ent)
-{
-    int i;
-    if (!ent) return;
-    for (i = 0; i < SPAWN_FNS; i++) if (g_spawn_fns[i]) g_spawn_fns[i](ent);
-}
-
 static void frame_fns(void)
 {
     int i;
