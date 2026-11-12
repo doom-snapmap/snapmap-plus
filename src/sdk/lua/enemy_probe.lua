@@ -12,8 +12,19 @@
 --   probe shot  decl fwd left up | nearest tag and distance | aim error (deg between the launch
 --               direction and the enemy) | enemy_bearing at the launch
 --   probe frame command args                (each animation-layer event the brain hears)
+--   probe fire  mode anim_mode pulled ready focus muzzle radius precision require
+--                                           (the engine's fire control at each shot, read from the
+--                                           game: the fire mode the script events set and the one
+--                                           the animation events set, whether the trigger is down,
+--                                           whether the weapon's wait is over, whether the aim focus
+--                                           is valid, the engine's own muzzle test, the muzzle
+--                                           sphere's radius and precision, and whether the fire gate
+--                                           asks the muzzle test at all)
 --
 -- A tag the model does not have is reported once as "probe tag <name> MISSING".
+-- A shot with a fire state the game cannot be asked for is reported as "probe fire UNAVAILABLE".
+
+local weapon = require("enemy_weapon")
 
 local P = {}
 
@@ -102,6 +113,15 @@ function P.wrap(brain, opts)
       local to = sub(en:pos(), o)
       local n = len(to) * len(dir)
       if n > 0 then aim = ("%.1f"):format(deg(dot(to, dir) / n)) end
+    end
+    local fok, fs = pcall(weapon.state, e)
+    if fok then
+      out(("probe fire %s %s pulled=%s ready=%s focus=%s muzzle=%s radius=%s precision=%s require=%s"):format(
+        tostring(fs.mode), tostring(fs.anim_mode), tostring(fs.pulled), tostring(fs.ready),
+        tostring(fs.focus_valid), tostring(fs.on_target), fs.radius and ("%.1f"):format(fs.radius) or "?",
+        tostring(fs.precision), tostring(fs.require_muzzle)))
+    else
+      out("probe fire UNAVAILABLE")
     end
     local a, b, c = rel(e, o)
     out(("probe shot %s %.1f %.1f %.1f | nearest %s %.1f | aim_error=%s | enemy_bearing=%s"):format(

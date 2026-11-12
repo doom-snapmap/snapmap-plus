@@ -475,10 +475,10 @@ static void test_api_declaration(void)
     file_add("aaaaaaaa", "main.lua", "api = 1\nlocal L = require('enemy_locomotion')\n"
                                      "print('sdk ' .. type(L.register) .. ' ' .. tostring(require('enemy_locomotion') == L))\n"
                                      "print(type(require('enemy_placement').acquire), type(require('enemy_sdk').bind))\n"
-                                     "print(type(require('enemy_probe').wrap))\n");
+                                     "print(type(require('enemy_probe').wrap), type(require('enemy_weapon').tick))\n");
     start1("aaaaaaaa", "Test Mod", 1);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
-    CHECK(!strcmp(log_of("aaaaaaaa"), "sdk function true\nfunction\tfunction\nfunction\n"));
+    CHECK(!strcmp(log_of("aaaaaaaa"), "sdk function true\nfunction\tfunction\nfunction\tfunction\n"));
     sh_script_map_end();
     files_clear();
     file_add("aaaaaaaa", "main.lua", "api = 1\nprint(require('enemy_sdk').mine)\n");
