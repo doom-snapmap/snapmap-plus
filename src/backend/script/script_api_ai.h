@@ -429,6 +429,12 @@ typedef struct sh_script_ai_engine {
      * its entityDef names). 1 done, 0 nothing to do (another type, no gore
      * graph, already done, gore off), -1 unavailable. */
     int      (*gore_init)(void *ai);
+    /* From now on, when the game shows the demon's gore wound `wound` (a
+     * whole gorewounds decl name), hide the n meshes of its model named in
+     * `meshes`, as the game's armour pop-off hides a damage group's
+     * hideMeshes. 1 set, -2 the wound decl is not loaded, -3 the model has
+     * no mesh of one of the names (nothing set), -1 unavailable. */
+    int      (*wound_hides)(void *ai, const char *wound, const char *const *meshes, int n);
 } sh_script_ai_engine;
 
 /* The gore init site (SH_AI_SIG_GORE_INIT_SITE): the cvar test, the two
@@ -439,6 +445,19 @@ typedef struct sh_script_ai_engine {
 #define SH_AI_GORE_SITE_CALL      72u     /* call init */
 #define SH_AI_GORE_GRAPH          0x630u  /* component: the gore graph decl */
 #define SH_AI_GORE_OWNER          0x610u  /* component: its owner, NULL until the init */
+/* ShowWound's window: the first argument's home, push rbx, push rdi, sub
+ * rsp (whole, position-independent). */
+#define SH_AI_WOUND_STOLEN 14
+static const unsigned char k_ai_wound_prologue[SH_AI_WOUND_STOLEN] = {
+    0x48, 0x89, 0x4C, 0x24, 0x08, 0x53, 0x57, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00
+};
+/* The mesh hide site (SH_AI_SIG_MESH_HIDE_SITE): the two calls, and where
+ * an entity keeps its model. */
+#define SH_AI_MESH_SITE_INDEX     11u     /* call index-by-name (model, name) */
+#define SH_AI_MESH_SITE_HIDE      107u    /* call hide (model, index) */
+#define SH_AI_OFF_MODEL           0x3DB0u /* entity: its md6 model */
+#define SH_AI_WOUND_MESHES        24      /* meshes one wound can hide */
+#define SH_AI_WOUND_ROWS          32      /* wounds of one demon that hide meshes */
 #define SH_AI_BEHAVIOR_MONSTER    0x120u  /* behaviour decl: aiMonsterType_t */
 #define SH_AI_MONSTER_GENERIC     1
 
@@ -536,6 +555,8 @@ enum sh_ai_sig {
     SH_AI_SIG_CMD_SET_WAIT,        /* the command context's set-active-wait-handle (context, handle) */
     SH_AI_SIG_MOVE_STAGE,          /* the animFSM's move update (reads the stage) */
     SH_AI_SIG_GORE_INIT_SITE,      /* the demon spawn's gore component init (skipped for the generic type) */
+    SH_AI_SIG_SHOW_WOUND,          /* idGoreComponent::ShowWound (component, wound row) (detoured) */
+    SH_AI_SIG_MESH_HIDE_SITE,      /* the armour pop-off's mesh index by name and hide by index */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

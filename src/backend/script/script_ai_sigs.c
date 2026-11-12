@@ -41,6 +41,17 @@
  *                      component ai +0x4E08, 0, the gore graph at component +0x630, 0, 0). A demon of the
  *                      generic type is spawned without it: no hit is recorded, no wound opens, no full body
  *                      gib is tried, and the body is never faded out and removed.
+ *   AiShowWound        VK 0x1409021C0  GL 0x140901270  idGoreComponent::ShowWound (component, wound row): the
+ *                      first word of the row is the gorewounds decl; the component's owner is at +0x610 (the
+ *                      handle pair +0x608 is resolved by the function itself). It shows the wound's mesh kits
+ *                      (VK 0x1408FD680 -> 0x1415F0A70: bits of the model's 64-bit shown-mesh mask at model
+ *                      +0xEE8, one per mesh index), clips, sprays and spawns the breakables. A wound has no
+ *                      list of meshes to hide. Detoured; 14-byte window.
+ *   AiMeshHideSite     VK 0x140830F00  GL 0x140830090  inside the armour pop-off of a damage group (VK
+ *                      0x140830E10): for each name of the group's hideMeshes the model's mesh index by name
+ *                      (call at +11: VK 0x1415EDF50, model, name -> index or -1) and, after the hide message
+ *                      to clients, the model's hide (call at +107: VK 0x1415EFEC0, model, index: clears the
+ *                      mesh's bit of the shown-mesh mask). The model is the entity's at +0x3DB0.
  *   AiThreatRow        VK 0x1406E08D0  GL 0x1406DFD00  the threat table's check of one SDPSReaction_t row
  *                      (threat, actor, row, ...), called for every row by the evaluator (VK 0x1406DFE70);
  *                      the row's reaction is at +0x1C. Detoured; 15-byte window.
@@ -216,6 +227,16 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "4D 8D 86 08 4E 00 00 49 8D 8E D8 B3 02 00 4C 89 7C 24 30 4C 89 7C 24 28 48 89 54 24 20 45 33 C9 49 8B D6 "
       "E8 ?? ?? ?? ??",
       0x42A7AAu, 0x4299FAu },
+    { "AiShowWound",
+      "48 89 4C 24 08 53 57 48 81 EC 88 00 00 00 48 83 B9 30 06 00 00 00 48 8B FA 48 8B D9 0F 84 ?? ?? ?? ?? "
+      "48 83 3A 00 0F 84 ?? ?? ?? ?? 4C 89 6C 24 70 4C 89 7C 24 60 4C 8D B9 B0 06 00 00",
+      0x9021C0u, 0x901270u },
+    { "AiMeshHideSite",
+      "49 8B 56 48 48 8B 14 17 49 8B CD E8 ?? ?? ?? ?? 44 8B F8 48 8D 56 04 85 C0 78 61 8B 06 3B 02 75 1B "
+      "3D FE FF FF 01 74 1C 48 83 7E 08 00 75 15 48 83 3D ?? ?? ?? ?? 00 74 0B 48 8B D6 48 8B CE E8 ?? ?? ?? ?? "
+      "4C 8B 46 08 41 8B D7 48 8D 4D B8 E8 ?? ?? ?? ?? 90 48 8D 55 B8 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "41 8B D7 49 8B CD E8 ?? ?? ?? ??",
+      0x830F00u, 0x830090u },
     { NULL, NULL, 0, 0 }
 };
 

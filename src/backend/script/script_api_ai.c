@@ -2063,6 +2063,55 @@ static int l_rear_footsteps(lua_State *L)
     return 2;
 }
 
+/* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
+ * go when the game shows the gore wound. A wound of the game shows meshes
+ * (its meshKits) and cuts the model with spheres; it has no list of meshes
+ * to hide, which a demon whose wounds replace a piece of skin by a wound
+ * mesh needs. The game hides meshes by name for a damage group's armour
+ * (hideMeshes); this call hides the named meshes the same way at the moment
+ * the game shows the wound. `wound` is a gorewounds decl of this mod or the
+ * game; the meshes are names of the model's own meshes. Call it once per
+ * wound, after the demon spawned. Answers true, or false and why. */
+static int l_wound_hides(lua_State *L)
+{
+    const char *wound, *names[SH_AI_WOUND_MESHES];
+    char *keep;
+    void *ai;
+    int st, n = 0, i, top;
+    wound = sh_script_check_name(L, 2, "wound_hides", 1, NULL);
+    keep = _strdup(wound);                 /* the buffer is the name checker's */
+    if (g_engine && !g_engine->wound_hides) {
+        free(keep);
+        NEED_OP(L, wound_hides, "wound_hides");
+    }
+    if (lua_type(L, 3) != LUA_TTABLE) {
+        free(keep);
+        return luaL_error(L, "\"wound_hides\" needs a list of mesh names here, got %s", luaL_typename(L, 3));
+    }
+    top = (int)lua_rawlen(L, 3);
+    if (top > SH_AI_WOUND_MESHES) {
+        free(keep);
+        return luaL_error(L, "\"wound_hides\" takes at most %d meshes for one wound, got %d", SH_AI_WOUND_MESHES, top);
+    }
+    for (i = 1; i <= top; i++) {
+        lua_rawgeti(L, 3, i);
+        if (lua_type(L, -1) != LUA_TSTRING) {
+            free(keep);
+            return luaL_error(L, "\"wound_hides\" needs mesh names in its list, got %s at %d", luaL_typename(L, -1), i);
+        }
+        names[n++] = lua_tostring(L, -1);  /* kept on the stack until the call returns */
+    }
+    ai = self_ai(L, "wound_hides", NULL);
+    st = (ai && keep) ? g_engine->wound_hides(ai, keep, names, n) : -1;
+    free(keep);
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, st == -2 ? "the wound is not a loaded gorewounds decl"
+                    : st == -3 ? "the demon's model has no mesh of one of these names"
+                               : "the game's wound display could not be reached");
+    return 2;
+}
+
 static const char *check_node(lua_State *L, int idx, const char *call, const char *what)
 {
     size_t n = 0, i;
@@ -2716,6 +2765,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "tracking", l_tracking },         { "body_rotation", l_body_rotation },
     { "laser_add", l_laser_add },       { "laser_remove", l_laser_remove },
     { "rear_footsteps", l_rear_footsteps },
+    { "wound_hides", l_wound_hides },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3811,6 +3861,110 @@ static int e_rear_footsteps(void *ai, const char *front, const char *rear)
     return 1;
 }
 
+/* ---- wound hides: the meshes that go when a gore wound is shown */
+
+typedef void (*ai_show_wound_fn)(void *gore, void **row);
+typedef int (*ai_mesh_index_fn)(void *model, const char *name);
+typedef void (*ai_mesh_hide_fn)(void *model, int index);
+static ai_show_wound_fn g_wound_target, g_wound_orig;
+static ai_mesh_index_fn g_mesh_index;
+static ai_mesh_hide_fn g_mesh_hide;
+static int g_wound_failed;
+
+/* One record per demon that named hides, found by the demon and its spawn
+ * id; a row is a wound decl (decls outlive the map) and mesh indices of the
+ * demon's model. The detour reads it on the game's threads without a lock,
+ * so it never moves; a row is complete before its wound pointer is set. */
+typedef struct {
+    void *volatile wound;
+    volatile LONG n;
+    int index[SH_AI_WOUND_MESHES];
+} ai_wound_row;
+typedef struct {
+    void *volatile ai;
+    volatile LONG spawn_id;
+    ai_wound_row row[SH_AI_WOUND_ROWS];
+} ai_wound_rec;
+static ai_wound_rec g_wound[AI_PARKED_MAX];
+static volatile LONG g_wound_used;
+
+static void show_wound_detour(void *gore, void **row)
+{
+    void *wound = NULL, *owner = NULL;
+    g_wound_orig(gore, row);
+    __try {
+        if (gore && row) {
+            wound = *row;
+            owner = *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER);
+        }
+        if (wound && owner) {
+            int i, k, j, used = (int)g_wound_used;
+            for (i = 0; i < used; i++) {
+                void *model;
+                if (g_wound[i].ai != owner) continue;
+                if (spawn_id_of(owner) != (uint32_t)g_wound[i].spawn_id) break;
+                model = *(void * const *)((const uint8_t *)owner + SH_AI_OFF_MODEL);
+                if (!model) break;
+                for (k = 0; k < SH_AI_WOUND_ROWS; k++) {
+                    int n;
+                    if (g_wound[i].row[k].wound != wound) continue;
+                    n = (int)g_wound[i].row[k].n;
+                    for (j = 0; j < n && j < SH_AI_WOUND_MESHES; j++) g_mesh_hide(model, g_wound[i].row[k].index[j]);
+                    break;
+                }
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
+static int e_wound_hides(void *ai, const char *wound, const char *const *meshes, int n)
+{
+    void *decl = sh_script_combat_decl("gorewounds", wound);
+    uint32_t id = spawn_id_of(ai);
+    int i, k, slot = -1, used = (int)g_wound_used, index[SH_AI_WOUND_MESHES];
+    void *model = NULL;
+    if (!decl) return -2;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE || !g_mesh_index || !g_mesh_hide || n < 0 || n > SH_AI_WOUND_MESHES) return -1;
+    __try { model = *(void * const *)((const uint8_t *)ai + SH_AI_OFF_MODEL); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { model = NULL; }
+    if (!model) return -1;
+    for (i = 0; i < n; i++) {
+        int at = -1;
+        __try { at = g_mesh_index(model, meshes[i]); } __except (EXCEPTION_EXECUTE_HANDLER) { at = -1; }
+        if (at < 0) return -3;
+        index[i] = at;
+    }
+    if (!commit_hook((void *)g_wound_target, (void *)show_wound_detour, k_ai_wound_prologue, SH_AI_WOUND_STOLEN,
+                     (void **)&g_wound_orig, &g_wound_failed, "wound_hides"))
+        return -1;
+    for (i = 0; i < used; i++) {
+        void *p = g_wound[i].ai;
+        if (p == ai && (uint32_t)g_wound[i].spawn_id == id) { slot = i; break; }
+        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_wound[i].spawn_id)) slot = i;
+    }
+    if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
+    if (slot < 0) return -1;
+    if (g_wound[slot].ai != ai || (uint32_t)g_wound[slot].spawn_id != id) {
+        g_wound[slot].ai = NULL;
+        for (k = 0; k < SH_AI_WOUND_ROWS; k++) {
+            g_wound[slot].row[k].wound = NULL;
+            InterlockedExchange(&g_wound[slot].row[k].n, 0);
+        }
+        InterlockedExchange(&g_wound[slot].spawn_id, (LONG)id);
+    }
+    for (k = 0; k < SH_AI_WOUND_ROWS; k++)
+        if (g_wound[slot].row[k].wound == decl || !g_wound[slot].row[k].wound) break;
+    if (k == SH_AI_WOUND_ROWS) return -1;
+    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].row[k].wound, NULL);
+    for (i = 0; i < n; i++) g_wound[slot].row[k].index[i] = index[i];
+    InterlockedExchange(&g_wound[slot].row[k].n, (LONG)n);
+    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].row[k].wound, decl);
+    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].ai, ai);
+    if (slot >= used) InterlockedExchange(&g_wound_used, slot + 1);
+    return 1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -3844,7 +3998,7 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt, e_gore_init
+    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -3966,6 +4120,11 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_gore_comp = (uint32_t)rel32_at(site + SH_AI_GORE_SITE_COMP + 3);
         g_gore_init = (ai_gore_init_fn)(site + SH_AI_GORE_SITE_CALL + 5 + rel32_at(site + SH_AI_GORE_SITE_CALL + 1));
     } else g_live.gore_init = NULL;
+    if (r[SH_AI_SIG_SHOW_WOUND].addr && (site = (const uint8_t *)r[SH_AI_SIG_MESH_HIDE_SITE].addr) != NULL) {
+        g_wound_target = (ai_show_wound_fn)r[SH_AI_SIG_SHOW_WOUND].addr;
+        g_mesh_index = (ai_mesh_index_fn)(site + SH_AI_MESH_SITE_INDEX + 5 + rel32_at(site + SH_AI_MESH_SITE_INDEX + 1));
+        g_mesh_hide = (ai_mesh_hide_fn)(site + SH_AI_MESH_SITE_HIDE + 5 + rel32_at(site + SH_AI_MESH_SITE_HIDE + 1));
+    } else g_live.wound_hides = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

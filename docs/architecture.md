@@ -2138,6 +2138,18 @@ is touched, and a removed demon answers nil.
   detoured (at the first call, 15 whole bytes) and, for foot indices 2 and 3
   of a demon that named a pair, answers `rear` where the game answered
   `front`. Records are per demon and spawn id; the tables are decl pointers.
+  `wound_hides(wound, meshes)` serves a demon whose gore wounds replace a
+  piece of skin by a wound mesh. A wound of the game shows meshes (its
+  `meshKits`) and cuts the model with clipping spheres; it names no mesh to
+  hide. The game hides meshes by name only for a damage group's armour
+  (`hideMeshes`, VK 0x140830E10: the model's mesh index by name, then a clear
+  of that mesh's bit in the model's 64-bit shown-mesh mask at model +0xEE8).
+  The call resolves the names to mesh indices with the game's own lookup and
+  detours `idGoreComponent::ShowWound` (VK 0x1409021C0, at the first call, 14
+  whole bytes): after the game showed a wound of a demon that named hides for
+  it, the meshes are hidden with the game's own hide, in the same call, so no
+  frame draws the wound and the skin together. Records are per demon and
+  spawn id; a model shows at most 64 meshes separately (the mask's width).
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

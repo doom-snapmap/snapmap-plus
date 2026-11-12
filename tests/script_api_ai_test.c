@@ -323,6 +323,21 @@ static int f_rear_footsteps(void *ai, const char *front, const char *rear)
     ev_cat(line);
     return 1;
 }
+static int g_no_wound, g_no_mesh;
+static int f_wound_hides(void *ai, const char *wound, const char *const *meshes, int n)
+{
+    char line[600];
+    int i, used;
+    (void)ai;
+    if (g_no_wound) return -2;
+    if (g_no_mesh) return -3;
+    used = snprintf(line, sizeof line, "wound_hides %s:", wound);
+    for (i = 0; i < n && used > 0 && used < (int)sizeof line; i++)
+        used += snprintf(line + used, sizeof line - (size_t)used, " %s", meshes[i]);
+    if (used > 0 && used < (int)sizeof line - 1) { line[used] = '\n'; line[used + 1] = 0; }
+    ev_cat(line);
+    return 1;
+}
 static const sh_script_ai_engine g_fake;
 static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
 {
@@ -390,7 +405,7 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt, f_gore_init
+    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1504,6 +1519,52 @@ static void test_enemy_weapon_sdk(void)
 static void test_lasers_and_rear_feet(void)
 {
     const char *log;
+    printf("-- wound_hides names the wound by its whole decl name and the meshes as written\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('hides ' .. tostring(self:wound_hides('wounds/brute/chest', { 'body$2@chest', 'body$3@chest' })))\n"
+        "  print('none ' .. tostring(self:wound_hides('wounds/brute/armor', {})))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "hides true\nnone true\n") != NULL);
+    CHECK(strstr(g_events, "wound_hides mods/aaaaaaaa/wounds/brute/chest: body$2@chest body$3@chest\n"
+                           "wound_hides mods/aaaaaaaa/wounds/brute/armor:\n") != NULL);
+    sh_script_map_end();
+    g_no_wound = 1;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  local ok, why = self:wound_hides('wounds/brute/chest', { 'a' })\n"
+        "  print('hides ' .. tostring(ok) .. ' ' .. tostring(why))\n"
+        "end)\n"));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "hides false the wound is not a loaded gorewounds decl\n") != NULL);
+    sh_script_map_end();
+    g_no_wound = 0; g_no_mesh = 1;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  local ok, why = self:wound_hides('wounds/brute/chest', { 'a' })\n"
+        "  print('hides ' .. tostring(ok) .. ' ' .. tostring(why))\n"
+        "end)\n"));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "hides false the demon's model has no mesh of one of these names\n") != NULL);
+    sh_script_map_end();
+    g_no_mesh = 0;
+    expect_stop("self:wound_hides('w', 'mesh')", "\"wound_hides\" needs a list of mesh names here, got string");
+    expect_stop("self:wound_hides('w', { 1 })", "\"wound_hides\" needs mesh names in its list, got number at 1");
+
     printf("-- laser_add, laser_remove and rear_footsteps ask the engine by tag and whole decl name\n");
     CHECK(start(
         "api = 1\n"
@@ -1798,7 +1859,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 45);
+    CHECK(sh_script_ai_register() == 46);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

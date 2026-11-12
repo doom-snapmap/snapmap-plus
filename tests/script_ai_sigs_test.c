@@ -342,6 +342,25 @@ static void check_image(const char *path)
         CHECK(window_has(base, f, 0x100, "\x30\x06\x00\x00", 4));
         CHECK(window_has(base, f, 0x200, "\xB0\x3D\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_SHOW_WOUND]) {
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + rva[SH_AI_SIG_SHOW_WOUND], 64, 14, 48, &flags);
+        CHECK(b == SH_AI_WOUND_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + rva[SH_AI_SIG_SHOW_WOUND], k_ai_wound_prologue, SH_AI_WOUND_STOLEN));
+        /* the owner handle is the pair at component +0x608 (its pointer, +0x610, is read through it) */
+        CHECK(window_has(base, rva[SH_AI_SIG_SHOW_WOUND], 0x120, "\x08\x06\x00\x00", 4));
+    }
+    if (rva[SH_AI_SIG_MESH_HIDE_SITE]) {
+        uint32_t s = rva[SH_AI_SIG_MESH_HIDE_SITE];
+        uint32_t index = rel_target(base, s + SH_AI_MESH_SITE_INDEX, 5, 1);
+        uint32_t hide = rel_target(base, s + SH_AI_MESH_SITE_HIDE, 5, 1);
+        printf("  mesh index by name 0x%X, mesh hide 0x%X\n", index, hide);
+        if (vk) CHECK(index == 0x15EDF50u && hide == 0x15EFEC0u);
+        /* the hide clears a bit of the shown-mesh mask at model +0xEE8; the index walks the model's meshes */
+        CHECK(window_has(base, hide, 0x30, "\xE8\x0E\x00\x00", 4));
+        CHECK(window_has(base, index, 0x20, "\x90\x0E\x00\x00", 4));
+    }
     if (rva[SH_AI_SIG_MOVE_STAGE]) {
         /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
         CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));
