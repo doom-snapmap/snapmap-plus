@@ -184,6 +184,7 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
  * the clip, and the script hears of it through on.pain). The demon is the
  * script's again when the reaction is over. Pure. */
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
+int      sh_ai_pain_pending(int next_reaction);   /* painParms.mNextPainReaction is a pain graph reaction */
 
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame);
 /* Feed the status read at `frame`; returns the move's state. */

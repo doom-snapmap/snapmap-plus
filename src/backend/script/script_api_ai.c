@@ -129,6 +129,13 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
     return frames_since_issue > give_up_frames ? SH_AI_FORCE_VIA_DONE : SH_AI_FORCE_VIA_WAIT;
 }
 
+/* A pending pain request worth yielding for: a reaction of the pain graph. The twitch levels are additive and the
+ * engine plays them without its pain action. */
+int sh_ai_pain_pending(int next_reaction)
+{
+    return next_reaction > 2 && next_reaction < SH_COMBAT_PAIN_COUNT;   /* above PAIN_TWITCH_HEAVY */
+}
+
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
 {
     return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
@@ -3255,18 +3262,23 @@ static volatile LONG g_parked_used;   /* slots below this were ever used */
  * (sh_ai_park_holds): the demon's own fields, read as the FSM threads read
  * them. Unreadable fields leave it parked. */
 #define AI_HEALTH_CUR        (0x2B290u + 0x1Cu)  /* idAI2: idAIHealth +0x2B290, current +0x1C (script_api_common.c) */
-#define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: this frame's pain request, -1 when none (idAIDamageInfo;
-                                                  * VK 0x140403DD0 / GL its twin read it as [0x10A2]) */
+#define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: damageInfo.painJointGroupIndex, -1 when the hit named none
+                                                  * (VK 0x140403DD0 / GL its twin read it as [0x10A2]) */
+#define AI_PAIN_NEXT         (SH_COMBAT_AI_PAIN + 0x3618u)   /* idActorPainState.painParms.mNextPainReaction: the
+                                                  * reaction the engine's pain selection chose and its pain action
+                                                  * has yet to play (the engine's reflected layout, both renderers).
+                                                  * A pending request can stand with the joint group at -1. */
 static int parked_now(void *ai)
 {
     float health = 1.0f;
-    int group = -1, reaction = SH_COMBAT_PAIN_NONE;
+    int group = -1, next = SH_COMBAT_PAIN_NONE, reaction = SH_COMBAT_PAIN_NONE;
     __try {
         health = *(const float *)((const uint8_t *)ai + AI_HEALTH_CUR);
         group = *(const int *)((const uint8_t *)ai + AI_PAIN_JOINT_GROUP);
+        next = *(const int *)((const uint8_t *)ai + AI_PAIN_NEXT);
         reaction = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
-    return sh_ai_park_holds(!(health <= 0.0f), group >= 0, reaction);
+    return sh_ai_park_holds(!(health <= 0.0f), group >= 0 || sh_ai_pain_pending(next), reaction);
 }
 
 /* IsRunningScript(ai): true for a parked demon whose spawn id still matches

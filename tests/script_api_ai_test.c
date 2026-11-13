@@ -604,6 +604,10 @@ static void test_move_state(void)
     CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN | SH_SCRIPT_ANIM_DEST, 1, 9, 600) == SH_AI_FORCE_VIA_DONE);
     /* a parked demon stays the script's except while dead, or while a pain reaction is asked for or playing */
     CHECK(sh_ai_park_holds(1, 0, 0) == 1);
+    /* the engine's pending request (painParms.mNextPainReaction): a pain graph reaction yields, a twitch does not */
+    CHECK(sh_ai_pain_pending(0) == 0 && sh_ai_pain_pending(1) == 0 && sh_ai_pain_pending(2) == 0);
+    CHECK(sh_ai_pain_pending(6) == 1 && sh_ai_pain_pending(7) == 1 && sh_ai_pain_pending(13) == 1);
+    CHECK(sh_ai_pain_pending(14) == 0 && sh_ai_pain_pending(-1) == 0);
     CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */
     CHECK(sh_ai_park_holds(1, 1, 0) == 0);          /* this frame's damage asked for a pain */
     CHECK(sh_ai_park_holds(1, 0, 6) == 0);          /* PAIN_FALTER is playing */

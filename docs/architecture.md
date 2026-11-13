@@ -2034,7 +2034,15 @@ is touched, and a removed demon answers nil.
   enters its own `ExecuteDoomscript` state from `ac_default` and never leaves
   it through `Shared_NotExecutingScript`. That state's class overrides no
   state method; the designer commands below act there, and the engine keeps
-  pain, damage, death and animation. The command also posts
+  pain, damage, death and animation. The detour answers false, so the
+  engine's own cycle runs, while the demon is dead, while a pain reaction of
+  the pain graph plays, and while one is pending: the hit named a pain joint
+  group (ai+0x8510) or the engine's pain selection left a reaction above the
+  twitch levels in `idActorPainState.painParms.mNextPainReaction`
+  (ai+0x8678, the same offset in both executables: VK 0x1405FC319, GL
+  0x1405FB549 compare it). The selection can leave a request with the joint
+  group at -1, and without the second test its pain action never ran on a
+  parked demon. The command also posts
   `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
   in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
   alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
