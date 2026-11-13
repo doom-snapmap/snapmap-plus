@@ -122,6 +122,11 @@ int sh_ai_event_format_ok(int ev, const char *registry_format)
     return strcmp(SH_AI_EVENTS[ev].format, registry_format) == 0;
 }
 
+const char *const SH_AI_AIMPOINT_NAMES[13] = {
+    "ORIGIN", "HEAD", "TORSO", "CENTER", "LEGS", "FEET", "LEFT_SHOULDER", "RIGHT_SHOULDER", "LEFT_FOOT", "RIGHT_FOOT",
+    "BEST", "EYELEVEL", "LOOKAHEAD"
+};
+
 int sh_ai_order_interrupt(int kind)
 {
     switch (kind) {
@@ -1971,18 +1976,31 @@ static int l_muzzle_on_target(lua_State *L)
     return 2;
 }
 
-/* ai:focus(target): the engine's aim focus, which the fire gate needs (with
- * no valid focus the muzzle test fails and a parked demon fires nothing).
- * An entity is tracked (setFocus, aiming, kept in view); a position is a
- * fixed aim point (the game's set-focus-to-position); nil clears the aim
- * focus. ai:aim_at (entity or nil) and ai:aim_point (position or nil) are
- * the same two orders under their older names. */
+/* ai:focus(target, [aim_point]): the engine's aim focus, which the fire
+ * gate needs (with no valid focus the muzzle test fails and a parked demon
+ * fires nothing). An entity is tracked (setFocus, aiming, kept in view) at
+ * the aim point named (an aimPoint_t name with or without AIMPOINT_:
+ * "CENTER", the default, or "BEST", the one the game's own focus on an
+ * enemy and DOOM Eternal's take); a position is a fixed aim point (the
+ * game's set-focus-to-position); nil clears the aim focus. ai:aim_at
+ * (entity or nil) and ai:aim_point (position or nil) are the same two
+ * orders under their older names. */
 static int l_focus(lua_State *L)
 {
     sh_script_handle h = 0;
     float p[3];
     void *ai, *ent = NULL;
-    int kind = 0;
+    int kind = 0, aim = SH_AI_AIMPOINT_CENTER;
+    if (!lua_isnoneornil(L, 3)) {
+        const char *n;
+        int i;
+        if (lua_type(L, 3) != LUA_TSTRING)
+            sh_script_refuse(L, "\"focus\" needs an aim point name, as \"BEST\", got %s", luaL_typename(L, 3));
+        n = lua_tostring(L, 3);
+        if (!_strnicmp(n, "AIMPOINT_", 9)) n += 9;
+        for (aim = -1, i = 0; i < 13; i++) if (!_stricmp(n, SH_AI_AIMPOINT_NAMES[i])) aim = i;
+        if (aim < 0) sh_script_refuse(L, "\"focus\" does not know the aim point \"%s\"", lua_tostring(L, 3));
+    }
     if (!lua_isnoneornil(L, 2)) {
         if (is_entity(L, 2)) { sh_script_check_entity(L, 2, "focus"); kind = 1; }
         else if (lua_type(L, 2) == LUA_TTABLE) { check_vec(L, 2, "focus", p); kind = 2; }
@@ -1995,7 +2013,7 @@ static int l_focus(lua_State *L)
     if (!park(ai, h)) return 0;
     if (kind == 1) {
         sh_ai_arg a[4];
-        a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(SH_AI_AIMPOINT_CENTER);
+        a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(aim);
         run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
     } else if (kind == 2) {
         g_engine->aim_point(ai, p);

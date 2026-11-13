@@ -99,6 +99,9 @@ extern const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT];
 #define SH_AI_WALKSTATE_WALKING     1   /* walkState_t */
 #define SH_AI_WALKSTATE_RUNNING     2
 #define SH_AI_AIMPOINT_CENTER       3   /* aimPoint_t */
+#define SH_AI_AIMPOINT_BEST        10   /* the game's AIMPOINT_BEST (DOOM Eternal's is 11: it adds MEAT_HOOK at 10) */
+/* The game's aimPoint_t names without their prefix, by value (0 ORIGIN .. 12 LOOKAHEAD). */
+extern const char *const SH_AI_AIMPOINT_NAMES[13];
 #define SH_AI_PLAYER_CLOSEST        0   /* aiPlayer_t */
 #define SH_AI_FOCI_AIM              0   /* aiFoci_t */
 #define SH_AI_AWARE_UNAWARE         0   /* AIAWARE_ */

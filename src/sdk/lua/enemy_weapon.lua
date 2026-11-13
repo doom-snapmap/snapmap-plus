@@ -111,13 +111,15 @@ function W.on_target(e, test)
   return e:muzzle_on_target(test)
 end
 
---- The engine's aim focus: an entity (tracked), a position (fixed) or nil (cleared). Without a
--- valid focus the engine's fire gate never passes.
-function W.focus(e, target)
-  e:focus(target)
+--- The engine's aim focus: an entity (tracked, at the aim point named: "CENTER" when none is
+-- given, "BEST" as the game's own focus on an enemy), a position (fixed) or nil (cleared). Without
+-- a valid focus the engine's fire gate never passes.
+function W.focus(e, target, aim_point)
+  if aim_point ~= nil and type(target) ~= "table" then e:focus(target, aim_point) else e:focus(target) end
   local m = memory(e)
   m.fixed = type(target) == "table"      -- a fixed point is the script's to move, not tick's
   m.focus = (not m.fixed) and target or nil
+  m.aim_point = aim_point
 end
 
 --- Stand the demon still the engine's way and let the engine turn it toward its focus: ends the
@@ -146,7 +148,7 @@ function W.tick(e, dt)
   if not ok or not enemy then return end
   local m = memory(e)
   if not m.fixed and m.focus ~= enemy then
-    e:focus(enemy)
+    if m.aim_point ~= nil then e:focus(enemy, m.aim_point) else e:focus(enemy) end
     m.focus = enemy
   end
 end

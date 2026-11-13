@@ -1318,6 +1318,8 @@ static void test_fire_calls(void)
         "    tostring(info.body_rotation)))\n"
         "  print('firing ' .. tostring(self:muzzle_on_target('firing', 'left')))\n"
         "  self:focus(ent(2))\n"
+        "  self:focus(ent(2), 'best')\n"
+        "  self:focus(ent(2), 'AIMPOINT_HEAD')\n"
         "  self:focus({x = 1, y = 2, z = 3})\n"
         "  self:focus(nil)\n"
         "  print('hold ' .. tostring(self:hold()))\n"
@@ -1365,7 +1367,7 @@ static void test_fire_calls(void)
     CHECK(g_ent[1].muzzle_mode == SH_AI_MUZZLE_FIRING && g_ent[1].muzzle_hand == SH_AI_HAND_LEFT);
     CHECK(strstr(log, "firing true\n") != NULL);
     /* the focus: an entity, a point, nothing */
-    CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n") != NULL);
+    CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n1:setFocus(e2,1,1,10)\n1:setFocus(e2,1,1,1)\n") != NULL);
     CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 1 && g_ent[1].aim[1] == 2 && g_ent[1].aim[2] == 3);
     CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
     /* hold: the engine's ClearMove, then its idle with the turn type; the default is COMBAT */
@@ -1439,6 +1441,8 @@ static void test_fire_refusals(void)
                 "got hard");
     expect_stop("self:muzzle_on_target(5)", "\"muzzle_on_target\" needs the test as \"pull\", \"firing\" or \"plain\", got number");
     expect_stop("self:focus(5)", "\"focus\" needs an entity, a position or nil, got number");
+    expect_stop("self:focus(ent(2), 'NECK')", "\"focus\" does not know the aim point \"NECK\"");
+    expect_stop("self:focus(ent(2), 3)", "\"focus\" needs an aim point name, as \"BEST\", got number");
     expect_stop("self:focus({x = 1, y = 'a', z = 3})", "\"focus\" needs a position with a number for y");
     expect_stop("self:hold('SPRINT')", "\"hold\" needs the turn as \"RELAXED\", \"COMBAT\" or \"INCOVER\" (the game's "
                 "AIIDLETURN_ names), got SPRINT");
