@@ -122,6 +122,15 @@ int sh_ai_event_format_ok(int ev, const char *registry_format)
     return strcmp(SH_AI_EVENTS[ev].format, registry_format) == 0;
 }
 
+int sh_ai_order_interrupt(int kind)
+{
+    switch (kind) {
+    case SH_AI_ORDER_CHANGE:    return SH_AI_INTR_BLEND_MULTI;   /* DOOM Eternal's command default */
+    case SH_AI_ORDER_FORCE_VIA: return SH_AI_INTR_BLEND_MULTI;   /* ForceAndChangeState */
+    default:                    return -1;                       /* ForceState's YES; the via's second leg */
+    }
+}
+
 int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue, uint32_t give_up_frames)
 {
     if (flags & SH_SCRIPT_ANIM_DEST) return SH_AI_FORCE_VIA_DONE;
@@ -253,6 +262,8 @@ typedef struct ai_rec {
     unsigned   turn_noted;       /* hold told the author of an idle turn with no turnParms entry (a bit per turn type) */
     char      *wait_dest;        /* an animation order held back while a step of the engine's is in flight */
     char      *wait_via;         /* (malloc'd node names; wait_dest NULL: none) */
+    int        wait_kind;        /* its SH_AI_ORDER_ kind */
+    int        eternal_interrupts; /* ai:eternal_interrupts(): orders carry DOOM Eternal's interrupt mode */
 } ai_rec;
 
 #define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
@@ -2228,6 +2239,31 @@ static int l_fk_reference_pose(lua_State *L)
     return 2;
 }
 
+/* ai:eternal_interrupts(): from now on the demon's animation orders carry the
+ * interrupt mode DOOM Eternal's AI command carries (sh_ai_order_interrupt):
+ * a change and a forced via nest over a blend that still runs, as DOOM
+ * Eternal's do, where the game's script orders wait (a change) or end the
+ * running blend at once (a forced via: the pose jumps). A node whose
+ * customFlags carry AW_CF_USE_MULTIPLE_INTERRUPT nests in both games
+ * whatever the mode. Call it once after the demon spawned. Answers true, or
+ * false and why. */
+static int l_eternal_interrupts(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    ai_rec *r;
+    NEED_OP(L, interrupt_blend, "eternal_interrupts");
+    ai = self_ai(L, "eternal_interrupts", &h);
+    if (!ai || !(r = park(ai, h))) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "the demon could not be taken over");
+        return 2;
+    }
+    r->eternal_interrupts = 1;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 /* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
  * go when the game shows the gore wound. A wound of the game shows meshes
  * (its meshKits) and cuts the model with spheres; it has no list of meshes
@@ -2397,7 +2433,7 @@ static void force_via_step(void)
              * leaves the node for it when the clip ends. A forced clip the web
              * is not asked to leave holds its last frame for good. */
             f->asked = 1;
-            (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, 0, 0);
+            (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, SH_AI_ORDER_VIA_DEST, 0);
             break;
         default:
             break;
@@ -2424,7 +2460,7 @@ static int l_anim_force_via(lua_State *L)
     if (!ai) return 0;
     for (i = 0; i < g_nforce; i++) if (g_force_via[i].handle == h) { slot = i; break; }
     sh_script_api_anim_request(h, dest, via);
-    if (!sh_script_ai_anim(ai, h, via, NULL, 1, (int)(blend * 1000.0 + 0.5))) return 0;
+    if (!sh_script_ai_anim(ai, h, via, NULL, SH_AI_ORDER_FORCE_VIA, (int)(blend * 1000.0 + 0.5))) return 0;
     d = _strdup(dest);
     v = _strdup(via);
     if (!d || !v) { free(d); free(v); return luaL_error(L, "not enough memory"); }
@@ -2820,30 +2856,37 @@ int sh_script_ai_park(void *ai, sh_script_handle h)
     return g_engine && ai && park(ai, h) != NULL;
 }
 
-/* The order as the engine's event. */
-static int anim_send(void *ai, const char *dest, const char *via, int force, int blend_ms)
+/* The order as the engine's event. A demon given DOOM Eternal's interrupts
+ * (r->eternal_interrupts) then has its web's interrupt blend mode set to the
+ * one DOOM Eternal's command would have carried (sh_ai_order_interrupt). */
+static int anim_send(void *ai, ai_rec *r, const char *dest, const char *via, int kind, int blend_ms)
 {
     sh_ai_arg a[4];
+    int ok, mode;
     a[0] = arg_i(SH_AI_ANIMWEB_BODY);
     a[1] = arg_s('1', dest);
-    if (force) {
+    if (kind == SH_AI_ORDER_FORCE || kind == SH_AI_ORDER_FORCE_VIA) {
         a[2] = arg_i(blend_ms);
         a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-        return run(ai, SH_AI_EV_FORCE_ANIM_STATE, a, 4, NULL);
-    }
-    if (via) {
+        ok = run(ai, SH_AI_EV_FORCE_ANIM_STATE, a, 4, NULL);
+    } else if (via) {
         a[2] = arg_s('1', via);
         a[3] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-        return run(ai, SH_AI_EV_CHANGE_ANIM_STATE_VIA, a, 4, NULL);
+        ok = run(ai, SH_AI_EV_CHANGE_ANIM_STATE_VIA, a, 4, NULL);
+    } else {
+        a[2] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
+        ok = run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL);
     }
-    a[2] = arg_i(SH_AI_ANIMWAIT_DONT_WAIT);
-    return run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL);
+    mode = sh_ai_order_interrupt(kind);
+    if (ok && r && r->eternal_interrupts && mode >= 0 && g_engine->interrupt_blend)
+        (void)g_engine->interrupt_blend(ai, mode);
+    return ok;
 }
 
 /* An order that is not forced, given now. An idle order that stands ends
  * with it; a turn in place the engine has asked for under that order and
  * not begun is ended first, so that no step begins behind the order. */
-static int anim_give(void *ai, const char *dest, const char *via)
+static int anim_give(void *ai, ai_rec *r, const char *dest, const char *via, int kind)
 {
     sh_ai_step_state st;
     memset(&st, 0, sizeof st);
@@ -2851,7 +2894,7 @@ static int anim_give(void *ai, const char *dest, const char *via)
     if (g_engine->step_state && g_engine->step_state(ai, &st) == 1 && st.moving && st.idle_turn >= 0 &&
         g_engine->clear_move)
         g_engine->clear_move(ai);
-    return anim_send(ai, dest, via, 0, 0);
+    return anim_send(ai, r, dest, via, kind, 0);
 }
 
 /* The engine ends a step stage of its animFSM (a turn in place, a step or an
@@ -2868,10 +2911,10 @@ int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char
     ai_rec *r;
     sh_ai_step_state st;
     if (!g_engine || !ai || !dest || !(r = park(ai, h))) return 0;
-    if (force) {
+    if (force == SH_AI_ORDER_FORCE || force == SH_AI_ORDER_FORCE_VIA) {
         int in_flight = step_in_flight(ai, &st);
         anim_wait_drop(r);
-        if (!anim_send(ai, dest, NULL, 1, blend_ms)) return 0;
+        if (!anim_send(ai, r, dest, NULL, force, blend_ms)) return 0;
         if (in_flight && g_engine->step_interrupt) (void)g_engine->step_interrupt(ai);
         return 1;
     }
@@ -2881,10 +2924,11 @@ int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char
         anim_wait_drop(r);
         r->wait_dest = d;
         r->wait_via = v;
+        r->wait_kind = force;
         return 1;
     }
     anim_wait_drop(r);
-    return anim_give(ai, dest, via);
+    return anim_give(ai, r, dest, via, force);
 }
 
 /* Every frame: an order held back is given once its step has ended. */
@@ -2900,7 +2944,7 @@ static void anim_wait_step(void)
         ai = r->handle ? g_engine->entity(r->handle) : NULL;
         if (!ai || !park(ai, r->handle)) { anim_wait_drop(r); continue; }
         if (step_in_flight(ai, &st)) continue;
-        (void)anim_give(ai, r->wait_dest, r->wait_via);
+        (void)anim_give(ai, r, r->wait_dest, r->wait_via, r->wait_kind);
         anim_wait_drop(r);
     }
 }
@@ -2933,7 +2977,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "wound_hides", l_wound_hides },
     { "held", l_held },
     { "posed_legs", l_posed_legs },
-    { "fk_reference_pose", l_fk_reference_pose },
+    { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -4475,6 +4519,20 @@ static void fkref_detour(void *ai, const void *address, intptr_t effector, void 
     t_fkref_no_leaf = 0;
 }
 
+/* The web's interruptBlend, written after the order's event returned (the
+ * script events run their animator call at once: the web's update, later in
+ * the frame, reads it). Only a value of the enum is replaced. */
+static int e_interrupt_blend(void *ai, int mode)
+{
+    int v = -1;
+    if (!ai || mode < SH_AI_INTR_BLEND_NO || mode > SH_AI_INTR_BLEND_MULTI) return -1;
+    __try {
+        int32_t *p = (int32_t *)((uint8_t *)ai + SH_AI_OFF_WEB_ANIMATOR + SH_AI_AW_INTERRUPT_BLEND);
+        if (*p >= SH_AI_INTR_BLEND_NO && *p <= SH_AI_INTR_BLEND_MULTI) { *p = mode; v = 1; }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
 static int e_fk_reference_pose(void *ai)
 {
     uint32_t id = spawn_id_of(ai);
@@ -4533,7 +4591,8 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose
+    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
+    e_interrupt_blend
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -4695,6 +4754,10 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_fkref_target = (ai_fkref_fn)site;
         g_leaf_target = (ai_web_leaf_fn)r[SH_AI_SIG_WEB_LEAF].addr;
     } else g_live.fk_reference_pose = NULL;
+    /* The interrupt mode: ForceState writes interruptBlend at web +0x570 and the update reads it there (both
+     * found, the offsets the sigs test checks); the web is ai +0x222B8, the fk reference pose's check above. */
+    if (!r[SH_AI_SIG_WEB_FORCE_STATE].addr || !r[SH_AI_SIG_WEB_UPDATE].addr || !g_live.fk_reference_pose)
+        g_live.interrupt_blend = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

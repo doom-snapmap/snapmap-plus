@@ -453,6 +453,11 @@ typedef struct sh_script_ai_engine {
      * from the animation of the anim web's current leaf (sh_ai_fk_reference
      * below). 1 set, -1 unavailable. */
     int      (*fk_reference_pose)(void *ai);
+    /* Set the interrupt blend mode of the demon's anim web (SH_AI_INTR_BLEND_)
+     * for the order just given: the mode the web's next transition takes when
+     * it meets a running blend (sh_ai_order_interrupt below). 1 set, -1
+     * unavailable. */
+    int      (*interrupt_blend)(void *ai, int mode);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -549,6 +554,43 @@ int sh_script_ai_register(void);
  * this session. Game thread, inside the script tick. */
 int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms);
 
+/* The kinds of animation order (sh_script_ai_anim's `force`). FORCE is
+ * ssaction_ForceAnimState; FORCE_VIA forces the via node of ai:anim_force_via
+ * the same way; VIA_DEST is the change to its destination asked when the via
+ * plays; CHANGE is ssaction_ChangeAnimState(Via). */
+enum { SH_AI_ORDER_CHANGE = 0, SH_AI_ORDER_FORCE = 1, SH_AI_ORDER_FORCE_VIA = 2, SH_AI_ORDER_VIA_DEST = 3 };
+
+/* Interrupts. Both games' anim web update (VK 0x14170B890, DOOM Eternal
+ * 0x140495800) meets a new transition while the model's blend still runs in
+ * one of two ways. When the current node carries AW_CF_USE_MULTIPLE_INTERRUPT
+ * (bit 25 of its customFlags in both games) the new blend is nested over the
+ * running one, the oldest clip dropped when two already run. Otherwise the
+ * web's interruptBlend decides: NO waits for the blend to end, YES ends the
+ * running blend at once (the pose jumps to its destination) and then blends,
+ * MULTI nests. Each transition resets the mode to NO. The orders set it:
+ * ChangeState and ChangeStateVia take it from their caller, ForceState sets
+ * YES and ForceAndChangeState (a forced via with a destination) sets MULTI,
+ * the same functions in both games. DOOM Eternal's AI command (constructor
+ * 0x1408F2D40: intrPath YES, intrBlend MULTI; its processor 0x1408F0EE0)
+ * gives a change MULTI, a forced via MULTI and a forced node without a via
+ * YES. The game's script events give ssaction_ChangeAnimState(Via) NO (VK
+ * 0x1405DC680) and ssaction_ForceAnimState YES (VK 0x1405DCAC0, ForceState),
+ * so a ported demon's changes waited and its forced vias cut where DOOM
+ * Eternal's nest. sh_ai_order_interrupt: the mode DOOM Eternal's command of
+ * that kind carries, or -1 to leave the game's (a forced node: YES in both;
+ * the via's destination: in DOOM Eternal the second leg of the same command,
+ * whose transition finds the mode reset). */
+#define SH_AI_INTR_BLEND_NO        0   /* interruptBlend_t */
+#define SH_AI_INTR_BLEND_YES       1
+#define SH_AI_INTR_BLEND_MULTI     2
+#define SH_AI_OFF_WEB_ANIMATOR     0x222B8u /* idAI2: the body anim web's idAnimator_AnimWeb */
+#define SH_AI_AW_INTERRUPT_BLEND   0x570u   /* idAnimator_AnimWeb: interruptBlend (interruptPath at +0x56C) */
+#define SH_AI_FORCE_STATE_SET_YES  0x412u   /* ForceState: mov dword [r13+0x570], 1 */
+#define SH_AI_UPDATE_FLAG_TEST     0x564u   /* update: mov eax,[rax+0x10]; shr eax,0x19; test al,1 */
+#define SH_AI_UPDATE_READ_MODE     0x575u   /* update: mov eax,[r12+0x570] */
+#define SH_AI_UPDATE_RESET_MODE    0xAB6u   /* update: mov [r12+0x570], r13d (zero) at a transition */
+int sh_ai_order_interrupt(int kind);
+
 /* Park the mod's own demon `ai` (handle h) without a command: 1 when it is
  * parked. ai:fire uses it, so a demon a script fires from stops its own
  * behaviour like one it moves. Game thread, inside the script tick. */
@@ -615,6 +657,8 @@ enum sh_ai_sig {
     SH_AI_SIG_RIG_SITE,            /* the demon's setup: its model's animation object, whose rig runtime it is */
     SH_AI_SIG_FK_REFERENCE,        /* an fk effector's reference pose (ai, chain address, effector, out) (detoured) */
     SH_AI_SIG_WEB_LEAF,            /* the anim web's current leaf (web) (detoured) */
+    SH_AI_SIG_WEB_FORCE_STATE,     /* the anim web's ForceState (sets interruptPath and interruptBlend YES) */
+    SH_AI_SIG_WEB_UPDATE,          /* the anim web's update (tests interruptBlend, resets it at a transition) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

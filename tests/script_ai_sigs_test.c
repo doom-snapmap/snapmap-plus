@@ -442,6 +442,21 @@ static void check_image(const char *path)
         CHECK(window_has(base, f + SH_AI_FKREF_LEAF_CALL, 0x40, "\x4C\x8B\x4C\x19\x30", 5));
         CHECK(SH_AI_FK_SUBGRAPH_EFFECTORS == 0x40 && SH_AI_FK_EFFECTOR_SIZE == 0x58 && SH_AI_FK_EFFECTOR_REF_LEN == 0x30 - 8);
     }
+    if (rva[SH_AI_SIG_WEB_FORCE_STATE] && rva[SH_AI_SIG_WEB_UPDATE]) {
+        uint32_t f = rva[SH_AI_SIG_WEB_FORCE_STATE], u = rva[SH_AI_SIG_WEB_UPDATE];
+        /* ForceState sets interruptBlend YES at web +0x570 (interruptPath at +0x56C just before) */
+        CHECK(!memcmp(base + f + SH_AI_FORCE_STATE_SET_YES, "\x41\xC7\x85\x70\x05\x00\x00\x01\x00\x00\x00", 11));
+        CHECK(!memcmp(base + f + SH_AI_FORCE_STATE_SET_YES - 11, "\x41\xC7\x85\x6C\x05\x00\x00\x01\x00\x00\x00", 11));
+        /* the update: the node's bit 25 (AW_CF_USE_MULTIPLE_INTERRUPT), then the mode at +0x570, 0 waits and 2
+         * or more nests; a transition writes it back to zero */
+        CHECK(!memcmp(base + u + SH_AI_UPDATE_FLAG_TEST, "\x8B\x40\x10\xC1\xE8\x19\xA8\x01", 8));
+        CHECK(!memcmp(base + u + SH_AI_UPDATE_READ_MODE, "\x41\x8B\x84\x24\x70\x05\x00\x00\x85\xC0", 10));
+        CHECK(!memcmp(base + u + SH_AI_UPDATE_READ_MODE + 0x10, "\x83\xF8\x02", 3));
+        CHECK(!memcmp(base + u + SH_AI_UPDATE_RESET_MODE, "\x45\x89\xAC\x24\x70\x05\x00\x00", 8));
+        CHECK(SH_AI_AW_INTERRUPT_BLEND == 0x570 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8);
+        CHECK(SH_AI_INTR_BLEND_NO == 0 && SH_AI_INTR_BLEND_YES == 1 && SH_AI_INTR_BLEND_MULTI == 2);
+        printf("  interrupts: ForceState 0x%X, update 0x%X\n", f, u);
+    }
     if (rva[SH_AI_SIG_MOVE_STAGE]) {
         /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
         CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));

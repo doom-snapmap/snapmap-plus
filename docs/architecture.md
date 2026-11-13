@@ -2214,6 +2214,19 @@ is touched, and a removed demon answers nil.
   asked and an effector that names a poseReferenceAnim, the reference pose's
   own first call of the current leaf answers none, so the game loads and
   samples the named animation. Records are per demon and spawn id.
+  `eternal_interrupts()` gives a demon's animation orders DOOM Eternal's
+  interrupt mode. Both games' anim web update (VK 0x14170B890) meets a new
+  transition while the model's blend still runs by the current node's
+  `AW_CF_USE_MULTIPLE_INTERRUPT` (nest the new blend, the oldest clip
+  dropped when two run) or else by the web's interruptBlend: NO waits for the
+  blend, YES ends it at once (the pose jumps to its destination), MULTI
+  nests; each transition resets it to NO. DOOM Eternal's AI command carries
+  MULTI for a change and for a forced via (ForceAndChangeState) and YES only
+  for a forced node; the game's script events give a change NO and a forced
+  via ForceState's YES. After such an order's event returns (its animator
+  call runs at once), the call writes MULTI to the web's interruptBlend (ai
+  +0x222B8, +0x570; ForceState VK 0x141704AA0 and the update are found to
+  check the offsets). Records are per park record.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

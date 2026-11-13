@@ -138,7 +138,14 @@
  *                      (VK 0x1404C9380) and the fk solve (VK 0x1404140A0). Detoured; 15-byte window.
  *   AiWebLeaf          VK 0x141705850  GL 0x1417062C0  the anim web's current leaf (web): the leaf of the web's
  *                      current node, or none. Detoured; 18-byte window (its node accessor call is
- *                      register-indirect). */
+ *                      register-indirect).
+ *   AiWebForceState    VK 0x141704AA0  GL 0x141705510  the anim web's ForceState (web, subweb, state, blend, ...):
+ *                      sets interruptPath (+0x56C) and interruptBlend (+0x570) to YES at +0x407 and +0x412.
+ *                      Present for the offset ai:eternal_interrupts writes; not called.
+ *   AiWebUpdate        VK 0x14170B890  GL 0x14170C300  the anim web's update: while the model's blend runs it
+ *                      tests the current node's customFlags bit 25 (AW_CF_USE_MULTIPLE_INTERRUPT, +0x567) and
+ *                      reads interruptBlend at +0x575 (NO: wait, YES: end the running blends, MULTI: nest);
+ *                      a transition resets it to NO at +0xAB6. Present for those offsets; not called. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -313,6 +320,14 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B 01 48 8B D9 FF 90 80 00 00 00 48 8B D0 48 83 78 10 00 75 39 48 83 78 18 00 75 32 "
       "48 0F BF 93 2C 03 00 00 48 8B 83 48 03 00 00",
       0x1705850u, 0x17062C0u },
+    { "AiWebForceState",
+      "66 44 89 44 24 18 66 89 54 24 10 57 41 55 48 83 EC 68 48 83 B9 10 03 00 00 00 49 8B F9 4C 8B E9 75 0A 33 C0 "
+      "48 83 C4 68 41 5D 5F C3 48 89 5C 24 60",
+      0x1704AA0u, 0x1705510u },
+    { "AiWebUpdate",
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 98 48 81 EC 68 01 00 00 48 C7 45 D8 FE FF FF FF 0F 29 B4 24 "
+      "50 01 00 00 48 8B 05",
+      0x170B890u, 0x170C300u },
     { NULL, NULL, 0, 0 }
 };
 

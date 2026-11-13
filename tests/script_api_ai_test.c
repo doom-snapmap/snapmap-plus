@@ -338,6 +338,13 @@ static int f_fk_reference_pose(void *ai)
     ev_cat("fk_reference_pose\n");
     return 1;
 }
+static int f_interrupt_blend(void *ai, int mode)
+{
+    char line[48];
+    snprintf(line, sizeof line, "%d:interrupt_blend(%d)\n", idx_of(ai), mode);
+    ev_cat(line);
+    return 1;
+}
 static int f_held(void *ai, int hand, char *decl, size_t cap)
 {
     fent *e = (fent *)ai;
@@ -428,7 +435,8 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose
+    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
+    f_interrupt_blend
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2030,11 +2038,55 @@ static void test_fk_reference_pose(void)
     sh_script_map_end();
 }
 
+/* eternal_interrupts: a change and a forced via carry DOOM Eternal's MULTI; a forced node keeps the game's YES and
+ * the via's destination (the second leg of DOOM Eternal's one command) the game's NO; without the call nothing
+ * is written. */
+static int followed_by_mode(const char *events, const char *line)
+{
+    const char *at = strstr(events, line);
+    if (!at) return -1;
+    return !strncmp(at + strlen(line), "1:interrupt_blend(2)\n", 21);
+}
+
+static void test_eternal_interrupts(void)
+{
+    const char *c;
+    printf("-- interrupts: the mode of DOOM Eternal's command by the kind of order\n");
+    CHECK(sh_ai_order_interrupt(SH_AI_ORDER_CHANGE) == SH_AI_INTR_BLEND_MULTI);
+    CHECK(sh_ai_order_interrupt(SH_AI_ORDER_FORCE_VIA) == SH_AI_INTR_BLEND_MULTI);
+    CHECK(sh_ai_order_interrupt(SH_AI_ORDER_FORCE) == -1);
+    CHECK(sh_ai_order_interrupt(SH_AI_ORDER_VIA_DEST) == -1);
+    printf("-- eternal_interrupts: the orders after it carry the mode, the ones before do not\n");
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then self:anim_state('rocket_combat/walk') end\n"
+        "  if step == 2 then print('intr ' .. tostring(self:eternal_interrupts())); self:anim_state('melee') end\n"
+        "  if step == 3 then self:anim_force('pain/left', 0.1) end\n"
+        "  if step == 4 then self:anim_force_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
+        "end)\n"));
+    strcpy(g_ent[1].node, "rocket_combat/run");
+    tick(); tick(); tick(); tick();
+    strcpy(g_ent[1].node, "evade/left"); tick();
+    strcpy(g_ent[1].node, "evade/left_out"); tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "intr true\n") != NULL);
+    CHECK(followed_by_mode(g_events, "1:ssaction_ChangeAnimState(0,rocket_combat/walk,0)\n") == 0);
+    CHECK(followed_by_mode(g_events, "1:ssaction_ChangeAnimState(0,rocket_combat/melee,0)\n") == 1);
+    CHECK(followed_by_mode(g_events, "1:ssaction_ForceAnimState(0,pain/left,100,0)\n") == 0);
+    CHECK(followed_by_mode(g_events, "1:ssaction_ForceAnimState(0,evade/left,250,0)\n") == 1);
+    c = strstr(g_events, "1:ssaction_ChangeAnimState(0,rocket_combat/idle,0)\n");   /* the via's destination */
+    CHECK(c != NULL && followed_by_mode(c, "1:ssaction_ChangeAnimState(0,rocket_combat/idle,0)\n") == 0);
+    sh_script_map_end();
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 49);
+    CHECK(sh_script_ai_register() == 50);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2070,6 +2122,7 @@ int main(int argc, char **argv)
     test_pain_stub();
     test_posed_legs();
     test_fk_reference_pose();
+    test_eternal_interrupts();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");

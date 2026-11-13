@@ -375,7 +375,7 @@ static int l_anim_state(lua_State *L)
         /* idAI2 ignores the stock animWeb events: the designer commands act
          * on a demon parked in its script state, so the AI calls park it and
          * run them (ssaction_ChangeAnimState, ..Via). */
-        (void)sh_script_ai_anim(ent, h, dest, via ? vpath : NULL, 0, 0);
+        (void)sh_script_ai_anim(ent, h, dest, via ? vpath : NULL, SH_AI_ORDER_CHANGE, 0);
     } else {
         sh_script_earg a[4];
         const char *sub, *state, *vsub, *vstate;
@@ -414,7 +414,7 @@ static int l_anim_force(lua_State *L)
     if (!dest) return luaL_error(L, "not enough memory");
     sh_script_api_anim_request(h, dest, NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
-        (void)sh_script_ai_anim(ent, h, dest, NULL, 1, ms);   /* ssaction_ForceAnimState, parked */
+        (void)sh_script_ai_anim(ent, h, dest, NULL, SH_AI_ORDER_FORCE, ms);   /* ssaction_ForceAnimState, parked */
     } else {
         const char *sub, *state;
         split_path(dest, &sub, &state);

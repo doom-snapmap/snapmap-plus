@@ -987,7 +987,9 @@ named meshes of its model when the game shows one of its gore wounds (`wound_hid
 game's leg rig follow legs that a demon's clips pose themselves so they keep every animation layer
 and still stand on slopes and steps (`posed_legs`), takes a demon's fk reference pose from the
 animation its fkGraph names as DOOM Eternal does, so its head and weapon do not jump when a blend's
-new clip becomes the heavier one (`fk_reference_pose`),
+new clip becomes the heavier one (`fk_reference_pose`), gives a demon's animation orders DOOM
+Eternal's interrupt mode so a change or a forced via blends over a blend still running rather than
+waiting for it or cutting it (`eternal_interrupts`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
 demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
