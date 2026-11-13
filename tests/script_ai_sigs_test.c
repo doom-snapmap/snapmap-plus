@@ -419,6 +419,29 @@ static void check_image(const char *path)
         printf("  rig: aligner 0x%X, model ai +0x%X, animation object model +0x%X\n", align, model, anim);
         CHECK(model == 0x3DB0 && anim == 0xE98);
     }
+    if (rva[SH_AI_SIG_FK_REFERENCE] && rva[SH_AI_SIG_WEB_LEAF]) {
+        uint32_t f = rva[SH_AI_SIG_FK_REFERENCE], w = rva[SH_AI_SIG_WEB_LEAF];
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + f, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_FKREF_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + f, k_ai_fkref_prologue, SH_AI_FKREF_STOLEN));
+        flags = 0;
+        b = sh_x64_stolen_boundary(base + w, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_LEAF_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + w, k_ai_leaf_prologue, SH_AI_LEAF_STOLEN));
+        /* the reference pose asks the web at ai +0x222B8 for its current leaf first (add rcx, 0x222B8; call) */
+        CHECK(!memcmp(base + f + SH_AI_FKREF_LEAF_CALL - 7, "\x48\x81\xC1\xB8\x22\x02\x00", 7));
+        CHECK(base[f + SH_AI_FKREF_LEAF_CALL] == 0xE8);
+        CHECK(rel_target(base, f + SH_AI_FKREF_LEAF_CALL, 5, 1) == w);
+        /* without one, the effector's poseReferenceAnim: index * 0x58 into the subgraph's effectors (+0x40), the
+         * idStr's data at +0x30 (so its length at +0x28) */
+        CHECK(window_has(base, f + SH_AI_FKREF_LEAF_CALL, 0x30, "\x49\x6B\xDC\x58", 4));
+        CHECK(window_has(base, f + SH_AI_FKREF_LEAF_CALL, 0x30, "\x48\x8B\x48\x40", 4));
+        CHECK(window_has(base, f + SH_AI_FKREF_LEAF_CALL, 0x40, "\x4C\x8B\x4C\x19\x30", 5));
+        CHECK(SH_AI_FK_SUBGRAPH_EFFECTORS == 0x40 && SH_AI_FK_EFFECTOR_SIZE == 0x58 && SH_AI_FK_EFFECTOR_REF_LEN == 0x30 - 8);
+    }
     if (rva[SH_AI_SIG_MOVE_STAGE]) {
         /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
         CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));

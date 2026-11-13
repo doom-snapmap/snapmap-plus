@@ -332,6 +332,12 @@ static int f_posed_legs(void *ai)
     ev_cat("posed_legs\n");
     return 1;
 }
+static int f_fk_reference_pose(void *ai)
+{
+    (void)ai;
+    ev_cat("fk_reference_pose\n");
+    return 1;
+}
 static int f_held(void *ai, int hand, char *decl, size_t cap)
 {
     fent *e = (fent *)ai;
@@ -422,7 +428,7 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs
+    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1982,11 +1988,53 @@ static void test_posed_legs(void)
     g_no_rig = 0;
 }
 
+static void test_fk_reference_pose(void)
+{
+    /* a subgraph whose effectors are fkEffector_t rows: the first names a poseReferenceAnim (its idStr's length at
+     * +0x28), the second names none */
+    uint8_t sub[0x78], effs[2 * SH_AI_FK_EFFECTOR_SIZE];
+    const void *address[2];
+    uint8_t *data = effs;
+    int count = 2, len = 14;
+    const char *log;
+    printf("-- fk reference pose: an effector names a poseReferenceAnim when its idStr is not empty\n");
+    memset(sub, 0, sizeof sub);
+    memset(effs, 0, sizeof effs);
+    memcpy(sub + SH_AI_FK_SUBGRAPH_EFFECTORS, &data, sizeof data);
+    memcpy(sub + SH_AI_FK_SUBGRAPH_EFFECTORS + 8, &count, sizeof count);
+    memcpy(effs + SH_AI_FK_EFFECTOR_REF_LEN, &len, sizeof len);
+    address[0] = sub; address[1] = NULL;
+    CHECK(sh_ai_fk_reference_named(address, 0) == 1);
+    CHECK(sh_ai_fk_reference_named(address, 1) == 0);
+    printf("-- fk reference pose: an index out of the list, no subgraph or no address names nothing\n");
+    CHECK(sh_ai_fk_reference_named(address, 2) == 0);
+    CHECK(sh_ai_fk_reference_named(address, -1) == 0);
+    address[0] = NULL;
+    CHECK(sh_ai_fk_reference_named(address, 0) == 0);
+    CHECK(sh_ai_fk_reference_named(NULL, 0) == 0);
+
+    printf("-- fk_reference_pose asks the engine and answers true\n");
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('fkref ' .. tostring(self:fk_reference_pose()))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "fkref true\n") != NULL);
+    CHECK(strstr(g_events, "fk_reference_pose\n") != NULL);
+    sh_script_map_end();
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 48);
+    CHECK(sh_script_ai_register() == 49);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2021,6 +2069,7 @@ int main(int argc, char **argv)
     test_pain_records();
     test_pain_stub();
     test_posed_legs();
+    test_fk_reference_pose();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");

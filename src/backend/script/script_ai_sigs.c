@@ -129,7 +129,16 @@
  *                      place, target rotation, swivel}, thigh rotation out, shin rotation out). Reads only.
  *   AiRigSite          VK 0x140426377  GL 0x140425437  inside the demon's setup: its model (entity +0x3DB0) and
  *                      the model's animation object (+0xE98), given to the aligner's maker; the object's second
- *                      word is the rig runtime. */
+ *                      word is the rig runtime.
+ *   AiFkReference      VK 0x140418BF0  GL 0x140417D20  an fk effector's reference pose (ai, fkChainAddress_t*,
+ *                      effector index, out): the animation is the anim web's current leaf (AiWebLeaf on ai
+ *                      +0x222B8, called at +0xA7) when there is one, else the effector's poseReferenceAnim
+ *                      (subgraph +0x40 effectors, 0x58 each, the idStr at +0x20); the effector's and its chain's
+ *                      joints are then read from that animation. Called by the focus update's reference frames
+ *                      (VK 0x1404C9380) and the fk solve (VK 0x1404140A0). Detoured; 15-byte window.
+ *   AiWebLeaf          VK 0x141705850  GL 0x1417062C0  the anim web's current leaf (web): the leaf of the web's
+ *                      current node, or none. Detoured; 18-byte window (its node accessor call is
+ *                      register-indirect). */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -296,6 +305,14 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "49 8B 8C 24 B0 3D 00 00 F3 0F 11 44 24 20 4C 8B CB 48 8B D7 48 8B 89 98 0E 00 00 E8 ?? ?? ?? ?? "
       "49 8B 8C 24 B0 3D 00 00",
       0x426377u, 0x425437u },
+    { "AiFkReference",
+      "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 58 FA FF FF 48 81 EC 68 06 00 00 48 C7 45 80 FE FF FF "
+      "FF 0F 29 70 A8 0F 29 78 98 44 0F 29 40 88",
+      0x418BF0u, 0x417D20u },
+    { "AiWebLeaf",
+      "40 53 48 83 EC 20 48 8B 01 48 8B D9 FF 90 80 00 00 00 48 8B D0 48 83 78 10 00 75 39 48 83 78 18 00 75 32 "
+      "48 0F BF 93 2C 03 00 00 48 8B 83 48 03 00 00",
+      0x1705850u, 0x17062C0u },
     { NULL, NULL, 0, 0 }
 };
 

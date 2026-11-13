@@ -448,6 +448,11 @@ typedef struct sh_script_ai_engine {
      * the ground. 1 set, 0 the demon's model has no two-bone leg rig, -1
      * unavailable. */
     int      (*posed_legs)(void *ai);
+    /* From now on the demon's fk effectors take their reference pose from
+     * the poseReferenceAnim their fkGraph names, as DOOM Eternal's do, not
+     * from the animation of the anim web's current leaf (sh_ai_fk_reference
+     * below). 1 set, -1 unavailable. */
+    int      (*fk_reference_pose)(void *ai);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -608,6 +613,8 @@ enum sh_ai_sig {
     SH_AI_SIG_RIG_EVAL,            /* the two-bone leg component's evaluate (reads a leg's joints, calls the solve) */
     SH_AI_SIG_RIG_SOLVE,           /* the two-bone solve (hip, parent rotation, leg, target, thigh out, shin out) */
     SH_AI_SIG_RIG_SITE,            /* the demon's setup: its model's animation object, whose rig runtime it is */
+    SH_AI_SIG_FK_REFERENCE,        /* an fk effector's reference pose (ai, chain address, effector, out) (detoured) */
+    SH_AI_SIG_WEB_LEAF,            /* the anim web's current leaf (web) (detoured) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -670,6 +677,40 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
  * bytes with its joints from +0x80 (24 bits each). The context's pose (+0x50)
  * holds the parents, the joint count, and the local translations and
  * rotations with their strides. The evaluate calls the solve at +0x1ED. */
+/* The fk reference pose. Both games aim a demon's fk chain from a reference
+ * pose of the effector and its chain: where the effector sits and how its
+ * chain is turned when the clip has done its part. The game samples that pose
+ * from the animation of the anim web's current leaf, the heavier of a
+ * blend's two, and only when there is none from the poseReferenceAnim the
+ * effector's fkGraph names (FkReference below). DOOM Eternal does the
+ * reverse: the named poseReferenceAnim first, the current leaf only for an
+ * effector that names none (its executable, the effector's reference anim
+ * load, "Bad reference anim (%s) in FK Graph node"). So in the game the
+ * effector's origin jumps when a blend's new clip becomes the heavier one,
+ * and the aim and look focus goals, built from that origin, jump with it: a
+ * ported demon's head and cannon pop in that tick where DOOM Eternal's turn.
+ * fk_reference_pose gives a demon DOOM Eternal's order: while the reference
+ * pose of one of its effectors that names a poseReferenceAnim is made, the
+ * web's current leaf answers none, so the game takes the named animation. */
+#define SH_AI_FKREF_STOLEN 15
+static const unsigned char k_ai_fkref_prologue[SH_AI_FKREF_STOLEN] = {
+    0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57
+};
+/* The web's current leaf: push rbx, sub rsp, mov rax,[rcx], mov rbx,rcx and
+ * the call of the web's node accessor through rax (register-indirect). */
+#define SH_AI_LEAF_STOLEN 18
+static const unsigned char k_ai_leaf_prologue[SH_AI_LEAF_STOLEN] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xD9, 0xFF, 0x90, 0x80, 0x00, 0x00, 0x00
+};
+#define SH_AI_FKREF_LEAF_CALL      0xA7u   /* the reference pose's call of the web's current leaf (E8 rel32) */
+#define SH_AI_FK_SUBGRAPH_EFFECTORS 0x40u  /* idDeclFKSubGraph: idList<fkEffector_t> effectors (data, count +8) */
+#define SH_AI_FK_EFFECTOR_SIZE     0x58u   /* fkEffector_t */
+#define SH_AI_FK_EFFECTOR_REF_LEN  0x28u   /*              poseReferenceAnim (idStr at +0x20): its length */
+/* 1 when the effector `effector` of the chain at `chain_address` (an
+ * fkChainAddress_t: the subgraph first) names a poseReferenceAnim, 0 when it
+ * names none or cannot be read. */
+int sh_ai_fk_reference_named(const void *chain_address, int effector);
+
 #define SH_AI_RIG_STOLEN 16
 static const unsigned char k_ai_rig_prologue[SH_AI_RIG_STOLEN] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xD9

@@ -309,6 +309,19 @@ static int leg_model(const sh_ai_leg_pose *p, int joint, float t[3], float q[4])
     }
 }
 
+int sh_ai_fk_reference_named(const void *chain_address, int effector)
+{
+    const uint8_t *sub, *effs;
+    int count;
+    if (!chain_address || effector < 0) return 0;
+    sub = *(const uint8_t * const *)chain_address;
+    if (!sub) return 0;
+    effs = *(const uint8_t * const *)(sub + SH_AI_FK_SUBGRAPH_EFFECTORS);
+    count = *(const int *)(sub + SH_AI_FK_SUBGRAPH_EFFECTORS + 8);
+    if (!effs || effector >= count) return 0;
+    return *(const int *)(effs + (size_t)effector * SH_AI_FK_EFFECTOR_SIZE + SH_AI_FK_EFFECTOR_REF_LEN) > 0;
+}
+
 int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_leg_solve_fn solve, void *leg)
 {
     float hip_t[3], hip_q[4], par_t[3], par_q[4], thigh_t[3], thigh_q[4], foot_t[3], foot_q[4];
@@ -2194,6 +2207,27 @@ static int l_posed_legs(lua_State *L)
     return 2;
 }
 
+/* ai:fk_reference_pose(): the demon's fk effectors take their reference pose
+ * (where the effector sits before the aim and look solve turn its chain) from
+ * the poseReferenceAnim its fkGraph names, as DOOM Eternal's do; the game
+ * takes it from the clip of the anim web's current leaf, so the head and the
+ * cannon of a demon whose clips differ there jump in the tick a blend's new
+ * clip becomes the heavier one. Effectors that name no poseReferenceAnim keep
+ * the current leaf in both games. Call it once after the demon spawned.
+ * Answers true, or false and why. */
+static int l_fk_reference_pose(lua_State *L)
+{
+    void *ai;
+    int st;
+    NEED_OP(L, fk_reference_pose, "fk_reference_pose");
+    ai = self_ai(L, "fk_reference_pose", NULL);
+    st = ai ? g_engine->fk_reference_pose(ai) : -1;
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, "the game's fk reference pose could not be reached");
+    return 2;
+}
+
 /* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
  * go when the game shows the gore wound. A wound of the game shows meshes
  * (its meshKits) and cuts the model with spheres; it has no list of meshes
@@ -2899,6 +2933,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "wound_hides", l_wound_hides },
     { "held", l_held },
     { "posed_legs", l_posed_legs },
+    { "fk_reference_pose", l_fk_reference_pose },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -4397,6 +4432,74 @@ static int e_posed_legs(void *ai)
     return 1;
 }
 
+/* ---- fk reference pose (script_api_ai.h, "The fk reference pose") */
+
+typedef void (*ai_fkref_fn)(void *ai, const void *address, intptr_t effector, void *out);
+typedef void *(*ai_web_leaf_fn)(void *web);
+static ai_fkref_fn g_fkref_target, g_fkref_orig;
+static ai_web_leaf_fn g_leaf_target, g_leaf_orig;
+static int g_fkref_failed, g_leaf_failed;
+typedef struct {
+    void *volatile ai;
+    volatile LONG spawn_id;
+} ai_fkref_rec;
+static ai_fkref_rec g_fkref[AI_PARKED_MAX];
+static volatile LONG g_fkref_used;
+/* Set by the reference pose of a named demon's effector that names an
+ * animation, for its own first call of the web's current leaf (made before
+ * any other call of that function); cleared by that call or on return. */
+static __declspec(thread) int t_fkref_no_leaf;
+
+static void *web_leaf_detour(void *web)
+{
+    if (t_fkref_no_leaf) {
+        t_fkref_no_leaf = 0;
+        return NULL;
+    }
+    return g_leaf_orig(web);
+}
+
+static void fkref_detour(void *ai, const void *address, intptr_t effector, void *out)
+{
+    int i, used = (int)g_fkref_used, named = 0;
+    for (i = 0; ai && i < used; i++) {
+        if (g_fkref[i].ai != ai) continue;
+        if (spawn_id_of(ai) == (uint32_t)g_fkref[i].spawn_id) {
+            __try { named = sh_ai_fk_reference_named(address, (int)effector); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { named = 0; }
+        }
+        break;
+    }
+    t_fkref_no_leaf = named;
+    g_fkref_orig(ai, address, effector, out);
+    t_fkref_no_leaf = 0;
+}
+
+static int e_fk_reference_pose(void *ai)
+{
+    uint32_t id = spawn_id_of(ai);
+    int i, slot = -1, used = (int)g_fkref_used;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE) return -1;
+    if (!commit_hook((void *)g_leaf_target, (void *)web_leaf_detour, k_ai_leaf_prologue, SH_AI_LEAF_STOLEN,
+                     (void **)&g_leaf_orig, &g_leaf_failed, "fk_reference_pose (web leaf)"))
+        return -1;
+    if (!commit_hook((void *)g_fkref_target, (void *)fkref_detour, k_ai_fkref_prologue, SH_AI_FKREF_STOLEN,
+                     (void **)&g_fkref_orig, &g_fkref_failed, "fk_reference_pose"))
+        return -1;
+    for (i = 0; i < used; i++) {
+        void *p = g_fkref[i].ai;
+        if (p == ai && (uint32_t)g_fkref[i].spawn_id == id) return 1;
+        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_fkref[i].spawn_id)) slot = i;
+    }
+    if (slot < 0 && used < AI_PARKED_MAX) slot = used;
+    if (slot < 0) return -1;
+    InterlockedExchangePointer((PVOID volatile *)&g_fkref[slot].ai, NULL);
+    InterlockedExchange(&g_fkref[slot].spawn_id, (LONG)id);
+    InterlockedExchangePointer((PVOID volatile *)&g_fkref[slot].ai, ai);
+    if (slot >= used) InterlockedExchange(&g_fkref_used, slot + 1);
+    return 1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -4430,7 +4533,7 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs
+    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -4583,6 +4686,15 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_rig_model_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_MODEL);
         g_rig_anim_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_ANIM);
     } else g_live.posed_legs = NULL;
+    /* The fk reference pose and the web's current leaf it calls first (the
+     * call at +0xA7 must reach the leaf the signature found). */
+    site = (const uint8_t *)r[SH_AI_SIG_FK_REFERENCE].addr;
+    if (site && r[SH_AI_SIG_WEB_LEAF].addr && site[SH_AI_FKREF_LEAF_CALL] == 0xE8 &&
+        site + SH_AI_FKREF_LEAF_CALL + 5 + rel32_at(site + SH_AI_FKREF_LEAF_CALL + 1) ==
+            (const uint8_t *)r[SH_AI_SIG_WEB_LEAF].addr) {
+        g_fkref_target = (ai_fkref_fn)site;
+        g_leaf_target = (ai_web_leaf_fn)r[SH_AI_SIG_WEB_LEAF].addr;
+    } else g_live.fk_reference_pose = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

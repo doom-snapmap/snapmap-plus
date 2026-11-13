@@ -2199,6 +2199,21 @@ is touched, and a removed demon answers nil.
   rig runtime (the second word of the model's animation object, model
   +0xE98) on the pose jobs' threads; a frame step drops a record whose demon
   is gone.
+  `fk_reference_pose()` gives a demon DOOM Eternal's choice of the fk
+  reference pose. Both games aim an fk chain from a reference pose of the
+  effector and its chain (where the effector sits before the aim or look
+  solve turns the chain); the aim and look focus goals are built from that
+  effector origin. The game samples it from the animation of the anim web's
+  current leaf, the heavier clip of a blend, and from the poseReferenceAnim
+  the fkGraph names only when there is no leaf (VK 0x140418BF0); DOOM
+  Eternal takes the named poseReferenceAnim first and the leaf only for an
+  effector that names none. With the game's order a ported demon's head and
+  cannon jump in the tick a blend's new clip becomes the heavier one. The
+  call detours the reference pose (15 whole bytes) and the web's current
+  leaf (VK 0x141705850, 18 whole bytes) at the first call: for a demon that
+  asked and an effector that names a poseReferenceAnim, the reference pose's
+  own first call of the current leaf answers none, so the game loads and
+  samples the named animation. Records are per demon and spawn id.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:
