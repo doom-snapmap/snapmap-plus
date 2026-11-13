@@ -2387,8 +2387,10 @@ damage comes from the world entity, as a trigger's does.
   decl's own radius, which queues the deferred radius damage the game applies
   that frame); `explode(pos, damage, [effect], [attacker])` (radius damage and
   an effect entity); `fx(e, condition)` / `fx_stop(e, condition)`
-  (`ae_startFX_Networked` / `ae_stopFX_Networked`: a condition of the entity's
-  own fx decl, started on every machine); `fx(effect, pos, [dir])`,
+  (a condition of the entity's own fx decl: on an AI or a player
+  `ae_startFX_Networked` / `ae_stopFX_Networked`, started on every machine;
+  on any other entity, such as an effect entity, which answers neither
+  event, the engine's own entity StartFX / StopFX); `fx(effect, pos, [dir])`,
   `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
   through `spawn` and its caps, removed by `fx_stop`); `sound(e, sound,
   [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,

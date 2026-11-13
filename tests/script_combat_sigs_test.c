@@ -174,6 +174,18 @@ static void check_image(const char *path)
             CHECK(call_in(base, launch_at, 0x400, rva[SH_COMBAT_SIG_PROJECTILE_LAUNCH]) == launch_at + 0x32C);
         if (rva[SH_COMBAT_SIG_RADIUS_DAMAGE])
             CHECK(call_in(base, radius_handler, 0x200, rva[SH_COMBAT_SIG_RADIUS_DAMAGE]) != 0);
+        /* idEntity StartFX / StopFX: each loads the entity's FX manager (lea rcx,[rbx+0x30]) and calls its start
+         * (stop) by condition; StopFX passes "not immediate" (mov byte [rsp+0x20],0) */
+        if (rva[SH_COMBAT_SIG_ENT_START_FX]) {
+            uint32_t mgr_start = vk ? 0x16EED40u : 0x16EF6C0u;
+            CHECK(!memcmp(base + rva[SH_COMBAT_SIG_ENT_START_FX] + 0x3F, "\x48\x8D\x4B\x30", 4));
+            CHECK(call_in(base, rva[SH_COMBAT_SIG_ENT_START_FX], 0x68, mgr_start) != 0);
+        }
+        if (rva[SH_COMBAT_SIG_ENT_STOP_FX]) {
+            uint32_t mgr_stop = vk ? 0x16EFE60u : 0x16F07E0u;
+            CHECK(!memcmp(base + rva[SH_COMBAT_SIG_ENT_STOP_FX] + 0x32, "\x48\x8D\x4B\x30\xC6\x44\x24\x20\x00", 9));
+            CHECK(call_in(base, rva[SH_COMBAT_SIG_ENT_STOP_FX], 0x58, mgr_stop) != 0);
+        }
         /* SetPainReaction: mov [rdi+0x5060], esi */
         if (rva[SH_COMBAT_SIG_SET_PAIN])
             CHECK(!memcmp(base + rva[SH_COMBAT_SIG_SET_PAIN] + 0x126, "\x89\xB7\x60\x50\x00\x00", 6));

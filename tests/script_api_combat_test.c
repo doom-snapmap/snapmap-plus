@@ -294,7 +294,23 @@ static int c_fx(const char *name)
 }
 static void *c_world(void) { return g_world_ent; }
 
-static const sh_script_combat_engine k_combat = { c_decl, c_radius, c_explode, c_pain, c_name, c_fx, c_world };
+static int c_start_fx(void *ent, int cond)
+{
+    char line[256];
+    _snprintf_s(line, sizeof line, _TRUNCATE, "entity StartFX@%s(%d);", ((fent *)ent)->def, cond);
+    ev_cat(line);
+    return 1;
+}
+static int c_stop_fx(void *ent, int cond)
+{
+    char line[256];
+    _snprintf_s(line, sizeof line, _TRUNCATE, "entity StopFX@%s(%d);", ((fent *)ent)->def, cond);
+    ev_cat(line);
+    return 1;
+}
+
+static const sh_script_combat_engine k_combat = { c_decl, c_radius, c_explode, c_pain, c_name, c_fx, c_world,
+                                                 c_start_fx, c_stop_fx };
 
 static void *h_resolve(uint32_t id) { return by_id(id); }
 
@@ -454,6 +470,7 @@ static void test_effects_sound(void)
         "  local e = fx('fx/beam_impact', {x = 10, y = 0, z = 0}, {x = 0, y = 1, z = 0})\n"
         "  print('placed', e:def(), e:pos().x, math.floor(e:yaw() + 0.5))\n"
         "  print('moved', fx_move(e, {x = 20, y = 0, z = 0}, {x = -1, y = 0, z = 0}), e:pos().x, math.floor(e:yaw() + 0.5))\n"
+        "  print('effect', fx(e, 'FX_CINEMATIC_8'), fx_stop(e, 'FX_NONE'))\n"
         "  print('stopped', fx_stop(e))\n"
         "  print('sound', sound(self, 'brute/roar'), sound(self, 'brute/roar', 'weapon'))\n"
         "end)\n");
@@ -463,6 +480,12 @@ static void test_effects_sound(void)
     CHECK(has(g_events, "ae_stopFX_Networked@mods/" SALT "/ai/brute(NULL,222);"));
     CHECK(has(g_log, "placed\tfx/beam_impact\t10.0\t90"));
     CHECK(has(g_log, "moved\ttrue\t20.0\t180"));
+    /* an effect entity answers no animation event: its conditions go to the engine's entity StartFX / StopFX */
+    CHECK(has(g_log, "effect\ttrue\ttrue"));
+    CHECK(has(g_events, "entity StartFX@mods/" SALT "/fx/beam_impact(222);"));
+    CHECK(has(g_events, "entity StopFX@mods/" SALT "/fx/beam_impact(0);"));
+    CHECK(!strstr(g_events, "ae_startFX_Networked@mods/" SALT "/fx/beam_impact"));
+    CHECK(!strstr(g_events, "entity StartFX@mods/" SALT "/ai/brute"));
     CHECK(has(g_log, "stopped\ttrue"));
     CHECK(has(g_events, "post remove@mods/" SALT "/fx/beam_impact();"));
     CHECK(has(g_log, "sound\ttrue\ttrue"));

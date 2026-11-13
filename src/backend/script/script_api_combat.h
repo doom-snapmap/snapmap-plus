@@ -42,8 +42,10 @@
  *   steer            setLinearVelocity on the projectile, at its current speed unless one is given
  *   p:explode        the projectile's own Explode (idProjectile vtable +0xAA0: VK 0x140F38240,
  *                    GL 0x140F37700) with no collision, as the projectile's fuse does
- *   fx(e, cond)      ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i') on the entity: the
- *                    entity's fx decl, started on every machine
+ *   fx(e, cond)      on an AI or a player ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'):
+ *                    the entity's fx decl, started on every machine. Any other entity (an effect entity)
+ *                    answers neither event: idEntity StartFX / StopFX (VK 0x14082C270 / 0x14082D1D0, GL
+ *                    0x14082B430 / 0x14082C390), which start and stop the condition on its FX manager
  *   fx(effect, pos)  the mod's entityDef spawned through spawn() (its caps), placed and turned to `dir`;
  *                    fx_stop removes it
  *   sound            startSoundShader (200, 'di'): a sound decl on a channel of the entity
@@ -93,6 +95,10 @@ typedef struct sh_script_combat_engine {
     int   (*fx_condition)(const char *name);
     /* the world entity (environmental damage comes from it), NULL when unreadable */
     void *(*world)(void);
+    /* start / stop the actions of the entity's own fx decl listed under a condition, by the engine's entity call
+     * (an effect entity answers no animation event) */
+    int   (*start_fx)(void *ent, int condition);
+    int   (*stop_fx)(void *ent, int condition);
 } sh_script_combat_engine;
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
@@ -160,6 +166,8 @@ enum sh_combat_sig {
     SH_COMBAT_SIG_SET_PAIN,          /* idAI2 SetPainReaction(ai, reaction, ms): detoured */
     SH_COMBAT_SIG_PROJECTILE_LAUNCH, /* idProjectile::Launch(projectile, owner, origin, axis, ...): detoured */
     SH_COMBAT_SIG_RADIUS_DAMAGE,     /* idGameLocal::RadiusDamage wrapper: called */
+    SH_COMBAT_SIG_ENT_START_FX,      /* idEntity StartFX(entity, condition, extra): called */
+    SH_COMBAT_SIG_ENT_STOP_FX,       /* idEntity StopFX(entity, condition, extra): called */
     SH_COMBAT_SIG_COUNT
 };
 extern const sig_entry SH_COMBAT_SIGNATURES[];

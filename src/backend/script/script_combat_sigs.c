@@ -16,7 +16,13 @@
  *                       axis*, ...): every projectile launch (AI weapons, ae_launchProjectile*, players)
  *                       stores the owner at +0x4788. 15-byte window.
  *   CombatRadiusDamage  VK 0x1403A21E0  GL 0x1403A1AF0  RadiusDamage(game, origin*, inflictor, attacker,
- *                       parms*, scale, bool, ignore): the ae_radiusDamage handler's call. */
+ *                       parms*, scale, bool, ignore): the ae_radiusDamage handler's call.
+ *   CombatEntStartFx    VK 0x14082C270  GL 0x14082B430  idEntity StartFX(entity, condition, extraCondition):
+ *                       unless the entity's +0x3EA bit 0 is set, the game clock and the FX manager's start by
+ *                       condition (entity +0x30, time, condition, extra, tag -1). In every entity class's
+ *                       vtable; what the game's own code calls on an effect entity.
+ *   CombatEntStopFx     VK 0x14082D1D0  GL 0x14082C390  idEntity StopFX(entity, condition, extraCondition): the
+ *                       FX manager's stop by condition (entity +0x30, time, condition, extra, not immediate). */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -35,6 +41,16 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
     { "CombatRadiusDamage",
       "48 83 EC 68 F3 0F 10 05 ?? ?? ?? ?? 48 8B 84 24 A8 00 00 00",
       0x3A21E0u, 0x3A1AF0u },
+    { "CombatEntStartFx",
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 30 0F B6 81 EA 03 00 00 41 8B F8 F6 D0 8B F2 48 8B D9 A8 01 74 34 "
+      "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 40",
+      0x82C270u, 0x82B430u },
+    { "CombatEntStopFx",
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 30 48 8B D9 41 8B F8 48 8B 0D ?? ?? ?? ?? 8B F2 41 B8 01 00 00 00 "
+      "48 8D 54 24 40 48 8B 01 FF 90 10 08 00 00 48 8D 4B 30 C6 44 24 20 00 44 8B CF 44 8B C6 8B 10 E8 ?? ?? ?? ?? "
+      "48 8B 5C 24 48 48 8B 74 24 50 48 83 C4 30 5F C3 CC CC CC CC CC CC CC CC 48 8B C4 55 56 57 48 81 EC 80 00 00 "
+      "00 48 C7 40 98 FE FF FF FF",
+      0x82D1D0u, 0x82C390u },
     { NULL, NULL, 0, 0 }
 };
 

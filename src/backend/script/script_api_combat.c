@@ -582,6 +582,14 @@ static int fx_condition(lua_State *L, int arg, const char *call)
     return v;
 }
 
+/* An actor (an AI, a player) starts and stops its effects by the animation events its clips use. Any other entity
+ * (an effect entity made by fx(effect, pos) or explode) answers neither event: the engine's own entity call. */
+static int fx_by_entity_call(void *ent)
+{
+    int kind = sh_script_api_kind(ent);
+    return kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER;
+}
+
 /* fx(e, condition) or fx(effect, pos, [dir]) */
 static int l_fx(lua_State *L)
 {
@@ -591,6 +599,7 @@ static int l_fx(lua_State *L)
         void *ent = sh_script_api_owned(L, 1, "fx", "start effects on", NULL);
         cond = fx_condition(L, 2, "fx");
         if (!ent || cond < 0) return bool1(L, 0);
+        if (fx_by_entity_call(ent)) return bool1(L, CE(start_fx) && g_ce.start_fx(ent, cond));
         a[0] = sh_script_earg_no_anim();
         a[1] = sh_script_earg_int(cond);
         return bool1(L, sh_script_api_event(ent, "ae_startFX_Networked", a, 2, NULL));
@@ -638,6 +647,7 @@ static int l_fx_stop(lua_State *L)
         sh_script_earg a[2];
         int cond = fx_condition(L, 2, "fx_stop");
         if (!ent || cond < 0) return bool1(L, 0);
+        if (fx_by_entity_call(ent)) return bool1(L, CE(stop_fx) && g_ce.stop_fx(ent, cond));
         a[0] = sh_script_earg_no_anim();
         a[1] = sh_script_earg_int(cond);
         return bool1(L, sh_script_api_event(ent, "ae_stopFX_Networked", a, 2, NULL));
@@ -942,10 +952,12 @@ typedef void  (*radius_fn)(void *game, const float *origin, void *inflictor, voi
 typedef void  (*explode_fn)(void *projectile, void *ignore, const void *collision);
 typedef void *(*type_fn)(void *registry, const char *type);
 typedef void *(*find_decl_fn)(void *manager, const char *name, unsigned char make_default);
+typedef void  (*ent_fx_fn)(void *entity, int condition, int extra_condition);
 
 static const uint8_t *g_base;
 static size_t        g_text_lo, g_text_hi;   /* the image's executable range, RVAs */
 static radius_fn     g_radius;
+static ent_fx_fn     g_ent_start_fx, g_ent_stop_fx;   /* idEntity StartFX / StopFX */
 static const uint8_t *g_decl_anchor;
 static void         *g_decl_register;
 static type_fn       g_decl_type;
@@ -1102,6 +1114,22 @@ static void *c_world(void)
     return e && e->resolve ? e->resolve(SH_SCRIPT_SPAWN_ID_WORLD) : NULL;
 }
 
+static int c_start_fx(void *ent, int condition)
+{
+    int ok = 0;
+    if (!ent || !g_ent_start_fx) return 0;
+    __try { g_ent_start_fx(ent, condition, 0); ok = 1; } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
+static int c_stop_fx(void *ent, int condition)
+{
+    int ok = 0;
+    if (!ent || !g_ent_stop_fx) return 0;
+    __try { g_ent_stop_fx(ent, condition, 0); ok = 1; } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
 static void *clean(const sig_result *r, size_t n, const char *name)
 {
     size_t i;
@@ -1121,7 +1149,8 @@ static void combat_off(const char *why)
 int sh_script_combat_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const sh_script_combat_engine engine = {
-        c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world
+        c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
+        c_start_fx, c_stop_fx
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;
@@ -1145,6 +1174,13 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     else
         combat_off("the game's radius damage was not found in this executable, so radius_damage and explode do "
                    "nothing");
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_START_FX], &r) == SIG_OK)
+        g_ent_start_fx = (ent_fx_fn)r.addr;
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_STOP_FX], &r) == SIG_OK)
+        g_ent_stop_fx = (ent_fx_fn)r.addr;
+    if (!g_ent_start_fx || !g_ent_stop_fx)
+        combat_off("the game's entity effect calls were not found in this executable, so fx(e, condition) and "
+                   "fx_stop(e, condition) do nothing on an effect entity");
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
     g_decl_register = clean(results, count, "DeclRegisterFile");
     g_decl_type = (type_fn)clean(results, count, "DeclTypeByName");
