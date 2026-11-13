@@ -266,6 +266,82 @@ static const sh_script_ai_engine *g_engine;
 
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = engine; }
 
+/* ---- posed legs (script_api_ai.h) */
+
+static void legq_mul(const float a[4], const float b[4], float o[4])
+{
+    float x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+    float y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+    float z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+    float w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    o[0] = x; o[1] = y; o[2] = z; o[3] = w;
+}
+
+static void legq_rot(const float q[4], const float v[3], float o[3])
+{
+    float ax = q[1] * v[2] - q[2] * v[1] + q[3] * v[0];
+    float ay = q[2] * v[0] - q[0] * v[2] + q[3] * v[1];
+    float az = q[0] * v[1] - q[1] * v[0] + q[3] * v[2];
+    float x = v[0] + 2.0f * (q[1] * az - q[2] * ay);
+    float y = v[1] + 2.0f * (q[2] * ax - q[0] * az);
+    float z = v[2] + 2.0f * (q[0] * ay - q[1] * ax);
+    o[0] = x; o[1] = y; o[2] = z;
+}
+
+/* A joint's model transform: its local one under each parent's in turn. */
+static int leg_model(const sh_ai_leg_pose *p, int joint, float t[3], float q[4])
+{
+    int at = joint, steps = 0;
+    if (joint < 0 || joint >= p->joints) return 0;
+    memcpy(t, p->lt + (size_t)joint * (size_t)p->lt_stride, 3 * sizeof(float));
+    memcpy(q, p->lq + (size_t)joint * (size_t)p->lq_stride, 4 * sizeof(float));
+    for (;;) {
+        float pt[3], pq[4];
+        int up = p->parents[at];
+        if (up < 0) return 1;
+        if (up >= p->joints || ++steps > p->joints) return 0;
+        memcpy(pt, p->lt + (size_t)up * (size_t)p->lt_stride, sizeof pt);
+        memcpy(pq, p->lq + (size_t)up * (size_t)p->lq_stride, sizeof pq);
+        legq_rot(pq, t, t);
+        t[0] += pt[0]; t[1] += pt[1]; t[2] += pt[2];
+        legq_mul(pq, q, q);
+        at = up;
+    }
+}
+
+int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_leg_solve_fn solve, void *leg)
+{
+    float hip_t[3], hip_q[4], par_t[3], par_q[4], thigh_t[3], thigh_q[4], foot_t[3], foot_q[4];
+    float base_t[3] = { 0, 0, 0 }, base_q[4] = { 0, 0, 0, 1 }, inv[4], solved[4], d[4], ax[3], v[3], out_t[3], out_q[4];
+    float len, half, pole[4];
+    int up;
+    if (!p || !j || !solve || !p->parents || !p->lt || !p->lq || p->joints <= 0) return 0;
+    if (j->target < 0 || j->target >= p->joints || j->pole < 0 || j->pole >= p->joints) return 0;
+    if (!leg_model(p, j->hip, hip_t, hip_q) || !leg_model(p, j->parent, par_t, par_q) ||
+        !leg_model(p, j->thigh, thigh_t, thigh_q) || !leg_model(p, j->foot, foot_t, foot_q))
+        return 0;
+    ax[0] = foot_t[0] - hip_t[0]; ax[1] = foot_t[1] - hip_t[1]; ax[2] = foot_t[2] - hip_t[2];
+    len = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+    if (!(len > 1e-6f)) return 0;
+    ax[0] /= len; ax[1] /= len; ax[2] /= len;
+    if (!solve(leg, hip_t, par_q, foot_t, foot_q, solved)) return 0;
+    /* what turns the solved thigh to the posed one, and its part about the hip-to-target line */
+    inv[0] = -solved[0]; inv[1] = -solved[1]; inv[2] = -solved[2]; inv[3] = solved[3];
+    legq_mul(thigh_q, inv, d);
+    half = atan2f(d[0] * ax[0] + d[1] * ax[1] + d[2] * ax[2], d[3]);
+    pole[0] = sinf(half); pole[1] = 0; pole[2] = 0; pole[3] = cosf(half);
+    up = p->parents[j->target];
+    if (up >= 0 && !leg_model(p, up, base_t, base_q)) return 0;
+    inv[0] = -base_q[0]; inv[1] = -base_q[1]; inv[2] = -base_q[2]; inv[3] = base_q[3];
+    v[0] = foot_t[0] - base_t[0]; v[1] = foot_t[1] - base_t[1]; v[2] = foot_t[2] - base_t[2];
+    legq_rot(inv, v, out_t);
+    legq_mul(inv, foot_q, out_q);
+    memcpy(p->lt + (size_t)j->target * (size_t)p->lt_stride, out_t, sizeof out_t);
+    memcpy(p->lq + (size_t)j->target * (size_t)p->lq_stride, out_q, sizeof out_q);
+    memcpy(p->lq + (size_t)j->pole * (size_t)p->lq_stride, pole, sizeof pole);
+    return 1;
+}
+
 static void force_via_reset(void);
 static void anim_wait_drop(ai_rec *r)
 {
@@ -2095,6 +2171,29 @@ static int l_held(lua_State *L)
     return 1;
 }
 
+/* ai:posed_legs(): the demon's clips pose its legs themselves (they rotate
+ * thigh, shin and foot, as DOOM Eternal's clips do) and its model carries the
+ * game's leg rig. The game's own clips animate the rig's target and pole
+ * joints instead, so a layer added on top of a clip cannot be carried in
+ * them. From this call on, every frame, the rig's targets and poles are taken
+ * from the legs as the blended clips pose them, before the game moves them
+ * by the ground: on a flat floor the legs are the clips' own with every
+ * layer, on a slope or a step the feet follow the ground. Call it once after
+ * the demon spawned. Answers true, or false and why. */
+static int l_posed_legs(lua_State *L)
+{
+    void *ai;
+    int st;
+    NEED_OP(L, posed_legs, "posed_legs");
+    ai = self_ai(L, "posed_legs", NULL);
+    st = ai ? g_engine->posed_legs(ai) : -1;
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, st == 0 ? "the demon's model has no leg rig (its skeleton lacks the rig's joints)"
+                              : "the game's leg rig could not be reached");
+    return 2;
+}
+
 /* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
  * go when the game shows the gore wound. A wound of the game shows meshes
  * (its meshKits) and cuts the model with spheres; it has no list of meshes
@@ -2799,6 +2898,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "rear_footsteps", l_rear_footsteps },
     { "wound_hides", l_wound_hides },
     { "held", l_held },
+    { "posed_legs", l_posed_legs },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -4140,6 +4240,163 @@ static int e_wound_hides(void *ai, const char *wound, const char *const *meshes,
     return 1;
 }
 
+/* ---- posed legs: the rig's targets and poles from the clips' own legs */
+
+typedef void (*ai_rig_entry_fn)(void *runtime, void *ctx, char align);
+typedef uint64_t (*ai_rig_solve_fn)(const float *hip, const float *parent_q, const void *leg, const float *target,
+                                    float *thigh_q, float *shin_q);
+static ai_rig_entry_fn g_rig_target, g_rig_orig;
+static ai_rig_solve_fn g_rig_solve;
+static const void *g_rig_eval;
+static uint32_t g_rig_model_off, g_rig_anim_off;
+static int g_rig_failed;
+
+/* One record per demon that asked, found by its rig runtime on the pose
+ * jobs' threads without a lock, so it never moves; the runtime is set last
+ * and cleared first. A frame step drops the record of a demon that is gone. */
+typedef struct {
+    void *volatile ai;
+    volatile LONG spawn_id;
+    void *volatile runtime;
+} ai_legs_rec;
+static ai_legs_rec g_legs[AI_PARKED_MAX];
+static volatile LONG g_legs_used;
+
+static void *rig_runtime_of(void *ai)
+{
+    void *rt = NULL;
+    __try {
+        const uint8_t *model = *(const uint8_t * const *)((const uint8_t *)ai + g_rig_model_off);
+        const uint8_t *anim = model ? *(const uint8_t * const *)(model + g_rig_anim_off) : NULL;
+        if (anim) rt = *(void * const *)(anim + SH_AI_RIG_ANIM_RUNTIME);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { rt = NULL; }
+    return rt;
+}
+
+static int rig_solve_plain(void *leg, const float hip[3], const float parent_q[4], const float target[3],
+                           const float target_q[4], float thigh_q[4])
+{
+    __declspec(align(16)) float at[4], pq[4], want[12], thigh[4], shin[4];
+    memcpy(at, hip, 3 * sizeof(float)); at[3] = 0;
+    memcpy(pq, parent_q, sizeof pq);
+    memcpy(want, target, 3 * sizeof(float));
+    memcpy(want + 3, target_q, 4 * sizeof(float));
+    want[7] = 0; want[8] = 0; want[9] = 0; want[10] = 1; want[11] = 0;   /* no swivel */
+    g_rig_solve(at, pq, leg, want, thigh, shin);
+    memcpy(thigh_q, thigh, sizeof thigh);
+    return 1;
+}
+
+/* Every leg of the runtime's two-bone components: posed (pose given) or only
+ * counted (pose NULL). Caller guards the reads. */
+static int rig_legs_walk(void *runtime, const sh_ai_leg_pose *pose)
+{
+    const uint8_t *engine = *(const uint8_t * const *)((const uint8_t *)runtime + SH_AI_RIG_RUNTIME_ENGINE);
+    const uint8_t *blocks;
+    int nblocks, b, legs = 0;
+    if (!engine) return 0;
+    blocks = *(const uint8_t * const *)(engine + SH_AI_RIG_ENGINE_BLOCKS);
+    nblocks = *(const int32_t *)(engine + SH_AI_RIG_ENGINE_COUNT);
+    if (!blocks || nblocks <= 0 || nblocks > 64) return 0;
+    for (b = 0; b < nblocks; b++) {
+        const uint8_t *block = blocks + (size_t)b * SH_AI_RIG_BLOCK_SIZE;
+        const uint8_t *parts = *(const uint8_t * const *)(block + SH_AI_RIG_BLOCK_PARTS);
+        int nparts = *(const int32_t *)(block + SH_AI_RIG_BLOCK_COUNT), k;
+        if ((block[SH_AI_RIG_BLOCK_SKIP] & 1) || !parts || nparts <= 0 || nparts > 256) continue;
+        for (k = 0; k < nparts; k++) {
+            const uint8_t *part = parts + (size_t)k * SH_AI_RIG_PART_SIZE;
+            void **object = *(void ** const *)part;
+            uint8_t *leg = *(uint8_t * const *)(part + 8);
+            int n = *(const int32_t *)(part + 0x10), i;
+            if (!object || !leg || n <= 0 || n > 64) continue;
+            if ((*(void ** const *)object)[SH_AI_RIG_PART_EVAL_SLOT] != g_rig_eval) continue;
+            for (i = 0; i < n; i++, leg += SH_AI_RIG_LEG_SIZE) {
+                legs++;
+                if (pose) {
+                    sh_ai_leg_joints j;
+                    j.parent = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_PARENT) & 0xFFFFFFu);
+                    j.target = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_TARGET) & 0xFFFFFFu);
+                    j.pole = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_POLE) & 0xFFFFFFu);
+                    j.hip = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_HIP) & 0xFFFFFFu);
+                    j.thigh = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_THIGH) & 0xFFFFFFu);
+                    j.foot = (int)(*(const uint32_t *)(leg + SH_AI_RIG_LEG_FOOT) & 0xFFFFFFu);
+                    (void)sh_ai_posed_leg(pose, &j, rig_solve_plain, leg);
+                }
+            }
+        }
+    }
+    return legs;
+}
+
+static void rig_entry_detour(void *runtime, void *ctx, char align)
+{
+    __try {
+        int i, used = (int)g_legs_used;
+        for (i = 0; i < used; i++) {
+            void *ai;
+            const uint8_t *pose;
+            sh_ai_leg_pose p;
+            if (g_legs[i].runtime != runtime) continue;
+            ai = g_legs[i].ai;
+            if (!ai || !ctx || rig_runtime_of(ai) != runtime) break;
+            pose = *(const uint8_t * const *)((const uint8_t *)ctx + SH_AI_RIG_CTX_POSE);
+            if (!pose) break;
+            p.parents = *(const int16_t * const *)(pose + SH_AI_RIG_POSE_PARENTS);
+            p.joints = *(const int32_t *)(pose + SH_AI_RIG_POSE_JOINTS);
+            p.lt = *(uint8_t * const *)(pose + SH_AI_RIG_POSE_LT);
+            p.lq = *(uint8_t * const *)(pose + SH_AI_RIG_POSE_LQ);
+            p.lt_stride = *(const int32_t *)(pose + SH_AI_RIG_POSE_LT_STRIDE);
+            p.lq_stride = *(const int32_t *)(pose + SH_AI_RIG_POSE_LQ_STRIDE);
+            (void)rig_legs_walk(runtime, &p);
+            break;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    g_rig_orig(runtime, ctx, align);
+}
+
+/* Each frame, on the game's thread: a record whose demon is gone stops
+ * answering before another animation can be given its rig runtime. */
+static void posed_legs_step(void)
+{
+    int i, used = (int)g_legs_used;
+    for (i = 0; i < used; i++) {
+        void *ai = g_legs[i].ai;
+        if (!ai) continue;
+        if (spawn_id_of(ai) != (uint32_t)g_legs[i].spawn_id || rig_runtime_of(ai) != g_legs[i].runtime) {
+            InterlockedExchangePointer((PVOID volatile *)&g_legs[i].runtime, NULL);
+            InterlockedExchangePointer((PVOID volatile *)&g_legs[i].ai, NULL);
+        }
+    }
+}
+
+static int e_posed_legs(void *ai)
+{
+    uint32_t id = spawn_id_of(ai);
+    void *rt = rig_runtime_of(ai);
+    int i, slot = -1, used = (int)g_legs_used, legs = 0;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE || !g_rig_solve || !g_rig_eval) return -1;
+    if (!rt) return 0;
+    __try { legs = rig_legs_walk(rt, NULL); } __except (EXCEPTION_EXECUTE_HANDLER) { legs = 0; }
+    if (legs <= 0) return 0;
+    if (!commit_hook((void *)g_rig_target, (void *)rig_entry_detour, k_ai_rig_prologue, SH_AI_RIG_STOLEN,
+                     (void **)&g_rig_orig, &g_rig_failed, "posed_legs"))
+        return -1;
+    for (i = 0; i < used; i++) {
+        void *p = g_legs[i].ai;
+        if (p == ai && (uint32_t)g_legs[i].spawn_id == id) { slot = i; break; }
+        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_legs[i].spawn_id)) slot = i;
+    }
+    if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
+    if (slot < 0) return -1;
+    InterlockedExchangePointer((PVOID volatile *)&g_legs[slot].runtime, NULL);
+    InterlockedExchange(&g_legs[slot].spawn_id, (LONG)id);
+    InterlockedExchangePointer((PVOID volatile *)&g_legs[slot].ai, ai);
+    InterlockedExchangePointer((PVOID volatile *)&g_legs[slot].runtime, rt);
+    if (slot >= used) InterlockedExchange(&g_legs_used, slot + 1);
+    sh_script_api_on_frame(posed_legs_step);
+    return 1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -4173,7 +4430,7 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held
+    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -4310,6 +4567,22 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_mesh_index = (ai_mesh_index_fn)(site + SH_AI_MESH_SITE_INDEX + 5 + rel32_at(site + SH_AI_MESH_SITE_INDEX + 1));
         g_mesh_hide = (ai_mesh_hide_fn)(site + SH_AI_MESH_SITE_HIDE + 5 + rel32_at(site + SH_AI_MESH_SITE_HIDE + 1));
     } else g_live.wound_hides = NULL;
+    /* Posed legs: the rig's entry, the two-bone component's evaluate (its
+     * address names the component, its call the solve) and the demon's way
+     * to its rig runtime (the setup site's two displacements). */
+    site = (const uint8_t *)r[SH_AI_SIG_RIG_SITE].addr;
+    if (r[SH_AI_SIG_RIG_ENTRY].addr && r[SH_AI_SIG_RIG_RUN].addr && r[SH_AI_SIG_RIG_BLOCK].addr &&
+        r[SH_AI_SIG_RIG_EVAL].addr && r[SH_AI_SIG_RIG_SOLVE].addr && site &&
+        ((const uint8_t *)r[SH_AI_SIG_RIG_EVAL].addr)[SH_AI_RIG_EVAL_SOLVE_CALL] == 0xE8 &&
+        (const uint8_t *)r[SH_AI_SIG_RIG_EVAL].addr + SH_AI_RIG_EVAL_SOLVE_CALL + 5 +
+            rel32_at((const uint8_t *)r[SH_AI_SIG_RIG_EVAL].addr + SH_AI_RIG_EVAL_SOLVE_CALL + 1) ==
+            (const uint8_t *)r[SH_AI_SIG_RIG_SOLVE].addr) {
+        g_rig_target = (ai_rig_entry_fn)r[SH_AI_SIG_RIG_ENTRY].addr;
+        g_rig_eval = (const void *)r[SH_AI_SIG_RIG_EVAL].addr;
+        g_rig_solve = (ai_rig_solve_fn)r[SH_AI_SIG_RIG_SOLVE].addr;
+        g_rig_model_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_MODEL);
+        g_rig_anim_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_ANIM);
+    } else g_live.posed_legs = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

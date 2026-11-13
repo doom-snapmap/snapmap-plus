@@ -109,7 +109,27 @@
  *                      command sent through the context ends the one before it this way.
  *   AiMoveStage        VK 0x14051A660  GL 0x140519390  the animFSM's move update: it switches on the stage
  *                      (animFSM +0x2A9C); stages 2, 7 and 8 (a step, an arrival) end when the context's active
- *                      command is no longer waiting. Present for that offset. */
+ *                      command is no longer waiting. Present for that offset.
+ *   AiRigEntry         VK 0x141A20CD0  GL 0x141A3CC00  the rig's entry (rig runtime, pose context, align): called
+ *                      for every blended pose; with `align` and an aligner (runtime +0x18) the aligner moves the
+ *                      hips and the leg target joints by the ground, then the rig engine (runtime +0x8) runs.
+ *                      Detoured; 16-byte window.
+ *   AiRigRun           VK 0x141A2C1F0  GL 0x141A480D0  the rig engine's run (engine, context): model transforms
+ *                      of the context's pose (+0x50), then each block (engine +0, count +8, 0x70 bytes each).
+ *                      Present for those offsets.
+ *   AiRigBlock         VK 0x141A2BDA0  GL 0x141A47C80  a block's run: unless its bit +0x60.0 is set, each
+ *                      component (block +0x18, count +0x20, 0x18 bytes each: object, legs, count) is evaluated
+ *                      through the object's vtable +0x58. Present for those offsets.
+ *   AiRigEval          VK 0x141A29310  GL 0x141A451F0  the two-bone leg component's evaluate (object, legs,
+ *                      count, context): per leg (0xCC bytes) the joints at +0x80 parent, +0x84 target, +0x88
+ *                      pole, +0x8C hip, +0x90 thigh, +0x94 shin, +0x98 foot; it reads the target's model
+ *                      transform and the pole's local rotation (x and w), calls the solve (at +0x1ED) and
+ *                      writes thigh, shin and foot.
+ *   AiRigSolve         VK 0x141A26940  GL 0x141A428B0  the solve (hip place, parent model rotation, leg, {target
+ *                      place, target rotation, swivel}, thigh rotation out, shin rotation out). Reads only.
+ *   AiRigSite          VK 0x140426377  GL 0x140425437  inside the demon's setup: its model (entity +0x3DB0) and
+ *                      the model's animation object (+0xE98), given to the aligner's maker; the object's second
+ *                      word is the rig runtime. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -251,6 +271,31 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "4C 8B F9 80 B9 1D AA 02 00 00 0F 85 ?? ?? ?? ?? 80 B9 EC A9 02 00 00 74 28 80 B9 E5 C0 00 00 00 74 1F "
       "48 81 C1 B8 23 01 00 48 8B 01 FF 50 78 BA E8 00 00 00 48 8B C8 E8 ?? ?? ?? ?? E9",
       0x402FA0u, 0x402480u },
+    { "AiRigEntry",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 45 84 C0 74 17 48 8B 49 18 48 85 C9 74 0E 83 3D ?? ?? ?? ?? 00 "
+      "75 05 E8 ?? ?? ?? ?? 48 8B 4B 08",
+      0x1A20CD0u, 0x1A3CC00u },
+    { "AiRigRun",
+      "48 89 74 24 18 41 56 48 83 EC 20 4C 8B F1 48 8B F2 48 8B 4A 50 E8 ?? ?? ?? ?? 41 8B 46 08 85 C0 7E 30 "
+      "48 89 5C 24 30 33 DB 48 89 7C 24 38 8B F8 49 8B 0E 48 8B D6 48 03 CB E8 ?? ?? ?? ?? 48 83 C3 70",
+      0x1A2C1F0u, 0x1A480D0u },
+    { "AiRigBlock",
+      "40 53 55 56 57 41 56 48 81 EC F0 00 00 00 33 FF 4C 8B F2 F6 41 60 01 48 8B F1 75 39 48 63 69 20 48 85 ED "
+      "7E 30 8B DF 66 0F 1F 84 00 00 00 00 00 48 8B 56 18 4D 8B CE 48 8B 0C 13 44 8B 44 13 10 48 8B 54 13 08 "
+      "48 8B 01 FF 50 58 48 8D 5B 18",
+      0x1A2BDA0u, 0x1A47C80u },
+    { "AiRigEval",
+      "45 85 C0 0F 8E ?? ?? ?? ?? 48 8B C4 48 89 58 20 55 56 41 56 48 8D 68 A8 48 81 EC 40 01 00 00 49 8B 59 50 "
+      "4D 8B F1 F3 0F 10 15 ?? ?? ?? ?? 48 89 78 08 48 8D 7A 70",
+      0x1A29310u, 0x1A451F0u },
+    { "AiRigSolve",
+      "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 57 48 81 EC D0 00 00 00 0F 29 70 E8 49 8B F0 0F 29 78 D8 "
+      "48 8B E9 44 0F 29 40 C8 49 83 C0 48 44 0F 29 48 B8",
+      0x1A26940u, 0x1A428B0u },
+    { "AiRigSite",
+      "49 8B 8C 24 B0 3D 00 00 F3 0F 11 44 24 20 4C 8B CB 48 8B D7 48 8B 89 98 0E 00 00 E8 ?? ?? ?? ?? "
+      "49 8B 8C 24 B0 3D 00 00",
+      0x426377u, 0x425437u },
     { NULL, NULL, 0, 0 }
 };
 

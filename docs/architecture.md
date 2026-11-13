@@ -2177,6 +2177,25 @@ is touched, and a removed demon answers nil.
   it, the meshes are hidden with the game's own hide, in the same call, so no
   frame draws the wound and the skin together. Records are per demon and
   spawn id; a model shows at most 64 meshes separately (the mask's width).
+  `posed_legs()` serves a demon whose clips pose its legs themselves (thigh,
+  shin and foot rotations, as DOOM Eternal's clips do) on a model that
+  carries the game's leg rig. The game poses a leg from the hip to a target
+  joint, swivelled by a pole joint, after the whole blend (the rig's entry,
+  VK 0x141A20CD0: the aligner moves the hips and the targets by the ground,
+  then the rig engine runs its components); its own clips animate those two
+  joints, and a layer added over a clip can only add one fixed difference to
+  them, so a recoil or a pain layer that moves a foot by an amount depending
+  on the pose underneath cannot be carried. The call detours the entry (at
+  the first call, 16 whole bytes): for a demon that asked, each leg of the
+  rig's two-bone component gets its target joint set to the leg's end joint
+  as the blended clips pose it and its pole joint set to the angle that turns
+  the rig's own solve (called with no swivel) to the posed thigh, and then
+  the game's entry runs unchanged. On a flat floor the legs are the clips'
+  own with every layer; on a slope or a step the aligner moves the targets
+  and the hips from there. Records are per demon and spawn id, found by the
+  rig runtime (the second word of the model's animation object, model
+  +0xE98) on the pose jobs' threads; a frame step drops a record whose demon
+  is gone.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

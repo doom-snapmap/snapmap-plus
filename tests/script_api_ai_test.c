@@ -324,7 +324,14 @@ static int f_rear_footsteps(void *ai, const char *front, const char *rear)
     ev_cat(line);
     return 1;
 }
-static int g_no_wound, g_no_mesh;
+static int g_no_wound, g_no_mesh, g_no_rig;
+static int f_posed_legs(void *ai)
+{
+    (void)ai;
+    if (g_no_rig) return 0;
+    ev_cat("posed_legs\n");
+    return 1;
+}
 static int f_held(void *ai, int hand, char *decl, size_t cap)
 {
     fent *e = (fent *)ai;
@@ -415,7 +422,7 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held
+    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1879,11 +1886,107 @@ static int t_ai_anim(lua_State *L)
     return 1;
 }
 
+/* Posed legs: the rig's target and pole from the legs as the clips pose them. A root turned a quarter about z
+ * and moved; hips, a thigh turned 60 degrees about its own length, a shin and a foot straight down; the target
+ * and the pole under the root. */
+static float g_leg_hip[3], g_leg_parent_q[4], g_leg_target[3];
+static int fake_leg_solve(void *leg, const float hip[3], const float parent_q[4], const float target[3],
+                          const float target_q[4], float thigh_q[4])
+{
+    (void)target_q;
+    if (!leg) return 0;
+    memcpy(g_leg_hip, hip, sizeof g_leg_hip);
+    memcpy(g_leg_parent_q, parent_q, sizeof g_leg_parent_q);
+    memcpy(g_leg_target, target, sizeof g_leg_target);
+    /* the rig's answer with no swivel: the thigh as its parent stands */
+    memcpy(thigh_q, parent_q, 4 * sizeof(float));
+    return 1;
+}
+
+static int near3(const float *a, float x, float y, float z)
+{
+    return fabsf(a[0] - x) < 1e-4f && fabsf(a[1] - y) < 1e-4f && fabsf(a[2] - z) < 1e-4f;
+}
+
+static void test_posed_legs(void)
+{
+    static const int16_t parents[7] = { -1, 0, 1, 2, 3, 0, 0 };
+    const float r = 0.70710678f, s30 = 0.5f, c30 = 0.8660254f;
+    struct { float t[3]; float pad; } lt[7] = {
+        { { 5, 6, 7 }, 0 }, { { 0, 0, 100 }, 0 }, { { 10, 0, 0 }, 0 }, { { 0, 0, -40 }, 0 }, { { 0, 0, -40 }, 0 },
+        { { 1, 2, 3 }, 0 }, { { 4, 5, 6 }, 0 }
+    };
+    float lq[7][4] = {
+        { 0, 0, 0.70710678f, 0.70710678f }, { 0, 0, 0, 1 }, { 0, 0, 0.5f, 0.8660254f }, { 0, 0, 0, 1 }, { 0, 0, 0, 1 },
+        { 0, 0, 0, 1 }, { 0, 0, 0, 1 }
+    };
+    sh_ai_leg_pose pose;
+    sh_ai_leg_joints j = { 1, 5, 6, 2, 2, 4 };
+    int leg = 0;
+    const char *log;
+    printf("-- posed legs: the target is the foot under the target's parent, the pole the thigh's turn about the leg\n");
+    pose.parents = parents; pose.joints = 7;
+    pose.lt = (uint8_t *)lt; pose.lt_stride = (int)sizeof lt[0];
+    pose.lq = (uint8_t *)lq; pose.lq_stride = (int)sizeof lq[0];
+    CHECK(sh_ai_posed_leg(&pose, &j, fake_leg_solve, &leg) == 1);
+    /* what the solve was asked: the hip's place, the parent's rotation and the foot's place, all in model space */
+    CHECK(near3(g_leg_hip, 5, 16, 107));
+    CHECK(near3(g_leg_parent_q, 0, 0, r) && fabsf(g_leg_parent_q[3] - r) < 1e-4f);
+    CHECK(near3(g_leg_target, 5, 16, 27));
+    /* the target: the foot in the root's frame; its rotation the foot's there (60 degrees about z) */
+    CHECK(near3(lt[5].t, 10, 0, 20));
+    CHECK(near3(lq[5], 0, 0, s30) && fabsf(lq[5][3] - c30) < 1e-4f);
+    /* the pole: the thigh stands 60 degrees about +z from the solved one and the leg points down -z */
+    CHECK(near3(lq[6], -s30, 0, 0) && fabsf(lq[6][3] - c30) < 1e-4f);
+    /* nothing else moved */
+    CHECK(near3(lt[4].t, 0, 0, -40) && near3(lt[6].t, 4, 5, 6) && near3(lq[2], 0, 0, s30));
+    printf("-- posed legs: a joint out of range, a leg of no length and a refused solve write nothing\n");
+    lt[5].t[0] = 1; lt[5].t[1] = 2; lt[5].t[2] = 3;
+    j.foot = 9;
+    CHECK(sh_ai_posed_leg(&pose, &j, fake_leg_solve, &leg) == 0);
+    j.foot = 2;
+    CHECK(sh_ai_posed_leg(&pose, &j, fake_leg_solve, &leg) == 0);
+    j.foot = 4;
+    CHECK(sh_ai_posed_leg(&pose, &j, fake_leg_solve, NULL) == 0);
+    CHECK(near3(lt[5].t, 1, 2, 3));
+
+    printf("-- posed_legs asks the engine once and says why when the model has no leg rig\n");
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  print('legs ' .. tostring(self:posed_legs()))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "legs true\n") != NULL);
+    CHECK(strstr(g_events, "posed_legs\n") != NULL);
+    sh_script_map_end();
+    g_no_rig = 1;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step ~= 1 then return end\n"
+        "  local ok, why = self:posed_legs()\n"
+        "  print('legs ' .. tostring(ok) .. ' ' .. tostring(why))\n"
+        "end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "legs false the demon's model has no leg rig") != NULL);
+    sh_script_map_end();
+    g_no_rig = 0;
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 47);
+    CHECK(sh_script_ai_register() == 48);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -1917,6 +2020,7 @@ int main(int argc, char **argv)
     test_a_spawned_demon_gets_its_gore();
     test_pain_records();
     test_pain_stub();
+    test_posed_legs();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");

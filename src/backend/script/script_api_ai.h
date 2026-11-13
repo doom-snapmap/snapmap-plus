@@ -443,7 +443,43 @@ typedef struct sh_script_ai_engine {
     /* The decl name of the inventory item in `hand` now (the engine's weapon in that equip slot): 1 and the
      * name, 0 when the hand is empty, -1 when it cannot be read. */
     int      (*held)(void *ai, int hand, char *decl, size_t cap);
+    /* From now on the game's leg rig takes each leg's target and pole from
+     * the legs as the demon's clips pose them, every frame, before it follows
+     * the ground. 1 set, 0 the demon's model has no two-bone leg rig, -1
+     * unavailable. */
+    int      (*posed_legs)(void *ai);
 } sh_script_ai_engine;
+
+/* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
+ * the hip to a target joint and swivels the knee by a pole joint, and its own
+ * clips animate those two joints and carry no thigh, shin or foot tracks. A
+ * demon whose clips rotate the leg joints themselves has its pose in those
+ * joints, with every additive layer blended in; this turns that pose into the
+ * rig's inputs. Rotations are x y z w; a joint's model transform is its
+ * parent's times its own. */
+typedef struct {
+    const int16_t *parents;   /* parent joint per joint, negative for a root */
+    int            joints;
+    uint8_t       *lt;        /* local translations (3 floats), lt_stride bytes apart */
+    int            lt_stride;
+    uint8_t       *lq;        /* local rotations (4 floats), lq_stride bytes apart */
+    int            lq_stride;
+} sh_ai_leg_pose;
+typedef struct {
+    int parent;               /* the thigh's parent: the rig reads its model rotation */
+    int target, pole;         /* the two joints the rig reads */
+    int hip, thigh, foot;     /* where the thigh starts, the thigh, and the leg's end joint */
+} sh_ai_leg_joints;
+/* The rig's own solve with no swivel: the thigh's model rotation for a hip
+ * place, the parent's model rotation and a target. 1 when it answered. */
+typedef int (*sh_ai_leg_solve_fn)(void *leg, const float hip[3], const float parent_q[4], const float target[3],
+                                  const float target_q[4], float thigh_q[4]);
+/* Write the target joint's local translation and rotation (the end joint's
+ * model transform under the target's parent) and the pole joint's local
+ * rotation (about x by the angle that turns the solved thigh to the posed one
+ * about the line from hip to target) into the pose. 1 written, 0 not (a joint
+ * out of range, a leg of no length, the solve refused). */
+int sh_ai_posed_leg(const sh_ai_leg_pose *pose, const sh_ai_leg_joints *j, sh_ai_leg_solve_fn solve, void *leg);
 
 /* The gore init site (SH_AI_SIG_GORE_INIT_SITE): the cvar test, the two
  * component offsets and the call. */
@@ -566,6 +602,12 @@ enum sh_ai_sig {
     SH_AI_SIG_SHOW_WOUND,          /* idGoreComponent::ShowWound (component, wound row) (detoured) */
     SH_AI_SIG_MESH_HIDE_SITE,      /* the armour pop-off's mesh index by name and hide by index */
     SH_AI_SIG_PAIN_START,          /* the engine's start of a pain reaction (its FSM request and pain code calls) */
+    SH_AI_SIG_RIG_ENTRY,           /* the rig's entry after the blend (runtime, context, align) (detoured) */
+    SH_AI_SIG_RIG_RUN,             /* the rig engine's run (reads its blocks) */
+    SH_AI_SIG_RIG_BLOCK,           /* a rig block's run (reads its components and calls each one's evaluate) */
+    SH_AI_SIG_RIG_EVAL,            /* the two-bone leg component's evaluate (reads a leg's joints, calls the solve) */
+    SH_AI_SIG_RIG_SOLVE,           /* the two-bone solve (hip, parent rotation, leg, target, thigh out, shin out) */
+    SH_AI_SIG_RIG_SITE,            /* the demon's setup: its model's animation object, whose rig runtime it is */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -620,6 +662,45 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
 #define SH_AI_PATH_LENGTH_STOLEN 14
 /* The footstep table selector's window: two register saves and push rsi,
  * r14, r15 (whole, position-independent). */
+/* The rig (SH_AI_SIG_RIG_*). The entry's window: a register save, push rdi,
+ * sub rsp and two register moves (whole, position-independent). The runtime
+ * holds the rig engine at +0x8; the engine its blocks (0x70 bytes each) and
+ * their count; a block its components (0x18 bytes each: object, legs, count)
+ * and their count, and a skip bit; a leg of the two-bone component is 0xCC
+ * bytes with its joints from +0x80 (24 bits each). The context's pose (+0x50)
+ * holds the parents, the joint count, and the local translations and
+ * rotations with their strides. The evaluate calls the solve at +0x1ED. */
+#define SH_AI_RIG_STOLEN 16
+static const unsigned char k_ai_rig_prologue[SH_AI_RIG_STOLEN] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xD9
+};
+#define SH_AI_RIG_SITE_MODEL       4       /* the site: disp32 of mov rcx,[r12+model] */
+#define SH_AI_RIG_SITE_ANIM        23      /* the site: disp32 of mov rcx,[rcx+animation object] */
+#define SH_AI_RIG_ANIM_RUNTIME     0x8u    /* animation object: its rig runtime */
+#define SH_AI_RIG_RUNTIME_ENGINE   0x8u
+#define SH_AI_RIG_ENGINE_BLOCKS    0x0u
+#define SH_AI_RIG_ENGINE_COUNT     0x8u
+#define SH_AI_RIG_BLOCK_SIZE       0x70u
+#define SH_AI_RIG_BLOCK_PARTS      0x18u
+#define SH_AI_RIG_BLOCK_COUNT      0x20u
+#define SH_AI_RIG_BLOCK_SKIP       0x60u   /* bit 0: the block is not run */
+#define SH_AI_RIG_PART_SIZE        0x18u   /* object +0, legs +8, count +0x10 */
+#define SH_AI_RIG_PART_EVAL_SLOT   11      /* the object's vtable slot the block calls (+0x58) */
+#define SH_AI_RIG_LEG_SIZE         0xCCu
+#define SH_AI_RIG_LEG_PARENT       0x80u
+#define SH_AI_RIG_LEG_TARGET       0x84u
+#define SH_AI_RIG_LEG_POLE         0x88u
+#define SH_AI_RIG_LEG_HIP          0x8Cu
+#define SH_AI_RIG_LEG_THIGH        0x90u
+#define SH_AI_RIG_LEG_FOOT         0x98u
+#define SH_AI_RIG_EVAL_SOLVE_CALL  0x1EDu
+#define SH_AI_RIG_CTX_POSE         0x50u
+#define SH_AI_RIG_POSE_PARENTS     0x0u
+#define SH_AI_RIG_POSE_JOINTS      0x8u
+#define SH_AI_RIG_POSE_LT          0x10u
+#define SH_AI_RIG_POSE_LQ          0x18u
+#define SH_AI_RIG_POSE_LT_STRIDE   0x28u
+#define SH_AI_RIG_POSE_LQ_STRIDE   0x2Cu
 #define SH_AI_FOOT_STOLEN 15
 static const unsigned char k_ai_foot_prologue[SH_AI_FOOT_STOLEN] = {
     0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x41, 0x56, 0x41, 0x57

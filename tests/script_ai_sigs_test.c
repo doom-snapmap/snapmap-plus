@@ -385,6 +385,40 @@ static void check_image(const char *path)
         CHECK(window_has(base, hide, 0x30, "\xE8\x0E\x00\x00", 4));
         CHECK(window_has(base, index, 0x20, "\x90\x0E\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_RIG_ENTRY] && rva[SH_AI_SIG_RIG_EVAL] && rva[SH_AI_SIG_RIG_SOLVE] && rva[SH_AI_SIG_RIG_SITE]) {
+        uint32_t e = rva[SH_AI_SIG_RIG_ENTRY], ev = rva[SH_AI_SIG_RIG_EVAL], s = rva[SH_AI_SIG_RIG_SITE];
+        uint32_t align = rel_target(base, e + 39, 5, 1);
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + e, 64, 14, 48, &flags);
+        int32_t model, anim;
+        CHECK(b == SH_AI_RIG_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + e, k_ai_rig_prologue, SH_AI_RIG_STOLEN));
+        /* the entry runs the engine at runtime +0x8 after the aligner at +0x18 */
+        CHECK(window_has(base, e, 0x30, "\x48\x8B\x49\x18", 4) && window_has(base, e, 0x40, "\x48\x8B\x4B\x08", 4));
+        /* the aligner writes local translations of the pose at context +0x50: stride +0x28, base +0x10 */
+        CHECK(window_has(base, align, 0x100, "\x48\x8B\x77\x50", 4));
+        CHECK(window_has(base, align, 0x100, "\x0F\xAF\x46\x28", 4) && window_has(base, align, 0x100, "\x48\x03\x4E\x10", 4));
+        /* the evaluate: legs from +0x70 on, the target (+0x84) read in model space, the pole (+0x88) as a local
+         * rotation (stride +0x2C, base +0x18), the hip (+0x8C), the parent (+0x80); thigh, shin and foot written
+         * through +0x90, +0x94 and +0x98; a leg is 0xCC bytes */
+        CHECK(window_has(base, ev, 0x40, "\x48\x8D\x7A\x70", 4));
+        CHECK(window_has(base, ev, 0xA0, "\x8B\x57\x14\x81\xE2\xFF\xFF\xFF\x00", 9));
+        CHECK(window_has(base, ev, 0xE0, "\x8B\x47\x18\x25\xFF\xFF\xFF\x00", 8));
+        CHECK(window_has(base, ev, 0xE0, "\x0F\xAF\x43\x2C", 4) && window_has(base, ev, 0xE0, "\x48\x03\x4B\x18", 4));
+        CHECK(window_has(base, ev, 0x100, "\x8B\x47\x1C\x25\xFF\xFF\xFF\x00", 8));
+        CHECK(window_has(base, ev, 0x130, "\x8B\x47\x10\x25\xFF\xFF\xFF\x00", 8));
+        CHECK(window_has(base, ev, 0x720, "\x8B\x47\x20", 3) && window_has(base, ev, 0x720, "\x8B\x47\x24", 3) &&
+              window_has(base, ev, 0x720, "\x8B\x47\x28", 3));
+        CHECK(window_has(base, ev, 0x720, "\x48\x81\xC7\xCC\x00\x00\x00", 7));
+        CHECK(base[ev + SH_AI_RIG_EVAL_SOLVE_CALL] == 0xE8);
+        CHECK(rel_target(base, ev + SH_AI_RIG_EVAL_SOLVE_CALL, 5, 1) == rva[SH_AI_SIG_RIG_SOLVE]);
+        /* the demon's model and the model's animation object, as the setup reads them */
+        memcpy(&model, base + s + SH_AI_RIG_SITE_MODEL, 4);
+        memcpy(&anim, base + s + SH_AI_RIG_SITE_ANIM, 4);
+        printf("  rig: aligner 0x%X, model ai +0x%X, animation object model +0x%X\n", align, model, anim);
+        CHECK(model == 0x3DB0 && anim == 0xE98);
+    }
     if (rva[SH_AI_SIG_MOVE_STAGE]) {
         /* the stage is the int at animFSM +0x2A9C: mov eax,[rdi+0x2A9C]; dec eax; cmp eax,0x12 */
         CHECK(window_has(base, rva[SH_AI_SIG_MOVE_STAGE], 0x50, "\x8B\x87\x9C\x2A\x00\x00\xFF\xC8\x83\xF8\x12", 11));
