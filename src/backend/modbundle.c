@@ -825,7 +825,7 @@ int sh_mb_extension_allowed(const char *request)
 {
     static const char *const allowed[] = { ".decl", ".bmd6model", ".bmd6skl", ".bmd6anim", ".bimage",
                                            ".bmodel", ".bcm", ".bnk", ".json", ".bin", ".vspv",
-                                           ".fspv", ".cspv", ".mrpr", ".dmodel", NULL };
+                                           ".fspv", ".cspv", ".mrpr", ".dmodel", ".pmodel", NULL };
     const char *slash = strrchr(request, '/');
     const char *dot = strrchr(slash ? slash : request, '.');
     size_t i;
@@ -1355,6 +1355,10 @@ int sh_mb_logical_name(const char *r, char type[SH_MB_TYPE_CAP], char **name)
              mb_ends(r, ".vspv") || mb_ends(r, ".fspv") || mb_ends(r, ".cspv") ||
              mb_ends(r, ".mrpr")) cls = "renderProg";
     else if (mb_starts(r, "generated/discreteanimation/") || mb_ends(r, ".dmodel")) cls = "discreteAnimation";
+    /* The mesh a particle stage draws per particle (systemProperties.staticData
+     * "<name>.lwo"): the engine opens generated/<name>.pmodel, a vertex list
+     * with no reference inside it. */
+    else if (mb_ends(r, ".pmodel")) cls = "staticParticleModel";
     else if (mb_starts(r, "generated/anim/")) cls = "anim";
     else if (mb_starts(r, "generated/decalatlas/")) cls = "decalatlas";
     else if (mb_starts(r, "generated/lightatlas/")) cls = "lightatlas";
