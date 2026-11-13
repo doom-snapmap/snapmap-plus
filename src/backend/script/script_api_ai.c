@@ -3982,6 +3982,27 @@ static void *foot_table_detour(void *actor, int foot)
     return table;
 }
 
+/* The game lets a blend skip a front foot's event (ae_leftFoot and
+ * ae_rightFoot carry EVENTFLAG_CANSKIP) and not a rear foot's, so every
+ * clip of a blended walk fires its own rear-foot row and the rear table
+ * plays several times a step. The rear events take the front feet's skip
+ * bit, once; no model of the game itself fires a rear-foot event. */
+#define AI_EVENTFLAG_CANSKIP 1
+static void rear_feet_skip_as_front(void)
+{
+    static volatile LONG done;
+    const sh_script_engine *e = sh_script_api_engine();
+    int front;
+    if (done || !e || !e->event_flags) return;
+    front = e->event_flags("ae_leftFoot", 0);
+    if (front < 0) return;
+    if (front & AI_EVENTFLAG_CANSKIP) {
+        e->event_flags("ae_leftRearFoot", AI_EVENTFLAG_CANSKIP);
+        e->event_flags("ae_rightRearFoot", AI_EVENTFLAG_CANSKIP);
+    }
+    InterlockedExchange(&done, 1);
+}
+
 static int e_rear_footsteps(void *ai, const char *front, const char *rear)
 {
     void *f = sh_script_combat_decl("projectileImpactEffect", front);
@@ -3990,6 +4011,7 @@ static int e_rear_footsteps(void *ai, const char *front, const char *rear)
     int i, k, slot = -1, used = (int)g_foot_used;
     if (!f || !r) return -2;
     if (id == SH_SCRIPT_SPAWN_ID_NONE) return -1;
+    rear_feet_skip_as_front();
     if (!commit_hook((void *)g_foot_target, (void *)foot_table_detour, k_ai_foot_prologue, SH_AI_FOOT_STOLEN,
                      (void **)&g_foot_orig, &g_foot_failed, "rear_footsteps"))
         return -1;

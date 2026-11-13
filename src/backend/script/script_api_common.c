@@ -534,6 +534,7 @@ enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRA
 #define EV_FIND_VSLOT       0x10u
 #define EV_FORMAT           0x08u
 #define EV_NUMARGS          0x2Cu
+#define EV_FLAGS            0x38u       /* idEventDef.flags */
 /* traces */
 #define TRACE_CONTENTS      0x103085u   /* the SnapMap laser hazard's mask: the world, players and demons */
 #define TRACE_BLOCKS_DEMONS 0x20010u    /* what a Blocking Box adds to its contents when Block Demons is ticked */
@@ -835,6 +836,23 @@ static int e_event_format(const char *name, char *format, size_t cap)
     return 1;
 }
 
+static int e_event_flags(const char *name, int set)
+{
+    void *m = evmgr(), *def = NULL;
+    vfn_name_fn find = (vfn_name_fn)vfn(m, EV_FIND_VSLOT);
+    int flags = -1;
+    if (!find || !name) return -1;
+    __try {
+        def = find(m, name);
+        if (def) {
+            int *p = (int *)((uint8_t *)def + EV_FLAGS);
+            if (set & ~*p) *p |= set;
+            flags = *p;
+        }
+    } __except (av_only(GetExceptionCode())) { flags = -1; }
+    return flags;
+}
+
 /* Build engine arguments; 0 when an entity argument could not be built. */
 static int build_args(const sh_script_earg *args, int n, eng_arg *a)
 {
@@ -1131,7 +1149,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format, e_trace_as_demon
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

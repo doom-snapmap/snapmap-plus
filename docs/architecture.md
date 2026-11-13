@@ -2160,6 +2160,11 @@ is touched, and a removed demon answers nil.
   detoured (at the first call, 15 whole bytes) and, for foot indices 2 and 3
   of a demon that named a pair, answers `rear` where the game answered
   `front`. Records are per demon and spawn id; the tables are decl pointers.
+  The first call also gives the two rear-foot events the skip bit the game
+  gives the front feet (idEventDef.flags bit 1, read from `ae_leftFoot`):
+  without it every clip of a blended walk fires its own rear-foot row and
+  the rear table plays several times a step. No model of the game itself
+  fires a rear-foot event, so nothing else changes.
   `wound_hides(wound, meshes)` serves a demon whose gore wounds replace a
   piece of skin by a wound mesh. A wound of the game shows meshes (its
   `meshKits`) and cuts the model with clipping spheres; it names no mesh to

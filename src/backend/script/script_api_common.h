@@ -118,6 +118,11 @@ typedef struct sh_script_engine {
     /* trace, and what stops a demon is solid too: a Blocking Box with Block
      * Demons ticked, which the plain trace passes through. */
     int      (*trace_as_demon)(const float from[3], const float to[3], uint32_t ignore_spawn_id, sh_script_trace *out);
+    /* The flags of the engine event `name` (idEventDef.flags: 1 can be
+     * skipped, 2 can be suppressed, 4 client safe, 8 no script, 16 passive
+     * marker) after setting the bits of `set` in them, or -1 when the game
+     * has no such event. A set bit stays for the life of the process. */
+    int      (*event_flags)(const char *name, int set);
 } sh_script_engine;
 
 /* The floor under pos made of the engine's world trace: straight down from
