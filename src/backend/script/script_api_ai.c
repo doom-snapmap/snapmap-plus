@@ -1766,11 +1766,15 @@ static int refuse_no_hand(lua_State *L, const char *call)
 }
 
 /* ai:pull_trigger([check], [hand]): the engine pulls the trigger of the
- * weapon in `hand`. Without check it is the game's pullTrigger event; with
- * check = true it is the animation event ae_aIPullTrigger with its checkValid
- * set, which runs the fire gate first (the sight, cooldown, range and muzzle
- * tests of CheckPullTrigger) and pulls only when the gate passes. Answers
- * whether the trigger is held afterwards (nil when the hand holds no weapon). */
+ * weapon in `hand` through the demon's fire control, as its animation event
+ * ae_aIPullTrigger does: the fire control draws the burst from the weapon
+ * decl and holds the trigger for it. With check = true the event's checkValid
+ * is set, which runs the fire gate first (the sight, cooldown, range and
+ * muzzle tests of CheckPullTrigger) and pulls only when the gate passes.
+ * The game's bare pullTrigger events are not used: they pull the weapon past
+ * the fire control, no burst is drawn, and a demon in the WEAPON fire mode
+ * releases the trigger in its next think without a shot. Answers whether the
+ * trigger is held afterwards (nil when the hand holds no weapon). */
 static int l_pull_trigger(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -1787,16 +1791,14 @@ static int l_pull_trigger(lua_State *L)
     if (!ai) { lua_pushnil(L); return 1; }
     if (!(hand = hand_of(ai, hand))) return refuse_no_hand(L, "pull_trigger");
     if (!park(ai, h)) { lua_pushnil(L); return 1; }
-    if (check) {
+    {
         sh_ai_arg a[3];
         a[0] = arg_anim();
-        a[1] = arg_s('s', hand == SH_AI_HAND_LEFT ? "EQUIP_LEFT_HAND" : "EQUIP_RIGHT_HAND");
-        a[2] = arg_b(1);
+        /* the slot as the engine's equip slot parser reads it (its name table: "left_hand", "right_hand"; the
+         * enum spelling EQUIP_LEFT_HAND is refused with "invalid slot" and nothing is pulled) */
+        a[1] = arg_s('s', hand == SH_AI_HAND_LEFT ? "left_hand" : "right_hand");
+        a[2] = arg_b(check);
         run(ai, SH_AI_EV_AE_PULL_TRIGGER, a, 3, NULL);
-    } else if (hand == SH_AI_HAND_LEFT) {
-        run(ai, SH_AI_EV_PULL_TRIGGER_LEFT, NULL, 0, NULL);
-    } else {
-        run(ai, SH_AI_EV_PULL_TRIGGER, NULL, 0, NULL);
     }
     if (g_engine->trigger_state) st = g_engine->trigger_state(ai, hand);
     if (st < 0) lua_pushnil(L); else lua_pushboolean(L, st == 1);
@@ -2061,6 +2063,26 @@ static int l_rear_footsteps(lua_State *L)
     lua_pushstring(L, st == -2 ? "one of the two footstep tables is not a loaded projectileImpactEffect decl"
                                : "the game's footstep table choice could not be reached");
     return 2;
+}
+
+/* ai:held([hand]) -> the decl of the inventory item the demon holds in `hand`
+ * now (the mod's own name without its prefix, as equip takes it), or nil when
+ * the hand is empty. The engine's answer: a clip's ae_equipInventoryItem
+ * changes the held item without the script ordering it. */
+static int l_held(lua_State *L)
+{
+    char decl[512];
+    void *ai;
+    int hand = check_hand(L, 2, "held"), r;
+    NEED_OP(L, held, "held");
+    ai = self_ai(L, "held", NULL);
+    if (!ai) { lua_pushnil(L); return 1; }
+    if (!(hand = hand_of(ai, hand))) return refuse_no_hand(L, "held");
+    decl[0] = 0;
+    r = g_engine->held(ai, hand, decl, sizeof decl);
+    if (r == 1 && decl[0]) lua_pushstring(L, own_name(L, decl));
+    else lua_pushnil(L);
+    return 1;
 }
 
 /* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
@@ -2766,6 +2788,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "laser_add", l_laser_add },       { "laser_remove", l_laser_remove },
     { "rear_footsteps", l_rear_footsteps },
     { "wound_hides", l_wound_hides },
+    { "held", l_held },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3012,6 +3035,21 @@ static int e_item(void *ai, int index, char *decl, size_t cap, int *hand)
         strncpy_s(decl, cap, name, _TRUNCATE);
         if (hand) *hand = *(const int *)(d + SH_AI_DECL_EQUIP_SLOT);
         v = 1;
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_held(void *ai, int hand, char *decl, size_t cap)
+{
+    uint8_t *w = weapon_in(ai, hand);
+    int v = 0;
+    if (!decl || !cap) return -1;
+    decl[0] = 0;
+    if (!w) return 0;
+    __try {
+        const uint8_t *d = *(const uint8_t * const *)(w + SH_AI_ITEM_DECL);
+        const char *name = d ? *(const char * const *)(d + 8) : NULL;
+        if (name) { strncpy_s(decl, cap, name, _TRUNCATE); v = 1; }
     } __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
 }
@@ -3998,7 +4036,7 @@ static const sh_script_ai_engine k_engine = {
     e_pain_string, e_block_pain, e_weapon_hand, e_item,
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
-    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides
+    e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */

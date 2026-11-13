@@ -2091,9 +2091,14 @@ is touched, and a removed demon answers nil.
   (`FIREWHENREADY` and `SPRAYWHENREADY` are the self-firing modes) and
   `fire_mode()` answers the mode the script events set and the one the
   animation events set (`fireControl` +0x20 and +0x1C); `pull_trigger([check],
-  [hand])` is `pullTrigger`, or with `check` the animation event
-  `ae_aIPullTrigger` with `checkValid`, which runs the fire gate first, and
-  answers the trigger state read back; `release_trigger([hand])` is
+  [hand])` is the animation event `ae_aIPullTrigger` with the engine's own
+  slot name (`left_hand`, `right_hand`), so the pull goes through the fire
+  control, which draws the burst from the weapon decl (a bare `pullTrigger`
+  event skips it, and a demon in the `WEAPON` mode then releases in its next
+  think without a shot); `check` sets the event's `checkValid`, which runs the
+  fire gate first; it answers the trigger state read back; `held([hand])`
+  answers the decl of the item the engine holds in the hand now (a clip's
+  `ae_equipInventoryItem` changes it without the script); `release_trigger([hand])` is
   `releaseTrigger`; `trigger_pulled` and `weapon_ready` read the engine's own
   trigger word and next-pull time; `muzzle_on_target([test], [hand])` calls the
   engine's muzzle test with the weapon in the hand (weights `"pull"`,

@@ -121,6 +121,7 @@ typedef struct fent {
     const char *item[4];
     int   item_hand[4];
     int   asked_hand;
+    const char *held;      /* the item the engine holds in the hand now (ai:held) */
     /* the engine's fire control and aim focus (the fire calls) */
     int   sim;             /* the events change this state as the engine would */
     int   fire_state, fire_anim;
@@ -324,6 +325,15 @@ static int f_rear_footsteps(void *ai, const char *front, const char *rear)
     return 1;
 }
 static int g_no_wound, g_no_mesh;
+static int f_held(void *ai, int hand, char *decl, size_t cap)
+{
+    fent *e = (fent *)ai;
+    (void)hand;
+    if (!e->held) return 0;
+    strncpy_s(decl, cap, e->held, _TRUNCATE);
+    return 1;
+}
+
 static int f_wound_hides(void *ai, const char *wound, const char *const *meshes, int n)
 {
     char line[600];
@@ -405,7 +415,7 @@ static const sh_script_ai_engine g_fake = {
     f_pain_string, f_block_pain, f_weapon_hand, f_item,
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
-    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides
+    f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1150,6 +1160,7 @@ static void test_weapon_hands(void)
         "    print('hand ' .. tostring(self:equip('weapon/ai/brute/cannon')))\n"
         "    print('hand2 ' .. tostring(self:equip('weapon/ai/brute/cannon')))\n"
         "    print('hand3 ' .. tostring(self:equip(0)))\n"
+        "    print('held ' .. tostring(self:held()) .. ' ' .. tostring(self:held('left')))\n"
         "    self:trigger(true)\n"
         "    print('pulled ' .. tostring(self:trigger_pulled()))\n"
         "    self:trigger(true, 'left')\n"
@@ -1166,6 +1177,7 @@ static void test_weapon_hands(void)
         "  end\n"
         "end)\n"));
     g_ent[1].nitems = 2;   /* this test carries two */
+    g_ent[1].held = "mods/aaaaaaaa/weapon/ai/brute/claw";
     g_ent[1].item[0] = "mods/aaaaaaaa/weapon/ai/brute/claw";
     g_ent[1].item_hand[0] = SH_AI_HAND_RIGHT;
     g_ent[1].item[1] = "mods/aaaaaaaa/weapon/ai/brute/cannon";
@@ -1175,6 +1187,8 @@ static void test_weapon_hands(void)
     tick();
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "hand left\nhand2 left\nhand3 right\n") != NULL);
+    /* the held item is the engine's answer, the mod's own name without its prefix */
+    CHECK(strstr(log, "held weapon/ai/brute/claw weapon/ai/brute/claw\n") != NULL);
     /* the right hand is the weapon hand: the cannon in the left one is never fired, said once */
     CHECK(strstr(log, "weapon/ai/brute/cannon goes in the demon's left hand") != NULL);
     CHECK(strstr(log, "set weaponSlot = \"EQUIP_LEFT_HAND\"") != NULL);
@@ -1307,13 +1321,13 @@ static void test_fire_calls(void)
     CHECK(strstr(log, "mode1 AIFIREMODE_FIREWHENREADY AIFIREMODE_HOLDFIRE\n") != NULL);
     CHECK(strstr(log, "mode2 AIFIREMODE_HOLDFIRE AIFIREMODE_HOLDFIRE\n") != NULL);
     CHECK(strstr(g_events, "park\n1:ssaction") == NULL);   /* the park comes first, once */
-    CHECK(strstr(g_events, "1:setFireMode(3)\n1:setFireMode(4)\n1:setFireMode(0)\n1:pullTriggerRight()\n"
-                           "1:releaseTriggerRight()\n") != NULL);
+    CHECK(strstr(g_events, "1:setFireMode(3)\n1:setFireMode(4)\n1:setFireMode(0)\n"
+                           "1:ae_aIPullTrigger(noanim,right_hand,0)\n1:releaseTriggerRight()\n") != NULL);
     /* the trigger: the engine's own state is read back after each order */
     CHECK(strstr(log, "pull true\npulled true\nreleased false\n") != NULL);
-    CHECK(strstr(g_events, "1:ae_aIPullTrigger(noanim,EQUIP_RIGHT_HAND,1)\n"
-                           "1:ae_aIPullTrigger(noanim,EQUIP_LEFT_HAND,1)\n1:releaseTriggerLeft()\n"
-                           "1:pullTriggerLeft()\n") != NULL);
+    CHECK(strstr(g_events, "1:ae_aIPullTrigger(noanim,right_hand,1)\n"
+                           "1:ae_aIPullTrigger(noanim,left_hand,1)\n1:releaseTriggerLeft()\n"
+                           "1:ae_aIPullTrigger(noanim,left_hand,0)\n") != NULL);
     CHECK(strstr(log, "gated false\ngated left false\nplain left true\n") != NULL);
     /* the muzzle test: the engine's answer and the inputs it read */
     CHECK(strstr(log, "muzzle true true 12.0 24.5 PRECISE true true true\n") != NULL);
@@ -1503,7 +1517,7 @@ static void test_enemy_weapon_sdk(void)
     /* the library asks the engine and keeps no fire state: the focus follows the enemy once per enemy, a fixed
      * point is left alone, and nil gives the enemy back */
     CHECK(strstr(g_events, "1:equipInventoryItemByIndex(0)\n1:setFireMode(3)\n1:setFocus(e2,1,1,3)\n"
-                           "1:ae_aIPullTrigger(noanim,EQUIP_RIGHT_HAND,1)\n1:releaseTriggerRight()\n"
+                           "1:ae_aIPullTrigger(noanim,right_hand,1)\n1:releaseTriggerRight()\n"
                            "clear_move\n1:ssaction_Idle(-1,1)\n") != NULL);
     CHECK(strstr(g_events, "1:releaseTriggerRight()\nclear_move") != NULL);
     {
@@ -1859,7 +1873,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 46);
+    CHECK(sh_script_ai_register() == 47);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

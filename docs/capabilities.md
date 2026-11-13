@@ -979,7 +979,7 @@ script sets in a cvar or a decl is put back when the map ends. It drives demons 
 `path_length`, `path_points`, `find_position`, `firing_position`, `trigger`, `weapon_ready`,
 `recoil`, `aim_point`, `equip`, `laser`, `focus_tag`, `anim_valid`, `anim_force_via`, the game's
 own fire control (`fire_mode` sets the engine's fire mode so it pulls, holds and releases the
-trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `muzzle_on_target`, `focus`,
+trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `held`, `muzzle_on_target`, `focus`,
 `tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
 toward its focus), gives a demon lasers of its own on the game's laser targeter (`laser_add`,
 `laser_remove`) and a footstep table of their own to its rear feet (`rear_footsteps`), hides

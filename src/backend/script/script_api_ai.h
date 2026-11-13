@@ -435,6 +435,9 @@ typedef struct sh_script_ai_engine {
      * hideMeshes. 1 set, -2 the wound decl is not loaded, -3 the model has
      * no mesh of one of the names (nothing set), -1 unavailable. */
     int      (*wound_hides)(void *ai, const char *wound, const char *const *meshes, int n);
+    /* The decl name of the inventory item in `hand` now (the engine's weapon in that equip slot): 1 and the
+     * name, 0 when the hand is empty, -1 when it cannot be read. */
+    int      (*held)(void *ai, int hand, char *decl, size_t cap);
 } sh_script_ai_engine;
 
 /* The gore init site (SH_AI_SIG_GORE_INIT_SITE): the cvar test, the two

@@ -73,7 +73,9 @@ function W.fire_mode(e, mode)
   return e:fire_mode(mode)
 end
 
---- The engine pulls the trigger. With check = true the game's fire gate runs first and the trigger
+--- The engine's fire control pulls the trigger and draws the burst from the weapon decl (the game's
+-- ae_aIPullTrigger path; a bare pullTrigger event would skip the fire control and a demon in the WEAPON
+-- mode would release at once without a shot). With check = true the game's fire gate runs first and the trigger
 -- is pulled only when it passes. Answers whether the trigger is held afterwards.
 function W.pull(e, check)
   return e:pull_trigger(check and true or false)
