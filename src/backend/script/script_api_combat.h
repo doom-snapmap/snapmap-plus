@@ -11,6 +11,7 @@
  *   explode(pos, damage, [effect], [attacker]) -> the effect entity or nil
  *   fx(e, condition)                           fx_stop(e, condition)
  *   fx(effect, pos, [dir]) -> e                fx_move(e, pos, [dir])   fx_stop(e)
+ *   fx_hard_stops([effect]) -> boolean         (effect: an fx decl; none: every fx decl of this mod)
  *   sound(e, sound, [channel])
  *   e:tag(name) -> pos, forward                e:pain() -> reaction or nil
  *     (name: a tag of a demon's md6Def, else a joint)
@@ -50,6 +51,10 @@
  *                    0x14082B430 / 0x14082C390), which start and stop the condition on its FX manager
  *   fx(effect, pos)  the mod's entityDef spawned through spawn() (its caps), placed and turned to `dir`;
  *                    fx_stop removes it
+ *   fx_hard_stops    a detour of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870:
+ *                    manager, action index, time, immediate, recycle), installed at the first call. For an
+ *                    action of a named decl it skips the fade the game gives a stopped action where DOOM
+ *                    Eternal's stop gives none (see "Hard stops" below); every other stop runs unchanged
  *   sound            startSoundShader (200, 'di'): a sound decl on a channel of the entity
  *   tag              getJointHandle / getJointPos / getJointAngle (256 / 259 / 260, the base event
  *                    dispatcher's own cases): the joint in world space
@@ -104,6 +109,9 @@ typedef struct sh_script_combat_engine {
     /* damage a player by the game's own player damage call with an inflictor: 1 done, 0 when the victim is not a
      * player of that class (the caller then sends the entity's damage event) */
     int   (*player_damage)(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3]);
+    /* make the FX manager's stop follow the hard stop rule for the decls named with sh_fx_hard_add: 1 when the
+     * hook is in place, 0 when this executable cannot serve it */
+    int   (*fx_hard_stops)(void);
 } sh_script_combat_engine;
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
@@ -114,6 +122,43 @@ void sh_script_combat_register(void);
 /* Forget every record (a new map's states, or the tests) and register the
  * release of records with the handle table. */
 void sh_script_combat_reset(void);
+
+/* -------------------------------------------------------------- hard stops */
+
+/* The game ends a stopped action of an effect one way for every kind of
+ * item: with a fade-out time the action fades for that long from the stop,
+ * without one it ends in that frame. DOOM Eternal's effects are authored for
+ * another rule (its FX manager's stop, read in its executable): a model, a
+ * render parm item, a radial or gaussian blur, a screen overlay and a screen
+ * particle end in the frame of the stop whatever their fade-out time, which
+ * acts on them only at the end of their own duration; lights, particles,
+ * sounds and ribbons fade as the game's do. And an action the stop reaches
+ * while it still waits out its delay is started later with a fade factor
+ * below zero, with which a particle draws nothing. fx_hard_stops gives the
+ * named decls that rule: the first kinds end at once, and a particle or a
+ * light stopped inside its delay ends there and is never started. Names are
+ * whole decl names ("mods/<salt>/character/x") or a prefix ending in '/'
+ * ("mods/<salt>/": every decl of the mod). The game's own decls are never
+ * named, so they keep the game's rule. */
+#define SH_FX_TYPE_LIGHT           0     /* fxActionType_t of build 13954591 (both renderers) */
+#define SH_FX_TYPE_PARTICLE        1
+#define SH_FX_TYPE_MODEL           4
+#define SH_FX_TYPE_RENDERPARM      9
+#define SH_FX_TYPE_BLUR_RADIAL     13
+#define SH_FX_TYPE_BLUR_GAUSSIAN   14
+#define SH_FX_TYPE_SCREEN_OVERLAY  20
+/* 1 when a stop that is not immediate ends an action of this type in that
+ * frame under the rule: `screen_particle` is the item's isScreenPrt, `waiting`
+ * says the action's delay has not passed yet. 0: the game's own stop. */
+int  sh_fx_hard_ends(int type, int screen_particle, int waiting);
+/* Name a decl, or every decl under a prefix that ends in '/'. 1 named (or
+ * already named), 0 refused (empty, too many, no memory). Any thread. */
+int  sh_fx_hard_add(const char *name);
+/* 1 when a decl of this name follows the rule. Any thread. */
+int  sh_fx_hard_is(const char *decl_name);
+int  sh_fx_hard_count(void);
+/* Forget every name (a new map's states, or the tests). */
+void sh_fx_hard_reset(void);
 
 /* ------------------------------------------------- records from the hooks */
 
@@ -174,6 +219,7 @@ enum sh_combat_sig {
     SH_COMBAT_SIG_ENT_START_FX,      /* idEntity StartFX(entity, condition, extra): called */
     SH_COMBAT_SIG_ENT_STOP_FX,       /* idEntity StopFX(entity, condition, extra): called */
     SH_COMBAT_SIG_PLAYER_DAMAGE,     /* idPlayer::Damage(player, inflictor, attacker, parms, scale, dir, hit): called */
+    SH_COMBAT_SIG_FX_ACTION_STOP,    /* idFXManager's stop of one action (manager, index, time, immediate, recycle): detoured */
     SH_COMBAT_SIG_COUNT
 };
 extern const sig_entry SH_COMBAT_SIGNATURES[];
@@ -182,6 +228,29 @@ extern const sig_entry SH_COMBAT_SIGNATURES[];
 #define SH_COMBAT_DAMAGE_APPLY_STOLEN 14
 #define SH_COMBAT_SET_PAIN_STOLEN     15
 #define SH_COMBAT_LAUNCH_STOLEN       15
+/* The FX manager's stop of one action: six pushes and sub rsp (whole,
+ * position-independent). */
+#define SH_COMBAT_FX_STOP_STOLEN      16
+static const unsigned char k_combat_fx_stop_prologue[SH_COMBAT_FX_STOP_STOLEN] = {
+    0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x55, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00
+};
+/* What that function reads (its own code, both renderers; the test compares
+ * the bytes): the manager's decl and actions, the decl's items, and of an
+ * item and an action the fields its fade branch tests. */
+#define SH_FX_MGR_DECL            0x18u    /* idFXManager: its idDeclFX* */
+#define SH_FX_MGR_ACTIONS         0x58u    /*              idFXActionData array, one per item */
+#define SH_FX_DECL_ITEMS          0x80u    /* idDeclFX: idFXSingleAction array */
+#define SH_FX_DECL_COUNT          0x88u    /*           and its count */
+#define SH_FX_ITEM_SIZE           0x570u
+#define SH_FX_ITEM_TYPE           0x14u    /* idFXSingleAction: fxActionType_t */
+#define SH_FX_ITEM_SCREEN_PRT     0x20Eu   /*                   particleParms.isScreenPrt */
+#define SH_FX_ACTION_SIZE         0x128u
+#define SH_FX_ACTION_FLAGS        0x00u    /* idFXActionData: bit 1 requested, bit 4 fading */
+#define SH_FX_ACTION_DELAY        0x04u    /*                 the delay drawn at the request, ms */
+#define SH_FX_ACTION_REQUEST      0x08u    /*                 the request's time, ms */
+#define SH_FX_ACTION_REQUESTED    0x02u
+#define SH_FX_ACTION_FADING       0x10u
+#define SH_FX_STOP_FADE_BRANCH    0x90u    /* the function's fade branch (the test compares its bytes) */
 
 /* Engine layout the hooks and the calls read (both renderers). */
 #define SH_COMBAT_REC_INFLICTOR   0x000u   /* damage record: idEntity* inflictor */

@@ -26,7 +26,14 @@
  *   CombatPlayerDamage  VK 0x140DC3880  GL 0x140DC30A0  idPlayer::Damage(player, inflictor, attacker, parms
  *                       (decl + 0x70), scale, direction*, hit*): slot 130 of the player's vtable in both images. It takes the
  *                       direction of a decl with radialDmgUseInflictorToTargetDir from the inflictor and warns
- *                       when there is none; the `damage` event carries none. */
+ *                       when there is none; the `damage` event carries none.
+ *   CombatFxActionStop  VK 0x1416EEEF0  GL 0x1416EF870  idFXManager's stop of one action (manager, action index,
+ *                       fx time, immediate, recycle): returns when the action is not requested (flags bit 1);
+ *                       with a fade-out time, not immediate and not fading yet it pulls the fade-out start to
+ *                       now, sets the fading bit and returns (the fade branch, +0x90); otherwise it ends the
+ *                       action by its type and clears it. Called by the stop by condition (VK 0x1416EF740), the
+ *                       stop of all, the restart and the item update at the end of an action's time. Detoured;
+ *                       16-byte window. */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -59,6 +66,10 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
       "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 18 F2 FF FF 48 81 EC A8 0E 00 00 48 C7 45 E0 FE FF FF "
       "FF 0F 29 70 A8 0F 29 78 98 44 0F 29 40 88",
       0xDC3880u, 0xDC30A0u },
+    { "CombatFxActionStop",
+      "40 53 55 56 57 41 55 41 57 48 81 EC 88 00 00 00 48 8B 41 18 45 0F B6 F9 48 63 FA 41 8B F0 48 69 DF 28 01 00 00 "
+      "48 69 EF 70 05 00 00 4C 8B E9 48 89 7C 24 40",
+      0x16EEEF0u, 0x16EF870u },
     { NULL, NULL, 0, 0 }
 };
 

@@ -32,6 +32,78 @@ void sh_script_combat_set_engine(const sh_script_combat_engine *engine)
 
 #define CE(fn) (g_have_ce && g_ce.fn)
 
+/* -------------------------------------------------------------- hard stops */
+
+#define FX_HARD_MAX 64
+static SRWLOCK g_fx_hard_lock = SRWLOCK_INIT;
+static char   *g_fx_hard[FX_HARD_MAX];       /* whole names, or prefixes ending in '/' */
+static volatile LONG g_fx_hard_n;
+
+int sh_fx_hard_ends(int type, int screen_particle, int waiting)
+{
+    switch (type) {
+    case SH_FX_TYPE_MODEL:
+    case SH_FX_TYPE_RENDERPARM:
+    case SH_FX_TYPE_BLUR_RADIAL:
+    case SH_FX_TYPE_BLUR_GAUSSIAN:
+    case SH_FX_TYPE_SCREEN_OVERLAY:
+        return 1;
+    case SH_FX_TYPE_PARTICLE:
+        return screen_particle || waiting;
+    case SH_FX_TYPE_LIGHT:
+        return waiting != 0;
+    default:
+        return 0;
+    }
+}
+
+static int fx_hard_matches(const char *entry, const char *name)
+{
+    size_t n = strlen(entry);
+    if (n && entry[n - 1] == '/') return _strnicmp(entry, name, n) == 0;
+    return _stricmp(entry, name) == 0;
+}
+
+int sh_fx_hard_is(const char *decl_name)
+{
+    int i, n, is = 0;
+    if (!g_fx_hard_n || !decl_name || !decl_name[0]) return 0;
+    AcquireSRWLockShared(&g_fx_hard_lock);
+    n = (int)g_fx_hard_n;
+    for (i = 0; i < n && !is; i++) is = fx_hard_matches(g_fx_hard[i], decl_name);
+    ReleaseSRWLockShared(&g_fx_hard_lock);
+    return is;
+}
+
+int sh_fx_hard_add(const char *name)
+{
+    int i, n, ok = 0;
+    char *copy;
+    if (!name || !name[0]) return 0;
+    AcquireSRWLockExclusive(&g_fx_hard_lock);
+    n = (int)g_fx_hard_n;
+    for (i = 0; i < n; i++)
+        if (!_stricmp(g_fx_hard[i], name)) { ok = 1; break; }
+    if (!ok && n < FX_HARD_MAX && (copy = _strdup(name)) != NULL) {
+        g_fx_hard[n] = copy;
+        InterlockedExchange(&g_fx_hard_n, n + 1);
+        ok = 1;
+    }
+    ReleaseSRWLockExclusive(&g_fx_hard_lock);
+    return ok;
+}
+
+int sh_fx_hard_count(void) { return (int)g_fx_hard_n; }
+
+void sh_fx_hard_reset(void)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_fx_hard_lock);
+    for (i = 0; i < (int)g_fx_hard_n; i++) { free(g_fx_hard[i]); g_fx_hard[i] = NULL; }
+    InterlockedExchange(&g_fx_hard_n, 0);
+    ReleaseSRWLockExclusive(&g_fx_hard_lock);
+}
+
 /* -------------------------------------------------- records from the hooks */
 
 /* Three maps keyed by a 32-bit value: launches by projectile spawn id, last
@@ -179,6 +251,7 @@ void sh_script_combat_reset(void)
     g_fire_owner = 0;
     g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
     ReleaseSRWLockExclusive(&g_rec_lock);
+    sh_fx_hard_reset();
     sh_script_handles_on_gone(rec_gone);
 }
 
@@ -659,6 +732,22 @@ static int l_fx_stop(lua_State *L)
     }
 }
 
+/* fx_hard_stops([effect]): the hard stop rule (script_api_combat.h) for one fx decl of this mod, or for all of
+ * them. true when the rule is in place for it. */
+static int l_fx_hard_stops(lua_State *L)
+{
+    const char *name;
+    if (lua_isnoneornil(L, 1)) {
+        lua_settop(L, 0);
+        lua_pushfstring(L, "mods/%s/", sh_script_salt(L));
+        name = lua_tostring(L, -1);
+    } else {
+        name = sh_script_check_name(L, 1, "fx_hard_stops", 0, NULL);
+    }
+    if (!CE(fx_hard_stops) || !g_ce.fx_hard_stops()) return bool1(L, 0);
+    return bool1(L, sh_fx_hard_add(name));
+}
+
 /* explode(pos, damage, [effect], [attacker]) */
 static int l_explode(lua_State *L)
 {
@@ -927,6 +1016,7 @@ void sh_script_combat_register(void)
         { SH_SCRIPT_API_GLOBAL, "fx", l_fx },
         { SH_SCRIPT_API_GLOBAL, "fx_move", l_fx_move },
         { SH_SCRIPT_API_GLOBAL, "fx_stop", l_fx_stop },
+        { SH_SCRIPT_API_GLOBAL, "fx_hard_stops", l_fx_hard_stops },
         { SH_SCRIPT_API_GLOBAL, "sound", l_sound },
         { SH_SCRIPT_API_METHOD, "damage", l_damage },
         { SH_SCRIPT_API_METHOD, "tag", l_tag },
@@ -948,6 +1038,7 @@ void sh_script_combat_register(void)
 #include "../feature_health.h"
 #include "../entity.h"
 #include "../engine_build.h"
+#include "../hook.h"
 
 #define DECL_STATE     0x2Cu       /* bit 0 failed to load, bit 1 not loaded */
 #define FX_MAX         1024
@@ -1158,6 +1249,65 @@ static int c_stop_fx(void *ent, int condition)
     return ok;
 }
 
+/* The FX manager's stop of one action. For an action of a decl named with
+ * fx_hard_stops that the rule ends at once, the fading bit is set before the
+ * game's own stop runs: its fade branch is then skipped and it ends and
+ * clears the action in this frame, as it does for a second stop. */
+typedef void (*fx_action_stop_fn)(void *mgr, int index, int now, unsigned char immediate, unsigned char recycle);
+static fx_action_stop_fn g_fx_stop_target, g_fx_stop_orig;
+static int g_fx_stop_failed;
+
+static void fx_action_stop_detour(void *mgr, int index, int now, unsigned char immediate, unsigned char recycle)
+{
+    if (!immediate && g_fx_hard_n && mgr && index >= 0) {
+        __try {
+            const uint8_t *decl = *(const uint8_t * const *)((const uint8_t *)mgr + SH_FX_MGR_DECL);
+            uint8_t *acts = *(uint8_t * const *)((const uint8_t *)mgr + SH_FX_MGR_ACTIONS);
+            if (decl && acts && index < *(const int *)(decl + SH_FX_DECL_COUNT)
+                && sh_fx_hard_is(*(const char * const *)(decl + SH_COMBAT_DECL_NAME))) {
+                const uint8_t *item = *(const uint8_t * const *)(decl + SH_FX_DECL_ITEMS) + (size_t)index * SH_FX_ITEM_SIZE;
+                uint8_t *act = acts + (size_t)index * SH_FX_ACTION_SIZE;
+                uint32_t flags = *(const uint32_t *)(act + SH_FX_ACTION_FLAGS);
+                if ((flags & SH_FX_ACTION_REQUESTED) && !(flags & SH_FX_ACTION_FADING)) {
+                    int start = *(const int *)(act + SH_FX_ACTION_DELAY) + *(const int *)(act + SH_FX_ACTION_REQUEST);
+                    if (sh_fx_hard_ends(*(const int *)(item + SH_FX_ITEM_TYPE), item[SH_FX_ITEM_SCREEN_PRT] != 0, now < start))
+                        *(uint32_t *)(act + SH_FX_ACTION_FLAGS) = flags | SH_FX_ACTION_FADING;
+                }
+            }
+        } __except (av_only(GetExceptionCode())) { }
+    }
+    g_fx_stop_orig(mgr, index, now, immediate, recycle);
+}
+
+static int c_fx_hard_stops(void)
+{
+    void *tramp;
+    if (g_fx_stop_orig && hook_is_installed((void *)g_fx_stop_orig)) return 1;
+    if (g_fx_stop_failed || !g_fx_stop_target) return 0;
+    if (memcmp((const void *)g_fx_stop_target, k_combat_fx_stop_prologue, SH_COMBAT_FX_STOP_STOLEN)) {
+        g_fx_stop_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops is unavailable in this session: the game function it needs is not the "
+                   "expected one (another tool may have changed it).");
+        return 0;
+    }
+    tramp = hook_prepare((void *)g_fx_stop_target, (void *)fx_action_stop_detour, SH_COMBAT_FX_STOP_STOLEN);
+    if (!tramp) {
+        g_fx_stop_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops is unavailable in this session; the hook could not be prepared (%s).",
+                   hook_last_failure());
+        return 0;
+    }
+    g_fx_stop_orig = (fx_action_stop_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_fx_stop_orig = NULL;
+        g_fx_stop_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops is unavailable in this session; the hook could not be installed.");
+        return 0;
+    }
+    combat_log("SCRIPTS: fx_hard_stops hook installed at %p", (void *)g_fx_stop_target);
+    return 1;
+}
+
 static void *clean(const sig_result *r, size_t n, const char *name)
 {
     size_t i;
@@ -1178,7 +1328,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
 {
     static const sh_script_combat_engine engine = {
         c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
-        c_start_fx, c_stop_fx, c_player_damage
+        c_start_fx, c_stop_fx, c_player_damage, c_fx_hard_stops
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;
@@ -1211,6 +1361,8 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     if (!g_ent_start_fx || !g_ent_stop_fx)
         combat_off("the game's entity effect calls were not found in this executable, so fx(e, condition) and "
                    "fx_stop(e, condition) do nothing on an effect entity");
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_FX_ACTION_STOP], &r) == SIG_OK)
+        g_fx_stop_target = (fx_action_stop_fn)r.addr;   /* without it fx_hard_stops answers false */
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
     g_decl_register = clean(results, count, "DeclRegisterFile");
     g_decl_type = (type_fn)clean(results, count, "DeclTypeByName");

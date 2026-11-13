@@ -9,6 +9,8 @@
  *     calls the OnDamage dispatcher; Event_LaunchProjectileAtTarget calls
  *     idProjectile::Launch; the ae_radiusDamage handler calls RadiusDamage;
  *     SetPainReaction writes ai +0x5060;
+ *   - the FX manager's stop of one action reads the fields the hard stop
+ *     rule reads, and its fade branch is the code the rule skips;
  *   - idProjectile's vtable (by its RTTI name) holds Explode at +0xAA0;
  *   - the painType_t, soundChannel_t and fxCondition_t tables are found by
  *     sh_script_combat_enum_find with the names and values the calls use.
@@ -145,6 +147,34 @@ static void check_image(const char *path)
         if (!rva[i]) continue;
         CHECK(sh_x64_stolen_boundary(base + rva[i], 64, 14, 48, &flags) == windows[i]);
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+    }
+
+    /* the FX manager's stop of one action: its window, the fields it reads and its fade branch */
+    if (rva[SH_COMBAT_SIG_FX_ACTION_STOP]) {
+        const uint8_t *f = base + rva[SH_COMBAT_SIG_FX_ACTION_STOP];
+        unsigned flags = 0;
+        /* the fade branch: fadeOutTime above zero, not immediate, not fading (flags bit 0x10), stop time after
+         * now or looping; then the fade-out start is pulled to now */
+        static const uint8_t branch[] = {
+            0xF3, 0x0F, 0x10, 0x45, 0x2C,       /* movss xmm0, [rbp+0x2C]   the item's fadeOutTime */
+            0x0F, 0x57, 0xF6, 0x0F, 0x2F, 0xC6, /* xorps xmm6, xmm6 ; comiss xmm0, xmm6 */
+            0x76, 0x43,                         /* jbe   end */
+            0x45, 0x84, 0xFF, 0x75, 0x3E,       /* test r15b, r15b ; jne end     immediate */
+            0x8B, 0x0B, 0xF6, 0xC1, 0x10,       /* mov ecx, [rbx] ; test cl, 0x10   the action's fading bit */
+            0x75, 0x37,                         /* jne   end */
+            0x8B, 0x43, 0x0C, 0x2B, 0xC6        /* mov eax, [rbx+0xC] ; sub eax, esi   stop time - now */
+        };
+        CHECK(sh_x64_stolen_boundary(f, 64, 14, 48, &flags) == SH_COMBAT_FX_STOP_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(f, k_combat_fx_stop_prologue, SH_COMBAT_FX_STOP_STOLEN));
+        CHECK(!memcmp(f + 0x10, "\x48\x8B\x41\x18", 4) && SH_FX_MGR_DECL == 0x18);           /* mov rax, [rcx+0x18] */
+        CHECK(!memcmp(f + 0x1E, "\x48\x69\xDF\x28\x01\x00\x00", 7) && SH_FX_ACTION_SIZE == 0x128); /* imul rbx, rdi, 0x128 */
+        CHECK(!memcmp(f + 0x25, "\x48\x69\xEF\x70\x05\x00\x00", 7) && SH_FX_ITEM_SIZE == 0x570);   /* imul rbp, rdi, 0x570 */
+        CHECK(!memcmp(f + 0x34, "\x48\x03\x59\x58", 4) && SH_FX_MGR_ACTIONS == 0x58);        /* add rbx, [rcx+0x58] */
+        CHECK(!memcmp(f + 0x3D, "\x48\x03\xA8\x80\x00\x00\x00", 7) && SH_FX_DECL_ITEMS == 0x80);   /* add rbp, [rax+0x80] */
+        CHECK(!memcmp(f + 0x44, "\xF6\x03\x02", 3) && SH_FX_ACTION_REQUESTED == 2);          /* test byte [rbx], 2 */
+        CHECK(!memcmp(f + 0x59, "\x83\x7D\x14", 3) && SH_FX_ITEM_TYPE == 0x14);              /* cmp dword [rbp+0x14], .. */
+        CHECK(!memcmp(f + SH_FX_STOP_FADE_BRANCH, branch, sizeof branch) && SH_FX_ACTION_FADING == 0x10);
     }
 
     /* the type lookup the state-machine class bridge detours */

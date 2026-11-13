@@ -309,8 +309,11 @@ static int c_stop_fx(void *ent, int cond)
     return 1;
 }
 
+static int g_hard_hook = 1, g_hard_asked;
+static int c_fx_hard_stops(void) { g_hard_asked++; return g_hard_hook; }
+
 static const sh_script_combat_engine k_combat = { c_decl, c_radius, c_explode, c_pain, c_name, c_fx, c_world,
-                                                 c_start_fx, c_stop_fx };
+                                                 c_start_fx, c_stop_fx, NULL, c_fx_hard_stops };
 
 static void *h_resolve(uint32_t id) { return by_id(id); }
 
@@ -493,6 +496,67 @@ static void test_effects_sound(void)
     CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,7);"));
 }
 
+/* The hard stop rule: which stops end an action at once, which decls are named, and the call. */
+static void test_fx_hard_stops(void)
+{
+    int type;
+    /* a model, a render parm item, the two blurs and a screen overlay end at the stop, waiting or running */
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_MODEL, 0, 0) == 1 && sh_fx_hard_ends(SH_FX_TYPE_MODEL, 0, 1) == 1);
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_RENDERPARM, 0, 0) == 1);
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_BLUR_RADIAL, 0, 0) == 1 && sh_fx_hard_ends(SH_FX_TYPE_BLUR_GAUSSIAN, 0, 0) == 1);
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_SCREEN_OVERLAY, 0, 0) == 1);
+    /* a particle fades as the game fades it, unless it is a screen particle or still waits out its delay */
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_PARTICLE, 0, 0) == 0);
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_PARTICLE, 1, 0) == 1);
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_PARTICLE, 0, 1) == 1);
+    /* a light fades; one that waits is never started */
+    CHECK(sh_fx_hard_ends(SH_FX_TYPE_LIGHT, 0, 0) == 0 && sh_fx_hard_ends(SH_FX_TYPE_LIGHT, 0, 1) == 1);
+    /* every other kind keeps the game's stop: decals, sounds, shakes, ribbons ... */
+    for (type = 0; type <= 24; type++) {
+        if (type == SH_FX_TYPE_LIGHT || type == SH_FX_TYPE_PARTICLE || type == SH_FX_TYPE_MODEL
+            || type == SH_FX_TYPE_RENDERPARM || type == SH_FX_TYPE_BLUR_RADIAL || type == SH_FX_TYPE_BLUR_GAUSSIAN
+            || type == SH_FX_TYPE_SCREEN_OVERLAY) continue;
+        CHECK(sh_fx_hard_ends(type, 0, 0) == 0 && sh_fx_hard_ends(type, 1, 1) == 0);
+    }
+
+    /* names: whole, or a prefix that ends in a slash; the game's own decls are never named */
+    sh_fx_hard_reset();
+    CHECK(sh_fx_hard_count() == 0 && !sh_fx_hard_is("mods/" SALT "/character/brute"));
+    CHECK(!sh_fx_hard_add(NULL) && !sh_fx_hard_add(""));
+    CHECK(sh_fx_hard_add("mods/" SALT "/character/brute") && sh_fx_hard_add("mods/" SALT "/character/brute"));
+    CHECK(sh_fx_hard_count() == 1);
+    CHECK(sh_fx_hard_is("mods/" SALT "/character/brute") && sh_fx_hard_is("MODS/" SALT "/Character/Brute"));
+    CHECK(!sh_fx_hard_is("mods/" SALT "/character/brute2") && !sh_fx_hard_is("mods/" SALT "/character"));
+    CHECK(!sh_fx_hard_is("character/hellknight") && !sh_fx_hard_is(NULL) && !sh_fx_hard_is(""));
+    CHECK(sh_fx_hard_add("mods/othersalt/"));
+    CHECK(sh_fx_hard_is("mods/othersalt/weapon/rocket") && !sh_fx_hard_is("mods/othersal/weapon/rocket"));
+    sh_fx_hard_reset();
+    CHECK(sh_fx_hard_count() == 0 && !sh_fx_hard_is("mods/othersalt/weapon/rocket"));
+
+    /* the call: one decl of the mod, then every decl of the mod; it asks the engine for the hook each time */
+    g_hard_asked = 0;
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  print('one', fx_hard_stops('character/brute'))\n"
+        "  print('all', fx_hard_stops())\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "one\ttrue"));
+    CHECK(has(g_log, "all\ttrue"));
+    CHECK(g_hard_asked == 2 && sh_fx_hard_count() == 2);
+    CHECK(sh_fx_hard_is("mods/" SALT "/character/brute") && sh_fx_hard_is("mods/" SALT "/weapon/anything"));
+    CHECK(!sh_fx_hard_is("mods/othersalt/weapon/rocket") && !sh_fx_hard_is("character/hellknight"));
+
+    /* without the hook nothing is named and the call says so */
+    sh_fx_hard_reset();
+    g_hard_hook = 0;
+    run("api = 1\non.spawn('ai/brute', function(self)\n  print('off', fx_hard_stops())\nend)\n");
+    CHECK(has(log_now(), "off\tfalse"));
+    CHECK(sh_fx_hard_count() == 0);
+    g_hard_hook = 1;
+    sh_fx_hard_reset();
+}
+
 static void test_tag_pain_sight(void)
 {
     run("api = 1\n"
@@ -594,6 +658,8 @@ static void test_refusals(void)
             "3", "\"fx\" needs an entity and an effect condition, or the name of one of this mod's effect entities and a position; got number");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_stop(self)\nend)\n",
             "3", "\"fx_stop\" without a condition removes an effect made by fx(effect, pos)");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_hard_stops('mods/othersalt/character/x')\nend)\n",
+            "3", "\"fx_hard_stops\" can only use this mod's own content");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_move(ent(3), {x = 1, y = 2, z = 3})\nend)\n",
             "3", "\"fx_move\" moves an effect made by fx(effect, pos); this entity is not one");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  sound(self, 'brute/roar', 'loud')\nend)\n",
@@ -812,6 +878,7 @@ int main(void)
     test_damage();
     test_hitscan_radius();
     test_effects_sound();
+    test_fx_hard_stops();
     test_tag_pain_sight();
     test_tags();
     test_fire();

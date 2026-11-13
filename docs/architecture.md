@@ -2419,7 +2419,24 @@ damage comes from the world entity, as a trigger's does.
   on any other entity, such as an effect entity, which answers neither
   event, the engine's own entity StartFX / StopFX); `fx(effect, pos, [dir])`,
   `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
-  through `spawn` and its caps, removed by `fx_stop`); `sound(e, sound,
+  through `spawn` and its caps, removed by `fx_stop`); `fx_hard_stops([effect])`
+  (the mod's fx decl of that name, or every fx decl of the mod, ends the way
+  DOOM Eternal ends an effect, for content made for that game. The game's FX
+  manager stops one action through one function, VK 0x1416EEEF0 / GL
+  0x1416EF870 (manager, action index, time, immediate, recycle): an action
+  with a fade-out time fades from the stop for that long, whatever its kind,
+  and one without ends in that frame. Eternal's stop sends a model, a render
+  parm item, a radial or gaussian blur, a screen overlay and a screen
+  particle straight to the end, so their fade-out time acts only at the end
+  of their own duration, and it starts an action the stop reached inside its
+  delay with a fade factor below zero, with which a particle draws nothing.
+  The call detours the function at its first use, 16 whole bytes: for an
+  action of a named decl that Eternal would end, and for a particle or a
+  light still waiting out its delay, it sets the action's fading bit before
+  the game's own code runs, which then skips its fade branch and ends and
+  clears the action as it does for a second stop. Every other stop, and
+  every decl that was not named, runs unchanged; names are kept for the map
+  the scripts run in); `sound(e, sound,
   [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
   a named point with a parent joint and its own offset and rotation, found
   as the engine finds aim and focus tags: the model decl's `_info` prop row,
