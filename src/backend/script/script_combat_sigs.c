@@ -22,7 +22,11 @@
  *                       condition (entity +0x30, time, condition, extra, tag -1). In every entity class's
  *                       vtable; what the game's own code calls on an effect entity.
  *   CombatEntStopFx     VK 0x14082D1D0  GL 0x14082C390  idEntity StopFX(entity, condition, extraCondition): the
- *                       FX manager's stop by condition (entity +0x30, time, condition, extra, not immediate). */
+ *                       FX manager's stop by condition (entity +0x30, time, condition, extra, not immediate).
+ *   CombatPlayerDamage  VK 0x140DC3880  GL 0x140DC30A0  idPlayer::Damage(player, inflictor, attacker, parms
+ *                       (decl + 0x70), scale, direction*, hit*): slot 130 of the player's vtable in both images. It takes the
+ *                       direction of a decl with radialDmgUseInflictorToTargetDir from the inflictor and warns
+ *                       when there is none; the `damage` event carries none. */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -51,6 +55,10 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
       "48 8B 5C 24 48 48 8B 74 24 50 48 83 C4 30 5F C3 CC CC CC CC CC CC CC CC 48 8B C4 55 56 57 48 81 EC 80 00 00 "
       "00 48 C7 40 98 FE FF FF FF",
       0x82D1D0u, 0x82C390u },
+    { "CombatPlayerDamage",
+      "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 18 F2 FF FF 48 81 EC A8 0E 00 00 48 C7 45 E0 FE FF FF "
+      "FF 0F 29 70 A8 0F 29 78 98 44 0F 29 40 88",
+      0xDC3880u, 0xDC30A0u },
     { NULL, NULL, 0, 0 }
 };
 

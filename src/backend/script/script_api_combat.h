@@ -30,7 +30,9 @@
  * snaphak-re logs/shared-ghidra/SC6-*, offline scans in the campaign's
  * work/SC6/scan):
  *   damage           the entity's `damage` event (244, 'daffeb': decl, direction angles, radius 0,
- *                    multiplier 1, activator, false)
+ *                    multiplier 1, activator, false); a player damaged by a named attacker takes the game's own
+ *                    idPlayer::Damage (VK 0x140DC3880, GL 0x140DC30A0) with that attacker as inflictor, because
+ *                    the event carries none and a decl with radialDmgUseInflictorToTargetDir warns without one
  *   radius_damage    RadiusDamage(game, origin, inflictor, attacker, decl + 0x70, 1.0, true, NULL)
  *                    (VK 0x1403A21E0, GL 0x1403A1AF0; the ae_radiusDamage handler's own call), which
  *                    queues the deferred radius damage the game applies that frame; the decl's radius
@@ -99,6 +101,9 @@ typedef struct sh_script_combat_engine {
      * (an effect entity answers no animation event) */
     int   (*start_fx)(void *ent, int condition);
     int   (*stop_fx)(void *ent, int condition);
+    /* damage a player by the game's own player damage call with an inflictor: 1 done, 0 when the victim is not a
+     * player of that class (the caller then sends the entity's damage event) */
+    int   (*player_damage)(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3]);
 } sh_script_combat_engine;
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
@@ -168,6 +173,7 @@ enum sh_combat_sig {
     SH_COMBAT_SIG_RADIUS_DAMAGE,     /* idGameLocal::RadiusDamage wrapper: called */
     SH_COMBAT_SIG_ENT_START_FX,      /* idEntity StartFX(entity, condition, extra): called */
     SH_COMBAT_SIG_ENT_STOP_FX,       /* idEntity StopFX(entity, condition, extra): called */
+    SH_COMBAT_SIG_PLAYER_DAMAGE,     /* idPlayer::Damage(player, inflictor, attacker, parms, scale, dir, hit): called */
     SH_COMBAT_SIG_COUNT
 };
 extern const sig_entry SH_COMBAT_SIGNATURES[];

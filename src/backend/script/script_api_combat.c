@@ -427,11 +427,16 @@ static void dir_axis(const float f[3], float ax[9])
 }
 
 /* The entity's own `damage` event: decl, from direction, no radius, full
- * multiplier, the attacker as activator. 1 when the engine ran it. */
-static int damage_event(void *victim, void *decl, const float dir[3], void *attacker)
+ * multiplier, the attacker as activator. 1 when the engine ran it. The event
+ * carries no inflictor, and the player's damage code takes the direction of
+ * a decl with radialDmgUseInflictorToTargetDir from the inflictor (it warns
+ * and falls back to the attacker): when a script names the attacker, a
+ * player is damaged by the game's own call with that attacker as inflictor. */
+static int damage_event(void *victim, void *decl, const float dir[3], void *attacker, int named_attacker)
 {
     sh_script_earg a[6];
     float ang[3];
+    if (named_attacker && g_ce.player_damage && g_ce.player_damage(victim, decl, attacker, attacker, dir)) return 1;
     dir_angles(dir, ang);
     memset(a, 0, sizeof a);
     a[0].type = 'd'; a[0].p = decl;
@@ -463,7 +468,7 @@ static int do_damage(lua_State *L, int target, const char *call)
     }
     dir[0] = to[0] - from[0]; dir[1] = to[1] - from[1]; dir[2] = to[2] - from[2];
     if (!normalize(dir)) { dir[0] = 0; dir[1] = 0; dir[2] = -1; }
-    return bool1(L, damage_event(victim, decl, dir, attacker));
+    return bool1(L, damage_event(victim, decl, dir, attacker, !lua_isnoneornil(L, target + 2)));
 }
 
 /* The global and the method take the same values: damage(e, ...) and e:damage(...). */
@@ -496,7 +501,7 @@ static int l_hitscan(lua_State *L)
     if (!e->trace(from, to, ignore, &t) || !(t.fraction < 1.0f)) return nil1(L);
     if (t.hit_spawn_id != SH_SCRIPT_SPAWN_ID_NONE && t.hit_spawn_id != SH_SCRIPT_SPAWN_ID_WORLD && e->resolve)
         hit = e->resolve(t.hit_spawn_id);
-    if (hit) damage_event(hit, decl, dir, attacker);
+    if (hit) damage_event(hit, decl, dir, attacker, !lua_isnoneornil(L, 5));
     lua_createtable(L, 0, 3);
     sh_script_api_push_vec(L, t.end); lua_setfield(L, -2, "pos");
     sh_script_api_push_vec(L, t.normal); lua_setfield(L, -2, "normal");
@@ -953,11 +958,15 @@ typedef void  (*explode_fn)(void *projectile, void *ignore, const void *collisio
 typedef void *(*type_fn)(void *registry, const char *type);
 typedef void *(*find_decl_fn)(void *manager, const char *name, unsigned char make_default);
 typedef void  (*ent_fx_fn)(void *entity, int condition, int extra_condition);
+typedef void  (*player_damage_fn)(void *player, void *inflictor, void *attacker, void *parms, float scale,
+                                  const float *dir, void *hit);
+#define SH_COMBAT_DAMAGE_VSLOT 130       /* idPlayer::Damage in the player's vtable, both images */
 
 static const uint8_t *g_base;
 static size_t        g_text_lo, g_text_hi;   /* the image's executable range, RVAs */
 static radius_fn     g_radius;
 static ent_fx_fn     g_ent_start_fx, g_ent_stop_fx;   /* idEntity StartFX / StopFX */
+static player_damage_fn g_player_damage;              /* idPlayer::Damage */
 static const uint8_t *g_decl_anchor;
 static void         *g_decl_register;
 static type_fn       g_decl_type;
@@ -1050,6 +1059,25 @@ static void *c_decl(const char *type, const char *name)
 void *sh_script_combat_decl(const char *type, const char *name)
 {
     return g_decl_find ? c_decl(type, name) : NULL;
+}
+
+/* The victim's own Damage is the player's (its vtable slot holds the function found by signature): call it. */
+static int c_player_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
+{
+    const uint8_t *parms = (const uint8_t *)decl + SH_COMBAT_DECL_PARMS;
+    void *slot = NULL;
+    float d[3];
+    int ok = 0;
+    if (!g_player_damage || !victim || !decl || !inflictor) return 0;
+    __try { slot = (*(void ***)victim)[SH_COMBAT_DAMAGE_VSLOT]; }
+    __except (av_only(GetExceptionCode())) { slot = NULL; }
+    if (slot != (void *)g_player_damage) return 0;
+    /* the call takes the decl's parms, which name their own decl (as radius damage checks) */
+    if (read_ptr(parms, SH_COMBAT_PARMS_DECL) != decl) return 0;
+    memcpy(d, dir, sizeof d);
+    __try { g_player_damage(victim, inflictor, attacker, (void *)parms, 1.0f, d, NULL); ok = 1; }
+    __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
 }
 
 static int c_radius_damage(const float pos[3], void *decl, void *inflictor, void *attacker)
@@ -1150,7 +1178,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
 {
     static const sh_script_combat_engine engine = {
         c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
-        c_start_fx, c_stop_fx
+        c_start_fx, c_stop_fx, c_player_damage
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;
@@ -1174,6 +1202,8 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     else
         combat_off("the game's radius damage was not found in this executable, so radius_damage and explode do "
                    "nothing");
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PLAYER_DAMAGE], &r) == SIG_OK)
+        g_player_damage = (player_damage_fn)r.addr;     /* without it a player takes the damage event, as before */
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_START_FX], &r) == SIG_OK)
         g_ent_start_fx = (ent_fx_fn)r.addr;
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_STOP_FX], &r) == SIG_OK)
