@@ -2967,6 +2967,94 @@ static void anim_wait_step(void)
     }
 }
 
+/* ---- spawn teleport: a demon's own teleport delay and enter backoff (script_api_ai.h) */
+
+#define AI_TELEPORT_NAME_MAX 160
+typedef struct { char def[AI_TELEPORT_NAME_MAX]; int delay_ms, backoff_ms; } ai_teleport_def;
+static ai_teleport_def g_tp[SH_AI_TELEPORT_DEFS];
+static volatile LONG g_tp_n;
+static SRWLOCK g_tp_lock = SRWLOCK_INIT;
+
+int sh_ai_spawn_teleport_add(const char *def, int delay_ms, int backoff_ms)
+{
+    int i, n, ok = 0;
+    if (!def || !def[0] || strlen(def) >= AI_TELEPORT_NAME_MAX || delay_ms < 1 || delay_ms > 60000 || backoff_ms < 0 ||
+        backoff_ms > delay_ms)
+        return 0;
+    AcquireSRWLockExclusive(&g_tp_lock);
+    n = (int)g_tp_n;
+    for (i = 0; i < n; i++) if (!_stricmp(g_tp[i].def, def)) break;
+    if (i < n || n < SH_AI_TELEPORT_DEFS) {
+        strcpy_s(g_tp[i].def, sizeof g_tp[i].def, def);
+        g_tp[i].delay_ms = delay_ms;
+        g_tp[i].backoff_ms = backoff_ms;
+        if (i == n) InterlockedExchange(&g_tp_n, n + 1);
+        ok = 1;
+    }
+    ReleaseSRWLockExclusive(&g_tp_lock);
+    return ok;
+}
+
+int sh_ai_spawn_teleport_find(const char *const *names, int n, int *delay_ms, int *backoff_ms)
+{
+    int i, k, used, found = 0;
+    if (!g_tp_n || !names || n <= 0) return 0;
+    AcquireSRWLockShared(&g_tp_lock);
+    used = (int)g_tp_n;
+    for (k = 0; k < n && !found; k++) {
+        if (!names[k]) continue;
+        for (i = 0; i < used; i++) {
+            if (_stricmp(g_tp[i].def, names[k])) continue;
+            if (delay_ms) *delay_ms = g_tp[i].delay_ms;
+            if (backoff_ms) *backoff_ms = g_tp[i].backoff_ms;
+            found = 1;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_tp_lock);
+    return found;
+}
+
+void sh_ai_spawn_teleport_reset(void)
+{
+    AcquireSRWLockExclusive(&g_tp_lock);
+    InterlockedExchange(&g_tp_n, 0);
+    ReleaseSRWLockExclusive(&g_tp_lock);
+}
+
+/* spawn_teleport(def, delay, backoff): a demon of this mod's entityDef `def`
+ * (or one inheriting it) that SnapMap spawns by teleport is shown `delay`
+ * milliseconds after its spawn effect starts, and the effect's
+ * FX_TELEPORT_ENTER starts `backoff` milliseconds before that, as DOOM
+ * Eternal runs its spawn (the entityDef's teleportDelayMS and Eternal's
+ * ai_spawnTeleportFXBackoff, 0.1 s); SnapMap's spawn gives every demon 1200
+ * and 2016's cvar 0.8 s. The game's own demons keep the game's. Call it when
+ * the script starts, before the demon spawns. Answers true, or false and
+ * why. */
+static int l_spawn_teleport(lua_State *L)
+{
+    const char *def = sh_script_check_name(L, 1, "spawn_teleport", 0, NULL);
+    lua_Integer delay = luaL_checkinteger(L, 2), backoff = luaL_checkinteger(L, 3);
+    if (delay < 1 || delay > 60000)
+        sh_script_refuse(L, "\"spawn_teleport\" needs the delay in milliseconds from 1 to 60000, got %d", (int)delay);
+    if (backoff < 0 || backoff > delay)
+        sh_script_refuse(L, "\"spawn_teleport\" needs the backoff in milliseconds from 0 to the delay, got %d",
+                         (int)backoff);
+    NEED_OP(L, spawn_teleport, "spawn_teleport");
+    if (!g_engine || g_engine->spawn_teleport() != 1) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "the game's teleport show could not be reached");
+        return 2;
+    }
+    if (!sh_ai_spawn_teleport_add(def, (int)delay, (int)backoff)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "too many entityDefs name their own spawn teleport in this map");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3015,6 +3103,7 @@ int sh_script_ai_register(void)
     sh_script_api_on_frame(anim_wait_step);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
+    n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "spawn_teleport", l_spawn_teleport);
     return n;
 }
 
@@ -4576,6 +4665,44 @@ static int e_fk_reference_pose(void *ai)
     return 1;
 }
 
+/* ---- spawn teleport: the teleport show of a demon named with spawn_teleport */
+
+typedef void (*ai_teleport_show_fn)(void *ai);
+static ai_teleport_show_fn g_tp_target, g_tp_orig;
+static int g_tp_failed;
+static float *g_tp_backoff;      /* ai_spawnTeleportFXBackoff's cached float, which the effect reads */
+void *sh_script_game_cvar(const char *name);   /* script_api_game.c */
+int sh_companions_def_chain(void *entity, const char **names, int cap);   /* companion_engine.c */
+
+/* The game's thread runs the show and, inside it, the effect: the demon's
+ * delay is written where the show reads it, and the cvar holds the demon's
+ * backoff for that one call. */
+static void teleport_show_detour(void *ai)
+{
+    const char *names[10];
+    int n = 0, delay = 0, backoff = 0, have = 0;
+    float keep = 0.0f;
+    __try {
+        n = sh_companions_def_chain(ai, names, 10);
+        if (n > 0 && sh_ai_spawn_teleport_find(names, n, &delay, &backoff)) {
+            *(int32_t *)((uint8_t *)ai + SH_AI_OFF_TELEPORT_DELAY) = delay;
+            if (g_tp_backoff) { keep = *g_tp_backoff; *g_tp_backoff = (float)backoff * 0.001f; have = 1; }
+        }
+    } __except (av_only(GetExceptionCode())) { have = 0; }
+    g_tp_orig(ai);
+    if (have) *g_tp_backoff = keep;
+}
+
+static int e_spawn_teleport(void)
+{
+    uint8_t *cvar;
+    if (!g_tp_backoff && (cvar = (uint8_t *)sh_script_game_cvar(SH_AI_TELEPORT_CVAR)) != NULL)
+        g_tp_backoff = (float *)(cvar + SH_AI_CVAR_FLOAT);
+    if (!g_tp_backoff) return -1;
+    return commit_hook((void *)g_tp_target, (void *)teleport_show_detour, k_ai_teleport_prologue,
+                       SH_AI_TELEPORT_STOLEN, (void **)&g_tp_orig, &g_tp_failed, "spawn_teleport") ? 1 : -1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -4610,7 +4737,7 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend
+    e_interrupt_blend, e_spawn_teleport
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -4776,6 +4903,11 @@ int sh_script_ai_install(const uint8_t *module_base)
      * found, the offsets the sigs test checks); the web is ai +0x222B8, the fk reference pose's check above. */
     if (!r[SH_AI_SIG_WEB_FORCE_STATE].addr || !r[SH_AI_SIG_WEB_UPDATE].addr || !g_live.fk_reference_pose)
         g_live.interrupt_blend = NULL;
+    /* The teleport show: its window and the delay it reads at +0x1B (the sigs test checks both). */
+    site = (const uint8_t *)r[SH_AI_SIG_TELEPORT_SHOW].addr;
+    if (site && !memcmp(site + SH_AI_TELEPORT_DELAY_READ, "\x44\x8B\x87\xE0\xC0\x00\x00", 7))
+        g_tp_target = (ai_teleport_show_fn)site;
+    else g_live.spawn_teleport = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

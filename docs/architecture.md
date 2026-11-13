@@ -2227,6 +2227,22 @@ is touched, and a removed demon answers nil.
   call runs at once), the call writes MULTI to the web's interruptBlend (ai
   +0x222B8, +0x570; ForceState VK 0x141704AA0 and the update are found to
   check the offsets). Records are per park record.
+  `spawn_teleport(def, delay, backoff)` (a global, asked when the script
+  starts) gives a demon of the mod's entityDef `def` DOOM Eternal's
+  teleport spawn timing. Both games run the same show (VK 0x1403DE270,
+  Eternal 0x1406FB2F0) and spawn effect (VK 0x1403D9610, Eternal
+  0x1406F5CA0): the demon is hidden, FX_SPAWN_START starts at once,
+  FX_TELEPORT_ENTER starts ai_spawnTeleportFXBackoff before the show and the
+  show comes after the demon's teleport delay (ai +0xC0E0). DOOM Eternal
+  takes the delay from the entityDef's teleportDelayMS and its cvar defaults
+  to 0.1 s; SnapMap's spawn writes 1200 into every teleport spawn's delay (VK
+  0x1407373C0 and five siblings) and 2016's cvar defaults to 0.8 s. The call
+  detours the show (16 whole bytes, installed at the first call): for a demon
+  whose def chain names a registered def it writes the delay where the show
+  reads it and holds the cvar's float at the backoff for that one call (the
+  effect runs inside it on the server); every other demon keeps the game's.
+  The registry is per map (16 defs). `enemy_sdk.bind` calls the brain's
+  `bind(def)` first, where the brain names its entityDef's pair.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

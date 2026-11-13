@@ -989,7 +989,9 @@ and still stand on slopes and steps (`posed_legs`), takes a demon's fk reference
 animation its fkGraph names as DOOM Eternal does, so its head and weapon do not jump when a blend's
 new clip becomes the heavier one (`fk_reference_pose`), gives a demon's animation orders DOOM
 Eternal's interrupt mode so a change or a forced via blends over a blend still running rather than
-waiting for it or cutting it (`eternal_interrupts`),
+waiting for it or cutting it (`eternal_interrupts`), shows a demon SnapMap teleports in after
+its own entityDef's teleport delay with its spawn effect's pop DOOM Eternal's tenth of a second
+before it, where SnapMap gives every demon 1.2 s and the pop 0.8 s early (`spawn_teleport`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
 demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state

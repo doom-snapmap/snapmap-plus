@@ -145,7 +145,12 @@
  *   AiWebUpdate        VK 0x14170B890  GL 0x14170C300  the anim web's update: while the model's blend runs it
  *                      tests the current node's customFlags bit 25 (AW_CF_USE_MULTIPLE_INTERRUPT, +0x567) and
  *                      reads interruptBlend at +0x575 (NO: wait, YES: end the running blends, MULTI: nest);
- *                      a transition resets it to NO at +0xAB6. Present for those offsets; not called. */
+ *                      a transition resets it to NO at +0xAB6. Present for those offsets; not called.
+ *   AiTeleportShow     VK 0x1403DE270  GL 0x1403DD770  the teleport show (ai): hides the demon, posts its show
+ *                      after the delay at +0xC0E0 (read at +0x1B) and, on the server, spawns the spawn effect
+ *                      (VK 0x1403D9610, whose enter backoff is ai_spawnTeleportFXBackoff). Its callers are the
+ *                      show request (VK 0x1403DEB30) and the deferred setup (VK 0x1403DEF60). Detoured; 16-byte
+ *                      window (snaphak-re reports/R-M21). */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -328,6 +333,10 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 98 48 81 EC 68 01 00 00 48 C7 45 D8 FE FF FF FF 0F 29 B4 24 "
       "50 01 00 00 48 8B 05",
       0x170B890u, 0x170C300u },
+    { "AiTeleportShow",
+      "40 57 48 83 EC 20 F6 81 EA 03 00 00 01 48 8B F9 75 09 48 8B 01 FF 90 30 01 00 00 44 8B 87 E0 C0 00 00 "
+      "48 8D 15 ?? ?? ?? ?? 48 8B CF E8",
+      0x3DE270u, 0x3DD770u },
     { NULL, NULL, 0, 0 }
 };
 

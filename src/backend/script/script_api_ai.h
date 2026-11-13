@@ -461,6 +461,9 @@ typedef struct sh_script_ai_engine {
      * it meets a running blend (sh_ai_order_interrupt below). 1 set, -1
      * unavailable. */
     int      (*interrupt_blend)(void *ai, int mode);
+    /* Make sure the game's teleport show runs through the product
+     * (sh_ai_spawn_teleport below). 1 ready, -1 unavailable. */
+    int      (*spawn_teleport)(void);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -599,6 +602,34 @@ int sh_ai_order_interrupt(int kind);
  * behaviour like one it moves. Game thread, inside the script tick. */
 int sh_script_ai_park(void *ai, sh_script_handle h);
 
+/* Spawn teleport. A demon spawned with SnapMap's teleport spawn is hidden,
+ * the game spawns its spawnFXEntityDef where it stands and starts its
+ * FX_SPAWN_START, starts FX_TELEPORT_ENTER `backoff` before the show and
+ * shows the demon (with FX_TELEPORT_EXIT) `delay` after the start: the
+ * teleport show (VK 0x1403DE270 / GL 0x1403DD770, the delay at ai +0xC0E0)
+ * and the effect (VK 0x1403D9610: backoff = ai_spawnTeleportFXBackoff
+ * times the game clock's units per second). Both games run that same code,
+ * DOOM Eternal from FUN_1406FB2F0 and FUN_1406F5CA0. Two values differ:
+ * SnapMap's spawn writes 1200 into every teleport-spawned demon's delay
+ * (VK 0x1407373C0 and its five siblings, from 0x140724270) where DOOM
+ * Eternal keeps the entityDef's teleportDelayMS, and 2016's cvar defaults to
+ * 0.8 s where DOOM Eternal's defaults to 0.1 s. spawn_teleport(def, delay,
+ * backoff) names a demon's own pair: the show of a demon whose entityDef
+ * (or one it inherits) is `def` takes `delay` milliseconds and its effect's
+ * enter backoff `backoff` milliseconds; every other demon keeps the game's.
+ * The registry is per map; names are whole and compared without case. */
+#define SH_AI_TELEPORT_DEFS        16
+#define SH_AI_OFF_TELEPORT_DELAY   0xC0E0u  /* idAI2: spawnSettings.teleportDelayMS (int) */
+#define SH_AI_CVAR_FLOAT           0x34u    /* idCVar: the cached float value */
+#define SH_AI_TELEPORT_CVAR        "ai_spawnTeleportFXBackoff"
+/* 1 recorded (a second call for the same def replaces it), 0 the registry is
+ * full or the values are out of range (delay 1..60000 ms, backoff 0..delay). */
+int sh_ai_spawn_teleport_add(const char *def, int delay_ms, int backoff_ms);
+/* 1 and the pair when one of the n names (an entity's def chain) was
+ * recorded, else 0. */
+int sh_ai_spawn_teleport_find(const char *const *names, int n, int *delay_ms, int *backoff_ms);
+void sh_ai_spawn_teleport_reset(void);
+
 /* Forget every per-demon record (a new map). The parked table is the
  * engine side's and is checked by spawn id, so a stale entry never parks
  * another map's demon. */
@@ -662,6 +693,7 @@ enum sh_ai_sig {
     SH_AI_SIG_WEB_LEAF,            /* the anim web's current leaf (web) (detoured) */
     SH_AI_SIG_WEB_FORCE_STATE,     /* the anim web's ForceState (sets interruptPath and interruptBlend YES) */
     SH_AI_SIG_WEB_UPDATE,          /* the anim web's update (tests interruptBlend, resets it at a transition) */
+    SH_AI_SIG_TELEPORT_SHOW,       /* the teleport show (ai): hide, effect, show after the delay (detoured) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -789,6 +821,13 @@ static const unsigned char k_ai_rig_prologue[SH_AI_RIG_STOLEN] = {
 #define SH_AI_RIG_POSE_LQ          0x18u
 #define SH_AI_RIG_POSE_LT_STRIDE   0x28u
 #define SH_AI_RIG_POSE_LQ_STRIDE   0x2Cu
+/* The teleport show's window: push rdi; sub rsp,0x20; test byte [rcx+0x3EA],1; mov rdi,rcx (whole,
+ * position-independent); it reads the delay at +0x1B (mov r8d,[rdi+0xC0E0]). */
+#define SH_AI_TELEPORT_STOLEN 16
+static const unsigned char k_ai_teleport_prologue[SH_AI_TELEPORT_STOLEN] = {
+    0x40, 0x57, 0x48, 0x83, 0xEC, 0x20, 0xF6, 0x81, 0xEA, 0x03, 0x00, 0x00, 0x01, 0x48, 0x8B, 0xF9
+};
+#define SH_AI_TELEPORT_DELAY_READ 0x1Bu
 #define SH_AI_FOOT_STOLEN 15
 static const unsigned char k_ai_foot_prologue[SH_AI_FOOT_STOLEN] = {
     0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x41, 0x56, 0x41, 0x57

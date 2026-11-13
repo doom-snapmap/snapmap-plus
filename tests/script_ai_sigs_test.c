@@ -320,6 +320,16 @@ static void check_image(const char *path)
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
         CHECK(!memcmp(base + rva[SH_AI_SIG_FOOT_TABLE], k_ai_foot_prologue, SH_AI_FOOT_STOLEN));
     }
+    if (rva[SH_AI_SIG_TELEPORT_SHOW]) {
+        uint32_t t = rva[SH_AI_SIG_TELEPORT_SHOW];
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + t, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_TELEPORT_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + t, k_ai_teleport_prologue, SH_AI_TELEPORT_STOLEN));
+        /* mov r8d,[rdi+0xC0E0]: the delay the show posts the demon's show after */
+        CHECK(!memcmp(base + t + SH_AI_TELEPORT_DELAY_READ, "\x44\x8B\x87\xE0\xC0\x00\x00", 7));
+    }
     if (rva[SH_AI_SIG_CMD_SET_WAIT]) {
         uint32_t w = rva[SH_AI_SIG_CMD_SET_WAIT];
         /* the active handle at context +0x18, the status written at handle +0x18: 9, INTERRUPTED */

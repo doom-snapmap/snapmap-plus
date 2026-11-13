@@ -675,6 +675,12 @@ static void *cvar_find(const char *name)
     return sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
 }
 
+/* The engine's cvar object of that name, for the other API parts (NULL when unknown). */
+void *sh_script_game_cvar(const char *name)
+{
+    return cvar_find(name);
+}
+
 static int g_cvar_get(const char *name, char *out, size_t cap)
 {
     const uint8_t *c = (const uint8_t *)cvar_find(name);

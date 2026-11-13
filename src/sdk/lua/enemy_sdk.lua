@@ -15,6 +15,8 @@ S.FRAME_EVENTS = { "fsm_interrupt_window", "blackboard", "blackboard_remove", "e
                    "pull_trigger", "equip", "laser_autostop", "eternal" }
 
 function S.bind(def, brain)
+  -- what the brain names to the game for the entityDef before any demon of it spawns (its spawn teleport)
+  if brain.bind then brain.bind(def) end
   on.spawn(def, function(self) brain.spawn(self) end)
   on.think(def, function(self, dt) brain.think(self, dt) end)
   on.damage(def, function(self, hit) brain.damage(self, hit) end)
