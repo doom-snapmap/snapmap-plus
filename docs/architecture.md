@@ -1981,8 +1981,11 @@ the map, as any error does).
   `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
   flat enough to stand on, normal at least 0.7 up; it does not consult the
-  navigation areas) and `difficulty()` (idGameLocal vtable +0x670, the game's
-  own difficulty, 0 easy to 4 nightmare). Positions are tables `{x, y, z}`; an
+  navigation areas), `difficulty()` (idGameLocal vtable +0x670, the game's
+  own difficulty, 0 easy to 4 nightmare) and `noting()` / `note(text)` (a line
+  for a development tool that listens to the diagnostic build, `diag_status.h`;
+  no listener exists in a release build, where `noting()` is false and `note`
+  does nothing). Positions are tables `{x, y, z}`; an
   entity stands for its position wherever a position is asked for.
 - **Engine.** Every call goes through one table of engine operations
   (`sh_script_engine`), filled at boot by `sh_script_api_install` from private

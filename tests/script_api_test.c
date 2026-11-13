@@ -565,6 +565,10 @@ static void test_ground_and_difficulty(void)
     CHECK(has(g_log, "steep\tnil"));
     CHECK(has(g_log, "under self\t0.0"));
     CHECK(has(g_log, "difficulty\t2"));
+    /* notes: no listener in this build, so noting() is false and note() does nothing */
+    run("api = 1\non.spawn('ai/brute', function(self) note('a line') print('noting', noting()) end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "noting\tfalse"));
     g_difficulty = -1;
     run("api = 1\non.spawn('ai/brute', function(self) print('unread', difficulty()) end)\n");
     CHECK(has(log_now(), "unread\tnil"));

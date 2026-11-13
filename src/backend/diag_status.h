@@ -27,6 +27,16 @@ int sh_diag_status(char *out, int cap);
 
 /* The object, malloc'd and sized to it; NULL when memory runs out. */
 char *sh_diag_status_build(void);
+
+/* Notes from mod scripts for a development listener (the daemon's entity
+ * inspector). A script asks noting() and hands lines to note(text)
+ * (script_api_world.c). sh_diag_note_listening is exported as data at ordinal
+ * 302: a listener sets it non-zero while it listens. sh_diag_note is exported
+ * at ordinal 301 and only counts: the listener hooks its entry and reads mod
+ * (the mod's salt), text (the note, NUL-terminated) and len. Game thread. */
+extern volatile long sh_diag_note_listening;
+extern volatile long sh_diag_note_count;
+void sh_diag_note(const char *mod, const char *text, size_t len);
 #endif
 
 #endif /* BACKEND_DIAG_STATUS_H */

@@ -987,7 +987,7 @@ named meshes of its model when the game shows one of its gore wounds (`wound_hid
 game's leg rig follow legs that a demon's clips pose themselves so they keep every animation layer
 and still stand on slopes and steps (`posed_legs`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
-demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point and
+demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
 and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
 `hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and

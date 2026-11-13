@@ -4,6 +4,8 @@
  *                                          `from` to `to` hits, or nil
  *   nav_ground(pos) -> the point on the ground under pos, or nil
  *   difficulty() -> the game's difficulty, 0 easy .. 4 nightmare
+ *   noting() -> true while a development tool listens for notes
+ *   note(text) -> hands the listener one line; does nothing when none listens
  * `pos`, `from` and `to` are positions or entities (their positions). These
  * calls only read, so they work on any entity.
  *
@@ -22,12 +24,20 @@
  *                   sh_script_api_ground_trace. It does not consult the navigation areas.
  *   difficulty      idGameLocal vtable +0x670, the game's own difficulty (the g_gameDifficulty cvar when
  *                   set, else the game's current difficulty), VK 0x140391A80 / GL 0x140391350.
+ *   noting, note    the diagnostic build's listener (diag_status.h): a development tool hooks
+ *                   sh_diag_note and sets sh_diag_note_listening. A release build has neither: noting()
+ *                   is false and note() does nothing, so a script can leave its notes in place and
+ *                   build them only when they are read.
  * The time and log calls (now, after, every, run, wait, print, warn) are the
  * runtime's (script_lib_base.c). */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "script_api_common.h"
+#include "script_internal.h"
+#ifdef SH_DIAG
+#include "../diag_status.h"
+#endif
 
 #define TRACE_RIM       8          /* rays around the centre line of a thick trace */
 #define PI              3.14159265358979323846
@@ -189,10 +199,41 @@ static int l_difficulty(lua_State *L)
     return 1;
 }
 
+#define NOTE_MAX 4096              /* bytes of one note */
+
+/* noting() -> true while a development tool listens for notes */
+static int l_noting(lua_State *L)
+{
+    if (lua_gettop(L) > 0) sh_script_refuse(L, "\"noting\" takes no values; call it as noting()");
+#ifdef SH_DIAG
+    lua_pushboolean(L, sh_diag_note_listening != 0);
+#else
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/* note(text): one line for the listener; nothing when none listens */
+static int l_note(lua_State *L)
+{
+    const char *text = sh_script_api_check_text(L, 1, "note", "the note as text", NOTE_MAX);
+#ifdef SH_DIAG
+    if (sh_diag_note_listening) {
+        shs_mod *m = shs_mod_of(L);
+        sh_diag_note(m ? m->salt : "", text, strlen(text));
+    }
+#else
+    (void)text;
+#endif
+    return 0;
+}
+
 void sh_script_api_world_register(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities_near", l_entities_near);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "trace", l_trace);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "nav_ground", l_nav_ground);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "difficulty", l_difficulty);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "noting", l_noting);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "note", l_note);
 }

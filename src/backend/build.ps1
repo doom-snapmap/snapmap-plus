@@ -83,7 +83,7 @@ $defs = ""
 $def = "xinput1_4.def"
 if ($Diag) {
     # The cs_dontuse / sh_alginfo math overrides exist only in this build.
-    # The development daemon's status export (diag_status.h), at ordinal 300.
+    # The development daemon's status export and script notes (diag_status.h), ordinals 300 to 302.
     $Sources += "../fault_shield/shield_diag.c", "algo.c", "diag_status.c"
     $defs = "/DSH_DIAG"
     $def = "xinput1_4_diag.def"

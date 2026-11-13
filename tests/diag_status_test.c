@@ -59,7 +59,13 @@ int main(int argc, char **argv)
     CHECK(need == n && tiny[0] == '\0');
     CHECK(sh_diag_status(NULL, 0) == n);
 
-    /* The diagnostic export source is the release one plus ordinal 300. */
+    /* A script note is counted; nothing listens until a listener says so. */
+    CHECK(sh_diag_note_listening == 0 && sh_diag_note_count == 0);
+    sh_diag_note("salt", "brain T a b", 11);
+    sh_diag_note("salt", "", 0);
+    CHECK(sh_diag_note_count == 1);
+
+    /* The diagnostic export source is the release one plus ordinals 300 to 302. */
     if (argc > 1) {
         char rel[MAX_PATH], diag[MAX_PATH];
         char *a, *b;
@@ -70,7 +76,9 @@ int main(int argc, char **argv)
         if (a && b) {
             size_t la = strlen(a);
             CHECK(strncmp(a, b, la) == 0);
-            CHECK(strcmp(b + la, "    sh_diag_status                  @300\n") == 0);
+            CHECK(strcmp(b + la, "    sh_diag_status                  @300\n"
+                                 "    sh_diag_note                    @301\n"
+                                 "    sh_diag_note_listening          @302 DATA\n") == 0);
         }
         free(a); free(b);
     }

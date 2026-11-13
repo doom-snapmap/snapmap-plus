@@ -11,6 +11,15 @@
 #include "../common/text.h"
 #include "../fault_shield/crash_report.h"   /* sh_product_version */
 
+volatile long sh_diag_note_listening;
+volatile long sh_diag_note_count;
+
+/* Kept out of line and with a body long enough to be hooked at its entry. */
+__declspec(noinline) void sh_diag_note(const char *mod, const char *text, size_t len)
+{
+    if (mod && text && len) InterlockedIncrement(&sh_diag_note_count);
+}
+
 /* The object being built: malloc'd, grown as text is appended. */
 typedef struct diag_text { char *buf; size_t len, cap; } diag_text;
 
