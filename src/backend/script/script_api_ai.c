@@ -129,11 +129,14 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
     return frames_since_issue > give_up_frames ? SH_AI_FORCE_VIA_DONE : SH_AI_FORCE_VIA_WAIT;
 }
 
-/* A pending pain request worth yielding for: a reaction of the pain graph. The twitch levels are additive and the
- * engine plays them without its pain action. */
-int sh_ai_pain_pending(int next_reaction)
+int sh_ai_fsm_code_yields(int code)
 {
-    return next_reaction > 2 && next_reaction < SH_COMBAT_PAIN_COUNT;   /* above PAIN_TWITCH_HEAVY */
+    return code == 232 || code == 233 || code == 237 || code == 238 || code == 242;
+}
+
+int sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms)
+{
+    return alive && playing == SH_COMBAT_PAIN_NONE && now_ms <= until_ms;
 }
 
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
@@ -3254,7 +3257,12 @@ static uint32_t e_frame(void) { return sh_script_hooks_frame(); }
  * can hold at once), read only below the high-water mark; a slot whose demon
  * is gone is reused. */
 #define AI_PARKED_MAX SH_SCRIPT_ENGINE_ENTITIES
-typedef struct { void *volatile ai; volatile LONG spawn_id; } ai_parked;
+typedef struct {
+    void *volatile ai;
+    volatile LONG  spawn_id;
+    volatile LONG  pain_until;   /* game ms until which the park is open for a pain or death request; 0 none */
+    volatile LONG  fsm_busy;     /* the request detour is inside this demon's request */
+} ai_parked;
 static ai_parked g_parked[AI_PARKED_MAX];
 static volatile LONG g_parked_used;   /* slots below this were ever used */
 
@@ -3264,21 +3272,16 @@ static volatile LONG g_parked_used;   /* slots below this were ever used */
 #define AI_HEALTH_CUR        (0x2B290u + 0x1Cu)  /* idAI2: idAIHealth +0x2B290, current +0x1C (script_api_common.c) */
 #define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: damageInfo.painJointGroupIndex, -1 when the hit named none
                                                   * (VK 0x140403DD0 / GL its twin read it as [0x10A2]) */
-#define AI_PAIN_NEXT         (SH_COMBAT_AI_PAIN + 0x3618u)   /* idActorPainState.painParms.mNextPainReaction: the
-                                                  * reaction the engine's pain selection chose and its pain action
-                                                  * has yet to play (the engine's reflected layout, both renderers).
-                                                  * A pending request can stand with the joint group at -1. */
-static int parked_now(void *ai)
+static int parked_now(void *ai, LONG pain_until)
 {
     float health = 1.0f;
-    int group = -1, next = SH_COMBAT_PAIN_NONE, reaction = SH_COMBAT_PAIN_NONE;
+    int group = -1, reaction = SH_COMBAT_PAIN_NONE;
     __try {
         health = *(const float *)((const uint8_t *)ai + AI_HEALTH_CUR);
         group = *(const int *)((const uint8_t *)ai + AI_PAIN_JOINT_GROUP);
-        next = *(const int *)((const uint8_t *)ai + AI_PAIN_NEXT);
         reaction = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
-    return sh_ai_park_holds(!(health <= 0.0f), group >= 0 || sh_ai_pain_pending(next), reaction);
+    return sh_ai_park_holds(!(health <= 0.0f), group >= 0 || pain_until != 0, reaction);
 }
 
 /* IsRunningScript(ai): true for a parked demon whose spawn id still matches
@@ -3291,7 +3294,7 @@ static uint64_t irs_detour(void *ai)
         if (g_parked[i].ai == ai && ai) {
             uint32_t id = spawn_id_of(ai);
             if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id)
-                return (uint64_t)parked_now(ai);
+                return (uint64_t)parked_now(ai, g_parked[i].pain_until);
         }
     }
     return g_irs_orig(ai);
@@ -3379,6 +3382,104 @@ static int commit_detour(void)
     return 1;
 }
 
+/* ---- the engine's pain and death on a parked demon
+ *
+ * The engine starts a pain reaction and a death the same way: it asks the
+ * demon's alert cycle FSM to take a transition (pain, light pain, stagger,
+ * dying). A parked demon's alert cycle is in ExecuteDoomscript, which has no
+ * link for any of them, so the request was refused: the pain was lost, and a
+ * dead demon was found outside the dying cycle by its think and forced dead
+ * with no death clip. The request is detoured: when it is refused with one of
+ * those codes for a parked demon, the park opens (IsRunningScript answers
+ * false), the alert cycle is asked to leave ExecuteDoomscript by its own link
+ * (the same request with no code) and the code is asked again, inside the
+ * engine's call. The park holds again when the reaction has played or, if the
+ * alert cycle still refused, after SH_AI_PAIN_TAKE_MS. */
+typedef int      (*ai_pain_code_fn)(void *ai);
+typedef uint8_t  (*ai_fsm_request_fn)(void *fsm, int code);
+typedef void    *(*ai_fsm_get_fn)(void *owner);
+static ai_fsm_request_fn g_fsm_request_target, g_fsm_request_orig;
+static ai_pain_code_fn   g_pain_code;
+static int               g_fsm_request_failed;
+static int gm_clock(int *ms);
+static int commit_hook(void *target, void *detour, const uint8_t *want, size_t stolen, void **orig, int *failed,
+                       const char *what);
+
+static void *alert_fsm_of(void *ai)
+{
+    void *owner = (uint8_t *)ai + SH_AI_FSM_OWNER, *fsm = NULL;
+    __try {
+        ai_fsm_get_fn get = (ai_fsm_get_fn)vfn(owner, SH_AI_FSM_GET_SLOT);
+        if (get) fsm = get(owner);
+    } __except (av_only(GetExceptionCode())) { fsm = NULL; }
+    return fsm;
+}
+
+static int parked_slot_of_fsm(void *fsm)
+{
+    int i, used = (int)g_parked_used;
+    for (i = 0; i < used; i++) {
+        void *ai = g_parked[i].ai;
+        if (!ai || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id) continue;
+        if (alert_fsm_of(ai) == fsm) return i;
+    }
+    return -1;
+}
+
+static uint8_t fsm_request_detour(void *fsm, int code)
+{
+    uint8_t taken = g_fsm_request_orig(fsm, code);
+    int slot, now = 0;
+    if (taken || !fsm || !sh_ai_fsm_code_yields(code)) return taken;
+    slot = parked_slot_of_fsm(fsm);
+    if (slot < 0 || InterlockedCompareExchange(&g_parked[slot].fsm_busy, 1, 0) != 0) return taken;
+    if (gm_clock(&now)) {
+        InterlockedExchange(&g_parked[slot].pain_until, (LONG)(now + SH_AI_PAIN_TAKE_MS));
+        __try {
+            (void)g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE);
+            taken = g_fsm_request_orig(fsm, code);
+        } __except (av_only(GetExceptionCode())) { taken = 0; }
+    }
+    InterlockedExchange(&g_parked[slot].fsm_busy, 0);
+    return taken;
+}
+
+/* Every frame (the game thread): the park opened for a refused request holds
+ * again when the reaction plays, the demon is dead or the time is up; until
+ * then a pain the alert cycle still refused is asked for again. */
+static void pain_take_step(void)
+{
+    int i, used = (int)g_parked_used, now = 0;
+    if (!g_fsm_request_orig || !gm_clock(&now)) return;
+    for (i = 0; i < used; i++) {
+        void *ai = g_parked[i].ai;
+        LONG until = g_parked[i].pain_until;
+        float health = 0.0f;
+        int playing = SH_COMBAT_PAIN_NONE, done = 1;
+        if (!until) continue;
+        if (ai && spawn_id_of(ai) == (uint32_t)g_parked[i].spawn_id) {
+            __try {
+                health = *(const float *)((const uint8_t *)ai + AI_HEALTH_CUR);
+                playing = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN);
+                if (sh_ai_pain_take_next(!(health <= 0.0f), playing, now, (int)until)) {
+                    void *fsm = alert_fsm_of(ai);
+                    int code = g_pain_code ? g_pain_code(ai) : 0;
+                    done = fsm && code && g_fsm_request_target(fsm, code);
+                }
+            } __except (av_only(GetExceptionCode())) { done = 1; }
+        }
+        if (done) InterlockedExchange(&g_parked[i].pain_until, 0);
+    }
+}
+
+static void pain_take_commit(void)
+{
+    if (!g_fsm_request_target) return;
+    (void)commit_hook((void *)g_fsm_request_target, (void *)fsm_request_detour, k_ai_fsm_request_prologue,
+                      SH_AI_FSM_REQUEST_STOLEN, (void **)&g_fsm_request_orig, &g_fsm_request_failed,
+                      "a scripted demon's pain and death");
+}
+
 static int e_park(void *ai)
 {
     uint32_t id = spawn_id_of(ai);
@@ -3392,9 +3493,11 @@ static int e_park(void *ai)
     if (free_slot < 0 && used < AI_PARKED_MAX) free_slot = used;
     if (free_slot < 0) return 0;   /* every entity the game can hold is a parked demon */
     g_parked[free_slot].ai = NULL;
+    InterlockedExchange(&g_parked[free_slot].pain_until, 0);
     InterlockedExchange(&g_parked[free_slot].spawn_id, (LONG)id);
     InterlockedExchangePointer((PVOID volatile *)&g_parked[free_slot].ai, ai);
     if (free_slot >= used) InterlockedExchange(&g_parked_used, free_slot + 1);
+    pain_take_commit();
     return 1;
 }
 
@@ -4155,6 +4258,16 @@ int sh_script_ai_install(const uint8_t *module_base)
     }
     if (r[SH_AI_SIG_FOOT_TABLE].addr) g_foot_target = (ai_foot_table_fn)r[SH_AI_SIG_FOOT_TABLE].addr;
     else g_live.rear_footsteps = NULL;
+    /* The pain start holds the alert cycle's request and the pain code calls; without it a parked demon takes no
+     * pain and dies with no death clip. */
+    if ((site = (const uint8_t *)r[SH_AI_SIG_PAIN_START].addr) != NULL &&
+        site[SH_AI_PAIN_START_FSM_CALL] == 0xE8 && site[SH_AI_PAIN_START_CODE_CALL] == 0xE8) {
+        g_fsm_request_target = (ai_fsm_request_fn)(site + SH_AI_PAIN_START_FSM_CALL + 5 +
+                                                   rel32_at(site + SH_AI_PAIN_START_FSM_CALL + 1));
+        g_pain_code = (ai_pain_code_fn)(site + SH_AI_PAIN_START_CODE_CALL + 5 +
+                                        rel32_at(site + SH_AI_PAIN_START_CODE_CALL + 1));
+        sh_script_api_on_frame(pain_take_step);
+    } else ai_log("Mod scripts: a demon a script drives will play no pain reaction or death clip in this session.");
     /* The step calls read the stage where the move update reads it and end a
      * command with the context's own call; without either an order is given
      * as it comes. */

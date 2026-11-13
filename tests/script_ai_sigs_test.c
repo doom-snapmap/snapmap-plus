@@ -351,6 +351,30 @@ static void check_image(const char *path)
         /* the owner handle is the pair at component +0x608 (its pointer, +0x610, is read through it) */
         CHECK(window_has(base, rva[SH_AI_SIG_SHOW_WOUND], 0x120, "\x08\x06\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_PAIN_START]) {
+        uint32_t s = rva[SH_AI_SIG_PAIN_START];
+        unsigned flags = 0;
+        size_t b;
+        uint32_t request = rel_target(base, s + SH_AI_PAIN_START_FSM_CALL, 5, 1);
+        uint32_t code = rel_target(base, s + SH_AI_PAIN_START_CODE_CALL, 5, 1);
+        printf("  pain start 0x%X: fsm request 0x%X, pain code 0x%X\n", s, request, code);
+        /* the FSM request is the detoured function: its window */
+        b = sh_x64_stolen_boundary(base + request, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_FSM_REQUEST_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + request, k_ai_fsm_request_prologue, SH_AI_FSM_REQUEST_STOLEN));
+        /* it keeps the code it is asked with at fsm +0x6C08 while it looks for a link */
+        CHECK(window_has(base, request, 0x90, "\x08\x6C\x00\x00", 4));
+        CHECK(request == (vk ? 0x64A560u : 0x649870u) && code == (vk ? 0x5FBE70u : 0x5FB0A0u));
+        /* the FSM is asked of the object at ai +0x123B8 through its vtable +0x78, with TRANSCODE_AC_IN_PAIN (232) */
+        CHECK(!memcmp(base + s + SH_AI_PAIN_START_FSM_CALL - 21,
+                      "\x48\x81\xC1\xB8\x23\x01\x00\x48\x8B\x01\xFF\x50\x78\xBA\xE8\x00\x00\x00\x48\x8B\xC8", 21));
+        /* the second request is made with the code the pain code call returned (mov edx,eax ... call) */
+        CHECK(rel_target(base, s + SH_AI_PAIN_START_CODE_CALL + 10, 5, 1) == request);
+        /* the pain code reads the request at ai +0x8678 and answers 232, 233 or 237/238 */
+        CHECK(window_has(base, code, 0x90, "\x8B\x91\x78\x86\x00\x00", 6));
+        CHECK(window_has(base, code, 0x90, "\xB8\xE8\x00\x00\x00", 5));
+    }
     if (rva[SH_AI_SIG_MESH_HIDE_SITE]) {
         uint32_t s = rva[SH_AI_SIG_MESH_HIDE_SITE];
         uint32_t index = rel_target(base, s + SH_AI_MESH_SITE_INDEX, 5, 1);

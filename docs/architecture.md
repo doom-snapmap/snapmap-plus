@@ -2036,13 +2036,22 @@ is touched, and a removed demon answers nil.
   state method; the designer commands below act there, and the engine keeps
   pain, damage, death and animation. The detour answers false, so the
   engine's own cycle runs, while the demon is dead, while a pain reaction of
-  the pain graph plays, and while one is pending: the hit named a pain joint
-  group (ai+0x8510) or the engine's pain selection left a reaction above the
-  twitch levels in `idActorPainState.painParms.mNextPainReaction`
-  (ai+0x8678, the same offset in both executables: VK 0x1405FC319, GL
-  0x1405FB549 compare it). The selection can leave a request with the joint
-  group at -1, and without the second test its pain action never ran on a
-  parked demon. The command also posts
+  the pain graph plays, and for a moment after a pain or death request (below).
+  The engine starts a pain reaction and a death by asking the demon's alert
+  cycle FSM for a transition (VK 0x14064A560, GL 0x140649870: fsm, code;
+  232 pain, 233 light pain, 237 and 238 stagger, 242 dying; the FSM is the
+  answer of the object at ai+0x123B8, vtable +0x78). `ExecuteDoomscript` has no
+  link for any of them (its links go to `ac_default`, `ac_UnhandledError`,
+  `ac_MeleeInteraction` and `ac_passified`), so a parked demon lost every pain
+  and, found dead outside the dying cycle by its think, was forced dead with
+  no death clip. The request is detoured (18-byte window, committed at the
+  first park): refused with one of those codes for a parked demon, the park
+  opens for `SH_AI_PAIN_TAKE_MS`, the same request is made with no code, which
+  takes the alert cycle out of `ExecuteDoomscript` by its own link, and the
+  code is asked again, all inside the engine's call. A per-frame step closes
+  the park when the reaction plays or the time is up, and asks again for a
+  pain still refused (the code from the engine's own function, VK
+  0x1405FBE70). The command also posts
   `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
   in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
   alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo

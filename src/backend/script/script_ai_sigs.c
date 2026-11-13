@@ -52,6 +52,14 @@
  *                      (call at +11: VK 0x1415EDF50, model, name -> index or -1) and, after the hide message
  *                      to clients, the model's hide (call at +107: VK 0x1415EFEC0, model, index: clears the
  *                      mesh's bit of the shown-mesh mask). The model is the entity's at +0x3DB0.
+ *   AiPainStart        VK 0x140402FA0  GL 0x140402480  the start of a pain reaction (ai, reaction*, row,
+ *                      damage) -> started: the pain selection chooses the clip and writes painParms, then the
+ *                      alert cycle's FSM (the object at ai +0x123B8, vtable +0x78) is asked to take the pain
+ *                      transition (call at +0x638 and, for a forced move, at +0x7E: VK 0x14064A560 / GL
+ *                      0x140649870, fsm, code -> taken) with the code of the pending request (call at +0x62E:
+ *                      VK 0x1405FBE70, ai -> 232 pain, 233 light, 237/238 stagger, 0 none). The death (VK
+ *                      0x140400130) asks the same FSM request for 242. A site: the FSM request it calls is
+ *                      detoured, 18-byte window.
  *   AiThreatRow        VK 0x1406E08D0  GL 0x1406DFD00  the threat table's check of one SDPSReaction_t row
  *                      (threat, actor, row, ...), called for every row by the evaluator (VK 0x1406DFE70);
  *                      the row's reaction is at +0x1C. Detoured; 15-byte window.
@@ -237,6 +245,12 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "4C 8B 46 08 41 8B D7 48 8D 4D B8 E8 ?? ?? ?? ?? 90 48 8D 55 B8 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
       "41 8B D7 49 8B CD E8 ?? ?? ?? ??",
       0x830F00u, 0x830090u },
+    { "AiPainStart",
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 58 F9 FF FF 48 81 EC A8 07 00 00 48 C7 45 C8 FE FF FF FF "
+      "0F 29 B4 24 90 07 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 80 06 00 00 4D 8B E9 4C 89 45 A8 4C 8B E2 "
+      "4C 8B F9 80 B9 1D AA 02 00 00 0F 85 ?? ?? ?? ?? 80 B9 EC A9 02 00 00 74 28 80 B9 E5 C0 00 00 00 74 1F "
+      "48 81 C1 B8 23 01 00 48 8B 01 FF 50 78 BA E8 00 00 00 48 8B C8 E8 ?? ?? ?? ?? E9",
+      0x402FA0u, 0x402480u },
     { NULL, NULL, 0, 0 }
 };
 

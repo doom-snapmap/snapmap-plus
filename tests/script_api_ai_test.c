@@ -604,10 +604,16 @@ static void test_move_state(void)
     CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN | SH_SCRIPT_ANIM_DEST, 1, 9, 600) == SH_AI_FORCE_VIA_DONE);
     /* a parked demon stays the script's except while dead, or while a pain reaction is asked for or playing */
     CHECK(sh_ai_park_holds(1, 0, 0) == 1);
-    /* the engine's pending request (painParms.mNextPainReaction): a pain graph reaction yields, a twitch does not */
-    CHECK(sh_ai_pain_pending(0) == 0 && sh_ai_pain_pending(1) == 0 && sh_ai_pain_pending(2) == 0);
-    CHECK(sh_ai_pain_pending(6) == 1 && sh_ai_pain_pending(7) == 1 && sh_ai_pain_pending(13) == 1);
-    CHECK(sh_ai_pain_pending(14) == 0 && sh_ai_pain_pending(-1) == 0);
+    /* the alert cycle codes a park opens for: pain, light pain, the two staggers, dying; nothing else */
+    CHECK(sh_ai_fsm_code_yields(232) && sh_ai_fsm_code_yields(233) && sh_ai_fsm_code_yields(237));
+    CHECK(sh_ai_fsm_code_yields(238) && sh_ai_fsm_code_yields(242));
+    CHECK(!sh_ai_fsm_code_yields(0) && !sh_ai_fsm_code_yields(234) && !sh_ai_fsm_code_yields(240));
+    CHECK(!sh_ai_fsm_code_yields(228) && !sh_ai_fsm_code_yields(243));
+    /* a refused start is asked again while the demon lives, nothing plays and the time is not up */
+    CHECK(sh_ai_pain_take_next(1, 0, 1000, 1250) == 1 && sh_ai_pain_take_next(1, 0, 1250, 1250) == 1);
+    CHECK(sh_ai_pain_take_next(1, 0, 1251, 1250) == 0);
+    CHECK(sh_ai_pain_take_next(1, 7, 1000, 1250) == 0);
+    CHECK(sh_ai_pain_take_next(0, 0, 1000, 1250) == 0);
     CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */
     CHECK(sh_ai_park_holds(1, 1, 0) == 0);          /* this frame's damage asked for a pain */
     CHECK(sh_ai_park_holds(1, 0, 6) == 0);          /* PAIN_FALTER is playing */

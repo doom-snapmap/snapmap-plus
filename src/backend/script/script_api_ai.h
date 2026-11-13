@@ -184,7 +184,11 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
  * the clip, and the script hears of it through on.pain). The demon is the
  * script's again when the reaction is over. Pure. */
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
-int      sh_ai_pain_pending(int next_reaction);   /* painParms.mNextPainReaction is a pain graph reaction */
+/* The alert cycle transition codes a parked demon's park opens for: TRANSCODE_AC_IN_PAIN (232), _IN_PAIN_LIGHT
+ * (233), _IN_STAGGER (237), _IN_STAGGER_ONESHOT (238) and _IS_DYING (242). */
+int      sh_ai_fsm_code_yields(int code);
+/* A refused pain is asked again while the demon lives, no reaction plays and the time is not up (1), else dropped (0). */
+int      sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms);
 
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame);
 /* Feed the status read at `frame`; returns the move's state. */
@@ -561,6 +565,7 @@ enum sh_ai_sig {
     SH_AI_SIG_GORE_INIT_SITE,      /* the demon spawn's gore component init (skipped for the generic type) */
     SH_AI_SIG_SHOW_WOUND,          /* idGoreComponent::ShowWound (component, wound row) (detoured) */
     SH_AI_SIG_MESH_HIDE_SITE,      /* the armour pop-off's mesh index by name and hide by index */
+    SH_AI_SIG_PAIN_START,          /* the engine's start of a pain reaction (its FSM request and pain code calls) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -599,6 +604,19 @@ static const uint8_t k_ai_pain_stolen[SH_AI_PAIN_STUB_STOLEN] = {
 size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const void *resume);
 /* Detour windows, whole and position-independent. */
 #define SH_AI_THREAT_STOLEN 15
+/* The pain start (SH_AI_SIG_PAIN_START, a site): its call of the alert cycle's FSM request, its call of the pain
+ * transition code, and where it finds that FSM (the object at idAI2 +0x123B8, vtable +0x78); the signature holds
+ * the last two. The FSM request is detoured: its window and the transition codes the detour acts on. */
+#define SH_AI_PAIN_START_FSM_CALL   0x7Eu
+#define SH_AI_PAIN_START_CODE_CALL  0x62Eu
+#define SH_AI_FSM_OWNER             0x123B8u
+#define SH_AI_FSM_GET_SLOT          0x78u
+#define SH_AI_FSM_REQUEST_STOLEN    18
+static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] = {
+    0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x30, 0xFE, 0xFF, 0xFF, 0xFF
+};
+#define SH_AI_TRANSCODE_NONE        0
+#define SH_AI_PAIN_TAKE_MS          250      /* how long the park stays open for a request the alert cycle refused */
 #define SH_AI_PATH_LENGTH_STOLEN 14
 /* The footstep table selector's window: two register saves and push rsi,
  * r14, r15 (whole, position-independent). */
