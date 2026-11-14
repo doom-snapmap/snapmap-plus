@@ -151,7 +151,20 @@
  *                      after the delay at +0xC0E0 (read at +0x1B) and, on the server, spawns the spawn effect
  *                      (VK 0x1403D9610, whose enter backoff is ai_spawnTeleportFXBackoff). Its callers are the
  *                      show request (VK 0x1403DEB30) and the deferred setup (VK 0x1403DEF60). Detoured; 16-byte
- *                      window (snaphak-re reports/R-M21). */
+ *                      window (snaphak-re reports/R-M21).
+ *   AiBreakableGore    VK 0x1407A06E0  GL 0x14079FED0  a gore breakable's weapon-specific gore (manager, breakable,
+ *                      tag position, owner axis, position, hit direction, falloff, gore behaviour): called by the
+ *                      gore breakable spawn (VK 0x1407A2000) right after the spawn; when it answers true the spawn
+ *                      queues the hit's explosion record and breaks the breakable (VK 0x14079E3B0). It reads the
+ *                      breakable's rigid body count at +0xCC8 (physics +0xCA8, list +0x18, count +8). Detoured;
+ *                      19-byte window.
+ *   AiBreakableBreak   VK 0x14079E6D0  GL 0x14079DEC0  idBreakable's break (breakable, 0): unless brokenStartTime
+ *                      (+0xE6C) is set, places every piece where the model puts it plus up to 20 units an axis
+ *                      at random and turns it at random (VK 0x141758780, through the physics +0xCA8), starts the
+ *                      explosion records, stamps brokenStartTime. Called.
+ *   AiFxPhysPlace      VK 0x141650390  GL 0x141650F30  an effect rigid body's broad phase entry moved to a position
+ *                      and axis (broad phase, entry, position, axis, 0), as the piece placement calls it.
+ *                      Called. (snaphak-re reports/R-G6) */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -338,6 +351,18 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 57 48 83 EC 20 F6 81 EA 03 00 00 01 48 8B F9 75 09 48 8B 01 FF 90 30 01 00 00 44 8B 87 E0 C0 00 00 "
       "48 8D 15 ?? ?? ?? ?? 48 8B CF E8",
       0x3DE270u, 0x3DD770u },
+    { "AiBreakableGore",
+      "4C 8B DC 55 41 54 41 55 41 56 41 57 49 8D AB 48 FF FF FF 48 81 EC 90 01 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 45 D8 4C 8B B5 F8 00 00 00 4D 8B E0",
+      0x7A06E0u, 0x79FED0u },
+    { "AiBreakableBreak",
+      "41 56 41 57 48 83 EC 38 4C 8B FA 41 B8 10 27 00 00 33 D2 4C 8B F1 E8 ?? ?? ?? ?? 41 83 BE 6C 0E 00 00 FF "
+      "0F 8F ?? ?? ?? ?? 49 8B 8E 08 08 00 00",
+      0x79E6D0u, 0x79DEC0u },
+    { "AiFxPhysPlace",
+      "40 53 56 57 41 56 48 83 EC 48 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 8B DA 49 8B F1 48 8B 94 24 "
+      "90 00 00 00 4D 8B F0 48 8B F9 48 85 D2",
+      0x1650390u, 0x1650F30u },
     { NULL, NULL, 0, 0 }
 };
 

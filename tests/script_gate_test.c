@@ -72,6 +72,8 @@ static int g_combat_resets;
 void sh_script_combat_reset(void) { g_combat_resets++; }
 static int g_teleport_resets;
 void sh_ai_spawn_teleport_reset(void) { g_teleport_resets++; }
+static int g_destructible_resets;
+void sh_ai_destructible_reset(void) { g_destructible_resets++; }
 
 /* ---- the serving index: one map's mods ------------------------------------ */
 
@@ -183,13 +185,14 @@ int main(void)
     CHECK(log_has("SCRIPTS: 1 mod(s) with scripts prepared at the Play build"));
     CHECK(gate(SH_SCRIPT_GATE_PLAY));        /* a second Play reuses the hook */
     CHECK(sh_script_hooks_open() && g_prepared == 1);
-    /* The same line at the next map is said again: each map's log is whole. The map's spawn teleports are
-     * forgotten with it (the next map's scripts name their own). */
+    /* The same line at the next map is said again: each map's log is whole. The map's spawn teleports and
+     * destructibles are forgotten with it (the next map's scripts name their own). */
     g_logbuf[0] = 0;
     {
-        int before = g_teleport_resets;
+        int before = g_teleport_resets, dbefore = g_destructible_resets;
         CHECK(gate(SH_SCRIPT_GATE_MAP_LOAD));
         CHECK(g_teleport_resets > before);
+        CHECK(g_destructible_resets > dbefore);
     }
     CHECK(!sh_script_hooks_open() && !g_routing);
     CHECK(gate(SH_SCRIPT_GATE_PLAY));

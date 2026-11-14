@@ -352,6 +352,31 @@ static void check_image(const char *path)
         CHECK(window_has(base, f, 0x100, "\x30\x06\x00\x00", 4));
         CHECK(window_has(base, f, 0x200, "\xB0\x3D\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_BREAKABLE_GORE]) {
+        uint32_t g = rva[SH_AI_SIG_BREAKABLE_GORE];
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + g, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_BRK_GORE_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + g, k_ai_brk_gore_prologue, SH_AI_BRK_GORE_STOLEN));
+        /* the breakable's physics at +0xCA8 and its rigid body count at +0xCC8 (the list +0x18, count +8) */
+        CHECK(window_has(base, g, 0x500, "\xA8\x0C\x00\x00", 4));
+        CHECK(window_has(base, g, 0x900, "\xC8\x0C\x00\x00", 4));
+        CHECK(SH_AI_BRK_PHYSICS + SH_AI_FXB_BODIES + 8 == 0xCC8u);
+    }
+    if (rva[SH_AI_SIG_BREAKABLE_BREAK]) {
+        uint32_t k = rva[SH_AI_SIG_BREAKABLE_BREAK];
+        /* cmp dword [r14+0xE6C], -1 (brokenStartTime unset); mov rcx,[r14+0x808] (the physics); the pieces' physics
+         * at +0xCA8 passed to the placement */
+        CHECK(!memcmp(base + k + 0x1B, "\x41\x83\xBE\x6C\x0E\x00\x00\xFF", 8));
+        CHECK(!memcmp(base + k + 0x29, "\x49\x8B\x8E\x08\x08\x00\x00", 7));
+        CHECK(SH_AI_BRK_BROKEN == 0xE6Cu && SH_AI_OFF_PHYSICS == 0x808u);
+        CHECK(window_has(base, k, 0x100, "\xA8\x0C\x00\x00", 4));
+    }
+    if (rva[SH_AI_SIG_FXPHYS_PLACE]) {
+        /* mov rdx,[rsp+0x90]: the fifth argument the placement passes as 0 */
+        CHECK(!memcmp(base + rva[SH_AI_SIG_FXPHYS_PLACE] + 0x1F, "\x48\x8B\x94\x24\x90\x00\x00\x00", 8));
+    }
     if (rva[SH_AI_SIG_SHOW_WOUND]) {
         unsigned flags = 0;
         size_t b = sh_x64_stolen_boundary(base + rva[SH_AI_SIG_SHOW_WOUND], 64, 14, 48, &flags);

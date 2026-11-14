@@ -967,6 +967,10 @@ Eternal's interrupt mode so a change or a forced via blends over a blend still r
 waiting for it or cutting it (`eternal_interrupts`), shows a demon SnapMap teleports in after
 its own entityDef's teleport delay with its spawn effect's pop DOOM Eternal's tenth of a second
 before it, where SnapMap gives every demon 1.2 s and the pop 0.8 s early (`spawn_teleport`),
+throws the pieces a demon's gore breaks off the way DOOM Eternal's destructibles do, each from
+where its model places it at the speed and spin its decl draws, and keeps the hit away from a
+piece whose decl ignores it, where the game throws them by explosions the hit joins
+(`destructible`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
 demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state

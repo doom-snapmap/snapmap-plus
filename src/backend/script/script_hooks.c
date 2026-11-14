@@ -465,6 +465,7 @@ static void map_close(int run_end_handlers)
     mods_clear();
     sh_script_handles_reset();
     sh_ai_spawn_teleport_reset();   /* a map's scripts name their spawn teleports again */
+    sh_ai_destructible_reset();     /* and their destructibles */
     g_open = 0;
     g_started = 0;
     g_frame = 0;
@@ -606,6 +607,7 @@ void sh_script_hooks_gate(int gate)
     g_log_last = NULL;            /* a new map may say again what the last one said */
     sh_script_handles_reset();
     sh_ai_spawn_teleport_reset();   /* a map's scripts name their spawn teleports again */
+    sh_ai_destructible_reset();     /* and their destructibles */
     if (!sh_script_gate_opens(gate)) return;
     n = sh_script_map_open();
     if (n <= 0) {
@@ -643,6 +645,7 @@ int sh_script_hooks_reload(void)
     mods_clear();
     sh_script_handles_reset();
     sh_ai_spawn_teleport_reset();   /* a map's scripts name their spawn teleports again */
+    sh_ai_destructible_reset();     /* and their destructibles */
     g_open = 0;
     g_started = 0;
     g_time = 0;

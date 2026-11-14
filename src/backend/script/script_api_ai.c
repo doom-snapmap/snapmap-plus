@@ -3055,6 +3055,247 @@ static int l_spawn_teleport(lua_State *L)
     return 1;
 }
 
+/* ---- destructibles: DOOM Eternal's activation of a gore breakable's pieces (script_api_ai.h) */
+
+typedef struct { char def[AI_TELEPORT_NAME_MAX]; sh_ai_destruct_spec spec; } ai_destruct_def;
+static ai_destruct_def g_dd[SH_AI_DESTRUCT_DEFS];
+static volatile LONG g_dd_n;
+static SRWLOCK g_dd_lock = SRWLOCK_INIT;
+
+int sh_ai_destructible_add(const char *def, const sh_ai_destruct_spec *spec)
+{
+    int i, n, ok = 0;
+    if (!def || !def[0] || strlen(def) >= AI_TELEPORT_NAME_MAX || !spec || spec->n < 1 ||
+        spec->n > SH_AI_DESTRUCT_PIECES)
+        return 0;
+    AcquireSRWLockExclusive(&g_dd_lock);
+    n = (int)g_dd_n;
+    for (i = 0; i < n; i++) if (!_stricmp(g_dd[i].def, def)) break;
+    if (i < n || n < SH_AI_DESTRUCT_DEFS) {
+        strcpy_s(g_dd[i].def, sizeof g_dd[i].def, def);
+        g_dd[i].spec = *spec;
+        if (i == n) InterlockedExchange(&g_dd_n, n + 1);
+        ok = 1;
+    }
+    ReleaseSRWLockExclusive(&g_dd_lock);
+    return ok;
+}
+
+int sh_ai_destructible_find(const char *const *names, int n, sh_ai_destruct_spec *out)
+{
+    int i, k, used, found = 0;
+    if (!g_dd_n || !names || n <= 0) return 0;
+    AcquireSRWLockShared(&g_dd_lock);
+    used = (int)g_dd_n;
+    for (k = 0; k < n && !found; k++) {
+        if (!names[k]) continue;
+        for (i = 0; i < used; i++) {
+            if (_stricmp(g_dd[i].def, names[k])) continue;
+            if (out) *out = g_dd[i].spec;
+            found = 1;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_dd_lock);
+    return found;
+}
+
+void sh_ai_destructible_reset(void)
+{
+    AcquireSRWLockExclusive(&g_dd_lock);
+    InterlockedExchange(&g_dd_n, 0);
+    ReleaseSRWLockExclusive(&g_dd_lock);
+}
+
+/* idAngles::ToMat3 in both games (DOOM Eternal 0x1403ABBE0): degrees; rows forward, left, up. */
+static void dd_angles(float pitch, float yaw, float roll, float m[9])
+{
+    const float k = 0.017453292f;
+    float sp = sinf(pitch * k), cp = cosf(pitch * k), sy = sinf(yaw * k), cy = cosf(yaw * k);
+    float sr = sinf(roll * k), cr = cosf(roll * k);
+    m[0] = cp * cy; m[1] = cp * sy; m[2] = -sp;
+    m[3] = sr * sp * cy - cr * sy; m[4] = sr * sp * sy + cr * cy; m[5] = sr * cp;
+    m[6] = cr * sp * cy + sr * sy; m[7] = cr * sp * sy - sr * cy; m[8] = cr * cp;
+}
+
+/* v * m: v taken in the rows' frame (both games' idVec3 * idMat3). */
+static void dd_vmul(const float v[3], const float m[9], float out[3])
+{
+    int c;
+    for (c = 0; c < 3; c++) out[c] = v[0] * m[c] + v[1] * m[3 + c] + v[2] * m[6 + c];
+}
+
+static float dd_len(const float v[3]) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+
+static void dd_unit(float v[3])
+{
+    float l = dd_len(v);
+    if (l > 1e-12f) { v[0] /= l; v[1] /= l; v[2] /= l; }
+}
+
+/* A direction's frame (DOOM Eternal 0x1403B9F20): rows the direction, its horizontal normal, their cross. */
+static void dd_dir_frame(const float d[3], float m[9])
+{
+    float h = d[0] * d[0] + d[1] * d[1], hl;
+    if (h <= 1e-12f) {
+        float s = d[2] >= 0.0f ? 1.0f : -1.0f;
+        m[0] = 0.0f; m[1] = 0.0f; m[2] = s; m[3] = 1.0f; m[4] = 0.0f; m[5] = 0.0f; m[6] = 0.0f; m[7] = s; m[8] = 0.0f;
+        return;
+    }
+    m[0] = d[0]; m[1] = d[1]; m[2] = d[2];
+    dd_unit(m);
+    hl = 1.0f / sqrtf(h);
+    m[3] = -d[1] * hl; m[4] = d[0] * hl; m[5] = 0.0f;
+    m[6] = m[5] * m[1] - m[4] * m[2];           /* the first row crossed with the second */
+    m[7] = m[3] * m[2] - m[5] * m[0];
+    m[8] = m[4] * m[0] - m[3] * m[1];
+}
+
+static float dd_between(sh_ai_rand_fn rnd, void *rs, float lo, float hi) { return lo + rnd(rs) * (hi - lo); }
+
+void sh_ai_destruct_velocity(const sh_ai_destruct_piece *p, const float org[3], const float axis[9], const float ext[3],
+                             const float piece[3], float max_speed, float max_spin, sh_ai_rand_fn rnd, void *rs,
+                             float lin[3], float ang[3])
+{
+    float d[3] = { 0.0f, 0.0f, 1.0f }, m[9], e[9], f[3], w[3], s_lin = 0.0f, s_spin = 0.0f, l;
+    int k, drawn = 0;
+    dd_dir_frame(ext, e);
+    switch (p->preset) {
+    case SH_AI_PRESET_RANDOM:                   /* (0, 0, 1) plus a random forward, normalised */
+        dd_angles(rnd(rs) * 200.0f - 100.0f, rnd(rs) * 360.0f, 0.0f, m);
+        for (k = 0; k < 3; k++) d[k] += m[k];
+        dd_unit(d);
+        drawn = 1;
+        break;
+    case SH_AI_PRESET_CONE:                     /* the hit frame's second row, turned inside the two angles */
+        dd_angles(dd_between(rnd, rs, -p->pitch * 0.5f, p->pitch * 0.5f), dd_between(rnd, rs, -p->yaw * 0.5f, p->yaw * 0.5f),
+                  0.0f, m);
+        dd_vmul(e + 3, m, d);
+        drawn = 1;
+        break;
+    case SH_AI_PRESET_SPHERICAL: {              /* any direction above restrictBottomAngle below the horizon */
+        float r = p->bottom < 0.0f ? 0.0f : (p->bottom > 90.0f ? 90.0f : p->bottom);
+        dd_angles(rnd(rs) * ((90.0f - r) + 90.0f) - 90.0f, rnd(rs) * 360.0f, 0.0f, m);
+        d[0] = m[0]; d[1] = m[1]; d[2] = m[2];
+        drawn = 1;
+        break;
+    }
+    case SH_AI_PRESET_ANGEL_WINGS:              /* the owner's left (or the hit frame's third row), level, to the piece's side */
+        if (p->owner_frame) { w[0] = axis[3]; w[1] = axis[4]; }
+        else { w[0] = e[6]; w[1] = e[7]; }
+        w[2] = 0.0f;
+        if (p->random_dir) {
+            if (rnd(rs) < 0.5f) { w[0] = -w[0]; w[1] = -w[1]; }
+        } else if ((piece[0] - org[0]) * w[0] + (piece[1] - org[1]) * w[1] < 0.0f) {
+            w[0] = -w[0]; w[1] = -w[1];
+        }
+        dd_unit(w);
+        dd_angles(dd_between(rnd, rs, -p->pitch * 0.5f, p->pitch * 0.5f), dd_between(rnd, rs, -p->yaw * 0.5f, p->yaw * 0.5f),
+                  0.0f, m);
+        dd_vmul(w, m, f);
+        if (dd_len(f) > 0.0f) { d[0] = f[0]; d[1] = f[1]; d[2] = f[2]; }
+        drawn = 1;
+        break;
+    default:                                    /* custom (and a preset not carried): no preset speed */
+        break;
+    }
+    if (drawn) {
+        s_lin = dd_between(rnd, rs, p->lin_min, p->lin_max);
+        s_spin = dd_between(rnd, rs, p->spin_min, p->spin_max);
+    }
+    dd_unit(d);
+    f[0] = p->dir[0]; f[1] = p->dir[1]; f[2] = p->dir[2];
+    dd_unit(f);
+    dd_vmul(f, axis, w);                        /* the force's direction in the owner's axes */
+    for (k = 0; k < 3; k++) {
+        lin[k] = d[k] * s_lin + w[k] * p->speed;
+        ang[k] = d[k] * s_spin + w[k] * p->spin;    /* the preset's own spin axis is never read: its direction */
+    }
+    if (max_speed > 0.0f && (l = dd_len(lin)) > max_speed) for (k = 0; k < 3; k++) lin[k] *= max_speed / l;
+    if (max_spin > 0.0f && (l = dd_len(ang)) > max_spin) for (k = 0; k < 3; k++) ang[k] *= max_spin / l;
+}
+
+static float dd_field(lua_State *L, int idx, const char *key, float lo, float hi)
+{
+    return opt_num_field(L, idx, key, 0.0f, "destructible", lo, hi);
+}
+
+/* destructible(def, spec): a breakable entityDef `def` of this mod is DOOM
+ * Eternal's destructible `spec` names: when the game's gore spawns one, its
+ * pieces start where its model places them and fly and spin by DOOM
+ * Eternal's law, and the hit does not reach them when spec.ignore_external
+ * (DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE). spec: { ignore_external, max_speed
+ * (units/s), max_spin (rad/s), pieces = { { preset, min, max (units/s),
+ * spin_min, spin_max (rad/s), pitch, yaw, bottom (degrees), random, owner,
+ * dir = {x, y, z}, speed (units/s), spin (rad/s) }, ... } } in the
+ * breakable's piece order. Call it when the script starts. Answers true, or
+ * false and why (a preset the product does not carry: cone, thru square). */
+static int l_destructible(lua_State *L)
+{
+    const char *def = sh_script_check_name(L, 1, "destructible", 0, NULL);
+    sh_ai_destruct_spec s;
+    int i, n;
+    memset(&s, 0, sizeof s);
+    if (lua_type(L, 2) != LUA_TTABLE)
+        sh_script_refuse(L, "\"destructible\" needs a table describing the destructible, got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    s.ignore_external = opt_bool_field(L, 2, "ignore_external");
+    s.max_speed = dd_field(L, 2, "max_speed", 0.0f, 1e6f);
+    s.max_spin = dd_field(L, 2, "max_spin", 0.0f, 1e4f);
+    lua_getfield(L, 2, "pieces");
+    if (lua_type(L, -1) != LUA_TTABLE)
+        sh_script_refuse(L, "\"destructible\" needs pieces, a list of the pieces' motions");
+    n = (int)lua_rawlen(L, -1);
+    if (n < 1 || n > SH_AI_DESTRUCT_PIECES)
+        sh_script_refuse(L, "\"destructible\" takes 1 to %d pieces, got %d", SH_AI_DESTRUCT_PIECES, n);
+    for (i = 0; i < n; i++) {
+        sh_ai_destruct_piece *p = &s.piece[i];
+        int top = lua_gettop(L);
+        lua_rawgeti(L, -1, i + 1);
+        if (lua_type(L, -1) != LUA_TTABLE)
+            sh_script_refuse(L, "\"destructible\" needs a table for piece %d, got %s", i + 1, luaL_typename(L, -1));
+        p->preset = (int)dd_field(L, top + 1, "preset", 0.0f, 5.0f);
+        p->lin_min = dd_field(L, top + 1, "min", 0.0f, 1e6f);
+        p->lin_max = dd_field(L, top + 1, "max", 0.0f, 1e6f);
+        p->spin_min = dd_field(L, top + 1, "spin_min", 0.0f, 1e4f);
+        p->spin_max = dd_field(L, top + 1, "spin_max", 0.0f, 1e4f);
+        p->pitch = dd_field(L, top + 1, "pitch", 0.0f, 360.0f);
+        p->yaw = dd_field(L, top + 1, "yaw", 0.0f, 360.0f);
+        p->bottom = dd_field(L, top + 1, "bottom", 0.0f, 180.0f);
+        p->random_dir = opt_bool_field(L, top + 1, "random");
+        lua_getfield(L, top + 1, "owner");
+        p->owner_frame = lua_isnil(L, -1) ? 1 : lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, top + 1, "dir");
+        if (!lua_isnil(L, -1)) check_vec(L, lua_gettop(L), "destructible", p->dir);
+        lua_pop(L, 1);
+        p->speed = dd_field(L, top + 1, "speed", 0.0f, 1e6f);
+        p->spin = dd_field(L, top + 1, "spin", 0.0f, 1e4f);
+        lua_settop(L, top);
+        if (p->preset == SH_AI_PRESET_CONE || p->preset == SH_AI_PRESET_THRU_SQUARE) {
+            lua_pushboolean(L, 0);
+            lua_pushfstring(L, "piece %d uses DOOM Eternal's %s preset, which Snapmap+ does not carry", i + 1,
+                            p->preset == SH_AI_PRESET_CONE ? "cone" : "thru-square");
+            return 2;
+        }
+    }
+    s.n = n;
+    lua_pop(L, 1);
+    NEED_OP(L, destructible, "destructible");
+    if (!g_engine || g_engine->destructible() != 1) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "the game's gore breakable spawn could not be reached");
+        return 2;
+    }
+    if (!sh_ai_destructible_add(def, &s)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "too many entityDefs name a destructible in this map");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3104,6 +3345,7 @@ int sh_script_ai_register(void)
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "spawn_teleport", l_spawn_teleport);
+    n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "destructible", l_destructible);
     return n;
 }
 
@@ -4349,10 +4591,17 @@ typedef struct {
 static ai_wound_rec g_wound[AI_PARKED_MAX];
 static volatile LONG g_wound_used;
 
+/* The owner of the gore component whose ShowWound runs on this thread: the
+ * breakables the wound spawns are thrown in its frame (destructible). */
+static __declspec(thread) void *t_wound_owner;
+
 static void show_wound_detour(void *gore, void **row)
 {
-    void *wound = NULL, *owner = NULL;
+    void *wound = NULL, *owner = NULL, *was = t_wound_owner;
+    __try { t_wound_owner = gore ? *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER) : NULL; }
+    __except (av_only(GetExceptionCode())) { t_wound_owner = NULL; }
     g_wound_orig(gore, row);
+    t_wound_owner = was;
     __try {
         if (gore && row && *row) {
             /* the row's first word is its gore node (woundData_t.woundNode), not the wound: the wound is the
@@ -4706,6 +4955,138 @@ static int e_spawn_teleport(void)
                        SH_AI_TELEPORT_STOLEN, (void **)&g_tp_orig, &g_tp_failed, "spawn_teleport") ? 1 : -1;
 }
 
+/* ---- destructibles: a gore breakable of a def named with destructible() */
+
+typedef char (*ai_brk_gore_fn)(void *mgr, void *brk, const float *tag, const float *axis, const float *pos,
+                               const float *dir, const float *falloff, void *gore_behavior);
+typedef void (*ai_brk_break_fn)(void *brk, uint64_t zero);
+typedef void (*ai_fxphys_place_fn)(void *broadphase, void *entry, const float *pos, const float *axis, void *zero);
+typedef const float *(*ai_phys_vec_fn)(void *physics, int id);
+static ai_brk_gore_fn g_brkg_target, g_brkg_orig;
+static ai_brk_break_fn g_brk_break;
+static ai_fxphys_place_fn g_fxphys_place;
+static int g_brkg_failed;
+static volatile LONG g_dd_seed = 0x2545F491;
+
+static float dd_rand(void *state)
+{
+    (void)state;   /* an LCG of the game's kind; the draws need not be the game's own */
+    return (float)(((uint32_t)InterlockedExchange(&g_dd_seed, (LONG)((uint32_t)g_dd_seed * 1664525u + 1013904223u))
+                    >> 8) & 0xFFFFFF) / 16777216.0f;
+}
+
+static int dd_phys_vec(void *ent, size_t slot, float *out, int n)
+{
+    void *phys = *(void **)((uint8_t *)ent + SH_AI_OFF_PHYSICS);
+    ai_phys_vec_fn get = (ai_phys_vec_fn)vfn(phys, slot);
+    const float *v = get ? get(phys, 0) : NULL;
+    if (!v) return 0;
+    memcpy(out, v, (size_t)n * sizeof *out);
+    return 1;
+}
+
+/* Break the breakable as the game does, put every piece back where the
+ * model places it (the break moves each up to 20 units an axis and turns it
+ * at random), then give each piece DOOM Eternal's velocity and spin: the
+ * momentum the engine integrates, mass x velocity and the world inertia x
+ * spin (its integration takes spin = O^T J O L, J the inverse body inertia).
+ * `add`: on top of what the game's own hit gave (a decl that takes the
+ * external force). */
+static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *owner, const float *hit, int add)
+{
+    uint8_t *phys = (uint8_t *)brk + SH_AI_BRK_PHYSICS, **bodies;
+    float lpos[SH_AI_DESTRUCT_PIECES][3], lax[SH_AI_DESTRUCT_PIECES][9], org[3], ax[9], oorg[3], ext[3] = { 0, 0, 1 };
+    int i, n, fresh;
+    bodies = *(uint8_t ***)(phys + SH_AI_FXB_BODIES);
+    n = *(const int *)(phys + SH_AI_FXB_BODIES + 8);
+    if (!bodies || n <= 0) { g_brk_break(brk, 0); return; }
+    if (n > SH_AI_DESTRUCT_PIECES) n = SH_AI_DESTRUCT_PIECES;
+    fresh = *(const int32_t *)((uint8_t *)brk + SH_AI_BRK_BROKEN) == -1;
+    for (i = 0; i < n && fresh; i++) {
+        if (!bodies[i]) continue;
+        memcpy(lpos[i], bodies[i] + SH_AI_RB_POS, sizeof lpos[i]);
+        memcpy(lax[i], bodies[i] + SH_AI_RB_AXIS, sizeof lax[i]);
+    }
+    g_brk_break(brk, 0);
+    if (!dd_phys_vec(brk, SH_AI_VSLOT_ORIGIN, org, 3) || !dd_phys_vec(brk, SH_AI_VSLOT_AXIS, ax, 9)) return;
+    if (!owner || !dd_phys_vec(owner, SH_AI_VSLOT_ORIGIN, oorg, 3)) memcpy(oorg, org, sizeof oorg);
+    if (hit && !add) hit = NULL;
+    if (hit) { memcpy(ext, hit, sizeof ext); dd_unit(ext); if (dd_len(ext) <= 0.0f) { ext[0] = 0; ext[1] = 0; ext[2] = 1; } }
+    for (i = 0; i < n; i++) {
+        uint8_t *b = bodies[i], *props;
+        float lin[3], ang[3], *p, *o, w[3], lb[3], j[9], inv[9], det, im;
+        int r, c;
+        if (!b) continue;
+        p = (float *)(b + SH_AI_RB_POS);
+        o = (float *)(b + SH_AI_RB_AXIS);
+        props = *(uint8_t **)(b + SH_AI_RB_PROPS);
+        if (fresh) {                       /* where the model places the piece: local x axis + origin, local axis x axis */
+            float q[9];
+            for (c = 0; c < 3; c++) p[c] = org[c] + lpos[i][0] * ax[c] + lpos[i][1] * ax[3 + c] + lpos[i][2] * ax[6 + c];
+            for (r = 0; r < 3; r++) for (c = 0; c < 3; c++)
+                q[3 * r + c] = lax[i][3 * r] * ax[c] + lax[i][3 * r + 1] * ax[3 + c] + lax[i][3 * r + 2] * ax[6 + c];
+            memcpy(o, q, sizeof q);
+            if (props && g_fxphys_place)
+                g_fxphys_place(*(void **)(props + SH_AI_PROPS_BROADPHASE), b + SH_AI_RB_SPOBJECT, p, o, NULL);
+        }
+        if (i >= spec->n || !props) continue;
+        sh_ai_destruct_velocity(&spec->piece[i], oorg, ax, ext, p, spec->max_speed, spec->max_spin, dd_rand, NULL,
+                                lin, ang);
+        im = *(const float *)(props + SH_AI_PROPS_INV_MASS);
+        memcpy(j, props + SH_AI_PROPS_INV_INERTIA, sizeof j);
+        det = j[0] * (j[4] * j[8] - j[5] * j[7]) - j[1] * (j[3] * j[8] - j[5] * j[6]) + j[2] * (j[3] * j[7] - j[4] * j[6]);
+        if (im <= 0.0f || det == 0.0f || det != det) continue;
+        inv[0] = (j[4] * j[8] - j[5] * j[7]) / det; inv[1] = (j[2] * j[7] - j[1] * j[8]) / det;
+        inv[2] = (j[1] * j[5] - j[2] * j[4]) / det; inv[3] = (j[5] * j[6] - j[3] * j[8]) / det;
+        inv[4] = (j[0] * j[8] - j[2] * j[6]) / det; inv[5] = (j[2] * j[3] - j[0] * j[5]) / det;
+        inv[6] = (j[3] * j[7] - j[4] * j[6]) / det; inv[7] = (j[1] * j[6] - j[0] * j[7]) / det;
+        inv[8] = (j[0] * j[4] - j[1] * j[3]) / det;
+        for (r = 0; r < 3; r++) w[r] = o[3 * r] * ang[0] + o[3 * r + 1] * ang[1] + o[3 * r + 2] * ang[2];   /* O w */
+        for (r = 0; r < 3; r++) lb[r] = inv[3 * r] * w[0] + inv[3 * r + 1] * w[1] + inv[3 * r + 2] * w[2];  /* I (O w) */
+        {
+            float *lm = (float *)(b + SH_AI_RB_LINEAR), *am = (float *)(b + SH_AI_RB_ANGULAR);
+            for (c = 0; c < 3; c++) {
+                float lw = lb[0] * o[c] + lb[1] * o[3 + c] + lb[2] * o[6 + c];                               /* O^T */
+                lm[c] = (add ? lm[c] : 0.0f) + lin[c] / im;
+                am[c] = (add ? am[c] : 0.0f) + lw;
+            }
+        }
+        b[SH_AI_RB_SETTLED] = 0;
+        b[SH_AI_RB_ACTIVE] = 1;
+    }
+}
+
+static char brk_gore_detour(void *mgr, void *brk, const float *tag, const float *axis, const float *pos,
+                            const float *dir, const float *falloff, void *gore_behavior)
+{
+    sh_ai_destruct_spec spec;
+    const char *names[10];
+    int n = 0, have = 0;
+    char r = 0;
+    __try {
+        n = sh_companions_def_chain(brk, names, 10);
+        have = n > 0 && sh_ai_destructible_find(names, n, &spec);
+    } __except (av_only(GetExceptionCode())) { have = 0; }
+    if (!have) return g_brkg_orig(mgr, brk, tag, axis, pos, dir, falloff, gore_behavior);
+    /* a decl that ignores the external force takes nothing of the hit: neither the damage's weapon-specific gore
+     * nor the hit's explosion record the spawn queues when this answers true */
+    if (!spec.ignore_external) r = g_brkg_orig(mgr, brk, tag, axis, pos, dir, falloff, gore_behavior);
+    __try { destruct_activate(brk, &spec, t_wound_owner, dir, !spec.ignore_external); }
+    __except (av_only(GetExceptionCode())) { }
+    return r;
+}
+
+static int e_destructible(void)
+{
+    if (!g_brk_break || !g_fxphys_place) return -1;
+    /* the owner the pieces are thrown in the frame of comes from ShowWound; without it their own origin serves */
+    if (g_wound_target)
+        (void)commit_hook((void *)g_wound_target, (void *)show_wound_detour, k_ai_wound_prologue, SH_AI_WOUND_STOLEN,
+                          (void **)&g_wound_orig, &g_wound_failed, "destructible");
+    return commit_hook((void *)g_brkg_target, (void *)brk_gore_detour, k_ai_brk_gore_prologue, SH_AI_BRK_GORE_STOLEN,
+                       (void **)&g_brkg_orig, &g_brkg_failed, "destructible") ? 1 : -1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -4740,7 +5121,7 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend, e_spawn_teleport
+    e_interrupt_blend, e_spawn_teleport, e_destructible
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -4911,6 +5292,13 @@ int sh_script_ai_install(const uint8_t *module_base)
     if (site && !memcmp(site + SH_AI_TELEPORT_DELAY_READ, "\x44\x8B\x87\xE0\xC0\x00\x00", 7))
         g_tp_target = (ai_teleport_show_fn)site;
     else g_live.spawn_teleport = NULL;
+    /* Destructibles: the weapon-specific gore of a gore breakable (detoured), the break and the broad phase move
+     * (called; the sigs test checks the offsets each proves). */
+    if (r[SH_AI_SIG_BREAKABLE_GORE].addr && r[SH_AI_SIG_BREAKABLE_BREAK].addr && r[SH_AI_SIG_FXPHYS_PLACE].addr) {
+        g_brkg_target = (ai_brk_gore_fn)r[SH_AI_SIG_BREAKABLE_GORE].addr;
+        g_brk_break = (ai_brk_break_fn)r[SH_AI_SIG_BREAKABLE_BREAK].addr;
+        g_fxphys_place = (ai_fxphys_place_fn)r[SH_AI_SIG_FXPHYS_PLACE].addr;
+    } else g_live.destructible = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

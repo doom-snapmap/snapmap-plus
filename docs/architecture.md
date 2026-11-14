@@ -2243,6 +2243,26 @@ is touched, and a removed demon answers nil.
   effect runs inside it on the server); every other demon keeps the game's.
   The registry is per map (16 defs). `enemy_sdk.bind` calls the brain's
   `bind(def)` first, where the brain names its entityDef's pair.
+  `destructible(def, spec)` (a global, asked when the script starts) names a
+  breakable entityDef of the mod with what its DOOM Eternal destructible decl
+  says. DOOM Eternal sets each piece's velocity at the activation
+  (OnActivation 0x140AF8020): the preset's direction (spherical, angel wings,
+  random; cone and thru-square are refused) at a speed drawn from [min, max],
+  plus the decl's force in the owner's axes; the spin is the same direction at
+  a second draw plus the force direction at its angular speed; a decl flagged
+  DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE takes nothing from the hit. DOOM 2016
+  throws a gore breakable's pieces by explosion records, the hit's among them
+  (queued by the spawn, VK 0x14079E3B0, unless the damage's weapon-specific
+  gore, VK 0x1407A06E0, answers false), and its break (VK 0x14079E6D0) moves
+  every piece up to 20 units an axis. The call detours that weapon-specific
+  gore (19 whole bytes): for a breakable whose def chain names a registered
+  def it breaks the breakable itself, puts every piece back where the model
+  places it (the broad phase moved, VK 0x141650390), writes each piece's
+  momentum from DOOM Eternal's velocity and spin (mass x velocity; the world
+  inertia, from the inverse the integration uses, x spin), and answers false
+  for a decl that ignores the hit, so the spawn queues no hit record. The
+  frame is the owner of the gore component whose ShowWound runs (the ShowWound
+  detour keeps it per thread). The registry is per map (64 defs, 32 pieces).
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

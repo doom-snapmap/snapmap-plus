@@ -464,6 +464,9 @@ typedef struct sh_script_ai_engine {
     /* Make sure the game's teleport show runs through the product
      * (sh_ai_spawn_teleport below). 1 ready, -1 unavailable. */
     int      (*spawn_teleport)(void);
+    /* Make sure the game's handling of a gore breakable's hit runs through
+     * the product (sh_ai_destructible below). 1 ready, -1 unavailable. */
+    int      (*destructible)(void);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -631,6 +634,73 @@ int sh_ai_spawn_teleport_add(const char *def, int delay_ms, int backoff_ms);
 int sh_ai_spawn_teleport_find(const char *const *names, int n, int *delay_ms, int *backoff_ms);
 void sh_ai_spawn_teleport_reset(void);
 
+/* Destructibles. DOOM Eternal throws a destructible's pieces by SETTING each
+ * one's velocity when it is activated (idDestructibleMechanic_Generic::
+ * OnActivation 0x140AF8020, its sum 0x140AEEB50, the presets 0x140AEF540):
+ * a preset direction (spherical, angel wings, random, cone) at a speed drawn
+ * from the preset's [min, max], plus the decl's force (linearDirection in the
+ * owner's axes at linearSpeed); the spin is the same preset direction at a
+ * second draw from [min, max] plus the force direction at angularSpeed (the
+ * preset's own angular axis is computed and never read). The frame is the
+ * owner's origin and axis (the gore wound's spawn 0x140C4C170 passes them).
+ * A decl flagged DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE takes nothing from the
+ * hit (0x140AF3F10 zeroes it). Velocities are capped at
+ * Destructible_MaxLinearVelocity (30 m/s) and Destructible_MaxAngularVelocity
+ * (31.42 rad/s). DOOM 2016 throws a breakable's pieces by explosion records
+ * (impulse / ((d + 1) x falloff), radial from the record, on every piece's
+ * momentum): its decl's, and one more a gore wound queues from the hit at
+ * the breakable's origin (VK 0x14079E3B0) unless the damage's weapon-specific
+ * gore threw the pieces itself (VK 0x1407A06E0, which then answers false);
+ * the break (VK 0x14079E6D0) also moves every piece up to 20 units on each
+ * axis from where its model places it and turns it at random (VK
+ * 0x141758780). destructible(def, spec) names a breakable entityDef of the
+ * mod with what its DOOM Eternal decl says: when the game's gore spawns a
+ * breakable of that def, the product breaks it with its pieces where the
+ * model places them, sets each piece's velocity and spin by DOOM Eternal's
+ * law, and, for a decl that ignores the external force, keeps the hit away
+ * from the pieces. Speeds are units a second, spins radians a second. The
+ * registry is per map; names are whole and compared without case. The cone
+ * and thru-square presets are refused (not carried). */
+#define SH_AI_DESTRUCT_DEFS        64
+#define SH_AI_DESTRUCT_PIECES      32
+enum { SH_AI_PRESET_CUSTOM = 0, SH_AI_PRESET_RANDOM = 1, SH_AI_PRESET_CONE = 2, SH_AI_PRESET_SPHERICAL = 3,
+       SH_AI_PRESET_ANGEL_WINGS = 4, SH_AI_PRESET_THRU_SQUARE = 5 };
+typedef struct {
+    int   preset;              /* SH_AI_PRESET_ (DOOM Eternal's impulsePreset_t order) */
+    float lin_min, lin_max;    /* the preset's [minForce, maxForce] as a speed, units/s */
+    float spin_min, spin_max;  /* the same pair as a spin, rad/s */
+    float pitch, yaw;          /* angel wings: limitAngles (degrees) */
+    float bottom;              /* spherical: restrictBottomAngle (degrees) */
+    int   random_dir;          /* angel wings: changeDirRandomly */
+    int   owner_frame;         /* angel wings: inheritParentTransform */
+    float dir[3];              /* the force's linearDirection, in the owner's axes */
+    float speed;               /* the force's linearSpeed, units/s */
+    float spin;                /* the force's angularSpeed, rad/s */
+} sh_ai_destruct_piece;
+typedef struct {
+    int   ignore_external;     /* DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE */
+    float max_speed;           /* units/s; 0 none */
+    float max_spin;            /* rad/s; 0 none */
+    int   n;                   /* pieces, in the breakable's piece order */
+    sh_ai_destruct_piece piece[SH_AI_DESTRUCT_PIECES];
+} sh_ai_destruct_spec;
+typedef float (*sh_ai_rand_fn)(void *state);   /* uniform in [0, 1) */
+/* One piece's velocity (units/s) and spin (rad/s) by DOOM Eternal's law
+ * (pure). org and axis: the owner's origin and axis (rows: forward, left,
+ * up); ext: the hit's direction ((0, 0, 1) when the decl ignores it), whose
+ * frame the cone and the angel wings without inheritParentTransform use;
+ * piece: where the piece is. The preset's draws come from rnd. */
+void sh_ai_destruct_velocity(const sh_ai_destruct_piece *p, const float org[3], const float axis[9], const float ext[3],
+                             const float piece[3], float max_speed, float max_spin, sh_ai_rand_fn rnd, void *rs,
+                             float lin[3], float ang[3]);
+/* 1 recorded (a second call for the same def replaces it), 0 the registry
+ * is full or the spec is out of range. */
+int sh_ai_destructible_add(const char *def, const sh_ai_destruct_spec *spec);
+/* 1 and a copy of the spec when one of the n names (an entity's def chain)
+ * was recorded, else 0. */
+int sh_ai_destructible_find(const char *const *names, int n, sh_ai_destruct_spec *out);
+void sh_ai_destructible_reset(void);
+
 /* Forget every per-demon record (a new map). The parked table is the
  * engine side's and is checked by spawn id, so a stale entry never parks
  * another map's demon. */
@@ -695,6 +765,9 @@ enum sh_ai_sig {
     SH_AI_SIG_WEB_FORCE_STATE,     /* the anim web's ForceState (sets interruptPath and interruptBlend YES) */
     SH_AI_SIG_WEB_UPDATE,          /* the anim web's update (tests interruptBlend, resets it at a transition) */
     SH_AI_SIG_TELEPORT_SHOW,       /* the teleport show (ai): hide, effect, show after the delay (detoured) */
+    SH_AI_SIG_BREAKABLE_GORE,      /* a gore breakable's weapon-specific gore (manager, breakable, ...) (detoured) */
+    SH_AI_SIG_BREAKABLE_BREAK,     /* idBreakable's break (breakable, 0): every piece placed and activated */
+    SH_AI_SIG_FXPHYS_PLACE,        /* an effect rigid body's broad phase entry moved (broad phase, entry, pos, axis) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -920,6 +993,28 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 #define SH_AI_VSLOT_ORIGIN        0x80u
 #define SH_AI_VSLOT_AXIS          0x88u
 #define SH_AI_TYPE_NUM            0x68u     /* idTypeInfo: type number, +0x6C last descendant */
+
+/* Breakables (both renderers, 13954591; reflected names in brackets; tests/script_ai_sigs_test.c checks the code
+ * that uses each). The weapon-specific gore's window is 19 bytes: mov r11,rsp; push rbp, r12..r15; lea rbp,
+ * [r11-0xB8] (position-independent). */
+#define SH_AI_BRK_PHYSICS         0xCA8u    /* idBreakable: [breakablePhysics] (idEffectPhysicsBreakable) */
+#define SH_AI_BRK_BROKEN          0xE6Cu    /* idBreakable: [brokenStartTime], -1 until the break */
+#define SH_AI_FXB_BODIES          0x18u     /* idEffectPhysicsBreakable: [rigidBodies] list, count at +8 */
+#define SH_AI_RB_PROPS            0x00u     /* idEffectPhysicsRigidBody: [properties] */
+#define SH_AI_RB_POS              0x08u     /* [currentState.position] */
+#define SH_AI_RB_AXIS             0x14u     /* [currentState.orientation] (rows) */
+#define SH_AI_RB_LINEAR           0x38u     /* [currentState.linearMomentum] */
+#define SH_AI_RB_ANGULAR          0x44u     /* [currentState.angularMomentum] */
+#define SH_AI_RB_SPOBJECT         0x68u     /* [SPObject], the broad phase entry */
+#define SH_AI_RB_ACTIVE           0x110u    /* [active] */
+#define SH_AI_RB_SETTLED          0x111u    /* [settled] */
+#define SH_AI_PROPS_BROADPHASE    0x00u     /* idEffectPhysicsProperties: [broadPhase] */
+#define SH_AI_PROPS_INV_MASS      0x40u     /* [inverseMass] */
+#define SH_AI_PROPS_INV_INERTIA   0x74u     /* [inverseInertiaTensor] (body axes) */
+#define SH_AI_BRK_GORE_STOLEN     19
+static const unsigned char k_ai_brk_gore_prologue[SH_AI_BRK_GORE_STOLEN] = {
+    0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x8D, 0xAB, 0x48, 0xFF, 0xFF, 0xFF
+};
 
 #ifdef __cplusplus
 }

@@ -344,6 +344,12 @@ static int f_spawn_teleport(void)
     ev_cat("spawn_teleport\n");
     return g_spawn_teleport_ready ? 1 : -1;
 }
+static int g_destructible_ready = 1;
+static int f_destructible(void)
+{
+    ev_cat("destructible\n");
+    return g_destructible_ready ? 1 : -1;
+}
 static int f_interrupt_blend(void *ai, int mode)
 {
     char line[48];
@@ -442,7 +448,7 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_spawn_teleport
+    f_interrupt_blend, f_spawn_teleport, f_destructible
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2138,11 +2144,110 @@ static void test_spawn_teleport(void)
     sh_ai_spawn_teleport_reset();
 }
 
+/* destructible: DOOM Eternal's activation law, the registry and the script call. */
+static float g_rv[16];
+static int g_ri;
+static float seq_rand(void *s) { (void)s; return g_rv[g_ri++ % 16]; }
+
+static int dd_near3(const float a[3], float x, float y, float z, float tol)
+{
+    return fabsf(a[0] - x) <= tol && fabsf(a[1] - y) <= tol && fabsf(a[2] - z) <= tol;
+}
+
+static void test_destructible(void)
+{
+    /* an owner turned 90 degrees (forward +y, left -x, up +z), at the origin */
+    const float org[3] = { 0, 0, 0 }, axis[9] = { 0, 1, 0, -1, 0, 0, 0, 0, 1 }, up[3] = { 0, 0, 1 };
+    const float right_piece[3] = { 30, 5, 100 }, left_piece[3] = { -30, 5, 100 };
+    const char *chain[2] = { "mods/aaaaaaaa/breakable/tyrant/chest", "breakable/default" };
+    sh_ai_destruct_piece p;
+    sh_ai_destruct_spec s, got;
+    float lin[3], ang[3];
+    int i;
+    printf("-- destructible: DOOM Eternal's law\n");
+    memset(&p, 0, sizeof p);
+    /* the Tyrant's chunks: angel wings 3..8 m/s, limitAngles 20/60, positional, the owner's frame; force z 3 at 8 m/s
+     * and 2 rad/s (52.49 units a metre) */
+    p.preset = SH_AI_PRESET_ANGEL_WINGS; p.lin_min = 157.48f; p.lin_max = 419.95f; p.spin_min = 3; p.spin_max = 8;
+    p.pitch = 20; p.yaw = 60; p.owner_frame = 1; p.dir[2] = 3; p.speed = 419.95f; p.spin = 2;
+    for (i = 0; i < 16; i++) g_rv[i] = 0.5f;           /* the middle of every range: no jitter, the mean speeds */
+    g_ri = 0;
+    sh_ai_destruct_velocity(&p, org, axis, up, left_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
+    /* a piece on the owner's left (-x) flies left at the mean 288.7 and up at 419.95; spins about left at 5.5 + 2 up */
+    CHECK(dd_near3(lin, -288.7f, 0.0f, 419.95f, 0.1f));
+    CHECK(dd_near3(ang, -5.5f, 0.0f, 2.0f, 0.001f));
+    g_ri = 0;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, 288.7f, 0.0f, 419.95f, 0.1f));    /* the other side flies right */
+    for (i = 0; i < 16; i++) g_rv[i] = 0.0f;           /* the low ends: -10 pitch, -30 yaw, the min speeds */
+    g_ri = 0;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
+    CHECK(fabsf(sqrtf(lin[0] * lin[0] + lin[1] * lin[1] + (lin[2] - 419.95f) * (lin[2] - 419.95f)) - 157.48f) < 0.1f);
+    CHECK(lin[2] > 419.95f);                           /* id's negative pitch tilts the wing up */
+    /* spherical, restrictBottomAngle 60: the draw 0 is straight up, the draw 1 is 30 degrees below the horizon */
+    memset(&p, 0, sizeof p);
+    p.preset = SH_AI_PRESET_SPHERICAL; p.lin_min = p.lin_max = 100; p.bottom = 60;
+    for (i = 0; i < 16; i++) g_rv[i] = 0.0f;
+    g_ri = 0;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 0, 0, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, 0, 0, 100, 0.01f));
+    for (i = 0; i < 16; i++) g_rv[i] = 0.99999f;
+    g_ri = 0;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 0, 0, seq_rand, NULL, lin, ang);
+    CHECK(fabsf(lin[2] + 50.0f) < 0.1f);
+    /* a custom preset has no preset speed: the force alone; the caps hold */
+    memset(&p, 0, sizeof p);
+    p.dir[2] = 1; p.speed = 2000; p.spin = 50;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, 0, 0, 1574.8f, 0.1f) && dd_near3(ang, 0, 0, 31.42f, 0.001f));
+    printf("-- destructible: the registry\n");
+    memset(&s, 0, sizeof s);
+    s.ignore_external = 1; s.max_speed = 1574.8f; s.n = 1; s.piece[0].preset = SH_AI_PRESET_ANGEL_WINGS;
+    sh_ai_destructible_reset();
+    CHECK(!sh_ai_destructible_find(chain, 2, &got));
+    CHECK(sh_ai_destructible_add("mods/aaaaaaaa/breakable/tyrant/chest", &s) == 1);
+    CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.ignore_external == 1 && got.n == 1);
+    s.n = 0;
+    CHECK(sh_ai_destructible_add("mods/aaaaaaaa/breakable/tyrant/x", &s) == 0);
+    sh_ai_destructible_reset();
+    CHECK(!sh_ai_destructible_find(chain, 2, &got));
+    printf("-- destructible: the script call\n");
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "print('dd ' .. tostring(destructible('breakable/tyrant/chest', { ignore_external = true, max_speed = 1574.8,\n"
+        "  max_spin = 31.42, pieces = { { preset = 4, min = 157.48, max = 419.95, spin_min = 3, spin_max = 8,\n"
+        "  pitch = 20, yaw = 60, owner = true, dir = { 0, 0, 3 }, speed = 419.95, spin = 2 } } })))\n"));
+    CHECK(strstr(log_of("aaaaaaaa"), "dd true\n") != NULL);
+    CHECK(strstr(g_events, "destructible\n") != NULL);
+    CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.ignore_external && got.n == 1 &&
+          got.piece[0].preset == 4 && got.piece[0].owner_frame && fabsf(got.piece[0].dir[2] - 3.0f) < 1e-6f &&
+          fabsf(got.max_spin - 31.42f) < 1e-4f);
+    sh_script_map_end();
+    sh_ai_destructible_reset();
+    CHECK(start("api = 1\nprint(select(2, destructible('breakable/tyrant/chest', { pieces = { { preset = 2 } } })))\n"));
+    CHECK(strstr(log_of("aaaaaaaa"), "cone preset, which Snapmap+ does not carry") != NULL);
+    CHECK(!sh_ai_destructible_find(chain, 2, &got));
+    sh_script_map_end();
+    g_destructible_ready = 0;
+    CHECK(start("api = 1\nprint('dd ' .. tostring(destructible('breakable/tyrant/chest', { pieces = { {} } })))\n"));
+    CHECK(strstr(log_of("aaaaaaaa"), "dd false\n") != NULL);
+    sh_script_map_end();
+    g_destructible_ready = 1;
+    (void)start("api = 1\ndestructible('breakable/tyrant/chest', { pieces = {} })\n");
+    CHECK(strstr(stop_of("aaaaaaaa"), "takes 1 to 32 pieces, got 0") != NULL);
+    sh_script_map_end();
+    (void)start("api = 1\ndestructible('mods/bbbbbbbb/breakable/x', { pieces = { {} } })\n");
+    CHECK(strstr(stop_of("aaaaaaaa"), "belongs to another mod") != NULL);
+    sh_script_map_end();
+    sh_ai_destructible_reset();
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 51);
+    CHECK(sh_script_ai_register() == 52);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2180,6 +2285,7 @@ int main(int argc, char **argv)
     test_fk_reference_pose();
     test_eternal_interrupts();
     test_spawn_teleport();
+    test_destructible();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");
