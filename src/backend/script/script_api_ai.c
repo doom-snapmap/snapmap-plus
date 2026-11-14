@@ -4354,8 +4354,11 @@ static void show_wound_detour(void *gore, void **row)
     void *wound = NULL, *owner = NULL;
     g_wound_orig(gore, row);
     __try {
-        if (gore && row) {
-            wound = *row;
+        if (gore && row && *row) {
+            /* the row's first word is its gore node (woundData_t.woundNode), not the wound: the wound is the
+             * node's areaWoundDecl (the engine's lookup VK 0x1406E8AB0 returns it unless a weaponSpecific row
+             * names the damage decl; a ported demon's nodes have none) */
+            wound = *(void * const *)((const uint8_t *)*row + SH_AI_GORE_NODE_WOUND);
             owner = *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER);
         }
         if (wound && owner) {

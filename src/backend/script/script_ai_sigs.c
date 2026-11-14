@@ -42,7 +42,8 @@
  *                      generic type is spawned without it: no hit is recorded, no wound opens, no full body
  *                      gib is tried, and the body is never faded out and removed.
  *   AiShowWound        VK 0x1409021C0  GL 0x140901270  idGoreComponent::ShowWound (component, wound row): the
- *                      first word of the row is the gorewounds decl; the component's owner is at +0x610 (the
+ *                      first word of the row is its gore node, whose areaWoundDecl (+0x28) is the gorewounds
+ *                      decl (VK 0x1406E8AB0); the component's owner is at +0x610 (the
  *                      handle pair +0x608 is resolved by the function itself). It shows the wound's mesh kits
  *                      (VK 0x1408FD680 -> 0x1415F0A70: bits of the model's 64-bit shown-mesh mask at model
  *                      +0xEE8, one per mesh index), clips, sprays and spawns the breakables. A wound has no

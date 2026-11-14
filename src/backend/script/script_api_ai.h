@@ -505,6 +505,7 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *pose, const sh_ai_leg_joints *j, sh_ai
 #define SH_AI_GORE_SITE_CALL      72u     /* call init */
 #define SH_AI_GORE_GRAPH          0x630u  /* component: the gore graph decl */
 #define SH_AI_GORE_OWNER          0x610u  /* component: its owner, NULL until the init */
+#define SH_AI_GORE_NODE_WOUND     0x28u   /* idDeclGoreNode: areaWoundDecl, the wound a shown row opens */
 /* ShowWound's window: the first argument's home, push rbx, push rdi, sub
  * rsp (whole, position-independent). */
 #define SH_AI_WOUND_STOLEN 14
