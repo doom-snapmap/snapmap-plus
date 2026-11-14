@@ -34,8 +34,6 @@ $tests = @(
     @{ name = "module_prefab_test"; src = 'module_prefab_test.c ..\src\backend\module_prefab_map.c ..\src\backend\mp_json.c'; arg = "" }
     @{ name = "timeline_tile_test"; src = 'timeline_tile_test.c ..\src\backend\timeline_tile.c'; defs = '/DSH_TIMELINE_TILE_PURE'; arg = "" }
     @{ name = "typeinfo_cache_test"; src = 'typeinfo_cache_test.c ..\src\backend\modtypeinfo.c'; defs = '/DSH_MODTYPEINFO_PURE'; arg = "" }
-    @{ name = "modaction_test"; src = 'modaction_test.c ..\src\backend\modaction.c'; defs = '/DSH_MODACTION_PURE'; arg = "" }
-    @{ name = "modaction_engine_test"; src = 'modaction_engine_test.c'; arg = "" }
     @{ name = "budget_table_test"; src = 'budget_table_test.c ..\src\backend\budget_table.c'; defs = '/DSH_BUDGET_TABLE_PURE'; arg = "" }
     @{ name = "settings_tab_test"; src = 'settings_tab_test.c ..\src\backend\settings_tab.c'; defs = '/DSH_SETTINGS_TAB_PURE'; arg = "" }
     @{ name = "map_render_native_test"; src = 'map_render_native_test.c ..\src\backend\map_render.c ..\src\backend\map_settings.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\map_bounds.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\sha256.c'; defs = '/DSH_MAP_BOUNDS_PURE'; arg = "" }

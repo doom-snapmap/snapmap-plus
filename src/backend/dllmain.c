@@ -55,7 +55,6 @@
 #include "commands.h"
 #include "cvars.h"
 #include "entity.h"
-#include "modaction.h"
 #include "companion_engine.h"
 #include "typeinfo.h"
 #include "megapreview.h"
@@ -359,11 +358,6 @@ static void install_features(const sig_result *results, size_t db)
 
     /* Bind reflection functions and the signed decl-manager accessor call site. */
     sh_typeinfo_install(results, db, g_doom_base);
-
-    /* smp: commands carried by String Variable Set nodes (needs the game
-     * manager from sh_entity_install and the decl manager above). */
-    need(sh_modaction_install(results, db, g_doom_base), "String Variable Set actions cannot be observed",
-         SH_FEATURE_SMP_COMMANDS, NULL, NULL);
 
     /* Owner-bound companions (companion_engine.h): CallSpawn is detoured only
      * when an admitted bundle declares companions. */

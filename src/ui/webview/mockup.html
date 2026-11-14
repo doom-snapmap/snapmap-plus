@@ -1567,8 +1567,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function tlRuntimeTargetNote(ref) {
     if (!/^player[1-8]$/i.test(String(ref || '').trim())) return '';
     return 'Players do not exist yet when a timeline starts, so events on ' + String(ref).trim() +
-           ' never run. Target a map entity instead: for example "activate" on a Set (String) node whose' +
-           ' value is an smp: command, with ' + String(ref).trim() + ' as the activator.';
+           ' never run. Target a map entity instead; an entity-typed argument can still name ' +
+           String(ref).trim() + ', because it is resolved when the event fires.';
   }
   // Show both ID and display name; the ID disambiguates entities with the same name.
   function tlEntityLabel(ref) {

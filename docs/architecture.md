@@ -4615,51 +4615,12 @@ live usage as "Map after" for the held prefab instead of adding it again.
 `sh_module_prefab_selected_count` reads the length of Blueprint's module
 selection, the count Save uses, for the tab's Create gate.
 
-## Map behaviour carried by String Set nodes
+## Engine event registry
 
-`modaction.c` lets a map carry a behaviour in stock data, so a new engine event
-needs no product release: a Set (String) node whose literal value starts with
-`smp:` is a command. The detour sits on the action's `DoAction(this, activator)`
-(signature `StringSetDoAction`, Vulkan 0x9E26C0 / OpenGL 0x9E19B0, reached
-only through its vtable slot), the one hop where the activator is known; the
-variable-changed notification that follows carries only the variable index.
-The 20-byte prologue is checked before the detour is placed; the engine calls
-the hook uses (`ProcessEventArgs`, the argument clear and entity conversion,
-the two player casts) are raw RVA pairs that apply only on the recognised build
-13954591 executables.
-
-The hook reads the node's value parameter at `this+0xCA8`: a literal when its
-index equals the engine's "no variable" constant (-1), held in an `idStr` at
-`+0xCB0` (length `+0x08`, data `+0x10`). It acts only when all of these hold:
-the master switch (`sh_smp on|off`) is on, the game manager reports the host
-(`IsServer`, gameMgr `+0x2BB3A4`), the SnapMap logic manager exists (the same
-check every stock action makes); the `smp:` prefix is the map's own opt-in.
-Logic only runs on the host, so a client never reaches the hook. The literal
-must have a command's shape (`smp_check`: the verb is `event` with an event
-name, or `doomhands` with one bool); any registered engine event may fire, as
-a stock Timeline in plain map data can. The activator becomes a player by an
-`idPlayer` cast, else through the owner slot (vtable `+0x558`) the stock Give
-Item action uses. The command runs on the game thread inside `DoAction`, then
-the stock write proceeds unchanged. Every engine call it makes catches an
-access violation only (`ma_filter`): that stops the command with one `SMP:`
-line and the write still runs; any other exception (an `idException` is a C++
-throw) is named in one line and passed on to the engine's own handler.
-
-`smp:event` looks the event up through the decl manager's event interface
-(`+0x90`, FindByName `+0x10`), types the arguments from the record's compact
-format (`+0x08`), and dispatches at once with `ProcessEventArgs(obj, ret, def, n,
-arg...)`, up to eight 0x18-byte `idEventArg`s. A bool travels as `'i'` because
-the engine's argument copy drops a `'b'` value; an entity argument is resolved
-by name and converted to its handle with the engine's own constructor; a string
-points into the parsed command for the duration of the call. `smp:doomhands`
-writes the player's Doom-hands byte (`+0x45EB5`, otherwise written only by
-`idPlayer::Spawn` from the local-player check, the SnapMap game type, the map's
-`useSPModels` and a player count below two) and marks the hands and body stale
-(`+0xB512`, `+0xB513`) so the next think reselects them. The parser and the
-argument typing are pure C (`SH_MODACTION_PURE`, `tests/modaction_test.c`).
-
-`sh_event list` reads the same registry (Count `+0x28`, GetEventCommand
-`+0x08`); on this build it holds the 1611 events of the Timeline tab's
+`event_registry.c` backs `sh_event`: it reads the registry through the decl
+manager's event interface (`+0x90`; FindByName `+0x10`, Count `+0x28`,
+GetEventCommand `+0x08`) and each record's format (`+0x08`), types (`+0x10`)
+and argument names (`+0x18`). On this build it holds the 1611 events of the Timeline tab's
 generated catalogue with the same argument types, so the tab's picker already
 offers every registry event. Timelines resolve their target entities when the
 map spawns (`idComponentTimeLine` reports "references bad entity" for a name

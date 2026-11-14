@@ -33,7 +33,6 @@
 #define SH_FEATURE_TIMELINES       "the Timelines tile"
 #define SH_FEATURE_NAVIGATION      "Navigation"
 #define SH_FEATURE_PUBLISHING      "publishing maps with mods"
-#define SH_FEATURE_SMP_COMMANDS    "smp: commands"
 #define SH_FEATURE_MOD_TEXTURES    "mod virtual textures on lit materials"
 #define SH_FEATURE_MOD_MOVIES      "mod movies and HUD"
 #define SH_FEATURE_MOD_SOUNDS      "mod sounds"

@@ -1449,7 +1449,6 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
 void h_sh_dumpdef(idCmdArgs *a);
 void h_sh_spawninfo(idCmdArgs *a);
 void h_sh_spawn(idCmdArgs *a);
-void h_sh_smp(idCmdArgs *a);
 void h_sh_event(idCmdArgs *a);
 void h_sh_dumpmap(idCmdArgs *a);
 /* Local-player runtime cheat toggles. */
@@ -1697,7 +1696,6 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_reenable_devmode", (void *)h_reenable_devmode, "re-enable devmode" },
     { "sh_dumpmap",          (void *)h_sh_dumpmap,  "sh_dumpmap <name> dumps the current mapfile, even the generated snapmap mapfile, to <game dir>\\base\\mapdumps\\<name>.map (never overwrites: repeats get _2, _3, ...)" },
     { "sh_spawn",            (void *)h_sh_spawn,    "sh_spawn <entitydef> <entity name after spawning>" },
-    { "sh_smp",              (void *)h_sh_smp,      "sh_smp \"smp:<command> ...\" runs a String Set command on player1 (playtest); sh_smp on|off|status switches String Set commands" },
     { "sh_event",            (void *)h_sh_event,    "sh_event info <name> | list [filter] prints the live engine event registry (number, format, argument types and names)" },
     { "sh_dumpdef",          (void *)h_sh_dumpdef,  "sh_dumpdef <entity name>, dumps the entitydef of an existing ingame entity" },
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
