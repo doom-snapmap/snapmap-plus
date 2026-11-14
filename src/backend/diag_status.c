@@ -13,6 +13,7 @@
 
 volatile long sh_diag_note_listening;
 volatile long sh_diag_note_count;
+void *volatile sh_diag_hold_entity;
 
 /* Kept out of line and with a body long enough to be hooked at its entry. */
 __declspec(noinline) void sh_diag_note(const char *mod, const char *text, size_t len)

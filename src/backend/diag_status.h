@@ -37,6 +37,13 @@ char *sh_diag_status_build(void);
 extern volatile long sh_diag_note_listening;
 extern volatile long sh_diag_note_count;
 void sh_diag_note(const char *mod, const char *text, size_t len);
+
+/* A development hold of one demon (the daemon's entity inspector, `inspect_arm hold=`): exported as data at
+ * ordinal 303. A listener writes the entity's address; while it matches, the script runtime gives that entity no
+ * think (its brain takes no step, gives no order and pulls no trigger), and every other event (damage, pain,
+ * death, frame rows) still reaches its scripts. The listener writes NULL to release; a map's close clears it.
+ * Game thread reads; one entity at a time. */
+extern void *volatile sh_diag_hold_entity;
 #endif
 
 #endif /* BACKEND_DIAG_STATUS_H */

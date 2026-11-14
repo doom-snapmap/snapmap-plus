@@ -64,8 +64,10 @@ int main(int argc, char **argv)
     sh_diag_note("salt", "brain T a b", 11);
     sh_diag_note("salt", "", 0);
     CHECK(sh_diag_note_count == 1);
+    /* Nothing is held until a development listener names a demon. */
+    CHECK(sh_diag_hold_entity == NULL);
 
-    /* The diagnostic export source is the release one plus ordinals 300 to 302. */
+    /* The diagnostic export source is the release one plus ordinals 300 to 303. */
     if (argc > 1) {
         char rel[MAX_PATH], diag[MAX_PATH];
         char *a, *b;
@@ -78,7 +80,8 @@ int main(int argc, char **argv)
             CHECK(strncmp(a, b, la) == 0);
             CHECK(strcmp(b + la, "    sh_diag_status                  @300\n"
                                  "    sh_diag_note                    @301\n"
-                                 "    sh_diag_note_listening          @302 DATA\n") == 0);
+                                 "    sh_diag_note_listening          @302 DATA\n"
+                                 "    sh_diag_hold_entity             @303 DATA\n") == 0);
         }
         free(a); free(b);
     }

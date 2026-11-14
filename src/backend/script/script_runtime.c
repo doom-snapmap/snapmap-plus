@@ -25,6 +25,9 @@
 
 #ifndef SH_SCRIPT_PURE
 #include "../backend_log.h"
+#ifdef SH_DIAG
+#include "../diag_status.h"
+#endif
 #endif
 
 /* ------------------------------------------------------------------ state */
@@ -1476,6 +1479,9 @@ static void end_all(int run_end_handlers)
 
 void sh_script_map_close(int run_end_handlers)
 {
+#ifdef SH_DIAG
+    sh_diag_hold_entity = NULL;               /* a development hold ends with the map */
+#endif
     if (g_run_tid == GetCurrentThreadId()) { g_end_pending = 1; g_end_handlers = run_end_handlers; return; }
     if (!enter_run()) return;
     end_all(run_end_handlers);
@@ -1907,6 +1913,10 @@ static void tick_mod(shs_mod *m)
         shs_ent_job j;
         j.handle = m->ents[i].handle;
         j.chain = m->ents[i].chain;
+#ifdef SH_DIAG
+        /* a demon a development listener holds takes no think (diag_status.h) */
+        if (sh_diag_hold_entity && sh_script_handle_entity(j.handle) == sh_diag_hold_entity) continue;
+#endif
         if (!run_job(m, job_think, &j)) return;
         if (g_end_pending) return;
     }

@@ -31,3 +31,4 @@ EXPORTS
     sh_diag_status                  @300
     sh_diag_note                    @301
     sh_diag_note_listening          @302 DATA
+    sh_diag_hold_entity             @303 DATA
