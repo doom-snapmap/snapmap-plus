@@ -693,6 +693,13 @@ typedef float (*sh_ai_rand_fn)(void *state);   /* uniform in [0, 1) */
 void sh_ai_destruct_velocity(const sh_ai_destruct_piece *p, const float org[3], const float axis[9], const float ext[3],
                              const float piece[3], float max_speed, float max_spin, sh_ai_rand_fn rnd, void *rs,
                              float lin[3], float ang[3]);
+/* Give a breakable's explosion fx managers (the physics at `phys`) the
+ * breakable's own pieces model as the model their render parm items write,
+ * where they have none: DOOM Eternal plays a destructible's fx on the
+ * destructible's render entity, so an instance tint or fade reaches its
+ * pieces; DOOM 2016 starts a breakable's explosion fx on managers without a
+ * model, where those items write nothing. -> managers given the model. */
+int sh_ai_destruct_fx_model(unsigned char *phys);
 /* 1 recorded (a second call for the same def replaces it), 0 the registry
  * is full or the spec is out of range. */
 int sh_ai_destructible_add(const char *def, const sh_ai_destruct_spec *spec);
@@ -1011,6 +1018,10 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 #define SH_AI_PROPS_BROADPHASE    0x00u     /* idEffectPhysicsProperties: [broadPhase] */
 #define SH_AI_PROPS_INV_MASS      0x40u     /* [inverseMass] */
 #define SH_AI_PROPS_INV_INERTIA   0x74u     /* [inverseInertiaTensor] (body axes) */
+#define SH_AI_FXB_EXPLOSION_FX    0x68u     /* idEffectPhysicsBreakable: [explosionFX] list of idFXManager, count +8 */
+#define SH_AI_FXB_MODEL           0x180u    /* idEffectPhysicsBreakable: [model], the pieces' render model */
+#define SH_AI_FXM_SIZE            0x338u    /* sizeof idFXManager */
+#define SH_AI_FXM_RM              0x30u     /* idFXManager: [rm], the render model its render parm items write */
 #define SH_AI_BRK_GORE_STOLEN     19
 static const unsigned char k_ai_brk_gore_prologue[SH_AI_BRK_GORE_STOLEN] = {
     0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x8D, 0xAB, 0x48, 0xFF, 0xFF, 0xFF

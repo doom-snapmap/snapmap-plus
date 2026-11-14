@@ -2263,6 +2263,13 @@ is touched, and a removed demon answers nil.
   for a decl that ignores the hit, so the spawn queues no hit record. The
   frame is the owner of the gore component whose ShowWound runs (the ShowWound
   detour keeps it per thread). The registry is per map (64 defs, 32 pieces).
+  Before the break it also gives the breakable's explosion fx managers
+  (idEffectPhysicsBreakable `explosionFX`, which the game starts with no render
+  model) the breakable's own pieces model as their `rm`: DOOM Eternal plays a
+  destructible's fx on the destructible's render entity, so its render parm
+  items (an instance emissive tint and its fade, `FX_RENDERPARM`) reach the
+  pieces; without a model 2016's FX_RENDERPARM update (VK 0x1416EA1D0) writes
+  nothing. Only a manager without a model is given one.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
   `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:

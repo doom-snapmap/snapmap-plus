@@ -2241,6 +2241,27 @@ static void test_destructible(void)
     CHECK(strstr(stop_of("aaaaaaaa"), "belongs to another mod") != NULL);
     sh_script_map_end();
     sh_ai_destructible_reset();
+    printf("-- destructible: the explosion fx draw on the pieces\n");
+    {
+        static unsigned char phys[0x200], mgrs[2 * SH_AI_FXM_SIZE];
+        void *model = (void *)(uintptr_t)0x1234, *other = (void *)(uintptr_t)0x5678;
+        memset(phys, 0, sizeof phys);
+        memset(mgrs, 0, sizeof mgrs);
+        *(unsigned char **)(phys + SH_AI_FXB_EXPLOSION_FX) = mgrs;
+        *(int *)(phys + SH_AI_FXB_EXPLOSION_FX + 8) = 2;
+        *(void **)(phys + SH_AI_FXB_MODEL) = model;
+        *(void **)(mgrs + SH_AI_FXM_SIZE + SH_AI_FXM_RM) = other;      /* a manager with a model keeps it */
+        CHECK(sh_ai_destruct_fx_model(phys) == 1);
+        CHECK(*(void **)(mgrs + SH_AI_FXM_RM) == model && *(void **)(mgrs + SH_AI_FXM_SIZE + SH_AI_FXM_RM) == other);
+        CHECK(sh_ai_destruct_fx_model(phys) == 0);
+        *(void **)(phys + SH_AI_FXB_MODEL) = NULL;
+        *(void **)(mgrs + SH_AI_FXM_RM) = NULL;
+        CHECK(sh_ai_destruct_fx_model(phys) == 0 && *(void **)(mgrs + SH_AI_FXM_RM) == NULL);
+        *(void **)(phys + SH_AI_FXB_MODEL) = model;
+        *(int *)(phys + SH_AI_FXB_EXPLOSION_FX + 8) = 0;
+        CHECK(sh_ai_destruct_fx_model(phys) == 0);
+        CHECK(sh_ai_destruct_fx_model(NULL) == 0);
+    }
 }
 
 int main(int argc, char **argv)

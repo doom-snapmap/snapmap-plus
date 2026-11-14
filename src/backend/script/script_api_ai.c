@@ -3153,6 +3153,23 @@ static void dd_dir_frame(const float d[3], float m[9])
 
 static float dd_between(sh_ai_rand_fn rnd, void *rs, float lo, float hi) { return lo + rnd(rs) * (hi - lo); }
 
+int sh_ai_destruct_fx_model(unsigned char *phys)
+{
+    unsigned char *fx;
+    void *model;
+    int n, i, given = 0;
+    if (!phys) return 0;
+    fx = *(unsigned char **)(phys + SH_AI_FXB_EXPLOSION_FX);
+    n = *(const int *)(phys + SH_AI_FXB_EXPLOSION_FX + 8);
+    model = *(void **)(phys + SH_AI_FXB_MODEL);
+    if (!fx || !model || n <= 0 || n > 64) return 0;
+    for (i = 0; i < n; i++) {
+        void **rm = (void **)(fx + (size_t)i * SH_AI_FXM_SIZE + SH_AI_FXM_RM);
+        if (!*rm) { *rm = model; given++; }
+    }
+    return given;
+}
+
 void sh_ai_destruct_velocity(const sh_ai_destruct_piece *p, const float org[3], const float axis[9], const float ext[3],
                              const float piece[3], float max_speed, float max_spin, sh_ai_rand_fn rnd, void *rs,
                              float lin[3], float ang[3])
@@ -4999,6 +5016,9 @@ static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *
     int i, n, fresh;
     bodies = *(uint8_t ***)(phys + SH_AI_FXB_BODIES);
     n = *(const int *)(phys + SH_AI_FXB_BODIES + 8);
+    /* the explosion fx the break starts draws its render parm items on these pieces, as Eternal's on its
+     * destructible's render entity */
+    (void)sh_ai_destruct_fx_model(phys);
     if (!bodies || n <= 0) { g_brk_break(brk, 0); return; }
     if (n > SH_AI_DESTRUCT_PIECES) n = SH_AI_DESTRUCT_PIECES;
     fresh = *(const int32_t *)((uint8_t *)brk + SH_AI_BRK_BROKEN) == -1;
