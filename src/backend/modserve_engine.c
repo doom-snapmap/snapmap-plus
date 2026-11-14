@@ -243,6 +243,11 @@ static void me_serve_listener(const char *request, const char *bundle_hash, cons
     sh_modledger_ident id;
     if (g_peek) return;
     if (sh_modledger_ident_of(bundle_hash, file_hash, bytes, length, &id)) (void)sh_modledger_record(request, &id);
+    /* A decl served on the main thread is parsed as soon as this returns, and its #str_ names are looked up then.
+     * An index published off the main thread asks for its bundles' strings at the next main-thread chance, which
+     * came about a second after the first decl of a just-built bundle was served ("Attempted to get unknown string
+     * ID '#str_<salt>_..._name' while loading edit.npcName"). So a pending refresh runs here, before the parse. */
+    if (request && !strncmp(request, "generated/decls/", 16) && me_on_main() == 1) (void)sh_strids_refresh_pending();
 }
 
 /* What the open map serves for `request` now. 1 with its identity. */
