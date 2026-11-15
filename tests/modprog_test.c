@@ -535,6 +535,110 @@ static void test_real_ep(void)
     CHECK(!sh_modprog_owns("generated/spirv/uberparticles.fspv"));
 }
 
+/* ------------------------------------------------------------------ the post process's radial blur */
+
+static const char *g_dump;   /* dump=<dir>: the derived post files are written there for offline validation */
+
+static void dump(const char *base, const char *mask, const char *ext, const unsigned char *bytes, size_t n)
+{
+    char path[MAX_PATH];
+    FILE *f;
+    if (!g_dump || !bytes) return;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s%s%s%s", g_dump, base, mask ? "_" : "", mask ? mask : "", ext);
+    if (fopen_s(&f, path, "wb") == 0) { fwrite(bytes, 1, n, f); fclose(f); }
+}
+
+static int calls_of(const mod *m, uint32_t fn_id)
+{
+    size_t at;
+    int n = 0;
+    FOR_INS(m, at) if ((m->w[at] & 0xffff) == 57 && m->w[at + 3] == fn_id) n++;
+    return n;
+}
+
+static uint32_t function_named(const mod *m, const char *prefix)
+{
+    size_t at;
+    FOR_INS(m, at) if ((m->w[at] & 0xffff) == 5 && !strncmp((const char *)(m->w + at + 2), prefix, strlen(prefix))) return m->w[at + 1];
+    return 0;
+}
+
+/* One unit of a post program, derived from the installed one: the decl's include replaced by the blur's templates
+ * and the include's five scene reads taken from RADIAL_BLUR_SAMPLE; the cooked program matching that decl, its stage
+ * parameters grown by the blur's; the stage module's five clamped reads now calls of rb_clamped (and none left of the
+ * stock read with the scene image), its uniform block grown by the blur's parameters, its other stage unchanged. */
+static void check_post_unit(const char *base, const char *mask, int compute)
+{
+    char *pd = mask ? sh_textf("generated/renderprogs/permutations/%s_%s.decl", base, mask)
+                    : sh_textf("generated/decls/renderprog/%s.decl", base);
+    char *pb = mask ? sh_textf("generated/renderprogs/permutations/%s_%s_pc_vulkan.bin", base, mask)
+                    : sh_textf("generated/renderprogs/%s_pc_vulkan.bin", base);
+    const char *ext = compute ? ".cspv" : ".fspv";
+    char *pf = sh_mb_spirv_request(mask ? pd : base, ext), *pv = compute ? NULL : sh_mb_spirv_request(mask ? pd : base, ".vspv");
+    unsigned char *d = NULL, *b = NULL, *f = NULL, *v = NULL, *sf = NULL, *sv = NULL;
+    size_t dn = 0, bn = 0, fn = 0, vn = 0, sfn = 0, svn = 0, off[3], len[3];
+    char sha[SH_MB_HASH_HEX + 1];
+    unsigned long long sz = 0;
+    int stage = compute ? 2 : 1;
+    printf("   %s%s%s\n", base, mask ? "_" : "", mask ? mask : "");
+    CHECK(sh_modprog_post_owns(pd) && sh_modprog_post_owns(pb) && sh_modprog_post_owns(pf) && (compute || sh_modprog_post_owns(pv)));
+    CHECK(sh_modprog_post_read(pd, &d, &dn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_post_read(pb, &b, &bn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_post_read(pf, &f, &fn) == SH_MB_STOCK_OK);
+    if (!compute) CHECK(sh_modprog_post_read(pv, &v, &vn) == SH_MB_STOCK_OK);
+    if (sh_modstock_identify(pf, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(pf, sha, &sf, &sfn);
+    if (!compute && sh_modstock_identify(pv, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(pv, sha, &sv, &svn);
+    if (!d || !b || !f || (!compute && !v) || !sf || (!compute && !sv)) { fprintf(stderr, "  %s: %s\n", base, sh_modprog_cause()); goto out; }
+    dump(base, mask, ".decl", d, dn);
+    dump(base, mask, "_pc_vulkan.bin", b, bn);
+    dump(base, mask, compute ? ".cspv" : ".fspv", f, fn);
+    CHECK(strstr((const char *)d, "#template RADIAL_BLUR_SAMPLE( rbOut, rbTc ) {") != NULL);
+    CHECK(strstr((const char *)d, "#include \"postprocess.inc\"") == NULL);
+    CHECK(strstr((const char *)d, "RADIAL_BLUR_SAMPLE( rbSample4, rbTcIn4 );") != NULL && strstr((const char *)d, "rbSample5") == NULL);
+    CHECK(strstr((const char *)d, "tex2DlodClamped( $tex0, ") == NULL);
+    CHECK(rd_be32(b + 4) == decl_sum((const char *)d, dn));
+    CHECK(sh_mb_rp_stages(b, bn, off, len) == 1);
+    CHECK(strstr((const char *)b + off[stage], "vec4 rb_clamped(") != NULL);
+    CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[stage], len[stage]) && rd_be32(f + 12) == fn - 16);
+    if (!compute) CHECK(vn == svn && !memcmp(v, sv, vn));
+    {
+        mod m = { (const uint32_t *)(f + 16), (fn - 16) / 4 }, s = { (const uint32_t *)(sf + 16), (sfn - 16) / 4 };
+        uint32_t rb = function_named(&m, "rb_clamped("), stock_read = function_named(&s, "tex2DlodClamped(");
+        uint32_t mine = function_named(&m, "tex2DlodClamped(");
+        const char *blk = compute ? "freqHigh_computeUniforms" : "freqHigh_fragmentUniforms";
+        CHECK(rb != 0 && calls_of(&m, rb) == 5);
+        CHECK(stock_read != 0 && calls_of(&s, stock_read) >= 5 && mine == stock_read);
+        CHECK(calls_of(&m, mine) == calls_of(&s, stock_read) - 5);
+        CHECK(struct_members(&m, named(&m, blk)) == struct_members(&s, named(&s, blk)) + (int)SH_MODPROG_RB_PARM_COUNT);
+        CHECK(binding(&m, named(&m, "samp_viewdepthmap")) == binding(&s, named(&s, "samp_viewdepthmap")));
+        CHECK(binding(&m, named(&m, "samp_tex0")) == binding(&s, named(&s, "samp_tex0")));
+        CHECK(named(&m, "rb_depth") == 0);
+    }
+out:
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    if (f) HeapFree(GetProcessHeap(), 0, f);
+    if (v) HeapFree(GetProcessHeap(), 0, v);
+    if (sf) HeapFree(GetProcessHeap(), 0, sf);
+    if (sv) HeapFree(GetProcessHeap(), 0, sv);
+    free(pd); free(pb); free(pf); free(pv);
+}
+
+static void test_real_post(void)
+{
+    printf("-- the installed game's post process programs with the radial blur\n");
+    check_post_unit("postprocess", NULL, 0);
+    check_post_unit("postprocess", "0000000000000001", 0);
+    check_post_unit("computepostprocess", NULL, 1);
+    check_post_unit("computepostprocess", "0000000000000001", 1);
+    CHECK(sh_modprog_post_owns("generated/decls/renderparm/radialblur0.decl"));
+    CHECK(sh_modprog_post_owns("generated/decls/renderparm/radialblur12.decl"));
+    CHECK(!sh_modprog_post_owns("generated/decls/renderparm/projectionmatrixz.decl"));
+    CHECK(!sh_modprog_post_owns("generated/spirv/uberparticles.fspv"));
+    CHECK(!sh_modprog_post_owns("generated/spirv/postprocessx.fspv"));
+    CHECK(!sh_modprog_owns("generated/spirv/postprocess.fspv"));   /* served by the provider, not as product content */
+}
+
 typedef struct seen { int files; } seen;
 static void count(void *c, const char *path) { (void)path; ((seen *)c)->files++; }
 
@@ -586,6 +690,7 @@ static void test_real(const char *doom)
     s.files = 0;
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX, count, &s);
     CHECK(s.files == 2);
+    test_real_post();
     if (sh_modprog_cause()[0]) fprintf(stderr, "  %s\n", sh_modprog_cause());
     sh_modstock_reset();
 }
@@ -595,6 +700,7 @@ int main(int argc, char **argv)
     const char *doom = NULL;
     int i;
     for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "doom=", 5) && argv[i][5]) doom = argv[i] + 5;
+    for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "dump=", 5) && argv[i][5]) g_dump = argv[i] + 5;
     printf("modprog_test\n");
     test_decl();
     test_glsl();

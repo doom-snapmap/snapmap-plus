@@ -56,6 +56,7 @@
 #include "cvars.h"
 #include "entity.h"
 #include "companion_engine.h"
+#include "postfx.h"
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "modvt.h"
@@ -362,6 +363,8 @@ static void install_features(const sig_result *results, size_t db)
     /* Owner-bound companions (companion_engine.h): CallSpawn is detoured only
      * when an admitted bundle declares companions. */
     if (overrides_installed) (void)sh_companions_install(results, db, g_doom_base);
+    /* DOOM 2016's radial blur fx item, drawn in the post process the provider serves (modprog.h). */
+    if (overrides_installed) (void)sh_postfx_install(results, db, g_doom_base);
 
     /* Mod scripts (script/script_hooks.h): the frame hook, the spawn subscriber
      * on the companions' CallSpawn chain and the map-end subscriber; the frame

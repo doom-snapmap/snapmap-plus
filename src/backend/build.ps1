@@ -32,7 +32,7 @@ param(
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
-                           "modbundle.c", "modsalt.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modprog_multilayer.c", "modprog_particles.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
+                           "modbundle.c", "modsalt.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modprog_multilayer.c", "modprog_particles.c", "modprog_post.c", "postfx.c", "postfx_blurs.c", "postfx_sigs.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
                            "modnet.c", "modsync.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
