@@ -77,12 +77,12 @@ int sh_postfx_parms(int now, float ysign, float out[SH_POSTFX_PARMS][4])
     for (k = 0; k < n && drawn < POSTFX_DRAWN; k++) {
         const pf_blur *b = &cur[k];
         float s = sh_postfx_envelope(b->start, b->fade_in, b->fade_out, b->end, now) * b->color[1];
-        float *a, *q, *e;
+        float *a, *q, *e = out[SH_POSTFX_PARMS - 1];
         if (s <= 0.0f) continue;
-        a = out[1 + 3 * drawn]; q = out[2 + 3 * drawn]; e = out[3 + 3 * drawn];
+        a = out[1 + 2 * drawn]; q = out[2 + 2 * drawn];
         a[0] = b->centre[0]; a[1] = b->centre[1]; a[2] = b->centre[2]; a[3] = s;
-        q[0] = b->radius; q[1] = b->color[0]; q[2] = b->color[2]; q[3] = 0.0f;
-        e[0] = b->extents[0]; e[1] = b->extents[1]; e[2] = b->extents[2]; e[3] = b->size;
+        q[0] = b->radius; q[1] = b->color[0]; q[2] = b->color[2]; q[3] = b->extents[0];
+        if (!drawn) { e[0] = b->extents[1]; e[1] = b->extents[2]; e[2] = b->size; }     /* the newest blur's shape */
         if (b->color[3] > len) len = b->color[3];
         drawn++;
     }

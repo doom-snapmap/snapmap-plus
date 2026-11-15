@@ -632,9 +632,9 @@ static void test_real_post(void)
     check_post_unit("computepostprocess", NULL, 1);
     check_post_unit("computepostprocess", "0000000000000001", 1);
     CHECK(sh_modprog_post_owns("generated/decls/renderparm/radialblur0.decl"));
-    CHECK(sh_modprog_post_owns("generated/decls/renderparm/radialblur21.decl"));
-    CHECK(!sh_modprog_post_owns("generated/decls/renderparm/radialblur22.decl"));
-    CHECK(sh_modprog_post_claims("generated/decls/renderparm/radialblur21.decl"));
+    CHECK(sh_modprog_post_owns("generated/decls/renderparm/radialblur15.decl"));
+    CHECK(!sh_modprog_post_owns("generated/decls/renderparm/radialblur16.decl"));
+    CHECK(sh_modprog_post_claims("generated/decls/renderparm/radialblur15.decl"));
     CHECK(!sh_modprog_post_claims("generated/spirv/postprocess.fspv"));
     CHECK(!sh_modprog_post_owns("generated/decls/renderparm/projectionmatrixz.decl"));
     CHECK(!sh_modprog_post_owns("generated/spirv/uberparticles.fspv"));

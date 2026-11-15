@@ -87,13 +87,13 @@
 				float rbR[ 7 ];
 				float rbF[ 7 ];
 				float rbRing[ 7 ];
-				{ RB_SETUP( 0, $radialBlur1, $radialBlur2, $radialBlur3 ); }
-				{ RB_SETUP( 1, $radialBlur4, $radialBlur5, $radialBlur6 ); }
-				{ RB_SETUP( 2, $radialBlur7, $radialBlur8, $radialBlur9 ); }
-				{ RB_SETUP( 3, $radialBlur10, $radialBlur11, $radialBlur12 ); }
-				{ RB_SETUP( 4, $radialBlur13, $radialBlur14, $radialBlur15 ); }
-				{ RB_SETUP( 5, $radialBlur16, $radialBlur17, $radialBlur18 ); }
-				{ RB_SETUP( 6, $radialBlur19, $radialBlur20, $radialBlur21 ); }
+				{ RB_SETUP( 0, $radialBlur1, $radialBlur2, float4( $radialBlur2.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 1, $radialBlur3, $radialBlur4, float4( $radialBlur4.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 2, $radialBlur5, $radialBlur6, float4( $radialBlur6.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 3, $radialBlur7, $radialBlur8, float4( $radialBlur8.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 4, $radialBlur9, $radialBlur10, float4( $radialBlur10.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 5, $radialBlur11, $radialBlur12, float4( $radialBlur12.w, $radialBlur15.xyz ) ); }
+				{ RB_SETUP( 6, $radialBlur13, $radialBlur14, float4( $radialBlur14.w, $radialBlur15.xyz ) ); }
 				if ( rbS[ 0 ] > 0.0 || rbS[ 1 ] > 0.0 || rbS[ 2 ] > 0.0 || rbS[ 3 ] > 0.0 || rbS[ 4 ] > 0.0 || rbS[ 5 ] > 0.0 || rbS[ 6 ] > 0.0 ) {
 					float2 rbUv0 = ( rbTc ) / $resolutionScale.xy;
 					float2 rbV0;

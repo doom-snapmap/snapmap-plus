@@ -35,14 +35,17 @@ layout(location = 0) in vec4 rb_in;
 layout(location = 0) out vec4 rb_out;
 
 // P: 0 radialblur0 (x the image y sign: 1 Vulkan, -1 OpenGL; y the blurs on; z the length), then per blur b (0..6)
-// three vectors radialblur1 + 3b.. : (centre x, y, z, strength now), (world radius, falloff, ring, unused),
-// (cap, screenFade, nearFade, zoneCap); 22..25 viewprojectionmatrixx..w, 26 projectionmatrixz, 27 renderviewsize,
-// info: (resolutionscale.xy, the view texture's pixel size).
+// two vectors radialblur1 + 2b.. : (centre x, y, z, strength now), (world radius, falloff, ring, cap); 15 radialblur15
+// (screenFade, nearFade, zoneCap: the newest blur's, shared by those on, as the length is); 16..19
+// viewprojectionmatrixx..w, 20 projectionmatrixz, 21 renderviewsize, info: (resolutionscale.xy, the view texture's
+// pixel size). Every render parm takes one of the game's 1024 vector parm slots (idParmState::AllocParmState), which
+// the stock decls nearly fill, so the blur spends as few as its terms allow.
 #define RB_N 7
-#define RB_VP 22
-#define RB_PZ 26
-#define RB_SIZE 27
-#define RB_NP 28
+#define RB_SHAPE 15
+#define RB_VP 16
+#define RB_PZ 20
+#define RB_SIZE 21
+#define RB_NP 22
 
 // The eight depth samples of a blur's box (unit square), a 3 x 3 grid without its centre.
 const vec2 RB_TAPS[8] = vec2[8](vec2(0.1667, 0.1667), vec2(0.5, 0.1667), vec2(0.8333, 0.1667), vec2(0.1667, 0.5),
@@ -54,7 +57,7 @@ struct rb_blur { vec2 c; float r; float falloff; float ring; float s; };
 rb_blur rb_setup(int b, vec4 P[RB_NP], vec4 info, float aspect)
 {
     rb_blur o;
-    vec4 a = P[1 + 3 * b], q = P[2 + 3 * b], e = P[3 + 3 * b];
+    vec4 a = P[1 + 2 * b], q = P[2 + 2 * b], e = vec4(q.w, P[RB_SHAPE].xyz);
     vec4 p = vec4(a.xyz, 1.0);
     float cx = dot(P[RB_VP], p), cy = dot(P[RB_VP + 1], p), w = dot(P[RB_VP + 3], p);
     // the near plane: the view depth where the stored depth is 0 (the scene's depth is P.w / (d + P.z), as the

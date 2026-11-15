@@ -174,12 +174,6 @@ static const mp_parm MP_PARM_DECLS[] = {
     { "radialblur13",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
     { "radialblur14",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
     { "radialblur15",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur16",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur17",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur18",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur19",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur20",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur21",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
@@ -1419,8 +1413,7 @@ done:
 const char *const SH_MODPROG_RB_PARMS[] = {
     "radialblur0", "radialblur1", "radialblur2", "radialblur3", "radialblur4", "radialblur5", "radialblur6",
     "radialblur7", "radialblur8", "radialblur9", "radialblur10", "radialblur11", "radialblur12", "radialblur13",
-    "radialblur14", "radialblur15", "radialblur16", "radialblur17", "radialblur18", "radialblur19", "radialblur20",
-    "radialblur21",
+    "radialblur14", "radialblur15",
     "viewprojectionmatrixx", "viewprojectionmatrixy", "viewprojectionmatrixz", "viewprojectionmatrixw",
     "projectionmatrixz", "renderviewsize",
 };

@@ -1674,7 +1674,7 @@ time since (a pause during a blur does not hold it).
 `postfx.c` installs, on both renderers, a five-byte call at the item's start
 (the load of its radius) that records the item, a detour of the view's
 `SetBlurRadial` that keeps the blur, and a detour of the post process that
-writes the blurs that are on into the render parms `radialblur0`..`21` of the
+writes the blurs that are on into the render parms `radialblur0`..`15` of the
 parm state it draws with (on Vulkan's asynchronous compute path, the async
 context's) just before it draws (`postfx_blurs.c` holds the kept blurs and the parameter layout;
 `postfx_sigs.c` the signatures). The game's own `postprocess` (fragment) and

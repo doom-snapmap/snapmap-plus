@@ -57,8 +57,8 @@ int main(void)
     CHECK(sh_postfx_parms(1050, 1.0f, v) == 1);
     CHECK(NEAR(v[0][1], 1.0f) && NEAR(v[0][2], 0.07f));
     CHECK(NEAR(v[1][0], 1.0f) && NEAR(v[1][1], 2.0f) && NEAR(v[1][2], 3.0f) && NEAR(v[1][3], 0.5f * 0.75f));
-    CHECK(NEAR(v[2][0], 100.0f) && NEAR(v[2][1], 2.0f) && NEAR(v[2][2], 0.95f) && NEAR(v[2][3], 0.0f));
-    CHECK(NEAR(v[3][0], 0.5714285f) && NEAR(v[3][1], 1.3125f) && NEAR(v[3][2], 104.99f) && NEAR(v[3][3], 0.3f));
+    CHECK(NEAR(v[2][0], 100.0f) && NEAR(v[2][1], 2.0f) && NEAR(v[2][2], 0.95f) && NEAR(v[2][3], 0.5714285f));
+    CHECK(NEAR(v[15][0], 1.3125f) && NEAR(v[15][1], 104.99f) && NEAR(v[15][2], 0.3f) && NEAR(v[15][3], 0.0f));
     CHECK(sh_postfx_parms(1299, 1.0f, v) == 1 && sh_postfx_parms(1300, 1.0f, v) == 0);
 
     printf("-- every player view plays the same item: one blur\n");
@@ -74,8 +74,8 @@ int main(void)
         for (i = 0; i < 8; i++) keep_at((float)i, 1000 + i, 0, 0, 5000);
     }
     CHECK(sh_postfx_parms(2000, 1.0f, v) == 7);
-    CHECK(NEAR(v[1][0], 7.0f) && NEAR(v[4][0], 6.0f) && NEAR(v[16][0], 2.0f) && NEAR(v[19][0], 1.0f));
-    CHECK(SH_POSTFX_PARMS == 22 && NEAR(v[0][1], 7.0f));
+    CHECK(NEAR(v[1][0], 7.0f) && NEAR(v[3][0], 6.0f) && NEAR(v[11][0], 2.0f) && NEAR(v[13][0], 1.0f));
+    CHECK(SH_POSTFX_PARMS == 16 && NEAR(v[0][1], 7.0f));
 
     printf("-- nine kept: the oldest replaced\n");
     sh_postfx_forget();
