@@ -1,13 +1,13 @@
 /* postfx_blurs.c -- the radial blurs postfx.c keeps and the parameters the post programs read (postfx.h).
- * Up to POSTFX_SLOTS blurs are kept, the oldest replaced; four at a time are drawn (the most recent).
+ * Up to SH_POSTFX_KEPT blurs are kept, the oldest replaced; SH_POSTFX_DRAWN at a time are drawn (the most recent).
  * Kept apart from the engine side so tests/postfx_test.c links it alone. */
 #include <windows.h>
 #include <string.h>
 
 #include "postfx.h"
 
-#define POSTFX_SLOTS  8
-#define POSTFX_DRAWN  4
+#define POSTFX_SLOTS  SH_POSTFX_KEPT
+#define POSTFX_DRAWN  SH_POSTFX_DRAWN
 
 typedef struct pf_blur {
     float centre[3];
@@ -64,12 +64,12 @@ float sh_postfx_envelope(int start, int fade_in, int fade_out, int end, int now)
     return 1.0f;
 }
 
-int sh_postfx_parms(int now, float ysign, float out[13][4])
+int sh_postfx_parms(int now, float ysign, float out[SH_POSTFX_PARMS][4])
 {
     pf_blur cur[POSTFX_SLOTS];
     int n, i, k, drawn = 0;
     float len = 0.0f;
-    memset(out, 0, 13 * 4 * sizeof(float));
+    memset(out, 0, SH_POSTFX_PARMS * 4 * sizeof(float));
     AcquireSRWLockShared(&g_lock);
     n = g_count;
     for (i = 0; i < n; i++) cur[i] = g_blurs[(g_next - 1 - i + POSTFX_SLOTS * 2) % POSTFX_SLOTS];   /* newest first */

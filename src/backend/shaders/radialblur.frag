@@ -34,15 +34,15 @@ layout(binding = 1) uniform sampler2D rb_depth;   // viewdepthmap
 layout(location = 0) in vec4 rb_in;
 layout(location = 0) out vec4 rb_out;
 
-// P: 0 radialblur0 (x the image y sign: 1 Vulkan, -1 OpenGL; y the blurs on; z the length), then per blur b (0..3)
+// P: 0 radialblur0 (x the image y sign: 1 Vulkan, -1 OpenGL; y the blurs on; z the length), then per blur b (0..6)
 // three vectors radialblur1 + 3b.. : (centre x, y, z, strength now), (world radius, falloff, ring, unused),
-// (cap, screenFade, nearFade, zoneCap); 13..16 viewprojectionmatrixx..w, 17 projectionmatrixz, 18 renderviewsize,
+// (cap, screenFade, nearFade, zoneCap); 22..25 viewprojectionmatrixx..w, 26 projectionmatrixz, 27 renderviewsize,
 // info: (resolutionscale.xy, the view texture's pixel size).
-#define RB_N 4
-#define RB_VP 13
-#define RB_PZ 17
-#define RB_SIZE 18
-#define RB_NP 19
+#define RB_N 7
+#define RB_VP 22
+#define RB_PZ 26
+#define RB_SIZE 27
+#define RB_NP 28
 
 // The eight depth samples of a blur's box (unit square), a 3 x 3 grid without its centre.
 const vec2 RB_TAPS[8] = vec2[8](vec2(0.1667, 0.1667), vec2(0.5, 0.1667), vec2(0.8333, 0.1667), vec2(0.1667, 0.5),

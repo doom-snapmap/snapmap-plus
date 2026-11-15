@@ -128,7 +128,7 @@ extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
 /* The post process's radial blur (radialblur.frag, postfx.c). The game's own `postprocess` (fragment) and
  * `computepostprocess` (compute) programs, each permutation too, are served under their own names with their five
  * clamped scene reads drawn through rb_clamped, which blurs the scene toward the radial blurs that are on (the
- * render parms radialblur0..12, which postfx.c writes each frame; with none on it is the plain read). The
+ * render parms radialblur0..21, which postfx.c writes each frame; with none on it is the plain read). The
  * derivation reads the installed files; a program that is not the shape known is left to the game (the cause is
  * sh_modprog_cause()). sh_modprog_post_owns names every file served this way and the radialblur parm decls;
  * sh_modprog_post_read derives on first use and returns a heap copy (SH_MB_STOCK_*). */

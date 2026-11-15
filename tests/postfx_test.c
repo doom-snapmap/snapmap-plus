@@ -1,5 +1,5 @@
 /* postfx_test.c -- the radial blurs postfx.c keeps and the parameters it writes (postfx_blurs.c): which items are
- * drawn, the envelope, one blur per item however many views play it, the newest four drawn, the parameter layout
+ * drawn, the envelope, one blur per item however many views play it, the newest seven drawn, the parameter layout
  * radialblur.frag reads. */
 #include <stdio.h>
 #include <string.h>
@@ -21,7 +21,7 @@ static void keep_at(float x, int start, int fade_in, int fade_out, int duration)
 
 int main(void)
 {
-    float v[13][4];
+    float v[SH_POSTFX_PARMS][4];
     const float none[3] = { 0.0f, 0.0f, 0.0f };
     printf("postfx_test\n");
 
@@ -67,14 +67,15 @@ int main(void)
     keep_at(1.0f, 1000, 0, 0, 500);
     CHECK(sh_postfx_parms(1100, 1.0f, v) == 1);
 
-    printf("-- six on: the newest four drawn, newest first\n");
+    printf("-- eight on: the newest seven drawn, newest first\n");
     sh_postfx_forget();
     {
         int i;
-        for (i = 0; i < 6; i++) keep_at((float)i, 1000 + i, 0, 0, 5000);
+        for (i = 0; i < 8; i++) keep_at((float)i, 1000 + i, 0, 0, 5000);
     }
-    CHECK(sh_postfx_parms(2000, 1.0f, v) == 4);
-    CHECK(NEAR(v[1][0], 5.0f) && NEAR(v[4][0], 4.0f) && NEAR(v[7][0], 3.0f) && NEAR(v[10][0], 2.0f));
+    CHECK(sh_postfx_parms(2000, 1.0f, v) == 7);
+    CHECK(NEAR(v[1][0], 7.0f) && NEAR(v[4][0], 6.0f) && NEAR(v[16][0], 2.0f) && NEAR(v[19][0], 1.0f));
+    CHECK(SH_POSTFX_PARMS == 22 && NEAR(v[0][1], 7.0f));
 
     printf("-- nine kept: the oldest replaced\n");
     sh_postfx_forget();

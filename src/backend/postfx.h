@@ -22,16 +22,22 @@
 
 extern const sig_entry SH_POSTFX_SIGNATURES[];   /* NULL-terminated */
 
+/* Blurs kept (the oldest replaced) and drawn at once: DOOM Eternal's own (8 view slots, slot 0 its dash blur, up to
+ * 7 drawn). The parameter vectors: radialblur0, then three per blur (radialblur.frag's P). */
+#define SH_POSTFX_KEPT  8
+#define SH_POSTFX_DRAWN 7
+#define SH_POSTFX_PARMS (1 + 3 * SH_POSTFX_DRAWN)
+
 /* Install the item relay, the SetBlurRadial and post process detours (both renderers). 1 when the blur draws. */
 int sh_postfx_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
 /* Pure parts (unit tested): whether an item's shape is drawn; keep one item's blur; an item's envelope at `now`
- * (game ms); the 13 parameter vectors of the blurs on at `now` (radialblur0..12), returning how many are drawn. */
+ * (game ms); the parameter vectors of the blurs on at `now` (radialblur0..21), returning how many are drawn. */
 int sh_postfx_shape_drawn(const float color[4], const float extents[3], float size, float radius);
 void sh_postfx_keep(const float centre[3], int start, int fade_in, int fade_out, int duration, float radius,
                     const float color[4], const float extents[3], float size);
 float sh_postfx_envelope(int start, int fade_in, int fade_out, int end, int now);
-int sh_postfx_parms(int now, float ysign, float out[13][4]);
+int sh_postfx_parms(int now, float ysign, float out[SH_POSTFX_PARMS][4]);
 void sh_postfx_forget(void);   /* every blur kept (tests) */
 
 #endif /* SNAPMAP_PLUS_POSTFX_H */

@@ -9,7 +9,7 @@
  *     (postfx.h); an item that sets no cap (extents.x) is the game's and stays undrawn. On that game-thread call
  *     the render parm decls are found and the game clock is sampled;
  *   - the post process (RenderPostProcess, its detour, on the render thread) writes the blurs that are on into the
- *     render parms radialblur0..12 of the parm state it draws with (the frame's, or on Vulkan's asynchronous compute
+ *     render parms radialblur0..21 of the parm state it draws with (the frame's, or on Vulkan's asynchronous compute
  *     path the async context's), at the game time the sample advanced by the time since;
  *   - the post programs read them (modprog.h, shaders/radialblur.frag).
  * The blurs kept and their parameters are postfx_blurs.c. */
@@ -57,7 +57,7 @@ static set_blur_fn g_set_blur;
 static rpp_vk_fn g_rpp_vk;
 static rpp_gl_fn g_rpp_gl;
 static set_vec4_fn g_set_vec4;
-static void *g_parms[13];
+static void *g_parms[SH_POSTFX_PARMS];
 static volatile int g_parms_ready;
 static int g_gl, g_logged, g_parms_missing;
 static const uint8_t *g_anchor;
@@ -189,7 +189,7 @@ static int pf_parms_ready(void)
     int i;
     if (g_parms_ready) return 1;
     if (!(m = renderparm_manager())) return 0;
-    for (i = 0; i < 13; i++) {
+    for (i = 0; i < SH_POSTFX_PARMS; i++) {
         char name[16];
         _snprintf_s(name, sizeof name, _TRUNCATE, "radialblur%d", i);
         __try { g_parms[i] = g_decl(m, name, 0); } __except (EXCEPTION_EXECUTE_HANDLER) { g_parms[i] = NULL; }
@@ -208,7 +208,7 @@ static int pf_parms_ready(void)
  * async context's (*[slot], the `mov r11, [rip + x]` at RenderPostProcess + 0x86), as RenderPostProcess picks it. */
 static void pf_write(void **frame, int async)
 {
-    float v[13][4];
+    float v[SH_POSTFX_PARMS][4];
     int now = 0, i, drawn;
     void *state;
     if (!g_set_vec4 || !frame || !g_parms_ready) return;     /* found on the game thread (set_blur_detour) */
@@ -218,7 +218,7 @@ static void pf_write(void **frame, int async)
     __try {
         state = async ? *(void **)*g_async_slot : *(void **)*frame;
         if (!state) return;
-        for (i = 0; i < 13; i++) g_set_vec4(state, g_parms[i], v[i]);
+        for (i = 0; i < SH_POSTFX_PARMS; i++) g_set_vec4(state, g_parms[i], v[i]);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     if (drawn && InterlockedIncrement(&g_drawn) == 1)
         pf_log("POSTFX: radial blur drawn (%d on, first at game ms %d)", drawn, now);

@@ -1663,7 +1663,7 @@ them. The item's fields give the blur's shape (`postfx.h`):
 | `size` | the widest fade zone, screen heights; a wider one is narrowed and a falloff below 1 weakens it |
 
 A blur is hidden by the share of eight depth samples around its centre where
-the scene is in front of it. Up to eight items are kept and the four most
+the scene is in front of it. Up to eight items are kept and the seven most
 recent that are on are drawn; one item played to several views is one blur.
 Its strength follows the game clock read at the item's start, advanced by the
 time since (a pause during a blur does not hold it).
@@ -1671,7 +1671,7 @@ time since (a pause during a blur does not hold it).
 `postfx.c` installs, on both renderers, a five-byte call at the item's start
 (the load of its radius) that records the item, a detour of the view's
 `SetBlurRadial` that keeps the blur, and a detour of the post process that
-writes the blurs that are on into the render parms `radialblur0`..`12` of the
+writes the blurs that are on into the render parms `radialblur0`..`21` of the
 parm state it draws with (on Vulkan's asynchronous compute path, the async
 context's) just before it draws (`postfx_blurs.c` holds the kept blurs and the parameter layout;
 `postfx_sigs.c` the signatures). The game's own `postprocess` (fragment) and
@@ -1680,7 +1680,7 @@ under their own names by the provider, derived in memory from the installed
 files as above: the decl's `#include "postprocess.inc"` becomes the blur's
 templates and the include's text with its five clamped scene reads (the
 chromatic aberration's) taken through `RADIAL_BLUR_SAMPLE`; the cooked `.bin`
-gains the 19 parameters after the stage's material uniforms; the stage module's
+gains the 28 parameters after the stage's material uniforms; the stage module's
 five calls of `tex2DlodClamped` with the scene image become calls of
 `rb_clamped`, which blurs the read toward the blurs that are on and is the same
 read when none is. The rule is documented in `src/backend/shaders/radialblur.frag`;

@@ -62,7 +62,7 @@
 		#template RB_VECTOR( rbV, rbAt ) {
 			float2 rbSum = float2( 0.0, 0.0 );
 			float rbWsum = 1e-6;
-			for ( int rbB = 0; rbB < 4; rbB++ ) {
+			for ( int rbB = 0; rbB < 7; rbB++ ) {
 				if ( rbS[ rbB ] > 0.0 ) {
 					float2 rbD = rbC[ rbB ] - ( rbAt );
 					rbD.x *= rbAspect;
@@ -82,16 +82,19 @@
 			rbOut = tex2Dlod( $tex0, float4( rbTc, 0.0, 0.0 ) );
 			if ( $radialBlur0.y > 0.0 ) {
 				float rbAspect = $renderViewSize.x / $renderViewSize.y;
-				float rbS[ 4 ];
-				float2 rbC[ 4 ];
-				float rbR[ 4 ];
-				float rbF[ 4 ];
-				float rbRing[ 4 ];
+				float rbS[ 7 ];
+				float2 rbC[ 7 ];
+				float rbR[ 7 ];
+				float rbF[ 7 ];
+				float rbRing[ 7 ];
 				{ RB_SETUP( 0, $radialBlur1, $radialBlur2, $radialBlur3 ); }
 				{ RB_SETUP( 1, $radialBlur4, $radialBlur5, $radialBlur6 ); }
 				{ RB_SETUP( 2, $radialBlur7, $radialBlur8, $radialBlur9 ); }
 				{ RB_SETUP( 3, $radialBlur10, $radialBlur11, $radialBlur12 ); }
-				if ( rbS[ 0 ] > 0.0 || rbS[ 1 ] > 0.0 || rbS[ 2 ] > 0.0 || rbS[ 3 ] > 0.0 ) {
+				{ RB_SETUP( 4, $radialBlur13, $radialBlur14, $radialBlur15 ); }
+				{ RB_SETUP( 5, $radialBlur16, $radialBlur17, $radialBlur18 ); }
+				{ RB_SETUP( 6, $radialBlur19, $radialBlur20, $radialBlur21 ); }
+				if ( rbS[ 0 ] > 0.0 || rbS[ 1 ] > 0.0 || rbS[ 2 ] > 0.0 || rbS[ 3 ] > 0.0 || rbS[ 4 ] > 0.0 || rbS[ 5 ] > 0.0 || rbS[ 6 ] > 0.0 ) {
 					float2 rbUv0 = ( rbTc ) / $resolutionScale.xy;
 					float2 rbV0;
 					RB_VECTOR( rbV0, rbUv0 );
