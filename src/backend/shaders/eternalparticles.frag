@@ -17,6 +17,10 @@
 // near fade = saturate((d - end) / (begin - end)) on the distance d from the view (when begin > end); soft =
 // saturate((zScene - zFrag - saturate(1 - T.g) depthOffsetScale) / distance). Then 2016's own fog, and the colour
 // premultiplied by its alpha, as both games blend (ONE, ONE_MINUS_SRC_ALPHA).
+// c and its alpha are the numbers the CPU wrote into the particle vertex, linear, as DOOM Eternal's vertex program
+// passes them on: DOOM 2016's uberParticles vertex stage hands the fragment DeGamma(vertex.color) (its exact sRGB
+// decode, on rgb and on alpha) and its CPU stores the alpha remapped past r_particlesMinAlpha t (a' = (a - t) /
+// (1 - t), t = 16 / 255 by default); both are undone first (ep_srgb, EP_MIN_ALPHA).
 //
 // ep_shade is spliced into the game's uberparticles fragment stage at the end of main and replaces the colour it
 // wrote (the stock shading runs as its unlit mode and is overwritten). main() and the bindings below exist only so
@@ -36,6 +40,12 @@ layout(location = 0) out vec4 ep_out;
 
 // The sRGB curve DOOM Eternal's uberparticles applies to both texture channels (2016's SRGBlinearApprox).
 float ep_lin(float x) { return x * (x * (x * 0.305306011 + 0.682171111) + 0.012522878); }
+
+// The inverse of DOOM 2016's SRGBlinear (global.inc: x / 12.92 up to 0.04045, else pow(x / 1.055 + 0.0521327, 2.4)),
+// which its particle vertex stage applies to the vertex colour; and the alpha floor its CPU remaps the alpha past
+// (r_particlesMinAlpha, default 16 of 255).
+float ep_srgb(float x) { return x <= 0.0031308 ? x * 12.92 : 1.055 * (pow(x, 1.0 / 2.4) - 0.0521327); }
+const float EP_MIN_ALPHA = 16.0 / 255.0;
 
 // A bicubic B-spline sample of the light atlas (four bilinear taps), as both games read it.
 float ep_w0(float a) { return (1.0 / 6.0) * (a * (a * (-a + 3.0) - 3.0) + 1.0); }
@@ -81,10 +91,10 @@ void ep_shade(inout vec4 frag, vec4 V[7], vec4 P[6], vec4 U[7])
     float gp0 = (V[2].x - 1.0) / 10.0;
     float gp1 = (V[4].z - 1.0) / 10.0;
     float gp3 = V[2].w;
-    vec3 c = V[0].rgb;
+    vec3 c = vec3(ep_srgb(V[0].r), ep_srgb(V[0].g), ep_srgb(V[0].b));
 
     // near fade, on the distance from the view
-    float ca = V[0].a;
+    float ca = ep_srgb(V[0].a) * (1.0 - EP_MIN_ALPHA) + EP_MIN_ALPHA;
     if (P[1].x > P[1].y) {
         float d = length(V[3].xyz - P[5].xyz);
         ca *= clamp((d - P[1].y) / (P[1].x - P[1].y), 0.0, 1.0);

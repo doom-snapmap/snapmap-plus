@@ -1626,7 +1626,10 @@ engine remaps `transsortblend`, `particleshighq`, `liquidhighq` and
 Eternal's shading of a CPU particle stage: its unlit, lit and explosion modes,
 the near fade on the distance from the view and the soft-particle fade as a
 distance, from the same particle vertices (flipbook frames and blend, colour,
-`genericParm` as the engine packs it). The stock shading still runs and its
+`genericParm` as the engine packs it). The colour and its alpha are read as the
+CPU wrote them, linear: the game's vertex stage hands them over sRGB-decoded and
+its CPU remaps the alpha past `r_particlesMinAlpha`, and the shading undoes both
+first, as DOOM Eternal's vertex program passes the colour on unchanged. The stock shading still runs and its
 colour is replaced before the stage returns. A material that names it sets
 `eternalparticle` (mode, emissive multiplier, emissive mask multiplier,
 `depthOffsetScale`), `eternalparticlefade` (near fade begin and end, soft

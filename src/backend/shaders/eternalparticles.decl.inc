@@ -5,6 +5,8 @@
 		// (the Vulkan module): see there for DOOM Eternal's rule. The engine compiles a program's fragment text inside
 		// main(), so the helpers are macros and templates, never functions.
 		#define epLin( x ) ( ( x ) * ( ( x ) * ( ( x ) * 0.305306011 + 0.682171111 ) + 0.012522878 ) )
+		#define epSrgb( x ) ( ( x ) <= 0.0031308 ? ( x ) * 12.92 : 1.055 * ( pow( ( x ), 1.0 / 2.4 ) - 0.0521327 ) )
+		#define EP_MIN_ALPHA ( 16.0 / 255.0 )
 		#define epW0( a ) ( ( 1.0 / 6.0 ) * ( ( a ) * ( ( a ) * ( -( a ) + 3.0 ) - 3.0 ) + 1.0 ) )
 		#define epW1( a ) ( ( 1.0 / 6.0 ) * ( ( a ) * ( a ) * ( 3.0 * ( a ) - 6.0 ) + 4.0 ) )
 		#define epW2( a ) ( ( 1.0 / 6.0 ) * ( ( a ) * ( ( a ) * ( -3.0 * ( a ) + 3.0 ) + 3.0 ) + 1.0 ) )
@@ -40,9 +42,9 @@
 			float epGp0 = ( fragment.texcoord1.x - 1.0 ) / 10.0;
 			float epGp1 = ( fragment.texcoord4.z - 1.0 ) / 10.0;
 			float epGp3 = fragment.texcoord1.w;
-			float3 epC = fragment.color.xyz;
+			float3 epC = float3( epSrgb( fragment.color.x ), epSrgb( fragment.color.y ), epSrgb( fragment.color.z ) );
 
-			float epCa = fragment.color.w;
+			float epCa = epSrgb( fragment.color.w ) * ( 1.0 - EP_MIN_ALPHA ) + EP_MIN_ALPHA;
 			if ( $eternalParticleFade.x > $eternalParticleFade.y ) {
 				float epD = length( fragment.texcoord2.xyz - $globalViewOrigin.xyz );
 				epCa *= saturate( ( epD - $eternalParticleFade.y ) / ( $eternalParticleFade.x - $eternalParticleFade.y ) );
