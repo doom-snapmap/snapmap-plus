@@ -4558,7 +4558,7 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wc
         mb_note(b, "%u game file%s borrowed for completeness: campaign content a served decl needs, which SnapMap does "
                 "not load on its own (first %s)", c.borrowed - c.derived, c.borrowed - c.derived == 1 ? "" : "s", c.first);
     if (c.derived)
-        mb_note(b, "%u file%s of Snapmap+'s multilayer render programs, which a material names, made from the game's own "
+        mb_note(b, "%u file%s of Snapmap+'s own render programs, which a material names, made from the game's own "
                 "programs on this computer (first %s)", c.derived, c.derived == 1 ? "" : "s", c.first_derived);
     qsort(b->files, b->file_count, sizeof(sh_mb_file), mb_file_cmp);
 }

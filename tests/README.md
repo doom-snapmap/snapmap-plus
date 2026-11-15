@@ -189,8 +189,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   permutations, each `.bin` carrying its decl's MD5fold and each SPIR-V
   header its stage text's, the product render-parm decls, and a damaged base
   stopping with a sentence that names the program. With `-Doom` it derives
-  both programs from the installed game and checks the same. The JavaScript
-  `multilayer_gen_test.js` fails when the generated files are out of date.
+  both programs from the installed game and checks the same. The particle
+  program the same way: its decl and stage-text patches and its splice into a
+  stand-in particle stage (`fixtures/modprog/particle.frag`), and with `-Doom`
+  its variant of the installed `uberparticles` and its permutation. The
+  JavaScript `multilayer_gen_test.js` fails when the generated files are out of
+  date.
 - `modstock_migrate_test.c` runs the overrides migration over a synthetic
   install and tree: an authored pack and a delivered package whose unchanged
   stock files become pointers, with the counts in each folder's line, the

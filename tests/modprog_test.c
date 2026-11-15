@@ -10,6 +10,9 @@
  * With the game installed (doom=<install root>), the same checks on the multilayer variants of skinvmtr and
  * skinvmtrwounds derived from the installed programs through modstock.
  *
+ * The particle program the same way: its decl and stage-text transforms and its splice over a stand-in particle
+ * stage (tests/fixtures/modprog/particle.frag), and with the game its variant of uberparticles and its permutation.
+ *
  *   modprog_test.exe [doom=<install root>] */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
@@ -366,6 +369,172 @@ static void test_derivation(void)
     free(g_bin.p); free(g_pbin.p); free(g_vspv.p); free(g_fspv.p);
 }
 
+/* ------------------------------------------------------------------ the particle program */
+
+extern const unsigned MODPROG_FIXTURE_EP_SPIRV_WORDS;
+extern const unsigned MODPROG_FIXTURE_EP_SPIRV[];
+extern const char MODPROG_FIXTURE_EP_GLSL[];
+
+static const char EP_DECL[] =
+    "{\r\n\thlsl_vp {\r\n\t\t#include \"includes/fog.inc\"\r\n\t\tresult.position = vertex.position;\r\n\t}\r\n"
+    "\thlsl_fp {\r\n\t\t#include \"includes/particle.inc\"\r\n\t\t#include \"includes/fog.inc\"\r\n"
+    "\t\tresult.color = float4( 1.0 );\r\n\t\tPREMULTIPLY_ALPHA_BLENDED( result );\r\n\t}\r\n}";
+
+/* The checks one derived particle fragment module must pass against its stock one: the emissive sheet's sampler on
+ * the binding after the program's textures, the shading's other samplers the program's own (no texture added), a
+ * binding at or after tex_end moved up by one, the material uniforms grown by the four parameters and the two
+ * render parms the shading reads, and one call of ep_shade, in main, after the stock colour's last store. */
+static void check_ep_module(const uint32_t *w, size_t n, const uint32_t *stock, size_t sn, unsigned tex_end)
+{
+    mod m = { w, n }, s = { stock, sn };
+    size_t at, call_at = 0, last_store = 0;
+    uint32_t shade = 0, calls = 0, out = named(&s, "out_FragColor0");
+    CHECK(n > sn && w[0] == 0x07230203u && w[3] > stock[3]);
+    CHECK(binding(&m, named(&m, "ep_emissive")) == (int)tex_end);
+    CHECK(named(&m, "ep_trans") == 0 && named(&m, "ep_depth") == 0 && named(&m, "ep_atlas") == 0);
+    CHECK(binding(&m, named(&m, "samp_transmap")) == binding(&s, named(&s, "samp_transmap")));
+    CHECK(binding(&m, named(&m, "samp_particleslightatlasmap")) == binding(&s, named(&s, "samp_particleslightatlasmap")));
+    FOR_INS(&s, at) {
+        if ((s.w[at] & 0xffff) == 71 && s.w[at + 2] == 33 && s.w[at + 3] >= tex_end)
+            CHECK(binding(&m, s.w[at + 1]) == (int)s.w[at + 3] + 1);
+    }
+    CHECK(struct_members(&m, named(&m, "freqHigh_fragmentUniforms")) ==
+          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")) + (int)SH_MODPROG_EP_PARM_COUNT + 2);
+    FOR_INS(&m, at) if ((m.w[at] & 0xffff) == 5 && !strncmp((const char *)(m.w + at + 2), "ep_shade(", 9)) shade = m.w[at + 1];
+    CHECK(shade != 0);
+    FOR_INS(&m, at) {
+        size_t c;
+        uint32_t ptr = (m.w[at] & 0xffff) == 62 ? m.w[at + 1] : 0;
+        int to_out = ptr && ptr == out;
+        if (ptr && !to_out)   /* a store through an access chain into the colour */
+            FOR_INS(&m, c) if ((m.w[c] & 0xffff) == 65 && m.w[c + 2] == ptr && m.w[c + 3] == out) to_out = 1;
+        if ((m.w[at] & 0xffff) == 57 && m.w[at + 3] == shade) { calls++; call_at = at; }
+        if (to_out && !call_at) last_store = at;
+    }
+    CHECK(calls == 1 && last_store && last_store < call_at);
+}
+
+static void test_ep_texts(void)
+{
+    size_t n = 0;
+    char *t = sh_modprog_ep_patch_decl(EP_DECL, strlen(EP_DECL), &n), *u;
+    printf("-- the particle program's decl and stage text\n");
+    CHECK(t && n == strlen(t));
+    if (t) {
+        const char *fp = strstr(t, "hlsl_fp {"), *tmpl = strstr(t, "#template ETERNAL_PARTICLE( epResult ) {");
+        const char *fog = fp ? strstr(fp, "#include \"includes/fog.inc\"") : NULL;
+        const char *pm = strstr(t, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tETERNAL_PARTICLE( result );\r\n");
+        CHECK(fp && fog && tmpl && pm && fog < tmpl && tmpl < pm);
+        CHECK(strstr(t, "result.position = vertex.position;") < fp);   /* the vertex stage untouched */
+        CHECK(!strstr(t, "\r\r") && strstr(t, "#endtemplate\r\n"));
+    }
+    free(t);
+    /* no premultiply, or two: refused */
+    CHECK(sh_modprog_ep_patch_decl("{ hlsl_fp { #include \"includes/fog.inc\"\n } }", 44, &n) == NULL);
+    u = (char *)malloc(2 * strlen(EP_DECL) + 1);
+    strcpy(u, EP_DECL);
+    strcat(u, EP_DECL);
+    CHECK(sh_modprog_ep_patch_decl(u, strlen(u), &n) == NULL);
+    free(u);
+    t = sh_modprog_ep_patch_glsl(MODPROG_FIXTURE_EP_GLSL, strlen(MODPROG_FIXTURE_EP_GLSL), 7, 1, &n);
+    CHECK(t != NULL);
+    if (t) {
+        CHECK(strstr(t, "layout( binding = 6 ) uniform sampler2D samp_particleslightatlasmap;") != NULL);
+        CHECK(strstr(t, "layout( binding = 7 ) uniform sampler2D samp_eternalparticleemissivemap;") != NULL);
+        CHECK(strstr(t, "\tvec4 globalvieworigin;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+        CHECK(strstr(t, "void ep_shade(") != NULL && strstr(t, "void ep_shade(") < strstr(t, "void main() {"));
+        CHECK(strstr(t, "\t}\n\tep_shade( out_FragColor0, vec4[7]( vofi_Color,") != NULL);
+    }
+    free(t);
+    CHECK(sh_modprog_ep_patch_glsl("void main() {}", 14, 7, 1, &n) == NULL);
+}
+
+static void test_ep_splice(void)
+{
+    size_t n = 0;
+    const char *why = NULL;
+    uint32_t *m = sh_modprog_ep_splice(MODPROG_FIXTURE_EP_SPIRV, MODPROG_FIXTURE_EP_SPIRV_WORDS, 7, 1, &n, &why);
+    printf("-- the particle module\n");
+    CHECK(m != NULL && why == NULL);
+    if (m) check_ep_module(m, n, MODPROG_FIXTURE_EP_SPIRV, MODPROG_FIXTURE_EP_SPIRV_WORDS, 7);
+    free(m);
+    /* a lit program is not a particle program: refused with a reason */
+    why = NULL;
+    CHECK(sh_modprog_ep_splice(MODPROG_FIXTURE_SPIRV, MODPROG_FIXTURE_SPIRV_WORDS, 10, 1, &n, &why) == NULL && why != NULL);
+}
+
+static void check_ep_unit(const char *decl_req, const char *bin_req, const char *vreq, const char *freq,
+                          const unsigned char *stock_v, size_t stock_vn, const unsigned char *stock_f, size_t stock_fn)
+{
+    unsigned char *d = NULL, *b = NULL, *v = NULL, *f = NULL;
+    size_t dn = 0, bn = 0, vn = 0, fn = 0, off[3], len[3];
+    CHECK(sh_modprog_owns(decl_req) && sh_modprog_owns(bin_req) && sh_modprog_owns(vreq) && sh_modprog_owns(freq));
+    CHECK(sh_modprog_read(decl_req, &d, &dn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(bin_req, &b, &bn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(vreq, &v, &vn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(freq, &f, &fn) == SH_MB_STOCK_OK);
+    if (!d || !b || !v || !f) { fprintf(stderr, "  uberparticles: %s\n", sh_modprog_cause()); goto out; }
+    CHECK(strstr((const char *)d, "#template ETERNAL_PARTICLE( epResult ) {") != NULL);
+    CHECK(strstr((const char *)d, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tETERNAL_PARTICLE( result );") != NULL);
+    CHECK(rd_be32(b) == 0xb68800adu && rd_be32(b + 4) == decl_sum((const char *)d, dn));
+    CHECK(sh_mb_rp_stages(b, bn, off, len) == 1);
+    CHECK(rd_be32(v) == 4 && rd_be32(v + 4) == sh_mb_md5fold(b + off[0], len[0]) && rd_be32(v + 12) == vn - 16);
+    CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]) && rd_be32(f + 12) == fn - 16);
+    CHECK(vn == stock_vn && !memcmp(v, stock_v, vn));
+    CHECK(strstr((const char *)b + off[1], "\tep_shade( out_FragColor0,") != NULL);
+    {
+        const char *t = (const char *)b + off[1], *sheet = strstr(t, "uniform sampler2D samp_eternalparticleemissivemap");
+        unsigned tex_end = 0;
+        if (sheet) {
+            const char *eq = sheet;
+            while (eq > t && strncmp(eq, "binding = ", 10)) eq--;
+            tex_end = (unsigned)atoi(eq + 10);
+        }
+        CHECK(tex_end > 0);
+        check_ep_module((const uint32_t *)(f + 16), (fn - 16) / 4, (const uint32_t *)(stock_f + 16), (stock_fn - 16) / 4, tex_end);
+    }
+out:
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    if (v) HeapFree(GetProcessHeap(), 0, v);
+    if (f) HeapFree(GetProcessHeap(), 0, f);
+}
+
+/* The particle program derived from the installed uberparticles and its permutation. */
+static void test_real_ep(void)
+{
+    static const char *const masks[] = { NULL, "0000000000000001" };
+    int i;
+    printf("-- the installed game's particle program\n");
+    for (i = 0; i < 2; i++) {
+        char *sd = masks[i] ? sh_textf("generated/renderprogs/permutations/uberparticles_%s.decl", masks[i]) : NULL;
+        char *sv = masks[i] ? sh_mb_spirv_request(sd, ".vspv") : sh_mb_spirv_request("uberparticles", ".vspv");
+        char *sf = masks[i] ? sh_mb_spirv_request(sd, ".fspv") : sh_mb_spirv_request("uberparticles", ".fspv");
+        char *d = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX "uberparticles_%s.decl", masks[i])
+                           : sh_textf("generated/decls/renderprog/" SH_MODPROG_EP_PREFIX "uberparticles.decl");
+        char *b = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX "uberparticles_%s_pc_vulkan.bin", masks[i])
+                           : sh_textf("generated/renderprogs/" SH_MODPROG_EP_PREFIX "uberparticles_pc_vulkan.bin");
+        char *v = masks[i] ? sh_mb_spirv_request(d, ".vspv") : sh_textf("generated/spirv/" SH_MODPROG_EP_PREFIX "uberparticles.vspv");
+        char *f = masks[i] ? sh_mb_spirv_request(d, ".fspv") : sh_textf("generated/spirv/" SH_MODPROG_EP_PREFIX "uberparticles.fspv");
+        char sha[SH_MB_HASH_HEX + 1];
+        unsigned long long sz = 0;
+        unsigned char *svb = NULL, *sfb = NULL;
+        size_t svn = 0, sfn = 0;
+        if (sh_modstock_identify(sv, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(sv, sha, &svb, &svn);
+        if (sh_modstock_identify(sf, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(sf, sha, &sfb, &sfn);
+        CHECK(svb && sfb);
+        if (svb && sfb) check_ep_unit(d, b, v, f, svb, svn, sfb, sfn);
+        if (svb) HeapFree(GetProcessHeap(), 0, svb);
+        if (sfb) HeapFree(GetProcessHeap(), 0, sfb);
+        free(sd); free(sv); free(sf); free(d); free(b); free(v); free(f);
+    }
+    /* the parms the shading adds are the product's; the two it reads from the game stay the game's */
+    CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
+    CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticleemissivemap.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/projectionmatrixz.decl"));
+    CHECK(!sh_modprog_owns("generated/spirv/uberparticles.fspv"));
+}
+
 typedef struct seen { int files; } seen;
 static void count(void *c, const char *path) { (void)path; ((seen *)c)->files++; }
 
@@ -413,6 +582,10 @@ static void test_real(const char *doom)
     }
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_PREFIX, count, &s);
     CHECK(s.files == 4);      /* each base's permutation decl and cooked program */
+    test_real_ep();
+    s.files = 0;
+    sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX, count, &s);
+    CHECK(s.files == 2);
     if (sh_modprog_cause()[0]) fprintf(stderr, "  %s\n", sh_modprog_cause());
     sh_modstock_reset();
 }
@@ -427,6 +600,8 @@ int main(int argc, char **argv)
     test_glsl();
     test_splice();
     test_derivation();
+    test_ep_texts();
+    test_ep_splice();
     if (doom) test_real(doom);
     else printf("-- the installed game's programs: no install given (doom=<root>); skipped\n");
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

@@ -12,7 +12,26 @@
 
 /* ------------------------------------------------------------------------------------------- the family ---- */
 
-static const char *const MP_BASES[] = { "skinvmtr", "skinvmtrwounds" };
+/* The programs the product derives: each a variant (a family's prefix + the base's name) of one installed base
+ * program; a family says what its variant adds (modprog.h). */
+typedef char *(*mp_patch_fn)(const char *text, size_t len, size_t *out_len);
+typedef char *(*mp_glsl_fn)(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
+typedef uint32_t *(*mp_splice_fn)(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                                  size_t *out_words, const char **why);
+typedef struct mp_family {
+    const char *prefix;            /* the variant's name before the base's */
+    const char *what;              /* in the failure sentence: "its <what> of the game's <base> program" */
+    const char *const *parms;      /* the material uniforms the fragment stage gains */
+    const unsigned *nparms;
+    const char *const *textures;   /* the textures it gains, after its own */
+    const unsigned *ntextures;
+    mp_patch_fn decl;
+    mp_glsl_fn glsl;
+    mp_splice_fn splice;
+    const char *decl_needs;        /* why a decl is refused */
+} mp_family;
+typedef struct mp_base { const char *name; int family; } mp_base;
+static const mp_base MP_BASES[] = { { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 } };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
 const char *const SH_MODPROG_ML_PARMS[] = {
@@ -48,6 +67,34 @@ static const char *const MP_EMISSIVE[] = { "bloommaskscale", "colorscale", "colo
 static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "normal", "lightmap", "emissive",
                                          "thickness" };
 #define MP_NINOUT 7
+
+/* The Eternal particle program (shaders/eternalparticles.frag): its material parameters appended to the fragment
+ * stage's material uniforms (the product's four, then two of the game's own render parms the shading reads), its
+ * added texture, the module's samplers (the first three bound to the program's own textures), the stage inputs and
+ * the program's own uniforms it reads ('h' the material block, 'l' the view block). */
+const char *const SH_MODPROG_EP_PARMS[] = {
+    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
+};
+const unsigned SH_MODPROG_EP_PARM_COUNT = sizeof SH_MODPROG_EP_PARMS / sizeof SH_MODPROG_EP_PARMS[0];
+const char *const SH_MODPROG_EP_TEXTURES[] = { "eternalparticleemissivemap" };
+const unsigned SH_MODPROG_EP_TEXTURE_COUNT = sizeof SH_MODPROG_EP_TEXTURES / sizeof SH_MODPROG_EP_TEXTURES[0];
+static const char *const EP_BLOCK_PARMS[] = {
+    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
+    "projectionmatrixz", "globalvieworigin",
+};
+#define EP_NBLOCK_PARMS (sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0])
+static const char *const EP_SAMPLERS[] = { "ep_trans", "ep_depth", "ep_atlas", "ep_emissive" };
+static const char *const EP_SAMPLER_STOCK[] = { "samp_transmap", "samp_viewdepthmap", "samp_particleslightatlasmap", NULL };
+#define EP_NSAMPLERS (sizeof EP_SAMPLERS / sizeof EP_SAMPLERS[0])
+static const char *const EP_VARYINGS[] = {
+    "vofi_Color", "vofi_TexCoord0", "vofi_TexCoord1", "vofi_TexCoord2", "vofi_TexCoord4", "vofi_TexCoord6", "gl_FragCoord",
+};
+#define EP_NVARYINGS (sizeof EP_VARYINGS / sizeof EP_VARYINGS[0])
+static const char *const EP_UNIFORMS[] = {
+    "hrenderpositiontoviewtexture", "lparticleatlasparms", "lfoglightinscattercolor", "lfoglightinscatterintensity",
+    "lfoglightoppositecolor", "lfogcolor", "ltransparencylightmult",
+};
+#define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
 
 /* The render parm decls: the blend's defaults (DOOM Eternal's template/boss_character where it names one). */
 typedef struct mp_parm { const char *name, *text; } mp_parm;
@@ -102,6 +149,13 @@ static const mp_parm MP_PARM_DECLS[] = {
     { "blendlayer4heightmap",      "{ Tex2D textures/system/constant_color/grey_md }" },
     { "multilayerextramap0",       "{ Tex2D textures/system/constant_color/black }" },
     { "multilayerextramap1",       "{ Tex2D textures/system/constant_color/black }" },
+    /* The Eternal particle program: an unlit stage of no emissive multiplier, no near fade, no soft distance and no
+     * emissive sheet unless the material sets them (the converter writes every one a stage gives). */
+    { "eternalparticle",           "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
+    { "eternalparticlefade",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
+    { "eternalparticlecolor",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
+    { "eternalparticlecolor2",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
+    { "eternalparticleemissivemap", "{ Tex2D textures/system/constant_color/white }" },
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
@@ -272,6 +326,119 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     return mp_take(&b, out_len);
 }
 
+/* --------------------------------------------------------------------------- the Eternal particle texts ---- */
+
+/* `text` with the line `line` inserted after the first line at or after `from` that contains `after`. NULL when
+ * either is missing or `after` occurs twice after `from`. */
+static char *mp_insert_after_line(const char *text, size_t len, const char *from, const char *after, const char *line,
+                                  const char *nl, mp_buf *b)
+{
+    const char *f = mp_find(text, len, from), *a, *eol;
+    size_t nll = strlen(nl);
+    if (!f || !(a = mp_find(f, len - (size_t)(f - text), after))) return NULL;
+    if (mp_find(a + 1, len - (size_t)(a + 1 - text), after)) return NULL;
+    if (!(eol = mp_find(a, len - (size_t)(a - text), nl))) return NULL;
+    eol += nll;
+    mp_put(b, text, (size_t)(eol - text));
+    mp_puts(b, line);
+    return (char *)eol;
+}
+
+char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len)
+{
+    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *p, *end = text + len, *rest, *call;
+    mp_buf inc = { 0 }, b = { 0 };
+    char *t;
+    size_t n;
+    /* the shading's templates, in the base text's line ends */
+    for (p = SH_MODPROG_EP_DECL; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t k = e ? (size_t)(e - p) : strlen(p);
+        mp_put(&inc, p, k);
+        mp_puts(&inc, nl);
+        p += k + (e ? 1 : 0);
+    }
+    if (inc.oom || !inc.p) { free(inc.p); return NULL; }
+    /* after the fragment stage's last include; the call after its premultiply */
+    rest = mp_insert_after_line(text, len, "hlsl_fp {", "#include \"includes/fog.inc\"", inc.p, nl, &b);
+    free(inc.p);
+    if (!rest) { free(b.p); return NULL; }
+    call = mp_find(rest, (size_t)(end - rest), "PREMULTIPLY_ALPHA_BLENDED( result );");
+    if (!call || mp_find(call + 1, (size_t)(end - call - 1), "PREMULTIPLY_ALPHA_BLENDED( result );")) { free(b.p); return NULL; }
+    {
+        const char *eol = mp_find(call, (size_t)(end - call), nl), *ls = call;
+        if (!eol) { free(b.p); return NULL; }
+        while (ls > rest && ls[-1] != '\n') ls--;
+        eol += strlen(nl);
+        mp_put(&b, rest, (size_t)(eol - rest));
+        mp_put(&b, ls, (size_t)(call - ls));
+        mp_puts(&b, "ETERNAL_PARTICLE( result );");
+        mp_puts(&b, nl);
+        mp_put(&b, eol, (size_t)(end - eol));
+    }
+    t = mp_take(&b, &n);
+    if (t && out_len) *out_len = n;
+    return t;
+}
+
+char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
+{
+    static const char bind[] = "layout( binding = ";
+    static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
+    mp_buf b = { 0 }, s = { 0 };
+    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *last;
+    unsigned k;
+    char *t1;
+    size_t n1;
+    while (p < end) {
+        const char *q = mp_find(p, (size_t)(end - p), bind);
+        if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
+        q += sizeof bind - 1;
+        mp_put(&s, p, (size_t)(q - p));
+        {
+            unsigned v = 0;
+            const char *d = q;
+            while (d < end && *d >= '0' && *d <= '9') v = v * 10 + (unsigned)(*d++ - '0');
+            if (d == q) { p = q; continue; }
+            mp_printf(&s, "%u", v >= tex_end ? v + shift : v);
+            p = d;
+        }
+    }
+    if (s.oom) { free(s.p); return NULL; }
+    t1 = s.p;
+    n1 = s.n;
+    end = t1 + n1;
+    if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
+    first = mp_find(t1, n1, "layout( location");
+    mainp = mp_find(t1, n1, "void main() {");
+    /* the end of main: its closing brace, the text's last */
+    last = end;
+    while (last > t1 && (last[-1] == '\n' || last[-1] == '\r' || last[-1] == ' ' || last[-1] == '\t')) last--;
+    if (!first || !mainp || last <= mainp || last[-1] != '}' || first < close || mainp < first) { free(t1); return NULL; }
+    last--;
+    mp_put(&b, t1, (size_t)(close - t1));
+    for (k = 0; k < EP_NBLOCK_PARMS; k++) mp_printf(&b, "\tvec4 %s;\n", EP_BLOCK_PARMS[k]);
+    mp_put(&b, close, (size_t)(first - close));
+    for (k = 0; k < SH_MODPROG_EP_TEXTURE_COUNT; k++)
+        mp_printf(&b, "layout( binding = %u ) uniform sampler2D samp_%s;\n", tex_end + k, SH_MODPROG_EP_TEXTURES[k]);
+    mp_put(&b, first, (size_t)(mainp - first));
+    mp_puts(&b, SH_MODPROG_EP_GLSL);
+    mp_put(&b, mainp, (size_t)(last - mainp));
+    mp_puts(&b, "\tep_shade( out_FragColor0, vec4[");
+    mp_printf(&b, "%u]( ", (unsigned)EP_NVARYINGS);
+    for (k = 0; k < EP_NVARYINGS; k++) mp_printf(&b, "%s%s", k ? ", " : "", EP_VARYINGS[k]);
+    mp_printf(&b, " ), vec4[%u]( ", (unsigned)EP_NBLOCK_PARMS);
+    for (k = 0; k < EP_NBLOCK_PARMS; k++) mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", EP_BLOCK_PARMS[k]);
+    mp_printf(&b, " ), vec4[%u]( ", (unsigned)EP_NUNIFORMS);
+    for (k = 0; k < EP_NUNIFORMS; k++)
+        mp_printf(&b, "%s%s_fragmentUniforms.%s", k ? ", " : "", EP_UNIFORMS[k][0] == 'h' ? "freqHigh" : "freqLow",
+                  EP_UNIFORMS[k] + 1);
+    mp_puts(&b, " ) );\n");
+    mp_put(&b, last, (size_t)(end - last));
+    free(t1);
+    return mp_take(&b, out_len);
+}
+
 /* --------------------------------------------------------------------------------------------- SPIR-V ---- */
 /* A module as a list of instructions; an instruction's words (opcode word first) point into the input or into
  * an owned copy. Only the opcodes glslang emits for shaders/multilayer.frag need their operand shapes (the
@@ -287,7 +454,7 @@ enum {
     OpAccessChain = 65, OpDecorate = 71, OpMemberDecorate = 72, OpVectorShuffle = 79, OpCompositeConstruct = 80,
     OpCompositeExtract = 81, OpCompositeInsert = 82, OpLabel = 248, OpLoopMerge = 246, OpSelectionMerge = 247,
     OpBranch = 249, OpBranchConditional = 250, OpReturn = 253, OpReturnValue = 254, OpSource = 3,
-    OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpUndef = 1, OpPhi = 245
+    OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpUndef = 1, OpPhi = 245, OpKill = 252
 };
 
 typedef struct mp_ins { uint32_t *w; } mp_ins;     /* w[0]: count << 16 | opcode */
@@ -360,7 +527,7 @@ static int mp_has_type(uint32_t op)
     case OpTypeStruct: case OpTypePointer: case OpTypeFunction: case OpExtInstImport: case OpLabel:
     case OpStore: case OpFunctionEnd: case OpSelectionMerge: case OpLoopMerge: case OpBranch:
     case OpBranchConditional: case OpReturn: case OpReturnValue: case OpName: case OpMemberName: case OpDecorate:
-    case OpMemberDecorate: case OpCapability: case OpEntryPoint: case OpExecutionMode: case OpSource:
+    case OpMemberDecorate: case OpCapability: case OpEntryPoint: case OpExecutionMode: case OpSource: case OpKill:
     case 2: case 4: case 8: case 10: case 14: case 317: case 330:
         return 0;
     default:
@@ -372,7 +539,7 @@ static int mp_has_result(uint32_t op)
     switch (op) {
     case OpStore: case OpFunctionEnd: case OpSelectionMerge: case OpLoopMerge: case OpBranch:
     case OpBranchConditional: case OpReturn: case OpReturnValue: case OpName: case OpMemberName: case OpDecorate:
-    case OpMemberDecorate: case OpCapability: case OpEntryPoint: case OpExecutionMode: case OpSource:
+    case OpMemberDecorate: case OpCapability: case OpEntryPoint: case OpExecutionMode: case OpSource: case OpKill:
     case 2: case 4: case 8: case 10: case 14: case 317: case 330:   /* SourceContinued, SourceExtension, Line,
                                                                      * Extension, MemoryModel, NoLine,
                                                                      * ModuleProcessed */
@@ -403,7 +570,7 @@ static int mp_ids(const mp_ins *in, uint32_t out[], int cap)
     switch (op) {
     case OpTypeVoid: case OpTypeBool: case OpTypeInt: case OpTypeFloat: case OpTypeSampler: case OpConstantTrue:
     case OpConstantFalse: case OpConstant: case OpConstantNull: case OpFunctionParameter: case OpLabel:
-    case OpReturn: case OpFunctionEnd: case OpExtInstImport: case OpUndef:
+    case OpReturn: case OpFunctionEnd: case OpExtInstImport: case OpUndef: case OpKill:
         break;
     case OpTypeVector: case OpTypeMatrix: case OpTypeImage: ADD(2); break;
     case OpTypePointer: ADD(3); break;
@@ -569,252 +736,426 @@ static const mp_ins *mp_def_any(mp_ctx *c, uint32_t id)
 
 #define MP_FAIL(c, text) do { (c)->why = (text); goto done; } while (0)
 
-uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
-                            size_t *out_words, const char **why)
-{
-    mp_ctx c;
-    uint32_t *out = NULL, *mark = NULL, *ids = NULL;
-    size_t i, k, nkeep = 0, *keep = NULL, *fstart = NULL, nf = 0;
-    uint32_t entry_fn = 0, inputs = 0, in_struct = 0, fh = 0, fl = 0, fh_struct = 0, fl_struct = 0, v4 = 0;
-    uint32_t n0 = 0, wound = 0, t_float = 0, t_void = 0, ml_entry = 0;
-    uint32_t params[MP_NINOUT + 4], temps[MP_NINOUT + 4];
-    uint32_t sampler_ids[MP_NSAMPLERS];
-    size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
-    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
-    memset(&c, 0, sizeof c);
-    memset(sampler_ids, 0, sizeof sampler_ids);
-    if (out_words) *out_words = 0;
-    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
-    if (!mp_parse(&c.M, SH_MODPROG_ML_SPIRV, SH_MODPROG_ML_SPIRV_WORDS)) MP_FAIL(&c, "the multilayer module is damaged");
-    if (!(c.idmap = (uint32_t *)calloc(c.M.bound, sizeof *c.idmap)) ||
-        !(mark = (uint32_t *)calloc(c.M.bound, sizeof *mark)) ||
-        !(fstart = (size_t *)calloc(c.M.n + 1, sizeof *fstart)) || !(keep = (size_t *)calloc(c.M.n + 1, sizeof *keep)))
-        MP_FAIL(&c, "out of memory");
+/* A module's functions brought into the stock module: `entry` (an OpName prefix) and what it calls, the globals
+ * they need (types and constants shared with the stock module where they are the same), its samplers (module
+ * variables named in `samplers`) either bound to the stock sampler `stock[k]` names (no texture added) or added at
+ * bindings tex_end, tex_end + 1, ... in the order of those without a stock name. `what` names the module in the
+ * sentences. On success *entry_id is the entry's id in the stock module and the functions are in *funcs. */
+typedef struct mp_import_spec {
+    const uint32_t *words;
+    unsigned nwords;
+    const char *entry;
+    const char *const *samplers;
+    const char *const *stock;
+    size_t nsamplers;
+    const char *what;
+} mp_import_spec;
 
-    /* ---- the multilayer functions: ml_blend and what it calls (module order) */
-    for (i = 0; i < c.M.n; i++) if (MP_OP(&c.M.ins[i]) == OpFunction) fstart[nf++] = i;
-    entry_fn = mp_named(&c.M, "ml_blend(", 1);
-    if (!entry_fn) MP_FAIL(&c, "the multilayer module has no single ml_blend");
+static int mp_import(mp_ctx *c, const mp_import_spec *sp, unsigned tex_end, uint32_t *entry_id, mp_list *funcs)
+{
+    uint32_t *mark = NULL, *sampler_ids = NULL, entry_fn;
+    size_t i, k, nkeep = 0, *keep = NULL, *fstart = NULL, nf = 0, added = 0;
+    int ok = 0;
+    if (!mp_parse(&c->M, sp->words, sp->nwords)) { c->why = "a module of the product's programs is damaged"; return 0; }
+    if (!(c->idmap = (uint32_t *)calloc(c->M.bound, sizeof *c->idmap)) ||
+        !(mark = (uint32_t *)calloc(c->M.bound, sizeof *mark)) ||
+        !(sampler_ids = (uint32_t *)calloc(sp->nsamplers ? sp->nsamplers : 1, sizeof *sampler_ids)) ||
+        !(fstart = (size_t *)calloc(c->M.n + 1, sizeof *fstart)) || !(keep = (size_t *)calloc(c->M.n + 1, sizeof *keep)))
+        MP_FAIL(c, "out of memory");
+
+    /* ---- the module's functions: the entry and what it calls (module order) */
+    for (i = 0; i < c->M.n; i++) if (MP_OP(&c->M.ins[i]) == OpFunction) fstart[nf++] = i;
+    entry_fn = mp_named(&c->M, sp->entry, 1);
+    if (!entry_fn) MP_FAIL(c, "a module of the product's programs has no single entry function");
     /* mark bits: 1 kept function, 2 defined inside a kept function, 4 a global a kept function needs */
     mark[entry_fn] |= 1;
     for (;;) {
         int grew = 0;
         for (k = 0; k < nf; k++) {
-            uint32_t fid = c.M.ins[fstart[k]].w[2];
+            uint32_t fid = c->M.ins[fstart[k]].w[2];
             if (!(mark[fid] & 1)) continue;
-            for (i = fstart[k]; i < c.M.n && MP_OP(&c.M.ins[i]) != OpFunctionEnd; i++)
-                if (MP_OP(&c.M.ins[i]) == OpFunctionCall && !(mark[c.M.ins[i].w[3]] & 1)) {
-                    mark[c.M.ins[i].w[3]] |= 1;
+            for (i = fstart[k]; i < c->M.n && MP_OP(&c->M.ins[i]) != OpFunctionEnd; i++)
+                if (MP_OP(&c->M.ins[i]) == OpFunctionCall && !(mark[c->M.ins[i].w[3]] & 1)) {
+                    mark[c->M.ins[i].w[3]] |= 1;
                     grew = 1;
                 }
         }
         if (!grew) break;
     }
     for (k = 0; k < nf; k++) {
-        uint32_t fid = c.M.ins[fstart[k]].w[2];
+        uint32_t fid = c->M.ins[fstart[k]].w[2];
         if (!(mark[fid] & 1)) continue;
         keep[nkeep++] = fstart[k];
-        for (i = fstart[k]; i < c.M.n; i++) {
-            uint32_t r = mp_rid(&c.M.ins[i]);
+        for (i = fstart[k]; i < c->M.n; i++) {
+            uint32_t r = mp_rid(&c->M.ins[i]);
             if (r) mark[r] |= 2;
-            if (MP_OP(&c.M.ins[i]) == OpFunctionEnd) break;
+            if (MP_OP(&c->M.ins[i]) == OpFunctionEnd) break;
         }
     }
     /* the globals they reference, transitively */
     for (;;) {
         int grew = 0;
-        for (i = 0; i < c.M.n; i++) {
-            const mp_ins *in = &c.M.ins[i];
+        for (i = 0; i < c->M.n; i++) {
+            const mp_ins *in = &c->M.ins[i];
             uint32_t pos[64], r = mp_rid(in), op = MP_OP(in);
-            int np, q, inside = r && (mark[r] & 2), needed = r && (mark[r] & 4);
+            int np, q, needed = r && (mark[r] & 4);
             int in_fn = 0;
             for (k = 0; k < nkeep; k++) {
                 size_t e = keep[k];
-                while (e < c.M.n && MP_OP(&c.M.ins[e]) != OpFunctionEnd) e++;
+                while (e < c->M.n && MP_OP(&c->M.ins[e]) != OpFunctionEnd) e++;
                 if (i >= keep[k] && i <= e) { in_fn = 1; break; }
             }
             if (!in_fn && !needed) continue;
             if (op == OpExtInstImport || op == OpName || op == OpMemberName || op == OpDecorate) continue;
             np = mp_ids(in, pos, 64);
-            if (np < 0) MP_FAIL(&c, "the multilayer module uses an instruction the splice does not know");
+            if (np < 0) MP_FAIL(c, "a module of the product's programs uses an instruction the splice does not know");
             for (q = 0; q < np; q++) {
                 uint32_t v = in->w[pos[q]];
-                if (v < c.M.bound && !(mark[v] & 2) && !(mark[v] & 4) && v != r) {
+                if (v < c->M.bound && !(mark[v] & 2) && !(mark[v] & 4) && v != r) {
                     mark[v] |= 4;
                     grew = 1;
                 }
             }
-            (void)inside;
         }
         if (!grew) break;
     }
 
-    /* ---- the multilayer module's globals into the stock module */
-    for (i = 0; i < c.M.n; i++) {
-        mp_ins *in = &c.M.ins[i];
+    /* ---- the module's globals into the stock module */
+    for (i = 0; i < c->M.n; i++) {
+        mp_ins *in = &c->M.ins[i];
         uint32_t r = mp_rid(in), op = MP_OP(in), n = MP_N(in), rid_at, pos[64], *w;
         int np, q;
         if (!r || !(mark[r] & 4) || (mark[r] & 2)) continue;
         if (op == OpExtInstImport) {
             size_t s;
-            for (s = 0; s < c.S.n; s++)
-                if (MP_OP(&c.S.ins[s]) == OpExtInstImport &&
-                    !strcmp((const char *)(c.S.ins[s].w + 2), (const char *)(in->w + 2))) { c.idmap[r] = c.S.ins[s].w[1]; break; }
-            if (!c.idmap[r]) MP_FAIL(&c, "the program's fragment module does not import the blend's instructions");
+            for (s = 0; s < c->S.n; s++)
+                if (MP_OP(&c->S.ins[s]) == OpExtInstImport &&
+                    !strcmp((const char *)(c->S.ins[s].w + 2), (const char *)(in->w + 2))) { c->idmap[r] = c->S.ins[s].w[1]; break; }
+            if (!c->idmap[r]) MP_FAIL(c, "the program's fragment module does not import the instructions the product's functions use");
             continue;
         }
         if (!mp_is_type(op) && !mp_is_const(op) && op != OpVariable)
-            MP_FAIL(&c, "the multilayer functions read a global the splice does not carry");
+            MP_FAIL(c, "the product's functions read a global the splice does not carry");
         rid_at = mp_has_type(op) ? 2 : 1;
-        if (!(w = (uint32_t *)malloc(n * sizeof *w))) MP_FAIL(&c, "out of memory");
+        if (!(w = (uint32_t *)malloc(n * sizeof *w))) MP_FAIL(c, "out of memory");
         memcpy(w, in->w, n * sizeof *w);
         np = mp_ids(in, pos, 64);
         for (q = 0; q < np; q++) if (pos[q] != rid_at) {
-            uint32_t v = c.idmap[w[pos[q]]];
-            if (!v) { free(w); MP_FAIL(&c, "the multilayer module refers to a global before it declares it"); }
+            uint32_t v = c->idmap[w[pos[q]]];
+            if (!v) { free(w); MP_FAIL(c, "a module of the product's programs refers to a global before it declares it"); }
             w[pos[q]] = v;
-        }
-        if (op == OpVariable && mp_is_named(&c.M, r, "ml_noise")) {
-            /* the ember's noise is the program's own magnificationclouds: no texture is added */
-            uint32_t own = mp_named(&c.S, "samp_magnificationclouds", 0);
-            const mp_ins *d = own ? mp_def(&c.S, own) : NULL;
-            if (!d || MP_OP(d) != OpVariable || d->w[1] != w[1]) {
-                free(w);
-                MP_FAIL(&c, "the program does not sample magnificationclouds, which the ember reads");
-            }
-            c.idmap[r] = own;
-            free(w);
-            continue;
         }
         if (op == OpVariable) {
             int s, hit = -1;
-            for (s = 0; s < (int)MP_NSAMPLERS; s++) if (mp_is_named(&c.M, r, MP_SAMPLERS[s])) hit = s;
-            if (hit < 0 || w[3] != 0) { free(w); MP_FAIL(&c, "the multilayer functions read a global other than their samplers"); }
-            w[2] = c.S.bound++;
-            c.idmap[r] = w[2];
+            for (s = 0; s < (int)sp->nsamplers; s++) if (mp_is_named(&c->M, r, sp->samplers[s])) hit = s;
+            if (hit < 0 || w[3] != 0) { free(w); MP_FAIL(c, "the product's functions read a global other than their samplers"); }
+            if (sp->stock && sp->stock[hit]) {
+                /* a sampler the program already has: no texture is added */
+                uint32_t own = mp_named(&c->S, sp->stock[hit], 0);
+                const mp_ins *d = own ? mp_def(&c->S, own) : NULL;
+                free(w);
+                if (!d || MP_OP(d) != OpVariable || d->w[1] != c->idmap[in->w[1]])
+                    MP_FAIL(c, "the program does not have a texture the product's functions read");
+                c->idmap[r] = own;
+                sampler_ids[hit] = own;
+                continue;
+            }
+            w[2] = c->S.bound++;
+            c->idmap[r] = w[2];
             sampler_ids[hit] = w[2];
-            if (!mp_emit(&c.S, &c.globals, op, w + 1, n - 1)) { free(w); MP_FAIL(&c, "out of memory"); }
+            if (!mp_emit(&c->S, &c->globals, op, w + 1, n - 1)) { free(w); MP_FAIL(c, "out of memory"); }
             free(w);
             continue;
         }
         {
             uint32_t found = 0;
-            for (k = 0; k < c.S.n && !found; k++) {
-                const mp_ins *s = &c.S.ins[k];
+            for (k = 0; k < c->S.n && !found; k++) {
+                const mp_ins *s = &c->S.ins[k];
                 if (MP_OP(s) == OpFunction) break;
                 if ((mp_is_type(MP_OP(s)) || mp_is_const(MP_OP(s))) && mp_same(s->w, w, rid_at)) found = s->w[rid_at];
             }
-            for (k = 0; k < c.globals.n && !found; k++)
-                if (mp_same(c.globals.v[k].w, w, rid_at)) found = c.globals.v[k].w[rid_at];
-            if (found) c.idmap[r] = found;
+            for (k = 0; k < c->globals.n && !found; k++)
+                if (mp_same(c->globals.v[k].w, w, rid_at)) found = c->globals.v[k].w[rid_at];
+            if (found) c->idmap[r] = found;
             else {
-                w[rid_at] = c.S.bound++;
-                c.idmap[r] = w[rid_at];
-                if (!mp_emit(&c.S, &c.globals, op, w + 1, n - 1)) { free(w); MP_FAIL(&c, "out of memory"); }
+                w[rid_at] = c->S.bound++;
+                c->idmap[r] = w[rid_at];
+                if (!mp_emit(&c->S, &c->globals, op, w + 1, n - 1)) { free(w); MP_FAIL(c, "out of memory"); }
             }
         }
         free(w);
     }
-    for (k = 0; k < MP_NSAMPLERS; k++) if (!sampler_ids[k]) MP_FAIL(&c, "the multilayer module does not read all of its samplers");
+    for (k = 0; k < sp->nsamplers; k++) if (!sampler_ids[k]) MP_FAIL(c, "a module of the product's programs does not read all of its samplers");
 
     /* ---- the functions, every id renumbered */
     for (k = 0; k < nkeep; k++)
-        for (i = keep[k]; i < c.M.n; i++) {
-            uint32_t r = mp_rid(&c.M.ins[i]);
-            if (r) c.idmap[r] = c.S.bound++;
-            if (MP_OP(&c.M.ins[i]) == OpFunctionEnd) break;
+        for (i = keep[k]; i < c->M.n; i++) {
+            uint32_t r = mp_rid(&c->M.ins[i]);
+            if (r) c->idmap[r] = c->S.bound++;
+            if (MP_OP(&c->M.ins[i]) == OpFunctionEnd) break;
         }
     for (k = 0; k < nkeep; k++)
-        for (i = keep[k]; i < c.M.n; i++) {
-            const mp_ins *in = &c.M.ins[i];
+        for (i = keep[k]; i < c->M.n; i++) {
+            const mp_ins *in = &c->M.ins[i];
             uint32_t pos[256], *w;
             int np = mp_ids(in, pos, 256), q;
-            if (np < 0) MP_FAIL(&c, "the multilayer module uses an instruction the splice does not know");
-            if (!(w = mp_emit(&c.S, &funcs, MP_OP(in), in->w + 1, MP_N(in) - 1))) MP_FAIL(&c, "out of memory");
+            if (np < 0) MP_FAIL(c, "a module of the product's programs uses an instruction the splice does not know");
+            if (!(w = mp_emit(&c->S, funcs, MP_OP(in), in->w + 1, MP_N(in) - 1))) MP_FAIL(c, "out of memory");
             for (q = 0; q < np; q++) {
-                uint32_t v = c.idmap[w[pos[q]]];
-                if (!v) MP_FAIL(&c, "the multilayer module refers to an id it does not define");
+                uint32_t v = c->idmap[w[pos[q]]];
+                if (!v) MP_FAIL(c, "a module of the product's programs refers to an id it does not define");
                 w[pos[q]] = v;
             }
             if (MP_OP(in) == OpFunctionEnd) break;
         }
 
-    /* ---- names and decorations of what was brought in */
-    for (i = 0; i < c.M.n; i++) {
-        const mp_ins *in = &c.M.ins[i];
+    /* ---- names and decorations of what was brought in (an added sampler's binding after the program's own) */
+    for (i = 0; i < c->M.n; i++) {
+        const mp_ins *in = &c->M.ins[i];
         uint32_t t = in->w[1];
         int sampler = 0, s;
-        if (MP_OP(in) != OpName || t >= c.M.bound || !c.idmap[t]) continue;
-        for (s = 0; s < (int)MP_NSAMPLERS; s++) if (sampler_ids[s] == c.idmap[t]) sampler = 1;
+        if (MP_OP(in) != OpName || t >= c->M.bound || !c->idmap[t]) continue;
+        for (s = 0; s < (int)sp->nsamplers; s++)
+            if (sampler_ids[s] == c->idmap[t] && !(sp->stock && sp->stock[s])) sampler = 1;
         if (!(mark[t] & 2) && !sampler) continue;
         {
-            uint32_t *w = mp_emit(&c.S, &c.names, OpName, in->w + 1, MP_N(in) - 1);
-            if (!w) MP_FAIL(&c, "out of memory");
-            w[1] = c.idmap[t];
+            uint32_t *w = mp_emit(&c->S, &c->names, OpName, in->w + 1, MP_N(in) - 1);
+            if (!w) MP_FAIL(c, "out of memory");
+            w[1] = c->idmap[t];
         }
     }
-    for (k = 0; k < MP_NSAMPLERS; k++) {
-        uint32_t d1[3] = { sampler_ids[k], 34, 0 }, d2[3] = { sampler_ids[k], 33, tex_end + (uint32_t)k };
-        if (!mp_emit(&c.S, &c.decos, OpDecorate, d1, 3) || !mp_emit(&c.S, &c.decos, OpDecorate, d2, 3)) MP_FAIL(&c, "out of memory");
+    for (k = 0; k < sp->nsamplers; k++) {
+        uint32_t d1[3], d2[3];
+        if (sp->stock && sp->stock[k]) continue;
+        d1[0] = sampler_ids[k]; d1[1] = 34; d1[2] = 0;
+        d2[0] = sampler_ids[k]; d2[1] = 33; d2[2] = tex_end + (uint32_t)added++;
+        if (!mp_emit(&c->S, &c->decos, OpDecorate, d1, 3) || !mp_emit(&c->S, &c->decos, OpDecorate, d2, 3)) MP_FAIL(c, "out of memory");
     }
+    *entry_id = c->idmap[entry_fn];
+    ok = 1;
+done:
+    free(mark); free(sampler_ids); free(fstart); free(keep);
+    return ok;
+}
 
-    /* ---- the stock module: bindings at or after tex_end move up */
-    for (i = 0; i < c.S.n; i++) {
-        mp_ins *in = &c.S.ins[i];
+/* The stock module's texture bindings at or after tex_end move up by `shift`. */
+static int mp_shift_bindings(mp_ctx *c, unsigned tex_end, unsigned shift)
+{
+    size_t i;
+    for (i = 0; i < c->S.n; i++) {
+        mp_ins *in = &c->S.ins[i];
         if (MP_OP(in) == OpDecorate && MP_N(in) == 4 && in->w[2] == 33 && in->w[3] >= tex_end) {
-            uint32_t *w = mp_own(&c.S, 4);
-            if (!w) MP_FAIL(&c, "out of memory");
+            uint32_t *w = mp_own(&c->S, 4);
+            if (!w) { c->why = "out of memory"; return 0; }
             memcpy(w, in->w, 4 * sizeof *w);
             w[3] += shift;
             in->w = w;
         }
     }
+    return 1;
+}
 
-    /* ---- the material uniform block grows by the blend's parameters */
-    fh = mp_named(&c.S, "freqHigh_fragmentUniforms", 0);
-    fl = mp_named(&c.S, "freqLow_fragmentUniforms", 0);
-    if (!fh || !fl) MP_FAIL(&c, "the program's fragment module has no single material uniform block");
+/* The material uniform block (freqHigh_fragmentUniforms) and the view block (freqLow_fragmentUniforms): their
+ * variables and struct types; the material block grows by `parms` (16-byte vectors after its own). *n0 is the
+ * block's own member count, *v4 its vector type. */
+typedef struct mp_blocks { uint32_t fh, fl, fh_struct, fl_struct, v4, n0; } mp_blocks;
+
+static int mp_grow_block(mp_ctx *c, const char *const *parms, unsigned nparms, mp_blocks *bk)
+{
+    size_t i, k;
+    memset(bk, 0, sizeof *bk);
+    bk->fh = mp_named(&c->S, "freqHigh_fragmentUniforms", 0);
+    bk->fl = mp_named(&c->S, "freqLow_fragmentUniforms", 0);
+    if (!bk->fh || !bk->fl) { c->why = "the program's fragment module has no single material uniform block"; return 0; }
     {
-        const mp_ins *v = mp_def(&c.S, fh), *p;
-        if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c.S, v->w[1]))) MP_FAIL(&c, "the material uniform block is not a variable");
-        fh_struct = p->w[3];
-        v = mp_def(&c.S, fl);
-        if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c.S, v->w[1]))) MP_FAIL(&c, "the view uniform block is not a variable");
-        fl_struct = p->w[3];
+        const mp_ins *v = mp_def(&c->S, bk->fh), *p;
+        if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c->S, v->w[1]))) { c->why = "the material uniform block is not a variable"; return 0; }
+        bk->fh_struct = p->w[3];
+        v = mp_def(&c->S, bk->fl);
+        if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c->S, v->w[1]))) { c->why = "the view uniform block is not a variable"; return 0; }
+        bk->fl_struct = p->w[3];
     }
     {
         mp_ins *st = NULL;
         uint32_t *w, offs_ok = 1, cnt = 0;
-        for (i = 0; i < c.S.n; i++) if (mp_rid(&c.S.ins[i]) == fh_struct) st = &c.S.ins[i];
-        if (!st || MP_OP(st) != OpTypeStruct || MP_N(st) < 3) MP_FAIL(&c, "the material uniform block is not a struct");
-        v4 = st->w[2];
-        n0 = MP_N(st) - 2;
-        if (!(w = mp_own(&c.S, MP_N(st) + SH_MODPROG_ML_PARM_COUNT))) MP_FAIL(&c, "out of memory");
+        for (i = 0; i < c->S.n; i++) if (mp_rid(&c->S.ins[i]) == bk->fh_struct) st = &c->S.ins[i];
+        if (!st || MP_OP(st) != OpTypeStruct || MP_N(st) < 3) { c->why = "the material uniform block is not a struct"; return 0; }
+        bk->v4 = st->w[2];
+        bk->n0 = MP_N(st) - 2;
+        if (!(w = mp_own(&c->S, MP_N(st) + nparms))) { c->why = "out of memory"; return 0; }
         memcpy(w, st->w, MP_N(st) * sizeof *w);
-        for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) w[MP_N(st) + k] = v4;
-        w[0] = (MP_N(st) + SH_MODPROG_ML_PARM_COUNT) << 16 | OpTypeStruct;
+        for (k = 0; k < nparms; k++) w[MP_N(st) + k] = bk->v4;
+        w[0] = (MP_N(st) + nparms) << 16 | OpTypeStruct;
         st->w = w;
-        for (i = 0; i < c.S.n; i++) {
-            const mp_ins *in = &c.S.ins[i];
-            if (MP_OP(in) == OpMemberDecorate && in->w[1] == fh_struct && in->w[3] == 35) {
+        for (i = 0; i < c->S.n; i++) {
+            const mp_ins *in = &c->S.ins[i];
+            if (MP_OP(in) == OpMemberDecorate && in->w[1] == bk->fh_struct && in->w[3] == 35) {
                 if (in->w[4] != 16 * in->w[2]) offs_ok = 0;
                 cnt++;
             }
         }
-        if (!offs_ok || cnt != n0) MP_FAIL(&c, "the material uniform block is not 16-byte vectors");
-        for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) {
-            uint32_t d[4] = { fh_struct, n0 + (uint32_t)k, 35, 16 * (n0 + (uint32_t)k) };
-            size_t len = strlen(SH_MODPROG_ML_PARMS[k]) / 4 + 1;
+        if (!offs_ok || cnt != bk->n0) { c->why = "the material uniform block is not 16-byte vectors"; return 0; }
+        for (k = 0; k < nparms; k++) {
+            uint32_t d[4] = { bk->fh_struct, bk->n0 + (uint32_t)k, 35, 16 * (bk->n0 + (uint32_t)k) };
+            size_t len = strlen(parms[k]) / 4 + 1;
             uint32_t nm[2 + 16];
-            if (mp_member(&c.S, fh_struct, SH_MODPROG_ML_PARMS[k]) >= 0) MP_FAIL(&c, "the program already reads a multilayer parameter");
-            if (!mp_emit(&c.S, &c.decos, OpMemberDecorate, d, 4)) MP_FAIL(&c, "out of memory");
+            if (mp_member(&c->S, bk->fh_struct, parms[k]) >= 0) { c->why = "the program already reads a parameter the product adds"; return 0; }
+            if (!mp_emit(&c->S, &c->decos, OpMemberDecorate, d, 4)) { c->why = "out of memory"; return 0; }
             memset(nm, 0, sizeof nm);
-            nm[0] = fh_struct;
-            nm[1] = n0 + (uint32_t)k;
-            memcpy(nm + 2, SH_MODPROG_ML_PARMS[k], strlen(SH_MODPROG_ML_PARMS[k]));
-            if (!mp_emit(&c.S, &c.names, OpMemberName, nm, 2 + (uint32_t)len)) MP_FAIL(&c, "out of memory");
+            nm[0] = bk->fh_struct;
+            nm[1] = bk->n0 + (uint32_t)k;
+            memcpy(nm + 2, parms[k], strlen(parms[k]));
+            if (!mp_emit(&c->S, &c->names, OpMemberName, nm, 2 + (uint32_t)len)) { c->why = "out of memory"; return 0; }
         }
     }
+    return 1;
+}
+
+/* The entry's parameters (each one's pointer type) after its OpFunction in `funcs`: `want` of them. */
+static int mp_entry_params(const mp_list *funcs, uint32_t entry, uint32_t *params, size_t want)
+{
+    size_t k, p, np = 0;
+    for (k = 0; k < funcs->n; k++) if (MP_OP(&funcs->v[k]) == OpFunction && funcs->v[k].w[2] == entry) break;
+    p = k + 1;
+    while (p < funcs->n && MP_OP(&funcs->v[p]) == OpFunctionParameter && np < want) params[np++] = funcs->v[p++].w[1];
+    return np == want && !(p < funcs->n && MP_OP(&funcs->v[p]) == OpFunctionParameter);
+}
+
+/* A vec4 member of a uniform block loaded into `code`: its value id, or 0. */
+static uint32_t mp_load_member(mp_ctx *c, mp_list *code, uint32_t var, uint32_t v4, int member)
+{
+    uint32_t ch, v, o[4];
+    if (member < 0) return 0;
+    ch = c->S.bound++;
+    o[0] = mp_ptr(c, 2, v4); o[1] = ch; o[2] = var; o[3] = mp_c_int(c, (uint32_t)member);
+    if (!mp_emit(&c->S, code, OpAccessChain, o, 4)) return 0;
+    v = c->S.bound++;
+    o[0] = v4; o[1] = v; o[2] = ch;
+    if (!mp_emit(&c->S, code, OpLoad, o, 3)) return 0;
+    return v;
+}
+
+/* Values gathered into one array temp: an OpCompositeConstruct of `n` ids stored to `temp` (pointer to the array
+ * type the entry's parameter `param` points to). */
+static int mp_store_array(mp_ctx *c, mp_list *code, uint32_t param, uint32_t temp, const uint32_t *vals, unsigned n)
+{
+    uint32_t o[2 + 64], a;
+    const mp_ins *pp = mp_def_any(c, param);
+    if (!pp || n > 64) return 0;
+    a = c->S.bound++;
+    o[0] = pp->w[3]; o[1] = a;
+    memcpy(o + 2, vals, n * sizeof *vals);
+    if (!mp_emit(&c->S, code, OpCompositeConstruct, o, 2 + n)) return 0;
+    o[0] = temp; o[1] = a;
+    return mp_emit(&c->S, code, OpStore, o, 2) != NULL;
+}
+
+/* One Function variable per parameter, at the head of main's first block (into `heads`); var_end is the index
+ * before which they go. */
+static int mp_temps(mp_ctx *c, size_t s_main, size_t s_main_end, const uint32_t *params, uint32_t *temps, size_t n,
+                    mp_list *heads, size_t *var_end)
+{
+    size_t i, q;
+    for (i = s_main; i < s_main_end && MP_OP(&c->S.ins[i]) != OpLabel; i++) {}
+    *var_end = i + 1;
+    while (*var_end < s_main_end && MP_OP(&c->S.ins[*var_end]) == OpVariable) (*var_end)++;
+    for (q = 0; q < n; q++) {
+        uint32_t o[3];
+        temps[q] = c->S.bound++;
+        o[0] = params[q];
+        o[1] = temps[q];
+        o[2] = 7;
+        if (!mp_emit(&c->S, heads, OpVariable, o, 3)) return 0;
+    }
+    return 1;
+}
+
+/* main's span in the stock module. */
+static int mp_main(mp_ctx *c, size_t *s_main, size_t *s_main_end)
+{
+    size_t i;
+    uint32_t mainid = mp_named(&c->S, "main", 0);
+    for (i = 0; i < c->S.n; i++) if (MP_OP(&c->S.ins[i]) == OpFunction && c->S.ins[i].w[2] == mainid) break;
+    if (!mainid || i == c->S.n) return 0;
+    *s_main = i;
+    while (i < c->S.n && MP_OP(&c->S.ins[i]) != OpFunctionEnd) i++;
+    *s_main_end = i;
+    return 1;
+}
+
+/* The stock module written out with what the splice added: names after the stock debug section, decorations
+ * after the stock annotations, globals before the first function, temps at the head of main, the code after the
+ * instruction at `anchor`, the functions last. */
+static uint32_t *mp_reassemble(mp_ctx *c, size_t var_end, const mp_list *heads, size_t anchor, const mp_list *code,
+                               const mp_list *funcs, size_t *out_words)
+{
+    size_t first_fn = c->S.n, last_name = 0, last_deco = 0, i;
+    mp_buf o = { 0 };
+    for (i = 0; i < c->S.n; i++) if (MP_OP(&c->S.ins[i]) == OpFunction) { first_fn = i; break; }
+    for (i = 0; i < first_fn; i++) {
+        uint32_t op = MP_OP(&c->S.ins[i]);
+        if (op == OpName || op == OpMemberName || op == OpSource) last_name = i;
+        if (op == OpDecorate || op == OpMemberDecorate) last_deco = i;
+    }
+    {
+        uint32_t h[5] = { c->S.head[0], c->S.head[1], c->S.head[2], c->S.bound, c->S.head[4] };
+        mp_put(&o, h, sizeof h);
+    }
+#define PUT_INS(x) mp_put(&o, (x)->w, MP_N(x) * sizeof(uint32_t))
+#define PUT_LIST(l) do { size_t z_; for (z_ = 0; z_ < (l).n; z_++) PUT_INS(&(l).v[z_]); } while (0)
+    for (i = 0; i < c->S.n; i++) {
+        if (i == first_fn) { PUT_LIST(c->globals); PUT_LIST(c->extra); }
+        if (i == var_end) PUT_LIST(*heads);
+        PUT_INS(&c->S.ins[i]);
+        if (i == last_name) PUT_LIST(c->names);
+        if (i == last_deco) PUT_LIST(c->decos);
+        if (i == anchor) PUT_LIST(*code);
+    }
+    if (first_fn == c->S.n) { PUT_LIST(c->globals); PUT_LIST(c->extra); }
+    PUT_LIST(*funcs);
+#undef PUT_INS
+#undef PUT_LIST
+    if (o.oom) { free(o.p); c->why = "out of memory"; return NULL; }
+    if (out_words) *out_words = o.n / 4;
+    return (uint32_t *)o.p;
+}
+
+static void mp_ctx_free(mp_ctx *c)
+{
+    free(c->globals.v); free(c->extra.v); free(c->names.v); free(c->decos.v);
+    free(c->idmap);
+    mp_mod_free(&c->S);
+    mp_mod_free(&c->M);
+}
+
+uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                            size_t *out_words, const char **why)
+{
+    static const char *const stock_samplers[MP_NSAMPLERS + 1] = { NULL };
+    static const char *samplers[MP_NSAMPLERS + 1];
+    static const char *stock_of[MP_NSAMPLERS + 1];
+    mp_ctx c;
+    mp_import_spec sp;
+    mp_blocks bk;
+    uint32_t *out = NULL;
+    size_t i, k;
+    uint32_t inputs = 0, in_struct = 0, t_float = 0, t_void = 0, ml_entry = 0;
+    uint32_t params[MP_NINOUT + 4], temps[MP_NINOUT + 4];
+    size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
+    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
+    (void)stock_samplers;
+    memset(&c, 0, sizeof c);
+    if (out_words) *out_words = 0;
+    /* the blend's samplers, then the ember's noise: the program's own magnificationclouds (no texture added) */
+    for (k = 0; k < MP_NSAMPLERS; k++) { samplers[k] = MP_SAMPLERS[k]; stock_of[k] = NULL; }
+    samplers[MP_NSAMPLERS] = "ml_noise";
+    stock_of[MP_NSAMPLERS] = "samp_magnificationclouds";
+    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
+    sp.words = SH_MODPROG_ML_SPIRV; sp.nwords = SH_MODPROG_ML_SPIRV_WORDS; sp.entry = "ml_blend(";
+    sp.samplers = samplers; sp.stock = stock_of; sp.nsamplers = MP_NSAMPLERS + 1; sp.what = "multilayer";
+    if (!mp_import(&c, &sp, tex_end, &ml_entry, &funcs)) goto done;
+    if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
+    if (!mp_grow_block(&c, SH_MODPROG_ML_PARMS, SH_MODPROG_ML_PARM_COUNT, &bk)) goto done;
 
     /* ---- helpers' types */
     (void)mp_t_int(&c);
@@ -822,30 +1163,23 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
     { uint32_t o[1] = { 0 }; t_void = mp_find_or_add(&c, OpTypeVoid, o, 1, 1); }
 
     /* ---- main: the anchor and the inputs */
-    {
-        uint32_t mainid = mp_named(&c.S, "main", 0);
-        for (i = 0; i < c.S.n; i++) if (MP_OP(&c.S.ins[i]) == OpFunction && c.S.ins[i].w[2] == mainid) break;
-        if (!mainid || i == c.S.n) MP_FAIL(&c, "the program's fragment module has no main");
-        s_main = i;
-        while (i < c.S.n && MP_OP(&c.S.ins[i]) != OpFunctionEnd) i++;
-        s_main_end = i;
-        for (i = s_main; i < s_main_end; i++)
-            if (MP_OP(&c.S.ins[i]) == OpVariable && mp_is_named(&c.S, c.S.ins[i].w[2], "inputs")) {
-                if (inputs) MP_FAIL(&c, "main has no single inputs");
-                inputs = c.S.ins[i].w[2];
-            }
-        if (!inputs) MP_FAIL(&c, "main has no single inputs");
-        {
-            const mp_ins *v = mp_def(&c.S, inputs), *p = v ? mp_def(&c.S, v->w[1]) : NULL;
-            if (!p) MP_FAIL(&c, "the lighting inputs have no type");
-            in_struct = p->w[3];
+    if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's fragment module has no main");
+    for (i = s_main; i < s_main_end; i++)
+        if (MP_OP(&c.S.ins[i]) == OpVariable && mp_is_named(&c.S, c.S.ins[i].w[2], "inputs")) {
+            if (inputs) MP_FAIL(&c, "main has no single inputs");
+            inputs = c.S.ins[i].w[2];
         }
+    if (!inputs) MP_FAIL(&c, "main has no single inputs");
+    {
+        const mp_ins *v = mp_def(&c.S, inputs), *p = v ? mp_def(&c.S, v->w[1]) : NULL;
+        if (!p) MP_FAIL(&c, "the lighting inputs have no type");
+        in_struct = p->w[3];
     }
     {
         static const char *const fields[MP_NINOUT + 1] = { "albedo", "specular", "smoothness", "normal", "lightmap",
                                                            "emissive", "thickness", "texCoords" };
         int members[MP_NINOUT + 1], q;
-        uint32_t t_int = mp_t_int(&c), normal_ix;
+        uint32_t t_int = mp_t_int(&c), normal_ix, wound;
         const mp_ins *st = mp_def(&c.S, in_struct);
         for (q = 0; q <= MP_NINOUT; q++)
             if ((members[q] = mp_member(&c.S, in_struct, fields[q])) < 0) MP_FAIL(&c, "the lighting inputs lack a field the blend changes");
@@ -873,26 +1207,8 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
             for (q = 0; q < np; q++) if (in->w[pos[q]] == wound) hit = 1;
             if (hit) break;
         }
-        /* the entry's parameters */
-        ml_entry = c.idmap[entry_fn];
-        for (k = 0; k < funcs.n; k++) if (MP_OP(&funcs.v[k]) == OpFunction && funcs.v[k].w[2] == ml_entry) break;
-        {
-            size_t p = k + 1, np = 0;
-            while (p < funcs.n && MP_OP(&funcs.v[p]) == OpFunctionParameter && np < MP_NINOUT + 4) params[np++] = funcs.v[p++].w[1];
-            if (np != MP_NINOUT + 4) MP_FAIL(&c, "ml_blend does not take the parameters the splice passes");
-        }
-        /* temps: one Function variable per parameter, at the head of main's first block */
-        for (i = s_main; i < s_main_end && MP_OP(&c.S.ins[i]) != OpLabel; i++) {}
-        var_end = i + 1;
-        while (var_end < s_main_end && MP_OP(&c.S.ins[var_end]) == OpVariable) var_end++;
-        for (q = 0; q < MP_NINOUT + 4; q++) {
-            uint32_t o[3];
-            temps[q] = c.S.bound++;
-            o[0] = params[q];
-            o[1] = temps[q];
-            o[2] = 7;
-            if (!mp_emit(&c.S, &heads, OpVariable, o, 3)) MP_FAIL(&c, "out of memory");
-        }
+        if (!mp_entry_params(&funcs, ml_entry, params, MP_NINOUT + 4)) MP_FAIL(&c, "ml_blend does not take the parameters the splice passes");
+        if (!mp_temps(&c, s_main, s_main_end, params, temps, MP_NINOUT + 4, &heads, &var_end)) MP_FAIL(&c, "out of memory");
         /* copy in (params[] holds each parameter's pointer type) */
         for (q = 0; q <= MP_NINOUT; q++) {
             uint32_t ft = st->w[2 + members[q]], tptr, ch, v, o[4];
@@ -910,13 +1226,13 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
         }
         {
             /* time.x */
-            const mp_ins *fls = mp_def(&c.S, fl_struct);
-            int tm = mp_member(&c.S, fl_struct, "time");
+            const mp_ins *fls = mp_def(&c.S, bk.fl_struct);
+            int tm = mp_member(&c.S, bk.fl_struct, "time");
             uint32_t t, ch, v, x, o[4];
             if (tm < 0 || !fls) MP_FAIL(&c, "the view uniforms have no time");
             t = fls->w[2 + tm];
             ch = c.S.bound++;
-            o[0] = mp_ptr(&c, 2, t); o[1] = ch; o[2] = fl; o[3] = mp_c_int(&c, (uint32_t)tm);
+            o[0] = mp_ptr(&c, 2, t); o[1] = ch; o[2] = bk.fl; o[3] = mp_c_int(&c, (uint32_t)tm);
             if (!mp_emit(&c.S, &code, OpAccessChain, o, 4)) MP_FAIL(&c, "out of memory");
             v = c.S.bound++;
             o[0] = t; o[1] = v; o[2] = ch;
@@ -929,30 +1245,17 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
         }
         {
             /* the parameters and the emissive factors, as two arrays */
-            uint32_t pv[64], a, o[66], arr;
+            uint32_t pv[64];
             int which;
             for (which = 0; which < 2; which++) {
                 unsigned cnt = which ? 4u : SH_MODPROG_ML_PARM_COUNT;
-                const mp_ins *pp = mp_def_any(&c, params[MP_NINOUT + 2 + which]);
-                if (!pp) MP_FAIL(&c, "ml_blend's parameter array has no type");
-                arr = pp->w[3];
                 for (k = 0; k < cnt; k++) {
-                    int mem = which ? mp_member(&c.S, fh_struct, MP_EMISSIVE[k]) : (int)(n0 + k);
-                    uint32_t ch, ov[4];
+                    int mem = which ? mp_member(&c.S, bk.fh_struct, MP_EMISSIVE[k]) : (int)(bk.n0 + k);
                     if (mem < 0) MP_FAIL(&c, "the program has no emissive factor the blend recomputes from");
-                    ch = c.S.bound++;
-                    ov[0] = mp_ptr(&c, 2, v4); ov[1] = ch; ov[2] = fh; ov[3] = mp_c_int(&c, (uint32_t)mem);
-                    if (!mp_emit(&c.S, &code, OpAccessChain, ov, 4)) MP_FAIL(&c, "out of memory");
-                    pv[k] = c.S.bound++;
-                    ov[0] = v4; ov[1] = pv[k]; ov[2] = ch;
-                    if (!mp_emit(&c.S, &code, OpLoad, ov, 3)) MP_FAIL(&c, "out of memory");
+                    if (!(pv[k] = mp_load_member(&c, &code, bk.fh, bk.v4, mem))) MP_FAIL(&c, "out of memory");
                 }
-                a = c.S.bound++;
-                o[0] = arr; o[1] = a;
-                memcpy(o + 2, pv, cnt * sizeof *pv);
-                if (!mp_emit(&c.S, &code, OpCompositeConstruct, o, 2 + cnt)) MP_FAIL(&c, "out of memory");
-                o[0] = temps[MP_NINOUT + 2 + which]; o[1] = a;
-                if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
+                if (!mp_store_array(&c, &code, params[MP_NINOUT + 2 + which], temps[MP_NINOUT + 2 + which], pv, cnt))
+                    MP_FAIL(&c, "ml_blend's parameter array has no type");
             }
         }
         {
@@ -976,51 +1279,121 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
         }
     }
     if (c.S.oom) MP_FAIL(&c, "out of memory");
-
-    /* ---- reassemble: names after the stock debug section, decorations after the stock annotations, globals
-     * before the first function, temps at the head of main, the call after the anchor, the functions last */
-    {
-        size_t first_fn = c.S.n, last_name = 0, last_deco = 0, total = 5;
-        mp_buf o = { 0 };
-        for (i = 0; i < c.S.n; i++) if (MP_OP(&c.S.ins[i]) == OpFunction) { first_fn = i; break; }
-        for (i = 0; i < first_fn; i++) {
-            uint32_t op = MP_OP(&c.S.ins[i]);
-            if (op == OpName || op == OpMemberName || op == OpSource) last_name = i;
-            if (op == OpDecorate || op == OpMemberDecorate) last_deco = i;
-        }
-        {
-            uint32_t h[5] = { c.S.head[0], c.S.head[1], c.S.head[2], c.S.bound, c.S.head[4] };
-            mp_put(&o, h, sizeof h);
-        }
-#define PUT_INS(x) mp_put(&o, (x)->w, MP_N(x) * sizeof(uint32_t))
-#define PUT_LIST(l) do { size_t z_; for (z_ = 0; z_ < (l).n; z_++) PUT_INS(&(l).v[z_]); } while (0)
-        for (i = 0; i < c.S.n; i++) {
-            if (i == first_fn) { PUT_LIST(c.globals); PUT_LIST(c.extra); }
-            if (i == var_end) PUT_LIST(heads);
-            PUT_INS(&c.S.ins[i]);
-            if (i == last_name) PUT_LIST(c.names);
-            if (i == last_deco) PUT_LIST(c.decos);
-            if (i == anchor) PUT_LIST(code);
-        }
-        if (first_fn == c.S.n) { PUT_LIST(c.globals); PUT_LIST(c.extra); }
-        PUT_LIST(funcs);
-#undef PUT_INS
-#undef PUT_LIST
-        (void)total;
-        if (o.oom) { free(o.p); MP_FAIL(&c, "out of memory"); }
-        out = (uint32_t *)o.p;
-        if (out_words) *out_words = o.n / 4;
-    }
+    out = mp_reassemble(&c, var_end, &heads, anchor, &code, &funcs, out_words);
 done:
     if (why) *why = c.why;
     free(code.v); free(heads.v); free(funcs.v);
-    free(c.globals.v); free(c.extra.v); free(c.names.v); free(c.decos.v);
-    free(c.idmap); free(mark); free(fstart); free(keep); free(ids);
-    mp_mod_free(&c.S);
-    mp_mod_free(&c.M);
+    mp_ctx_free(&c);
     if (c.why) { free(out); return NULL; }
     return out;
 }
+
+/* --------------------------------------------------------------------------- the Eternal particle splice ---- */
+
+uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                               size_t *out_words, const char **why)
+{
+    mp_ctx c;
+    mp_import_spec sp;
+    mp_blocks bk;
+    uint32_t *out = NULL;
+    size_t i, k;
+    uint32_t entry = 0, frag = 0, v4ptr_out = 0, params[4], temps[4], vals[16];
+    size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
+    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
+    memset(&c, 0, sizeof c);
+    if (out_words) *out_words = 0;
+    (void)shift;
+    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
+    sp.words = SH_MODPROG_EP_SPIRV; sp.nwords = SH_MODPROG_EP_SPIRV_WORDS; sp.entry = "ep_shade(";
+    sp.samplers = EP_SAMPLERS; sp.stock = EP_SAMPLER_STOCK; sp.nsamplers = EP_NSAMPLERS; sp.what = "particle";
+    if (!mp_import(&c, &sp, tex_end, &entry, &funcs)) goto done;
+    if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
+    if (!mp_grow_block(&c, EP_BLOCK_PARMS, EP_NBLOCK_PARMS, &bk)) goto done;
+    if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's fragment module has no main");
+    /* the anchor: the instruction before main's last return (the stock shading has written its colour) */
+    for (i = s_main_end; i > s_main; i--) if (MP_OP(&c.S.ins[i]) == OpReturn) { anchor = i - 1; break; }
+    if (!anchor) MP_FAIL(&c, "the program's main does not end in a return");
+    frag = mp_named(&c.S, "out_FragColor0", 0);
+    if (!frag) MP_FAIL(&c, "the program writes no colour");
+    if (!mp_entry_params(&funcs, entry, params, 4)) MP_FAIL(&c, "ep_shade does not take the parameters the splice passes");
+    if (!mp_temps(&c, s_main, s_main_end, params, temps, 4, &heads, &var_end)) MP_FAIL(&c, "out of memory");
+    {
+        /* frag in */
+        const mp_ins *pp = mp_def_any(&c, params[0]), *fv = mp_def(&c.S, frag), *fp = fv ? mp_def(&c.S, fv->w[1]) : NULL;
+        uint32_t o[3], v;
+        if (!pp || !fp || pp->w[3] != fp->w[3]) MP_FAIL(&c, "the program's colour is not a vector");
+        v4ptr_out = fp->w[3];
+        v = c.S.bound++;
+        o[0] = v4ptr_out; o[1] = v; o[2] = frag;
+        if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
+        o[0] = temps[0]; o[1] = v;
+        if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
+    }
+    {
+        /* V: the stage inputs */
+        for (k = 0; k < EP_NVARYINGS; k++) {
+            uint32_t var = mp_named(&c.S, EP_VARYINGS[k], 0), o[3];
+            const mp_ins *d = var ? mp_def(&c.S, var) : NULL, *p = d ? mp_def(&c.S, d->w[1]) : NULL;
+            if (!d || MP_OP(d) != OpVariable || d->w[3] != 1 || !p || p->w[3] != v4ptr_out)
+                MP_FAIL(&c, "the program's fragment stage lacks an input the particle shading reads");
+            vals[k] = c.S.bound++;
+            o[0] = v4ptr_out; o[1] = vals[k]; o[2] = var;
+            if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
+        }
+        if (!mp_store_array(&c, &code, params[1], temps[1], vals, EP_NVARYINGS)) MP_FAIL(&c, "ep_shade's input array has no type");
+    }
+    {
+        /* P: the parameters the block grew by */
+        for (k = 0; k < EP_NBLOCK_PARMS; k++)
+            if (!(vals[k] = mp_load_member(&c, &code, bk.fh, bk.v4, (int)(bk.n0 + k)))) MP_FAIL(&c, "out of memory");
+        if (!mp_store_array(&c, &code, params[2], temps[2], vals, EP_NBLOCK_PARMS)) MP_FAIL(&c, "ep_shade's parameter array has no type");
+    }
+    {
+        /* U: the program's own uniforms */
+        for (k = 0; k < EP_NUNIFORMS; k++) {
+            int high = EP_UNIFORMS[k][0] == 'h';
+            const char *name = EP_UNIFORMS[k] + 1;
+            int mem = mp_member(&c.S, high ? bk.fh_struct : bk.fl_struct, name);
+            if (mem < 0) MP_FAIL(&c, "the program lacks a uniform the particle shading reads");
+            if (!(vals[k] = mp_load_member(&c, &code, high ? bk.fh : bk.fl, bk.v4, mem))) MP_FAIL(&c, "out of memory");
+        }
+        if (!mp_store_array(&c, &code, params[3], temps[3], vals, EP_NUNIFORMS)) MP_FAIL(&c, "ep_shade's uniform array has no type");
+    }
+    {
+        uint32_t o[7], t_void, v;
+        { uint32_t ov[1] = { 0 }; t_void = mp_find_or_add(&c, OpTypeVoid, ov, 1, 1); }
+        o[0] = t_void; o[1] = c.S.bound++; o[2] = entry;
+        memcpy(o + 3, temps, sizeof temps);
+        if (!mp_emit(&c.S, &code, OpFunctionCall, o, 7)) MP_FAIL(&c, "out of memory");
+        v = c.S.bound++;
+        o[0] = v4ptr_out; o[1] = v; o[2] = temps[0];
+        if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
+        o[0] = frag; o[1] = v;
+        if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
+    }
+    if (c.S.oom) MP_FAIL(&c, "out of memory");
+    out = mp_reassemble(&c, var_end, &heads, anchor, &code, &funcs, out_words);
+done:
+    if (why) *why = c.why;
+    free(code.v); free(heads.v); free(funcs.v);
+    mp_ctx_free(&c);
+    if (c.why) { free(out); return NULL; }
+    return out;
+}
+
+/* ---------------------------------------------------------------------------------------------- families ---- */
+
+static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
+static const mp_family MP_FAMILIES[] = {
+    { SH_MODPROG_PREFIX, "multilayer version", SH_MODPROG_ML_PARMS, &SH_MODPROG_ML_PARM_COUNT, SH_MODPROG_ML_TEXTURES,
+      &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
+      "its decl has no single CUSTOM_TEXTURE_INPUTS template" },
+    { SH_MODPROG_EP_PREFIX, "DOOM Eternal particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+      &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
+      "its decl's fragment stage does not end in one premultiplied colour after its includes" },
+};
+#define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
 /* --------------------------------------------------------------------------------------- cooked program ---- */
 /* package_shader's reader, cut at what the variant changes: a parameter block whose vector values are 16 bytes
@@ -1275,18 +1648,18 @@ static int mp_keep(const char *path, char *bytes, size_t len)
     return 1;
 }
 
-static void mp_fail(const char *base, const char *why)
+static void mp_fail(const mp_family *f, const char *base, const char *why)
 {
     free(g_cause);
-    g_cause = sh_textf("Snapmap+ could not build its multilayer version of the game's %s program: %s (check the "
-                       "game's files in Steam)", base, why);
+    g_cause = sh_textf("Snapmap+ could not build its %s of the game's %s program: %s (check the "
+                       "game's files in Steam)", f->what, base, why);
 }
 
 /* One unit (the program, or one of its permutations) of a base: its four files. Caller holds the lock. */
-static int mp_unit(const char *base, const char *mask)
+static int mp_unit(const mp_family *fam, const char *base, const char *mask)
 {
     char *sd = NULL, *sb = NULL, *sv = NULL, *sf = NULL, *vd = NULL, *vb = NULL, *vv = NULL, *vf = NULL;
-    char *var = sh_textf(SH_MODPROG_PREFIX "%s", base), *decl = NULL, *glsl = NULL, *bin_out = NULL;
+    char *var = sh_textf("%s%s", fam->prefix, base), *decl = NULL, *glsl = NULL, *bin_out = NULL;
     unsigned char *d = NULL, *b = NULL, *v = NULL, *f = NULL;
     size_t dn = 0, bn = 0, vn = 0, fn = 0, decl_n = 0, glsl_n = 0, bin_n = 0, mod_n = 0;
     uint32_t *mod = NULL;
@@ -1328,7 +1701,7 @@ static int mp_unit(const char *base, const char *mask)
     {
         /* the fragment stage's categories: binding starts at block[13..19], counts at block[34..40] */
         uint32_t *a = x.block + 6 + 7, *cn = x.block + 27 + 7;
-        unsigned tex_end = a[4] + cn[4], shift = SH_MODPROG_ML_TEXTURE_COUNT, k;
+        unsigned tex_end = a[4] + cn[4], shift = *fam->ntextures, k;
         if (a[4] == 0xffffffffu || x.counts[1][2] != cn[4] || x.counts[1][3] != cn[4]) {
             why = "its fragment textures do not match its binding table";
             goto out;
@@ -1336,20 +1709,20 @@ static int mp_unit(const char *base, const char *mask)
         for (k = 5; k < 7; k++) if (a[k] != 0xffffffffu) a[k] += shift;
         cn[4] += shift;
         x.block[5] += shift;
-        for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++)
-            if (!mp_bin_add(&x, 1, 0, SH_MODPROG_ML_PARMS[k], strlen(SH_MODPROG_ML_PARMS[k]))) { why = "out of memory"; goto out; }
-        for (k = 0; k < SH_MODPROG_ML_TEXTURE_COUNT; k++)
-            if (!mp_bin_add(&x, 1, 2, SH_MODPROG_ML_TEXTURES[k], strlen(SH_MODPROG_ML_TEXTURES[k])) ||
+        for (k = 0; k < *fam->nparms; k++)
+            if (!mp_bin_add(&x, 1, 0, fam->parms[k], strlen(fam->parms[k]))) { why = "out of memory"; goto out; }
+        for (k = 0; k < *fam->ntextures; k++)
+            if (!mp_bin_add(&x, 1, 2, fam->textures[k], strlen(fam->textures[k])) ||
                 !mp_bin_add(&x, 1, 3, "defaultsampler", 14)) { why = "out of memory"; goto out; }
-        if (!(decl = sh_modprog_patch_decl((const char *)d, dn, &decl_n))) {
-            why = "its decl has no single CUSTOM_TEXTURE_INPUTS template";
+        if (!(decl = fam->decl((const char *)d, dn, &decl_n))) {
+            why = fam->decl_needs;
             goto out;
         }
-        if (!(glsl = sh_modprog_patch_glsl(x.text[1], x.text_n[1], tex_end, shift, &glsl_n))) {
+        if (!(glsl = fam->glsl(x.text[1], x.text_n[1], tex_end, shift, &glsl_n))) {
             why = "its fragment stage text is not the shape Snapmap+ knows";
             goto out;
         }
-        if (!(mod = sh_modprog_splice((const uint32_t *)(f + 16), (fn - 16) / 4, tex_end, shift, &mod_n, &why))) goto out;
+        if (!(mod = fam->splice((const uint32_t *)(f + 16), (fn - 16) / 4, tex_end, shift, &mod_n, &why))) goto out;
     }
     free(x.text[1]);
     x.text[1] = glsl;
@@ -1377,7 +1750,7 @@ static int mp_unit(const char *base, const char *mask)
         if (!ok) why = "out of memory";
     }
 out:
-    if (!ok && why) mp_fail(base, why);
+    if (!ok && why) mp_fail(fam, base, why);
     mp_bin_free(&x);
     free(sd); free(sb); free(sv); free(sf); free(vd); free(vb); free(vv); free(vf); free(var);
     free(decl); free(glsl); free(bin_out); free(mod);
@@ -1393,17 +1766,19 @@ static int mp_derive(size_t base)
     char *sb;
     mp_bin x;
     int ok;
+    const mp_family *fam = &MP_FAMILIES[MP_BASES[base].family];
+    const char *name = MP_BASES[base].name;
     if (g_done[base]) return g_done[base] > 0;
-    sb = sh_textf("generated/renderprogs/%s_pc_vulkan.bin", MP_BASES[base]);
+    sb = sh_textf("generated/renderprogs/%s_pc_vulkan.bin", name);
     memset(&x, 0, sizeof x);
     ok = sb && mp_read(sb, &b, &bn) == SH_MB_STOCK_OK && mp_bin_parse(&x, b, bn, mp_parm_is_vec);
     free(sb);
-    if (!ok) mp_fail(MP_BASES[base], "its cooked program cannot be read");
-    ok = ok && mp_unit(MP_BASES[base], NULL);
+    if (!ok) mp_fail(fam, name, "its cooked program cannot be read");
+    ok = ok && mp_unit(fam, name, NULL);
     for (i = 0; ok && i < x.nperms; i++) {
         char mask[17];
         snprintf(mask, sizeof mask, "%08x%08x", (unsigned)(x.perms[i] >> 32), (unsigned)x.perms[i]);
-        ok = mp_unit(MP_BASES[base], mask);
+        ok = mp_unit(fam, name, mask);
     }
     mp_bin_free(&x);
     mp_heap_free(b);
@@ -1424,22 +1799,23 @@ static int mp_parm_of(const char *path)
 }
 
 /* The base a product program path belongs to, or -1. */
+static const char *const MP_HEADS[] = {
+    "generated/decls/renderprog/", "generated/renderprogs/", "generated/spirv/", "generated/renderprogs/permutations/",
+    "generated/spirv/generated/renderprogs/permutations/",
+};
+#define MP_NHEADS (sizeof MP_HEADS / sizeof MP_HEADS[0])
 static int mp_base_of(const char *path)
 {
-    static const char *const heads[] = {
-        "generated/decls/renderprog/" SH_MODPROG_PREFIX, "generated/renderprogs/" SH_MODPROG_PREFIX,
-        "generated/spirv/" SH_MODPROG_PREFIX, "generated/renderprogs/permutations/" SH_MODPROG_PREFIX,
-        "generated/spirv/generated/renderprogs/permutations/" SH_MODPROG_PREFIX,
-    };
     size_t h, b;
-    for (h = 0; h < sizeof heads / sizeof heads[0]; h++) {
-        size_t hn = strlen(heads[h]);
-        if (_strnicmp(path, heads[h], hn)) continue;
+    for (h = 0; h < MP_NHEADS; h++) {
+        size_t hn = strlen(MP_HEADS[h]);
+        if (_strnicmp(path, MP_HEADS[h], hn)) continue;
         for (b = 0; b < MP_NBASES; b++) {
-            size_t bn = strlen(MP_BASES[b]);
+            const char *pre = MP_FAMILIES[MP_BASES[b].family].prefix;
+            size_t pn = strlen(pre), bn = strlen(MP_BASES[b].name);
             char c;
-            if (_strnicmp(path + hn, MP_BASES[b], bn)) continue;
-            c = path[hn + bn];
+            if (_strnicmp(path + hn, pre, pn) || _strnicmp(path + hn + pn, MP_BASES[b].name, bn)) continue;
+            c = path[hn + pn + bn];
             if (c == '.' || c == '_' || c == '/') return (int)b;
         }
     }
@@ -1487,11 +1863,6 @@ int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
 
 void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *path), void *context)
 {
-    static const char *const heads[] = {
-        "generated/decls/renderprog/" SH_MODPROG_PREFIX, "generated/renderprogs/" SH_MODPROG_PREFIX,
-        "generated/spirv/" SH_MODPROG_PREFIX, "generated/renderprogs/permutations/" SH_MODPROG_PREFIX,
-        "generated/spirv/generated/renderprogs/permutations/" SH_MODPROG_PREFIX,
-    };
     const char *pre = prefix ? prefix : "";
     size_t i, n = strlen(pre), b, np = 0;
     char **paths = NULL;
@@ -1503,9 +1874,14 @@ void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *p
         free(p);
     }
     /* Only a prefix inside (or above) a program namespace asks for the derivation. */
-    for (i = 0; i < sizeof heads / sizeof heads[0]; i++) {
-        size_t hn = strlen(heads[i]);
-        if (!_strnicmp(heads[i], pre, n < hn ? n : hn)) overlaps = 1;
+    for (i = 0; i < MP_NHEADS; i++) {
+        size_t f;
+        for (f = 0; f < MP_NFAMILIES; f++) {
+            char *head = sh_textf("%s%s", MP_HEADS[i], MP_FAMILIES[f].prefix);
+            size_t hn = head ? strlen(head) : 0;
+            if (head && !_strnicmp(head, pre, n < hn ? n : hn)) overlaps = 1;
+            free(head);
+        }
     }
     if (!overlaps) return;
     AcquireSRWLockExclusive(&g_lock);

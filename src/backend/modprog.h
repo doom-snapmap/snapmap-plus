@@ -28,6 +28,17 @@
  * 0x141a7bbb0); the blend's 20 bring skinvmtrwounds to exactly 32 (2 vertex, 10 + 20 fragment). OpenGL's 32
  * texture units per stage hold the fragment stage's 30.
  *
+ * The particle program, snapmapplus/eternal/uberparticles (the base uberparticles, every particle material's program
+ * once the engine remaps transsortblend, particleshighq and explosionhighq to it), draws a CPU particle stage as DOOM
+ * Eternal's uberparticles does: its unlit, lit and explosion shading, the near fade and the soft-particle distance,
+ * from the same particle vertices and the stage's constants in the material (shaders/eternalparticles.frag). Its
+ * closure is derived the same way: the decl with the shading's templates after the fragment stage's includes and
+ * ETERNAL_PARTICLE( result ) after its PREMULTIPLY_ALPHA_BLENDED( result ); the cooked program with the four
+ * parameters, projectionmatrixz and globalvieworigin after the fragment stage's material uniforms and the emissive
+ * sheet after its textures; the fragment SPIR-V with ep_shade spliced in and called before main returns, replacing
+ * the colour the stock shading wrote (it reads the program's own transmap, viewdepthmap and light atlas samplers);
+ * the vertex SPIR-V unchanged. A liquid stage keeps the game's own blood shading (its material names liquidhighq).
+ *
  * modstock.c answers for these paths as for an archive entry, in the container SH_MODPROG_CONTAINER: a mod's
  * material that names a multilayer program brings its closure along as pointers, which the builder checks and
  * the server serves like any other installed program, and which an upload never sends.
@@ -40,6 +51,7 @@
 
 #define SH_MODPROG_CONTAINER "snapmapplus"
 #define SH_MODPROG_PREFIX    "snapmapplus/multilayer/"
+#define SH_MODPROG_EP_PREFIX "snapmapplus/eternal/"
 
 /* 1 when `path` (an archive path: '/' separated, any case) is a file the product derives, else 0. */
 int sh_modprog_owns(const char *path);
@@ -82,6 +94,15 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
 uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                             size_t *out_words, const char **why);
 
+/* The particle program's building blocks, as the multilayer ones above: the decl with the shading's templates and
+ * its call; the fragment stage text with bindings at or after `tex_end` up by `shift`, the parameters after the
+ * material uniforms, the emissive sheet's sampler before the first input, ep_shade before main and its call at
+ * main's end; the fragment module with ep_shade spliced in. NULL (with `why`) when the base is not the shape known. */
+char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len);
+char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
+uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                               size_t *out_words, const char **why);
+
 /* The generated module and texts (modprog_multilayer.c). */
 extern const unsigned SH_MODPROG_ML_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_ML_SPIRV[];
@@ -93,5 +114,15 @@ extern const char *const SH_MODPROG_ML_PARMS[];
 extern const unsigned SH_MODPROG_ML_PARM_COUNT;
 extern const char *const SH_MODPROG_ML_TEXTURES[];
 extern const unsigned SH_MODPROG_ML_TEXTURE_COUNT;
+
+/* The particle program's generated module and texts (modprog_particles.c) and its material keys. */
+extern const unsigned SH_MODPROG_EP_SPIRV_WORDS;
+extern const unsigned SH_MODPROG_EP_SPIRV[];
+extern const char SH_MODPROG_EP_GLSL[];
+extern const char SH_MODPROG_EP_DECL[];
+extern const char *const SH_MODPROG_EP_PARMS[];
+extern const unsigned SH_MODPROG_EP_PARM_COUNT;
+extern const char *const SH_MODPROG_EP_TEXTURES[];
+extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
 
 #endif /* SNAPMAP_PLUS_MODPROG_H */
