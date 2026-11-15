@@ -20,8 +20,15 @@
 //   thickness   the subsurface mask, what the packed pages would have given
 //   smoothness  SRGBlinear of the blended smoothness (the pages hold it gamma-encoded in alpha)
 //   normal.xy   the page encoding of the reoriented normal, (n * 128 + 128) / 255
-//   lightmap.x  the emissive mask: the sRGB-decoded square root of the brightest blended emissive channel
+//   lightmap.x  the emissive mask: the square root of the brightest blended emissive channel divided by 1 +
+//               colorscale x color x albedo in the bloom colour's brightest channel (below); the base program
+//               lights bloommaskscale x mask^2, and reads the pages' mask already decoded from sRGB
 //   emissive    the program's own emissive term recomputed from that mask
+// The base program adds the emissive twice: once into the ambient light the albedo multiplies (emissive x colorscale
+// x color) and once in its composite (bloommaskscale x mask^2 x bloomcolor), so a mask m leaves the surface as
+// bloommaskscale m^2 bloomcolor (1 + colorscale color albedo). DOOM Eternal writes its emissive once; the mask is
+// divided so that the bloom colour's brightest channel leaves exactly as Eternal's (the others within the ratio of
+// their 1 + albedo terms).
 // Each layer image is sampled only where the mask selects its layer, with the screen-space footprint of its tiled
 // uv (the derivatives are taken once, in uniform control flow).
 //
@@ -190,7 +197,9 @@ void ml_blend(inout vec3 albedo, inout vec3 specular, inout float smoothness, in
     float f_smooth = ml_srgb_enc(smoothness);
     vec2 base_n = normal.xy;
     vec4 f_n = vec4(0.5, 0.5, 0.0, 0.0);
-    float raw0 = ml_srgb_enc(lightmap.x);
+    // the pages' mask is read from the sRGB plane already decoded; its square is layer 0's emissive intensity (the
+    // converter writes the sRGB encoding of its square root)
+    float raw0 = lightmap.x;
     vec4 f_em = vec4(P[11].xyz * (raw0 * raw0), 0.0);
 
     vec2 uv0 = uv * P[10].xy + time * P[10].zw;
@@ -231,7 +240,10 @@ void ml_blend(inout vec3 albedo, inout vec3 specular, inout float smoothness, in
     smoothness = ml_srgb_dec(clamp(f_smooth, 0.0, 1.0));
     normal.xy = clamp((r.xy * 128.0 + 128.0) / 255.0, 0.0, 1.0);
     float em = max(f_em.x, max(f_em.y, f_em.z));
-    float lmx = ml_srgb_dec(sqrt(clamp(em, 0.0, 1.0)));
+    vec3 ka = E[1].x * E[2].xyz * f_alb.xyz;
+    float kj = E[3].x >= max(E[3].y, E[3].z) ? ka.x : (E[3].y >= E[3].z ? ka.y : ka.z);
+    em = em / (1.0 + max(kj, 0.0));
+    float lmx = sqrt(clamp(em, 0.0, 1.0));
     lightmap.x = lmx;
     emissive = vec3(E[0].x * lmx * lmx * E[1].x) * E[2].xyz * E[3].xyz;
     thickness = lightmap.y;

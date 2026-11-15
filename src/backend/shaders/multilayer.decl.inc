@@ -102,7 +102,7 @@
 			float mlSmooth = mlSrgbEncode( inputs.smoothness );
 			float2 mlBaseNormal = inputs.normal.xy;
 			float4 mlNormal = float4( 0.5, 0.5, 0.0, 0.0 );
-			float mlRaw0 = mlSrgbEncode( inputs.lightmap.x );
+			float mlRaw0 = inputs.lightmap.x;	// decoded from the sRGB plane: its square is layer 0's intensity
 			float4 mlEmissive = float4( $blendLayer0Emissive.xyz * ( mlRaw0 * mlRaw0 ), 0.0 );
 			float2 mlUv0 = mlUv * $blendLayer0Tiling.xy + _float2( mlTime ) * $blendLayer0Tiling.zw;
 			BRANCH if ( $multilayerEmber.y != 0.0 ) {
@@ -135,7 +135,12 @@
 			inputs.smoothness = mlSrgbDecode( saturate( mlSmooth ) );
 			inputs.normal.xy = saturate( ( mlR.xy * 128.0 + 128.0 ) / 255.0 );
 			float mlEm = max( mlEmissive.x, max( mlEmissive.y, mlEmissive.z ) );
-			float mlLm = mlSrgbDecode( sqrt( saturate( mlEm ) ) );
+			// the base program adds the emissive twice (the ambient light the albedo multiplies, and its composite):
+			// the mask is divided by 1 + colorscale x color x albedo in the bloom colour's brightest channel
+			float3 mlKa = _float3( $colorScale.x ) * $color.xyz * mlAlbedo.xyz;
+			float mlKj = ( $bloomColor.x >= max( $bloomColor.y, $bloomColor.z ) ) ? mlKa.x : ( ( $bloomColor.y >= $bloomColor.z ) ? mlKa.y : mlKa.z );
+			mlEm = mlEm / ( 1.0 + max( mlKj, 0.0 ) );
+			float mlLm = sqrt( saturate( mlEm ) );
 			inputs.lightmap.x = mlLm;
 			inputs.emissive = _float3( $bloomMaskScale.x * mlLm * mlLm * $colorScale.x ) * $color.xyz * $bloomColor.xyz;
 			inputs.thickness = inputs.lightmap.y;
