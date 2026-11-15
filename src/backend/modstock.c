@@ -21,6 +21,7 @@
 #include "../common/wide_path.h"
 #include "modstock.h"
 #include "modbundle.h"
+#include "modprog.h"
 #include "raw_deflate.h"
 #include "backend_log.h"
 
@@ -644,6 +645,22 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
     return SH_MB_STOCK_ABSENT;
 }
 
+/* ------------------------------------------------- derived programs ---- */
+/* The render programs the product derives from the installed game's own (modprog.h) are answered here as entries
+ * of the container SH_MODPROG_CONTAINER, so the builder and the server treat them as installed content. */
+
+static int mst_prog_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    unsigned char *b = NULL;
+    size_t n = 0;
+    int r = sh_modprog_read(source, &b, &n);
+    if (r != SH_MB_STOCK_OK) return r;
+    sh_mb_sha256_hex(b, n, sha256);
+    *size = n;
+    HeapFree(GetProcessHeap(), 0, b);
+    return SH_MB_STOCK_OK;
+}
+
 int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size)
 {
     uint32_t first, count, i;
@@ -651,6 +668,7 @@ int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], un
     if (sha256) sha256[0] = 0;
     if (size) *size = 0;
     if (!source || !sha256 || !size) return SH_MB_STOCK_ABSENT;
+    if (sh_modprog_owns(source)) return mst_prog_identify(source, sha256, size);
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     first = mst_name_range(source, &count);
     for (i = first; i < first + count; i++) {
@@ -708,6 +726,14 @@ int sh_modstock_verify(const char *source, const char *sha256, unsigned long lon
     int exists = 0;
     if (size) *size = 0;
     if (!source || !mst_unhex(sha256, want)) return SH_MB_STOCK_ABSENT;
+    if (sh_modprog_owns(source)) {
+        char hex[SH_MB_HASH_HEX + 1];
+        int r = mst_prog_identify(source, hex, &n);
+        if (r != SH_MB_STOCK_OK) return r;
+        if (strcmp(hex, sha256) != 0) return SH_MB_STOCK_MISMATCH;
+        if (size) *size = n;
+        return SH_MB_STOCK_OK;
+    }
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     if (mst_locate(source, want, sha256, &exists, &n) == -1)
         return exists ? SH_MB_STOCK_MISMATCH : SH_MB_STOCK_ABSENT;
@@ -724,6 +750,18 @@ int sh_modstock_read(const char *source, const char *sha256, unsigned char **byt
     if (bytes) *bytes = NULL;
     if (len) *len = 0;
     if (!source || !bytes || !len || !mst_unhex(sha256, want)) return SH_MB_STOCK_ABSENT;
+    if (sh_modprog_owns(source)) {
+        unsigned char *b = NULL;
+        size_t n = 0;
+        int r = sh_modprog_read(source, &b, &n);
+        if (r != SH_MB_STOCK_OK) return r;
+        sh_mb_sha256_hex(b, n, hex);
+        if (strcmp(hex, sha256) != 0) { HeapFree(GetProcessHeap(), 0, b); return SH_MB_STOCK_MISMATCH; }
+        *bytes = b;
+        *len = n;
+        InterlockedIncrement(&g_reads);
+        return SH_MB_STOCK_OK;
+    }
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     /* Each candidate row is decoded once: a remembered hash decides without
      * decoding; otherwise the decoded bytes are hashed and handed over. */
@@ -775,6 +813,12 @@ int sh_modstock_exists(const char *path)
     uint32_t first, count, i;
     int which;
     if (!path || !path[0]) return 0;
+    if (sh_modprog_owns(path)) {
+        char hex[SH_MB_HASH_HEX + 1];
+        unsigned long long n = 0;
+        int r = mst_prog_identify(path, hex, &n);
+        return r == SH_MB_STOCK_OK ? 1 : r == SH_MB_STOCK_ABSENT ? 0 : -1;
+    }
     if (!mst_ready()) return -1;
     first = mst_name_range(path, &count);
     for (i = first; i < first + count; i++)
@@ -795,6 +839,15 @@ int sh_modstock_container(const char *source, const char *sha256, char *out, siz
     int seen[MST_CONTAINERS] = { 0 }, which, c, kinds = 0;
     if (out && cap) out[0] = 0;
     if (!source || !source[0] || !out || !cap) return SH_MB_STOCK_ABSENT;
+    if (sh_modprog_owns(source)) {
+        char hex[SH_MB_HASH_HEX + 1];
+        unsigned long long n = 0;
+        int r = mst_prog_identify(source, hex, &n);
+        if (r != SH_MB_STOCK_OK) return r;
+        if (sha256 && strcmp(hex, sha256) != 0) return SH_MB_STOCK_ABSENT;
+        strncpy_s(out, cap, SH_MODPROG_CONTAINER, _TRUNCATE);
+        return SH_MB_STOCK_OK;
+    }
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     /* By name first: most names sit in one archive, so nothing is hashed.
      * A name both archives hold (with other bytes) is decided by the hash. */
@@ -839,6 +892,7 @@ int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *p
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     for (r = 0; r < g_nrows; r++)
         if (!strncmp(g_names + g_rows[r].name, folded, n)) fn(context, g_names + g_rows[r].name);
+    sh_modprog_list(folded, fn, context);
     return SH_MB_STOCK_OK;
 }
 

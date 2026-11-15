@@ -12,6 +12,7 @@
 #pragma comment(lib, "ole32.lib")     /* CoTaskMemFree */
 
 #include "modbundle.h"
+#include "modprog.h"    /* SH_MODPROG_CONTAINER: the render programs the product derives */
 #include "modsalt.h"
 #include "strkeys.h"   /* string edits: keys the game or the product defines (DECISIONS 9) */
 #include "companion.h"
@@ -3938,6 +3939,8 @@ typedef struct mb_closure {
     size_t n, cap;
     size_t manifest;       /* canonical bytes so far (estimated before the hash and number) */
     unsigned borrowed;     /* files this build added */
+    unsigned derived;      /* of them, files of the product's derived render programs (modprog.h) */
+    const char *first_derived;
     const char *first;     /* the first of them, for the build note */
     int stopped;
     char **vt_rows;        /* material names of the installed virtual-texture rows, sorted */
@@ -4287,7 +4290,7 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need, 
     sh_mb_bundle *b = c->b;
     char *by;
     size_t at[2] = { 0, 0 };
-    int i, found, campaign = -1;
+    int i, found, campaign = -1, derived = 0;
     for (i = 0; i < n; i++) {
         size_t pos = mb_closure_find(c, cand[i], &found);
         if (found) return 1;
@@ -4296,14 +4299,22 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need, 
     for (i = 0; i < n; i++) {
         char where[32];
         if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;
-        if (strcmp(where, "gameresources") != 0) return 1;   /* SnapMap loads it on its own */
-        if (campaign < 0) campaign = i;
+        /* SnapMap loads it on its own, unless the campaign archive or the product's derived programs hold it */
+        if (strcmp(where, "gameresources") != 0 && strcmp(where, SH_MODPROG_CONTAINER) != 0) return 1;
+        if (campaign < 0) { campaign = i; derived = !strcmp(where, SH_MODPROG_CONTAINER); }
     }
     if (campaign < 0) return 0;
     if (strcmp(need->type, "image") == 0 && mb_closure_vt_served(c, &b->files[file], need->name)) return 1;
     /* A copy: the files array may move while the closure grows. */
     if (!(by = mb_strdup(b->files[file].path))) { mb_error(b, "out of memory"); c->stopped = 1; return 1; }
-    if (!mb_closure_add(c, at[campaign], cand[campaign], need, by)) c->stopped = 1;
+    {
+        unsigned before = c->borrowed;
+        if (!mb_closure_add(c, at[campaign], cand[campaign], need, by)) c->stopped = 1;
+        if (derived && c->borrowed > before) {
+            c->derived++;
+            if (!c->first_derived) c->first_derived = b->files[c->by_req[at[campaign]]].request;
+        }
+    }
     free(by);
     return 1;
 }
@@ -4382,6 +4393,37 @@ static void mb_perm_cb(void *context, const char *path)
     l->n++;
 }
 
+/* The render parms a program's decl text names ($parm), each offered as its decl: a parm SnapMap holds settles
+ * itself, one the product declares is added. */
+static void mb_closure_parms(mb_closure *c, size_t file, const char *decl)
+{
+    char sha[SH_MB_HASH_HEX + 1];
+    unsigned long long size = 0;
+    unsigned char *text = NULL;
+    size_t len = 0, i;
+    if (c->ops->identify(c->ops->context, decl, sha, &size) != SH_MB_STOCK_OK ||
+        c->ops->read(c->ops->context, decl, sha, &text, &len) != SH_MB_STOCK_OK)
+        return;
+    for (i = 0; i + 1 < len && !c->stopped; i++) {
+        size_t s = i + 1, e = s;
+        char *name, *cand[1];
+        sh_mb_need need;
+        if (text[i] != '$' || !(isalpha(text[s]) || text[s] == '_')) continue;
+        while (e < len && (isalnum(text[e]) || text[e] == '_')) e++;
+        i = e - 1;
+        if (!(name = mb_strndup((const char *)text + s, e - s))) { mb_error(c->b, "out of memory"); c->stopped = 1; break; }
+        mb_lower(name);
+        cand[0] = sh_textf("generated/decls/renderparm/%s.decl", name);
+        need.type = "renderParm";
+        need.name = name;
+        if (cand[0]) (void)mb_closure_offer(c, file, &need, cand, 1);
+        else { mb_error(c->b, "out of memory"); c->stopped = 1; }
+        free(cand[0]);
+        free(name);
+    }
+    HeapFree(GetProcessHeap(), 0, text);
+}
+
 /* A material's program is one unit with its files (archive_renderprog.py's
  * closure, reproduced for all 923 programs of 13954591): the decl, the cooked
  * .bin and SPIR-V, and every permutation's decl, .bin and SPIR-V, at the
@@ -4401,11 +4443,14 @@ static void mb_closure_program(mb_closure *c, size_t file, const char *name)
     mb_lower(program);
     decl = sh_textf("generated/decls/renderprog/%s.decl", program);
     if (!decl || c->ops->container(c->ops->context, decl, NULL, where, sizeof where) != SH_MB_STOCK_OK ||
-        strcmp(where, "gameresources") != 0 || !c->ops->list) {
+        (strcmp(where, "gameresources") != 0 && strcmp(where, SH_MODPROG_CONTAINER) != 0) || !c->ops->list) {
         free(decl);
         free(program);
         return;
     }
+    /* A program the product derives reads render parms the product declares: each one its decl names ($parm)
+     * that the game does not hold comes along too. */
+    if (!strcmp(where, SH_MODPROG_CONTAINER)) mb_closure_parms(c, file, decl);
     free(decl);
     if (!(stem = sh_textf("generated/renderprogs/%s", program))) {
         mb_error(c->b, "out of memory");
@@ -4509,9 +4554,12 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wc
     free(c.by_req);
     for (i = 0; i < c.vt_n; i++) free(c.vt_rows[i]);
     free(c.vt_rows);
-    if (c.borrowed)
+    if (c.borrowed > c.derived)
         mb_note(b, "%u game file%s borrowed for completeness: campaign content a served decl needs, which SnapMap does "
-                "not load on its own (first %s)", c.borrowed, c.borrowed == 1 ? "" : "s", c.first);
+                "not load on its own (first %s)", c.borrowed - c.derived, c.borrowed - c.derived == 1 ? "" : "s", c.first);
+    if (c.derived)
+        mb_note(b, "%u file%s of Snapmap+'s multilayer render programs, which a material names, made from the game's own "
+                "programs on this computer (first %s)", c.derived, c.derived == 1 ? "" : "s", c.first_derived);
     qsort(b->files, b->file_count, sizeof(sh_mb_file), mb_file_cmp);
 }
 
