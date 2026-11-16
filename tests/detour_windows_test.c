@@ -18,6 +18,7 @@
 #include "companion_engine.h"
 #include "modscene_decl.h"
 #include "postfx.h"
+#include "particlemotion.h"
 #include "clip_events.h"
 #include "../src/fault_shield/engine_layout.h"
 
@@ -31,7 +32,8 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
                  SITE_COMPANION /* a private signature of companion_sigs.c */,
                  SITE_MODSCENE /* a private signature of modscene_sigs.c */,
                  SITE_POSTFX /* a private signature of postfx_sigs.c (one renderer's when the other RVA is 0) */,
-                 SITE_CLIP /* an event lookup of clip_events_sigs.c, resolved with its query check */ };
+                 SITE_CLIP /* an event lookup of clip_events_sigs.c, resolved with its query check */,
+                 SITE_PARTICLE /* a private signature of particlemotion_sigs.c */ };
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
@@ -130,6 +132,7 @@ static const site SITES[] = {
     { "clip_events.c",        "Md6EventsInWindow",          SITE_CLIP, 0, 15, REPLAYS, 0 },
     { "clip_events.c",        "Md6EventsOfType",            SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "clip_events.c",        "Md6EventsOfType2",           SITE_CLIP, 0, 16, REPLAYS, 0 },
+    { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -341,6 +344,17 @@ static void check_image(const char *path)
             }
             code = (const uint8_t *)own.addr + s->offset;
         }
+        if (s->kind == SITE_PARTICLE) {
+            sig_result own;
+            size_t k;
+            for (k = 0; SH_PARTICLEMOTION_SIGNATURES[k].name && strcmp(SH_PARTICLEMOTION_SIGNATURES[k].name, s->name); k++) {}
+            if (!SH_PARTICLEMOTION_SIGNATURES[k].name ||
+                sig_resolve_one(base, &SH_PARTICLEMOTION_SIGNATURES[k], &own) != SIG_OK || !own.addr) {
+                report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
+                continue;
+            }
+            code = (const uint8_t *)own.addr + s->offset;
+        }
         if (s->kind == SITE_CALL_IN_SIG) {
             int32_t rel;
             if (code[0] != 0xE8) {
@@ -402,6 +416,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\postfx.c", 1 }, { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
+    { "backend\\particlemotion.c", 1 },
 };
 
 static int count_calls(const char *text)

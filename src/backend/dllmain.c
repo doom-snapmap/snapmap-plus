@@ -58,6 +58,7 @@
 #include "companion_engine.h"
 #include "postfx.h"
 #include "parmslots.h"
+#include "particlemotion.h"
 #include "clip_events.h"
 #include "typeinfo.h"
 #include "megapreview.h"
@@ -372,6 +373,9 @@ static void install_features(const sig_result *results, size_t db)
     /* A render parm always gets a parm state slot (parmslots.h): the product's programs keep theirs, a parm past
      * a full range shares one instead of stopping the load. */
     (void)sh_parmslots_install(results, db, g_doom_base);
+    /* Simulated motion for a CPU particle stage that asks for it in its decl (particlemotion.h): only a mod's
+     * stage can, so the particle vertex writer is detoured only when mods are served. */
+    if (overrides_installed) (void)sh_particlemotion_install(results, db, g_doom_base);
     /* Clip events (clip_events.h): the three event lookups, detoured at the first Play whose mods add rows to
      * their own clips. */
     if (overrides_installed) (void)sh_clip_events_install(g_doom_base);
