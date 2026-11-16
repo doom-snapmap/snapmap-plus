@@ -73,6 +73,7 @@
 #include "modtypeinfo.h"
 #include "companion_engine.h"
 #include "script/script_hooks.h"   /* mod scripts' map gates */
+#include "clip_events.h"            /* clip events' Play gate */
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -499,6 +500,65 @@ static int op_held(void *context, const char *type, const char *name, unsigned *
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
     me_unlock(cs);
+    return held;
+}
+
+int sh_modserve_engine_on_main(void)
+{
+    return me_on_main();
+}
+
+/* Clip events' carriers (clip_events.h): the engine's own find, which loads a name the probe admits. */
+void *sh_modserve_engine_decl(const char *type, const char *name)
+{
+    void *decl = NULL;
+    if (!type || !name || !g_bound || !g_decl || me_on_main() != 1) return NULL;
+    __try {
+        void *m = me_manager(type);
+        if (m) decl = g_decl(m, name, 0);
+        if (decl && (((const unsigned char *)decl)[RES_STATE_OFF] & 3)) decl = NULL;
+    } __except (me_fault_filter(GetExceptionCode())) { decl = NULL; }
+    return decl;
+}
+
+int sh_modserve_engine_decl_held(const char *type, const char *name, void **out, unsigned *state,
+                                 unsigned *lifetime)
+{
+    int held = -1;
+    const unsigned char *m = NULL;
+    CRITICAL_SECTION *cs;
+    unsigned s = 0, l = 0;
+    void *obj = NULL;
+    if (out) *out = NULL;
+    if (state) *state = 0;
+    if (lifetime) *lifetime = 0;
+    if (!type || !name || !g_bound) return -1;
+    __try { m = (const unsigned char *)me_manager(type); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    if (!m) return -1;
+    cs = me_lock();
+    __try {
+        unsigned char *const *entries = *(unsigned char *const *const *)(m + ME_LIST_ENTRIES);
+        int count = *(const int *)(m + ME_LIST_COUNT), i;
+        if (count < 0 || count > (1 << 22) || (count && !entries)) count = -1;
+        held = count < 0 ? -1 : 0;
+        for (i = 0; i < count; ++i) {
+            unsigned char *r = entries[i];
+            if (!r || *(const unsigned char *const *)(r + ME_RES_LIST) != m) continue;
+            if (me_name_eq(*(const char *const *)(r + ME_RES_NAME), name)) {
+                s = r[RES_STATE_OFF];
+                l = *(const unsigned *)(r + RES_LIFETIME_OFF);
+                obj = r;
+                held = 1;
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
+    me_unlock(cs);
+    if (held == 1) {
+        if (out) *out = obj;
+        if (state) *state = s;
+        if (lifetime) *lifetime = l;
+    }
     return held;
 }
 
@@ -1020,6 +1080,8 @@ void sh_modserve_play_begin(void)
         sh_script_hooks_gate(SH_SCRIPT_GATE_PLAY);
         if (sh_script_hooks_open()) (void)sh_companions_ensure("play scripts");
     }
+    /* Clip events: the rows this Play's mods add to their own clips (clip_events.h), by name. */
+    if (on_main == 1) sh_clip_events_play_begin();
     /* What the editor's spawns created for a kept decl since the last pass
      * is still level 1: kept before the level load's purge frees it. */
     if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
@@ -2737,6 +2799,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     double t0;
     /* A new map: the last one's mod scripts end (they start at its Play). */
     if (main == 1) sh_script_hooks_gate(SH_SCRIPT_GATE_MAP_LOAD);
+    if (main == 1) sh_clip_events_map_end();
     /* Companions follow the index at every map load, a map with no rows included. */
     if (main == 1) (void)sh_companions_ensure("map");
     /* A map without manifest rows: nothing to do, nothing logged. */

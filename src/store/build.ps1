@@ -16,6 +16,8 @@ $Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c", 
              "../backend/config_json.c", "../backend/decl_text.c", "../backend/decl_tree.c", "../backend/modbankinfo.c",
              # The "scenes" and "hud" checks a build of the game runs (modcontent.h).
              "../backend/modcontent.c", "../backend/modscene_decl.c",
+             # The "clip_events" rows a build of the game records (clip_events.h).
+             "../backend/clip_events_rule.c",
              # A build that carries mod scripts compiles them (never runs them): the Lua parser only.
              "../backend/script/script_compile.c", "../backend/script/script_reason.c",
              # Which mods get a Script node row and the paths it holds (no Lua runs).

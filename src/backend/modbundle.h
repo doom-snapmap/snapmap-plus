@@ -20,7 +20,7 @@
  *     "warnings": [...],               every warning of the build, when any
  *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"banks": [...], "conductor": [...], "strings": [...]},
+ *     "registries": {"banks": [...], "clipEvents": [...], "conductor": [...], "strings": [...]},
  *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
  *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "node", "dynamic"},
  *                                      what the mod's scripts bind, read without running them
@@ -604,6 +604,17 @@ void sh_mb_set_script_check(sh_mb_script_check_fn fn);
  * it. NULL (the default) checks nothing. */
 typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char **cause);
 void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
+
+/* The registries "clipEvents" of a build (clip_events.h, sh_ce_build_registry): from the author's
+ * "clip_events" names, the mod's salt and a reader of its md6Def texts by decl name (1 with a malloc'd text,
+ * 0 not one of its md6Defs, -1 unreadable); every entry or clip it leaves out is one warning through `warn`,
+ * and the build goes on. Returns a JSON array (malloc'd) or NULL; *oom on memory failure. NULL (the
+ * default) records nothing for "clip_events". */
+typedef int (*sh_mb_text_fn)(void *context, const char *name, char **text, size_t *len);
+typedef char *(*sh_mb_clip_events_fn)(const char *salt, const char *const *names, int n, sh_mb_text_fn text,
+                                      void *text_ctx, void (*warn)(void *context, const char *line), void *warn_ctx,
+                                      int *oom);
+void sh_mb_set_clip_events(sh_mb_clip_events_fn fn);
 
 
 /* The static registration pass: every literal call of the registration API in

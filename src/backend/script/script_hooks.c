@@ -717,6 +717,8 @@ void sh_script_hooks_map_cancel(int during_load)
 
 int sh_script_hooks_on_game_thread(void) { return on_main() == 1; }
 
+int sh_script_hooks_in_play(void) { return editor_inactive(); }
+
 sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod)
 {
     if (mod) *mod = -1;

@@ -79,6 +79,8 @@ int sh_companions_ensure(const char *phase) { (void)phase; return 0; }
 void sh_companions_refresh(void) {}
 void sh_script_hooks_gate(int gate) { (void)gate; }
 int sh_script_hooks_open(void) { return 0; }
+void sh_clip_events_play_begin(void) {}
+void sh_clip_events_map_end(void) {}
 
 /* ------------------------------------------------------------------ the faked engine */
 

@@ -20,6 +20,7 @@
 #include "apply_engine.h"
 #include "modstock.h"
 #include "modui.h"
+#include "clip_events.h"
 #include "../common/text.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
@@ -726,6 +727,11 @@ void h_sh_mods(idCmdArgs *a)
         for (i = 1; i < n && argc < 8; i++) if (cmd_argv(a, i)) argv[argc++] = cmd_argv(a, i);
         if (sh_modui_command(argc, argv, mc_doctor_line, NULL) < 0)
             mc_line("MODS: %s: refused (not on the game's main thread)", verb);
+        return;
+    }
+    if (!_stricmp(verb, "clip-events")) {
+        /* The rows the open map's mods add to their own clips (clip_events.h), for the test bench. */
+        sh_clip_events_command(mc_doctor_line, NULL);
         return;
     }
     if (!_stricmp(verb, "doctor")) {

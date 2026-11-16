@@ -3682,15 +3682,117 @@ static int mb_string_key_ok(const char *key, const char *salt)
     return 1;
 }
 
-static void mb_registries(sh_mb_bundle *b)
+static sh_mb_clip_events_fn volatile g_clip_events;
+void sh_mb_set_clip_events(sh_mb_clip_events_fn fn)
+{
+    InterlockedExchangePointer((void *volatile *)&g_clip_events, (void *)fn);
+}
+
+typedef struct mb_ce_ctx { sh_mb_bundle *b; const wchar_t *root; } mb_ce_ctx;
+
+static int mb_ce_name_same(const char *a, const char *b)
+{
+    for (; *a && *b; ++a, ++b) {
+        char x = *a == '\\' ? '/' : (char)tolower((unsigned char)*a);
+        char y = *b == '\\' ? '/' : (char)tolower((unsigned char)*b);
+        if (x != y) return 0;
+    }
+    return !*a && !*b;
+}
+
+/* The text of the mod's own md6Def `name`, read from its folder (clip events' build check). */
+static int mb_ce_text(void *context, const char *name, char **text, size_t *len)
+{
+    mb_ce_ctx *c = (mb_ce_ctx *)context;
+    size_t i;
+    *text = NULL;
+    *len = 0;
+    for (i = 0; i < c->b->file_count; i++) {
+        const sh_mb_file *f = &c->b->files[i];
+        wchar_t *path;
+        unsigned char *data;
+        if (!f->ptype || !f->pname || _stricmp(f->ptype, "md6Def") != 0 || !mb_ce_name_same(f->pname, name)) continue;
+        if (f->absent || !c->root) return 0;
+        path = mb_file_wpath(c->root, f->path);
+        data = path ? mb_read_wfile(path, MB_ANY_SIZE, len) : NULL;
+        free(path);
+        if (!data) return -1;
+        *text = (char *)data;
+        return 1;
+    }
+    return 0;
+}
+
+/* 1 when the author's "clip_events" lists the md6Def `name`. */
+static int mb_ce_listed(const sh_mb_bundle *b, const char *name)
+{
+    mbj *extra = name && b->extra ? mbj_parse(b->extra, strlen(b->extra), NULL) : NULL;
+    const mbj *list = extra ? mbj_get(extra, "clip_events") : NULL;
+    size_t i;
+    int found = 0;
+    for (i = 0; list && list->t == MBJ_ARR && i < list->count && !found; i++)
+        found = list->items[i] && list->items[i]->t == MBJ_STR && mb_ce_name_same(list->items[i]->s, name);
+    mbj_free(extra);
+    return found;
+}
+
+static void mb_ce_warn(void *context, const char *line)
+{
+    mb_warn((sh_mb_bundle *)context, "%s", line);
+}
+
+/* registries "clipEvents": the author's "clip_events" checked and recorded (clip_events.h). A value that is
+ * not a list, or an entry that is not a name, is left out with a warning, never failing the build. */
+static void mb_registry_clip_events(sh_mb_bundle *b, const wchar_t *root, const mbj *extra, mb_buf *o, int *first)
+{
+    sh_mb_clip_events_fn fn = g_clip_events;
+    const mbj *list = extra ? mbj_get(extra, "clip_events") : NULL;
+    const char **names;
+    char *json;
+    size_t i;
+    int n = 0, oom = 0;
+    mb_ce_ctx c;
+    if (!list || !fn) return;
+    if (list->t != MBJ_ARR) {
+        mb_warn(b, "mod.json \"clip_events\" is not a list, so it was ignored. Write it as a list of this mod's md6Def "
+                "names, like \"clip_events\": [\"mods/<folder name>/<path>.md6\"].");
+        return;
+    }
+    if (!list->count) return;
+    names = (const char **)calloc(list->count, sizeof *names);
+    if (!names) { mb_error(b, "out of memory"); return; }
+    for (i = 0; i < list->count; i++) {
+        const mbj *e = list->items[i];
+        if (!e || e->t != MBJ_STR || !e->n || strlen(e->s) != e->n || strchr(e->s, '"') || strchr(e->s, '\\')) {
+            mb_warn(b, "mod.json \"clip_events\" entry %zu is not an md6Def name, so it was ignored. Write each entry "
+                    "as a name in quotes, like \"mods/<folder name>/<path>.md6\".", i + 1);
+            continue;
+        }
+        names[n++] = e->s;
+    }
+    c.b = b;
+    c.root = root;
+    json = n ? fn(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
+    free((void *)names);
+    if (oom) { free(json); mb_error(b, "out of memory"); return; }
+    if (!json) return;
+    mb_puts(o, *first ? "\"clipEvents\":" : ",\"clipEvents\":");
+    mb_puts(o, json);
+    *first = 0;
+    free(json);
+}
+
+static void mb_registries(sh_mb_bundle *b, const wchar_t *root)
 {
     mb_buf o = {0};
     size_t i;
     int any, first = 1;
     mbj *extra = NULL;
     const mbj *strings = NULL, *en = NULL;
+    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     mb_put(&o, "{", 1);
     mb_registry_banks(b, &o, &first);   /* "banks" sorts first */
+    mb_registry_clip_events(b, root, extra, &o, &first);   /* then "clipEvents" */
     for (i = 0, any = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         if (!f->ptype || !f->pname || _stricmp(f->ptype, "snapAIEncounter") != 0) continue;
@@ -3699,7 +3801,6 @@ static void mb_registries(sh_mb_bundle *b)
         any = 1;
     }
     if (any) { mb_put(&o, "]", 1); first = 0; }
-    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     strings = extra ? mbj_get(extra, "strings") : NULL;
     en = strings && strings->t == MBJ_OBJ ? mbj_get(strings, "en") : NULL;
     if (en && en->t == MBJ_OBJ && en->count) {
@@ -5227,6 +5328,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             else if (got == 0 && f->ptype && strcmp(f->ptype, "animWeb") == 0 && strcmp(f->needs[k].type, "anim") == 0)
                 mb_warn(b, "%s names anim %s, which no archive holds (an animWeb clip: reported, not refused)", f->path,
                         f->needs[k].name);
+            /* A clip a clip_events md6Def gives rows to and the mod does not carry: those rows never
+             * play, and the mod still builds (clip_events.h). */
+            else if (got == 0 && f->ptype && !strcmp(f->ptype, "md6Def") && !strcmp(f->needs[k].type, "anim") &&
+                     mb_ce_listed(b, f->pname))
+                mb_warn(b, "mod.json clip_events: \"%s\" adds rows to \"%s\", which this mod does not carry, so those "
+                        "rows never play. Check the clip's name, or add the clip to the mod.", f->pname,
+                        f->needs[k].name);
             /* Effects, particles, ribbons and movies likewise. */
             else if (got == 0 && (!strcmp(f->needs[k].type, "particle") || !strcmp(f->needs[k].type, "ribbon") ||
                                   !strcmp(f->needs[k].type, "swf") ||
@@ -5247,7 +5355,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
     mb_scripts_free(&scripts);
     mb_classify_all(b);
     mb_derive_edits(b, root);
-    mb_registries(b);
+    mb_registries(b, root);
     mb_report(b);
     free(own.req);
     if (!b->errors) mb_check_renderprogs(b, root);

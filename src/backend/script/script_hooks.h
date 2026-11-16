@@ -230,6 +230,9 @@ void sh_script_hooks_map_cancel(int during_load);
 sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod);
 /* 1 on DOOM's main thread, the only thread scripts run on. */
 int sh_script_hooks_on_game_thread(void);
+/* 1 during SnapMap Play of any kind (the editor's active flag is clear), 0 while the editor is active, -1
+ * unknown (the scripts' engine side did not resolve). Any thread; reads one byte. */
+int sh_script_hooks_in_play(void);
 
 #ifdef SH_SCRIPT_PURE
 /* Tests only: empty the mod table. */

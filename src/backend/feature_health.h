@@ -37,6 +37,7 @@
 #define SH_FEATURE_MOD_MOVIES      "mod movies and HUD"
 #define SH_FEATURE_MOD_SOUNDS      "mod sounds"
 #define SH_FEATURE_MOD_SCENES      "mod scenes"
+#define SH_FEATURE_CLIP_EVENTS     "Clip events"
 #define SH_FEATURE_MOD_SCRIPTS     "mod scripts"
 #define SH_FEATURE_SCRIPT_NODES    "Script nodes"
 #define SH_FEATURE_SCRIPT_DEMONS   "demons driven by scripts"

@@ -58,6 +58,7 @@
 #include "companion_engine.h"
 #include "postfx.h"
 #include "parmslots.h"
+#include "clip_events.h"
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "modvt.h"
@@ -189,6 +190,8 @@ static void install_features(const sig_result *results, size_t db)
     sh_mb_set_script_check(sh_script_compile_check);
     /* A mod's "scenes" and "hud" blocks are checked when it is built. */
     sh_mb_set_extra_check(sh_modcontent_check);
+    /* and its "clip_events" recorded, a bad entry left out with a warning (clip_events.h) */
+    sh_mb_set_clip_events(sh_ce_build_registry);
 
     /* No store migration runs here: the installer's store tool converts
      * earlier shapes. A folder a crash took away mid-replacement is put back
@@ -369,6 +372,10 @@ static void install_features(const sig_result *results, size_t db)
     /* A render parm always gets a parm state slot (parmslots.h): the product's programs keep theirs, a parm past
      * a full range shares one instead of stopping the load. */
     (void)sh_parmslots_install(results, db, g_doom_base);
+    /* Clip events (clip_events.h): the three event lookups, detoured at the first Play whose mods add rows to
+     * their own clips. */
+    if (overrides_installed) (void)sh_clip_events_install(g_doom_base);
+    else sh_feature_off(SH_FEATURE_CLIP_EVENTS, "mods are not served");
 
     /* Mod scripts (script/script_hooks.h): the frame hook, the spawn subscriber
      * on the companions' CallSpawn chain and the map-end subscriber; the frame

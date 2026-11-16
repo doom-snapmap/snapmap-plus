@@ -67,7 +67,9 @@
                               "example, 'sh_mods held [filter]' prints what the game was served under each name this " \
                               "session and what it still holds, 'sh_mods choose \"<game file>/<path>\" \"<mod folder>\"' picks " \
                               "which of the open map's mods' edits serves a field several of them set " \
-                              "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty mod clears)."
+                              "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty mod clears), 'sh_mods " \
+                              "clip-events' lists the event rows the open map's mods add to their own clips " \
+                              "(mod.json \"clip_events\") and whether each md6Def carrying them is loaded."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_AUTHOR (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<mod folder>\" \"<ref>\"' uploads a mod and claims it under ref, " \
                              "'sh_mods release \"<ref>\"' drops a claim, 'sh_mods retry' retries uploads queued after a " \

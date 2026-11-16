@@ -1357,6 +1357,19 @@ int sh_modserve_engine_in_play(void);
 /* Set one engine cvar by name through the requirements gate (immediate); 1 when set. */
 int sh_modserve_engine_set_cvar(const char *cvar, const char *value);
 
+/* 1 on DOOM's main thread, 0 on another, -1 unknown. */
+int sh_modserve_engine_on_main(void);
+/* The decl of `type` named `name` as the engine's own lookups find it: DeclFind without makeDefault, which
+ * answers from the resource lists and loads on demand a name the serving layer admits (created and parsed at
+ * the engine's level, as an entity naming it would). NULL when there is none, its load failed or ended in a
+ * default, or not on the main thread (nothing is loaded off it). Creates no default. */
+void *sh_modserve_engine_decl(const char *type, const char *name);
+/* Find only: 1 when the engine holds a resource of `type` named `name` now (*out its object, *state its state
+ * byte, *lifetime its level), 0 when not, -1 when the list cannot be read. Creates and loads nothing; any
+ * thread (it takes the engine's resource lock). */
+int sh_modserve_engine_decl_held(const char *type, const char *name, void **out, unsigned *state,
+                                 unsigned *lifetime);
+
 /* A scope change (sh_modserve_scope_set) brought into the running game, at
  * a map load, the map exit, the Play entry and in the editor after a save or
  * a map-level change: the requirements pass first (stopped bundles' cvars

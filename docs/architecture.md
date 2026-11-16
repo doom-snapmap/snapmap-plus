@@ -577,7 +577,7 @@ These backend files share the work:
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
-  `strings`, `hud`, `scenes`, `companions`; any other key is kept in the manifest's
+  `strings`, `hud`, `scenes`, `companions`, `clip_events`; any other key is kept in the manifest's
   `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
@@ -1732,6 +1732,109 @@ needs no compiler and compares the texts). `modprog_test` checks the decl, text
 and module patches on a stand-in program (`tests/fixtures/modprog/lit.frag`),
 the derived `.bin` and SPIR-V against the engine's checks, and, given
 `-Doom`, the derivation from the installed game.
+
+### Clip events
+
+A mod adds animation event rows to its own clips when they play on a game
+model, without replacing any game file (`clip_events.{c,h}`,
+`clip_events_rule.c`, `clip_events_sigs.c`). It writes an md6Def of its own,
+the carrier, that inherits the model the clip plays on
+(`init { inherit "player/mp/tp_body_mp.md6" }`) and lists the rows in its
+`events { anim "<clip>" { event ... } }` blocks, and names it in the author
+key `"clip_events": ["mods/<folder name>/.../rows.md6"]`. The engine parses
+the carrier with its own md6Def parser, so every event type is available with
+its own argument types; the product never builds an event.
+
+The build (`sh_ce_build_registry`, registered with the builder through
+`sh_mb_set_clip_events` by the DLL and the store tool) records the registries
+member `clipEvents`, `[{"md6Def", "base", "clips": [...]}]`, outside the
+canonical text. Every mistake is a warning, never the build's cause: a value
+that is not a list, an entry that is not a name, an entry that is not one of
+the mod's md6Defs, has no `inherit` inside `init`, has no anim block with an
+event row, or repeats an earlier entry is left out; a clip outside
+`md6/mods/<salt>/` is left out of its entry ("A mod can add rows only to its
+own clips"), and a clip two entries give rows keeps the first. An anim need of
+a carrier that the mod does not carry is reported, not refused, unlike any
+other md6Def's. Each sentence says what to write instead.
+
+The registry of a Play is built at the Play gate (`sh_modserve_play_begin`,
+main thread, before the level load) from the `clipEvents` of the builds the
+open map serves (`sh_modserve_each_bundle_registries` and
+`sh_modserve_bundle_scope`'s `names_live`), checked again (a carrier outside
+`mods/<salt>/` or a clip outside `md6/mods/<salt>/` is dropped with a line, so
+no build can register a stock clip or another mod's), sorted by clip name and
+published with one pointer swap; the map-load gate drops it. It holds names
+only. The previous registry is freed at the swap after next.
+
+The three event lookups are `bool f(idDeclMD6 *model, idMD6Anim *anim, int
+from, int to[, int filter], idList *out)`: each empties `out`, queries the
+model's own table (`+0x228`) with the anim's resource name (`+0x08`), then
+every parent (`+0x98`), merging into `out`, and returns whether `out` holds a
+row. `model` is the entity's animator model decl (entity `+0x3DB0`, then
+`+0xE90`, the md6Def decl the script tags read; VK sync helper 0x140A403A0).
+
+| Site | VK | GL | Query of its first call (VK / GL) | Window |
+|---|---|---|---|---|
+| `Md6EventsInWindow` | 0x16D7680 | 0x16D8190 | 0x16D71D0 / 0x16D7CE0 | 15 |
+| `Md6EventsOfType` | 0x16D7810 | 0x16D8320 | 0x16D7350 / 0x16D7E60 | 16 |
+| `Md6EventsOfType2` | 0x16D79B0 | 0x16D84C0 | 0x16D7500 / 0x16D8010 | 16 |
+
+The two filtered lookups are the same 196 bytes up to their first query
+call, so their shared pattern matches both in each executable; each is
+accepted at its recorded RVA only when that E8 reaches its own query, checked
+by the query's own pattern, which is unique (`sh_ce_site_resolve`). The
+windows are whole and position independent. A site that does not resolve
+records `Clip events` off (`These features are unavailable in this session:
+Clip events.`), and each Play whose mods list clip events then logs one line
+per mod: `<mod>: its clips play without the events it adds (clip_events):
+Clip events is unavailable in this session.`
+
+The detours are prepared at boot and committed, all three or none, at the
+first Play whose registry has a row; with no registration no hook is
+committed. Each calls the engine first:
+
+```
+r = orig(model, anim, from, to, [filter,] out);
+if (r || !g_any) return r;                  // the model's chain answered, or nothing is registered
+name = anim->name (+0x08);
+if (!under("md6/mods/", name)) return r;    // every stock clip leaves here
+row = registry_find(name);  if (!row || editor active) return r;
+carrier = carrier_of(row);                  // found by name, checked by name before each use
+if (!carrier || !in_chain(carrier, model)) return r;
+return orig(carrier, anim, from, to, [filter,] out);
+```
+
+`in_chain`: the carrier's parents reach `model`, or `model`'s parents reach
+the carrier's own parent, at most 32 steps: rows written over the SnapMap body
+apply on it, on the campaign body it inherits and on a body that inherits it,
+and on nothing else. The first call wins in the sense of the window: a model
+whose own chain has rows for the clip in the window answers; the carrier is
+asked only when the window holds none of the model's own rows.
+
+The carrier is found the first time one of its clips is looked up in a Play:
+on the main thread by the engine's own find (`sh_modserve_engine_decl`:
+DeclFind without makeDefault, which loads on demand a name the probe admits,
+created and parsed at the engine's level as an entity naming it would be; the
+map's activation registered its source with the bundle's other gameplay
+decls); on another thread by a find-only walk of the md6Def list under the
+resource lock (`sh_modserve_engine_decl_held`), and one not loaded yet is
+asked for again at the next lookup. It is not held across the Play purge on
+purpose: it inherits a stock body the product does not keep, so a carrier kept
+at level 4 would hold a parent pointer the purge frees. Loaded after the
+purge, it binds to the models of that Play and is freed with them; the
+registry forgets the pointer at the next gate. A carrier that does not load
+logs `MODS: clip-events: <mod>: "<md6Def>" did not load, so "<clip>" plays
+without the events it adds.` once per Play, and the clip plays as the game
+plays it. The diagnostic build logs the first answer of each clip in a Play,
+`clip-events: "<clip>" on <model>: <n> rows from "<md6Def>"`.
+
+`sh_mods clip-events` prints the open map's registry (the Play's, or the one
+its next Play builds): each carrier with its mod, its base and whether the
+engine holds it, then its clips and how many lookups each answered.
+`clip_events_test` covers the names, the md6Def reader, the build's rows and
+warnings, the registry and the chain rule; `clip_events_sigs_test` the sites,
+the lookalikes, the walk they share and the windows on both executables;
+`detour_windows_test` audits the windows with every other site.
 
 ### Owner-bound companions
 
