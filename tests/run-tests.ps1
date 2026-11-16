@@ -193,6 +193,9 @@ $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c 
 # DOOM 2016's radial blur fx item: which items are drawn, the envelope and the parameters the post
 # programs read (postfx_blurs.c); the signatures and detour windows are in sig_test and detour_windows_test.
 $tests += @{ name = "postfx_test"; src = 'postfx_test.c ..\src\backend\postfx_blurs.c'; arg = "" }
+# Where a render parm asking for a parm state slot goes (parmslots_rule.c): the engine's ranges, the product's
+# reserved vector parms, the shared slot past a full range.
+$tests += @{ name = "parmslots_test"; src = 'parmslots_test.c ..\src\backend\parmslots_rule.c'; arg = "" }
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
 # The engine side of companions against a faked engine table: the serving build, rebuilds at a safe point.

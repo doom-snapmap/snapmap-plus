@@ -181,6 +181,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   default the Steam path) it measures the Imp, both cyberdemon packs and the
   doors pack: files, pointers, bytes not stored, bytes hashed and time;
   skipped otherwise.
+- `parmslots_test.c` covers where a render parm asking for a parm state slot
+  goes (`parmslots_rule.c`): the engine's ranges, the product's vector parms
+  keeping their slots whichever order the parms arrive in, the shared slot at
+  the end of the vector range, a full range of another kind. The signature and
+  the detour window of `AllocParmState` are in `sig_test` and
+  `detour_windows_test`.
 - `modprog_test.c` covers the multilayer render programs (`modprog.h`): the
   decl and stage-text patches, the SPIR-V splice of the generated blend into a
   stand-in lit program (`fixtures/modprog/lit.frag`, compiled into

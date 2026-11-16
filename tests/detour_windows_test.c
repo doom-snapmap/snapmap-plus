@@ -124,6 +124,7 @@ static const site SITES[] = {
     { "postfx.c",             "SetBlurRadial",              SITE_POSTFX, 0, 14, REPLAYS, 0 },
     { "postfx.c",             "RenderPostProcessVk",        SITE_POSTFX, 0, 14, REPLAYS, 0 },
     { "postfx.c",             "RenderPostProcessGl",        SITE_POSTFX, 0, 14, REPLAYS, 0 },
+    { "parmslots.c",          "ParmStateAlloc",             SITE_SIG, 0, 15, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -384,7 +385,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
-    { "backend\\postfx.c", 1 },
+    { "backend\\postfx.c", 1 }, { "backend\\parmslots.c", 1 },
 };
 
 static int count_calls(const char *text)

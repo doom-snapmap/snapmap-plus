@@ -77,6 +77,10 @@ void sh_modprog_set_reader(sh_modprog_reader reader);
 /* Forget every derived file (tests). */
 void sh_modprog_reset(void);
 
+/* The i-th vector render parm the product's programs declare (the multilayer blend's, the particle shading's, the
+ * radial blur's), or NULL past the last: the parms that keep their parm state slots (parmslots.h). */
+const char *sh_modprog_vector_parm(unsigned i);
+
 /* ------------------------------------------------------------------ building blocks (tests) ---- */
 
 /* The multilayer variant of a base program's decl text (its line ends kept), or NULL when the text has no single

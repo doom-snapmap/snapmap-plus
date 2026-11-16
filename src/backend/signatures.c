@@ -1555,6 +1555,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
       "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 07 00 00 00",
       0x282B90u, 0x282D80u },
+    /* idParmState::AllocParmState(state, idDeclRenderParm *) -> slot: the kind's range from the decl's +0x6C
+     * (cmp eax, 0x12 over the switch), the slot a holder of the same name has or the first empty one, else Error6
+     * "failed to allocate %s parm state". parmslots.c detours its first 15 bytes (three register saves to the
+     * shadow space, no relative operand) so that a parm past a full range shares a slot instead. */
+    { "ParmStateAlloc",
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 63 42 6C 48 8D 35 "
+      "?? ?? ?? ?? 45 33 F6 48 8B EA 4C 8B D9 45 8B D6 45 8B CE 83 F8 12 0F 87 B4 00 00 00 48 8D 0D",
+      0x199D000u, 0x19918D0u },
     /* idCommonLocal::Frame, the recovery frame-hook target; recovery.c steals its
      * first 15 bytes (five pushes and MOV EAX,0x11DC0), compared exactly before the detour. */
     { "Frame",

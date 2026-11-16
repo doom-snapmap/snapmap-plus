@@ -177,6 +177,16 @@ static const mp_parm MP_PARM_DECLS[] = {
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
+const char *sh_modprog_vector_parm(unsigned i)
+{
+    size_t k;
+    for (k = 0; k < MP_NPARM_DECLS; k++) {
+        if (strncmp(MP_PARM_DECLS[k].text, "{ Vec ", 6)) continue;
+        if (!i--) return MP_PARM_DECLS[k].name;
+    }
+    return NULL;
+}
+
 /* --------------------------------------------------------------------------------------------- helpers ---- */
 
 typedef struct mp_buf { char *p; size_t n, cap; int oom; } mp_buf;
