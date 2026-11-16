@@ -375,8 +375,9 @@ typedef struct sh_script_ai_engine {
     int      (*set_recoil)(void *ai, float alpha);
     int      (*weapon_ready)(void *ai, int hand);     /* 1 ready, 0 cooling down, -1 no weapon there */
     int      (*aim_point)(void *ai, const float pos[3]);
-    /* 1 valid (*index: the animation), 0 not, 2 still being asked, -1 no such node */
-    int      (*anim_valid)(void *ai, const char *node, unsigned tests, int side, int *index);
+    /* 1 valid (*index: the animation), 0 not, 2 still being asked, -1 no such node; seed (side < 0): 0 tries
+     * the animations in order, another value in an order shuffled by it */
+    int      (*anim_valid)(void *ai, const char *node, unsigned tests, int side, unsigned seed, int *index);
     /* 0 found (*n points), 1 still searching, 2 no path, -1 unavailable */
     /* the computed path's points, whole: *out malloc'd (the caller frees it), *n its count */
     int      (*path_points)(void *ai, const float goal[3], int key, float (**out)[3], int *n);
@@ -541,7 +542,10 @@ int sh_ai_firing_run(const sh_script_ai_engine *e, void *ai, const sh_ai_positio
 int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap,
                      int *n);
 int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
-                         int key_base, int *index);
+                         unsigned seed, int key_base, int *index);
+/* The path-cache key of animation `index` of `node` in an anim_valid query: each node takes its own block of
+ * 64 keys inside the demon's span, so two nodes asked in turn do not restart each other's path queries. */
+int sh_ai_anim_key(int key_base, const char *node, int index);
 /* The engine's path cache is keyed by an int: each demon's record gets
  * SH_AI_KEY_SPAN keys for its queries (a query with more candidates than that
  * shares keys in turn; the engine then answers "searching" a little longer). */

@@ -381,9 +381,9 @@ static int f_wound_hides(void *ai, const char *wound, const char *const *meshes,
     return 1;
 }
 static const sh_script_ai_engine g_fake;
-static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
+static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, unsigned seed, int *index)
 {
-    return sh_ai_anim_valid_run(&g_fake, ai, node, tests, side, 100, index);
+    return sh_ai_anim_valid_run(&g_fake, ai, node, tests, side, seed, 100, index);
 }
 static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[3], int *n)
 {
@@ -1006,23 +1006,38 @@ static void test_compositions(void)
     g_ent[2].origin[0] = 600; g_ent[2].origin[1] = 0;
     g_ent[2].yaw = 180;                                   /* the enemy looks back at the demon */
     /* anim_valid: both side steps fit an open floor; the first one is the answer */
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == 1 && idx == 0);
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, 1, 0, &idx) == 1 && idx == 1);
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/still", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == 0);
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/none", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == -1);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 1 && idx == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, 1, 0, 0, &idx) == 1 && idx == 1);
+    /* with a seed every animation is still tried, in an order the seed shuffles: both steps come first by turns */
+    {
+        int seen[2] = { 0, 0 };
+        unsigned sd;
+        for (sd = 1; sd <= 40; sd++) {
+            CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, -1, sd, 0, &idx) == 1);
+            if (idx == 0 || idx == 1) seen[idx]++;
+        }
+        CHECK(seen[0] > 0 && seen[1] > 0 && seen[0] + seen[1] == 40);
+        /* each node's path queries take keys of their own; the same node and animation the same key */
+        CHECK(sh_ai_anim_key(1000, "evades/lr_small", 0) != sh_ai_anim_key(1000, "evades/lr_medium", 0));
+        CHECK(sh_ai_anim_key(1000, "evades/lr_small", 1) == sh_ai_anim_key(1000, "evades/lr_small", 1));
+        CHECK(sh_ai_anim_key(1000, "evades/lr_small", 1) - sh_ai_anim_key(1000, "evades/lr_small", 0) == 1);
+        CHECK(sh_ai_anim_key(1000, "x", 63) < 1000 + SH_AI_KEY_SPAN);
+    }
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/still", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/none", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == -1);
     /* the enemy's view centre: a side step out of a straight line keeps 18 degrees: refused at 20 */
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_AVOID_ENEMY_FOV, -1, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_AVOID_ENEMY_FOV, -1, 0, 0, &idx) == 0);
     /* the eyes from the end point: a wall between the step and the enemy */
     g_wall_x = 300;
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_EYE_VISIBILITY, -1, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_EYE_VISIBILITY, -1, 0, 0, &idx) == 0);
     g_wall_x = 0;
     /* a path still being searched answers 2, then the step fits */
     g_ent[1].path_ready = 1; g_ent[1].path_calls = 0;
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, &idx) == 2);
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, &idx) == 1);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, 0, &idx) == 2);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, 0, &idx) == 1);
     /* no ground where the step ends */
     g_hole_x = -1;
-    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_ENDPOINT, -1, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_ENDPOINT, -1, 0, 0, &idx) == 0);
     g_hole_x = 0;
 
     /* firing_position: the current place (600 from the target, ideal 600, seeing it) is kept for "any";

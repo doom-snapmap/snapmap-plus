@@ -1694,12 +1694,21 @@ int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_
     return 1;
 }
 
+int sh_ai_anim_key(int key_base, const char *node, int index)
+{
+    unsigned h = 2166136261u;                                   /* FNV-1a of the node's name */
+    for (; node && *node; node++) { h ^= (unsigned char)*node; h *= 16777619u; }
+    return key_base + (int)((h % (SH_AI_KEY_SPAN / 64)) * 64) + (index & 63);
+}
+
+/* DOOM Eternal's animation query (Shared_AnimationValid, 0x1409FCA40) tries every animation of the node in an order
+ * it shuffles at each query and answers with the first that passes; `seed` gives that order here (0: in order). */
 int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
-                         int key_base, int *index)
+                         unsigned seed, int key_base, int *index)
 {
     float at[3], d[3], yaw = 0, head, enemy_at[3];
     void *enemy;
-    int count = 0, first, last, i, pending = 0;
+    int count = 0, first, last, n, i, k, pending = 0, order[64];
     if (index) *index = -1;
     if (!e || !ai || !node || !e->anim_delta || !e->origin || !e->origin(ai, at)) return -1;
     if (e->anim_delta(ai, node, 0, d, &count) < 0) return -1;
@@ -1712,8 +1721,20 @@ int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *nod
         yaw = (float)(atan2((double)enemy_at[1] - at[1], (double)enemy_at[0] - at[0]) * 180.0 / AI_PI);
     first = side >= 0 ? side % count : 0;
     last = side >= 0 ? first : count - 1;
-    for (i = first; i <= last; i++) {
+    if (last > 63) last = 63;
+    for (n = 0; n <= last - first; n++) order[n] = first + n;
+    if (side < 0 && seed) {                                     /* Fisher-Yates over the seed's LCG */
+        unsigned x = seed;
+        for (i = n - 1; i > 0; i--) {
+            int j, t;
+            x = x * 1664525u + 1013904223u;
+            j = (int)((x >> 8) % (unsigned)(i + 1));
+            t = order[i]; order[i] = order[j]; order[j] = t;
+        }
+    }
+    for (k = 0; k < n; k++) {
         float end[3], c, s, from[3], to[3], g[3];
+        i = order[k];
         double r = yaw * AI_PI / 180.0;
         int ok = 1;
         if (e->anim_delta(ai, node, i, d, &count) != 1) continue;
@@ -1761,7 +1782,7 @@ int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *nod
         }
         if (ok && (tests & SH_AI_TF_NAV_DIRECT)) {
             float len = 0;
-            int st = e->path ? e->path(ai, end, key_base + i, &len) : -1;
+            int st = e->path ? e->path(ai, end, sh_ai_anim_key(key_base, node, i), &len) : -1;
             if (st == 1) { pending = 1; continue; }
             if (st != 0 || len > dist2(at, end) * 1.5f + AI_STEP) ok = 0;
         }
@@ -2345,13 +2366,14 @@ static const char *check_node(lua_State *L, int idx, const char *call, const cha
     return s;
 }
 
-/* ai:anim_valid(node, tests, [side]) -> true, index | false | nil, "searching"
+/* ai:anim_valid(node, tests, [side], [seed]) -> true, index | false | nil, "searching"
  * Whether one of the node's animations fits where the demon stands: its root
  * motion, turned by the demon's facing, tested by the words of `tests`
  * (TF_NAV_DIRECT, TF_NAV_ENDPOINT, TF_CLAMP_TO_GROUND, TF_BOUNDS,
  * TF_EYE_VISIBILITY, TF_MUZZLE_VISIBILITY, TF_TRANSLATION_TO_ENEMY_FORCE,
  * TF_AVOID_ENEMY_FOV, or VALIDATE_ANIM_DELTA). `side` picks one animation
- * (0 first); without it every animation is tried. */
+ * (0 first); without it every animation is tried, in order, or with `seed`
+ * (a whole number above 0) in an order shuffled by it. */
 static int l_anim_valid(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2360,6 +2382,7 @@ static int l_anim_valid(lua_State *L)
     char bad[64];
     unsigned tests;
     int side = -1, st, index = -1;
+    unsigned seed = 0;
     void *ai;
     ai_rec *r;
     if (!words) {
@@ -2378,10 +2401,15 @@ static int l_anim_valid(lua_State *L)
             sh_script_refuse(L, "\"anim_valid\" needs the animation to try as a whole number from 0 to 63");
         side = (int)lua_tointeger(L, 4);
     }
+    if (!lua_isnoneornil(L, 5)) {
+        if (!lua_isinteger(L, 5) || lua_tointeger(L, 5) < 1 || lua_tointeger(L, 5) > 0x7FFFFFFF)
+            sh_script_refuse(L, "\"anim_valid\" needs its order seed as a whole number from 1 to 2147483647");
+        seed = (unsigned)lua_tointeger(L, 5);
+    }
     NEED_OP(L, anim_valid, "anim_valid");
     ai = self_ai(L, "anim_valid", &h);
     if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
-    st = g_engine->anim_valid(ai, node, tests, side, &index);
+    st = g_engine->anim_valid(ai, node, tests, side, seed, &index);
     if (st == 1) { lua_pushboolean(L, 1); lua_pushinteger(L, index); return 2; }
     if (st == 0) { lua_pushboolean(L, 0); return 1; }
     lua_pushnil(L);
@@ -5117,9 +5145,9 @@ static int ai_key(void *ai)
     return 0x40000000 | (int)((((uintptr_t)ai >> 4) & 0x3FF) << 15);   /* 2 * SH_AI_KEY_SPAN keys a demon */
 }
 
-static int e_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
+static int e_anim_valid(void *ai, const char *node, unsigned tests, int side, unsigned seed, int *index)
 {
-    return sh_ai_anim_valid_run(&k_engine, ai, node, tests, side, ai_key(ai), index);
+    return sh_ai_anim_valid_run(&k_engine, ai, node, tests, side, seed, ai_key(ai), index);
 }
 
 static int e_firing_position(void *ai, const sh_ai_position_query *q, float out[3])

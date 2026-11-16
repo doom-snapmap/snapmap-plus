@@ -2462,13 +2462,15 @@ is touched, and a removed demon answers nil.
   +0x1B4), the "cooldown" test of the can-fire check (VK 0x1404439D0);
   `aim_point(pos | nil)` calls the set-focus-to-position
   `ae_selectAimFocusPoint` uses (VK 0x14041BBA0, foci 0, 2 and 3);
-  `anim_valid(node, tests, [side])` reads the node's animations (VK
+  `anim_valid(node, tests, [side], [seed])` reads the node's animations (VK
   0x141712C60) and their total root motion (VK 0x1415C5290), turns it by the
   demon's facing (by the direction to its enemy with
   `TF_TRANSLATION_TO_ENEMY_FORCE`) and tests the end point with the ground
   under it, the world trace at knee and chest height, sights to the enemy from
   eye and weapon height, the enemy's view centre (20 degrees) and the path
-  query, as the test words ask; `anim_force_via(dest, via, [blend])` forces
+  query, as the test words ask (every animation in turn without `side`, in an order
+  shuffled by `seed` when given, as DOOM Eternal's query shuffles them; each node's
+  path queries under keys of their own); `anim_force_via(dest, via, [blend])` forces
   `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
   `path_points(pos)` is the path query's computed path, read by a detour of
