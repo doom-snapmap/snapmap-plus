@@ -5445,8 +5445,16 @@ static void test_load_attribution(void)
         sh_modserve_attrib_leave(depth);
         CHECK(kept && sh_modserve_attrib_keep(&gore) == 1 && gore.level == 4);
         sh_modserve_attrib_leave(d0);
+        /* Kept at level 4 now, a later load of it with a map's heap selected
+         * moves to process heap 0; process heap 0, an unknown heap, a
+         * resource the product does not keep, or one back at level 1 do not. */
+        CHECK(sh_modserve_kept_has(&gore) && sh_modserve_kept_load_moves(&gore, 2) == 1);
+        CHECK(sh_modserve_kept_load_moves(&gore, 0) == 0 && sh_modserve_kept_load_moves(&gore, -1) == 0);
+        CHECK(sh_modserve_kept_load_moves(&outside, 2) == 0 && sh_modserve_kept_load_moves(NULL, 2) == 0);
+        CHECK(stock.level == 4 && !sh_modserve_kept_has(&perm) && sh_modserve_kept_load_moves(&perm, 2) == 0);
         /* An unknown heap (-1) neither marks nor clears. */
         gore.level = 1;
+        CHECK(sh_modserve_kept_load_moves(&gore, 2) == 0);
         depth = sh_modserve_attrib_enter(&gore, -1, &kept);
         sh_modserve_attrib_leave(depth);
         CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && gore.level == 4 && sh_modserve_left_to_map(NULL, 0) == 0);

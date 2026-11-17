@@ -3555,6 +3555,20 @@ next Play entry. The one other level write is the native load of a new
 identity at level 4, which `op_load` sets back to the engine's level as soon
 as the load returns.
 
+Keepability is decided when a resource is raised, and a kept resource can be
+loaded again later: a re-parse in place, a load the engine repeats. If that
+load ran with a map's heap selected, what it allocated would be released with
+the heap while the object stays listed at level 4, the same freed-data shape
+the gate exists to prevent. So the load hook runs a load of a resource the
+product keeps at level 4 inside process heap 0 when a map's heap is selected
+(`sh_modserve_kept_load_moves`); the load is then attributed to heap 0, and
+the resource is named once in the log (`kept resource '<name>' loaded again
+with a map heap selected; loaded in process heap 0`). Loads the engine makes
+without `ResourceGenericLoad` (a static model reloading its geometry when its
+reference count rises from zero) are not seen by the hook; a static render
+model built from a table freed that way is drawn empty by the fault shield's
+static-model guard, which names the model.
+
 A kept decl's render models are loaded by the product itself, in process heap
 0, while their files serve (`sh_modserve_held_models`, `me_hold_models`, run at
 the start of every `me_keep_holds`). An entityDef's parse does not load its
@@ -5289,6 +5303,33 @@ The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves
 the engine's list reduction and removed-entity reset. Startup requires a unique
 instruction signature and exact-byte verification on both supported renderers.
+
+Static render models never build from a surface table that is not a static
+model's (`static_model_guard.c`). A static render model (`idRenderModelStatic`,
+0xEC0 bytes) draws a copy of its backing static model's surface table (an
+`idStaticModel` on the `model` resource list). Its update
+(`StaticModelUpdate`, the class's vtable +0x78, VK 0x15DD990 / GL 0x15DEA40)
+copies the table when the model is new (marker -1), when the list's reload
+counter moved (it first looks the backing up again by name), and re-reads it
+when the model's skin or custom material changed. The copy takes each
+surface's first 0x60 bytes; the render model's teardown frees the three
+vertex-cache slots of every surface it holds, whoever filled them. A backing
+whose table holds freed memory therefore faults the copy, and the
+half-built copy faults again when the shield's recovery frees the world, the
+redirect is declined and the load screen stays at 95 % (snaphak-re R-CR1: VK
+0x15DDDF7 reading 0x69, then 0x17948BA reading 0x5; the same pair on OpenGL).
+The guard detours the update and, only when the engine is about to read the
+table, checks it: the header (count, capacity, readable data) and every
+surface (a material whose first word is a vtable inside DOOM's image, readable
+geometry, and none of the three slots, which no static model's table holds).
+On a table that fails, the render model is pointed at the engine's own
+`_empty` model with the never-built marker, so the engine builds an empty
+copy; the model draws nothing for the rest of the map and one line in
+`shield_faults.log` and the backend log names the backing (its name, level,
+state, reference count and the first bad surface). Nothing is freed. The head
+(with its security-cookie load relocated), the counter compare at +0x3E2 and
+the list LEA at +0x3FA are verified at startup, and the counter must be the
+list's +0x60.
 
 Failures the player or author reads are worded by one table, `plain_reason.h`
 (`sh_reason`): a Windows error code becomes what happened to which file and

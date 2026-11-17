@@ -24,6 +24,8 @@ param(
                            # Guards for event-link walks and interactable spawning.
                            "../fault_shield/mapload_guards.c",
                            "../fault_shield/serialized_entities_guard.c",
+                           # Static render models never build from a table that is not a static model's.
+                           "../fault_shield/static_model_guard.c",
                            # Stop a failed map load's loading screen at CancelMapChange.
                            "../fault_shield/load_screen_stop.c", "../fault_shield/saved_map_guard.c",
                            "../fault_shield/fault_shield.c",

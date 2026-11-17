@@ -102,4 +102,42 @@
 #define IA_SUBSYS_PROBE        0xE98u     /* bytes of the subsystem the engine must be able to read:
                                            * both derefs are [base+0xE90] (8 bytes) -> 0xE90 + 8 */
 
+/* A static render model (idRenderModelStatic, 0xEC0 bytes) draws a copy of its
+ * backing static model's surface table (idStaticModel, the "model" resource
+ * list). Its update (vtable +0x78, "StaticModelUpdate") rebuilds the copy when
+ * its marker is -1 (a new model), when the list's reload counter moved (after
+ * the backing is looked up again by name), and re-reads the backing's surfaces
+ * when the copied skin or custom-material state changed. The rebuild copies the
+ * first 0x60 bytes of every backing surface into the model's own table, and the
+ * model's teardown frees the vertex-cache slots of every copied surface
+ * unconditionally, so a backing surface may never carry them: a backing whose
+ * surfaces hold them, or whose materials are not engine objects, is not a
+ * static model's table (static_model_guard.c). Same offsets on both renderers. */
+#define SMU_STOLEN             16u        /* PUSH RDI; SUB RSP,0x110; MOV RAX,[RIP+cookie] */
+#define SMU_COOKIE_LOAD_OFF    9u         /* the RIP-relative cookie load the hook relocates */
+#define SMU_COUNTER_CMP_OFF    0x3E2u     /* CMP EAX,[RIP+disp32]: the list's reload counter */
+#define SMU_LIST_LEA_OFF       0x3FAu     /* LEA RCX,[RIP+disp32]: the "model" resource list */
+#define RMS_BACKING_OFF        0xE90u     /* idStaticModel *: the backing */
+#define RMS_SKIN_SEEN_OFF      0xE98u     /* the skin the copy was made with (vs RMS_SKIN_OFF) */
+#define RMS_PARM_SEEN_OFF      0xEA0u     /* int: the custom-material index the copy was made with */
+#define RMS_MARKER_OFF         0xEA4u     /* int: the list counter the copy was made at; -1 = never built */
+#define RMS_SKIN_OFF           0x118u     /* the render model's current skin */
+#define RMS_PARM_OFF           0x120u     /* int: the render model's current custom-material index */
+#define SM_SURFACES_OFF        0x70u      /* idStaticModel: surface table data */
+#define SM_SURFACE_COUNT_OFF   0x78u      /* int: surfaces */
+#define SM_SURFACE_CAP_OFF     0x7Cu      /* int: allocated surfaces */
+#define SM_SURFACE_STRIDE      0x78u
+#define SMS_MATERIAL_OFF       0x00u      /* idMaterial * (may be NULL) */
+#define SMS_GEOMETRY_OFF       0x18u      /* surface geometry (0x120 bytes when present) */
+#define SMS_GEOMETRY_SIZE      0x120u
+#define SMS_CACHE_A_OFF        0x30u      /* the three vertex-cache slots a render model's own */
+#define SMS_CACHE_B_OFF        0x40u      /*   surfaces fill and its teardown frees; zero in a */
+#define SMS_CACHE_C_OFF        0x48u      /*   static model's table */
+#define SM_SURFACES_MAX        0x10000    /* bound a malformed count; far beyond any shipped model */
+#define RES_NAME_OFF           0x08u      /* resource: const char *name */
+#define RES_LEVEL_OFF          0x28u      /* resource: lifetime level (1 map, 4 session) */
+#define RES_STATE_OFF          0x2Cu      /* resource: state bits */
+#define SM_REFCOUNT_OFF        0x64u      /* idStaticModel: reference count (refcounted models) */
+#define SM_REFCOUNTED_OFF      0x68u      /* idStaticModel: byte, nonzero = geometry follows the count */
+
 #endif /* SHIELD_ENGINE_LAYOUT_H */

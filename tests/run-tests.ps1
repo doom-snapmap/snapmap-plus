@@ -26,6 +26,7 @@ $null = Import-MsvcEnv $env:SNAPMAPPLUS_VCVARS_VER
 $tests = @(
     @{ name = "nav_menu_test"; src = 'nav_menu_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "serialized_entities_guard_test"; src = 'serialized_entities_guard_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "static_model_guard_test"; src = 'static_model_guard_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "map_render_test"; src = 'map_render_test.c ..\src\backend\map_render.c'; arg = "" }
     @{ name = "map_render_editor_test"; src = 'map_render_editor_test.c ..\src\backend\map_render.c'; arg = "" }
     @{ name = "map_bounds_test"; src = 'map_bounds_test.c ..\src\backend\map_bounds.c'; defs = '/DSH_MAP_BOUNDS_PURE'; arg = "" }
