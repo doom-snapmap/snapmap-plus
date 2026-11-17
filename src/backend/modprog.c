@@ -1956,11 +1956,12 @@ typedef struct mp_img { char *path; unsigned char *bytes; size_t len; } mp_img;
 static mp_img *g_imgs;
 static size_t g_nimgs, g_cimgs;
 
-/* 1 when `path` has the shape of a registered image's (the hash is 16 hex digits). */
+/* 1 when `path` has the shape of a registered image's (the hash is 16 hex digits; a constant image's has a 'c' before). */
 static int mp_image_shape(const char *path)
 {
     size_t hn = strlen(MP_IMAGE_HEAD), i;
     if (_strnicmp(path, MP_IMAGE_HEAD, hn)) return 0;
+    if (path[hn] == 'c' || path[hn] == 'C') hn++;
     for (i = 0; i < 16; i++) {
         char c = path[hn + i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
@@ -1975,19 +1976,18 @@ static long mp_image_find(const char *path)
     return -1;
 }
 
-const char *sh_modprog_register_param_image(const float vec[][4], unsigned count)
+/* Registers `b` (malloc'd; taken, or freed on failure) under MP_IMAGE_HEAD, `tag`, the first 16 hex digits of its
+ * SHA-256 and .bimage; the path, or NULL. */
+static const char *mp_register(const char *tag, unsigned char *b, size_t n)
 {
-    unsigned char *b = NULL;
-    size_t n = 0;
     sh_sha256 h;
     char hex[17], *path;
     const char *r = NULL;
     long at;
-    if (!sh_modprog_param_image(vec, count, &b, &n)) return NULL;
     sh_sha256_init(&h);
     sh_sha256_update(&h, b, n);
     sh_sha256_hex(&h, hex, 16);
-    path = sh_textf(MP_IMAGE_HEAD "%s.bimage", hex);
+    path = sh_textf(MP_IMAGE_HEAD "%s%s.bimage", tag, hex);
     if (!path) { free(b); return NULL; }
     AcquireSRWLockExclusive(&g_lock);
     if ((at = mp_image_find(path)) >= 0) {
@@ -2011,6 +2011,25 @@ const char *sh_modprog_register_param_image(const float vec[][4], unsigned count
     free(path);
     free(b);
     return r;
+}
+
+const char *sh_modprog_register_param_image(const float vec[][4], unsigned count)
+{
+    unsigned char *b = NULL;
+    size_t n = 0;
+    if (!sh_modprog_param_image(vec, count, &b, &n)) return NULL;
+    return mp_register("", b, n);
+}
+
+const char *sh_modprog_register_const_image(const float rgba[4])
+{
+    float texel[16][4];
+    unsigned char *b = NULL;
+    size_t n = 0, i;
+    if (!rgba) return NULL;
+    for (i = 0; i < 16; i++) memcpy(texel[i], rgba, sizeof texel[i]);
+    if (!sh_modprog_bimage_rgba16f(4, 4, texel, &b, &n)) return NULL;
+    return mp_register("c", b, n);
 }
 
 /* The parm decl a path names (index), or -1. */

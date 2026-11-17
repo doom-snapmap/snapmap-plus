@@ -775,6 +775,14 @@ typedef void (*sh_mb_need_fn)(void *context, const char *type,
 void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t len,
                       sh_mb_need_fn callback, void *context);
 
+/* The Graphics SDK's look compiler (modlook.h sh_look_compile_notes), set by the backend before the first build: the
+ * build reads each material decl through it (a mistake in a look fails the build with its sentence, a look's images
+ * and programs are scanned from the text the engine will read, the notes go to the build report). Unset, a material
+ * is scanned as its file holds it (the store tool, the tests that do not link the compiler). */
+typedef int (*sh_mb_look_fn)(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                             size_t why_len, char **notes);
+void sh_mb_set_look_compiler(sh_mb_look_fn fn);
+
 /* Bare (unquoted) words that name a mod resource ("mods/...") and contain
  * '-': the engine's breakable and material lexers split them. The callback
  * receives the 1-based line and the word (not NUL-terminated). Returns the

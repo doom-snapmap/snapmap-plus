@@ -89,6 +89,11 @@ typedef struct ms_file {
      * copy whose derived edits the product block records ("edits"). Never
      * served, keyed, planned or refreshed; the game file is generated. */
     int edit;
+    /* A material served as its look compiles (modlook.h; malloc'd, freed with the index), derived on first ask.
+     * look_state 0 not asked, 1 served as the file holds it, 2 the compiled text. */
+    char *volatile look;
+    size_t look_len;
+    volatile LONG look_state;
 } ms_file;
 
 /* A text composed for one listing (arena; memoized per winner by the set of declared providers). */
@@ -320,6 +325,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     int i;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
+    for (i = 0; x->files && i < x->nfiles; i++) free(x->files[i].look);
     for (i = 0; x->bundles && i < x->nbundles + (x->reg_made ? 1 : 0); i++) {
         free(x->bundles[i].cause);
     }
@@ -4735,6 +4741,66 @@ static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
     return buf;
 }
 
+static sh_modserve_material_fn volatile g_material_filter;
+
+void sh_modserve_set_material_filter(sh_modserve_material_fn fn)
+{
+    InterlockedExchangePointer((PVOID volatile *)&g_material_filter, (PVOID)fn);
+}
+
+/* The text a mod's material decl is served as instead of its file when the filter changes it (modlook.h: a look
+ * compiled to the engine's material, an old program's keys moved), or NULL when the file is served as it is. Derived
+ * from the file's bytes on the first ask and kept with the index, so every open and the ledger see the same bytes; like
+ * a composed text, the ledger identifies it by those bytes, while the build's identity of the file (its SHA-256) stays
+ * the author's file. A mistake in a look was refused by the build: here the file is served as it holds it, with one
+ * log line. A stock pointer is the game's own material and is never changed. */
+static const unsigned char *ms_look_of(const ms_file *f, size_t *len)
+{
+    ms_file *m = (ms_file *)f;
+    sh_modserve_material_fn fn;
+    unsigned char *raw;
+    char *out = NULL, why[300];
+    size_t n = 0, out_n = 0;
+    LONG state;
+    int r;
+    *len = 0;
+    if (!f->is_decl || f->stock || !f->ptype || (_stricmp(f->ptype, "material") && _stricmp(f->ptype, "material2")))
+        return NULL;
+    state = InterlockedCompareExchange(&m->look_state, 0, 0);
+    if (state == 1) return NULL;
+    if (state == 2) {
+        *len = m->look_len;
+        return (const unsigned char *)InterlockedCompareExchangePointer((PVOID volatile *)&m->look, NULL, NULL);
+    }
+    fn = (sh_modserve_material_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_material_filter, NULL, NULL);
+    if (!fn || !(raw = ms_file_raw(f, &n))) return NULL;
+    why[0] = 0;
+    r = fn(f->request, (const char *)raw, n, &out, &out_n, why, sizeof why);
+    switch (r) {
+    case 0:
+        InterlockedExchange(&m->look_state, 1);
+        break;
+    case 1:
+        if (!out) break;
+        m->look_len = out_n;
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&m->look, out, NULL) != NULL) free(out);
+        InterlockedExchange(&m->look_state, 2);
+        break;
+    case 2:
+        free(out);
+        ms_log("material '%s' is served as its file holds it: %s", f->request, why);
+        InterlockedExchange(&m->look_state, 1);
+        break;
+    default:                                      /* out of memory: served as it is, asked again next time */
+        free(out);
+        break;
+    }
+    HeapFree(GetProcessHeap(), 0, raw);
+    if (InterlockedCompareExchange(&m->look_state, 0, 0) != 2) return NULL;
+    *len = m->look_len;
+    return (const unsigned char *)InterlockedCompareExchangePointer((PVOID volatile *)&m->look, NULL, NULL);
+}
+
 /* Bounded cache of small files: decls are opened three times while they are
  * registered (source read, probe-gated open, load). Every open gets its own
  * copy, so eviction never frees bytes a stream holds. */
@@ -4825,6 +4891,7 @@ static int ms_serve_identity(const char *request, const char **bundle_hash, cons
     if (size) *size = 0;
     if (!f) return 0;
     b = ms_body_of(f, &bl);
+    if (!b) b = ms_look_of(f, &bl);
     if (bundle_hash) *bundle_hash = x->bundles[f->bundle].hash;
     if (b) { if (body) *body = b; if (body_len) *body_len = bl; if (size) *size = bl; }
     else { if (file_hash) *file_hash = f->blob; if (size) *size = f->size; }
@@ -4849,15 +4916,17 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
     unsigned char *buf = NULL;
     const unsigned char *body;
     size_t len = 0, body_len = 0;
-    int first;
+    int first, looked = 0;
     if (bytes) *bytes = NULL;
     if (length) *length = 0;
     if (!bytes || !length) return 0;
     f = ms_lookup_file(&x, request);
     if (!f) return 0;
     body = ms_body_of(f, &body_len);
+    if (!body && (body = ms_look_of(f, &body_len)) != NULL) looked = 1;
     if (body) {
-        /* A composed text (ms_resolve, ms_scope_compute): the index holds the bytes. */
+        /* A composed text (ms_resolve, ms_scope_compute) or a material as its look compiles (ms_look_of): the index
+         * holds the bytes. */
         len = body_len;
         buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len ? len : 1u);
         if (!buf) return -1;
@@ -4895,7 +4964,7 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
         ms_log("renderprog: served %s (%s, %zu bytes%s)", f->request, ms_label(&x->bundles[f->bundle]), len, f->stock ? ", installed content" : "");
     InterlockedIncrement(&g_opens_served);
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
-        ms_log("shadow '%s' served from %s (%zu bytes%s)", f->request, ms_label(&x->bundles[f->bundle]), len, body ? ", composed with the other providers' list entries" : "");
+        ms_log("shadow '%s' served from %s (%zu bytes%s)", f->request, ms_label(&x->bundles[f->bundle]), len, looked ? ", its look compiled" : body ? ", composed with the other providers' list entries" : "");
     listen = (sh_modserve_serve_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_serve_listener, NULL, NULL);
     if (listen) listen(f->request, x->bundles[f->bundle].hash, body ? NULL : f->blob, buf, len);
     *bytes = buf;
@@ -4924,7 +4993,7 @@ int sh_modserve_open_disk(const char *request, unsigned char **bytes, size_t *le
     if (!bytes || !length) return 0;
     InterlockedIncrement(&g_readers);
     f = ms_lookup_file(&x, request);
-    if (f && !f->stock && f->disk && !ms_body_of(f, &len)) {
+    if (f && !f->stock && f->disk && !ms_body_of(f, &len) && !ms_look_of(f, &len)) {
         buf = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
         if (buf) { *bytes = buf; *length = len; r = 1; }
         else r = -1;

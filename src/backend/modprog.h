@@ -117,6 +117,11 @@ int sh_modprog_param_image(const float vec[][4], unsigned count, unsigned char *
  * sh_modprog_list names it. */
 const char *sh_modprog_register_param_image(const float vec[][4], unsigned count);
 
+/* Registers a constant image (4 x 4 RGBA16F, every texel `rgba`) to be served and returns its path,
+ * generated/image/snapmapplus/look/c<16 lowercase hex digits of the SHA-256 of its bytes>.bimage (the same colour gives the
+ * same path), valid until sh_modprog_reset; NULL on failure. Served and listed as the parameter image is. */
+const char *sh_modprog_register_const_image(const float rgba[4]);
+
 /* A material that writes the OLD keys, rewritten so that it draws the same: for a particle material the four
  * eternalparticle* vectors and eternalparticleemissivemap into particleuberparms1..3, emissive, smokebrightness and
  * particleemissivemap (merged field by field with any of those lines the material has; see particles.rp for where each

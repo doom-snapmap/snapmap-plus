@@ -13,6 +13,7 @@
 
 #include "modbundle.h"
 #include "modprog.h"    /* SH_MODPROG_CONTAINER: the render programs the product derives */
+#include "modlook.h"    /* sh_look_compile: the Graphics SDK's looks, checked and scanned as the engine reads them */
 #include "modsalt.h"
 #include "strkeys.h"   /* string edits: keys the game or the product defines (DECISIONS 9) */
 #include "companion.h"
@@ -1683,6 +1684,8 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         sc->fn(sc->ctx, "renderProg", v, vn);
         return;
     }
+    /* old-key materials rewrite the layerparms image unquoted; the build must see it as it sees a quoted one */
+    if (!quoted && sc->is_material && mb_ieq_n(k, kn, "layerparms")) { sc->fn(sc->ctx, "image", v, vn); return; }
     if (!quoted) return;
     if (sc->depth == 1 && mb_ieq_n(k, kn, "inherit")) {
         /* A mod parent orders registration; a stock parent is always present. */
@@ -1730,7 +1733,8 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     }
     if (sc->is_sedef && mb_ieq_n(k, kn, "previewImage")) { sc->fn(sc->ctx, "material", v, vn); return; }
     if (sc->is_material && (mb_iends(k, kn, "map") || mb_iends(k, kn, "mask") ||
-                            mb_ieq_n(k, kn, "editorimage") || mb_ieq_n(k, kn, "qer_editorimage"))) {
+                            mb_ieq_n(k, kn, "editorimage") || mb_ieq_n(k, kn, "qer_editorimage") ||
+                            mb_ieq_n(k, kn, "layerparms") || (kn > 18 && mb_ieq_n(k, 18, "multilayerextramap")))) {
         sc->fn(sc->ctx, "image", v, vn);
     }
 }
@@ -1860,6 +1864,10 @@ int sh_mb_set_first_cause(sh_mb_bundle *b, const char *text) { return b && mb_se
 int sh_mb_set_state_cause(sh_mb_bundle *b, const char *text) { return b && mb_set_text(&b->state_cause, text); }
 
 typedef struct mb_bare_ctx { sh_mb_bundle *b; const sh_mb_file *f; } mb_bare_ctx;
+
+static sh_mb_look_fn volatile g_mb_look;
+
+void sh_mb_set_look_compiler(sh_mb_look_fn fn) { InterlockedExchangePointer((PVOID volatile *)&g_mb_look, (PVOID)fn); }
 
 static void mb_bare_cb(void *context, int line, const char *name, size_t len)
 {
@@ -5168,7 +5176,28 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             } else {
                 mb_need_ctx nc = { f, 0 };
                 mb_bare_ctx bc = { b, f };
-                sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
+                char *look = NULL, *notes = NULL;
+                size_t look_len = 0;
+                /* A material is read as the engine will read it: a look compiled (a mistake in one stops the
+                 * build with its sentence), a material of the old keys rewritten. */
+                sh_mb_look_fn look_fn = (sh_mb_look_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_look, NULL, NULL);
+                int refused = 0;
+                if (look_fn && (!strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2"))) {
+                    char why[400];
+                    int lr = look_fn(f->path, (const char *)text, len, &look, &look_len, why, sizeof why, &notes);
+                    if (lr == SH_LOOK_MISTAKE) { mb_error(b, "%s", why); refused = 1; }
+                    else if (lr == SH_LOOK_OOM) { mb_error(b, "out of memory"); refused = 1; }
+                    for (char *n = notes; n && *n;) {
+                        char *e = strchr(n, '\n');
+                        if (e) *e = 0;
+                        mb_note(b, "%s", n);
+                        n = e ? e + 1 : NULL;
+                    }
+                    free(notes);
+                }
+                if (!refused)
+                    sh_mb_scan_needs(f->ptype, look ? (const unsigned char *)look : text, look ? look_len : len, mb_need_cb, &nc);
+                free(look);
                 if (nc.oom) mb_error(b, "out of memory");
                 qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
                 sh_mb_scan_bare_hyphen(text, len, mb_bare_cb, &bc);

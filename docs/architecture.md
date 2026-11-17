@@ -1676,6 +1676,36 @@ blood shading.
 
 The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal/uberparticles` before they stopped naming a source game; both old names are served until 1.0 for mods emitted before the rename (`SH_MODPROG_OLD_PREFIX`, `SH_MODPROG_EP_OLD_PREFIX`), answering with the new name's bytes.
 
+#### The Graphics SDK: looks
+
+A mod describes a surface or a particle stage in plain terms and the product writes the engine's material for it
+([the guide](graphics-sdk.md)). The compiler is `modlook.c` (`sh_look_compile`, pure text work): a material whose first
+key is `look` with the value `layered` or `particle` is read field by field (every field optional, the guide's
+defaults) and written as the keys of the two programs above, its other lines passing through unchanged. A layered look
+becomes `ambientprogram "snapmapplus/layered/skinvmtr"` (or `skinvmtrwounds`), each layer image under its
+`blendlayer<i>...map` key, the mask as `layerblendmask`, the 28 vectors as the parameter image named by `layerparms`,
+and the two shared places `multilayerextramap0`/`1` filled in a fixed order (burn tile, burn glow, burn blood, base
+height, then each layer's specular and glow); what does not fit is drawn as the field's default and noted for the
+build log, never refused. A particle look becomes the five stock keys of the particle program and, with a glow mask,
+`particleemissivemap`. Where the game's own program draws the same picture (no layer can show; an unlit or lit particle
+with nothing the game's shading lacks) the material names `skinvmtr`, `skinvmtrwounds`, `transsortblend` or
+`particleshighq` and the product's programs are not involved. A value or a colour where an image is expected becomes a
+constant image, 4 x 4 RGBA16F, registered beside the parameter image at
+`generated/image/snapmapplus/look/c<16 hex digits of its SHA-256>.bimage` (`sh_modprog_register_const_image`; the
+same colour, the same path). A material that is not a look but writes the old keys or program names goes through
+`sh_modprog_legacy_material` and the rename, so an earlier mod draws unchanged. A mistake in a look is one sentence
+naming the file, the line, the field and what to write (`SH_LOOK_MISTAKE`); a limit of the game never is.
+
+Two hooks use it. The builder reads every material decl of a mod through it (`sh_mb_set_look_compiler`, set in
+`dllmain.c`, called where `modbundle.c` reads a decl): a mistake fails the build with the sentence, the needs
+(images, programs) are scanned from the compiled text so the closure brings the derived images and programs along, and
+the notes go to the build report. The server serves the compiled text (`sh_modserve_set_material_filter`,
+`ms_look_of` in `modserve.c`): derived on the first open of the file and kept with the serving table like a composed
+text, so every open and the ledger see the same bytes while the build's identity of the file stays the author's file;
+a mistake at serve time (the build already refused it) serves the file as it holds it with one log line. `look_cli`
+(`tests/look_cli.c`, built by `tests/run-tests.ps1`) compiles one decl outside the game and writes the text and the
+images it derived.
+
 #### Render parm slots are never refused
 
 The engine keeps every render parm in one of 2,367 parm state slots, a fixed

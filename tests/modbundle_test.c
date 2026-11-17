@@ -289,6 +289,15 @@ static void test_scan(void)
     CHECK(!strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"));
     if (strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"))
         fprintf(stderr, "  material scan gave %s\n", got);
+    /* old-key materials write layerparms unquoted; it is a need all the same */
+    {
+        const char *old = "{ layerparms mods/a/p.tga\n diffusemap \"mods/a/d.tga\" }";
+        got[0] = 0;
+        sh_mb_scan_needs("material", (const unsigned char *)old, strlen(old), collect, got);
+        CHECK(!strcmp(got, "image=mods/a/p.tga;image=mods/a/d.tga;"));
+        if (strcmp(got, "image=mods/a/p.tga;image=mods/a/d.tga;")) fprintf(stderr, "  unquoted layerparms scan gave %s\n", got);
+        got[0] = 0;
+    }
     /* An animWeb: its modelInfos pairs and models list name md6Defs (an alias
      * is not one), a node's ".md6anim" name is an anim, other names are not. */
     {
