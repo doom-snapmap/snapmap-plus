@@ -1626,10 +1626,24 @@ static void h_sh_perf(idCmdArgs *a)
 /* What the simulated particle motion has drawn since the start (particlemotion.h): for the test bench. */
 static void h_sh_particles(idCmdArgs *a)
 {
-    (void)a;
-    sh_printf("particles moved %ld, against the scene's planes %ld, died on a surface %ld, children at a parent %ld\n",
-              sh_particlemotion_moved(), sh_particlemotion_collided(), sh_particlemotion_killed(),
-              sh_particlemotion_children());
+    char line[256];
+    const char *sub = cmd_argc(a) > 1 ? cmd_argv(a, 1) : "";
+    if (sub && !_stricmp(sub, "trace")) {
+        long n = cmd_argc(a) > 2 ? strtol(cmd_argv(a, 2), NULL, 10) : 64;
+        sh_particlemotion_trace(n);
+        sh_printf("the next %ld simulated particles go to the backend log (PARTICLES: trace)\n", n < 0 ? 0 : n);
+        return;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "particles moved %ld, against the scene's planes %ld, died on a surface %ld, children at a parent %ld",
+                sh_particlemotion_moved(), sh_particlemotion_collided(), sh_particlemotion_killed(),
+                sh_particlemotion_children());
+    sh_printf("%s\n", line);
+    {   /* the backend log too: a reader that has no console still gets the counts */
+        char logged[300];
+        _snprintf_s(logged, sizeof logged, _TRUNCATE, "PARTICLES: counts: %s", line);
+        backend_log(logged);
+    }
 }
 
 /* Resize the selected Grid Room through the inspector's own path (format
@@ -1697,7 +1711,7 @@ static void h_sh_overrides_off(idCmdArgs *a)
 #endif
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_particles",         (void *)h_sh_particles, "What Snapmap+'s simulated particle motion has drawn since the start: particles moved, against the scene's surfaces, died on a surface, children drawn at their parent." },
+    { "sh_particles",         (void *)h_sh_particles, "What Snapmap+'s simulated particle motion has drawn since the start: particles moved, against the scene's surfaces, died on a surface, children drawn at their parent (also in the backend log). sh_particles trace N writes the next N simulated particles to the backend log." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_type",             (void *)h_sh_type,     "Dumps a types (enum/class) fields to the console and copies the text to your clipboard." },

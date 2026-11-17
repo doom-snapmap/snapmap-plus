@@ -44,6 +44,7 @@ static write_fn g_write;
 static origin_fn g_origin;
 static volatile LONG g_moved, g_collided, g_killed, g_children;
 static volatile LONG g_said_local, g_say_local, g_said_planes;
+static volatile LONG g_trace;            /* particles still to be written to the log (sh_particles trace N) */
 
 static void pm_log(const char *fmt, ...)
 {
@@ -106,8 +107,14 @@ static float read_frame(void **context, sh_motion_frame *fr, float eye[3])
 /* A particle's flight to `age`: its birth place and launch by the game's origin function (from `from` when given:
  * a child born at its parent's place), then the stage's simulated motion against the scene's planes. 1 when it died
  * on a surface. `have` says whether planes were used. */
+/* What a traced particle's flight started from (sh_particlemotion_trace). */
+typedef struct pm_start {
+    float p0[3], v0[3], scale;
+    sh_motion_frame fr;
+} pm_start;
+
 static int flight(void **context, const uint8_t *stage, const uint32_t *born, float age, float life,
-                  const float *from, const float *inherit, float p[3], float v[3], int *have)
+                  const float *from, const float *inherit, float p[3], float v[3], int *have, pm_start *start)
 {
     sh_motion m;
     sh_motion_frame fr;
@@ -124,6 +131,12 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     sh_motion_launch(&m, born[5], v0);
     if (from) for (i = 0; i < 3; i++) p0[i] = from[i] + (p0[i] - fr.origin[i]);
     if (inherit) for (i = 0; i < 3; i++) v0[i] += inherit[i];
+    if (start) {
+        memcpy(start->p0, p0, sizeof start->p0);
+        memcpy(start->v0, v0, sizeof start->v0);
+        start->scale = scale;
+        start->fr = fr;
+    }
     if (sh_motion_collides(&m) && (stage[SH_MOTION_STAGE_FLAGS] & SH_MOTION_STAGE_SORTED)) {
         /* world axes: the planes of the emitter's place (asked for, and found on the game thread, when new) */
         if (sh_planes_lookup(fr.origin, fr.z, &planes) && planes.count > 0) *have = 1;
@@ -139,6 +152,27 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
         return 0;
     }
     return sh_motion_run_planes(&m, &fr, born[5], age, life, scale, p0, v0, *have ? &planes : NULL, p, v);
+}
+
+/* One traced particle in the backend log: the stage (its address, count, life, sorted bit), the particle (index,
+ * age, life, seed), what its flight started from (birth place, launch velocity after the launch speed factor and
+ * ball, the emitter's scale, origin and axes the detour read) and where it is (the game's own place, the
+ * simulated place and velocity). Doomforge's particle_motion.run on p0, v0, scale and the frame gives p again. */
+static void trace_line(const uint8_t *stage, const uint32_t *born, float age, float life, const pm_start *s,
+                       const float pe[3], const float p[3], const float v[3], int dead)
+{
+    short count;
+    float maxlife;
+    memcpy(&count, stage + SH_MOTION_STAGE_COUNT, sizeof count);
+    memcpy(&maxlife, stage + SH_MOTION_STAGE_MAXLIFE, sizeof maxlife);
+    pm_log("PARTICLES: trace stage=%p count=%d maxlife=%.4f sorted=%d index=%u age=%.5f life=%.5f seed=%u "
+           "scale=%.5f origin=%.3f,%.3f,%.3f x=%.4f,%.4f,%.4f y=%.4f,%.4f,%.4f z=%.4f,%.4f,%.4f "
+           "p0=%.3f,%.3f,%.3f v0=%.3f,%.3f,%.3f engine=%.3f,%.3f,%.3f p=%.3f,%.3f,%.3f v=%.3f,%.3f,%.3f dead=%d",
+           (const void *)stage, (int)count, maxlife, (stage[SH_MOTION_STAGE_FLAGS] & SH_MOTION_STAGE_SORTED) ? 1 : 0,
+           born[0], age, life, born[5], s->scale, s->fr.origin[0], s->fr.origin[1], s->fr.origin[2],
+           s->fr.x[0], s->fr.x[1], s->fr.x[2], s->fr.y[0], s->fr.y[1], s->fr.y[2], s->fr.z[0], s->fr.z[1], s->fr.z[2],
+           s->p0[0], s->p0[1], s->p0[2], s->v0[0], s->v0[1], s->v0[2], pe[0], pe[1], pe[2], p[0], p[1], p[2],
+           v[0], v[1], v[2], dead);
 }
 
 static void fold(float *verts)          /* a particle that is not there: its quad has no area */
@@ -173,13 +207,14 @@ static int parent_place(void **context, const uint8_t *child, const uint32_t *bo
     memcpy(&prec[3], &x, sizeof x);
     memcpy(&prec[4], &x, sizeof x);
     prec[5] = prec[6] = sh_family_seed(sh_family_salt(fr.origin, parent), p);
-    return flight((void **)pctx, parent, prec, delta, plife, NULL, NULL, at, vel, &have) ? 0 : 1;
+    return flight((void **)pctx, parent, prec, delta, plife, NULL, NULL, at, vel, &have, NULL) ? 0 : 1;
 }
 
 static void move_quad(void **context, const uint8_t *stage, const uint32_t *born, float *verts)
 {
     sh_motion m;
     sh_motion_frame fr;
+    pm_start start;
     float age, life, pe[3], p[3], v[3], eye[3], from[3], pvel[3], inherit[3];
     int i, dead, have, role = sh_family_role(stage), parent = -1;
     memcpy(&age, &born[1], sizeof age);
@@ -194,7 +229,8 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     read_frame(context, &fr, eye);
     origin_at(context, born, age, life, pe);
     dead = flight(context, stage, born, age, life, parent == 1 ? from : NULL, parent == 1 ? inherit : NULL, p, v,
-                  &have);
+                  &have, &start);
+    if (g_trace > 0 && InterlockedDecrement(&g_trace) >= 0) trace_line(stage, born, age, life, &start, pe, p, v, dead);
     sh_motion_place(verts, VERT_STRIDE, *(const int *)(stage + SH_MOTION_STAGE_ORIENTATION) == 3, pe, p, v, eye,
                     m.stretch);
     if (dead) {                          /* Eternal's COLLISION_KILL: the particle is gone */
@@ -232,6 +268,11 @@ static uint64_t write_detour(void **context, void *generation, void **cursor)
         __except (EXCEPTION_EXECUTE_HANDLER) { }
     }
     return n;
+}
+
+void sh_particlemotion_trace(long n)
+{
+    InterlockedExchange(&g_trace, n < 0 ? 0 : (n > 4096 ? 4096 : n));
 }
 
 long sh_particlemotion_moved(void)

@@ -239,6 +239,9 @@ uint32_t sh_family_salt(const float origin[3], const uint8_t *stage);
 float sh_family_inherit(const uint8_t *child);
 
 /* Particles moved since the start (for the test bench). */
+/* Write the next n particles the detour moves to the backend log, one "PARTICLES: trace" line each (at most 4,096;
+ * 0 stops): for comparing the live flight with Doomforge's copy of the arithmetic. */
+void sh_particlemotion_trace(long n);
 long sh_particlemotion_moved(void);
 /* Particles moved against the scene's planes, and particles that died on them, since the start. */
 long sh_particlemotion_collided(void);
