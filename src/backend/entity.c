@@ -355,18 +355,15 @@ void h_sh_spawn(idCmdArgs *a)
         sh_printf("sh_spawn: teleport dispatch failed.\n");
 }
 
-/* MapWriter uses paths relative to base/, forces the extension, and can overwrite
- * existing dumps. Choose a free name and inspect the written file to report its
+/* MapWriter resolves a relative path under base/ and takes an absolute one as it is, forces the extension, and
+ * can overwrite existing dumps. Dumps go under <game dir>\snapmap-plus\ so nothing is written into the game's own
+ * folders: choose a free name there, hand the writer the absolute path and inspect the written file to report its
  * actual destination. Pure path rules live in dumpmap_path.h. */
 static BOOL dumpmap_base_dir(char *out, size_t outcap)
 {
     char exe[MAX_PATH] = {0};
     if (!GetModuleFileNameA(NULL, exe, MAX_PATH)) return FALSE;
-    char *slash = strrchr(exe, '\\');
-    if (!slash) return FALSE;
-    *slash = '\0';
-    _snprintf_s(out, outcap, _TRUNCATE, "%s\\base", exe);
-    return TRUE;
+    return dumpmap_root(exe, out, outcap) ? TRUE : FALSE;
 }
 
 static BOOL dumpmap_file_size(const char *ospath, unsigned long long *size_out)
@@ -428,7 +425,7 @@ void h_sh_dumpmap(idCmdArgs *a)
     const char *path = cmd_argv(a, 1);
     if (path == NULL) {
         sh_printf("You need to provide a mapfile to write to\n");
-        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\base\\%s\\<name>.map\n", DUMPMAP_SUBDIR);
+        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\%s\\%s\\<name>.map\n", DUMPMAP_ROOT, DUMPMAP_SUBDIR);
         return;
     }
     void *gm = get_gamemgr();
@@ -453,29 +450,32 @@ void h_sh_dumpmap(idCmdArgs *a)
     char rel[MAX_PATH]  = {0};
     char os[MAX_PATH]   = {0};
     const char *why = NULL;
-    if (!dumpmap_base_dir(base, sizeof base))
-        base[0] = '\0';                     /* unknown game dir -> no collision check, no full path */
-    if (!dumpmap_resolve(path, base, rel, sizeof rel, os, sizeof os, &why)) {
-        sh_printf("sh_dumpmap: %s.\n", why);
-        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\base\\%s\\<name>.map\n", DUMPMAP_SUBDIR);
+    if (!dumpmap_base_dir(base, sizeof base)) {
+        /* without the game's folder the writer would resolve a relative name under base\: write nothing */
+        sh_printf("sh_dumpmap: the game's folder could not be read, so there is nowhere outside the game's own "
+                  "folders to write the dump; nothing was written.\n");
         return;
     }
-    if (os[0] != '\0')
-        dumpmap_make_dirs(os);
+    if (!dumpmap_resolve(path, base, rel, sizeof rel, os, sizeof os, &why)) {
+        sh_printf("sh_dumpmap: %s.\n", why);
+        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\%s\\%s\\<name>.map\n", DUMPMAP_ROOT, DUMPMAP_SUBDIR);
+        return;
+    }
+    dumpmap_make_dirs(os);
 
     int ok = 0;
-    __try { ok = g_map_writer(map, rel); }
+    __try { ok = g_map_writer(map, os); }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     if (!ok) {
-        sh_printf("Failed to write map file %s\n", rel);
+        sh_printf("Failed to write map file %s\n", os);
         return;
     }
 
     unsigned long long bytes = 0;
-    if (os[0] != '\0' && dumpmap_file_size(os, &bytes))
+    if (dumpmap_file_size(os, &bytes))
         sh_printf("sh_dumpmap: wrote %s (%llu bytes)\n", os, bytes);
     else
-        sh_printf("sh_dumpmap: wrote '%s' (game-relative -- look under <game dir>\\base\\)\n", rel);
+        sh_printf("sh_dumpmap: the writer reported %s written, but the file is not there; please report this.\n", os);
 }
 
 /* Player cheat commands toggle runtime enforcement bits. Reflected properties

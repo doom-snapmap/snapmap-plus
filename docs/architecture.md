@@ -1589,7 +1589,7 @@ block and lighting. The rule, the material keys it reads (`layerstilingfactor`,
 images `blendlayer<i>{albedo,normal,smoothness,height}map`, `layerblendmask`,
 `blendlayer0heightmap` and `multilayerextramap0`/`1` for a layer's specular or
 emissive image) and what it writes into the lighting inputs are documented in
-`src/backend/shaders/multilayer.frag`. A material Eternal draws with its ember
+`src/backend/eternal/shaders/multilayer.frag`. A material Eternal draws with its ember
 (`isember`) also sets `multilayerember`, `multilayerembertiling`,
 `multilayerembernoise` and `multilayeremberhot`: after the blend the program
 burns the surface by the wound cap's blood level and adds the embers, flickered
@@ -1598,7 +1598,7 @@ ember adds no texture), its burnt tile, cap blood and layer-0 emissive image in
 the two extra maps. Everything else is the base program unchanged.
 
 The OpenGL renderer compiles the program from the decl text, its fragment text
-inside `main()`, so `shaders/multilayer.decl.inc` defines macros and templates
+inside `main()`, so `eternal/shaders/multilayer.decl.inc` defines macros and templates
 only, never functions.
 
 Nothing of the game is shipped. Every file of the program's closure (its decl
@@ -1638,7 +1638,7 @@ distance, whether `eternalparticleemissivemap` holds an emissive sheet),
 the explosion's two gradient colours); the shading also reads the game's own
 `projectionmatrixz` and `globalvieworigin`, added to the stage's material
 uniforms, and the program's own `transmap`, `viewdepthmap` and particle light
-atlas samplers. The rule is documented in `src/backend/shaders/eternalparticles.frag`;
+atlas samplers. The rule is documented in `src/backend/eternal/shaders/eternalparticles.frag`;
 `eternalparticles.decl.inc` is the OpenGL text. A liquid stage keeps the game's
 own blood shading.
 
@@ -1744,9 +1744,34 @@ motion, a point, axis or plane attractor, drag toward the emitter, a launch
 ball, a launch speed factor, and a velocity stretch that draws a quad aligned
 to its velocity at its own length times its speed. The forces and the
 integrator are DOOM Eternal's particle simulation commands (its formulas, read
-from its simulation program), so a converted stage moves as it does there;
-collision with the scene's depth is not included. None of the 9,834 CPU stages
-the game ships writes `vectorFieldGPU`, so no stage of the game asks.
+from its simulation program), so a converted stage moves as it does there.
+None of the 9,834 CPU stages the game ships writes `vectorFieldGPU`, so no
+stage of the game asks.
+
+A stage can also collide with the scene (`colorGPU.fadeColor.x`, its
+thickness, over 0). DOOM Eternal tests a particle against the screen's depth
+on the GPU; a CPU particle has no depth, and the particle jobs run off the game
+thread, where the engine's trace is not safe. So the particle jobs ask for
+their emitter's place, the game thread traces it once from the script tick
+(`particlemotion_planes.c`: the surface under it and, for an emitter that does
+not face up, the one behind it, passing through players and demons) and
+publishes the planes in a table the jobs read under a sequence count. Each
+step then runs Eternal's collision test, response and kill against them. The
+test needs the particle's place in the world, so a colliding stage is written
+`isTransparencySorted`, which makes the game build it in world axes; a stage
+that is not, or a map without a mod script, draws its particles without
+collision and the backend log says which.
+
+A stage can be the child of another stage of the same decl, its particles
+born where a parent particle is, as DOOM Eternal's spawned children are (a
+spark's trail). A CPU particle cannot be born at another stage's particle, so
+the product retraces the parent: a parent stage's particles take the product's
+random numbers (from their index and the emitter's place), and child particle
+k is drawn at its own offset from the place parent k mod the parent's count
+had at the child's birth, which the game's spawn timing gives from the two
+stages' counts, spawn windows and time offsets alone. A child whose parent was
+not yet born or already dead is not drawn. The link is
+`systemPropertiesGPU.emissionTime` (`particlemotion.h`).
 
 Two parts of the launch are the product's because the game's keys cannot say
 them. The game multiplies a particle's direction by `speed[0]`, `speed[1]` and
@@ -1758,7 +1783,8 @@ which the game applies to a particle's whole place, is taken out of the launch
 velocity the detour measures and given to the steps, as Eternal's integrator
 has it: the forces see the scaled places and each step moves the particle by
 velocity times step times scale. The game's origin function carries the scale
-only for a stage whose material is transparency sorted; for any other stage it
+only for a stage that is transparency sorted (the stage's own
+`isTransparencySorted` key, off by default); for any other stage it
 answers unscaled, the scale is applied when the model is drawn, and the forces
 that depend on a place see unscaled places.
 
@@ -1790,8 +1816,10 @@ temp file beside the target and rename it there. Every other write, and one
 whose folder cannot be made, is passed through unchanged. The backend log has
 one `CACHE:` line when it is ready.
 
-The blend's Vulkan module and texts are vendored in `modprog_multilayer.c`,
-generated by `node tools/gen_multilayer.js` from `src/backend/shaders/`
+`src/backend/eternal/` holds DOOM Eternal's shading (the multilayer blend and the particle program) behind the general
+derived-program mechanism of `modprog.c`; the radial blur of the post process stays beside it.
+The blend's Vulkan module and texts are vendored in `eternal/modprog_multilayer.c`,
+generated by `node tools/gen_multilayer.js` from `src/backend/eternal/shaders/`
 (glslangValidator compiles the module; `--check`, run by the JavaScript tests,
 needs no compiler and compares the texts). `modprog_test` checks the decl, text
 and module patches on a stand-in program (`tests/fixtures/modprog/lit.frag`),

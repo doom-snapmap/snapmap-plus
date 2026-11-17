@@ -700,9 +700,10 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). Add `-v` to also show each field's byte offset and size. |
 | `sh_validclasses` | List the engine-valid classnames for a given inherit (the same enumerator that feeds the Classname dropdown). |
 | `sh_target_any` | Reveal / re-hide the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette. |
-| `sh_dumpmap` | Dump the current generated `.map` from memory to `<game dir>\base\mapdumps\<name>.map` (debugging). Never overwrites an earlier dump. |
+| `sh_dumpmap` | Dump the current generated `.map` from memory to `<game dir>\snapmap-plus\mapdumps\<name>.map` (debugging), never into the game's own folders. Never overwrites an earlier dump. |
 | `sh_genbmodel` | Generate a bmodel from a `.obj` / `.ase` / `.lwo`. |
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
+| `sh_particles` | Count what the simulated particle motion has drawn since the start: particles moved, moved against the scene's surfaces, died on a surface, child particles drawn at their parent (test bench). |
 | `sh_perf` | Report how much time each Snapmap+ hot path has taken this session: the engine resource opens that pass through the override hook, the engine writing the open map as JSON, the navigation parse, the green preview build, and the session log. `sh_perf reset` starts the counting again. `sh_perf read` times reading the open editor map whole and entity by entity, and estimates the cost of reading only the marked navigation volumes. |
 | `sh_gridsize` | Print the selected Grid Room's size, or `sh_gridsize <x> <y> <z> [instance]` to resize it through the same path as Module Properties. Prints the applied size and the reason any axis was limited or the edit refused. `sh_gridsize templates` lists, for the stock modern room and each resized variant, the module entity templates a loaded room receives (diagnostic). Without an instance it uses the Blueprint selection, then the room whose properties are open. |
 | `sh_event` | The live engine event registry: `sh_event info <name>` prints an event's number, argument format, types and names; `sh_event list [filter]` prints every event (1611 on this build), or those whose line contains the filter. |

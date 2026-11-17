@@ -164,8 +164,14 @@ void sh_script_api_world_register(void);
  * anim_finished). */
 void sh_script_api_frame(void);
 /* Run fn at the end of every sh_script_api_frame (the AI calls finish a
- * forced animation through a via node there). Up to 4; idempotent. */
+ * forced animation through a via node there). Up to 8; idempotent. */
 void sh_script_api_on_frame(void (*fn)(void));
+
+/* One trace of the static world from the game thread (the particle planes,
+ * particlemotion_planes.c): a hit on a player or a demon is passed through
+ * (up to 4 times) so only the world is found. 1 and the hit's end and normal,
+ * 0 for no hit or outside a Play. */
+int sh_script_api_world_trace(const float from[3], const float to[3], float end[3], float normal[3]);
 
 /* The engine's own entity table: the game holds at most
  * SH_SCRIPT_ENGINE_ENTITIES entities at once (MAX_GENTITIES less the world

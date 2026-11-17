@@ -69,7 +69,7 @@ static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "nor
                                          "thickness" };
 #define MP_NINOUT 7
 
-/* The Eternal particle program (shaders/eternalparticles.frag): its material parameters appended to the fragment
+/* The Eternal particle program (eternal/shaders/eternalparticles.frag): its material parameters appended to the fragment
  * stage's material uniforms (the product's four, then two of the game's own render parms the shading reads), its
  * added texture, the module's samplers (the first three bound to the program's own textures), the stage inputs and
  * the program's own uniforms it reads ('h' the material block, 'l' the view block). */
@@ -469,7 +469,7 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
 
 /* --------------------------------------------------------------------------------------------- SPIR-V ---- */
 /* A module as a list of instructions; an instruction's words (opcode word first) point into the input or into
- * an owned copy. Only the opcodes glslang emits for shaders/multilayer.frag need their operand shapes (the
+ * an owned copy. Only the opcodes glslang emits for eternal/shaders/multilayer.frag need their operand shapes (the
  * multilayer module is renumbered whole); the stock module is only searched and amended. */
 
 enum {

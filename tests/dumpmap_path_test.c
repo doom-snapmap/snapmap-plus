@@ -91,6 +91,28 @@ static void test_ospath(void)
     assert(strcmp(o, "D:\\base\\a\\b.map") == 0);
 }
 
+static void test_root(void)
+{
+    char r[260], stem[260], rel[260], o[260];
+
+    /* every dump goes under <game dir>\snapmap-plus, never base\ or any other folder of the game */
+    assert(dumpmap_root("D:\\Games\\DOOM\\DOOMx64vk.exe", r, sizeof r) == 1);
+    assert(strcmp(r, "D:\\Games\\DOOM\\snapmap-plus") == 0);
+    assert(dumpmap_stem("arena", stem, sizeof stem) == 1);
+    dumpmap_candidate(stem, 2, rel, sizeof rel);
+    dumpmap_ospath(r, rel, o, sizeof o);
+    assert(strcmp(o, "D:\\Games\\DOOM\\snapmap-plus\\mapdumps\\arena_2.map") == 0);
+    assert(strstr(o, "\\base\\") == NULL);
+    /* a name that picks its own folder stays under the root too */
+    assert(dumpmap_stem("arena/pass1", stem, sizeof stem) == 1);
+    dumpmap_candidate(stem, 1, rel, sizeof rel);
+    dumpmap_ospath(r, rel, o, sizeof o);
+    assert(strcmp(o, "D:\\Games\\DOOM\\snapmap-plus\\arena\\pass1.map") == 0);
+    /* no folder in the executable's path: no root */
+    assert(dumpmap_root("DOOMx64vk.exe", r, sizeof r) == 0 && r[0] == '\0');
+    assert(dumpmap_root(NULL, r, sizeof r) == 0);
+}
+
 static void test_truncation(void)
 {
     /* a bounded buffer must truncate and stay NUL-terminated, never run off the end */
@@ -111,6 +133,7 @@ int main(void)
     test_stem();
     test_candidate();
     test_ospath();
+    test_root();
     test_truncation();
     printf("dumpmap_path_test: OK\n");
     return 0;
