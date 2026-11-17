@@ -351,7 +351,11 @@ foreach ($t in $tests) {
     # The store tool's path buffers hold any Windows path; its sources link the stack its build gives it.
     if ($t.src -match '\\src\\store\\') { $libs = if ($libs) { "$libs /STACK:67108864" } else { " /link /STACK:67108864" } }
     $objArgs = ($t.objs | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $cmd = "cl /nologo /O2 /MT$($t.cxx) $objArgs /Fe:obj\$($t.name).exe$libs"
+    # The objects go in a response file: a suite that links many sources from a deep checkout passes cmd.exe's
+    # 8,191-character line limit, and cmd then fails before the compiler writes a log.
+    $rsp = Join-Path $obj ($t.name + ".objs.rsp")
+    [System.IO.File]::WriteAllText($rsp, $objArgs)
+    $cmd = "cl /nologo /O2 /MT$($t.cxx) `"@$rsp`" /Fe:obj\$($t.name).exe$libs"
     $record = Join-Path $obj ($t.name + ".link.txt")
     $want = Get-CbLinkRecord $cmd $t.objs
     if (-not (Test-Path $exe) -or -not (Test-Path $record) -or [System.IO.File]::ReadAllText($record) -ne $want) {
