@@ -1574,8 +1574,8 @@ which shows the variant this GPU binds.
 
 #### Multilayer render programs
 
-Snapmap+ provides render programs of its own, `snapmapplus/multilayer/skinvmtr`
-and `snapmapplus/multilayer/skinvmtrwounds` (`modprog.c`, `modprog.h`), which a
+Snapmap+ provides render programs of its own, `snapmapplus/layered/skinvmtr`
+and `snapmapplus/layered/skinvmtrwounds` (`modprog.c`, `modprog.h`), which a
 mod's material names like any program. Each is the game's lit skinned
 virtual-texture program of the same base name with DOOM Eternal's multilayer
 blend added: the material's own layer, read from its virtual-texture pages, is
@@ -1586,7 +1586,7 @@ block and lighting. The rule, the material keys it reads (`layerstilingfactor`,
 images `blendlayer<i>{albedo,normal,smoothness,height}map`, `layerblendmask`,
 `blendlayer0heightmap` and `multilayerextramap0`/`1` for a layer's specular or
 emissive image) and what it writes into the lighting inputs are documented in
-`src/backend/eternal/shaders/multilayer.frag`. A material Eternal draws with its ember
+`src/backend/programs/shaders/layered.rp`. A material Eternal draws with its ember
 (`isember`) also sets `multilayerember`, `multilayerembertiling`,
 `multilayerembernoise` and `multilayeremberhot`: after the blend the program
 burns the surface by the wound cap's blood level and adds the embers, flickered
@@ -1594,9 +1594,17 @@ by the view's own `magnificationclouds` noise (the base program's sampler; the
 ember adds no texture), its burnt tile, cap blood and layer-0 emissive image in
 the two extra maps. Everything else is the base program unchanged.
 
-The OpenGL renderer compiles the program from the decl text, its fragment text
-inside `main()`, so `eternal/shaders/multilayer.decl.inc` defines macros and templates
-only, never functions.
+Each program has one source, an `.rp` file in the render program language: an
+`hlsl_fp_header` section of functions (the engine compiles that section before
+`main()`, so they are real functions) and a `call` section that builds the
+arguments from the stage inputs and render parms and calls them. The OpenGL
+renderer compiles the program from the decl text, which carries both sections as
+written. For Vulkan, `tools/gen_programs.js` translates the same functions to GLSL
+by a few explicit token rules (types, `lerp`, `frac`, `saturate`, `tex2D`,
+`tex2Dlod`, `clip`, `$texture` names), which becomes the cooked program's stage
+text and, compiled, the SPIR-V spliced into the base module; the splice loads
+the arguments from the same inputs and uniforms the call section names (the
+tables in `modprog.c`). `tests/programs_rp_test.js` checks both ends.
 
 Nothing of the game is shipped. Every file of the program's closure (its decl
 and permutation decls, the `.bin` files, the SPIR-V and the render-parm decls of
@@ -1604,8 +1612,8 @@ its keys) is derived in memory from the installed base program when first asked
 for, and `modstock.c` answers for it as installed content in the container
 `snapmapplus`: the closure brings it along as pointers (noted once per bundle),
 the checks above run on it as on any program, the server serves it, and an
-upload never sends it. The decl gains the blend's templates (OpenGL compiles
-that text); the cooked `.bin` gains the blend's parameters after the fragment
+upload never sends it. The decl gains the blend's functions (in an
+`hlsl_fp_header` section) and its call (OpenGL compiles that text); the cooked `.bin` gains the blend's parameters after the fragment
 stage's material uniforms and its 20 textures after the stage's own, its binding
 tables moved past them; the fragment module has the blend's functions spliced in
 with its samplers bound after the program's textures; the vertex stage is the
@@ -1616,7 +1624,7 @@ pointing at the game's files.
 
 #### The DOOM Eternal particle program
 
-`snapmapplus/eternal/uberparticles` (`modprog.c`, the same derivation) is the
+`snapmapplus/particles/uberparticles` (`modprog.c`, the same derivation) is the
 game's `uberParticles`, which every particle material is drawn with once the
 engine remaps `transsortblend`, `particleshighq`, `liquidhighq` and
 `explosionhighq` to it (`decl_useTransparentUberShader`, on by default), with DOOM
@@ -1635,9 +1643,11 @@ distance, whether `eternalparticleemissivemap` holds an emissive sheet),
 the explosion's two gradient colours); the shading also reads the game's own
 `projectionmatrixz` and `globalvieworigin`, added to the stage's material
 uniforms, and the program's own `transmap`, `viewdepthmap` and particle light
-atlas samplers. The rule is documented in `src/backend/eternal/shaders/eternalparticles.frag`;
-`eternalparticles.decl.inc` is the OpenGL text. A liquid stage keeps the game's
+atlas samplers. The rule is documented in `src/backend/programs/shaders/particles.rp`,
+the one source of both renderers' text. A liquid stage keeps the game's
 own blood shading.
+
+The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal/uberparticles` before they stopped naming a source game; both old names are served until 1.0 for mods emitted before the rename (`SH_MODPROG_OLD_PREFIX`, `SH_MODPROG_EP_OLD_PREFIX`), answering with the new name's bytes.
 
 #### Render parm slots are never refused
 
@@ -1764,10 +1774,10 @@ temp file beside the target and rename it there. Every other write, and one
 whose folder cannot be made, is passed through unchanged. The backend log has
 one `CACHE:` line when it is ready.
 
-`src/backend/eternal/` holds DOOM Eternal's shading (the multilayer blend and the particle program) behind the general
+`src/backend/programs/` holds DOOM Eternal's shading (the multilayer blend and the particle program) behind the general
 derived-program mechanism of `modprog.c`.
-The blend's Vulkan module and texts are vendored in `eternal/modprog_multilayer.c`,
-generated by `node tools/gen_multilayer.js` from `src/backend/eternal/shaders/`
+The blend's Vulkan module and texts are vendored in `programs/programs_layered.c`,
+generated by `node tools/gen_programs.js` from `src/backend/programs/shaders/`
 (glslangValidator compiles the module; `--check`, run by the JavaScript tests,
 needs no compiler and compares the texts). `modprog_test` checks the decl, text
 and module patches on a stand-in program (`tests/fixtures/modprog/lit.frag`),

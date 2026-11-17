@@ -1,18 +1,24 @@
 /* modprog.h -- render programs the product derives from the installed game's own.
  *
- * The multilayer programs, snapmapplus/multilayer/<base> for the bases listed in modprog.c (skinvmtr and
+ * The multilayer programs, snapmapplus/layered/<base> for the bases listed in modprog.c (skinvmtr and
  * skinvmtrwounds, the lit skinned virtual-texture programs a ported demon's body, head and wounds draw with), draw
  * DOOM Eternal's MATERIAL_IS_MULTILAYER blend at draw time: the material's own layer from its virtual-texture
  * pages, blended with up to four tiled layers chosen by a mask, each layer image sampled as Eternal samples it.
  * Everything else is the base program unchanged: skinning, page sampling and feedback, lighting, shadows,
- * the wound block, the effects. The blend's rule and what it writes are in eternal/shaders/multilayer.frag.
+ * the wound block, the effects. The blend's rule and what it writes are in programs/shaders/layered.rp.
+ *
+ * Each program has ONE source, an .rp file in the render program language (programs/shaders/): a function section
+ * (hlsl_fp_header) and a call section. tools/gen_programs.js derives from it the OpenGL texts (the two sections as
+ * they are), the Vulkan stage text (the functions translated to GLSL, samplers named as the engine names a
+ * material's textures) and the SPIR-V (the same GLSL, compiled), so the two renderers run one rule.
  *
  * Every file of such a program's closure is derived, when first asked for and then remembered for the process,
- * from the base program's installed files and the product's own sources (eternal/modprog_multilayer.c, generated from
- * eternal/shaders/ by tools/gen_multilayer.js); nothing of the game is shipped:
- *   generated/decls/renderprog/<P>.decl and each permutation's decl: the base's text with the blend's templates
- *     before its CUSTOM_TEXTURE_INPUTS template and MULTILAYER_BLEND( inputs ) as that template's first statement
- *     (the OpenGL renderer compiles this text);
+ * from the base program's installed files and the product's own sources (programs/programs_layered.c, generated from
+ * programs/shaders/ by tools/gen_programs.js); nothing of the game is shipped:
+ *   generated/decls/renderprog/<P>.decl and each permutation's decl: the base's text with the blend's functions in
+ *     an hlsl_fp_header section (before its hlsl_fp section; at the end of its own hlsl_fp_header when it has one)
+ *     and the blend's call statements as its CUSTOM_TEXTURE_INPUTS template's first statements (the OpenGL renderer
+ *     compiles this text);
  *   generated/renderprogs/<P>_pc_vulkan.bin and each permutation's: the base's cooked program with that decl's
  *     checksum, the blend's parameters after the fragment stage's material uniforms, its textures (each with
  *     defaultsampler) after the stage's own, the binding tables moved past them, and the fragment stage text with
@@ -28,12 +34,12 @@
  * 0x141a7bbb0); the blend's 20 bring skinvmtrwounds to exactly 32 (2 vertex, 10 + 20 fragment). OpenGL's 32
  * texture units per stage hold the fragment stage's 30.
  *
- * The particle program, snapmapplus/eternal/uberparticles (the base uberparticles, every particle material's program
+ * The particle program, snapmapplus/particles/uberparticles (the base uberparticles, every particle material's program
  * once the engine remaps transsortblend, particleshighq and explosionhighq to it), draws a CPU particle stage as DOOM
  * Eternal's uberparticles does: its unlit, lit and explosion shading, the near fade and the soft-particle distance,
- * from the same particle vertices and the stage's constants in the material (eternal/shaders/eternalparticles.frag). Its
- * closure is derived the same way: the decl with the shading's templates after the fragment stage's includes and
- * ETERNAL_PARTICLE( result ) after its PREMULTIPLY_ALPHA_BLENDED( result ); the cooked program with the four
+ * from the same particle vertices and the stage's constants in the material (programs/shaders/particles.rp). Its
+ * closure is derived the same way: the decl with the shading's functions in an hlsl_fp_header section and the call
+ * statements after its PREMULTIPLY_ALPHA_BLENDED( result ); the cooked program with the four
  * parameters, projectionmatrixz and globalvieworigin after the fragment stage's material uniforms and the emissive
  * sheet after its textures; the fragment SPIR-V with ep_shade spliced in and called before main returns, replacing
  * the colour the stock shading wrote (it reads the program's own transmap, viewdepthmap and light atlas samplers);
@@ -50,8 +56,14 @@
 #include <stdint.h>
 
 #define SH_MODPROG_CONTAINER "snapmapplus"
-#define SH_MODPROG_PREFIX    "snapmapplus/multilayer/"
-#define SH_MODPROG_EP_PREFIX "snapmapplus/eternal/"
+#define SH_MODPROG_PREFIX    "snapmapplus/layered/"
+#define SH_MODPROG_EP_PREFIX "snapmapplus/particles/"
+
+/* The names these two programs had before they stopped naming a source game. Served until 1.0 for mods emitted
+ * before the rename: sh_modprog_owns and sh_modprog_read answer a path under either with the bytes of the
+ * new-name path; sh_modprog_list lists only the new names. */
+#define SH_MODPROG_OLD_PREFIX    "snapmapplus/multilayer/"
+#define SH_MODPROG_EP_OLD_PREFIX "snapmapplus/eternal/"
 
 /* 1 when `path` (an archive path: '/' separated, any case) is a file the product derives, else 0. */
 int sh_modprog_owns(const char *path);
@@ -82,8 +94,9 @@ const char *sh_modprog_vector_parm(unsigned i);
 
 /* ------------------------------------------------------------------ building blocks (tests) ---- */
 
-/* The multilayer variant of a base program's decl text (its line ends kept), or NULL when the text has no single
- * CUSTOM_TEXTURE_INPUTS template. malloc'd. */
+/* The multilayer variant of a base program's decl text (its line ends kept): the blend's functions in its
+ * hlsl_fp_header section and the call as the first statements of its CUSTOM_TEXTURE_INPUTS template. NULL when the
+ * text has no single CUSTOM_TEXTURE_INPUTS template or no hlsl_fp section. malloc'd. */
 char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len);
 
 /* The base fragment stage text with the blend added: bindings at or after `tex_end` up by `shift`, the
@@ -97,7 +110,7 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
 uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                             size_t *out_words, const char **why);
 
-/* The particle program's building blocks, as the multilayer ones above: the decl with the shading's templates and
+/* The particle program's building blocks, as the multilayer ones above: the decl with the shading's functions and
  * its call; the fragment stage text with bindings at or after `tex_end` up by `shift`, the parameters after the
  * material uniforms, the emissive sheet's sampler before the first input, ep_shade before main and its call at
  * main's end; the fragment module with ep_shade spliced in. NULL (with `why`) when the base is not the shape known. */
@@ -106,11 +119,12 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
 uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why);
 
-/* The generated module and texts (eternal/modprog_multilayer.c). */
+/* The generated module and texts (programs/programs_layered.c). */
 extern const unsigned SH_MODPROG_ML_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_ML_SPIRV[];
 extern const char SH_MODPROG_ML_GLSL[];
-extern const char SH_MODPROG_ML_DECL[];
+extern const char SH_MODPROG_ML_HEADER[];   /* OpenGL: the hlsl_fp_header section's text (no braces) */
+extern const char SH_MODPROG_ML_CALL[];     /* OpenGL: the statements that call it */
 
 /* The blend's material keys, in the order the program reads them (uniforms, then textures). */
 extern const char *const SH_MODPROG_ML_PARMS[];
@@ -118,11 +132,12 @@ extern const unsigned SH_MODPROG_ML_PARM_COUNT;
 extern const char *const SH_MODPROG_ML_TEXTURES[];
 extern const unsigned SH_MODPROG_ML_TEXTURE_COUNT;
 
-/* The particle program's generated module and texts (eternal/modprog_particles.c) and its material keys. */
+/* The particle program's generated module and texts (programs/programs_particles.c) and its material keys. */
 extern const unsigned SH_MODPROG_EP_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_EP_SPIRV[];
 extern const char SH_MODPROG_EP_GLSL[];
-extern const char SH_MODPROG_EP_DECL[];
+extern const char SH_MODPROG_EP_HEADER[];
+extern const char SH_MODPROG_EP_CALL[];
 extern const char *const SH_MODPROG_EP_PARMS[];
 extern const unsigned SH_MODPROG_EP_PARM_COUNT;
 extern const char *const SH_MODPROG_EP_TEXTURES[];

@@ -206,7 +206,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modprog_test.c` covers the multilayer render programs (`modprog.h`): the
   decl and stage-text patches, the SPIR-V splice of the generated blend into a
   stand-in lit program (`fixtures/modprog/lit.frag`, compiled into
-  `modprog_fixture.c` by `tools/gen_multilayer.js`), and the derivation over a
+  `modprog_fixture.c` by `tools/gen_programs.js`), and the derivation over a
   stand-in install: every closure file of both programs and their
   permutations, each `.bin` carrying its decl's MD5fold and each SPIR-V
   header its stage text's, the product render-parm decls, and a damaged base
@@ -216,7 +216,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   stand-in particle stage (`fixtures/modprog/particle.frag`), and with `-Doom`
   its variant of the installed `uberparticles` and its permutation. The
   JavaScript `multilayer_gen_test.js` fails when the generated files are out of
-  date.
+  date, and `programs_rp_test.js` checks that the `.rp` sources translate and compile
+  and that each call block loads what the SPIR-V splice loads. `modprog_test`
+  takes `dump=<dir>` to write the derived decls (to read them with another compiler).
 - `modstock_migrate_test.c` runs the overrides migration over a synthetic
   install and tree: an authored pack and a delivered package whose unchanged
   stock files become pointers, with the counts in each folder's line, the

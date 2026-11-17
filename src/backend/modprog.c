@@ -68,7 +68,7 @@ static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "nor
                                          "thickness" };
 #define MP_NINOUT 7
 
-/* The Eternal particle program (eternal/shaders/eternalparticles.frag): its material parameters appended to the fragment
+/* The Eternal particle program (programs/shaders/particles.rp): its material parameters appended to the fragment
  * stage's material uniforms (the product's four, then two of the game's own render parms the shading reads), its
  * added texture, the module's samplers (the first three bound to the program's own textures), the stage inputs and
  * the program's own uniforms it reads ('h' the material block, 'l' the view block). */
@@ -235,35 +235,121 @@ static unsigned mp_decl_checksum(const char *t, size_t n)
     return sh_mb_md5fold(t, n);
 }
 
+/* `text` (lines ended by '\n') put in `b` one line at a time, each after `prefix` (a blank line stays bare) and
+ * followed by `nl`; with `lead` the line end comes before each line instead, for a block that continues the line
+ * before it and leaves the last line end to the caller. */
+static void mp_put_lines(mp_buf *b, const char *text, const char *prefix, const char *nl, int lead)
+{
+    const char *p = text;
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (lead) mp_puts(b, nl);
+        if (n) { mp_puts(b, prefix); mp_put(b, p, n); }
+        if (!lead) mp_puts(b, nl);
+        p += n + (e ? 1 : 0);
+    }
+}
+
+/* The index of the } that closes the { at t[open], comments skipped; len when it is never closed. */
+static size_t mp_close_brace(const char *t, size_t len, size_t open)
+{
+    size_t i;
+    int depth = 0;
+    for (i = open; i < len; i++) {
+        if (t[i] == '/' && i + 1 < len && t[i + 1] == '/') { while (i + 1 < len && t[i + 1] != '\n') i++; }
+        else if (t[i] == '/' && i + 1 < len && t[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(t[i] == '*' && t[i + 1] == '/')) i++;
+            i++;
+        }
+        else if (t[i] == '{') depth++;
+        else if (t[i] == '}' && !--depth) return i;
+    }
+    return len;
+}
+
+/* 1 when only blanks precede `at` on its line, with the line's start in *from and the blanks' count in *n. */
+static int mp_line_indent(const char *text, const char *at, const char **from, size_t *n)
+{
+    const char *ls = at;
+    while (ls > text && ls[-1] != '\n') ls--;
+    for (*from = ls, *n = 0; ls + *n < at; (*n)++) if (ls[*n] != ' ' && ls[*n] != '\t') return 0;
+    return 1;
+}
+
+/* The decl `text` with the program's functions in its hlsl_fp_header section: a section of their own before its
+ * hlsl_fp section, or, when it has one, at the end of that section (which must close on a line of its own). The
+ * engine compiles the section before main(), so the functions are real functions. NULL when there is no hlsl_fp
+ * section or the base's header cannot be extended. malloc'd. */
+static char *mp_add_header(const char *text, size_t len, const char *header, const char *nl, size_t *out_len)
+{
+    const char *h = mp_find(text, len, "hlsl_fp_header"), *ind;
+    size_t in;
+    char *prefix;
+    mp_buf b = { 0 };
+    if (h) {
+        const char *open = (const char *)memchr(h, '{', len - (size_t)(h - text));
+        size_t close;
+        if (!open) return NULL;
+        close = mp_close_brace(text, len, (size_t)(open - text));
+        if (close >= len || !mp_line_indent(text, text + close, &ind, &in)) return NULL;
+        prefix = (char *)malloc(in + 2);
+        if (!prefix) return NULL;
+        memcpy(prefix, ind, in);
+        memcpy(prefix + in, "\t", 2);
+        mp_put(&b, text, (size_t)(ind - text));
+        mp_put_lines(&b, header, prefix, nl, 0);
+        mp_put(&b, ind, len - (size_t)(ind - text));
+    } else {
+        const char *at = mp_find(text, len, "hlsl_fp {");
+        if (!at || !mp_line_indent(text, at, &ind, &in)) return NULL;
+        prefix = (char *)malloc(in + 2);
+        if (!prefix) return NULL;
+        memcpy(prefix, ind, in);
+        memcpy(prefix + in, "\t", 2);
+        mp_put(&b, text, (size_t)(ind - text));
+        mp_put(&b, ind, in);
+        mp_puts(&b, "hlsl_fp_header {");
+        mp_puts(&b, nl);
+        mp_put_lines(&b, header, prefix, nl, 0);
+        mp_put(&b, ind, in);
+        mp_puts(&b, "}");
+        mp_puts(&b, nl);
+        mp_put(&b, ind, len - (size_t)(ind - text));
+    }
+    free(prefix);
+    return mp_take(&b, out_len);
+}
+
 /* ---------------------------------------------------------------------------------------------- decl ---- */
 
 char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len)
 {
     static const char key[] = "#template CUSTOM_TEXTURE_INPUTS( inputs ) {";
     const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n";
-    const char *k = mp_find(text, len, key), *line, *eol, *p;
+    const char *k = mp_find(text, len, key), *line, *eol;
     mp_buf b = { 0 };
-    size_t nll = strlen(nl);
+    char *call, *ind, *t;
+    size_t n;
     if (!k || mp_find(k + 1, len - (size_t)(k + 1 - text), key)) return NULL;
     line = k;
     while (line > text && line[-1] != '\n') line--;
     eol = mp_find(k, len - (size_t)(k - text), nl);
     if (!eol) return NULL;
-    mp_put(&b, text, (size_t)(line - text));
-    /* the blend's templates, in the base text's line ends */
-    for (p = SH_MODPROG_ML_DECL; *p;) {
-        const char *e = strchr(p, '\n');
-        size_t n = e ? (size_t)(e - p) : strlen(p);
-        mp_put(&b, p, n);
-        mp_put(&b, nl, nll);
-        p += n + (e ? 1 : 0);
-    }
-    mp_put(&b, line, (size_t)(eol - line));
-    mp_put(&b, nl, nll);
-    mp_put(&b, line, (size_t)(k - line));
-    mp_puts(&b, "\tMULTILAYER_BLEND( inputs );");
+    /* the call, as the template's first statements: one tab in from the template's line */
+    if (!(ind = (char *)malloc((size_t)(k - line) + 2))) return NULL;
+    memcpy(ind, line, (size_t)(k - line));
+    memcpy(ind + (k - line), "\t", 2);
+    mp_put(&b, text, (size_t)(eol - text));
+    mp_put_lines(&b, SH_MODPROG_ML_CALL, ind, nl, 1);
     mp_put(&b, eol, len - (size_t)(eol - text));
-    return mp_take(&b, out_len);
+    free(ind);
+    if (!(call = mp_take(&b, &n))) return NULL;
+    /* the functions, in the header section */
+    t = mp_add_header(call, n, SH_MODPROG_ML_HEADER, nl, out_len);
+    free(call);
+    return t;
 }
 
 /* ---------------------------------------------------------------------------------------------- GLSL ---- */
@@ -338,57 +424,33 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
 
 /* --------------------------------------------------------------------------- the Eternal particle texts ---- */
 
-/* `text` with the line `line` inserted after the first line at or after `from` that contains `after`. NULL when
- * either is missing or `after` occurs twice after `from`. */
-static char *mp_insert_after_line(const char *text, size_t len, const char *from, const char *after, const char *line,
-                                  const char *nl, mp_buf *b)
-{
-    const char *f = mp_find(text, len, from), *a, *eol;
-    size_t nll = strlen(nl);
-    if (!f || !(a = mp_find(f, len - (size_t)(f - text), after))) return NULL;
-    if (mp_find(a + 1, len - (size_t)(a + 1 - text), after)) return NULL;
-    if (!(eol = mp_find(a, len - (size_t)(a - text), nl))) return NULL;
-    eol += nll;
-    mp_put(b, text, (size_t)(eol - text));
-    mp_puts(b, line);
-    return (char *)eol;
-}
-
 char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len)
 {
-    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *p, *end = text + len, *rest, *call;
-    mp_buf inc = { 0 }, b = { 0 };
-    char *t;
+    static const char anchor[] = "PREMULTIPLY_ALPHA_BLENDED( result );";
+    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *end = text + len;
+    const char *fp = mp_find(text, len, "hlsl_fp {"), *call, *eol, *ls;
+    mp_buf b = { 0 };
+    char *prefix, *t;
     size_t n;
-    /* the shading's templates, in the base text's line ends */
-    for (p = SH_MODPROG_EP_DECL; *p;) {
-        const char *e = strchr(p, '\n');
-        size_t k = e ? (size_t)(e - p) : strlen(p);
-        mp_put(&inc, p, k);
-        mp_puts(&inc, nl);
-        p += k + (e ? 1 : 0);
-    }
-    if (inc.oom || !inc.p) { free(inc.p); return NULL; }
-    /* after the fragment stage's last include; the call after its premultiply */
-    rest = mp_insert_after_line(text, len, "hlsl_fp {", "#include \"includes/fog.inc\"", inc.p, nl, &b);
-    free(inc.p);
-    if (!rest) { free(b.p); return NULL; }
-    call = mp_find(rest, (size_t)(end - rest), "PREMULTIPLY_ALPHA_BLENDED( result );");
-    if (!call || mp_find(call + 1, (size_t)(end - call - 1), "PREMULTIPLY_ALPHA_BLENDED( result );")) { free(b.p); return NULL; }
-    {
-        const char *eol = mp_find(call, (size_t)(end - call), nl), *ls = call;
-        if (!eol) { free(b.p); return NULL; }
-        while (ls > rest && ls[-1] != '\n') ls--;
-        eol += strlen(nl);
-        mp_put(&b, rest, (size_t)(eol - rest));
-        mp_put(&b, ls, (size_t)(call - ls));
-        mp_puts(&b, "ETERNAL_PARTICLE( result );");
-        mp_puts(&b, nl);
-        mp_put(&b, eol, (size_t)(end - eol));
-    }
-    t = mp_take(&b, &n);
-    if (t && out_len) *out_len = n;
-    return t;
+    if (!fp) return NULL;
+    call = mp_find(fp, (size_t)(end - fp), anchor);
+    if (!call || mp_find(call + 1, (size_t)(end - call - 1), anchor)) return NULL;
+    if (!(eol = mp_find(call, (size_t)(end - call), nl))) return NULL;
+    for (ls = call; ls > fp && ls[-1] != '\n'; ) ls--;
+    eol += strlen(nl);
+    /* the call after the premultiply, at its indentation */
+    if (!(prefix = (char *)malloc((size_t)(call - ls) + 1))) return NULL;
+    memcpy(prefix, ls, (size_t)(call - ls));
+    prefix[call - ls] = 0;
+    mp_put(&b, text, (size_t)(eol - text));
+    mp_put_lines(&b, SH_MODPROG_EP_CALL, prefix, nl, 0);
+    mp_put(&b, eol, (size_t)(end - eol));
+    free(prefix);
+    if (!(t = mp_take(&b, &n))) return NULL;
+    /* the functions, in the header section */
+    prefix = mp_add_header(t, n, SH_MODPROG_EP_HEADER, nl, out_len);
+    free(t);
+    return prefix;
 }
 
 char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
@@ -451,7 +513,7 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
 
 /* --------------------------------------------------------------------------------------------- SPIR-V ---- */
 /* A module as a list of instructions; an instruction's words (opcode word first) point into the input or into
- * an owned copy. Only the opcodes glslang emits for eternal/shaders/multilayer.frag need their operand shapes (the
+ * an owned copy. Only the opcodes glslang emits for programs/shaders/layered.rp need their operand shapes (the
  * multilayer module is renumbered whole); the stock module is only searched and amended. */
 
 enum {
@@ -1402,12 +1464,12 @@ done:
 
 static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
 static const mp_family MP_FAMILIES[] = {
-    { SH_MODPROG_PREFIX, "multilayer version", SH_MODPROG_ML_PARMS, &SH_MODPROG_ML_PARM_COUNT, SH_MODPROG_ML_TEXTURES,
+    { SH_MODPROG_PREFIX, "layered version", SH_MODPROG_ML_PARMS, &SH_MODPROG_ML_PARM_COUNT, SH_MODPROG_ML_TEXTURES,
       &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
-      "its decl has no single CUSTOM_TEXTURE_INPUTS template" },
-    { SH_MODPROG_EP_PREFIX, "DOOM Eternal particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+      "its decl has no single CUSTOM_TEXTURE_INPUTS template, or no hlsl_fp section for the functions" },
+    { SH_MODPROG_EP_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
       &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
-      "its decl's fragment stage does not end in one premultiplied colour after its includes" },
+      "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
@@ -1838,9 +1900,36 @@ static int mp_base_of(const char *path)
     return -1;
 }
 
+/* The old program names (SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX), served until 1.0 for mods emitted before
+ * the rename: a path under one of them, after any of the heads, is rewritten to the same path under the new name
+ * (a malloc'd copy), so the old name answers with the new name's bytes. NULL when the path names neither. */
+static char *mp_canonical(const char *path)
+{
+    static const char *const OLD[2] = { SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX };
+    static const char *const NEW[2] = { SH_MODPROG_PREFIX, SH_MODPROG_EP_PREFIX };
+    size_t h, k;
+    for (h = 0; h < MP_NHEADS; h++) {
+        size_t hn = strlen(MP_HEADS[h]);
+        if (_strnicmp(path, MP_HEADS[h], hn)) continue;
+        for (k = 0; k < 2; k++) {
+            size_t on = strlen(OLD[k]);
+            if (_strnicmp(path + hn, OLD[k], on)) continue;
+            return sh_textf("%.*s%s%s", (int)hn, path, NEW[k], path + hn + on);
+        }
+    }
+    return NULL;
+}
+
 int sh_modprog_owns(const char *path)
 {
-    return path && (mp_parm_of(path) >= 0 || mp_base_of(path) >= 0);
+    char *c;
+    int r;
+    if (!path) return 0;
+    if (mp_parm_of(path) >= 0) return 1;
+    c = mp_canonical(path);
+    r = mp_base_of(c ? c : path) >= 0;
+    free(c);
+    return r;
 }
 
 static unsigned char *mp_heap_copy(const void *p, size_t n)
@@ -1850,13 +1939,25 @@ static unsigned char *mp_heap_copy(const void *p, size_t n)
     return h;
 }
 
+static int mp_read_new(const char *path, unsigned char **bytes, size_t *len);
+
 int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
 {
-    int base, parm, r = SH_MB_STOCK_ABSENT;
-    size_t i;
+    char *c;
+    int r;
     if (bytes) *bytes = NULL;
     if (len) *len = 0;
     if (!path || !bytes || !len) return SH_MB_STOCK_ABSENT;
+    c = mp_canonical(path);
+    r = mp_read_new(c ? c : path, bytes, len);
+    free(c);
+    return r;
+}
+
+static int mp_read_new(const char *path, unsigned char **bytes, size_t *len)
+{
+    int base, parm, r = SH_MB_STOCK_ABSENT;
+    size_t i;
     if ((parm = mp_parm_of(path)) >= 0) {
         size_t t = strlen(MP_PARM_DECLS[parm].text);
         if (!(*bytes = mp_heap_copy(MP_PARM_DECLS[parm].text, t))) return SH_MB_STOCK_UNAVAILABLE;

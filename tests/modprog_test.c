@@ -212,6 +212,31 @@ static void check_module(const uint32_t *w, size_t n, const uint32_t *stock, siz
     for (k = 0; k < 4; k++) (void)k;
 }
 
+/* An old-name path (SH_MODPROG_OLD_PREFIX / SH_MODPROG_EP_OLD_PREFIX) is owned and reads the bytes of the new-name path. */
+static void alias_same(const char *head, const char *new_prefix, const char *old_prefix, const char *tail)
+{
+    char *np = sh_textf("%s%s%s", head, new_prefix, tail), *op = sh_textf("%s%s%s", head, old_prefix, tail);
+    unsigned char *nb = NULL, *ob = NULL;
+    size_t nn = 0, on = 0;
+    int nr = sh_modprog_read(np, &nb, &nn), orr = sh_modprog_read(op, &ob, &on);
+    CHECK(sh_modprog_owns(op));
+    CHECK(nr == SH_MB_STOCK_OK && orr == SH_MB_STOCK_OK && nn == on && nn > 0 && !memcmp(nb, ob, nn));
+    if (nb) HeapFree(GetProcessHeap(), 0, nb);
+    if (ob) HeapFree(GetProcessHeap(), 0, ob);
+    free(np); free(op);
+}
+
+/* dump=<dir>: write each derived decl there (<program>[.perm].decl), to read it with another compiler. */
+static const char *g_dump = NULL;
+static void dump_decl(const char *program, const char *decl_req, const unsigned char *d, size_t n)
+{
+    char path[MAX_PATH];
+    FILE *f;
+    if (!g_dump) return;
+    snprintf(path, sizeof path, "%s\\%s%s.decl", g_dump, program, strstr(decl_req, "permutations") ? ".perm" : "");
+    if ((f = fopen(path, "wb")) != NULL) { fwrite(d, 1, n, f); fclose(f); }
+}
+
 static void check_unit(const char *base, const char *decl_req, const char *bin_req, const char *vreq, const char *freq,
                        const unsigned char *stock_v, size_t stock_vn, const unsigned char *stock_f, size_t stock_fn)
 {
@@ -223,10 +248,18 @@ static void check_unit(const char *base, const char *decl_req, const char *bin_r
     CHECK(sh_modprog_read(vreq, &v, &vn) == SH_MB_STOCK_OK);
     CHECK(sh_modprog_read(freq, &f, &fn) == SH_MB_STOCK_OK);
     if (!d || !b || !v || !f) { fprintf(stderr, "  %s: %s\n", base, sh_modprog_cause()); goto out; }
-    /* the decl: the blend's templates, then the call as the template's first statement */
-    CHECK(strstr((const char *)d, "#template MULTILAYER_BLEND( inputs ) {") != NULL);
-    CHECK(strstr((const char *)d, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {\r\n\t\t\tMULTILAYER_BLEND( inputs );") != NULL ||
-          strstr((const char *)d, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {") != NULL);
+    dump_decl(base, decl_req, d, dn);
+    /* the decl: the blend's functions in an hlsl_fp_header section before hlsl_fp, then the call as the template's
+     * first statements */
+    {
+        const char *hdr = strstr((const char *)d, "hlsl_fp_header {"), *fp = strstr((const char *)d, "hlsl_fp {");
+        const char *tmpl = strstr((const char *)d, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {");
+        const char *call = tmpl ? strstr(tmpl, "float4 mlP[28] = {") : NULL;
+        CHECK(hdr && fp && tmpl && call && hdr < fp && fp < tmpl);
+        CHECK(hdr && strstr(hdr, "void ml_blend(") != NULL && strstr(hdr, "void ml_blend(") < fp);
+        CHECK(call && strstr(call, "ml_blend( inputs.albedo") != NULL);
+        CHECK(!strstr((const char *)d, "#template MULTILAYER_BLEND"));
+    }
     /* the engine's checks */
     CHECK(rd_be32(b) == 0xb68800adu && rd_be32(b + 4) == decl_sum((const char *)d, dn));
     CHECK(sh_mb_rp_stages(b, bn, off, len) == 1);
@@ -264,14 +297,31 @@ static void test_decl(void)
     printf("-- the decl\n");
     CHECK(t && n == strlen(t));
     if (t) {
-        const char *blend = strstr(t, "#template MULTILAYER_BLEND( inputs ) {"), *call = strstr(t, "\tMULTILAYER_BLEND( inputs );");
-        const char *custom = strstr(t, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {");
-        CHECK(blend && custom && call && blend < custom && custom < call);
-        CHECK(strstr(call, "WOUND_BLOCK( inputs );") != NULL);     /* the base's statements stay, after the call */
-        CHECK(strstr(t, "\r\n") && !strstr(t, "\n\n\n") && strstr(t, "inputs.thickness = inputs.lightmap.y;\r\n"));
-        CHECK(!strstr(t, "\r\r"));
+        const char *hdr = strstr(t, "\thlsl_fp_header {\r\n"), *fp = strstr(t, "\thlsl_fp {\r\n");
+        const char *fn = strstr(t, "\t\tvoid ml_blend( inout float3 albedo");
+        const char *custom = strstr(t, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {\r\n");
+        const char *call = custom ? strstr(custom, "\t\t\tfloat4 mlP[28] = {\r\n") : NULL;
+        CHECK(hdr && fn && fp && custom && call && hdr < fn && fn < fp && fp < custom && custom < call);
+        CHECK(hdr && fp && strstr(hdr, "\t}\r\n\thlsl_fp {") != NULL);   /* the section closes before the program's */
+        CHECK(strstr(t, "inputs.thickness, inputs.texCoords, $time.x, mlP, mlE );\r\n\t\t\tWOUND_BLOCK( inputs );") != NULL);
+        CHECK(strstr(t, "\r\n") && !strstr(t, "\n\n\n") && !strstr(t, "\r\r"));
+        CHECK(!strstr(t, "#template MULTILAYER"));
     }
     free(t);
+    {
+        static const char OWN[] = "{\n\thlsl_fp_header {\n\t\tfloat own( float x ) { return x; }\n\t}\n\thlsl_fp {\n"
+            "\t\t#template CUSTOM_TEXTURE_INPUTS( inputs ) {\n\t\t\tWOUND_BLOCK( inputs );\n\t\t}\n\t\t#endtemplate\n\t}\n}";
+        t = sh_modprog_patch_decl(OWN, strlen(OWN), &n);
+        CHECK(t != NULL);
+        if (t) {
+            const char *own = strstr(t, "float own( float x )"), *fn = strstr(t, "\t\tvoid ml_blend( inout float3 albedo");
+            const char *close = strstr(t, "\n\t}\n\thlsl_fp {");
+            CHECK(own && fn && close && own < fn && fn < close);
+            CHECK(!strstr(strstr(t, "hlsl_fp_header") + 1, "hlsl_fp_header"));
+            CHECK(!strchr(t, '\r'));
+        }
+        free(t);
+    }
     /* no template, or two: refused */
     CHECK(sh_modprog_patch_decl("{ hlsl_fp { COMPUTE_SHADING; } }", 32, &n) == NULL);
     u = (char *)malloc(2 * strlen(DECL) + 1);
@@ -340,6 +390,11 @@ static void test_derivation(void)
         check_unit(bases[i], pd, pb, pv, pf, g_vspv.p, g_vspv.n, g_fspv.p, g_fspv.n);
         free(d); free(b); free(v); free(f); free(pd); free(pb); free(pv); free(pf);
     }
+    /* the names the programs had before the rename are served until 1.0: the same bytes as the new name */
+    alias_same("generated/decls/renderprog/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtr.decl");
+    alias_same("generated/renderprogs/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtrwounds_pc_vulkan.bin");
+    alias_same("generated/spirv/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtr.fspv");
+    alias_same("generated/renderprogs/permutations/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtr_0000000000000001.decl");
     /* the render parms the blend reads are product decls; a stock parm is not the product's */
     for (i = 0; i < (int)SH_MODPROG_ML_PARM_COUNT; i++) {
         char *r = sh_textf("generated/decls/renderparm/%s.decl", SH_MODPROG_ML_PARMS[i]);
@@ -421,12 +476,14 @@ static void test_ep_texts(void)
     printf("-- the particle program's decl and stage text\n");
     CHECK(t && n == strlen(t));
     if (t) {
-        const char *fp = strstr(t, "hlsl_fp {"), *tmpl = strstr(t, "#template ETERNAL_PARTICLE( epResult ) {");
-        const char *fog = fp ? strstr(fp, "#include \"includes/fog.inc\"") : NULL;
-        const char *pm = strstr(t, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tETERNAL_PARTICLE( result );\r\n");
-        CHECK(fp && fog && tmpl && pm && fog < tmpl && tmpl < pm);
-        CHECK(strstr(t, "result.position = vertex.position;") < fp);   /* the vertex stage untouched */
-        CHECK(!strstr(t, "\r\r") && strstr(t, "#endtemplate\r\n"));
+        const char *hdr = strstr(t, "\thlsl_fp_header {\r\n"), *fp = strstr(t, "\thlsl_fp {\r\n");
+        const char *fn = strstr(t, "\t\tvoid ep_shade( inout float4 frag");
+        const char *pm = strstr(t, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tfloat4 epV[7] = {\r\n");
+        const char *call = strstr(t, "\t\tep_shade( result.color, epV, epP, epU );\r\n\t}\r\n}");
+        CHECK(hdr && fn && fp && pm && call && hdr < fn && fn < fp && fp < pm && pm < call);
+        CHECK(strstr(t, "result.position = vertex.position;") < hdr);   /* the vertex stage untouched */
+        CHECK(strstr(t, "\t\tresult.color = float4( 1.0 );\r\n\t\tPREMULTIPLY") != NULL);   /* the base's statements stay */
+        CHECK(!strstr(t, "\r\r") && !strstr(t, "#template"));
     }
     free(t);
     /* no premultiply, or two: refused */
@@ -474,8 +531,9 @@ static void check_ep_unit(const char *decl_req, const char *bin_req, const char 
     CHECK(sh_modprog_read(vreq, &v, &vn) == SH_MB_STOCK_OK);
     CHECK(sh_modprog_read(freq, &f, &fn) == SH_MB_STOCK_OK);
     if (!d || !b || !v || !f) { fprintf(stderr, "  uberparticles: %s\n", sh_modprog_cause()); goto out; }
-    CHECK(strstr((const char *)d, "#template ETERNAL_PARTICLE( epResult ) {") != NULL);
-    CHECK(strstr((const char *)d, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tETERNAL_PARTICLE( result );") != NULL);
+    dump_decl("uberparticles", decl_req, d, dn);
+    CHECK(strstr((const char *)d, "hlsl_fp_header {") != NULL && strstr((const char *)d, "void ep_shade(") != NULL);
+    CHECK(strstr((const char *)d, "PREMULTIPLY_ALPHA_BLENDED( result );\r\n\t\tfloat4 epV[7] = {") != NULL);
     CHECK(rd_be32(b) == 0xb68800adu && rd_be32(b + 4) == decl_sum((const char *)d, dn));
     CHECK(sh_mb_rp_stages(b, bn, off, len) == 1);
     CHECK(rd_be32(v) == 4 && rd_be32(v + 4) == sh_mb_md5fold(b + off[0], len[0]) && rd_be32(v + 12) == vn - 16);
@@ -528,6 +586,9 @@ static void test_real_ep(void)
         if (sfb) HeapFree(GetProcessHeap(), 0, sfb);
         free(sd); free(sv); free(sf); free(d); free(b); free(v); free(f);
     }
+    alias_same("generated/decls/renderprog/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.decl");
+    alias_same("generated/renderprogs/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles_pc_vulkan.bin");
+    alias_same("generated/spirv/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.fspv");
     /* the parms the shading adds are the product's; the two it reads from the game stay the game's */
     CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
     CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticleemissivemap.decl"));
@@ -595,6 +656,7 @@ int main(int argc, char **argv)
     const char *doom = NULL;
     int i;
     for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "doom=", 5) && argv[i][5]) doom = argv[i] + 5;
+    for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "dump=", 5) && argv[i][5]) g_dump = argv[i] + 5;
     printf("modprog_test\n");
     test_decl();
     test_glsl();

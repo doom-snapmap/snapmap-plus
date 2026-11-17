@@ -1,7 +1,7 @@
 #version 450 core
 // lit.frag -- modprog_test's stand-in for a lit COMPUTE_SHADING fragment program: the uniform blocks, textures,
 // buffers and lighting inputs the multilayer splice reads, written the way the engine's stage text spells them.
-// Compiled into tests/modprog_fixture.c by tools/gen_multilayer.js.
+// Compiled into tests/modprog_fixture.c by tools/gen_programs.js.
 layout( binding = 5 ) uniform freqHigh_fragmentUniforms_ubo {
 	vec4 usevirtualmapping;
 	vec4 bloommaskscale;
