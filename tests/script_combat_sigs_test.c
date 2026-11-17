@@ -11,6 +11,9 @@
  *     SetPainReaction writes ai +0x5060;
  *   - the FX manager's stop of one action reads the fields the hard stop
  *     rule reads, and its fade branch is the code the rule skips;
+ *   - the FX manager's request of one action reads the fields the sound
+ *     request rule reads, its head and re-arm are as described, and the
+ *     update starts a sound item again and stores its new handle over the old;
  *   - idProjectile's vtable (by its RTTI name) holds Explode at +0xAA0;
  *   - the painType_t, soundChannel_t and fxCondition_t tables are found by
  *     sh_script_combat_enum_find with the names and values the calls use.
@@ -177,6 +180,63 @@ static void check_image(const char *path)
         CHECK(!memcmp(f + SH_FX_STOP_FADE_BRANCH, branch, sizeof branch) && SH_FX_ACTION_FADING == 0x10);
     }
 
+    /* the FX manager's request of one action: its window, the fields it reads, its head and its re-arm; the update
+     * that starts a sound item while the action's started bit is clear and stores the new handle over the old */
+    if (rva[SH_COMBAT_SIG_FX_ACTION_REQUEST]) {
+        const uint8_t *f = base + rva[SH_COMBAT_SIG_FX_ACTION_REQUEST];
+        const uint8_t *u = base + (vk ? 0x16F0240u : 0x16F0BC0u);
+        unsigned flags = 0;
+        int32_t rel;
+        /* the head: requested (bit 0x02), looping, no forced loop restart, not fading (bit 0x10): return */
+        static const uint8_t head[] = {
+            0x8B, 0x03, 0xA8, 0x02, 0x74, 0x14,       /* mov eax, [rbx] ; test al, 2 ; jz rearm */
+            0x80, 0x7F, 0x25, 0x00, 0x74, 0x0E,       /* cmp byte [rdi+0x25], 0 ; jz rearm   looping */
+            0x80, 0x7F, 0x26, 0x00, 0x75, 0x08,       /* cmp byte [rdi+0x26], 0 ; jnz rearm  forceLoopRestart */
+            0xA8, 0x10, 0x0F, 0x84                    /* test al, 0x10 ; jz epilogue */
+        };
+        /* the sound case: the item's sound shader, and the action's started bit */
+        static const uint8_t sound_case[] = {
+            0x49, 0x8B, 0x8E, 0x58, 0x02, 0x00, 0x00, /* mov rcx, [r14+0x258]   soundParms.sound */
+            0x48, 0x85, 0xC9, 0x0F, 0x84              /* test rcx, rcx ; jz */
+        };
+        static const uint8_t sound_started[] = {
+            0x41, 0x8B, 0x04, 0x24, 0xA8, 0x04, 0x0F, 0x85 /* mov eax, [r12] ; test al, 4 ; jnz (already started) */
+        };
+        /* the start: the sound system's start of the shader, its handle stored at action +0xB0 */
+        static const uint8_t sound_store[] = {
+            0x4D, 0x8B, 0x8E, 0x58, 0x02, 0x00, 0x00, /* mov r9, [r14+0x258] */
+            0x48, 0x8D, 0x95, 0x30, 0x02, 0x00, 0x00, /* lea rdx, [rbp+0x230] */
+            0x48, 0x8B, 0xCE, 0x41, 0xFF, 0x52, 0x48, /* mov rcx, rsi ; call [r10+0x48] */
+            0x48, 0x8B, 0x08,                         /* mov rcx, [rax] */
+            0x49, 0x89, 0x8C, 0x24, 0xB0, 0x00, 0x00, 0x00 /* mov [r12+0xB0], rcx */
+        };
+        CHECK(sh_x64_stolen_boundary(f, 64, 14, 48, &flags) == SH_COMBAT_FX_REQUEST_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(f, k_combat_fx_request_prologue, SH_COMBAT_FX_REQUEST_STOLEN));
+        CHECK(!memcmp(f + 0x13, "\x48\x81\xEC\x90\x01\x00\x00\x48\x8B\x05", 10));  /* sub rsp ; the cookie, RIP-relative */
+        CHECK(!memcmp(f + 0x38, "\x48\x69\xF8\x70\x05\x00\x00", 7) && SH_FX_ITEM_SIZE == 0x570);   /* imul rdi, rax, 0x570 */
+        CHECK(!memcmp(f + 0x4C, "\x48\x8B\x41\x18", 4) && SH_FX_MGR_DECL == 0x18);           /* mov rax, [rcx+0x18] */
+        CHECK(!memcmp(f + 0x50, "\x49\x69\xD8\x28\x01\x00\x00", 7) && SH_FX_ACTION_SIZE == 0x128); /* imul rbx, r8, 0x128 */
+        CHECK(!memcmp(f + 0x57, "\x48\x03\xB8\x80\x00\x00\x00", 7) && SH_FX_DECL_ITEMS == 0x80);   /* add rdi, [rax+0x80] */
+        CHECK(!memcmp(f + 0x5E, "\x48\x03\x59\x58", 4) && SH_FX_MGR_ACTIONS == 0x58);        /* add rbx, [rcx+0x58] */
+        CHECK(!memcmp(f + 0x6C, head, sizeof head));
+        CHECK(SH_FX_ACTION_REQUESTED == 0x02 && SH_FX_ITEM_LOOPING == 0x25 && SH_FX_ITEM_RESTART == 0x26
+              && SH_FX_ACTION_FADING == 0x10);
+        memcpy(&rel, f + 0x82, 4);   /* the head's return: the cookie check and the epilogue */
+        CHECK(0x86 + rel == 0x1984);
+        CHECK(!memcmp(f + 0x1984, "\x48\x8B\x4D\xD0\x48\x33\xCC\xE8", 8));
+        CHECK(!memcmp(f + 0x1984 + 12, "\x48\x81\xC4\x90\x01\x00\x00\x41\x5F\x41\x5E\x41\x5D\x5F\x5E\x5B\x5D\xC3", 18));
+        /* the re-arm in place: mov eax,[rbx] ... and eax, ~0x14 ... or eax, 8 ; mov [rbx], eax */
+        CHECK(!memcmp(f + 0x1AC, "\x8B\x03", 2) && !memcmp(f + 0x1B5, "\x83\xE0\xEB", 3)
+              && !memcmp(f + 0x1C0, "\x83\xC8\x08\x89\x03", 5));
+        CHECK(SH_FX_ACTION_STARTED == 0x04 && SH_FX_ACTION_SOUND == 0xB0);
+        /* the update (not detoured): the same prologue in both images, its sound case and the handle store */
+        CHECK(!memcmp(u, "\x48\x8B\xC4\x55\x53\x56\x57\x41\x54\x41\x55\x41\x56\x41\x57\x48\x8D\xA8\x28\xF8\xFF\xFF", 22));
+        CHECK(!memcmp(u + 0x1565, sound_case, sizeof sound_case));
+        CHECK(!memcmp(u + 0x1565 + 0x1B, sound_started, sizeof sound_started));
+        CHECK(!memcmp(u + 0x16FE, sound_store, sizeof sound_store));
+    }
+
     /* the type lookup the state-machine class bridge detours */
     {
         sig_result r;
@@ -270,6 +330,15 @@ static void check_image(const char *path)
         }
         printf("  fxCondition_t: %d conditions\n", k);
         CHECK(k == 577 && found_cinematic);
+        /* fxActionType_t: the item types the hard stop rule names */
+        t = sh_script_combat_enum_find(base, 0, "FX_LIGHT", "FX_PARTICLE", "FX_", &count);
+        CHECK(t != 0 && count > SH_FX_TYPE_SCREEN_OVERLAY);
+        if (t) {
+            CHECK(!strcmp(name_at(base, image_base, t + SH_FX_TYPE_SOUND * 0x18), "FX_SOUND"));
+            CHECK(!strcmp(name_at(base, image_base, t + SH_FX_TYPE_SOUND * 0x18 + 8), "5"));
+            CHECK(!strcmp(name_at(base, image_base, t + SH_FX_TYPE_MODEL * 0x18), "FX_MODEL"));
+            CHECK(!strcmp(name_at(base, image_base, t + SH_FX_TYPE_LIGHT * 0x18), "FX_LIGHT"));
+        }
     }
 }
 

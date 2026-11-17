@@ -54,7 +54,10 @@
  *   fx_hard_stops    a detour of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870:
  *                    manager, action index, time, immediate, recycle), installed at the first call. For an
  *                    action of a named decl it skips the fade the game gives a stopped action where DOOM
- *                    Eternal's stop gives none (see "Hard stops" below); every other stop runs unchanged
+ *                    Eternal's stop gives none (see "Hard stops" below); every other stop runs unchanged.
+ *                    With it a detour of the FX manager's request of one action (VK 0x1416ECC80, GL
+ *                    0x1416ED600: manager, action index and six more, forwarded unchanged): a named decl's
+ *                    sound item already playing is not requested again, as in DOOM Eternal
  *   sound            startSoundShader (200, 'di'): a sound decl on a channel of the entity
  *   tag              getJointHandle / getJointPos / getJointAngle (256 / 259 / 260, the base event
  *                    dispatcher's own cases): the joint in world space
@@ -109,8 +112,8 @@ typedef struct sh_script_combat_engine {
     /* damage a player by the game's own player damage call with an inflictor: 1 done, 0 when the victim is not a
      * player of that class (the caller then sends the entity's damage event) */
     int   (*player_damage)(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3]);
-    /* make the FX manager's stop follow the hard stop rule for the decls named with sh_fx_hard_add: 1 when the
-     * hook is in place, 0 when this executable cannot serve it */
+    /* make the FX manager's stop and its request of a sound item follow the hard stop rule for the decls named
+     * with sh_fx_hard_add: 1 when either hook is in place, 0 when this executable can serve neither */
     int   (*fx_hard_stops)(void);
 } sh_script_combat_engine;
 
@@ -136,13 +139,27 @@ void sh_script_combat_reset(void);
  * while it still waits out its delay is started later with a fade factor
  * below zero, with which a particle draws nothing. fx_hard_stops gives the
  * named decls that rule: the first kinds end at once, and a particle or a
- * light stopped inside its delay ends there and is never started. Names are
- * whole decl names ("mods/<salt>/character/x") or a prefix ending in '/'
- * ("mods/<salt>/": every decl of the mod). The game's own decls are never
- * named, so they keep the game's rule. */
+ * light stopped inside its delay ends there and is never started.
+ *
+ * The same rule covers a request of a sound item while its sound plays. The
+ * game requests the action again in place and starts a second sound in the
+ * next update, keeping only the second one's handle: the first goes on
+ * unstopped, and one that loops in its sound event plays for good. DOOM
+ * Eternal requests an item again only when nothing of it is running, or when
+ * the item allows a restart before its end (the item's byte at +0x26, which
+ * this game names forceLoopRestart). Under fx_hard_stops a request of a
+ * named decl's sound item whose action is requested and has started, with
+ * that byte clear, is not passed to the game; every other request is. A
+ * sound still inside its delay has not started, so the game's own re-arm of
+ * it stays.
+ *
+ * Names are whole decl names ("mods/<salt>/character/x") or a prefix ending
+ * in '/' ("mods/<salt>/": every decl of the mod). The game's own decls are
+ * never named, so they keep the game's rule. */
 #define SH_FX_TYPE_LIGHT           0     /* fxActionType_t of build 13954591 (both renderers) */
 #define SH_FX_TYPE_PARTICLE        1
 #define SH_FX_TYPE_MODEL           4
+#define SH_FX_TYPE_SOUND           5
 #define SH_FX_TYPE_RENDERPARM      9
 #define SH_FX_TYPE_BLUR_RADIAL     13
 #define SH_FX_TYPE_BLUR_GAUSSIAN   14
@@ -151,6 +168,11 @@ void sh_script_combat_reset(void);
  * frame under the rule: `screen_particle` is the item's isScreenPrt, `waiting`
  * says the action's delay has not passed yet. 0: the game's own stop. */
 int  sh_fx_hard_ends(int type, int screen_particle, int waiting);
+/* 1 when a request of an item of this type is not passed to the game under
+ * the rule: a sound item whose action's `flags` say requested and started,
+ * and `restart_before_end` (the item's byte at +0x26) is 0. 0: the game's own
+ * request. */
+int  sh_fx_sound_held(int type, unsigned flags, int restart_before_end);
 /* Name a decl, or every decl under a prefix that ends in '/'. 1 named (or
  * already named), 0 refused (empty, too many, no memory). Any thread. */
 int  sh_fx_hard_add(const char *name);
@@ -220,6 +242,7 @@ enum sh_combat_sig {
     SH_COMBAT_SIG_ENT_STOP_FX,       /* idEntity StopFX(entity, condition, extra): called */
     SH_COMBAT_SIG_PLAYER_DAMAGE,     /* idPlayer::Damage(player, inflictor, attacker, parms, scale, dir, hit): called */
     SH_COMBAT_SIG_FX_ACTION_STOP,    /* idFXManager's stop of one action (manager, index, time, immediate, recycle): detoured */
+    SH_COMBAT_SIG_FX_ACTION_REQUEST, /* idFXManager's request of one action (manager, index, six more): detoured */
     SH_COMBAT_SIG_COUNT
 };
 extern const sig_entry SH_COMBAT_SIGNATURES[];
@@ -251,6 +274,21 @@ static const unsigned char k_combat_fx_stop_prologue[SH_COMBAT_FX_STOP_STOLEN] =
 #define SH_FX_ACTION_REQUESTED    0x02u
 #define SH_FX_ACTION_FADING       0x10u
 #define SH_FX_STOP_FADE_BRANCH    0x90u    /* the function's fade branch (the test compares its bytes) */
+/* The FX manager's request of one action: seven pushes and lea rbp,[rsp-0x90]
+ * (whole, position-independent; the next instruction loads the stack cookie
+ * RIP-relative). */
+#define SH_COMBAT_FX_REQUEST_STOLEN   19
+static const unsigned char k_combat_fx_request_prologue[SH_COMBAT_FX_REQUEST_STOLEN] = {
+    0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x70, 0xFF, 0xFF, 0xFF
+};
+/* What the request reads besides the fields above (its own code, both
+ * renderers; the test compares the bytes): its head returns at once for a
+ * requested, looping, not fading action whose item does not force a loop
+ * restart, and otherwise re-arms the action in place. */
+#define SH_FX_ITEM_LOOPING        0x25u    /* idFXSingleAction: looping */
+#define SH_FX_ITEM_RESTART        0x26u    /*                   forceLoopRestart (DOOM Eternal: allowRestartBeforeEnd) */
+#define SH_FX_ACTION_STARTED      0x04u    /* idFXActionData flags: actually started (a sound: posted or due) */
+#define SH_FX_ACTION_SOUND        0xB0u    /*                 the sound's handle, overwritten at each start */
 
 /* Engine layout the hooks and the calls read (both renderers). */
 #define SH_COMBAT_REC_INFLICTOR   0x000u   /* damage record: idEntity* inflictor */

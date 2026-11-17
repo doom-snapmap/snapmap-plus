@@ -2806,8 +2806,20 @@ damage comes from the world entity, as a trigger's does.
   light still waiting out its delay, it sets the action's fading bit before
   the game's own code runs, which then skips its fade branch and ends and
   clears the action as it does for a second stop. Every other stop, and
-  every decl that was not named, runs unchanged; names are kept for the map
-  the scripts run in); `sound(e, sound,
+  every decl that was not named, runs unchanged. The same call detours the
+  FX manager's request of one action, VK 0x1416ECC80 / GL 0x1416ED600
+  (manager, action index and six more, all forwarded unchanged), 19 whole
+  bytes. The game requests a sound item again while its sound plays by
+  re-arming the action in place; its update then starts a second sound and
+  keeps only the new handle, so the first plays on unstopped, for good when
+  its sound event loops. Eternal requests an item again only when nothing of
+  it runs or the item allows a restart before its end (the item's byte at
+  +0x26, this game's forceLoopRestart). For a named decl's sound item whose
+  action is requested and has started, with that byte clear, the detour
+  returns without calling the game; every other request goes to the game.
+  If only one of the two hooks can be installed the other still serves and
+  one log line says which is missing; names are kept for the map the
+  scripts run in); `sound(e, sound,
   [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
   a named point with a parent joint and its own offset and rotation, found
   as the engine finds aim and focus tags: the model decl's `_info` prop row,
