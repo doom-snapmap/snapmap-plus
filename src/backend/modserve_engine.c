@@ -1147,13 +1147,49 @@ static int me_heap_now(void)
     return id;
 }
 
+/* A load of a resource the product keeps, run with a map's heap selected,
+ * runs in process heap 0 (sh_modserve_kept_load_moves): what it allocates
+ * lives as long as the kept object. Named once per resource, at most 16. */
+static void me_kept_load_note(const void *res, int moved)
+{
+    static const void *seen[16];
+    static int nseen;
+    char name[160];
+    int i;
+    for (i = 0; i < nseen; ++i) if (seen[i] == res) return;
+    if (nseen >= (int)(sizeof seen / sizeof seen[0])) return;
+    seen[nseen++] = res;
+    name[0] = 0;
+    __try {
+        const char *n = *(const char *const *)((const unsigned char *)res + SEDEF_NAME_OFF);
+        if (n) strncpy_s(name, sizeof name, n, _TRUNCATE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { name[0] = 0; }
+    if (moved)
+        me_log("kept resource '%s' loaded again with a map heap selected; loaded in process heap 0, which keeps "
+               "what it allocates as long as the resource", name);
+    else
+        me_log("kept resource '%s' loaded again with a map heap selected and process heap 0 unavailable; what it "
+               "allocates is released with the map", name);
+}
+
 static void me_load_hook(void *res)
 {
-    int depth, kept = 0;
+    int depth, kept = 0, heap, moved = 0;
+    sh_process_heap_scope scope;
     if (me_on_main() != 1) { g_load_orig(res); return; }
-    depth = sh_modserve_attrib_enter(res, me_heap_now(), &kept);
+    heap = me_heap_now();
+    memset(&scope, 0, sizeof scope);
+    if (sh_modserve_kept_load_moves(res, heap)) {
+        moved = sh_process_heap_enter(&g_heap, &scope);
+        me_kept_load_note(res, moved);
+        if (moved) heap = 0;
+    }
+    depth = sh_modserve_attrib_enter(res, heap, &kept);
     __try { g_load_orig(res); }
-    __finally { sh_modserve_attrib_leave(depth); }
+    __finally {
+        sh_modserve_attrib_leave(depth);
+        if (moved && !sh_process_heap_leave(&scope)) me_log("kept resource reload: heap scope did not balance");
+    }
     if (kept) (void)sh_modserve_attrib_keep(res);
 }
 

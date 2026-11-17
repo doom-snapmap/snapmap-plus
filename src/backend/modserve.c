@@ -5967,6 +5967,13 @@ int sh_modserve_kept_has(const void *resource)
     return ms_aset_has(&g_kept, (uintptr_t)resource);
 }
 
+int sh_modserve_kept_load_moves(const void *resource, int heap)
+{
+    const unsigned char *r = (const unsigned char *)resource;
+    if (!r || heap <= 0 || !ms_aset_has(&g_kept, (uintptr_t)r)) return 0;
+    return *(const unsigned *)(r + MS_RES_LEVEL) == 4;
+}
+
 int sh_modserve_attrib_note(const void *parent, const void *child)
 {
     uintptr_t p = (uintptr_t)parent, c = (uintptr_t)child;

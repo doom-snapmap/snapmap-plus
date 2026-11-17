@@ -521,6 +521,14 @@ void sh_modserve_attrib_leave(int depth);
 int  sh_modserve_attrib_depth(void);
 void sh_modserve_attrib_found(void *resource);
 unsigned sh_modserve_left_to_map(char *names, size_t cap);
+/* A kept resource's data lives as long as it is kept. Keepability is decided
+ * when a resource is raised; a resource the product already keeps at level 4
+ * can be loaded again later (a re-parse in place, a load the engine repeats)
+ * with a map's heap selected, and that load's allocations would be released
+ * with the heap while the object stays listed at level 4. 1 when the load of
+ * `resource` with `heap` selected must run in process heap 0 instead: it is
+ * kept, at level 4, and `heap` is a map's (> 0). */
+int  sh_modserve_kept_load_moves(const void *resource, int heap);
 int  sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attrib *out);
 /* Tests: forget everything. */
 void sh_modserve_attrib_reset(void);
