@@ -395,7 +395,7 @@ for ($k = 0; $k -lt $together.Count; $k++) { $codes[$together[$k]] = $c[$k] }
 foreach ($i in $alone) { $codes[$i] = (Invoke-CbParallel @($runJobs[$i]) 1)[0] }
 foreach ($j in $runJobs) { $times[$j.name] = $j.seconds }
 $lines = foreach ($k in $times.Keys) { "{0}`t{1:0.00}" -f $k, $times[$k] }
-[System.IO.File]::WriteAllLines($timesPath, [string[]]$lines)
+[System.IO.File]::WriteAllLines($timesPath, [string[]]@($lines | Where-Object { $_ }))   # none when nothing ran (a compile failure)
 
 for ($i = 0; $i -lt $nativeCount; $i++) {
     $j = $runJobs[$i]
