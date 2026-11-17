@@ -36,6 +36,20 @@
  *   physicsGPU.massVariation                          that drag's radius (units)
  *   systemPropertiesGPU.boundsExpansion  x            launch ball (units / s): a velocity in a random direction,
  *                                                     this size x sqrt(u), added to the particle's own at birth
+ *   systemPropertiesGPU.boundsExpansion  y z          launch speed factor: the velocity the game launches the
+ *                                                     particle with is multiplied by a number drawn between y and
+ *                                                     z, once per particle (both 0: as launched). A stage's three
+ *                                                     speed parms draw apart, so a speed per particle along one
+ *                                                     direction is the stage's speed on all three times this
+ *
+ * The emitter's scale (an fx item's `size`). The game scales a particle's whole place by it: for a stage whose
+ * material is transparency sorted the origin function answers in the world and the scale is in the axes it applies;
+ * for any other stage it answers in the emitter's own axes, unscaled, and the scale is applied when the model is
+ * drawn. The simulation is DOOM Eternal's: the forces see the scaled places, the velocity stays in the stage's own
+ * units and each step moves the particle by velocity x step x scale. So the detour takes the scale out of the launch
+ * velocity it measures and gives it to the steps; where the origin function answers unscaled the scale is 1 and the
+ * forces that depend on a place (the vortex, the noise field, the attractors, the emitter drag) see unscaled
+ * places.
  *
  * The forces are DOOM Eternal's particle simulation commands (its `gpuparticlesimulate` program: vortex, vortex
  * grid, velocity field, brownian, attractor, emitter drag, acceleration, integrate), with its formulas and its
@@ -68,6 +82,7 @@ typedef struct sh_motion {
     float attract_at[3];
     float emitter_drag0, emitter_drag1, emitter_drag_radius;
     float launch;
+    float launch_lo, launch_hi;
 } sh_motion;
 
 /* The emitter a particle belongs to: its origin and its three axes in the world. */
@@ -100,16 +115,21 @@ int sh_motion_asked(const uint8_t *stage);
 /* Read a stage's motion from its fields. */
 void sh_motion_read(const uint8_t *stage, sh_motion *out);
 
-/* Add the stage's launch ball to a particle's launch velocity (the same for the same seed). */
+/* A particle's launch velocity by the stage: times its launch speed factor, plus its launch ball (the same for
+ * the same seed). */
 void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3]);
 
 /* The step a particle of this life is integrated with (seconds). */
 float sh_motion_step(float life);
 
+/* The emitter's scale from the lengths of the three axes the origin function applies: the largest, 1 when they
+ * are not a scale. */
+float sh_motion_scale(const float factors[3]);
+
 /* Where a particle born at p0 with velocity v0 is after `age` seconds, and its velocity there. `seed` is the
- * particle's own; the same arguments always give the same answer. Pure. */
+ * particle's own, `scale` the emitter's; the same arguments always give the same answer. Pure. */
 void sh_motion_run(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
-                   const float p0[3], const float v0[3], float p[3], float v[3]);
+                   float scale, const float p0[3], const float v0[3], float p[3], float v[3]);
 
 /* Move the four vertices of one particle's quad (stride bytes apart, position first) from the game's place
  * `engine_at` to `p`; `aimed` rebuilds the quad along `v` as the game's aimed builder lays it out (far - side,

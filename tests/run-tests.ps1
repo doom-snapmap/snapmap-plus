@@ -202,6 +202,11 @@ $tests += @{ name = "particlemotion_test"; src = 'particlemotion_test.c ..\src\b
 # With images: the particle vertex writer and the origin function at their recorded RVAs, the writer's first
 # call being the origin function, the writer's detour window.
 $tests += @{ name = "particlemotion_sigs_test"; src = 'particlemotion_sigs_test.c ..\src\backend\particlemotion_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Cache writes out of the game folder (cachewrites_rule.c): which of the engine's writes is a cache write, where
+# it goes under the save path, and every path refused.
+$tests += @{ name = "cachewrites_test"; src = 'cachewrites_test.c ..\src\backend\cachewrites_rule.c'; arg = "" }
+# With images: the atomic write at its recorded RVAs and its detour window.
+$tests += @{ name = "cachewrites_sigs_test"; src = 'cachewrites_sigs_test.c ..\src\backend\cachewrites_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Clip events (clip_events_rule.c): the namespace tests, the md6Def reader, the build's rows and every entry it
 # leaves out with its warning, the per-Play registry and the chain rule on fake models.
 $tests += @{ name = "clip_events_test"; src = 'clip_events_test.c ..\src\backend\clip_events_rule.c ..\src\backend\mp_json.c'; arg = "" }
@@ -259,7 +264,7 @@ $tests += @{ name = "script_node_test"; src = 'script_node_test.c ..\src\backend
 $tests += @{ name = "modvt_test"; src = 'modvt_test.c ..\src\backend\modvt.c ..\src\backend\modserve.c ..\src\backend\modstore.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\script\script_sdk_lua.c ..\src\backend\script\script_node_row.c ..\src\backend\strkeys.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\sha256.c'; defs = '/DSH_MODVT_PURE /DSH_MODSERVE_PURE /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib ole32.lib'; arg = $identityImages }
 $tests += @{ name = "native_slots_test"; src = 'native_slots_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Every fixed detour window against the images: boundary and relative operands.
-$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\postfx_sigs.c ..\src\backend\clip_events_sigs.c ..\src\backend\particlemotion_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
+$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\postfx_sigs.c ..\src\backend\clip_events_sigs.c ..\src\backend\particlemotion_sigs.c ..\src\backend\cachewrites_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
 # The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced
 # it (CI builds first); with images, also their XInput imports.
 $proxyDir = Join-Path (Resolve-Path (Join-Path $here '..')).Path 'build'

@@ -57,6 +57,12 @@ int sh_fx_hard_ends(int type, int screen_particle, int waiting)
     }
 }
 
+int sh_fx_sound_held(int type, unsigned flags, int restart_before_end)
+{
+    const unsigned playing = SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED;
+    return type == SH_FX_TYPE_SOUND && (flags & playing) == playing && !restart_before_end;
+}
+
 static int fx_hard_matches(const char *entry, const char *name)
 {
     size_t n = strlen(entry);
@@ -1279,7 +1285,78 @@ static void fx_action_stop_detour(void *mgr, int index, int now, unsigned char i
     g_fx_stop_orig(mgr, index, now, immediate, recycle);
 }
 
-static int c_fx_hard_stops(void)
+/* The FX manager's request of one action, eight arguments (four in registers,
+ * four on the stack), all forwarded unchanged. A request of a sound item of a
+ * decl named with fx_hard_stops whose sound is playing is not passed on
+ * (sh_fx_sound_held): the game would re-arm the action and start a second
+ * sound over the first, which it never stops. */
+typedef void (*fx_action_request_fn)(void *mgr, intptr_t index, void *a3, void *a4, intptr_t a5, intptr_t a6,
+                                     void *a7, intptr_t a8);
+static fx_action_request_fn g_fx_request_target, g_fx_request_orig;
+static int g_fx_request_failed;
+
+static void fx_action_request_detour(void *mgr, intptr_t index, void *a3, void *a4, intptr_t a5, intptr_t a6,
+                                     void *a7, intptr_t a8)
+{
+    int i = (int)index;
+    if (g_fx_hard_n && mgr && i >= 0) {
+        int held = 0;
+        __try {
+            const uint8_t *decl = *(const uint8_t * const *)((const uint8_t *)mgr + SH_FX_MGR_DECL);
+            const uint8_t *acts = *(const uint8_t * const *)((const uint8_t *)mgr + SH_FX_MGR_ACTIONS);
+            if (decl && acts && i < *(const int *)(decl + SH_FX_DECL_COUNT)) {
+                const uint8_t *item = *(const uint8_t * const *)(decl + SH_FX_DECL_ITEMS) + (size_t)i * SH_FX_ITEM_SIZE;
+                const uint8_t *act = acts + (size_t)i * SH_FX_ACTION_SIZE;
+                if (sh_fx_sound_held(*(const int *)(item + SH_FX_ITEM_TYPE), *(const uint32_t *)(act + SH_FX_ACTION_FLAGS),
+                                     item[SH_FX_ITEM_RESTART])
+                    && sh_fx_hard_is(*(const char * const *)(decl + SH_COMBAT_DECL_NAME)))
+                    held = 1;
+            }
+        } __except (av_only(GetExceptionCode())) { held = 0; }
+        if (held) return;
+    }
+    g_fx_request_orig(mgr, index, a3, a4, a5, a6, a7, a8);
+}
+
+/* The request hook, once per session; a failure leaves the stop hook as it is. */
+static int fx_request_hook(void)
+{
+    void *tramp;
+    if (g_fx_request_orig && hook_is_installed((void *)g_fx_request_orig)) return 1;
+    if (g_fx_request_failed) return 0;
+    if (!g_fx_request_target) {
+        g_fx_request_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session: the game function "
+                   "it needs was not found in this executable.");
+        return 0;
+    }
+    if (memcmp((const void *)g_fx_request_target, k_combat_fx_request_prologue, SH_COMBAT_FX_REQUEST_STOLEN)) {
+        g_fx_request_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session: the game function "
+                   "it needs is not the expected one (another tool may have changed it).");
+        return 0;
+    }
+    tramp = hook_prepare((void *)g_fx_request_target, (void *)fx_action_request_detour, SH_COMBAT_FX_REQUEST_STOLEN);
+    if (!tramp) {
+        g_fx_request_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session; the hook could not "
+                   "be prepared (%s).", hook_last_failure());
+        return 0;
+    }
+    g_fx_request_orig = (fx_action_request_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_fx_request_orig = NULL;
+        g_fx_request_failed = 1;
+        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session; the hook could not "
+                   "be installed.");
+        return 0;
+    }
+    combat_log("SCRIPTS: fx_hard_stops request hook installed at %p", (void *)g_fx_request_target);
+    return 1;
+}
+
+/* The stop hook, once per session. */
+static int fx_stop_hook(void)
 {
     void *tramp;
     if (g_fx_stop_orig && hook_is_installed((void *)g_fx_stop_orig)) return 1;
@@ -1306,6 +1383,13 @@ static int c_fx_hard_stops(void)
     }
     combat_log("SCRIPTS: fx_hard_stops hook installed at %p", (void *)g_fx_stop_target);
     return 1;
+}
+
+static int c_fx_hard_stops(void)
+{
+    int stop = fx_stop_hook();
+    int request = fx_request_hook();
+    return stop || request;
 }
 
 static void *clean(const sig_result *r, size_t n, const char *name)
@@ -1362,7 +1446,9 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
         combat_off("the game's entity effect calls were not found in this executable, so fx(e, condition) and "
                    "fx_stop(e, condition) do nothing on an effect entity");
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_FX_ACTION_STOP], &r) == SIG_OK)
-        g_fx_stop_target = (fx_action_stop_fn)r.addr;   /* without it fx_hard_stops answers false */
+        g_fx_stop_target = (fx_action_stop_fn)r.addr;   /* without it and the request fx_hard_stops answers false */
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_FX_ACTION_REQUEST], &r) == SIG_OK)
+        g_fx_request_target = (fx_action_request_fn)r.addr;   /* without it sound requests stay the game's */
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
     g_decl_register = clean(results, count, "DeclRegisterFile");
     g_decl_type = (type_fn)clean(results, count, "DeclTypeByName");
