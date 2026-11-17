@@ -1713,8 +1713,13 @@ void sh_modpublished_poll(void)
         int refused = sh_modmanifest_load_refusal(&refusal);
         g_notes_held = 0;
         (void)sh_modmanifest_load_notes_flush(1);
-        /* The editor cannot open the map: the player is told why, in words. */
-        if (refused && refusal) pub_notice(refusal);
+        /* The editor cannot open the map: the player is told why, in words,
+         * and the engine's own "damaged" notice for the same failed load is
+         * dismissed: the map is sound. */
+        if (refused && refusal) {
+            if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
+            pub_notice(refusal);
+        }
         free(refusal);
     }
     if (h->state == HOLD_IDLE && !g_notice && !g_notice_ticket && !g_orphans) return;
@@ -1838,6 +1843,7 @@ const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "engine_dialog.h"
+#include "../fault_shield/recovery.h"   /* shield_note_refused_load: a map the editor cannot open is sound */
 #include "modserve.h"
 #include "modstore.h"
 #include "modpublish.h" /* sh_modpublish_item_linked: an item this machine published */
@@ -2509,13 +2515,15 @@ static void eng_launch_refused(void *c, int hook)
     }
 }
 
+static void eng_refused_load(void *c) { (void)c; shield_note_refused_load(); }
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
-    eng_served_scripts, eng_progress, eng_fetch_cause
+    eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load
 };
 
 /* ------------------------------------------------------------ detours */

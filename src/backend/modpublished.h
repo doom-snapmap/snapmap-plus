@@ -336,6 +336,11 @@ typedef struct sh_modpub_ops {
      * store's sentence, or why the downloaded mod could not be installed), in
      * *out (malloc'd), else 0. NULL counts as none. */
     int  (*fetch_cause)(void *c, const char *hash, char **out);
+    /* The editor could not open a map because a mod one of its entities uses
+     * is not installed: the map is sound, so the engine's own "damaged" notice
+     * and its offer to replace the map with its published version are
+     * dismissed (recovery.h shield_note_refused_load). NULL counts as none. */
+    void (*refused_load)(void *c);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it
