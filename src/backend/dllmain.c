@@ -19,6 +19,7 @@
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
 #include "../fault_shield/serialized_entities_guard.h"
+#include "../fault_shield/static_model_guard.h"
 #include "../fault_shield/load_screen_stop.h"
 #include "strids.h"
 #include "overrides.h"
@@ -175,6 +176,7 @@ static void install_features(const sig_result *results, size_t db)
      * Their implementations define the engine-layout checks and recovery limits. */
     sh_evwire_guard_install(g_doom_base, results, db);
     sh_interactable_guard_install(g_doom_base, results, db);
+    sh_static_model_guard_install(g_doom_base, results, db);
     sh_serialized_entities_guard_install(results, db);
     /* Stop a failed map load's loading screen before the engine returns to the menu;
      * while it is armed the shield recovers faults during a load (redirect_policy.h). */

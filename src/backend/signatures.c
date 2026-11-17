@@ -971,6 +971,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 C7 45 80 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 "
       "0F 29 78 B8 44 0F 29 40 A8 48 8B 05 ?? ?? ?? ??",
       0x921AC0u, 0x920BD0u },
+    { "StaticModelUpdate",  /* idRenderModelStatic vtable +0x78: rebuild or refresh a static render
+                             * model's copy of its backing static model's surfaces. Head through the
+                             * cookie load, the backing test and the dead-surface walk; the counter
+                             * compare (+0x3E2) and the list LEA (+0x3FA) are checked at install
+                             * (static_model_guard.c). Same bytes and offsets on both renderers. */
+      "40 57 48 81 EC 10 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 "
+      "48 83 B9 90 0E 00 00 00 48 8B F9 75 07 32 C0 E9 14 07 00 00 "
+      "48 89 9C 24 28 01 00 00 8B 99 00 0B 00 00 83 EB 01",
+      0x15DD990u, 0x15DEA40u },
     { "DeclResourceProbe",  /* Decl existence probe at vtable +0x78; validate the method by signature. */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
