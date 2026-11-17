@@ -36,6 +36,7 @@
 #include "vt_harness.h"
 #include "prefab_mods.h"
 #include "script/script_console.h"
+#include "particlemotion.h"
 
 /* Engine call contracts. */
 
@@ -1622,6 +1623,15 @@ static void h_sh_perf(idCmdArgs *a)
     sh_perf_report(sh_printf);
 }
 
+/* What the simulated particle motion has drawn since the start (particlemotion.h): for the test bench. */
+static void h_sh_particles(idCmdArgs *a)
+{
+    (void)a;
+    sh_printf("particles moved %ld, against the scene's planes %ld, died on a surface %ld, children at a parent %ld\n",
+              sh_particlemotion_moved(), sh_particlemotion_collided(), sh_particlemotion_killed(),
+              sh_particlemotion_children());
+}
+
 /* Resize the selected Grid Room through the inspector's own path (format
  * clamp, boundary fit, native edit, read back). Prints the size and the
  * adapter's sentence for the edit: applied, unchanged, limited or refused. */
@@ -1687,6 +1697,7 @@ static void h_sh_overrides_off(idCmdArgs *a)
 #endif
 
 static const cmd_entry CMD_TABLE[] = {
+    { "sh_particles",         (void *)h_sh_particles, "What Snapmap+'s simulated particle motion has drawn since the start: particles moved, against the scene's surfaces, died on a surface, children drawn at their parent." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_type",             (void *)h_sh_type,     "Dumps a types (enum/class) fields to the console and copies the text to your clipboard." },
