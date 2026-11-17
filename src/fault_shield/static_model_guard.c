@@ -29,6 +29,7 @@
 #include "fault_record.h"
 #include "hook.h"
 #include "../backend/backend_log.h"
+#include "../backend/process_heap_scope.h"
 
 typedef uint64_t (*smu_fn)(void *self);
 typedef void *(*materialize_fn)(void *list, const char *name, char make_default, char quiet);
@@ -292,5 +293,130 @@ int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *
     }
     smg_log("static-model-guard: armed -- static render models are drawn empty rather than built from a "
             "surface table that is not a static model's");
+    return 1;
+}
+
+/* ------------------------------------------------------------------------
+ * A session static model reloads its surfaces in process heap 0.
+ *
+ * A refcounted static model (its byte +0x68 set) frees its surfaces when its
+ * reference count falls to zero and loads them again when the count next
+ * rises: IncReferenceCount ("StaticModelIncRef") calls the model's own load
+ * (vtable +0x40) directly, not through ResourceGenericLoad, and that load
+ * allocates the surface table and geometry from the current heap. The
+ * editor's map reloads run with a map heap selected, and the next Play load
+ * releases that heap; a model at level 4 is not purged then, so it stays
+ * listed with a freed table, and the next static render model built from it
+ * faults (R-CR1: the door cap models/snapmaps/door_caps/cap_05.lwo, level 4,
+ * refcounted). So when such a reload is about to run for a level-4 model with
+ * a map heap selected, it runs inside process heap 0, where the model lives.
+ * ------------------------------------------------------------------------ */
+typedef void (*incref_fn)(void *model);
+static incref_fn          g_orig_incref;
+static sh_process_heap_api g_heap_api;
+static volatile LONG      g_incref_moves;
+static uintptr_t          g_incref_rva;
+
+long sh_static_model_heap_moves(void) { return g_incref_moves; }
+
+/* The heap the engine allocates from with heap -1 on this thread: idMemLocal's
+ * stack top (ids at +0x44, depth at +0xC4), 0 when empty, -1 unreadable. */
+static int smh_heap_now(void)
+{
+    const uint8_t *self;
+    int depth;
+    if (!g_heap_api.get) return -1;
+    __try {
+        self = (const uint8_t *)g_heap_api.get();
+        if (!self) return -1;
+        depth = *(const int *)(self + 0xC4);
+        if (depth < 1 || depth > 32) return 0;
+        return *(const int *)(self + 0x44 + (depth - 1) * 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+/* 1 when IncReferenceCount on `model` is about to reload a level-4 model's
+ * surfaces with heap `heap` selected (> 0, a map's). */
+static int smh_reload_moves(const uint8_t *model, int heap)
+{
+    __try {
+        return heap > 0 && *(const uint8_t *)(model + SM_REFCOUNTED_OFF) &&
+               *(const int *)(model + SM_SURFACE_COUNT_OFF) == 0 && *(const int *)(model + SM_DECLARED_OFF) > 0 &&
+               *(const unsigned *)(model + RES_LEVEL_OFF) == 4;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static void smh_note(const uint8_t *model)
+{
+    char name[160], m[320];
+    LONG n = InterlockedIncrement(&g_incref_moves);
+    if (n > SMG_LOG_MAX) return;
+    smg_name(model, name, sizeof name);
+    _snprintf_s(m, sizeof m, _TRUNCATE,
+        "static-model-heap: model '%s' reloads its surfaces with a map heap selected; loaded in process heap 0, "
+        "where the session model lives", name);
+    {
+        shield_fault f = { "load", -1, m, g_incref_rva, (uintptr_t)model };
+        shield_emit(&f);
+    }
+    backend_log(m);
+}
+
+static void sh_incref_detour(void *model)
+{
+    sh_process_heap_scope scope;
+    int scoped = 0;
+    memset(&scope, 0, sizeof scope);
+    if (model && smh_reload_moves((const uint8_t *)model, smh_heap_now())) {
+        scoped = sh_process_heap_enter(&g_heap_api, &scope);
+        if (scoped) smh_note((const uint8_t *)model);
+    }
+    if (!scoped) { g_orig_incref(model); return; }
+    __try { g_orig_incref(model); }    /* __finally does not catch: the engine's throws still unwind */
+    __finally {
+        if (!sh_process_heap_leave(&scope)) backend_log("static-model-heap: heap scope did not balance");
+    }
+}
+
+int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_result *results, size_t count)
+{
+    static const uint8_t head[] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x60,
+                                    0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF };
+    const uint8_t *target;
+    void *tramp;
+    int same = 0;
+    if (!module_base || !results) return 0;
+    if (g_orig_incref) {
+        if (hook_is_installed((void *)g_orig_incref)) return 1;
+        if (!hook_unpatch((void *)g_orig_incref)) return 0;
+        g_orig_incref = NULL;
+    }
+    target = (const uint8_t *)sig_addr_by_name(results, count, "StaticModelIncRef");
+    g_incref_rva = target ? (uintptr_t)(target - module_base) : 0;
+    if (!target || !sh_process_heap_bind(&g_heap_api, results, count, module_base)) {
+        backend_log("static-model-heap: StaticModelIncRef or the heap stack is unresolved on this build -- NOT installed");
+        return 0;
+    }
+    __try { same = !memcmp(target, head, sizeof head); } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    if (!same) {
+        backend_log("static-model-heap: StaticModelIncRef's head differs -- NOT installed");
+        return 0;
+    }
+    tramp = hook_prepare((void *)target, (void *)sh_incref_detour, SMI_STOLEN);
+    if (!tramp) {
+        backend_log("static-model-heap: trampoline preparation failed -- NOT installed");
+        return 0;
+    }
+    g_orig_incref = (incref_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_orig_incref = NULL;
+        backend_log("static-model-heap: commit failed; retained callbacks require restoration");
+        return 0;
+    }
+    {
+        shield_fault f = { "load", -1, "static-model-heap: armed -- a session static model reloads its surfaces in "
+                           "process heap 0", g_incref_rva, 0 };
+        shield_emit(&f);
+    }
     return 1;
 }

@@ -139,5 +139,9 @@
 #define RES_STATE_OFF          0x2Cu      /* resource: state bits */
 #define SM_REFCOUNT_OFF        0x64u      /* idStaticModel: reference count (refcounted models) */
 #define SM_REFCOUNTED_OFF      0x68u      /* idStaticModel: byte, nonzero = geometry follows the count */
+#define SM_DECLARED_OFF        0x6Cu      /* int: surfaces the model declares; IncRef reloads when > 0 */
+/* IncReferenceCount ("StaticModelIncRef", VK 0x17AD640 / GL 0x17AEA00): PUSH RBX; SUB RSP,0x60;
+ * MOV [RSP+0x20],-2 -- 15 position-independent bytes before the cookie load. */
+#define SMI_STOLEN             15u
 
 #endif /* SHIELD_ENGINE_LAYOUT_H */

@@ -980,6 +980,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 83 B9 90 0E 00 00 00 48 8B F9 75 07 32 C0 E9 14 07 00 00 "
       "48 89 9C 24 28 01 00 00 8B 99 00 0B 00 00 83 EB 01",
       0x15DD990u, 0x15DEA40u },
+    { "StaticModelIncRef",  /* idStaticModel IncReferenceCount: a refcounted model with no surfaces and a
+                             * declared count reloads them through its vtable +0x40 load, then counts.
+                             * Detoured over its 15-byte head (static_model_guard.c). */
+      "40 53 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 "
+      "48 8B D9 80 79 68 00 74 4F 83 79 78 00 75 46 83 79 6C 00 7E 40 48 8B 0D ?? ?? ?? ?? "
+      "48 8B 01 33 D2 FF 50 48",
+      0x17AD640u, 0x17AEA00u },
     { "DeclResourceProbe",  /* Decl existence probe at vtable +0x78; validate the method by signature. */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",

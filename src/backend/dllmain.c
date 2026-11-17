@@ -177,6 +177,7 @@ static void install_features(const sig_result *results, size_t db)
     sh_evwire_guard_install(g_doom_base, results, db);
     sh_interactable_guard_install(g_doom_base, results, db);
     sh_static_model_guard_install(g_doom_base, results, db);
+    sh_static_model_heap_rule_install(g_doom_base, results, db);
     sh_serialized_entities_guard_install(results, db);
     /* Stop a failed map load's loading screen before the engine returns to the menu;
      * while it is armed the shield recovers faults during a load (redirect_policy.h). */
