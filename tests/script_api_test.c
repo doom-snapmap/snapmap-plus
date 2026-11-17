@@ -12,7 +12,8 @@
  * subweb a bare state name takes) and on other entities (the stock events);
  * anim_current, anim_event and anim_finished from the node observed each
  * frame; view_angle_to on a player's aim and an entity's facing; now() is
- * the time the tick passes. */
+ * the time the tick passes; tint and glow: the three lerpRenderParmFrom
+ * events of a request, the look kept between requests, the refusals. */
 #include "heap_out.h"
 #include <windows.h>
 #include <math.h>
@@ -142,6 +143,7 @@ static int f_event(void *ent, const char *name, const sh_script_earg *a, int n, 
         case 'f': off += _snprintf_s(line + off, sizeof line - off, _TRUNCATE, "%s%g", sep, a[i].f); break;
         case 'v': off += _snprintf_s(line + off, sizeof line - off, _TRUNCATE, "%s%g %g %g", sep, a[i].v[0], a[i].v[1], a[i].v[2]); break;
         case 's': case '1': off += _snprintf_s(line + off, sizeof line - off, _TRUNCATE, "%s'%s'", sep, a[i].s); break;
+        case 'd': off += _snprintf_s(line + off, sizeof line - off, _TRUNCATE, "%s%s", sep, (const char *)a[i].p); break;
         default: off += _snprintf_s(line + off, sizeof line - off, _TRUNCATE, "%s?", sep); break;
         }
     }
@@ -205,6 +207,18 @@ static int f_trace(const float a[3], const float b[3], uint32_t ignore, sh_scrip
 }
 
 static int f_time(int *ms) { *ms = g_ms; return 1; }
+
+/* The game's render parm decls (the fake's decl is its name). A type or name it does not know is not found;
+ * g_missing_parm names one the fake lacks. */
+static const char *g_missing_parm;
+static void *f_decl(const char *type, const char *name)
+{
+    static const char *const parms[] = { "color", "bloomcolor", "highlightcolor" };
+    size_t i;
+    if (strcmp(type, "renderParm") || (g_missing_parm && !strcmp(g_missing_parm, name))) return NULL;
+    for (i = 0; i < sizeof parms / sizeof parms[0]; i++) if (!strcmp(parms[i], name)) return (void *)parms[i];
+    return NULL;
+}
 
 /* The floor for nav_ground: z 0 everywhere, a slope too steep to stand on
  * past x 1000, nothing at all below x -1000. */
@@ -695,6 +709,73 @@ static void test_trace_as_demon(void)
     sh_script_api_set_engine(&k_engine);
 }
 
+/* tint and glow: one lerpRenderParmFrom per parm from the look the entity has to the look it is given. */
+static void test_tint(void)
+{
+    sh_script_engine with = k_engine;
+    with.decl = f_decl;
+    sh_script_api_set_engine(&with);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  print('tinted', ent(1):tint(2, 0.5, 1))\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "tinted\ttrue"));
+    /* the instant change is a fade of 1 ms from the entity's own look (color, bloomcolor, highlightcolor) */
+    CHECK(has(g_events, "lerpRenderParmFrom(color,1 1 1,1,2 0.5 1,1,1);"
+                        "lerpRenderParmFrom(bloomcolor,1 1 1,1,1 1 1,1,1);"
+                        "lerpRenderParmFrom(highlightcolor,0 0 0,0,1 -0.5 0,0,1);"));
+    /* glow after tint, over two seconds, the tint kept as the target; a later request starts where the fade is */
+    run("api = 1\n"
+        "local done = false\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local imp = ent(1)\n"
+        "  imp:tint(0.5, 0.5, 0.5)\n"
+        "  imp:glow(1, 0, 0, 2)\n"
+        "end)\n"
+        "on.think('ai/brute', function(self)\n"
+        "  if now() > 6.9 and not done then\n"
+        "    done = true\n"
+        "    ent(1):glow(0, 0, 0)\n"
+        "  end\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(g_events, "lerpRenderParmFrom(color,1 1 1,1,0.5 0.5 0.5,1,1);"));
+    CHECK(has(g_events, "lerpRenderParmFrom(color,1 1 1,1,0.5 0.5 0.5,1,2000);"));
+    CHECK(has(g_events, "lerpRenderParmFrom(bloomcolor,1 1 1,1,2 1 1,1,2000);"));
+    CHECK(has(g_events, "lerpRenderParmFrom(highlightcolor,0 0 0,0,0.5 -0.5 -0.5,0,2000);"));
+    frame(1000);
+    frame(1000);
+    CHECK(has(g_events, "lerpRenderParmFrom(bloomcolor,2 1 1,1,1 1 1,1,1);"));
+    /* wrong arguments: one plain sentence at the calling line, nothing sent */
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):tint(1, 1)\nend)\n",
+            "3", "\"tint\" needs the blue as a number");
+    CHECK(strstr(g_events, "lerpRenderParmFrom") == NULL);
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):tint(-1, 1, 1)\nend)\n",
+            "3", "\"tint\" needs the red from 0 to 16, got -1");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):tint(1, 17, 1)\nend)\n",
+            "3", "\"tint\" needs the green from 0 to 16, got 17");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):glow(1, 1, 65)\nend)\n",
+            "3", "\"glow\" needs the blue from 0 to 64, got 65");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):glow(1, 1, 1, -1)\nend)\n",
+            "3", "\"glow\" needs the seconds to fade over from 0 to 3600, got -1");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):glow('red', 1, 1)\nend)\n",
+            "3", "\"glow\" needs the red as a number");
+    CHECK(strstr(g_events, "lerpRenderParmFrom") == NULL);
+    /* a removed entity, a game without the parm, and an engine without decls all answer nil */
+    run("api = 1\non.spawn('ai/brute', function(self)\n  local c = ent(4)\n  c:remove()\n  print('gone', c:tint(1, 1, 1))\nend)\n");
+    CHECK(has(log_now(), "gone\tnil"));
+    CHECK(strstr(g_events, "lerpRenderParmFrom") == NULL);
+    g_missing_parm = "highlightcolor";
+    run("api = 1\non.spawn('ai/brute', function(self)\n  print('lacking', ent(1):glow(1, 1, 1))\nend)\n");
+    CHECK(has(log_now(), "lacking\tnil"));
+    CHECK(strstr(g_events, "lerpRenderParmFrom") == NULL);
+    g_missing_parm = NULL;
+    sh_script_api_set_engine(&k_engine);
+    run("api = 1\non.spawn('ai/brute', function(self)\n  print('no decls', ent(1):tint(1, 1, 1))\nend)\n");
+    CHECK(has(log_now(), "no decls\tnil"));
+}
+
 int main(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
@@ -714,6 +795,7 @@ int main(void)
     test_trace_as_demon();
     test_animation();
     test_view_angle();
+    test_tint();
     sh_script_map_end();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_test: FAILED\n" : "script_api_test: ok\n");
