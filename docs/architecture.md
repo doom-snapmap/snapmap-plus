@@ -1744,9 +1744,23 @@ motion, a point, axis or plane attractor, drag toward the emitter, a launch
 ball, a launch speed factor, and a velocity stretch that draws a quad aligned
 to its velocity at its own length times its speed. The forces and the
 integrator are DOOM Eternal's particle simulation commands (its formulas, read
-from its simulation program), so a converted stage moves as it does there;
-collision with the scene's depth is not included. None of the 9,834 CPU stages
-the game ships writes `vectorFieldGPU`, so no stage of the game asks.
+from its simulation program), so a converted stage moves as it does there.
+None of the 9,834 CPU stages the game ships writes `vectorFieldGPU`, so no
+stage of the game asks.
+
+A stage can also collide with the scene (`colorGPU.fadeColor.x`, its
+thickness, over 0). DOOM Eternal tests a particle against the screen's depth
+on the GPU; a CPU particle has no depth, and the particle jobs run off the game
+thread, where the engine's trace is not safe. So the particle jobs ask for
+their emitter's place, the game thread traces it once from the script tick
+(`particlemotion_planes.c`: the surface under it and, for an emitter that does
+not face up, the one behind it, passing through players and demons) and
+publishes the planes in a table the jobs read under a sequence count. Each
+step then runs Eternal's collision test, response and kill against them. The
+test needs the particle's place in the world, so a colliding stage is written
+`isTransparencySorted`, which makes the game build it in world axes; a stage
+that is not, or a map without a mod script, draws its particles without
+collision and the backend log says which.
 
 Two parts of the launch are the product's because the game's keys cannot say
 them. The game multiplies a particle's direction by `speed[0]`, `speed[1]` and
@@ -1758,7 +1772,8 @@ which the game applies to a particle's whole place, is taken out of the launch
 velocity the detour measures and given to the steps, as Eternal's integrator
 has it: the forces see the scaled places and each step moves the particle by
 velocity times step times scale. The game's origin function carries the scale
-only for a stage whose material is transparency sorted; for any other stage it
+only for a stage that is transparency sorted (the stage's own
+`isTransparencySorted` key, off by default); for any other stage it
 answers unscaled, the scale is applied when the model is drawn, and the forces
 that depend on a place see unscaled places.
 

@@ -418,7 +418,7 @@ unsigned sh_script_api_anim_flags(sh_script_handle h, void *ent, int *requested)
     return r->flags;
 }
 
-#define FRAME_FNS 4
+#define FRAME_FNS 8
 static void (*g_frame_fns[FRAME_FNS])(void);
 
 void sh_script_api_on_frame(void (*fn)(void))
@@ -1121,6 +1121,28 @@ static int e_game_time_ms(int *ms)
 static int e_ground(const float pos[3], float out[3])
 {
     return sh_script_api_ground_trace(e_trace, pos, out);
+}
+
+int sh_script_api_world_trace(const float from[3], const float to[3], float end[3], float normal[3])
+{
+    sh_script_trace t;
+    float at[3], dir[3], len;
+    int hop, i;
+    memcpy(at, from, sizeof at);
+    for (i = 0; i < 3; i++) dir[i] = to[i] - from[i];
+    len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (!(len > 1e-3f)) return 0;
+    for (i = 0; i < 3; i++) dir[i] /= len;
+    for (hop = 0; hop < 4; hop++) {
+        if (!e_trace(at, to, SH_SCRIPT_SPAWN_ID_NONE, &t) || !(t.fraction < 1.0f)) return 0;
+        if (t.hit_spawn_id == SH_SCRIPT_SPAWN_ID_WORLD) {
+            memcpy(end, t.end, 3 * sizeof(float));
+            memcpy(normal, t.normal, 3 * sizeof(float));
+            return 1;
+        }
+        for (i = 0; i < 3; i++) at[i] = t.end[i] + dir[i] * 4.0f;   /* past a player or a demon */
+    }
+    return 0;
 }
 
 /* The game's own difficulty (idGameLocal +0x670), only when the live vtable

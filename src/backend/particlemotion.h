@@ -42,6 +42,28 @@
  *                                                     speed parms draw apart, so a speed per particle along one
  *                                                     direction is the stage's speed on all three times this
  *
+ * Collision with the scene. A stage that asks and whose `colorGPU.fadeColor.x` is over 0 collides with the
+ * surfaces under and behind its emitter (DOOM Eternal's hard collision, which tests the screen's depth on the GPU;
+ * a CPU particle has no depth, so the planes are found by the engine's own trace, on the game thread, once per
+ * emitter place: particlemotion_planes.c):
+ *
+ *   colorGPU.fadeColor            x y z w             thickness (units; over 0: the stage collides), minimal life
+ *                                                     time (s), penetration threshold (units), velocity threshold
+ *                                                     (units / s; 0: a particle at rest is never killed)
+ *   physicsGPU.elasticity, .restitution               the reflected velocity's factor; the share of its part along
+ *                                                     the normal kept (the stage reset's 0.5 each, Eternal's too)
+ *   systemPropertiesGPU.timeOffset                    the depth offset (units)
+ *
+ * Each step, after the forces are summed and before the integrate, Eternal's COLLISION_TEST, RESPONSE and KILL
+ * (its simulate commands 10, 11, 12): the place one step ahead is behind a plane by less than the thickness and the
+ * particle is older than the minimal life time: it steps back by v dt, its velocity is reflected and times the
+ * elasticity, then loses (1 - restitution) of its normal part; it dies (its quad is folded to a point) when it is
+ * less than the penetration threshold behind the plane and slower than the velocity threshold. The test needs the
+ * particle's place in the world: a stage that collides writes `isTransparencySorted = true` (stage flag 0x02),
+ * which makes the game build it in world axes; one that does not is drawn without collision, and the backend log
+ * says so once. Planes come from a mod script's map (the game-thread service runs with the script tick); until an
+ * emitter's planes are found, its particles fly without them.
+ *
  * The emitter's scale (an fx item's `size`). The game scales a particle's whole place by it: for a stage whose
  * material is transparency sorted the origin function answers in the world and the scale is in the axes it applies;
  * for any other stage it answers in the emitter's own axes, unscaled, and the scale is applied when the model is
@@ -83,7 +105,17 @@ typedef struct sh_motion {
     float emitter_drag0, emitter_drag1, emitter_drag_radius;
     float launch;
     float launch_lo, launch_hi;
+    float collide_thickness, collide_min_life, collide_penetration, collide_speed;
+    float collide_elasticity, collide_restitution, collide_offset;
 } sh_motion;
+
+/* The scene's surfaces a colliding particle bounces on: n . x >= d is the open side, n of unit length. */
+#define SH_MOTION_PLANES 2
+typedef struct sh_motion_planes {
+    int count;
+    float n[SH_MOTION_PLANES][3];
+    float d[SH_MOTION_PLANES];
+} sh_motion_planes;
 
 /* The emitter a particle belongs to: its origin and its three axes in the world. */
 typedef struct sh_motion_frame {
@@ -92,8 +124,13 @@ typedef struct sh_motion_frame {
 } sh_motion_frame;
 
 /* idParticleStage offsets of build 13954591 (the engine's own reflection; the same in both executables). */
-#define SH_MOTION_STAGE_FLAGS        0x44     /* bit 0x20: gpuStage */
+#define SH_MOTION_STAGE_FLAGS        0x44     /* bit 0x20: gpuStage; bit 0x02: isTransparencySorted */
 #define SH_MOTION_STAGE_GPU          0x20
+#define SH_MOTION_STAGE_SORTED       0x02
+#define SH_MOTION_SYSTEM_TIMEOFFSET  0x594
+#define SH_MOTION_COLOR_FADE         0x5D0
+#define SH_MOTION_PHYSICS_RESTITUTION 0x66C
+#define SH_MOTION_PHYSICS_ELASTICITY 0x670
 #define SH_MOTION_STAGE_ORIENTATION  0x12C    /* prtOrientationType_t; 3 = POR_AIMED */
 #define SH_MOTION_SYSTEM_BOUNDS      0x59C
 #define SH_MOTION_GEOMETRY_SIZEVAR   0x61C
@@ -131,6 +168,31 @@ float sh_motion_scale(const float factors[3]);
 void sh_motion_run(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
                    float scale, const float p0[3], const float v0[3], float p[3], float v[3]);
 
+/* sh_motion_run against the scene's planes (NULL: none); returns 1 when the particle has died on a surface (p and
+ * v are then where and how it died). */
+int sh_motion_run_planes(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
+                         float scale, const float p0[3], const float v0[3], const sh_motion_planes *planes,
+                         float p[3], float v[3]);
+
+/* 1 when the stage collides with the scene. */
+int sh_motion_collides(const sh_motion *m);
+
+/* The planes of an emitter place (particlemotion_planes.c). The particle jobs read them (any thread); the game
+ * thread finds them with the engine's trace. Places are quantized to 8 units and the emitter's z axis to 1/8, so an
+ * emitter that stays put is traced once; a table entry older than SH_PLANES_STALE service frames is traced again. */
+#define SH_PLANES_STALE 600
+/* 1 and `out` when the planes of this place are known (count may be 0); 0 when not yet, and the place is asked for. */
+int sh_planes_lookup(const float origin[3], const float zaxis[3], sh_motion_planes *out);
+/* One trace of the world: 1 and the hit's end and normal, 0 for no hit. */
+typedef int (*sh_planes_trace_fn)(const float from[3], const float to[3], float end[3], float normal[3]);
+/* Game thread, once a frame: trace up to `budget` asked places. Returns how many were traced. */
+int sh_planes_service(sh_planes_trace_fn trace, int budget);
+/* Forget every place (a new map). Game thread. */
+void sh_planes_clear(void);
+/* The planes of one place by the trace (the service's own rule, for the test): the surface under it and, for an
+ * emitter that does not face up, the one behind it. */
+void sh_planes_find(sh_planes_trace_fn trace, const float origin[3], const float zaxis[3], sh_motion_planes *out);
+
 /* Move the four vertices of one particle's quad (stride bytes apart, position first) from the game's place
  * `engine_at` to `p`; `aimed` rebuilds the quad along `v` as the game's aimed builder lays it out (far - side,
  * far + side, near - side, near + side), facing `eye`, its length scaled by |v| x stretch when stretch is set. */
@@ -144,5 +206,8 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
 
 /* Particles moved since the start (for the test bench). */
 long sh_particlemotion_moved(void);
+/* Particles moved against the scene's planes, and particles that died on them, since the start. */
+long sh_particlemotion_collided(void);
+long sh_particlemotion_killed(void);
 
 #endif /* SNAPMAP_PLUS_PARTICLEMOTION_H */

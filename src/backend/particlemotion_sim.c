@@ -50,6 +50,42 @@ void sh_motion_read(const uint8_t *stage, sh_motion *m)
     m->launch = rd(stage, SH_MOTION_SYSTEM_BOUNDS);
     m->launch_lo = rd(stage, SH_MOTION_SYSTEM_BOUNDS + 4);
     m->launch_hi = rd(stage, SH_MOTION_SYSTEM_BOUNDS + 8);
+    m->collide_thickness = rd(stage, SH_MOTION_COLOR_FADE);
+    m->collide_min_life = rd(stage, SH_MOTION_COLOR_FADE + 4);
+    m->collide_penetration = rd(stage, SH_MOTION_COLOR_FADE + 8);
+    m->collide_speed = rd(stage, SH_MOTION_COLOR_FADE + 12);
+    m->collide_restitution = rd(stage, SH_MOTION_PHYSICS_RESTITUTION);
+    m->collide_elasticity = rd(stage, SH_MOTION_PHYSICS_ELASTICITY);
+    m->collide_offset = rd(stage, SH_MOTION_SYSTEM_TIMEOFFSET);
+}
+
+int sh_motion_collides(const sh_motion *m)
+{
+    return m && m->collide_thickness > 0.0f;
+}
+
+/* Eternal's COLLISION_TEST, RESPONSE and KILL (simulate commands 10 to 12) against the first plane the next step
+ * crosses: changes p and v; 1 when the particle dies. */
+static int collide(const sh_motion *m, const sh_motion_planes *pl, float t, float dt, float scale, float p[3],
+                   float v[3])
+{
+    int j, i;
+    if (!pl || !sh_motion_collides(m) || t < m->collide_min_life) return 0;
+    for (j = 0; j < pl->count && j < SH_MOTION_PLANES; j++) {
+        const float *n = pl->n[j];
+        float q[3], s, k, r[3];
+        for (i = 0; i < 3; i++) q[i] = p[i] + v[i] * dt * scale;
+        s = n[0] * q[0] + n[1] * q[1] + n[2] * q[2] - pl->d[j] + m->collide_offset;
+        if (!(s < 0.0f && s > -m->collide_thickness)) continue;
+        for (i = 0; i < 3; i++) p[i] -= v[i] * dt * scale;
+        k = 2.0f * (v[0] * n[0] + v[1] * n[1] + v[2] * n[2]);
+        for (i = 0; i < 3; i++) r[i] = (v[i] - k * n[i]) * m->collide_elasticity;
+        k = (1.0f - m->collide_restitution) * (r[0] * n[0] + r[1] * n[1] + r[2] * n[2]);
+        for (i = 0; i < 3; i++) v[i] = r[i] - n[i] * k;
+        return m->collide_speed > 0.0f && -s < m->collide_penetration &&
+               v[0] * v[0] + v[1] * v[1] + v[2] * v[2] < m->collide_speed * m->collide_speed;
+    }
+    return 0;
 }
 
 float sh_motion_scale(const float f[3])
@@ -129,11 +165,11 @@ static void to_world(const sh_motion_frame *fr, const float l[3], float w[3])
     for (i = 0; i < 3; i++) w[i] = fr->x[i] * l[0] + fr->y[i] * l[1] + fr->z[i] * l[2];
 }
 
-static void one_step(const sh_motion *m, const sh_motion_frame *fr, uint32_t seed, uint32_t index, float t,
-                     float dt, float life, float scale, float p[3], float v[3])
+static int one_step(const sh_motion *m, const sh_motion_frame *fr, uint32_t seed, uint32_t index, float t,
+                    float dt, float life, float scale, const sh_motion_planes *pl, float p[3], float v[3])
 {
     float a[3], r[3], w[3], n[3], q[3], k, d2;
-    int i;
+    int i, dead;
     for (i = 0; i < 3; i++) { a[i] = m->accel[i]; r[i] = p[i] - fr->origin[i]; }
     if (m->noise_drag != 0.0f) {
         for (i = 0; i < 3; i++) q[i] = p[i] * m->noise_scale + t * m->noise_speed;
@@ -178,10 +214,12 @@ static void one_step(const sh_motion *m, const sh_motion_frame *fr, uint32_t see
             (1.0f + d2 / (m->emitter_drag_radius * m->emitter_drag_radius));
         for (i = 0; i < 3; i++) a[i] -= v[i] * k;
     }
+    dead = collide(m, pl, t, dt, scale, p, v);
     for (i = 0; i < 3; i++) {
         v[i] += a[i] * dt;
         p[i] += (v[i] - a[i] * dt * 0.5f) * dt * scale;
     }
+    return dead;
 }
 
 /* Whether any force depends on the particle's place or velocity (without one the flight is a closed form). */
@@ -192,25 +230,35 @@ static int has_force(const sh_motion *m)
            ((m->emitter_drag0 != 0.0f || m->emitter_drag1 != 0.0f) && m->emitter_drag_radius > 0.0f);
 }
 
-void sh_motion_run(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
-                   float scale, const float p0[3], const float v0[3], float p[3], float v[3])
+int sh_motion_run_planes(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
+                         float scale, const float p0[3], const float v0[3], const sh_motion_planes *planes,
+                         float p[3], float v[3])
 {
     float h = sh_motion_step(life), t = 0.0f;
     uint32_t i, n;
     memcpy(p, p0, 3 * sizeof(float));
     memcpy(v, v0, 3 * sizeof(float));
-    if (!(age > 0.0f)) return;
-    if (!has_force(m)) {                 /* a uniform acceleration at most: what the steps would add up to */
+    if (!(age > 0.0f)) return 0;
+    if (planes && (planes->count <= 0 || !sh_motion_collides(m))) planes = NULL;
+    if (!has_force(m) && !planes) {      /* a uniform acceleration at most: what the steps would add up to */
         for (i = 0; i < 3; i++) {
             p[i] += (v0[i] * age + m->accel[i] * age * age * 0.5f) * scale;
             v[i] += m->accel[i] * age;
         }
-        return;
+        return 0;
     }
     n = (uint32_t)(age / h);
     if (n > 4096u) n = 4096u;
-    for (i = 0; i < n; i++, t += h) one_step(m, frame, seed, i, t, h, life, scale, p, v);
-    if (age - t > 1e-6f) one_step(m, frame, seed, n, t, age - t, life, scale, p, v);
+    for (i = 0; i < n; i++, t += h)
+        if (one_step(m, frame, seed, i, t, h, life, scale, planes, p, v)) return 1;
+    if (age - t > 1e-6f && one_step(m, frame, seed, n, t, age - t, life, scale, planes, p, v)) return 1;
+    return 0;
+}
+
+void sh_motion_run(const sh_motion *m, const sh_motion_frame *frame, uint32_t seed, float age, float life,
+                   float scale, const float p0[3], const float v0[3], float p[3], float v[3])
+{
+    (void)sh_motion_run_planes(m, frame, seed, age, life, scale, p0, v0, NULL, p, v);
 }
 
 void sh_motion_place(float *verts, size_t stride, int aimed, const float engine_at[3], const float p[3],

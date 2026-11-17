@@ -23,6 +23,7 @@
 #include <math.h>
 
 #include "particlemotion.h"
+#include "script/script_api_common.h"
 #include "backend_log.h"
 #include "hook.h"
 #include "patch.h"
@@ -40,7 +41,8 @@ typedef float *(*origin_fn)(float *velocity, void **context, void *generation, f
 
 static write_fn g_write;
 static origin_fn g_origin;
-static volatile LONG g_moved;
+static volatile LONG g_moved, g_collided, g_killed;
+static volatile LONG g_said_local, g_say_local, g_said_planes;
 
 static void pm_log(const char *fmt, ...)
 {
@@ -79,8 +81,10 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     const float *c = (const float *)context;
     sh_motion m;
     sh_motion_frame fr;
+    sh_motion_planes planes;
+    const sh_motion_planes *have = NULL;
     float age, life, span, scale, len[3], p0[3], p1[3], pe[3], v0[3], p[3], v[3], eye[3];
-    int i;
+    int i, dead;
     memcpy(&age, &born[1], sizeof age);
     memcpy(&life, &born[2], sizeof life);
     if (!(age > 0.0f) || !(life > 0.0f)) return;
@@ -108,9 +112,23 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     origin_at(context, born, age, life, pe);
     for (i = 0; i < 3; i++) v0[i] = (p1[i] - p0[i]) / (span * scale);
     sh_motion_launch(&m, born[5], v0);
-    sh_motion_run(&m, &fr, born[5], age, life, scale, p0, v0, p, v);
+    if (sh_motion_collides(&m) && (stage[SH_MOTION_STAGE_FLAGS] & SH_MOTION_STAGE_SORTED)) {
+        /* world axes: the planes of the emitter's place (asked for, and found on the game thread, when new) */
+        if (sh_planes_lookup(fr.origin, fr.z, &planes) && planes.count > 0) have = &planes;
+    } else if (sh_motion_collides(&m) && !InterlockedCompareExchange(&g_said_local, 1, 0)) {
+        g_say_local = 1;
+    }
+    dead = sh_motion_run_planes(&m, &fr, born[5], age, life, scale, p0, v0, have, p, v);
     sh_motion_place(verts, VERT_STRIDE, *(const int *)(stage + SH_MOTION_STAGE_ORIENTATION) == 3, pe, p, v, eye,
                     m.stretch);
+    if (dead) {                          /* Eternal's COLLISION_KILL: the particle is gone; its quad has no area */
+        float *q0 = verts;
+        int k;
+        for (i = 1; i < 4; i++)
+            for (k = 0; k < 3; k++) ((float *)((uint8_t *)verts + VERT_STRIDE * (size_t)i))[k] = q0[k];
+        InterlockedIncrement(&g_killed);
+    }
+    if (have) InterlockedIncrement(&g_collided);
     InterlockedIncrement(&g_moved);
 }
 
@@ -134,6 +152,31 @@ static uint64_t write_detour(void **context, void *generation, void **cursor)
 long sh_particlemotion_moved(void)
 {
     return InterlockedCompareExchange(&g_moved, 0, 0);
+}
+
+long sh_particlemotion_collided(void)
+{
+    return InterlockedCompareExchange(&g_collided, 0, 0);
+}
+
+long sh_particlemotion_killed(void)
+{
+    return InterlockedCompareExchange(&g_killed, 0, 0);
+}
+
+/* The game thread, once a frame with the script tick: trace the emitter places the particle jobs asked for. */
+static void planes_frame(void)
+{
+    int n = sh_planes_service(sh_script_api_world_trace, 24);
+    if (n > 0 && !g_said_planes) {
+        g_said_planes = 1;
+        pm_log("PARTICLES: the scene's surfaces found for %d emitter place(s); colliding stages bounce on them", n);
+    }
+    if (g_say_local == 1) {
+        g_say_local = 2;
+        pm_log("PARTICLES: a stage asks for collision but is built in its model's axes (not isTransparencySorted); "
+               "its particles are drawn without collision");
+    }
 }
 
 int sh_particlemotion_install(const sig_result *results, size_t count, const uint8_t *module_base)
@@ -164,6 +207,8 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
                "is not drawn");
         return 0;
     }
-    pm_log("PARTICLES: simulated motion ready for stages that ask (vectorFieldGPU.repeat on a CPU stage)");
+    sh_script_api_on_frame(planes_frame);
+    pm_log("PARTICLES: simulated motion ready for stages that ask (vectorFieldGPU.repeat on a CPU stage); "
+           "collision with the scene in maps a mod script runs in");
     return 1;
 }

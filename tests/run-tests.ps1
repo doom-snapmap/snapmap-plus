@@ -198,7 +198,7 @@ $tests += @{ name = "postfx_test"; src = 'postfx_test.c ..\src\backend\postfx_bl
 $tests += @{ name = "parmslots_test"; src = 'parmslots_test.c ..\src\backend\parmslots_rule.c'; arg = "" }
 # Simulated motion for a CPU particle stage (particlemotion_sim.c): which stage asks, the decl fields it is read
 # from, the integrator against closed forms and Doomforge's arithmetic, the quad's placement.
-$tests += @{ name = "particlemotion_test"; src = 'particlemotion_test.c ..\src\backend\particlemotion_sim.c'; arg = "" }
+$tests += @{ name = "particlemotion_test"; src = 'particlemotion_test.c ..\src\backend\particlemotion_sim.c ..\src\backend\particlemotion_planes.c'; arg = "" }
 # With images: the particle vertex writer and the origin function at their recorded RVAs, the writer's first
 # call being the origin function, the writer's detour window.
 $tests += @{ name = "particlemotion_sigs_test"; src = 'particlemotion_sigs_test.c ..\src\backend\particlemotion_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
