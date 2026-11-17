@@ -5515,17 +5515,31 @@ static int mb_write_wfile(const wchar_t *path, const void *data, size_t len)
 {
     size_t n = wcslen(path);
     wchar_t *tmp = (wchar_t *)malloc(sizeof(wchar_t) * (n + 16));
-    HANDLE h;
-    DWORD put = 0;
-    int ok;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    DWORD put = 0, err = 0;
+    int ok = 0, attempt;
     if (!tmp) return 0;
     _snwprintf_s(tmp, n + 16, _TRUNCATE, L"%s.tmp%lu", path, GetCurrentProcessId());
-    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { free(tmp); return 0; }
-    ok = WriteFile(h, data, (DWORD)len, &put, NULL) && put == (DWORD)len && FlushFileBuffers(h);
-    CloseHandle(h);
-    ok = ok && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    if (!ok) DeleteFileW(tmp);
+    /* A virus scanner, the indexer or a reader holds the file open for a moment after it is
+     * written or read, and the replace then fails with a sharing or access error. mb_record_read
+     * waits those out; the write waits them out the same way (a load-dependent flake: the asked
+     * list was not saved, so modsync_asked_refresh returned -1 under load). */
+    for (attempt = 0; attempt < 20; attempt++) {
+        SetLastError(ERROR_SUCCESS);
+        h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            put = 0;
+            ok = WriteFile(h, data, (DWORD)len, &put, NULL) && put == (DWORD)len && FlushFileBuffers(h);
+            CloseHandle(h);
+            ok = ok && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            if (ok) break;
+            err = GetLastError();
+            DeleteFileW(tmp);
+        } else err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED && err != ERROR_LOCK_VIOLATION) break;
+        Sleep(50);
+    }
+    if (!ok) SetLastError(err);
     free(tmp);
     return ok;
 }
