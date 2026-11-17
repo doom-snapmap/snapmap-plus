@@ -17,6 +17,7 @@
 #include "particlemotion.h"
 
 #define WRITE_STOLEN 19      /* particlemotion.c */
+#define CONTEXT_STOLEN 15    /* particlemotion.c */
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -93,7 +94,7 @@ static void check_image(const char *path)
     wchar_t wide[MAX_PATH];
     uint8_t *base = map_pe_by_rva(path);
     const sh_build_identity *identity;
-    uint32_t rva[2] = { 0, 0 }, at, w = 0, first_call = 0;
+    uint32_t rva[3] = { 0, 0, 0 }, at, w = 0, first_call = 0;
     int vk, i;
     if (!base) { printf("FAIL cannot map %s\n", path); g_fail = 1; return; }
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);
@@ -101,7 +102,7 @@ static void check_image(const char *path)
     if (!identity) { printf("FAIL %s is not a supported executable\n", path); g_fail = 1; return; }
     vk = identity->vulkan;
     printf("image %s: %s\n", path, identity->label);
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < 3; i++) {
         const sig_entry *s = &SH_PARTICLEMOTION_SIGNATURES[i];
         sig_result r;
         uint32_t hit = 0;
@@ -110,7 +111,7 @@ static void check_image(const char *path)
         CHECK(scan(base, s->pattern, &hit) == 1 && hit == rva[i]);
         printf("  %-20s rva=0x%X\n", s->name, rva[i]);
     }
-    CHECK(SH_PARTICLEMOTION_SIGNATURES[2].name == NULL);
+    CHECK(SH_PARTICLEMOTION_SIGNATURES[3].name == NULL);
     /* the writer's first call is the origin function */
     for (at = rva[0]; at < rva[0] + 0x100 && !first_call; ) {
         unsigned flags = 0;
@@ -133,6 +134,16 @@ static void check_image(const char *path)
         w += (uint32_t)len;
     }
     CHECK(w == WRITE_STOLEN);
+    /* the context builder's detour window */
+    w = 0;
+    while (w < CONTEXT_STOLEN) {
+        unsigned flags = 0;
+        size_t len = sh_x64_insn_len(base + rva[2] + w, 32, &flags);
+        if (!len) break;
+        CHECK(!(flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)));
+        w += (uint32_t)len;
+    }
+    CHECK(w == CONTEXT_STOLEN);
     free(base);
 }
 

@@ -16,5 +16,11 @@ const sig_entry SH_PARTICLEMOTION_SIGNATURES[] = {
       "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 88 48 81 EC 78 01 00 00 0F 29 70 A8 0F 29 78 98 "
       "44 0F 29 40 88",
       0x19B8080u, 0x19AC350u },
+    /* The stage's context: (job, sorted, the model's origin, its axes, the fx item's scale, ..., the context). A
+     * stage built in its model's axes leaves the scale out of the context (VK 0x1419BA6F0, read). */
+    { "ParticleContext",
+      "48 83 EC 18 41 8B 01 4C 8B D9 4C 8B 54 24 58 48 8B 4C 24 48 41 89 42 24 41 8B 41 04 41 89 42 28 41 8B 41 08 "
+      "41 89 42 2C 41 8B 41 0C 41 89 42 30",
+      0x19BA6F0u, 0x19AE9C0u },
     { NULL, NULL, 0, 0 }
 };

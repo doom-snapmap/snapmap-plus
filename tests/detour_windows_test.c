@@ -133,6 +133,7 @@ static const site SITES[] = {
     { "clip_events.c",        "Md6EventsOfType2",           SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "attach_tags.c",        "TagInfoLookup",              SITE_ATTACH, 0, 15, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
+    { "particlemotion.c",     "ParticleContext",            SITE_PARTICLE, 0, 15, REPLAYS, 0 },
     { "cachewrites.c",        "AtomicWrite",                SITE_CACHE, 0, 21, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -426,7 +427,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
     { "backend\\attach_tags.c", 1 },
-    { "backend\\particlemotion.c", 1 }, { "backend\\cachewrites.c", 1 },
+    { "backend\\particlemotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 
 static int count_calls(const char *text)
