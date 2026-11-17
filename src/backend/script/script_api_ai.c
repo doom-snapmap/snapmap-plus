@@ -47,7 +47,10 @@
  *                 [rbp+0x88], compared with each pain anim's +0x48 string),
  *                 replaced at its last write by a stub (sh_ai_pain_stub_build);
  *   block_pain    a detour of the threat table's row check (VK 0x1406E08D0 /
- *                 GL 0x1406DFD00) refusing a blocked reaction's rows. */
+ *                 GL 0x1406DFD00) refusing a blocked reaction's rows;
+ *   wound_damage_counts  a detour of idGoreComponent::DamageActivatesWound
+ *                 (VK 0x1408FC8E0 / GL 0x1408FB910) that counts each wound's
+ *                 own damage (sh_wound_count_step). */
 #include <windows.h>
 #include <limits.h>
 #include <math.h>
@@ -372,6 +375,7 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_le
 }
 
 static void force_via_reset(void);
+static void wound_count_gone(sh_script_handle h, uint32_t spawn_id);
 static void anim_wait_drop(ai_rec *r)
 {
     free(r->wait_dest);
@@ -388,6 +392,7 @@ void sh_script_ai_reset(void)
     }
     force_via_reset();
     sh_ai_pain_records_reset();
+    sh_wound_count_reset();
 }
 
 /* The record of `h` (made when missing); a record whose handle no longer
@@ -1556,6 +1561,155 @@ int sh_ai_blocked(void *ai, uint32_t id, int reaction, int now_ms)
     return until != 0 && now_ms < (int)until;
 }
 
+/* ------------------------------------------- wound damage counts (script_api_ai.h) */
+
+float sh_wound_count_threshold(float total, float relative, float max_health)
+{
+    return relative < 0.0f ? total : relative * max_health;
+}
+
+int sh_wound_count_step(float threshold, float *sum, float damage, int gates_passed)
+{
+    if (!gates_passed || !sum) return 0;
+    if (damage > 0.0f && damage <= 3.402823466e+38f) *sum += damage;
+    if (!(threshold > 0.0f)) return 1;
+    return *sum >= threshold;
+}
+
+uint32_t sh_wound_count_mark(const void *record)
+{
+    const uint8_t *p = (const uint8_t *)record;
+    uint32_t h = 2166136261u;
+    int i;
+    if (!p) return 0;
+    for (i = 0; i < 16; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+/* One record per demon that asked; few demons ask (a ported demon's script),
+ * and a record whose demon is gone is reused. */
+#define AI_WCOUNT_DEMONS 64
+typedef struct {
+    const void *wound;
+    float       sum;
+    const void *last_record;   /* the hit last counted, so the same hit offered again counts once */
+    uint32_t    last_mark;
+} ai_wcount_row;
+typedef struct {
+    void          *ai;
+    uint32_t       spawn_id;
+    int            n;
+    ai_wcount_row  row[SH_WOUND_COUNT_WOUNDS];
+} ai_wcount_rec;
+static ai_wcount_rec g_wcount[AI_WCOUNT_DEMONS];
+static int g_wcount_used;
+static SRWLOCK g_wcount_lock = SRWLOCK_INIT;
+
+static ai_wcount_rec *wcount_find(void *ai, uint32_t id)
+{
+    int i;
+    if (!ai || id == SH_SCRIPT_SPAWN_ID_NONE) return NULL;
+    for (i = 0; i < g_wcount_used; i++)
+        if (g_wcount[i].ai == ai && g_wcount[i].spawn_id == id) return &g_wcount[i];
+    return NULL;
+}
+
+void sh_wound_count_reset(void)
+{
+    AcquireSRWLockExclusive(&g_wcount_lock);
+    memset(g_wcount, 0, (size_t)g_wcount_used * sizeof g_wcount[0]);
+    g_wcount_used = 0;
+    ReleaseSRWLockExclusive(&g_wcount_lock);
+}
+
+int sh_wound_count_set(void *ai, uint32_t id, int on)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    ai_wcount_rec *r;
+    int i, ok = 1;
+    if (!ai || id == SH_SCRIPT_SPAWN_ID_NONE) return 0;
+    AcquireSRWLockExclusive(&g_wcount_lock);
+    r = wcount_find(ai, id);
+    if (!on) {
+        if (r) memset(r, 0, sizeof *r);
+    } else if (!r) {
+        for (i = 0; i < g_wcount_used && !r; i++)
+            if (!g_wcount[i].ai || (e && e->resolve && e->resolve(g_wcount[i].spawn_id) != g_wcount[i].ai))
+                r = &g_wcount[i];
+        if (!r && g_wcount_used < AI_WCOUNT_DEMONS) r = &g_wcount[g_wcount_used++];
+        if (r) {
+            memset(r, 0, sizeof *r);
+            r->ai = ai;
+            r->spawn_id = id;
+        } else ok = 0;
+    }
+    ReleaseSRWLockExclusive(&g_wcount_lock);
+    return ok;
+}
+
+int sh_wound_count_on(void *ai, uint32_t id)
+{
+    int on;
+    AcquireSRWLockShared(&g_wcount_lock);
+    on = wcount_find(ai, id) != NULL;
+    ReleaseSRWLockShared(&g_wcount_lock);
+    return on;
+}
+
+int sh_wound_count_hit(void *ai, uint32_t id, const void *wound, const void *record, uint32_t mark,
+                       float threshold, float damage, int gates_passed)
+{
+    ai_wcount_rec *r;
+    ai_wcount_row *w = NULL;
+    int i, st = -1;
+    if (!wound) return -1;
+    AcquireSRWLockExclusive(&g_wcount_lock);
+    r = wcount_find(ai, id);
+    if (r) {
+        for (i = 0; i < r->n; i++) if (r->row[i].wound == wound) { w = &r->row[i]; break; }
+        if (!w && r->n < SH_WOUND_COUNT_WOUNDS) {
+            w = &r->row[r->n++];
+            memset(w, 0, sizeof *w);
+            w->wound = wound;
+        }
+    }
+    if (w) {
+        if (gates_passed && record && w->last_record == record && w->last_mark == mark) damage = 0.0f;
+        st = sh_wound_count_step(threshold, &w->sum, damage, gates_passed);
+        if (gates_passed) { w->last_record = record; w->last_mark = mark; }
+    }
+    ReleaseSRWLockExclusive(&g_wcount_lock);
+    return st;
+}
+
+float sh_wound_count_sum(void *ai, uint32_t id, const void *wound)
+{
+    ai_wcount_rec *r;
+    float s = 0.0f;
+    int i;
+    AcquireSRWLockShared(&g_wcount_lock);
+    r = wcount_find(ai, id);
+    for (i = 0; r && i < r->n; i++) if (r->row[i].wound == wound) { s = r->row[i].sum; break; }
+    ReleaseSRWLockShared(&g_wcount_lock);
+    return s;
+}
+
+void sh_wound_count_gone(uint32_t id)
+{
+    int i;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE) return;
+    AcquireSRWLockExclusive(&g_wcount_lock);
+    for (i = 0; i < g_wcount_used; i++)
+        if (g_wcount[i].ai && g_wcount[i].spawn_id == id) memset(&g_wcount[i], 0, sizeof g_wcount[i]);
+    ReleaseSRWLockExclusive(&g_wcount_lock);
+}
+
+static void wound_count_gone(sh_script_handle h, uint32_t spawn_id)
+{
+    (void)h;
+    sh_wound_count_gone(spawn_id);
+}
+
 /* --------------------------------------------- compositions over primitives */
 
 #define AI_KNEE        24.0f     /* the low line of TF_BOUNDS */
@@ -2297,6 +2451,30 @@ static int l_fk_reference_pose(lua_State *L)
     return 2;
 }
 
+/* ai:wound_damage_counts(true|false): with true, a gore wound of the demon
+ * opens on the damage that landed inside its own clipping spheres: each hit
+ * the game's gates pass for the wound adds its damage to that wound's own
+ * counter, and the wound opens when the counter reaches its threshold. The
+ * game counts the health the wound's whole damage group has lost instead, so
+ * two wounds on one group open together on a hit inside either (script_api_ai.h,
+ * "Wound damage counts"). false, or never calling it, keeps the game's rule;
+ * true again keeps the counts so far. Answers true, or false and why. */
+static int l_wound_damage_counts(lua_State *L)
+{
+    void *ai;
+    int st;
+    if (lua_type(L, 2) != LUA_TBOOLEAN)
+        sh_script_refuse(L, "\"wound_damage_counts\" needs true or false, got %s", luaL_typename(L, 2));
+    NEED_OP(L, wound_damage_counts, "wound_damage_counts");
+    ai = self_ai(L, "wound_damage_counts", NULL);
+    st = ai ? g_engine->wound_damage_counts(ai, lua_toboolean(L, 2)) : -1;
+    lua_pushboolean(L, st == 1);
+    if (st == 1) return 1;
+    lua_pushstring(L, st == 0 ? "too many demons count their wounds' damage in this map"
+                              : "the game's wound test could not be reached");
+    return 2;
+}
+
 /* ai:eternal_interrupts(): from now on the demon's animation orders carry the
  * interrupt mode DOOM Eternal's AI command carries (sh_ai_order_interrupt):
  * a change and a forced via nest over a blend that still runs, as DOOM
@@ -2474,6 +2652,7 @@ static void force_via_step(void)
     frame = g_engine->frame();
     if (frame < g_seen_frame) {
         sh_ai_pain_records_reset();
+        sh_wound_count_reset();
         force_via_reset();
     }
     g_seen_frame = frame;
@@ -3390,6 +3569,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "held", l_held },
     { "posed_legs", l_posed_legs },
     { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
+    { "wound_damage_counts", l_wound_damage_counts },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3407,6 +3587,7 @@ int sh_script_ai_register(void)
     sh_script_api_on_spawn(sh_script_ai_spawned);
     sh_script_api_on_frame(force_via_step);
     sh_script_api_on_frame(anim_wait_step);
+    sh_script_handles_on_gone(wound_count_gone);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "spawn_teleport", l_spawn_teleport);
@@ -5175,6 +5356,63 @@ static int e_destructible(void)
                        (void **)&g_brkg_orig, &g_brkg_failed, "destructible") ? 1 : -1;
 }
 
+/* ---- wound damage counts (script_api_ai.h, "Wound damage counts") */
+
+typedef uint8_t (*ai_daw_fn)(void *gore, void *wound, void *record, void *group_decl, int group, int lost,
+                             float max_health);
+static ai_daw_fn g_daw_target, g_daw_orig;
+static int g_daw_failed;
+static volatile LONG g_daw_any;   /* a demon asked in this session: until then the detour only calls through */
+
+static uint8_t daw_detour(void *gore, void *wound, void *record, void *group_decl, int group, int lost,
+                          float max_health)
+{
+    void *owner = NULL;
+    uint32_t id, mark = 0;
+    float total = 0.0f, relative = 0.0f, damage = 0.0f;
+    int st, ok = 0;
+    uint8_t pass;
+    if (!g_daw_any || !gore || !wound || !record)
+        return g_daw_orig(gore, wound, record, group_decl, group, lost, max_health);
+    __try { owner = *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER); }
+    __except (av_only(GetExceptionCode())) { owner = NULL; }
+    id = owner ? spawn_id_of(owner) : SH_SCRIPT_SPAWN_ID_NONE;
+    if (!owner || !sh_wound_count_on(owner, id))
+        return g_daw_orig(gore, wound, record, group_decl, group, lost, max_health);
+    __try {
+        total = *(const float *)((const uint8_t *)wound + SH_AI_WOUND_TOTAL_REQUIRED);
+        relative = *(const float *)((const uint8_t *)wound + SH_AI_WOUND_RELATIVE_REQUIRED);
+        damage = *(const float *)((const uint8_t *)record + SH_AI_GFD_DAMAGE);
+        mark = sh_wound_count_mark(record);
+        ok = 1;
+    } __except (av_only(GetExceptionCode())) { ok = 0; }
+    if (!ok) return g_daw_orig(gore, wound, record, group_decl, group, lost, max_health);
+    /* every gate but the group's loss, as the game runs them (the loss is read once, only for that gate) */
+    pass = g_daw_orig(gore, wound, record, group_decl, group, SH_AI_DAW_LOST_RAISED, max_health);
+    st = sh_wound_count_hit(owner, id, wound, record, mark, sh_wound_count_threshold(total, relative, max_health),
+                            damage, pass != 0);
+    if (st < 0) return g_daw_orig(gore, wound, record, group_decl, group, lost, max_health);
+    return (uint8_t)st;
+}
+
+static int e_wound_damage_counts(void *ai, int on)
+{
+    uint32_t id = spawn_id_of(ai);
+    if (id == SH_SCRIPT_SPAWN_ID_NONE) return -1;
+    if (!on) {
+        (void)sh_wound_count_set(ai, id, 0);
+        return 1;
+    }
+    if (!commit_hook((void *)g_daw_target, (void *)daw_detour, k_ai_daw_prologue, SH_AI_DAW_STOLEN,
+                     (void **)&g_daw_orig, &g_daw_failed, "wound_damage_counts"))
+        return -1;
+    if (!sh_wound_count_set(ai, id, 1)) return 0;
+    if (!InterlockedExchange(&g_daw_any, 1))
+        ai_log("Mod scripts: a demon's gore wounds now open on the damage inside each wound's own spheres "
+               "(wound_damage_counts).");
+    return 1;
+}
+
 /* ---- the compositions */
 
 static const sh_script_ai_engine k_engine;
@@ -5209,7 +5447,7 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend, e_spawn_teleport, e_destructible, e_weapon_use
+    e_interrupt_blend, e_spawn_teleport, e_destructible, e_weapon_use, e_wound_damage_counts
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -5388,6 +5626,10 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_brk_break = (ai_brk_break_fn)r[SH_AI_SIG_BREAKABLE_BREAK].addr;
         g_fxphys_place = (ai_fxphys_place_fn)r[SH_AI_SIG_FXPHYS_PLACE].addr;
     } else g_live.destructible = NULL;
+    /* Wound damage counts: DamageActivatesWound (detoured at the first call; its window and the offsets the
+     * detour reads are the sigs test's) */
+    if (r[SH_AI_SIG_DAMAGE_WOUND].addr) g_daw_target = (ai_daw_fn)r[SH_AI_SIG_DAMAGE_WOUND].addr;
+    else g_live.wound_damage_counts = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

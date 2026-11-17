@@ -345,6 +345,13 @@ static int f_fk_reference_pose(void *ai)
     ev_cat("fk_reference_pose\n");
     return 1;
 }
+static int g_wound_counts_ready = 1;
+static int f_wound_damage_counts(void *ai, int on)
+{
+    (void)ai;
+    ev_cat(on ? "wound_damage_counts on\n" : "wound_damage_counts off\n");
+    return g_wound_counts_ready;
+}
 static int g_spawn_teleport_ready = 1;
 static int f_spawn_teleport(void)
 {
@@ -455,7 +462,7 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_spawn_teleport, f_destructible, f_weapon_use
+    f_interrupt_blend, f_spawn_teleport, f_destructible, f_weapon_use, f_wound_damage_counts
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2289,11 +2296,126 @@ static void test_destructible(void)
     }
 }
 
+/* wound_damage_counts: the rule, the per-demon per-wound counters, and the script call. */
+static void test_wound_damage_counts(void)
+{
+    static const struct { float threshold, sum, damage; int gates; float sum_after; int pass; } rows[] = {
+        { 690, 0, 200, 1, 200, 0 },        /* below the threshold */
+        { 690, 600, 100, 1, 700, 1 },      /* crosses it on this hit */
+        { 690, 690, 0, 1, 690, 1 },        /* reached already: a hit that passes the gates opens it */
+        { 690, 600, 500, 0, 600, 0 },      /* the gates refused: never counts, never opens */
+        { 690, 0, -50, 1, 0, 0 },          /* a negative damage adds nothing */
+        { 0, 0, 10, 1, 10, 1 },            /* no threshold: the game's gate passes */
+        { -1, 0, 10, 1, 10, 1 },
+        { 0, 0, 10, 0, 0, 0 },             /* ... but not past the other gates */
+    };
+    const int A = 13, B = 14;
+    float sum, wa = 0, wb = 0;
+    int i, wound1, wound2, rec1[4], rec2[4];
+    sh_script_handle_change ch[8];
+    printf("-- wound damage counts: the rule\n");
+    for (i = 0; i < (int)(sizeof rows / sizeof rows[0]); i++) {
+        sum = rows[i].sum;
+        CHECK(sh_wound_count_step(rows[i].threshold, &sum, rows[i].damage, rows[i].gates) == rows[i].pass);
+        CHECK(sum == rows[i].sum_after);
+    }
+    CHECK(sh_wound_count_step(690, NULL, 10, 1) == 0);
+    printf("-- wound damage counts: the threshold, total or a fraction of max health\n");
+    CHECK(sh_wound_count_threshold(690, -1, 4000) == 690);
+    CHECK(sh_wound_count_threshold(690, 0.25f, 4000) == 1000);
+    CHECK(sh_wound_count_threshold(690, 0, 4000) == 0);            /* relative 0 is a fraction: no threshold */
+    sum = 0;
+    CHECK(sh_wound_count_step(sh_wound_count_threshold(0, 0.25f, 4000), &sum, 600, 1) == 0);
+    CHECK(sh_wound_count_step(sh_wound_count_threshold(0, 0.25f, 4000), &sum, 400, 1) == 1 && sum == 1000);
+
+    printf("-- wound damage counts: per demon, per wound\n");
+    g_ent[A].live = g_ent[B].live = 1;
+    memset(rec1, 0, sizeof rec1);
+    memset(rec2, 0, sizeof rec2);
+    rec1[0] = 1; rec2[0] = 2;
+    sh_wound_count_reset();
+    CHECK(!sh_wound_count_on(&g_ent[A], A));
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound1, rec1, 1, 690, 400, 1) == -1);   /* not asked: the game's rule */
+    CHECK(sh_wound_count_set(&g_ent[A], A, 1) == 1 && sh_wound_count_on(&g_ent[A], A));
+    CHECK(!sh_wound_count_on(&g_ent[A], B) && !sh_wound_count_on(&g_ent[B], B));     /* another spawn, another demon */
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound1, rec1, 1, 690, 400, 1) == 0);
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound1, rec1, 1, 690, 400, 1) == 0);     /* the same hit again: once */
+    wa = sh_wound_count_sum(&g_ent[A], A, &wound1);
+    CHECK(wa == 400);
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound2, rec1, 1, 690, 400, 1) == 0);     /* the same hit, another wound */
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound2, rec2, 2, 690, 300, 0) == 0);     /* refused: not counted */
+    wb = sh_wound_count_sum(&g_ent[A], A, &wound2);
+    CHECK(wb == 400);
+    CHECK(sh_wound_count_hit(&g_ent[A], A, &wound1, rec2, 2, 690, 300, 1) == 1);     /* 700: wound 1 opens */
+    CHECK(sh_wound_count_sum(&g_ent[A], A, &wound1) == 700 && sh_wound_count_sum(&g_ent[A], A, &wound2) == 400);
+    CHECK(sh_wound_count_hit(&g_ent[A], A, NULL, rec2, 2, 690, 300, 1) == -1);
+    CHECK(sh_wound_count_set(&g_ent[A], A, 1) == 1 && sh_wound_count_sum(&g_ent[A], A, &wound1) == 700);  /* kept */
+    CHECK(sh_wound_count_mark(rec1) != sh_wound_count_mark(rec2) && sh_wound_count_mark(NULL) == 0);
+    printf("-- wound damage counts: off, and the counters go with the demon\n");
+    CHECK(sh_wound_count_set(&g_ent[A], A, 0) == 1 && !sh_wound_count_on(&g_ent[A], A));
+    CHECK(sh_wound_count_sum(&g_ent[A], A, &wound1) == 0);
+    CHECK(sh_wound_count_set(&g_ent[B], B, 1) == 1);
+    CHECK(sh_wound_count_hit(&g_ent[B], B, &wound1, rec1, 1, 690, 100, 1) == 0);
+    sh_wound_count_gone(B);
+    CHECK(!sh_wound_count_on(&g_ent[B], B) && sh_wound_count_sum(&g_ent[B], B, &wound1) == 0);
+    /* the handle table's sweep releases a demon that is gone, and its counters go with it */
+    CHECK(sh_wound_count_set(&g_ent[B], B, 1) == 1);
+    CHECK(sh_script_handles_ref((uint32_t)B) != 0);
+    g_ent[B].live = 0;
+    (void)sh_script_handles_sweep(ch, 8);
+    CHECK(!sh_wound_count_on(&g_ent[B], B));
+    /* a record whose demon is gone (the resolver no longer gives it for its spawn id) is reused for another; a
+     * live demon's is not */
+    {
+        static fent gone1, gone2;
+        sh_wound_count_reset();
+        CHECK(sh_wound_count_set(&g_ent[A], A, 1) == 1);
+        CHECK(sh_wound_count_set(&gone1, 1000u, 1) == 1 && sh_wound_count_on(&gone1, 1000u));
+        CHECK(sh_wound_count_set(&gone2, 1001u, 1) == 1 && sh_wound_count_on(&gone2, 1001u));
+        CHECK(!sh_wound_count_on(&gone1, 1000u) && sh_wound_count_on(&g_ent[A], A));
+    }
+    sh_wound_count_reset();
+    CHECK(sh_wound_count_set(&g_ent[A], A, 1) == 1);
+    sh_wound_count_reset();
+    CHECK(!sh_wound_count_on(&g_ent[A], A));
+    g_ent[A].live = g_ent[B].live = 0;
+    (void)wa; (void)wb;
+
+    printf("-- wound_damage_counts: the script call\n");
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then print('wdc ' .. tostring(self:wound_damage_counts(true))) end\n"
+        "  if step == 2 then print('wdc ' .. tostring(self:wound_damage_counts(false))) end\n"
+        "end)\n"));
+    tick(); tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "wdc true\nwdc true\n") != NULL);
+    CHECK(strstr(g_events, "wound_damage_counts on\nwound_damage_counts off\n") != NULL);
+    sh_script_map_end();
+    g_wound_counts_ready = -1;
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print('wdc ' .. tostring(self:wound_damage_counts(true)) .. ' ' .. tostring(select(2, self:wound_damage_counts(true))))\n"
+        "end)\n"));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "wdc false the game's wound test could not be reached\n") != NULL);
+    sh_script_map_end();
+    g_wound_counts_ready = 1;
+    CHECK(start("api = 1\non.think('ai/brute', function(self) self:wound_damage_counts('yes') end)\n"));
+    tick();
+    CHECK(strstr(stop_of("aaaaaaaa"), "\"wound_damage_counts\" needs true or false, got string") != NULL);
+    sh_script_map_end();
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 53);
+    CHECK(sh_script_ai_register() == 54);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2332,6 +2454,7 @@ int main(int argc, char **argv)
     test_eternal_interrupts();
     test_spawn_teleport();
     test_destructible();
+    test_wound_damage_counts();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");

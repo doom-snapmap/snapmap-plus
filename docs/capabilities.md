@@ -980,7 +980,10 @@ trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `held`, 
 `tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
 toward its focus), gives a demon lasers of its own on the game's laser targeter (`laser_add`,
 `laser_remove`) and a footstep table of their own to its rear feet (`rear_footsteps`), hides
-named meshes of its model when the game shows one of its gore wounds (`wound_hides`), lets the
+named meshes of its model when the game shows one of its gore wounds (`wound_hides`), opens each
+of a demon's gore wounds on the damage that landed inside that wound's own hit spheres as DOOM
+Eternal does, where the game counts the health the wound's whole damage group has lost so two
+wounds on one group open together (`wound_damage_counts`), lets the
 game's leg rig follow legs that a demon's clips pose themselves so they keep every animation layer
 and still stand on slopes and steps (`posed_legs`), takes a demon's fk reference pose from the
 animation its fkGraph names as DOOM Eternal does, so its head and weapon do not jump when a blend's

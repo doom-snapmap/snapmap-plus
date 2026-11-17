@@ -2478,6 +2478,25 @@ is touched, and a removed demon answers nil.
   it, the meshes are hidden with the game's own hide, in the same call, so no
   frame draws the wound and the skin together. Records are per demon and
   spawn id; a model shows at most 64 meshes separately (the mask's width).
+  `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
+  game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
+  (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
+  group and per offered wound with the health the whole GROUP has lost: two
+  wounds on one group open together on a hit inside either's spheres once
+  the group lost the threshold. The call detours that function (at the first
+  call, 16 whole bytes). For a demon that asked, the detour calls the game's
+  function with the lost health raised past any threshold, so every other
+  gate (frame damage, damage per second, gore type, distance, directions,
+  the clipping spheres) is the game's own; when it passes, the record's
+  damage (its +0, the hit's damage with the gore behaviour's multiplier) is
+  added to that wound's counter and the answer is whether the counter has
+  reached the wound's threshold (`sh_wound_count_step`; the threshold as the
+  game's helper computes it, total or a fraction of max health). Counters are
+  per demon and spawn id, per wound decl, under a lock (the gore think and
+  the script call may be on different threads); the same hit offered twice
+  for one wound counts once. They go when the handle table releases the
+  demon (`sh_script_handles_on_gone`), when the call is turned off, and at a
+  map's start. Stock demons call straight through.
   `posed_legs()` serves a demon whose clips pose its legs themselves (thigh,
   shin and foot rotations, as DOOM Eternal's clips do) on a model that
   carries the game's leg rig. The game poses a leg from the hip to a target
