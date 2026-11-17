@@ -1686,6 +1686,13 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     }
     /* old-key materials rewrite the layerparms image unquoted; the build must see it as it sees a quoted one */
     if (!quoted && sc->is_material && mb_ieq_n(k, kn, "layerparms")) { sc->fn(sc->ctx, "image", v, vn); return; }
+    /* A look's keys the compiler passes through as the author wrote them (a particle look's transmap, a base
+     * surface's maps) may be bare words: a bare mod image path is the same need a quoted one is. */
+    if (!quoted && sc->is_material && val->kind == TK_WORD && vn > 5 && mb_ieq_n(v, 5, "mods/") &&
+        (mb_iends(k, kn, "map") || mb_iends(k, kn, "mask") || (kn > 18 && mb_ieq_n(k, 18, "multilayerextramap")))) {
+        sc->fn(sc->ctx, "image", v, vn);
+        return;
+    }
     if (!quoted) return;
     if (sc->depth == 1 && mb_ieq_n(k, kn, "inherit")) {
         /* A mod parent orders registration; a stock parent is always present. */

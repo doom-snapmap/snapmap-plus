@@ -50,6 +50,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   published map and a staged rawmap that carry an unconvertible `smpkg.`
   package load as plain maps (the variables removed, `allocCount` corrected, one
   verdict line), lookalike names stay, and a save keeps the engine's own bytes.
+- `modlook_mod_test.c` runs the Graphics SDK look compiler where it is hooked in: a fixture mod folder (`fixtures/mods/looks-good`, and `looks-bad` with one misspelled field) built into a bundle with the look compiler set, then served through the provider's material filter. With `doom=` it also builds Doomforge's `tyrant-pg1-after` folder when present.
 - `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
   round trip, rows appended last and stripped with `allocCount` restored, the
   per-row budget that keeps them out of the 4 KiB playtest message, placed names,
