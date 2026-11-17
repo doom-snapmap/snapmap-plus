@@ -1741,12 +1741,26 @@ A CPU stage (`gpuStage` unset) never reads its GPU blocks. With
 the table of keys is in `src/backend/particlemotion.h`: a world acceleration,
 wind with drag, a vortex about an axis of the emitter, a noise field, brownian
 motion, a point, axis or plane attractor, drag toward the emitter, a launch
-ball, and a velocity stretch that draws a quad aligned to its velocity at its
-own length times its speed. The forces and the integrator are DOOM Eternal's
-particle simulation commands (its formulas, read from its simulation
-program), so a converted stage moves as it does there; collision with the
-scene's depth is not included. None of the 9,834 CPU stages the game ships
-writes `vectorFieldGPU`, so no stage of the game asks.
+ball, a launch speed factor, and a velocity stretch that draws a quad aligned
+to its velocity at its own length times its speed. The forces and the
+integrator are DOOM Eternal's particle simulation commands (its formulas, read
+from its simulation program), so a converted stage moves as it does there;
+collision with the scene's depth is not included. None of the 9,834 CPU stages
+the game ships writes `vectorFieldGPU`, so no stage of the game asks.
+
+Two parts of the launch are the product's because the game's keys cannot say
+them. The game multiplies a particle's direction by `speed[0]`, `speed[1]` and
+`speed[2]` one axis at a time, each drawing its own random number, so a speed
+that differs per particle cannot be written without bending the direction: the
+launch speed factor multiplies the launched velocity by one number per
+particle between its two ends. And the emitter's scale (an fx item's size),
+which the game applies to a particle's whole place, is taken out of the launch
+velocity the detour measures and given to the steps, as Eternal's integrator
+has it: the forces see the scaled places and each step moves the particle by
+velocity times step times scale. The game's origin function carries the scale
+only for a stage whose material is transparency sorted; for any other stage it
+answers unscaled, the scale is applied when the model is drawn, and the forces
+that depend on a place see unscaled places.
 
 `particlemotion.c` detours the function that writes one particle's vertices
 on both renderers (`particlemotion_sigs.c`) and returns to the game's code for
