@@ -1008,7 +1008,8 @@ static char *e_anim_node(void *ai)
     return out;
 }
 
-static void *entitydef_manager(void)
+/* The decl manager of `type`, through the registry the product validates for entityDefs. */
+static void *decl_manager(const char *type)
 {
     int32_t displacement;
     void *r = NULL;
@@ -1022,7 +1023,24 @@ static void *entitydef_manager(void)
         vt = *(void ***)r;
         if (!vt || vt[7] != g_decl_register || vt[11] != (void *)g_decl_type) return NULL;
     } __except (av_only(GetExceptionCode())) { return NULL; }
-    return g_decl_type(r, "entityDef");
+    return g_decl_type(r, type);
+}
+
+static void *entitydef_manager(void)
+{
+    return decl_manager("entityDef");
+}
+
+/* The loaded decl `name` of `type`, or NULL (the engine table's decl). */
+static void *e_decl(const char *type, const char *name)
+{
+    void *manager, *decl = NULL;
+    uint8_t state = 0xff;
+    if (!type || !name || !(manager = decl_manager(type))) return NULL;
+    __try { decl = g_decl_find(manager, name, 0); } __except (av_only(GetExceptionCode())) { decl = NULL; }
+    if (!decl) return NULL;
+    __try { state = *((const uint8_t *)decl + DECL_STATE); } __except (av_only(GetExceptionCode())) { state = 0xff; }
+    return (state & 3) ? NULL : decl;
 }
 
 static void yaw_axis(float yaw, float axis[9])
@@ -1171,7 +1189,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

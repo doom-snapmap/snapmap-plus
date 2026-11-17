@@ -2386,6 +2386,8 @@ the map, as any error does).
   `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
   `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
   `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
+  `e:tint(r, g, b, [seconds])` and `e:glow(r, g, b, [seconds])` (the entity's
+  look, below);
   `entities_near(pos, radius)` (every entity in range, nearest first),
   `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
@@ -2410,6 +2412,33 @@ the map, as any error does).
   is the game's trace query run at once, with the SnapMap laser hazard's
   contents mask; a radius makes the line thick (nine parallel traces, the
   nearest hit wins).
+- **Tint and glow.** An entity's look is two colours: a tint (a multiplier,
+  `{1, 1, 1}` is the entity's own look; each channel 0 to 16) and a glow (a
+  colour added, `{0, 0, 0}` is none; each channel 0 to 64). Setting one
+  keeps the other. The look is written as the three render parms `color`
+  `{tint, 1}`, `bloomcolor` `{1 + glow, 1}` and `highlightcolor`
+  `{tint - 1 + glow, 0}`, each at its engine default when the look is
+  neutral, so `{1, 1, 1}` and `{0, 0, 0}` restore the entity. They are the
+  parms of the stock model programs: `color` and `bloomcolor` scale the
+  emissive (bloom-mask) surfaces of every model program and `bloomcolor` is
+  the colour the skinned demon programs add there; `highlightcolor` is added
+  to the final colour of every model program, a wash over the whole lit
+  surface. No model program multiplies a surface's albedo by a per-entity
+  parm, so a tint reads as a product on the emissive parts and as the wash
+  elsewhere. Each call sends one `lerpRenderParmFrom` event per parm through
+  `sh_script_api_event`: the engine's own event on an entity, which sets the
+  parm on the entity's render model and fades it in game time
+  (idGameLocal's render parm lerper; no script tick drives the fade). The
+  parm decls are found as `renderParm` decls by name through the engine
+  table's `decl`. `seconds` fades from the look the entity has now; with no
+  seconds the change is a fade of one millisecond, which also replaces a
+  fade still running. The look "now" is kept by the product
+  (`script_api_tint.h`: the last request per entity handle and when it
+  began, 256 entities, the oldest replaced; an entity not in it starts from
+  its own look). The call answers true when the engine took all three parms,
+  false when it did not (the entity has no render model), and nil when the
+  entity is gone or the game's parms cannot be found; a channel outside its
+  range or a bad `seconds` is one plain sentence.
 - **Per frame.** `sh_script_api_frame` also runs the steps other call
   groups register with `sh_script_api_on_frame` (the AI calls finish a forced
   animation through a via node there).

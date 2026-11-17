@@ -123,6 +123,9 @@ typedef struct sh_script_engine {
      * marker) after setting the bits of `set` in them, or -1 when the game
      * has no such event. A set bit stays for the life of the process. */
     int      (*event_flags)(const char *name, int set);
+    /* The loaded decl `name` of the decl type `type` ("renderParm", ...), by
+     * the game's own find, or NULL when there is none or it is not loaded. */
+    void    *(*decl)(const char *type, const char *name);
 } sh_script_engine;
 
 /* The floor under pos made of the engine's world trace: straight down from
