@@ -33,7 +33,15 @@
  *                       now, sets the fading bit and returns (the fade branch, +0x90); otherwise it ends the
  *                       action by its type and clears it. Called by the stop by condition (VK 0x1416EF740), the
  *                       stop of all, the restart and the item update at the end of an action's time. Detoured;
- *                       16-byte window. */
+ *                       16-byte window.
+ *   CombatFxActionRequest VK 0x1416ECC80 GL 0x1416ED600 idFXManager's request of one action (manager, action
+ *                       index, six more: eight arguments, four on the stack): item = decl items + index * 0x570,
+ *                       action = actions + index * 0x128; returns at once when the action is requested (flags bit
+ *                       1), the item loops (+0x25), does not force a loop restart (+0x26) and the action is not
+ *                       fading (bit 0x10); otherwise it re-arms the action in place (clears bits 0x04 and 0x10,
+ *                       sets 0x08 and 0x02, new times) and never stops the action's sound. The update then starts
+ *                       a sound item again while bit 0x04 is clear and stores the new handle at action +0xB0 over
+ *                       the old one. Detoured; 19-byte window. */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -70,6 +78,10 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
       "40 53 55 56 57 41 55 41 57 48 81 EC 88 00 00 00 48 8B 41 18 45 0F B6 F9 48 63 FA 41 8B F0 48 69 DF 28 01 00 00 "
       "48 69 EF 70 05 00 00 4C 8B E9 48 89 7C 24 40",
       0x16EEEF0u, 0x16EF870u },
+    { "CombatFxActionRequest",
+      "40 55 53 56 57 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
+      "48 89 45 D0 4C 8B AD 00 01 00 00 4D 8B F8 48 63 C2 4D 8B F1 48 69 F8 70 05 00 00",
+      0x16ECC80u, 0x16ED600u },
     { NULL, NULL, 0, 0 }
 };
 

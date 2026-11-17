@@ -980,7 +980,10 @@ trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `held`, 
 `tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
 toward its focus), gives a demon lasers of its own on the game's laser targeter (`laser_add`,
 `laser_remove`) and a footstep table of their own to its rear feet (`rear_footsteps`), hides
-named meshes of its model when the game shows one of its gore wounds (`wound_hides`), lets the
+named meshes of its model when the game shows one of its gore wounds (`wound_hides`), opens each
+of a demon's gore wounds on the damage that landed inside that wound's own hit spheres as DOOM
+Eternal does, where the game counts the health the wound's whole damage group has lost so two
+wounds on one group open together (`wound_damage_counts`), lets the
 game's leg rig follow legs that a demon's clips pose themselves so they keep every animation layer
 and still stand on slopes and steps (`posed_legs`), takes a demon's fk reference pose from the
 animation its fkGraph names as DOOM Eternal does, so its head and weapon do not jump when a blend's
@@ -999,7 +1002,7 @@ demons too; `monster_type` names any demon's type, `nav_ground` finds the floor 
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
 and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
 `hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and
-steers or explodes them, starts and stops effects (`fx`, `fx_move`, `fx_stop`), lets its own effects end the way DOOM Eternal ends them, a stopped model gone in that frame instead of fading (`fx_hard_stops`), plays its own sounds
+steers or explodes them, starts and stops effects (`fx`, `fx_move`, `fx_stop`), lets its own effects end the way DOOM Eternal ends them, a stopped model gone in that frame instead of fading and a sound already playing not started a second time over itself (`fx_hard_stops`), plays its own sounds
 (`sound`), reads a tag of its md6Def or a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
 (amount, decl, damage zone, direction, attacker), death, pain reactions, `ae_notify` rows and
 launched projectiles to the mod's handlers. A mod whose scripts handle an input gets a **Script** node in its Toybox

@@ -2509,6 +2509,25 @@ is touched, and a removed demon answers nil.
   it, the meshes are hidden with the game's own hide, in the same call, so no
   frame draws the wound and the skin together. Records are per demon and
   spawn id; a model shows at most 64 meshes separately (the mask's width).
+  `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
+  game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
+  (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
+  group and per offered wound with the health the whole GROUP has lost: two
+  wounds on one group open together on a hit inside either's spheres once
+  the group lost the threshold. The call detours that function (at the first
+  call, 16 whole bytes). For a demon that asked, the detour calls the game's
+  function with the lost health raised past any threshold, so every other
+  gate (frame damage, damage per second, gore type, distance, directions,
+  the clipping spheres) is the game's own; when it passes, the record's
+  damage (its +0, the hit's damage with the gore behaviour's multiplier) is
+  added to that wound's counter and the answer is whether the counter has
+  reached the wound's threshold (`sh_wound_count_step`; the threshold as the
+  game's helper computes it, total or a fraction of max health). Counters are
+  per demon and spawn id, per wound decl, under a lock (the gore think and
+  the script call may be on different threads); the same hit offered twice
+  for one wound counts once. They go when the handle table releases the
+  demon (`sh_script_handles_on_gone`), when the call is turned off, and at a
+  map's start. Stock demons call straight through.
   `posed_legs()` serves a demon whose clips pose its legs themselves (thigh,
   shin and foot rotations, as DOOM Eternal's clips do) on a model that
   carries the game's leg rig. The game poses a leg from the hip to a target
@@ -2837,8 +2856,20 @@ damage comes from the world entity, as a trigger's does.
   light still waiting out its delay, it sets the action's fading bit before
   the game's own code runs, which then skips its fade branch and ends and
   clears the action as it does for a second stop. Every other stop, and
-  every decl that was not named, runs unchanged; names are kept for the map
-  the scripts run in); `sound(e, sound,
+  every decl that was not named, runs unchanged. The same call detours the
+  FX manager's request of one action, VK 0x1416ECC80 / GL 0x1416ED600
+  (manager, action index and six more, all forwarded unchanged), 19 whole
+  bytes. The game requests a sound item again while its sound plays by
+  re-arming the action in place; its update then starts a second sound and
+  keeps only the new handle, so the first plays on unstopped, for good when
+  its sound event loops. Eternal requests an item again only when nothing of
+  it runs or the item allows a restart before its end (the item's byte at
+  +0x26, this game's forceLoopRestart). For a named decl's sound item whose
+  action is requested and has started, with that byte clear, the detour
+  returns without calling the game; every other request goes to the game.
+  If only one of the two hooks can be installed the other still serves and
+  one log line says which is missing; names are kept for the map the
+  scripts run in); `sound(e, sound,
   [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
   a named point with a parent joint and its own offset and rotation, found
   as the engine finds aim and focus tags: the model decl's `_info` prop row,
