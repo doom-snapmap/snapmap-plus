@@ -5331,6 +5331,22 @@ state, reference count and the first bad surface). Nothing is freed. The head
 the list LEA at +0x3FA are verified at startup, and the counter must be the
 list's +0x60.
 
+The freed table the guard was built for is a session static model's own
+reload. A refcounted static model (byte +0x68) frees its surfaces when its
+reference count falls to zero and loads them again when it next rises:
+IncReferenceCount (`StaticModelIncRef`, VK 0x17AD640 / GL 0x17AEA00) calls the
+model's load (vtable +0x40) directly, not through `ResourceGenericLoad`, and
+the load takes the surface table and geometry from the current heap. In the
+editor after a map change that is a map heap, which the next Play load
+releases; a level-4 model is not purged, so it stays listed with a freed
+table. Live (R-CR1, Vulkan, fresh boot: Tyrant map Play, Baron map Play,
+Tyrant map, berserk map, Play) it was the door cap
+`models/snapmaps/door_caps/cap_05.lwo`, level 4, refcounted, 11 surfaces. So
+the fault shield detours IncReferenceCount: when the call is about to reload
+the surfaces of a level-4 refcounted model with a map heap selected, it runs
+inside process heap 0, and the model is named once (`static-model-heap:`).
+The 15-byte head is verified at startup.
+
 Failures the player or author reads are worded by one table, `plain_reason.h`
 (`sh_reason`): a Windows error code becomes what happened to which file and
 what to do (access denied, a file open elsewhere, a full disk naming the drive

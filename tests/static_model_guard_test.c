@@ -96,6 +96,41 @@ static uint8_t *author_update(int good_shape)
 
 typedef uint64_t (*update_fn)(void *self);
 
+/* A fake idMemLocal: 32 heap ids at +0x44, depth at +0xC4. */
+static uint8_t g_mem[0x100];
+static void *fake_mem_get(void) { return g_mem; }
+static void fake_mem_push(void *self, int heap)
+{
+    int *depth = (int *)((uint8_t *)self + 0xC4);
+    ((int *)((uint8_t *)self + 0x44))[*depth] = heap;
+    ++*depth;
+}
+static void fake_mem_pop(void *self) { --*(int *)((uint8_t *)self + 0xC4); }
+static int g_seen_heap = -9, g_increfs;
+static void observe_incref(void *model)
+{
+    (void)model;
+    ++g_increfs;
+    g_seen_heap = smh_heap_now();
+}
+
+/* The authored IncReferenceCount: the engine's 15-byte head, then it calls
+ * observe_incref(model) and returns. */
+static uint8_t *author_incref(void)
+{
+    static const uint8_t head[] = { 0x40,0x53, 0x48,0x83,0xEC,0x60, 0x48,0xC7,0x44,0x24,0x20,0xFE,0xFF,0xFF,0xFF };
+    uint8_t *c = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    uintptr_t fn = (uintptr_t)observe_incref;
+    size_t at = sizeof head;
+    if (!c) return NULL;
+    memset(c, 0xCC, 4096);
+    memcpy(c, head, sizeof head);
+    c[at++] = 0x48; c[at++] = 0xB8; memcpy(c + at, &fn, 8); at += 8;        /* mov rax,imm64 */
+    c[at++] = 0xFF; c[at++] = 0xD0;                                          /* call rax */
+    { static const uint8_t tail[] = { 0x48,0x83,0xC4,0x60, 0x5B, 0xC3 }; memcpy(c + at, tail, sizeof tail); }
+    return c;
+}
+
 int main(void)
 {
     static uint8_t good_table[3 * SM_SURFACE_STRIDE], bad_table[10 * SM_SURFACE_STRIDE];
@@ -238,6 +273,53 @@ int main(void)
 
     CHECK(hook_unpatch((void *)g_orig_smu));
     g_orig_smu = NULL;
+
+    /* A session static model reloads its surfaces in process heap 0. */
+    {
+        sig_result hs[4];
+        uint8_t *inc = author_incref();
+        fake_model cap;
+        if (!inc) return 1;
+        hs[0].name = "StaticModelIncRef"; hs[0].status = SIG_OK; hs[0].addr = (uintptr_t)inc;
+        hs[0].rva = (uint32_t)((uintptr_t)inc - (uintptr_t)base);
+        hs[1].name = "MemLocalGet"; hs[2].name = "MemLocalPushHeap"; hs[3].name = "MemLocalPopHeap";
+        hs[1].addr = (uintptr_t)fake_mem_get; hs[2].addr = (uintptr_t)fake_mem_push; hs[3].addr = (uintptr_t)fake_mem_pop;
+        for (i = 1; i < 4; ++i) { hs[i].status = SIG_OK; hs[i].rva = (uint32_t)(hs[i].addr - (uintptr_t)base); }
+        /* Unresolved heap stack: refused. */
+        CHECK(!sh_static_model_heap_rule_install(base, hs, 1));
+        CHECK(sh_static_model_heap_rule_install(base, hs, 4));
+        CHECK(sh_static_model_heap_rule_install(base, hs, 4));
+        /* The door cap's shape: level 4, refcounted, no surfaces, 11 declared; a map heap (3) on top. */
+        model_init(&cap, "models/snapmaps/door_caps/cap_05.lwo", NULL, 0, 0);
+        *(uint8_t *)(cap.b + SM_REFCOUNTED_OFF) = 1;
+        *(int *)(cap.b + SM_DECLARED_OFF) = 11;
+        memset(g_mem, 0, sizeof g_mem);
+        fake_mem_push(g_mem, 3);
+        g_emits = 0;
+        ((void (*)(void *))inc)(cap.b);
+        CHECK(g_increfs == 1 && g_seen_heap == 0);                     /* ran in process heap 0 */
+        CHECK(*(int *)(g_mem + 0xC4) == 1 && smh_heap_now() == 3);     /* and the stack is restored */
+        CHECK(sh_static_model_heap_moves() == 1 && g_emits == 1);
+        /* Not moved: process heap 0 already, a level-1 model, a model with surfaces, not refcounted, nothing declared. */
+        fake_mem_pop(g_mem); ((void (*)(void *))inc)(cap.b); CHECK(g_seen_heap == 0 && sh_static_model_heap_moves() == 1);
+        fake_mem_push(g_mem, 3);
+        *(unsigned *)(cap.b + RES_LEVEL_OFF) = 1;
+        ((void (*)(void *))inc)(cap.b); CHECK(g_seen_heap == 3);
+        *(unsigned *)(cap.b + RES_LEVEL_OFF) = 4;
+        *(int *)(cap.b + SM_SURFACE_COUNT_OFF) = 2;
+        ((void (*)(void *))inc)(cap.b); CHECK(g_seen_heap == 3);
+        *(int *)(cap.b + SM_SURFACE_COUNT_OFF) = 0;
+        *(uint8_t *)(cap.b + SM_REFCOUNTED_OFF) = 0;
+        ((void (*)(void *))inc)(cap.b); CHECK(g_seen_heap == 3);
+        *(uint8_t *)(cap.b + SM_REFCOUNTED_OFF) = 1;
+        *(int *)(cap.b + SM_DECLARED_OFF) = 0;
+        ((void (*)(void *))inc)(cap.b); CHECK(g_seen_heap == 3);
+        CHECK(sh_static_model_heap_moves() == 1 && g_increfs == 6);
+        CHECK(hook_unpatch((void *)g_orig_incref));
+        g_orig_incref = NULL;
+        CHECK(inc[0] == 0x40 && inc[1] == 0x53 && inc[14] == 0xFF);
+        VirtualFree(inc, 0, MEM_RELEASE);
+    }
     CHECK(code[0] == 0x40 && code[1] == 0x57 && code[9] == 0x48 && code[10] == 0x8B && code[11] == 0x05);
     VirtualFree(code, 0, MEM_RELEASE);
     VirtualFree(wrong, 0, MEM_RELEASE);

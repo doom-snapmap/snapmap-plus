@@ -18,4 +18,13 @@ int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *
 /* Times the guard drew a render model empty this session. */
 long sh_static_model_guard_fires(void);
 
+/* A session static model reloads its surfaces in process heap 0: a level-4
+ * refcounted static model's IncReferenceCount ("StaticModelIncRef") that is
+ * about to reload its surfaces with a map heap selected runs inside process
+ * heap 0 (the MemLocal heap-stack signatures). Returns 1 when armed. */
+int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_result *results, size_t count);
+
+/* Reloads moved to process heap 0 this session. */
+long sh_static_model_heap_moves(void);
+
 #endif /* SHIELD_STATIC_MODEL_GUARD_H */
