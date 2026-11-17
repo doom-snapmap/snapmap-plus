@@ -2478,6 +2478,18 @@ is touched, and a removed demon answers nil.
   it, the meshes are hidden with the game's own hide, in the same call, so no
   frame draws the wound and the skin together. Records are per demon and
   spawn id; a model shows at most 64 meshes separately (the mask's width).
+  It also takes any entity with a gore component (a mod's `idGoreEntity`):
+  its model and the component's owner sit where a demon's do.
+  `script_api_body.c` adds three entity methods on the same type walk as
+  `e:get`: `sync_partner()` scans the map's `idSyncEntity`s for the one whose
+  `activeParticipants` hold the receiver and answers its TARGET, INSTIGATOR
+  and the sync entity; `wounds_open()` answers the gore node names of the
+  gore component's `activeWounds` then `pendingWounds`; `break_constraint
+  (name)` finds the constraint of that name in the entity's `idAnimator_AF`
+  physics and removes it with `idPhysics_AF::DeleteConstraint` (VK
+  0x141643050 / GL 0x141643B60, `ScriptAfDeleteConstraint`), which sets the
+  figure to rebuild. Each answers nil or false and a reason when the part
+  is missing; `tests/script_api_body_test.c` covers them on fake types.
   `posed_legs()` serves a demon whose clips pose its legs themselves (thigh,
   shin and foot rotations, as DOOM Eternal's clips do) on a model that
   carries the game's leg rig. The game poses a leg from the hip to a target

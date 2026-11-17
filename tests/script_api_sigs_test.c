@@ -73,7 +73,7 @@ static const char *rtti_name(const uint8_t *base, uint64_t image_base, uint32_t 
 static void check_image(const char *path)
 {
     wchar_t wide[MAX_PATH];
-    uint32_t size = 0, rva[8];
+    uint32_t size = 0, rva[9];
     uint8_t *base = map_pe_by_rva(path, &size);
     const sh_build_identity *identity;
     IMAGE_NT_HEADERS *nt;
@@ -101,7 +101,7 @@ static void check_image(const char *path)
         rva[n] = r.rva;
         printf("  %-24s rva=0x%X\n", e->name, r.rva);
     }
-    CHECK(n == 8);
+    CHECK(n == 9);
 
     /* class vtables */
     {
@@ -155,6 +155,21 @@ static void check_image(const char *path)
         CHECK(traces && mask);
         /* the immediate branch: test r8,r8 (the result) then jnz */
         CHECK(!memcmp(base + rva[4] + 0x1C, "\x4D\x85\xC0\x0F\x85", 5));
+    }
+
+    /* the articulated figure's constraint removal by name: its not-found line
+     * (a lea of the message within the first 0x60 bytes) names DeleteConstraint */
+    if (rva[8]) {
+        uint32_t k;
+        int named = 0;
+        for (k = rva[8]; k < rva[8] + 0x60 && !named; k++) {
+            int32_t rel;
+            if (base[k] != 0x48 || base[k + 1] != 0x8D || (base[k + 2] != 0x0D && base[k + 2] != 0x15)) continue;
+            memcpy(&rel, base + k + 3, 4);
+            if ((uint32_t)(k + 7 + rel) + 40 < size &&
+                !memcmp(base + k + 7 + rel, "DeleteConstraint: no constriant found", 37)) named = 1;
+        }
+        CHECK(named);
     }
 }
 

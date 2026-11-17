@@ -2322,6 +2322,13 @@ static int l_eternal_interrupts(lua_State *L)
     return 1;
 }
 
+/* Whether a non-demon entity has a gore component wound_hides can serve (an
+ * idGoreEntity of a mod: its model and its gore component sit where a
+ * demon's do, in the idAnimatedEntity part and at the component's owner).
+ * Set by script_api_body.c; NULL keeps wound_hides to demons. */
+static int (*g_gore_owner_test)(void *ent);
+void sh_script_ai_set_gore_owner_test(int (*fn)(void *ent)) { g_gore_owner_test = fn; }
+
 /* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
  * go when the game shows the gore wound. A wound of the game shows meshes
  * (its meshKits) and cuts the model with spheres; it has no list of meshes
@@ -2360,7 +2367,18 @@ static int l_wound_hides(lua_State *L)
         }
         names[n++] = lua_tostring(L, -1);  /* kept on the stack until the call returns */
     }
-    ai = self_ai(L, "wound_hides", NULL);
+    {
+        uint64_t h = sh_script_check_entity(L, 1, "wound_hides");
+        if (!g_engine) { free(keep); sh_script_refuse(L, "\"wound_hides\" is not available in this session (Snapmap+ could "
+                                                      "not find the game's AI functions; see the backend log)"); }
+        ai = h ? g_engine->entity((sh_script_handle)h) : NULL;
+    }
+    if (ai && !g_engine->is_ai(ai) && !(g_gore_owner_test && g_gore_owner_test(ai))) {
+        free(keep);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "this entity is neither a demon nor an entity with a gore component");
+        return 2;
+    }
     st = (ai && keep) ? g_engine->wound_hides(ai, keep, names, n) : -1;
     free(keep);
     lua_pushboolean(L, st == 1);

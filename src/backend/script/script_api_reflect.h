@@ -66,6 +66,14 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
  * Each pushes its result or raises. A write with restore_at_map_end is put
  * back when the map ends (for objects that outlive the map). */
 int sh_script_reflect_ready(void);
+/* For other calls built on the walk (script_api_body.c): the host while the
+ * game's types answer (NULL otherwise), an entity's class, the name of a
+ * named object (a decl, a gore node), and whether a class descends from
+ * another. Each answers NULL or 0 when it cannot. */
+const sh_rf_host *sh_script_reflect_host(void);
+const char *sh_script_reflect_class_of(void *ent);
+const char *sh_script_reflect_name_of(const void *object);
+int sh_script_reflect_is_a(const char *cls, const char *base);
 int sh_script_reflect_get(lua_State *L, const void *object, const char *cls, const char *path, const char *call);
 int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const char *path, int idx, const char *call,
                           int restore_at_map_end);

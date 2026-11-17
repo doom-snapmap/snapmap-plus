@@ -438,6 +438,27 @@ int sh_script_reflect_ready(void)
     return ready();
 }
 
+const sh_rf_host *sh_script_reflect_host(void)
+{
+    return ready() ? &g_host : NULL;
+}
+
+const char *sh_script_reflect_class_of(void *ent)
+{
+    const char *cls = (ready() && ent && g_ops.entity_class) ? g_ops.entity_class(g_ops.ctx, ent) : NULL;
+    return cls && cls[0] ? cls : NULL;
+}
+
+const char *sh_script_reflect_name_of(const void *object)
+{
+    return (ready() && object && g_ops.resource_name) ? g_ops.resource_name(g_ops.ctx, object) : NULL;
+}
+
+int sh_script_reflect_is_a(const char *cls, const char *base)
+{
+    return cls && base && ready() && is_a(cls, base);
+}
+
 int sh_script_reflect_get(lua_State *L, const void *object, const char *cls, const char *path, const char *call)
 {
     sh_rf_loc loc;

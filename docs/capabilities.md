@@ -980,7 +980,13 @@ trigger by itself; `pull_trigger`, `release_trigger`, `trigger_pulled`, `held`, 
 `tracking`, `body_rotation`; `hold` stands a demon the engine's way and lets the engine turn it
 toward its focus), gives a demon lasers of its own on the game's laser targeter (`laser_add`,
 `laser_remove`) and a footstep table of their own to its rear feet (`rear_footsteps`), hides
-named meshes of its model when the game shows one of its gore wounds (`wound_hides`), lets the
+named meshes of its model when the game shows one of its gore wounds (`wound_hides`, on a demon or
+on any entity with a gore component, such as a mod's `idGoreEntity` body), reads which sync an entity is
+bound in and its target, instigator and sync entity (`e:sync_partner()`), which gore wounds are open
+on an entity (`e:wounds_open()`, the node names `ae_goreEnableByName` takes, so a body can show the
+wounds its demon had), and removes one named constraint of an entity's articulated figure with the
+game's own removal (`e:break_constraint(name)`; the impulse argument is accepted and not applied); each
+answers nil or false and a plain reason on an entity without the part, lets the
 game's leg rig follow legs that a demon's clips pose themselves so they keep every animation layer
 and still stand on slopes and steps (`posed_legs`), takes a demon's fk reference pose from the
 animation its fkGraph names as DOOM Eternal does, so its head and weapon do not jump when a blend's

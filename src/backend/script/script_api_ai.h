@@ -1047,6 +1047,10 @@ static const unsigned char k_ai_brk_gore_prologue[SH_AI_BRK_GORE_STOLEN] = {
     0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x8D, 0xAB, 0x48, 0xFF, 0xFF, 0xFF
 };
 
+/* wound_hides takes a non-demon entity when fn answers 1 for it (an entity
+ * with a gore component; script_api_body.c). */
+void sh_script_ai_set_gore_owner_test(int (*fn)(void *ent));
+
 #ifdef __cplusplus
 }
 #endif
