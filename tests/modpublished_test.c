@@ -411,13 +411,16 @@ static int f_place_norm(void *c, const char *place, char **out)
     return 1;
 }
 
+static int g_refused_loads;
+static void f_refused_load(void *c) { (void)c; ++g_refused_loads; }
+
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
     f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts,
-    f_progress, f_fetch_cause
+    f_progress, f_fetch_cause, f_refused_load
 };
 
 static void reset(void)
@@ -1436,15 +1439,18 @@ static void editor_open_missing_placed_mod(void)
         "{\"entities\":[{\"entityDef\":{\"inherit\":\"mods/" SALT_A "/imp\"}}],\"instances\":[],"
         "\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[" VAR("door_label", "Open") "]}"
         MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728")) "}";
-    printf("-- the editor cannot open a map that places a mod not installed: one plain notice\n");
+    printf("-- the editor cannot open a map that places a mod not installed: one plain notice, not \"damaged\"\n");
     reset();
     g_map_notes = 0;
+    g_refused_loads = 0;
     sh_modmanifest_set_editor_load(1);
     parse(SH_MODPUB_PARSE_OTHER, PLACED, MAP);
     sh_modmanifest_set_editor_load(0);
     CHECK(!sh_modpub_test_notice()[0]);
     tick(1);
     CHECK(g_map_notes == 1);
+    /* The engine's "damaged" notice for the same failed load is dismissed (R-PG1, R-CR1 live). */
+    CHECK(g_refused_loads == 1);
     tick(2);
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map needs alex.pink-imp, which is not installed on this computer, so "
                                              "the editor cannot open the map. Restore the mod's folder from the Recycle "
@@ -1456,6 +1462,7 @@ static void editor_open_missing_placed_mod(void)
     sh_modmanifest_set_editor_load(0);
     tick(3);
     CHECK(F.asks == 0 && !sh_modpub_test_notice()[0]);
+    CHECK(g_refused_loads == 1);
     reset();
     /* A gate that takes the parse (a published play) says its own cause: no editor notice. */
     sh_modmanifest_set_editor_load(1);
