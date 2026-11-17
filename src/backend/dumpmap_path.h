@@ -1,7 +1,7 @@
-/* String-only path helpers for sh_dumpmap. The native writer accepts paths
- * relative to the game base directory and forces the extension. These helpers
- * choose the directory and numbered filename; the command handler owns
- * collision checks and filesystem operations.
+/* String-only path helpers for sh_dumpmap. Dumps go under <game dir>\snapmap-plus\, never into the game's own
+ * folders: the native writer takes an absolute path (a relative one is resolved under base\) and forces the
+ * extension. These helpers choose the directory and numbered filename; the command handler owns collision checks
+ * and filesystem operations.
  */
 #ifndef SNAPMAP_PLUS_DUMPMAP_PATH_H
 #define SNAPMAP_PLUS_DUMPMAP_PATH_H
@@ -10,7 +10,10 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Default subdirectory for a bare dump name, relative to base. */
+/* The folder every dump is written under, beside the game's executable (with the product's logs). */
+#define DUMPMAP_ROOT    "snapmap-plus"
+
+/* Default subdirectory for a bare dump name, relative to DUMPMAP_ROOT. */
 #define DUMPMAP_SUBDIR  "mapdumps"
 
 /* Highest _N suffix the handler tries before giving up on a name. */
@@ -39,7 +42,7 @@ static int dumpmap_validate(const char *arg, const char **why)
         return 0;
     }
     if (strstr(arg, "..") != NULL) {
-        *why = "'..' is not allowed -- dumps stay under the game's base directory";
+        *why = "'..' is not allowed -- dumps stay under the game's snapmap-plus folder";
         return 0;
     }
     return 1;
@@ -87,7 +90,24 @@ static void dumpmap_candidate(const char *stem, int seq, char *out, size_t outca
     dp_cat(out, outcap, ".map");
 }
 
-/* Join the game's base directory with a game-relative path into an OS path, normalizing every
+/* The dumps' root for the game's executable path ("D:\DOOM\DOOMx64vk.exe" -> "D:\DOOM\snapmap-plus"). Returns 0
+ * when the path has no folder. */
+static int dumpmap_root(const char *exe, char *out, size_t outcap)
+{
+    const char *slash;
+    size_t n;
+    if (outcap == 0) return 0;
+    out[0] = '\0';
+    if (exe == NULL || (slash = strrchr(exe, '\\')) == NULL) return 0;
+    n = (size_t)(slash - exe);
+    if (n + 1 > outcap) n = outcap - 1;
+    memcpy(out, exe, n);
+    out[n] = '\0';
+    dp_cat(out, outcap, "\\" DUMPMAP_ROOT);
+    return 1;
+}
+
+/* Join the dumps' root with a relative dump path into an OS path, normalizing every
  * separator to '\' so the result is printable as-is. */
 static void dumpmap_ospath(const char *base, const char *rel, char *out, size_t outcap)
 {
