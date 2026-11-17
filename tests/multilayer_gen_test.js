@@ -1,4 +1,4 @@
-// multilayer_gen_test.js -- the embedded multilayer blend (src/backend/modprog_multilayer.c) and modprog_test's
+// multilayer_gen_test.js -- the embedded multilayer blend (src/backend/eternal/modprog_multilayer.c) and modprog_test's
 // stand-in program (tests/modprog_fixture.c) are what their sources give: an edited shader cannot ship without its
 // regenerated copy. Where no shader compiler is at hand (CI) the texts are compared and the SPIR-V is kept.
 const { test } = require('node:test');
