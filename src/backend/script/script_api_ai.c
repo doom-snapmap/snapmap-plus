@@ -1802,6 +1802,25 @@ int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *nod
     do { if (g_engine && !g_engine->op) sh_script_refuse(L, "\"%s\" is not available in this session (Snapmap+ could not find " \
                                              "the game function it needs; see the backend log)", call); } while (0)
 
+/* ai:weapon_use(name): the demon's weapon-use behaviour becomes the entry
+ * of that name in its behaviour decl's weaponUseBehaviorList (the recoil
+ * clip and its weights, the trigger-hold times). true when selected, false
+ * when the list has no such entry. */
+static int l_weapon_use(lua_State *L)
+{
+    const char *name;
+    void *ai;
+    int st;
+    if (lua_type(L, 2) != LUA_TSTRING) sh_script_refuse(L, "\"weapon_use\" needs the entry's name (a string)");
+    name = lua_tostring(L, 2);
+    NEED_OP(L, weapon_use, "weapon_use");
+    ai = self_ai(L, "weapon_use", NULL);
+    st = ai ? g_engine->weapon_use(ai, name) : 0;
+    if (st < 0) sh_script_refuse(L, "\"weapon_use\" could not read this demon's behaviour");
+    lua_pushboolean(L, st > 0);
+    return 1;
+}
+
 /* ai:recoil(alpha): the weight of the weapon's recoil animation, 0 none .. 1 full */
 static int l_recoil(lua_State *L)
 {
@@ -3355,6 +3374,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "laser_sweep", l_laser_sweep },   { "focus_tag", l_focus_tag },
     { "turn_done", l_turn_done },       { "laser_state", l_laser_state },
     { "recoil", l_recoil },             { "weapon_ready", l_weapon_ready },
+    { "weapon_use", l_weapon_use },
     { "aim_point", l_aim_point },       { "anim_valid", l_anim_valid },
     { "anim_force_via", l_anim_force_via }, { "firing_position", l_firing_position },
     { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
@@ -4227,6 +4247,26 @@ static int e_anim_delta(void *ai, const char *name, int index, float out[3], int
                     g_anim_delta(anim, out, NULL);
                     st = out[0] == out[0] && out[1] == out[1] && out[2] == out[2];
                 }
+            }
+        }
+    } __except (av_only(GetExceptionCode())) { st = -1; }
+    return st;
+}
+
+static int e_weapon_use(void *ai, const char *name)
+{
+    int st = 0;
+    __try {
+        const uint8_t *decl = *(const uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_BEHAVIOR_DECL);
+        const uint8_t *list = decl ? *(const uint8_t * const *)(decl + SH_AI_BEHAVIOR_WEAPON_USES) : NULL;
+        int n = decl ? *(const int32_t *)(decl + SH_AI_BEHAVIOR_WEAPON_USES + 8) : 0, i;
+        if (!list || n <= 0 || n > SH_AI_WEAPON_USE_MAX) return decl ? 0 : -1;
+        for (i = 0; i < n; i++) {
+            const char *entry = *(const char * const *)(list + (size_t)i * SH_AI_WEAPON_USE_ENTRY);
+            if (entry && !strcmp(entry, name)) {
+                *(int32_t *)((uint8_t *)ai + SH_AI_OFF_WEAPON_USE_INDEX) = i;
+                st = 1;
+                break;
             }
         }
     } __except (av_only(GetExceptionCode())) { st = -1; }
@@ -5169,7 +5209,7 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend, e_spawn_teleport, e_destructible
+    e_interrupt_blend, e_spawn_teleport, e_destructible, e_weapon_use
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -5223,6 +5263,7 @@ int sh_script_ai_install(const uint8_t *module_base)
     g_move_target = (ai_move_fn)r[SH_AI_SIG_MOVE_TRANSITION].addr;
     if (r[SH_AI_SIG_RECOIL_PLAY].addr) g_recoil_site = (uint8_t *)r[SH_AI_SIG_RECOIL_PLAY].addr;
     else g_live.set_recoil = NULL;
+    if (!r[SH_AI_SIG_WEAPON_USE].addr) g_live.weapon_use = NULL;   /* its offsets are the signature's own bytes */
     if ((site = (const uint8_t *)r[SH_AI_SIG_NEXT_PULL].addr) != NULL) {
         g_fire_decl = (ai_fire_decl_fn)(site + SH_AI_NEXT_PULL_DECL_CALL + 5 + rel32_at(site + SH_AI_NEXT_PULL_DECL_CALL + 1));
         g_slot_table = (const int32_t *)(site + SH_AI_NEXT_PULL_SLOT_TABLE + 7 +

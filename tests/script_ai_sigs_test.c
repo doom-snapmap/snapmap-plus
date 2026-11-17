@@ -373,6 +373,15 @@ static void check_image(const char *path)
         CHECK(SH_AI_BRK_BROKEN == 0xE6Cu && SH_AI_OFF_PHYSICS == 0x808u);
         CHECK(window_has(base, k, 0x100, "\xA8\x0C\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_WEAPON_USE]) {
+        /* the accessor's own bytes are the offsets the call uses */
+        const uint8_t *s = base + rva[SH_AI_SIG_WEAPON_USE];
+        uint32_t index, decl, list;
+        memcpy(&index, s + 3, 4); memcpy(&decl, s + 14, 4); memcpy(&list, s + 29, 4);
+        CHECK(index == SH_AI_OFF_WEAPON_USE_INDEX && decl == SH_AI_OFF_BEHAVIOR_DECL && list == SH_AI_BEHAVIOR_WEAPON_USES);
+        CHECK(!memcmp(s + 18, "\x48\x8D\x0C\x80\x48\xC1\xE1\x04", 8));   /* index x 5 x 16 = 0x50 an entry */
+        CHECK(!memcmp(s + 33, "\x48\x83\xC0\x08", 4));                     /* the entry's data at +8 */
+    }
     if (rva[SH_AI_SIG_FXPHYS_PLACE]) {
         /* mov rdx,[rsp+0x90]: the fifth argument the placement passes as 0 */
         CHECK(!memcmp(base + rva[SH_AI_SIG_FXPHYS_PLACE] + 0x1F, "\x48\x8B\x94\x24\x90\x00\x00\x00", 8));

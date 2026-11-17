@@ -468,6 +468,12 @@ typedef struct sh_script_ai_engine {
     /* Make sure the game's handling of a gore breakable's hit runs through
      * the product (sh_ai_destructible below). 1 ready, -1 unavailable. */
     int      (*destructible)(void);
+    /* Select the entry named `name` of the demon's behaviour decl's
+     * weaponUseBehaviorList as its weapon-use behaviour (the recoil clip and
+     * weights, the trigger-hold times): the game selects "default" at spawn
+     * and never again. 1 selected, 0 the list has no entry of that name
+     * (nothing changed), -1 unavailable. */
+    int      (*weapon_use)(void *ai, const char *name);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -779,6 +785,7 @@ enum sh_ai_sig {
     SH_AI_SIG_BREAKABLE_GORE,      /* a gore breakable's weapon-specific gore (manager, breakable, ...) (detoured) */
     SH_AI_SIG_BREAKABLE_BREAK,     /* idBreakable's break (breakable, 0): every piece placed and activated */
     SH_AI_SIG_FXPHYS_PLACE,        /* an effect rigid body's broad phase entry moved (broad phase, entry, pos, axis) */
+    SH_AI_SIG_WEAPON_USE,          /* the demon's weapon-use behaviour: the list entry its index names */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -793,6 +800,15 @@ extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
 /* Inside the recoil play: mulss xmm6,[rsi+0x24EB0] at +0x29 reads the
  * recoil strength. */
 #define SH_AI_RECOIL_SITE_MUL       0x29u
+/* The weapon-use accessor is its whole signature: movsxd rax,[rcx+0x250C8]
+ * (the index), mov rdx,[rcx+0xC120] (the behaviour decl), mov rax,[rdx+0x398]
+ * (the list's elements; its count is the int after the pointer), 0x50 an
+ * entry: the name (a pointer to its text) at +0, the data at +8. */
+#define SH_AI_OFF_WEAPON_USE_INDEX  0x250C8u
+#define SH_AI_OFF_BEHAVIOR_DECL     0xC120u
+#define SH_AI_BEHAVIOR_WEAPON_USES  0x398u
+#define SH_AI_WEAPON_USE_ENTRY      0x50u
+#define SH_AI_WEAPON_USE_MAX        64
 /* Inside the next-pull writer: the fire-decl call (E8 at +0x52) and the
  * trigger-slot table (lea rbp,[rip+] at +0x57). */
 #define SH_AI_NEXT_PULL_DECL_CALL   0x52u

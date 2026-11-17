@@ -106,6 +106,7 @@ typedef struct fent {
     int   path_long;       /* path_points answers this many points (0: three) */
     /* the calls the brain needs */
     float recoil;
+    char  weapon_use[64];  /* the weapon-use entry selected */
     int   ready;           /* weapon_ready answer (-1 no weapon) */
     float aim[3];
     int   aimed;
@@ -258,6 +259,12 @@ static int f_anim_delta(void *ai, const char *node, int index, float out[3], int
     return -1;
 }
 static int f_set_recoil(void *ai, float a) { ((fent *)ai)->recoil = a; return 1; }
+static int f_weapon_use(void *ai, const char *name)
+{
+    if (strcmp(name, "default") && strcmp(name, "recoil:")) return 0;
+    snprintf(((fent *)ai)->weapon_use, sizeof ((fent *)ai)->weapon_use, "%s", name);
+    return 1;
+}
 static int f_weapon_ready(void *ai, int hand) { ((fent *)ai)->asked_hand = hand; return ((fent *)ai)->ready; }
 static int f_weapon_hand(void *ai) { return ((fent *)ai)->weapon_hand ? ((fent *)ai)->weapon_hand : SH_AI_HAND_RIGHT; }
 static int f_item(void *ai, int index, char *decl, size_t cap, int *hand)
@@ -448,7 +455,7 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_spawn_teleport, f_destructible
+    f_interrupt_blend, f_spawn_teleport, f_destructible, f_weapon_use
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1132,6 +1139,7 @@ static void test_brain_calls(void)
         "  step = step + 1\n"
         "  if step == 1 then\n"
         "    self:recoil(0.2)\n"
+        "    print('use ' .. tostring(self:weapon_use('recoil:')) .. ' ' .. tostring(self:weapon_use('other')))\n"
         "    print('ready ' .. tostring(self:weapon_ready()))\n"
         "    self:aim_point({x = 1, y = 2, z = 3})\n"
         "    print('valid ' .. tostring(self:anim_valid('evade/side', 'TF_NAV_ENDPOINT TF_BOUNDS', 1)))\n"
@@ -1178,6 +1186,7 @@ static void test_brain_calls(void)
     tick();
     log = log_of("aaaaaaaa");
     CHECK(fabsf(g_ent[1].recoil - 0.2f) < 1e-6f);
+    CHECK(strstr(log, "use true false\n") != NULL && !strcmp(g_ent[1].weapon_use, "recoil:"));
     CHECK(strstr(log, "ready true\n") != NULL && strstr(log, "ready2 false\n") != NULL);
     CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 1 && g_ent[1].aim[2] == 3);
     CHECK(strstr(log, "valid true\nvalid2 true\nvalid3 false\nvalid4 nil no such node\n") != NULL);
@@ -1715,6 +1724,7 @@ static void test_brain_refusals(void)
 {
     printf("-- the brain's calls refuse plainly\n");
     expect_stop("self:recoil(2)", "\"recoil\" needs a weight from 0 (no recoil) to 1 (full), got 2");
+    expect_stop("self:weapon_use(5)", "\"weapon_use\" needs the entry's name (a string)");
     expect_stop("self:aim_point(5)", "\"aim_point\" needs a position");
     expect_stop("self:anim_valid('evade/side', 'TF_FLY')", "\"anim_valid\" does not know the test \"TF_FLY\"");
     expect_stop("self:anim_valid('a b')", "\"anim_valid\": \"a b\" is not an animWeb node name");
@@ -2283,7 +2293,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 52);
+    CHECK(sh_script_ai_register() == 53);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

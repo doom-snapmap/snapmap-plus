@@ -162,6 +162,11 @@
  *                      (+0xE6C) is set, places every piece where the model puts it plus up to 20 units an axis
  *                      at random and turns it at random (VK 0x141758780, through the physics +0xCA8), starts the
  *                      explosion records, stamps brokenStartTime. Called.
+ *   AiWeaponUse        VK 0x140435430  GL 0x1404343A0  the demon's weapon-use behaviour: entry [ai+0x250C8] of the
+ *                      behaviour decl's weaponUseBehaviorList (decl at ai+0xC120, list at decl+0x398, 0x50 an
+ *                      entry, its data at +8), or NULL below 0. The recoil play and the trigger-hold timers read
+ *                      the entry through it; the game sets the index once, at spawn, by name (VK 0x1404395E0:
+ *                      the entry named "default").
  *   AiFxPhysPlace      VK 0x141650390  GL 0x141650F30  an effect rigid body's broad phase entry moved to a position
  *                      and axis (broad phase, entry, position, axis, 0), as the piece placement calls it.
  *                      Called. (snaphak-re reports/R-G6) */
@@ -363,6 +368,10 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 53 56 57 41 56 48 83 EC 48 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 8B DA 49 8B F1 48 8B 94 24 "
       "90 00 00 00 4D 8B F0 48 8B F9 48 85 D2",
       0x1650390u, 0x1650F30u },
+    { "AiWeaponUse",
+      "48 63 81 C8 50 02 00 85 C0 78 1E 48 8B 91 20 C1 00 00 48 8D 0C 80 48 C1 E1 04 48 8B 82 98 03 00 00 "
+      "48 83 C0 08 48 03 C1 C3 33 C0 C3",
+      0x435430u, 0x4343A0u },
     { NULL, NULL, 0, 0 }
 };
 
