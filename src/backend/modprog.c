@@ -35,16 +35,7 @@ typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = { { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 } };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
-const char *const SH_MODPROG_ML_PARMS[] = {
-    "layerstilingfactor", "multiblendlayerscale", "multiblendheightmapscale", "multiblendsoftness",
-    "multiblendalbedoscale", "multiblendnormalscale", "multiblendspecularscale", "multiblendsmoothnessscale",
-    "multiblendemissivescale", "blendheightmapscale", "blendlayer0tiling", "blendlayer0emissive",
-    "blendlayer1tiling", "blendlayer2tiling", "blendlayer3tiling", "blendlayer4tiling",
-    "blendlayer1specular", "blendlayer2specular", "blendlayer3specular", "blendlayer4specular",
-    "blendlayer1emissive", "blendlayer2emissive", "blendlayer3emissive", "blendlayer4emissive",
-    "multilayerember", "multilayerembertiling", "multilayerembernoise", "multilayeremberhot",
-};
-const unsigned SH_MODPROG_ML_PARM_COUNT = sizeof SH_MODPROG_ML_PARMS / sizeof SH_MODPROG_ML_PARMS[0];
+/* The blend's parameters (bank parms) are generated with the module (modprog_multilayer.c). */
 const char *const SH_MODPROG_ML_TEXTURES[] = {
     "layerblendmask", "blendlayer0heightmap",
     "blendlayer1albedomap", "blendlayer1normalmap", "blendlayer1smoothnessmap", "blendlayer1heightmap",
@@ -70,20 +61,14 @@ static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "nor
 #define MP_NINOUT 7
 
 /* The Eternal particle program (shaders/eternalparticles.frag): its material parameters appended to the fragment
- * stage's material uniforms (the product's four, then two of the game's own render parms the shading reads), its
- * added texture, the module's samplers (the first three bound to the program's own textures), the stage inputs and
- * the program's own uniforms it reads ('h' the material block, 'l' the view block). */
-const char *const SH_MODPROG_EP_PARMS[] = {
-    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
-};
-const unsigned SH_MODPROG_EP_PARM_COUNT = sizeof SH_MODPROG_EP_PARMS / sizeof SH_MODPROG_EP_PARMS[0];
+ * stage's material uniforms (generated, modprog_particles.c: the product's four bank parms, then two of the game's
+ * own render parms the shading reads), its added texture, the module's samplers (the first three bound to the
+ * program's own textures), the stage inputs and the program's own uniforms it reads ('h' the material block, 'l'
+ * the view block). */
 const char *const SH_MODPROG_EP_TEXTURES[] = { "eternalparticleemissivemap" };
 const unsigned SH_MODPROG_EP_TEXTURE_COUNT = sizeof SH_MODPROG_EP_TEXTURES / sizeof SH_MODPROG_EP_TEXTURES[0];
-static const char *const EP_BLOCK_PARMS[] = {
-    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
-    "projectionmatrixz", "globalvieworigin",
-};
-#define EP_NBLOCK_PARMS (sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0])
+#define EP_BLOCK_PARMS  SH_MODPROG_EP_BLOCK_PARMS
+#define EP_NBLOCK_PARMS SH_MODPROG_EP_BLOCK_PARM_COUNT
 static const char *const EP_SAMPLERS[] = { "ep_trans", "ep_depth", "ep_atlas", "ep_emissive" };
 static const char *const EP_SAMPLER_STOCK[] = { "samp_transmap", "samp_viewdepthmap", "samp_particleslightatlasmap", NULL };
 #define EP_NSAMPLERS (sizeof EP_SAMPLERS / sizeof EP_SAMPLERS[0])
@@ -97,38 +82,10 @@ static const char *const EP_UNIFORMS[] = {
 };
 #define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
 
-/* The render parm decls: the blend's defaults (DOOM Eternal's template/boss_character where it names one). */
+/* The render parm decls the product declares besides the bank (below): the blend's and the particle shading's
+ * textures, the radial blur's vectors. */
 typedef struct mp_parm { const char *name, *text; } mp_parm;
 static const mp_parm MP_PARM_DECLS[] = {
-    { "layerstilingfactor",        "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendlayerscale",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendheightmapscale",  "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendsoftness",        "{ Vec { 0.25, 0.25, 0.25, 0.25 } }" },
-    { "multiblendalbedoscale",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendnormalscale",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendspecularscale",   "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendsmoothnessscale", "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendemissivescale",   "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "blendheightmapscale",       "{ Vec { 1.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer0tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer0emissive",       "{ Vec { 1.0, 1.0, 1.0, 0.0 } }" },
-    { "blendlayer1tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer2tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer3tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer4tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer1specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer2specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer3specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer4specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer1emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer2emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer3emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer4emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    /* No ember: an isember material's converter writes all four. */
-    { "multilayerember",           "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "multilayerembertiling",     "{ Vec { 4.0, 4.0, 0.0, 0.0 } }" },
-    { "multilayerembernoise",      "{ Vec { 1.0, 4.0, 0.7, 0.4 } }" },
-    { "multilayeremberhot",        "{ Vec { 1.0, 0.07, 0.0, 0.0 } }" },
     /* No mask, no layer: what an image key the material does not set gives. */
     { "layerblendmask",            "{ Tex2D textures/system/constant_color/black }" },
     { "blendlayer0heightmap",      "{ Tex2D textures/system/constant_color/grey_md }" },
@@ -150,12 +107,7 @@ static const mp_parm MP_PARM_DECLS[] = {
     { "blendlayer4heightmap",      "{ Tex2D textures/system/constant_color/grey_md }" },
     { "multilayerextramap0",       "{ Tex2D textures/system/constant_color/black }" },
     { "multilayerextramap1",       "{ Tex2D textures/system/constant_color/black }" },
-    /* The Eternal particle program: an unlit stage of no emissive multiplier, no near fade, no soft distance and no
-     * emissive sheet unless the material sets them (the converter writes every one a stage gives). */
-    { "eternalparticle",           "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "eternalparticlefade",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "eternalparticlecolor",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "eternalparticlecolor2",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
+    /* The Eternal particle program: no emissive sheet unless the material sets one. */
     { "eternalparticleemissivemap", "{ Tex2D textures/system/constant_color/white }" },
     /* The post process's radial blur (postfx.c writes them each frame): none on. */
     { "radialblur0",               "{ Vec { 1.0, 0.0, 0.0, 0.0 } }" },
@@ -177,9 +129,23 @@ static const mp_parm MP_PARM_DECLS[] = {
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
+/* The default of bank parm k: what a material that does not write it reads. The particle program's for the first
+ * four: a material names snapmapplus/eternal/uberparticles as its stageprogram, and one that writes none of the four
+ * keys (no Snapmap+ converter writes such a material, but a hand-written one may) is left as it is by modprog_bank.c,
+ * so it reads these, as it read the particle parms' own decls before the bank. An unlit stage of no emissive
+ * multiplier, no near fade, no soft distance and no emissive sheet. The rest are the multilayer blend's; a multilayer
+ * material is always served with every bank key written, so none of them is read by default. */
+static const char *mp_bank_default(unsigned k)
+{
+    if (k < SH_MODPROG_EP_PARM_COUNT) return SH_MODPROG_EP_DEFAULTS[k];
+    return k < SH_MODPROG_ML_PARM_COUNT ? SH_MODPROG_ML_DEFAULTS[k] : "{ 0.0, 0.0, 0.0, 0.0 }";
+}
+
 const char *sh_modprog_vector_parm(unsigned i)
 {
     size_t k;
+    if (i < SH_MODPROG_BANK_COUNT) return SH_MODPROG_BANK[i];
+    i -= SH_MODPROG_BANK_COUNT;
     for (k = 0; k < MP_NPARM_DECLS; k++) {
         if (strncmp(MP_PARM_DECLS[k].text, "{ Vec ", 6)) continue;
         if (!i--) return MP_PARM_DECLS[k].name;
@@ -1567,12 +1533,11 @@ char *sh_modprog_rb_patch_decl(const char *text, size_t len, const char *inc, si
 
 /* ---------------------------------------------------------------------------------------------- families ---- */
 
-static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
 static const mp_family MP_FAMILIES[] = {
     { SH_MODPROG_PREFIX, "multilayer version", SH_MODPROG_ML_PARMS, &SH_MODPROG_ML_PARM_COUNT, SH_MODPROG_ML_TEXTURES,
       &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
       "its decl has no single CUSTOM_TEXTURE_INPUTS template" },
-    { SH_MODPROG_EP_PREFIX, "DOOM Eternal particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+    { SH_MODPROG_EP_PREFIX, "DOOM Eternal particle version", EP_BLOCK_PARMS, &EP_NBLOCK_PARMS, SH_MODPROG_EP_TEXTURES,
       &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
       "its decl's fragment stage does not end in one premultiplied colour after its includes" },
 };
@@ -1969,16 +1934,23 @@ static int mp_derive(size_t base)
     return ok;
 }
 
-/* The parm decl a path names (index), or -1. */
+/* The parm decl a path names, or -1: an index of MP_PARM_DECLS, or MP_NPARM_DECLS + k for bank parm k. */
 static int mp_parm_of(const char *path)
 {
     size_t b;
     if (_strnicmp(path, "generated/decls/renderparm/", 27)) return -1;
-    for (b = 0; b < MP_NPARM_DECLS; b++) {
-        size_t n = strlen(MP_PARM_DECLS[b].name);
-        if (!_strnicmp(path + 27, MP_PARM_DECLS[b].name, n) && !_stricmp(path + 27 + n, ".decl")) return (int)b;
+    for (b = 0; b < MP_NPARM_DECLS + SH_MODPROG_BANK_COUNT; b++) {
+        const char *name = b < MP_NPARM_DECLS ? MP_PARM_DECLS[b].name : SH_MODPROG_BANK[b - MP_NPARM_DECLS];
+        size_t n = strlen(name);
+        if (!_strnicmp(path + 27, name, n) && !_stricmp(path + 27 + n, ".decl")) return (int)b;
     }
     return -1;
+}
+
+/* 1 when parm decl `parm` (mp_parm_of) is one of the radial blur's. */
+static int mp_parm_is_post(int parm)
+{
+    return parm >= 0 && (size_t)parm < MP_NPARM_DECLS && !_strnicmp(MP_PARM_DECLS[parm].name, "radialblur", 10);
 }
 
 /* The base a product program path belongs to, or -1. */
@@ -2025,8 +1997,13 @@ int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
     if (len) *len = 0;
     if (!path || !bytes || !len) return SH_MB_STOCK_ABSENT;
     if ((parm = mp_parm_of(path)) >= 0) {
-        size_t t = strlen(MP_PARM_DECLS[parm].text);
-        if (!(*bytes = mp_heap_copy(MP_PARM_DECLS[parm].text, t))) return SH_MB_STOCK_UNAVAILABLE;
+        char *bank = (size_t)parm < MP_NPARM_DECLS ? NULL
+                     : sh_textf("{ Vec %s }", mp_bank_default((unsigned)((size_t)parm - MP_NPARM_DECLS)));
+        const char *text = (size_t)parm < MP_NPARM_DECLS ? MP_PARM_DECLS[parm].text : bank;
+        size_t t = text ? strlen(text) : 0;
+        *bytes = text ? mp_heap_copy(text, t) : NULL;
+        free(bank);
+        if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
         *len = t;
         return SH_MB_STOCK_OK;
     }
@@ -2205,14 +2182,13 @@ int sh_modprog_post_owns(const char *path)
 {
     int parm;
     if (!path) return 0;
-    if ((parm = mp_parm_of(path)) >= 0) return !_strnicmp(MP_PARM_DECLS[parm].name, "radialblur", 10);
+    if ((parm = mp_parm_of(path)) >= 0) return mp_parm_is_post(parm);
     return mp_post_base_of(path) >= 0;
 }
 
 int sh_modprog_post_claims(const char *path)
 {
-    int parm = path ? mp_parm_of(path) : -1;
-    return parm >= 0 && !_strnicmp(MP_PARM_DECLS[parm].name, "radialblur", 10);
+    return path && mp_parm_is_post(mp_parm_of(path));
 }
 
 int sh_modprog_post_read(const char *path, unsigned char **bytes, size_t *len)
@@ -2244,8 +2220,9 @@ void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *p
     char **paths = NULL;
     int overlaps = 0;
     if (!fn) return;
-    for (i = 0; i < MP_NPARM_DECLS; i++) {
-        char *p = sh_textf("generated/decls/renderparm/%s.decl", MP_PARM_DECLS[i].name);
+    for (i = 0; i < MP_NPARM_DECLS + SH_MODPROG_BANK_COUNT; i++) {
+        char *p = sh_textf("generated/decls/renderparm/%s.decl",
+                           i < MP_NPARM_DECLS ? MP_PARM_DECLS[i].name : SH_MODPROG_BANK[i - MP_NPARM_DECLS]);
         if (p && !_strnicmp(p, pre, n)) fn(context, p);
         free(p);
     }

@@ -1228,6 +1228,14 @@ typedef void (*sh_modserve_serve_fn)(const char *request, const char *bundle_has
                                      const unsigned char *bytes, size_t length);
 void sh_modserve_set_serve_listener(sh_modserve_serve_fn fn);
 
+/* The text a mod's material decl (a material or material2 file of a folder, not a stock pointer) is served as:
+ * SH_MODPROG_BANK_CHANGED (1) with a malloc'd text in *out, or 0 when the file is served as it is (modprog_bank.h
+ * sh_modprog_bank, set by the backend before the first index; the native tests leave it unset). The text is derived
+ * once per indexed file and served like a composed text: sh_modserve_open and sh_modserve_serve_identity answer
+ * with it, and the serve listener gets no file hash for it, so the ledger identifies it by its bytes. */
+typedef int (*sh_modserve_text_fn)(const char *text, size_t len, char **out, size_t *out_len);
+void sh_modserve_set_material_filter(sh_modserve_text_fn fn);
+
 /* What sh_modserve_open would serve for `request` now, without serving it:
  * 1 with the bundle hash and either the file's SHA-256 (*file_hash) or, for a
  * composed text, its bytes (*body, *body_len; index memory, valid for the

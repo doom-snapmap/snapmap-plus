@@ -77,8 +77,18 @@ void sh_modprog_set_reader(sh_modprog_reader reader);
 /* Forget every derived file (tests). */
 void sh_modprog_reset(void);
 
-/* The i-th vector render parm the product's programs declare (the multilayer blend's, the particle shading's, the
- * radial blur's), or NULL past the last: the parms that keep their parm state slots (parmslots.h). */
+/* The bank. DOOM 2016 has 1,024 vector render parm slots and its own decls hold 973 (parmslots.h), and a slot is
+ * taken per parm name, so the product's material programs share their vector parms: the k-th parameter of every one
+ * of them (the multilayer blend's, the particle shading's) is the render parm snapmapplusvec<k>, as many as the
+ * largest program reads (each generated table checks that it fits). The shader sources and an author's material keep
+ * each program's readable names (SH_MODPROG_ML_NAMES, SH_MODPROG_EP_NAMES); tools/gen_multilayer.js rewrites the
+ * program texts and modprog_bank.c a mod's material decls served to the engine. The radial blur keeps its own parms
+ * (postfx.c writes them each frame, for the view). */
+#define SH_MODPROG_BANK_COUNT 28
+extern const char *const SH_MODPROG_BANK[];      /* snapmapplusvec0 .. snapmapplusvec27 (modprog_multilayer.c) */
+
+/* The i-th vector render parm the product declares (the bank, then the radial blur's), or NULL past the last: the
+ * parms that keep their parm state slots (parmslots.h). */
 const char *sh_modprog_vector_parm(unsigned i);
 
 /* ------------------------------------------------------------------ building blocks (tests) ---- */
@@ -113,19 +123,28 @@ extern const unsigned SH_MODPROG_ML_SPIRV[];
 extern const char SH_MODPROG_ML_GLSL[];
 extern const char SH_MODPROG_ML_DECL[];
 
-/* The blend's material keys, in the order the program reads them (uniforms, then textures). */
+/* The blend's material keys, in the order the program reads them (uniforms, then textures): its parameters' bank
+ * parms, readable names and defaults (vector text, "{ 1.0, 1.0, 1.0, 1.0 }"; generated), then its textures. */
 extern const char *const SH_MODPROG_ML_PARMS[];
+extern const char *const SH_MODPROG_ML_NAMES[];
+extern const char *const SH_MODPROG_ML_DEFAULTS[];
 extern const unsigned SH_MODPROG_ML_PARM_COUNT;
 extern const char *const SH_MODPROG_ML_TEXTURES[];
 extern const unsigned SH_MODPROG_ML_TEXTURE_COUNT;
 
-/* The particle program's generated module and texts (modprog_particles.c) and its material keys. */
+/* The particle program's generated module and texts (modprog_particles.c) and its material keys: the parameters as
+ * the blend's, the parameter array the shading reads (the bank parms, then the game's projectionmatrixz and
+ * globalvieworigin), its texture. */
 extern const unsigned SH_MODPROG_EP_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_EP_SPIRV[];
 extern const char SH_MODPROG_EP_GLSL[];
 extern const char SH_MODPROG_EP_DECL[];
 extern const char *const SH_MODPROG_EP_PARMS[];
+extern const char *const SH_MODPROG_EP_NAMES[];
+extern const char *const SH_MODPROG_EP_DEFAULTS[];
 extern const unsigned SH_MODPROG_EP_PARM_COUNT;
+extern const char *const SH_MODPROG_EP_BLOCK_PARMS[];
+extern const unsigned SH_MODPROG_EP_BLOCK_PARM_COUNT;
 extern const char *const SH_MODPROG_EP_TEXTURES[];
 extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
 

@@ -1602,8 +1602,8 @@ inside `main()`, so `shaders/multilayer.decl.inc` defines macros and templates
 only, never functions.
 
 Nothing of the game is shipped. Every file of the program's closure (its decl
-and permutation decls, the `.bin` files, the SPIR-V and the render-parm decls of
-its keys) is derived in memory from the installed base program when first asked
+and permutation decls, the `.bin` files, the SPIR-V and the render-parm decls it
+reads, the bank's among them, below) is derived in memory from the installed base program when first asked
 for, and `modstock.c` answers for it as installed content in the container
 `snapmapplus`: the closure brings it along as pointers (noted once per bundle),
 the checks above run on it as on any program, the server serves it, and an
@@ -1641,6 +1641,36 @@ uniforms, and the program's own `transmap`, `viewdepthmap` and particle light
 atlas samplers. The rule is documented in `src/backend/shaders/eternalparticles.frag`;
 `eternalparticles.decl.inc` is the OpenGL text. A liquid stage keeps the game's
 own blood shading.
+
+#### The parameter bank
+
+The engine gives each vector render parm name a slot of its own, and its
+vector slots are nearly all held (below), so the material programs share their
+vector parms. The k-th vector parameter of every material program (the
+multilayer blend's 28, the particle shading's four) is the render parm
+`snapmapplusvec<k>`, as many as the largest program reads
+(`SH_MODPROG_BANK_COUNT`, 28, checked at compile time against each program's
+generated table). A later material program needs no vector slot. The radial
+blur keeps its own 16: `postfx.c` writes them for the view each frame. Texture
+parms keep their names.
+
+The readable names above stay the author's and the shader sources':
+`tools/gen_multilayer.js` holds each program's ordered names and defaults,
+rewrites the OpenGL text's `$<name>` references to the bank's and generates the
+tables the derivation names its uniforms, bindings and cooked parameters by.
+A mod's material decl is served to the engine in the bank's names
+(`modprog_bank.c`, set as the provider's material filter, `modserve.h`): a
+material whose `ambientprogram` names `snapmapplus/multilayer/` draws with the
+blend, one that writes a key of the particle program draws with that; each
+readable key of its program becomes its bank name, and the program's other
+bank keys are added with the program's defaults, so nothing is left to another
+program's meaning. A material that names neither program, or is already in
+the bank's names, is served as its file holds it. The text is derived on the
+first open and kept with the serving table; like a composed text it is served
+without the file's hash, so the served-bytes ledger identifies it by its bytes
+while the build keeps the author's file and its hash. The bank parms' own
+defaults are the particle program's for the first four (a particle material
+may write none of its keys and then reads them) and the blend's after them.
 
 #### The radial blur fx item
 
@@ -1701,15 +1731,15 @@ the fault shield a parm that never loads, so every program naming it draws the
 engine's default program. The vector range is the tight one: the game's own
 decls and its 128 expression temporaries (`temp1`..`temp128`, of which only 80
 have a decl file) hold 973, which leaves 51 for everything else, and the
-product's programs declare 48.
+product's programs declare 44 (the bank's 28 and the radial blur's 16).
 
 `parmslots.c` detours `AllocParmState` on both renderers and decides first
 (`parmslots_rule.c`, pure):
 
 - A parm whose name already holds a slot, or whose range has room, is placed
   by the engine as before, with one reservation: the vector parms of the
-  product's own programs (`sh_modprog_vector_parm`: the multilayer blend's,
-  the particle shading's, the radial blur's) keep as many free vector slots
+  product's own programs (`sh_modprog_vector_parm`: the bank the material
+  programs share, the radial blur's) keep as many free vector slots
   as they still need, whatever asks first. A mod's own parms cannot take the
   slots a ported demon's programs draw with.
 - A vector parm that finds no slot of its own shares one. The last vector
@@ -1723,7 +1753,7 @@ product's programs declare 48.
 Nothing is shown to the author or the player. The backend log has one `PARMS:`
 line when the guard is installed, one when the shared slot is made, and one
 for each of the first 32 parms that share a slot. With today's contents a mod
-gets two vector slots of its own and the shared one after them.
+gets six vector slots of its own and the shared one after them.
 
 #### Simulated particle motion
 

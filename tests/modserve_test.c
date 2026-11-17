@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "modserve.h"
+#include "modprog_bank.h"
 #include "decl_tree.h"
 #include "modmanifest.h"
 #include "modbundle.h"
@@ -2756,6 +2757,66 @@ static void test_renderparm_first(void)
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST);
     CHECK(strstr(seen.order, "mods/rpmat000/own_parm;") == NULL && strstr(seen.order, "skinsssmap;") == NULL);
+    /* Leave the table the next test expects. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
+/* ------------------------------------------------------------------ materials in the bank's names */
+
+/* A mod's material on one of the product's material programs is served in the bank's names (modprog_bank.h): the
+ * open, the serve identity and the serve listener all see that text, the ledger without a file hash (the bytes are
+ * not the file's), every open the same bytes; a material on another program, and every other decl, is served as
+ * its file holds it, with its hash. */
+#define BK_ML    "generated/decls/material2/mods/bankmat0/skin.decl"
+#define BK_PLAIN "generated/decls/material2/mods/bankmat0/plain.decl"
+#define BK_ENT   "generated/decls/entitydef/mods/bankmat0/thing.decl"
+static char g_bk_heard_hash[2];
+static void bk_listen(const char *request, const char *bundle_hash, const char *file_hash, const unsigned char *bytes,
+                      size_t length)
+{
+    (void)bundle_hash; (void)bytes; (void)length;
+    if (!strcmp(request, BK_ML)) g_bk_heard_hash[0] = file_hash ? 'h' : 'n';
+    if (!strcmp(request, BK_PLAIN)) g_bk_heard_hash[1] = file_hash ? 'h' : 'n';
+}
+static void test_material_bank(void)
+{
+    static const fx_file m[] = {
+        { BK_ML, "{\n\tambientprogram\t\"snapmapplus/multilayer/skinvmtr\"\n\tlayerstilingfactor\t{ 2, 2, 2, 2 }\n}\n", -1,
+          "material2", "mods/bankmat0/skin", NULL, '1' },
+        { BK_PLAIN, "{\n\tambientprogram\tskinvmtr\n\tlayerstilingfactor\t{ 2, 2, 2, 2 }\n}\n", -1, "material2",
+          "mods/bankmat0/plain", NULL, '2' },
+        { BK_ENT, "entityDef thing { layerstilingfactor 1 }", -1, "entityDef", "mods/bankmat0/thing", NULL, '3' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], text[4096], again[4096];
+    char *slash;
+    const char *bundle = NULL, *file = NULL;
+    const unsigned char *body = NULL;
+    size_t body_len = 0;
+    uint64_t size = 0;
+    printf("-- a mod's material on a product program is served in the bank's names\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\bank\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "bankmat0", "bankmat0", 'a', NULL, m, 3, NULL);
+    sh_modserve_set_material_filter(sh_modprog_bank);
+    sh_modserve_set_serve_listener(bk_listen);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(open_text(BK_ML, text, sizeof text) == 1);
+    CHECK(strstr(text, "\tsnapmapplusvec0\t{ 2, 2, 2, 2 }\n") != NULL && !strstr(text, "layerstilingfactor"));
+    CHECK(strstr(text, "snapmapplusvec27\t{ 1.0, 0.07, 0.0, 0.0 }\n}\n") != NULL);
+    CHECK(open_text(BK_ML, again, sizeof again) == 1 && !strcmp(text, again));
+    CHECK(g_bk_heard_hash[0] == 'n');
+    CHECK(sh_modserve_serve_identity(BK_ML, &bundle, &file, &body, &body_len, &size) == 1);
+    CHECK(!file && body && body_len == strlen(text) && !memcmp(body, text, body_len) && size == body_len);
+    CHECK(open_text(BK_PLAIN, text, sizeof text) == 1 && !strcmp(text, m[1].body));
+    CHECK(g_bk_heard_hash[1] == 'h');
+    CHECK(sh_modserve_serve_identity(BK_PLAIN, &bundle, &file, &body, &body_len, &size) == 1 && file && !body);
+    CHECK(open_text(BK_ENT, text, sizeof text) == 1 && !strcmp(text, m[2].body));
+    sh_modserve_set_serve_listener(NULL);
+    sh_modserve_set_material_filter(NULL);
     /* Leave the table the next test expects. */
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
     (void)sh_modserve_index_build(root);
@@ -5543,6 +5604,7 @@ int main(void)
     test_load_attribution();
     test_editor_closure();
     test_renderparm_first();
+    test_material_bank();
     test_surfaces_never_parsed();
     test_launch_preload();
     test_refusals();

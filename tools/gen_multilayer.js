@@ -10,7 +10,14 @@
 // src/backend/modprog_particles.c is the same for the particle program (shaders/eternalparticles.frag and
 // eternalparticles.decl.inc), src/backend/modprog_post.c for the radial blur of the post process (shaders/radialblur.frag
 // and radialblur.decl.inc). tests/modprog_fixture.c is modprog_test's stand-in program (tests/fixtures/modprog/lit.frag).
-// --check compares the texts always and the SPIR-V only where a compiler is at hand (CI has none).
+// --check compares the texts always and the SPIR-V only where a compiler is at hand (CI has none). Without a
+// compiler a write keeps the SPIR-V each file embeds and regenerates its texts and tables.
+//
+// The bank: every material program of the product reads its k-th vector parameter from the render parm
+// snapmapplusvec<k> (modprog.h SH_MODPROG_BANK_COUNT), so a later program needs no vector parm slot of its own.
+// The shader sources and an author's material keep each program's readable names, listed below with the program's
+// default for each; this generator is the one place that turns them into bank names: the OpenGL text's `$<name>`
+// references, and the generated tables (bank names, readable names, defaults) that modprog.c and modprog_bank.c read.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -21,14 +28,59 @@ const out = path.join(root, 'src', 'backend', 'modprog_multilayer.c');
 const fixtureSrc = path.join(root, 'tests', 'fixtures', 'modprog', 'lit.frag');
 const fixtureOut = path.join(root, 'tests', 'modprog_fixture.c');
 const frag = fs.readFileSync(path.join(dir, 'multilayer.frag'), 'utf8').replace(/\r\n/g, '\n');
-const decl = fs.readFileSync(path.join(dir, 'multilayer.decl.inc'), 'utf8').replace(/\r\n/g, '\n');
+const declSrc = fs.readFileSync(path.join(dir, 'multilayer.decl.inc'), 'utf8').replace(/\r\n/g, '\n');
 const fixture = fs.readFileSync(fixtureSrc, 'utf8').replace(/\r\n/g, '\n');
 const epFixture = fs.readFileSync(path.join(root, 'tests', 'fixtures', 'modprog', 'particle.frag'), 'utf8')
   .replace(/\r\n/g, '\n');
 const check = process.argv.includes('--check');
 const epOut = path.join(root, 'src', 'backend', 'modprog_particles.c');
 const epFrag = fs.readFileSync(path.join(dir, 'eternalparticles.frag'), 'utf8').replace(/\r\n/g, '\n');
-const epDecl = fs.readFileSync(path.join(dir, 'eternalparticles.decl.inc'), 'utf8').replace(/\r\n/g, '\n');
+const epDeclSrc = fs.readFileSync(path.join(dir, 'eternalparticles.decl.inc'), 'utf8').replace(/\r\n/g, '\n');
+
+// Each material program's parameters, in the order it reads them (ml_blend's P, ep_shade's first four of P), with
+// the program's default (DOOM Eternal's template/boss_character where it names one).
+const bankName = (k) => `snapmapplusvec${k}`;
+const mlParms = [
+  ['layerstilingfactor', [1, 1, 1, 1]], ['multiblendlayerscale', [1, 1, 1, 1]],
+  ['multiblendheightmapscale', [1, 1, 1, 1]], ['multiblendsoftness', [0.25, 0.25, 0.25, 0.25]],
+  ['multiblendalbedoscale', [1, 1, 1, 1]], ['multiblendnormalscale', [1, 1, 1, 1]],
+  ['multiblendspecularscale', [1, 1, 1, 1]], ['multiblendsmoothnessscale', [1, 1, 1, 1]],
+  ['multiblendemissivescale', [1, 1, 1, 1]], ['blendheightmapscale', [1, 0, 0, 0]],
+  ['blendlayer0tiling', [1, 1, 0, 0]], ['blendlayer0emissive', [1, 1, 1, 0]],
+  ['blendlayer1tiling', [1, 1, 0, 0]], ['blendlayer2tiling', [1, 1, 0, 0]],
+  ['blendlayer3tiling', [1, 1, 0, 0]], ['blendlayer4tiling', [1, 1, 0, 0]],
+  ['blendlayer1specular', [0, 0, 0, 0]], ['blendlayer2specular', [0, 0, 0, 0]],
+  ['blendlayer3specular', [0, 0, 0, 0]], ['blendlayer4specular', [0, 0, 0, 0]],
+  ['blendlayer1emissive', [0, 0, 0, 0]], ['blendlayer2emissive', [0, 0, 0, 0]],
+  ['blendlayer3emissive', [0, 0, 0, 0]], ['blendlayer4emissive', [0, 0, 0, 0]],
+  // no ember: an isember material's converter writes all four
+  ['multilayerember', [0, 0, 0, 0]], ['multilayerembertiling', [4, 4, 0, 0]],
+  ['multilayerembernoise', [1, 4, 0.7, 0.4]], ['multilayeremberhot', [1, 0.07, 0, 0]],
+];
+// an unlit stage of no emissive multiplier, no near fade, no soft distance and no emissive sheet
+const epParms = [
+  ['eternalparticle', [0, 0, 0, 0]], ['eternalparticlefade', [0, 0, 0, 0]],
+  ['eternalparticlecolor', [1, 1, 1, 1]], ['eternalparticlecolor2', [1, 1, 1, 1]],
+];
+// the game's own render parms ep_shade reads after them (the rest of its P)
+const epGameParms = ['projectionmatrixz', 'globalvieworigin'];
+
+// `text` with every $<readable> render parm reference of `parms` (any case) under its bank name; each must occur.
+function toBank(file, text, parms) {
+  const index = new Map(parms.map(([name], k) => [name, k]));
+  const seen = new Set();
+  const out = text.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (m, name) => {
+    const k = index.get(name.toLowerCase());
+    if (k === undefined) return m;
+    seen.add(k);
+    return '$' + bankName(k);
+  });
+  for (const [name, k] of index) if (!seen.has(k)) throw new Error(`${file}: the parameter ${name} is never read`);
+  return out;
+}
+const vecText = (v) => '{ ' + v.map((x) => (Number.isInteger(x) ? x.toFixed(1) : String(x))).join(', ') + ' }';
+const decl = toBank('multilayer.decl.inc', declSrc, mlParms);
+const epDecl = toBank('eternalparticles.decl.inc', epDeclSrc, epParms);
 // the particle shading's samplers and the material textures they are (the first three the program's own)
 const epSamplers = [['ep_trans', 'transmap'], ['ep_depth', 'viewdepthmap'], ['ep_atlas', 'particleslightatlasmap'],
   ['ep_emissive', 'eternalparticleemissivemap']];
@@ -98,18 +150,54 @@ function wordsC(name, words) {
   return c + '\n};\n\n';
 }
 
+function namesC(name, items) {
+  let c = `const char *const ${name}[] = {\n`, line = '   ';
+  for (const s of items) {
+    const item = ` "${s}",`;
+    if (line.length + item.length > 116) { c += line + '\n'; line = '   '; }
+    line += item;
+  }
+  return c + line + '\n};\n';
+}
+
+// A program's parameter tables: the bank parms (its material keys and parm decls), the readable names, the defaults.
+function tablesC(tag, what, parms) {
+  const n = parms.length;
+  return `/* ${what}, in the order the program reads them. PARMS: the bank parm each is read from (the\n` +
+         ' * material key and the parm decl); NAMES: the readable name an author writes (modprog_bank.c rewrites it to\n' +
+         ' * the bank\'s); DEFAULTS: the program\'s default. */\n' +
+         namesC(`SH_MODPROG_${tag}_PARMS`, parms.map((p, k) => bankName(k))) +
+         namesC(`SH_MODPROG_${tag}_NAMES`, parms.map(([name]) => name)) +
+         namesC(`SH_MODPROG_${tag}_DEFAULTS`, parms.map(([, v]) => vecText(v))) +
+         `const unsigned SH_MODPROG_${tag}_PARM_COUNT = ${n};\n` +
+         `typedef char sh_modprog_${tag.toLowerCase()}_fits_bank[${n} <= SH_MODPROG_BANK_COUNT ? 1 : -1];\n\n`;
+}
+
+// The bank itself: as many parms as the largest material program reads.
+function bankC() {
+  const n = Math.max(mlParms.length, epParms.length);
+  return '/* The bank (modprog.h): the vector render parms every material program of the product reads. */\n' +
+         namesC('SH_MODPROG_BANK', Array.from({ length: n }, (x, k) => bankName(k))) +
+         `typedef char sh_modprog_bank_is_${n}[${n} == SH_MODPROG_BANK_COUNT ? 1 : -1];\n\n`;
+}
+
 function render(words) {
   return '/* modprog_multilayer.c -- GENERATED by tools/gen_multilayer.js from src/backend/shaders/; do not edit.\n' +
-         ' * The multilayer blend of the product\'s render programs (modprog.h): the Vulkan module, its functions as\n' +
-         ' * stage text, and the OpenGL text. */\n#include "modprog.h"\n\n' +
+         ' * The multilayer blend of the product\'s render programs (modprog.h): its parameters, the Vulkan module, its\n' +
+         ' * functions as stage text, and the OpenGL text. */\n#include "modprog.h"\n\n' +
+         bankC() + tablesC('ML', 'The blend\'s parameters', mlParms) +
          wordsC('SH_MODPROG_ML_SPIRV', words) + cString('SH_MODPROG_ML_GLSL', glsl) + '\n' +
          cString('SH_MODPROG_ML_DECL', decl);
 }
 
 function renderParticles(words) {
   return '/* modprog_particles.c -- GENERATED by tools/gen_multilayer.js from src/backend/shaders/; do not edit.\n' +
-         ' * DOOM Eternal\'s particle shading of the product\'s particle program (modprog.h): the Vulkan module, its\n' +
-         ' * functions as stage text, and the OpenGL text. */\n#include "modprog.h"\n\n' +
+         ' * DOOM Eternal\'s particle shading of the product\'s particle program (modprog.h): its parameters, the\n' +
+         ' * Vulkan module, its functions as stage text, and the OpenGL text. */\n#include "modprog.h"\n\n' +
+         tablesC('EP', 'The shading\'s material parameters', epParms) +
+         '/* The parameter array ep_shade reads (P): the bank parms above, then the game\'s own render parms. */\n' +
+         namesC('SH_MODPROG_EP_BLOCK_PARMS', epParms.map((p, k) => bankName(k)).concat(epGameParms)) +
+         `const unsigned SH_MODPROG_EP_BLOCK_PARM_COUNT = ${epParms.length + epGameParms.length};\n\n` +
          wordsC('SH_MODPROG_EP_SPIRV', words) + cString('SH_MODPROG_EP_GLSL', epGlsl) + '\n' +
          cString('SH_MODPROG_EP_DECL', epDecl);
 }
@@ -149,7 +237,14 @@ if (check) {
   console.log('modprog_multilayer.c, modprog_particles.c, modprog_post.c and modprog_fixture.c match their sources');
 } else {
   for (const [file, mods, fn] of outputs) {
-    const words = mods.map(([text]) => compile(text));
+    const have = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const words = mods.map(([text, name]) => {
+      try { return compile(text); } catch (e) {
+        if (e.code !== 'ENOENT' || !wordsOf(have, name).length) throw e;
+        console.log(`no glslangValidator: ${name} keeps the SPIR-V ${path.basename(file)} embeds`);
+        return wordsOf(have, name);
+      }
+    });
     fs.writeFileSync(file, fn(...words));
     console.log(`wrote ${path.relative(root, file)} (${words.map((w) => w.length).join(' + ')} SPIR-V words)`);
   }

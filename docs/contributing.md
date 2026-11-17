@@ -494,8 +494,10 @@ Don't hand-edit them in a PR; open an issue describing the change you need inste
 `src/backend/shaders/multilayer.frag`, `multilayer.decl.inc`, `eternalparticles.frag`,
 `eternalparticles.decl.inc`, `radialblur.frag` or `radialblur.decl.inc` (or
 `tests/fixtures/modprog/lit.frag` or `particle.frag`) and run `node tools/gen_multilayer.js`, which needs glslangValidator from the
-Vulkan SDK on `PATH` (or named by `GLSLANG_VALIDATOR`). The JavaScript tests fail when the generated files are
-out of date.
+Vulkan SDK on `PATH` (or named by `GLSLANG_VALIDATOR`); without it the texts and tables are regenerated and each
+file keeps the SPIR-V it embeds. Each material program's parameter names and defaults are listed in the generator
+itself, which turns them into the bank's names (`docs/architecture.md`, "The parameter bank"). The JavaScript tests
+fail when the generated files are out of date.
 
 ## 11. Reporting security issues
 

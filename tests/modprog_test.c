@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "text.h"
 #include "modprog.h"
@@ -187,6 +188,38 @@ static int struct_members(const mod *m, uint32_t var)
     return -1;
 }
 
+/* A render parm reference $<name> (any case, the whole name) in [p, p + n). */
+static int has_ref(const unsigned char *p, size_t n, const char *name)
+{
+    size_t k = strlen(name), i;
+    for (i = 0; i + 1 + k <= n; i++)
+        if (p[i] == '$' && !_strnicmp((const char *)p + i + 1, name, k) &&
+            (i + 1 + k == n || !(isalnum(p[i + 1 + k]) || p[i + 1 + k] == '_')))
+            return 1;
+    return 0;
+}
+
+/* A string of the cooked program's parameter lists (a u32 length, then the name) in [p, p + n). */
+static int has_listed(const unsigned char *p, size_t n, const char *name)
+{
+    size_t k = strlen(name), i;
+    for (i = 0; i + 4 + k <= n; i++)
+        if (p[i] == (unsigned char)k && !p[i + 1] && !p[i + 2] && !p[i + 3] && !memcmp(p + i + 4, name, k)) return 1;
+    return 0;
+}
+
+/* A derived program names only bank vector parms of its own: the decl reads $snapmapplusvec<k> and no readable
+ * name, and the cooked program lists every bank parm of the program and none of its readable names. */
+static void check_bank_names(const unsigned char *d, size_t dn, const unsigned char *b, size_t bn,
+                             const char *const *bank, const char *const *names, unsigned n)
+{
+    unsigned k;
+    for (k = 0; k < n; k++) {
+        CHECK(!has_ref(d, dn, names[k]) && has_ref(d, dn, bank[k]));
+        CHECK(has_listed(b, bn, bank[k]) && !has_listed(b, bn, names[k]));
+    }
+}
+
 /* The checks one derived fragment module must pass, against its stock one: the blend's samplers on the bindings
  * after the program's textures (tex_end..), a binding at or after tex_end moved up by the blend's 20, the material
  * uniforms grown by its 24, and a call of ml_blend in main after the store of inputs.normal. */
@@ -234,6 +267,7 @@ static void check_unit(const char *base, const char *decl_req, const char *bin_r
     CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]) && rd_be32(f + 12) == fn - 16);
     CHECK(vn == stock_vn && !memcmp(v, stock_v, vn));
     CHECK(strstr((const char *)b + off[1], "ml_blend( inputs.albedo") != NULL);
+    check_bank_names(d, dn, b, bn, SH_MODPROG_ML_PARMS, SH_MODPROG_ML_NAMES, SH_MODPROG_ML_PARM_COUNT);
     {
         /* the stock fragment's texture end: its stage text's woundtexture binding + its texture count */
         const char *t = (const char *)b + off[1];
@@ -292,7 +326,8 @@ static void test_glsl(void)
     CHECK(strstr(t, "layout( binding = 30, std430 ) buffer clusternumlights_b") != NULL);     /* moved up */
     CHECK(strstr(t, "layout( binding = 10 ) uniform sampler2D samp_layerblendmask;") != NULL);
     CHECK(strstr(t, "layout( binding = 29 ) uniform sampler2D samp_multilayerextramap1;") != NULL);
-    CHECK(strstr(t, "\tvec4 multilayeremberhot;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+    CHECK(strstr(t, "\tvec4 snapmapplusvec0;\n") != NULL && !strstr(t, "vec4 layerstilingfactor;"));
+    CHECK(strstr(t, "\tvec4 snapmapplusvec27;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
     CHECK(strstr(t, "void ml_blend(") != NULL && strstr(t, "void ml_blend(") < strstr(t, "void main() {"));
     CHECK(strstr(t, "inputs.normal = sampleNormal.wyz;\n\t\tml_blend( inputs.albedo,") != NULL);
     free(t);
@@ -357,6 +392,7 @@ static void test_derivation(void)
     }
     CHECK(parms == (int)(SH_MODPROG_ML_PARM_COUNT + SH_MODPROG_ML_TEXTURE_COUNT));
     CHECK(!sh_modprog_owns("generated/decls/renderparm/bloomcolor.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/layerstilingfactor.decl"));
     CHECK(!sh_modprog_owns("generated/spirv/skinvmtr.fspv"));
     CHECK(sh_modprog_read("generated/renderprogs/" SH_MODPROG_PREFIX "skinvmtr_pc.bin", &p, &pn) == SH_MB_STOCK_ABSENT);
     /* a damaged install: the derivation stops with a sentence that names the program */
@@ -441,7 +477,8 @@ static void test_ep_texts(void)
     if (t) {
         CHECK(strstr(t, "layout( binding = 6 ) uniform sampler2D samp_particleslightatlasmap;") != NULL);
         CHECK(strstr(t, "layout( binding = 7 ) uniform sampler2D samp_eternalparticleemissivemap;") != NULL);
-        CHECK(strstr(t, "\tvec4 globalvieworigin;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+        CHECK(strstr(t, "\tvec4 snapmapplusvec3;\n\tvec4 projectionmatrixz;\n\tvec4 globalvieworigin;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+        CHECK(!strstr(t, "vec4 eternalparticle"));
         CHECK(strstr(t, "void ep_shade(") != NULL && strstr(t, "void ep_shade(") < strstr(t, "void main() {"));
         CHECK(strstr(t, "\t}\n\tep_shade( out_FragColor0, vec4[7]( vofi_Color,") != NULL);
     }
@@ -482,6 +519,7 @@ static void check_ep_unit(const char *decl_req, const char *bin_req, const char 
     CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]) && rd_be32(f + 12) == fn - 16);
     CHECK(vn == stock_vn && !memcmp(v, stock_v, vn));
     CHECK(strstr((const char *)b + off[1], "\tep_shade( out_FragColor0,") != NULL);
+    check_bank_names(d, dn, b, bn, SH_MODPROG_EP_PARMS, SH_MODPROG_EP_NAMES, SH_MODPROG_EP_PARM_COUNT);
     {
         const char *t = (const char *)b + off[1], *sheet = strstr(t, "uniform sampler2D samp_eternalparticleemissivemap");
         unsigned tex_end = 0;
@@ -528,8 +566,9 @@ static void test_real_ep(void)
         if (sfb) HeapFree(GetProcessHeap(), 0, sfb);
         free(sd); free(sv); free(sf); free(d); free(b); free(v); free(f);
     }
-    /* the parms the shading adds are the product's; the two it reads from the game stay the game's */
-    CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
+    /* the parms the shading adds are the product's (the bank's); the two it reads from the game stay the game's */
+    CHECK(sh_modprog_owns("generated/decls/renderparm/snapmapplusvec3.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
     CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticleemissivemap.decl"));
     CHECK(!sh_modprog_owns("generated/decls/renderparm/projectionmatrixz.decl"));
     CHECK(!sh_modprog_owns("generated/spirv/uberparticles.fspv"));
@@ -642,6 +681,46 @@ static void test_real_post(void)
     CHECK(!sh_modprog_owns("generated/spirv/postprocess.fspv"));   /* served by the provider, not as product content */
 }
 
+/* ------------------------------------------------------------------ the bank */
+
+/* The vector parms the product declares: the bank's 28, then the radial blur's 16, each with a decl; the bank's
+ * first four default to the particle shading's (a particle material may write none of them), the rest to the
+ * blend's. */
+static void test_bank(void)
+{
+    static const struct { unsigned k; const char *text; } defaults[] = {
+        { 0, "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" }, { 1, "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
+        { 2, "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" }, { 3, "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
+        { 4, "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" }, { 9, "{ Vec { 1.0, 0.0, 0.0, 0.0 } }" },
+        { 26, "{ Vec { 1.0, 4.0, 0.7, 0.4 } }" }, { 27, "{ Vec { 1.0, 0.07, 0.0, 0.0 } }" },
+    };
+    unsigned i, n = 0;
+    printf("-- the bank\n");
+    while (sh_modprog_vector_parm(n)) n++;
+    CHECK(n == SH_MODPROG_BANK_COUNT + 16 && n == 44);
+    for (i = 0; i < SH_MODPROG_BANK_COUNT; i++) {
+        char want[24];
+        sprintf(want, "snapmapplusvec%u", i);
+        CHECK(!strcmp(sh_modprog_vector_parm(i), want) && !strcmp(SH_MODPROG_BANK[i], want));
+        CHECK(!strcmp(SH_MODPROG_ML_PARMS[i], want));
+        if (i < SH_MODPROG_EP_PARM_COUNT) CHECK(!strcmp(SH_MODPROG_EP_PARMS[i], want) && !strcmp(SH_MODPROG_EP_BLOCK_PARMS[i], want));
+    }
+    CHECK(!strcmp(sh_modprog_vector_parm(SH_MODPROG_BANK_COUNT), "radialblur0"));
+    CHECK(!strcmp(sh_modprog_vector_parm(n - 1), "radialblur15"));
+    CHECK(SH_MODPROG_EP_BLOCK_PARM_COUNT == 6 && !strcmp(SH_MODPROG_EP_BLOCK_PARMS[4], "projectionmatrixz"));
+    for (i = 0; i < sizeof defaults / sizeof defaults[0]; i++) {
+        unsigned char *p = NULL;
+        size_t pn = 0;
+        char *r = sh_textf("generated/decls/renderparm/snapmapplusvec%u.decl", defaults[i].k);
+        CHECK(sh_modprog_owns(r) && !sh_modprog_post_owns(r));
+        CHECK(sh_modprog_read(r, &p, &pn) == SH_MB_STOCK_OK && pn == strlen(defaults[i].text) && !memcmp(p, defaults[i].text, pn));
+        if (p) HeapFree(GetProcessHeap(), 0, p);
+        free(r);
+    }
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/snapmapplusvec28.decl"));
+    CHECK(sh_modprog_owns("generated/decls/renderparm/SnapmapplusVec27.decl"));
+}
+
 typedef struct seen { int files; } seen;
 static void count(void *c, const char *path) { (void)path; ((seen *)c)->files++; }
 
@@ -711,6 +790,7 @@ int main(int argc, char **argv)
     test_derivation();
     test_ep_texts();
     test_ep_splice();
+    test_bank();
     if (doom) test_real(doom);
     else printf("-- the installed game's programs: no install given (doom=<root>); skipped\n");
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

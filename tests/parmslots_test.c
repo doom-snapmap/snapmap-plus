@@ -1,11 +1,14 @@
 /* parmslots_test.c -- where a render parm asking for a parm state slot goes (parmslots_rule.c): the engine's
  * ranges, the engine placing every parm it can, the product's vector parms keeping their slots whatever asks first,
  * the shared slot once the vector range is at its end, a full range of another kind. The table here is the game's
- * as measured (973 vector parms that are not the product's) with the product's 48. */
+ * as measured (973 vector parms that are not the product's) with the product's 44 (the bank's 28, the radial
+ * blur's 16). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "parmslots.h"
+
+#define OWN 44                       /* the product's vector parms (modprog.h sh_modprog_vector_parm) */
 
 static int g_checks, g_failed;
 #define CHECK(x) do { g_checks++; if (!(x)) { g_failed++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); } } while (0)
@@ -13,7 +16,7 @@ static int g_checks, g_failed;
 typedef struct holder { const char *name; int kind; } holder;
 static holder g_table[SH_PARMSLOTS_COUNT];
 static char g_names[SH_PARMSLOTS_COUNT + 64][16];
-static const char *g_reserved[48];
+static const char *g_reserved[OWN];
 static int g_spill;
 static const char TEX[] = "tex";
 
@@ -42,7 +45,7 @@ static void reset(int stock_vectors)
 static int ask(int kind, const char *name)
 {
     int becomes = 0, lo, hi, s;
-    int slot = sh_parmslots_decide(kind, name, read_slot, NULL, g_reserved, 48, g_spill, &becomes);
+    int slot = sh_parmslots_decide(kind, name, read_slot, NULL, g_reserved, OWN, g_spill, &becomes);
     if (slot != SH_PARMSLOTS_ENGINE) return slot;
     sh_parmslots_range(kind, &lo, &hi);
     for (s = lo; s < hi; s++)
@@ -69,10 +72,10 @@ static int distinct_own(int *slots, int n)
 
 int main(void)
 {
-    static char reserved_names[48][16], foreign[64][16];
-    int lo, hi, i, own[48], f[64];
+    static char reserved_names[OWN][16], foreign[64][16];
+    int lo, hi, i, own[OWN], f[64];
     printf("parmslots_test\n");
-    for (i = 0; i < 48; i++) { sprintf(reserved_names[i], "smp%d", i); g_reserved[i] = reserved_names[i]; }
+    for (i = 0; i < OWN; i++) { sprintf(reserved_names[i], "smp%d", i); g_reserved[i] = reserved_names[i]; }
     for (i = 0; i < 64; i++) sprintf(foreign[i], "mod%d", i);
 
     printf("-- the ranges are AllocParmState's\n");
@@ -90,44 +93,45 @@ int main(void)
 
     printf("-- with room, every parm is the engine's, and a name that holds a slot keeps it\n");
     reset(100);
-    CHECK(sh_parmslots_decide(0, foreign[0], read_slot, NULL, g_reserved, 48, -1, NULL) == SH_PARMSLOTS_ENGINE);
+    CHECK(sh_parmslots_decide(0, foreign[0], read_slot, NULL, g_reserved, OWN, -1, NULL) == SH_PARMSLOTS_ENGINE);
     CHECK(ask(0, foreign[0]) == 100);
     CHECK(ask(0, foreign[0]) == 100);
     CHECK(ask(3, "atexture") == 0x400);
-    CHECK(sh_parmslots_decide(99, "unknownkind", read_slot, NULL, g_reserved, 48, -1, NULL) == SH_PARMSLOTS_ENGINE);
+    CHECK(sh_parmslots_decide(99, "unknownkind", read_slot, NULL, g_reserved, OWN, -1, NULL) == SH_PARMSLOTS_ENGINE);
 
-    printf("-- today's game: the product's 48 first, then a mod's parms: two slots of their own, then one shared\n");
+    printf("-- today's game: the product's 44 first, then a mod's parms: six slots of their own, then one shared\n");
     reset(973);
-    for (i = 0; i < 48; i++) own[i] = ask(0, g_reserved[i]);
-    CHECK(distinct_own(own, 48));
+    for (i = 0; i < OWN; i++) own[i] = ask(0, g_reserved[i]);
+    CHECK(distinct_own(own, OWN));
     for (i = 0; i < 10; i++) f[i] = ask(0, foreign[i]);
-    CHECK(f[0] == 1021 && f[1] == 1022 && f[2] == 1023);
-    CHECK(g_spill == 1023);
-    for (i = 3; i < 10; i++) CHECK(f[i] == 1023);
-    CHECK(ask(0, foreign[2]) == 1023 && ask(0, foreign[9]) == 1023);     /* asked again: the same slots */
-    CHECK(ask(0, foreign[0]) == 1021);
+    for (i = 0; i < 6; i++) CHECK(f[i] == 1017 + i);
+    CHECK(f[6] == 1023 && g_spill == 1023);
+    for (i = 7; i < 10; i++) CHECK(f[i] == 1023);
+    CHECK(ask(0, foreign[6]) == 1023 && ask(0, foreign[9]) == 1023);     /* asked again: the same slots */
+    CHECK(ask(0, foreign[0]) == 1017);
 
-    printf("-- a mod's parms first: the product's 48 still get a slot each\n");
+    printf("-- a mod's parms first: the product's 44 still get a slot each\n");
     reset(973);
     for (i = 0; i < 30; i++) f[i] = ask(0, foreign[i]);
-    CHECK(f[0] == 973 && f[1] == 974 && f[2] == 975 && g_spill == 975);
-    for (i = 3; i < 30; i++) CHECK(f[i] == 975);
-    for (i = 0; i < 48; i++) own[i] = ask(0, g_reserved[i]);
-    CHECK(distinct_own(own, 48));
-    for (i = 0; i < 48; i++) CHECK(ask(0, g_reserved[i]) == own[i]);
+    for (i = 0; i < 6; i++) CHECK(f[i] == 973 + i);
+    CHECK(f[6] == 979 && g_spill == 979);
+    for (i = 7; i < 30; i++) CHECK(f[i] == 979);
+    for (i = 0; i < OWN; i++) own[i] = ask(0, g_reserved[i]);
+    CHECK(distinct_own(own, OWN));
+    for (i = 0; i < OWN; i++) CHECK(ask(0, g_reserved[i]) == own[i]);
 
     printf("-- interleaved: a mod's parm between each of the product's\n");
     reset(973);
-    for (i = 0; i < 48; i++) { own[i] = ask(0, g_reserved[i]); f[i] = ask(0, foreign[i]); }
-    CHECK(distinct_own(own, 48));
-    for (i = 0; i < 48; i++) CHECK(f[i] >= 0 && f[i] < 0x400);
-    CHECK(g_spill >= 0 && f[47] == g_spill);
+    for (i = 0; i < OWN; i++) { own[i] = ask(0, g_reserved[i]); f[i] = ask(0, foreign[i]); }
+    CHECK(distinct_own(own, OWN));
+    for (i = 0; i < OWN; i++) CHECK(f[i] >= 0 && f[i] < 0x400);
+    CHECK(g_spill >= 0 && f[OWN - 1] == g_spill);
 
     printf("-- no room at all: nothing is refused\n");
     reset(1024);
     CHECK(ask(0, foreign[0]) == 0x3FF);                    /* the range's last slot, with no shared slot made */
     CHECK(ask(0, g_reserved[0]) == 0x3FF);
-    reset(1023);                                           /* one left and 48 reserved still missing */
+    reset(1023);                                           /* one left and 44 reserved still missing */
     CHECK(ask(0, foreign[0]) == 1023 && g_spill == 1023);
     CHECK(ask(0, foreign[1]) == 1023);
     CHECK(ask(0, g_reserved[0]) == 1023);                  /* the product's own shares it too */

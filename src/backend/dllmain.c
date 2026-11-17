@@ -36,6 +36,7 @@
 #include "modscene_place.h"
 #include "modstore.h"
 #include "modstock.h"
+#include "modprog_bank.h"
 #include "modpublished.h"
 #include "modpublish.h"
 #include "budget_table.h"
@@ -199,6 +200,8 @@ static void install_features(const sig_result *results, size_t db)
      * first, so it serves on this boot, and the work folders a crash left are
      * removed. */
     (void)sh_ms_recover_work();
+    /* A mod's material on one of the product's material programs is served in the bank's names (modprog_bank.h). */
+    sh_modserve_set_material_filter(sh_modprog_bank);
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
     (void)sh_modserve_index_boot();
