@@ -204,10 +204,46 @@ extern const sig_entry SH_PARTICLEMOTION_SIGNATURES[];   /* NULL-terminated */
 /* Detour the particle vertex writer (both renderers). 1 when simulated motion is available. */
 int sh_particlemotion_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
+/* Children born at their parent's place (DOOM Eternal's spawnChildrenNEW, condition IN_TIMESPAN: a parent particle
+ * spawns children at a rate over a window of its life, each born where the parent is; Eternal does it on the GPU).
+ * A CPU stage's particles cannot be born at another stage's particle, so the product retraces the parent: a parent
+ * stage writes `systemPropertiesGPU.emissionTime = -1` and its particles take the product's random numbers (a seed
+ * from the particle's index and its emitter's place); a child stage writes `emissionTime = 1000 + d`, d the parent's
+ * stage index less its own (the decl's stages are one array of idParticleStage, 0x6E0 bytes each: the allocation
+ * count x 0x6E0 and its constructor loop, VK 0x1417C9D39). Child k's parent is p = k mod the parent's count; the
+ * game gives particle i of a stage its birth i x (spawnBunching x bunchTime) / count after its cycle starts, plus
+ * the stage's timeOffset (the per-stage job, VK 0x1419B1400), so the parent's age at the child's birth is known
+ * from the two stages alone. The child is drawn at its own birth offset from the emitter added to the parent's
+ * place then (the parent's flight retraced with its seed), not drawn when the parent was not yet born or already
+ * dead. The converter gives the child stage the parent's window (timeOffset = delay, spawn window = duration) and
+ * count x rate x duration particles. One cycle is assumed (the children of a burst). */
+#define SH_MOTION_STAGE_MAXLIFE      0x10
+#define SH_MOTION_STAGE_BUNCHTIME    0x18
+#define SH_MOTION_STAGE_COUNT        0x70     /* short: systemProperties.totalParticles */
+#define SH_MOTION_STAGE_TIMEOFFSET   0x8C     /* systemProperties.timeOffset */
+#define SH_MOTION_STAGE_BUNCHING     0xA4     /* systemProperties.spawnBunching */
+#define SH_MOTION_SYSTEM_EMISSION    0x598    /* systemPropertiesGPU.emissionTime: the family link */
+#define SH_MOTION_STAGE_SIZE         0x6E0
+/* 0 none, 1 a parent, 2 a child. */
+int sh_family_role(const uint8_t *stage);
+/* A child's parent stage (NULL when the link is out of range). */
+const uint8_t *sh_family_parent(const uint8_t *child);
+/* Child particle k: its parent's index and the parent's age at the child's birth (s). 0 when a count is 0. */
+int sh_family_link(const uint8_t *child, const uint8_t *parent, int k, int *p, float *delta);
+/* The life a parent is retraced with: the stage's longest. */
+float sh_family_life(const uint8_t *parent);
+/* The seed a family's particle p takes, and the place's salt (0 for a stage built in its model's axes). */
+uint32_t sh_family_seed(uint32_t salt, int p);
+uint32_t sh_family_salt(const float origin[3], const uint8_t *stage);
+/* The share of the parent's velocity a child takes at birth (Eternal's SPAWN command is not read: 0). */
+float sh_family_inherit(const uint8_t *child);
+
 /* Particles moved since the start (for the test bench). */
 long sh_particlemotion_moved(void);
 /* Particles moved against the scene's planes, and particles that died on them, since the start. */
 long sh_particlemotion_collided(void);
 long sh_particlemotion_killed(void);
+/* Child particles drawn at their parent's place since the start. */
+long sh_particlemotion_children(void);
 
 #endif /* SNAPMAP_PLUS_PARTICLEMOTION_H */

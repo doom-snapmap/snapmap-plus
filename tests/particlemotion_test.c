@@ -324,6 +324,48 @@ int main(void)
         CHECK(sh_planes_lookup(ON_FLOOR, UP, &got) && got.count == 0);
     }
 
+    printf("-- children born at their parent's place: the link between two stages of one decl\n");
+    {
+        static uint8_t stages[3][SH_MOTION_STAGE_SIZE];
+        uint8_t *parent = stages[0], *child = stages[2];
+        short n;
+        int pidx;
+        float delta;
+        static const float AT[3] = { 100.0f, 200.0f, 16.0f }, NEARBY[3] = { 101.0f, 201.0f, 17.0f };
+        memset(stages, 0, sizeof stages);
+        CHECK(sh_family_role(parent) == 0 && sh_family_role(NULL) == 0);
+        put(parent, SH_MOTION_SYSTEM_EMISSION, -1.0f);
+        put(child, SH_MOTION_SYSTEM_EMISSION, 998.0f);          /* the parent is two stages before */
+        CHECK(sh_family_role(parent) == 1 && sh_family_role(child) == 2);
+        CHECK(sh_family_parent(child) == parent);
+        put(stages[1], SH_MOTION_SYSTEM_EMISSION, 1000.0f);      /* a link to itself is none */
+        CHECK(sh_family_parent(stages[1]) == NULL);
+        /* a burst of 7 parents (INSTANT: no spawn window); 700 children over 1 s after a delay of 0.25 s */
+        n = 7; memcpy(parent + SH_MOTION_STAGE_COUNT, &n, sizeof n);
+        put(parent, SH_MOTION_STAGE_BUNCHTIME, 1.5f); put(parent, SH_MOTION_STAGE_MAXLIFE, 1.5f);
+        n = 700; memcpy(child + SH_MOTION_STAGE_COUNT, &n, sizeof n);
+        put(child, SH_MOTION_STAGE_BUNCHING, 2.0f); put(child, SH_MOTION_STAGE_BUNCHTIME, 0.5f);   /* 1 s window */
+        put(child, SH_MOTION_STAGE_TIMEOFFSET, 0.25f);
+        CHECK(sh_family_link(child, parent, 0, &pidx, &delta) && pidx == 0 && fabsf(delta - 0.25f) < 1e-4f);
+        CHECK(sh_family_link(child, parent, 9, &pidx, &delta) && pidx == 2 && fabsf(delta - 0.262f) < 1e-4f);
+        CHECK(sh_family_link(child, parent, 699, &pidx, &delta) && pidx == 6 && fabsf(delta - 1.248f) < 1e-4f);
+        /* each parent's children follow it through the window: child 7 j + p is parent p's j-th, about j / 100 s apart */
+        CHECK(sh_family_link(child, parent, 7 * 50 + 3, &pidx, &delta) && pidx == 3 && fabsf(delta - 0.754f) < 1e-4f);
+        CHECK(sh_family_life(parent) == 1.5f);
+        /* a parent with a spawn window of its own: parent 3 is born 3 x 700 / 7 = 300 ms into it */
+        put(parent, SH_MOTION_STAGE_BUNCHING, 0.4666667f);     /* 0.7 s */
+        CHECK(sh_family_link(child, parent, 3, &pidx, &delta) && pidx == 3 && fabsf(delta - (0.25f + 0.004f - 0.3f)) < 2e-3f);
+        n = 0; memcpy(parent + SH_MOTION_STAGE_COUNT, &n, sizeof n);
+        CHECK(!sh_family_link(child, parent, 3, &pidx, &delta));
+        /* the seed: the same for a parent's particle and its children's retrace, different per particle; the salt
+         * is the emitter's place for a stage in world axes, 0 in its model's */
+        CHECK(sh_family_seed(77u, 3) == sh_family_seed(77u, 3) && sh_family_seed(77u, 3) != sh_family_seed(77u, 4));
+        CHECK(sh_family_salt(AT, parent) == 0u);
+        parent[SH_MOTION_STAGE_FLAGS] |= SH_MOTION_STAGE_SORTED;
+        CHECK(sh_family_salt(AT, parent) != 0u && sh_family_salt(AT, parent) == sh_family_salt(NEARBY, parent));
+        CHECK(sh_family_inherit(child) == 0.0f);
+    }
+
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

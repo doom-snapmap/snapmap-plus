@@ -1762,6 +1762,17 @@ test needs the particle's place in the world, so a colliding stage is written
 that is not, or a map without a mod script, draws its particles without
 collision and the backend log says which.
 
+A stage can be the child of another stage of the same decl, its particles
+born where a parent particle is, as DOOM Eternal's spawned children are (a
+spark's trail). A CPU particle cannot be born at another stage's particle, so
+the product retraces the parent: a parent stage's particles take the product's
+random numbers (from their index and the emitter's place), and child particle
+k is drawn at its own offset from the place parent k mod the parent's count
+had at the child's birth, which the game's spawn timing gives from the two
+stages' counts, spawn windows and time offsets alone. A child whose parent was
+not yet born or already dead is not drawn. The link is
+`systemPropertiesGPU.emissionTime` (`particlemotion.h`).
+
 Two parts of the launch are the product's because the game's keys cannot say
 them. The game multiplies a particle's direction by `speed[0]`, `speed[1]` and
 `speed[2]` one axis at a time, each drawing its own random number, so a speed

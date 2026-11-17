@@ -88,6 +88,87 @@ static int collide(const sh_motion *m, const sh_motion_planes *pl, float t, floa
     return 0;
 }
 
+/* ------------------------------------------------------------------------------------ parents and children */
+
+int sh_family_role(const uint8_t *stage)
+{
+    float e;
+    if (!stage) return 0;
+    e = rd(stage, SH_MOTION_SYSTEM_EMISSION);
+    if (e < 0.0f) return 1;
+    if (e >= 900.0f && e <= 1100.0f) return 2;
+    return 0;
+}
+
+const uint8_t *sh_family_parent(const uint8_t *child)
+{
+    float e = rd(child, SH_MOTION_SYSTEM_EMISSION) - 1000.0f;
+    int d = (int)floorf(e + 0.5f);
+    if (d == 0 || d < -64 || d > 64) return NULL;
+    return child + (ptrdiff_t)d * SH_MOTION_STAGE_SIZE;
+}
+
+static int count_of(const uint8_t *stage)
+{
+    short n;
+    memcpy(&n, stage + SH_MOTION_STAGE_COUNT, sizeof n);
+    return n;
+}
+
+/* Particle i's birth after its stage's cycle starts, ms, as the game's per-stage job has it (VK 0x1419B1400:
+ * i x (int)(spawnBunching x bunchTime x 1000) / count, integer). */
+static long long birth_ms(const uint8_t *stage, int i, int n)
+{
+    long long window = (long long)(rd(stage, SH_MOTION_STAGE_BUNCHING) * rd(stage, SH_MOTION_STAGE_BUNCHTIME) * 1000.0f);
+    return n > 0 ? ((long long)i * window) / n : 0;
+}
+
+int sh_family_link(const uint8_t *child, const uint8_t *parent, int k, int *p, float *delta)
+{
+    int nc = count_of(child), np = count_of(parent);
+    long long ms;
+    if (nc <= 0 || np <= 0 || k < 0) return 0;
+    k %= nc;
+    *p = k % np;
+    ms = birth_ms(child, k, nc) - birth_ms(parent, *p, np) +
+         (long long)(rd(child, SH_MOTION_STAGE_TIMEOFFSET) * 1000.0f) -
+         (long long)(rd(parent, SH_MOTION_STAGE_TIMEOFFSET) * 1000.0f);
+    *delta = (float)ms * 0.001f;
+    return 1;
+}
+
+float sh_family_life(const uint8_t *parent)
+{
+    return rd(parent, SH_MOTION_STAGE_MAXLIFE);
+}
+
+uint32_t sh_family_seed(uint32_t salt, int p)
+{
+    uint32_t x = (uint32_t)p * 0x9E3779B9u ^ salt ^ 0x5BD1E995u;
+    x ^= x >> 16; x *= 0x7FEB352Du;
+    x ^= x >> 15; x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+uint32_t sh_family_salt(const float o[3], const uint8_t *stage)
+{
+    uint32_t h = 2166136261u;
+    int i;
+    if (!stage || !(stage[SH_MOTION_STAGE_FLAGS] & SH_MOTION_STAGE_SORTED)) return 0;
+    for (i = 0; i < 3; i++) {
+        long q = (long)floorf(o[i] / 8.0f + 0.5f);
+        h = (h ^ (uint32_t)q) * 16777619u;
+    }
+    return h;
+}
+
+float sh_family_inherit(const uint8_t *child)
+{
+    (void)child;
+    return 0.0f;
+}
+
 float sh_motion_scale(const float f[3])
 {
     float s = f[0] > f[1] ? f[0] : f[1];
