@@ -12,7 +12,6 @@
 #include "host_image.h"
 #include "companion_engine.h"
 #include "modscene_decl.h"
-#include "postfx.h"
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {
@@ -107,14 +106,12 @@ int main(int argc, char **argv)
     }
     /* The private tables the companion and scene-spawn features resolve. */
     {
-        const sig_entry *tables[3] = { SH_COMPANION_SIGNATURES, SH_MODSCENE_SPAWN_SIGNATURES, SH_POSTFX_SIGNATURES };
-        for (int t = 0; t < 3; t++) {
+        const sig_entry *tables[2] = { SH_COMPANION_SIGNATURES, SH_MODSCENE_SPAWN_SIGNATURES };
+        for (int t = 0; t < 2; t++) {
             for (const sig_entry *e = tables[t]; e->name; e++) {
                 sig_result scan, rec;
                 uint32_t known = identity ? (identity->vulkan ? e->rva_vk : e->rva_gl) : 0;
                 int good;
-                /* postfx.c names one post process per renderer; the other renderer's is not in this image. */
-                if (t == 2 && (identity ? !known : (!e->rva_vk || !e->rva_gl))) continue;
                 sig_scan_one(base, e, &scan);
                 sig_resolve_one(base, e, &rec);
                 good = pinned ? (scan.status == SIG_OK && known && scan.rva == known && rec.status == SIG_OK)
@@ -122,14 +119,6 @@ int main(int argc, char **argv)
                 if (!good) bad++;
                 printf("%s %-20s scanned=0x%-9x recorded=0x%-9x\n", good ? "OK " : "BAD",
                        e->name, scan.rva, known);
-                /* postfx.c reads the async compute context at RenderPostProcess + 0x86 (mov r11, [rip + x]). */
-                if (t == 2 && !strcmp(e->name, "RenderPostProcessVk") && scan.status == SIG_OK) {
-                    const uint8_t *at = base + scan.rva + 0x86;
-                    int ok = !memcmp(at, "\x4c\x8b\x1d", 3);
-                    if (!ok) bad++;
-                    printf("%s %-20s async context load at +0x86: %02x %02x %02x\n", ok ? "OK " : "BAD", e->name,
-                           at[0], at[1], at[2]);
-                }
             }
         }
     }

@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
 #include "../common/text.h"
 #include "modprog.h"
@@ -157,23 +156,6 @@ static const mp_parm MP_PARM_DECLS[] = {
     { "eternalparticlecolor",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
     { "eternalparticlecolor2",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
     { "eternalparticleemissivemap", "{ Tex2D textures/system/constant_color/white }" },
-    /* The post process's radial blur (postfx.c writes them each frame): none on. */
-    { "radialblur0",               "{ Vec { 1.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur1",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur2",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur3",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur4",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur5",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur6",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur7",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur8",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur9",               "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur10",              "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur11",              "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur12",              "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur13",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur14",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "radialblur15",             "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
@@ -1416,155 +1398,6 @@ done:
     return out;
 }
 
-/* ------------------------------------------------------------------------------- the post process's blur ---- */
-
-/* The material uniforms the post program gains: the product's radial blur parameters, then the view's own
- * view-projection, depth projection and size (radialblur.frag's P, in order). */
-const char *const SH_MODPROG_RB_PARMS[] = {
-    "radialblur0", "radialblur1", "radialblur2", "radialblur3", "radialblur4", "radialblur5", "radialblur6",
-    "radialblur7", "radialblur8", "radialblur9", "radialblur10", "radialblur11", "radialblur12", "radialblur13",
-    "radialblur14", "radialblur15",
-    "viewprojectionmatrixx", "viewprojectionmatrixy", "viewprojectionmatrixz", "viewprojectionmatrixw",
-    "projectionmatrixz", "renderviewsize",
-};
-const unsigned SH_MODPROG_RB_PARM_COUNT = sizeof SH_MODPROG_RB_PARMS / sizeof SH_MODPROG_RB_PARMS[0];
-static const char *const RB_SAMPLERS[] = { "rb_depth" };
-static const char *const RB_SAMPLER_STOCK[] = { "samp_viewdepthmap" };
-#define RB_NSCENE_READS 5u
-
-/* The game's post process (`postprocess`, fragment, or `computepostprocess`) with its five clamped scene reads
- * (tex2DlodClamped(tex0, ...), its chromatic aberration) turned into rb_clamped: the same arguments and the
- * product's parameter array, loaded once at the head of main. */
-uint32_t *sh_modprog_rb_splice(const uint32_t *stock, size_t stock_words, int compute, size_t *out_words,
-                               const char **why)
-{
-    mp_ctx c;
-    mp_import_spec sp;
-    mp_blocks bk;
-    uint32_t *out = NULL;
-    size_t i, k, sites[RB_NSCENE_READS], nsites = 0;
-    uint32_t entry = 0, tex0, callee = 0, params[4], temp = 0, vals[32];
-    size_t s_main = 0, s_main_end = 0, var_end = 0;
-    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
-    memset(&c, 0, sizeof c);
-    if (out_words) *out_words = 0;
-    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's module is not SPIR-V");
-    sp.words = SH_MODPROG_RB_SPIRV; sp.nwords = SH_MODPROG_RB_SPIRV_WORDS; sp.entry = "rb_clamped(";
-    sp.samplers = RB_SAMPLERS; sp.stock = RB_SAMPLER_STOCK; sp.nsamplers = 1; sp.what = "post process";
-    if (!mp_import(&c, &sp, 0, &entry, &funcs)) goto done;
-    if (!mp_grow_block_in(&c, compute ? "freqHigh_computeUniforms" : "freqHigh_fragmentUniforms",
-                          compute ? "freqLow_computeUniforms" : "freqLow_fragmentUniforms", SH_MODPROG_RB_PARMS,
-                          SH_MODPROG_RB_PARM_COUNT, &bk)) goto done;
-    if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's module has no main");
-    tex0 = mp_named(&c.S, "samp_tex0", 0);
-    if (!tex0) MP_FAIL(&c, "the program reads no scene image");
-    /* the clamped scene reads: calls of one three-argument function whose first argument is tex0 */
-    for (i = s_main; i < s_main_end; i++) {
-        const mp_ins *in = &c.S.ins[i];
-        if (MP_OP(in) != OpFunctionCall || MP_N(in) != 7 || in->w[4] != tex0) continue;
-        if (callee && in->w[3] != callee) MP_FAIL(&c, "the program reads its scene image through more than one function");
-        callee = in->w[3];
-        if (nsites == RB_NSCENE_READS) MP_FAIL(&c, "the program reads its scene image more often than its five clamped reads");
-        sites[nsites++] = i;
-    }
-    if (nsites != RB_NSCENE_READS) MP_FAIL(&c, "the program does not read its scene image five times through its clamped read");
-    if (!mp_entry_params(&funcs, entry, params, 4)) MP_FAIL(&c, "rb_clamped does not take the parameters the splice passes");
-    {
-        /* the stock function's parameters are the first three of rb_clamped's, type for type */
-        size_t f;
-        uint32_t sp_types[3];
-        int np = 0;
-        for (f = 0; f < c.S.n; f++) if (MP_OP(&c.S.ins[f]) == OpFunction && c.S.ins[f].w[2] == callee) break;
-        for (f++; f < c.S.n && MP_OP(&c.S.ins[f]) == OpFunctionParameter && np < 3; f++) sp_types[np++] = c.S.ins[f].w[1];
-        if (np != 3) MP_FAIL(&c, "the program's clamped read is not the shape Snapmap+ knows");
-        for (k = 0; k < 3; k++) {
-            const mp_ins *pp = mp_def_any(&c, params[k]);
-            if (!pp || pp->w[1] != sp_types[k]) MP_FAIL(&c, "rb_clamped takes its arguments as other types than the program's clamped read");
-        }
-    }
-    if (!mp_temps(&c, s_main, s_main_end, &params[3], &temp, 1, &heads, &var_end)) MP_FAIL(&c, "out of memory");
-    for (k = 0; k < SH_MODPROG_RB_PARM_COUNT; k++)
-        if (!(vals[k] = mp_load_member(&c, &code, bk.fh, bk.v4, (int)(bk.n0 + k)))) MP_FAIL(&c, "out of memory");
-    if (!mp_store_array(&c, &code, params[3], temp, vals, SH_MODPROG_RB_PARM_COUNT)) MP_FAIL(&c, "rb_clamped's parameter array has no type");
-    for (k = 0; k < nsites; k++) {
-        mp_ins *in = &c.S.ins[sites[k]];
-        uint32_t *w = mp_own(&c.S, 8);
-        if (!w) MP_FAIL(&c, "out of memory");
-        w[0] = 8u << 16 | OpFunctionCall;
-        w[1] = in->w[1]; w[2] = in->w[2]; w[3] = entry;
-        w[4] = in->w[4]; w[5] = in->w[5]; w[6] = in->w[6]; w[7] = temp;
-        in->w = w;
-    }
-    if (c.S.oom) MP_FAIL(&c, "out of memory");
-    /* the parameter array's code right after the temps, ahead of main's first instruction that is not a variable */
-    out = mp_reassemble(&c, var_end, &heads, (size_t)-1, &code, &funcs, out_words);
-done:
-    if (why) *why = c.why;
-    free(code.v); free(heads.v); free(funcs.v);
-    mp_ctx_free(&c);
-    if (c.why) { free(out); return NULL; }
-    return out;
-}
-
-/* The post program's decl for the OpenGL renderer: its `#include "postprocess.inc"` becomes the blur's templates and
- * the include's own text with each clamped scene read taken from RADIAL_BLUR_SAMPLE, computed just ahead of the
- * statement that reads it. `inc` is the installed postprocess.inc. */
-char *sh_modprog_rb_patch_decl(const char *text, size_t len, const char *inc, size_t inc_len, size_t *out_len)
-{
-    static const char include_line[] = "#include \"postprocess.inc\"";
-    static const char read[] = "tex2DlodClamped( $tex0, ";
-    static const char tail[] = ", resScalingInfo )";
-    const char *at = mp_find(text, len, include_line), *p, *stmt = NULL;
-    mp_buf o = { 0 }, pre = { 0 };
-    size_t done = 0, k = 0;
-    if (out_len) *out_len = 0;
-    if (!at || mp_find(at + 1, len - (size_t)(at + 1 - text), include_line)) return NULL;
-    mp_put(&o, text, (size_t)(at - text));
-    mp_puts(&o, SH_MODPROG_RB_DECL);
-    /* the include, its five clamped scene reads replaced */
-    for (p = inc; (p = mp_find(p, inc_len - (size_t)(p - inc), read)) != NULL;) {
-        const char *arg = p + sizeof read - 1, *q = arg;
-        int depth = 0;
-        while (q < inc + inc_len && !(depth == 0 && *q == ',')) {
-            if (*q == '(') depth++;
-            if (*q == ')') depth--;
-            q++;
-        }
-        if (q >= inc + inc_len || (size_t)(inc + inc_len - q) < sizeof tail - 1 || memcmp(q, tail, sizeof tail - 1)) break;
-        if (!stmt) {
-            /* the statement the first read is in: after the last ';', '{' or '}' before it */
-            const char *s = p;
-            while (s > inc && s[-1] != ';' && s[-1] != '{' && s[-1] != '}') s--;
-            while (s < p && (*s == '\r' || *s == '\n')) s++;
-            stmt = s;
-        }
-        mp_printf(&pre, "\t{ float4 rbArg%u = %.*s; float2 rbTcIn%u = clamp( rbArg%u.xy, float2( 0.0, 0.0 ), "
-                        "resScalingInfo.xy - resScalingInfo.zw * 0.5 ); RADIAL_BLUR_SAMPLE( rbSample%u, rbTcIn%u ); }\n",
-                  (unsigned)k, (int)(q - arg), arg, (unsigned)k, (unsigned)k, (unsigned)k, (unsigned)k);
-        k++;
-        p = q + sizeof tail - 1;
-    }
-    if (k != RB_NSCENE_READS || !stmt) { free(o.p); free(pre.p); return NULL; }
-    /* write the include: up to the statement, the declarations and blurs, then the reads by name */
-    mp_put(&o, inc, (size_t)(stmt - inc));
-    {
-        size_t j;
-        for (j = 0; j < k; j++) mp_printf(&o, "\tfloat4 rbSample%u;\n", (unsigned)j);
-    }
-    mp_put(&o, pre.p, pre.n);
-    for (p = stmt, k = 0; (at = mp_find(p, inc_len - (size_t)(p - inc), read)) != NULL && k < RB_NSCENE_READS;) {
-        const char *q = mp_find(at, inc_len - (size_t)(at - inc), tail);
-        mp_put(&o, p, (size_t)(at - p));
-        mp_printf(&o, "rbSample%u", (unsigned)k++);
-        p = q + sizeof tail - 1;
-    }
-    mp_put(&o, p, inc_len - (size_t)(p - inc));
-    done = (size_t)(mp_find(text, len, include_line) - text) + sizeof include_line - 1;
-    mp_put(&o, text + done, len - done);
-    free(pre.p);
-    return mp_take(&o, out_len);
-}
-
 /* ---------------------------------------------------------------------------------------------- families ---- */
 
 static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
@@ -2044,199 +1877,6 @@ int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
     return r;
 }
 
-/* ------------------------------------------------------------------------------------ the post programs ---- */
-/* The game's own post process programs, served under their own names with the radial blur spliced in: the
- * fragment `postprocess` and the compute `computepostprocess`, each with its permutations. */
-
-static const char *const MP_POST_BASES[] = { "postprocess", "computepostprocess" };
-#define MP_NPOST (sizeof MP_POST_BASES / sizeof MP_POST_BASES[0])
-static int g_post_done[MP_NPOST];      /* 1 derived, -1 failed */
-
-static void mp_post_fail(const char *base, const char *why)
-{
-    free(g_cause);
-    g_cause = sh_textf("Snapmap+ could not build its radial blur into the game's %s program: %s (the game's own "
-                       "post process is used)", base, why);
-}
-
-/* One unit of a post program (the program, or a permutation): decl, cooked program and stage modules. */
-static int mp_post_unit(size_t base, const char *mask)
-{
-    const char *name = MP_POST_BASES[base];
-    int compute = base == 1, s = compute ? 2 : 1, ok = 0;
-    const char *ext = compute ? ".cspv" : ".fspv", *why = NULL;
-    char *pd = NULL, *pb = NULL, *pf = NULL, *pv = NULL, *decl = NULL, *glsl = NULL, *bin_out = NULL;
-    unsigned char *d = NULL, *b = NULL, *f = NULL, *v = NULL, *inc = NULL;
-    size_t dn = 0, bn = 0, fn = 0, vn = 0, incn = 0, decl_n = 0, glsl_n = 0, bin_n = 0, mod_n = 0, k;
-    uint32_t *mod = NULL;
-    mp_bin x;
-    memset(&x, 0, sizeof x);
-    if (mask) {
-        pd = sh_textf("generated/renderprogs/permutations/%s_%s.decl", name, mask);
-        pb = sh_textf("generated/renderprogs/permutations/%s_%s_pc_vulkan.bin", name, mask);
-        if (pd) { pf = sh_mb_spirv_request(pd, ext); if (!compute) pv = sh_mb_spirv_request(pd, ".vspv"); }
-    } else {
-        pd = sh_textf("generated/decls/renderprog/%s.decl", name);
-        pb = sh_textf("generated/renderprogs/%s_pc_vulkan.bin", name);
-        pf = sh_mb_spirv_request(name, ext);
-        if (!compute) pv = sh_mb_spirv_request(name, ".vspv");
-    }
-    if (!pd || !pb || !pf || (!compute && !pv)) { why = "out of memory"; goto out; }
-    if (mp_read(pd, &d, &dn) != SH_MB_STOCK_OK || mp_read(pb, &b, &bn) != SH_MB_STOCK_OK ||
-        mp_read(pf, &f, &fn) != SH_MB_STOCK_OK || (!compute && mp_read(pv, &v, &vn) != SH_MB_STOCK_OK) ||
-        mp_read("decls/renderprogs/postprocess.inc", &inc, &incn) != SH_MB_STOCK_OK) {
-        why = "its installed files cannot be read";
-        goto out;
-    }
-    if (!mp_bin_parse(&x, b, bn, mp_parm_is_vec)) { why = "its cooked program is not the shape Snapmap+ knows"; goto out; }
-    if (mp_decl_checksum((const char *)d, dn) != mp_be32(b + 4)) { why = "its cooked program does not match its decl"; goto out; }
-    if (fn < 16 || sh_mb_md5fold(x.text[s], x.text_n[s]) != mp_be32(f + 4) ||
-        (!compute && (vn < 16 || sh_mb_md5fold(x.text[0], x.text_n[0]) != mp_be32(v + 4)))) {
-        why = "its SPIR-V does not match its cooked program";
-        goto out;
-    }
-    for (k = 0; k < SH_MODPROG_RB_PARM_COUNT; k++)
-        if (!mp_bin_add(&x, s, 0, SH_MODPROG_RB_PARMS[k], strlen(SH_MODPROG_RB_PARMS[k]))) { why = "out of memory"; goto out; }
-    if (!(decl = sh_modprog_rb_patch_decl((const char *)d, dn, (const char *)inc, incn, &decl_n))) {
-        why = "its decl or postprocess.inc does not read the scene image the way Snapmap+ knows";
-        goto out;
-    }
-    {
-        mp_buf o = { 0 };
-        mp_put(&o, x.text[s], x.text_n[s]);
-        mp_puts(&o, "\n");
-        mp_puts(&o, SH_MODPROG_RB_GLSL);
-        if (!(glsl = mp_take(&o, &glsl_n))) { why = "out of memory"; goto out; }
-    }
-    if (!(mod = sh_modprog_rb_splice((const uint32_t *)(f + 16), (fn - 16) / 4, compute, &mod_n, &why))) goto out;
-    free(x.text[s]);
-    x.text[s] = glsl;
-    x.text_n[s] = glsl_n;
-    glsl = NULL;
-    if (!(bin_out = mp_bin_encode(&x, mp_decl_checksum(decl, decl_n), &bin_n))) { why = "out of memory"; goto out; }
-    {
-        mp_buf o = { 0 };
-        char *fo, *vo = NULL;
-        size_t fo_n = 0;
-        mp_put_be32(&o, 4);
-        mp_put_be32(&o, sh_mb_md5fold(x.text[s], x.text_n[s]));
-        mp_put(&o, f + 8, 4);
-        mp_put_be32(&o, (uint32_t)(mod_n * 4));
-        mp_put(&o, mod, mod_n * 4);
-        fo = mp_take(&o, &fo_n);
-        if (!compute && (vo = (char *)malloc(vn)) != NULL) memcpy(vo, v, vn);
-        if (!fo || (!compute && !vo)) { free(fo); free(vo); why = "out of memory"; goto out; }
-        ok = mp_keep(pd, decl, decl_n);
-        decl = NULL;
-        ok = mp_keep(pb, bin_out, bin_n) && ok;
-        bin_out = NULL;
-        ok = mp_keep(pf, fo, fo_n) && ok;
-        if (!compute) ok = mp_keep(pv, vo, vn) && ok;
-        if (!ok) why = "out of memory";
-    }
-out:
-    if (!ok && why) mp_post_fail(name, why);
-    mp_bin_free(&x);
-    free(pd); free(pb); free(pf); free(pv); free(decl); free(glsl); free(bin_out); free(mod);
-    mp_heap_free(d); mp_heap_free(b); mp_heap_free(f); mp_heap_free(v); mp_heap_free(inc);
-    return ok;
-}
-
-/* Every unit of a post program. Caller holds the lock. */
-static int mp_post_derive(size_t base)
-{
-    unsigned char *b = NULL;
-    size_t bn = 0, i;
-    char *sb;
-    mp_bin x;
-    int ok;
-    if (g_post_done[base]) return g_post_done[base] > 0;
-    sb = sh_textf("generated/renderprogs/%s_pc_vulkan.bin", MP_POST_BASES[base]);
-    memset(&x, 0, sizeof x);
-    ok = sb && mp_read(sb, &b, &bn) == SH_MB_STOCK_OK && mp_bin_parse(&x, b, bn, mp_parm_is_vec);
-    free(sb);
-    if (!ok) mp_post_fail(MP_POST_BASES[base], "its cooked program cannot be read");
-    ok = ok && mp_post_unit(base, NULL);
-    for (i = 0; ok && i < x.nperms; i++) {
-        char mask[17];
-        snprintf(mask, sizeof mask, "%08x%08x", (unsigned)(x.perms[i] >> 32), (unsigned)x.perms[i]);
-        ok = mp_post_unit(base, mask);
-    }
-    mp_bin_free(&x);
-    mp_heap_free(b);
-    g_post_done[base] = ok ? 1 : -1;
-    return ok;
-}
-
-/* The post program a path is a file of (index), or -1: its decl, cooked program, stage modules, permutations. */
-static int mp_post_base_of(const char *path)
-{
-    size_t h, b;
-    for (h = 0; h < MP_NHEADS; h++) {
-        size_t hn = strlen(MP_HEADS[h]), j, k = 0;
-        char name[96];
-        if (_strnicmp(path, MP_HEADS[h], hn)) continue;
-        /* a stage module's long name is cut every 30 characters (sh_mb_spirv_request): read it whole */
-        for (j = hn; path[j] && k + 1 < sizeof name; j++)
-            if (path[j] != '/' || !strstr(MP_HEADS[h], "spirv/")) name[k++] = path[j];
-        if (path[j]) continue;
-        name[k] = '\0';
-        for (b = 0; b < MP_NPOST; b++) {
-            size_t bn = strlen(MP_POST_BASES[b]);
-            const char *rest = name + bn;
-            if (_strnicmp(name, MP_POST_BASES[b], bn)) continue;
-            if (!_stricmp(rest, ".decl") || !_stricmp(rest, "_pc_vulkan.bin") || !_stricmp(rest, ".fspv") ||
-                !_stricmp(rest, ".vspv") || !_stricmp(rest, ".cspv"))
-                return (int)b;
-            if (rest[0] == '_' && strlen(rest) > 17) {
-                const char *sfx = rest + 17;
-                size_t q;
-                for (q = 1; q < 17; q++) if (!isxdigit((unsigned char)rest[q])) break;
-                if (q == 17 && (!_stricmp(sfx, ".decl") || !_stricmp(sfx, "_pc_vulkan.bin") || !_stricmp(sfx, ".fspv") ||
-                                !_stricmp(sfx, ".vspv") || !_stricmp(sfx, ".cspv")))
-                    return (int)b;
-            }
-        }
-    }
-    return -1;
-}
-
-int sh_modprog_post_owns(const char *path)
-{
-    int parm;
-    if (!path) return 0;
-    if ((parm = mp_parm_of(path)) >= 0) return !_strnicmp(MP_PARM_DECLS[parm].name, "radialblur", 10);
-    return mp_post_base_of(path) >= 0;
-}
-
-int sh_modprog_post_claims(const char *path)
-{
-    int parm = path ? mp_parm_of(path) : -1;
-    return parm >= 0 && !_strnicmp(MP_PARM_DECLS[parm].name, "radialblur", 10);
-}
-
-int sh_modprog_post_read(const char *path, unsigned char **bytes, size_t *len)
-{
-    int base, r = SH_MB_STOCK_ABSENT;
-    size_t i;
-    if (bytes) *bytes = NULL;
-    if (len) *len = 0;
-    if (!path || !bytes || !len || !sh_modprog_post_owns(path)) return SH_MB_STOCK_ABSENT;
-    if (mp_parm_of(path) >= 0) return sh_modprog_read(path, bytes, len);
-    base = mp_post_base_of(path);
-    AcquireSRWLockExclusive(&g_lock);
-    if (!mp_post_derive((size_t)base)) r = SH_MB_STOCK_UNAVAILABLE;
-    else
-        for (i = 0; i < g_nfiles; i++)
-            if (!_stricmp(g_files[i].path, path)) {
-                r = (*bytes = mp_heap_copy(g_files[i].bytes, g_files[i].len)) != NULL ? SH_MB_STOCK_OK : SH_MB_STOCK_UNAVAILABLE;
-                if (*bytes) *len = g_files[i].len;
-                break;
-            }
-    ReleaseSRWLockExclusive(&g_lock);
-    return r;
-}
-
 void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *path), void *context)
 {
     const char *pre = prefix ? prefix : "";
@@ -2264,7 +1904,7 @@ void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *p
     for (b = 0; b < MP_NBASES; b++) (void)mp_derive(b);
     if (g_nfiles && (paths = (char **)calloc(g_nfiles, sizeof *paths)) != NULL)
         for (i = 0; i < g_nfiles; i++)
-            if (!_strnicmp(g_files[i].path, pre, n) && mp_post_base_of(g_files[i].path) < 0)
+            if (!_strnicmp(g_files[i].path, pre, n))
                 paths[np++] = mp_dupn(g_files[i].path, strlen(g_files[i].path));
     ReleaseSRWLockExclusive(&g_lock);
     for (i = 0; i < np; i++) { if (paths[i]) fn(context, paths[i]); free(paths[i]); }
@@ -2290,7 +1930,6 @@ void sh_modprog_reset(void)
     g_files = NULL;
     g_nfiles = g_cfiles = 0;
     memset(g_done, 0, sizeof g_done);
-    memset(g_post_done, 0, sizeof g_post_done);
     free(g_cause);
     g_cause = NULL;
     ReleaseSRWLockExclusive(&g_lock);

@@ -77,8 +77,7 @@ void sh_modprog_set_reader(sh_modprog_reader reader);
 /* Forget every derived file (tests). */
 void sh_modprog_reset(void);
 
-/* The i-th vector render parm the product's programs declare (the multilayer blend's, the particle shading's, the
- * radial blur's), or NULL past the last: the parms that keep their parm state slots (parmslots.h). */
+/* The i-th vector render parm the product's programs declare (the multilayer blend's, the particle shading's), or NULL past the last: the parms that keep their parm state slots (parmslots.h). */
 const char *sh_modprog_vector_parm(unsigned i);
 
 /* ------------------------------------------------------------------ building blocks (tests) ---- */
@@ -128,29 +127,5 @@ extern const char *const SH_MODPROG_EP_PARMS[];
 extern const unsigned SH_MODPROG_EP_PARM_COUNT;
 extern const char *const SH_MODPROG_EP_TEXTURES[];
 extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
-
-/* The post process's radial blur (radialblur.frag, postfx.c). The game's own `postprocess` (fragment) and
- * `computepostprocess` (compute) programs, each permutation too, are served under their own names with their five
- * clamped scene reads drawn through rb_clamped, which blurs the scene toward the radial blurs that are on (the
- * render parms radialblur0..15, which postfx.c writes each frame; with none on it is the plain read). The
- * derivation reads the installed files; a program that is not the shape known is left to the game (the cause is
- * sh_modprog_cause()). sh_modprog_post_owns names every file served this way and the radialblur parm decls;
- * sh_modprog_post_read derives on first use and returns a heap copy (SH_MB_STOCK_*). */
-int sh_modprog_post_owns(const char *path);
-/* 1 for the radialblur parm decls: names the game's resource index does not hold, which its existence probe must
- * find (modserve_engine.c claims them whether or not a mod is installed). */
-int sh_modprog_post_claims(const char *path);
-int sh_modprog_post_read(const char *path, unsigned char **bytes, size_t *len);
-/* The pieces: the post decl with the blur templates and its include's scene reads taken from them (`inc` the
- * installed postprocess.inc); the stage module with its clamped scene reads turned into rb_clamped. */
-char *sh_modprog_rb_patch_decl(const char *text, size_t len, const char *inc, size_t inc_len, size_t *out_len);
-uint32_t *sh_modprog_rb_splice(const uint32_t *stock, size_t stock_words, int compute, size_t *out_words,
-                               const char **why);
-extern const unsigned SH_MODPROG_RB_SPIRV_WORDS;
-extern const unsigned SH_MODPROG_RB_SPIRV[];
-extern const char SH_MODPROG_RB_GLSL[];
-extern const char SH_MODPROG_RB_DECL[];
-extern const char *const SH_MODPROG_RB_PARMS[];      /* the material uniforms the post stage gains, in P order */
-extern const unsigned SH_MODPROG_RB_PARM_COUNT;
 
 #endif /* SNAPMAP_PLUS_MODPROG_H */

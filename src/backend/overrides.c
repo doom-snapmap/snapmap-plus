@@ -21,8 +21,6 @@
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline tile, Unknown, Lift, Blocking) */
 #include "engine_build.h"
 #include "modserve.h"             /* installed mod bundles, after every product source */
-#include "modprog.h"              /* the post process programs with the radial blur */
-#include "modbundle.h"            /* SH_MB_STOCK_OK */
 
 /* Provider open slot offset: +0x148 on build 13954591 (+0xf8 in 2018); the
  * provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA below.
@@ -758,28 +756,6 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             ov_stream *s = make_mem_stream(nav, (long long)nav_len, name, 1);
             if (s) return s;
             HeapFree(GetProcessHeap(), 0, nav);
-        }
-    }
-
-    /* The game's post process programs with the radial blur (modprog.h), and the blur's parm decls: the game's
-     * own names, derived from the installed files; a derivation that fails leaves them to the game. */
-    if (mode < 2 && name != NULL && sh_modprog_post_owns(name)) {
-        unsigned char *bytes = NULL;
-        size_t length = 0;
-        static volatile LONG logged;
-        int r = sh_modprog_post_read(name, &bytes, &length);
-        if (InterlockedIncrement(&logged) <= 24) {
-            char line[512];
-            if (r == SH_MB_STOCK_OK)
-                _snprintf_s(line, sizeof line, _TRUNCATE, "POSTFX: served %s (%zu bytes)", name, length);
-            else
-                _snprintf_s(line, sizeof line, _TRUNCATE, "POSTFX: %s left to the game: %s", name, sh_modprog_cause());
-            backend_log(line);
-        }
-        if (r == SH_MB_STOCK_OK) {
-            ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
-            if (s) return s;
-            HeapFree(GetProcessHeap(), 0, bytes);
         }
     }
 

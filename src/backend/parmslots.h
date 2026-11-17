@@ -11,7 +11,7 @@
  * Snapmap+ makes the refusal impossible. AllocParmState is detoured and asked first:
  *   - a parm whose name already holds a slot, or whose range has room, is the engine's to place, with one
  *     reservation: the vector parms of Snapmap+'s own render programs (modprog.h: the multilayer blend, the Eternal
- *     particle shading, the radial blur) keep as many free vector slots as they still need, whatever asks first, so
+ *     particle shading) keep as many free vector slots as they still need, whatever asks first, so
  *     a mod's own parms can never take the slots a ported demon's programs draw with;
  *   - a vector parm that finds no slot of its own shares one: the last vector slot handed out to a parm that is
  *     not Snapmap+'s becomes the shared slot, and every later one is given the same slot. Parms sharing a slot

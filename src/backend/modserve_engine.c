@@ -48,7 +48,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include "modserve.h"
-#include "modprog.h"
 #include "modhud_scene.h"
 #include "modscene_place.h"
 #include "modbundle.h"
@@ -1106,8 +1105,6 @@ static unsigned char me_probe_hook(void *self, const char *path, void *a, void *
     int ours = 0;
     unsigned char r;
     if (path && sh_modserve_active()) ours = sh_modserve_probe_claims(path);
-    /* the product's own decls the game's post programs read (modprog.h), with or without mods */
-    if (path && !ours) ours = sh_modprog_post_claims(path);
     r = g_probe_orig(self, path, a, b, c, d, ours ? ((quiet & ~(uint64_t)0xff) | 1u) : quiet);
     return r ? r : (unsigned char)(ours ? 1 : 0);
 }
@@ -1206,16 +1203,17 @@ static void me_ensure_lookup(void)
     me_log("resource lookup hook installed (rva 0x%X, %d-byte window)", g_lookup_sig.rva, LOOKUP_STOLEN);
 }
 
-/* The lookup and load are detoured only once the index holds a decl, so an
- * empty mods folder leaves them untouched. The probe is detoured at bind: the
- * game's own post programs read the product's radialblur parm decls
- * (modprog.h), which only the probe can make the engine find. */
+/* The probe is detoured only once the index holds a decl, so an empty mods
+ * folder leaves the engine's probe untouched; the lookup and load likewise. */
 static void me_ensure_probe(void)
 {
     void *tramp;
+    sh_modserve_stats st;
     me_ensure_lookup();
     me_ensure_load();
     if (g_probe_orig || !g_probe_sig_ok) return;
+    sh_modserve_get_stats(&st);
+    if (!st.files) return;
     tramp = sh_prepare_detour_sig(&g_probe_sig, (void *)me_probe_hook, PROBE_STOLEN);
     if (!tramp) { me_log("existence probe detour refused; new decl identities cannot load"); g_probe_sig_ok = 0; return; }
     g_probe_orig = (probe_fn)tramp;

@@ -36,7 +36,6 @@ static int log_has(const char *needle) { return strstr(g_log, needle) != NULL; }
 void sh_modhud_scene_play_begin(void) {}
 void sh_modscene_place_play_begin(void) {}
 int sh_modstock_exists(const char *request) { (void)request; return 0; }
-int sh_modprog_post_claims(const char *path) { (void)path; return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len) { (void)name; if (out_len) *out_len = 0; return NULL; }
 void *sh_prepare_detour_sig(const sig_result *sig, void *detour, size_t stolen) { (void)sig; (void)detour; (void)stolen; return NULL; }
 sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; return (sh_patch_status)0; }

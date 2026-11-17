@@ -736,10 +736,7 @@ These backend files share the work:
   resolved once per table, through the same request paths the builder uses.
   Lookups allocate nothing.
 - `modserve_engine.c` registers editor rows inside the palette build (Timeline
-  tile detour), answers the decl existence probe for served decls and for the
-  product's `radialblur` render parm decls (the probe is detoured at bind, since
-  the game's own post programs read those; the lookup and load hooks only when
-  the table holds a decl), activates a map's gameplay decls at
+  tile detour), answers the decl existence probe for served decls (the probe, lookup and load hooks only when the table holds a decl), activates a map's gameplay decls at
   the engine's own level 1, and rebuilds the live palette inside process heap 0.
   A grandfathered bundle's shadows are planned like new names; the engine
   already knowing the source marks a stock decl, which is left to the provider.
@@ -1642,55 +1639,6 @@ atlas samplers. The rule is documented in `src/backend/eternal/shaders/eternalpa
 `eternalparticles.decl.inc` is the OpenGL text. A liquid stage keeps the game's
 own blood shading.
 
-#### The radial blur fx item
-
-DOOM 2016's fx decls have a radial blur item (`FX_BLUR_RADIAL`): the engine
-plays it (the fx update hands its centre, start, fade times and
-`blurRadial2Parms.radius` to each player view, which copies them into its
-render view), and its shipped renderer never draws it. Snapmap+ draws any such
-item that sets a strength cap, so a mod's effect can blur the screen around a
-point in the world; the game's own items set none and stay as the game plays
-them. The item's fields give the blur's shape (`postfx.h`):
-
-| Field | Meaning |
-|---|---|
-| `blurRadial2Parms.radius` | the radius where the blur is strongest, world units |
-| `fadeInTime`, `fadeOutTime`, `duration` | its strength 0 -> 1 -> 0 over its life, seconds |
-| `color.x` | falloff: how fast the blur rises from the edge of its ring to its peak |
-| `color.y` | strength at full envelope |
-| `color.z` | the ring's half width as a fraction of the radius |
-| `color.w` | the blur's length at full kernel, screen heights |
-| `extents.x` | the strength cap after the screen and distance terms (0: not drawn) |
-| `extents.y` | the screen radius (screen heights) below which the strength ramps down |
-| `extents.z` | the distance in front of the near plane over which it fades in, world units (above 0) |
-| `size` | the widest fade zone, screen heights; a wider one is narrowed and a falloff below 1 weakens it |
-
-A blur is hidden by the share of eight depth samples around its centre where
-the scene is in front of it. Up to eight items are kept and the seven most
-recent that are on are drawn; one item played to several views is one blur.
-Its strength follows the game clock read at the item's start, advanced by the
-time since (a pause during a blur does not hold it).
-
-`postfx.c` installs, on both renderers, a five-byte call at the item's start
-(the load of its radius) that records the item, a detour of the view's
-`SetBlurRadial` that keeps the blur, and a detour of the post process that
-writes the blurs that are on into the render parms `radialblur0`..`15` of the
-parm state it draws with (on Vulkan's asynchronous compute path, the async
-context's) just before it draws (`postfx_blurs.c` holds the kept blurs and the parameter layout;
-`postfx_sigs.c` the signatures). The game's own `postprocess` (fragment) and
-`computepostprocess` (compute) programs, each with its permutation, are served
-under their own names by the provider, derived in memory from the installed
-files as above: the decl's `#include "postprocess.inc"` becomes the blur's
-templates and the include's text with its five clamped scene reads (the
-chromatic aberration's) taken through `RADIAL_BLUR_SAMPLE`; the cooked `.bin`
-gains the 28 parameters after the stage's material uniforms; the stage module's
-five calls of `tex2DlodClamped` with the scene image become calls of
-`rb_clamped`, which blurs the read toward the blurs that are on and is the same
-read when none is. The rule is documented in `src/backend/shaders/radialblur.frag`;
-`radialblur.decl.inc` is the OpenGL text. A program that is not the shape the
-derivation knows is left to the game, which then draws no radial blur
-(`POSTFX:` and the cause in the log).
-
 #### Render parm slots are never refused
 
 The engine keeps every render parm in one of 2,367 parm state slots, a fixed
@@ -1701,15 +1649,15 @@ the fault shield a parm that never loads, so every program naming it draws the
 engine's default program. The vector range is the tight one: the game's own
 decls and its 128 expression temporaries (`temp1`..`temp128`, of which only 80
 have a decl file) hold 973, which leaves 51 for everything else, and the
-product's programs declare 48.
+product's programs declare 32.
 
 `parmslots.c` detours `AllocParmState` on both renderers and decides first
 (`parmslots_rule.c`, pure):
 
 - A parm whose name already holds a slot, or whose range has room, is placed
   by the engine as before, with one reservation: the vector parms of the
-  product's own programs (`sh_modprog_vector_parm`: the multilayer blend's,
-  the particle shading's, the radial blur's) keep as many free vector slots
+  product's own programs (`sh_modprog_vector_parm`: the multilayer blend's and
+  the particle shading's) keep as many free vector slots
   as they still need, whatever asks first. A mod's own parms cannot take the
   slots a ported demon's programs draw with.
 - A vector parm that finds no slot of its own shares one. The last vector
@@ -1817,7 +1765,7 @@ whose folder cannot be made, is passed through unchanged. The backend log has
 one `CACHE:` line when it is ready.
 
 `src/backend/eternal/` holds DOOM Eternal's shading (the multilayer blend and the particle program) behind the general
-derived-program mechanism of `modprog.c`; the radial blur of the post process stays beside it.
+derived-program mechanism of `modprog.c`.
 The blend's Vulkan module and texts are vendored in `eternal/modprog_multilayer.c`,
 generated by `node tools/gen_multilayer.js` from `src/backend/eternal/shaders/`
 (glslangValidator compiles the module; `--check`, run by the JavaScript tests,

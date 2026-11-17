@@ -56,7 +56,6 @@
 #include "cvars.h"
 #include "entity.h"
 #include "companion_engine.h"
-#include "postfx.h"
 #include "parmslots.h"
 #include "particlemotion.h"
 #include "cachewrites.h"
@@ -372,8 +371,6 @@ static void install_features(const sig_result *results, size_t db)
     /* Owner-bound companions (companion_engine.h): CallSpawn is detoured only
      * when an admitted bundle declares companions. */
     if (overrides_installed) (void)sh_companions_install(results, db, g_doom_base);
-    /* DOOM 2016's radial blur fx item, drawn in the post process the provider serves (modprog.h). */
-    if (overrides_installed) (void)sh_postfx_install(results, db, g_doom_base);
     /* A render parm always gets a parm state slot (parmslots.h): the product's programs keep theirs, a parm past
      * a full range shares one instead of stopping the load. */
     (void)sh_parmslots_install(results, db, g_doom_base);
