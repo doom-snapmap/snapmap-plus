@@ -3,14 +3,15 @@
  *
  * The engine's per-stage job (VK 0x19B1400) walks a stage's particles and calls the writer for each one that is
  * alive: writer(context, generation, cursor). `context` is the job's own record of the stage being drawn (its
- * stage pointer first; the emitter's axes at +0x48 and origin at +0x6C as the origin function applies them; the
- * view's origin at +0xB4), `generation` the particle (index, age in seconds, life in seconds, two fractions of
+ * stage pointer first; the emitter's axes at +0x48, times its scale, and origin at +0x6C as the origin function
+ * applies them, the identity and zero for a stage that is not transparency sorted; the view's origin at +0xB4),
+ * `generation` the particle (index, age in seconds, life in seconds, two fractions of
  * its life, its seed), `cursor` where the vertices go (48 bytes each, position first). Both records live on the
  * job's stack, so nothing here is shared between threads.
  *
  * For a stage that asks (sh_motion_asked) the game's writer runs first and writes the quad at the game's own
  * place. The detour then asks the game's origin function where the particle was born and where it is a moment
- * later (its launch velocity, plus the stage's launch ball), where the game put it now, integrates the stage's
+ * later (its launch velocity, times the stage's launch speed factor, plus its launch ball), where the game put it now, integrates the stage's
  * forces from the birth
  * (sh_motion_run) and moves the quad (sh_motion_place). A trail or a mesh (more or fewer than four vertices) is
  * left where the game put it. */
@@ -19,6 +20,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "particlemotion.h"
 #include "backend_log.h"
@@ -77,7 +79,7 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     const float *c = (const float *)context;
     sh_motion m;
     sh_motion_frame fr;
-    float age, life, span, p0[3], p1[3], pe[3], v0[3], p[3], v[3], eye[3];
+    float age, life, span, scale, len[3], p0[3], p1[3], pe[3], v0[3], p[3], v[3], eye[3];
     int i;
     memcpy(&age, &born[1], sizeof age);
     memcpy(&life, &born[2], sizeof life);
@@ -90,13 +92,23 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
         fr.origin[i] = c[(CTX_ORIGIN + 4 * i) / 4];
         eye[i] = c[(CTX_EYE + 4 * i) / 4];
     }
+    /* the axes carry the emitter's scale: take it out of them, and below out of the launch velocity */
+    len[0] = sqrtf(fr.x[0] * fr.x[0] + fr.x[1] * fr.x[1] + fr.x[2] * fr.x[2]);
+    len[1] = sqrtf(fr.y[0] * fr.y[0] + fr.y[1] * fr.y[1] + fr.y[2] * fr.y[2]);
+    len[2] = sqrtf(fr.z[0] * fr.z[0] + fr.z[1] * fr.z[1] + fr.z[2] * fr.z[2]);
+    scale = sh_motion_scale(len);
+    for (i = 0; i < 3; i++) {
+        if (len[0] > 1e-6f) fr.x[i] /= len[0];
+        if (len[1] > 1e-6f) fr.y[i] /= len[1];
+        if (len[2] > 1e-6f) fr.z[i] /= len[2];
+    }
     span = life < LAUNCH_SPAN ? life : LAUNCH_SPAN;
     origin_at(context, born, 0.0f, life, p0);
     origin_at(context, born, span, life, p1);
     origin_at(context, born, age, life, pe);
-    for (i = 0; i < 3; i++) v0[i] = (p1[i] - p0[i]) / span;
+    for (i = 0; i < 3; i++) v0[i] = (p1[i] - p0[i]) / (span * scale);
     sh_motion_launch(&m, born[5], v0);
-    sh_motion_run(&m, &fr, born[5], age, life, p0, v0, p, v);
+    sh_motion_run(&m, &fr, born[5], age, life, scale, p0, v0, p, v);
     sh_motion_place(verts, VERT_STRIDE, *(const int *)(stage + SH_MOTION_STAGE_ORIENTATION) == 3, pe, p, v, eye,
                     m.stretch);
     InterlockedIncrement(&g_moved);

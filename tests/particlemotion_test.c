@@ -69,6 +69,7 @@ int main(void)
     put(stage, 0x61C, 26.0f); put(stage, 0x620, 27.0f);   /* geometryGPU.sizeVariation */
     put(stage, 0x678, 28.0f);                       /* physicsGPU.massVariation */
     put(stage, 0x59C, 29.0f);                       /* systemPropertiesGPU.boundsExpansion.x */
+    put(stage, 0x5A0, 30.0f); put(stage, 0x5A4, 31.0f);   /* .y .z */
     sh_motion_read(stage, &m);
     CHECK(m.accel[0] == 1.0f && m.accel[2] == 3.0f && m.wind[0] == 4.0f && m.wind[2] == 6.0f);
     CHECK(m.vortex_axis[0] == 7.0f && m.vortex_axis[2] == 9.0f);
@@ -78,7 +79,7 @@ int main(void)
     CHECK(m.attract_kind == 19.0f && m.attract_strength == 20.0f && m.attract_radius == 21.0f);
     CHECK(m.attract_at[0] == 22.0f && m.attract_at[2] == 24.0f);
     CHECK(m.wind_drag == 25.0f && m.emitter_drag0 == 26.0f && m.emitter_drag1 == 27.0f && m.emitter_drag_radius == 28.0f);
-    CHECK(m.launch == 29.0f);
+    CHECK(m.launch == 29.0f && m.launch_lo == 30.0f && m.launch_hi == 31.0f);
 
     printf("-- the launch ball: a velocity in a random direction, up to its size, the same for the same seed\n");
     {
@@ -96,6 +97,27 @@ int main(void)
         CHECK(sqrtf((a[0] - 1) * (a[0] - 1) + (a[1] - 2) * (a[1] - 2) + (a[2] - 3) * (a[2] - 3)) <= 157.48f);
     }
 
+    printf("-- the launch speed factor: one number per particle between its two ends, before the ball\n");
+    {
+        float a[3] = { 1.0f, 2.0f, 3.0f }, b[3] = { 1.0f, 2.0f, 3.0f };
+        static const float WANT[3] = { -0.62273f, -1.24546f, -1.86819f };            /* particle_motion.launch_velocity */
+        sh_motion f;
+        memset(&f, 0, sizeof f);
+        f.launch_lo = -0.8f; f.launch_hi = 2.4f;
+        sh_motion_launch(&f, 12345u, a);
+        CHECK(near3(a, WANT, 1e-4f));
+        CHECK(fabsf(a[1] / a[0] - 2.0f) < 1e-4f && fabsf(a[2] / a[0] - 3.0f) < 1e-4f);   /* the direction is kept */
+        f.launch_lo = f.launch_hi = 0.5f;
+        sh_motion_launch(&f, 777u, b);
+        CHECK(b[0] == 0.5f && b[1] == 1.0f && b[2] == 1.5f);
+    }
+
+    printf("-- the emitter's scale: the largest of the three factors, 1 when they are not a scale\n");
+    {
+        static const float S[3] = { 1.7f, 1.7f, 1.7f }, T[3] = { 1.0f, 2.5f, 0.5f }, Z0[3] = { 0, 0, 0 }, H[3] = { 1e9f, 1, 1 };
+        CHECK(sh_motion_scale(S) == 1.7f && sh_motion_scale(T) == 2.5f && sh_motion_scale(Z0) == 1.0f && sh_motion_scale(H) == 1.0f);
+    }
+
     printf("-- the step: life / 96 between 1/60 s and 0.05 s\n");
     CHECK(fabsf(sh_motion_step(0.4f) - 1.0f / 60.0f) < 1e-7f);
     CHECK(fabsf(sh_motion_step(3.0f) - 0.03125f) < 1e-7f);
@@ -103,15 +125,29 @@ int main(void)
 
     printf("-- no force: a straight flight; a uniform acceleration: the closed form\n");
     memset(&m, 0, sizeof m);
-    sh_motion_run(&m, &FR, 1u, 0.8f, 1.2f, P0, V0, p, v);
+    sh_motion_run(&m, &FR, 1u, 0.8f, 1.2f, 1.0f, P0, V0, p, v);
     for (i = 0; i < 3; i++) want[i] = P0[i] + V0[i] * 0.8f;
     CHECK(near3(p, want, 1e-5f) && near3(v, V0, 1e-6f));
     m.accel[2] = -800.0f;
-    sh_motion_run(&m, &FR, 1u, 0.8f, 1.2f, P0, V0, p, v);
+    sh_motion_run(&m, &FR, 1u, 0.8f, 1.2f, 1.0f, P0, V0, p, v);
     want[2] = P0[2] + V0[2] * 0.8f - 800.0f * 0.32f;
     CHECK(near3(p, want, 1e-4f) && fabsf(v[2] - (V0[2] - 640.0f)) < 0.01f);
-    sh_motion_run(&m, &FR, 1u, 0.0f, 1.2f, P0, V0, p, v);          /* at its birth: where it was born */
+    sh_motion_run(&m, &FR, 1u, 0.0f, 1.2f, 1.0f, P0, V0, p, v);          /* at its birth: where it was born */
     CHECK(near3(p, P0, 0.0f) && near3(v, V0, 0.0f));
+
+    printf("-- a scaled emitter: a step moves the particle by velocity x step x scale; the forces see the scaled places\n");
+    sh_motion_run(&m, &FR, 1u, 0.8f, 1.2f, 1.7f, P0, V0, p, v);
+    for (i = 0; i < 3; i++) want[i] = P0[i] + V0[i] * 0.8f * 1.7f;
+    want[2] -= 800.0f * 0.32f * 1.7f;
+    CHECK(near3(p, want, 1e-4f) && fabsf(v[2] - (V0[2] - 640.0f)) < 0.01f);      /* the velocity is not scaled */
+    {
+        static const float WANT_P[3] = { 190.8733f, 423.9781f, 217.1707f }, WANT_V[3] = { -130.5954f, 262.6765f, 38.5853f };
+        sh_motion e;
+        memset(&e, 0, sizeof e);
+        e.vortex_axis[2] = 1.0f; e.vortex_falloff = 524.934f; e.vortex_speed = 5.0f; e.vortex_drag = 1.0f; e.brownian = 104.9868f;
+        sh_motion_run(&e, &FR, 12345u, 0.8f, 1.2f, 1.7f, P0, V0, p, v);
+        CHECK(near3(p, WANT_P, 2e-3f) && near3(v, WANT_V, 5e-3f));
+    }
 
     printf("-- each force against Doomforge's arithmetic\n");
     memset(cases, 0, sizeof cases);
@@ -126,7 +162,7 @@ int main(void)
     cases[7].emitter_drag0 = 5.0f; cases[7].emitter_drag_radius = 105.0f;
     cases[8] = cases[1]; cases[8].brownian = 104.9868f;
     for (i = 0; i < 9; i++) {
-        sh_motion_run(&cases[i], &FR, 12345u, 0.8f, 1.2f, P0, V0, p, v);
+        sh_motion_run(&cases[i], &FR, 12345u, 0.8f, 1.2f, 1.0f, P0, V0, p, v);
         g_checks++;
         if (!near3(p, EXPECT[i].p, 2e-3f) || !near3(v, EXPECT[i].v, 5e-3f)) {
             g_failed++;
@@ -137,12 +173,12 @@ int main(void)
     printf("-- the same particle is in the same place whenever it is asked; a later age continues the path\n");
     {
         float a[3], b[3], va[3], vb[3], c[3], vc[3];
-        sh_motion_run(&cases[8], &FR, 777u, 0.5f, 1.2f, P0, V0, a, va);
-        sh_motion_run(&cases[8], &FR, 777u, 0.5f, 1.2f, P0, V0, b, vb);
+        sh_motion_run(&cases[8], &FR, 777u, 0.5f, 1.2f, 1.0f, P0, V0, a, va);
+        sh_motion_run(&cases[8], &FR, 777u, 0.5f, 1.2f, 1.0f, P0, V0, b, vb);
         CHECK(near3(a, b, 0.0f) && near3(va, vb, 0.0f));
-        sh_motion_run(&cases[8], &FR, 777u, 0.5001f, 1.2f, P0, V0, c, vc);     /* no jump across a part step */
+        sh_motion_run(&cases[8], &FR, 777u, 0.5001f, 1.2f, 1.0f, P0, V0, c, vc);     /* no jump across a part step */
         CHECK(near3(a, c, 1e-3f));
-        sh_motion_run(&cases[8], &FR, 778u, 0.5f, 1.2f, P0, V0, c, vc);        /* another seed, another path */
+        sh_motion_run(&cases[8], &FR, 778u, 0.5f, 1.2f, 1.0f, P0, V0, c, vc);        /* another seed, another path */
         CHECK(!near3(a, c, 1e-3f));
     }
 
@@ -150,7 +186,7 @@ int main(void)
     {
         static const float B[3] = { 163.0f, 200.0f, 50.0f }, Z[3] = { 0, 0, 0 };
         float ang;
-        sh_motion_run(&cases[1], &FR, 1u, 1.0f, 1.2f, B, Z, p, v);
+        sh_motion_run(&cases[1], &FR, 1u, 1.0f, 1.2f, 1.0f, B, Z, p, v);
         ang = atan2f(p[1] - 200.0f, p[0] - 100.0f);
         CHECK(ang > 0.5f && ang < 2.6f && fabsf(p[2] - 50.0f) < 1e-3f);        /* counter-clockwise, in its plane */
     }

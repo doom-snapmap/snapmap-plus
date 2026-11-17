@@ -496,7 +496,8 @@ static void test_effects_sound(void)
     CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,7);"));
 }
 
-/* The hard stop rule: which stops end an action at once, which decls are named, and the call. */
+/* The hard stop rule: which stops end an action at once, which sound requests are held, which decls are named,
+ * and the call. */
 static void test_fx_hard_stops(void)
 {
     int type;
@@ -517,6 +518,34 @@ static void test_fx_hard_stops(void)
             || type == SH_FX_TYPE_RENDERPARM || type == SH_FX_TYPE_BLUR_RADIAL || type == SH_FX_TYPE_BLUR_GAUSSIAN
             || type == SH_FX_TYPE_SCREEN_OVERLAY) continue;
         CHECK(sh_fx_hard_ends(type, 0, 0) == 0 && sh_fx_hard_ends(type, 1, 1) == 0);
+    }
+
+    /* a sound item's request: held while its action is requested and started, unless the item allows a restart
+     * before its end; inside its delay (requested, not started) and on a cleared action the game re-arms it */
+    {
+        static const struct { unsigned flags; int restart, held; } rows[] = {
+            { 0x00, 0, 0 },                                                       /* cleared */
+            { SH_FX_ACTION_REQUESTED, 0, 0 },                                     /* inside its delay */
+            { SH_FX_ACTION_REQUESTED | 0x08u, 0, 0 },                             /* due to start */
+            { SH_FX_ACTION_STARTED, 0, 0 },                                       /* started, not requested */
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED, 0, 1 },              /* playing */
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED | 0x08u, 0, 1 },
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED | SH_FX_ACTION_FADING, 0, 1 },
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED | 0x01u, 0, 1 },      /* hidden */
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED, 1, 0 },              /* restart allowed */
+            { SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED | SH_FX_ACTION_FADING, 1, 0 },
+            { 0xFFFFFFFFu, 0, 1 }, { 0xFFFFFFFFu, 1, 0 },
+        };
+        size_t k;
+        for (k = 0; k < sizeof rows / sizeof rows[0]; k++)
+            CHECK(sh_fx_sound_held(SH_FX_TYPE_SOUND, rows[k].flags, rows[k].restart) == rows[k].held);
+        /* every other kind keeps the game's request, whatever its state */
+        for (type = 0; type <= 24; type++) {
+            if (type == SH_FX_TYPE_SOUND) continue;
+            CHECK(!sh_fx_sound_held(type, SH_FX_ACTION_REQUESTED | SH_FX_ACTION_STARTED, 0));
+            CHECK(!sh_fx_sound_held(type, 0xFFFFFFFFu, 0));
+        }
+        CHECK(!sh_fx_sound_held(-1, 0xFFFFFFFFu, 0));
     }
 
     /* names: whole, or a prefix that ends in a slash; the game's own decls are never named */

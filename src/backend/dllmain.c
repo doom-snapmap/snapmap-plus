@@ -60,6 +60,7 @@
 #include "postfx.h"
 #include "parmslots.h"
 #include "particlemotion.h"
+#include "cachewrites.h"
 #include "clip_events.h"
 #include "typeinfo.h"
 #include "megapreview.h"
@@ -379,6 +380,9 @@ static void install_features(const sig_result *results, size_t db)
     /* Simulated motion for a CPU particle stage that asks for it in its decl (particlemotion.h): only a mod's
      * stage can, so the particle vertex writer is detoured only when mods are served. */
     if (overrides_installed) (void)sh_particlemotion_install(results, db, g_doom_base);
+    /* Cache writes out of the game folder (cachewrites.h): the atomic write is handed the save path for the
+     * engine's generated files and its flight file, which the engine's search path finds there. */
+    if (overrides_installed) (void)sh_cachewrites_install(g_doom_base);
     /* Clip events (clip_events.h): the three event lookups, detoured at the first Play whose mods add rows to
      * their own clips. */
     if (overrides_installed) (void)sh_clip_events_install(g_doom_base);

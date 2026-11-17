@@ -299,6 +299,55 @@ const char *sh_ai_pain_string_get(void *ai, uint32_t spawn_id);
 int         sh_ai_block_set(void *ai, uint32_t spawn_id, int reaction, int until_ms);
 int         sh_ai_blocked(void *ai, uint32_t spawn_id, int reaction, int now_ms);
 
+/* Wound damage counts. The game opens a living demon's gore wound by its
+ * damage GROUP: idGoreComponent::DamageActivatesWound (SH_AI_SIG_DAMAGE_WOUND)
+ * is asked per queued hit record, per damage group of the record and per
+ * wound the group's gore nodes offer, with the health the whole group has
+ * lost, and it passes the wound when that loss has reached the wound's
+ * threshold and the hit lands inside the wound's clipping spheres (with its
+ * frame damage, damage-per-second, gore type, distance and direction gates).
+ * Wounds that share a group (two halves of a face on one joint) open
+ * together, on a hit inside either. DOOM Eternal keeps a counter per wound:
+ * the damage of each hit that landed inside that wound's own spheres, and the
+ * wound opens when that sum reaches its threshold. ai:wound_damage_counts(true)
+ * gives one demon that rule: the product calls the game's function with the
+ * lost health raised past any threshold (SH_AI_DAW_LOST_RAISED), so every
+ * other gate, the sphere test among them, is the game's own; when the game
+ * passes, the record's damage is added to the wound's counter and the answer
+ * is whether the counter has reached the wound's threshold.
+ *
+ * The threshold as the game computes it (VK 0x1406E8A80, GL 0x1406E7EE0):
+ * the wound's relativeDamageRequiredToGore times the owner's max health when
+ * that is not negative, else totalDamageRequiredToGore. The game's gate
+ * refuses only a threshold above 0 that the loss is below. Pure. */
+float sh_wound_count_threshold(float total, float relative, float max_health);
+/* One hit on one wound: gates_passed is the game's answer with the lost
+ * health raised. A refused hit never counts (*sum unchanged, 0); a passed one
+ * adds damage (a negative or non-finite damage adds nothing) and answers 1
+ * when the sum has reached the threshold, or always for a threshold that is
+ * not above 0 (the game has no threshold then). Pure. */
+int   sh_wound_count_step(float threshold, float *sum, float damage, int gates_passed);
+/* The per-demon counters: one record per demon that asked, keyed by the demon
+ * and its spawn id, one counter per wound decl (decls outlive the map), up to
+ * SH_WOUND_COUNT_WOUNDS wounds a demon. A record is dropped when the demon's
+ * handle is released (sh_script_handles_on_gone) or the call is turned off,
+ * and the whole table at a map's start. Lock-protected: the gore think and
+ * the script call may be on different threads. */
+#define SH_WOUND_COUNT_WOUNDS 64
+void  sh_wound_count_reset(void);
+int   sh_wound_count_set(void *ai, uint32_t spawn_id, int on);    /* 1 done, 0 the table is full */
+int   sh_wound_count_on(void *ai, uint32_t spawn_id);             /* 1 the demon asked */
+/* The rule for one call of the game's function on a demon that asked. record
+ * and mark (the record's damage and position bits, sh_wound_count_mark) name
+ * the hit: the same hit offered twice for one wound counts once. 1 pass, 0
+ * refuse, -1 not counted (the demon did not ask, or its wounds are full): the
+ * caller answers the game's own rule. */
+int   sh_wound_count_hit(void *ai, uint32_t spawn_id, const void *wound, const void *record, uint32_t mark,
+                         float threshold, float damage, int gates_passed);
+float sh_wound_count_sum(void *ai, uint32_t spawn_id, const void *wound);   /* the counter, 0 when none */
+void  sh_wound_count_gone(uint32_t spawn_id);
+uint32_t sh_wound_count_mark(const void *record);   /* FNV-1a of the record's first 16 bytes */
+
 /* ------------------------------------------------------------ engine seam */
 
 /* The muzzle test's weights (the ray against a sphere of the focus radius:
@@ -468,6 +517,16 @@ typedef struct sh_script_ai_engine {
     /* Make sure the game's handling of a gore breakable's hit runs through
      * the product (sh_ai_destructible below). 1 ready, -1 unavailable. */
     int      (*destructible)(void);
+    /* Select the entry named `name` of the demon's behaviour decl's
+     * weaponUseBehaviorList as its weapon-use behaviour (the recoil clip and
+     * weights, the trigger-hold times): the game selects "default" at spawn
+     * and never again. 1 selected, 0 the list has no entry of that name
+     * (nothing changed), -1 unavailable. */
+    int      (*weapon_use)(void *ai, const char *name);
+    /* on 1: from now on a gore wound of the demon opens on the damage that
+     * landed inside its own hit spheres (sh_wound_count_step); on 0: by the
+     * game's own rule again. 1 set, -1 unavailable. */
+    int      (*wound_damage_counts)(void *ai, int on);
 } sh_script_ai_engine;
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
@@ -516,6 +575,36 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *pose, const sh_ai_leg_joints *j, sh_ai
 static const unsigned char k_ai_wound_prologue[SH_AI_WOUND_STOLEN] = {
     0x48, 0x89, 0x4C, 0x24, 0x08, 0x53, 0x57, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00
 };
+/* DamageActivatesWound (SH_AI_SIG_DAMAGE_WOUND; VK 0x1408FC8E0, GL
+ * 0x1408FB910, the same code on both): (component, wound decl, record,
+ * damage group decl, group index, lost health, max health) -> a bool in al.
+ * The arguments: rcx the gore component (its owner handle at +0x608, the
+ * owner at +0x610, SH_AI_GORE_OWNER); rdx the wound's gorewounds decl (the
+ * gore node's areaWoundDecl; the frame gate reads its +0x218); r8 the hit's
+ * goreFrameDamage_t; r9 the damage group decl (only tested for NULL); the
+ * stack's 5th the group index (an int, at most 31), 6th the group's lost
+ * health (an int: movd and cvtdq2ps at +0x1E0, the only read of it), 7th the
+ * owner's max health (a float: movss xmm1 at +0x1CE, passed to the threshold
+ * helper the call at +0x1D6 reaches). The helper reads the wound's +0x214
+ * (relative) and +0x210 (total) as sh_wound_count_threshold does. The record
+ * is one slot (0x58 bytes) of the component's 8-slot ring; the frame damage
+ * queue (VK 0x1408FA7B0, GL 0x1408F97E0) stores at its +0 the hit's damage
+ * times the gore behaviour's multiplier (+0x9C), the gore damage cvar and the
+ * damage's own scale, at +4 its position. tests/script_ai_sigs_test.c checks
+ * every byte named here on both executables. The window: push rbp, rbx, rsi,
+ * rdi, r12, r14, r15; lea rbp,[rsp-0xF] (whole, position-independent). */
+#define SH_AI_DAW_STOLEN 16
+static const unsigned char k_ai_daw_prologue[SH_AI_DAW_STOLEN] = {
+    0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xF1
+};
+#define SH_AI_DAW_MAXH_READ       0x1CEu   /* movss xmm1,[rbp+0x7F]; mov rcx,rsi: the max health and the wound */
+#define SH_AI_DAW_THRESHOLD_CALL  0x1D6u   /* call threshold(wound, max health) */
+#define SH_AI_DAW_LOST_READ       0x1E0u   /* movd xmm1,[rbp+0x77]; cvtdq2ps; comiss; ja refuse */
+#define SH_AI_DAW_LOST_RAISED     0x7FFFFFFF
+#define SH_AI_WOUND_TOTAL_REQUIRED    0x210u  /* gorewounds decl: damageRequirements.totalDamageRequiredToGore */
+#define SH_AI_WOUND_RELATIVE_REQUIRED 0x214u  /*                  damageRequirements.relativeDamageRequiredToGore */
+#define SH_AI_GFD_DAMAGE          0x00u    /* goreFrameDamage_t: totalDamage */
+#define SH_AI_GFD_SIZE            0x58u
 /* The mesh hide site (SH_AI_SIG_MESH_HIDE_SITE): the two calls, and where
  * an entity keeps its model. */
 #define SH_AI_MESH_SITE_INDEX     11u     /* call index-by-name (model, name) */
@@ -779,6 +868,8 @@ enum sh_ai_sig {
     SH_AI_SIG_BREAKABLE_GORE,      /* a gore breakable's weapon-specific gore (manager, breakable, ...) (detoured) */
     SH_AI_SIG_BREAKABLE_BREAK,     /* idBreakable's break (breakable, 0): every piece placed and activated */
     SH_AI_SIG_FXPHYS_PLACE,        /* an effect rigid body's broad phase entry moved (broad phase, entry, pos, axis) */
+    SH_AI_SIG_WEAPON_USE,          /* the demon's weapon-use behaviour: the list entry its index names */
+    SH_AI_SIG_DAMAGE_WOUND,        /* idGoreComponent::DamageActivatesWound (component, wound, record, ...) (detoured) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -793,6 +884,15 @@ extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
 /* Inside the recoil play: mulss xmm6,[rsi+0x24EB0] at +0x29 reads the
  * recoil strength. */
 #define SH_AI_RECOIL_SITE_MUL       0x29u
+/* The weapon-use accessor is its whole signature: movsxd rax,[rcx+0x250C8]
+ * (the index), mov rdx,[rcx+0xC120] (the behaviour decl), mov rax,[rdx+0x398]
+ * (the list's elements; its count is the int after the pointer), 0x50 an
+ * entry: the name (a pointer to its text) at +0, the data at +8. */
+#define SH_AI_OFF_WEAPON_USE_INDEX  0x250C8u
+#define SH_AI_OFF_BEHAVIOR_DECL     0xC120u
+#define SH_AI_BEHAVIOR_WEAPON_USES  0x398u
+#define SH_AI_WEAPON_USE_ENTRY      0x50u
+#define SH_AI_WEAPON_USE_MAX        64
 /* Inside the next-pull writer: the fire-decl call (E8 at +0x52) and the
  * trigger-slot table (lea rbp,[rip+] at +0x57). */
 #define SH_AI_NEXT_PULL_DECL_CALL   0x52u

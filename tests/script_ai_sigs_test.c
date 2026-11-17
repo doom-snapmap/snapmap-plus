@@ -23,7 +23,11 @@
  *     the idle action stores idleTurnType at animFSM +0xBF0 after reading
  *     the behaviour decl's turnParms (+0xC120, +0x528, +0x530), the fire gate
  *     asks requireMuzzleOnTarget at +0x27, and the fire mode and idle turn
- *     names against the executable's own enum tables.
+ *     names against the executable's own enum tables;
+ *   - wound damage counts: DamageActivatesWound's window, its unique
+ *     signature, the registers its arguments land in, the threshold helper
+ *     it calls with the wound and the max health (+0x214, +0x210), the one
+ *     read of the lost health, and the frame damage queue's record layout.
  * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
@@ -373,6 +377,15 @@ static void check_image(const char *path)
         CHECK(SH_AI_BRK_BROKEN == 0xE6Cu && SH_AI_OFF_PHYSICS == 0x808u);
         CHECK(window_has(base, k, 0x100, "\xA8\x0C\x00\x00", 4));
     }
+    if (rva[SH_AI_SIG_WEAPON_USE]) {
+        /* the accessor's own bytes are the offsets the call uses */
+        const uint8_t *s = base + rva[SH_AI_SIG_WEAPON_USE];
+        uint32_t index, decl, list;
+        memcpy(&index, s + 3, 4); memcpy(&decl, s + 14, 4); memcpy(&list, s + 29, 4);
+        CHECK(index == SH_AI_OFF_WEAPON_USE_INDEX && decl == SH_AI_OFF_BEHAVIOR_DECL && list == SH_AI_BEHAVIOR_WEAPON_USES);
+        CHECK(!memcmp(s + 18, "\x48\x8D\x0C\x80\x48\xC1\xE1\x04", 8));   /* index x 5 x 16 = 0x50 an entry */
+        CHECK(!memcmp(s + 33, "\x48\x83\xC0\x08", 4));                     /* the entry's data at +8 */
+    }
     if (rva[SH_AI_SIG_FXPHYS_PLACE]) {
         /* mov rdx,[rsp+0x90]: the fifth argument the placement passes as 0 */
         CHECK(!memcmp(base + rva[SH_AI_SIG_FXPHYS_PLACE] + 0x1F, "\x48\x8B\x94\x24\x90\x00\x00\x00", 8));
@@ -385,6 +398,58 @@ static void check_image(const char *path)
         CHECK(!memcmp(base + rva[SH_AI_SIG_SHOW_WOUND], k_ai_wound_prologue, SH_AI_WOUND_STOLEN));
         /* the owner handle is the pair at component +0x608 (its pointer, +0x610, is read through it) */
         CHECK(window_has(base, rva[SH_AI_SIG_SHOW_WOUND], 0x120, "\x08\x06\x00\x00", 4));
+    }
+    if (rva[SH_AI_SIG_DAMAGE_WOUND]) {
+        /* DamageActivatesWound (script_api_ai.h, SH_AI_DAW_*) */
+        static const sig_entry gfd = { "GoreFrameDamage",
+            "48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 40 8B 81 DC 02 00 00 4D 8B F0 0F 29 74 24 30 "
+            "0F 28 F3 0F 29 7C 24 20 0F 28 F9 48 8B F9", 0x8FA7B0u, 0x8F97E0u };
+        uint32_t s = rva[SH_AI_SIG_DAMAGE_WOUND], thr, k, reads = 0;
+        unsigned flags = 0;
+        sig_result u;
+        size_t b = sh_x64_stolen_boundary(base + s, 64, 14, 48, &flags);
+        CHECK(b == SH_AI_DAW_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + s, k_ai_daw_prologue, SH_AI_DAW_STOLEN));
+        /* the signature is the only match in the image */
+        CHECK(sig_scan_one(base, &SH_AI_SIGNATURES[SH_AI_SIG_DAMAGE_WOUND], &u) == SIG_OK && u.rva == s);
+        /* the arguments kept: r12 the group decl, r15 the 5th (the group index), r14 the record, rsi the wound,
+         * rbx the component; the index is refused above 31; the owner handle at component +0x608 */
+        CHECK(!memcmp(base + s + 0x2D, "\x4D\x8B\xE1\x4C\x63\x7D\x6F\x4D\x8B\xF0\x48\x8B\xF2\x48\x8B\xD9", 16));
+        CHECK(!memcmp(base + s + 0x94, "\x41\x83\xFF\x1F", 4));
+        CHECK(window_has(base, s, 0x60, "\x48\x8D\xB9\x08\x06\x00\x00", 7));
+        /* the record's gore behaviour at +0x40 (the queue stores it there) */
+        CHECK(!memcmp(base + s + 0xC6, "\x49\x8B\x46\x40", 4));
+        /* the frame gate: the wound's +0x218 against the component's group frame damage +0xA0C + 4 x group */
+        CHECK(!memcmp(base + s + 0x1AC, "\xF3\x0F\x10\x86\x18\x02\x00\x00", 8));
+        CHECK(!memcmp(base + s + 0x1BC, "\x42\x0F\x2F\x84\xBB\x0C\x0A\x00\x00", 9));
+        /* the threshold: the helper gets the wound and the 7th argument (the max health, a float) */
+        CHECK(!memcmp(base + s + SH_AI_DAW_MAXH_READ, "\xF3\x0F\x10\x4D\x7F\x48\x8B\xCE\xE8", 9));
+        CHECK(SH_AI_DAW_MAXH_READ + 8 == SH_AI_DAW_THRESHOLD_CALL);
+        thr = rel_target(base, s + SH_AI_DAW_THRESHOLD_CALL, 5, 1);
+        printf("  wound threshold 0x%X\n", thr);
+        CHECK(thr == (vk ? 0x6E8A80u : 0x6E7EE0u));
+        /* relative (+0x214) below 0: total (+0x210); else relative x max health */
+        CHECK(!memcmp(base + thr, "\xF3\x0F\x10\x91\x14\x02\x00\x00\x0F\x57\xC0\x0F\x2F\xC2\x76\x09"
+                                  "\xF3\x0F\x10\x81\x10\x02\x00\x00\xC3\xF3\x0F\x59\xD1\x0F\x28\xC2", 32));
+        CHECK(*(const uint32_t *)(base + thr + 4) == SH_AI_WOUND_RELATIVE_REQUIRED &&
+              *(const uint32_t *)(base + thr + 20) == SH_AI_WOUND_TOTAL_REQUIRED);
+        /* the 6th argument (the lost health) is an int, compared with the threshold and refused below it */
+        CHECK(!memcmp(base + s + SH_AI_DAW_LOST_READ, "\x66\x0F\x6E\x4D\x77\x0F\x5B\xC9\x0F\x2F\xC1\x0F\x87", 13));
+        /* ... and read nowhere else in the function (no other [rbp+0x77] operand in its 0x692 bytes) */
+        for (k = 0; k + 1 < 0x692u; k++) if ((base[s + k] & 0xC7) == 0x45 && base[s + k + 1] == 0x77) reads++;
+        CHECK(reads == 1);
+        /* the record: the frame damage queue's 8-slot ring of 0x58-byte records, its +0 the hit's damage times the
+         * gore behaviour's +0x9C and the two scales, the behaviour at +0x40 */
+        if (sig_resolve_one(base, &gfd, &u) == SIG_OK && u.addr) {
+            CHECK(!memcmp(base + u.rva + 0x49, "\x48\x6B\xF0\x58", 4) && SH_AI_GFD_SIZE == 0x58);
+            CHECK(!memcmp(base + u.rva + 0x6F, "\xF3\x0F\x59\xB0\x9C\x00\x00\x00", 8));
+            CHECK(!memcmp(base + u.rva + 0x96, "\xF3\x0F\x11\x36", 4) && SH_AI_GFD_DAMAGE == 0);
+            CHECK(!memcmp(base + u.rva + 0xA1, "\x48\x89\x46\x40", 4));
+        } else {
+            printf("FAIL the frame damage queue did not resolve\n");
+            g_fail = 1;
+        }
     }
     if (rva[SH_AI_SIG_PAIN_START]) {
         uint32_t s = rva[SH_AI_SIG_PAIN_START];

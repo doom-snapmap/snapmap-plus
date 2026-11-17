@@ -162,9 +162,23 @@
  *                      (+0xE6C) is set, places every piece where the model puts it plus up to 20 units an axis
  *                      at random and turns it at random (VK 0x141758780, through the physics +0xCA8), starts the
  *                      explosion records, stamps brokenStartTime. Called.
+ *   AiWeaponUse        VK 0x140435430  GL 0x1404343A0  the demon's weapon-use behaviour: entry [ai+0x250C8] of the
+ *                      behaviour decl's weaponUseBehaviorList (decl at ai+0xC120, list at decl+0x398, 0x50 an
+ *                      entry, its data at +8), or NULL below 0. The recoil play and the trigger-hold timers read
+ *                      the entry through it; the game sets the index once, at spawn, by name (VK 0x1404395E0:
+ *                      the entry named "default").
  *   AiFxPhysPlace      VK 0x141650390  GL 0x141650F30  an effect rigid body's broad phase entry moved to a position
  *                      and axis (broad phase, entry, position, axis, 0), as the piece placement calls it.
- *                      Called. (snaphak-re reports/R-G6) */
+ *                      Called. (snaphak-re reports/R-G6)
+ *   AiDamageWound      VK 0x1408FC8E0  GL 0x1408FB910  idGoreComponent::DamageActivatesWound (component, wound decl,
+ *                      goreFrameDamage_t, damage group decl, group index, the group's lost health as an int, the
+ *                      owner's max health as a float): called by the wound offer (VK 0x1408FE600) per record, per
+ *                      damage group and per gore node of the group. It gates in order on the alive flags, the
+ *                      group's frame damage (component +0xA0C + 4 x group) against the wound's +0x218, the lost
+ *                      health against the threshold (VK 0x1406E8A80: +0x214 x max health, or +0x210 when +0x214
+ *                      is negative), the group's damage-per-second bucket, gore type, distance, directions and
+ *                      the clipping spheres. Detoured; 16-byte window (script_api_ai.h, SH_AI_DAW_*;
+ *                      snaphak-re R-GAPS-B gap 6). */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -363,6 +377,15 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "40 53 56 57 41 56 48 83 EC 48 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 8B DA 49 8B F1 48 8B 94 24 "
       "90 00 00 00 4D 8B F0 48 8B F9 48 85 D2",
       0x1650390u, 0x1650F30u },
+    { "AiWeaponUse",
+      "48 63 81 C8 50 02 00 85 C0 78 1E 48 8B 91 20 C1 00 00 48 8D 0C 80 48 C1 E1 04 48 8B 82 98 03 00 00 "
+      "48 83 C0 08 48 03 C1 C3 33 C0 C3",
+      0x435430u, 0x4343A0u },
+    { "AiDamageWound",
+      "40 55 53 56 57 41 54 41 56 41 57 48 8D 6C 24 F1 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
+      "48 89 45 BF 48 83 B9 30 06 00 00 00 4D 8B E1 4C 63 7D 6F 4D 8B F0 48 8B F2 48 8B D9 0F 84 ?? ?? ?? ?? "
+      "48 8D B9 08 06 00 00",
+      0x8FC8E0u, 0x8FB910u },
     { NULL, NULL, 0, 0 }
 };
 
