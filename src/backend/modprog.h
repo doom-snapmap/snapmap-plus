@@ -169,6 +169,8 @@ extern const char SH_MODPROG_ML_CALL[];     /* OpenGL: the statements that call 
  * NOT render parms (the product declares none of them). Then its textures, in the order the program reads them. */
 extern const char *const SH_MODPROG_ML_PARMS[];
 extern const unsigned SH_MODPROG_ML_PARM_COUNT;
+/* What each of the 28 vectors was when a material did not set it (the old parms' decl defaults). */
+extern const float SH_MODPROG_ML_DEFAULTS[28][4];
 extern const char *const SH_MODPROG_ML_TEXTURES[];
 extern const unsigned SH_MODPROG_ML_TEXTURE_COUNT;
 

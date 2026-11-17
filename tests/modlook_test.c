@@ -580,9 +580,13 @@ static void test_legacy(void)
         res x;
         if (!t) continue;
         x = compile(names[i], t);
+        /* the old keys are read as the look they say and compiled as a look: no old key is left, and the stored vectors the
+         * old rewrite would have written are written by the look branch */
         CHECK(sh_modprog_legacy_material(t, n, &legacy, &ln) == 1 && legacy);
         want = renamed(legacy);
-        CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(x.out, want));
+        CHECK(x.r == SH_LOOK_CHANGED && x.out && (has(x.out, "layerparms") || has(x.out, "particleuberparms3")));
+        CHECK(x.out && !has(x.out, "eternalparticle") && !has(x.out, "multiblendalbedoscale") &&
+              !has(x.out, "layerstilingfactor") && !has(x.out, "blendlayer0heightmap"));
         CHECK(x.out && !has(x.out, "snapmapplus/multilayer/") && !has(x.out, "snapmapplus/eternal/"));
         if (x.out) {
             res again = compile(names[i], x.out);

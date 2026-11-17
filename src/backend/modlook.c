@@ -861,11 +861,409 @@ static int lk_rename(const char *text, size_t len, char **out, size_t *out_len)
     return 1;
 }
 
-static int lk_legacy(const char *text, size_t len, char **out, size_t *out_len)
+/* ------------------------------------------------------------------------------------ old keys as a look ---- */
+/* A material emitted before the Graphics SDK writes the old keys (the 28 layered vectors and their texture keys, the
+ * eternalparticle* vectors). It is turned into the look it says (the inverse of the storage mapping above, as
+ * Doomforge writes the look), and the look is compiled by the look branch, so an old emit and a new emit of the same
+ * material compile to the same bytes. A field equal to its default is left out, as Doomforge leaves it out. */
+
+static long lk_last_key(const lk_doc *d, const char *key)
 {
-    char *t = NULL, *r = NULL;
-    size_t tn = 0, rn = 0;
-    int legacy = sh_modprog_legacy_material(text, len, &t, &tn);
+    size_t i;
+    long hit = -1;
+    for (i = 0; i < d->n; i++)
+        if (d->l[i].key && lk_ieq(d->l[i].a + d->l[i].ks, d->l[i].kn, key)) hit = (long)i;
+    return hit;
+}
+
+/* A key's value as a vector of doubles: `{ a, b, c, d }` (the missing components 0) or a scalar (all four); `def` when
+ * the material does not set it or sets it unreadably. */
+static void lk_dvec(const lk_doc *d, const char *key, const double def[4], double out[4])
+{
+    long at = lk_last_key(d, key);
+    char t[256], *p, *e;
+    size_t n;
+    int k = 0;
+    memcpy(out, def, 4 * sizeof(double));
+    if (at < 0) return;
+    n = d->l[at].vn;
+    if (!n || n >= sizeof t) return;
+    memcpy(t, d->l[at].a + d->l[at].v0, n);
+    t[n] = 0;
+    p = t;
+    while (lk_blank(*p)) p++;
+    if (*p == '{') {
+        double v[4] = { 0, 0, 0, 0 };
+        p++;
+        while (k < 4) {
+            while (lk_blank(*p) || *p == ',') p++;
+            if (!*p || *p == '}') break;
+            v[k] = strtod(p, &e);
+            if (e == p) return;
+            k++;
+            p = e;
+        }
+        if (k) memcpy(out, v, sizeof v);
+        return;
+    }
+    {
+        double x = strtod(p, &e);
+        if (e == p) return;
+        out[0] = out[1] = out[2] = out[3] = x;
+    }
+}
+
+/* A number as the stored vectors had it (six decimals), as Doomforge writes it into a look (-0 is 0). */
+static double lk_r6(double x)
+{
+    char t[64];
+    snprintf(t, sizeof t, "%.6f", x);
+    x = strtod(t, NULL);
+    return x == 0.0 ? 0.0 : x;
+}
+
+static void lk_dnum(char *out, size_t cap, double x) { snprintf(out, cap, "%.9g", x == 0.0 ? 0.0 : x); }
+
+static void lk_field_num(lk_buf *b, const char *eol, const char *key, double x)
+{
+    char t[40];
+    lk_dnum(t, sizeof t, x);
+    lk_key(b, eol, key, t);
+}
+
+static void lk_field_nums(lk_buf *b, const char *eol, const char *key, const double *x, int n)
+{
+    char t[300], c[40];
+    int k;
+    snprintf(t, sizeof t, "{ ");
+    for (k = 0; k < n; k++) {
+        lk_dnum(c, sizeof c, x[k]);
+        strcat(t, c);
+        strcat(t, k + 1 < n ? ", " : " }");
+    }
+    lk_key(b, eol, key, t);
+}
+
+static int lk_same_nums(const double *a, const double *b, int n)
+{
+    int k;
+    for (k = 0; k < n; k++) if ((float)a[k] != (float)b[k]) return 0;
+    return 1;
+}
+
+/* An image key's value (quotes cut). kind: 0 the material does not name it, 1 a constant image (its four values), 2 an
+ * image. The text of the name is kept for both. */
+typedef struct lk_tx { int kind; double c[4]; const char *s; size_t sn; } lk_tx;
+
+static float lk_half(unsigned h)
+{
+    int e = (int)(h >> 10) & 31, m = (int)(h & 1023);
+    float v;
+    if (e == 0) v = (float)m * (1.0f / 16777216.0f);
+    else if (e == 31) v = 65504.0f;
+    else v = ldexpf((float)(1024 + m), e - 25);
+    return (h & 0x8000u) ? -v : v;
+}
+
+static int lk_hex(char c)
+{
+    c = lk_lc(c);
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+
+static void lk_tex(const lk_doc *d, const char *key, lk_tx *t)
+{
+    long at = lk_last_key(d, key);
+    const char *s, *b;
+    size_t n, i;
+    memset(t, 0, sizeof *t);
+    if (at < 0 || !d->l[at].vn) return;
+    s = d->l[at].a + d->l[at].v0;
+    n = d->l[at].vn;
+    if (n >= 2 && s[0] == '"' && s[n - 1] == '"') { s++; n -= 2; }
+    if (!n) return;
+    t->kind = 2;
+    t->s = s;
+    t->sn = n;
+    b = s;
+    for (i = 0; i < n; i++) if (s[i] == '/') b = s + i + 1;
+    n -= (size_t)(b - s);
+    if (lk_ieq(b, n, "_black")) { t->kind = 1; t->c[3] = 1.0; return; }
+    if (lk_ieq(b, n, "_white")) { t->kind = 1; t->c[0] = t->c[1] = t->c[2] = t->c[3] = 1.0; return; }
+    if (lk_ieq(b, n, "_flat")) { t->kind = 1; t->c[0] = t->c[1] = 0.5; t->c[2] = t->c[3] = 1.0; return; }
+    if (n >= 6 + 19 && !_strnicmp(b, "const_", 6) && (n == 25 || lk_ieq(b + 25, n - 25, ".tga"))) {
+        double c[4];
+        int k, j;
+        for (k = 0; k < 4; k++) {
+            unsigned h = 0;
+            for (j = 0; j < 4; j++) {
+                int x = lk_hex(b[6 + k * 5 + j]);
+                if (x < 0) return;
+                h = h << 4 | (unsigned)x;
+            }
+            if (k < 3 && b[6 + k * 5 + 4] != '_') return;
+            c[k] = (double)lk_half(h);
+        }
+        t->kind = 1;
+        memcpy(t->c, c, sizeof c);
+    }
+}
+
+static int lk_tx_is(const lk_tx *t, const double v[4])
+{
+    return t->kind == 0 || (t->kind == 1 && lk_same_nums(t->c, v, 4));
+}
+
+static void lk_field_img(lk_buf *b, const char *eol, const char *key, const lk_tx *t) { lk_key_q(b, eol, key, t->s, t->sn); }
+
+/* The look's value for an image or a colour field: the colour of a constant, else the image. */
+static void lk_field_colour(lk_buf *b, const char *eol, const char *key, const lk_tx *t)
+{
+    if (t->kind == 1) lk_field_nums(b, eol, key, t->c, 3);
+    else lk_field_img(b, eol, key, t);
+}
+static void lk_field_scalar(lk_buf *b, const char *eol, const char *key, const lk_tx *t)
+{
+    if (t->kind == 1) lk_field_num(b, eol, key, t->c[0]);
+    else lk_field_img(b, eol, key, t);
+}
+
+static int lk_key_in(const char *k, size_t n, const char *const *list, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; i++) if (lk_ieq(k, n, list[i])) return 1;
+    return 0;
+}
+
+/* The layered fields of the old vectors and texture keys. */
+static void lk_old_layered_fields(const lk_doc *d, lk_buf *b, const char *eol)
+{
+    static const double zero4[4] = { 0, 0, 0, 0 }, ones5[5] = { 1, 1, 1, 1, 1 }, ones2[2] = { 1, 1 },
+                        zero2[2] = { 0, 0 }, ones3[3] = { 1, 1, 1 };
+    static const double d_albedo[4] = { 1, 1, 1, 1 }, d_normal[4] = { 0.5, 0.5, 1, 1 }, d_smooth[4] = { 1, 1, 1, 1 },
+                        d_height[4] = { 0.5, 0.5, 0.5, 1 };
+    static const char *const part[4] = { "albedo", "normal", "smoothness", "height" };
+    double v[28][4];
+    lk_tx mask, h0, extra[2], tx[4][4];
+    long ap = lk_last_key(d, "ambientprogram");
+    int i, k;
+    char key[64];
+    for (k = 0; k < 28; k++) {
+        double def[4];
+        int c;
+        for (c = 0; c < 4; c++) def[c] = (double)SH_MODPROG_ML_DEFAULTS[k][c];
+        lk_dvec(d, SH_MODPROG_ML_PARMS[k], def, v[k]);
+    }
+    lk_tex(d, "layerblendmask", &mask);
+    lk_tex(d, "blendlayer0heightmap", &h0);
+    lk_tex(d, "multilayerextramap0", &extra[0]);
+    lk_tex(d, "multilayerextramap1", &extra[1]);
+    for (i = 0; i < 4; i++)
+        for (k = 0; k < 4; k++) {
+            snprintf(key, sizeof key, "blendlayer%d%smap", i + 1, part[k]);
+            lk_tex(d, key, &tx[i][k]);
+        }
+    if (ap >= 0) {
+        char w[160];
+        size_t n = d->l[ap].vn < sizeof w - 1 ? d->l[ap].vn : sizeof w - 1;
+        memcpy(w, d->l[ap].a + d->l[ap].v0, n);
+        w[n] = 0;
+        for (k = 0; w[k]; k++) w[k] = lk_lc(w[k]);
+        if (strstr(w, "wounds")) lk_key(b, eol, "wounds", "yes");
+    }
+    if (mask.kind == 2 || (mask.kind == 1 && !lk_same_nums(mask.c, zero4, 4))) lk_field_img(b, eol, "layermask", &mask);
+    for (i = 0; i < 4; i++) {
+        double tiling[2], scroll[2], weights[5];
+        const double *sp = v[16 + i], *em = v[20 + i];
+        int absent, f;
+        tiling[0] = v[12 + i][0]; tiling[1] = v[12 + i][1];
+        scroll[0] = v[12 + i][2]; scroll[1] = v[12 + i][3];
+        for (k = 0; k < 5; k++) weights[k] = v[4 + k][i];
+        absent = v[1][i] == 0.0 && lk_tx_is(&tx[i][0], d_albedo) && lk_tx_is(&tx[i][1], d_normal) &&
+                 lk_tx_is(&tx[i][2], d_smooth) && lk_tx_is(&tx[i][3], d_height) && lk_same_nums(sp, zero4, 4) &&
+                 lk_same_nums(em, zero4, 4);
+        if (absent) continue;
+        snprintf(key, sizeof key, "layer%d", i + 1);
+        if (tx[i][0].kind == 0) lk_field_nums(b, eol, key, ones3, 3);
+        else lk_field_colour(b, eol, key, &tx[i][0]);
+        if (!lk_tx_is(&tx[i][1], d_normal)) {
+            snprintf(key, sizeof key, "layer%dnormal", i + 1);
+            lk_field_img(b, eol, key, &tx[i][1]);
+        }
+        {
+            lk_tx s = tx[i][2], h = tx[i][3];
+            if (s.kind == 0) { s.kind = 1; memcpy(s.c, d_smooth, sizeof s.c); }
+            if (h.kind == 0) { h.kind = 1; memcpy(h.c, d_height, sizeof h.c); }
+            if (s.kind != 1 || (float)s.c[0] != 0.5f) {
+                snprintf(key, sizeof key, "layer%dsmoothness", i + 1);
+                lk_field_scalar(b, eol, key, &s);
+            }
+            if (h.kind != 1 || (float)h.c[0] != 0.5f) {
+                snprintf(key, sizeof key, "layer%dheight", i + 1);
+                lk_field_scalar(b, eol, key, &h);
+            }
+        }
+        for (f = 0; f < 2; f++) {
+            const double *vec = f ? em : sp;
+            int slot = (int)vec[3];
+            const lk_tx *x = (vec[3] != 0.0 && (slot == 1 || slot == 2) && extra[slot - 1].kind) ? &extra[slot - 1] : NULL;
+            snprintf(key, sizeof key, "layer%d%s", i + 1, f ? "glow" : "specular");
+            if (x) lk_field_img(b, eol, key, x);
+            else if (!lk_same_nums(vec, zero4, 3)) lk_field_nums(b, eol, key, vec, 3);
+        }
+        if ((float)v[0][i] != 1.0f) { snprintf(key, sizeof key, "layer%drepeat", i + 1); lk_field_num(b, eol, key, v[0][i]); }
+        if (!lk_same_nums(tiling, ones2, 2)) { snprintf(key, sizeof key, "layer%dtiling", i + 1); lk_field_nums(b, eol, key, tiling, 2); }
+        if (!lk_same_nums(scroll, zero2, 2)) { snprintf(key, sizeof key, "layer%dscroll", i + 1); lk_field_nums(b, eol, key, scroll, 2); }
+        if ((float)v[1][i] != 1.0f) { snprintf(key, sizeof key, "layer%dcoverage", i + 1); lk_field_num(b, eol, key, v[1][i]); }
+        if ((float)v[2][i] != 1.0f) { snprintf(key, sizeof key, "layer%dheightblend", i + 1); lk_field_num(b, eol, key, v[2][i]); }
+        if ((float)v[3][i] != 0.25f) { snprintf(key, sizeof key, "layer%dsoftness", i + 1); lk_field_num(b, eol, key, v[3][i]); }
+        if (!lk_same_nums(weights, ones5, 5)) { snprintf(key, sizeof key, "layer%dweights", i + 1); lk_field_nums(b, eol, key, weights, 5); }
+    }
+    if (h0.kind == 2) lk_field_img(b, eol, "baseheight", &h0);
+    else if (h0.kind == 1 && (float)h0.c[0] != 0.5f) lk_field_num(b, eol, "baseheight", h0.c[0]);
+    if ((float)v[9][0] != 1.0f) lk_field_num(b, eol, "baseheightblend", v[9][0]);
+    if (!lk_same_nums(v[10], ones2, 2)) lk_field_nums(b, eol, "basetiling", v[10], 2);
+    if (!lk_same_nums(v[10] + 2, zero2, 2)) lk_field_nums(b, eol, "basescroll", v[10] + 2, 2);
+    if (!lk_same_nums(v[11], ones3, 3)) lk_field_nums(b, eol, "baseglow", v[11], 3);
+    if (v[24][0] == 1.0) {
+        static const double d_tiling[2] = { 4, 4 }, d_noise[4] = { 1, 4, 0.7, 0.4 }, d_heat[3] = { 1, 0.07, 0 };
+        int s[3];
+        const lk_tx *x[3];
+        s[0] = (int)v[24][2]; s[1] = (int)v[24][1]; s[2] = (int)v[24][3];
+        for (k = 0; k < 3; k++) x[k] = (s[k] == 1 || s[k] == 2) && extra[s[k] - 1].kind ? &extra[s[k] - 1] : NULL;
+        if (!x[0] && extra[0].kind) x[0] = &extra[0];
+        if (x[0]) lk_field_img(b, eol, "burn", x[0]);
+        if (x[1]) lk_field_img(b, eol, "burnglow", x[1]);
+        if (x[2]) lk_field_img(b, eol, "burnblood", x[2]);
+        if (!lk_same_nums(v[25], d_tiling, 2)) lk_field_nums(b, eol, "burntiling", v[25], 2);
+        if (!lk_same_nums(v[26], d_noise, 4)) lk_field_nums(b, eol, "burnnoise", v[26], 4);
+        if (!lk_same_nums(v[27], d_heat, 3)) lk_field_nums(b, eol, "burnheat", v[27], 3);
+    }
+}
+
+static const char *const LK_OLD_P[] = { "eternalparticle", "eternalparticlefade", "eternalparticlecolor",
+                                        "eternalparticlecolor2", "eternalparticleemissivemap" };
+
+/* The particle fields of the old eternalparticle* vectors (mode, emissive, mask, depth; fade; the two colours).
+ * Returns the mode. */
+static int lk_old_particle_fields(const lk_doc *d, lk_buf *b, const char *eol)
+{
+    static const double z4[4] = { 0, 0, 0, 0 }, o4[4] = { 1, 1, 1, 1 }, o6[6] = { 1, 1, 1, 1, 1, 1 };
+    double ep[4], fade[4], col[4], col2[4], t[6];
+    long sheet = lk_last_key(d, "eternalparticleemissivemap");
+    int mode, m;
+    lk_dvec(d, "eternalparticle", z4, ep);
+    lk_dvec(d, "eternalparticlefade", z4, fade);
+    lk_dvec(d, "eternalparticlecolor", o4, col);
+    lk_dvec(d, "eternalparticlecolor2", o4, col2);
+    mode = ep[0] == 1.0 ? 1 : ep[0] == 4.0 ? 4 : 0;
+    if (mode) lk_key(b, eol, "lighting", mode == 1 ? "lit" : "explosion");
+    if (lk_r6(ep[1]) != 1.0) lk_field_num(b, eol, "glow", lk_r6(ep[1]));
+    if (sheet >= 0) {
+        lk_tx x;
+        lk_tex(d, "eternalparticleemissivemap", &x);
+        if (x.sn) lk_field_img(b, eol, "glowmask", &x);
+    }
+    if (lk_r6(ep[2]) != 0.0) lk_field_num(b, eol, "glowmaskstrength", lk_r6(ep[2]));
+    if (lk_r6(ep[3]) != 0.0) lk_field_num(b, eol, "depthoffset", lk_r6(ep[3]));
+    if (lk_r6(col2[3]) != 1.0) lk_field_num(b, eol, "litscale", lk_r6(col2[3]));
+    if (mode == 4) {
+        for (m = 0; m < 3; m++) { t[m] = lk_r6(col[m]); t[3 + m] = lk_r6(col2[m]); }
+        if (!lk_same_nums(t, o6, 6)) lk_field_nums(b, eol, "gradient", t, 6);
+    } else {
+        for (m = 0; m < 3; m++) t[m] = lk_r6(col[m]);
+        if (!lk_same_nums(t, o6, 3)) lk_field_nums(b, eol, "glowmaskcolour", t, 3);
+    }
+    if (lk_r6(fade[0]) > lk_r6(fade[1])) {
+        t[0] = lk_r6(fade[0]);
+        t[1] = lk_r6(fade[1]);
+        lk_field_nums(b, eol, "nearfade", t, 2);
+    }
+    if (lk_r6(fade[2]) > 1e-3) lk_field_num(b, eol, "softdistance", lk_r6(fade[2]));
+    return mode;
+}
+
+/* An old-key material as the look text that says the same. *out is malloc'd; 1 converted, 0 no old key, -1 no memory. */
+static int lk_old_to_look(const char *text, size_t len, char **out, size_t *out_len)
+{
+    static const char *const own[] = { "ambientprogram", "layerblendmask", "blendlayer0heightmap", "layerparms",
+                                       "multilayerextramap0", "multilayerextramap1" };
+    static const char *const part[4] = { "albedo", "normal", "smoothness", "height" };
+    lk_doc d;
+    lk_buf f = { 0 }, o = { 0 };
+    size_t i, first = (size_t)-1;
+    unsigned k;
+    int particle = 0, layered = 0, mode = 0;
+    *out = NULL;
+    if (!lk_split(&d, text, len)) return -1;
+    for (i = 0; i < d.n; i++) if (d.l[i].key) { first = i; break; }
+    for (k = 0; k < sizeof LK_OLD_P / sizeof LK_OLD_P[0]; k++) if (lk_last_key(&d, LK_OLD_P[k]) >= 0) particle = 1;
+    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) if (lk_last_key(&d, SH_MODPROG_ML_PARMS[k]) >= 0) layered = 1;
+    if (lk_last_key(&d, "blendlayer0heightmap") >= 0) layered = 1;
+    if (first == (size_t)-1 || (!particle && !layered)) { lk_doc_free(&d); return 0; }
+    if (particle) mode = lk_old_particle_fields(&d, &f, d.eol);
+    else lk_old_layered_fields(&d, &f, d.eol);
+    for (i = 0; i < d.n; i++) {
+        const lk_ln *x = &d.l[i];
+        if (i == first) {
+            lk_key(&o, d.eol, "look", particle ? "particle" : "layered");
+            if (f.p) lk_put(&o, f.p, f.n);
+        }
+        if (x->key) {
+            const char *key = x->a + x->ks;
+            int drop;
+            if (particle) {
+                drop = lk_key_in(key, x->kn, LK_OLD_P, sizeof LK_OLD_P / sizeof LK_OLD_P[0]) ||
+                       ((mode == 1 || mode == 4) && lk_ieq(key, x->kn, "particlelightatlasprogram"));
+            } else {
+                char name[48];
+                int a, p;
+                drop = lk_key_in(key, x->kn, SH_MODPROG_ML_PARMS, SH_MODPROG_ML_PARM_COUNT) ||
+                       lk_key_in(key, x->kn, own, sizeof own / sizeof own[0]);
+                for (a = 1; a <= 4 && !drop; a++)
+                    for (p = 0; p < 4 && !drop; p++) {
+                        snprintf(name, sizeof name, "blendlayer%d%smap", a, part[p]);
+                        drop = lk_ieq(key, x->kn, name);
+                    }
+            }
+            if (drop) continue;
+        }
+        lk_put(&o, x->a, x->an);
+        lk_put(&o, x->a + x->an, x->en);
+    }
+    lk_doc_free(&d);
+    if (o.oom || f.oom) { free(o.p); free(f.p); return -1; }
+    free(f.p);
+    *out = o.p;
+    *out_len = o.n;
+    return o.p ? 1 : -1;
+}
+
+static int lk_legacy(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                     size_t why_len, char **notes)
+{
+    char *t = NULL, *r = NULL, *conv = NULL;
+    size_t tn = 0, rn = 0, cn = 0;
+    int legacy, k = lk_old_to_look(text, len, &conv, &cn);
+    if (k < 0) return SH_LOOK_OOM;
+    if (k == 1) {
+        /* the look the old keys say, compiled as any look is; a look that does not compile is served the old way */
+        char *lout = NULL, *lnotes = NULL;
+        size_t ln = 0;
+        int res = sh_look_compile_notes(path, conv, cn, &lout, &ln, why, why_len, &lnotes);
+        free(conv);
+        if (res == SH_LOOK_CHANGED) {
+            *out = lout;
+            *out_len = ln;
+            if (notes) *notes = lnotes; else free(lnotes);
+            return SH_LOOK_CHANGED;
+        }
+        free(lout);
+        free(lnotes);
+        if (res == SH_LOOK_OOM) return SH_LOOK_OOM;
+        if (why && why_len) why[0] = 0;
+    }
+    legacy = sh_modprog_legacy_material(text, len, &t, &tn);
     if (legacy < 0) return SH_LOOK_OOM;
     if (!lk_rename(legacy == 1 ? t : text, legacy == 1 ? tn : len, &r, &rn)) { free(t); return SH_LOOK_OOM; }
     if (r) { free(t); *out = r; *out_len = rn; return SH_LOOK_CHANGED; }
@@ -901,7 +1299,7 @@ int sh_look_compile_notes(const char *path, const char *text, size_t len, char *
                 return SH_LOOK_MISTAKE;
             }
         lk_doc_free(&d);
-        return lk_legacy(text, len, out, out_len);
+        return lk_legacy(path, text, len, out, out_len, why, why_len, notes);
     }
     {
         char word[32];

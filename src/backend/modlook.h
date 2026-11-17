@@ -9,8 +9,9 @@
  * access; the images it registers are served from modprog.c.
  *
  * A material that is not a look is left alone, except that one that still names the old program names or writes the
- * old keys (the 28 layered vectors, the eternalparticle* vectors) is rewritten the way sh_modprog_legacy_material
- * does, its program names the new ones, so a mod emitted before the numbers moved draws unchanged.
+ * old keys (the 28 layered vectors, the eternalparticle* vectors) is read as the look those keys say and compiled as that
+ * look, so it compiles to the bytes a new emit of the same material does (a field at its default left out, as Doomforge
+ * writes it); one with only old program names has them renamed. A mod emitted before the numbers moved draws unchanged.
  *
  * A mistake in a look is one sentence naming the file's base name, the line, the field and what to write instead.
  * Nothing about the game's limits is ever a mistake: what does not fit is drawn as a constant and noted. */

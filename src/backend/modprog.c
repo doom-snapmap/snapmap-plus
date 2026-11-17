@@ -49,7 +49,7 @@ const char *const SH_MODPROG_ML_PARMS[] = {
 };
 const unsigned SH_MODPROG_ML_PARM_COUNT = sizeof SH_MODPROG_ML_PARMS / sizeof SH_MODPROG_ML_PARMS[0];
 /* What a vector the material does not set was (the parms' decl defaults), for a material that sets only some. */
-static const float ML_DEFAULTS[28][4] = {
+const float SH_MODPROG_ML_DEFAULTS[28][4] = {
     { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 0.25f, 0.25f, 0.25f, 0.25f },
     { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 },
     { 1, 1, 1, 1 }, { 1, 0, 0, 0 }, { 1, 1, 0, 0 }, { 1, 1, 1, 0 },
@@ -58,6 +58,7 @@ static const float ML_DEFAULTS[28][4] = {
     { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
     { 0, 0, 0, 0 }, { 4, 4, 0, 0 }, { 1, 4, 0.7f, 0.4f }, { 1, 0.07f, 0, 0 },
 };
+#define ML_DEFAULTS SH_MODPROG_ML_DEFAULTS
 /* The layered program adds nothing to the fragment stage's material uniforms. */
 static const char *const ML_BLOCK_PARMS[] = { NULL };
 static const unsigned ML_NBLOCK_PARMS = 0;
