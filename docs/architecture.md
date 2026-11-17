@@ -3621,10 +3621,13 @@ the decl read path both reach) calls the serve listener, which records per
 request path the serving bundle's hash and the file's identity: the first 64
 bits of its recorded SHA-256, or an FNV-1a 64 of the bytes for a composed text
 or a file without one. A product read of served bytes (the anim check, the
-dependents search) is not recorded. Records live in a fixed open-address table
-of 16,384 paths (32,768 slots), published once and updated under a per-record
-sequence count, so readers take no lock; a serve past the bound is counted and
-the ledger then calls itself incomplete. It is bound in `sh_modserve_install`
+dependents search) is not recorded. Records live in a chain of open-address
+levels (32,768 slots, then twice the last; only the newest takes new paths,
+until half full), published once and never moved, and updated under a
+per-record sequence count, so readers take no lock and only a path's first
+serve takes a writer lock. There is no fixed bound: a new path that finds no
+level (one cannot be allocated) is counted and the ledger then calls itself
+incomplete. It is bound in `sh_modserve_install`
 and is complete only when the provider served nothing before that. At a
 refresh, a pending model, image or anim is reloaded only when the ledger says
 the bytes the engine was given differ from what the open map serves now

@@ -2930,7 +2930,7 @@ static void me_print_held(const char *filter)
     c.filter = filter;
     sh_printf("sh_mods held: ledger: %u of %u request path(s) recorded, %lu serve(s), %s%s; %d resource(s) in %d list(s)%s\n",
               st.records, st.cap, st.serves, st.complete ? "complete" : "incomplete",
-              st.overflow ? " (table full)" : !st.complete ? " (the provider served before the ledger was bound)" : "",
+              st.overflow ? " (no memory for more records)" : !st.complete ? " (the provider served before the ledger was bound)" : "",
               held.n, held.lists, g_res_lock ? "" : " (walked without the resource lock)");
     sh_printf("sh_mods held: ledger records%s%s:\n", filter && filter[0] ? " matching " : "", filter && filter[0] ? filter : "");
     (void)sh_modledger_each(me_census_visit, &c);

@@ -1,6 +1,6 @@
 /* modledger_test.c -- the served-bytes ledger (modledger.c) and the refresh
- * decision it feeds: identities, records and updates, binding, the bound,
- * concurrent serves, the KEEP / REFRESH / GAME rule, and, against a fixture
+ * decision it feeds: identities, records and updates, binding, growth past
+ * level 0, concurrent serves and first serves, the KEEP / REFRESH / GAME rule, and, against a fixture
  * mods tree served by modserve.c, the anim refresh kind: one key at two
  * hashes marks the anim whose bytes differ and not the one both builds carry,
  * a rescan counts a changed anim as reloadable and a changed skeleton as a
@@ -81,7 +81,7 @@ static void test_records(void)
     CHECK(sh_modledger_record("generated/decls/entitydef/mods/k/y.decl", &a) == 1);
     CHECK(sh_modledger_record(NULL, &a) == 0 && sh_modledger_record("", &a) == 0);
     sh_modledger_get_stats(&st);
-    CHECK(st.records == 2 && st.serves == 3 && st.overflow == 0 && st.complete && st.cap == SH_MODLEDGER_CAP);
+    CHECK(st.records == 2 && st.serves == 3 && st.overflow == 0 && st.complete && st.cap == SH_MODLEDGER_SLOTS / 2);
     sh_modledger_set_complete(0);
     CHECK(!sh_modledger_complete());
     sh_modledger_set_complete(1);
@@ -91,27 +91,69 @@ static void test_records(void)
 static int g_each;
 static void count_each(void *context, const sh_modledger_rec *rec) { (void)context; if (rec->request) g_each++; }
 
-/* At most SH_MODLEDGER_CAP paths; past that a serve is counted and the
- * ledger stops calling itself complete. */
-static void test_bound(void)
+/* Generated request paths; the ledger keeps the pointers, so they outlive the records. */
+#define NAME_LEN 48
+static char *make_names(unsigned n, const char *fmt)
 {
-    static char names[SH_MODLEDGER_CAP + 1][48];
-    sh_modledger_ident a;
+    char *names = (char *)malloc((size_t)n * NAME_LEN);
+    unsigned i;
+    if (!names) { fprintf(stderr, "out of memory\n"); exit(1); }
+    for (i = 0; i < n; ++i) _snprintf_s(names + (size_t)i * NAME_LEN, NAME_LEN, _TRUNCATE, fmt, i);
+    return names;
+}
+
+static void name_ident(const char *name, sh_modledger_ident *out)
+{
+    (void)sh_modledger_ident_of(BUNDLE_1, NULL, (const unsigned char *)name, strlen(name), out);
+}
+
+/* No fixed bound: past level 0's half (16384 paths) the next level takes
+ * new paths, and every record stays where it was published. */
+#define GROW_N 100000u
+static void test_growth(void)
+{
+    char *names = make_names(GROW_N, "generated/image/mods/k/%06u.bimage");
+    sh_modledger_ident a, b;
     sh_modledger_stats st;
-    unsigned i, ok = 0;
-    printf("-- ledger: bounded\n");
+    sh_modledger_rec r, first;
+    unsigned i, ok = 0, all = 1;
+    printf("-- ledger: grows past level 0\n");
     sh_modledger_reset();
-    (void)sh_modledger_ident_of(BUNDLE_1, SHA_A, NULL, 1, &a);
-    for (i = 0; i <= SH_MODLEDGER_CAP; ++i) {
-        _snprintf_s(names[i], sizeof names[i], _TRUNCATE, "generated/image/mods/k/%05u.bimage", i);
-        ok += (unsigned)sh_modledger_record(names[i], &a);
+    for (i = 0; i < GROW_N; ++i) {
+        name_ident(names + (size_t)i * NAME_LEN, &a);
+        ok += (unsigned)sh_modledger_record(names + (size_t)i * NAME_LEN, &a);
+        if (i + 1 == SH_MODLEDGER_SLOTS / 2) {
+            /* Level 0 is half full: still one level, and the first path as published. */
+            sh_modledger_get_stats(&st);
+            CHECK(st.records == SH_MODLEDGER_SLOTS / 2 && st.cap == SH_MODLEDGER_SLOTS / 2);
+            CHECK(sh_modledger_find(names, &first) && first.request == names && first.serves == 1 && first.seq == 1);
+        } else if (i == SH_MODLEDGER_SLOTS / 2) {
+            sh_modledger_get_stats(&st);   /* one more: level 1 */
+            CHECK(st.records == SH_MODLEDGER_SLOTS / 2 + 1 && st.cap == SH_MODLEDGER_SLOTS / 2 * 3);
+        }
     }
     sh_modledger_get_stats(&st);
-    CHECK(ok == SH_MODLEDGER_CAP && st.records == SH_MODLEDGER_CAP && st.overflow == 1 && !st.complete);
-    CHECK(sh_modledger_record(names[5], &a) == 1);   /* a recorded path still updates */
+    CHECK(ok == GROW_N && st.records == GROW_N && st.serves == GROW_N && st.overflow == 0 && st.complete);
+    CHECK(st.cap == SH_MODLEDGER_SLOTS / 2 * 7);   /* levels 0, 1 and 2 */
+    for (i = 0; i < GROW_N; ++i) {
+        const char *n = names + (size_t)i * NAME_LEN;
+        name_ident(n, &a);
+        if (!sh_modledger_find(n, &r) || r.request != n || !sh_modledger_same(&r.id, &a) || r.serves != 1) all = 0;
+    }
+    CHECK(all);
     g_each = 0;
-    CHECK(sh_modledger_each(count_each, NULL) == (int)SH_MODLEDGER_CAP && g_each == (int)SH_MODLEDGER_CAP);
+    CHECK(sh_modledger_each(count_each, NULL) == (int)GROW_N && g_each == (int)GROW_N);
+    /* A path recorded before growth updates in place. */
+    (void)sh_modledger_ident_of(BUNDLE_2, SHA_B, NULL, 7, &b);
+    CHECK(sh_modledger_record(names, &b) == 1);
+    CHECK(sh_modledger_find("GENERATED\\image\\mods\\k\\000000.bimage", &r) && r.request == names && r.serves == 2);
+    CHECK(sh_modledger_same(&r.id, &b) && r.seq == GROW_N + 1);
+    sh_modledger_get_stats(&st);
+    CHECK(st.records == GROW_N && st.serves == GROW_N + 1);
     sh_modledger_reset();
+    sh_modledger_get_stats(&st);
+    CHECK(st.records == 0 && st.cap == 0 && !sh_modledger_find(names, &r));
+    free(names);
 }
 
 /* Serves arrive on the engine's loader threads: many threads, shared paths. */
@@ -154,6 +196,66 @@ static void test_threads(void)
     }
     CHECK(all && serves == (long)TH_N * 4 * TH_PATHS);
     sh_modledger_reset();
+}
+
+/* Many threads serving one set of new paths at once, across two level
+ * allocations: each path gets one record, and no serve is lost. */
+#define NEW_N 60000u
+static char *g_new_names;
+static HANDLE g_go;
+static DWORD WINAPI new_thread(LPVOID p)
+{
+    unsigned t = (unsigned)(intptr_t)p, i;
+    sh_modledger_ident a;
+    WaitForSingleObject(g_go, INFINITE);
+    for (i = 0; i < NEW_N; ++i) {
+        const char *n = g_new_names + (size_t)((i * 7u + t * 4099u) % NEW_N) * NAME_LEN;
+        name_ident(n, &a);
+        (void)sh_modledger_record(n, &a);
+    }
+    return 0;
+}
+
+static unsigned char g_seen[NEW_N];
+static int g_seen_bad;
+static void seen_each(void *context, const sh_modledger_rec *rec)
+{
+    size_t at = (size_t)(rec->request - g_new_names);
+    (void)context;
+    if (rec->request < g_new_names || at % NAME_LEN || at / NAME_LEN >= NEW_N) { g_seen_bad++; return; }
+    g_seen[at / NAME_LEN]++;
+}
+
+static void test_threads_new(void)
+{
+    HANDLE h[TH_N];
+    sh_modledger_stats st;
+    sh_modledger_rec r;
+    unsigned i, once = 1, all = 1;
+    long serves = 0;
+    printf("-- ledger: concurrent first serves across growth\n");
+    sh_modledger_reset();
+    g_new_names = make_names(NEW_N, "cooked/anim/mods/n/%06u.bmd6anim");
+    g_go = CreateEventA(NULL, TRUE, FALSE, NULL);
+    for (i = 0; i < TH_N; ++i) h[i] = CreateThread(NULL, 0, new_thread, (LPVOID)(intptr_t)i, 0, NULL);
+    SetEvent(g_go);
+    WaitForMultipleObjects(TH_N, h, TRUE, INFINITE);
+    for (i = 0; i < TH_N; ++i) CloseHandle(h[i]);
+    CloseHandle(g_go);
+    sh_modledger_get_stats(&st);
+    CHECK(st.records == NEW_N && st.serves == (unsigned long)TH_N * NEW_N && st.overflow == 0 && st.complete);
+    memset(g_seen, 0, sizeof g_seen);
+    g_seen_bad = 0;
+    CHECK(sh_modledger_each(seen_each, NULL) == (int)NEW_N && g_seen_bad == 0);
+    for (i = 0; i < NEW_N; ++i) {
+        const char *n = g_new_names + (size_t)i * NAME_LEN;
+        if (g_seen[i] != 1) once = 0;
+        if (!sh_modledger_find(n, &r) || r.request != n || r.serves != TH_N) all = 0;
+        else serves += r.serves;
+    }
+    CHECK(once && all && serves == (long)TH_N * NEW_N);
+    sh_modledger_reset();
+    free(g_new_names);
 }
 
 /* ------------------------------------------------------------------ decision */
@@ -461,8 +563,9 @@ int main(void)
     mkdirs(top);
     test_identity();
     test_records();
-    test_bound();
+    test_growth();
     test_threads();
+    test_threads_new();
     test_decide();
     test_anim_kind(top);
     test_tally();

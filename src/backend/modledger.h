@@ -18,11 +18,17 @@
  * refreshed. A stock path (a shadow) or a withdrawn one is left to the
  * serving index's own marks, since the game's bytes may be what it holds.
  *
- * Readers take no lock: records are published once into a fixed open-address
- * table and updated under a per-record sequence count. Bounded: at most
- * SH_MODLEDGER_CAP request paths; a serve past that is counted, and the
- * ledger then reports itself incomplete, so a name with no record is
- * refreshed rather than trusted. Pure: no engine access. */
+ * Readers take no lock: records are published once into a chain of
+ * open-address levels and updated under a per-record sequence count. Level 0
+ * has SH_MODLEDGER_SLOTS slots and level k twice the slots of level k - 1;
+ * only the newest level takes inserts, and only until it is half full, when
+ * the next level is allocated. Records never move, so a lookup probes the
+ * levels in order. There is no fixed bound on request paths: the chain stops
+ * only at SH_MODLEDGER_LEVELS levels (about 67 million paths) or when a level
+ * cannot be allocated. A serve that finds no room then is counted, and the
+ * ledger reports itself incomplete, so a name with no record is refreshed
+ * rather than trusted. The first serve of a path takes a writer lock; every
+ * other serve and every read is lock-free. Pure: no engine access. */
 #ifndef SH_MODLEDGER_H
 #define SH_MODLEDGER_H
 
@@ -33,8 +39,8 @@
 extern "C" {
 #endif
 
-#define SH_MODLEDGER_CAP   16384u    /* request paths recorded */
-#define SH_MODLEDGER_SLOTS 32768u    /* table slots (power of two, at most half full) */
+#define SH_MODLEDGER_SLOTS  32768u   /* level 0 slots (power of two; a level is at most half full) */
+#define SH_MODLEDGER_LEVELS 12       /* level k has SH_MODLEDGER_SLOTS << k slots */
 
 #define SH_MODLEDGER_ID_NONE 0       /* no identity known */
 #define SH_MODLEDGER_ID_SHA  1       /* the file's recorded SHA-256 (first 64 bits) */
@@ -56,9 +62,10 @@ typedef struct sh_modledger_rec {
 } sh_modledger_rec;
 
 typedef struct sh_modledger_stats {
-    unsigned records, cap;
+    unsigned records;
+    unsigned cap;            /* request paths the allocated levels hold (half of each level's slots) */
     unsigned long serves;    /* serves recorded */
-    unsigned long overflow;  /* serves not recorded (table full) */
+    unsigned long overflow;  /* serves not recorded (no level could be allocated for a new path) */
     int complete;            /* every serve this session is recorded */
 } sh_modledger_stats;
 
@@ -73,8 +80,8 @@ int sh_modledger_ident_of(const char *bundle_hash, const char *file_hash, const 
  * bytes from another build are the same bytes. Unknown identities never are. */
 int sh_modledger_same(const sh_modledger_ident *a, const sh_modledger_ident *b);
 
-/* Record a serve. 1 recorded, 0 not recorded (table full or bad arguments;
- * counted as overflow when full). Any thread. */
+/* Record a serve. 1 recorded, 0 not recorded (bad arguments, or a new path
+ * with no level to hold it, counted as overflow). Any thread. */
 int sh_modledger_record(const char *request, const sh_modledger_ident *id);
 
 /* The record of `request` (any case, either separator). 1 found, 0 none. Lock-free. */
@@ -89,7 +96,7 @@ void sh_modledger_set_complete(int complete);
 int  sh_modledger_complete(void);
 
 typedef void (*sh_modledger_fn)(void *context, const sh_modledger_rec *rec);
-/* Visit every record (a consistent copy each), in table order. Returns the count. */
+/* Visit every record (a consistent copy each), level by level in table order. Returns the count. */
 int sh_modledger_each(sh_modledger_fn fn, void *context);
 
 void sh_modledger_get_stats(sh_modledger_stats *out);
@@ -129,7 +136,7 @@ int sh_modledger_tally_truncated(const sh_modledger_tally_type *row);
  * needle matches. `sh_mods held <filter>` uses it. Pure. */
 int sh_modledger_name_contains(const char *text, const char *needle);
 
-/* Tests: drop every record and reset the counters (not thread-safe). */
+/* Tests: free every level and reset the counters (not thread-safe). */
 void sh_modledger_reset(void);
 
 #ifdef __cplusplus

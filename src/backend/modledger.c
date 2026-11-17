@@ -6,7 +6,7 @@
 #include "modledger.h"
 
 typedef struct ml_slot {
-    volatile LONG state;       /* 0 empty, 1 being claimed, 2 published */
+    volatile LONG state;       /* 0 empty, 1 published (its request, hash and first serve written) */
     volatile LONG ver;         /* odd while the fields below change */
     uint32_t hash;
     const char *request;
@@ -16,9 +16,17 @@ typedef struct ml_slot {
     LONG seq;
 } ml_slot;
 
-static ml_slot *volatile g_slots;
+/* The levels (modledger.h): level k has SH_MODLEDGER_SLOTS << k slots. A
+ * level's pointer is published before g_nlevels counts it; only the newest
+ * takes inserts, under g_insert, which also guards g_newest_used. */
+static ml_slot *volatile g_levels[SH_MODLEDGER_LEVELS];
+static volatile LONG g_nlevels;
+static uint32_t g_newest_used;   /* records in the newest level */
+static SRWLOCK g_insert = SRWLOCK_INIT;
 static volatile LONG g_records, g_serves, g_overflow, g_seq;
 static volatile LONG g_complete = 1;
+
+static uint32_t ml_level_slots(int k) { return SH_MODLEDGER_SLOTS << k; }
 
 static char ml_fold(char c)
 {
@@ -39,16 +47,28 @@ static int ml_equal(const char *a, const char *b)
     return !*a && !*b;
 }
 
-static ml_slot *ml_table(int create)
+static int ml_count(void) { return (int)InterlockedCompareExchange(&g_nlevels, 0, 0); }
+
+static ml_slot *ml_level(int k)
 {
-    ml_slot *t = (ml_slot *)InterlockedCompareExchangePointer((PVOID volatile *)&g_slots, NULL, NULL);
-    if (t || !create) return t;
-    t = (ml_slot *)VirtualAlloc(NULL, sizeof(ml_slot) * SH_MODLEDGER_SLOTS, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    return (ml_slot *)InterlockedCompareExchangePointer((PVOID volatile *)&g_levels[k], NULL, NULL);
+}
+
+/* Under g_insert: the newest level with room for one more record, allocating
+ * the next one when the newest is half full; NULL when none can be had. */
+static ml_slot *ml_insert_level(int *k_out)
+{
+    int n = ml_count();
+    ml_slot *t;
+    if (n && g_newest_used < ml_level_slots(n - 1) / 2) { *k_out = n - 1; return ml_level(n - 1); }
+    if (n == SH_MODLEDGER_LEVELS) return NULL;
+    t = (ml_slot *)VirtualAlloc(NULL, sizeof(ml_slot) * (size_t)ml_level_slots(n), MEM_COMMIT | MEM_RESERVE,
+                                PAGE_READWRITE);
     if (!t) return NULL;
-    if (InterlockedCompareExchangePointer((PVOID volatile *)&g_slots, t, NULL) != NULL) {
-        VirtualFree(t, 0, MEM_RELEASE);
-        t = (ml_slot *)InterlockedCompareExchangePointer((PVOID volatile *)&g_slots, NULL, NULL);
-    }
+    InterlockedExchangePointer((PVOID volatile *)&g_levels[n], t);
+    InterlockedExchange(&g_nlevels, n + 1);
+    g_newest_used = 0;
+    *k_out = n;
     return t;
 }
 
@@ -114,43 +134,72 @@ static void ml_write_begin(ml_slot *s)
 
 static void ml_write_end(ml_slot *s) { InterlockedIncrement(&s->ver); }
 
-/* The published slot of `request`, or NULL with the empty slot it would take. */
-static ml_slot *ml_probe(ml_slot *t, const char *request, uint32_t h, ml_slot **empty)
+/* The published slot of `request` in level `k`, or NULL with the empty slot it
+ * would take. A level is never more than half full, so a probe ends at an
+ * empty slot. */
+static ml_slot *ml_probe_level(int k, const char *request, uint32_t h, ml_slot **empty)
 {
-    uint32_t i, n;
+    ml_slot *t = ml_level(k);
+    uint32_t mask = ml_level_slots(k) - 1, i, n;
     if (empty) *empty = NULL;
-    for (n = 0, i = h & (SH_MODLEDGER_SLOTS - 1); n < SH_MODLEDGER_SLOTS; ++n, i = (i + 1) & (SH_MODLEDGER_SLOTS - 1)) {
+    for (n = 0, i = h & mask; n <= mask; ++n, i = (i + 1) & mask) {
         ml_slot *s = &t[i];
-        LONG st = InterlockedCompareExchange(&s->state, 0, 0);
-        while (st == 1) { YieldProcessor(); st = InterlockedCompareExchange(&s->state, 0, 0); }
-        if (st == 0) { if (empty) *empty = s; return NULL; }
+        if (!InterlockedCompareExchange(&s->state, 0, 0)) { if (empty) *empty = s; return NULL; }
         if (s->hash == h && ml_equal(s->request, request)) return s;
     }
     return NULL;
 }
 
+/* The published slot of `request` in any level, or NULL. Lock-free. */
+static ml_slot *ml_probe(const char *request, uint32_t h)
+{
+    int k, n = ml_count();
+    for (k = 0; k < n; ++k) {
+        ml_slot *s = ml_probe_level(k, request, h, NULL);
+        if (s) return s;
+    }
+    return NULL;
+}
+
+/* The first serve of `request`: under the writer lock, probe every level again
+ * (another thread may have just published it) and otherwise publish it, with
+ * this serve written, in the newest level. 1 published, 0 found, -1 no room. */
+static int ml_insert(const char *request, uint32_t h, const sh_modledger_ident *id, ml_slot **found)
+{
+    ml_slot *s = NULL;
+    int k, r = 0;
+    AcquireSRWLockExclusive(&g_insert);
+    *found = ml_probe(request, h);
+    if (!*found) {
+        if (ml_insert_level(&k)) (void)ml_probe_level(k, request, h, &s);
+        if (!s) r = -1;
+        else {
+            s->hash = h;
+            s->request = request;
+            s->id = *id;
+            s->serves = 1;
+            s->seq = InterlockedIncrement(&g_seq);
+            g_newest_used++;
+            InterlockedIncrement(&g_records);
+            InterlockedExchange(&s->state, 1);
+            r = 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_insert);
+    return r;
+}
+
 int sh_modledger_record(const char *request, const sh_modledger_ident *id)
 {
-    ml_slot *t, *s, *empty;
+    ml_slot *s;
     uint32_t h;
     if (!request || !request[0] || !id) return 0;
-    t = ml_table(1);
-    if (!t) { InterlockedIncrement(&g_overflow); return 0; }
     h = ml_hash(request);
-    for (;;) {
-        s = ml_probe(t, request, h, &empty);
-        if (s) break;
-        if (!empty || (ULONG)InterlockedCompareExchange(&g_records, 0, 0) >= SH_MODLEDGER_CAP) {
-            InterlockedIncrement(&g_overflow);
-            return 0;
-        }
-        if (InterlockedCompareExchange(&empty->state, 1, 0) != 0) continue;   /* another serve took it: probe again */
-        empty->hash = h;
-        empty->request = request;
-        InterlockedIncrement(&g_records);
-        InterlockedExchange(&empty->state, 2);
-        s = empty;
-        break;
+    s = ml_probe(request, h);
+    if (!s) {
+        int r = ml_insert(request, h, id, &s);
+        if (r < 0) { InterlockedIncrement(&g_overflow); return 0; }
+        if (r > 0) { InterlockedIncrement(&g_serves); return 1; }
     }
     ml_write_begin(s);
     s->id = *id;
@@ -179,9 +228,9 @@ static void ml_copy(ml_slot *s, sh_modledger_rec *out)
 
 int sh_modledger_find(const char *request, sh_modledger_rec *out)
 {
-    ml_slot *t = ml_table(0), *s;
-    if (!t || !request) return 0;
-    s = ml_probe(t, request, ml_hash(request), NULL);
+    ml_slot *s;
+    if (!request) return 0;
+    s = ml_probe(request, ml_hash(request));
     if (!s) return 0;
     if (out) ml_copy(s, out);
     return 1;
@@ -189,9 +238,9 @@ int sh_modledger_find(const char *request, sh_modledger_rec *out)
 
 int sh_modledger_bind(const char *request, void *obj)
 {
-    ml_slot *t = ml_table(0), *s;
-    if (!t || !request) return 0;
-    s = ml_probe(t, request, ml_hash(request), NULL);
+    ml_slot *s;
+    if (!request) return 0;
+    s = ml_probe(request, ml_hash(request));
     if (!s) return 0;
     ml_write_begin(s);
     s->obj = obj;
@@ -208,25 +257,28 @@ int sh_modledger_complete(void)
 
 int sh_modledger_each(sh_modledger_fn fn, void *context)
 {
-    ml_slot *t = ml_table(0);
-    uint32_t i;
-    int n = 0;
-    if (!t || !fn) return 0;
-    for (i = 0; i < SH_MODLEDGER_SLOTS; ++i) {
-        sh_modledger_rec r;
-        if (InterlockedCompareExchange(&t[i].state, 0, 0) != 2) continue;
-        ml_copy(&t[i], &r);
-        fn(context, &r);
-        n++;
+    uint32_t i, slots;
+    int n = 0, k, levels = ml_count();
+    if (!fn) return 0;
+    for (k = 0; k < levels; ++k) {
+        ml_slot *t = ml_level(k);
+        for (i = 0, slots = ml_level_slots(k); i < slots; ++i) {
+            sh_modledger_rec r;
+            if (!InterlockedCompareExchange(&t[i].state, 0, 0)) continue;
+            ml_copy(&t[i], &r);
+            fn(context, &r);
+            n++;
+        }
     }
     return n;
 }
 
 void sh_modledger_get_stats(sh_modledger_stats *out)
 {
+    int k, levels = ml_count();
     if (!out) return;
     out->records = (unsigned)InterlockedCompareExchange(&g_records, 0, 0);
-    out->cap = SH_MODLEDGER_CAP;
+    for (out->cap = 0, k = 0; k < levels; ++k) out->cap += ml_level_slots(k) / 2;
     out->serves = (unsigned long)InterlockedCompareExchange(&g_serves, 0, 0);
     out->overflow = (unsigned long)InterlockedCompareExchange(&g_overflow, 0, 0);
     out->complete = sh_modledger_complete();
@@ -251,8 +303,13 @@ const char *sh_modledger_decision_name(int decision)
 
 void sh_modledger_reset(void)
 {
-    ml_slot *t = ml_table(0);
-    if (t) memset(t, 0, sizeof(ml_slot) * SH_MODLEDGER_SLOTS);
+    int k, levels = ml_count();
+    for (k = 0; k < levels; ++k) {
+        VirtualFree(ml_level(k), 0, MEM_RELEASE);
+        g_levels[k] = NULL;
+    }
+    g_nlevels = 0;
+    g_newest_used = 0;
     g_records = g_serves = g_overflow = g_seq = 0;
     g_complete = 1;
 }
