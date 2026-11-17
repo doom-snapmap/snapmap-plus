@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -189,7 +190,7 @@ static int struct_members(const mod *m, uint32_t var)
 
 /* The checks one derived fragment module must pass, against its stock one: the blend's samplers on the bindings
  * after the program's textures (tex_end..), a binding at or after tex_end moved up by the blend's 20, the material
- * uniforms grown by its 24, and a call of ml_blend in main after the store of inputs.normal. */
+ * uniforms not grown, and a call of ml_blend in main after the store of inputs.normal. */
 static void check_module(const uint32_t *w, size_t n, const uint32_t *stock, size_t sn, unsigned tex_end)
 {
     mod m = { w, n }, s = { stock, sn };
@@ -197,6 +198,7 @@ static void check_module(const uint32_t *w, size_t n, const uint32_t *stock, siz
     uint32_t blend = 0, k, call_seen = 0;
     CHECK(n > sn && w[0] == 0x07230203u && w[3] > stock[3]);
     CHECK(binding(&m, named(&m, "ml_mask")) == (int)tex_end);
+    CHECK(binding(&m, named(&m, "ml_params")) == (int)tex_end + 1);
     CHECK(binding(&m, named(&m, "ml_extra1")) == (int)tex_end + 19);
     CHECK(binding(&m, named(&m, "samp_woundtexture")) == binding(&s, named(&s, "samp_woundtexture")));
     FOR_INS(&s, at) {
@@ -204,7 +206,7 @@ static void check_module(const uint32_t *w, size_t n, const uint32_t *stock, siz
             CHECK(binding(&m, s.w[at + 1]) == (int)s.w[at + 3] + 20);
     }
     CHECK(struct_members(&m, named(&m, "freqHigh_fragmentUniforms")) ==
-          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")) + (int)SH_MODPROG_ML_PARM_COUNT);
+          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")));   /* the layered program adds no parameter */
     FOR_INS(&m, at) if ((m.w[at] & 0xffff) == 5 && !strncmp((const char *)(m.w + at + 2), "ml_blend(", 9)) blend = m.w[at + 1];
     CHECK(blend != 0);
     FOR_INS(&m, at) if ((m.w[at] & 0xffff) == 57 && m.w[at + 3] == blend) call_seen++;
@@ -237,6 +239,20 @@ static void dump_decl(const char *program, const char *decl_req, const unsigned 
     if ((f = fopen(path, "wb")) != NULL) { fwrite(d, 1, n, f); fclose(f); }
 }
 
+/* The textures a derived program binds over its stages: the sampler declarations of its three stage texts. */
+static int g_stage_textures;
+static int count_textures(const unsigned char *b, size_t bn)
+{
+    size_t off[3], len[3];
+    int st, total = 0;
+    if (sh_mb_rp_stages(b, bn, off, len) != 1) return -1;
+    for (st = 0; st < 3; st++) {
+        const char *t = (const char *)b + off[st], *e = t + len[st], *at = t;
+        while ((at = strstr(at, "uniform sampler")) != NULL && at < e) { total++; at += 15; }
+    }
+    return total;
+}
+
 static void check_unit(const char *base, const char *decl_req, const char *bin_req, const char *vreq, const char *freq,
                        const unsigned char *stock_v, size_t stock_vn, const unsigned char *stock_f, size_t stock_fn)
 {
@@ -249,12 +265,13 @@ static void check_unit(const char *base, const char *decl_req, const char *bin_r
     CHECK(sh_modprog_read(freq, &f, &fn) == SH_MB_STOCK_OK);
     if (!d || !b || !v || !f) { fprintf(stderr, "  %s: %s\n", base, sh_modprog_cause()); goto out; }
     dump_decl(base, decl_req, d, dn);
+    g_stage_textures = count_textures(b, bn);
     /* the decl: the blend's functions in an hlsl_fp_header section before hlsl_fp, then the call as the template's
      * first statements */
     {
         const char *hdr = strstr((const char *)d, "hlsl_fp_header {"), *fp = strstr((const char *)d, "hlsl_fp {");
         const char *tmpl = strstr((const char *)d, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {");
-        const char *call = tmpl ? strstr(tmpl, "float4 mlP[28] = {") : NULL;
+        const char *call = tmpl ? strstr(tmpl, "float4 mlE[4] = {") : NULL;
         CHECK(hdr && fp && tmpl && call && hdr < fp && fp < tmpl);
         CHECK(hdr && strstr(hdr, "void ml_blend(") != NULL && strstr(hdr, "void ml_blend(") < fp);
         CHECK(call && strstr(call, "ml_blend( inputs.albedo") != NULL);
@@ -300,10 +317,10 @@ static void test_decl(void)
         const char *hdr = strstr(t, "\thlsl_fp_header {\r\n"), *fp = strstr(t, "\thlsl_fp {\r\n");
         const char *fn = strstr(t, "\t\tvoid ml_blend( inout float3 albedo");
         const char *custom = strstr(t, "#template CUSTOM_TEXTURE_INPUTS( inputs ) {\r\n");
-        const char *call = custom ? strstr(custom, "\t\t\tfloat4 mlP[28] = {\r\n") : NULL;
+        const char *call = custom ? strstr(custom, "\t\t\tfloat4 mlE[4] = { $bloomMaskScale") : NULL;
         CHECK(hdr && fn && fp && custom && call && hdr < fn && fn < fp && fp < custom && custom < call);
         CHECK(hdr && fp && strstr(hdr, "\t}\r\n\thlsl_fp {") != NULL);   /* the section closes before the program's */
-        CHECK(strstr(t, "inputs.thickness, inputs.texCoords, $time.x, mlP, mlE );\r\n\t\t\tWOUND_BLOCK( inputs );") != NULL);
+        CHECK(strstr(t, "inputs.thickness, inputs.texCoords, $time.x, mlE );\r\n\t\t\tWOUND_BLOCK( inputs );") != NULL);
         CHECK(strstr(t, "\r\n") && !strstr(t, "\n\n\n") && !strstr(t, "\r\r"));
         CHECK(!strstr(t, "#template MULTILAYER"));
     }
@@ -341,8 +358,11 @@ static void test_glsl(void)
     CHECK(strstr(t, "layout( binding = 8 ) uniform sampler2D samp_woundtexture;") != NULL);   /* below tex_end */
     CHECK(strstr(t, "layout( binding = 30, std430 ) buffer clusternumlights_b") != NULL);     /* moved up */
     CHECK(strstr(t, "layout( binding = 10 ) uniform sampler2D samp_layerblendmask;") != NULL);
+    CHECK(strstr(t, "layout( binding = 11 ) uniform sampler2D samp_layerparms;") != NULL);
     CHECK(strstr(t, "layout( binding = 29 ) uniform sampler2D samp_multilayerextramap1;") != NULL);
-    CHECK(strstr(t, "\tvec4 multilayeremberhot;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+    CHECK(strstr(t, "samp_blendlayer0heightmap") == NULL);
+    CHECK(strstr(t, "multilayerember") == NULL && strstr(t, "layerstilingfactor") == NULL);   /* no vector parm of its own */
+    CHECK(strstr(t, "vec4 bloomcolor;\n}\nfreqHigh_fragmentUniforms ;") != NULL);            /* the block is the program's */
     CHECK(strstr(t, "void ml_blend(") != NULL && strstr(t, "void ml_blend(") < strstr(t, "void main() {"));
     CHECK(strstr(t, "inputs.normal = sampleNormal.wyz;\n\t\tml_blend( inputs.albedo,") != NULL);
     free(t);
@@ -395,14 +415,15 @@ static void test_derivation(void)
     alias_same("generated/renderprogs/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtrwounds_pc_vulkan.bin");
     alias_same("generated/spirv/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtr.fspv");
     alias_same("generated/renderprogs/permutations/", SH_MODPROG_PREFIX, SH_MODPROG_OLD_PREFIX, "skinvmtr_0000000000000001.decl");
-    /* the render parms the blend reads are product decls; a stock parm is not the product's */
+    /* the render parms the program reads that are textures are product decls; no vector render parm is the product's */
     for (i = 0; i < (int)SH_MODPROG_ML_PARM_COUNT; i++) {
         char *r = sh_textf("generated/decls/renderparm/%s.decl", SH_MODPROG_ML_PARMS[i]);
-        if (sh_modprog_read(r, &p, &pn) == SH_MB_STOCK_OK && pn > 6 && !memcmp(p, "{ Vec ", 6)) parms++;
-        if (p) HeapFree(GetProcessHeap(), 0, p);
-        p = NULL;
+        CHECK(!sh_modprog_owns(r));
+        CHECK(sh_modprog_read(r, &p, &pn) == SH_MB_STOCK_ABSENT);
         free(r);
     }
+    CHECK(sh_modprog_vector_parm(0) == NULL && sh_modprog_vector_parm(27) == NULL && sh_modprog_vector_parm(999) == NULL);
+    CHECK(SH_MODPROG_ML_PARM_COUNT == 28 && SH_MODPROG_ML_TEXTURE_COUNT == 20);
     for (i = 0; i < (int)SH_MODPROG_ML_TEXTURE_COUNT; i++) {
         char *r = sh_textf("generated/decls/renderparm/%s.decl", SH_MODPROG_ML_TEXTURES[i]);
         if (sh_modprog_read(r, &p, &pn) == SH_MB_STOCK_OK && pn > 8 && !memcmp(p, "{ Tex2D ", 8)) parms++;
@@ -410,7 +431,9 @@ static void test_derivation(void)
         p = NULL;
         free(r);
     }
-    CHECK(parms == (int)(SH_MODPROG_ML_PARM_COUNT + SH_MODPROG_ML_TEXTURE_COUNT));
+    CHECK(parms == (int)SH_MODPROG_ML_TEXTURE_COUNT);
+    CHECK(sh_modprog_owns("generated/decls/renderparm/layerparms.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/blendlayer0heightmap.decl"));
     CHECK(!sh_modprog_owns("generated/decls/renderparm/bloomcolor.decl"));
     CHECK(!sh_modprog_owns("generated/spirv/skinvmtr.fspv"));
     CHECK(sh_modprog_read("generated/renderprogs/" SH_MODPROG_PREFIX "skinvmtr_pc.bin", &p, &pn) == SH_MB_STOCK_ABSENT);
@@ -437,8 +460,8 @@ static const char EP_DECL[] =
 
 /* The checks one derived particle fragment module must pass against its stock one: the emissive sheet's sampler on
  * the binding after the program's textures, the shading's other samplers the program's own (no texture added), a
- * binding at or after tex_end moved up by one, the material uniforms grown by the four parameters and the two
- * render parms the shading reads, and one call of ep_shade, in main, after the stock colour's last store. */
+ * binding at or after tex_end moved up by one, the material uniforms grown by the three parameters the shading reads
+ * (smokebrightness, projectionmatrixz, globalvieworigin), and one call of ep_shade, in main, after the stock colour's last store. */
 static void check_ep_module(const uint32_t *w, size_t n, const uint32_t *stock, size_t sn, unsigned tex_end)
 {
     mod m = { w, n }, s = { stock, sn };
@@ -454,7 +477,7 @@ static void check_ep_module(const uint32_t *w, size_t n, const uint32_t *stock, 
             CHECK(binding(&m, s.w[at + 1]) == (int)s.w[at + 3] + 1);
     }
     CHECK(struct_members(&m, named(&m, "freqHigh_fragmentUniforms")) ==
-          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")) + (int)SH_MODPROG_EP_PARM_COUNT + 2);
+          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")) + 3);   /* smokebrightness, projectionmatrixz, globalvieworigin */
     FOR_INS(&m, at) if ((m.w[at] & 0xffff) == 5 && !strncmp((const char *)(m.w + at + 2), "ep_shade(", 9)) shade = m.w[at + 1];
     CHECK(shade != 0);
     FOR_INS(&m, at) {
@@ -497,7 +520,9 @@ static void test_ep_texts(void)
     CHECK(t != NULL);
     if (t) {
         CHECK(strstr(t, "layout( binding = 6 ) uniform sampler2D samp_particleslightatlasmap;") != NULL);
-        CHECK(strstr(t, "layout( binding = 7 ) uniform sampler2D samp_eternalparticleemissivemap;") != NULL);
+        CHECK(strstr(t, "layout( binding = 7 ) uniform sampler2D samp_particleemissivemap;") != NULL);
+        CHECK(strstr(t, "\tvec4 smokebrightness;\n\tvec4 projectionmatrixz;\n\tvec4 globalvieworigin;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+        CHECK(strstr(t, "eternalparticle") == NULL);
         CHECK(strstr(t, "\tvec4 globalvieworigin;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
         CHECK(strstr(t, "void ep_shade(") != NULL && strstr(t, "void ep_shade(") < strstr(t, "void main() {"));
         CHECK(strstr(t, "\t}\n\tep_shade( out_FragColor0, vec4[7]( vofi_Color,") != NULL);
@@ -540,8 +565,11 @@ static void check_ep_unit(const char *decl_req, const char *bin_req, const char 
     CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]) && rd_be32(f + 12) == fn - 16);
     CHECK(vn == stock_vn && !memcmp(v, stock_v, vn));
     CHECK(strstr((const char *)b + off[1], "\tep_shade( out_FragColor0,") != NULL);
+    g_stage_textures = count_textures(b, bn);
+    printf("   uberparticles: %d textures over its stages\n", g_stage_textures);
+    CHECK(g_stage_textures > 0 && g_stage_textures <= 32);
     {
-        const char *t = (const char *)b + off[1], *sheet = strstr(t, "uniform sampler2D samp_eternalparticleemissivemap");
+        const char *t = (const char *)b + off[1], *sheet = strstr(t, "uniform sampler2D samp_particleemissivemap");
         unsigned tex_end = 0;
         if (sheet) {
             const char *eq = sheet;
@@ -589,15 +617,488 @@ static void test_real_ep(void)
     alias_same("generated/decls/renderprog/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.decl");
     alias_same("generated/renderprogs/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles_pc_vulkan.bin");
     alias_same("generated/spirv/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.fspv");
-    /* the parms the shading adds are the product's; the two it reads from the game stay the game's */
-    CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
-    CHECK(sh_modprog_owns("generated/decls/renderparm/eternalparticleemissivemap.decl"));
+    /* the sheet is the product's texture parm; every vector the shading reads is the game's */
+    CHECK(sh_modprog_owns("generated/decls/renderparm/particleemissivemap.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/smokebrightness.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/particleuberparms1.decl"));
+    CHECK(!sh_modprog_owns("generated/decls/renderparm/emissive.decl"));
     CHECK(!sh_modprog_owns("generated/decls/renderparm/projectionmatrixz.decl"));
     CHECK(!sh_modprog_owns("generated/spirv/uberparticles.fspv"));
 }
 
 typedef struct seen { int files; } seen;
 static void count(void *c, const char *path) { (void)path; ((seen *)c)->files++; }
+
+/* ------------------------------------------------------------------ the parameter image */
+
+/* const_37f8_37f8_37f8_3c00.bimage as the research repository's writer wrote it (4 x 4 RGBA16F, every texel
+ * 0x37f8 0x37f8 0x37f8 0x3c00). */
+static const unsigned char CONST_4X4[190] = {
+    0x00, 0x00, 0x00, 0x00, 0x07, 0x4d, 0x49, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x80, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37,
+    0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c, 0xf8, 0x37, 0xf8, 0x37, 0xf8, 0x37, 0x00, 0x3c,
+};
+#define IMG_DATA 62      /* the first texel: a 42-byte header and one 20-byte mip record */
+
+static unsigned rd_le16(const unsigned char *p) { return (unsigned)p[0] | (unsigned)p[1] << 8; }
+
+/* A half float's value (written here, apart from the product's). */
+static float half_value(unsigned h)
+{
+    int e = (int)(h >> 10) & 31, m = (int)(h & 1023);
+    float v = e == 0 ? (float)ldexp((double)m, -24) : (float)ldexp(1.0 + m / 1024.0, e - 15);
+    return (h & 0x8000u) ? -v : v;
+}
+
+static void test_image(void)
+{
+    /* each pair: a float and the half the nearest-even rule gives (ties to the even mantissa) */
+    static const struct { float in; unsigned half; } H[] = {
+        { 0.0f, 0x0000 }, { 1.0f, 0x3c00 }, { -2.0f, 0xc000 }, { 0.5f, 0x3800 }, { 0.1f, 0x2e66 },
+        { 3.14159274f, 0x4248 }, { 65504.0f, 0x7bff }, { 65519.0f, 0x7bff }, { 65520.0f, 0x7c00 },
+        { 1.0009765625f, 0x3c01 },        /* 1 + 2^-10: exact */
+        { 1.00048828125f, 0x3c00 },       /* 1 + 2^-11: a tie, to the even 0x3c00 */
+        { 1.00146484375f, 0x3c02 },       /* 1 + 3 x 2^-11: a tie, to the even 0x3c02 */
+        { 5.9604645e-8f, 0x0001 },        /* 2^-24, the smallest subnormal */
+        { 2.9802322e-8f, 0x0000 },        /* 2^-25: a tie, to the even 0 */
+        { 8.9406967e-8f, 0x0002 },        /* 1.5 x 2^-24: a tie, to the even 2 */
+        { 6.1035156e-5f, 0x0400 },        /* 2^-14, the smallest normal */
+    };
+    float tex[4][4], vec[28][4];
+    unsigned char *b = NULL;
+    size_t n = 0;
+    unsigned k;
+    int i;
+    printf("-- the parameter image\n");
+    /* a 4 x 4 image of the research repository's constant is that file, byte for byte */
+    {
+        float c[16][4];
+        for (i = 0; i < 16; i++) { c[i][0] = c[i][1] = c[i][2] = 0.498046875f; c[i][3] = 1.0f; }
+        CHECK(sh_modprog_bimage_rgba16f(4, 4, c, &b, &n) == 1 && n == sizeof CONST_4X4 && !memcmp(b, CONST_4X4, n));
+        free(b);
+        b = NULL;
+    }
+    /* the rounding rule */
+    for (i = 0; i < (int)(sizeof H / sizeof H[0]); i += 4) {
+        for (k = 0; k < 4; k++) tex[k][0] = tex[k][1] = tex[k][2] = tex[k][3] = 0.0f;
+        for (k = 0; k < 4 && (unsigned)i + k < sizeof H / sizeof H[0]; k++) tex[k][0] = H[i + k].in;
+        CHECK(sh_modprog_bimage_rgba16f(4, 1, tex, &b, &n) == 1 && n == IMG_DATA + 32);
+        for (k = 0; b && k < 4 && (unsigned)i + k < sizeof H / sizeof H[0]; k++) {
+            if (rd_le16(b + IMG_DATA + k * 8) != H[i + k].half)
+                fprintf(stderr, "half of %.9g: %04x, want %04x\n", H[i + k].in, rd_le16(b + IMG_DATA + k * 8), H[i + k].half);
+            CHECK(rd_le16(b + IMG_DATA + k * 8) == H[i + k].half);
+        }
+        free(b);
+        b = NULL;
+    }
+    /* the parameter image: 8 x 4, vector k at texel ( k % 8, k / 8 ) */
+    for (k = 0; k < 28; k++) { vec[k][0] = (float)k; vec[k][1] = (float)k + 0.5f; vec[k][2] = -(float)k; vec[k][3] = 0.25f; }
+    CHECK(sh_modprog_param_image(vec, 28, &b, &n) == 1 && n == IMG_DATA + 256);
+    if (b) {
+        CHECK(rd_be32(b + 4) == 0x074d4942u && rd_be32(b + 12) == 8 && rd_be32(b + 16) == 4 && rd_be32(b + 24) == 1);
+        CHECK(b[0x20] == 2 && b[0x24] == 5 && rd_be32(b + 0x2a) == 0 && rd_be32(b + 0x32) == 8 && rd_be32(b + 0x36) == 4 &&
+              rd_be32(b + 0x3a) == 256);
+        for (k = 0; k < 32; k++) {
+            unsigned x = k % 8, y = k / 8, c;
+            for (c = 0; c < 4; c++) {
+                float want = k < 28 ? vec[k][c] : 0.0f;
+                CHECK(half_value(rd_le16(b + IMG_DATA + (y * 8 + x) * 8 + c * 2)) == want);
+            }
+        }
+    }
+    free(b);
+    b = NULL;
+    CHECK(sh_modprog_param_image(vec, 33, &b, &n) == 0 && b == NULL);
+    CHECK(sh_modprog_bimage_rgba16f(0, 4, tex, &b, &n) == 0);
+}
+
+/* ------------------------------------------------------------------ the registered images */
+
+static void test_registry(void)
+{
+    float vec[28][4];
+    unsigned k;
+    char *p1, *p2, hex[SH_MB_HASH_HEX + 1], sha[SH_MB_HASH_HEX + 1], where[32];
+    const char *r1, *r2, *r3;
+    unsigned char *b = NULL, *img = NULL;
+    size_t n = 0, in = 0;
+    unsigned long long sz = 0;
+    seen s = { 0 };
+    static const char head[] = "generated/image/snapmapplus/look/";
+    printf("-- the registered parameter images\n");
+    sh_modprog_reset();
+    for (k = 0; k < 28; k++) { vec[k][0] = (float)k; vec[k][1] = 1.0f; vec[k][2] = 0.5f; vec[k][3] = 0.0f; }
+    CHECK(sh_modprog_param_image(vec, 28, &img, &in) == 1);
+    sh_mb_sha256_hex(img, in, hex);
+    r1 = sh_modprog_register_param_image(vec, 28);
+    CHECK(r1 != NULL);
+    if (!r1) { free(img); return; }
+    p1 = sh_textf("%s", r1);
+    /* the hash of the image's bytes, 16 hex digits, lower case */
+    CHECK(strlen(p1) == strlen(head) + 16 + 7 && !strncmp(p1, head, strlen(head)) &&
+          !strncmp(p1 + strlen(head), hex, 16) && !strcmp(p1 + strlen(head) + 16, ".bimage"));
+    /* the same vectors, the same path; another vector, another */
+    r2 = sh_modprog_register_param_image(vec, 28);
+    CHECK(r2 && !strcmp(r2, p1));
+    vec[3][1] = 2.0f;
+    r3 = sh_modprog_register_param_image(vec, 28);
+    CHECK(r3 && strcmp(r3, p1) != 0);
+    vec[3][1] = 1.0f;
+    /* served: owned, read back as the image's bytes, in the product's container */
+    CHECK(sh_modprog_owns(p1));
+    CHECK(sh_modprog_read(p1, &b, &n) == SH_MB_STOCK_OK && n == in && b && !memcmp(b, img, n));
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    b = NULL;
+    p2 = sh_textf("%s%s", head, "0000000000000000.bimage");
+    CHECK(!sh_modprog_owns(p2) && sh_modprog_read(p2, &b, &n) == SH_MB_STOCK_ABSENT);
+    free(p2);
+    CHECK(sh_modstock_identify(p1, sha, &sz) == SH_MB_STOCK_OK && sz == in && !strcmp(sha, hex));
+    CHECK(sh_modstock_container(p1, sha, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, SH_MODPROG_CONTAINER));
+    sh_modprog_list(head, count, &s);
+    CHECK(s.files == 2);
+    sh_modprog_reset();
+    CHECK(!sh_modprog_owns(p1));
+    free(p1);
+    free(img);
+}
+
+/* ------------------------------------------------------------------ old material keys */
+
+static char *g_fixtures;
+static char *read_fixture(const char *name, size_t *n)
+{
+    char path[MAX_PATH];
+    FILE *f;
+    char *t;
+    long sz;
+    snprintf(path, sizeof path, "%s\\%s", g_fixtures ? g_fixtures : ".", name);
+    f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "no fixture %s\n", path); g_failed++; return NULL; }
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    t = (char *)malloc((size_t)sz + 1);
+    *n = fread(t, 1, (size_t)sz, f);
+    t[*n] = 0;
+    fclose(f);
+    return t;
+}
+
+/* The value of a key line of a material (a pointer to it), or NULL; `nth` counts the lines of the key. */
+static const char *mat_value(const char *text, const char *key, int nth)
+{
+    size_t k = strlen(key);
+    const char *p = text;
+    while (*p) {
+        const char *e = strchr(p, '\n'), *q = p;
+        while (*q == ' ' || *q == '\t') q++;
+        if (!strncmp(q, key, k) && (q[k] == ' ' || q[k] == '\t')) {
+            if (!nth--) { q += k; while (*q == ' ' || *q == '\t') q++; return q; }
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    return NULL;
+}
+static int mat_count(const char *text, const char *key)
+{
+    int n = 0;
+    while (mat_value(text, key, n)) n++;
+    return n;
+}
+/* A value as up to four floats, `{ a, b, c, d }` or a scalar; the count read. */
+static int mat_floats(const char *v, float out[4])
+{
+    int k = 0;
+    char *e;
+    if (!v) return 0;
+    if (*v == '{') v++;
+    while (k < 4) {
+        while (*v == ' ' || *v == ',') v++;
+        out[k] = strtof(v, &e);
+        if (e == v) break;
+        v = e;
+        k++;
+    }
+    return k;
+}
+/* The text of a key's value up to its line's end (no terminator), in a static buffer. */
+static const char *mat_line(const char *text, const char *key)
+{
+    static char t[512];
+    const char *v = mat_value(text, key, 0);
+    size_t n = 0;
+    if (!v) return "";
+    while (v[n] && v[n] != '\r' && v[n] != '\n' && n < sizeof t - 1) n++;
+    memcpy(t, v, n);
+    t[n] = 0;
+    return t;
+}
+
+/* A particle material's rewrite: each stock key holds exactly the floats the mapping says, bit for bit. */
+static void check_particle(const char *label, const char *text, size_t len, const float want[5][4], int sheet)
+{
+    static const char *const keys[5] = { "particleuberparms1", "particleuberparms2", "particleuberparms3", "emissive",
+                                         "smokebrightness" };
+    static const char *const old[] = { "eternalparticle", "eternalparticlefade", "eternalparticlecolor",
+                                       "eternalparticlecolor2", "eternalparticleemissivemap" };
+    char *out = NULL;
+    size_t on = 0;
+    int k, c, r = sh_modprog_legacy_material(text, len, &out, &on);
+    CHECK(r == 1 && out && on == strlen(out));
+    if (!out) return;
+    for (k = 0; k < 5; k++) {
+        float got[4];
+        int cnt = mat_floats(mat_value(out, keys[k], 0), got);
+        if (cnt != 4 || mat_count(out, keys[k]) != 1) { CHECK(cnt == 4 && mat_count(out, keys[k]) == 1); continue; }
+        for (c = 0; c < 4; c++) {
+            if (memcmp(&got[c], &want[k][c], 4)) fprintf(stderr, "%s: %s[%d] = %.9g, want %.9g\n", label, keys[k], c, got[c], want[k][c]);
+            CHECK(!memcmp(&got[c], &want[k][c], 4));
+        }
+    }
+    for (k = 0; k < 5; k++) CHECK(mat_count(out, old[k]) == 0);
+    CHECK(sheet ? mat_count(out, "particleemissivemap") == 1 : mat_count(out, "particleemissivemap") == 0);
+    /* nothing else changed: the stage's other keys are as they were, and a second pass finds nothing to do */
+    CHECK(!strcmp(mat_line(out, "transmap"), mat_line(text, "transmap")) &&
+          !strcmp(mat_line(out, "texanimdims"), mat_line(text, "texanimdims")) &&
+          !strcmp(mat_line(out, "virtualtexturefeedbackfloat"), mat_line(text, "virtualtexturefeedbackfloat")));
+    if (sheet) CHECK(!strcmp(mat_line(out, "particleemissivemap"), mat_line(text, "eternalparticleemissivemap")));
+    {
+        char *again = NULL;
+        size_t an = 0;
+        CHECK(sh_modprog_legacy_material(out, on, &again, &an) == 0 && again == NULL);
+    }
+    free(out);
+}
+
+static void test_legacy_particle(void)
+{
+    size_t n = 0;
+    char *t;
+    printf("-- old particle keys\n");
+    /* an explosion stage with an emissive sheet (the tyrant's exp_m_02): mode 4 + 16, near fade 52.49 to 26.25, soft
+     * distance 21, gradients (1, 0.0999, 0) and (1, 0.1119, 0.0222), emissive multiplier 10, mask multiplier 1 */
+    t = read_fixture("legacy_particle_explosion.decl", &n);
+    if (t) {
+        static const float want[5][4] = {
+            { 0.0f, 0.0f, 20.0f, 0.0f },
+            { 1.0f, 0.099899f, 0.0f, 52.493438f },
+            { 1.0f, 0.111932f, 0.022174f, 10.0f },
+            { 1.0f, 26.246719f, 20.997376f, 1.0f },
+            { 1.0f, 0.0f, 0.0f, 0.0f },
+        };
+        check_particle("explosion", t, n, want, 1);
+        free(t);
+    }
+    /* an unlit stage with no sheet (fir_l): mode 0, emissive multiplier 1 */
+    t = read_fixture("legacy_particle_unlit.decl", &n);
+    if (t) {
+        static const float want[5][4] = {
+            { 0.0f, 0.0f, 0.0f, 0.0f },
+            { 1.0f, 1.0f, 1.0f, 5.249344f },
+            { 0.0f, 0.0f, 0.0f, 1.0f },
+            { 1.0f, 0.524934f, 5.249344f, 1.0f },
+            { 0.0f, 0.0f, 0.0f, 0.0f },
+        };
+        check_particle("unlit", t, n, want, 0);
+        free(t);
+    }
+    /* a lit stage that names only some old keys and has none of the stock ones: defaults fill the rest, the new lines
+     * stand where the old ones stood, in the material's own line ends */
+    {
+        static const char LIT[] = "{\r\n\tstageprogram\t\"snapmapplus/eternal/uberparticles\"\r\n"
+            "\teternalparticle\t{ 1, 2.5, 3, 0.75 }\r\n\teternalparticlefade\t{ 5, 6, 7, 1 }\r\n\ttransmap\tx.tga\r\n}\r\n";
+        static const float want[5][4] = {
+            { 0.0f, 0.0f, 17.0f, 0.75f },
+            { 1.0f, 1.0f, 1.0f, 5.0f },
+            { 1.0f, 1.0f, 1.0f, 2.5f },
+            { 1.0f, 6.0f, 7.0f, 1.0f },
+            { 3.0f, 0.0f, 0.0f, 0.0f },
+        };
+        char *out = NULL;
+        size_t on = 0, i;
+        check_particle("lit", LIT, strlen(LIT), want, 0);
+        CHECK(sh_modprog_legacy_material(LIT, strlen(LIT), &out, &on) == 1 && out);
+        if (out) {
+            const char *a = strstr(out, "particleuberparms1"), *tm = strstr(out, "transmap");
+            int bare = 0;
+            for (i = 0; i < on; i++) if (out[i] == '\n' && (i == 0 || out[i - 1] != '\r')) bare = 1;
+            CHECK(a && tm && a < tm && !bare);
+            free(out);
+        }
+    }
+    /* a material with no old key is left alone */
+    {
+        char *out = (char *)1;
+        size_t on = 5;
+        CHECK(sh_modprog_legacy_material("{\n\tdiffusemap\tx.tga\n}\n", 22, &out, &on) == 0 && out == NULL && on == 0);
+    }
+}
+
+/* The 28 vectors a layered material gives, from its text (every key set), in the table's order. */
+static int read_vectors(const char *text, float v[28][4])
+{
+    unsigned k;
+    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++)
+        if (mat_floats(mat_value(text, SH_MODPROG_ML_PARMS[k], 0), v[k]) < 1) { fprintf(stderr, "no %s\n", SH_MODPROG_ML_PARMS[k]); return 0; }
+    return 1;
+}
+
+/* A layered material's rewrite: the old keys are gone, `layerparms` names a registered image, vector k of the image
+ * (within half precision) is the vector the material gave (vector 9's y and z saying where layer 0's height comes
+ * from: source y, constant z), and the extra map the height took (if one) holds its image. Prints the largest
+ * relative error of each vector. */
+static void check_layered(const char *label, const char *text, size_t len, float src, float cst, const char *extra_key,
+                          const char *extra_value)
+{
+    char *out = NULL, *path = NULL;
+    size_t on = 0, in = 0;
+    float want[28][4], worst[28], overall = 0.0f;
+    unsigned k, c;
+    const char *lp;
+    unsigned char *img = NULL;
+    int r = sh_modprog_legacy_material(text, len, &out, &on);
+    CHECK(r == 1 && out);
+    if (!out) return;
+    CHECK(read_vectors(text, want));
+    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) CHECK(mat_count(out, SH_MODPROG_ML_PARMS[k]) == 0);
+    CHECK(mat_count(out, "blendlayer0heightmap") == 0 && mat_count(out, "layerparms") == 1);
+    lp = mat_line(out, "layerparms");
+    /* its name: snapmapplus/look/<16 hex>.tga, the path of the registered image */
+    CHECK(strlen(lp) == 17 + 16 + 4 && !strncmp(lp, "snapmapplus/look/", 17) && !strcmp(lp + 33, ".tga"));
+    path = sh_textf("generated/image/%.*s.bimage", 33, lp);
+    CHECK(sh_modprog_owns(path) && sh_modprog_read(path, &img, &in) == SH_MB_STOCK_OK && in == IMG_DATA + 256);
+    want[9][1] = src;
+    want[9][2] = cst;
+    want[9][3] = 0.0f;
+    if (img) {
+        for (k = 0; k < 28; k++) {
+            worst[k] = 0.0f;
+            for (c = 0; c < 4; c++) {
+                float got = half_value(rd_le16(img + IMG_DATA + k * 8 + c * 2)), w = want[k][c], rel;
+                if (w == 0.0f) { CHECK(got == 0.0f); continue; }
+                rel = (float)fabs((double)(got - w) / (double)w);
+                if (rel > worst[k]) worst[k] = rel;
+                if (rel > 4.89e-4f) fprintf(stderr, "%s: vector %u[%u] = %.9g in the image, %.9g given\n", label, k, c, got, w);
+                CHECK(rel <= 4.89e-4f);
+            }
+            if (worst[k] > overall) overall = worst[k];
+        }
+        for (k = 28; k < 32; k++) for (c = 0; c < 4; c++) CHECK(rd_le16(img + IMG_DATA + k * 8 + c * 2) == 0);
+        printf("   %s: largest relative error per vector (0..27):", label);
+        for (k = 0; k < 28; k++) printf(" %.2e", worst[k]);
+        printf("\n   %s: largest overall %.3e (half precision: 4.88e-04)\n", label, overall);
+        HeapFree(GetProcessHeap(), 0, img);
+    }
+    /* where the new line stands, and what stays */
+    {
+        const char *a = strstr(out, "layerparms"), *w = strstr(out, "usewoundclip"), *m = strstr(out, "layerblendmask");
+        CHECK(a && w && m && w < a && a < m);
+        CHECK(!strcmp(mat_line(out, "layerblendmask"), mat_line(text, "layerblendmask")));
+        CHECK(!strcmp(mat_line(out, "blendlayer1albedomap"), mat_line(text, "blendlayer1albedomap")));
+        CHECK(!strcmp(mat_line(out, "diffusemap"), mat_line(text, "diffusemap")));
+        CHECK(!strcmp(mat_line(out, "ambientprogram"), mat_line(text, "ambientprogram")));
+        CHECK(!strcmp(mat_line(out, "landpagefile"), mat_line(text, "landpagefile")));
+    }
+    /* the pool */
+    CHECK(mat_count(out, "multilayerextramap0") == 1 && mat_count(out, "multilayerextramap1") == 1);
+    if (extra_key) {
+        CHECK(!strcmp(mat_line(out, extra_key), extra_value));
+        CHECK(!strcmp(mat_line(out, !strcmp(extra_key, "multilayerextramap0") ? "multilayerextramap1" : "multilayerextramap0"),
+                      mat_line(text, !strcmp(extra_key, "multilayerextramap0") ? "multilayerextramap1" : "multilayerextramap0")));
+    } else {
+        CHECK(!strcmp(mat_line(out, "multilayerextramap0"), mat_line(text, "multilayerextramap0")));
+        CHECK(!strcmp(mat_line(out, "multilayerextramap1"), mat_line(text, "multilayerextramap1")));
+    }
+    /* a second pass has nothing left to rewrite; the same material rewrites to the same text */
+    {
+        char *again = NULL, *same = NULL;
+        size_t an = 0, sn = 0;
+        CHECK(sh_modprog_legacy_material(out, on, &again, &an) == 0 && again == NULL);
+        CHECK(sh_modprog_legacy_material(text, len, &same, &sn) == 1 && same && sn == on && !memcmp(same, out, on));
+        free(same);
+    }
+    free(path);
+    free(out);
+}
+
+/* A copy of `text` with the line of `key` replaced by `line` (no terminator), or with `line` put before the closing brace. */
+static char *with_line(const char *text, const char *key, const char *line)
+{
+    const char *v = key ? mat_value(text, key, 0) : NULL, *ls, *le;
+    size_t head, tail_at;
+    char *o;
+    if (v) {
+        ls = v;
+        while (ls > text && ls[-1] != '\n') ls--;
+        le = strchr(v, '\n');
+        head = (size_t)(ls - text);
+        tail_at = le ? (size_t)(le - text) : strlen(text);
+    } else {
+        le = strrchr(text, '}');
+        head = (size_t)(le - text);
+        tail_at = head;
+    }
+    o = (char *)malloc(strlen(text) + strlen(line) + 8);
+    memcpy(o, text, head);
+    strcpy(o + head, line);
+    strcat(o, v ? "" : "\n");
+    strcat(o, text + tail_at);
+    return o;
+}
+
+static void test_legacy_layered(void)
+{
+    size_t n = 0;
+    char *head, *wounds, *t;
+    printf("-- old layered keys\n");
+    sh_modprog_reset();
+    head = read_fixture("legacy_head.decl", &n);
+    if (head) {
+        /* the tyrant's head: a constant height image (0x37f8 = 0.498046875), both extra maps unused */
+        check_layered("tyrant head", head, n, 0.0f, 0.498046875f, NULL, NULL);
+        /* a real height image takes a free extra map, the lowest one */
+        t = with_line(head, "blendlayer0heightmap", "blendlayer0heightmap\t\"mods/x/ml/base_h.tga\"");
+        check_layered("height in extra map 0", t, strlen(t), 1.0f, 0.0f, "multilayerextramap0", "mods/x/ml/base_h.tga");
+        /* a layer's specular image holds map 0: the height takes map 1 */
+        {
+            char *u = with_line(t, "blendlayer2specular", "blendlayer2specular\t{ 0, 0, 0, 1 }");
+            check_layered("height in extra map 1", u, strlen(u), 2.0f, 0.0f, "multilayerextramap1", "mods/x/ml/base_h.tga");
+            free(u);
+        }
+        /* both maps held (a burn's tile and cap blood): no room, the neutral height as the constant */
+        {
+            char *u = with_line(t, "multilayerember", "multilayerember\t{ 1, 0, 1, 2 }");
+            check_layered("both extra maps held", u, strlen(u), 0.0f, 0.498046875f, NULL, NULL);
+            free(u);
+        }
+        /* a material that names no height image: the neutral constant */
+        {
+            char *u = with_line(head, "blendlayer0heightmap", "// no base height");
+            check_layered("no height image", u, strlen(u), 0.0f, 0.498046875f, NULL, NULL);
+            free(u);
+        }
+        free(t);
+        free(head);
+    }
+    /* the tyrant's wounds: the specular images of layers 1 to 3 hold the other defaults; its constants as the head's */
+    wounds = read_fixture("legacy_wounds.decl", &n);
+    if (wounds) {
+        check_layered("tyrant wounds", wounds, n, 0.0f, 0.498046875f, NULL, NULL);
+        free(wounds);
+    }
+    sh_modprog_reset();
+}
 
 static void test_real(const char *doom)
 {
@@ -630,7 +1131,11 @@ static void test_real(const char *doom)
         CHECK(svb && sfb && spvb && spfb);
         if (svb && sfb && spvb && spfb) {
             check_unit(bases[i], d, b, v, f, svb, svn, sfb, sfn);
+            printf("   %s: %d textures over its stages (the engine's 32)\n", bases[i], g_stage_textures);
+            CHECK(g_stage_textures > 0 && g_stage_textures <= 32 && (i == 0 || g_stage_textures == 32));
             check_unit(bases[i], pd, pb, pv, pf, spvb, spvn, spfb, spfn);
+            printf("   %s permutation: %d textures\n", bases[i], g_stage_textures);
+            CHECK(g_stage_textures > 0 && g_stage_textures <= 32 && (i == 0 || g_stage_textures == 32));
         }
         /* modstock answers for them as installed content of the product's container */
         CHECK(sh_modstock_identify(f, sha, &sz) == SH_MB_STOCK_OK && sz > 0);
@@ -657,6 +1162,7 @@ int main(int argc, char **argv)
     int i;
     for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "doom=", 5) && argv[i][5]) doom = argv[i] + 5;
     for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "dump=", 5) && argv[i][5]) g_dump = argv[i] + 5;
+    for (i = 1; i < argc; ++i) if (!strncmp(argv[i], "fixtures=", 9) && argv[i][9]) g_fixtures = argv[i] + 9;
     printf("modprog_test\n");
     test_decl();
     test_glsl();
@@ -664,6 +1170,10 @@ int main(int argc, char **argv)
     test_derivation();
     test_ep_texts();
     test_ep_splice();
+    test_image();
+    test_registry();
+    if (g_fixtures) { test_legacy_particle(); test_legacy_layered(); }
+    else printf("-- old material keys: no fixtures given (fixtures=<dir>); skipped\n");
     if (doom) test_real(doom);
     else printf("-- the installed game's programs: no install given (doom=<root>); skipped\n");
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

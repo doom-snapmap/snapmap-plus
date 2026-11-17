@@ -4,6 +4,8 @@
 // Compiled into tests/modprog_fixture.c by tools/gen_programs.js.
 layout( binding = 2 ) uniform freqHigh_fragmentUniforms_ubo {
 	vec4 particleuberparms1;
+	vec4 particleuberparms2;
+	vec4 particleuberparms3;
 	vec4 renderpositiontoviewtexture;
 	vec4 emissive;
 }

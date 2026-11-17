@@ -1,4 +1,4 @@
-// layered.rp -- the multilayer blend of the product's render programs (modprog.h): ONE source, in the render program
+// layered.rp -- the layered surface of the product's render programs (modprog.h): ONE source, in the render program
 // language, for both renderers.
 //
 // An .rp file has two sections, and tools/gen_programs.js builds programs_layered.c from them:
@@ -15,9 +15,9 @@
 //                           call the function. The Vulkan splice loads the same values from the same material
 //                           uniforms (tables in modprog.c), in the same order.
 //
-// DOOM Eternal draws a MATERIAL_IS_MULTILAYER character material (nearly every demon's wounds, gore and head) as
-// its own layer blended with up to four tiled layers, each selected by one channel of a mask:
-//   M = min(mask(uv) * multiblendlayerscale, 1); hb = (H0 - 127/255) * blendheightmapscale (layer 0's height);
+// A layered surface is the material's own layer blended with up to four tiled layers, each selected by one channel of
+// a mask:
+//   M = min(mask(uv) * layer scale, 1); hb = (H0 - 127/255) * height scale (layer 0's height, below);
 //   for layer i (mask channel i) where m = M[i] != 0: hi = (Hi(uv * tiling[i]) - 127/255) * heightmapscale[i],
 //   t0 = clamp(((hi + m) - (hb + 1 - m)) / softness[i], -1, 1) / 2 + 0.5, and within 0.1 of either end of the mask
 //   t moves toward m by saturate((|0.5 - m| - 0.4) / 0.1); then albedo, specular, smoothness, normal and emissive
@@ -40,11 +40,18 @@
 //   emissive    the program's own emissive term recomputed from that mask
 // The base program adds the emissive twice: once into the ambient light the albedo multiplies (emissive x colorscale
 // x color) and once in its composite (bloommaskscale x mask^2 x bloomcolor), so a mask m leaves the surface as
-// bloommaskscale m^2 bloomcolor (1 + colorscale color albedo). DOOM Eternal writes its emissive once; the mask is
-// divided so that the bloom colour's brightest channel leaves exactly as Eternal's (the others within the ratio of
+// bloommaskscale m^2 bloomcolor (1 + colorscale color albedo). The blend writes its emissive once; the mask is
+// divided so that the bloom colour's brightest channel leaves exactly as written (the others within the ratio of
 // their 1 + albedo terms).
 // Each layer image is sampled only where the mask selects its layer, with the screen-space footprint of its tiled
 // uv (the derivatives are taken once, in uniform control flow).
+//
+// The numbers are not render parms. The program reads 28 vectors from one small image, $layerParms (8 x 4 texels,
+// RGBA16F, one mip): vector k is the texel ( k % 8, k / 8 ), fetched exactly (texelFetch, no filtering), and a layer's
+// vectors are fetched only where its mask is non-zero. The image is the material's: modprog.c writes it from the
+// vectors, so the program takes none of the engine's 1,024 vector render parm slots. Layer 0's height has no sampler of
+// its own: vector 9 says where it comes from (below). The two extra maps are a pool shared by the burn tile, the
+// burn's layer-0 glow, the wound cap's blood, the base height and the layers' specular and glow images.
 //
 // The Vulkan splice keeps ml_blend and what it calls and binds each $texture below to the base program's sampler or
 // to a sampler it adds after the program's own textures (the list and its order are modprog.c's
@@ -58,6 +65,9 @@ hlsl_fp_header {
 	float ml_srgb_enc( float v ) { v = saturate( v ); return v <= 0.0031308 ? v * 12.92 : 1.055 * pow( v, 1.0 / 2.4 ) - 0.055; }
 	float3 ml_srgb_enc3( float3 v ) { return float3( ml_srgb_enc( v.x ), ml_srgb_enc( v.y ), ml_srgb_enc( v.z ) ); }
 
+	// Vector k of the parameter image (8 x 4 texels, texel ( k % 8, k / 8 )).
+	float4 ml_p( int k ) { return texelFetch( $layerParms, int2( k % 8, k / 8 ), 0 ); }
+
 	float3 ml_decode_normal( float2 v )
 	{
 	    float2 n = v * ( 255.0 / 128.0 ) - 1.0;
@@ -65,17 +75,17 @@ hlsl_fp_header {
 	}
 
 	// One blend layer i (0..3: mask channel R, G, B, A selects layer i + 1), moving the running layer toward it.
-	void ml_layer( int i, float m, float hb, float2 uv, float2 dx, float2 dy, float time, float4 P[28],
+	void ml_layer( int i, float m, float hb, float2 uv, float2 dx, float2 dy, float time,
 	               sampler2D s_albedo, sampler2D s_normal, sampler2D s_smoothness, sampler2D s_height,
 	               inout float4 f_alb, inout float4 f_spec, inout float f_smooth, inout float4 f_n, inout float4 f_em )
 	{
 	    BRANCH if ( m != 0.0 ) {
-	        float tl = P[0][i];
-	        float4 lt = P[12 + i];
-	        float hi = ( tex2D( s_height, uv * tl, dx * tl, dy * tl ).x - ML_HEIGHT_MID ) * P[2][i];
+	        float tl = ml_p( 0 )[i];
+	        float4 lt = ml_p( 12 + i );
+	        float hi = ( tex2D( s_height, uv * tl, dx * tl, dy * tl ).x - ML_HEIGHT_MID ) * ml_p( 2 )[i];
 	        float a = ( hb + 1.0 ) - m;
 	        float b = ( hi + 0.0 ) + m;
-	        float t0 = clamp( ( b - a ) / P[3][i], -1.0, 1.0 ) / 2.0 + 0.5;
+	        float t0 = clamp( ( b - a ) / ml_p( 3 )[i], -1.0, 1.0 ) / 2.0 + 0.5;
 	        float f = saturate( ( abs( 0.5 - m ) - ( 0.5 - ML_EDGE ) ) / ML_EDGE );
 	        float t;
 	        if ( m < ML_EDGE && t0 > m ) {
@@ -89,44 +99,54 @@ hlsl_fp_header {
 	        float2 lu = ( uv * tl ) * lsc + time * lt.zw;
 	        float2 ldx = dx * tl * lsc;
 	        float2 ldy = dy * tl * lsc;
-	        BRANCH if ( P[4][i] != 0.0 ) {
-	            f_alb = lerp( f_alb, float4( tex2D( s_albedo, lu, ldx, ldy ).xyz, 1.0 ), _float4( t * P[4][i] ) );
+	        float sa = ml_p( 4 )[i];
+	        BRANCH if ( sa != 0.0 ) {
+	            f_alb = lerp( f_alb, float4( tex2D( s_albedo, lu, ldx, ldy ).xyz, 1.0 ), _float4( t * sa ) );
 	        }
-	        BRANCH if ( P[6][i] != 0.0 ) {
-	            float4 ls = P[16 + i];
+	        float ss = ml_p( 6 )[i];
+	        BRANCH if ( ss != 0.0 ) {
+	            float4 ls = ml_p( 16 + i );
 	            float3 l_spec = ls.w == 1.0 ? tex2D( $multilayerExtraMap0, lu, ldx, ldy ).xyz :
 	                            ls.w == 2.0 ? tex2D( $multilayerExtraMap1, lu, ldx, ldy ).xyz : ls.xyz;
-	            f_spec = lerp( f_spec, float4( l_spec, 1.0 ), _float4( t * P[6][i] ) );
+	            f_spec = lerp( f_spec, float4( l_spec, 1.0 ), _float4( t * ss ) );
 	        }
-	        BRANCH if ( P[7][i] != 0.0 ) {
-	            f_smooth = lerp( f_smooth, tex2D( s_smoothness, lu, ldx, ldy ).x, t * P[7][i] );
+	        float sm = ml_p( 7 )[i];
+	        BRANCH if ( sm != 0.0 ) {
+	            f_smooth = lerp( f_smooth, tex2D( s_smoothness, lu, ldx, ldy ).x, t * sm );
 	        }
-	        BRANCH if ( P[5][i] != 0.0 ) {
-	            f_n = lerp( f_n, float4( tex2D( s_normal, lu, ldx, ldy ).xy, 0.0, 0.0 ), _float4( t * P[5][i] ) );
+	        float sn = ml_p( 5 )[i];
+	        BRANCH if ( sn != 0.0 ) {
+	            f_n = lerp( f_n, float4( tex2D( s_normal, lu, ldx, ldy ).xy, 0.0, 0.0 ), _float4( t * sn ) );
 	        }
-	        BRANCH if ( P[8][i] != 0.0 ) {
-	            float4 le = P[20 + i];
+	        float se = ml_p( 8 )[i];
+	        BRANCH if ( se != 0.0 ) {
+	            float4 le = ml_p( 20 + i );
 	            float3 l_em = le.w == 1.0 ? tex2D( $multilayerExtraMap0, lu, ldx, ldy ).xyz * le.xyz :
 	                          le.w == 2.0 ? tex2D( $multilayerExtraMap1, lu, ldx, ldy ).xyz * le.xyz : le.xyz;
-	            f_em = lerp( f_em, float4( l_em, 0.0 ), _float4( t * P[8][i] ) );
+	            f_em = lerp( f_em, float4( l_em, 0.0 ), _float4( t * se ) );
 	        }
 	    }
 	}
 
-	// DOOM Eternal's ember: characteropaque's wound block for an isember material, after the layers (R-G9's reading,
-	// tools/vt/multilayer.py Blend._ember): g is the wound cap's blood level (its image's green; 1 with no cap image),
+	// A burning surface, after the layers: g is the wound cap's blood level (its image's green; 1 with no cap image),
 	// the blood takes the specular toward 0.02 and the smoothness toward 0.75 by its coverage squared, 1 - g burns
 	// the surface (normal toward the burnt tile's, charcoal albedo, smoothness and specular), and the emissive gains the
-	// embers (1, 0.07, 0) x 25 N.x N.y, flickered by the view's scrolled noise (magnificationclouds), animated as Eternal
-	// draws it. Emissive values are relative to the board's emissive scale; Pe[3].xyz is the ember colour on that scale.
-	void ml_ember( float2 uv, float2 dx, float2 dy, float time, float4 Pe[4], inout float4 f_alb, inout float4 f_spec,
+	// embers (1, 0.07, 0) x 25 N.x N.y, flickered by the view's scrolled noise (magnificationclouds). Emissive values
+	// are relative to the board's emissive scale; vector 27's rgb is the ember colour on that scale. The burn's vectors
+	// are 24 (x: 1 for a burning surface; z: the burnt tile in extra map 0 or 1, else none; w: the wound cap's blood
+	// image in extra map 0 or 1, else none), 25 (xy: the burnt tile's tiling), 26 (the noise's tiling and scroll) and 27.
+	void ml_ember( float2 uv, float2 dx, float2 dy, float time, inout float4 f_alb, inout float4 f_spec,
 	               inout float f_smooth, inout float3 r, inout float4 f_em )
 	{
-	    float2 bt = Pe[1].xy;
-	    float4 B = Pe[0].z == 1.0 ? tex2D( $multilayerExtraMap0, uv * bt, dx * bt, dy * bt ) :
-	               Pe[0].z == 2.0 ? tex2D( $multilayerExtraMap1, uv * bt, dx * bt, dy * bt ) : float4( 0.5, 0.5, 0.0, 0.0 );
-	    float g = Pe[0].w == 1.0 ? tex2D( $multilayerExtraMap0, uv, dx, dy ).y :
-	              Pe[0].w == 2.0 ? tex2D( $multilayerExtraMap1, uv, dx, dy ).y : 1.0;
+	    float4 pe0 = ml_p( 24 );
+	    float4 pe1 = ml_p( 25 );
+	    float4 pe2 = ml_p( 26 );
+	    float4 pe3 = ml_p( 27 );
+	    float2 bt = pe1.xy;
+	    float4 B = pe0.z == 1.0 ? tex2D( $multilayerExtraMap0, uv * bt, dx * bt, dy * bt ) :
+	               pe0.z == 2.0 ? tex2D( $multilayerExtraMap1, uv * bt, dx * bt, dy * bt ) : float4( 0.5, 0.5, 0.0, 0.0 );
+	    float g = pe0.w == 1.0 ? tex2D( $multilayerExtraMap0, uv, dx, dy ).y :
+	              pe0.w == 2.0 ? tex2D( $multilayerExtraMap1, uv, dx, dy ).y : 1.0;
 	    float ig = 1.0 - g;
 	    float bb = B.z;
 	    float w = saturate( 1.0 - g * g );
@@ -143,11 +163,11 @@ hlsl_fp_header {
 	    f_alb.xyz = f_alb.xyz + ( charcoal - f_alb.xyz ) * ig;
 	    f_smooth = f_smooth + ( ( 0.1 + ( 0.7 - 0.1 ) * bb ) - f_smooth ) * ig;
 	    f_spec.xyz = f_spec.xyz + ( _float3( 0.048 ) - f_spec.xyz ) * ig;
-	    float3 hot = ( bb * bb ) * Pe[3].xyz;
+	    float3 hot = ( bb * bb ) * pe3.xyz;
 	    float3 e1 = hot + ( f_em.xyz - hot ) * g;
 	    float s = ( B.w + ( bb - B.w ) * ig ) * ig;
 	    float3 k = ( _float3( s ) + ( e1 - _float3( s ) ) * g ) * float3( 1.0, 0.07, 0.0 ) * 25.0 * ( nxy.x * nxy.y );
-	    float4 nt = Pe[2];
+	    float4 nt = pe2;
 	    float2 u1 = float2( uv.x * nt.x, uv.y * nt.x + time * nt.z );
 	    float2 u2 = float2( uv.x * nt.y, uv.y * nt.y - time * nt.w );
 	    float n1 = tex2D( $magnificationClouds, u1, dx * nt.x, dy * nt.x ).x;
@@ -158,22 +178,26 @@ hlsl_fp_header {
 	    r = float3( x, sqrt( saturate( 1.0 - x.x * x.x - x.y * x.y ) ) );
 	}
 
-	// P: the material's multilayer parameters, in the order the program declares them (renderparm names):
-	//   0 layerstilingfactor  1 multiblendlayerscale  2 multiblendheightmapscale  3 multiblendsoftness
-	//   4 multiblendalbedoscale  5 multiblendnormalscale  6 multiblendspecularscale  7 multiblendsmoothnessscale
-	//   8 multiblendemissivescale  9 blendheightmapscale (x)  10 blendlayer0tiling  11 blendlayer0emissive (rgb: layer
-	//   0's emissive colour, brightest channel 1)  12..15 blendlayer1..4tiling (surface tiling xy, scroll xy)
-	//   16..19 blendlayer1..4specular (rgb: the layer's specular when it is one colour; w: 0 that colour, 1 or 2 the
-	//   image in extra map 0 or 1)  20..23 blendlayer1..4emissive (rgb: the layer's emissive, relative to the board's
-	//   emissive scale, or the factor of its emissive image; w: 0 that colour, 1 or 2 the image in extra map 0 or 1)
-	//   24 multilayerember (x: 1 for an isember material; y: layer 0's emissive image in extra map 0 or 1, else the
-	//   pages' mask (11's w then scales 11's rgb to the image's emissive on the board's scale); z: the burnt tile in extra map 0 or 1, else none; w: the
-	//   wound cap's blood image in extra map 0 or 1, else none)  25 multilayerembertiling (xy: the burnt tile's tiling)
-	//   26 multilayerembernoise (Eternal's emissivenoisetiling)  27 multilayeremberhot (rgb: the ember colour on the
+	// The parameter image, vector k (SH_MODPROG_ML_PARMS names them by the material keys the vectors had; modprog.c writes
+	// the image):
+	//   0 layers' tiling factor  1 layers' mask scale  2 layers' height scale  3 layers' softness
+	//   4 layers' albedo scale  5 layers' normal scale  6 layers' specular scale  7 layers' smoothness scale
+	//   8 layers' emissive scale  (0..8: one component per layer, layers 1..4)
+	//   9 layer 0's height: x its scale; y where the height comes from (0 the constant z, 1 or 2 the red of extra map 0
+	//   or 1, sampled at layer 0's tiled uv)
+	//   10 layer 0's tiling (surface tiling xy, scroll xy)  11 layer 0's emissive (rgb: its colour, brightest channel 1;
+	//   w: scales rgb to its emissive image's on the board's emissive scale)
+	//   12..15 layers 1..4's tiling (surface tiling xy, scroll xy)
+	//   16..19 layers 1..4's specular (rgb: the layer's specular when it is one colour; w: 0 that colour, 1 or 2 the image
+	//   in extra map 0 or 1)  20..23 layers 1..4's emissive (rgb: the layer's emissive, relative to the board's emissive
+	//   scale, or the factor of its emissive image; w: 0 that colour, 1 or 2 the image in extra map 0 or 1)
+	//   24 the burn (x: 1 for a burning surface; y: layer 0's emissive image in extra map 0 or 1, else the pages' mask;
+	//   z: the burnt tile in extra map 0 or 1, else none; w: the wound cap's blood image in extra map 0 or 1, else none)
+	//   25 the burnt tile's tiling (xy)  26 the embers' noise (tiling xy, scroll zw)  27 the ember colour (rgb, on the
 	//   board's emissive scale)
 	// E: bloommaskscale, colorscale, color, bloomcolor (the program's emissive factors)
 	void ml_blend( inout float3 albedo, inout float3 specular, inout float smoothness, inout float3 normal,
-	               inout float3 lightmap, inout float3 emissive, inout float thickness, float4 texcoords, float time, float4 P[28],
+	               inout float3 lightmap, inout float3 emissive, inout float thickness, float4 texcoords, float time,
 	               float4 E[4] )
 	{
 	    float2 uv = texcoords.xy;
@@ -189,26 +213,31 @@ hlsl_fp_header {
 	    // the pages' mask is read from the sRGB plane already decoded; its square is layer 0's emissive intensity (the
 	    // converter writes the sRGB encoding of its square root)
 	    float raw0 = lightmap.x;
-	    float4 f_em = float4( P[11].xyz * ( raw0 * raw0 ), 0.0 );
+	    float4 p11 = ml_p( 11 );
+	    float4 f_em = float4( p11.xyz * ( raw0 * raw0 ), 0.0 );
 
-	    float2 uv0 = uv * P[10].xy + time * P[10].zw;
-	    BRANCH if ( P[24].y != 0.0 ) {
-	        // an ember material reads layer 0's emissive image itself (its colour, not only the pages' mask)
-	        float2 d0x = dx * P[10].xy, d0y = dy * P[10].xy;
-	        float3 e0 = P[24].y == 1.0 ? tex2D( $multilayerExtraMap0, uv0, d0x, d0y ).xyz : tex2D( $multilayerExtraMap1, uv0, d0x, d0y ).xyz;
-	        f_em = float4( e0 * P[11].xyz * P[11].w, 0.0 );
+	    float4 p10 = ml_p( 10 );
+	    float2 uv0 = uv * p10.xy + time * p10.zw;
+	    float2 d0x = dx * p10.xy, d0y = dy * p10.xy;
+	    float4 p24 = ml_p( 24 );
+	    BRANCH if ( p24.y != 0.0 ) {
+	        // a burning surface reads layer 0's emissive image itself (its colour, not only the pages' mask)
+	        float3 e0 = p24.y == 1.0 ? tex2D( $multilayerExtraMap0, uv0, d0x, d0y ).xyz : tex2D( $multilayerExtraMap1, uv0, d0x, d0y ).xyz;
+	        f_em = float4( e0 * p11.xyz * p11.w, 0.0 );
 	    }
-	    float h0 = tex2D( $blendLayer0HeightMap, uv0, dx * P[10].xy, dy * P[10].xy ).x;
-	    float4 M = min( tex2D( $layerBlendMask, uv, dx, dy ) * P[1], _float4( 1.0 ) );
-	    float hb = ( h0 - ML_HEIGHT_MID ) * P[9].x;
+	    float4 p9 = ml_p( 9 );
+	    float h0 = p9.y == 1.0 ? tex2D( $multilayerExtraMap0, uv0, d0x, d0y ).x :
+	               p9.y == 2.0 ? tex2D( $multilayerExtraMap1, uv0, d0x, d0y ).x : p9.z;
+	    float4 M = min( tex2D( $layerBlendMask, uv, dx, dy ) * ml_p( 1 ), _float4( 1.0 ) );
+	    float hb = ( h0 - ML_HEIGHT_MID ) * p9.x;
 
-	    ml_layer( 0, M[0], hb, uv, dx, dy, time, P, $blendLayer1AlbedoMap, $blendLayer1NormalMap, $blendLayer1SmoothnessMap, $blendLayer1HeightMap,
+	    ml_layer( 0, M[0], hb, uv, dx, dy, time, $blendLayer1AlbedoMap, $blendLayer1NormalMap, $blendLayer1SmoothnessMap, $blendLayer1HeightMap,
 	              f_alb, f_spec, f_smooth, f_n, f_em );
-	    ml_layer( 1, M[1], hb, uv, dx, dy, time, P, $blendLayer2AlbedoMap, $blendLayer2NormalMap, $blendLayer2SmoothnessMap, $blendLayer2HeightMap,
+	    ml_layer( 1, M[1], hb, uv, dx, dy, time, $blendLayer2AlbedoMap, $blendLayer2NormalMap, $blendLayer2SmoothnessMap, $blendLayer2HeightMap,
 	              f_alb, f_spec, f_smooth, f_n, f_em );
-	    ml_layer( 2, M[2], hb, uv, dx, dy, time, P, $blendLayer3AlbedoMap, $blendLayer3NormalMap, $blendLayer3SmoothnessMap, $blendLayer3HeightMap,
+	    ml_layer( 2, M[2], hb, uv, dx, dy, time, $blendLayer3AlbedoMap, $blendLayer3NormalMap, $blendLayer3SmoothnessMap, $blendLayer3HeightMap,
 	              f_alb, f_spec, f_smooth, f_n, f_em );
-	    ml_layer( 3, M[3], hb, uv, dx, dy, time, P, $blendLayer4AlbedoMap, $blendLayer4NormalMap, $blendLayer4SmoothnessMap, $blendLayer4HeightMap,
+	    ml_layer( 3, M[3], hb, uv, dx, dy, time, $blendLayer4AlbedoMap, $blendLayer4NormalMap, $blendLayer4SmoothnessMap, $blendLayer4HeightMap,
 	              f_alb, f_spec, f_smooth, f_n, f_em );
 
 	    // reoriented normal mapping onto layer 0's normal
@@ -217,9 +246,8 @@ hlsl_fp_header {
 	    float3 tt = n0 + float3( 0.0, 0.0, 1.0 );
 	    float3 uu = float3( -d.x, -d.y, d.z );
 	    float3 r = normalize( tt * dot( tt, uu ) - uu * tt.z );
-	    BRANCH if ( P[24].x != 0.0 ) {
-	        float4 Pe[4] = { P[24], P[25], P[26], P[27] };
-	        ml_ember( uv, dx, dy, time, Pe, f_alb, f_spec, f_smooth, r, f_em );
+	    BRANCH if ( p24.x != 0.0 ) {
+	        ml_ember( uv, dx, dy, time, f_alb, f_spec, f_smooth, r, f_em );
 	    }
 
 	    albedo = f_alb.xyz;
@@ -240,16 +268,7 @@ hlsl_fp_header {
 }
 
 call {
-	float4 mlP[28] = {
-		$layersTilingFactor, $multiblendLayerScale, $multiblendHeightmapScale, $multiblendSoftness,
-		$multiblendAlbedoScale, $multiblendNormalScale, $multiblendSpecularScale, $multiblendSmoothnessScale,
-		$multiblendEmissiveScale, $blendHeightmapScale, $blendLayer0Tiling, $blendLayer0Emissive,
-		$blendLayer1Tiling, $blendLayer2Tiling, $blendLayer3Tiling, $blendLayer4Tiling,
-		$blendLayer1Specular, $blendLayer2Specular, $blendLayer3Specular, $blendLayer4Specular,
-		$blendLayer1Emissive, $blendLayer2Emissive, $blendLayer3Emissive, $blendLayer4Emissive,
-		$multilayerEmber, $multilayerEmberTiling, $multilayerEmberNoise, $multilayerEmberHot
-	};
 	float4 mlE[4] = { $bloomMaskScale, $colorScale, $color, $bloomColor };
 	ml_blend( inputs.albedo, inputs.specular, inputs.smoothness, inputs.normal, inputs.lightmap, inputs.emissive,
-	          inputs.thickness, inputs.texCoords, $time.x, mlP, mlE );
+	          inputs.thickness, inputs.texCoords, $time.x, mlE );
 }

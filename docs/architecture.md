@@ -1572,27 +1572,40 @@ The first open of each served render-program file logs
 `MODS: renderprog: served <request> (<mod name>, <n> bytes)` (the first 64),
 which shows the variant this GPU binds.
 
-#### Multilayer render programs
+#### Layered render programs
 
 Snapmap+ provides render programs of its own, `snapmapplus/layered/skinvmtr`
 and `snapmapplus/layered/skinvmtrwounds` (`modprog.c`, `modprog.h`), which a
-mod's material names like any program. Each is the game's lit skinned
-virtual-texture program of the same base name with DOOM Eternal's multilayer
-blend added: the material's own layer, read from its virtual-texture pages, is
+mod's material names like any program; the material that names one is written as
+a `look layered` material (see [the Graphics SDK](graphics-sdk.md)). Each is the
+game's lit skinned virtual-texture program of the same base name with a layered
+surface added: the material's own layer, read from its virtual-texture pages, is
 blended with up to four tiled layers, one per channel of `layerblendmask`, by a
 height-weighted transition, with reoriented normal mapping, before the wound
-block and lighting. The rule, the material keys it reads (`layerstilingfactor`,
-`multiblend*scale`, `blendlayer<i>tiling`, `specular`, `emissive`, the layer
-images `blendlayer<i>{albedo,normal,smoothness,height}map`, `layerblendmask`,
-`blendlayer0heightmap` and `multilayerextramap0`/`1` for a layer's specular or
-emissive image) and what it writes into the lighting inputs are documented in
-`src/backend/programs/shaders/layered.rp`. A material Eternal draws with its ember
-(`isember`) also sets `multilayerember`, `multilayerembertiling`,
-`multilayerembernoise` and `multilayeremberhot`: after the blend the program
-burns the surface by the wound cap's blood level and adds the embers, flickered
+block and lighting. The rule is documented in
+`src/backend/programs/shaders/layered.rp`. The layers' images are the
+material's textures (`blendlayer<i>{albedo,normal,smoothness,height}map` and
+`layerblendmask`) and `multilayerextramap0`/`1`, a pool of two images shared by a
+layer's specular or glow image, the burn's tile, the burn's layer-0 glow, the
+wound cap's blood and the base height.
+
+The program's numbers are not render parms. The 28 vectors (tilings, scales,
+softness, the layers' specular and glow, where layer 0's height comes from, the
+burn) are the texels of one 8 x 4 RGBA16F image, the `layerparms` texture: vector
+k is the texel (k % 8, k / 8), fetched exactly with `texelFetch`, and a layer's
+vectors only where its mask is non-zero. `sh_modprog_param_image` writes the
+image (a DOOM 2016 `.bimage`), `sh_modprog_register_param_image` serves it at
+`generated/image/snapmapplus/look/<16 hex digits of its SHA-256>.bimage` in the
+product's container (the same vectors, the same path), and `SH_MODPROG_ML_PARMS`
+names the vectors by the material keys they had. Layer 0's height has no sampler
+of its own: vector 9 says whether it is a constant or the red channel of an
+extra map. A material emitted with the old keys (the 28 vectors and
+`blendlayer0heightmap`) is rewritten into the image by
+`sh_modprog_legacy_material`. A burning surface (the `isember` materials) also
+burns after the blend, by the wound cap's blood level, and adds embers flickered
 by the view's own `magnificationclouds` noise (the base program's sampler; the
-ember adds no texture), its burnt tile, cap blood and layer-0 emissive image in
-the two extra maps. Everything else is the base program unchanged.
+burn adds no texture), its burnt tile, cap blood and layer-0 glow image in the
+two extra maps. Everything else is the base program unchanged.
 
 Each program has one source, an `.rp` file in the render program language: an
 `hlsl_fp_header` section of functions (the engine compiles that section before
@@ -1601,7 +1614,8 @@ arguments from the stage inputs and render parms and calls them. The OpenGL
 renderer compiles the program from the decl text, which carries both sections as
 written. For Vulkan, `tools/gen_programs.js` translates the same functions to GLSL
 by a few explicit token rules (types, `lerp`, `frac`, `saturate`, `tex2D`,
-`tex2Dlod`, `clip`, `$texture` names), which becomes the cooked program's stage
+`tex2Dlod`, `clip`, `$texture` names; `texelFetch` and `int2` pass through),
+which becomes the cooked program's stage
 text and, compiled, the SPIR-V spliced into the base module; the splice loads
 the arguments from the same inputs and uniforms the call section names (the
 tables in `modprog.c`). `tests/programs_rp_test.js` checks both ends.
@@ -1613,39 +1627,52 @@ for, and `modstock.c` answers for it as installed content in the container
 `snapmapplus`: the closure brings it along as pointers (noted once per bundle),
 the checks above run on it as on any program, the server serves it, and an
 upload never sends it. The decl gains the blend's functions (in an
-`hlsl_fp_header` section) and its call (OpenGL compiles that text); the cooked `.bin` gains the blend's parameters after the fragment
-stage's material uniforms and its 20 textures after the stage's own, its binding
-tables moved past them; the fragment module has the blend's functions spliced in
-with its samplers bound after the program's textures; the vertex stage is the
-base's. `skinvmtrwounds` then binds exactly the engine's 32 textures across its
-stages (`ID_VULKAN_MAX_BOUND_TEXTURES`). A base program that is not the shape the
+`hlsl_fp_header` section) and its call (OpenGL compiles that text); the cooked
+`.bin` gains its 20 textures (19 images and the parameter image) after the
+stage's own, its binding tables moved past them, and no parameter (the
+fragment stage's material uniforms do not grow); the fragment module has the
+blend's functions spliced in with its samplers bound after the program's
+textures; the vertex stage is the base's. `skinvmtrwounds` then binds exactly
+the engine's 32 textures across its stages (`ID_VULKAN_MAX_BOUND_TEXTURES`),
+and the derivation refuses a program that would bind more. A base program that is not the shape the
 derivation knows makes the build fail with one sentence naming the program and
 pointing at the game's files.
 
-#### The DOOM Eternal particle program
+#### The particle program
 
 `snapmapplus/particles/uberparticles` (`modprog.c`, the same derivation) is the
 game's `uberParticles`, which every particle material is drawn with once the
 engine remaps `transsortblend`, `particleshighq`, `liquidhighq` and
-`explosionhighq` to it (`decl_useTransparentUberShader`, on by default), with DOOM
-Eternal's shading of a CPU particle stage: its unlit, lit and explosion modes,
+`explosionhighq` to it (`decl_useTransparentUberShader`, on by default), with the
+product's shading of a CPU particle stage: its unlit, lit and explosion modes,
 the near fade on the distance from the view and the soft-particle fade as a
 distance, from the same particle vertices (flipbook frames and blend, colour,
 `genericParm` as the engine packs it). The colour and its alpha are read as the
 CPU wrote them, linear: the game's vertex stage hands them over sRGB-decoded and
 its CPU remaps the alpha past `r_particlesMinAlpha`, and the shading undoes both
-first, as DOOM Eternal's vertex program passes the colour on unchanged. The stock shading still runs and its
-colour is replaced before the stage returns. A material that names it sets
-`eternalparticle` (mode, emissive multiplier, emissive mask multiplier,
-`depthOffsetScale`), `eternalparticlefade` (near fade begin and end, soft
-distance, whether `eternalparticleemissivemap` holds an emissive sheet),
-`eternalparticlecolor` and `eternalparticlecolor2` (the emissive mask colour or
-the explosion's two gradient colours); the shading also reads the game's own
-`projectionmatrixz` and `globalvieworigin`, added to the stage's material
-uniforms, and the program's own `transmap`, `viewdepthmap` and particle light
-atlas samplers. The rule is documented in `src/backend/programs/shaders/particles.rp`,
-the one source of both renderers' text. A liquid stage keeps the game's
-own blood shading.
+first. The stock shading still runs and its colour is replaced before the stage
+returns. The stage's constants take no render parm of the product's own: they are
+kept in keys the game's particle program already holds, by what they mean.
+`particleuberparms1` holds the mode in z (0 unlit, 1 lit, 4 explosion, plus 16
+when the emissive mask sheet is bound) and the depth offset scale in w (x and y are
+0, left for the game's own code that still runs), `particleuberparms2` the
+emissive mask colour or the explosion's second gradient colour in xyz and the near
+fade's begin in w, `particleuberparms3` the explosion's third colour in xyz and
+the emissive multiplier in w, `emissive` the near fade's end in y, the soft
+distance in z and a lit stage's scale in w (x stays the material's own), and
+`smokebrightness`, a vector no engine code, program or fx names, the emissive
+mask's multiplier in x. The shading loads the first four from the program's own
+material uniforms; `smokebrightness`, `projectionmatrixz` and `globalvieworigin`
+are appended to the fragment stage's material uniforms, and the emissive sheet is
+the texture `particleemissivemap`, added after the program's own. (The engine
+writes `particleuberparms` only for a material whose stage program it remaps to
+`uberparticles`, never for a material that names this program.)
+`SH_MODPROG_EP_PARMS` names the keys the constants had as render parms
+(`eternalparticle`, `eternalparticlefade`, `eternalparticlecolor`,
+`eternalparticlecolor2`), and `sh_modprog_legacy_material` rewrites a material that
+writes them. The rule is documented in `src/backend/programs/shaders/particles.rp`,
+the one source of both renderers' text. A liquid stage keeps the game's own
+blood shading.
 
 The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal/uberparticles` before they stopped naming a source game; both old names are served until 1.0 for mods emitted before the rename (`SH_MODPROG_OLD_PREFIX`, `SH_MODPROG_EP_OLD_PREFIX`), answering with the new name's bytes.
 
@@ -1658,18 +1685,18 @@ image buffers. A parm whose range is full is a fatal engine error, and under
 the fault shield a parm that never loads, so every program naming it draws the
 engine's default program. The vector range is the tight one: the game's own
 decls and its 128 expression temporaries (`temp1`..`temp128`, of which only 80
-have a decl file) hold 973, which leaves 51 for everything else, and the
-product's programs declare 32.
+have a decl file) hold 973, which leaves 51 for everything else. The product's
+programs declare none of them: the layered program reads its numbers from an
+image and the particle program from keys the game's own program holds
+(`docs/graphics-sdk.md`).
 
 `parmslots.c` detours `AllocParmState` on both renderers and decides first
 (`parmslots_rule.c`, pure):
 
 - A parm whose name already holds a slot, or whose range has room, is placed
-  by the engine as before, with one reservation: the vector parms of the
-  product's own programs (`sh_modprog_vector_parm`: the multilayer blend's and
-  the particle shading's) keep as many free vector slots
-  as they still need, whatever asks first. A mod's own parms cannot take the
-  slots a ported demon's programs draw with.
+  by the engine as before. The reservation for the vector parms of the
+  product's own programs (`sh_modprog_vector_parm`) is empty, because the
+  programs declare none: nothing is held back from a mod's own parms.
 - A vector parm that finds no slot of its own shares one. The last vector
   slot handed to a parm that is not the product's becomes the shared slot, and
   every later such parm is given it. Parms that share a slot read each other's
@@ -1680,8 +1707,9 @@ product's programs declare 32.
 
 Nothing is shown to the author or the player. The backend log has one `PARMS:`
 line when the guard is installed, one when the shared slot is made, and one
-for each of the first 32 parms that share a slot. With today's contents a mod
-gets two vector slots of its own and the shared one after them.
+for each of the first 32 parms that share a slot. With today's contents the
+product's programs take no vector slot, so a mod gets the 51 free ones and
+the shared one after them.
 
 #### Simulated particle motion
 
@@ -1774,9 +1802,10 @@ temp file beside the target and rename it there. Every other write, and one
 whose folder cannot be made, is passed through unchanged. The backend log has
 one `CACHE:` line when it is ready.
 
-`src/backend/programs/` holds DOOM Eternal's shading (the multilayer blend and the particle program) behind the general
+`src/backend/programs/` holds the layered surface and the particle shading behind the general
 derived-program mechanism of `modprog.c`.
-The blend's Vulkan module and texts are vendored in `programs/programs_layered.c`,
+The layered program's Vulkan module and texts are vendored in `programs/programs_layered.c`,
+the particle program's in `programs/programs_particles.c`,
 generated by `node tools/gen_programs.js` from `src/backend/programs/shaders/`
 (glslangValidator compiles the module; `--check`, run by the JavaScript tests,
 needs no compiler and compares the texts). `modprog_test` checks the decl, text

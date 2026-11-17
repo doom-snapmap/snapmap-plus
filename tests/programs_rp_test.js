@@ -71,20 +71,35 @@ test('the translator rules', () => {
   refused('half3 c;', /'half3'/);
   refused('x = tex2Dbias( s, v );', /'tex2Dbias'/);
   refused('x = tex2Dlod( s, float4( uv, 1.0, 0.0 ) );', /tex2Dlod is translated only as/);
+  // texelFetch and int2 pass through (the engine's language has GLSL's own texelFetch; int2 is ivec2), with the integer
+  // operators on the coordinate and a texture parm as the sampler
+  assert.equal(tr('float4 p( int k ) { return texelFetch( $layerParms, int2( k % 8, k / 8 ), 0 ); }'),
+               'vec4 p( int k ) { return texelFetch( samp_layerparms, ivec2( k % 8, k / 8 ), 0 ); }');
+  assert.equal(tr('float4 v = texelFetch( s, int2( 3, 1 ), 0 ) * 2.0f;'), 'vec4 v = texelFetch( s, ivec2( 3, 1 ), 0 ) * 2.0;');
 });
 
 test('the call blocks load what the splice loads, in its order', () => {
-  // the multilayer blend: P is SH_MODPROG_ML_PARMS, E the program's emissive factors
+  // the layered surface: its 28 vectors are not render parms (the call block passes none: the program reads the
+  // parameter image), E is the program's emissive factors
   const ml = progs.layered.call;
-  const mlP = arrayInit(ml, 'mlP');
-  assert.deepEqual(parmNames(mlP.items), table('SH_MODPROG_ML_PARMS'));
-  assert.equal(mlP.size, mlP.items.length);
-  assert.ok(new RegExp(`ml_blend\\( [^;]*\\$time\\.x, mlP, mlE \\)`).test(ml.replace(/\s+/g, ' ')), 'ml_blend is called with $time.x, mlP, mlE');
+  assert.ok(!/float4 mlP\b/.test(ml), 'the layered call passes no vector parms');
+  assert.ok(new RegExp(`ml_blend\\( [^;]*\\$time\\.x, mlE \\)`).test(ml.replace(/\s+/g, ' ')), 'ml_blend is called with $time.x, mlE');
   const mlE = arrayInit(ml, 'mlE');
   assert.deepEqual(parmNames(mlE.items), table('MP_EMISSIVE'));
   const header = progs.layered.header;
-  assert.match(header, new RegExp(`float4 P\\[${mlP.size}\\]`));
   assert.match(header, new RegExp(`float4 E\\[${mlE.size}\\]`));
+  assert.ok(!/float4 P\[/.test(header), 'the blend takes no parameter array');
+  // the parameter image: every vector the header fetches is one of the table's 28, and all 28 are read
+  const names = table('SH_MODPROG_ML_PARMS');
+  assert.equal(names.length, 28);
+  const fetched = new Set();
+  for (const m of header.matchAll(/ml_p\( (\d+)( \+ i)? \)/g)) {
+    const k = Number(m[1]);
+    assert.ok(k + (m[2] ? 3 : 0) < 28, `ml_p( ${k} ) is past the image`);
+    for (let i = 0; i <= (m[2] ? 3 : 0); i++) fetched.add(k + i);
+  }
+  assert.deepEqual([...fetched].sort((a, b) => a - b), names.map((_, k) => k), 'every vector is fetched');
+  assert.match(header, /texelFetch\( \$layerParms, int2\( k % 8, k \/ 8 \), 0 \)/);
   // the splice passes the lighting inputs in this order
   const inout = table('MP_INOUT');
   const m = /ml_blend\(([^;]*)\);/.exec(ml.replace(/\s+/g, ' '));
@@ -105,7 +120,14 @@ test('the call blocks load what the splice loads, in its order', () => {
   assert.ok(table('EP_UNIFORMS').every((x) => 'hl'.includes(x[0])));
   assert.match(ep.replace(/\s+/g, ' '), /ep_shade\( result\.color, epV, epP, epU \);/);
   assert.match(progs.particles.header, new RegExp(`float4 V\\[${epV.size}\\], float4 P\\[${epP.size}\\], float4 U\\[${epU.size}\\]`));
-  assert.match(modprogC, /EP_BLOCK_PARMS\[\] = \{[^}]*"eternalparticle"/);   // the first four are the product's own
+  // the three appended parameters are the game's own vectors (smokebrightness, which nothing else names), and the
+  // product's programs declare no vector render parm
+  assert.deepEqual(table('EP_BLOCK_PARMS'), ['smokebrightness', 'projectionmatrixz', 'globalvieworigin']);
+  assert.deepEqual(table('EP_UNIFORMS').slice(7), ['hparticleuberparms1', 'hparticleuberparms2', 'hparticleuberparms3', 'hemissive']);
+  const decls = modprogC.slice(modprogC.indexOf('MP_PARM_DECLS[] = {'), modprogC.indexOf('#define MP_NPARM_DECLS'));
+  assert.ok(!/\{ Vec\b/.test(decls), 'the product derives no vector render parm decl');
+  assert.match(decls, /"layerparms"/);
+  assert.match(decls, /"particleemissivemap"/);
 });
 
 test('the header reads exactly the program\'s textures', () => {

@@ -105,6 +105,7 @@ function dedent(text) {
 //   saturate( x ) -> clamp( x, 0.0, 1.0 );
 //   tex2D( s, uv ) -> texture( s, uv ); tex2D( s, uv, dx, dy ) -> textureGrad( s, uv, dx, dy );
 //   tex2Dlod( s, float4( uv, 0, 0 ) ) -> textureLod( s, uv, 0.0 ) (any other coordinate is refused);
+//   texelFetch( s, int2( x, y ), lod ) passes through (the engine's language has GLSL's texelFetch; int2 -> ivec2);
 //   clip( x ) -> if ( x < 0.0 ) discard, a scalar x (clip( a - b ) -> if ( a < b ) discard: the same test, a - b being
 //     negative exactly when a < b); a statement, so it needs its own ;
 //   $name -> the sampler the caller names for the texture parm (samp_<lowercase name> in the stage text); a $ whose
@@ -208,7 +209,8 @@ function tr(toks, opts) {
 
 // A program: its source, the samplers its header names ([the stub's sampler, the texture parm]) and its stub.
 function layeredSpec() {
-  const samplers = [['ml_mask', 'layerblendmask'], ['ml_height0', 'blendlayer0heightmap']];
+  // the parameter image takes the place of layer 0's height image: the program's 20 textures stay 20
+  const samplers = [['ml_mask', 'layerblendmask'], ['ml_params', 'layerparms']];
   for (let i = 1; i <= 4; i++)
     for (const k of ['albedo', 'normal', 'smoothness', 'height']) samplers.push([`ml_${k}${i}`, `blendlayer${i}${k}map`]);
   samplers.push(['ml_extra0', 'multilayerextramap0'], ['ml_extra1', 'multilayerextramap1']);
@@ -217,12 +219,12 @@ function layeredSpec() {
   return {
     file: 'layered.rp', samplers, name: 'ML',
     stubHead: 'layout(location = 0) in vec4 ml_in_uv;\nlayout(location = 0) out vec4 ml_out;\n',
-    stubTail: 'layout(binding = 30) uniform ml_parms_ubo { vec4 P[28]; vec4 E[4]; vec4 time; } ml_parms;\n\n' +
+    stubTail: 'layout(binding = 30) uniform ml_parms_ubo { vec4 E[4]; vec4 time; } ml_parms;\n\n' +
       'void main()\n{\n' +
       '    vec3 albedo = vec3(0.5), specular = vec3(0.04), normal = vec3(0.5, 0.5, 0.0), lightmap = vec3(0.0);\n' +
       '    vec3 emissive = vec3(0.0);\n' +
       '    float smoothness = 0.5, thickness = 0.0;\n' +
-      '    ml_blend(albedo, specular, smoothness, normal, lightmap, emissive, thickness, ml_in_uv, ml_parms.time.x, ml_parms.P,\n' +
+      '    ml_blend(albedo, specular, smoothness, normal, lightmap, emissive, thickness, ml_in_uv, ml_parms.time.x,\n' +
       '             ml_parms.E);\n' +
       '    ml_out = vec4(albedo + specular + emissive + lightmap + normal, smoothness + thickness);\n}\n',
   };
@@ -233,9 +235,9 @@ function particlesSpec() {
     file: 'particles.rp', name: 'EP',
     // the shading's samplers and the material textures they are (the first three the program's own)
     samplers: [['ep_trans', 'transmap'], ['ep_depth', 'viewdepthmap'], ['ep_atlas', 'particleslightatlasmap'],
-      ['ep_emissive', 'eternalparticleemissivemap']],
+      ['ep_emissive', 'particleemissivemap']],
     stubHead: 'layout(location = 0) in vec4 ep_in;\nlayout(location = 0) out vec4 ep_out;\n',
-    stubTail: 'layout(binding = 30) uniform ep_parms_ubo { vec4 V[7]; vec4 P[6]; vec4 U[7]; } ep_parms;\n\n' +
+    stubTail: 'layout(binding = 30) uniform ep_parms_ubo { vec4 V[7]; vec4 P[3]; vec4 U[11]; } ep_parms;\n\n' +
       'void main()\n{\n    vec4 frag = ep_in;\n    ep_shade(frag, ep_parms.V, ep_parms.P, ep_parms.U);\n    ep_out = frag;\n}\n',
   };
 }
@@ -326,8 +328,8 @@ function outputs() {
   const epFixture = read(path.join(root, 'tests', 'fixtures', 'modprog', 'particle.frag'));
   // each output: its file, the modules it embeds (source text and the C name of its words), its renderer
   return [
-    [out, [[progs.layered.spirvSource, 'SH_MODPROG_ML_SPIRV']], (w) => renderProgram(progs.layered, { file: 'layered.c', desc: 'The multilayer blend', words: w })],
-    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV']], (w) => renderProgram(progs.particles, { file: 'particles.c', desc: 'DOOM Eternal\'s particle shading', words: w })],
+    [out, [[progs.layered.spirvSource, 'SH_MODPROG_ML_SPIRV']], (w) => renderProgram(progs.layered, { file: 'layered.c', desc: 'The layered surface', words: w })],
+    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV']], (w) => renderProgram(progs.particles, { file: 'particles.c', desc: 'The particle shading', words: w })],
     [fixtureOut, [[fixture, 'MODPROG_FIXTURE_SPIRV'], [epFixture, 'MODPROG_FIXTURE_EP_SPIRV']], (w, e) => renderFixture(fixture, epFixture, w, e)],
   ];
 }

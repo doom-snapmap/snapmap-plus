@@ -1,0 +1,79 @@
+{
+surfacetype	surftype_flesh
+diffusemap	"mods/wuahwfly/models/monsters/tyrant/tyrant_wounds.tga"
+bumpmap	"mods/wuahwfly/models/monsters/tyrant/tyrant_wounds_n.tga"
+specularmap	"mods/wuahwfly/models/monsters/tyrant/tyrant_wounds_s.tga"
+powermap	"mods/wuahwfly/models/monsters/tyrant/tyrant_wounds_g.tga"
+ambientprogram	"snapmapplus/multilayer/skinvmtrwounds"
+zprepassprogram	prezdrawwound
+sssmaskscale	1.000000
+sssblurradius	1.700000
+sssblurscale	{ 1.000000, 0.500000, 0.300000, 1.000000 }
+ssscattering	{ 0.700000, 0.600000, 0.010023, 0.500000 }
+packedspec	0.000000
+pulsefreq	{ 0.000000, 0.000000, 0.000000, 0.000000 }
+pulseinfo	{ 0.000000, 0.000000, 0.000000, 0.000000 }
+pulseparms	{ 0.000000, 1.000000, 5.000000, 0.000000 }
+bloommask	"mods/wuahwfly/models/monsters/tyrant/tyrant_wounds_e.tga"
+bloomcolor	{ 1.000000, 0.316848, 0.139334, 1.000000 }
+bloommaskscale	4.000000
+bloodcolor	{ 0.862745, 0.047059, 0.047059, 0.000000 }
+usewoundclip	0.000000
+layerstilingfactor	{ 20, 6, 10, 10 }
+multiblendlayerscale	{ 1, 1, 1, 1 }
+multiblendheightmapscale	{ 1, 1, 1, 1 }
+multiblendsoftness	{ 0.25, 0.25, 0.25, 0.25 }
+multiblendalbedoscale	{ 0.5, 1, 0, 1 }
+multiblendnormalscale	{ 1, 1, 1, 1 }
+multiblendspecularscale	{ -1, -1, 0.5, 0 }
+multiblendsmoothnessscale	{ 1, 0, 1, 1 }
+multiblendemissivescale	{ 1, 1, 0, 0 }
+blendheightmapscale	{ 1, 0, 0, 0 }
+blendlayer0tiling	{ 1, 1, 0, 0 }
+blendlayer0emissive	{ 1, 1, 1, 0 }
+blendlayer1tiling	{ 1, 1, 0, 0 }
+blendlayer2tiling	{ 1, 1, 0, 0 }
+blendlayer3tiling	{ 1, 1, 0, 0 }
+blendlayer4tiling	{ 1, 1, 0, 0 }
+blendlayer1specular	{ 1, 1, 1, 0 }
+blendlayer2specular	{ 1, 1, 1, 0 }
+blendlayer3specular	{ 1, 1, 1, 0 }
+blendlayer4specular	{ 0, 0, 0, 0 }
+blendlayer1emissive	{ 0, 0, 0, 0 }
+blendlayer2emissive	{ 0, 0, 0, 0 }
+blendlayer3emissive	{ 0, 0, 0, 0 }
+blendlayer4emissive	{ 0, 0, 0, 0 }
+multilayerember	{ 0, 0, 0, 0 }
+multilayerembertiling	{ 4, 4, 0, 0 }
+multilayerembernoise	{ 1, 4, 0.7, 0.4 }
+multilayeremberhot	{ 1, 0.07, 0, 0 }
+layerblendmask	mods/wuahwfly/ml/models/monsters/tyrant/tyrant_wounds_mask_blendmask.tga
+blendlayer0heightmap	mods/wuahwfly/ml/const_37f8_37f8_37f8_3c00.tga
+blendlayer1albedomap	mods/wuahwfly/ml/art/tile/gore/blood_gore_char_albedo.tga
+blendlayer1normalmap	mods/wuahwfly/ml/art/tile/gore/blood_gore_char_n_normal.tga
+blendlayer1smoothnessmap	mods/wuahwfly/ml/art/tile/gore/blood_gore_char_g_smoothness.tga
+blendlayer1heightmap	mods/wuahwfly/ml/art/tile/gore/blood_gore_h_heightmap.tga
+blendlayer2albedomap	mods/wuahwfly/ml/art/tile/gore/bone_char_b_albedo.tga
+blendlayer2normalmap	mods/wuahwfly/ml/art/tile/gore/bone_char_b_n_normal.tga
+blendlayer2smoothnessmap	mods/wuahwfly/ml/art/tile/gore/bone_char_b_g_smoothness.tga
+blendlayer2heightmap	mods/wuahwfly/ml/art/tile/gore/bone_b_h_heightmap.tga
+blendlayer3albedomap	mods/wuahwfly/ml/const_3c00_3c00_3c00_3c00.tga
+blendlayer3normalmap	mods/wuahwfly/ml/art/tile/cultist/bare_metal_a_n_normal.tga
+blendlayer3smoothnessmap	mods/wuahwfly/ml/art/tile/hell_earth/metal_base_g_smoothness.tga
+blendlayer3heightmap	mods/wuahwfly/ml/const_37f8_37f8_37f8_3c00.tga
+blendlayer4albedomap	mods/wuahwfly/ml/art/tile/hell_earth/mech_metal1_albedo.tga
+blendlayer4normalmap	mods/wuahwfly/ml/art/tile/hell/metaltrim_02_n_normal.tga
+blendlayer4smoothnessmap	mods/wuahwfly/ml/art/tile/hell_earth/mech_metal1_g_smoothness.tga
+blendlayer4heightmap	mods/wuahwfly/ml/const_37f8_37f8_37f8_3c00.tga
+multilayerextramap0	mods/wuahwfly/ml/const_0000_0000_0000_3c00.tga
+multilayerextramap1	mods/wuahwfly/ml/const_0000_0000_0000_3c00.tga
+lightprojatlasscalebias	0.000000
+lightfalloffatlasscalebias	0.000000
+decalsatlasalbedoscalebias	0.000000
+decalsatlasspecularscalebias	0.000000
+decalsatlasnormalscalebias	0.000000
+landpagefile	"mods/wuahwfly/tyrant"
+usevirtualmapping	1.000000
+virtualmapping	{ 0.0083333333, 0.0083333333, 0.0087890625, 0.0000000000 }
+virtualtexturefeedbackfloat	{ 1.000000, 2048.000000, 245760.000000, 16.000000 }
+}
