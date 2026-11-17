@@ -489,11 +489,10 @@ descriptions, the event catalog/docs, asset lists), `src/backend/class_universe.
 on both shipped executables). They're checked in so the repo builds standalone — treat them as **vendored**.
 Don't hand-edit them in a PR; open an issue describing the change you need instead.
 
-`src/backend/eternal/modprog_multilayer.c`, `src/backend/eternal/modprog_particles.c` and
+`src/backend/programs/programs_layered.c`, `src/backend/programs/programs_particles.c` and
 `tests/modprog_fixture.c` are generated too, but from sources in this repository: edit
-`src/backend/eternal/shaders/multilayer.frag`, `multilayer.decl.inc`, `eternalparticles.frag`
-or `eternalparticles.decl.inc` (or
-`tests/fixtures/modprog/lit.frag` or `particle.frag`) and run `node tools/gen_multilayer.js`, which needs glslangValidator from the
+`src/backend/programs/shaders/layered.rp` or `particles.rp` (each one source in the render program language,
+for both renderers; or `tests/fixtures/modprog/lit.frag` or `particle.frag`) and run `node tools/gen_programs.js`, which needs glslangValidator from the
 Vulkan SDK on `PATH` (or named by `GLSLANG_VALIDATOR`). The JavaScript tests fail when the generated files are
 out of date.
 

@@ -1,0 +1,9 @@
+{
+  "name": "Look fixture lookbad0",
+  "author": "fixture",
+
+  "snapmap-plus": {
+    "format": 2,
+    "salt": "lookbad0"
+  }
+}

@@ -7,6 +7,7 @@
 
 #include "../common/text.h"
 #include "modprog.h"
+#include "sha256.h"
 #include "modbundle.h"
 #include "modstock.h"
 
@@ -34,6 +35,9 @@ typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = { { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 } };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
+/* The layered program's 28 vectors, by the material keys they had when each was a render parm: vector k of the
+ * parameter image (layered.rp), the name the serve filter maps to it. NOT render parms: the product declares none
+ * of them, the program reads the image (the `layerparms` texture). */
 const char *const SH_MODPROG_ML_PARMS[] = {
     "layerstilingfactor", "multiblendlayerscale", "multiblendheightmapscale", "multiblendsoftness",
     "multiblendalbedoscale", "multiblendnormalscale", "multiblendspecularscale", "multiblendsmoothnessscale",
@@ -44,8 +48,21 @@ const char *const SH_MODPROG_ML_PARMS[] = {
     "multilayerember", "multilayerembertiling", "multilayerembernoise", "multilayeremberhot",
 };
 const unsigned SH_MODPROG_ML_PARM_COUNT = sizeof SH_MODPROG_ML_PARMS / sizeof SH_MODPROG_ML_PARMS[0];
+/* What a vector the material does not set was (the parms' decl defaults), for a material that sets only some. */
+static const float ML_DEFAULTS[28][4] = {
+    { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 0.25f, 0.25f, 0.25f, 0.25f },
+    { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 },
+    { 1, 1, 1, 1 }, { 1, 0, 0, 0 }, { 1, 1, 0, 0 }, { 1, 1, 1, 0 },
+    { 1, 1, 0, 0 }, { 1, 1, 0, 0 }, { 1, 1, 0, 0 }, { 1, 1, 0, 0 },
+    { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
+    { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
+    { 0, 0, 0, 0 }, { 4, 4, 0, 0 }, { 1, 4, 0.7f, 0.4f }, { 1, 0.07f, 0, 0 },
+};
+/* The layered program adds nothing to the fragment stage's material uniforms. */
+static const char *const ML_BLOCK_PARMS[] = { NULL };
+static const unsigned ML_NBLOCK_PARMS = 0;
 const char *const SH_MODPROG_ML_TEXTURES[] = {
-    "layerblendmask", "blendlayer0heightmap",
+    "layerblendmask", "layerparms",
     "blendlayer1albedomap", "blendlayer1normalmap", "blendlayer1smoothnessmap", "blendlayer1heightmap",
     "blendlayer2albedomap", "blendlayer2normalmap", "blendlayer2smoothnessmap", "blendlayer2heightmap",
     "blendlayer3albedomap", "blendlayer3normalmap", "blendlayer3smoothnessmap", "blendlayer3heightmap",
@@ -55,7 +72,7 @@ const char *const SH_MODPROG_ML_TEXTURES[] = {
 const unsigned SH_MODPROG_ML_TEXTURE_COUNT = sizeof SH_MODPROG_ML_TEXTURES / sizeof SH_MODPROG_ML_TEXTURES[0];
 /* The module's samplers, in the textures' order. */
 static const char *const MP_SAMPLERS[] = {
-    "ml_mask", "ml_height0",
+    "ml_mask", "ml_params",
     "ml_albedo1", "ml_normal1", "ml_smoothness1", "ml_height1", "ml_albedo2", "ml_normal2", "ml_smoothness2",
     "ml_height2", "ml_albedo3", "ml_normal3", "ml_smoothness3", "ml_height3", "ml_albedo4", "ml_normal4",
     "ml_smoothness4", "ml_height4", "ml_extra0", "ml_extra1",
@@ -68,20 +85,22 @@ static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "nor
                                          "thickness" };
 #define MP_NINOUT 7
 
-/* The Eternal particle program (eternal/shaders/eternalparticles.frag): its material parameters appended to the fragment
- * stage's material uniforms (the product's four, then two of the game's own render parms the shading reads), its
- * added texture, the module's samplers (the first three bound to the program's own textures), the stage inputs and
- * the program's own uniforms it reads ('h' the material block, 'l' the view block). */
+/* The particle program (programs/shaders/particles.rp): the parameters appended to the fragment stage's material
+ * uniforms (the game's own vector smokebrightness, which no program, fx or engine code names, and two more of the
+ * game's own render parms the shading reads), its added texture, the module's samplers (the first three bound to the
+ * program's own textures), the stage inputs and the program's own uniforms it reads ('h' the material block, 'l' the
+ * view block). The stage's constants live in keys the game's particle program already holds (particleuberparms1..3,
+ * emissive) and smokebrightness; no vector render parm is the product's. */
+/* The particle program's old keys, in the order of the shading's former parameter array: NOT render parms (the
+ * product declares none of them), the names the serve filter maps to the stock keys (particles.rp lists where each
+ * went). */
 const char *const SH_MODPROG_EP_PARMS[] = {
     "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
 };
 const unsigned SH_MODPROG_EP_PARM_COUNT = sizeof SH_MODPROG_EP_PARMS / sizeof SH_MODPROG_EP_PARMS[0];
-const char *const SH_MODPROG_EP_TEXTURES[] = { "eternalparticleemissivemap" };
+const char *const SH_MODPROG_EP_TEXTURES[] = { "particleemissivemap" };
 const unsigned SH_MODPROG_EP_TEXTURE_COUNT = sizeof SH_MODPROG_EP_TEXTURES / sizeof SH_MODPROG_EP_TEXTURES[0];
-static const char *const EP_BLOCK_PARMS[] = {
-    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
-    "projectionmatrixz", "globalvieworigin",
-};
+static const char *const EP_BLOCK_PARMS[] = { "smokebrightness", "projectionmatrixz", "globalvieworigin" };
 #define EP_NBLOCK_PARMS (sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0])
 static const char *const EP_SAMPLERS[] = { "ep_trans", "ep_depth", "ep_atlas", "ep_emissive" };
 static const char *const EP_SAMPLER_STOCK[] = { "samp_transmap", "samp_viewdepthmap", "samp_particleslightatlasmap", NULL };
@@ -93,44 +112,19 @@ static const char *const EP_VARYINGS[] = {
 static const char *const EP_UNIFORMS[] = {
     "hrenderpositiontoviewtexture", "lparticleatlasparms", "lfoglightinscattercolor", "lfoglightinscatterintensity",
     "lfoglightoppositecolor", "lfogcolor", "ltransparencylightmult",
+    "hparticleuberparms1", "hparticleuberparms2", "hparticleuberparms3", "hemissive",
 };
 #define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
 
-/* The render parm decls: the blend's defaults (DOOM Eternal's template/boss_character where it names one). */
+/* The render parm decls the product derives: textures only. No vector render parm is the product's: the layered
+ * program reads its numbers from the `layerparms` image and the particle program from keys of the game's own. A
+ * texture a material does not set gives no layer (no mask, a black parameter image), a flat layer image, and no
+ * emissive sheet. */
 typedef struct mp_parm { const char *name, *text; } mp_parm;
 static const mp_parm MP_PARM_DECLS[] = {
-    { "layerstilingfactor",        "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendlayerscale",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendheightmapscale",  "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendsoftness",        "{ Vec { 0.25, 0.25, 0.25, 0.25 } }" },
-    { "multiblendalbedoscale",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendnormalscale",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendspecularscale",   "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendsmoothnessscale", "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "multiblendemissivescale",   "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "blendheightmapscale",       "{ Vec { 1.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer0tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer0emissive",       "{ Vec { 1.0, 1.0, 1.0, 0.0 } }" },
-    { "blendlayer1tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer2tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer3tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer4tiling",         "{ Vec { 1.0, 1.0, 0.0, 0.0 } }" },
-    { "blendlayer1specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer2specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer3specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer4specular",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer1emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer2emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer3emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "blendlayer4emissive",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    /* No ember: an isember material's converter writes all four. */
-    { "multilayerember",           "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "multilayerembertiling",     "{ Vec { 4.0, 4.0, 0.0, 0.0 } }" },
-    { "multilayerembernoise",      "{ Vec { 1.0, 4.0, 0.7, 0.4 } }" },
-    { "multilayeremberhot",        "{ Vec { 1.0, 0.07, 0.0, 0.0 } }" },
     /* No mask, no layer: what an image key the material does not set gives. */
     { "layerblendmask",            "{ Tex2D textures/system/constant_color/black }" },
-    { "blendlayer0heightmap",      "{ Tex2D textures/system/constant_color/grey_md }" },
+    { "layerparms",                "{ Tex2D textures/system/constant_color/black }" },
     { "blendlayer1albedomap",      "{ Tex2D textures/system/constant_color/grey_md }" },
     { "blendlayer1normalmap",      "{ Tex2D textures/system/flat_normal_noalpha }" },
     { "blendlayer1smoothnessmap",  "{ Tex2D textures/system/constant_color/white }" },
@@ -149,24 +143,15 @@ static const mp_parm MP_PARM_DECLS[] = {
     { "blendlayer4heightmap",      "{ Tex2D textures/system/constant_color/grey_md }" },
     { "multilayerextramap0",       "{ Tex2D textures/system/constant_color/black }" },
     { "multilayerextramap1",       "{ Tex2D textures/system/constant_color/black }" },
-    /* The Eternal particle program: an unlit stage of no emissive multiplier, no near fade, no soft distance and no
-     * emissive sheet unless the material sets them (the converter writes every one a stage gives). */
-    { "eternalparticle",           "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "eternalparticlefade",       "{ Vec { 0.0, 0.0, 0.0, 0.0 } }" },
-    { "eternalparticlecolor",      "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "eternalparticlecolor2",     "{ Vec { 1.0, 1.0, 1.0, 1.0 } }" },
-    { "eternalparticleemissivemap", "{ Tex2D textures/system/constant_color/white }" },
+    /* A particle stage with no emissive mask sheet. */
+    { "particleemissivemap",       "{ Tex2D textures/system/constant_color/white }" },
 };
 #define MP_NPARM_DECLS (sizeof MP_PARM_DECLS / sizeof MP_PARM_DECLS[0])
 
 const char *sh_modprog_vector_parm(unsigned i)
 {
-    size_t k;
-    for (k = 0; k < MP_NPARM_DECLS; k++) {
-        if (strncmp(MP_PARM_DECLS[k].text, "{ Vec ", 6)) continue;
-        if (!i--) return MP_PARM_DECLS[k].name;
-    }
-    return NULL;
+    (void)i;
+    return NULL;   /* the product's programs declare no vector render parm */
 }
 
 /* --------------------------------------------------------------------------------------------- helpers ---- */
@@ -235,35 +220,121 @@ static unsigned mp_decl_checksum(const char *t, size_t n)
     return sh_mb_md5fold(t, n);
 }
 
+/* `text` (lines ended by '\n') put in `b` one line at a time, each after `prefix` (a blank line stays bare) and
+ * followed by `nl`; with `lead` the line end comes before each line instead, for a block that continues the line
+ * before it and leaves the last line end to the caller. */
+static void mp_put_lines(mp_buf *b, const char *text, const char *prefix, const char *nl, int lead)
+{
+    const char *p = text;
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (lead) mp_puts(b, nl);
+        if (n) { mp_puts(b, prefix); mp_put(b, p, n); }
+        if (!lead) mp_puts(b, nl);
+        p += n + (e ? 1 : 0);
+    }
+}
+
+/* The index of the } that closes the { at t[open], comments skipped; len when it is never closed. */
+static size_t mp_close_brace(const char *t, size_t len, size_t open)
+{
+    size_t i;
+    int depth = 0;
+    for (i = open; i < len; i++) {
+        if (t[i] == '/' && i + 1 < len && t[i + 1] == '/') { while (i + 1 < len && t[i + 1] != '\n') i++; }
+        else if (t[i] == '/' && i + 1 < len && t[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(t[i] == '*' && t[i + 1] == '/')) i++;
+            i++;
+        }
+        else if (t[i] == '{') depth++;
+        else if (t[i] == '}' && !--depth) return i;
+    }
+    return len;
+}
+
+/* 1 when only blanks precede `at` on its line, with the line's start in *from and the blanks' count in *n. */
+static int mp_line_indent(const char *text, const char *at, const char **from, size_t *n)
+{
+    const char *ls = at;
+    while (ls > text && ls[-1] != '\n') ls--;
+    for (*from = ls, *n = 0; ls + *n < at; (*n)++) if (ls[*n] != ' ' && ls[*n] != '\t') return 0;
+    return 1;
+}
+
+/* The decl `text` with the program's functions in its hlsl_fp_header section: a section of their own before its
+ * hlsl_fp section, or, when it has one, at the end of that section (which must close on a line of its own). The
+ * engine compiles the section before main(), so the functions are real functions. NULL when there is no hlsl_fp
+ * section or the base's header cannot be extended. malloc'd. */
+static char *mp_add_header(const char *text, size_t len, const char *header, const char *nl, size_t *out_len)
+{
+    const char *h = mp_find(text, len, "hlsl_fp_header"), *ind;
+    size_t in;
+    char *prefix;
+    mp_buf b = { 0 };
+    if (h) {
+        const char *open = (const char *)memchr(h, '{', len - (size_t)(h - text));
+        size_t close;
+        if (!open) return NULL;
+        close = mp_close_brace(text, len, (size_t)(open - text));
+        if (close >= len || !mp_line_indent(text, text + close, &ind, &in)) return NULL;
+        prefix = (char *)malloc(in + 2);
+        if (!prefix) return NULL;
+        memcpy(prefix, ind, in);
+        memcpy(prefix + in, "\t", 2);
+        mp_put(&b, text, (size_t)(ind - text));
+        mp_put_lines(&b, header, prefix, nl, 0);
+        mp_put(&b, ind, len - (size_t)(ind - text));
+    } else {
+        const char *at = mp_find(text, len, "hlsl_fp {");
+        if (!at || !mp_line_indent(text, at, &ind, &in)) return NULL;
+        prefix = (char *)malloc(in + 2);
+        if (!prefix) return NULL;
+        memcpy(prefix, ind, in);
+        memcpy(prefix + in, "\t", 2);
+        mp_put(&b, text, (size_t)(ind - text));
+        mp_put(&b, ind, in);
+        mp_puts(&b, "hlsl_fp_header {");
+        mp_puts(&b, nl);
+        mp_put_lines(&b, header, prefix, nl, 0);
+        mp_put(&b, ind, in);
+        mp_puts(&b, "}");
+        mp_puts(&b, nl);
+        mp_put(&b, ind, len - (size_t)(ind - text));
+    }
+    free(prefix);
+    return mp_take(&b, out_len);
+}
+
 /* ---------------------------------------------------------------------------------------------- decl ---- */
 
 char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len)
 {
     static const char key[] = "#template CUSTOM_TEXTURE_INPUTS( inputs ) {";
     const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n";
-    const char *k = mp_find(text, len, key), *line, *eol, *p;
+    const char *k = mp_find(text, len, key), *line, *eol;
     mp_buf b = { 0 };
-    size_t nll = strlen(nl);
+    char *call, *ind, *t;
+    size_t n;
     if (!k || mp_find(k + 1, len - (size_t)(k + 1 - text), key)) return NULL;
     line = k;
     while (line > text && line[-1] != '\n') line--;
     eol = mp_find(k, len - (size_t)(k - text), nl);
     if (!eol) return NULL;
-    mp_put(&b, text, (size_t)(line - text));
-    /* the blend's templates, in the base text's line ends */
-    for (p = SH_MODPROG_ML_DECL; *p;) {
-        const char *e = strchr(p, '\n');
-        size_t n = e ? (size_t)(e - p) : strlen(p);
-        mp_put(&b, p, n);
-        mp_put(&b, nl, nll);
-        p += n + (e ? 1 : 0);
-    }
-    mp_put(&b, line, (size_t)(eol - line));
-    mp_put(&b, nl, nll);
-    mp_put(&b, line, (size_t)(k - line));
-    mp_puts(&b, "\tMULTILAYER_BLEND( inputs );");
+    /* the call, as the template's first statements: one tab in from the template's line */
+    if (!(ind = (char *)malloc((size_t)(k - line) + 2))) return NULL;
+    memcpy(ind, line, (size_t)(k - line));
+    memcpy(ind + (k - line), "\t", 2);
+    mp_put(&b, text, (size_t)(eol - text));
+    mp_put_lines(&b, SH_MODPROG_ML_CALL, ind, nl, 1);
     mp_put(&b, eol, len - (size_t)(eol - text));
-    return mp_take(&b, out_len);
+    free(ind);
+    if (!(call = mp_take(&b, &n))) return NULL;
+    /* the functions, in the header section */
+    t = mp_add_header(call, n, SH_MODPROG_ML_HEADER, nl, out_len);
+    free(call);
+    return t;
 }
 
 /* ---------------------------------------------------------------------------------------------- GLSL ---- */
@@ -297,7 +368,7 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     t1 = s.p;
     n1 = s.n;
     end = t1 + n1;
-    /* 2. the parameters after the material uniforms */
+    /* 2. the material uniform block (the layered program adds no parameter to it) */
     if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
     /* 3. the samplers before the program's first struct (or its first input) */
     first = mp_find(t1, n1, "struct clusternumlights_t");
@@ -310,7 +381,7 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     ind = ls;
     while (ind > t1 && ind[-1] != '\n') ind--;
     mp_put(&b, t1, (size_t)(close - t1));
-    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) mp_printf(&b, "\tvec4 %s;\n", SH_MODPROG_ML_PARMS[k]);
+    for (k = 0; k < ML_NBLOCK_PARMS; k++) mp_printf(&b, "\tvec4 %s;\n", ML_BLOCK_PARMS[k]);
     mp_put(&b, close, (size_t)(first - close));
     for (k = 0; k < SH_MODPROG_ML_TEXTURE_COUNT; k++)
         mp_printf(&b, "layout( binding = %u ) uniform sampler2D samp_%s;\n", tex_end + k, SH_MODPROG_ML_TEXTURES[k]);
@@ -324,11 +395,7 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
         mp_put(&b, ind, (size_t)(w - ind));
     }
     mp_puts(&b, "ml_blend( inputs.albedo, inputs.specular, inputs.smoothness, inputs.normal, inputs.lightmap, "
-                "inputs.emissive, inputs.thickness, inputs.texCoords, freqLow_fragmentUniforms.time.x, vec4[");
-    mp_printf(&b, "%u]( ", SH_MODPROG_ML_PARM_COUNT);
-    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++)
-        mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", SH_MODPROG_ML_PARMS[k]);
-    mp_puts(&b, " ), vec4[4]( ");
+                "inputs.emissive, inputs.thickness, inputs.texCoords, freqLow_fragmentUniforms.time.x, vec4[4]( ");
     for (k = 0; k < 4; k++) mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", MP_EMISSIVE[k]);
     mp_puts(&b, " ) );\n");
     mp_put(&b, a, (size_t)(end - a));
@@ -336,59 +403,35 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     return mp_take(&b, out_len);
 }
 
-/* --------------------------------------------------------------------------- the Eternal particle texts ---- */
-
-/* `text` with the line `line` inserted after the first line at or after `from` that contains `after`. NULL when
- * either is missing or `after` occurs twice after `from`. */
-static char *mp_insert_after_line(const char *text, size_t len, const char *from, const char *after, const char *line,
-                                  const char *nl, mp_buf *b)
-{
-    const char *f = mp_find(text, len, from), *a, *eol;
-    size_t nll = strlen(nl);
-    if (!f || !(a = mp_find(f, len - (size_t)(f - text), after))) return NULL;
-    if (mp_find(a + 1, len - (size_t)(a + 1 - text), after)) return NULL;
-    if (!(eol = mp_find(a, len - (size_t)(a - text), nl))) return NULL;
-    eol += nll;
-    mp_put(b, text, (size_t)(eol - text));
-    mp_puts(b, line);
-    return (char *)eol;
-}
+/* --------------------------------------------------------------------------- the particle texts ---- */
 
 char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len)
 {
-    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *p, *end = text + len, *rest, *call;
-    mp_buf inc = { 0 }, b = { 0 };
-    char *t;
+    static const char anchor[] = "PREMULTIPLY_ALPHA_BLENDED( result );";
+    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *end = text + len;
+    const char *fp = mp_find(text, len, "hlsl_fp {"), *call, *eol, *ls;
+    mp_buf b = { 0 };
+    char *prefix, *t;
     size_t n;
-    /* the shading's templates, in the base text's line ends */
-    for (p = SH_MODPROG_EP_DECL; *p;) {
-        const char *e = strchr(p, '\n');
-        size_t k = e ? (size_t)(e - p) : strlen(p);
-        mp_put(&inc, p, k);
-        mp_puts(&inc, nl);
-        p += k + (e ? 1 : 0);
-    }
-    if (inc.oom || !inc.p) { free(inc.p); return NULL; }
-    /* after the fragment stage's last include; the call after its premultiply */
-    rest = mp_insert_after_line(text, len, "hlsl_fp {", "#include \"includes/fog.inc\"", inc.p, nl, &b);
-    free(inc.p);
-    if (!rest) { free(b.p); return NULL; }
-    call = mp_find(rest, (size_t)(end - rest), "PREMULTIPLY_ALPHA_BLENDED( result );");
-    if (!call || mp_find(call + 1, (size_t)(end - call - 1), "PREMULTIPLY_ALPHA_BLENDED( result );")) { free(b.p); return NULL; }
-    {
-        const char *eol = mp_find(call, (size_t)(end - call), nl), *ls = call;
-        if (!eol) { free(b.p); return NULL; }
-        while (ls > rest && ls[-1] != '\n') ls--;
-        eol += strlen(nl);
-        mp_put(&b, rest, (size_t)(eol - rest));
-        mp_put(&b, ls, (size_t)(call - ls));
-        mp_puts(&b, "ETERNAL_PARTICLE( result );");
-        mp_puts(&b, nl);
-        mp_put(&b, eol, (size_t)(end - eol));
-    }
-    t = mp_take(&b, &n);
-    if (t && out_len) *out_len = n;
-    return t;
+    if (!fp) return NULL;
+    call = mp_find(fp, (size_t)(end - fp), anchor);
+    if (!call || mp_find(call + 1, (size_t)(end - call - 1), anchor)) return NULL;
+    if (!(eol = mp_find(call, (size_t)(end - call), nl))) return NULL;
+    for (ls = call; ls > fp && ls[-1] != '\n'; ) ls--;
+    eol += strlen(nl);
+    /* the call after the premultiply, at its indentation */
+    if (!(prefix = (char *)malloc((size_t)(call - ls) + 1))) return NULL;
+    memcpy(prefix, ls, (size_t)(call - ls));
+    prefix[call - ls] = 0;
+    mp_put(&b, text, (size_t)(eol - text));
+    mp_put_lines(&b, SH_MODPROG_EP_CALL, prefix, nl, 0);
+    mp_put(&b, eol, (size_t)(end - eol));
+    free(prefix);
+    if (!(t = mp_take(&b, &n))) return NULL;
+    /* the functions, in the header section */
+    prefix = mp_add_header(t, n, SH_MODPROG_EP_HEADER, nl, out_len);
+    free(t);
+    return prefix;
 }
 
 char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
@@ -451,7 +494,7 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
 
 /* --------------------------------------------------------------------------------------------- SPIR-V ---- */
 /* A module as a list of instructions; an instruction's words (opcode word first) point into the input or into
- * an owned copy. Only the opcodes glslang emits for eternal/shaders/multilayer.frag need their operand shapes (the
+ * an owned copy. Only the opcodes glslang emits for programs/shaders/layered.rp need their operand shapes (the
  * multilayer module is renumbered whole); the stock module is only searched and amended. */
 
 enum {
@@ -464,7 +507,8 @@ enum {
     OpAccessChain = 65, OpDecorate = 71, OpMemberDecorate = 72, OpVectorShuffle = 79, OpCompositeConstruct = 80,
     OpCompositeExtract = 81, OpCompositeInsert = 82, OpLabel = 248, OpLoopMerge = 246, OpSelectionMerge = 247,
     OpBranch = 249, OpBranchConditional = 250, OpReturn = 253, OpReturnValue = 254, OpSource = 3,
-    OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpUndef = 1, OpPhi = 245, OpKill = 252
+    OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpImageFetch = 95, OpImage = 100, OpVectorExtractDynamic = 77, OpUndef = 1,
+    OpPhi = 245, OpKill = 252
 };
 
 typedef struct mp_ins { uint32_t *w; } mp_ins;     /* w[0]: count << 16 | opcode */
@@ -592,12 +636,14 @@ static int mp_ids(const mp_ins *in, uint32_t out[], int cap)
     case OpLoad: ADD(3); break;
     case OpStore: ADD(1); ADD(2); break;
     case OpVectorShuffle: ADD(3); ADD(4); break;
+    case OpVectorExtractDynamic: ADD(3); ADD(4); break;
     case OpCompositeExtract: ADD(3); break;
     case OpCompositeInsert: ADD(3); ADD(4); break;
     case OpExtInst: ADD(3); for (k = 5; k < n; k++) ADD(k); break;
-    case OpImageSampleImplicitLod: case OpImageSampleExplicitLod:
+    case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: case OpImageFetch:
         ADD(3); ADD(4); for (k = 6; k < n; k++) ADD(k);
         break;
+    case OpImage: ADD(3); break;
     case OpSelectionMerge: ADD(1); break;
     case OpLoopMerge: ADD(1); ADD(2); break;
     case OpBranch: case OpReturnValue: ADD(1); break;
@@ -1156,7 +1202,7 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
     uint32_t *out = NULL;
     size_t i, k;
     uint32_t inputs = 0, in_struct = 0, t_float = 0, t_void = 0, ml_entry = 0;
-    uint32_t params[MP_NINOUT + 4], temps[MP_NINOUT + 4];
+    uint32_t params[MP_NINOUT + 3], temps[MP_NINOUT + 3];
     size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
     mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
     (void)stock_samplers;
@@ -1168,10 +1214,10 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
     stock_of[MP_NSAMPLERS] = "samp_magnificationclouds";
     if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
     sp.words = SH_MODPROG_ML_SPIRV; sp.nwords = SH_MODPROG_ML_SPIRV_WORDS; sp.entry = "ml_blend(";
-    sp.samplers = samplers; sp.stock = stock_of; sp.nsamplers = MP_NSAMPLERS + 1; sp.what = "multilayer";
+    sp.samplers = samplers; sp.stock = stock_of; sp.nsamplers = MP_NSAMPLERS + 1; sp.what = "layered";
     if (!mp_import(&c, &sp, tex_end, &ml_entry, &funcs)) goto done;
     if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
-    if (!mp_grow_block(&c, SH_MODPROG_ML_PARMS, SH_MODPROG_ML_PARM_COUNT, &bk)) goto done;
+    if (!mp_grow_block(&c, ML_BLOCK_PARMS, ML_NBLOCK_PARMS, &bk)) goto done;
 
     /* ---- helpers' types */
     (void)mp_t_int(&c);
@@ -1223,8 +1269,8 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
             for (q = 0; q < np; q++) if (in->w[pos[q]] == wound) hit = 1;
             if (hit) break;
         }
-        if (!mp_entry_params(&funcs, ml_entry, params, MP_NINOUT + 4)) MP_FAIL(&c, "ml_blend does not take the parameters the splice passes");
-        if (!mp_temps(&c, s_main, s_main_end, params, temps, MP_NINOUT + 4, &heads, &var_end)) MP_FAIL(&c, "out of memory");
+        if (!mp_entry_params(&funcs, ml_entry, params, MP_NINOUT + 3)) MP_FAIL(&c, "ml_blend does not take the parameters the splice passes");
+        if (!mp_temps(&c, s_main, s_main_end, params, temps, MP_NINOUT + 3, &heads, &var_end)) MP_FAIL(&c, "out of memory");
         /* copy in (params[] holds each parameter's pointer type) */
         for (q = 0; q <= MP_NINOUT; q++) {
             uint32_t ft = st->w[2 + members[q]], tptr, ch, v, o[4];
@@ -1260,26 +1306,22 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
             if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
         }
         {
-            /* the parameters and the emissive factors, as two arrays */
-            uint32_t pv[64];
-            int which;
-            for (which = 0; which < 2; which++) {
-                unsigned cnt = which ? 4u : SH_MODPROG_ML_PARM_COUNT;
-                for (k = 0; k < cnt; k++) {
-                    int mem = which ? mp_member(&c.S, bk.fh_struct, MP_EMISSIVE[k]) : (int)(bk.n0 + k);
-                    if (mem < 0) MP_FAIL(&c, "the program has no emissive factor the blend recomputes from");
-                    if (!(pv[k] = mp_load_member(&c, &code, bk.fh, bk.v4, mem))) MP_FAIL(&c, "out of memory");
-                }
-                if (!mp_store_array(&c, &code, params[MP_NINOUT + 2 + which], temps[MP_NINOUT + 2 + which], pv, cnt))
-                    MP_FAIL(&c, "ml_blend's parameter array has no type");
+            /* the program's emissive factors, as one array (the numbers come from the parameter image) */
+            uint32_t pv[4];
+            for (k = 0; k < 4; k++) {
+                int mem = mp_member(&c.S, bk.fh_struct, MP_EMISSIVE[k]);
+                if (mem < 0) MP_FAIL(&c, "the program has no emissive factor the blend recomputes from");
+                if (!(pv[k] = mp_load_member(&c, &code, bk.fh, bk.v4, mem))) MP_FAIL(&c, "out of memory");
             }
+            if (!mp_store_array(&c, &code, params[MP_NINOUT + 2], temps[MP_NINOUT + 2], pv, 4))
+                MP_FAIL(&c, "ml_blend's parameter array has no type");
         }
         {
-            uint32_t o[3 + MP_NINOUT + 4];
+            uint32_t o[3 + MP_NINOUT + 3];
             o[0] = t_void; o[1] = 0; o[2] = ml_entry;
             memcpy(o + 3, temps, sizeof temps);
             o[1] = c.S.bound++;
-            if (!mp_emit(&c.S, &code, OpFunctionCall, o, 3 + MP_NINOUT + 4)) MP_FAIL(&c, "out of memory");
+            if (!mp_emit(&c.S, &code, OpFunctionCall, o, 3 + MP_NINOUT + 3)) MP_FAIL(&c, "out of memory");
         }
         /* copy back */
         for (q = 0; q < MP_NINOUT; q++) {
@@ -1304,7 +1346,7 @@ done:
     return out;
 }
 
-/* --------------------------------------------------------------------------- the Eternal particle splice ---- */
+/* --------------------------------------------------------------------------- the particle splice ---- */
 
 uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
@@ -1402,12 +1444,12 @@ done:
 
 static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
 static const mp_family MP_FAMILIES[] = {
-    { SH_MODPROG_PREFIX, "multilayer version", SH_MODPROG_ML_PARMS, &SH_MODPROG_ML_PARM_COUNT, SH_MODPROG_ML_TEXTURES,
+    { SH_MODPROG_PREFIX, "layered version", ML_BLOCK_PARMS, &ML_NBLOCK_PARMS, SH_MODPROG_ML_TEXTURES,
       &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
-      "its decl has no single CUSTOM_TEXTURE_INPUTS template" },
-    { SH_MODPROG_EP_PREFIX, "DOOM Eternal particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+      "its decl has no single CUSTOM_TEXTURE_INPUTS template, or no hlsl_fp section for the functions" },
+    { SH_MODPROG_EP_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
       &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
-      "its decl's fragment stage does not end in one premultiplied colour after its includes" },
+      "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
@@ -1418,6 +1460,8 @@ static const mp_family MP_FAMILIES[] = {
  * permutation mask and list, 192 bytes of state and binding tables (6 words, then each stage's 7 binding starts
  * and 7 counts by category: material uniforms, view uniforms, uniform-buffer arrays, texel buffers, textures,
  * storage buffers, storage images), the three stage texts and a 36-byte trailer. */
+
+#define MP_MAX_BOUND_TEXTURES 32u   /* ID_VULKAN_MAX_BOUND_TEXTURES (VK 0x141a7bbb0) */
 
 typedef int (*mp_vec_fn)(const char *parm);    /* 1 when the render parm is a vector (16-byte value) */
 
@@ -1730,6 +1774,13 @@ static int mp_unit(const mp_family *fam, const char *base, const char *mask)
         for (k = 0; k < *fam->ntextures; k++)
             if (!mp_bin_add(&x, 1, 2, fam->textures[k], strlen(fam->textures[k])) ||
                 !mp_bin_add(&x, 1, 3, "defaultsampler", 14)) { why = "out of memory"; goto out; }
+        {
+            /* a program's textures over all its stages are bounded by the engine (ID_VULKAN_MAX_BOUND_TEXTURES) */
+            size_t bound = 0;
+            int st;
+            for (st = 0; st < 3; st++) bound += x.counts[st][2];
+            if (bound > MP_MAX_BOUND_TEXTURES) { why = "its textures would exceed the engine's 32 per program"; goto out; }
+        }
         if (!(decl = fam->decl((const char *)d, dn, &decl_n))) {
             why = fam->decl_needs;
             goto out;
@@ -1802,6 +1853,185 @@ static int mp_derive(size_t base)
     return ok;
 }
 
+/* ------------------------------------------------------------------------------- the parameter image ---- */
+/* The layered program reads its numbers from an 8 x 4 RGBA16F image (layered.rp): a DOOM 2016 .bimage (the layout
+ * the research repository's writer, doomforge/doom2016/image/bimage.py, gives: a 42-byte header, then one record per
+ * mip), served from a registry of images the product derives, at a path that is the hash of its bytes. */
+
+#define MP_PARAM_W 8u
+#define MP_PARAM_H 4u
+#define MP_IMAGE_HEAD "generated/image/snapmapplus/look/"
+#define MP_BIMAGE_MAGIC 0x074d4942u
+#define MP_FMT_RGBA16F 2u
+
+/* A float as the nearest half (ties to even); beyond the half range, infinity. */
+static uint16_t mp_half(float f)
+{
+    uint32_t x, sign, e, m, half, rem;
+    int ex;
+    memcpy(&x, &f, 4);
+    sign = (x >> 16) & 0x8000u;
+    e = (x >> 23) & 0xffu;
+    m = x & 0x7fffffu;
+    if (e == 0xffu) return (uint16_t)(sign | 0x7c00u | (m ? 0x200u : 0u));
+    ex = (int)e - 127 + 15;
+    if (ex >= 31) return (uint16_t)(sign | 0x7c00u);
+    if (ex <= 0) {
+        unsigned shift;
+        if (ex < -10) return (uint16_t)sign;
+        m |= 0x800000u;
+        shift = (unsigned)(14 - ex);
+        half = m >> shift;
+        rem = m & ((1u << shift) - 1u);
+        if (rem > (1u << (shift - 1)) || (rem == (1u << (shift - 1)) && (half & 1u))) half++;
+        return (uint16_t)(sign | half);
+    }
+    half = ((uint32_t)ex << 10) | (m >> 13);
+    rem = m & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) half++;   /* a carry runs into the exponent: right */
+    return (uint16_t)(sign | half);
+}
+
+static float mp_half_float(uint16_t h)
+{
+    int e = (h >> 10) & 31, m = h & 1023;
+    float v;
+    if (e == 0) v = (float)m * (1.0f / 16777216.0f);
+    else if (e == 31) { uint32_t x = 0x7f800000u | ((uint32_t)m << 13); memcpy(&v, &x, 4); }
+    else {
+        uint32_t x = (uint32_t)(e - 15 + 127) << 23 | (uint32_t)m << 13;
+        memcpy(&v, &x, 4);
+    }
+    return (h & 0x8000u) ? -v : v;
+}
+
+int sh_modprog_bimage_rgba16f(unsigned width, unsigned height, const float texel[][4], unsigned char **bytes,
+                              size_t *len)
+{
+    static const unsigned char fmt[10] = { MP_FMT_RGBA16F, 0, 0, 0, 5, 0, 0, 0, 0, 0 };   /* format, filter 5, repeat 0 */
+    mp_buf b = { 0 };
+    size_t px, i, k;
+    if (bytes) *bytes = NULL;
+    if (len) *len = 0;
+    if (!bytes || !len || !texel || !width || !height || width > 4096u || height > 4096u) return 0;
+    px = (size_t)width * height;
+    mp_put_be32(&b, 0);                 /* source file time */
+    mp_put_be32(&b, MP_BIMAGE_MAGIC);
+    mp_put_be32(&b, 0);                 /* texture type */
+    mp_put_be32(&b, width);
+    mp_put_be32(&b, height);
+    mp_put_be32(&b, 0);
+    mp_put_be32(&b, 1);                 /* one mip */
+    mp_put_be32(&b, 0);
+    mp_put(&b, fmt, sizeof fmt);
+    mp_put_be32(&b, 0);                 /* the mip: level, destination z, size, data size */
+    mp_put_be32(&b, 0);
+    mp_put_be32(&b, width);
+    mp_put_be32(&b, height);
+    mp_put_be32(&b, (uint32_t)(px * 8));
+    for (i = 0; i < px; i++)
+        for (k = 0; k < 4; k++) {
+            uint16_t h = mp_half(texel[i][k]);
+            unsigned char x[2] = { (unsigned char)h, (unsigned char)(h >> 8) };
+            mp_put(&b, x, 2);
+        }
+    *bytes = (unsigned char *)mp_take(&b, len);
+    return *bytes != NULL;
+}
+
+int sh_modprog_param_image(const float vec[][4], unsigned count, unsigned char **bytes, size_t *len)
+{
+    float texel[MP_PARAM_W * MP_PARAM_H][4];
+    unsigned i;
+    if (bytes) *bytes = NULL;
+    if (len) *len = 0;
+    if (!vec || count > MP_PARAM_W * MP_PARAM_H) return 0;
+    memset(texel, 0, sizeof texel);
+    for (i = 0; i < count; i++) memcpy(texel[i], vec[i], sizeof texel[i]);
+    return sh_modprog_bimage_rgba16f(MP_PARAM_W, MP_PARAM_H, texel, bytes, len);
+}
+
+/* The registered images (under g_lock): path and bytes. */
+typedef struct mp_img { char *path; unsigned char *bytes; size_t len; } mp_img;
+static mp_img *g_imgs;
+static size_t g_nimgs, g_cimgs;
+
+/* 1 when `path` has the shape of a registered image's (the hash is 16 hex digits; a constant image's has a 'c' before). */
+static int mp_image_shape(const char *path)
+{
+    size_t hn = strlen(MP_IMAGE_HEAD), i;
+    if (_strnicmp(path, MP_IMAGE_HEAD, hn)) return 0;
+    if (path[hn] == 'c' || path[hn] == 'C') hn++;
+    for (i = 0; i < 16; i++) {
+        char c = path[hn + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return !_stricmp(path + hn + 16, ".bimage");
+}
+
+static long mp_image_find(const char *path)
+{
+    size_t i;
+    for (i = 0; i < g_nimgs; i++) if (!_stricmp(g_imgs[i].path, path)) return (long)i;
+    return -1;
+}
+
+/* Registers `b` (malloc'd; taken, or freed on failure) under MP_IMAGE_HEAD, `tag`, the first 16 hex digits of its
+ * SHA-256 and .bimage; the path, or NULL. */
+static const char *mp_register(const char *tag, unsigned char *b, size_t n)
+{
+    sh_sha256 h;
+    char hex[17], *path;
+    const char *r = NULL;
+    long at;
+    sh_sha256_init(&h);
+    sh_sha256_update(&h, b, n);
+    sh_sha256_hex(&h, hex, 16);
+    path = sh_textf(MP_IMAGE_HEAD "%s%s.bimage", tag, hex);
+    if (!path) { free(b); return NULL; }
+    AcquireSRWLockExclusive(&g_lock);
+    if ((at = mp_image_find(path)) >= 0) {
+        r = g_imgs[at].path;
+    } else {
+        if (g_nimgs == g_cimgs) {
+            size_t cap = g_cimgs ? g_cimgs * 2 : 16;
+            mp_img *g = (mp_img *)realloc(g_imgs, cap * sizeof *g);
+            if (g) { g_imgs = g; g_cimgs = cap; }
+        }
+        if (g_nimgs < g_cimgs) {
+            g_imgs[g_nimgs].path = path;
+            g_imgs[g_nimgs].bytes = b;
+            g_imgs[g_nimgs].len = n;
+            r = g_imgs[g_nimgs++].path;
+            path = NULL;
+            b = NULL;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    free(path);
+    free(b);
+    return r;
+}
+
+const char *sh_modprog_register_param_image(const float vec[][4], unsigned count)
+{
+    unsigned char *b = NULL;
+    size_t n = 0;
+    if (!sh_modprog_param_image(vec, count, &b, &n)) return NULL;
+    return mp_register("", b, n);
+}
+
+const char *sh_modprog_register_const_image(const float rgba[4])
+{
+    float texel[16][4];
+    unsigned char *b = NULL;
+    size_t n = 0, i;
+    if (!rgba) return NULL;
+    for (i = 0; i < 16; i++) memcpy(texel[i], rgba, sizeof texel[i]);
+    if (!sh_modprog_bimage_rgba16f(4, 4, texel, &b, &n)) return NULL;
+    return mp_register("c", b, n);
+}
+
 /* The parm decl a path names (index), or -1. */
 static int mp_parm_of(const char *path)
 {
@@ -1838,9 +2068,42 @@ static int mp_base_of(const char *path)
     return -1;
 }
 
+/* The old program names (SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX), served until 1.0 for mods emitted before
+ * the rename: a path under one of them, after any of the heads, is rewritten to the same path under the new name
+ * (a malloc'd copy), so the old name answers with the new name's bytes. NULL when the path names neither. */
+static char *mp_canonical(const char *path)
+{
+    static const char *const OLD[2] = { SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX };
+    static const char *const NEW[2] = { SH_MODPROG_PREFIX, SH_MODPROG_EP_PREFIX };
+    size_t h, k;
+    for (h = 0; h < MP_NHEADS; h++) {
+        size_t hn = strlen(MP_HEADS[h]);
+        if (_strnicmp(path, MP_HEADS[h], hn)) continue;
+        for (k = 0; k < 2; k++) {
+            size_t on = strlen(OLD[k]);
+            if (_strnicmp(path + hn, OLD[k], on)) continue;
+            return sh_textf("%.*s%s%s", (int)hn, path, NEW[k], path + hn + on);
+        }
+    }
+    return NULL;
+}
+
 int sh_modprog_owns(const char *path)
 {
-    return path && (mp_parm_of(path) >= 0 || mp_base_of(path) >= 0);
+    char *c;
+    int r;
+    if (!path) return 0;
+    if (mp_parm_of(path) >= 0) return 1;
+    if (mp_image_shape(path)) {
+        AcquireSRWLockExclusive(&g_lock);
+        r = mp_image_find(path) >= 0;
+        ReleaseSRWLockExclusive(&g_lock);
+        return r;
+    }
+    c = mp_canonical(path);
+    r = mp_base_of(c ? c : path) >= 0;
+    free(c);
+    return r;
 }
 
 static unsigned char *mp_heap_copy(const void *p, size_t n)
@@ -1850,18 +2113,40 @@ static unsigned char *mp_heap_copy(const void *p, size_t n)
     return h;
 }
 
+static int mp_read_new(const char *path, unsigned char **bytes, size_t *len);
+
 int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
 {
-    int base, parm, r = SH_MB_STOCK_ABSENT;
-    size_t i;
+    char *c;
+    int r;
     if (bytes) *bytes = NULL;
     if (len) *len = 0;
     if (!path || !bytes || !len) return SH_MB_STOCK_ABSENT;
+    c = mp_canonical(path);
+    r = mp_read_new(c ? c : path, bytes, len);
+    free(c);
+    return r;
+}
+
+static int mp_read_new(const char *path, unsigned char **bytes, size_t *len)
+{
+    int base, parm, r = SH_MB_STOCK_ABSENT;
+    size_t i;
     if ((parm = mp_parm_of(path)) >= 0) {
         size_t t = strlen(MP_PARM_DECLS[parm].text);
         if (!(*bytes = mp_heap_copy(MP_PARM_DECLS[parm].text, t))) return SH_MB_STOCK_UNAVAILABLE;
         *len = t;
         return SH_MB_STOCK_OK;
+    }
+    if (mp_image_shape(path)) {
+        long at;
+        AcquireSRWLockExclusive(&g_lock);
+        if ((at = mp_image_find(path)) >= 0) {
+            r = (*bytes = mp_heap_copy(g_imgs[at].bytes, g_imgs[at].len)) != NULL ? SH_MB_STOCK_OK : SH_MB_STOCK_UNAVAILABLE;
+            if (*bytes) *len = g_imgs[at].len;
+        }
+        ReleaseSRWLockExclusive(&g_lock);
+        return r;
     }
     if ((base = mp_base_of(path)) < 0) return SH_MB_STOCK_ABSENT;
     AcquireSRWLockExclusive(&g_lock);
@@ -1888,6 +2173,18 @@ void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *p
         char *p = sh_textf("generated/decls/renderparm/%s.decl", MP_PARM_DECLS[i].name);
         if (p && !_strnicmp(p, pre, n)) fn(context, p);
         free(p);
+    }
+    /* the registered parameter images */
+    {
+        char **img = NULL;
+        size_t ni = 0;
+        AcquireSRWLockExclusive(&g_lock);
+        if (g_nimgs && (img = (char **)calloc(g_nimgs, sizeof *img)) != NULL)
+            for (i = 0; i < g_nimgs; i++)
+                if (!_strnicmp(g_imgs[i].path, pre, n)) img[ni++] = mp_dupn(g_imgs[i].path, strlen(g_imgs[i].path));
+        ReleaseSRWLockExclusive(&g_lock);
+        for (i = 0; i < ni; i++) { if (img[i]) fn(context, img[i]); free(img[i]); }
+        free(img);
     }
     /* Only a prefix inside (or above) a program namespace asks for the derivation. */
     for (i = 0; i < MP_NHEADS; i++) {
@@ -1930,7 +2227,337 @@ void sh_modprog_reset(void)
     g_files = NULL;
     g_nfiles = g_cfiles = 0;
     memset(g_done, 0, sizeof g_done);
+    for (i = 0; i < g_nimgs; i++) { free(g_imgs[i].path); free(g_imgs[i].bytes); }
+    free(g_imgs);
+    g_imgs = NULL;
+    g_nimgs = g_cimgs = 0;
     free(g_cause);
     g_cause = NULL;
     ReleaseSRWLockExclusive(&g_lock);
+}
+
+/* ------------------------------------------------------------------------------- old material keys ---- */
+/* A material emitted before the numbers moved names the old keys (the 28 layered vectors and blendlayer0heightmap;
+ * eternalparticle, eternalparticlefade, eternalparticlecolor, eternalparticlecolor2 and eternalparticleemissivemap).
+ * sh_modprog_legacy_material rewrites them into the new storage so that the material draws the same. A material is a
+ * braced list of lines, `key<blanks>value`. */
+
+typedef struct mp_ln {
+    const char *a;          /* the line, without its terminator */
+    size_t an;
+    const char *eol;        /* its terminator ("" for a last line without one) */
+    size_t en;
+    size_t ks, kn;          /* the key's offset and length in the line (kn 0: not a key line: a brace, a comment, blank) */
+    size_t v0, vn;          /* the value's offset and length in the line */
+    int drop;
+    char *text;             /* the replacement line, without its terminator (malloc'd), or NULL */
+} mp_ln;
+
+typedef struct mp_new { size_t before; char *text; } mp_new;   /* a new line, put before line `before` */
+typedef struct mp_mat {
+    mp_ln *l;
+    size_t n;
+    size_t closing;         /* the line of the closing brace: where a line is appended */
+    mp_new q[16];
+    size_t nq;
+    const char *eol;
+} mp_mat;
+
+static int mp_blank(char c) { return c == ' ' || c == '\t' || c == '\r'; }
+
+static void mp_mat_free(mp_mat *m)
+{
+    size_t i;
+    for (i = 0; i < m->n; i++) free(m->l[i].text);
+    for (i = 0; i < m->nq; i++) free(m->q[i].text);
+    free(m->l);
+    memset(m, 0, sizeof *m);
+}
+
+/* The text split into lines. 0 on no memory. */
+static int mp_split(mp_mat *m, const char *text, size_t len)
+{
+    size_t count = 1, i, at = 0;
+    memset(m, 0, sizeof *m);
+    m->eol = (len && memchr(text, '\r', len)) ? "\r\n" : "\n";
+    for (i = 0; i < len; i++) if (text[i] == '\n') count++;
+    if (!(m->l = (mp_ln *)calloc(count, sizeof *m->l))) return 0;
+    for (;;) {
+        mp_ln *x = &m->l[m->n++];
+        size_t e = at, k = 0;
+        while (e < len && text[e] != '\n') e++;
+        x->a = text + at;
+        x->an = e - at;
+        x->eol = text + e;
+        x->en = e < len ? 1 : 0;
+        if (x->an && x->a[x->an - 1] == '\r') { x->an--; x->eol = text + e - 1; x->en = e < len ? 2 : 1; }
+        while (k < x->an && mp_blank(x->a[k])) k++;
+        if (k < x->an && x->a[k] != '{' && x->a[k] != '}' && x->a[k] != '/') {
+            x->ks = k;
+            while (k < x->an && !mp_blank(x->a[k])) k++;
+            x->kn = k - x->ks;
+            while (k < x->an && mp_blank(x->a[k])) k++;
+            x->v0 = k;
+            x->vn = x->an - k;
+            while (x->vn && mp_blank(x->a[x->v0 + x->vn - 1])) x->vn--;
+        } else if (k < x->an && x->a[k] == '}') {
+            m->closing = m->n - 1;
+        }
+        if (e >= len) break;
+        at = e + 1;
+    }
+    return 1;
+}
+
+static int mp_is_key(const mp_ln *x, const char *key)
+{
+    size_t k = strlen(key);
+    return x->kn == k && !_strnicmp(x->a + x->ks, key, k);
+}
+
+/* The last line of the key (case-insensitive), or -1. */
+static long mp_key_at(const mp_mat *m, const char *key)
+{
+    size_t i;
+    long hit = -1;
+    for (i = 0; i < m->n; i++) if (mp_is_key(&m->l[i], key)) hit = (long)i;
+    return hit;
+}
+
+/* A vector value: `{ a, b, c, d }` (missing components 0) or a scalar (all four components). 1 on success. */
+static int mp_parse_vec(const char *v, size_t n, float out[4])
+{
+    char t[256], *p, *e;
+    int k = 0;
+    if (!n || n >= sizeof t) return 0;
+    memcpy(t, v, n);
+    t[n] = 0;
+    p = t;
+    while (mp_blank(*p)) p++;
+    out[0] = out[1] = out[2] = out[3] = 0.0f;
+    if (*p == '{') {
+        p++;
+        while (k < 4) {
+            while (mp_blank(*p) || *p == ',') p++;
+            if (!*p || *p == '}') break;
+            out[k] = strtof(p, &e);
+            if (e == p) return 0;
+            k++;
+            p = e;
+        }
+        return k > 0;
+    }
+    out[0] = strtof(p, &e);
+    if (e == p) return 0;
+    out[1] = out[2] = out[3] = out[0];
+    return 1;
+}
+
+/* The shortest text that reads back as the same float. */
+static void mp_fmt_float(char *out, size_t cap, float v)
+{
+    int p;
+    for (p = 1; p <= 9; p++) {
+        snprintf(out, cap, "%.*g", p, (double)v);
+        if (strtof(out, NULL) == v) return;
+    }
+}
+
+/* A key's value as a vector (`def` when the material does not set it or sets it unreadably). */
+static void mp_get_vec(const mp_mat *m, const char *key, const float def[4], float out[4])
+{
+    long at = mp_key_at(m, key);
+    if (at < 0 || !mp_parse_vec(m->l[at].a + m->l[at].v0, m->l[at].vn, out)) memcpy(out, def, 4 * sizeof(float));
+}
+
+/* Every line of a key dropped. */
+static void mp_drop_key(mp_mat *m, const char *key)
+{
+    size_t i;
+    for (i = 0; i < m->n; i++) if (mp_is_key(&m->l[i], key)) m->l[i].drop = 1;
+}
+
+/* A key set to `value` (`vn` characters): in place where the material has it (its other lines of the key dropped), else
+ * as a new line before line `before`. 0 on no memory. */
+static int mp_set_text(mp_mat *m, size_t before, const char *key, const char *value, size_t vn)
+{
+    long at = mp_key_at(m, key);
+    char *t = sh_textf("%s\t%.*s", key, (int)vn, value);
+    if (!t) return 0;
+    if (at < 0) {
+        char *u = sh_textf("%s%s", t, m->eol);
+        free(t);
+        if (!u || m->nq == sizeof m->q / sizeof m->q[0]) { free(u); return 0; }
+        m->q[m->nq].before = before;
+        m->q[m->nq++].text = u;
+        return 1;
+    }
+    mp_drop_key(m, key);
+    m->l[at].drop = 0;
+    free(m->l[at].text);
+    m->l[at].text = t;
+    return 1;
+}
+
+static int mp_set_vec(mp_mat *m, size_t before, const char *key, const float v[4])
+{
+    char c[4][40], t[200];
+    int k;
+    for (k = 0; k < 4; k++) mp_fmt_float(c[k], sizeof c[k], v[k]);
+    snprintf(t, sizeof t, "{ %s, %s, %s, %s }", c[0], c[1], c[2], c[3]);
+    return mp_set_text(m, before, key, t, strlen(t));
+}
+
+/* The earliest of two lines (-1 for none). */
+static long mp_first(long a, long b) { return a < 0 ? b : (b < 0 || a < b) ? a : b; }
+
+/* eternalparticle (mode, emissive multiplier, mask multiplier, depth offset scale), eternalparticlefade (near fade
+ * begin and end, soft distance, 1 with an emissive sheet), eternalparticlecolor (mask colour or gradient 2),
+ * eternalparticlecolor2 (gradient 3; w the lit scale) and eternalparticleemissivemap become the stock keys
+ * particles.rp reads (particleuberparms1..3, emissive, smokebrightness) and particleemissivemap. 1 rewritten, 0 no
+ * old key, -1 no memory. */
+static int mp_legacy_particle(mp_mat *m)
+{
+    static const char *const old[] = { "eternalparticle", "eternalparticlefade", "eternalparticlecolor",
+                                       "eternalparticlecolor2" };
+    static const float z4[4] = { 0, 0, 0, 0 }, o4[4] = { 1, 1, 1, 1 };
+    float ep[4], fade[4], col[4], col2[4], u1[4], u2[4], u3[4], em[4], sb[4];
+    long first = -1, sheet = mp_key_at(m, "eternalparticleemissivemap");
+    size_t k;
+    for (k = 0; k < 4; k++) first = mp_first(first, mp_key_at(m, old[k]));
+    first = mp_first(first, sheet);
+    if (first < 0) return 0;
+    mp_get_vec(m, "eternalparticle", z4, ep);
+    mp_get_vec(m, "eternalparticlefade", z4, fade);
+    mp_get_vec(m, "eternalparticlecolor", o4, col);
+    mp_get_vec(m, "eternalparticlecolor2", o4, col2);
+    /* particleuberparms1: x and y 0; z the mode, + 16 with the emissive sheet; w the depth offset scale */
+    u1[0] = 0.0f; u1[1] = 0.0f; u1[2] = ep[0] + (fade[3] != 0.0f ? 16.0f : 0.0f); u1[3] = ep[3];
+    u2[0] = col[0]; u2[1] = col[1]; u2[2] = col[2]; u2[3] = fade[0];
+    u3[0] = col2[0]; u3[1] = col2[1]; u3[2] = col2[2]; u3[3] = ep[1];
+    /* emissive: x the material's own (a scalar or a vector), y the near fade's end, z the soft distance, w the lit scale */
+    mp_get_vec(m, "emissive", o4, em);
+    em[1] = fade[1]; em[2] = fade[2]; em[3] = col2[3];
+    mp_get_vec(m, "smokebrightness", z4, sb);
+    sb[0] = ep[2];
+    for (k = 0; k < 4; k++) mp_drop_key(m, old[k]);
+    if (sheet >= 0) {
+        mp_ln *x = &m->l[sheet];
+        char *t = sh_textf("particleemissivemap\t%.*s", (int)x->vn, x->a + x->v0);
+        if (!t) return -1;
+        free(x->text);
+        x->text = t;
+        mp_drop_key(m, "eternalparticleemissivemap");
+        x->drop = 0;
+    }
+    return mp_set_vec(m, (size_t)first, "particleuberparms1", u1) && mp_set_vec(m, (size_t)first, "particleuberparms2", u2) &&
+           mp_set_vec(m, (size_t)first, "particleuberparms3", u3) && mp_set_vec(m, (size_t)first, "emissive", em) &&
+           mp_set_vec(m, (size_t)first, "smokebrightness", sb) ? 1 : -1;
+}
+
+/* 1 when the image name is a constant colour image (const_<h>_<h>_<h>_<h>, four half floats, as the converters name
+ * them: the last component of the path), with its first channel in *value. */
+static int mp_const_image(const char *v, size_t n, float *value)
+{
+    size_t i = n, k, d;
+    unsigned h = 0;
+    const char *s;
+    while (i && v[i - 1] != '/') i--;
+    s = v + i;
+    n -= i;
+    if (n < 6 + 19 || _strnicmp(s, "const_", 6)) return 0;
+    s += 6;
+    for (k = 0; k < 4; k++) {
+        for (d = 0; d < 4; d++) {
+            char c = (char)(s[k * 5 + d] | 32);
+            unsigned x;
+            if (c >= '0' && c <= '9') x = (unsigned)(c - '0');
+            else if (c >= 'a' && c <= 'f') x = (unsigned)(c - 'a' + 10);
+            else return 0;
+            if (k == 0) h = h << 4 | x;
+        }
+        if (k < 3 && s[k * 5 + 4] != '_') return 0;
+    }
+    *value = mp_half_float((uint16_t)h);
+    return 1;
+}
+
+/* The base height's neutral value: half of the 8-bit range, as the converters write a flat height. */
+#define MP_FLAT_HEIGHT 0.498046875f
+
+/* The 1 or 2 an extra-map reference holds (the extra map 0 or 1 it names), else 0. */
+static int mp_extra_use(float v) { return v == 1.0f ? 1 : v == 2.0f ? 2 : 0; }
+
+/* The 28 vectors and blendlayer0heightmap become the `layerparms` image the vectors are written into, vector 9
+ * carrying where layer 0's height comes from. 1 rewritten, 0 no old key, -1 no memory. */
+static int mp_legacy_layered(mp_mat *m)
+{
+    float v[28][4];
+    long first = mp_key_at(m, "blendlayer0heightmap"), hm = first;
+    unsigned k;
+    int used[3] = { 0, 0, 0 };
+    const char *path;
+    char name[96];
+    float y = 0.0f, z = MP_FLAT_HEIGHT, c;
+    size_t pn;
+    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) {
+        mp_get_vec(m, SH_MODPROG_ML_PARMS[k], ML_DEFAULTS[k], v[k]);
+        first = mp_first(first, mp_key_at(m, SH_MODPROG_ML_PARMS[k]));
+    }
+    if (first < 0) return 0;
+    /* the extra maps in use: a layer's specular or glow image (w of 16..23), layer 0's glow image, the burn's tile and
+     * the wound cap's blood (y, z, w of 24) */
+    for (k = 16; k < 24; k++) used[mp_extra_use(v[k][3])] = 1;
+    for (k = 1; k < 4; k++) used[mp_extra_use(v[24][k])] = 1;
+    if (hm >= 0) {
+        const char *val = m->l[hm].a + m->l[hm].v0;
+        size_t vn = m->l[hm].vn;
+        if (vn >= 2 && val[0] == '"' && val[vn - 1] == '"') { val++; vn -= 2; }
+        if (mp_const_image(val, vn, &c)) {
+            z = c;                                   /* a constant image: its value */
+        } else if (!used[1] || !used[2]) {
+            char key[24];                            /* a free extra map takes the image */
+            int slot = used[1] ? 1 : 0;
+            snprintf(key, sizeof key, "multilayerextramap%d", slot);
+            if (!mp_set_text(m, m->closing, key, val, vn)) return -1;
+            y = (float)(slot + 1);
+            z = 0.0f;
+        }                                            /* else its neutral value: its own mean is not known here */
+    }
+    v[9][1] = y;
+    v[9][2] = z;
+    v[9][3] = 0.0f;
+    if (!(path = sh_modprog_register_param_image((const float (*)[4])v, SH_MODPROG_ML_PARM_COUNT))) return -1;
+    /* the material names the image by its name: the path without generated/image/ and its extension, as .tga */
+    pn = strlen(path) - strlen("generated/image/") - strlen(".bimage");
+    snprintf(name, sizeof name, "%.*s.tga", (int)pn, path + strlen("generated/image/"));
+    for (k = 0; k < SH_MODPROG_ML_PARM_COUNT; k++) mp_drop_key(m, SH_MODPROG_ML_PARMS[k]);
+    mp_drop_key(m, "blendlayer0heightmap");
+    return mp_set_text(m, (size_t)first, "layerparms", name, strlen(name)) ? 1 : -1;
+}
+
+int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t *out_len)
+{
+    mp_mat m;
+    mp_buf b = { 0 };
+    size_t i, j;
+    int p, ml;
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!text || !out) return -1;
+    if (!mp_split(&m, text, len)) return -1;
+    p = mp_legacy_particle(&m);
+    ml = p < 0 ? -1 : mp_legacy_layered(&m);
+    if (p < 0 || ml < 0) { mp_mat_free(&m); return -1; }
+    if (!p && !ml) { mp_mat_free(&m); return 0; }
+    for (i = 0; i <= m.n; i++) {
+        for (j = 0; j < m.nq; j++) if (m.q[j].before == i) mp_puts(&b, m.q[j].text);
+        if (i == m.n || m.l[i].drop) continue;
+        if (m.l[i].text) mp_puts(&b, m.l[i].text);
+        else mp_put(&b, m.l[i].a, m.l[i].an);
+        mp_put(&b, m.l[i].eol, m.l[i].en);
+    }
+    mp_mat_free(&m);
+    *out = mp_take(&b, out_len);
+    return *out ? 1 : -1;
 }

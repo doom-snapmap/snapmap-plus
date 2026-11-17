@@ -1,9 +1,11 @@
 #version 450 core
 // particle.frag -- modprog_test's stand-in for the particle program's fragment stage: the uniform blocks, textures,
 // stage inputs and colour output the particle splice reads, written the way the engine's stage text spells them.
-// Compiled into tests/modprog_fixture.c by tools/gen_multilayer.js.
+// Compiled into tests/modprog_fixture.c by tools/gen_programs.js.
 layout( binding = 2 ) uniform freqHigh_fragmentUniforms_ubo {
 	vec4 particleuberparms1;
+	vec4 particleuberparms2;
+	vec4 particleuberparms3;
 	vec4 renderpositiontoviewtexture;
 	vec4 emissive;
 }

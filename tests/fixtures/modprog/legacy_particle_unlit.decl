@@ -1,0 +1,25 @@
+{
+stageprogram	"snapmapplus/eternal/uberparticles"
+transmap	mods/wuahwfly/effect/texture/fire/fir_top_l.tga
+texanimdims	{ 8.000000, 4.000000, 0.000000, 0.000000 }
+emissive	1.000000
+particleuberparms1	{ 0.000000, 0.000000, 0.400000, 1.000000 }
+eternalparticle	{ 0.000000, 1.000000, 0.000000, 0.000000 }
+eternalparticlefade	{ 5.249344, 0.524934, 5.249344, 0.000000 }
+eternalparticlecolor	{ 1.000000, 1.000000, 1.000000, 1.000000 }
+eternalparticlecolor2	{ 0.000000, 0.000000, 0.000000, 1.000000 }
+lightprojatlasscalebias	0.000000
+lightfalloffatlasscalebias	0.000000
+decalsatlasalbedoscalebias	0.000000
+decalsatlasspecularscalebias	0.000000
+decalsatlasnormalscalebias	0.000000
+virtualtexturefeedbackfloat	{ 1.000000, 2048.000000, 245760.000000, 16.000000 }
+physicalfilterparms	physicalvmtrfilterparms
+minlodmap	_black
+pagetablemap	_vmtrpagetable
+physicalmappingsmap	_physicalvmtrmappings
+physicalpagesmaparray0	_physicalvmtrpages0
+physicalpagesmaparray1	_physicalvmtrpages0
+physicalpagesmap4	_black
+physicalpagesprtmap4	_black
+}

@@ -4,7 +4,7 @@
  *   e:set_velocity(v) e:health() e:set_health(n) e:alive() e:def()
  *   e:distance(other) e:is_player() e:remove() e:view_angle_to(other, [use_view_pos])
  *   e:anim_state(node, [via]) e:anim_force(node, [blend]) e:anim_finished()
- *   e:anim_current() e:anim_event(name)
+ *   e:anim_current() e:anim_event(name) e:tint(r, g, b, [seconds]) e:glow(r, g, b, [seconds])
  * Reads work on any entity; a call that changes an entity works only on the
  * mod's own (placed from its entityDefs or spawned by its scripts), except
  * that any mod may heal a player. A removed entity answers nil (alive and
@@ -26,6 +26,9 @@
  *   anim_current      the idAI2 animWeb's current node; anim_event and anim_finished are that node
  *                     observed every frame against the last request (script_api_common.c)
  *   view angle        idPlayer: getViewAngles (its aim) and getViewPos; other entities: the axis forward
+ *   tint, glow        the engine's lerpRenderParmFrom event (idEntity: it sets a render parm of the entity's
+ *                     render model and fades it in game time) on the parms color, bloomcolor and
+ *                     highlightcolor, found as renderParm decls by name (script_api_tint.h)
  *   spawn             idGameLocal +0x448 create, the pose, +0x458 finish, as idTarget_Spawn does */
 #include <math.h>
 #include <stdlib.h>
@@ -35,6 +38,7 @@
 #include "script_api_common.h"
 #include "script_hooks.h"
 #include "script_api_ai.h"   /* a demon's animation goes through its park (sh_script_ai_anim) */
+#include "script_api_tint.h"
 
 #define PLAYER_SLOTS       64      /* players take the first entity numbers */
 #define TEXT_ANY           ((size_t)-1 >> 1)
@@ -563,6 +567,67 @@ static int l_players(lua_State *L)
     return 1;
 }
 
+/* --------------------------------------------------------- tint, glow */
+
+static sh_tint_table g_tint;
+
+/* tint(r, g, b, [seconds]) and glow(r, g, b, [seconds]): the entity's look (script_api_tint.h). Answers true when
+ * the engine took all three parms, false when it did not (the entity has no render model, or an event is not the
+ * game's), nil when the entity is gone or the game's render parms cannot be found. Every argument is checked
+ * before the engine is touched. */
+static int tint_call(lua_State *L, const char *call, int kind)
+{
+    static const char *const what[3] = { "the red", "the green", "the blue" };
+    const sh_script_engine *e = eng();
+    const double max = kind ? SH_TINT_MAX_GLOW : SH_TINT_MAX_TINT;
+    sh_script_handle h = 0;
+    double seconds = 0.0, c;
+    char err[160];
+    float rgb[3];
+    int i, ok = 0, now = 0, ms;
+    void *ent, *decl[SH_TINT_PARMS];
+    sh_tint_state from, to;
+    sh_tint_parm a[SH_TINT_PARMS], b[SH_TINT_PARMS];
+    ent = sh_script_api_owned(L, 1, call, kind ? "make glow" : "tint", &h);
+    for (i = 0; i < 3; i++) {
+        c = sh_script_api_check_number(L, 2 + i, call, what[i]);
+        if (!sh_tint_check_channel(call, what[i], c, max, err, sizeof err)) sh_script_refuse(L, "%s", err);
+        rgb[i] = (float)c;
+    }
+    if (sh_script_api_opt_number(L, 5, call, "the seconds to fade over", &seconds) &&
+        !sh_tint_check_seconds(call, seconds, err, sizeof err))
+        sh_script_refuse(L, "%s", err);
+    if (!ent || !e || !e->decl) return nil1(L);
+    sh_tint_neutral(&from);
+    sh_tint_parms(&from, a);
+    for (i = 0; i < SH_TINT_PARMS; i++) {
+        decl[i] = e->decl("renderParm", a[i].name);
+        if (!decl[i]) return nil1(L);
+    }
+    (void)sh_script_api_now_ms(&now);
+    ms = sh_tint_duration_ms(seconds);
+    sh_tint_begin(&g_tint, h, kind, rgb, now, ms, &from, &to);
+    sh_tint_parms(&from, a);
+    sh_tint_parms(&to, b);
+    ok = 1;
+    for (i = 0; i < SH_TINT_PARMS; i++) {
+        sh_script_earg ev[6];
+        memset(ev, 0, sizeof ev);
+        ev[0].type = 'd'; ev[0].p = decl[i];
+        ev[1] = sh_script_earg_vec(a[i].v);
+        ev[2] = sh_script_earg_float(a[i].v[3]);
+        ev[3] = sh_script_earg_vec(b[i].v);
+        ev[4] = sh_script_earg_float(b[i].v[3]);
+        ev[5] = sh_script_earg_int(ms);
+        if (!sh_script_api_event(ent, "lerpRenderParmFrom", ev, 6, NULL)) ok = 0;
+    }
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+static int l_tint(lua_State *L) { return tint_call(L, "tint", 0); }
+static int l_glow(lua_State *L) { return tint_call(L, "glow", 1); }
+
 /* ------------------------------------------------------- registration */
 
 void sh_script_api_entity_register(void)
@@ -590,6 +655,8 @@ void sh_script_api_entity_register(void)
         { SH_SCRIPT_API_METHOD, "anim_finished", l_anim_finished },
         { SH_SCRIPT_API_METHOD, "anim_current", l_anim_current },
         { SH_SCRIPT_API_METHOD, "anim_event", l_anim_event },
+        { SH_SCRIPT_API_METHOD, "tint", l_tint },
+        { SH_SCRIPT_API_METHOD, "glow", l_glow },
     };
     size_t i;
     for (i = 0; i < sizeof calls / sizeof calls[0]; i++) sh_script_api_add(calls[i].kind, calls[i].name, calls[i].fn);

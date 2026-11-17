@@ -50,6 +50,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   published map and a staged rawmap that carry an unconvertible `smpkg.`
   package load as plain maps (the variables removed, `allocCount` corrected, one
   verdict line), lookalike names stay, and a save keeps the engine's own bytes.
+- `modlook_mod_test.c` runs the Graphics SDK look compiler where it is hooked in: a fixture mod folder (`fixtures/mods/looks-good`, and `looks-bad` with one misspelled field) built into a bundle with the look compiler set, then served through the provider's material filter. With `doom=` it also builds Doomforge's `tyrant-pg1-after` folder when present.
 - `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
   round trip, rows appended last and stripped with `allocCount` restored, the
   per-row budget that keeps them out of the 4 KiB playtest message, placed names,
@@ -203,10 +204,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `attach_tags_sigs_test.c`, given `-Doom`/`-DoomAlt`, checks the tag-info
   lookup at its recorded RVA, its pattern's uniqueness, its prologue and its
   window.
-- `modprog_test.c` covers the multilayer render programs (`modprog.h`): the
+- `modprog_test.c` covers the layered render programs (`modprog.h`): the
   decl and stage-text patches, the SPIR-V splice of the generated blend into a
   stand-in lit program (`fixtures/modprog/lit.frag`, compiled into
-  `modprog_fixture.c` by `tools/gen_multilayer.js`), and the derivation over a
+  `modprog_fixture.c` by `tools/gen_programs.js`), and the derivation over a
   stand-in install: every closure file of both programs and their
   permutations, each `.bin` carrying its decl's MD5fold and each SPIR-V
   header its stage text's, the product render-parm decls, and a damaged base
@@ -214,9 +215,14 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   both programs from the installed game and checks the same. The particle
   program the same way: its decl and stage-text patches and its splice into a
   stand-in particle stage (`fixtures/modprog/particle.frag`), and with `-Doom`
-  its variant of the installed `uberparticles` and its permutation. The
-  JavaScript `multilayer_gen_test.js` fails when the generated files are out of
-  date.
+  its variant of the installed `uberparticles` and its permutation. It also
+  checks the parameter image (a 4 x 4 RGBA16F image byte for byte against the
+  research writer's file, the 8 x 4 layout, half rounding), the registered
+  images, and the rewrite of old material keys over the copies in
+  `fixtures/modprog/legacy_*.decl` (`fixtures=<dir>`). The JavaScript `multilayer_gen_test.js` fails when the generated files are out of
+  date, and `programs_rp_test.js` checks that the `.rp` sources translate and compile
+  and that each call block loads what the SPIR-V splice loads. `modprog_test`
+  takes `dump=<dir>` to write the derived decls (to read them with another compiler).
 - `modstock_migrate_test.c` runs the overrides migration over a synthetic
   install and tree: an authored pack and a delivered package whose unchanged
   stock files become pointers, with the counts in each folder's line, the

@@ -1,0 +1,179 @@
+// particles.rp -- the particle shading of the product's particle program (modprog.h): ONE source, in the
+// render program language, for both renderers.
+//
+// An .rp file has two sections, and tools/gen_programs.js builds programs_particles.c from them:
+//   hlsl_fp_header { ... }  the program's functions. modprog.c puts them in the base program's own hlsl_fp_header
+//                           section (the engine compiles that section before main(), so they are real functions).
+//                           The OpenGL renderer compiles them from the decl text; the Vulkan renderer runs the same
+//                           functions translated to GLSL (the stage text of the cooked program) and compiled to SPIR-V
+//                           (spliced into the base program's fragment module). The translation is
+//                           tools/gen_programs.js's, a handful of token rules written there; a texture is $name, as in
+//                           any program of the game, and a render parm is never read inside a function (the call
+//                           block passes it in).
+//   call { ... }            the statements modprog.c places where the shading runs (after the base program's
+//                           PREMULTIPLY_ALPHA_BLENDED( result )): they build the arrays from the stage inputs and the
+//                           render parms and call the function. The Vulkan splice loads the same values from the same
+//                           stage inputs and uniforms (tables in modprog.c), in the same order.
+//
+// A particle stage is drawn by a particle program; the stage's render mode (unlit, lit or explosion) picks the shading,
+// and per-stage constants (the emissive multiplier, the emissive mask's multiplier and colour, the explosion
+// gradients, the near fade, the soft-particle distance, the depth offset) come with the stage. Per particle it reads
+// the same things DOOM 2016's particle vertices carry:
+// the flipbook's two frames and their blend, the colour and its alpha, and genericParm[0..3] (2016 encodes each in
+// a byte: brightness 1 + 10 gp0, alpha scale 1 + 10 gp1, gp3 the opacity curve). With T the frame-blended texture
+// (red and green linearized by the sRGB polynomial), c the particle colour, ca its alpha times the near fade, s the
+// soft-particle term and E, Em, Mc, G2, G3 the stage constants:
+//   UNLIT       rgb = T.r c (1 + 200 gp0) E ca^2        a = mix(sqrt T.g, T.g, gp3) ca (1 + 10 gp1) s
+//   LIT         rgb = T.r c (L + 200 gp0) w + Mc Em m^2   a as UNLIT          (L the particle light atlas,
+//                                                                            m the emissive map's red)
+//   EXPLOSION   rgb = mix(L T.r c, mix(G2, G3, m) E, m)  o = mix(sqrt T.g, T.g, gp3) ca; a = mix(sqrt o, o, gp3) ca s
+// near fade = saturate((d - end) / (begin - end)) on the distance d from the view (when begin > end); soft =
+// saturate((zScene - zFrag - saturate(1 - T.g) depthOffsetScale) / distance). Then 2016's own fog, and the colour
+// premultiplied by its alpha (ONE, ONE_MINUS_SRC_ALPHA).
+// c and its alpha are the numbers the CPU wrote into the particle vertex, linear: DOOM 2016's uberParticles vertex
+// stage hands the fragment DeGamma(vertex.color) (its exact sRGB decode, on rgb and on alpha) and its CPU stores the
+// alpha remapped past r_particlesMinAlpha t (a' = (a - t) / (1 - t), t = 16 / 255 by default); both are undone first
+// (ep_srgb, EP_MIN_ALPHA).
+//
+// The stage's constants are not render parms of the product's own: they are kept in keys the game's particle program
+// already holds, by what they mean (modprog.c's table SH_MODPROG_EP_PARMS names the old keys they replace):
+//   particleuberparms1  x, y 0 (left for the game's own code, which still runs: x picks its unlit vertex path, y its gun
+//                       soft scale); z the mode (0 unlit, 1 lit, 4 explosion) + 16 when the emissive mask sheet is bound;
+//                       w the depth offset scale
+//   particleuberparms2  xyz the emissive mask colour (lit) or the explosion's gradient 2; w the near fade's begin
+//   particleuberparms3  xyz the explosion's gradient 3; w the emissive multiplier E
+//   emissive            x the material's own (the game's code reads it); y the near fade's end; z the soft distance;
+//                       w a lit stage's scale
+//   smokebrightness     x the emissive mask's multiplier Em (a vector no program, fx or engine code names)
+// and the sheet is the texture $particleEmissiveMap.
+//
+// ep_shade runs at the end of the program's main and replaces the colour it wrote (the stock shading runs as its
+// unlit mode and is overwritten). The Vulkan splice keeps ep_shade and what it calls, binds $transMap, $viewDepthMap
+// and $particlesLightAtlasMap to the program's own transmap, viewdepthmap and particleslightatlasmap samplers, binds
+// $particleEmissiveMap after the program's textures, and loads V from the stage inputs, P from the material
+// uniforms the splice appends (smokebrightness, projectionmatrixz, globalvieworigin) and U from the program's own
+// uniforms (modprog.c's tables).
+
+hlsl_fp_header {
+	// The sRGB curve both texture channels go through (2016's SRGBlinearApprox).
+	float ep_lin( float x ) { return x * ( x * ( x * 0.305306011 + 0.682171111 ) + 0.012522878 ); }
+
+	// The inverse of DOOM 2016's SRGBlinear (global.inc: x / 12.92 up to 0.04045, else pow(x / 1.055 + 0.0521327, 2.4)),
+	// which its particle vertex stage applies to the vertex colour; and the alpha floor its CPU remaps the alpha past
+	// (r_particlesMinAlpha, default 16 of 255).
+	float ep_srgb( float x ) { return x <= 0.0031308 ? x * 12.92 : 1.055 * ( pow( x, 1.0 / 2.4 ) - 0.0521327 ); }
+	static const float EP_MIN_ALPHA = 16.0 / 255.0;
+
+	// A bicubic B-spline sample of the light atlas (four bilinear taps), as both games read it.
+	float ep_w0( float a ) { return ( 1.0 / 6.0 ) * ( a * ( a * ( -a + 3.0 ) - 3.0 ) + 1.0 ); }
+	float ep_w1( float a ) { return ( 1.0 / 6.0 ) * ( a * a * ( 3.0 * a - 6.0 ) + 4.0 ); }
+	float ep_w2( float a ) { return ( 1.0 / 6.0 ) * ( a * ( a * ( -3.0 * a + 3.0 ) + 3.0 ) + 1.0 ); }
+	float ep_w3( float a ) { return ( 1.0 / 6.0 ) * ( a * a * a ); }
+	float3 ep_bicubic( sampler2D image, float2 uv, float2 res )
+	{
+	    uv = uv * res + 0.5;
+	    float2 iuv = floor( uv ), fuv = frac( uv );
+	    float g0x = ep_w0( fuv.x ) + ep_w1( fuv.x ), g1x = ep_w2( fuv.x ) + ep_w3( fuv.x );
+	    float g0y = ep_w0( fuv.y ) + ep_w1( fuv.y ), g1y = ep_w2( fuv.y ) + ep_w3( fuv.y );
+	    float h0x = -1.0 + ep_w1( fuv.x ) / g0x, h1x = 1.0 + ep_w3( fuv.x ) / g1x;
+	    float h0y = -1.0 + ep_w1( fuv.y ) / g0y, h1y = 1.0 + ep_w3( fuv.y ) / g1y;
+	    float3 t0 = tex2Dlod( image, float4( ( float2( iuv.x + h0x, iuv.y + h0y ) - 0.5 ) / res, 0.0, 0.0 ) ).xyz;
+	    float3 t1 = tex2Dlod( image, float4( ( float2( iuv.x + h1x, iuv.y + h0y ) - 0.5 ) / res, 0.0, 0.0 ) ).xyz;
+	    float3 t2 = tex2Dlod( image, float4( ( float2( iuv.x + h0x, iuv.y + h1y ) - 0.5 ) / res, 0.0, 0.0 ) ).xyz;
+	    float3 t3 = tex2Dlod( image, float4( ( float2( iuv.x + h1x, iuv.y + h1y ) - 0.5 ) / res, 0.0, 0.0 ) ).xyz;
+	    return g0y * ( g0x * t0 + g1x * t1 ) + g1y * ( g0x * t2 + g1x * t3 );
+	}
+
+	// V: 0 colour, 1 texcoord0 (current and next frame uv), 2 texcoord1 (x 1 + 10 gp0, z frame blend, w gp3),
+	//    3 texcoord2 (xyz world position), 4 texcoord4 (xy light atlas uv, z 1 + 10 gp1), 5 texcoord6 (fog), 6 the
+	//    fragment position
+	// P: 0 smokebrightness (x the emissive mask's multiplier), 1 projectionmatrixz, 2 globalvieworigin
+	// U: 0 renderpositiontoviewtexture, 1 particleatlasparms, 2 foglightinscattercolor, 3 foglightinscatterintensity,
+	//    4 foglightoppositecolor, 5 fogcolor, 6 transparencylightmult, 7 particleuberparms1 (z the mode, + 16 when the
+	//    emissive mask sheet is bound: 0 unlit, 1 lit, 4 explosion; w depthOffsetScale, units), 8 particleuberparms2 (xyz
+	//    the emissive mask colour, or the explosion's gradient2; w the near fade's begin), 9 particleuberparms3 (xyz the
+	//    explosion's gradient3; w emissiveMultiplier), 10 emissive (y the near fade's end, z the soft distance, units;
+	//    w a lit stage's scale, 1 for a CPU stage: a stage lit per vertex draws (L + k)(1 + k))
+	void ep_shade( inout float4 frag, float4 V[7], float4 P[3], float4 U[11] )
+	{
+	    float4 cur = tex2D( $transMap, V[1].xy );
+	    float4 nxt = tex2D( $transMap, V[1].zw );
+	    float fb = V[2].z;
+	    float R = lerp( ep_lin( cur.r ), ep_lin( nxt.r ), fb );
+	    float G = lerp( ep_lin( cur.g ), ep_lin( nxt.g ), fb );
+	    clip( G - 1e-6 );
+	    // the stage's constants (U[7..10], P[0]), by what they mean
+	    bool hasMask = U[7].z >= 8.0;
+	    float mode = hasMask ? U[7].z - 16.0 : U[7].z;
+	    float depthScale = U[7].w;
+	    float nearBegin = U[8].w;
+	    float3 maskColour = U[8].xyz;
+	    float3 gradient3 = U[9].xyz;
+	    float emissiveMul = U[9].w;
+	    float nearEnd = U[10].y;
+	    float softDist = U[10].z;
+	    float litScale = U[10].w;
+	    float maskMul = P[0].x;
+	    float gp0 = ( V[2].x - 1.0 ) / 10.0;
+	    float gp1 = ( V[4].z - 1.0 ) / 10.0;
+	    float gp3 = V[2].w;
+	    float3 c = float3( ep_srgb( V[0].r ), ep_srgb( V[0].g ), ep_srgb( V[0].b ) );
+
+	    // near fade, on the distance from the view
+	    float ca = ep_srgb( V[0].a ) * ( 1.0 - EP_MIN_ALPHA ) + EP_MIN_ALPHA;
+	    if ( nearBegin > nearEnd ) {
+	        float d = length( V[3].xyz - P[2].xyz );
+	        ca *= saturate( ( d - nearEnd ) / ( nearBegin - nearEnd ) );
+	    }
+	    // soft particle, on linear view depth
+	    float2 tc = V[6].xy * U[0].zw + U[0].xy;
+	    float zs = P[1].w / ( tex2Dlod( $viewDepthMap, float4( tc, 0.0, 0.0 ) ).x + P[1].z );
+	    float zf = P[1].w / ( V[6].z + P[1].z );
+	    float soft = saturate( ( zs - zf - saturate( 1.0 - G ) * depthScale ) / max( softDist, 1e-3 ) );
+
+	    float m = 1.0;
+	    if ( hasMask ) m = lerp( tex2D( $particleEmissiveMap, V[1].xy ).r, tex2D( $particleEmissiveMap, V[1].zw ).r, fb );
+
+	    float3 rgb;
+	    float a;
+	    float curve = lerp( sqrt( G ), G, gp3 );
+	    if ( mode == 1.0 ) {
+	        float3 L = ep_bicubic( $particlesLightAtlasMap, V[4].xy, U[1].xy );
+	        rgb = R * c * ( L + 200.0 * gp0 ) * litScale;
+	        if ( maskMul != 0.0 ) rgb += maskColour * maskMul * m * m;
+	        a = curve * ca * ( 1.0 + 10.0 * gp1 );
+	    } else if ( mode == 4.0 ) {
+	        float3 L = ep_bicubic( $particlesLightAtlasMap, V[4].xy, U[1].xy );
+	        rgb = lerp( L * R * c, lerp( maskColour, gradient3, m ) * emissiveMul, m );
+	        float o = curve * ca;
+	        a = lerp( sqrt( o ), o, gp3 ) * ca;
+	    } else {
+	        rgb = R * c * ( 1.0 + 200.0 * gp0 ) * emissiveMul * ca * ca;
+	        a = curve * ca * ( 1.0 + 10.0 * gp1 );
+	    }
+	    a = saturate( a * soft );
+
+	    // 2016's fog (the stock program's, from its fog interpolator)
+	    float3 heightFog = lerp( U[2].xyz * U[3].x, U[4].xyz, V[5].z );
+	    float fogAmount = saturate( V[5].y + V[5].x );
+	    float fogSafe = max( fogAmount, 0.0001 );
+	    float3 fogColor = lerp( U[5].xyz, heightFog, max( 0.0, ( fogSafe - V[5].x ) / fogSafe ) );
+	    rgb = lerp( fogColor * U[6].x, rgb, 1.0 - fogAmount );
+
+	    frag = float4( rgb * a, a );
+	}
+}
+
+call {
+	float4 epV[7] = {
+		fragment.color, fragment.texcoord0, fragment.texcoord1, fragment.texcoord2, fragment.texcoord4,
+		fragment.texcoord6, fragment.position
+	};
+	float4 epP[3] = { $smokeBrightness, $projectionMatrixZ, $globalViewOrigin };
+	float4 epU[11] = {
+		$renderPositionToViewTexture, $particleAtlasParms, $fogLightInscatterColor, $fogLightInscatterIntensity,
+		$fogLightOppositeColor, $fogColor, $transparencyLightMult, $particleUberParms1, $particleUberParms2,
+		$particleUberParms3, $emissive
+	};
+	ep_shade( result.color, epV, epP, epU );
+}

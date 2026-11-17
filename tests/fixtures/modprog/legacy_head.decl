@@ -1,0 +1,81 @@
+{
+surfacetype	surftype_flesh
+diffusemap	"mods/wuahwfly/models/monsters/tyrant/tyrant_head.tga"
+bumpmap	"mods/wuahwfly/models/monsters/tyrant/tyrant_head_n.tga"
+specularmap	"mods/wuahwfly/models/monsters/tyrant/tyrant_head_s.tga"
+powermap	"mods/wuahwfly/models/monsters/tyrant/tyrant_head_g.tga"
+ambientprogram	"snapmapplus/multilayer/skinvmtr"
+shadowprogram	shadowvmtrclipspheres
+zprepassprogram	prezdrawwound
+sssmap	"_black"
+sssmaskscale	4.000000
+sssblurradius	4.000000
+sssblurscale	1.000000
+ssscattering	{ 0.937255, 0.192157, 0.121569, 0.050000 }
+packedspec	0.000000
+pulsefreq	{ 0.000000, 0.000000, 0.000000, 0.000000 }
+pulseinfo	{ 0.000000, 0.000000, 0.000000, 0.000000 }
+pulseparms	{ 0.000000, 1.000000, 5.000000, 0.000000 }
+bloommask	"mods/wuahwfly/models/monsters/tyrant/tyrant_head_e.tga"
+bloomcolor	{ 1.000000, 0.466601, 0.323702, 1.000000 }
+bloommaskscale	1.000000
+bloodcolor	{ 0.862745, 0.047059, 0.047059, 0.000000 }
+usewoundclip	0.000000
+layerstilingfactor	{ 20, 3, 50, 1 }
+multiblendlayerscale	{ 1, 1, 1, 0 }
+multiblendheightmapscale	{ 1, 1, 1, 1 }
+multiblendsoftness	{ 0.25, 0.25, 0.25, 0.25 }
+multiblendalbedoscale	{ -0.100000001, 0, 0.200000003, 1 }
+multiblendnormalscale	{ 0.300000012, 0.5, 0.200000003, 1 }
+multiblendspecularscale	{ 0, 0, 0, 1 }
+multiblendsmoothnessscale	{ 0, 0, 0, 1 }
+multiblendemissivescale	{ 1, 1, 1, 1 }
+blendheightmapscale	{ 1, 0, 0, 0 }
+blendlayer0tiling	{ 1, 1, 0, 0 }
+blendlayer0emissive	{ 1, 1, 1, 0 }
+blendlayer1tiling	{ 1, 1, 0, 0 }
+blendlayer2tiling	{ 1, 1, 0, 0 }
+blendlayer3tiling	{ 1, 1, 0, 0 }
+blendlayer4tiling	{ 1, 1, 0, 0 }
+blendlayer1specular	{ 0, 0, 0, 0 }
+blendlayer2specular	{ 0, 0, 0, 0 }
+blendlayer3specular	{ 0, 0, 0, 0 }
+blendlayer4specular	{ 1, 1, 1, 0 }
+blendlayer1emissive	{ 0, 0, 0, 0 }
+blendlayer2emissive	{ 0, 0, 0, 0 }
+blendlayer3emissive	{ 0, 0, 0, 0 }
+blendlayer4emissive	{ 0, 0, 0, 0 }
+multilayerember	{ 0, 0, 0, 0 }
+multilayerembertiling	{ 4, 4, 0, 0 }
+multilayerembernoise	{ 1, 4, 0.7, 0.4 }
+multilayeremberhot	{ 1, 0.07, 0, 0 }
+layerblendmask	mods/wuahwfly/ml/models/monsters/tyrant/tyrant_head_mask_blendmask.tga
+blendlayer0heightmap	mods/wuahwfly/ml/const_37f8_37f8_37f8_3c00.tga
+blendlayer1albedomap	mods/wuahwfly/ml/art/tile/detail/pores_a_albedo.tga
+blendlayer1normalmap	mods/wuahwfly/ml/art/tile/detail/pores_a_n_normal.tga
+blendlayer1smoothnessmap	mods/wuahwfly/ml/art/tile/detail/pores_a_h_smoothness.tga
+blendlayer1heightmap	mods/wuahwfly/ml/art/tile/detail/pores_a_g_heightmap.tga
+blendlayer2albedomap	mods/wuahwfly/ml/art/tile/terrain/mars/rock_albedo.tga
+blendlayer2normalmap	mods/wuahwfly/ml/art/tile/terrain/mars/rock_n_normal.tga
+blendlayer2smoothnessmap	mods/wuahwfly/ml/art/tile/terrain/mars/rock_g_smoothness.tga
+blendlayer2heightmap	mods/wuahwfly/ml/art/tile/terrain/mars/rock_h_heightmap.tga
+blendlayer3albedomap	mods/wuahwfly/ml/art/tile/detail/pimples_a_albedo.tga
+blendlayer3normalmap	mods/wuahwfly/ml/art/tile/detail/pimples_a_n_normal.tga
+blendlayer3smoothnessmap	mods/wuahwfly/ml/art/tile/detail/pimples_a_g_smoothness.tga
+blendlayer3heightmap	mods/wuahwfly/ml/art/tile/detail/pimples_a_h_heightmap.tga
+blendlayer4albedomap	mods/wuahwfly/ml/art/tile/detail/pores_a_albedo.tga
+blendlayer4normalmap	mods/wuahwfly/ml/art/tile/detail/pores_a_n_normal.tga
+blendlayer4smoothnessmap	mods/wuahwfly/ml/art/tile/detail/pores_a_h_smoothness.tga
+blendlayer4heightmap	mods/wuahwfly/ml/art/tile/detail/pores_a_g_heightmap.tga
+multilayerextramap0	mods/wuahwfly/ml/const_0000_0000_0000_3c00.tga
+multilayerextramap1	mods/wuahwfly/ml/const_0000_0000_0000_3c00.tga
+lightprojatlasscalebias	0.000000
+lightfalloffatlasscalebias	0.000000
+decalsatlasalbedoscalebias	0.000000
+decalsatlasspecularscalebias	0.000000
+decalsatlasnormalscalebias	0.000000
+landpagefile	"mods/wuahwfly/tyrant"
+usevirtualmapping	1.000000
+virtualmapping	{ 0.0041666667, 0.0041666667, 0.0000000000, 0.0087890625 }
+virtualtexturefeedbackfloat	{ 1.000000, 2048.000000, 245760.000000, 16.000000 }
+}

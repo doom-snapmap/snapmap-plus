@@ -1,0 +1,10 @@
+{
+	look			layered
+	layermask		mods/lookgood/tiles/mask.tga
+	layer1			mods/lookgood/tiles/pores.tga
+	layer1specular		mods/lookgood/tiles/spec.tga
+	baseheight		mods/lookgood/tiles/height.tga
+	burn			mods/lookgood/tiles/burnt.tga
+	burnglow		mods/lookgood/tiles/burnglow.tga
+	burnblood		mods/lookgood/tiles/burnblood.tga
+}

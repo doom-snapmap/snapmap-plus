@@ -1,0 +1,8 @@
+{
+	look			particle
+	transmap		mods/lookbad0/fx/embers.tga
+	lighting		lit
+	glow			4
+	glowmask		mods/lookbad0/fx/embers_mask.tga
+	nearfade		{ 40, 8 }
+}
