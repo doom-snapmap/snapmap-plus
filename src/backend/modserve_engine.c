@@ -74,6 +74,7 @@
 #include "companion_engine.h"
 #include "script/script_hooks.h"   /* mod scripts' map gates */
 #include "clip_events.h"            /* clip events' Play gate */
+#include "attach_tags.h"            /* attachment tags' Play gate */
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -508,7 +509,7 @@ int sh_modserve_engine_on_main(void)
     return me_on_main();
 }
 
-/* Clip events' carriers (clip_events.h): the engine's own find, which loads a name the probe admits. */
+/* Clip events' and attachment tags' carriers (clip_events.h, attach_tags.h): the engine's own find, which loads a name the probe admits. */
 void *sh_modserve_engine_decl(const char *type, const char *name)
 {
     void *decl = NULL;
@@ -1082,6 +1083,8 @@ void sh_modserve_play_begin(void)
     }
     /* Clip events: the rows this Play's mods add to their own clips (clip_events.h), by name. */
     if (on_main == 1) sh_clip_events_play_begin();
+    /* Attachment tags: the tag info this Play's mods give for their own attachments (attach_tags.h), by name. */
+    if (on_main == 1) sh_attach_tags_play_begin();
     /* What the editor's spawns created for a kept decl since the last pass
      * is still level 1: kept before the level load's purge frees it. */
     if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
@@ -2800,6 +2803,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     /* A new map: the last one's mod scripts end (they start at its Play). */
     if (main == 1) sh_script_hooks_gate(SH_SCRIPT_GATE_MAP_LOAD);
     if (main == 1) sh_clip_events_map_end();
+    if (main == 1) sh_attach_tags_map_end();
     /* Companions follow the index at every map load, a map with no rows included. */
     if (main == 1) (void)sh_companions_ensure("map");
     /* A map without manifest rows: nothing to do, nothing logged. */

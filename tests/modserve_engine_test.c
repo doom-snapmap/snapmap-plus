@@ -81,6 +81,8 @@ void sh_script_hooks_gate(int gate) { (void)gate; }
 int sh_script_hooks_open(void) { return 0; }
 void sh_clip_events_play_begin(void) {}
 void sh_clip_events_map_end(void) {}
+void sh_attach_tags_play_begin(void) {}
+void sh_attach_tags_map_end(void) {}
 
 /* ------------------------------------------------------------------ the faked engine */
 

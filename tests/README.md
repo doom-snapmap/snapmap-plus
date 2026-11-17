@@ -195,6 +195,14 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `clip_events_sigs_test.c`, given `-Doom`/`-DoomAlt`, checks the three event
   lookups at their recorded RVAs, the filtered pair told apart by their first
   query call, the parent walk and merge they share, and their windows.
+- `attach_tags_test.c` covers attachment tags' pure half (`attach_tags_rule.c`):
+  the `mods/` and own-namespace tests, the md6Def `props` reader, the registries
+  rows a build records and the warning for every entry or prop it leaves out,
+  the per-Play registry (a stock or another mod's prop never registered, first
+  rows kept, found in any case) and the chain rule it reuses from clip events.
+  `attach_tags_sigs_test.c`, given `-Doom`/`-DoomAlt`, checks the tag-info
+  lookup at its recorded RVA, its pattern's uniqueness, its prologue and its
+  window.
 - `modprog_test.c` covers the multilayer render programs (`modprog.h`): the
   decl and stage-text patches, the SPIR-V splice of the generated blend into a
   stand-in lit program (`fixtures/modprog/lit.frag`, compiled into

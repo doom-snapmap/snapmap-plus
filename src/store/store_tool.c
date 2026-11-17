@@ -22,6 +22,7 @@
 #include "modbankinfo.h"
 #include "modcontent.h"
 #include "clip_events.h"
+#include "attach_tags.h"
 
 #define ST_PATH_MAX ST_PATH
 
@@ -523,6 +524,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     sh_mb_set_bank_need(sh_mbi_bundle_need);
     sh_mb_set_extra_check(sh_modcontent_check);
     sh_mb_set_clip_events(sh_ce_build_registry);
+    sh_mb_set_attach_tags(sh_at_build_registry);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
     else sh_ms_set_discard(sh_store_recycle, &g_rc, "moved to the Recycle Bin");
     com = SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));

@@ -21,6 +21,7 @@
 #include "modstock.h"
 #include "modui.h"
 #include "clip_events.h"
+#include "attach_tags.h"
 #include "../common/text.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
@@ -732,6 +733,11 @@ void h_sh_mods(idCmdArgs *a)
     if (!_stricmp(verb, "clip-events")) {
         /* The rows the open map's mods add to their own clips (clip_events.h), for the test bench. */
         sh_clip_events_command(mc_doctor_line, NULL);
+        return;
+    }
+    if (!_stricmp(verb, "attachment-tags")) {
+        /* The tag info the open map's mods give for their own attachments (attach_tags.h), for the test bench. */
+        sh_attach_tags_command(mc_doctor_line, NULL);
         return;
     }
     if (!_stricmp(verb, "doctor")) {

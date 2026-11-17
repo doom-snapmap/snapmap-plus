@@ -20,7 +20,7 @@
  *     "warnings": [...],               every warning of the build, when any
  *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"banks": [...], "clipEvents": [...], "conductor": [...], "strings": [...]},
+ *     "registries": {"attachmentTags": [...], "banks": [...], "clipEvents": [...], "conductor": [...], "strings": [...]},
  *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
  *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "node", "dynamic"},
  *                                      what the mod's scripts bind, read without running them
@@ -615,6 +615,11 @@ typedef char *(*sh_mb_clip_events_fn)(const char *salt, const char *const *names
                                       void *text_ctx, void (*warn)(void *context, const char *line), void *warn_ctx,
                                       int *oom);
 void sh_mb_set_clip_events(sh_mb_clip_events_fn fn);
+
+/* The registries "attachmentTags" of a build (attach_tags.h, sh_at_build_registry): the same shape as
+ * "clipEvents" above, from the author's "attachment_tags" names; props in place of clips. NULL (the default)
+ * records nothing for "attachment_tags". */
+void sh_mb_set_attach_tags(sh_mb_clip_events_fn fn);
 
 
 /* The static registration pass: every literal call of the registration API in

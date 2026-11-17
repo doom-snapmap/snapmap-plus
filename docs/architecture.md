@@ -577,7 +577,7 @@ These backend files share the work:
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
-  `strings`, `hud`, `scenes`, `companions`, `clip_events`; any other key is kept in the manifest's
+  `strings`, `hud`, `scenes`, `companions`, `clip_events`, `attachment_tags`; any other key is kept in the manifest's
   `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
@@ -1900,6 +1900,100 @@ engine holds it, then its clips and how many lookups each answered.
 warnings, the registry and the chain rule; `clip_events_sigs_test` the sites,
 the lookalikes, the walk they share and the windows on both executables;
 `detour_windows_test` audits the windows with every other site.
+
+### Attachment tags
+
+A mod gives the tag info for an animated attachment of its own on a game
+model, without replacing any game file (`attach_tags.{c,h}`,
+`attach_tags_rule.c`, `attach_tags_sigs.c`). An attachment is attached to a
+host model at a tag by an `ae_animatedAttachment_Attach` clip event, and
+`idAttachmentCollection::AddAttachment` reads the tag info for (the attached
+md6Def's name, the tag's name) from the HOST model's `props` table through one
+engine function, the tag-info lookup; it fails with `model '%s' has no tag info
+for '%s'` when the answer is NULL or its joint is -1. The player's md6Def is
+the game's and is never edited, so a mod that attaches its own md6Def to the
+player's body writes an md6Def of its own, the carrier, that inherits the host
+model (`init { inherit "player/mp/tp_body_mp.md6" }`), lists the info in a
+top-level `props` block of the engine's own form
+
+```
+props { prop "mods/<salt>/gun.md6" {
+          tag "hand_r" { trans ( x y z ) rot ( x y z w ) parent "<joint>" } } }
+```
+
+and names it in the author key `"attachment_tags":
+["mods/<folder name>/.../tags.md6"]`. The engine parses the carrier with its
+own md6Def parser, so the product never builds a tag.
+
+The build (`sh_at_build_registry`, registered with the builder through
+`sh_mb_set_attach_tags` by the DLL and the store tool, reading the md6Def texts
+through the same `mb_ce_text` as clip events) records the registries member
+`attachmentTags`, `[{"md6Def", "base", "props": [...]}]`, outside the canonical
+text; it sorts first among the registries members. Every mistake is a warning,
+never the build's cause: a value that is not a list, an entry that is not a
+name, an entry that is not one of the mod's md6Defs, has no `inherit` inside
+`init`, has no prop block with a tag, or repeats an earlier entry is left out;
+a prop outside `mods/<salt>/` is left out of its entry ("A mod can give tag
+info only for its own md6Defs"), and a prop two entries give keeps the first.
+Each sentence says what to write instead.
+
+The registry of a Play is built at the Play gate (`sh_modserve_play_begin`,
+main thread, before the level load) from the `attachmentTags` of the builds the
+open map serves, exactly as clip events' is (`sh_at_registry_add` checks every
+row again: a carrier or a prop outside `mods/<salt>/` is dropped with a line,
+so no build can register a stock prop or another mod's), sorted by prop name
+and published with one pointer swap; the map-load gate drops it. It holds
+names only.
+
+The lookup is `const void *f(const void *props, const char *prop, const char
+*tag)`: `props` is the idList at the host md6Def + `0x210` (rows of `0x148`
+bytes, the prop name pointer at +`0x10`), the answer is a tag record whose
+int16 at +`0x1C` is the resolved joint, -1 for no tag (the engine answers a
+static default record with -1 when nothing matches).
+
+| Site | VK | GL | Window |
+|---|---|---|---|
+| `TagInfoLookup` | 0x16CE1E0 | 0x16CEE90 | 15 |
+
+One 48-byte pattern, unique in each executable (`sig_resolve_one`; no call
+target to check). The window (`mov [rsp+8],rbx; mov [rsp+0x10],rbp; mov
+[rsp+0x18],rsi`) is whole and position independent. A site that does not
+resolve records `Attachment tags` off, and each Play whose mods list
+attachment tags then logs one line per mod.
+
+The detour is prepared at boot and committed at the first Play whose registry
+has a row; with no registration no hook is committed. It calls the engine
+first:
+
+```
+r = orig(props, prop, tag);
+if (is_tag(r) || !g_any) return r;          // the host's own table answered, or nothing is registered
+if (!prop || !under("mods/", prop)) return r;   // every stock prop leaves here
+row = registry_find(prop);  if (!row || no Play) return r;
+host = props - 0x210;  carrier = carrier_of(row);   // found by name, checked by name before each use
+if (!carrier || !in_chain(carrier, host)) return r;
+r2 = orig(carrier + 0x210, prop, tag);
+return is_tag(r2) ? r2 : r;
+```
+
+`in_chain` is clip events' (`sh_ce_in_chain`): rows written over the SnapMap
+body apply on it, on the campaign body it inherits and on a body that inherits
+it, and on nothing else. The host's own tag info always wins. All reads of
+engine memory are fault guarded and nothing of a game model is written. The
+carrier is found by name exactly as clip events finds its own
+(`sh_modserve_engine_decl` on the main thread, `sh_modserve_engine_decl_held`
+elsewhere); a carrier that does not load logs `MODS: attachment-tags: <mod>:
+"<md6Def>" did not load, so "<prop>" attaches without the tag info it gives.`
+once per Play. The diagnostic build logs the first answer of each prop in a
+Play, `attachment-tags: "<prop>" on <model>: tag info from "<md6Def>"`.
+
+`sh_mods attachment-tags` prints the open map's registry (the Play's, or the
+one its next Play builds): each carrier with its mod, its base and whether the
+engine holds it, then its props and how many lookups each answered.
+`attach_tags_test` covers the names, the props reader, the build's rows and
+warnings, the registry and the chain rule it reuses; `attach_tags_sigs_test`
+the site and its window on both executables; `detour_windows_test` audits the
+window with every other site.
 
 ### Owner-bound companions
 

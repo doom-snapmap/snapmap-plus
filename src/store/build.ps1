@@ -18,6 +18,8 @@ $Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c", 
              "../backend/modcontent.c", "../backend/modscene_decl.c",
              # The "clip_events" rows a build of the game records (clip_events.h).
              "../backend/clip_events_rule.c",
+             # The "attachment_tags" rows a build of the game records (attach_tags.h).
+             "../backend/attach_tags_rule.c",
              # A build that carries mod scripts compiles them (never runs them): the Lua parser only.
              "../backend/script/script_compile.c", "../backend/script/script_reason.c",
              # Which mods get a Script node row and the paths it holds (no Lua runs).

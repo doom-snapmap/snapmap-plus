@@ -3782,6 +3782,54 @@ static void mb_registry_clip_events(sh_mb_bundle *b, const wchar_t *root, const 
     free(json);
 }
 
+static sh_mb_clip_events_fn volatile g_attach_tags;
+void sh_mb_set_attach_tags(sh_mb_clip_events_fn fn)
+{
+    InterlockedExchangePointer((void *volatile *)&g_attach_tags, (void *)fn);
+}
+
+/* registries "attachmentTags": the author's "attachment_tags" checked and recorded (attach_tags.h), as the
+ * "clip_events" are above: a value that is not a list, or an entry that is not a name, is left out with a
+ * warning, never failing the build. */
+static void mb_registry_attach_tags(sh_mb_bundle *b, const wchar_t *root, const mbj *extra, mb_buf *o, int *first)
+{
+    sh_mb_clip_events_fn fn = g_attach_tags;
+    const mbj *list = extra ? mbj_get(extra, "attachment_tags") : NULL;
+    const char **names;
+    char *json;
+    size_t i;
+    int n = 0, oom = 0;
+    mb_ce_ctx c;
+    if (!list || !fn) return;
+    if (list->t != MBJ_ARR) {
+        mb_warn(b, "mod.json \"attachment_tags\" is not a list, so it was ignored. Write it as a list of this mod's "
+                "md6Def names, like \"attachment_tags\": [\"mods/<folder name>/<path>.md6\"].");
+        return;
+    }
+    if (!list->count) return;
+    names = (const char **)calloc(list->count, sizeof *names);
+    if (!names) { mb_error(b, "out of memory"); return; }
+    for (i = 0; i < list->count; i++) {
+        const mbj *e = list->items[i];
+        if (!e || e->t != MBJ_STR || !e->n || strlen(e->s) != e->n || strchr(e->s, '"') || strchr(e->s, '\\')) {
+            mb_warn(b, "mod.json \"attachment_tags\" entry %zu is not an md6Def name, so it was ignored. Write each "
+                    "entry as a name in quotes, like \"mods/<folder name>/<path>.md6\".", i + 1);
+            continue;
+        }
+        names[n++] = e->s;
+    }
+    c.b = b;
+    c.root = root;
+    json = n ? fn(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
+    free((void *)names);
+    if (oom) { free(json); mb_error(b, "out of memory"); return; }
+    if (!json) return;
+    mb_puts(o, *first ? "\"attachmentTags\":" : ",\"attachmentTags\":");
+    mb_puts(o, json);
+    *first = 0;
+    free(json);
+}
+
 static void mb_registries(sh_mb_bundle *b, const wchar_t *root)
 {
     mb_buf o = {0};
@@ -3791,7 +3839,8 @@ static void mb_registries(sh_mb_bundle *b, const wchar_t *root)
     const mbj *strings = NULL, *en = NULL;
     if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL);
     mb_put(&o, "{", 1);
-    mb_registry_banks(b, &o, &first);   /* "banks" sorts first */
+    mb_registry_attach_tags(b, root, extra, &o, &first);   /* "attachmentTags" sorts first */
+    mb_registry_banks(b, &o, &first);   /* then "banks" */
     mb_registry_clip_events(b, root, extra, &o, &first);   /* then "clipEvents" */
     for (i = 0, any = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
