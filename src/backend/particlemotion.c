@@ -52,6 +52,7 @@ static context_fn g_context;
  * the builder leaves that scale out of a model-axes context (it multiplies the axes by it only for a sorted stage). */
 static __declspec(thread) void *t_model_context;
 static __declspec(thread) float t_model_scale;
+static __declspec(thread) float t_model_origin[3], t_model_axes[9];   /* the model in the world: o + A p */
 
 static void context_detour(void *job, char sorted, const float *origin, const float *axes, const float *scale,
                            const void *a6, const float *a7, void *context)
@@ -61,7 +62,10 @@ static void context_detour(void *job, char sorted, const float *origin, const fl
     if (sorted || !scale || !context) return;
     __try {
         float s = sh_motion_scale(scale);
-        if (s != 1.0f) { t_model_scale = s; t_model_context = context; }
+        memcpy(t_model_origin, origin, sizeof t_model_origin);
+        memcpy(t_model_axes, axes, sizeof t_model_axes);
+        t_model_scale = s;
+        t_model_context = context;
     } __except (EXCEPTION_EXECUTE_HANDLER) { t_model_context = NULL; }
 }
 static volatile LONG g_moved, g_collided, g_killed, g_children;
@@ -180,6 +184,20 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     if (sh_motion_collides(&m) && (stage[SH_MOTION_STAGE_FLAGS] & SH_MOTION_STAGE_SORTED)) {
         /* world axes: the planes of the emitter's place (asked for, and found on the game thread, when new) */
         if (sh_planes_lookup(fr.origin, fr.z, &planes) && planes.count > 0) *have = 1;
+    } else if (sh_motion_collides(&m) && model) {
+        /* the model's axes: the planes of the model's place in the world, brought into the model's frame (the
+         * builder's origin o and unit axes A: a world plane n.x = d is A'n . p = d - n.o) */
+        const float *A = t_model_axes, *o = t_model_origin;
+        float zw[3] = { A[6], A[7], A[8] };
+        if (sh_planes_lookup(o, zw, &planes) && planes.count > 0) {
+            int j;
+            for (j = 0; j < planes.count && j < SH_MOTION_PLANES; j++) {
+                float n[3] = { planes.n[j][0], planes.n[j][1], planes.n[j][2] };
+                planes.d[j] -= n[0] * o[0] + n[1] * o[1] + n[2] * o[2];
+                for (i = 0; i < 3; i++) planes.n[j][i] = n[0] * A[3 * i] + n[1] * A[3 * i + 1] + n[2] * A[3 * i + 2];
+            }
+            *have = 1;
+        }
     } else if (sh_motion_collides(&m) && !InterlockedCompareExchange(&g_said_local, 1, 0)) {
         g_say_local = 1;
     }
@@ -270,6 +288,7 @@ static int parent_place(void **context, const uint8_t *child, const uint32_t *bo
     memcpy(pctx, context, sizeof pctx);
     *(const uint8_t **)pctx = parent;
     read_frame(context, &fr, NULL);
+    if (t_model_context == (void *)context) t_model_context = pctx;      /* the parent: the same model's axes */
     memset(prec, 0, sizeof prec);
     prec[0] = (uint32_t)p;
     memcpy(&prec[1], &delta, sizeof delta);
@@ -278,7 +297,9 @@ static int parent_place(void **context, const uint8_t *child, const uint32_t *bo
     memcpy(&prec[3], &x, sizeof x);
     memcpy(&prec[4], &x, sizeof x);
     prec[5] = prec[6] = sh_family_seed(sh_family_salt(fr.origin, parent), p);
-    return flight((void **)pctx, parent, prec, delta, plife, NULL, NULL, at, vel, &have, NULL) ? 0 : 1;
+    p = flight((void **)pctx, parent, prec, delta, plife, NULL, NULL, at, vel, &have, NULL) ? 0 : 1;
+    if (t_model_context == (void *)pctx) t_model_context = context;
+    return p;
 }
 
 static void move_quad(void **context, const uint8_t *stage, const uint32_t *born, float *verts)
