@@ -292,7 +292,10 @@ static void fresh_mod(const char *fixture, const char *root)
     CHECK(sh_modserve_bundle_state(b.hash, NULL) == 1);
     for (i = 0; i < (int)b.file_count; i++) {
         CHECK(sh_modserve_lookup(b.files[i].request, &hit) == 1);
-        if (strstr(b.files[i].request, "alexrimp")) CHECK(hit.size == b.files[i].size);
+        /* a carried file is served whole; a decl's names as the engine names them (modauthor.h), so its size is the
+         * engine text's, which is never shorter than the author's */
+        if (strstr(b.files[i].request, "alexrimp"))
+            CHECK(b.files[i].is_decl ? hit.size >= b.files[i].size : hit.size == b.files[i].size);
     }
 
     /* Editor rows: both sedefs, after the decls they need. */
@@ -405,7 +408,7 @@ static void skins_namespace(const char *root)
     CreateDirectoryA(mods, NULL);
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "mod.json", "{\"name\":\"Skin test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"alexskin\"}}");
-    mt_write(folder, "assets\\generated\\decls\\skins\\md6\\mods\\alexskin\\imp.md6mesh.decl", "{\r\n}");
+    mt_write(folder, "decls\\skins\\md6\\imp.md6mesh.decl", "{\r\n}");   /* named mods/alexskin/md6/imp.md6mesh */
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 1);
     if (b.errors) printf("    %s\n", sh_mb_first_cause(&b));
     {
@@ -415,7 +418,7 @@ static void skins_namespace(const char *root)
     sh_mb_free(&b);
     CHECK(sh_modserve_index_build(mods) == 1);
     /* A skins decl outside the namespace is still refused. */
-    mt_write(folder, "assets\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
+    mt_write(folder, "game\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(sh_mb_first_cause(&b), "skins decl"));
     sh_mb_free(&b);
 }
@@ -436,7 +439,7 @@ static void cut_content(const char *root)
     printf("-- a bundle requiring both blacklist gates: collected at index time, applied before its registration\n");
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\cutmods", root);
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\cut", mods);
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\localcut\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    mt_write(folder, "entities\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
     mt_write(folder, "mod.json", CUT_DESC);
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 1 && b.requirements != NULL);
     CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))) == 1);

@@ -2,12 +2,12 @@
  * bundle by the builder (sh_mb_build with sh_mb_set_look_compiler) and the same folder served by the provider through
  * its material filter (sh_modserve_set_material_filter), the two hooks dllmain.c installs.
  *
- * Build: a folder of a layered look (a layer image, a colour layer, a burn), a particle look of the platform route and
+ * Build: a folder of a layered material (a layer image, a colour layer, a burn), a particle material of the platform route and
  * one of the stock route, a material that is not a look, builds; its needs are the folder's own images and the game's
  * names, never a file the product derives (snapmapplus/layered/*, snapmapplus/particles/*, snapmapplus/look/*); the
  * report carries the look notes; a copy with one wrong field fails with exactly the compiler's sentence.
  * Serve: each look material is served as it compiles, the derived images it names are readable through
- * sh_modprog_read, a material that is not a look is served byte for byte and an old-key material is served rewritten.
+ * sh_modprog_read, a material that is not a look, or that writes the old keys, is served byte for byte as written.
  * A real converted mod (Doomforge's Tyrant, when the folder is on this computer) builds offline.
  *
  *   modlook_mod_test.exe [fixtures=<tests\fixtures\mods>] [fixtures_prog=<tests\fixtures\modprog>]
@@ -24,6 +24,7 @@
 #include "modserve.h"
 #include "modbundle.h"
 #include "modlook.h"
+#include "modauthor.h"
 #include "modprog.h"
 #include "modstock.h"
 #include "mod_test_util.h"
@@ -273,7 +274,7 @@ static void test_build(const char *tmp)
     /* a deliberately wrong copy: one field misspelled, refused with exactly the compiler's one sentence */
     {
         char bad[MAX_PATH], src[MAX_PATH];
-        const char *want = "body.decl line 7: 'layer1nromal' is not a field of a layered look; the nearest is 'layer1normal'.";
+        const char *want = "body.decl line 7: 'layer1nromal' is not a field of a layered material; the nearest is 'layer1normal'.";
         _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\looks-bad", tmp);
         CHECK(mt_copy_tree(fixture_path("looks-bad", src, sizeof src), bad));
         CHECK(!sh_mb_build(bad, NULL, &g_resolver, &b));
@@ -302,6 +303,17 @@ static int open_text(const char *request, unsigned char **bytes, size_t *len)
     return sh_modserve_open(request, bytes, len);
 }
 
+/* A file of the folder as the engine is handed it: its names written as the engine names them (modauthor.h). */
+static unsigned char *engine_whole(const char *path, size_t *n)
+{
+    unsigned char *raw = read_whole(path, n);
+    size_t en = 0;
+    char *t = raw ? sh_ma_text(GOOD_SALT, (const char *)raw, *n, NULL, NULL, &en) : NULL;
+    if (!t) return raw;
+    free(raw);
+    *n = en;
+    return (unsigned char *)t;
+}
 static void test_serve(const char *tmp)
 {
     char root[MAX_PATH], folder[MAX_PATH], src[MAX_PATH], path[MAX_PATH], *cause = NULL;
@@ -327,7 +339,7 @@ static void test_serve(const char *tmp)
         if (t) {
             /* the fixture names another mod's salt; this folder's own, the images beside it */
             while ((w = strstr((char *)t, "wuahwfly")) != NULL) memcpy(w, GOOD_SALT, 8);
-            _snprintf_s(dst, sizeof dst, _TRUNCATE, "%s\\assets\\" MAT_DIR "legacy_head.decl", folder);
+            _snprintf_s(dst, sizeof dst, _TRUNCATE, "%s\\materials\\legacy_head.decl", folder);
             for (w = dst; *w; w++) if (*w == '/') *w = '\\';
             mt_mkdirs_for(dst);
             {
@@ -341,9 +353,9 @@ static void test_serve(const char *tmp)
                 if (e - w > 4 && !_strnicmp(e - 4, ".tga", 4) && (size_t)(e - w) < sizeof img - 16) {
                     memcpy(img, w, (size_t)(e - w) - 4);
                     img[e - w - 4] = 0;
-                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\assets\\generated\\image\\%s.bimage", folder, img);
+                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\images\\%s.bimage", folder, img + sizeof "mods/" GOOD_SALT "/" - 1);
                     for (q = to; *q; q++) if (*q == '/') *q = '\\';
-                    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\assets\\generated\\image\\mods\\" GOOD_SALT "\\plain.bimage", folder);
+                    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\images\\plain.bimage", folder);
                     mt_mkdirs_for(to);
                     CopyFileA(from, to, TRUE);
                 }
@@ -368,19 +380,22 @@ static void test_serve(const char *tmp)
         int r;
         char *p, *e;
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "%s.decl", LOOKS[i]);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", folder, req);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\%s.decl", folder, LOOKS[i]);
         for (p = path; *p; p++) if (*p == '/') *p = '\\';
-        file = read_whole(path, &fn);
+        file = engine_whole(path, &fn);
         CHECK(file != NULL);
         CHECK(open_text(req, &served, &sn) == 1 && served);
+        if (served) {   /* a NUL after the bytes, for the text helpers below */
+            unsigned char *z = (unsigned char *)HeapReAlloc(GetProcessHeap(), 0, served, sn + 1);
+            if (z) { served = z; served[sn] = 0; }
+        }
         r = sh_look_compile(req, (const char *)file, fn, &want, &want_n, why, sizeof why);
         CHECK(r == SH_LOOK_CHANGED && want);
         if (served && want) {
             /* the served text is the compiled text, not the author's file */
             CHECK(sn == want_n && !memcmp(served, want, sn));
             CHECK(!(sn == fn && !memcmp(served, file, fn)));
-            CHECK(!has((const char *)served, "look\t") || !has((const char *)served, "\tlook ") || 1);
-            CHECK(value((const char *)served, "look")[0] == 0);
+            CHECK(value((const char *)served, "type")[0] == 0);
             if (!strcmp(LOOKS[i], "body") || !strcmp(LOOKS[i], "crowded")) {
                 char prog[600], parms[600];
                 strcpy_s(prog, sizeof prog, value((const char *)served, "ambientprogram"));
@@ -432,25 +447,18 @@ static void test_serve(const char *tmp)
 
     /* a material that is not a look is served byte for byte */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "plain.decl");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\plain.decl", folder);
-    file = read_whole(path, &fn);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\plain.decl", folder);
+    file = engine_whole(path, &fn);
     CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
     if (served) { HeapFree(GetProcessHeap(), 0, served); served = NULL; }
 
-    /* an old-key material is served rewritten: the old program names and keys are the new ones */
+    /* a material written with the old keys has no type: it is served byte for byte, as written */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "legacy_head.decl");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\legacy_head.decl", folder);
-    file = read_whole(path, &fn);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\legacy_head.decl", folder);
+    file = engine_whole(path, &fn);
     CHECK(file && has((const char *)file, "snapmapplus/multilayer/skinvmtr"));
-    CHECK(open_text(req, &served, &sn) == 1 && served);
-    if (served && file) {
-        CHECK(!(sn == fn && !memcmp(served, file, fn)));
-        CHECK(!has((const char *)served, "snapmapplus/multilayer/"));
-        CHECK(has((const char *)served, "snapmapplus/layered/"));
-        CHECK(!has((const char *)served, "layerstilingfactor"));
-        CHECK(value((const char *)served, "layerparms")[0] != 0);
-    }
+    CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
     if (served) { HeapFree(GetProcessHeap(), 0, served); served = NULL; }
 
@@ -461,8 +469,8 @@ static void test_serve(const char *tmp)
         (void)dummy;
         sh_modserve_index_build(root);   /* a new index forgets the derived texts */
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "body.decl");
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\body.decl", folder);
-        file = read_whole(path, &fn);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\body.decl", folder);
+        file = engine_whole(path, &fn);
         CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
         free(file);
         if (served) HeapFree(GetProcessHeap(), 0, served);
@@ -504,7 +512,7 @@ static void test_tyrant(const char *tmp)
         mats++;
     }
     for (i = 0; i < b.note_count; i++) { notes++; printf("   note: %s\n", b.notes[i]); }
-    /* the materials compiled as looks: each file that is a look has `look` as its first key */
+    /* the materials compiled as looks: each file that is a look has `type` as its first key */
     for (i = 0; i < b.file_count; i++) {
         const sh_mb_file *f = &b.files[i];
         char path[MAX_PATH * 2], *p;
@@ -520,7 +528,7 @@ static void test_tyrant(const char *tmp)
         while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
         if (*q == '{') q++;
         while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
-        if (!_strnicmp((const char *)q, "look", 4) && (q[4] == ' ' || q[4] == '\t')) looks++;
+        if (!_strnicmp((const char *)q, "type", 4) && (q[4] == ' ' || q[4] == '\t')) looks++;
         free(t);
     }
     printf("   %u material(s), %u compiled as looks, %u note(s)\n", (unsigned)mats, (unsigned)looks, (unsigned)notes);
@@ -535,6 +543,8 @@ int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
     int i;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     for (i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "fixtures=", 9)) strcpy_s(g_fixtures, sizeof g_fixtures, argv[i] + 9);
         else if (!strncmp(argv[i], "fixtures_prog=", 14)) strcpy_s(g_fixtures_prog, sizeof g_fixtures_prog, argv[i] + 14);

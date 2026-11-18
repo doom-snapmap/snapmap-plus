@@ -38,6 +38,7 @@
  */
 #include "heap_out.h"
 #include "mod_store_stub.h"
+#include "../src/backend/modauthor.h"
 #include "../src/backend/modnet.h"
 #include "../src/backend/modsync.h"
 #include "../src/backend/modstore.h"
@@ -211,6 +212,26 @@ static const sh_mb_file *find(const sh_mb_bundle *b, const char *request)
 #define REQ_TOME  "maps/mods/tstock00/world.tome"
 #define SALT_STOCK "tstock00"
 
+/* Where a mod folder holds the file of the engine request `request`: its author path (modauthor.h). */
+static char *author_rel(const char *salt, const char *request)
+{
+    char *at = sh_ma_path(salt, request), *c;
+    for (c = at; c && *c; c++) if (*c == '/') *c = '\\';
+    return at;
+}
+static void put_req(const char *dir, const char *salt, const char *request, const void *p, size_t n)
+{
+    char *at = author_rel(salt, request);
+    if (at) put_rel(dir, at, p, n);
+    free(at);
+}
+static void del_req(const char *dir, const char *salt, const char *request)
+{
+    char *at = author_rel(salt, request);
+    if (at) mt_delete(dir, at);
+    free(at);
+}
+
 static void make_mod(const char *dir, const char *extra_json)
 {
     char desc[1024];
@@ -218,10 +239,11 @@ static void make_mod(const char *dir, const char *extra_json)
                 "{\"name\":\"Stock test\"%s,\"snapmap-plus\":{\"format\":2,\"salt\":\"" SALT_STOCK "\"}}",
                 extra_json ? extra_json : "");
     mt_write(dir, "mod.json", desc);
-    put_rel(dir, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
-    put_rel(dir, "assets\\" REQ_COPY, IMG_B, sizeof IMG_B);
-    put_rel(dir, "assets\\" REQ_OWN, OWN, sizeof OWN);
-    put_rel(dir, "assets\\" REQ_TOME, TOME_T, sizeof TOME_T);
+    put_req(dir, SALT_STOCK, P_IMAGE, IMG_B, sizeof IMG_B);
+    put_req(dir, SALT_STOCK, REQ_COPY, IMG_B, sizeof IMG_B);
+    put_req(dir, SALT_STOCK, REQ_OWN, OWN, sizeof OWN);
+    /* The earlier fixture also carried REQ_TOME, a .tome named under the mod's own folder (the game's tome as a
+     * pointer). A mod folder cannot spell that name now: game/ refuses mods/ and no folder takes a .tome. */
 }
 
 static void test_builder(const char *tmp)
@@ -234,8 +256,8 @@ static void test_builder(const char *tmp)
     make_mod(dir, NULL);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  build refused: %s\n", sh_mb_first_cause(&b));
-    CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof OWN);
-    CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T);
+    CHECK(b.file_count == 3 && b.stock_count == 2 && b.total_size == sizeof OWN);
+    CHECK(b.stock_bytes == sizeof IMG_B * 2);
     f = find(&b, REQ_COPY);
     CHECK(f && f->stock && f->stock_source && !strcmp(f->stock_source, P_IMAGE));
     /* The installed bytes at the game's own name are a surface, not a shadow. */
@@ -243,25 +265,21 @@ static void test_builder(const char *tmp)
     CHECK(f && f->stock && !f->shadowed && f->cls == SH_MB_CLASS_SURFACE && b.shadow_count == 0);
     f = find(&b, REQ_COPY);
     CHECK(f && f->cls == SH_MB_CLASS_BORROW);
-    CHECK(b.classes.surfaces == 1 && b.classes.borrows == 2 && b.classes.adds == 1);
-    f = find(&b, REQ_TOME);   /* .tome is outside the whitelist, but it is installed content */
-    CHECK(f && f->stock && !strcmp(f->stock_source, P_TOME));
+    CHECK(b.classes.surfaces == 1 && b.classes.borrows == 1 && b.classes.adds == 1);
     f = find(&b, REQ_OWN);
     CHECK(f && !f->stock);
     /* Canonical form: a pointer has stock and neither blob nor size. */
     hex_of(IMG_B, sizeof IMG_B, h);
     _snprintf_s(json, sizeof json, _TRUNCATE, "\"request\":\"%s\",\"stock\":{\"sha256\":\"%s\",\"source\":\"%s\"}}", REQ_COPY, h, P_IMAGE);
     CHECK(b.canonical && strstr(b.canonical, json));
-    CHECK(strstr(b.canonical, "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\"") != NULL);
+    CHECK(strstr(b.canonical, "{\"needs\":[],\"path\":\"images/b_copy.bimage\"") != NULL);
     CHECK(strstr(b.canonical, "\"stock\":{\"sha256\"") && !strstr(b.canonical, "\"descriptor\""));
     CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     {
         char path[MAX_PATH * 2];
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
         CHECK(sh_mb_load(path, &back));
-        CHECK(!strcmp(back.hash, b.hash) && back.stock_count == 3 && back.total_size == sizeof OWN);
-        f = find(&back, REQ_TOME);
-        CHECK(f && f->stock && f->size == 0 && !strcmp(f->stock_source, P_TOME));
+        CHECK(!strcmp(back.hash, b.hash) && back.stock_count == 2 && back.total_size == sizeof OWN);
         sh_mb_free(&back);
     }
     {
@@ -279,12 +297,8 @@ static void test_builder(const char *tmp)
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
     CHECK_CAUSE(b, SH_MB_EARLIER);
     sh_mb_free(&b);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod5", tmp);   /* a .tome that is not installed content */
-    make_mod(dir, NULL);
-    put_rel(dir, "assets\\maps\\mods\\tstock00\\other.tome", OWN, sizeof OWN);
-    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not the game's own file: a .sbsp, .ambientsh, .tome or .pages file can only be an unchanged copy");
-    sh_mb_free(&b);
+    /* (A .tome under the mod's own name that is not installed content was refused here; no folder of a mod holds
+     * a .tome now, so the case cannot be written.) */
 
     /* Without a reader nothing becomes a pointer. The files at game names
      * are then carried replacements, so this case builds as received content
@@ -293,7 +307,6 @@ static void test_builder(const char *tmp)
     sh_mb_keep_replacements_here(1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod7", tmp);
     make_mod(dir, NULL);
-    mt_delete(dir, "assets\\" REQ_TOME);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.stock_count == 0 && b.total_size == sizeof IMG_B * 2 + sizeof OWN);
     CHECK(b.canonical && !strstr(b.canonical, "\"stock\""));
     sh_mb_free(&b);
@@ -386,7 +399,7 @@ static void test_renamed_names_dead(const char *tmp)
 
     /* An md6 collision model name resolves to generated/model/, as the game ships it. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\entitydef\\mods\\tl1c0000\\death.decl",
+    l1c_mod(dir, "entities\\death.decl",
             "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
     /* Only the campaign archive holds it here, so it is brought along. */
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
@@ -398,7 +411,7 @@ static void test_renamed_names_dead(const char *tmp)
     /* A copied stock md6Def keeping a clip no archive holds: a warning naming
      * the stock decl, not an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c2", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\x.md6.decl",
+    l1c_mod(dir, "meshes\\m\\x.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// namespaced copy\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1);
     CHECK(strstr(b.first_warning, "names anim md6/m/dead.md6anim, which no archive holds; the game's own " D3_MD6
@@ -409,20 +422,20 @@ static void test_renamed_names_dead(const char *tmp)
     /* The same text byte for byte under another stem is a borrow: its text is
      * the game's, and the warning names its source. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c3", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\other.md6.decl", MD6_STOCK);
+    l1c_mod(dir, "meshes\\other.md6.decl", MD6_STOCK);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 1);
     CHECK(strstr(b.first_warning, "the game's own " D3_MD6 " names it too") != NULL);
     sh_mb_free(&b);
     /* A dead name only the mod introduces stays an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c4", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\x.md6.decl",
+    l1c_mod(dir, "meshes\\m\\x.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t}\r\n\tanim \"md6/m/mine.md6anim\" {\r\n\t}\r\n}\r\n");
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 1 && b.warnings == 1);
     CHECK_CAUSE(b, "needs anim md6/m/mine.md6anim, which resolves to nothing");
     sh_mb_free(&b);
     /* With no stock decl of that stem, a dead clip is the mod's own: an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c5", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\y.md6.decl",
+    l1c_mod(dir, "meshes\\m\\y.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// not a copy of y\r\n\t}\r\n}\r\n");
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
     CHECK_CAUSE(b, "needs anim md6/m/dead.md6anim, which resolves to nothing");
@@ -442,7 +455,7 @@ static void test_renamed_names_dead(const char *tmp)
 #define K_SKL    "generated/skeleton/k/wall.bmd6skl"
 #define K_SNAP   "generated/image/k/snap.bimage"
 #define K_BOTH   "generated/image/k/both.bimage"
-#define K_WEB    "assets\\generated\\decls\\animweb\\mods\\tclose00\\station.decl"
+#define K_WEB    "decls\\animweb\\station.decl"
 static const char K_MD6_TEXT[] = "{\r\n\tmesh = \"k/wall.md6mesh\";\r\n\tskeleton = \"k/wall.md6skl\";\r\n"
                                  "\tanim \"k/gone.md6anim\" {\r\n\t}\r\n}\r\n";
 /* The engine's own animWeb form, as designsystems/med_station_heal holds it. */
@@ -550,7 +563,7 @@ static void test_campaign_closure(const char *tmp)
      * gain nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close2", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
-    mt_write(dir, "assets\\generated\\decls\\material\\mods\\tclose00\\m.decl",
+    mt_write(dir, "materials\\m.decl",
              "{\r\n\tdiffusemap = \"k/snap\";\r\n\tspecularmap = \"k/both\";\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 && b.needs.stock == 2);
     CHECK(!has_note(&b, "borrowed for completeness"));
@@ -572,7 +585,7 @@ static void test_campaign_closure(const char *tmp)
         mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
         for (n = 0; n < 4095; n++) {
             char rel[96];
-            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\tclose00\\%04u.bimage", n);
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "images\\%04u.bimage", n);
             mt_write(dir, rel, "img");
         }
         mt_write(dir, K_WEB, K_WEB_TEXT);
@@ -597,7 +610,7 @@ static void test_closure_recomputed(const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, K_WEB_TEXT);
-    mt_write(dir, "assets\\generated\\decls\\material\\mods\\tclose00\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
+    mt_write(dir, "materials\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
     CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     memcpy(hash, b.hash, sizeof hash);
@@ -702,7 +715,7 @@ static void test_closure_effects(const char *tmp)
      * particle SnapMap holds adds nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Effect test\"}");
-    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\tfx00000\\glow.decl",
+    mt_write(dir, "effects\\glow.decl",
              "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 3;\r\n"
              "\t\t\titem[0] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/eyes\";\r\n\t\t\t}\r\n"
              "\t\t\titem[1] = {\r\n\t\t\t\ttype = \"FX_RIBBON\";\r\n\t\t\t\tdeclRibbon = \"k_trail\";\r\n\t\t\t}\r\n"
@@ -722,7 +735,7 @@ static void test_closure_effects(const char *tmp)
      * movie and its atlas. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\swf1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Movie test\"}");
-    mt_write(dir, "assets\\generated\\decls\\entitydef\\mods\\tfx00000\\panel.decl",
+    mt_write(dir, "entities\\panel.decl",
              "{\r\n\tedit = {\r\n\t\tguiData = {\r\n\t\t\tswfFile = \"swf/k/panel.swf\";\r\n\t\t}\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 2);
     f = find(&b, E_SWF);
@@ -735,8 +748,8 @@ static void test_closure_effects(const char *tmp)
      * engine samples its pages); one without a row gains its image. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\vt1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Virtual texture test\"}");
-    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\tfx00000\\a.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat\";\r\n\t}\r\n}\r\n");
-    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\tfx00000\\b.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat2\";\r\n\t}\r\n}\r\n");
+    mt_write(dir, "decls\\ribbon\\a.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat\";\r\n\t}\r\n}\r\n");
+    mt_write(dir, "decls\\ribbon\\b.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat2\";\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0);
     CHECK(find(&b, E_VT) && find(&b, E_VT2) && !find(&b, E_VTIMG) && find(&b, E_VT2IMG) && b.stock_count == 3);
     sh_mb_free(&b);
@@ -744,7 +757,7 @@ static void test_closure_effects(const char *tmp)
     /* A particle no archive holds is reported, not refused. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx2", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Effect test\"}");
-    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\tfx00000\\gone.decl",
+    mt_write(dir, "effects\\gone.decl",
              "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 1;\r\n"
              "\t\t\titem[0] = {\r\n\t\t\t\tdeclPrt = \"k/none\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 0);
@@ -837,16 +850,16 @@ static void test_whole_models(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tmodel00\"},\"name\":\"Model test\"}");
     /* A carried md6Def naming SnapMap's mesh. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\card.md6.decl",
+    mt_write(dir, "meshes\\card.md6.decl",
              "{\r\n\tinit {\r\n\t\tmesh \"s6/card.md6mesh\"\r\n\t}\r\n}\r\n");
     /* One naming the mod's own mesh, whose header names SnapMap's skeleton. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\own.md6.decl",
+    mt_write(dir, "meshes\\own.md6.decl",
              "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/tmodel00/own.md6mesh\"\r\n\t}\r\n}\r\n");
-    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\tmodel00\\own.bmd6model", OWN6_MESH_B, sizeof OWN6_MESH_B);
+    put_rel(dir, "meshes\\own.bmd6model", OWN6_MESH_B, sizeof OWN6_MESH_B);
     /* One whose mesh names a skeleton nothing holds: nothing is added for it. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\none.md6.decl",
+    mt_write(dir, "meshes\\none.md6.decl",
              "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/tmodel00/none.md6mesh\"\r\n\t}\r\n}\r\n");
-    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\tmodel00\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
+    put_rel(dir, "meshes\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  models: %s\n", sh_mb_first_cause(&b));
     CHECK(b.stock_count == 0 && b.file_count == 5);
@@ -866,7 +879,7 @@ static void test_whole_models(const char *tmp)
      * mesh, the skeleton the mesh names and its default clip. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model2", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tmodel00\"},\"name\":\"Model test\"}");
-    mt_write(dir, "assets\\generated\\decls\\animweb\\mods\\tmodel00\\door.decl",
+    mt_write(dir, "decls\\animweb\\door.decl",
              "// the mod's web\r\n{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k6/door.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 4);
     f = find(&b, M6_MD6);
@@ -903,16 +916,16 @@ static void test_closure_store_path(const char *tmp)
     /* An installed mod that already points at the door's model: it carries
      * the game's own files, which its build turns into pointers. */
     mt_write(other, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tother06\"},\"name\":\"Other\"}");
-    put_rel(other, "assets\\" M6_MD6, M6_MD6_TEXT, sizeof M6_MD6_TEXT - 1);
-    put_rel(other, "assets\\" M6_MESH, M6_MESH_B, sizeof M6_MESH_B);
-    put_rel(other, "assets\\" M6_SKL, M6_SKL_B, sizeof M6_SKL_B);
-    put_rel(other, "assets\\" M6_DEF, M6_DEF_B, sizeof M6_DEF_B);
-    put_rel(other, "assets/generated/image/mods/tother06/own.bimage", S6_SKL_B, 8);
+    put_req(other, "tother06", M6_MD6, M6_MD6_TEXT, sizeof M6_MD6_TEXT - 1);
+    put_req(other, "tother06", M6_MESH, M6_MESH_B, sizeof M6_MESH_B);
+    put_req(other, "tother06", M6_SKL, M6_SKL_B, sizeof M6_SKL_B);
+    put_req(other, "tother06", M6_DEF, M6_DEF_B, sizeof M6_DEF_B);
+    put_rel(other, "images/own.bimage", S6_SKL_B, 8);
     CHECK(HO2(key, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
     /* The hand-made folder: the game's animWeb, byte for byte. */
     mt_write(surf, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tsurf006\"},\"name\":\"Surface\"}");
-    put_rel(surf, "assets\\" M6_WEB, M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1);
+    put_req(surf, "tsurf006", M6_WEB, M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
     CHECK(sh_mb_load_folder(surf, &b) && b.rules == SH_MB_RULES && b.file_count == 5 && b.stock_count == 5);
     f = find(&b, M6_WEB);
@@ -977,13 +990,13 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(sh_ms_set_root(store));
     CHECK(HO2(key, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
-    CHECK(st.stock_files == 3 && st.copied == 4);
+    CHECK(st.stock_files == 2 && st.copied == 3);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
     /* DECISIONS 10: the store folder keeps every file the folder held, the
      * game's own copy included; the closure's pointers are in mod.json only. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store, key);
-    CHECK(count_files(path) == 4);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
+    CHECK(count_files(path) == 4);   /* mod.json and the three files */
     {
         char *text;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, key);
@@ -991,10 +1004,9 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         CHECK(text && strstr(text, "\"source\": \"" P_IMAGE "\"") && !strstr(text, "inAssets"));
         free(text);
     }
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\" REQ_COPY, store, key);
-    { char *q; for (q = path; *q; q++) if (*q == '/') *q = '\\'; }
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\images\\b_copy.bimage", store, key);
     CHECK(mt_exists(path));
-    CHECK(HO(cause, sh_ms_verify(key, &vs, HO_P(0))) && vs.files == 4 && vs.pointers == 3);
+    CHECK(HO(cause, sh_ms_verify(key, &vs, HO_P(0))) && vs.files == 3 && vs.pointers == 2);
 
     /* Serving: the pointer is answered with the installed bytes. */
     CHECK(sh_modserve_index_build(store) == 1);
@@ -1011,7 +1023,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         char other[MAX_PATH * 2];
         _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\src2", tmp);
         mt_write(other, "mod.json", "{\"name\":\"Other\",\"snapmap-plus\":{\"format\":2,\"salt\":\"tother00\"}}");
-        put_rel(other, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
+        put_req(other, "tother00", P_IMAGE, IMG_B, sizeof IMG_B);
         sh_mb_set_stock_ops(NULL);
         sh_mb_keep_replacements_here(1);   /* carried at a game name: a replacement */
         CHECK(HO2(key2, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
@@ -1057,7 +1069,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         one[0] = mod;
         memset(&ss, 0, sizeof ss);
         CHECK(modsync_upload_builds(one, 1, "map-stock", NULL, &ss));
-        CHECK(ss.builds_sent == 1 && ss.stock_files == 3 && stub_has_build(hash));
+        CHECK(ss.builds_sent == 1 && ss.stock_files == 2 && stub_has_build(hash));
     }
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, salt);
@@ -1073,8 +1085,8 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(modsync_fetch_build_for(&row, &place, NULL, &ss));
     if (ss.code != MODNET_OK) fprintf(stderr, "  fetch: %s\n", ss.cause);
     CHECK(sh_modserve_bundle_state(hash, NULL) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store2, ss.folder);
-    CHECK(count_files(path) == 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store2, ss.folder);
+    CHECK(count_files(path) == 2);   /* mod.json and the one carried file */
     /* A player on another revision: the archive is refused before anything is placed. */
     _snprintf_s(store3, sizeof store3, _TRUNCATE, "%s\\store3", tmp);
     CHECK(sh_ms_set_root(store3));
@@ -1092,14 +1104,14 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         CHECK(sh_ms_set_root(store));
         _snprintf_s(archive, sizeof archive, _TRUNCATE, "%s\\stock.zip", tmp);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
-        CHECK(HO(cause, modsync_write_archive(path, hash, archive, &asize, &pointers, &code, HO_P(0))) && pointers == 3);
+        CHECK(HO(cause, modsync_write_archive(path, hash, archive, &asize, &pointers, &code, HO_P(0))) && pointers == 2);
         CHECK(sh_ms_set_root(store3));
         memset(&info, 0, sizeof info);
         CHECK(!HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))) && info.game_lacks);
         sh_modstock_set_install(d1);
         memset(&info, 0, sizeof info);
         CHECK(HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))));
-        CHECK(info.files == 1 && info.stock_files == 3);
+        CHECK(info.files == 1 && info.stock_files == 2);
     }
     stub_stop();
     sh_ms_set_root(NULL);
@@ -1264,21 +1276,18 @@ static void make_install7(const char *d7)
  * ends writes it, then `tail`. */
 static void r7_write_lf(const char *dir, const char *request, const char *text, const char *tail)
 {
-    char rel[MAX_PATH * 2], *lf = (char *)malloc(strlen(text) + strlen(tail) + 1), *q = lf;
+    char *lf = (char *)malloc(strlen(text) + strlen(tail) + 1), *q = lf;
     const char *p;
     if (!lf) return;
     for (p = text; *p; p++) if (!(p[0] == '\r' && p[1] == '\n')) *q++ = *p;
     strcpy(q, tail);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", request);
-    put_rel(dir, rel, lf, strlen(lf));
+    put_req(dir, "tident07", request, lf, strlen(lf));
     free(lf);
 }
 
 static void r7_write_bytes(const char *dir, const char *request, const r7_blob *blob)
 {
-    char rel[MAX_PATH * 2];
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", request);
-    put_rel(dir, rel, blob->p, blob->n);
+    put_req(dir, "tident07", request, blob->p, blob->n);
 }
 
 /* Identity of decl-grammar text is textual: a copy at a game name that

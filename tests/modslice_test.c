@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "modauthor.h"
 #include "modbundle.h"
 #include "modslice.h"
 #include "mod_test_util.h"
@@ -58,32 +59,32 @@ static void write_pack(const char *folder)
 {
     mt_write(folder, "mod.json", "{\n  \"name\": \"Crates and barrels\",\n  \"description\": \"Props.\"\n}\n");
     /* The crate: entityDef -> model (a binary naming its material) -> material -> image. */
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\" SALT "\\crate.decl",
+    mt_write(folder, "entities\\crate.decl",
              "{\n\tinherit = \"snapmaps/props/crate\";\n\tedit = {\n\t\trenderModelInfo = {\n"
              "\t\t\tmodel = \"mods/" SALT "/models/crate.lwo\";\n\t\t}\n\t}\n}\n");
-    put_binary(folder, "assets\\cooked\\model\\mods\\" SALT "\\models\\crate.bmodel", "mods/" SALT "/crate_skin", 200);
-    mt_write(folder, "assets\\generated\\decls\\material\\mods\\" SALT "\\crate_skin.decl",
+    put_binary(folder, "meshes\\models\\crate.bmodel", "mods/" SALT "/crate_skin", 200);
+    mt_write(folder, "materials\\crate_skin.decl",
              "{\ndiffusemap\t\"mods/" SALT "/crate_d.tga\"\n}\n");
-    put_binary(folder, "assets\\generated\\image\\mods\\" SALT "\\crate_d.bimage", NULL, 300);
-    mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\mods\\" SALT "\\crate.decl",
+    put_binary(folder, "images\\crate_d.bimage", NULL, 300);
+    mt_write(folder, "decls\\snapeditorentitydef\\crate.decl",
              "{\n\tinherit = \"action/door/open\";\n\tedit = {\n\t\tentityDef = \"mods/" SALT "/crate\";\n\t}\n}\n");
     /* The barrel, the same shape and far larger. */
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\" SALT "\\barrel.decl",
+    mt_write(folder, "entities\\barrel.decl",
              "{\n\tinherit = \"snapmaps/props/crate\";\n\tedit = {\n\t\trenderModelInfo = {\n"
              "\t\t\tmodel = \"mods/" SALT "/models/barrel.lwo\";\n\t\t}\n\t}\n}\n");
-    put_binary(folder, "assets\\cooked\\model\\mods\\" SALT "\\models\\barrel.bmodel", "mods/" SALT "/barrel_skin", 9000);
-    mt_write(folder, "assets\\generated\\decls\\material\\mods\\" SALT "\\barrel_skin.decl",
+    put_binary(folder, "meshes\\models\\barrel.bmodel", "mods/" SALT "/barrel_skin", 9000);
+    mt_write(folder, "materials\\barrel_skin.decl",
              "{\ndiffusemap\t\"mods/" SALT "/barrel_d.tga\"\n}\n");
-    put_binary(folder, "assets\\generated\\image\\mods\\" SALT "\\barrel_d.bimage", NULL, 9000);
-    mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\mods\\" SALT "\\barrel.decl",
+    put_binary(folder, "images\\barrel_d.bimage", NULL, 9000);
+    mt_write(folder, "decls\\snapeditorentitydef\\barrel.decl",
              "{\n\tinherit = \"action/door/open\";\n\tedit = {\n\t\tentityDef = \"mods/" SALT "/barrel\";\n\t}\n}\n");
     /* A lever whose decl names a node inside an animWeb. */
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\" SALT "\\lever.decl",
+    mt_write(folder, "entities\\lever.decl",
              "{\n\tinherit = \"snapmaps/props/crate\";\n\tedit = {\n\t\tanimWebPath = \"mods/" SALT
              "/web/base/idle\";\n\t}\n}\n");
-    mt_write(folder, "assets\\generated\\decls\\animweb\\mods\\" SALT "\\web.decl", "{\n}\n");
+    mt_write(folder, "decls\\animweb\\web.decl", "{\n}\n");
     /* An AI score the conductor finds by its number, never by a name. */
-    mt_write(folder, "assets\\generated\\decls\\snapaiscore\\mods\\" SALT "\\score.decl",
+    mt_write(folder, "decls\\snapaiscore\\score.decl",
              "{\n\tedit = {\n\t\taiType = \"8388608\";\n\t}\n}\n");
 }
 
@@ -164,7 +165,7 @@ static void test_needed_and_cut(const char *top)
     CHECK(c1.total_size == p.kept_bytes);
     CHECK(sh_mb_load_folder(cut1, &back) && !strcmp(back.hash, c1.hash) && !strcmp(back.slice_of, src.hash));
     sh_mb_free(&back);
-    CHECK(mt_has(cut1, "source.json") && !mt_has(cut1, "assets\\generated\\image\\mods\\" SALT "\\barrel_d.bimage"));
+    CHECK(mt_has(cut1, "source.json") && !mt_has(cut1, "images\\barrel_d.bimage"));
     {
         char path[MAX_PATH * 2];
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\source.json", cut1);
@@ -239,8 +240,7 @@ static void fx_bundle(sh_mb_bundle *b, const char *folder, const fx *files, size
         sh_mb_file *f = &b->files[i];
         char rel[MAX_PATH * 2], *s;
         f->request = _strdup(files[i].request);
-        f->path = (char *)malloc(strlen(files[i].request) + 8);
-        sprintf_s(f->path, strlen(files[i].request) + 8, "assets/%s", files[i].request);
+        f->path = sh_ma_path(SALT, files[i].request);
         f->ptype = _strdup(files[i].ptype);
         f->pname = _strdup(files[i].request);
         f->cls = files[i].cls;
@@ -354,7 +354,7 @@ static void test_rules(const char *top)
         char gone[MAX_PATH * 2];
         _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\rules5", top);
         fx_bundle(&b, folder, files, sizeof files / sizeof *files);
-        _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\" SALT "\\thing.decl", folder);
+        _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\entities\\thing.decl", folder);
         DeleteFileA(gone);
         CHECK(sh_slice_needed(&b, folder, thing, 1, 0, NULL, 0, &p) && p.whole && strstr(p.why, "could not be read"));
         sh_slice_plan_free(&p);

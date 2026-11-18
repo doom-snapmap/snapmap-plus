@@ -1,0 +1,13 @@
+{
+	type			layered
+	wounds			yes
+	diffusemap		"images/body.tga"
+	layermask		images/tiles/mask.tga
+	layer1			images/tiles/pores.tga
+	layer1normal		images/tiles/pores_n.tga
+	layer1repeat		20
+	layer2			{ 0.35, 0.05, 0.03 }
+	layer2repeat		3
+	burn			images/tiles/burnt.tga
+	burnheat		{ 1, 0.07, 0 }
+}

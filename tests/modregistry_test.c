@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "modauthor.h"
 #include "modregistry.h"
 #include "modserve.h"
 #include "modmanifest.h"
@@ -253,13 +254,14 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
                       "    \"shadows\": [%s],\n    \"files\": [\n",
                       id, author ? author : "", id, h, 100 + digit, ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
     for (i = 0; i < n; ++i) {
-        char sha[65];
+        char sha[65], *ap = sh_ma_path(id, files[i].request);   /* the mod folder holds each file at its author path */
         sh_mb_sha256_hex((const unsigned char *)files[i].body, strlen(files[i].body), sha);
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                          "      {\"path\": \"assets/%s\", \"sha256\": \"%s\", \"size\": %zu, "
+                          "      {\"path\": \"%s\", \"sha256\": \"%s\", \"size\": %zu, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": []}%s\n",
-                          files[i].request, sha, strlen(files[i].body), files[i].ptype, files[i].pname, i + 1 < n ? "," : "");
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", dir, files[i].request);
+                          ap, sha, strlen(files[i].body), files[i].ptype, files[i].pname, i + 1 < n ? "," : "");
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, ap);
+        free(ap);
         for (p = path; *p; ++p) if (*p == '/') *p = '\\';
         write_file(path, files[i].body);
     }

@@ -1126,7 +1126,7 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
             msy_cause(cause, "%s: %s changed since the mod was built; open the Mods tab and Refresh", label, f->path);
             goto done;
         }
-        entry = sh_textf("assets/%s", f->request);
+        entry = sh_text(f->path);
         ok = entry && sh_zip_writer_add(&w, entry, bytes, len);
         free(bytes);
         free(entry);
@@ -1212,7 +1212,7 @@ static int msy_archive_matches(const sh_zip_reader *zr, const sh_mb_bundle *b, c
         int missing;
         if (b->files[i].stock) continue;
         carried++;
-        if (!(entry = sh_textf("assets/%s", b->files[i].request))) return msy_cause(cause, "out of memory");
+        if (!(entry = sh_text(b->files[i].path))) return msy_cause(cause, "out of memory");
         missing = sh_zip_reader_find(zr, entry) < 0;
         if (missing) msy_cause(cause, MSY_MISMATCH " (%s is missing)", entry);
         free(entry);
@@ -1242,7 +1242,7 @@ static int msy_unpack(sh_zip_reader *zr, const sh_mb_bundle *bp, const char *dir
         size_t len = 0;
         long idx;
         if (f->stock) continue;   /* never carried: the installed game holds it */
-        if (!(entry = sh_textf("assets/%s", f->request))) return msy_cause(cause, "out of memory");
+        if (!(entry = sh_text(f->path))) return msy_cause(cause, "out of memory");
         idx = sh_zip_reader_find(zr, entry);
         free(entry);
         bytes = idx < 0 ? NULL : sh_zip_reader_read(zr, idx, (size_t)f->size, &len, &why);

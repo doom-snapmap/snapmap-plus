@@ -612,7 +612,7 @@ const char *sh_script_check_name(lua_State *L, int arg, const char *call, int al
 
 /* --------------------------------------------------------- registration */
 
-static const char *const k_kinds[] = { "spawn", "think", "remove", "damage", "death", "anim", "pain", "projectile",
+static const char *const k_kinds[] = { "spawn", "think", "remove", "damage", "death", "animation", "pain", "projectile",
                                        "frame_event" };
 static const unsigned k_bits[] = { SH_SCRIPT_BIND_SPAWN, SH_SCRIPT_BIND_THINK, SH_SCRIPT_BIND_REMOVE,
                                    SH_SCRIPT_BIND_DAMAGE, SH_SCRIPT_BIND_DEATH, SH_SCRIPT_BIND_ANIM,
@@ -668,7 +668,7 @@ static void list_append(lua_State *L, int t, const char *key, int fn)
 }
 
 /* on.spawn / think / remove / damage / death / pain / projectile (name, fn);
- * on.anim(name, notify, fn); on.frame_event(name, command, fn). */
+ * on.animation(name, notify, fn); on.frame_event(name, command, fn). */
 static int on_entity(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
@@ -691,7 +691,7 @@ static int on_entity(lua_State *L)
         size_t n;
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
         if (!s || !n)
-            sh_script_refuse(L, "\"on.anim\" needs the notify text of an ae_notify row as its second value");
+            sh_script_refuse(L, "\"on.animation\" needs the notify text of an ae_notify row as its second value");
         (void)n;
         notify = push_lower(L, s);
     }
@@ -1696,7 +1696,7 @@ static int job_event(lua_State *L)
             const char *notify = push_lower(L, ev->text), *colon;
             const char *command;
             int self_at;
-            call_chain_keyed(L, "anim", chain, notify, at, 1);
+            call_chain_keyed(L, "animation", chain, notify, at, 1);
             /* a frame event: "<command>:<args>", the command matched without case */
             colon = strchr(notify, ':');
             lua_pushlstring(L, notify, colon ? (size_t)(colon - notify) : strlen(notify));

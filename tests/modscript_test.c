@@ -66,9 +66,9 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 
 #define SALT "scrptab1"
 #define MOD_JSON "{\"name\":\"Door Logic\",\"snapmap-plus\":{\"format\":2,\"salt\":\"" SALT "\"}}"
-#define ENTRY "assets\\mods\\" SALT "\\scripts\\door.lua"
-#define LIB "assets\\mods\\" SALT "\\scripts\\lib\\fsm.lua"
-#define DEF "assets\\generated\\decls\\entitydef\\mods\\" SALT "\\ai\\door.decl"
+#define ENTRY "scripts\\door.lua"
+#define LIB "scripts\\lib\\fsm.lua"
+#define DEF "entities\\ai\\door.decl"
 
 static const char GOOD_ENTRY[] =
     "api = 1\n"
@@ -163,7 +163,7 @@ static void test_scan(void)
         "--[==[ on.spawn(\"c2\")\n]==] local s = \"on.input('s1')\"\n"   /* 2-3 */
         "local l = [[ on.spawn(\"s2\") ]] x.on.spawn(\"field\")\n"      /* 4 */
         "on.spawn(\"ai/door\", f) on.think ( 'ai/door' , f )\n"         /* 5 */
-        "on.anim(\"ai/brute\", \"throw\", f)\n"                         /* 6 */
+        "on.animation(\"ai/brute\", \"throw\", f)\n"                         /* 6 */
         "on.input(\"switch_used\", function(n) node(\"open_door\"):fire() end)\n"   /* 7 */
         "on.spawn(name, f) on.damage(\"a\" .. b, f) on.map_start(f)\n"  /* 8 */
         "local m = require \"fsm\" local u = require(\"util\") require(mod)\n"       /* 9 */
@@ -171,7 +171,7 @@ static void test_scan(void)
         "on.pain('ai/demon/tyrant', f) on.projectile(\"ai/demon/tyrant\", f)\n"   /* 11 */
         "on.frame_event('ai/demon/tyrant', 'blackboard', f) on.frame_event(def, 'x', f)\n";  /* 12 */
     static const char want[] =
-        "5:bind.spawn:ai/door|5:bind.think:ai/door|6:bind.anim:ai/brute|7:input:switch_used|7:output:open_door|"
+        "5:bind.spawn:ai/door|5:bind.think:ai/door|6:bind.animation:ai/brute|7:input:switch_used|7:output:open_door|"
         "8:bind.spawn?:|8:bind.damage?:|9:require:fsm|9:require:util|9:require?:|10:input?:|10:bind.death:ai/long|"
         "11:bind.pain:ai/demon/tyrant|11:bind.projectile:ai/demon/tyrant|12:bind.frame_event:ai/demon/tyrant|"
         "12:bind.frame_event?:|";
@@ -265,14 +265,14 @@ static void test_builds(void)
     printf("-- no count or size of the scripts is checked: 150 files, 6 MB, a 2 MB file, a long name\n");
     good_mod(dir, sizeof dir);
     for (i = 0; i < 148; i++) {
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\" SALT "\\scripts\\lib\\m%03d.lua", i);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "scripts\\lib\\m%03d.lua", i);
         mt_write(dir, rel, "return 1\n");
     }
     for (i = 0; i < 3; i++) {
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\" SALT "\\scripts\\lib\\big%d.lua", i);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "scripts\\lib\\big%d.lua", i);
         put_big(dir, rel, 2u << 20);
     }
-    mt_write(dir, "assets\\mods\\" SALT "\\scripts\\lib\\"
+    mt_write(dir, "scripts\\lib\\"
                   "a_module_name_well_past_the_sixty_four_characters_the_builder_once_allowed_for_a_script.lua",
              "return 1\n");
     {
@@ -284,24 +284,20 @@ static void test_builds(void)
     }
 
     good_mod(dir, sizeof dir);
-    mt_write(dir, "assets\\mods\\" SALT "\\door.lua", "api = 1\n");
-    /* Named in the author's words, under the mod folder's name; never the salt. */
+    mt_write(dir, "materials\\door.lua", "api = 1\n");
+    /* Named in the author's words, by its path in the mod folder; never the salt. */
     {
         sh_mb_bundle b;
-        char want[256];
-        const char *folder = strrchr(dir, '\\') + 1;
+        const char *want = "materials/door.lua: this folder holds .decl files; move it to the folder for what it is";
         CHECK(!build(dir, &b) && !strstr(sh_mb_first_cause(&b), SALT));
-        _snprintf_s(want, sizeof want, _TRUNCATE, "assets\\mods\\%s\\door.lua: a script goes in this mod's own "
-                    "scripts folder, assets\\mods\\%s\\scripts\\ for the files that run or assets\\mods\\%s\\scripts\\lib\\ "
-                    "for the files loaded with require; move it there", folder, folder, folder);
         CHECK(!strcmp(sh_mb_first_cause(&b), want));
         if (strcmp(sh_mb_first_cause(&b), want)) fprintf(stderr, "    got: %s%c", sh_mb_first_cause(&b), 10);
         sh_mb_free(&b);
     }
 
     good_mod(dir, sizeof dir);
-    mt_write(dir, "assets\\mods\\" SALT "\\scripts\\more\\b.lua", "api = 1\n");
-    refused(dir, "scripts\\more\\b.lua: a script goes in this mod's own scripts folder");
+    mt_write(dir, "scripts\\more\\b.lua", "api = 1\n");
+    refused(dir, "scripts\\more\\b.lua: a script goes in the mod's scripts folder");
 
     good_mod(dir, sizeof dir);
     mt_write(dir, ENTRY, "-- no api line\nprint(1)\n");
@@ -321,8 +317,8 @@ static void test_builds(void)
     refused(dir, "scripts\\door.lua line 2: \"mods/zzzzzzzz/ai/imp\" is another mod's name. Name this mod's own content");
 
     good_mod(dir, sizeof dir);
-    mt_write(dir, "assets\\generated\\decls\\snapeditorentitydef\\mods\\" SALT "\\script.decl", "{\r\n}");
-    refused(dir, "assets/generated/decls/snapeditorentitydef/mods/" SALT "/script.decl: " SH_MB_SCRIPT_NODE_RESERVED);
+    mt_write(dir, "decls\\snapeditorentitydef\\script.decl", "{\r\n}");
+    refused(dir, "decls/snapeditorentitydef/script.decl: " SH_MB_SCRIPT_NODE_RESERVED);
 
     good_mod(dir, sizeof dir);
     sh_mb_set_script_check(NULL);
@@ -409,30 +405,29 @@ static void test_store(void)
     int code = 0;
     unsigned char *text;
 
-    printf("-- a new folder: paths lower-cased at install, mods/<folder>/ rewritten inside .lua\n");
+    printf("-- a new folder: paths lower-cased at install, the mod's own names in .lua as the author writes them\n");
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\door-logic", g_tmp);
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\storeA", g_tmp);
     mt_write(src, "mod.json", "{\"name\":\"Door Logic\"}");
-    mt_write(src, "assets\\generated\\decls\\entitydef\\mods\\door-logic\\AI\\Door.decl", "{\r\n}");
-    mt_write(src, "assets\\mods\\door-logic\\Scripts\\Door.lua",
-             "api = 1\nlocal fsm = require(\"fsm\")\non.spawn(\"mods/door-logic/ai/door\", function(self) end)\n");
-    mt_write(src, "assets\\mods\\door-logic\\Scripts\\LIB\\FSM.lua", "return {}\n");
+    mt_write(src, "entities\\AI\\Door.decl", "{\r\n}");
+    mt_write(src, "Scripts\\Door.lua",
+             "api = 1\nlocal fsm = require(\"fsm\")\non.spawn(\"ai/door\", function(self) end)\n");
+    mt_write(src, "Scripts\\LIB\\FSM.lua", "return {}\n");
     CreateDirectoryA(a, NULL);
     CHECK(sh_ms_set_root(a));
     memset(&b, 0, sizeof b);
     CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
     strncpy_s(salt, sizeof salt, b.id, _TRUNCATE);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts\\door.lua", a, name, salt);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\scripts\\door.lua", a, name);
     CHECK(disk_name_is(path, "door.lua"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts", a, name, salt);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\scripts", a, name);
     CHECK(disk_name_is(path, "scripts"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts\\door.lua", a, name, salt);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\scripts\\door.lua", a, name);
     text = sh_mb_read_file(path, 4096, &len);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "on.spawn(\"mods/%s/ai/door\"", salt);
-    CHECK(text && strstr((const char *)text, want) && !strstr((const char *)text, "door-logic"));
+    CHECK(text && strstr((const char *)text, "on.spawn(\"ai/door\"") && !strstr((const char *)text, "door-logic"));
     free(text);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "assets/mods/%s/scripts/lib/fsm.lua", salt);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "scripts/lib/fsm.lua");
     {
         size_t i;
         int found = 0, upper = 0;
@@ -464,17 +459,15 @@ static void test_store(void)
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\publish.zip", g_tmp);
     CHECK(HO(cause, modsync_write_archive(path, b.hash, zip, &size, &pointers, &code, HO_P(0))));
     zip_names(zip, names, sizeof names);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "assets/mods/%s/scripts/door.lua\n", salt);
-    CHECK(strstr(names, want) != NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "assets/generated/decls/entitydef/mods/%s/ai/door.decl\n", salt);
-    CHECK(strstr(names, want) != NULL);
+    CHECK(strstr(names, "scripts/door.lua\n") != NULL);
+    CHECK(strstr(names, "entities/ai/door.decl\n") != NULL);
 
     printf("-- a rawmap export carries them; its import installs and serves them\n");
     map = map_with(&row);
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\Door Map.zip", g_tmp);
     CHECK(map && HO(cause, modexport_write(map, strlen(map), zip, &es, HO_P(0))));
     zip_names(zip, names, sizeof names);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "mods/%s/assets/mods/%s/scripts/lib/fsm.lua\n", name, salt);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "mods/%s/scripts/lib/fsm.lua\n", name);
     CHECK(strstr(names, want) != NULL);
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\storeC", g_tmp);
     CreateDirectoryA(c, NULL);
@@ -493,7 +486,7 @@ static void test_store(void)
     if (!back) fprintf(stderr, "  import: %s\n", cause);
     CHECK(back && es.bundles_installed == 1);
     free(back);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Door Map\\Door Logic\\assets\\mods\\%s\\scripts\\door.lua", c, salt);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Door Map\\Door Logic\\scripts\\door.lua", c);
     CHECK(mt_exists(path));
     memset(&l, 0, sizeof l);
     CHECK(sh_modserve_script_files(salt, list_cb, &l) == 2 && l.match == 2);
@@ -507,8 +500,8 @@ static void test_store(void)
         _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", a, name);
         _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\mixed", g_tmp);
         CHECK(mt_copy_tree(from, copy));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\mods\\%s\\scripts\\door.lua", copy, salt);
-        _snprintf_s(up, sizeof up, _TRUNCATE, "%s\\assets\\mods\\%s\\scripts\\Door.LUA", copy, salt);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\scripts\\door.lua", copy);
+        _snprintf_s(up, sizeof up, _TRUNCATE, "%s\\scripts\\Door.LUA", copy);
         CHECK(MoveFileA(path, up));
         CHECK(sh_ms_set_root(d));
         sh_mb_free(&b);
@@ -516,7 +509,7 @@ static void test_store(void)
         CHECK(HO2(name, cause, sh_ms_install_from_folder(copy, NULL, HO_P(0), &st, &b, HO_P(1))));
         if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
         CHECK(!strcmp(b.hash, row.build));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts\\door.lua", d, name, salt);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\scripts\\door.lua", d, name);
         CHECK(disk_name_is(path, "door.lua"));
     }
     sh_mb_free(&b);
@@ -572,7 +565,7 @@ static void test_map_scripts(void)
     /* A script edited after the build: listed, not kept, named; the other file is kept. */
     hashes[0] = b.hash;
     CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\" SALT "\\scripts\\door.lua", root, name);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\scripts\\door.lua", root, name);
     {
         FILE *f = NULL;
         CHECK(!fopen_s(&f, path, "ab") && f != NULL);

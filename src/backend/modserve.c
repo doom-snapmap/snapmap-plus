@@ -22,6 +22,8 @@
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "modsalt.h"
+#include "modauthor.h"   /* the mod folder an author writes and the engine names it stands for */
+#include "strkeys.h"
 #include "modstore.h"
 #include "modregistry.h"
 #include "decl_tree.h"
@@ -48,6 +50,7 @@ typedef struct ms_need { const char *type, *name; int file; } ms_need;   /* file
 typedef struct ms_file {
     int bundle;
     const char *request, *disk, *blob;
+    const char *path;                     /* its path in the mod folder, as the author names it (modauthor.h) */
     uint64_t size;
     const char *ptype, *pname, *reg;
     int is_decl, is_shadow, is_sedef, rank;
@@ -404,11 +407,11 @@ static int ms_valid_hash(char *h)
     return 1;
 }
 
-/* A bundle-relative file path: assets/..., '/' separators, no traversal. */
+/* A bundle-relative file path: a folder of the mod and a file in it (modauthor.h), '/' separators, no traversal. */
 static int ms_valid_rel(const char *p)
 {
     size_t i, n = strlen(p);
-    if (n < 8 || n >= 512 || strncmp(p, "assets/", 7)) return 0;
+    if (n < 3 || n >= 512 || !strchr(p, '/') || p[0] == '/') return 0;
     if (strstr(p, "//") || strstr(p, "/./") || strstr(p, "/../") || p[n - 1] == '/' || p[n - 1] == '.') return 0;
     for (i = 0; i < n; ++i) {
         unsigned char c = (unsigned char)p[i];
@@ -733,9 +736,12 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         return;
     }
     {
-        char *derived = ms_strdup(x, path + 7);
+        char *mapped = NULL, *derived;
+        /* the engine request the folder's path stands for (modauthor.h) */
+        if (!b->id || !sh_ma_request(b->id, path, &mapped, NULL)) { ms_fail(b, MS_DAMAGED, path); return; }
+        derived = ms_strdup(x, mapped);
+        free(mapped);
         if (!derived) { ms_fail(b, "out of memory"); return; }
-        ms_lower(derived);
         if (request) {
             ms_lower(request);
             if (strcmp(request, derived)) { ms_fail(b, MS_DAMAGED, path); return; }
@@ -748,6 +754,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     memset(f, 0, sizeof *f);
     f->bundle = (int)(b - x->bundles);
     f->request = request;
+    f->path = path;
     f->blob = blob;
     f->stock = stock;
     f->size = (uint64_t)size;
@@ -1084,6 +1091,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     free(extra.p);
     salt = ms_trim(salt);
     b->id = salt;
+    if (b->extra && salt && sh_salt_valid(salt, strlen(salt))) {
+        /* the author's part as the engine names it (modauthor.h), as the build read it */
+        size_t en = 0;
+        char *engine = sh_ma_json(salt, b->extra, strlen(b->extra), sh_strkey_is_edit, &en);
+        if (engine) { b->extra = ms_strndup(x, engine, en); free(engine); }
+    }
     b->name = ms_trim(name);
     b->installed_at = built;
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
@@ -1160,8 +1173,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
         if (got < 0)
-            ms_fail(b, "assets/%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
-                    f->request);
+            ms_fail(b, "%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
+                    f->path ? f->path : f->request);
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
@@ -4400,6 +4413,60 @@ static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *byte
     return f->disk && f->blob;
 }
 
+/* The mod's own strings keys as its author wrote them: the keys of the engine-named extra (sh_ma_json) that carry
+ * the salt, without it. */
+static int ms_own_keys(const ms_bundle *b, sh_ma_keys *out)
+{
+    char **all = NULL;
+    size_t n = 0, i, w = 0, sl;
+    out->keys = NULL;
+    out->count = 0;
+    if (!b->extra || !b->id || !b->id[0]) return 1;
+    if (!sh_ma_string_keys(b->extra, strlen(b->extra), NULL, &all, &n)) return 0;
+    sl = strlen(b->id);
+    for (i = 0; i < n; ++i) {
+        if (!strncmp(all[i], b->id, sl) && all[i][sl] == '_' && all[i][sl + 1]) {
+            memmove(all[i], all[i] + sl + 1, strlen(all[i] + sl + 1) + 1);
+            all[w++] = all[i];
+        } else free(all[i]);
+    }
+    out->keys = all;
+    out->count = w;
+    return 1;
+}
+
+/* Every decl a mod carries (its own and its edits of the game's), served as the engine names its names
+ * (modauthor.h): the rewritten bytes go under mods\.served\files\ by their hash, as a renamed bank's decls do, so
+ * every open, the ledger and the bank rename after this see the engine's text. A stock pointer is the game's own. */
+static void ms_engine_names(ms_index *x)
+{
+    int bi, i;
+    for (bi = 0; bi < x->nbundles; ++bi) {
+        ms_bundle *b = &x->bundles[bi];
+        sh_ma_keys keys;
+        int changed = 0;
+        if (!b->admitted || !b->id || !sh_salt_valid(b->id, strlen(b->id)) || b->file_count <= 0) continue;
+        if (!ms_own_keys(b, &keys)) { ms_log("bundle '%s': out of memory; its names are served as written", b->id); continue; }
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            unsigned char *bytes;
+            char *text;
+            size_t len = 0, tl = 0;
+            if (f->stock || !f->disk || (!f->is_decl && _strnicmp(f->request, "maps/modules/", 13))) continue;
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            if (!bytes) continue;
+            text = sh_ma_text(b->id, (const char *)bytes, len, sh_ma_keys_has, &keys, &tl);
+            HeapFree(GetProcessHeap(), 0, bytes);
+            if (!text) continue;
+            if (ms_serve_rewritten(x, f, (const unsigned char *)text, tl, NULL)) changed++;
+            else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+            free(text);
+        }
+        if (changed) ms_log("bundle '%s': %d decl(s) served with the mod's names as the engine names them", b->id, changed);
+        sh_ma_keys_free(keys.keys, keys.count);
+    }
+}
+
 static void ms_bank_stems(ms_index *x)
 {
     int bi;
@@ -4503,6 +4570,7 @@ int sh_modserve_index_build(const char *mods_root)
     }
     ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
+    ms_engine_names(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
@@ -5487,8 +5555,8 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     bundle = x->bundles[f->bundle].id;
     InterlockedExchange(&f->withdrawn, 1);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: assets/%s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
-               ms_label(&x->bundles[f->bundle]), f->request, why ? why : "the game could not use it");
+    ms_console("%s: %s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why ? why : "the game could not use it");
     return 1;
 }
 
@@ -6708,18 +6776,18 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
-                    ms_console("%s: its animation file assets/%s names the model %s, which SnapMap cannot load, so "
+                    ms_console("%s: its animation file %s names the model %s, which SnapMap cannot load, so "
                                "the game's own animation is used. Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: assets/%s was not loaded because it names the model %s, which SnapMap cannot "
+                    ms_console("%s: %s was not loaded because it names the model %s, which SnapMap cannot "
                                "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 }
                 free(model);
                 continue;
@@ -6819,8 +6887,8 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             {
                 char *nl = strpbrk(why, "\r\n");
                 if (nl) *nl = 0;
-                ms_console("%s: the game could not read assets/%s%s%s. Fix the file and press Refresh.",
-                           ms_label(&x->bundles[f->bundle]), f->request, why[0] ? ": " : "", why);
+                ms_console("%s: the game could not read %s%s%s. Fix the file and press Refresh.",
+                           ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why[0] ? ": " : "", why);
             }
         } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);

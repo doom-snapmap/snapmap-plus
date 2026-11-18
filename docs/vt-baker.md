@@ -36,13 +36,13 @@ round trip in [Validation](#validation) before its output ships.
 
 | Item | Value |
 |---|---|
-| Family name | `mods/<id>/<family>`, lower case. `<id>` is the mod id as `mod.json` spells it; folders below it are allowed (`mods/<id>/skins/imp`). It must not contain `_vmtr` (such a name binds the stock family). |
-| Member files | `assets/virtualtextures/mods/<id>/<family>_sq<N>.mega2`, N from 1 to 16 without a leading zero. Write only the squares the family uses; any subset works. |
+| Family name | `virtual-textures/<family>`, lower case, the name of the family in the mod folder; folders below it are allowed (`virtual-textures/skins/imp`). It must not contain `_vmtr` (such a name binds the stock family). The engine is handed it as `mods/<salt>/<family>`; the author never writes the salt. |
+| Member files | `virtual-textures/<family>_sq<N>.mega2` in the mod folder (the engine's `virtualtextures/mods/<salt>/<family>_sq<N>.mega2`), N from 1 to 16 without a leading zero. Write only the squares the family uses; any subset works. |
 | Not written | No `_q<N>.mega2` members, no `.pages` file, no `.vmtr` table. The engine never reads a private family's `.vmtr` rows, so each material carries its own mapping. |
-| Materials | Ordinary material decls under `generated/decls/material/mods/<id>/`, naming the family (see [Material text](#material-text)). |
+| Materials | Ordinary material decls in `materials/`, naming the family (see [Material text](#material-text)). |
 
 The bundle builder admits a `.mega2` file only in exactly this form and only
-under the mod's own id; any other `.mega2` path fails the build.
+under `virtual-textures/`; any other `.mega2` path fails the build.
 
 ## Geometry
 
@@ -160,7 +160,7 @@ Keep the material's ordinary `diffusemap`, `bumpmap`, `specularmap` and
 and add:
 
 ```
-landpagefile "mods/<id>/<family>"
+landpagefile "virtual-textures/<family>"
 usevirtualmapping 1
 virtualmapping { w/245760, h/245760, x/245760, y/245760 }
 virtualtexturefeedbackfloat { 1, 2048, 245760, 16 }
@@ -169,7 +169,8 @@ virtualtexturefeedbackfloat { 1, 2048, 245760, 16 }
 The `virtualmapping` order is w, h, x, y, each the rectangle's texels divided
 by 245,760, written with at least 8 significant digits. Do not write
 `pagetablemap _vmtrpagetable` or the physical page image parameters. The
-`landpagefile` string must equal the family name exactly.
+`landpagefile` string must equal the family name exactly, written by its folder
+(`virtual-textures/<family>`).
 
 ## Sizes and limits
 
@@ -194,7 +195,7 @@ hold, with no cap of Snapmap+'s own.
   mod file.
 - The family is the mod's own board. One page-source record per board is
   created with
-  `SetSource(record, "mods/<id>/<family>", "virtualtextures/mods/<id>/<family>.pages", 2, 2)`
+  `SetSource(record, "mods/<salt>/<family>", "virtualtextures/mods/<salt>/<family>.pages", 2, 2)`
   and then pointed at the game's material page cache (the pool its own board
   pages through), for each mod the loaded map uses (in the editor, each mod
   the Toybox shows), always before any of the mod's materials is read. The
@@ -231,7 +232,7 @@ writes the bundle:
    rectangle outside the family or crossing a square, no two overlapping, every
    material's `landpagefile` naming this family and its `virtualmapping` equal
    to its rectangle / 245,760 within 1e-6.
-5. Names: family under `mods/<id>/`, no `_vmtr`, `_sq` members only.
+5. Names: family under `virtual-textures/`, no `_vmtr`, `_sq` members only.
 
 ## Authored map families
 

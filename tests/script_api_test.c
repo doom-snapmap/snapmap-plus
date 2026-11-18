@@ -10,7 +10,7 @@
  * entities_near order and radius; trace hits, misses, the thick line and the
  * ignored entity; animation requests on an AI (the ssaction events and the
  * subweb a bare state name takes) and on other entities (the stock events);
- * anim_current, anim_event and anim_finished from the node observed each
+ * current_animation, animation_event and animation_finished from the node observed each
  * frame; view_angle_to on a player's aim and an entity's facing; now() is
  * the time the tick passes; tint and glow: the three lerpRenderParmFrom
  * events of a request, the look kept between requests, the refusals. */
@@ -221,7 +221,7 @@ static void *f_decl(const char *type, const char *name)
     return NULL;
 }
 
-/* The floor for nav_ground: z 0 everywhere, a slope too steep to stand on
+/* The floor for ground_below: z 0 everywhere, a slope too steep to stand on
  * past x 1000, nothing at all below x -1000. */
 static int g_floor_traces;
 static int floor_trace(const float a[3], const float b[3], uint32_t ignore, sh_script_trace *t)
@@ -365,13 +365,13 @@ static void test_reads(void)
 {
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
-        "  local p = self:pos(); print('pos', p.x, p.y, p.z)\n"
+        "  local p = self:position(); print('pos', p.x, p.y, p.z)\n"
         "  print('yaw', self:yaw())\n"
         "  local a = self:axis(); print('fwd', a.forward.x, a.left.y, a.up.z)\n"
         "  local v = self:velocity(); print('vel', v.x)\n"
         "  print('health', self:health(), ent(1):health(), ent(2):health(), ent(3):health())\n"
         "  print('alive', self:alive(), ent(3):alive())\n"
-        "  print('def', self:def(), ent(1):def(), ent(3):def())\n"
+        "  print('def', self:definition(), ent(1):definition(), ent(3):definition())\n"
         "  print('dist', self:distance(ent(2)), self:distance({x = 3, y = 4, z = 0}), self:distance({3, 4, 0}))\n"
         "  print('player', self:is_player(), ent(2):is_player())\n"
         "  print('players', #players(), players()[1] == ent(2))\n"
@@ -397,14 +397,14 @@ static void test_writes(void)
 {
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
-        "  self:set_pos({x = 10, y = 20, z = 30}); local p = self:pos(); print('moved', p.x, p.y, p.z)\n"
+        "  self:set_position({x = 10, y = 20, z = 30}); local p = self:position(); print('moved', p.x, p.y, p.z)\n"
         "  self:set_yaw(90); print('turned', math.floor(self:yaw() + 0.5))\n"
         "  self:set_velocity({1, 2, 3}); print('pushed', self:velocity().z)\n"
         "  self:set_health(140); print('healed', self:health())\n"
         "  self:set_health(500); print('capped', self:health())\n"
         "  self:set_health(20); print('lowered', self:health())\n"
         "  ent(2):set_health(70); print('player healed', ent(2):health())\n"
-        "  ent(3):set_pos({x = 1, y = 1, z = 1}); print('prop moved', ent(3):pos().x)\n"
+        "  ent(3):set_position({x = 1, y = 1, z = 1}); print('prop moved', ent(3):position().x)\n"
         "  ent(3):remove()\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
@@ -424,7 +424,7 @@ static void test_writes(void)
         "local crate\n"
         "on.spawn('props/crate', function(self) crate = self; self:remove() end)\n"
         "on.think('ai/brute', function(self)\n"
-        "  if crate then print('after', crate:pos(), crate:health(), crate:alive(), crate:distance(self)); crate = nil end\n"
+        "  if crate then print('after', crate:position(), crate:health(), crate:alive(), crate:distance(self)); crate = nil end\n"
         "end)\n");
     frame(16);
     frame(16);
@@ -447,9 +447,9 @@ static void test_any_entity(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
         "  local imp = ent(1)\n"
-        "  imp:set_pos({x = 7, y = 8, z = 9})\n"
+        "  imp:set_position({x = 7, y = 8, z = 9})\n"
         "  imp:set_health(10)\n"
-        "  local p = imp:pos()\n"
+        "  local p = imp:position()\n"
         "  print('stock moved', p.x, p.y, p.z, imp:health())\n"
         "  ent(4):remove()\n"
         "end)\n");
@@ -460,9 +460,9 @@ static void test_any_entity(void)
 
 static void test_refusals(void)
 {
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_pos(nil)\nend)\n",
-            "3", "\"set_pos\" needs the new position (a position with x, y and z), got nothing");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_pos({x = 1, y = 'up'})\nend)\n",
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_position(nil)\nend)\n",
+            "3", "\"set_position\" needs the new position (a position with x, y and z), got nothing");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_position({x = 1, y = 'up'})\nend)\n",
             "3", "one of them is missing or not a number");
     refused("api = 1\non.spawn('ai/brute', function(self)\n\n  self:set_health(0)\nend)\n",
             "4", "\"set_health\" cannot take health to 0; kill with damage(...) so the death plays");
@@ -472,10 +472,10 @@ static void test_refusals(void)
             "3", "\"set_health\" was given an entity that has no health");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:distance('ai/imp')\nend)\n",
             "3", "\"distance\" needs what to measure to (an entity, or a position with x, y and z), got text");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:pos(5)\n  print(5):pos()\nend)\n",
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:position(5)\n  print(5):position()\nend)\n",
             "4", "");   /* a method on nothing: the runtime's own wording */
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:anim_event('DEST_BLEND_END')\nend)\n",
-            "3", "\"anim_event\" knows DEST_BLEND_START, DEST_REACHED, VIA_BLEND_IN_START, VIA_BLEND_OUT_START and FINISHED, not \"DEST_BLEND_END\"");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:animation_event('DEST_BLEND_END')\nend)\n",
+            "3", "\"animation_event\" knows DEST_BLEND_START, DEST_REACHED, VIA_BLEND_IN_START, VIA_BLEND_OUT_START and FINISHED, not \"DEST_BLEND_END\"");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:set_yaw(0/0)\nend)\n",
             "3", "\"set_yaw\" needs the new facing in degrees as an ordinary number");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  pos()\nend)\n",
@@ -487,10 +487,10 @@ static void test_spawn(void)
     run("api = 1\n"
         "on.map_start(function()\n"
         "  local c = spawn('props/crate', {x = 7, y = 8, z = 9}, 90)\n"
-        "  print('spawned', c ~= nil, c:pos().x, math.floor(c:yaw() + 0.5), c:def())\n"
-        "  c:set_pos({x = 1, y = 1, z = 1}); print('own', c:pos().x)\n"
+        "  print('spawned', c ~= nil, c:position().x, math.floor(c:yaw() + 0.5), c:definition())\n"
+        "  c:set_position({x = 1, y = 1, z = 1}); print('own', c:position().x)\n"
         "end)\n"
-        "on.spawn('props/crate', function(self) print('spawn handler', self:def()) end)\n");
+        "on.spawn('props/crate', function(self) print('spawn handler', self:definition()) end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "spawned\ttrue\t7.0\t90\tprops/crate"));
     CHECK(has(g_log, "own\t1.0"));
@@ -524,11 +524,11 @@ static void test_world(void)
         "on.spawn('ai/brute', function(self)\n"
         "  local near = entities_near(self, 260)\n"
         "  local d = {}\n"
-        "  for i, e in ipairs(near) do d[i] = e:def() end\n"
+        "  for i, e in ipairs(near) do d[i] = e:definition() end\n"
         "  print('near', #near, table.concat(d, ' '))\n"
         "  print('none', #entities_near({x = -9000, y = 0, z = 0}, 10))\n"
         "  local hit = trace({x = 0, y = 0, z = 0}, {x = 200, y = 0, z = 0})\n"
-        "  print('hit', hit.pos.x, hit.normal.x, hit.fraction, hit.entity:def())\n"
+        "  print('hit', hit.pos.x, hit.normal.x, hit.fraction, hit.entity:definition())\n"
         "  print('miss', trace({x = 0, y = 0, z = 0}, {x = 50, y = 0, z = 0}))\n"
         "  print('beside', trace({x = 0, y = 60, z = 0}, {x = 200, y = 60, z = 0}))\n"
         "  local thick = trace({x = 0, y = 60, z = 0}, {x = 200, y = 60, z = 0}, 20)\n"
@@ -551,12 +551,12 @@ static void test_world(void)
             "3", "\"entities_near\" needs the radius as a number, got nothing");
 }
 
-/* nav_ground: the trace straight down, a flat enough surface only;
+/* ground_below: the trace straight down, a flat enough surface only;
  * difficulty: the engine's value, nil when it cannot be read. */
 static void test_ground_and_difficulty(void)
 {
     float pos[3] = { 10, 20, 300 }, out[3];
-    printf("-- nav_ground and difficulty\n");
+    printf("-- ground_below and difficulty\n");
     g_floor_traces = 0;
     CHECK(sh_script_api_ground_trace(floor_trace, pos, out) == 1 && out[0] == 10 && out[1] == 20 && out[2] == 0);
     CHECK(g_floor_traces == 1);
@@ -569,10 +569,10 @@ static void test_ground_and_difficulty(void)
     CHECK(sh_script_api_ground_trace(NULL, pos, out) == 0);
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
-        "  local g = nav_ground({x = 5, y = 6, z = 100})\n"
+        "  local g = ground_below({x = 5, y = 6, z = 100})\n"
         "  print('ground', g.x, g.y, g.z)\n"
-        "  print('steep', nav_ground({x = 1500, y = 0, z = 100}))\n"
-        "  print('under self', nav_ground(self).z)\n"
+        "  print('steep', ground_below({x = 1500, y = 0, z = 100}))\n"
+        "  print('under self', ground_below(self).z)\n"
         "  print('difficulty', difficulty())\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
@@ -590,8 +590,8 @@ static void test_ground_and_difficulty(void)
     g_difficulty = 2;
     refused("api = 1\non.spawn('ai/brute', function(self)\n  difficulty(1)\nend)\n",
             "3", "\"difficulty\" takes no values; call it as difficulty()");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  nav_ground(5)\nend)\n",
-            "3", "\"nav_ground\" needs the position to look under");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ground_below(5)\nend)\n",
+            "3", "\"ground_below\" needs the position to look under");
 }
 
 static void test_animation(void)
@@ -601,13 +601,13 @@ static void test_animation(void)
         "local brute\n"
         "on.spawn('ai/brute', function(self)\n"
         "  brute = self\n"
-        "  print('current', self:anim_current(), ent(3):anim_current())\n"
-        "  self:anim_state('melee', 'combat/windup')\n"
-        "  print('requested', self:anim_event('DEST_BLEND_START'), self:anim_finished())\n"
+        "  print('current', self:current_animation(), ent(3):current_animation())\n"
+        "  self:animation_state('melee', 'combat/windup')\n"
+        "  print('requested', self:animation_event('DEST_BLEND_START'), self:animation_finished())\n"
         "end)\n"
         "on.think('ai/brute', function(self)\n"
-        "  print('frame', self:anim_current(), self:anim_event('VIA_BLEND_IN_START'), self:anim_event('AWCMD_EVENT_VIA_BLEND_OUT_START'),\n"
-        "        self:anim_event('dest_reached'), self:anim_event('FINISHED'), self:anim_finished())\n"
+        "  print('frame', self:current_animation(), self:animation_event('VIA_BLEND_IN_START'), self:animation_event('AWCMD_EVENT_VIA_BLEND_OUT_START'),\n"
+        "        self:animation_event('dest_reached'), self:animation_event('FINISHED'), self:animation_finished())\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "current\tcombat/idle\tnil"));
@@ -639,8 +639,8 @@ static void test_animation(void)
 
     /* a node the web passes through between two frames of the script still counts */
     run("api = 1\n"
-        "on.spawn('ai/brute', function(self) self:anim_force('combat/stagger', 0.2) end)\n"
-        "on.think('ai/brute', function(self) print('dest', self:anim_event('DEST_BLEND_START'), self:anim_finished()) end)\n");
+        "on.spawn('ai/brute', function(self) self:force_animation('combat/stagger', 0.2) end)\n"
+        "on.think('ai/brute', function(self) print('dest', self:animation_event('DEST_BLEND_START'), self:animation_finished()) end)\n");
     CHECK(has(g_events, "ssaction_ForceAnimState(0,'combat/stagger',200,0);"));
     ai = &g_ents[E_AI];
     strcpy_s(ai->node, sizeof ai->node, "combat/stagger");
@@ -652,9 +652,9 @@ static void test_animation(void)
     /* other entities use the stock animWeb events */
     run("api = 1\n"
         "on.spawn('props/crate', function(self)\n"
-        "  self:anim_state('doors/open')\n"
-        "  print('crate finished', self:anim_finished())\n"
-        "  self:anim_force('closed', 1)\n"
+        "  self:animation_state('doors/open')\n"
+        "  print('crate finished', self:animation_finished())\n"
+        "  self:force_animation('closed', 1)\n"
         "end)\n");
     CHECK(has(g_events, "post changeAnimState('doors','open');"));
     CHECK(has(g_events, "animState_IsFinished('doors','open');"));

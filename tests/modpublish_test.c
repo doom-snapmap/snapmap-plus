@@ -266,9 +266,9 @@ static int make_sized(const char *path, unsigned long long size)
     return ok;
 }
 
-static const char *const A_FILES[] = { "assets/generated/image/mods/testalph/a.bimage", NULL };
+static const char *const A_FILES[] = { "images/a.bimage", NULL };
 static const char *const A_BYTES[] = { "alpha bytes for the publish test", NULL };
-static const char *const B_FILES[] = { "assets/generated/image/mods/testbeta/b.bimage", NULL };
+static const char *const B_FILES[] = { "images/b.bimage", NULL };
 static const char *const B_BYTES[] = { "beta bytes for the publish test", NULL };
 
 int main(int argc, char **argv)

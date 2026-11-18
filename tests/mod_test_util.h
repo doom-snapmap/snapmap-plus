@@ -103,6 +103,64 @@ static void mt_delete(const char *folder, const char *rel)
 
 static int mt_exists(const char *path) { return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES; }
 
+#ifdef SNAPMAP_PLUS_MODAUTHOR_H
+/* The author path (relative to the mod folder, '/' separators) of an engine request of the mod with `salt`: the
+ * test's way to write a file at a request it builds from a name. Needs modauthor.h included first and
+ * modauthor.c linked. */
+static void mt_author(const char *salt, const char *request, char *out, size_t cap)
+{
+    char *p = sh_ma_path(salt, request);
+    _snprintf_s(out, cap, _TRUNCATE, "%s", p ? p : "");
+    free(p);
+}
+
+/* Re-spell a copy of a mod folder in the earlier layout, for the tests of the readers and converters of the
+ * earlier shapes: every file below the mod folder's own folders moves to assets\\<engine request>. Files beside
+ * mod.json stay. */
+static void mt_old_walk(const char *folder, const char *rel, char names[][260], int *n)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2], child[260];
+    HANDLE h;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\%s*", folder, rel);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        _snprintf_s(child, sizeof child, _TRUNCATE, "%s%s", rel, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            char sub[260];
+            if (!rel[0] && !_stricmp(fd.cFileName, "assets")) continue;
+            _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\", child);
+            mt_old_walk(folder, sub, names, n);
+        } else if (rel[0] && *n < 128) {
+            _snprintf_s(names[(*n)++], 260, _TRUNCATE, "%s", child);
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+static void mt_to_old_layout(const char *folder, const char *salt)
+{
+    static char names[128][260];
+    int n = 0, i;
+    mt_old_walk(folder, "", names, &n);
+    for (i = 0; i < n; i++) {
+        char from[MAX_PATH * 2], to[MAX_PATH * 2], slashed[260], *req = NULL, *cause = NULL, *c;
+        _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "%s", names[i]);
+        for (c = slashed; *c; c++) if (*c == '\\') *c = '/';
+        if (!sh_ma_request(salt, slashed, &req, &cause) || !req) { free(cause); continue; }
+        for (c = req; *c; c++) if (*c == '/') *c = '\\';
+        _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", folder, names[i]);
+        _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\assets\\%s", folder, req);
+        mt_mkdirs_for(to);
+        MoveFileA(from, to);
+        free(req);
+        free(cause);
+    }
+}
+#endif
+
 /* Extract a ZIP of stored entries (the exports write method 0) into dir, as a
  * player's file manager would. Returns the entry count, -1 on a damaged file. */
 static int mt_unzip_stored(const char *zip, const char *dir)

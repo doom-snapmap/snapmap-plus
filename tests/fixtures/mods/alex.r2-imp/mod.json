@@ -1,7 +1,7 @@
 {
   "name": "R2 Imp copy",
   "author": "alex",
-  "strings": {"english": {"#str_mod_alex_r2_imp": "Imp copy"}},
+  "strings": {"english": {"mod_alex_r2_imp": "Imp copy"}},
 
   "snapmap-plus": {
     "format": 2,

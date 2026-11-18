@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "modauthor.h"
 #include "modstore.h"
 #include "modstore_upgrade.h"
 #include "modbundle_old.h"
@@ -173,6 +174,7 @@ static void test_old_reader(const char *fixture, const char *tmp)
     int saw_pointer = 0;
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\old-shape", tmp);
     CHECK(mt_copy_tree(fixture, folder));
+    mt_to_old_layout(folder, "alexrimp");   /* the earlier shape held its files under assets\ */
     mt_write(folder, "mod.json",
              "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"shadows\":[\"a/b.decl\"],"
              "\"strings\":{\"en\":{\"#str_x\":\"X\"}},\"hud\":{\"weapons\":{}},"

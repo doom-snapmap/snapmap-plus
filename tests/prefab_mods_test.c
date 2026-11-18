@@ -58,6 +58,7 @@
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
+#include "../src/backend/modauthor.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/module_prefab_map.h"
 #include "../src/backend/modsync.h"
@@ -942,7 +943,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         e = zip_entry(z, zl, "mods/door/mod.json", &el);
         CHECK(e && disk_mj && el == ml && !memcmp(e, disk_mj, ml));
         free(disk_mj);
-        e = zip_entry(z, zl, "mods/door/assets/generated/decls/entitydef/mods/testdoor/door.decl", &el);
+        e = zip_entry(z, zl, "mods/door/entities/door.decl", &el);
         CHECK(e && el == sizeof DOOR_DECL - 1 && !memcmp(e, DOOR_DECL, el));
         CHECK(!memmem_find(z, zl, "bundle.canonical.json") && !memmem_find(z, zl, "bundle.json") && !memmem_find(z, zl, "mods/legacy/") &&
               !memmem_find(z, zl, "test.door@"));
@@ -1391,19 +1392,15 @@ static const sh_mb_stock_ops E_GAME = { NULL, e_match, e_identify, e_verify, e_r
 static int e_install(const char *src, const char *salt, const char *name, const char *bytes, int borrow,
                      sh_modmanifest_row *row, char *folder_out, size_t folder_cap)
 {
-    char json[256], rel[200], key[HO_TEXT + 1], cause[HO_TEXT];
+    char json[256], key[HO_TEXT + 1], cause[HO_TEXT];
     sh_ms_install_stats st;
     sh_mb_bundle b;
     int ok;
     _snprintf_s(json, sizeof json, _TRUNCATE,
                 "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
     mt_write(src, "mod.json", json);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\own.bimage", salt);
-    mt_write(src, rel, bytes);
-    if (borrow) {
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\rock.bimage", salt);
-        mt_write(src, rel, ROCK_BYTES);
-    }
+    mt_write(src, "images\\own.bimage", bytes);
+    if (borrow) mt_write(src, "images\\rock.bimage", ROCK_BYTES);
     memset(&b, 0, sizeof b);
     ok = HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1)));
     if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
@@ -1662,7 +1659,7 @@ static char *lv_text(const char *unit, size_t n)
 static void long_values_end_to_end(const char *tmp)
 {
     const char *store_url = getenv("SMP_STORE_URL");
-    char url[256], *base, *author, *player, *src, *request, *name, *who, *home, *json, *path, *where = NULL;
+    char url[256], *base, *author, *player, *src, *request, *name, *who, *home, *json, *path, *apath, *where = NULL;
     char *key = NULL, *cause = NULL, err[512];
     size_t used, i;
     sh_ms_install_stats st;
@@ -1707,6 +1704,8 @@ static void long_values_end_to_end(const char *tmp)
         request = r;
     }
     CHECK(strlen(request) == 5000);
+    apath = sh_ma_path("testlong", request);   /* where the mod folder holds it: images/<60 folders>/<leaf> */
+    CHECK(apath && strlen(apath) == 5000 - 30 + 7);
     {
         size_t slashes = 0;
         for (i = 0; request[i]; i++) slashes += request[i] == '/';
@@ -1729,8 +1728,8 @@ static void long_values_end_to_end(const char *tmp)
     path = sh_textf("%s\\mod.json", src);
     CHECK(lv_write(path, json, strlen(json)));
     free(path);
-    path = sh_textf("%s\\assets\\%s", src, request);
-    CHECK(strlen(path) > 5600 && lv_write(path, "deep bytes", 10));
+    path = sh_textf("%s\\%s", src, apath);
+    CHECK(strlen(path) > 5570 && lv_write(path, "deep bytes", 10));
     free(path);
 
     /* Build into the author's long mods folder. */
@@ -1746,7 +1745,7 @@ static void long_values_end_to_end(const char *tmp)
     CHECK(sh_modmanifest_row_set_name(&row, b.name ? b.name : ""));
     sh_mb_free(&b);
     {
-        char *built = sh_textf("%s\\%s\\assets\\%s", author, key ? key : "", request);
+        char *built = sh_textf("%s\\%s\\%s", author, key ? key : "", apath);
         CHECK(built && lv_exists(built));
         free(built);
     }
@@ -1787,7 +1786,7 @@ static void long_values_end_to_end(const char *tmp)
         modsync_stats_free(&ms);
     }
     if (where) {
-        char *deep = sh_textf("%s\\%s\\assets\\%s", player, where, request);
+        char *deep = sh_textf("%s\\%s\\%s", player, where, apath);
         char *mj = sh_textf("%s\\%s\\mod.json", player, where);
         sh_mb_bundle got;
         CHECK(deep && lv_exists(deep));
@@ -1818,7 +1817,7 @@ static void long_values_end_to_end(const char *tmp)
             free(w);
         }
     }
-    free(where); free(key); free(base); free(author); free(player); free(src); free(request);
+    free(where); free(key); free(base); free(author); free(player); free(src); free(request); free(apath);
     free(name); free(who); free(home); free(json);
 }
 
@@ -1841,7 +1840,7 @@ int main(int argc, char **argv)
     _snprintf_s(libA, sizeof libA, _TRUNCATE, "%s\\libA", tmp);
     CreateDirectoryA(libA, NULL);
     CHECK(sh_ms_set_root(storeA));
-    CHECK(install_mod(src, "testdoor", "test.door", "assets\\generated\\decls\\entitydef\\mods\\testdoor\\door.decl", DOOR_DECL, &door));
+    CHECK(install_mod(src, "testdoor", "test.door", "entities\\door.decl", DOOR_DECL, &door));
     CHECK(sh_modserve_index_build(storeA) >= 1);
     CHECK(sh_modserve_bundle_state(door.build, NULL) == 1);
     reset_fakes();

@@ -214,7 +214,7 @@ static void bad_value(lua_State *L, const char *call, const char *name, int pos,
 
 static int event_call(lua_State *L, int post)
 {
-    const char *call = post ? "post" : "event";
+    const char *call = post ? "queue_event" : "run_event";
     void *ent = sh_script_api_entity(L, 1, call, NULL);
     const char *name = sh_script_api_check_text(L, 2, call, "the event's name", 200);
     const sh_script_engine *e = sh_script_api_engine();
@@ -316,7 +316,7 @@ static int event_call(lua_State *L, int post)
     }
     memset(&r, 0, sizeof r);
     ok = sh_script_api_event(ent, name, a, n, &r);
-    if (!ok) return sh_script_refuse(L, "\"event\" could not run %s: the game did not take it", name);
+    if (!ok) return sh_script_refuse(L, "\"run_event\" could not run %s: the game did not take it", name);
     switch (r.type) {
     case 'i': lua_pushinteger(L, r.i); return 1;
     case 'b': lua_pushboolean(L, r.i != 0); return 1;
@@ -348,10 +348,10 @@ static int event_call(lua_State *L, int post)
 static int l_event(lua_State *L) { return event_call(L, 0); }
 static int l_post(lua_State *L) { return event_call(L, 1); }
 
-/* event_args(name) -> { "entity", "decl" } or nil */
+/* event_arguments(name) -> { "entity", "decl" } or nil */
 static int l_event_args(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 1, "event_args", "the event's name", 200);
+    const char *name = sh_script_api_check_text(L, 1, "event_arguments", "the event's name", 200);
     const sh_script_engine *e = sh_script_api_engine();
     char format[40];
     int i, n = 0;
@@ -459,13 +459,13 @@ static void signals_wanted(void)
     g_signals_wanted = 1;
 }
 
-/* cvar(name[, value]) */
+/* console_variable(name[, value]) */
 static int l_cvar(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 1, "cvar", "the cvar's name", 200);
+    const char *name = sh_script_api_check_text(L, 1, "console_variable", "the cvar's name", 200);
     char was[1024];
-    if (!OP(cvar_get)) return sh_script_refuse(L, "\"cvar\" is unavailable: the game's cvars could not be reached in this session");
-    if (!g_ops.cvar_get(name, was, sizeof was)) return sh_script_refuse(L, "\"cvar\" found no cvar named %s in the game", name);
+    if (!OP(cvar_get)) return sh_script_refuse(L, "\"console_variable\" is unavailable: the game's cvars could not be reached in this session");
+    if (!g_ops.cvar_get(name, was, sizeof was)) return sh_script_refuse(L, "\"console_variable\" found no cvar named %s in the game", name);
     if (lua_gettop(L) < 2) {
         char *end = NULL;
         double v = was[0] ? strtod(was, &end) : 0;
@@ -480,12 +480,12 @@ static int l_cvar(lua_State *L)
         int r;
         if (lua_isboolean(L, 2)) text = lua_toboolean(L, 2) ? "1" : "0";
         else if (lua_type(L, 2) == LUA_TNUMBER || lua_type(L, 2) == LUA_TSTRING) text = lua_tostring(L, 2);
-        else return sh_script_refuse(L, "\"cvar\" needs the value as a number, true or false, or text, got %s", value_words(L, 2));
+        else return sh_script_refuse(L, "\"console_variable\" needs the value as a number, true or false, or text, got %s", value_words(L, 2));
         if (!OP(cvar_set) || !cvar_keep(name, was))
-            return sh_script_refuse(L, "\"cvar\" could not set %s: the game's cvars cannot be changed in this session", name);
+            return sh_script_refuse(L, "\"console_variable\" could not set %s: the game's cvars cannot be changed in this session", name);
         r = g_ops.cvar_set(name, text);
-        if (r == -1) return sh_script_refuse(L, "\"cvar\" cannot set %s: the game only takes it when it starts", name);
-        if (r != 1) return sh_script_refuse(L, "\"cvar\" could not set %s: the game refused the value %s", name, text);
+        if (r == -1) return sh_script_refuse(L, "\"console_variable\" cannot set %s: the game only takes it when it starts", name);
+        if (r != 1) return sh_script_refuse(L, "\"console_variable\" could not set %s: the game refused the value %s", name, text);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -518,11 +518,11 @@ void sh_script_api_game_register(void)
     static int done;
     if (done) return;
     done = 1;
-    sh_script_api_add(SH_SCRIPT_API_METHOD, "event", l_event);
-    sh_script_api_add(SH_SCRIPT_API_METHOD, "post", l_post);
+    sh_script_api_add(SH_SCRIPT_API_METHOD, "run_event", l_event);
+    sh_script_api_add(SH_SCRIPT_API_METHOD, "queue_event", l_post);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "signal", l_signal);
-    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "event_args", l_event_args);
-    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "cvar", l_cvar);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "event_arguments", l_event_args);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "console_variable", l_cvar);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "decl", l_decl);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities", l_entities);
     sh_script_api_add_opener(open_decl);
@@ -739,7 +739,7 @@ int sh_script_api_game_install(const sig_result *results, size_t count, const ui
     sh_script_api_game_set(&ops);
     g_cvar_slot = module_base ? (const void *)glb_resolve(module_base, "cvar_system_slot", NULL) : NULL;
     g_cvar_set = (cvar_set_fn)sig_addr_by_name(results, count, "CvarSetString");
-    if (!g_cvar_slot || !g_cvar_set) backend_log("SCRIPTS: cvar() is unavailable: the game's cvars were not found");
+    if (!g_cvar_slot || !g_cvar_set) backend_log("SCRIPTS: console_variable() is unavailable: the game's cvars were not found");
     sh_script_set_signal_ops(signals_known, signals_hook);
     return 1;
 }

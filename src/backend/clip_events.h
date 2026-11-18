@@ -3,7 +3,7 @@
  * A mod writes an md6Def of its own that inherits the model its clip plays on and lists the rows in its
  * `events { anim "<clip>" { event ... } }` blocks, then names that md6Def (the carrier) in mod.json:
  *
- *   "clip_events": ["mods/<salt>/player/kill_rows.md6"]
+ *   "animation_events": ["mods/<salt>/player/kill_rows.md6"]
  *
  * Nothing of the game is replaced or edited. When the engine looks up the events of a registered clip on a
  * model whose own md6Def chain answers nothing, the product makes a second call of the engine's own lookup on
@@ -34,7 +34,7 @@ extern "C" {
 #define SH_CE_CLIP_ROOT     "md6/mods/"
 #define SH_CE_CLIP_ROOT_LEN 9
 /* The author key of mod.json and the registries member the builder writes. */
-#define SH_CE_AUTHOR_KEY    "clip_events"
+#define SH_CE_AUTHOR_KEY    "animation_events"
 #define SH_CE_REGISTRY_KEY  "clipEvents"
 /* Parent pointers followed at most this many times (a model chain is a few deep). */
 #define SH_CE_CHAIN_MAX     32

@@ -692,16 +692,22 @@ static char *mu_bundle_text(const sh_mb_bundle *b, const char *tag)
 {
     mpj *x;
     const mpj *s, *en;
-    char *out = NULL;
+    char *out = NULL, *own;
     int i;
     if (!b->extra || !tag) return NULL;
     if (!_strnicmp(tag, "#str_", 5)) tag += 5;
+    /* the bundle holds a key of the mod's own as the engine names it (<salt>_<key>, modauthor.h); a decl in the
+     * folder writes it as the author does */
+    own = b->id[0] ? sh_textf("%s_%s", b->id, tag) : NULL;
     x = mpj_parse(b->extra, strlen(b->extra));
     s = x ? mpj_get(x, "strings") : NULL;
     en = s && s->type == MPJ_OBJ ? mpj_get(s, "en") : NULL;
     for (i = 0; en && en->type == MPJ_OBJ && i < en->n && !out; i++)
-        if (!_stricmp(en->keys[i], tag) && en->items[i] && en->items[i]->type == MPJ_STR) out = sh_mm_decode(en->items[i]->text);
+        if ((!_stricmp(en->keys[i], tag) || (own && !_stricmp(en->keys[i], own))) && en->items[i] &&
+            en->items[i]->type == MPJ_STR)
+            out = sh_mm_decode(en->items[i]->text);
     mpj_free(x);
+    free(own);
     return out;
 }
 
@@ -4592,21 +4598,15 @@ static int mu_cause_names(const char *cause, const char *path)
 /* The cause that belongs to one file of the folder, or "". */
 static const char *mu_file_cause(const char *cause, const char *path)
 {
+    char *back, *c;
+    int named;
     if (mu_cause_names(cause, path)) return cause;
-    if (!_strnicmp(path, "assets/", 7)) {
-        char *request, *spelled = NULL, *c;
-        int named = 0;
-        if (mu_cause_names(cause, path + 7)) return cause;
-        /* A script's messages name it as the author does: scripts\<name>.lua. */
-        if (!(request = _strdup(path + 7))) return "";
-        for (c = request; *c; c++) *c = *c == '\\' ? '/' : (char)tolower((unsigned char)*c);
-        if (sh_mb_script_request(request, NULL, NULL) > 0 && (spelled = sh_mb_script_file_name(request)) != NULL)
-            named = spelled[0] && mu_cause_names(cause, spelled);
-        free(spelled);
-        free(request);
-        if (named) return cause;
-    }
-    return "";
+    /* A script's messages name it as Windows spells it: scripts\<name>.lua. */
+    if (!(back = _strdup(path))) return "";
+    for (c = back; *c; c++) if (*c == '/') *c = '\\';
+    named = mu_cause_names(cause, back);
+    free(back);
+    return named ? cause : "";
 }
 
 /* The mod's standing cause: why the folder serves nothing (a failed build

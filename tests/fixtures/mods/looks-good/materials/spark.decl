@@ -1,0 +1,6 @@
+{
+	type			particle
+	transmap		images/fx/spark.tga
+	lighting		unlit
+	glow			2
+}

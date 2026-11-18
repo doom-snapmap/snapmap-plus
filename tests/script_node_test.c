@@ -412,7 +412,7 @@ static void test_door(void)
     int mod, i;
 
     sh_script_source_clear();
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\door-logic\\assets\\mods\\doorlogc\\scripts", g_base);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\door-logic\\scripts", g_base);
     CHECK(sh_script_source_set_folder("doorlogc", "Door Logic", dir));
     g_folder_salt = "doorlogc";
     g_nmem = 0;

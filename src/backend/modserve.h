@@ -1299,6 +1299,9 @@ void sh_modserve_index_link_add(sh_modserve_index_link *link, sh_modserve_index_
 int sh_modserve_is_mod_sedef(const char *name);
 
 /* ------------------------------------------------------------------ engine */
+/* Declared for every build: the pure tests link their own definitions of these (modserve_engine.c, modserve.c). */
+int modserve_activate_bundles(const char *const *bundle_hashes, int n);
+int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap);
 #ifndef SH_MODSERVE_PURE
 #include "signatures.h"
 
@@ -1343,7 +1346,6 @@ int modserve_palette_rebuild_requested(void);
  * (sh_modserve_map_rows_sync; refused while an entity or a wire is held),
  * logged as one "MODS: map rows: ..." line. Returns the number of ready
  * steps, or -1 when refused (not the main thread, registry unavailable). */
-int modserve_activate_bundles(const char *const *bundle_hashes, int n);
 
 /* The pre-load pass of a hub launch (a published map or a My Maps play),
  * called once per launch at its gate, after the gate let it go and before
@@ -1399,7 +1401,6 @@ int sh_modserve_scope_apply(const char *phase);
 
 /* The listing's declared builds (the last sh_modserve_scope_set), in row
  * order: up to cap copied into out (NULL to count). Returns the count. */
-int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap);
 
 /* A declared set the author changed in the editor ("Use in this map"):
  * the map load's activation for the listing's builds, then the

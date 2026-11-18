@@ -247,16 +247,16 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
         if (!name || !name[0]) continue;
         for (k = 0; k < i && !dup; k++) dup = names[k] && sh_ce_name_eq(names[k], name);
         if (dup) {
-            ce_say(warn, warn_ctx, oom, "mod.json clip_events lists \"%s\" twice; the second entry is ignored. List "
+            ce_say(warn, warn_ctx, oom, "mod.json animation_events lists \"%s\" twice; the second entry is ignored. List "
                    "each md6Def once.", name);
             continue;
         }
         found = sh_ce_def_of_mod(name, salt) && text ? text(text_ctx, name, &body, &blen) : 0;
         if (found <= 0) {
             ce_say(warn, warn_ctx, oom, found < 0
-                   ? "mod.json clip_events: \"%s\" could not be read, so it was left out. Check that the file is not "
+                   ? "mod.json animation_events: \"%s\" could not be read, so it was left out. Check that the file is not "
                      "open in another program and press Refresh."
-                   : "mod.json clip_events: \"%s\" is not a model definition of this mod, so it was left out. List an "
+                   : "mod.json animation_events: \"%s\" is not a model definition of this mod, so it was left out. List an "
                      "md6Def this mod carries: the path of its file under assets/generated/decls/md6def/, from "
                      "mods/<folder name>/ on, without .decl.",
                    name);
@@ -265,12 +265,12 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
         if (!sh_ce_md6_read(body, blen, &read[i])) { free(body); *oom = 1; break; }
         free(body);
         if (!read[i].base) {
-            ce_say(warn, warn_ctx, oom, "mod.json clip_events: \"%s\" does not say which game model it adds rows to, "
+            ce_say(warn, warn_ctx, oom, "mod.json animation_events: \"%s\" does not say which game model it adds rows to, "
                    "so it was left out. Start it with init { inherit \"<that model>\" }.", name);
             continue;
         }
         if (!read[i].nclips) {
-            ce_say(warn, warn_ctx, oom, "mod.json clip_events: \"%s\" adds no event rows, so it was left out. Give it "
+            ce_say(warn, warn_ctx, oom, "mod.json animation_events: \"%s\" adds no event rows, so it was left out. Give it "
                    "an events { anim \"md6/mods/<folder name>/<clip>.md6anim\" { event ... } } block.", name);
             continue;
         }
@@ -278,7 +278,7 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
             const char *clip = read[i].clips[k];
             int g, other = -1;
             if (!sh_ce_clip_of_mod(clip, salt)) {
-                ce_say(warn, warn_ctx, oom, "mod.json clip_events: \"%s\" adds rows to \"%s\", which is not a clip of "
+                ce_say(warn, warn_ctx, oom, "mod.json animation_events: \"%s\" adds rows to \"%s\", which is not a clip of "
                        "this mod, so those rows are not used. A mod can add rows only to its own clips, the ones "
                        "under md6/mods/<folder name>/.", name, clip);
                 continue;
@@ -286,7 +286,7 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
             for (g = 0; g < ngiven && other < 0; g++) if (sh_ce_name_eq(given[g].clip, clip)) other = given[g].entry;
             if (other >= 0) {
                 if (other != i)
-                    ce_say(warn, warn_ctx, oom, "mod.json clip_events: \"%s\" gets rows from \"%s\" and from \"%s\"; only "
+                    ce_say(warn, warn_ctx, oom, "mod.json animation_events: \"%s\" gets rows from \"%s\" and from \"%s\"; only "
                            "\"%s\"'s are used. Keep its rows in one md6Def.", clip, names[other], name, names[other]);
                 continue;
             }
@@ -363,7 +363,7 @@ int sh_ce_registry_add(sh_ce_registry *r, const char *salt, const char *label, c
         const char *base = e && e->type == MPJ_OBJ ? ce_plain(mpj_get(e, "base")) : NULL;
         const mpj *clips = e && e->type == MPJ_OBJ ? mpj_get(e, "clips") : NULL;
         if (!carrier || !base || !clips || clips->type != MPJ_ARR || !sh_ce_def_of_mod(carrier, salt)) {
-            ce_say(line, line_ctx, NULL, "MODS: clip-events: %s: a clip_events row of its build is not one of its own "
+            ce_say(line, line_ctx, NULL, "MODS: clip-events: %s: a animation_events row of its build is not one of its own "
                    "md6Defs, so it is not used. Press Refresh in the Mods tab to build the mod again.", who);
             continue;
         }

@@ -3,7 +3,7 @@
  *
  * Two mods built at the root of a store (one in an organizing folder) and a
  * map whose rows name them as "<salt>@<build hash>" are written to one ZIP:
- * <zip name>.json and mods/<folder name>/mod.json and assets/ for each, the
+ * <zip name>.json and mods/<folder name>/mod.json and the files at their author paths for each, the
  * mod.json and carried files byte for byte, the same bytes on a second write.
  * Imported into an empty store, each carried folder lands in the ZIP's place,
  * mods\maps\<zip name>\<mod name>\, the serving index holds both and the map
@@ -63,17 +63,16 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 
 static const char BASE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"EXPORT_MARK\"}";
 
-/* A new mod by hand: an author part only, files under mods/<leaf>/. */
+/* A new mod by hand: an author part only, two images. */
 static void make_mod(const char *dir, const char *name, const char *leaf, const char *extra)
 {
     char text[512], rel[MAX_PATH];
     _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"version\":\"1.0.0\"}", name);
     mt_write(dir, "mod.json", text);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\a.bimage", leaf);
+    (void)leaf;
     _snprintf_s(text, sizeof text, _TRUNCATE, "image bytes of %s%s", name, extra ? extra : "");
-    mt_write(dir, rel, text);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", leaf);
-    mt_write(dir, rel, "second image");
+    mt_write(dir, "images\\a.bimage", text);
+    mt_write(dir, "images\\b.bimage", "second image");
 }
 
 /* Install `src` into the current store root; its row (salt, build, name). */
@@ -314,9 +313,8 @@ int main(int argc, char **argv)
         char want[MAX_PATH * 2], entry[300];
         _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\pink\\mod.json", a_root);
         CHECK(entry_is_file(zip, "mods/pink/mod.json", want));
-        _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\group\\room\\assets\\generated\\image\\mods\\%s\\a.bimage", a_root,
-                    rows[1].salt);
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/room/assets/generated/image/mods/%s/a.bimage", rows[1].salt);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\group\\room\\images\\a.bimage", a_root);
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/room/images/a.bimage");
         CHECK(entry_is_file(zip, entry, want));
     }
     z1 = slurp(zip, &z1l);
@@ -374,7 +372,7 @@ int main(int argc, char **argv)
         _snprintf_s(d, sizeof d, _TRUNCATE, "%s\\d", tmp);
         store_at(d);
         memcpy(bad, z1, z1l);
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/room/assets/generated/image/mods/%s/b.bimage", rows[1].salt);
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/room/images/b.bimage");
         CHECK(patch_entry(bad, z1l, entry, "second", "SECOND"));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bad.zip", tmp);
         CHECK(spit(path, bad, z1l));
@@ -565,8 +563,8 @@ int main(int argc, char **argv)
         unsigned rej = 0;
         /* The author changes Pink Imp and exports the same ZIP again. */
         store_at(a_root);
-        _snprintf_s(pinkasset, sizeof pinkasset, _TRUNCATE, "%s\\pink\\assets\\generated\\image\\mods\\%s\\a.bimage",
-                    a_root, rows[0].salt);
+        _snprintf_s(pinkasset, sizeof pinkasset, _TRUNCATE, "%s\\pink\\images\\a.bimage",
+                    a_root);
         CHECK(spit(pinkasset, "changed", 7));
         CHECK(sh_ms_sync(NULL, &ss));
         (void)sh_modserve_index_build(a_root);

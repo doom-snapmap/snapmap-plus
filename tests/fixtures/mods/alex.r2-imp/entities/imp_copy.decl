@@ -1,0 +1,8 @@
+{
+	inherit = "snapmaps/placeablesnapaiencounter/imp";
+	edit = {
+		renderModelInfo = {
+			model = "meshes/imp_copy.md6";
+		}
+	}
+}

@@ -61,7 +61,7 @@ function P.of(e)
   local t = clock and clock() or 0
   if s and (s.placeable or s.settled or t < s.look_at) then return s end
   if not s then
-    s = { behavior = "default", home = e:pos(), health_mod = 1, damage_mod = 1, first = t, look_at = 0 }
+    s = { behavior = "default", home = e:position(), health_mod = 1, damage_mod = 1, first = t, look_at = 0 }
     records[e] = s
   end
   local p = P.placeable(e)

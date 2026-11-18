@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "modserve.h"
+#include "modauthor.h"
 #include "decl_tree.h"
 #include "modmanifest.h"
 #include "modbundle.h"
@@ -143,7 +144,7 @@ static void write_file(const char *path, const char *body, size_t len)
 }
 
 typedef struct fx_file {
-    const char *path;      /* under assets/ */
+    const char *path;      /* the engine request; the mod folder holds it at its author path (sh_ma_path) */
     const char *body;      /* written to the tree (NULL: not written) */
     long long size;        /* -1: the body's size */
     const char *ptype, *pname;
@@ -198,22 +199,25 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     for (i = 0; i < n; ++i) {
         const fx_file *f = &files[i];
         long long size = f->size >= 0 ? f->size : (long long)strlen(f->body ? f->body : "");
-        char b[65];
+        char b[65], ap[512];
+        char *author = sh_ma_path(id, f->path);
+        _snprintf_s(ap, sizeof ap, _TRUNCATE, "%s", author ? author : "");
+        free(author);
         if ((g_fx_restore && !strcmp(g_fx_restore, f->path)) || (g_fx_restore2 && !strcmp(g_fx_restore2, f->path)))
             at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                              "      {\"path\": \"assets/%s\", \"stock\": {\"source\": \"%s\", \"sha256\": \"%s\"}, "
+                              "      {\"path\": \"%s\", \"stock\": {\"source\": \"%s\", \"sha256\": \"%s\"}, "
                               "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
-                              f->path, f->path, hash64(f->blob, b), f->ptype, f->pname, f->needs ? f->needs : "[]",
+                              ap, f->path, hash64(f->blob, b), f->ptype, f->pname, f->needs ? f->needs : "[]",
                               i + 1 < n ? "," : "");
         else
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                          "      {\"path\": \"assets/%s\", \"sha256\": \"%s\", \"size\": %lld, "
+                          "      {\"path\": \"%s\", \"sha256\": \"%s\", \"size\": %lld, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
-                          f->path, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
+                          ap, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
                           i + 1 < n ? "," : "");
         if (f->body) {
             char *p;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", dir, f->path);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, ap);
             for (p = path; *p; ++p) if (*p == '/') *p = '\\';
             write_file(path, f->body, strlen(f->body));
         }
@@ -3110,11 +3114,11 @@ static void test_refusals(void)
     /* Never loaded: the two whose models SnapMap cannot load. */
     CHECK(!strstr(g_calls, "mods/dzpack00/med_station") && !strstr(g_calls, "mods/dzpack00/turret"));
     CHECK(g_rf_loads == 2);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: assets/generated/decls/animweb/mods/dzpack00/med_station.decl was "
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: decls/animweb/med_station.decl was "
                                  "not loaded because it names the model zion/objects/props_set/kiosks/wallhealthstation.md6, "
                                  "which SnapMap cannot load (it is campaign-only or missing). Name a model SnapMap has, then "
                                  "press Refresh.\n") != NULL);
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: the game could not read assets/generated/decls/animweb/mods/dzpack00/"
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: the game could not read decls/animweb/"
                                  "throws.decl: ") != NULL);
     CHECK(!strstr(g_console_seen, "mods/dzpack00/fine"));
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/med_station.decl", NULL));
@@ -3139,7 +3143,7 @@ static void test_refusals(void)
     CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine",
                                "the game refused its bytes; the game's own decl is restored") == 1);
     CHECK(log_has("MODS: withdrawn: animWeb 'mods/dzpack00/fine' (dzpack00): the game refused its bytes"));
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: assets/generated/decls/animweb/mods/dzpack00/fine.decl was not "
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: decls/animweb/fine.decl was not "
                                  "loaded: the game refused its bytes; the game's own decl is restored. Fix the file and press "
                                  "Refresh in the Mods tab.") != NULL);
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/fine.decl", NULL));
@@ -4574,7 +4578,9 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
-    CHECK(log_has("bundle 'elsewhere' skipped: '" SP_THING "' is outside this mod's own files and is not a game file it changes"));
+    /* The mod folder cannot name another salt's file: it would be a game/ path under mods/. */
+    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (game/" SP_THING "). "
+                  "Press Refresh to build the mod again."));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
 
@@ -4676,6 +4682,14 @@ static void test_part_rows(void)
     sh_modserve_bundle_ref ref;
     sh_modmanifest_row row;
     const char *list[1];
+    char ap_thing[200], ap_gone[200];
+    {
+        char *a = sh_ma_path("kpart000", PT_THING), *b = sh_ma_path("kpart000", PT_GONE);
+        _snprintf_s(ap_thing, sizeof ap_thing, _TRUNCATE, "%s", a ? a : "");
+        _snprintf_s(ap_gone, sizeof ap_gone, _TRUNCATE, "%s", b ? b : "");
+        free(a);
+        free(b);
+    }
     printf("-- part of a build: a published map's own, served to that map only\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
@@ -4692,8 +4706,8 @@ static void test_part_rows(void)
     g_bundle_extra = NULL;
     g_bundle_name = NULL;
     /* What the build it was cut from held, beside the place's mod.json. */
-    _snprintf_s(source, sizeof source, _TRUNCATE, "{\"files\":[{\"path\":\"assets/%s\",\"request\":\"%s\"},"
-                "{\"path\":\"assets/%s\",\"request\":\"%s\"}],\"id\":\"kpart000\"}", PT_THING, PT_THING, PT_GONE, PT_GONE);
+    _snprintf_s(source, sizeof source, _TRUNCATE, "{\"files\":[{\"path\":\"%s\",\"request\":\"%s\"},"
+                "{\"path\":\"%s\",\"request\":\"%s\"}],\"id\":\"kpart000\"}", ap_thing, PT_THING, ap_gone, PT_GONE);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Arena\\Pack\\" SH_MB_SLICE_SOURCE, root);
     write_file(path, source, strlen(source));
     sh_modserve_scope_enable(0);
@@ -5019,7 +5033,7 @@ static void test_bank_stems(void)
         v = 0x71; memcpy(bank + 8, &v, 4);
         v = sh_mb_fnv1_lower("bbank000_sfx", 12); memcpy(bank + 12, &v, 4);
         make_bundle(root, "bbank000", "bbank000", digit, NULL, files, 2, NULL);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bbank000\\assets\\sound\\soundbanks\\pc\\bbank000_sfx.bnk", root);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bbank000\\sounds\\sfx.bnk", root);
         write_file(path, (const char *)bank, sizeof bank);
         sh_modserve_scope_enable(0);
         log_clear();

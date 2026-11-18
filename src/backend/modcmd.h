@@ -69,7 +69,7 @@
                               "which of the open map's mods' edits serves a field several of them set " \
                               "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty mod clears), 'sh_mods " \
                               "clip-events' lists the event rows the open map's mods add to their own clips " \
-                              "(mod.json \"clip_events\") and whether each md6Def carrying them is loaded, 'sh_mods attachment-tags' " \
+                              "(mod.json \"animation_events\") and whether each md6Def carrying them is loaded, 'sh_mods attachment-tags' " \
                               "lists the tag info the open map's mods give for their own attachments " \
                               "(mod.json \"attachment_tags\") the same way."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_AUTHOR (each under the console's 1 KiB line). */

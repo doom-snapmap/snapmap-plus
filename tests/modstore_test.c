@@ -127,22 +127,21 @@ static int entry_of(const char *name, char salt[SH_SALT_LEN + 1], char hash[65],
     return found;
 }
 
-/* A new mod by hand: an author part only, one file under mods/<leaf>/. */
+/* A new mod by hand: an author part only, one image. */
 static void make_small_mod(const char *dir, const char *leaf)
 {
     char text[256], rel[MAX_PATH];
     _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"version\":\"1.0.0\",\"author\":\"tester\"}", leaf);
     mt_write(dir, "mod.json", text);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\a.bimage", leaf);
     _snprintf_s(text, sizeof text, _TRUNCATE, "bytes of %s for the store test", leaf);
-    mt_write(dir, rel, text);
+    mt_write(dir, "images\\a.bimage", text);
 }
 
-#define FB_BASE "assets\\generated\\decls\\entitydef\\mods\\%s\\probe_base.decl"
-#define FB_ROW  "assets\\generated\\decls\\entitydef\\mods\\%s\\probe.decl"
+#define FB_BASE "entities\\probe_base.decl"
+#define FB_ROW  "entities\\probe.decl"
 
-/* A new mod named `leaf`: two decls under mods/<leaf>/, one inheriting the
- * other, and a mod.json value naming mods/<leaf>/. (Its strings cannot be
+/* A new mod named `leaf`: two entity decls, one inheriting the other by the
+ * mod's own name (entities/probe_base), and a mod.json value naming mods/<leaf>/. (Its strings cannot be
  * keyed before it has a salt: a key is <salt>_<name>, DECISIONS 5.) */
 static void fb_make(const char *dir, const char *leaf)
 {
@@ -151,11 +150,10 @@ static void fb_make(const char *dir, const char *leaf)
                 "{\r\n  \"name\": \"Cyber probe\",\r\n  \"version\": \"1.0.0\",\r\n"
                 "  \"description\": \"A probe (mods/%s/probe).\"\r\n}\r\n", leaf);
     mt_write(dir, "mod.json", text);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, leaf);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s", FB_BASE);
     mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, leaf);
-    _snprintf_s(text, sizeof text, _TRUNCATE, "{\r\n\tinherit = \"mods/%s/probe_base\";\r\n}", leaf);
-    mt_write(dir, rel, text);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s", FB_ROW);
+    mt_write(dir, rel, "{\r\n\tinherit = \"entities/probe_base\";\r\n}");
 }
 
 /* Every entry of `parent` (files and folders, names only) as one line. */
@@ -207,7 +205,7 @@ static void test_install(const char *fixture, const char *tmp)
     CHECK(st.copied == 13 && !st.in_place && !st.replaced && !st.present && !st.resalted);
     { char *after = slurp(src, "mod.json", NULL); CHECK(same_text(before, after)); free(after); }   /* the source is not written */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp\\assets\\generated\\decls\\md6def\\mods\\alexrimp\\imp_copy.md6.decl", root);
+                "%s\\alex.r2-imp\\meshes\\imp_copy.md6.decl", root);
     CHECK(links_of(path) == 1 && !(GetFileAttributesA(path) & FILE_ATTRIBUTE_READONLY));
     strcpy_s(h1, sizeof h1, b.hash);
     sh_mb_free(&b);
@@ -238,7 +236,7 @@ static void test_install(const char *fixture, const char *tmp)
 
     /* Another build of the salt from elsewhere is the newer copy (R9): it
      * lands beside the first under its own name and gets a new salt. */
-    mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited\r\n");
+    mt_append(src, "entities\\imp_copy.decl", "\r\n// edited\r\n");
     g_logged = 0;
     cause[0] = 0;
     CHECK(HO2(name, cause, sh_ms_install_from_folder(src, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
@@ -250,7 +248,7 @@ static void test_install(const char *fixture, const char *tmp)
     {
         char rel[MAX_PATH];
         char *t;
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "alex.r2-imp (2)\\assets\\generated\\decls\\entitydef\\mods\\%s\\imp_copy.decl", salt);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "alex.r2-imp (2)\\entities\\imp_copy.decl");
         t = slurp(root, rel, NULL);
         CHECK(t && strstr(t, "// edited") && !strstr(t, "mods/alexrimp/"));
         free(t);
@@ -259,16 +257,16 @@ static void test_install(const char *fixture, const char *tmp)
 
     /* Corruption: detected, recorded in mod.json, and that folder stops serving. */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp\\assets\\generated\\basemodel\\md6\\mods\\alexrimp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model", root);
+                "%s\\alex.r2-imp\\meshes\\imp_copy\\assets\\mesh\\imp_copy.bmd6model", root);
     { FILE *f = NULL; if (fopen_s(&f, path, "r+b") == 0 && f) { fputc('X', f); fclose(f); } }
     CHECK(!HO(cause, sh_ms_verify("alex.r2-imp", &vs, HO_P(0))) && strstr(cause, "imp_copy.bmd6model does not match mod.json"));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "alex.r2-imp");
     CHECK(e && e->loaded && e->sizes_ok && !e->validated && !sh_ms_entry_usable(e) && strstr(e->cause, "does not match"));
     sh_ms_list_free(&list);
-    { char *t = slurp(root, "alex.r2-imp\\mod.json", NULL); CHECK(t && strstr(t, "\"cause\": \"assets/")); free(t); }
+    { char *t = slurp(root, "alex.r2-imp\\mod.json", NULL); CHECK(t && strstr(t, "\"cause\": \"meshes/")); free(t); }
     /* A missing file shows at enumeration without hashing. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\assets\\generated\\image\\mods\\alexrimp\\imp_icon.bimage", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\images\\imp_icon.bimage", root);
     DeleteFileA(path);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "alex.r2-imp");
@@ -299,20 +297,17 @@ static void test_fresh_folder_salted(const char *tmp)
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "(mods/%s/probe)", salt);
     CHECK(t && strstr(t, rel) && !strstr(t, "mods/cyberprobe/") && strstr(t, "\"salt\""));
     free(t);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
-    t = slurp(dir, rel, NULL);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "inherit = \"mods/%s/probe_base\"", salt);
-    CHECK(t && strstr(t, rel));
+    /* The author's files stay where and as written: the product names them with the salt when it builds. */
+    t = slurp(dir, FB_ROW, NULL);
+    CHECK(t && strstr(t, "inherit = \"entities/probe_base\""));
     free(t);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, "cyberprobe");
-    CHECK(!mt_has(dir, rel));
+    CHECK(mt_has(dir, FB_BASE));
     /* Unchanged: the next scan builds nothing. */
     CHECK(sh_ms_sync_pending() == 0 && sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.salted == 0);
-    /* An edit under assets\ is a new tree: built again, the same salt. */
+    /* An edit of a file is a new tree: built again, the same salt. */
     {
         char h2[65], s2[SH_SALT_LEN + 1];
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, salt);
-        mt_append(dir, rel, "\r\n// edited\r\n");
+        mt_append(dir, FB_BASE, "\r\n// edited\r\n");
         CHECK(sh_ms_sync_pending() == 1);
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1);
         CHECK(entry_of("cyberprobe", s2, h2, &usable) && usable && !strcmp(s2, salt) && strcmp(h2, hash));
@@ -330,8 +325,7 @@ static void test_fresh_folder_salted(const char *tmp)
     /* A failed build serves nothing and records its cause in the block. */
     {
         char *mj;
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
-        mt_write(dir, rel, "{\r\n\tinherit = \"mods/nobody/missing\";\r\n}");
+        mt_write(dir, FB_ROW, "{\r\n\tinherit = \"mods/nobody/missing\";\r\n}");
         g_logged = 0;
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1 && ss.rebuilt == 0);
         CHECK(entry_of("cyberprobe", NULL, NULL, &usable) && !usable);
@@ -340,24 +334,22 @@ static void test_fresh_folder_salted(const char *tmp)
         free(mj);
         CHECK(sh_ms_sync_pending() == 1);   /* tried again at every scan */
         /* Fixed: it builds again under the same salt. */
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
-        _snprintf_s(hash, sizeof hash, _TRUNCATE, "{\r\n\tinherit = \"mods/%s/probe_base\";\r\n}", salt);
-        mt_write(dir, rel, hash);
+        mt_write(dir, FB_ROW, "{\r\n\tinherit = \"entities/probe_base\";\r\n}");
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
         CHECK(entry_of("cyberprobe", NULL, NULL, &usable) && usable);
     }
 }
 
-/* DECISIONS 6: a new folder's plain strings keys gain the salt's prefix at
- * its first scan, and its #str_ references follow; a copy's keys follow its
- * new salt; after the first scan a key without the prefix is refused. */
+/* DECISIONS 6: a mod's strings keys and the #str_ references in its texts are written without the salt; the
+ * build names each <salt>_<key>, so a new folder's and a copy's keys follow its salt and the files stay as
+ * written. */
 static void test_fresh_folder_strings(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], copy[MAX_PATH], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1], rel[MAX_PATH];
     char want[256], *t;
     sh_ms_sync_stats ss;
     int usable = 0;
-    printf("-- salt: a new folder's strings keys gain <salt>_ and its #str_ references follow; a copy's follow its salt\n");
+    printf("-- salt: a new folder's strings keys are served as <salt>_<key> and its #str_ references follow; a copy's follow its salt\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\strings\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\talker", root);
@@ -367,30 +359,32 @@ static void test_fresh_folder_strings(const char *tmp)
              "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\",\r\n"
              "      \"snapentity_demon_baron\": \"Big Baron\",\r\n      \"sh_bv_navigation_desc\": \"Mine\"\r\n"
              "    }\r\n  }\r\n}\r\n");
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "talker");
-    mt_write(dir, rel, "{\r\n\tinherit = \"mods/talker/probe_base\";\r\n\tdisplayName = \"#str_probe_name\";\r\n"
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s", FB_ROW);
+    mt_write(dir, rel, "{\r\n\tinherit = \"entities/probe_base\";\r\n\tdisplayName = \"#str_probe_name\";\r\n"
                        "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n"
                        "\tbaron = \"#str_snapentity_demon_baron\";\r\n}");
     g_logged = 0;
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 0);
     if (ss.failed || !ss.salted) log_dump("strings");
-    CHECK(log_has("2 strings key(s) named "));
     CHECK(entry_of("talker", salt, NULL, &usable) && usable && sh_salt_valid(salt, strlen(salt)));
+    /* The author's keys stay as written on disk; the build serves them with the salt, once. */
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_probe_name\": \"Probe\"", salt);
-    CHECK(t && strstr(t, want));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "Says #str_%s_probe_name.", salt);
-    CHECK(t && strstr(t, want) && !strstr(t, "\"probe_desc\""));
+    CHECK(t && strstr(t, "\"probe_name\": \"Probe\"") && strstr(t, "Says #str_probe_name.") && strstr(t, "\"probe_desc\""));
+    {
+        sh_ms_list l;
+        const sh_ms_entry *e;
+        CHECK(sh_ms_enumerate(&l));
+        e = find_entry(&l, "talker");
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"strings\":[\"%s_probe_desc\",\"%s_probe_name\"]", salt, salt);
+        CHECK(e && e->bundle.registries && strstr(e->bundle.registries, want));
+        sh_ms_list_free(&l);
+    }
     /* DECISIONS 9: a key the game (snapentity_demon_baron) or Snapmap+
      * (sh_bv_navigation_desc) defines is a string edit and keeps its name. */
     CHECK(t && strstr(t, "\"snapentity_demon_baron\": \"Big Baron\"") && strstr(t, "\"sh_bv_navigation_desc\": \"Mine\""));
     free(t);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
-    t = slurp(dir, rel, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "displayName = \"#str_%s_probe_name\"", salt);
-    CHECK(t && strstr(t, want));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "description = \"#str_%s_probe_desc\"", salt);
-    CHECK(t && strstr(t, want));
+    t = slurp(dir, FB_ROW, NULL);
+    CHECK(t && strstr(t, "displayName = \"#str_probe_name\"") && strstr(t, "description = \"#str_probe_desc\""));
     CHECK(t && strstr(t, "other = \"#str_probe_names\""));   /* not one of its keys: a name boundary */
     CHECK(t && strstr(t, "baron = \"#str_snapentity_demon_baron\""));   /* a string edit's reference stays */
     free(t);
@@ -400,18 +394,21 @@ static void test_fresh_folder_strings(const char *tmp)
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1 && ss.failed == 0);
     CHECK(entry_of("talker - Copy", s2, NULL, &usable) && usable && strcmp(s2, salt));
     t = slurp(copy, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_probe_name\"", s2);
-    CHECK(t && strstr(t, want));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "%s_", salt);
-    CHECK(t && !strstr(t, want));
+    CHECK(t && strstr(t, "\"probe_name\": \"Probe\"") && !strstr(t, salt));
     free(t);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, s2);
-    t = slurp(copy, rel, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "#str_%s_probe_desc", s2);
-    CHECK(t && strstr(t, want));
+    t = slurp(copy, FB_ROW, NULL);
+    CHECK(t && strstr(t, "#str_probe_desc"));
     free(t);
-    /* A key added without the prefix after the first scan gains it at the
-     * next scan, and the folder builds (DECISIONS 20). */
+    {
+        sh_ms_list l;
+        const sh_ms_entry *e;
+        CHECK(sh_ms_enumerate(&l));
+        e = find_entry(&l, "talker - Copy");
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_probe_name\"", s2);
+        CHECK(e && e->bundle.registries && strstr(e->bundle.registries, want));
+        sh_ms_list_free(&l);
+    }
+    /* A key added later builds as <salt>_<key> at the next scan; the file keeps it as written (DECISIONS 20). */
     t = slurp(dir, "mod.json", NULL);
     if (t) {
         char *at = strstr(t, "\"en\": {");
@@ -428,8 +425,7 @@ static void test_fresh_folder_strings(const char *tmp)
     }
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_late_key\": \"Late\"", salt);
-    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
+    CHECK(t && strstr(t, "\"late_key\": \"Late\"") && strstr(t, "\"build\""));
     free(t);
 }
 
@@ -451,19 +447,22 @@ static void test_fresh_folder_refusals(const char *tmp)
         char path[MAX_PATH * 2];
         FILE *f = NULL;
         static const char bytes[] = "MD6\0\0\0material mods/binprobe/skin\0";
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\basemodel\\md6\\mods\\binprobe\\m.bmd6model", bin);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\meshes\\m.bmd6model", bin);
         mt_mkdirs_for(path);
         if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
     }
     _snprintf_s(foreign, sizeof foreign, _TRUNCATE, "%s\\foreignprobe", root);
     fb_make(foreign, "someoneelse");
     mt_write(foreign, "mod.json", "{\"name\":\"Foreign\"}");
+    /* another mod's name cannot be spelled in a mod folder: game/ refuses mods/ */
+    mt_write(foreign, "game\\generated\\decls\\entitydef\\mods\\someoneelse\\x.decl", "{\r\n}");
     _snprintf_s(good, sizeof good, _TRUNCATE, "%s\\goodprobe", root);
     fb_make(good, "goodprobe");
     dir_names(bin, before, sizeof before);
     mj0 = slurp(bin, "mod.json", NULL);
     g_logged = 0;
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 2);
+    /* the foreign folder is salted (nothing in the salting reads a file) and then refused by its build */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 2 && ss.rebuilt == 1 && ss.failed == 2);
     dir_names(bin, after, sizeof after);
     mj1 = slurp(bin, "mod.json", NULL);
     CHECK(!strcmp(before, after) && same_text(mj0, mj1));   /* byte for byte */
@@ -476,8 +475,8 @@ static void test_fresh_folder_refusals(const char *tmp)
           strstr(e->cause, "New mod"));
     if (e) printf("   %s\n", e->cause);
     e = find_entry(&list, "foreignprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") &&
-          strstr(e->cause, "not this folder's name"));
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "game/ holds the game's own files at the game's own paths") &&
+          strstr(e->cause, "mods/someoneelse/"));
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
     /* Called directly: refused with the cause; an already salted folder answers 0. */
@@ -490,7 +489,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         HANDLE h;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\heldprobe", root);
         fb_make(path, "heldprobe");
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\heldprobe\\probe_base.decl", path);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\entities\\probe_base.decl", path);
         h = CreateFileA(rel, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
         dir_names(path, before, sizeof before);
@@ -510,7 +509,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         HANDLE h;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\lockedprobe", root);
         fb_make(path, "lockedprobe");
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\lockedprobe\\probe.decl", path);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\entities\\probe.decl", path);
         h = CreateFileA(rel, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
         CHECK(HO(cause, sh_ms_assign_salt(path, "lockedprobe", salt, HO_P(0))) == -1 && strstr(cause, "could not be read"));
@@ -535,9 +534,8 @@ static void conv_make(const char *dir, const char *salt)
     _snprintf_s(text, sizeof text, _TRUNCATE,
                 "{\r\n  \"name\": \"Converted demon\",\r\n  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\"}\r\n}\r\n", salt);
     mt_write(dir, "mod.json", text);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, salt);
-    mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\basemodel\\md6\\mods\\%s\\m.bmd6model", dir, salt);
+    mt_write(dir, FB_BASE, "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\meshes\\m.bmd6model", dir);
     mt_mkdirs_for(path);
     if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
 }
@@ -611,10 +609,8 @@ static void test_copy_gets_new_salt(const char *tmp)
     free(mj1);
     CHECK(entry_of("guards", sb, hb, &usable) && usable && !strcmp(sb, sa) && !strcmp(hb, ha));
     CHECK(entry_of("guards - Copy", sb, hb, &usable) && usable && strcmp(sb, sa) && strcmp(hb, ha));
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, sb);
-    t = slurp(b, rel, NULL);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/probe_base", sb);
-    CHECK(t && strstr(t, rel));
+    t = slurp(b, FB_ROW, NULL);   /* the copy's files name their neighbours by the mod's own names, so they follow its salt */
+    CHECK(t && strstr(t, "inherit = \"entities/probe_base\""));
     free(t);
     /* A copy whose name sorts first, with the same "built": the folder the
      * record names keeps the salt (DECISIONS 15). */
@@ -671,7 +667,7 @@ static void test_earlier_shapes(const char *tmp)
     for (i = 0; cases[i].leaf; i++, n++) {
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, cases[i].leaf);
         mt_write(dir, cases[i].file, cases[i].text);
-        mt_write(dir, "assets\\generated\\image\\mods\\x\\a.bimage", "bytes");
+        mt_write(dir, "images\\a.bimage", "bytes");
         before[i] = slurp(dir, cases[i].file, NULL);
     }
     CHECK(sh_ms_sync_pending() == 0);   /* nothing the scan can change */
@@ -734,7 +730,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
     CHECK(sh_ms_place_note(&arena, "maps/Hell Arena Part 1/R2 Imp copy") && HO(dir, sh_ms_place_of("1234567", HO_P(0), NULL)) &&
           !strcmp(dir, "maps\\Hell Arena Part 1"));
     /* Another build of the same salt for the same map replaces the place's folder. */
-    mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// republished\r\n");
+    mt_append(src, "entities\\imp_copy.decl", "\r\n// republished\r\n");
     CHECK(HO2(name, cause, sh_ms_install_placed(src, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     CHECK(!strcmp(name, "maps\\Hell Arena Part 1\\R2 Imp copy") && st.replaced);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1", root);
@@ -743,17 +739,11 @@ static void test_place_folders(const char *fixture, const char *tmp)
         dir_names(path, names, sizeof names);
         CHECK(!strcmp(names, "R2 Imp copy;"));
     }
-    /* A build whose files are under another salt is refused; nothing placed. */
+    /* A build with a file at another mod's name (a game/ path under mods/) is refused; nothing placed. */
     CHECK(mt_copy_tree(fixture, src2));
-    t = slurp(src2, "mod.json", NULL);
-    {
-        char *s = t ? strstr(t, "alexrimp") : NULL;
-        if (s) memcpy(s, "otherimp", 8);
-        if (t) mt_write(src2, "mod.json", t);
-    }
-    free(t);
+    mt_write(src2, "game\\generated\\decls\\entitydef\\mods\\otherimp\\x.decl", "{\r\n}");
     CHECK(!HO2(name, cause, sh_ms_install_placed(src2, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "is under mods/alexrimp/, which is neither this mod folder"));
+          strstr(cause, "game/ holds the game's own files"));
     /* The same title for another map: a place of its own. */
     CHECK(HOS(dir, sh_ms_place_dir(&other)) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
     CHECK(HO2(name, cause, sh_ms_install_placed(src, &other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
@@ -764,7 +754,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
     fb_make(path, "dropped");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\R2 Imp copy", root);
-    mt_append(path, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited by hand\r\n");
+    mt_append(path, "entities\\imp_copy.decl", "\r\n// edited by hand\r\n");
     CHECK(sh_ms_sync_pending() == 0);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.salted == 0 && ss.folders == 0);
     CHECK(sh_ms_enumerate(&list));
@@ -809,22 +799,20 @@ static void test_new_mod(const char *tmp)
     sh_ms_sync_stats ss;
     size_t fl;
     int usable;
-    printf("-- new mod: a folder named after it, its salt in the block, an example under mods/<salt>/\n");
+    printf("-- new mod: a folder named after it, its salt in the block, an example in the mod's folders\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\newmod\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     CHECK(HO3(folder, example, cause, sh_ms_new_mod_example("Hell Guards", salt, HO_P(0), HO_P(1), HO_P(2))));
     if (cause[0]) fprintf(stderr, "  new mod: %s\n", cause);
     fl = strlen(folder);
     CHECK(sh_salt_valid(salt, strlen(salt)) && fl > 11 && !strcmp(folder + fl - 12, "\\Hell Guards"));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", salt);
-    CHECK(!strcmp(example, want));
+    CHECK(!strcmp(example, "decls/snapeditorentitydef/example_crate.decl"));
     t = slurp(folder, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_category\": \"Hell Guards\"", salt);
-    CHECK(t && strstr(t, want) && strstr(t, "\"format\": 2") && strstr(t, salt));
+    CHECK(t && strstr(t, "\"category\": \"Hell Guards\"") && strstr(t, "\"example_crate_name\"") && strstr(t, "\"format\": 2") &&
+          strstr(t, salt));
     free(t);
     t = slurp(folder, example, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "categoryNameTag = \"#str_%s_category\"", salt);
-    CHECK(t && strstr(t, want));
+    CHECK(t && strstr(t, "categoryNameTag = \"#str_category\"") && strstr(t, "entityDef = \"entities/example_crate\""));
     free(t);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);
     CHECK(HO2(folder, cause, sh_ms_new_mod("Hell Guards", s2, HO_P(0), HO_P(1))) && strstr(folder, "Hell Guards (2)") && strcmp(s2, salt));
@@ -1027,7 +1015,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     CHECK(mt_copy_tree(fixture, a));
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\campaign\\alexboot", root);
     mt_write(c, "mod.json", "{\"version\":\"0.1.0\",\"name\":\"Boot\"}");
-    mt_write(c, "assets\\generated\\decls\\entitydef\\mods\\alexboot\\thing.decl", "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n}");
+    mt_write(c, "entities\\thing.decl", "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n}");
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "alex.r2-imp");
     CHECK(e && !e->loaded && strstr(e->cause, "not built"));
@@ -1045,10 +1033,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     CHECK(sh_ms_sync_pending() == 0 && sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 1);
     /* An edit made while the game was closed: built in the background, then indexed. */
     {
-        char salt[SH_SALT_LEN + 1], rel[MAX_PATH];
-        entry_of("campaign\\alexboot", salt, NULL, NULL);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\thing.decl", salt);
-        mt_write(c, rel, "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\t// edited\r\n}");
+        mt_write(c, "entities\\thing.decl", "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\t// edited\r\n}");
     }
     CHECK(sh_ms_sync_pending() == 1);
     CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 1) == 1);
@@ -1073,17 +1058,15 @@ static void boot_between(unsigned built)
 
 static void test_boot_release(const char *tmp)
 {
-    char a[MAX_PATH * 2], c[MAX_PATH * 2], salt[SH_SALT_LEN + 1], rel[MAX_PATH];
+    char a[MAX_PATH * 2], c[MAX_PATH * 2];
     unsigned waits;
     LONG rescans, at_lock;
     int i, built_at_lock;
     printf("-- boot: the scan waits for the startup install, then yields the store between folders\n");
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\boot\\mods\\alex.r2-imp", tmp);
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\boot\\mods\\campaign\\alexboot", tmp);
-    mt_append(a, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited at boot\r\n");
-    entry_of("campaign\\alexboot", salt, NULL, NULL);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\thing.decl", salt);
-    mt_write(c, rel, "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\t// edited twice\r\n}");
+    mt_append(a, "entities\\imp_copy.decl", "\r\n// edited at boot\r\n");
+    mt_write(c, "entities\\thing.decl", "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\t// edited twice\r\n}");
     CHECK(sh_ms_sync_pending() == 2);
     sh_ms_test_boot_rearm();
     rescans = InterlockedCompareExchange(&g_boot_rescans, 0, 0);
@@ -1262,27 +1245,16 @@ static void write_bank(const char *folder, const char *rel, unsigned long id)
     if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
 }
 
-static unsigned long bank_id(const char *folder, const char *rel)
-{
-    size_t len = 0;
-    char *t = slurp(folder, rel, &len);
-    unsigned long id = 0;
-    if (t && len >= 16) memcpy(&id, t + 12, 4);
-    free(t);
-    return id;
-}
-
-/* DECISIONS 20 and 16: what an author writes under the folder's name moves
- * under the salt at every scan, not only the first; a rename between scans
- * changes nothing already moved; a bank named for the folder takes the
- * salt's name and id; a README beside mod.json is ignored. */
+/* DECISIONS 20 and 16: what an author adds to a folder is built under the folder's salt at every scan, not
+ * only the first, and stays where the author put it; a rename between scans changes nothing; a bank in sounds/
+ * is served as <salt>_<name>; a README beside mod.json is ignored. */
 static void test_rehome(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH * 2], renamed[MAX_PATH * 2], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1];
     char rel[MAX_PATH], want[200], *t;
     sh_ms_sync_stats ss;
     int usable;
-    printf("-- scan: new content under the folder's name moves under the salt at every scan\n");
+    printf("-- scan: new content added to a built folder builds under its salt at every scan\n");
     sh_mb_set_script_check(script_ok);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\rehome\\mods", tmp);
     CHECK(sh_ms_set_root(root));
@@ -1294,10 +1266,10 @@ static void test_rehome(const char *tmp)
     t = slurp(dir, "README.txt", NULL);
     CHECK(t && !strcmp(t, "notes about mods/imp/ that stay as written"));
     free(t);
-    /* A second file, a second string and a script, all under the folder's name. */
-    mt_write(dir, "assets\\generated\\image\\mods\\imp\\b.bimage", "second image of imp");
-    mt_write(dir, "assets\\mods\\imp\\scripts\\door.lua",
-             "api = 1\r\nlocal image = \"mods/imp/b\"\r\nlocal title = \"#str_imp_title\"\r\n");
+    /* A second file, a second string and a script. */
+    mt_write(dir, "images\\b.bimage", "second image of imp");
+    mt_write(dir, "scripts\\door.lua",
+             "api = 1\r\nlocal image = \"images/b\"\r\nlocal title = \"#str_imp_title\"\r\n");
     t = slurp(dir, "mod.json", NULL);
     if (t) {
         size_t n = strlen(t) + 128;
@@ -1310,63 +1282,38 @@ static void test_rehome(const char *tmp)
         free(t);
     }
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.rebuilt == 1);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
-    CHECK(mt_has(dir, rel) && !mt_has(dir, "assets\\generated\\image\\mods\\imp\\b.bimage"));
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", salt);
-    t = slurp(dir, rel, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"mods/%s/b\"", salt);
-    CHECK(t && strstr(t, want));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"#str_%s_imp_title\"", salt);
-    CHECK(t && strstr(t, want));
+    CHECK(mt_has(dir, "images\\b.bimage"));
+    t = slurp(dir, "scripts\\door.lua", NULL);   /* the author's script stays as written: it names no salt */
+    CHECK(t && strstr(t, "\"images/b\"") && strstr(t, "\"#str_imp_title\""));
     free(t);
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_imp_title\": \"Imp\"", salt);
-    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
+    CHECK(t && strstr(t, "\"imp_title\": \"Imp\"") && strstr(t, "\"build\""));   /* the author's key stays; the build names it <salt>_imp_title */
     free(t);
     CHECK(entry_of("imp", s2, NULL, &usable) && usable && !strcmp(s2, salt));
-    /* Renamed: what was moved stays; new content under the new name moves,
-     * and a bank named for the folder takes the salt's name and id. */
+    /* Renamed: same salt; new content under the new name builds, and a bank in sounds/ carries the id of its
+     * served name, <salt>_music. */
     _snprintf_s(renamed, sizeof renamed, _TRUNCATE, "%s\\beast", root);
     CHECK(MoveFileA(dir, renamed));
-    mt_write(renamed, "assets\\generated\\image\\mods\\beast\\c.bimage", "third image");
-    write_bank(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk", 12345);
-    mt_write(renamed, "assets\\generated\\decls\\sound\\mods\\beast\\m.decl",
-             "{\n\tbank = \"beast_music\";\n\tother = \"beast_musical\";\n}\n");
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 0);
-    if (ss.failed) log_dump("rehome");
-    /* The decl naming the bank follows its new name; a longer word does not. */
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\sound\\mods\\%s\\m.decl", salt);
-    t = slurp(renamed, rel, NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s_music\";", salt);
-    CHECK(t && strstr(t, want) && strstr(t, "\"beast_musical\"") && !strstr(t, "\"beast_music\""));
-    free(t);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\c.bimage", salt);
-    CHECK(mt_has(renamed, rel));
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
-    CHECK(mt_has(renamed, rel));
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\sound\\soundbanks\\pc\\%s_music.bnk", salt);
-    CHECK(mt_has(renamed, rel) && !mt_has(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk"));
+    mt_write(renamed, "images\\c.bimage", "third image");
     {
         char stem[32];
         _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s_music", salt);
-        CHECK(bank_id(renamed, rel) == (unsigned long)sh_mb_fnv1_lower(stem, strlen(stem)));
+        write_bank(renamed, "sounds\\music.bnk", (unsigned long)sh_mb_fnv1_lower(stem, strlen(stem)));
     }
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 0);
+    if (ss.failed) log_dump("rehome");
+    CHECK(mt_has(renamed, "images\\c.bimage") && mt_has(renamed, "images\\b.bimage") && mt_has(renamed, "sounds\\music.bnk"));
     CHECK(entry_of("beast", s2, NULL, &usable) && usable && !strcmp(s2, salt));
     /* A current folder is not moved again: nothing to do, nothing written. */
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
-    /* A new folder named like another mod's salt: that name is the other
-     * mod's, so nothing is moved for it and it says so. */
+    /* A new folder named like another mod's salt: the folder's name is never read, so it is an ordinary new
+     * mod with a salt of its own. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, salt);
     make_small_mod(dir, salt);
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 1);
     {
-        sh_ms_list list;
-        const sh_ms_entry *e;
-        CHECK(sh_ms_enumerate(&list));
-        e = find_entry(&list, salt);
-        CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "is another mod's salt") && strstr(e->cause, "rename this folder"));
-        if (e) printf("   %s\n", e->cause);
-        sh_ms_list_free(&list);
+        char other[SH_SALT_LEN + 1];
+        CHECK(entry_of(salt, other, NULL, &usable) && usable && other[0] && strcmp(other, salt));
     }
     sh_mb_set_script_check(NULL);
 }
@@ -1422,7 +1369,7 @@ static void test_install_to_root(const char *tmp)
     CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && st.present &&
           !strcmp(name, "crate"));
     /* The player's own folder changed: it stays theirs. */
-    mt_write(dir, "assets\\generated\\image\\mods\\crate\\b.bimage", "the player's own second image");
+    mt_write(dir, "images\\b.bimage", "the player's own second image");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     CHECK(!HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "your mods already hold") && strstr(cause, "mods\\crate"));
@@ -1447,7 +1394,7 @@ static void test_part_never_at_root(const char *tmp)
     CHECK(sh_ms_set_root(root));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\part", root);
     mt_write(dir, "mod.json", PART);
-    mt_write(dir, "assets\\generated\\image\\mods\\part\\a.bimage", "bytes of the part");
+    mt_write(dir, "images\\a.bimage", "bytes of the part");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
     CHECK(entry_of("part", NULL, NULL, &usable) && !usable);
     CHECK(sh_ms_enumerate(&l));
@@ -1457,7 +1404,7 @@ static void test_part_never_at_root(const char *tmp)
     /* Built where a download puts it and offered to the root: refused, nothing copied. */
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\partsrc", tmp);
     mt_write(src, "mod.json", PART);
-    mt_write(src, "assets\\generated\\image\\mods\\pkcut001\\a.bimage", "bytes of the part");
+    mt_write(src, "images\\a.bimage", "bytes of the part");
     memset(&b, 0, sizeof b);
     CHECK(sh_mb_build(src, "pkcut001", &RESOLVER, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
     CHECK(!strcmp(b.slice_of, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));

@@ -653,7 +653,7 @@ test('an author never needs the salt: no Copy mod id, and the folder rule said w
   assert.equal(h.nodes.modsDetail.all('mods-copy-id').length, 0);
   assert.ok(!/Copy mod id|mod id/i.test(source), 'no Copy mod id and no "mod id" anywhere in the page code');
   assert.equal(modsTab.folderRuleText('Crate Pack'),
-               'Put new files under assets\\mods\\Crate Pack\\, and in your files write mods/Crate Pack/ and plain string names.');
+      'Put each new file in the folder for what it is (materials, images, meshes, animations, effects, entities, sounds, scripts), and in your files name it by that folder and its path, as in materials/crate.');
   h.ui.select('');
   assert.ok(h.nodes.modsDetail.textContent.indexOf(modsTab.folderRuleText('')) >= 0, 'How mods work says it too');
 });
@@ -1065,7 +1065,7 @@ test('details: the Scripts section and the script log, its Copy and its note', (
   /* Files: the Files view opens on the mod's scripts folder */
   sc.tags('button')[0].click();
   assert.equal(h.ui.state().files.open, true);
-  assert.equal(h.ui.state().files.want, 'assets/mods/doorsx8q/scripts/');
+  assert.equal(h.ui.state().files.want, 'scripts/');
   /* a mod without scripts has neither section */
   h.ui.closeFiles();
   h.ui.select('alex.r2-imp');
@@ -1112,7 +1112,7 @@ test('a sound bank the game loaded before a change: Restart DOOM to hear the new
   assert.ok(h.nodes.modsDetail.textContent.indexOf('Restart DOOM to hear the new doors_sfx.bnk.') >= 0);
 });
 test('the Files view: a script is named as one, its text read with Lua colours', () => {
-  const f = modsTab.normFiles({files: [{path: 'assets/mods/doorsx8q/scripts/door.lua', kind: 'text', 'class': 'add', size: 9},
+  const f = modsTab.normFiles({files: [{path: 'scripts/door.lua', kind: 'text', 'class': 'add', size: 9},
                                        {path: 'assets/generated/decls/entitydef/mods/doorsx8q/x.decl', kind: 'text', 'class': 'add', size: 9}]});
   assert.equal(f.files[1].cls, 'script');
   assert.equal(modsTab.fileMeta(f.files[1])[0], modsTab.FILE_CLASSES.script);
@@ -1127,13 +1127,13 @@ test('the Files view: a script is named as one, its text read with Lua colours',
   /* the view uses them for a .lua, the decl tokens for everything else */
   let declAsked = 0;
   const folders = {};
-  folders[DOORS] = {files: [{path: 'assets/mods/doorsx8q/scripts/door.lua', size: 20, kind: 'text', 'class': 'add', game: false,
+  folders[DOORS] = {files: [{path: 'scripts/door.lua', size: 20, kind: 'text', 'class': 'add', game: false,
                              container: '', inFolder: true, cause: ''}],
-                    texts: {'assets/mods/doorsx8q/scripts/door.lua': 'api = 1\n-- a comment\n'}};
+                    texts: {'scripts/door.lua': 'api = 1\n-- a comment\n'}};
   const h = harness({store: standIn(v4, folders), tokens: t => { declAsked++; return []; }});
   h.ui.show();
-  h.ui.openFiles(DOORS, 'assets/mods/doorsx8q/scripts/');
-  assert.equal(h.ui.state().files.selected, 'assets/mods/doorsx8q/scripts/door.lua');
+  h.ui.openFiles(DOORS, 'scripts/');
+  assert.equal(h.ui.state().files.selected, 'scripts/door.lua');
   assert.equal(declAsked, 0, 'a script is not read as a decl');
   const code = h.nodes.modsFilesHost.all('tk-cmt');
   assert.equal(code.length, 1);
