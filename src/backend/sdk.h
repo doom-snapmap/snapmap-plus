@@ -1,8 +1,8 @@
 /* sdk.h -- the Graphics SDK's compilers, one entry point (docs/graphics-sdk.md).
  *
  * A mod's decl is read through the SDK when its first key says what it is: a material with `look` (modlook.h), an fx
- * decl with `type effect` (modeffect.h), an env decl with `type environment` (modenv.h). Any material may also write
- * values that change over time (sdkvalues.h). The build checks each file with sh_sdk_compile (a mistake fails the
+ * decl with `type effect` (modeffect.h), an env decl with `type environment` (modenv.h), a gorewounds decl with
+ * `type wound` (modwound.h). Any material may also write values that change over time (sdkvalues.h). The build checks each file with sh_sdk_compile (a mistake fails the
  * build with its sentence; the needs it returns join the file's own) and the server serves what it compiles
  * (sh_sdk_serve_compile), so both read the same text.
  *
@@ -25,7 +25,7 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
 int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                          size_t why_len);
 
-/* The decl type an SDK path names: "material", "fx", "env", or NULL for any other. */
+/* The decl type an SDK path names: "material", "fx", "env", "gorewounds", or NULL for any other. */
 const char *sh_sdk_decl_type(const char *path);
 
 /* The decl name a path names (after generated/decls/<type>/, without .decl), malloc'd, or NULL. */

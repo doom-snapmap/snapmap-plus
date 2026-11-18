@@ -7,6 +7,7 @@
 #include "modeffect.h"
 #include "modenv.h"
 #include "modlook.h"
+#include "modwound.h"
 #include "sdkvalues.h"
 
 /* The offset of the type folder after "generated/decls/" in `path`, or -1. */
@@ -28,6 +29,7 @@ const char *sh_sdk_decl_type(const char *path)
     if (!_strnicmp(t, "material/", 9) || !_strnicmp(t, "material2/", 10)) return "material";
     if (!_strnicmp(t, "fx/", 3)) return "fx";
     if (!_strnicmp(t, "env/", 4)) return "env";
+    if (!_strnicmp(t, "gorewounds/", 11)) return "gorewounds";
     return NULL;
 }
 
@@ -78,6 +80,7 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
     if (!type) return SH_LOOK_SAME;
     if (!strcmp(type, "fx")) return sh_effect_compile(path, text, len, out, out_len, why, why_len, notes, needs);
     if (!strcmp(type, "env")) return sh_env_compile(path, text, len, out, out_len, why, why_len, needs, notes);
+    if (!strcmp(type, "gorewounds")) return sh_wound_compile(path, text, len, out, out_len, why, why_len);
     {
         /* a material: its values that change over time, then its look */
         char *v = NULL, *l = NULL, *ln = NULL;

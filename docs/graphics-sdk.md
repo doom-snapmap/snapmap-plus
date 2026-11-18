@@ -310,9 +310,33 @@ blends back to the level's own. An effect's `environment` item does the same for
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
 says so); the env decl itself, used for an area, draws it changing.
 
+## Wounds
+
+A wound is a gorewounds decl of the mod (`generated/decls/gorewounds/mods/<salt>/<name>.decl`) whose first key is
+`type wound`: one place a demon can be wounded. It is written over DOOM 2016's own default wound and bleeds with
+2016's blood (its spray effect, splatter decal and pool, at the game's most used values).
+
+```
+{
+	type		wound
+	kind		big			// small, big, headshot or limb
+	parts		{ chest, left_upper_arm }	// the damage groups that open it
+	opens		200			// the damage it takes in all
+	inonehit	50			// and in one frame
+	shows		wound_chest		// the mesh kit that appears
+	cuts		{ { 0, 4, 60, 12 } }	// spheres cut from the body: { x, y, z, radius }
+	blood		both			// spray, pool, both or none
+	at		gorefx_chest		// the joint the blood (and what it throws) comes from
+	throws		mods/abcdefgh/gibs/chest_chunk
+	whilealive	yes			// opens while the demon lives
+}
+```
+
+The demon's gore graph names its wounds, as for any wound.
+
 ## Mistakes
 
-The build reads every look, effect and environment and stops on a mistake with one sentence, for example:
+The build reads every look, effect, environment and wound and stops on a mistake with one sentence, for example:
 
 - `blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'.`
 - `blast.decl line 3: 'lihgt' is not an item of an effect; the nearest is 'light'.`

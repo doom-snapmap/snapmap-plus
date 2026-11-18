@@ -5233,7 +5233,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 sh_mb_sdk_fn sdk_fn = (sh_mb_sdk_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_sdk, NULL, NULL);
                 int refused = 0, is_mat = !strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2");
                 char *sdk_needs = NULL;
-                if (sdk_fn && (is_mat || !strcmp(f->ptype, "fx") || !strcmp(f->ptype, "env"))) {
+                if (sdk_fn && (is_mat || !strcmp(f->ptype, "fx") || !strcmp(f->ptype, "env") || !strcmp(f->ptype, "gorewounds"))) {
                     /* the SDK's compilers: a look, an effect, an environment, values that change; the request path
                      * names the decl's type and name (an effect's emitter is named after it) */
                     char why[400];

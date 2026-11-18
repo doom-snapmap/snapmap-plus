@@ -481,6 +481,33 @@ static void test_material_values(void)
     sdk_set_register(NULL);
 }
 
+static void test_wound(void)
+{
+    const char *t = "{\n\ttype\twound\n\tkind\tbig\n\tparts\t{ chest, left_upper_arm }\n\topens\t200\n\tinonehit\t50\n"
+                    "\tshows\twound_chest\n\tcuts\t{ { 0, 4, 60, 12 }, { 2, 0, 70, 8 } }\n\tblood\tboth\n\tat\tgorefx_chest\n"
+                    "\tthrows\tmods/abcdefgh/gibs/chest_chunk\n\twhilealive\tyes\n}\n";
+    res x = compile("generated/decls/gorewounds/mods/abcdefgh/chest.decl", t);
+    CHECK(x.r == SH_LOOK_CHANGED);
+    CHECK(x.out && !strncmp(x.out, "{\n\tinherit = \"wounds/default\";", 30));
+    CHECK(!strcmp(kv(x.out, "woundType", 0), "GORETYPE_BIG_WOUND"));
+    CHECK(!strcmp(kv(x.out, "woundFlags", 0), "WOUND_FLAGS_ALLOW_WHEN_ALIVE"));
+    CHECK(!strcmp(kv(x.out, "item[0]", 0), "wound_chest"));
+    CHECK(has(x.out, "clippingSpheres = {\n\t\t\t\tnum = 2;"));
+    CHECK(!strcmp(kv(x.out, "sprayFX", 0), "FX_GORE_SPRAY_1"));
+    CHECK(has(x.out, "decalMat = \"textures/decals/blood_splatter/blood_splatter_small_01\";"));
+    CHECK(has(x.out, "decalMat = \"textures/decals/blood_splatter/blood_pool_01\";"));
+    CHECK(!strcmp(kv(x.out, "entityDef", 0), "mods/abcdefgh/gibs/chest_chunk"));
+    CHECK(has(x.out, "damageGroups = {\n\t\t\t\tnum = 2;\n\t\t\t\titem[0] = \"chest\";\n\t\t\t\titem[1] = \"left_upper_arm\";"));
+    CHECK(!strcmp(kv(x.out, "totalDamageRequiredToGore", 0), "200") && !strcmp(kv(x.out, "frameDamageRequiredToGore", 0), "50"));
+    release(&x);
+    x = compile("generated/decls/gorewounds/mods/abcdefgh/chest.decl", "{\n\ttype\twound\n\tparts\tchest\n\tblod\tspray\n}\n");
+    CHECK(x.r == SH_LOOK_MISTAKE && !strcmp(x.why, "chest.decl line 4: 'blod' is not a field of a wound; the nearest is 'blood'."));
+    release(&x);
+    x = compile("generated/decls/gorewounds/mods/abcdefgh/chest.decl", "{\n\ttype\twound\n\tparts\tchest\n}\n");
+    CHECK(x.r == SH_LOOK_MISTAKE && has(x.why, "needs the joint its blood comes from"));
+    release(&x);
+}
+
 static void test_emitter_served(void)
 {
     unsigned char *b = NULL;
@@ -522,6 +549,7 @@ int main(void)
     test_not_sdk();
     test_environment();
     test_material_values();
+    test_wound();
     test_emitter_served();
     printf("sdk_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

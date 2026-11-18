@@ -13,7 +13,12 @@
 
 #define SDK_WORDS(X)                                                                                               \
     /* the first key of every SDK file, and its kinds */                                                           \
-    X(TYPE, "type") X(KIND_EFFECT, "effect") X(KIND_ENVIRONMENT, "environment")                                    \
+    X(TYPE, "type") X(KIND_EFFECT, "effect") X(KIND_ENVIRONMENT, "environment") X(KIND_WOUND, "wound")            \
+    /* a wound */                                                                                                  \
+    X(W_KIND, "kind") X(W_PARTS, "parts") X(W_OPENS, "opens") X(W_INONEHIT, "inonehit") X(W_SHOWS, "shows")         \
+    X(W_CUTS, "cuts") X(W_BLOOD, "blood") X(W_THROWS, "throws") X(W_WHILEALIVE, "whilealive") X(W_RAGDOLL, "ragdoll") \
+    X(V_SMALL, "small") X(V_BIG, "big") X(V_HEADSHOT, "headshot") X(V_LIMB, "limb") X(V_SPRAY, "spray")             \
+    X(V_POOL, "pool") X(V_BOTH, "both")                                                                            \
     /* an effect's items */                                                                                        \
     X(IT_LIGHT, "light") X(IT_DECAL, "decal") X(IT_SHAKE, "shake") X(IT_FLASH, "flash") X(IT_SCREEN, "screen")     \
     X(IT_BLUR, "blur") X(IT_FOCUS, "focus") X(IT_FLARE, "flare") X(IT_TRAIL, "trail") X(IT_MODEL, "model")         \
