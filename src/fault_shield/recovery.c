@@ -346,6 +346,7 @@ static int64_t frame_detour(void *self)
     InterlockedIncrement(&g_frame_seq);
     if (!InterlockedCompareExchange(&g_armed, 0, 0)) sh_apply_prefab_poll_play();
     sh_commands_main_frame();    /* the first frame registers the console commands */
+    sh_player_cheats_frame();    /* a cheat turned on survives the player's spawn */
     return result;
 }
 

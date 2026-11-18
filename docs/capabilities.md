@@ -703,7 +703,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_mods held`, `sh_mods palette check`, `sh_overrides_off`, `sh_resread`, `sh_dialogtest`, `sh_dialogpoll`, `sh_dialogdump`, `sh_debugrender`, `sh_superscriptop`, `cs_dumpeventdefs`, `cs_fieldinfo`, `cs_start_render_logging`, `sh_vt`, `cs_dontuse`, `sh_alginfo`, `sh_navmesh marks` | Developer diagnostics, registered only by the diagnostic build (`build.ps1 -Diag`); a release has none of them. |
 | `sh_disable_devmode` | Turn developer features off while keeping Bethesda.net connectivity. |
 | `sh_reenable_devmode` | Turn developer features back on. |
-| `noClip` / `infiniteHealth` / `noPlayerDeath` / `noPlayerKill` / `noTarget` | The five player-cheat toggles for the local player: no-collision flight, infinite health, can't die, can't be killed, enemies ignore you. |
+| `noClip` / `infiniteHealth` / `noPlayerDeath` / `noPlayerKill` / `noTarget` | The five player-cheat toggles for the local player: no-collision flight, infinite health, can't die, can't be killed, enemies ignore you. A cheat turned on stays on when the game places the player at its spawn point (which rewrites the player's cheats) until it is turned off; the next Play starts with none. |
 
 ## Cvars
 

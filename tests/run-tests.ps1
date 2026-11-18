@@ -74,6 +74,7 @@ $tests = @(
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }
     @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
+    @{ name = "cheatkeep_test";     src = 'cheatkeep_test.c ..\src\backend\cheatkeep.c';             arg = "" }
     @{ name = "json_pretty_test";   src = 'json_pretty_test.c';                                      arg = "" }
     @{ name = "editor_frame_test"; src = 'editor_frame_test.c'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "saved_map_guard_test"; src = 'saved_map_guard_test.c'; libs = 'shell32.lib ole32.lib'; arg = "" }

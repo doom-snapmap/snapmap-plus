@@ -44,4 +44,8 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
  * backfills the developer list, since both lists belong to the main thread. */
 void sh_commands_main_frame(void);
 
+/* Called from the engine's main frame after sh_commands_main_frame: a player cheat turned on by its console
+ * command is set again when the same player's spawn reset it (entity.c, cheatkeep.h). */
+void sh_player_cheats_frame(void);
+
 #endif /* BACKEND_B2_COMMANDS_H */

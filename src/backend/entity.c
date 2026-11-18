@@ -16,6 +16,7 @@
 #include "dumpmap_path.h"
 #include "engine_build.h"
 #include "typeinfo.h"
+#include "cheatkeep.h"
 
 /* Engine call contracts. */
 
@@ -489,8 +490,37 @@ void h_sh_dumpmap(idCmdArgs *a)
 #define CHEAT_BIT_NOPLYKILL     0x10u
 #define CHEAT_BIT_NOTARGET      0x20u
 #define CHEAT_BIT_NOCLIP        0x04u
+/* idPlayer's spawn count: its spawn reset (VK FUN_140DE2290) increments it and rewrites the cheat byte to 0. */
+#define PLAYER_SPAWN_COUNT_OFF  0x27d70u
 
-/* Toggle a runtime player bit in a live map/playtest; command arguments are ignored. */
+static sh_cheat_keep g_cheat_keep;   /* cheats turned on, kept over the same player's spawns (cheatkeep.h) */
+
+static int32_t player_spawns(const uint8_t *player)
+{
+    int32_t n = -1;
+    __try { n = *(const int32_t *)(player + PLAYER_SPAWN_COUNT_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { n = -1; }
+    return n;
+}
+
+/* Every main frame: a cheat turned on is set again after the same player's spawn reset it (cheatkeep.h). */
+void sh_player_cheats_frame(void)
+{
+    void *gm, *player;
+    int32_t spawns;
+    uint8_t set = 0;
+    if (!sh_cheat_keep_active(&g_cheat_keep)) return;
+    if (!(gm = get_gamemgr()) || !(player = gm_find_entity(gm, "player1"))) return;
+    if ((spawns = player_spawns((const uint8_t *)player)) < 0) return;
+    __try {
+        set = sh_cheat_keep_frame(&g_cheat_keep, player, spawns, (uint8_t *)player + PLAYER_CHEAT_FLAGS_OFF,
+                                  (uint8_t *)player + PLAYER_NOCLIP_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { set = 0; }
+    if (set) backend_log("cheats: the player spawned and its cheats were reset; the ones turned on are on again");
+}
+
+/* Toggle a runtime player bit in a live map/playtest; command arguments are ignored. A bit turned on stays on
+ * over the same player's spawn (sh_player_cheats_frame). */
 static void cheat_toggle(uint32_t field_off, uint8_t bit, const char *label)
 {
     void *gm = get_gamemgr();
@@ -510,6 +540,9 @@ static void cheat_toggle(uint32_t field_off, uint8_t bit, const char *label)
         on = (*p & bit) != 0;
         ok = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (ok)
+        sh_cheat_keep_note(&g_cheat_keep, player, player_spawns((const uint8_t *)player),
+                           field_off == PLAYER_NOCLIP_OFF ? 1 : 0, bit, on);
     if (ok)
         sh_printf("%s %s\n", label, on ? "ON" : "OFF");
     else
