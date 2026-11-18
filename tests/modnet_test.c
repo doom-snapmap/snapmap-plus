@@ -74,7 +74,7 @@ static void progress(void *ctx, unsigned long long done, unsigned long long tota
 }
 
 /* A built mod folder under `dir` with one carried file of `n` bytes, and its
- * archive at `zip` as the product writes it (mod.json, assets/<request>).
+ * archive at `zip` as the product writes it (mod.json, the author path of each file).
  * Returns 1 with the build hash and the archive's size. */
 static int make_build(const char *dir, const char *salt, size_t n, const char *zip, char hash[65], unsigned long long *size)
 {
@@ -89,7 +89,7 @@ static int make_build(const char *dir, const char *salt, size_t n, const char *z
     if (!bytes) return 0;
     for (i = 0; i < n; i++) bytes[i] = (unsigned char)(i * 13 + salt[0]);
     mt_write(dir, "mod.json", "{\"name\":\"Net test\",\"version\":\"1.0.0\"}");
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\a.bimage", salt);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "images\\a.bimage");
     {
         char full[MAX_PATH * 2];
         _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, rel);
@@ -109,7 +109,7 @@ static int make_build(const char *dir, const char *salt, size_t n, const char *z
     ok = text && wzip && sh_zip_writer_open(&w, wzip) && sh_zip_writer_add(&w, "mod.json", text, len);
     if (ok) {
         char entry[200];
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", b.files[0].request);
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "%s", b.files[0].path);
         ok = sh_zip_writer_add(&w, entry, bytes, n) && sh_zip_writer_finish(&w);
     }
     if (ok) *size = w.off;

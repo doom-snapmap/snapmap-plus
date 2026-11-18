@@ -28,6 +28,7 @@
  * it is read with the Prefabs tab's own parser and must name the bundle's module.
  */
 #include "heap_out.h"
+#include "../src/backend/modauthor.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
@@ -93,6 +94,16 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)b
 #define R_PROBE   MOD "/lightprobes/light_probe_1_compressed.bimage"
 #define R_MEGA    "generated/decls/material/" S_MEGA ".decl"
 
+/* Write the file of the engine request `request` where the mod folder holds it: its author path. */
+static void put_req(const char *dir, const char *request, const void *p, size_t n)
+{
+    char *at = sh_ma_path(ID, request), *c;
+    if (!at) return;
+    for (c = at; *c; c++) if (*c == '/') *c = '\\';
+    put_rel(dir, at, p, n);
+    free(at);
+}
+
 static const char MAT_TEXT[] = "{\r\n\tdiffusemap \"textures/t_arena/wall\"\r\n}\r\n";
 static const char MEGA_TEXT[] = "{\r\nlandPageFile \"maps/game/mp/t_arena/t_arena\"\r\n}\r\n";
 static const char MODULE_TEXT[] =
@@ -151,22 +162,18 @@ static const sh_mb_file *find(const sh_mb_bundle *b, const char *request)
 static void make_module_mod(const char *dir, const char *decl_req, int with_info, const char *module_text)
 {
     mt_write(dir, "mod.json", "{\"name\":\"Arena\",\"snapmap-plus\":{\"format\":2,\"salt\":\"" ID "\"}}");
-    put_rel(dir, "assets\\" R_MODEL, MODEL, sizeof MODEL);
-    put_rel(dir, "assets\\" R_CM, CM, sizeof CM);
-    put_rel(dir, "assets\\" R_AAS, AAS, sizeof AAS);
-    put_rel(dir, "assets\\" R_SBSP, SBSP, sizeof SBSP);
-    put_rel(dir, "assets\\" R_AMB, AMB, sizeof AMB);
-    put_rel(dir, "assets\\" R_TOME, TOME, sizeof TOME);
-    put_rel(dir, "assets\\" R_PROBE, PROBE, sizeof PROBE);
-    put_rel(dir, "assets\\" S_MAT, MAT_TEXT, sizeof MAT_TEXT - 1);
-    put_rel(dir, "assets\\" R_MEGA, MEGA_TEXT, sizeof MEGA_TEXT - 1);
-    put_rel(dir, "assets\\" S_PAGES, PAGES, sizeof PAGES);
-    {
-        char rel[512];
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", decl_req);
-        put_rel(dir, rel, module_text, strlen(module_text));
-    }
-    if (with_info) put_rel(dir, "assets\\" R_INFO, INFO_TEXT, sizeof INFO_TEXT - 1);
+    put_req(dir, R_MODEL, MODEL, sizeof MODEL);
+    put_req(dir, R_CM, CM, sizeof CM);
+    put_req(dir, R_AAS, AAS, sizeof AAS);
+    put_req(dir, R_SBSP, SBSP, sizeof SBSP);
+    put_req(dir, R_AMB, AMB, sizeof AMB);
+    put_req(dir, R_TOME, TOME, sizeof TOME);
+    put_req(dir, R_PROBE, PROBE, sizeof PROBE);
+    put_req(dir, S_MAT, MAT_TEXT, sizeof MAT_TEXT - 1);
+    put_req(dir, R_MEGA, MEGA_TEXT, sizeof MEGA_TEXT - 1);
+    put_req(dir, S_PAGES, PAGES, sizeof PAGES);
+    put_req(dir, decl_req, module_text, strlen(module_text));
+    if (with_info) put_req(dir, R_INFO, INFO_TEXT, sizeof INFO_TEXT - 1);
 }
 
 static int slot_disagreements(const char *json, size_t len, const char *ref, size_t ref_len);
@@ -276,7 +283,7 @@ static void test_builder(const char *tmp, const char *install)
     /* A carried copy of an installed .sbsp is a pointer; one with other bytes is refused. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_copy", tmp);
     make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
-    put_rel(dir, "assets\\" MOD "/copy.sbsp", SBSP, sizeof SBSP);
+    put_req(dir, MOD "/copy.sbsp", SBSP, sizeof SBSP);
     CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 0 && (f = find(&b, MOD "/copy.sbsp")) && f->stock && !strcmp(f->stock_source, S_SBSP));
     sh_mb_free(&b);
@@ -285,11 +292,9 @@ static void test_builder(const char *tmp, const char *install)
                                              "virtualtextures/mods/" ID "/arena.pages", NULL };
         int k;
         for (k = 0; kinds[k]; k++) {
-            char rel[512];
             _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_carry%d", tmp, k);
             make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
-            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\%s", kinds[k]);
-            put_rel(dir, rel, JUNK, sizeof JUNK);
+            put_req(dir, kinds[k], JUNK, sizeof JUNK);
             CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
             CHECK(b.errors == 1);
             CHECK_CAUSE(b, "can only be an unchanged copy of the game");
@@ -300,7 +305,7 @@ static void test_builder(const char *tmp, const char *install)
     {
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_noreader", tmp);
         mt_write(dir, "mod.json", "{\"name\":\"Arena\"}");
-        put_rel(dir, "assets\\" MOD "/arena.sbsp", SBSP, sizeof SBSP);
+        put_req(dir, MOD "/arena.sbsp", SBSP, sizeof SBSP);
         sh_mb_set_stock_ops(NULL);
         CHECK(!sh_mb_build(dir, "tarenaaa", NULL, &b));
         CHECK(b.errors >= 1);

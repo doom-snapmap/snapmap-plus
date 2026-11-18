@@ -1,7 +1,7 @@
 /* modsync_test -- one archive per build between a temporary local store and
  * a loopback stub of the mod store (mod_store_stub.h), ONE-SHAPE rule 5:
  *   upload: HEAD first, an archive written and PUT only for a build the
- *   store lacks (mod.json whole, assets/<request> per carried file, stock
+ *   store lacks (mod.json whole, the author path per carried file, stock
  *   pointers left out), one claim per ref kept in the claims section and
  *   re-claimed with its secret, a mod the machine lacks or rebuilt since the
  *   map was saved refused with the next step, a file changed since its build
@@ -287,7 +287,7 @@ static const sh_mb_stock_ops GAME = { NULL, rock_match, rock_identify, rock_veri
 
 static int stock_yes(void *context, const char *request) { (void)context; (void)request; return 1; }
 
-/* A mod folder: mod.json's author part, files under assets\ (relative paths
+/* A mod folder: mod.json's author part, files at their author paths (relative paths
  * with '/'), built with `salt` and written. Returns 1 with the build hash. */
 static int make_mod(const char *dir, const char *salt, const char *name, const char *const *files,
                     const char *const *bytes, const sh_mb_resolver *resolver, char hash[65])
@@ -409,26 +409,26 @@ static unsigned char *stored_copy(const char *hash, size_t *len)
     return out;
 }
 
-static const char *const A_FILES[] = { "assets/generated/image/mods/alpha001/a.bimage", "assets/generated/image/mods/alpha001/b.bimage", NULL };
+static const char *const A_FILES[] = { "images/a.bimage", "images/b.bimage", NULL };
 static const char *const A_BYTES[] = { "alpha bytes", "alpha second file", NULL };
 static const char *const A2_BYTES[] = { "alpha bytes, republished", "alpha second file", NULL };
-static const char *const B_FILES[] = { "assets/generated/image/mods/betab002/b.bimage", NULL };
+static const char *const B_FILES[] = { "images/b.bimage", NULL };
 static const char *const B_BYTES[] = { "beta bytes", NULL };
-static const char *const R_FILES[] = { "assets/generated/image/mods/rocks003/rock.bimage", "assets/generated/image/mods/rocks003/own.bimage", NULL };
+static const char *const R_FILES[] = { "images/rock.bimage", "images/own.bimage", NULL };
 static const char *const R_BYTES[] = { ROCK, "the rock mod's own bytes", NULL };
-static const char *const C_FILES[] = { "assets/generated/image/mods/gamma004/c.bimage", NULL };
+static const char *const C_FILES[] = { "images/c.bimage", NULL };
 static const char *const C_BYTES[] = { "gamma bytes", NULL };
-static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
+static const char *const E_FILES[] = { "game/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
 static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
 
 /* ---------------------------------------- part of a build (modslice.h) ---- */
 
 static const char *const P_FILES[] = {
-    "assets/generated/decls/entitydef/mods/pkpart01/crate.decl",
-    "assets/generated/image/mods/pkpart01/crate_icon.bimage",
-    "assets/generated/decls/entitydef/mods/pkpart01/barrel.decl",
-    "assets/generated/image/mods/pkpart01/barrel_icon.bimage",
-    "assets/generated/image/mods/pkpart01/unused.bimage",
+    "entities/crate.decl",
+    "images/crate_icon.bimage",
+    "entities/barrel.decl",
+    "images/barrel_icon.bimage",
+    "images/unused.bimage",
     NULL
 };
 #define P_BARREL_ICON "generated/image/mods/pkpart01/barrel_icon.bimage"
@@ -499,7 +499,7 @@ static void test_parts(const char *tmp)
     list[0] = mod;
     CHECK(modsync_upload_builds(list, 1, "item-part", NULL, &st) && st.builds_sent == 1);
     CHECK(stored_entries(cut, SH_MB_SLICE_SOURCE, &has) == 4 && has);
-    CHECK(stored_entries(cut, "assets/" P_BARREL_ICON, &has) == 4 && !has);
+    CHECK(stored_entries(cut, "game/" P_BARREL_ICON, &has) == 4 && !has);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s", cut);
     CHECK(!dir_exists(author, rel));
     /* A second map that places the crate: one hash, nothing sent. */
@@ -521,7 +521,7 @@ static void test_parts(const char *tmp)
     CHECK(mt_exists(got));
     _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\mod.json", player);
     CHECK(file_has(got, "\"slice-of\": \"") && file_has(got, hp));
-    _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\assets\\generated\\image\\mods\\pkpart01\\barrel_icon.bimage",
+    _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\images\\barrel_icon.bimage",
                 player);
     CHECK(!mt_exists(got));
     /* A row whose "of" the archive does not name is refused, nothing placed. */
@@ -575,7 +575,7 @@ static void test_parts(const char *tmp)
     if (why) { fprintf(stderr, "cut with what was asked: %s\n", why); free(why); why = NULL; }
     strcpy_s(again, sizeof again, row.build);
     modsync_asked_free(asked, n);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s\\assets\\" "generated\\image\\mods\\pkpart01\\barrel_icon.bimage", again);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s\\images\\barrel_icon.bimage", again);
     CHECK(dir_exists(author, rel));
     /* The launch removes a staged folder no queued upload names (one an earlier session left);
      * a cut this session staged for a publish still under way stays. */
@@ -643,7 +643,7 @@ int main(void)
     CHECK(file_has(path, "\"builds\"") && !file_has(path, "\"bundles\""));
     {
         int has = 0;
-        CHECK(stored_entries(ha, "assets/generated/image/mods/alpha001/b.bimage", &has) == 3 && has);
+        CHECK(stored_entries(ha, "images/b.bimage", &has) == 3 && has);
         CHECK(stored_entries(ha, "mod.json", &has) == 3 && has);
     }
     /* Again: the store holds both; nothing is written or sent; the secret re-claims. */
@@ -657,7 +657,7 @@ int main(void)
     CHECK(st.stock_files == 1 && st.builds_sent == 1);
     {
         int has = 1;
-        CHECK(stored_entries(hr, "assets/generated/image/mods/rocks003/rock.bimage", &has) == 2 && !has);
+        CHECK(stored_entries(hr, "images/rock.bimage", &has) == 2 && !has);
     }
 
     /* ---- upload refusals with the next step ---- */
@@ -681,7 +681,7 @@ int main(void)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", r1);
     CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
     mod_of(mc, "gamma004", hc);
-    mt_write(dir, "assets\\generated\\image\\mods\\gamma004\\c.bimage", "gamma bytes, edited by hand");
+    mt_write(dir, "images\\c.bimage", "gamma bytes, edited by hand");
     list[0] = mc;
     before = g_stub.build_puts;
     CHECK(!modsync_upload_builds(list, 1, "item-4", NULL, &st));
@@ -689,8 +689,8 @@ int main(void)
     CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
     /* Larger than one request: sent in parts, then claimed like any other. */
     {
-        static const char *const BIG_FILES[] = { "assets/generated/image/mods/hugee006/one.bimage",
-                                                 "assets/generated/image/mods/hugee006/two.bimage", NULL };
+        static const char *const BIG_FILES[] = { "images/one.bimage",
+                                                 "images/two.bimage", NULL };
         static const char *const BIG_TEXT[] = { "x", "y", NULL };
         char hbig[65], mbig[80], full[MAX_PATH * 2];
         size_t sz = 49u * 1024u * 1024u, k;
@@ -735,7 +735,7 @@ int main(void)
         mt_write(dir, "mod.json", "{\"name\":\"Many\"}");
         for (i = 0; i < 20000; i++) {
             char body[48];
-            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\manyf007\\f%05d.decl", i);
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "entities\\f%05d.decl", i);
             _snprintf_s(body, sizeof body, _TRUNCATE, "entityDef f%05d {}\n", i);
             mt_write(dir, rel, body);
         }
@@ -841,7 +841,7 @@ int main(void)
         _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\mod.json", r2);
         _snprintf_s(want, sizeof want, _TRUNCATE, "%s\\Alpha Pack\\mod.json", r1);
         CHECK(same_file(got, want));
-        _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\assets\\generated\\image\\mods\\alpha001\\a.bimage", r2);
+        _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Red Keep\\Alpha\\images\\a.bimage", r2);
         CHECK(file_has(got, "alpha bytes, republished"));
         CHECK(g_rescans == rescans + 1 && g_notes == notes + 1 && !strcmp(g_note_folder, "maps\\Red Keep\\Alpha") &&
               !strcmp(g_note_title, "Red Keep"));
@@ -882,7 +882,7 @@ int main(void)
             CHECK(modsync_fetch_build_for(&row, &green, NULL, &st) && st.already_installed && g_stub.build_gets == gets);
             CHECK(!strcmp(st.folder, "My Alpha"));
             /* At another hash it does not: the pinned build comes into the place. */
-            mt_write(got, "assets\\generated\\image\\mods\\alpha001\\a.bimage", "the player's own alpha");
+            mt_write(got, "images\\a.bimage", "the player's own alpha");
             {
                 sh_mb_bundle b;
                 char why[HO_TEXT];
@@ -951,8 +951,8 @@ int main(void)
                 memset(&w, 0, sizeof w);
                 wz = sh_mb_wpath(zp);
                 CHECK(text && wz && sh_zip_writer_open(&w, wz) && sh_zip_writer_add(&w, "mod.json", text, tl) &&
-                      sh_zip_writer_add(&w, "assets/generated/image/mods/gamma004/c.bimage", C_BYTES[0], strlen(C_BYTES[0])) &&
-                      sh_zip_writer_add(&w, "assets/generated/image/mods/gamma004/extra.bimage", "x", 1) &&
+                      sh_zip_writer_add(&w, "images/c.bimage", C_BYTES[0], strlen(C_BYTES[0])) &&
+                      sh_zip_writer_add(&w, "images/extra.bimage", "x", 1) &&
                       sh_zip_writer_finish(&w));
                 sh_zip_writer_free(&w);
                 free(wz);
@@ -972,7 +972,7 @@ int main(void)
             CHECK(st.code == MODNET_E_GAME && st.game_lacks && !strcmp(st.game_source, ROCK_SOURCE) && count_dirs(placedir) == 0);
             g_game_lacks = 0;
             CHECK(modsync_fetch_build_for(&row, &grey, NULL, &st) && !strcmp(st.folder, "maps\\Grey Keep\\Rocks"));
-            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Grey Keep\\Rocks\\assets\\generated\\image\\mods\\rocks003", r2);
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Grey Keep\\Rocks\\images", r2);
             {
                 char f1[MAX_PATH * 2], f2[MAX_PATH * 2];
                 _snprintf_s(f1, sizeof f1, _TRUNCATE, "%s\\own.bimage", got);

@@ -77,7 +77,8 @@ static int provider(void *context, sh_script_mod_desc *out, int cap, const sh_sc
 static void set_folder(const char *salt, const char *name, const char *mod_folder)
 {
     char dir[MAX_PATH];
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts", g_base, mod_folder, salt);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s\\scripts", g_base, mod_folder);
+    (void)salt;
     CHECK(sh_script_source_set_folder(salt, name, dir));
 }
 

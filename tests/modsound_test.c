@@ -607,10 +607,10 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
     return 0;
 }
 
-#define BANK "assets/sound/soundbanks/pc/p6probes_sfx.bnk"
-#define SND  "assets/generated/decls/sound/mods/p6probes/p6probes_far.decl"
-#define SNDSP "assets/generated/decls/sound/mods/p6probes/wpn_sp_plasma_flyby_lp.decl"
-#define ENT  "assets/generated/decls/entitydef/mods/p6probes/speaker_far.decl"
+#define BANK "sounds/sfx.bnk"   /* served as sound/soundbanks/pc/p6probes_sfx.bnk */
+#define SND  "sounds/p6probes_far.decl"
+#define SNDSP "sounds/wpn_sp_plasma_flyby_lp.decl"
+#define ENT  "entities/speaker_far.decl"
 #define DESC "{\"version\": \"1.0.0\", \"name\": \"Sound probe\"}"
 #define SALT "p6probes"   /* the salt every build here is given */
 
@@ -733,15 +733,15 @@ static void test_builder(void)
     put_bank(BANK, "p6probes_sfx", 0x78, 0);
     build_expect(0, "version 120");
     put_bank(BANK, "p6probes_sfx", 0x71, 0);
-    put_bank("assets/sound/soundbanks/pc/p6probes_spider.bnk", "p6probes_spider", 0x71, 0);
+    put_bank("sounds/spider.bnk", "p6probes_spider", 0x71, 0);
     build_expect(0, "contains _sp, _snapmaps or initial");
-    drop("assets/sound/soundbanks/pc/p6probes_spider.bnk");
-    put_bank("assets/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
+    drop("sounds/spider.bnk");
+    put_bank("game/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
     build_expect(0, "must start with this mod folder's name and _");
-    drop("assets/sound/soundbanks/pc/other_sfx.bnk");
-    put_bank("assets/sound/mods/p6probes/p6probes_x.bnk", "p6probes_x", 0x71, 0);
-    build_expect(0, "a sound bank goes in sound/soundbanks/pc/");
-    drop("assets/sound/mods/p6probes/p6probes_x.bnk");
+    drop("game/sound/soundbanks/pc/other_sfx.bnk");
+    put_bank("sounds/sub/x.bnk", "p6probes_x", 0x71, 0);
+    build_expect(0, "a sound bank goes in sounds/ itself");
+    drop("sounds/sub/x.bnk");
     /* The retired "shadows" key refuses the folder (a stock bank's refusal: modbundle_test). */
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Sound probe\", "
                     "\"shadows\": [\"sound/soundbanks/pc/p6probes_sfx.bnk\"]}");
@@ -752,12 +752,8 @@ static void test_builder(void)
     drop(BANK); drop(SND); drop(ENT); drop("mod.json");
     {
         static const char *const dirs[] = {
-            "assets\\sound\\soundbanks\\pc", "assets\\sound\\soundbanks", "assets\\sound\\mods\\p6probes",
-            "assets\\sound\\mods", "assets\\sound",
-            "assets\\generated\\decls\\sound\\mods\\p6probes", "assets\\generated\\decls\\sound\\mods",
-            "assets\\generated\\decls\\sound", "assets\\generated\\decls\\entitydef\\mods\\p6probes",
-            "assets\\generated\\decls\\entitydef\\mods", "assets\\generated\\decls\\entitydef",
-            "assets\\generated\\decls", "assets\\generated", "assets", "", NULL };
+            "sounds\\sub", "sounds", "entities", "game\\sound\\soundbanks\\pc", "game\\sound\\soundbanks",
+            "game\\sound", "game", "", NULL };
         char path[MAX_PATH];
         size_t i;
         for (i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_dir, dirs[i]); RemoveDirectoryA(path); }

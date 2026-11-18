@@ -327,7 +327,7 @@ static void test_serve(const char *tmp)
         if (t) {
             /* the fixture names another mod's salt; this folder's own, the images beside it */
             while ((w = strstr((char *)t, "wuahwfly")) != NULL) memcpy(w, GOOD_SALT, 8);
-            _snprintf_s(dst, sizeof dst, _TRUNCATE, "%s\\assets\\" MAT_DIR "legacy_head.decl", folder);
+            _snprintf_s(dst, sizeof dst, _TRUNCATE, "%s\\materials\\legacy_head.decl", folder);
             for (w = dst; *w; w++) if (*w == '/') *w = '\\';
             mt_mkdirs_for(dst);
             {
@@ -341,9 +341,9 @@ static void test_serve(const char *tmp)
                 if (e - w > 4 && !_strnicmp(e - 4, ".tga", 4) && (size_t)(e - w) < sizeof img - 16) {
                     memcpy(img, w, (size_t)(e - w) - 4);
                     img[e - w - 4] = 0;
-                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\assets\\generated\\image\\%s.bimage", folder, img);
+                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\images\\%s.bimage", folder, img + sizeof "mods/" GOOD_SALT "/" - 1);
                     for (q = to; *q; q++) if (*q == '/') *q = '\\';
-                    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\assets\\generated\\image\\mods\\" GOOD_SALT "\\plain.bimage", folder);
+                    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\images\\plain.bimage", folder);
                     mt_mkdirs_for(to);
                     CopyFileA(from, to, TRUE);
                 }
@@ -368,7 +368,7 @@ static void test_serve(const char *tmp)
         int r;
         char *p, *e;
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "%s.decl", LOOKS[i]);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", folder, req);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\%s.decl", folder, LOOKS[i]);
         for (p = path; *p; p++) if (*p == '/') *p = '\\';
         file = read_whole(path, &fn);
         CHECK(file != NULL);
@@ -431,7 +431,7 @@ static void test_serve(const char *tmp)
 
     /* a material that is not a look is served byte for byte */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "plain.decl");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\plain.decl", folder);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\plain.decl", folder);
     file = read_whole(path, &fn);
     CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
@@ -439,7 +439,7 @@ static void test_serve(const char *tmp)
 
     /* a material written with the old keys has no type: it is served byte for byte, as written */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "legacy_head.decl");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\legacy_head.decl", folder);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\legacy_head.decl", folder);
     file = read_whole(path, &fn);
     CHECK(file && has((const char *)file, "snapmapplus/multilayer/skinvmtr"));
     CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
@@ -453,7 +453,7 @@ static void test_serve(const char *tmp)
         (void)dummy;
         sh_modserve_index_build(root);   /* a new index forgets the derived texts */
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "body.decl");
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\body.decl", folder);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\body.decl", folder);
         file = read_whole(path, &fn);
         CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
         free(file);

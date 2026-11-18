@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/backend/modauthor.h"
 #include "../src/backend/modledger.h"
 #include "../src/backend/modserve.h"
 
@@ -327,13 +328,14 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d,\n"
                       "    \"shadows\": [],\n    \"files\": [\n", id, id, hash64(hash_digit, h), built);
     for (i = 0; i < n; ++i) {
-        char *p;
+        char *p, *ap = sh_ma_path(id, files[i].path);   /* the mod folder holds each file at its author path */
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                          "      {\"path\": \"assets/%s\", \"sha256\": \"%s\", \"size\": %zu, "
+                          "      {\"path\": \"%s\", \"sha256\": \"%s\", \"size\": %zu, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": []}%s\n",
-                          files[i].path, hash64(files[i].blob, b), strlen(files[i].body), files[i].ptype,
+                          ap, hash64(files[i].blob, b), strlen(files[i].body), files[i].ptype,
                           files[i].pname, i + 1 < n ? "," : "");
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", dir, files[i].path);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, ap);
+        free(ap);
         for (p = path; *p; ++p) if (*p == '/') *p = '\\';
         write_file(path, files[i].body, strlen(files[i].body));
     }

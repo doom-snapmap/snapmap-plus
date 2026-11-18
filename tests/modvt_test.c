@@ -417,23 +417,23 @@ static void families(void)
 
     /* Builder refusals: a misplaced or misnamed member. */
     put_mod(c, "badvt000");
-    mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\fam.mega2", "MEGA");
+    mt_write(c, "virtual-textures\\fam.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "file type not allowed") != NULL);
-    mt_delete(c, "assets\\virtualtextures\\mods\\badvt000\\fam.mega2");
-    mt_write(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");
-    CHECK(strstr(build_cause(c, cause, sizeof cause), "is under mods/other/, which is neither this mod folder") != NULL || (printf("  cause: %s\n", cause), 0));
-    mt_delete(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2");
-    mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
+    mt_delete(c, "virtual-textures\\fam.mega2");
+    mt_write(c, "game\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");   /* another mod's name: a mod folder cannot spell it */
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "game/ holds the game's own files at the game's own paths") != NULL || (printf("  cause: %s\n", cause), 0));
+    mt_delete(c, "game\\virtualtextures\\mods\\other\\fam_sq1.mega2");
+    mt_write(c, "virtual-textures\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested board name */
     mt_remove_tree(c);
 
     /* vtmod000: two boards (fam: members 1 and 3; other: member 2). plain000: none. */
     put_mod(a, "vtmod000");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq3.mega2", "member three");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\other_sq2.mega2", "other two");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "member one");
+    mt_write(a, "virtual-textures\\fam_sq3.mega2", "member three");
+    mt_write(a, "virtual-textures\\other_sq2.mega2", "other two");
     put_mod(b, "plain000");
-    mt_write(b, "assets\\maps\\mods\\plain000\\x.bin", "plain000");
+    mt_write(b, "images\\x.bimage", "plain000");
     CHECK(build_folder(a, hash_a));
     CHECK(build_folder(b, NULL));
 
@@ -476,7 +476,7 @@ static void families(void)
     /* A changed build of the same mod: at a pass the release waits for the
      * frame boundary (the old board keeps drawing meanwhile); there it is
      * released and the new build registered in the same record. */
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one, rebaked");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "member one, rebaked");
     CHECK(build_folder(a, hash_a2) && strcmp(hash_a, hash_a2) != 0);
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(sync_index(&f, "map", 0, &res) == 2 && res.pending == 2 && res.released == 0 && res.registered == 0 &&
@@ -496,7 +496,7 @@ static void families(void)
 
     /* The engine took the record back: registered again in the same record. */
     put_mod(a, "vtmod000");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(sync_index(&f, "editor", 0, &res) == 1 && res.registered == 1);
@@ -523,7 +523,7 @@ static void families(void)
 
     /* Records 1..30 full: refused once, one player notice; no stock record and not record 31 touched. */
     put_mod(a, "vtmod000");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     fake_init(&f);
@@ -582,9 +582,9 @@ static void detours(void)
     _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\second00", mods);
     CreateDirectoryA(mods, NULL);
     put_mod(a, "tyrant00");
-    mt_write(a, "assets\\virtualtextures\\mods\\tyrant00\\tyrant_sq1.mega2", "tyrant square one");
+    mt_write(a, "virtual-textures\\tyrant_sq1.mega2", "tyrant square one");
     put_mod(b, "second00");
-    mt_write(b, "assets\\virtualtextures\\mods\\second00\\skin_sq2.mega2", "second square two");
+    mt_write(b, "virtual-textures\\skin_sq2.mega2", "second square two");
     CHECK(build_folder(a, NULL) && build_folder(b, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     sh_modvt_reset();
@@ -651,7 +651,7 @@ static void detours(void)
     /* Served again: the same record, and both earlier materials bound again
      * (index, page table, feedback) before the pass parses anything. */
     put_mod(a, "tyrant00");
-    mt_write(a, "assets\\virtualtextures\\mods\\tyrant00\\tyrant_sq1.mega2", "tyrant square one");
+    mt_write(a, "virtual-textures\\tyrant_sq1.mega2", "tyrant square one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
     memset(body.parms, 0, sizeof body.parms);
@@ -823,10 +823,10 @@ static void families_follow_the_map(void)
     _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps\\Vt map\\vtplace0", mods);
     CreateDirectoryA(mods, NULL);
     put_mod(own, "vtplace0");
-    mt_write(own, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq1.mega2", "root one");
+    mt_write(own, "virtual-textures\\fam_sq1.mega2", "root one");
     put_mod(placed, "vtplace0");
-    mt_write(placed, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq1.mega2", "the map's own one");
-    mt_write(placed, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq2.mega2", "the map's two");
+    mt_write(placed, "virtual-textures\\fam_sq1.mega2", "the map's own one");
+    mt_write(placed, "virtual-textures\\fam_sq2.mega2", "the map's two");
     CHECK(build_folder(own, hash_own) && build_folder(placed, hash_placed));
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(mods) == 2);
