@@ -285,7 +285,7 @@ think-loop turn and places the prefab again, through the same Load / Place,
 once the mods are installed), a module the player cannot get, or refused. The
 page shows the backend's text as a toast. Export (Prefab Details head) always
 writes one ZIP, `<name>.json` and each mod as it is installed,
-`mods/<folder name>/mod.json` and `mods/<folder name>/assets/...`, through the rawmap pickers'
+`mods/<folder name>/mod.json` and its folders by kind (`mods/<folder name>/materials/...`), through the rawmap pickers'
 Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`; it and
 Import open in the last folder used for each, Downloads the first time (see
 File dialog folders above).
@@ -491,7 +491,7 @@ expanded declaration editor's size (`#modsFilesModal`; Escape and the backdrop c
 inside, focus returns to the opener; every render keeps focus inside). Its head is the mod's name
 and the details pane's sentence. On the left, a filter and the folder as a tree with the Prefabs
 primitives (a folder holding only one folder shown as one row; a folder above `mods/` keeps its own
-row; the paths here show the mod's own `mods/<salt>/` segment); a file row carries one glyph at
+row; the paths here are the files' paths in the mod folder, `materials/x.decl`); a file row carries one glyph at
 most: the triangle when the cause names it, else the `gamepad-2` glyph for the game's own bytes. On
 the right: the path once, the file's class as one phrase ("New file", "Your edit of a game file", "A
 game file under this mod's own name", "A game file SnapMap cannot see on its own", "Replaces a game
@@ -508,9 +508,9 @@ The reads and Open in editor never set the page's busy state.
 change its files, press Refresh to see the change.") selects the new mod and opens the Files modal on
 the example's Toybox row, with one line above the editor: "Place Example crate from the Toybox in
 your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods
-tab. Put new files under assets\mods\<folder>\, and in your files write mods/<folder>/ and plain
-string names." How mods work says the same rule. An author never needs the salt: there is no Copy
-mod id, and Refresh files what is written under the folder name under the mod.
+tab. Put new files in the mod's folders by kind (materials\, entities\, ...), name them in your
+files by those folders, and write plain string names." How mods work says the same rule. An author never needs the salt: there is no Copy
+mod id, and Refresh builds what is in the folder.
 
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
 folder can be restored from the Recycle Bin by hand. Uninstalling:" (with a map open; without one,
@@ -542,7 +542,7 @@ holding it, has a hover title naming its meaning.
 | Thing | Class | Hue token | Meaning (hover title) |
 |---|---|---|---|
 | A path's folder | `mk-dir` | `--muted` | where the file sits |
-| A path's own `mods/<salt>/` segment (Files view) | `mk-own` | `--tkStr` | "the mod's own file" |
+| A path in the mod's own folders (Files view) | `mk-own` | `--tkStr` | "the mod's own file" |
 | A game path's file name (Edits, Replaces, Borrows) | `mk-game` | `--tkBool` | "a game file this mod edits", "replaces", "reads from your install" |
 | A game sound bank | `mk-game` | `--tkBool` | "a game sound bank, read from your install" |
 | What an edit sets or adds | `mk-set` | `--tkNum` | "what this mod sets or adds in the game's text" |
@@ -561,7 +561,7 @@ Per entry of `mods`:
 | Key | Type | Meaning |
 |---|---|---|
 | `"key"` | string | The folder's path under `mods\` (`campaign-interactables\doors`, `maps\Hell Guard Arena\Hell Guards`): what every action names. |
-| `"salt"` | string | The mod's identity (its `snapmap-plus.salt`); "" before its first build. The page uses it only for the Files view's paths. |
+| `"salt"` | string | The mod's identity (its `snapmap-plus.salt`); "" before its first build. The Files view shows paths in the mod folder and does not need it. |
 | `"name"`, `"author"`, `"description"` | string | The author's part of `mod.json` (a folder that is not built is named by its `mod.json` when that parses). |
 | `"size"`, `"files"` | number | The carried bytes and files (game files read from the install not counted). |
 | `"state"` | string | `ready` or `attention`. |
