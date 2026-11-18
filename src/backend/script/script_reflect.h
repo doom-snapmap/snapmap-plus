@@ -91,6 +91,14 @@ int sh_rf_element(const sh_rf_host *h, const sh_rf_loc *list, uint32_t index, sh
 /* How many elements a LIST or ARRAY holds now; -1 when unreadable. */
 long long sh_rf_count(const sh_rf_host *h, const sh_rf_loc *list);
 
+/* The collision box of an entity: the bounds of the first clip model of its physics, in the entity's own
+ * frame (around its origin). The physics is the demon's own (`aiVolatile.physics.object`) when the entity
+ * has it, else its `defaultPhysicsObj`; on it the clip model is named by `clipModels` (an actor's two
+ * pointers, the first set one) or `clipModel` (one pointer); its `bounds` are two idVec3. Every name is
+ * found in the game's type tables. 1 with the box; 0 with a sentence in err. */
+int sh_rf_bounds(const sh_rf_host *h, const void *object, const char *cls, float mins[3], float maxs[3],
+                 char *err, size_t err_cap);
+
 /* idList / idStaticList header and idManagedClassPtr layout (both renderers). */
 #define SH_RF_LIST_PTR     0x00u
 #define SH_RF_LIST_NUM     0x08u

@@ -990,7 +990,7 @@ and animation, move, turn, push, heal, animate and remove any entity of the map,
 `entities()` and `entities_near`, and `trace` lines through the world. Beyond the purpose-built
 calls it reaches the whole game by name: `e:get`, `e:set` and `e:fields` read and write any field
 the game describes on any entity (a placed demon's team, spawn behaviour and health modifier among
-them), `e:run_event` and `e:queue_event` run any engine event, `e:signal` fires and `on.signal` hears
+them), `e:bounds` gives an entity's collision box around its origin (two corners; nil when it has none), `e:run_event` and `e:queue_event` run any engine event, `e:signal` fires and `on.signal` hears
 SnapMap's own events on any object, `console_variable` reads and sets cvars and `decl` opens any decl; what a
 script sets in a cvar or a decl is put back when the map ends. It drives demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
 `path_length`, `path_points`, `find_position`, `firing_position`, `trigger`, `weapon_ready`,

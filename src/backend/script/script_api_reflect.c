@@ -568,6 +568,20 @@ static int l_class(lua_State *L)
     return 1;
 }
 
+/* e:bounds() -> mins, maxs: the entity's collision box around its origin (two vectors), or nil when it has none
+ * (sh_rf_bounds: the first clip model of its physics, by the game's type tables). */
+static int l_bounds(lua_State *L)
+{
+    const char *cls = NULL;
+    float mins[3], maxs[3];
+    char err[200];
+    void *ent = subject(L, "bounds", &cls);
+    if (!ent || !sh_rf_bounds(&g_host, ent, cls, mins, maxs, err, sizeof err)) { lua_pushnil(L); return 1; }
+    sh_script_api_push_vec(L, mins);
+    sh_script_api_push_vec(L, maxs);
+    return 2;
+}
+
 /* enum(name) -> { MEMBER = number, ... } */
 static int l_enum(lua_State *L)
 {
@@ -594,6 +608,7 @@ void sh_script_api_reflect_register(void)
     sh_script_api_add(SH_SCRIPT_API_METHOD, "set", l_set);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "fields", l_fields);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "class", l_class);
+    sh_script_api_add(SH_SCRIPT_API_METHOD, "bounds", l_bounds);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "enum", l_enum);
     sh_script_api_add_closer(sh_script_reflect_restore);
 }
