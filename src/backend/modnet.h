@@ -188,6 +188,65 @@ int  modnet_report_asked(const char *hash, const char *request, const char *by, 
  * with the answer's text in *json (malloc'd; free), of any size. */
 int  modnet_list_asked(const char *claim, const char *secret, char **json, const modnet_io *io, modnet_result *r);
 
+/* ------------------------------------------------------------ units ---- */
+/* The store's unit routes (SPEC-distribution 10.2). A unit is the closure of one placed object, named by the
+ * SHA-256 of its manifest (modunit.h); its files are blobs, named by their SHA-256. Reads are anonymous; every
+ * write is signed by the publisher's key (modkey.h) through a signer. The bytes are untrusted: the cache
+ * (modcache.h) checks every manifest and blob against the hash a map names before anything serves (I10). */
+
+#define MODNET_UNITS_MAX        4096                          /* units one status request names */
+#define MODNET_ONE_REQUEST_MAX  (95ull * 1024u * 1024u)       /* the largest body one PUT takes */
+
+#define MODNET_UNIT_MISSING  0
+#define MODNET_UNIT_HELD     1
+#define MODNET_UNIT_REMOVED (-1)
+
+/* Signs one write: fills *headers (malloc'd, the X-Publisher-Key, -Name and -Signature header lines, each ending in
+ * CRLF) for `method` `route` whose body's SHA-256 is `body_sha` (64 lowercase hex). 1 on success. */
+typedef struct modnet_signer {
+    int (*sign)(void *context, const char *method, const char *route, const char *body_sha, wchar_t **headers);
+    void *context;
+} modnet_signer;
+
+/* POST /mods/units: each hash's state (MODNET_UNIT_*), in batches of MODNET_UNITS_MAX. */
+int  modnet_unit_status(const char *const *hashes, size_t n, int *states, const modnet_io *io, modnet_result *r);
+/* GET /mods/unit/<hash>: the manifest's bytes (malloc'd), checked against the hash (MODNET_E_HASH otherwise);
+ * MODNET_E_NOT_FOUND, MODNET_E_BLOCKED (451, removed). */
+int  modnet_get_unit(const char *hash, unsigned char **bytes, size_t *len, const modnet_io *io, modnet_result *r);
+/* GET /mods/blob/<sha> into `out_path`, resuming after the `have` bytes the file holds (Range). Not checked here. */
+int  modnet_get_blob(const char *sha, const char *out_path, unsigned long long have, const modnet_io *io, modnet_result *r);
+/* GET /mods/unit/<hash>/archive (a ZIP of unit.json and every file), resumed the same way. */
+int  modnet_get_unit_archive(const char *hash, const char *out_path, unsigned long long have, const modnet_io *io,
+                             modnet_result *r);
+/* POST /mods/unit/<hash>/begin with the manifest: *held 1, or the blobs the store lacks in *missing (malloc'd). */
+int  modnet_begin_unit(const char *hash, const char *manifest, size_t len, const modnet_signer *signer, int *held,
+                       char (**missing)[MODNET_HASH_HEX + 1], size_t *nmissing, const modnet_io *io, modnet_result *r);
+/* PUT /mods/unit/<hash>/archive: a ZIP (modzip.h) of unit.json and missing files, at most MODNET_ONE_REQUEST_MAX
+ * bytes, signed over its SHA-256. *held 1 when the store now holds every file of the unit. */
+int  modnet_put_unit_archive(const char *hash, const char *path, unsigned long long size, const modnet_signer *signer,
+                             int *held, const modnet_io *io, modnet_result *r);
+/* One blob larger than one request, in parts: POST .../parts (signed), PUT .../parts/<n> for the parts the store
+ * lacks, POST .../complete (signed); a later call resumes. */
+int  modnet_put_blob(const char *sha, const char *path, unsigned long long size, const modnet_signer *signer,
+                     const modnet_io *io, modnet_result *r);
+/* POST /mods/unit/<hash>/complete (signed): MODNET_OK when the store holds every file; MODNET_E_CONFLICT. */
+int  modnet_complete_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, modnet_result *r);
+/* POST /mods/map/claim {ref, units, secret, rev} (signed, D33): MODNET_OK with the claim's rev in *rev_out (and, when
+ * the store answered 451, the units moderation removed in *removed: the claim holds the rest); MODNET_E_CONFLICT with
+ * the stored rev in *rev_out when `rev` was stale, or -1 when a unit is missing. */
+int  modnet_map_claim(const char *ref, const char *const *units, size_t n, const char *secret, long long rev,
+                      const modnet_signer *signer, long long *rev_out, char (**removed)[MODNET_HASH_HEX + 1],
+                      size_t *nremoved, const modnet_io *io, modnet_result *r);
+/* POST /mods/map/release {ref, secret, rev} (signed): MODNET_OK (204), MODNET_E_NOT_FOUND, MODNET_E_CONFLICT (stale,
+ * the stored rev in *rev_out). */
+int  modnet_map_release(const char *ref, const char *secret, long long rev, const modnet_signer *signer, long long *rev_out,
+                        const modnet_io *io, modnet_result *r);
+/* POST /mods/unit/<hash>/asked {path}: a path a player's game asked the unit for that it lacks (anonymous). */
+int  modnet_unit_asked(const char *hash, const char *path, const modnet_io *io, modnet_result *r);
+/* POST /mods/asked {claims: [{ref, secret}]} (signed): the answer's text in *json (malloc'd). */
+int  modnet_asked_units(const char *const *refs, const char *const *secrets, size_t n, const modnet_signer *signer,
+                        char **json, const modnet_io *io, modnet_result *r);
+
 /* ------------------------------------------------------------ jobs ---- */
 
 /* A job body: runs on the worker thread with the io the helper owns (its

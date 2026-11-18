@@ -21,7 +21,8 @@
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
 #endif
 
-#define MN_AGENT        L"snapmap-plus-mods/1"
+/* SPEC-distribution 5.22: the store counts clients by this, and refuses retired ones. */
+#define MN_AGENT        L"snapmap-plus/1.0"
 #define MN_CHUNK        (256u * 1024u)
 #define MN_ERROR_BODY   (64u * 1024u)
 #define MN_SMALL_BODY   (64u * 1024u)
@@ -428,7 +429,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             headers = sh_wtextf(L"Content-Type: %s\r\nAccept: application/json, application/octet-stream\r\n%s", ct,
                                 q->headers ? q->headers : L"");
     } else {
-        headers = sh_wtextf(L"Accept: application/json, application/octet-stream\r\n");
+        headers = sh_wtextf(L"Accept: application/json, application/octet-stream\r\n%s", q->headers ? q->headers : L"");
     }
     if (!headers) { code = mn_fail(r, MODNET_E_ARG, "out of memory"); goto done; }
     r->requests++;
@@ -1267,6 +1268,581 @@ int modnet_list_asked(const char *claim, const char *secret, char **json, const 
             *json = text;
         }
     }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+/* ------------------------------------------------------------ units ----- */
+
+/* The signed headers of a write (SPEC-distribution 4.3), from the signer, for a body of SHA-256 `body_sha`.
+ * NULL with the failure set in r when there is no signer or it fails. */
+static wchar_t *mn_sign(const modnet_signer *signer, const char *method, const char *route, const char *body_sha,
+                        modnet_result *r)
+{
+    wchar_t *headers = NULL;
+    if (!signer || !signer->sign) { mn_fail(r, MODNET_E_ARG, "no publishing key signs this request"); return NULL; }
+    if (!signer->sign(signer->context, method, route, body_sha, &headers) || !headers) {
+        free(headers);
+        mn_fail(r, MODNET_E_ARG, "the publishing key could not sign the request");
+        return NULL;
+    }
+    return headers;
+}
+
+/* A small signed JSON POST: the answer in *resp (malloc'd). */
+static int mn_signed_post(const char *route, const char *body, size_t len, const modnet_signer *signer, DWORD receive_ms,
+                          unsigned char **resp, size_t *rlen, const modnet_io *io, modnet_result *r)
+{
+    char sha[MODNET_HASH_HEX + 1];
+    wchar_t *headers;
+    mn_req q;
+    int code;
+    sh_mb_sha256_hex(body, len, sha);
+    if (!(headers = mn_sign(signer, "POST", route, sha, r))) return r->code ? r->code : MODNET_E_ARG;
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = route;
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body;
+    q.body_len = len;
+    q.headers = headers;
+    q.receive_ms = receive_ms;
+    q.max_response = MN_SMALL_BODY * 16;
+    code = mn_exchange(&q, resp, rlen, io, r);
+    free(headers);
+    return code;
+}
+
+/* A JSON array of 64-hex strings from member `key` of the answer: *out (malloc'd, *n of them). */
+static int mn_hash_list(const mpj *root, const char *key, char (**out)[MODNET_HASH_HEX + 1], size_t *n)
+{
+    const mpj *a = root && root->type == MPJ_OBJ ? mpj_get(root, key) : NULL;
+    int i;
+    *out = NULL;
+    *n = 0;
+    if (!a) return 1;
+    if (a->type != MPJ_ARR) return 0;
+    if (a->n && !(*out = calloc((size_t)a->n, sizeof **out))) return 0;
+    for (i = 0; i < a->n; i++) {
+        if (!a->items[i] || a->items[i]->type != MPJ_STR || !modnet_valid_hash(a->items[i]->text)) { free(*out); *out = NULL; *n = 0; return 0; }
+        strcpy_s((*out)[*n], MODNET_HASH_HEX + 1, a->items[i]->text);
+        (*n)++;
+    }
+    return 1;
+}
+
+int modnet_unit_status(const char *const *hashes, size_t n, int *states, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    double t0;
+    size_t at = 0;
+    int code = MODNET_OK;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if ((n && (!hashes || !states))) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    for (size_t i = 0; i < n; i++) {
+        if (!modnet_valid_hash(hashes[i])) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad unit hash"));
+        states[i] = MODNET_UNIT_MISSING;
+    }
+    while (at < n && code == MODNET_OK) {
+        size_t batch = n - at > MODNET_UNITS_MAX ? MODNET_UNITS_MAX : n - at, i;
+        mn_buf body = {0};
+        unsigned char *resp = NULL;
+        size_t rlen = 0;
+        mn_req q;
+        mn_puts(&body, "{\"units\":[");
+        for (i = 0; i < batch; i++) {
+            if (i) mn_puts(&body, ",");
+            mn_puts(&body, "\"");
+            mn_put(&body, hashes[at + i], MODNET_HASH_HEX);
+            mn_puts(&body, "\"");
+        }
+        mn_puts(&body, "]}");
+        if (body.bad) { free(body.p); code = mn_fail(r, MODNET_E_NOMEM, NULL); break; }
+        memset(&q, 0, sizeof q);
+        q.verb = L"POST";
+        q.route = "/mods/units";
+        q.content_type = "application/json";
+        q.body = (const unsigned char *)body.p;
+        q.body_len = body.n;
+        q.max_response = MN_SMALL_BODY * 64;
+        code = mn_exchange(&q, &resp, &rlen, io, r);
+        free(body.p);
+        if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "units");
+        else if (code == MODNET_OK) {
+            mpj *root = mpj_parse((const char *)resp, rlen);
+            if (!root || root->type != MPJ_OBJ) code = mn_fail(r, MODNET_E_PROTOCOL, "units: the answer is not an object");
+            for (i = 0; code == MODNET_OK && i < batch; i++) {
+                const mpj *s = mpj_get(root, hashes[at + i]);
+                if (!s || s->type != MPJ_STR) { code = mn_fail(r, MODNET_E_PROTOCOL, "units: the answer leaves out a unit"); break; }
+                states[at + i] = mpj_str_is(s, "held") ? MODNET_UNIT_HELD : mpj_str_is(s, "removed") ? MODNET_UNIT_REMOVED
+                                                                                                    : MODNET_UNIT_MISSING;
+            }
+            mpj_free(root);
+        }
+        free(resp);
+        at += batch;
+    }
+    return mn_end(r, t0, code);
+}
+
+int modnet_get_unit(const char *hash, unsigned char **bytes, size_t *len, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[96], have[MODNET_HASH_HEX + 1];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (bytes) *bytes = NULL;
+    if (len) *len = 0;
+    if (!modnet_valid_hash(hash) || !bytes || !len) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s", hash);
+    memset(&q, 0, sizeof q);
+    q.verb = L"GET";
+    q.route = route;
+    q.max_response = 256ull * 1024u * 1024u;   /* a manifest of any unit there is (a few MB for a whole pack) */
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "unit");
+    else if (code == MODNET_OK) {
+        sh_mb_sha256_hex(resp, rlen, have);
+        if (strcmp(have, hash)) code = mn_fail(r, MODNET_E_HASH, "unit %.16s: the manifest is not the unit's", hash);
+    }
+    if (code == MODNET_OK) { *bytes = resp; *len = rlen; resp = NULL; }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+/* GET `route` into `out_path`, resuming from `have` bytes the file already holds (Range); a 200 answer to a range
+ * means the store sent the whole object, which is written from the start. */
+static int mn_get_resumed(const char *route, const char *out_path, unsigned long long have, const modnet_io *io,
+                          modnet_result *r)
+{
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    wchar_t *wpath, *range = NULL;
+    HANDLE h;
+    mn_req q;
+    LARGE_INTEGER at;
+    int code, tries;
+    if (!(wpath = sh_mb_wpath(out_path))) return mn_fail(r, MODNET_E_NOMEM, NULL);
+    for (tries = 0; tries < 2; tries++) {
+        h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, have ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) { free(wpath); return mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError()); }
+        at.QuadPart = (LONGLONG)have;
+        if (!SetFilePointerEx(h, at, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
+            CloseHandle(h);
+            free(wpath);
+            return mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+        }
+        free(range);
+        range = have ? sh_wtextf(L"Range: bytes=%llu-\r\n", have) : NULL;
+        memset(&q, 0, sizeof q);
+        q.verb = L"GET";
+        q.route = route;
+        q.max_response = ~0ull;
+        q.sink = h;
+        q.headers = range;
+        code = mn_exchange(&q, &resp, &rlen, io, r);
+        if (code == MODNET_OK && !FlushFileBuffers(h)) code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+        CloseHandle(h);
+        if (code == MODNET_OK && have && r->status == 200) {
+            /* The whole object came: write it again from the start. */
+            free(resp);
+            resp = NULL;
+            have = 0;
+            continue;
+        }
+        if (code == MODNET_OK && r->status == 416 && have) {
+            /* The file already holds every byte. */
+            code = MODNET_OK;
+            r->status = 206;
+        } else if (code == MODNET_OK && r->status != 200 && r->status != 206) code = mn_status_fail(r, resp, rlen, "download");
+        break;
+    }
+    free(range);
+    free(resp);
+    free(wpath);
+    return code;
+}
+
+int modnet_get_blob(const char *sha, const char *out_path, unsigned long long have, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[96];
+    double t0;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(sha) || !out_path || !out_path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s", sha);
+    return mn_end(r, t0, mn_get_resumed(route, out_path, have, io, r));
+}
+
+int modnet_get_unit_archive(const char *hash, const char *out_path, unsigned long long have, const modnet_io *io,
+                            modnet_result *r)
+{
+    modnet_result local;
+    char route[112];
+    double t0;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(hash) || !out_path || !out_path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/archive", hash);
+    return mn_end(r, t0, mn_get_resumed(route, out_path, have, io, r));
+}
+
+int modnet_begin_unit(const char *hash, const char *manifest, size_t len, const modnet_signer *signer, int *held,
+                      char (**missing)[MODNET_HASH_HEX + 1], size_t *nmissing, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[112];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    wchar_t *headers;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (held) *held = 0;
+    if (missing) *missing = NULL;
+    if (nmissing) *nmissing = 0;
+    if (!modnet_valid_hash(hash) || !manifest || !len || !held || !missing || !nmissing) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/begin", hash);
+    /* The body is the manifest, so its SHA-256 is the unit's hash. */
+    if (!(headers = mn_sign(signer, "POST", route, hash, r))) return mn_end(r, t0, r->code ? r->code : MODNET_E_ARG);
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = route;
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)manifest;
+    q.body_len = len;
+    q.headers = headers;
+    q.max_response = MN_SMALL_BODY * 64;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    free(headers);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "begin");
+    else if (code == MODNET_OK) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *h = root && root->type == MPJ_OBJ ? mpj_get(root, "held") : NULL;
+        if (h && h->type == MPJ_BOOL && h->b) *held = 1;
+        else if (!root || !mn_hash_list(root, "missing", missing, nmissing) || !*nmissing)
+            code = mn_fail(r, MODNET_E_PROTOCOL, "begin: the answer says neither held nor missing");
+        mpj_free(root);
+    }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_put_unit_archive(const char *hash, const char *path, unsigned long long size, const modnet_signer *signer,
+                            int *held, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[112], sha[MODNET_HASH_HEX + 1];
+    unsigned long long got = 0;
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    wchar_t *headers, *wpath;
+    HANDLE h;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (held) *held = 0;
+    if (!modnet_valid_hash(hash) || !path || !size || size > MODNET_ONE_REQUEST_MAX) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    if (!sh_mb_sha256_file(path, &got, sha) || got != size) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the unit archive cannot be read"));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/archive", hash);
+    if (!(headers = mn_sign(signer, "PUT", route, sha, r))) return mn_end(r, t0, r->code ? r->code : MODNET_E_ARG);
+    wpath = sh_mb_wpath(path);
+    h = wpath ? CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL)
+              : INVALID_HANDLE_VALUE;
+    free(wpath);
+    if (h == INVALID_HANDLE_VALUE) { free(headers); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the unit archive cannot be opened")); }
+    memset(&q, 0, sizeof q);
+    q.verb = L"PUT";
+    q.route = route;
+    q.content_type = MODNET_ARCHIVE_TYPE;
+    q.body_file = h;
+    q.body_len = (size_t)size;
+    q.headers = headers;
+    q.receive_ms = MN_COMPLETE_MS;   /* the store reads the archive back to check it before it answers */
+    q.max_response = MN_SMALL_BODY * 64;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    CloseHandle(h);
+    free(headers);
+    if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "archive");
+    else if (code == MODNET_OK) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *hv = root && root->type == MPJ_OBJ ? mpj_get(root, "held") : NULL;
+        if (held) *held = hv && hv->type == MPJ_BOOL && hv->b;
+        r->created = r->status == 201;
+        mpj_free(root);
+    }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_put_blob(const char *sha, const char *path, unsigned long long size, const modnet_signer *signer,
+                    const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[128], body[64];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    unsigned long long part_size = 0, parts = 0;
+    unsigned char *have = NULL;
+    wchar_t *wpath;
+    HANDLE h;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(sha) || !path || !size) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"size\":%llu}", size);
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s/parts", sha);
+    code = mn_signed_post(route, body, strlen(body), signer, 0, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "parts");
+    else if (code == MODNET_OK) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *ps = root ? mpj_get(root, "partSize") : NULL, *pn = root ? mpj_get(root, "parts") : NULL,
+                  *hv = root ? mpj_get(root, "have") : NULL;
+        if (!ps || !mpj_is_num(ps) || !pn || !mpj_is_num(pn) || mpj_int(ps) <= 0 || mpj_int(pn) <= 0 ||
+            (unsigned long long)mpj_int(pn) != (size + (unsigned long long)mpj_int(ps) - 1) / (unsigned long long)mpj_int(ps))
+            code = mn_fail(r, MODNET_E_PROTOCOL, "parts: the answer is not an upload session");
+        else {
+            part_size = (unsigned long long)mpj_int(ps);
+            parts = (unsigned long long)mpj_int(pn);
+            have = calloc((size_t)parts + 1, 1);
+            if (!have) code = mn_fail(r, MODNET_E_NOMEM, NULL);
+            for (int i = 0; have && hv && hv->type == MPJ_ARR && i < hv->n; i++) {
+                long long n = mpj_int(hv->items[i]);
+                if (n >= 1 && (unsigned long long)n <= parts) have[n] = 1;
+            }
+        }
+        mpj_free(root);
+    }
+    free(resp);
+    resp = NULL;
+    if (code != MODNET_OK) { free(have); return mn_end(r, t0, code); }
+    wpath = sh_mb_wpath(path);
+    h = wpath ? CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL)
+              : INVALID_HANDLE_VALUE;
+    free(wpath);
+    if (h == INVALID_HANDLE_VALUE) { free(have); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the file cannot be opened")); }
+    for (unsigned long long n = 1; code == MODNET_OK && n <= parts; n++) {
+        unsigned long long off = (n - 1) * part_size, len = n < parts ? part_size : size - off;
+        wchar_t *extra;
+        mn_req q;
+        if (have[n]) continue;
+        _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s/parts/%llu", sha, n);
+        extra = sh_wtextf(L"X-Blob-Size: %llu\r\n", size);
+        if (!extra) { code = mn_fail(r, MODNET_E_NOMEM, NULL); break; }
+        memset(&q, 0, sizeof q);
+        q.verb = L"PUT";
+        q.route = route;
+        q.content_type = "application/octet-stream";
+        q.body_file = h;
+        q.body_offset = off;
+        q.body_len = (size_t)len;
+        q.headers = extra;
+        q.max_response = MN_SMALL_BODY;
+        code = mn_exchange(&q, &resp, &rlen, io, r);
+        free(extra);
+        if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "part");
+        else if (code == MODNET_OK) r->parts++;
+        free(resp);
+        resp = NULL;
+    }
+    CloseHandle(h);
+    free(have);
+    if (code != MODNET_OK) return mn_end(r, t0, code);
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s/complete", sha);
+    code = mn_signed_post(route, body, strlen(body), signer, MN_COMPLETE_MS, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "complete");
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_complete_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[112];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(hash)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/complete", hash);
+    code = mn_signed_post(route, "", 0, signer, 0, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 201 && r->status != 200) code = mn_status_fail(r, resp, rlen, "complete");
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_map_claim(const char *ref, const char *const *units, size_t n, const char *secret, long long rev,
+                     const modnet_signer *signer, long long *rev_out, char (**removed)[MODNET_HASH_HEX + 1],
+                     size_t *nremoved, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    mn_hashset set = {0};
+    mn_buf body = {0};
+    unsigned char *resp = NULL;
+    size_t rlen = 0, i;
+    double t0;
+    int code;
+    char num[32];
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (rev_out) *rev_out = -1;
+    if (removed) *removed = NULL;
+    if (nremoved) *nremoved = 0;
+    if (!modnet_valid_ref(ref) || (n && !units) || !modnet_valid_hash(secret) || rev < 1 || !rev_out || !removed || !nremoved)
+        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    for (i = 0; i < n; i++) {
+        if (!modnet_valid_hash(units[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad unit hash")); }
+        if (!mn_set_has(&set, units[i]) && !mn_set_add(&set, units[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    }
+    mn_puts(&body, "{\"ref\":");
+    mn_put_json_string(&body, ref);
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rev\":%lld", rev);
+    mn_puts(&body, num);
+    mn_puts(&body, ",\"secret\":\"");
+    mn_puts(&body, secret);
+    mn_puts(&body, "\",\"units\":[");
+    for (i = 0; i < (size_t)set.n; i++) {
+        if (i) mn_puts(&body, ",");
+        mn_puts(&body, "\"");
+        mn_put(&body, set.v[i], MODNET_HASH_HEX);
+        mn_puts(&body, "\"");
+    }
+    mn_puts(&body, "]}");
+    free(set.v);
+    if (body.bad) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    code = mn_signed_post("/mods/map/claim", body.p, body.n, signer, 0, &resp, &rlen, io, r);
+    SecureZeroMemory(body.p, body.n);
+    free(body.p);
+    if (code == MODNET_OK) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *rv = root && root->type == MPJ_OBJ ? mpj_get(root, "rev") : NULL;
+        if (r->status == 200 || r->status == 201 || r->status == 451) {
+            /* 451: the claim holds every unit but the removed ones (SPEC 10.2). */
+            if (!rv || !mpj_is_num(rv) || (r->status == 451 && !mn_hash_list(root, "removed", removed, nremoved)))
+                code = r->status == 451 ? mn_status_fail(r, resp, rlen, "claim") : mn_fail(r, MODNET_E_PROTOCOL, "claim: the answer has no rev");
+            else { *rev_out = mpj_int(rv); r->created = r->status == 201; }
+        } else {
+            if (r->status == 409 && rv && mpj_is_num(rv)) *rev_out = mpj_int(rv);
+            code = mn_status_fail(r, resp, rlen, "claim");
+        }
+        mpj_free(root);
+    }
+    if (resp) { SecureZeroMemory(resp, rlen); free(resp); }
+    return mn_end(r, t0, code);
+}
+
+int modnet_map_release(const char *ref, const char *secret, long long rev, const modnet_signer *signer, long long *rev_out,
+                       const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    mn_buf body = {0};
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    double t0;
+    int code;
+    char num[32];
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (rev_out) *rev_out = -1;
+    if (!modnet_valid_ref(ref) || !modnet_valid_hash(secret) || rev < 1) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    mn_puts(&body, "{\"ref\":");
+    mn_put_json_string(&body, ref);
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rev\":%lld", rev);
+    mn_puts(&body, num);
+    mn_puts(&body, ",\"secret\":\"");
+    mn_puts(&body, secret);
+    mn_puts(&body, "\"}");
+    if (body.bad) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    code = mn_signed_post("/mods/map/release", body.p, body.n, signer, 0, &resp, &rlen, io, r);
+    SecureZeroMemory(body.p, body.n);
+    free(body.p);
+    if (code == MODNET_OK && r->status != 204) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *rv = root && root->type == MPJ_OBJ ? mpj_get(root, "rev") : NULL;
+        if (r->status == 409 && rv && mpj_is_num(rv) && rev_out) *rev_out = mpj_int(rv);
+        mpj_free(root);
+        code = mn_status_fail(r, resp, rlen, "release");
+    }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_unit_asked(const char *hash, const char *path, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char route[112];
+    mn_buf body = {0};
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(hash) || !path || !path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/asked", hash);
+    mn_puts(&body, "{\"path\":");
+    mn_put_json_string(&body, path);
+    mn_puts(&body, "}");
+    if (body.bad) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = route;
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body.p;
+    q.body_len = body.n;
+    q.max_response = MN_SMALL_BODY;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    free(body.p);
+    if (code == MODNET_OK && r->status != 204) code = mn_status_fail(r, resp, rlen, "asked");
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_asked_units(const char *const *refs, const char *const *secrets, size_t n, const modnet_signer *signer,
+                       char **json, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    mn_buf body = {0};
+    unsigned char *resp = NULL;
+    size_t rlen = 0, i;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (json) *json = NULL;
+    if (!json || (n && (!refs || !secrets))) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    mn_puts(&body, "{\"claims\":[");
+    for (i = 0; i < n; i++) {
+        if (!modnet_valid_ref(refs[i]) || !modnet_valid_hash(secrets[i])) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL)); }
+        if (i) mn_puts(&body, ",");
+        mn_puts(&body, "{\"ref\":");
+        mn_put_json_string(&body, refs[i]);
+        mn_puts(&body, ",\"secret\":\"");
+        mn_puts(&body, secrets[i]);
+        mn_puts(&body, "\"}");
+    }
+    mn_puts(&body, "]}");
+    if (body.bad) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    code = mn_signed_post("/mods/asked", body.p, body.n, signer, 0, &resp, &rlen, io, r);
+    SecureZeroMemory(body.p, body.n);
+    free(body.p);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "asked");
+    if (code == MODNET_OK) { *json = (char *)resp; resp = NULL; }
     free(resp);
     return mn_end(r, t0, code);
 }

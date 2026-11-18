@@ -1711,6 +1711,15 @@ int sh_unit_compose(const char *const *manifests, const size_t *lens, size_t cou
                     void *source_context, const char *salt, const char *name, const sh_mb_resolver *resolver,
                     const char *dest, sh_mb_bundle *out, char **why)
 {
+    return sh_unit_compose_ex(manifests, lens, count, source, source_context, NULL, 0, 0, salt, name, resolver, dest, out,
+                              why);
+}
+
+int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t count, sh_unit_source_fn source,
+                       void *source_context, const sh_unit_extra *extras, size_t extra_count, int link,
+                       const char *salt, const char *name, const sh_mb_resolver *resolver, const char *dest,
+                       sh_mb_bundle *out, char **why)
+{
     wchar_t *wdest = NULL;
     mpj *share = NULL, *doc = NULL;
     char *reason = NULL, *modjson = NULL, *one = NULL;
@@ -1761,7 +1770,13 @@ int sh_unit_compose(const char *const *manifests, const size_t *lens, size_t cou
             wf = sh_mb_wpath(from);
             wt = sh_mb_wpath(to);
             if ((slash = wt ? wcsrchr(wt, L'\\') : NULL) != NULL) { *slash = 0; uw_mkdirs(wt); *slash = L'\\'; }
-            if (!wf || !wt || !CopyFileW(wf, wt, TRUE)) sh_text_set(&reason, "%s could not be copied", p->text);
+            /* A hard link costs no bytes (the cache and the mods folder share a volume); a copy where it cannot be
+             * made. Either way the bytes are checked against the unit's SHA-256 (D51). */
+            if (!wf || !wt) sh_text_set(&reason, "%s could not be copied", p->text);
+            else if (link && CreateHardLinkW(wt, wf, NULL)) {
+                if (!sh_mb_sha256_file(to, &size, have) || strcmp(have, sha->text))
+                    sh_text_set(&reason, "%s is not the unit's bytes", p->text);
+            } else if (!CopyFileW(wf, wt, TRUE)) sh_text_set(&reason, "%s could not be copied", p->text);
             else {
                 SetFileAttributesW(wt, FILE_ATTRIBUTE_NORMAL);
                 if (!sh_mb_sha256_file(to, &size, have) || strcmp(have, sha->text))
@@ -1797,6 +1812,22 @@ int sh_unit_compose(const char *const *manifests, const size_t *lens, size_t cou
             free(to);
         }
         mpj_free(m);
+    }
+    /* Files of no unit (stand-ins, D60): written where no unit put a file. */
+    for (u = 0; u < extra_count && !reason && !oom; u++) {
+        char *to, have[SH_MB_HASH_HEX + 1];
+        unsigned long long size = 0;
+        wchar_t *wt, *slash;
+        if (!extras[u].path || strstr(extras[u].path, "..") || strchr(extras[u].path, '\\') || extras[u].path[0] == '/' ||
+            strchr(extras[u].path, ':')) { sh_text_set(&reason, "a stand-in names no valid path"); break; }
+        if (!(to = sh_textf("%s\\%s", dest, extras[u].path))) { oom = 1; break; }
+        for (char *c = to; *c; c++) if (*c == '/') *c = '\\';
+        if (!sh_mb_sha256_file(to, &size, have)) {
+            if ((wt = sh_mb_wpath(to)) != NULL && (slash = wcsrchr(wt, L'\\')) != NULL) { *slash = 0; uw_mkdirs(wt); }
+            free(wt);
+            if (!uw_write(to, extras[u].text, extras[u].len)) sh_text_set(&reason, "%s could not be written", extras[u].path);
+        }
+        free(to);
     }
     if (reason || oom || !share) goto done;
     if (!mpj_set(share, "name", mpj_new_str(name && name[0] ? name : salt))) { oom = 1; goto done; }

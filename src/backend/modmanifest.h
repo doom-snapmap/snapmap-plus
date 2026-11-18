@@ -55,6 +55,14 @@ typedef struct sh_modmanifest_row {
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
     char *choices;         /* its "choices": "<slot>\t<salt>\n" per entry, in text order; malloc'd, NULL for none */
+    /* Format 2 (SPEC-distribution 2.7). A pinned row names the units of the objects it places ("objects", and
+     * "whole" for a map-level row); its `build` is their composition hash (modcache.h), which the serving index
+     * finds the composition by. A row that is not pinned is a local row ("local": true, D6a): it follows the local
+     * folder of its namespace and names no unit until a publish or an export pins it. */
+    int pinned;
+    size_t unit_count;
+    char (*units)[SH_MOD_HASH_CHARS + 1];   /* malloc'd: the objects' units in root order, then "whole" */
+    char **roots;          /* malloc'd, parallel to units: the author root name, "*" for whole */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -74,6 +82,19 @@ void sh_modmanifest_list_free(sh_modmanifest_list *list);
 int  sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row *row);
 /* Add `name` to the row's list unless an equal name (case-insensitive) is there. */
 int  sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name);
+/* Make `row` a pinned row of `n` units (roots[i] -> units[i]; root "*" is the whole), and its build their
+ * composition hash. 1 on success. */
+int  sh_modmanifest_row_pin(sh_modmanifest_row *row, const char *const *roots, const char *const *units, size_t n);
+/* The composition hash of `units` under `salt` (modcache.h): SHA-256 of "snapmap-plus/composition/1\n1\n", the salt
+ * and "\n", then each distinct unit hash in byte order followed by "\n". 1 on success. */
+int  sh_modmanifest_composition_hash(const char *salt, const char *const *units, size_t count,
+                                     char out[SH_MODMANIFEST_HASH_CAP]);
+/* The content cache's step of every load (modcache.h, bound at install): the rows just read and the names the map
+ * places. It remembers the pinned rows and composes those whose composition is not on disk from what is here. */
+typedef void (*sh_modmanifest_content_fn)(const struct sh_modmanifest_list *rows, char *const *placed, size_t count);
+void sh_modmanifest_set_content(sh_modmanifest_content_fn fn);
+/* The placeholder build of a local row (64 zeros): it never names a build, so the resolver takes the local folder. */
+#define SH_MODMANIFEST_LOCAL_BUILD "0000000000000000000000000000000000000000000000000000000000000000"
 
 /* ------------------------------------------------------------ grammar ---- */
 

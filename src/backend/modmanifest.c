@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "modmanifest.h"
+#include "sha256.h"
 #include "modserve.h"
 #include "modsalt.h"
 #include "map_carrier.h"
@@ -37,10 +38,77 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     free(row->names);
     free(row->name);
     free(row->choices);
+    if (row->roots) for (i = 0; i < row->unit_count; i++) free(row->roots[i]);
+    free(row->roots);
+    free(row->units);
     row->names = NULL;
     row->name_count = 0;
     row->name = NULL;
     row->choices = NULL;
+    row->roots = NULL;
+    row->units = NULL;
+    row->unit_count = 0;
+    row->pinned = 0;
+}
+
+static int mm_hash_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
+
+int sh_modmanifest_composition_hash(const char *salt, const char *const *units, size_t count,
+                                    char out[SH_MODMANIFEST_HASH_CAP])
+{
+    const char **sorted;
+    sh_sha256 s;
+    size_t i;
+    if (!salt || !out || (count && !units)) return 0;
+    if (count && !(sorted = (const char **)malloc(count * sizeof *sorted))) return 0;
+    else if (!count) sorted = NULL;
+    for (i = 0; i < count; i++) sorted[i] = units[i];
+    if (count) qsort((void *)sorted, count, sizeof *sorted, mm_hash_cmp);
+    sh_sha256_init(&s);
+    sh_sha256_update(&s, "snapmap-plus/composition/1\n1\n", 29);
+    sh_sha256_update(&s, salt, strlen(salt));
+    sh_sha256_update(&s, "\n", 1);
+    for (i = 0; i < count; i++) {
+        if (i && !strcmp(sorted[i], sorted[i - 1])) continue;
+        sh_sha256_update(&s, sorted[i], strlen(sorted[i]));
+        sh_sha256_update(&s, "\n", 1);
+    }
+    sh_sha256_hex(&s, out, SH_MOD_HASH_CHARS);
+    free((void *)sorted);
+    return 1;
+}
+
+int sh_modmanifest_row_pin(sh_modmanifest_row *row, const char *const *roots, const char *const *units, size_t n)
+{
+    char (*u)[SH_MOD_HASH_CHARS + 1] = NULL, **r = NULL, chash[SH_MODMANIFEST_HASH_CAP];
+    size_t i;
+    if (!row || (n && (!roots || !units))) return 0;
+    if (n && (!(u = calloc(n, sizeof *u)) || !(r = (char **)calloc(n, sizeof *r)))) { free(u); free(r); return 0; }
+    for (i = 0; i < n; i++) {
+        if (!units[i] || !sh_modmanifest_valid_hash(units[i], strlen(units[i])) || !roots[i] || !roots[i][0] ||
+            !(r[i] = sh_text(roots[i]))) {
+            while (i) free(r[--i]);
+            free(r);
+            free(u);
+            return 0;
+        }
+        strcpy_s(u[i], sizeof u[i], units[i]);
+    }
+    if (!sh_modmanifest_composition_hash(row->salt, units, n, chash)) {
+        for (i = 0; i < n; i++) free(r[i]);
+        free(r);
+        free(u);
+        return 0;
+    }
+    if (row->roots) for (i = 0; i < row->unit_count; i++) free(row->roots[i]);
+    free(row->roots);
+    free(row->units);
+    row->roots = r;
+    row->units = u;
+    row->unit_count = n;
+    row->pinned = 1;
+    strcpy_s(row->build, sizeof row->build, chash);
+    return 1;
 }
 
 const char *sh_modmanifest_row_name(const sh_modmanifest_row *row)
@@ -103,9 +171,21 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
     slot->name_count = 0;
     slot->name = NULL;
     slot->choices = NULL;
+    slot->roots = NULL;
+    slot->units = NULL;
+    slot->unit_count = 0;
+    slot->pinned = 0;
     if ((row->name && !(slot->name = sh_text(row->name))) || (row->choices && !(slot->choices = sh_text(row->choices)))) {
         sh_modmanifest_row_free(slot);
         return 0;
+    }
+    if (row->pinned) {
+        const char **units = row->unit_count ? (const char **)calloc(row->unit_count, sizeof *units) : NULL;
+        int ok = !row->unit_count || units;
+        for (i = 0; ok && i < row->unit_count; i++) units[i] = row->units[i];
+        ok = ok && sh_modmanifest_row_pin(slot, (const char *const *)row->roots, units, row->unit_count);
+        free((void *)units);
+        if (!ok) { sh_modmanifest_row_free(slot); return 0; }
     }
     for (i = 0; i < row->name_count; i++) {
         if (!sh_modmanifest_row_add_name(slot, row->names[i])) {
@@ -419,17 +499,69 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     }
     {
         char mod[SH_MODMANIFEST_SALT_CAP + SH_MODMANIFEST_HASH_CAP + 1];
-        if (!mm_member_text(&object, "mod", mod, sizeof mod, 1) || strlen(mod) != SH_MODMANIFEST_SALT_LEN + 1 + SH_MOD_HASH_CHARS ||
-            mod[SH_MODMANIFEST_SALT_LEN] != '@') {
+        size_t ml;
+        if (!mm_member_text(&object, "mod", mod, sizeof mod, 1)) { MM_ERR("row has no valid mod"); goto done; }
+        ml = strlen(mod);
+        if (ml == SH_MODMANIFEST_SALT_LEN + 1 + SH_MOD_HASH_CHARS && mod[SH_MODMANIFEST_SALT_LEN] == '@') {
+            /* Format 1 (before 1.0): a local row at that build (D7). */
+            memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN);
+            out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
+            memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
+        } else if (ml == SH_MODMANIFEST_SALT_LEN) {
+            memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN + 1);
+            strcpy_s(out->build, sizeof out->build, SH_MODMANIFEST_LOCAL_BUILD);
+        } else {
             MM_ERR("row has no valid mod");
             goto done;
         }
-        memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN);
-        out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
-        memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
         if (!mm_salt_ok(out->salt) || !sh_modmanifest_valid_hash(out->build, strlen(out->build))) {
             MM_ERR("row has no valid mod");
             goto done;
+        }
+        if (ml == SH_MODMANIFEST_SALT_LEN) {
+            /* Format 2: a pinned row names its objects' units (and "whole"); a local row says "local": true. */
+            const char *local = sh_json_object_get(&object, "local"), *objects = sh_json_object_get(&object, "objects"),
+                       *whole = sh_json_object_get(&object, "whole");
+            if (!(local && !strcmp(local, "true"))) {
+                sh_json_object oo = {0};
+                const char **roots = NULL, **units = NULL;
+                char **owned = NULL;
+                size_t n = 0, c, k;
+                int good = 1;
+                if (objects && (*objects != '{' || !sh_native_json_parse_object(objects, strlen(objects), 2, &oo))) good = 0;
+                if (good) {
+                    size_t cap = oo.count + 1;
+                    roots = (const char **)calloc(cap, sizeof *roots);
+                    units = (const char **)calloc(cap, sizeof *units);
+                    owned = (char **)calloc(cap * 2, sizeof *owned);
+                    good = roots && units && owned;
+                }
+                for (c = 0; good && c < oo.count; c++) {
+                    char *root = sh_textn(oo.members[c].key, oo.members[c].key_length);
+                    char *unit = mm_decode(oo.members[c].value_json, strlen(oo.members[c].value_json));
+                    owned[2 * n] = root;
+                    owned[2 * n + 1] = unit;
+                    if (!root || !unit || !root[0] || !sh_modmanifest_valid_hash(unit, strlen(unit))) { good = 0; break; }
+                    roots[n] = root;
+                    units[n] = unit;
+                    n++;
+                }
+                if (good && whole) {
+                    char *unit = mm_decode(whole, strlen(whole));
+                    owned[2 * n] = NULL;
+                    owned[2 * n + 1] = unit;
+                    if (!unit || !sh_modmanifest_valid_hash(unit, strlen(unit))) good = 0;
+                    else { roots[n] = "*"; units[n] = unit; n++; }
+                }
+                if (good && !n) good = 0;
+                if (good && !sh_modmanifest_row_pin(out, roots, units, n)) good = 0;
+                for (k = 0; owned && k < (oo.count + 1) * 2; k++) free(owned[k]);
+                free(owned);
+                free((void *)roots);
+                free((void *)units);
+                sh_json_object_free(&oo);
+                if (!good) { MM_ERR("row '%s' names its objects' units wrongly", out->salt); goto done; }
+            }
         }
     }
     if (!mm_member_heap(&object, "name", &out->name, 0)) {
@@ -441,6 +573,9 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     {
         const char *attached = sh_json_object_get(&object, "attached");
         out->attached = attached && !strcmp(attached, "true");
+        /* A pinned row used map-wide names "whole" (SPEC 2.7). */
+        for (size_t u = 0; out->pinned && u < out->unit_count; u++)
+            if (!strcmp(out->roots[u], "*")) out->attached = 1;
     }
     {
         /* Registry choices: entries that do not read are skipped (the row stays). */
@@ -489,21 +624,35 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     if (!row) return NULL;
     if (!mm_salt_ok(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build)))
         return NULL;
+    /* Format 2 (SPEC-distribution 2.7): the namespace, then a pinned row's units or a local row's placed names. */
     mm_put(&t, "{\"mod\":\"", 8);
     mm_put(&t, row->salt, strlen(row->salt));
-    mm_put(&t, "@", 1);
-    mm_put(&t, row->build, strlen(row->build));
     mm_put(&t, "\",\"name\":", 9);
     mm_put_quoted(&t, sh_modmanifest_row_name(row));
     _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
     mm_put(&t, number, strlen(number));
-    mm_put(&t, ",\"names\":[", 10);
-    for (i = 0; i < row->name_count; i++) {
-        if (i) mm_put(&t, ",", 1);
-        mm_put_quoted(&t, row->names[i]);
+    if (row->pinned) {
+        size_t objects = 0;
+        const char *whole = NULL;
+        mm_put(&t, ",\"objects\":{", 12);
+        for (i = 0; i < row->unit_count; i++) {
+            if (!strcmp(row->roots[i], "*")) { whole = row->units[i]; continue; }
+            if (objects++) mm_put(&t, ",", 1);
+            mm_put_quoted(&t, row->roots[i]);
+            mm_put(&t, ":", 1);
+            mm_put_quoted(&t, row->units[i]);
+        }
+        mm_put(&t, "}", 1);
+        if (whole) { mm_put(&t, ",\"whole\":", 9); mm_put_quoted(&t, whole); }
+    } else {
+        mm_put(&t, ",\"local\":true,\"names\":[", 23);
+        for (i = 0; i < row->name_count; i++) {
+            if (i) mm_put(&t, ",", 1);
+            mm_put_quoted(&t, row->names[i]);
+        }
+        mm_put(&t, "]", 1);
+        if (row->attached) mm_put(&t, ",\"attached\":true", 16);
     }
-    mm_put(&t, "]", 1);
-    if (row->attached) mm_put(&t, ",\"attached\":true", 16);
     if (mm_choice_count(row->choices)) {
         char *slot, *key;
         mm_put(&t, ",\"choices\":{", 12);
@@ -1308,6 +1457,8 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 }
 
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve) { g_resolve = resolve; }
+static sh_modmanifest_content_fn volatile g_content;
+void sh_modmanifest_set_content(sh_modmanifest_content_fn fn) { g_content = fn; }
 
 
 /* The load's listing: the rows, and the placed names when the hook asks. */
@@ -1549,6 +1700,18 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         return NULL;
     }
     sh_modmanifest_read(json, length, &list, &rejected);
+    /* Pinned rows: the content cache composes what it can before the rows resolve (modcache.h). */
+    if (g_content) {
+        size_t i, placed_count = 0;
+        int pinned = 0, failed = 0;
+        char **placed = NULL;
+        for (i = 0; i < list.count; i++) pinned |= list.rows[i].pinned;
+        if (pinned) {
+            placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
+            g_content(&list, placed, failed ? 0 : placed_count);
+            sh_modmanifest_names_free(placed, placed_count);
+        }
+    }
 
     names = mm_describe(&list);
     /* The map scope first: the bundles' shadows and requirements are live
@@ -1698,6 +1861,38 @@ static int mm_save_keep_unserved(mm_save_ctx *ctx, char **names, size_t count)
     return ok;
 }
 
+/* A row the save's closure found served by a composition (its build is the composition hash of one of the open
+ * map's pinned rows) keeps that row's units: a downloaded map saved here keeps the units its rows name, and no unit
+ * is computed at a save (D-A15). A row served by a local folder is written as a local row. 0 when memory runs out. */
+static int mm_save_pins(mm_save_ctx *ctx)
+{
+    sh_modmanifest_list cur;
+    size_t i, k;
+    int ok = 1;
+    memset(&cur, 0, sizeof cur);
+    (void)sh_modmanifest_current(&cur);
+    for (i = 0; ok && i < ctx->list.count; i++) {
+        sh_modmanifest_row *r = &ctx->list.rows[i];
+        for (k = 0; k < cur.count; k++) {
+            const sh_modmanifest_row *c = &cur.rows[k];
+            const char **units;
+            size_t u;
+            if (!c->pinned || strcmp(c->build, r->build) || strcmp(c->salt, r->salt)) continue;
+            units = c->unit_count ? (const char **)calloc(c->unit_count, sizeof *units) : NULL;
+            if (c->unit_count && !units) { ok = 0; break; }
+            for (u = 0; u < c->unit_count; u++) units[u] = c->units[u];
+            ok = sh_modmanifest_row_pin(r, (const char *const *)c->roots, units, c->unit_count);
+            free((void *)units);
+            if (ok && !sh_modmanifest_row_name(r)[0] && c->name) ok = sh_modmanifest_row_set_name(r, c->name);
+            if (ok && c->size) r->size = c->size;
+            if (ok && c->attached) r->attached = 1;
+            break;
+        }
+    }
+    sh_modmanifest_list_free(&cur);
+    return ok;
+}
+
 /* A save step failed (why): the save keeps the rows the open map has, so a
  * map is never written without its declaration. NULL when it has none or they
  * could not be written either. */
@@ -1750,6 +1945,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!ctx.failed) mm_save_names(&ctx);
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_keep_unserved(&ctx, names, count)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
     sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {

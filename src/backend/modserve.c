@@ -1494,15 +1494,8 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
     if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_PLACES)) {
-        /* The places area: each child folder is a map's place, walked as its own area. */
-        ms_scan_item places = *at;
-        size_t first = stack->n, i;
-        ms_scan_list_folder(&places, stack);
-        for (i = first; i < stack->n; i++) {
-            stack->d[i].kind = MS_SCAN_FOLDER;
-            stack->d[i].top = 0;
-            stack->d[i].place = ms_strdup(x, stack->d[i].rel);
-        }
+        /* The retired places area (mods\maps\, before the content cache): never read; a map's content is its units,
+         * composed in the content cache (modcache.h). */
         return;
     }
     probe = sh_textf("%s\\mod.json", at->dir);
@@ -1527,6 +1520,13 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     b->first_file = x->nfiles;
     if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
     else ms_parse_bundle(x, b);
+    if (!b->cause && b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) {
+        /* A composition (modcache.h) is named by its composition hash, its folder's name: the hash a pinned map row
+         * names. */
+        if (strlen(leaf) == SH_MODSERVE_HASH_HEX && strspn(leaf, "0123456789abcdef") == SH_MODSERVE_HASH_HEX)
+            b->hash = ms_strdup(x, leaf);
+        else ms_fail(b, "it is not a composition of the content cache");
+    }
     if (b->cause) {
         /* Failure isolation: drop this bundle's rows, keep everything else. */
         x->nfiles = mark_files;
@@ -1549,6 +1549,24 @@ static void ms_scan_folder(ms_index *x, const char *top)
     ms_scan_list_folder(&root, &stack);
     free(root.dir);
     free(root.rel);
+    /* The content cache's compositions (modcache.h): each folder of .content\served is one map row's units, a
+     * bundle of the content area, served only for a map that declares it. */
+    {
+        ms_scan_item served;
+        const char *area = ms_strdup(x, SH_MODSERVE_CONTENT);
+        size_t first = stack.n, i;
+        served.dir = sh_textf("%s\\%s\\served", top, SH_MODSERVE_CONTENT);
+        served.rel = sh_textf("%s\\served", SH_MODSERVE_CONTENT);
+        served.place = area;
+        served.kind = MS_SCAN_FOLDER;
+        served.top = 0;
+        if (served.dir && served.rel && area) {
+            ms_scan_list_folder(&served, &stack);
+            for (i = first; i < stack.n; i++) stack.d[i].place = area;
+        }
+        free(served.dir);
+        free(served.rel);
+    }
     while (stack.n) {
         ms_scan_item at = stack.d[--stack.n];
         if (at.kind == MS_SCAN_FOLDER) ms_scan_list_folder(&at, &stack);
@@ -1582,6 +1600,7 @@ static void ms_one_per_area(ms_index *x)
             const ms_bundle *o = &x->bundles[k];
             int first;
             if (k == i || !o->admitted || strcmp(o->id, b->id) || !ms_same_area(o, b)) continue;
+            if (b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) break;   /* compositions: one per map row */
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
             if (b->place)
@@ -7969,9 +7988,12 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
     if (!x || !row || !sh_salt_valid(row->salt, strlen(row->salt))) return -1;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
+    /* A pinned row is served by its composition only: a local mod never stands in for a map's units (D21); its
+     * files serve the composition by exact hash instead (modcache.h). */
+    if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
+    (void)place;   /* places are retired: a local row follows the root folder of its namespace */
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
     if (at >= 0) return at;
-    if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
     return ms_salt_in(x, salt, NULL, "");
 }
 

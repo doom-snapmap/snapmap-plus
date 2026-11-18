@@ -161,7 +161,7 @@ static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
     sh_carrier_view *v = c->v;
     char first = s[m->value_from];
     if (cr_key_is(s, m, "format")) {
-        c->format_ok = (m->value_to - m->value_from == 1 && first == '1');
+        c->format_ok = (m->value_to - m->value_from == 1 && (first == '1' || first == '2'));   /* 2: units (SPEC-distribution 2.7) */
         return 1;
     }
     if (cr_key_is(s, m, "mods")) {
@@ -218,7 +218,7 @@ int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view)
             strcpy_s(v.why, sizeof v.why, "a part has the wrong type or appears twice");
         } else if (!ic.format_ok) {
             v.state = SH_CARRIER_MALFORMED;
-            strcpy_s(v.why, sizeof v.why, "its format is not 1");
+            strcpy_s(v.why, sizeof v.why, "its format is not 1 or 2");
         }
     }
     if (v.state == SH_CARRIER_MALFORMED) {
@@ -401,7 +401,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
 #define CR_LIT(s) CR_EMIT((s), sizeof(s) - 1)
     CR_EMIT(src, before);
     if (!empty_root) CR_LIT(",");
-    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":1");
+    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":2");
     for (i = 0; i < CR_PARTS; i++) {
         if (!pv[i]) continue;
         CR_LIT(",\"");

@@ -133,6 +133,17 @@ int  sh_unit_compose(const char *const *manifests, const size_t *lens, size_t co
                      void *source_context, const char *salt, const char *name, const sh_mb_resolver *resolver,
                      const char *dest, sh_mb_bundle *out, char **why);
 
+/* A file of no unit that a composition carries (a stand-in for an absent object, SPEC-distribution D60), at the
+ * mod's own path; written only where no unit puts a file. */
+typedef struct sh_unit_extra { const char *path; const char *text; size_t len; } sh_unit_extra;
+
+/* sh_unit_compose with `extras` and, when `link` is 1, each unit file hard-linked from its source where the volume
+ * allows (a copy otherwise); every file is checked against its SHA-256 either way. */
+int  sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t count, sh_unit_source_fn source,
+                        void *source_context, const sh_unit_extra *extras, size_t extra_count, int link,
+                        const char *salt, const char *name, const sh_mb_resolver *resolver, const char *dest,
+                        sh_mb_bundle *out, char **why);
+
 /* 1 when `type` (a decl type, any case) is one the game finds by enumeration, never by a name a file spells (the
  * conductor numbers the AI scores and encounters). */
 int  sh_unit_enumerated_type(const char *type);
