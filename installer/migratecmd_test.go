@@ -19,6 +19,7 @@ func runCmdMigrate(t *testing.T, withTool bool, mode string, f flags) (printed, 
 // placed, or not.
 func runCmdMigrateTool(t *testing.T, withTool, recorded bool, mode string, f flags) (printed, tool string, calls []string, err error) {
 	t.Helper()
+	enableStoreConversion(t)
 	appdata := filepath.Join(t.TempDir(), "appdata")
 	t.Setenv("LOCALAPPDATA", appdata)
 	if withTool {
@@ -58,6 +59,16 @@ func runCmdMigrateTool(t *testing.T, withTool, recorded bool, mode string, f fla
 		calls = strings.Split(strings.TrimSpace(string(data)), "\n")
 	}
 	return printed, out.String(), calls, err
+}
+
+// With the conversion off the command converts nothing and says so plainly.
+func TestCmdMigrateIsOffByDefault(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "appdata"))
+	var err error
+	printed := captureStdout(t, func() { err = cmdMigrate(flags{doom: `D:\Games\DOOM`}) })
+	if err != nil || !strings.Contains(printed, "does not convert mods or maps made with earlier releases") {
+		t.Fatalf("err %v, printed %q", err, printed)
+	}
 }
 
 func TestCmdMigrateRunsTheKeptToolWithoutReinstalling(t *testing.T) {
