@@ -355,8 +355,6 @@ var modsTab = (function () {
             group: str(b.group),
             /* a downloaded map's place ("maps\<segment>") and the map's name; "" for the player's own */
             place: str(b.place), placeTitle: str(b.placeTitle),
-            /* only the files of the mod that map uses: it stays with that map */
-            part: bool(b.part),
             description: str(b.description), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: normNames(b.editorRowNames),
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
@@ -871,12 +869,7 @@ var modsTab = (function () {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
-      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it.
-         One that holds only the files its map uses has no action: it stays with that map. */
-      if (b && b.place && b.part) {
-        u.style.display = 'none';
-        return;
-      }
+      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it. */
       if (b && b.place) {
         u.style.display = '';
         u.textContent = 'Add to my mods';

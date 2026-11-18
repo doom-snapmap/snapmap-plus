@@ -640,8 +640,6 @@ static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
     }
     if (!strcmp(c, "cannot read mod.json"))
         return sh_text("Its mod.json could not be read; close any program that has it open and press Refresh.");
-    /* A folder that holds a published map's cut (modstore.c): it stays with that map. */
-    if (!strcmp(c, SH_MB_SLICE_ROOT)) return mu_sentence_end(sh_text(c));
     /* The store's checks of the built files (modstore.c). */
     if (mu_ends(c, " is missing") || mu_ends(c, " is not the size mod.json records") || mu_ends(c, " is missing or unreadable") ||
         mu_ends(c, " does not match mod.json (damaged or edited)")) {
@@ -1234,8 +1232,6 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     title = mu_place_title(e);
     mu_kstr(b, "placeTitle", title ? title : "", 0);
     free(title);
-    /* Only the files of the mod that map uses: it stays with that map. */
-    mu_kbool(b, "part", e->loaded && e->bundle.slice_of[0], 0);
     {
         char *desc = e->loaded ? mu_extra_string(bd, "description") : NULL;
         mu_kstr(b, "description", desc ? desc : "", 0);

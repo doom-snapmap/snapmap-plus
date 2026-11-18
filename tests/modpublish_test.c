@@ -308,16 +308,10 @@ int main(int argc, char **argv)
     printf("-- the question text\n");
     {
         char q[256];
-        sh_modpublish_compose_question(q, sizeof q, 2, 3u * 1024u * 1024u, 3u * 1024u * 1024u);
+        sh_modpublish_compose_question(q, sizeof q, 2, 3u * 1024u * 1024u);
         CHECK(!strcmp(q, "This map uses 2 mods (3.0 MB). Upload them to the mod store so other players can download them? You are asked this only once."));
-        sh_modpublish_compose_question(q, sizeof q, 1, 512, 512);
+        sh_modpublish_compose_question(q, sizeof q, 1, 512);
         CHECK(strstr(q, "uses 1 mod (512 bytes). Upload it") != NULL && strlen(q) < 256);
-        /* The map uses only part of a mod: what goes up, against the whole. No new word. */
-        sh_modpublish_compose_question(q, sizeof q, 2, 1258291u, 147u * 1024u * 1024u);
-        CHECK(!strcmp(q, "This map uses 2 mods and needs 1.2 MB of their 147.0 MB of files. Upload those to the mod store so "
-                         "other players can download them? You are asked this only once."));
-        sh_modpublish_compose_question(q, sizeof q, 1, 2048, 1024u * 1024u);
-        CHECK(strstr(q, "uses 1 mod and needs 2048 bytes of its 1.0 MB of files.") && strlen(q) < 256 && !strstr(q, "slice"));
     }
 
     printf("-- a save whose mod list has a row the reader refuses is not published, naming the mod\n");
@@ -715,15 +709,6 @@ int main(int argc, char **argv)
         sh_modpublish_test_age_tag_arm(20000);
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 6);
-        /* The cut is armed for the publish's own save only: that save's end
-         * disarms it, so a later save inside the window carries whole builds. */
-        sh_modpublish_publish_started(LOCAL_ID);
-        CHECK(sh_modpublish_test_cut_armed());
-        {
-            char *saved = sh_modmanifest_on_save(text, len, NULL);
-            CHECK(!sh_modpublish_test_cut_armed());
-            if (saved) HeapFree(GetProcessHeap(), 0, saved);
-        }
         /* A publish whose save was not tagged says so at the hold. */
         mark = g_log_n;
         sh_modpublish_save_seen(text, len);

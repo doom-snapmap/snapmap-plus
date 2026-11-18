@@ -990,15 +990,6 @@ void sh_mb_set_extra_check(sh_mb_extra_check_fn fn)
     g_mb_extra_check = fn;
 }
 
-int sh_mb_sliceable(const sh_mb_bundle *b)
-{
-    size_t i;
-    if (!b) return 0;
-    for (i = 0; i < b->file_count; i++)
-        if (!b->files[i].stock && sh_mb_script_request(b->files[i].request, NULL, NULL) > 0) return 0;
-    return 1;
-}
-
 /* The static pass's lexer: just enough of Lua 5.4's to step over comments,
  * strings and numbers and to see the registration calls. */
 static int mbs_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
@@ -2019,6 +2010,8 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->files);
     for (i = 0; i < b->shadow_count; i++) free(b->shadows[i]);
     free(b->shadows);
+    for (i = 0; i < b->units_of_count; i++) free(b->units_of[i]);
+    free(b->units_of);
     free(b->name);
     free(b->author);
     free(b->homepage);
@@ -2818,11 +2811,6 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "mod.json \"" SH_MB_BLOCK_KEY "\" must be an object"); return 0; }
     if (!mb_common_fields(b, root)) return 0;
-    {
-        const mbj *of = mbj_get(root, SH_MB_SLICE_KEY);
-        if (of && !mb_is_hex64(of)) { mb_error(b, "mod.json \"" SH_MB_SLICE_KEY "\" is not a build"); return 0; }
-        if (of) memcpy(b->slice_of, of->s, SH_MB_HASH_HEX + 1);
-    }
     {
         mbj tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -6012,10 +6000,32 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
  * A block without "build" is a failed build (its "cause") or a folder given
  * its salt and not built yet: the load fails with that, after reading the
  * salt, "built", "rules" and "tree" so the store still knows the folder. */
+/* The block's "units_of" (a composition's unit hashes) into the bundle; 1, or 0 when it is not a list of hashes
+ * (or memory runs out). */
+static int mb_units_of_read(sh_mb_bundle *out, const mbj *block)
+{
+    const mbj *v = block ? mbj_get(block, "units_of") : NULL;
+    size_t i;
+    if (!v) return 1;
+    if (v->t != MBJ_ARR) return 0;
+    for (i = 0; i < out->units_of_count; i++) free(out->units_of[i]);
+    free(out->units_of);
+    out->units_of = NULL;
+    out->units_of_count = 0;
+    if (!v->count) return 1;
+    if (!(out->units_of = (char **)calloc(v->count, sizeof *out->units_of))) return 0;
+    for (i = 0; i < v->count; i++) {
+        if (!mb_is_hex64(v->items[i]) || !(out->units_of[i] = mb_strndup(v->items[i]->s, v->items[i]->n))) return 0;
+        out->units_of_count++;
+    }
+    return 1;
+}
+
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 {
     static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
-                                         "registries", "rules", "salt", "scripts", "shadows", "spelled", "stock", "tree", "warnings", NULL };
+                                         "registries", "rules", "salt", "scripts", "shadows", "spelled", "stock", "tree",
+                                         "units_of", "warnings", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i;
     if (root->t != MBJ_OBJ) { mb_error(out, MB_BLOCK_EDITED); return 0; }
@@ -6067,6 +6077,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     v = mbj_get(block, "spelled");
     if (v && (v->t != MBJ_STR || !sh_salt_valid(v->s, v->n))) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     if (v) { memcpy(out->spelled, v->s, SH_SALT_LEN); out->spelled[SH_SALT_LEN] = 0; }
+    if (!mb_units_of_read(out, block)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     v = mbj_get(block, "registries");
     if (v) {
         mb_buf rb = {0};
@@ -6762,6 +6773,14 @@ static char *mb_block_text(const sh_mb_bundle *b)
     if (b->edits) { mb_puts(&o, ",\"edits\":"); mb_puts(&o, b->edits); }
     if (b->scripts) { mb_puts(&o, ",\"scripts\":"); mb_puts(&o, b->scripts); }
     if (b->spelled[0]) { mb_puts(&o, ",\"spelled\":"); mb_put_jcstr(&o, b->spelled); }
+    if (b->units_of_count) {
+        mb_puts(&o, ",\"units_of\":[");
+        for (i = 0; i < b->units_of_count; i++) {
+            if (i) mb_put(&o, ",", 1);
+            mb_put_jcstr(&o, b->units_of[i]);
+        }
+        mb_put(&o, "]", 1);
+    }
     if (b->shadow_count) {
         mb_puts(&o, ",\"shadows\":[");
         for (i = 0; i < b->shadow_count; i++) {
@@ -7071,6 +7090,8 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
                         prev_built = _strtoi64(pt->s, NULL, 10);
                     pt = mbj_get(block, "build");
                     if (mb_is_hex64(pt)) memcpy(out->prev_hash, pt->s, SH_MB_HASH_HEX + 1);
+                    /* a composition stays one through every build of its folder */
+                    if (!mb_units_of_read(out, block)) mb_error(out, "out of memory");
                 }
             }
         }

@@ -622,17 +622,14 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
-test('a map that uses only part of a mod: no Add to my mods, and a file players lacked said beside the published map', () => {
+test('a file players lacked is said beside the published map', () => {
   const data = clone(v4);
-  data.mods.find(b => b.key === 'maps\\Hell Guard Arena\\Hell Guards').part = true;
   data.map.asked = [{mod: 'Hell Guards', request: 'generated/decls/entitydef/mods/urdebxyn/staff_fx.decl', by: 'mods/urdebxyn/staff'},
                     {mod: '', request: 'generated/image/mods/urdebxyn/glow.bimage', by: ''}];
   const h = live(data);
   h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
-  assert.equal(h.nodes.modsUseBtn.style.display, 'none', 'the files one map uses stay with that map');
-  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
-  h.ui.select('maps\\Hell Guard Arena\\Lava Floor');
   assert.equal(h.nodes.modsUseBtn.textContent, 'Add to my mods');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
   h.nodes.modsMapBtn.click();
   const lines = section(h, 'asked', h.nodes.modsMapHost).all('mods-line').map(n => n.textContent);
   assert.deepEqual(lines, [
@@ -1226,7 +1223,7 @@ test('page contract', () => {
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
                    '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile',
-                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps', '"part"', '"asked"'])
+                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps', '"asked"'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {

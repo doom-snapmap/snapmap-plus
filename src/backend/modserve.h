@@ -793,7 +793,7 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   gate that takes it can decide (the item is known at the read's
  *   completion; the text carries no place of this machine's). Remembers the
  *   place it replaces, as sh_modserve_place_load does. While pending a row
- *   resolves only at its own build (or the build it was cut from) at the
+ *   resolves only at its own build at the
  *   root: the root's other build of its salt never stands in for it, so
  *   nothing of that build is listed or activated before the gate decides
  *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
@@ -950,19 +950,21 @@ typedef struct sh_modserve_bundle_ref {
 /* Filled refs hold malloc'd text: release each with sh_modserve_bundle_ref_free. */
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
 
-/* A published map that uses part of a mod (modslice.h) carries only the
- * files its cut found it needs. A file the game then asks for that the cut
- * left out is a defect of the cut: the map plays on if the game can, and
- * the asked name is recorded. The provider (overrides.c) calls
- * sh_modserve_note_miss with every request it found nowhere; one under
- * mods/<salt>/ of a mod the open map declares by a cut is noted once per map,
- * with the name of the load that asked for it when the main thread's open
- * loads say (`by`, else ""), logged:
+/* A map's object served from its units (a composition, modunit.h, block
+ * "units_of") carries only the files its closure found it needs. A file the
+ * game then asks for that the composition lacks is a defect of the closure:
+ * the map plays on if the game can, and the asked name is recorded. The
+ * provider (overrides.c) calls sh_modserve_note_miss with every request it
+ * found nowhere; one under mods/<salt>/ of a composition (a board square
+ * aside: a unit leaves the squares its materials do not draw out on purpose)
+ * is noted once per process, with the name of the load that asked for it
+ * when the main thread's open loads say (`by`, else ""), logged:
  *   MODS: <mod name> came with this map without <request>, which <by> asked for; the map goes on without it
- * and handed to the bound reporter (modpublished.c: the store keeps it for
- * the map's author, who sees it beside the published map and corrects it by
- * publishing again). Returns 1 when noted now, 0 otherwise. Any thread. */
-typedef void (*sh_modserve_miss_fn)(const char *salt, const char *cut_hash, const char *request, const char *by);
+ * and handed to the bound reporter with the composition's first unit
+ * (modpublish.c: the store keeps it for the publishers of maps that claim the
+ * unit, whose next publish carries the file, SPEC-distribution 3.8). Returns
+ * 1 when noted now, 0 otherwise. Any thread. */
+typedef void (*sh_modserve_miss_fn)(const char *salt, const char *unit, const char *request, const char *by);
 void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn);
 int  sh_modserve_note_miss(const char *request);
 /* The misses noted since the process started: one "<mod name>: <request>"

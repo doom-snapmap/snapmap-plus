@@ -1265,7 +1265,6 @@ int main(int argc, char **argv)
             { "mod.json: unexpected '}' at byte 12",
               "Its mod.json is not valid JSON (unexpected '}' at byte 12); fix it in a text editor and press Refresh." },
             { "cannot read mod.json", "Its mod.json could not be read; close any program that has it open and press Refresh." },
-            { SH_MB_SLICE_ROOT, SH_MB_SLICE_ROOT "." },
         };
         size_t i;
         for (i = 0; i < sizeof C / sizeof C[0]; i++) {
