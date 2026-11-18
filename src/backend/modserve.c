@@ -5591,13 +5591,20 @@ static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_o
     if (!x || !hash) return -1;
     AcquireSRWLockShared(&g_place_lock);
     place = g_place ? g_place : "";
-    for (round = 0; at < 0 && round < (place[0] ? 2 : 1); ++round)
+    /* The root first, then the open map's place, then the content cache's compositions (modcache.h), which a pinned
+     * row names by their composition hash and which no other folder carries (R-LV2: without this round a pinned
+     * row's composition resolved but was never activated or ranked by the map scope). */
+    for (round = 0; at < 0 && round < 3; ++round) {
+        if (round == 1 && !place[0]) continue;
         for (i = 0; at < 0 && i < x->nbundles; ++i) {
             const ms_bundle *b = &x->bundles[i];
             if (!b->hash || _stricmp(b->hash, hash) || (admitted_only && !b->admitted)) continue;
-            if (round == 0 ? b->place != NULL : (!b->place || _stricmp(b->place, place))) continue;
+            if (round == 0 ? b->place != NULL
+                : round == 1 ? (!b->place || _stricmp(b->place, place))
+                : (!b->place || strcmp(b->place, SH_MODSERVE_CONTENT))) continue;
             at = i;
         }
+    }
     ReleaseSRWLockShared(&g_place_lock);
     return at;
 }

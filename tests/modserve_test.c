@@ -5138,6 +5138,44 @@ static void dep_visit(void *context, const char *id, const char *hash, unsigned 
     (void)id;
 }
 
+/* A composition of the content cache (.content\served\<composition hash>) serves a map that declares it by that
+ * hash, in the editor and in Play, and nothing else (R-LV2: the scope found a declared build at the root and in the
+ * map's place only, so a pinned row's composition resolved but never served). */
+static void test_composition_serves_its_map(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], served[MAX_PATH], text[64];
+    char *slash;
+    const char *list[1];
+    int was_on = sh_modserve_scope_enabled(), was_mode = sh_modserve_scope_mode_get();
+    static const char CHASH[] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    static const fx_file comp[] = {
+        { "generated/decls/entitydef/mods/dcompos1/x.decl", "COMPOSED", -1, "entityDef", "mods/dcompos1/x", NULL, 'd' },
+    };
+    printf("-- a content cache composition serves the map that declares it\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\compmap\\mods", top);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    mkdirs(served);
+    g_bundle_extra = NULL;
+    make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 1);
+    list[0] = CHASH;
+    (void)sh_modserve_scope_set(list, 1, 1);
+    CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+    CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
+    /* A map that does not declare it: nothing of it serves. */
+    (void)sh_modserve_scope_set(NULL, 0, 1);
+    CHECK(!open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text));
+    (void)sh_modserve_scope_mode(was_mode);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(was_on);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 static void test_dependency_names(void)
 {
     char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65];
@@ -5840,6 +5878,7 @@ int main(void)
     test_resource_lock();
     test_row_served();
     test_dependency_names();
+    test_composition_serves_its_map();
     test_bank_stems();
     test_namespace_maps();
     test_index_retire();
