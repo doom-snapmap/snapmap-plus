@@ -1222,12 +1222,10 @@ int main(int argc, char **argv)
         if (cause[0]) printf("    broken: %s\n", cause);
         /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
         CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         {
             /* An earlier version's builder part: the same sentence. */
             char older[MAX_PATH * 2];

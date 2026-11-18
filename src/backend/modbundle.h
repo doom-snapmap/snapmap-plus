@@ -118,7 +118,7 @@
 /* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
  * SH_MB_SHAPE is its first part, which readers of a cause match on. */
 #define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
-#define SH_MB_EARLIER         SH_MB_SHAPE "Run the Snapmap+ installer again and it converts it."
+#define SH_MB_EARLIER         SH_MB_SHAPE "This version does not read it yet."
 #define SH_MB_ID_MAX          64u
 /* No count, size or length limit on a mod (DECISIONS 26): its files, one
  * file, its total, its mod.json, its name, author and homepage, and a

@@ -772,7 +772,7 @@ void h_sh_mods(idCmdArgs *a)
         else if (!(folder = mc_resolve_folder(dest_arg))) mc_line("MODS: copystock: the store folder cannot be resolved");
         else mc_copystock(request, folder);
         free(dest_arg);
-    } else if (_stricmp(verb, "build") && _stricmp(verb, "install") && _stricmp(verb, "rebuild")) {
+    } else if (_stricmp(verb, "build") && _stricmp(verb, "install")) {   /* Rebuild is retired (decision 23) */
         sh_printf("sh_mods: unknown verb '%s'. %s\n", verb, SH_MODCMD_HELP);
     } else if (!arg[0]) {
         sh_printf("usage: sh_mods %s \"<folder>\"\n", verb);
@@ -783,11 +783,7 @@ void h_sh_mods(idCmdArgs *a)
          * download in progress. */
         modstore_lock();
         if (!_stricmp(verb, "build")) mc_build(folder);
-        else if (!_stricmp(verb, "rebuild")) {
-            /* build, then the rescan the tab's Rebuild runs (a folder in the store rescans in mc_build). */
-            mc_build(folder);
-            if (!mc_in_store(folder)) mc_rescan("rebuild");
-        } else mc_install(folder);
+        else mc_install(folder);
         modstore_unlock();
     }
     free(arg);

@@ -652,13 +652,13 @@ static void test_earlier_shapes(const char *tmp)
 {
     static const struct { const char *leaf, *file, *text, *cause; } cases[] = {
         { "format1", "mod.json", "{\"name\":\"Old\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.old\",\"build\":3}}",
-          "Run the Snapmap+ installer again and it converts it." },
+          "This version does not read it yet." },
         { "pkg", "package.json", "{\"id\":\"alex.pkg\",\"name\":\"Pkg\"}",
-          "Run the Snapmap+ installer again and it converts it." },
-        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "Run the Snapmap+ installer again and it converts it." },
-        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "Run the Snapmap+ installer again and it converts it." },
-        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "Run the Snapmap+ installer again and it converts it." },
-        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "Run the Snapmap+ installer again and it converts it." },
+          "This version does not read it yet." },
+        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "This version does not read it yet." },
+        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "This version does not read it yet." },
+        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "This version does not read it yet." },
+        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "This version does not read it yet." },
         { "notjson", "mod.json", "{\"name\": oops", "mod.json is not a valid JSON object" },
         { NULL, NULL, NULL, NULL } };
     char root[MAX_PATH], dir[MAX_PATH], *before[16], *after;

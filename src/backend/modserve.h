@@ -575,11 +575,13 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
  * sh_mb_requirements_canonical): any cvar at any value, any single console
  * line, within the builder's bounds; this layer names none of them. A bundle
  * whose requirements the builder refuses is skipped with that first cause.
- * Bundles are taken in install order (built time, then folder name); one that
- * asks a cvar an earlier accepted bundle asks at another value loses, both
- * named once in the log, and none of its requirements is applied (its steps
- * are blocked):
- *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, the later install, loses ...
+ * Among the bundles whose requirements apply for the listing, the open map's
+ * rows are decided first, in row order, then the undeclared ones (an editor's
+ * Toybox rows, every bundle with no map open) in install order (built time,
+ * then folder name); one that asks a cvar a bundle decided before it asks at
+ * another value loses, both named once in the log, and none of its
+ * requirements is applied (its steps are blocked):
+ *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, listed after it in this map | which this map does not use | the later install, loses ...
  * Each accepted bundle's requirements are logged once, the first time an
  * index carries it with that text:
  *   MODS: requirements: g_useResourceBlackList=0 for <mod name>
