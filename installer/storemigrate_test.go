@@ -88,6 +88,7 @@ func storeBundle(t *testing.T, withTool bool, digest string) string {
 // the tool's indented lines, and the stub's argument log.
 func runMigrateStore(t *testing.T, bundle, mode string) (printed, tool string, calls []string) {
 	t.Helper()
+	enableStoreConversion(t)
 	appdata := filepath.Join(t.TempDir(), "appdata")
 	t.Setenv("LOCALAPPDATA", appdata)
 	log := filepath.Join(t.TempDir(), "calls.txt")
@@ -104,6 +105,36 @@ func runMigrateStore(t *testing.T, bundle, mode string) (printed, tool string, c
 		calls = strings.Split(strings.TrimSpace(string(data)), "\n")
 	}
 	return printed, out.String(), calls
+}
+
+// enableStoreConversion turns the frozen conversion on for one test (storeConversion is off).
+func enableStoreConversion(t *testing.T) {
+	t.Helper()
+	saved := storeConversion
+	storeConversion = true
+	t.Cleanup(func() { storeConversion = saved })
+}
+
+// The conversion is off (decision 30; the owner, 2026-11-17): an install or update with a bundle whose
+// tool would find work runs nothing, places nothing and prints nothing.
+func TestMigrateStoreIsOffByDefault(t *testing.T) {
+	bundle := storeBundle(t, true, "")
+	appdata := filepath.Join(t.TempDir(), "appdata")
+	t.Setenv("LOCALAPPDATA", appdata)
+	log := filepath.Join(t.TempDir(), "calls.txt")
+	t.Setenv(storeStubEnv, "work")
+	t.Setenv(storeStubLogEnv, log)
+	var stdout string
+	errOut := captureStderr(t, func() { stdout = captureStdout(t, func() { migrateStore(bundle, `D:\Games\DOOM`) }) })
+	if _, err := os.Stat(log); err == nil {
+		t.Fatal("the store tool ran with the conversion off")
+	}
+	if exists(filepath.Join(appdata, "snapmap-plus", storeToolName)) || exists(filepath.Join(appdata, storeToolName)) {
+		t.Error("the store tool was placed with the conversion off")
+	}
+	if stdout+errOut != "" {
+		t.Errorf("printed %q", stdout+errOut)
+	}
 }
 
 func TestMigrateStoreRunsMigrateWhenCheckFindsWork(t *testing.T) {
@@ -202,6 +233,7 @@ func TestMigrateStoreRefusesAnAlteredTool(t *testing.T) {
 
 // A copy the player changed stays; the bundle's verified copy runs instead.
 func TestMigrateStoreKeepsAChangedCopy(t *testing.T) {
+	enableStoreConversion(t)
 	bundle := storeBundle(t, true, "")
 	appdata := filepath.Join(t.TempDir(), "appdata")
 	store := filepath.Join(appdata, "snapmap-plus")

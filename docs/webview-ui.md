@@ -403,7 +403,7 @@ rescan).
 **Vocabulary.** Nothing a player reads names a salt, a hash, a build number, "bundle", "key",
 "pointer", "surface", "legacy" or "migrate". Each cause, warning and result is one plain sentence
 written where it is raised; the window adds the next step only for the causes it knows one for
-(`mu_plain_cause`), and there is no rewrite table. The mod's salt reaches the page only as `salt`, which the
+(`mu_plain_cause`: a short list of the builder's and the store's own causes, kept in step with them by `modui_test`). The mod's salt reaches the page only as `salt`, which the
 Files view's paths show; an author never needs it.
 `tests/mods_tab_test.js` and `tests/modui_test.c` check every text a player reads against that list.
 

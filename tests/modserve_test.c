@@ -172,6 +172,7 @@ static const char *g_fx_restore2;   /* a second one, or NULL */
  * block, keyed by the salt `id`) and its files. A folder under
  * <root>\maps\<segment>\ sits in that map's place. `state` is the old
  * .state.json shape, mapped to the block's cause and built. */
+static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
                         const char *shadows, const fx_file *files, int n, const char *state)
 {
@@ -185,7 +186,7 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                       "{\n  \"name\": \"%s\",\n  %s\n"
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\"",
-                      g_bundle_name ? g_bundle_name : id, extra, id, hash64(hash_digit, h));
+                      g_bundle_name ? g_bundle_name : id, extra, id, g_bundle_hash ? g_bundle_hash : hash64(hash_digit, h));
     if (state) {
         const char *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (c) {
@@ -1249,6 +1250,113 @@ static void test_requirements_general(void)
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) == 1 && strstr(g_report, "requirements: none"));
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
+/* A map's requirements are decided by the mods it uses, in its row order:
+ * an earlier install the map does not use never takes a cvar from one of its
+ * rows, and two rows give the same result whichever was installed first. */
+static void test_requirements_by_map(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], h_b[65], h_c[65];
+    char *slash;
+    const char *list[2];
+    sh_modserve_gates r;
+    static const char *const OLD = "{\"cvars\": {\"com_maxFps\": 120}}";
+    static const char *const B = "{\"cvars\": {\"com_maxFps\": 60}}";
+    static const char *const C = "{\"cvars\": {\"com_maxFps\": 30}}";
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\reqmap\\mods", top);
+    mkdirs(root);
+    make_gen(root, "aold0000", 'a', OLD, 100);
+    make_gen(root, "bmine000", 'b', B, 200);
+    make_gen(root, "cmine000", 'c', C, 300);
+    hash64('b', h_b);
+    hash64('c', h_c);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 3);
+
+    /* The map uses bmine000 only, in the editor: its row wins over the earlier
+     * install it does not use (whose Toybox row keeps its requirements here). */
+    list[0] = h_b;
+    log_clear();
+    (void)sh_modserve_scope_set(list, 1, 1);
+    CHECK(log_has("MODS: requirements: conflict: com_maxFps: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
+                  "this map does not use, loses"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: aold0000: cvar com_maxFps=120: refused (com_maxFps=120 lost to bmine000, which "
+                           "this map uses and asks \"60\")\n") != NULL);
+    /* Its Play: only the map's own mods apply. */
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "60") && r.live == 1);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
+
+    /* Two rows asking one cvar: the first row wins, in either order, whatever
+     * the install order (bmine000 was installed before cmine000). */
+    list[0] = h_c;
+    list[1] = h_b;
+    (void)sh_modserve_scope_set(list, 2, 1);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: refused (com_maxFps=60 lost to cmine000, which "
+                           "this map lists first and asks \"30\")\n") != NULL);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
+    list[0] = h_b;
+    list[1] = h_c;
+    (void)sh_modserve_scope_set(list, 2, 1);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
+
+    /* No map open: no map decides, and the earliest install wins as before. */
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && !strcmp(g_text_val[0], "120"));
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
+/* No count of the product's own on the providers of one path (decision 26):
+ * seventy mods carry the same game file, and a map that uses only the last of
+ * them is served by it. Before, a path kept 63 alternates and the scope looked
+ * at 64 candidates, so the seventieth never served. */
+#define MANY_DECL "generated/decls/entitydef/monster/revenant.decl"
+static void test_many_providers(void)
+{
+    static const fx_file other[] = { { MANY_DECL, "entityDef rev { other }", -1, "entityDef", "monster/revenant", NULL, 'a' } };
+    static const fx_file last[] = { { MANY_DECL, "entityDef rev { last! }", -1, "entityDef", "monster/revenant", NULL, 'b' } };
+    char top[MAX_PATH], root[MAX_PATH], salt[16], hash[65], last_hash[65];
+    const char *list[1];
+    char *slash;
+    sh_modserve_hit hit;
+    int i;
+    printf("-- seventy mods carry one game file: the one the map uses serves it, however many there are\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\many\\mods", top);
+    mkdirs(root);
+    for (i = 0; i < 70; ++i) {
+        _snprintf_s(salt, sizeof salt, _TRUNCATE, "many%04d", i);
+        _snprintf_s(hash, sizeof hash, _TRUNCATE, "%064x", i + 1);
+        g_bundle_hash = hash;
+        make_bundle(root, salt, salt, '0', "\"" MANY_DECL "\"", i == 69 ? last : other, 1, "{\"installedAt\": 100}");
+        if (i == 69) strcpy_s(last_hash, sizeof last_hash, hash);
+    }
+    g_bundle_hash = NULL;
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 70);
+    sh_modserve_scope_enable(1);
+    list[0] = last_hash;
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+    CHECK(sh_modserve_lookup(MANY_DECL, &hit) && !strcmp(hit.bundle_id, "many0069"));
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
 }
 
 /* ------------------------------------------------------------------ conflicts (lane MG2) */
@@ -4170,6 +4278,31 @@ static void test_additive_same_key(void)
         CHECK(sh_modserve_place_restore() == 1);
         HOS(now, sh_modserve_place_get());
         CHECK(!now[0] && sh_modserve_place_restore() == 0);
+
+        /* A published read before its gate decides the place: a row resolves
+         * only at the root at its own build. The root's other build of the
+         * salt never stands in (a stranger's map at build 6 with the root at
+         * build 7), the place reads as none, and a failed parse puts back the
+         * place it replaced. */
+        strcpy_s(row.build, sizeof row.build, h1);
+        CHECK(sh_modserve_place_pending() >= 0 && sh_modserve_place_is_pending());
+        CHECK(!sh_modserve_row_build(&row, &ref));
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0]);
+        list[0] = h1;
+        CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+        CHECK(sh_modserve_bundle_scope(h1, &si) && !si.listed && sh_modserve_bundle_scope(h2, &si) && !si.listed);
+        CHECK(!sh_modserve_lookup(AD_OLD, NULL));   /* the root build's names still serve the Toybox, unlisted */
+        strcpy_s(row.build, sizeof row.build, h2);   /* the root's own build at the row's hash: it answers */
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
+        /* The gate decides the item's place: its build serves the map. */
+        strcpy_s(row.build, sizeof row.build, h1);
+        CHECK(sh_modserve_place_set("maps\\Fork map") >= 0 && !sh_modserve_place_is_pending());
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
+        CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && sh_modserve_lookup(AD_OLD, NULL));
+        CHECK(sh_modserve_place_set(NULL) >= 0 && sh_modserve_place_pending() >= 0 && sh_modserve_place_restore() == 1);
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0] && !sh_modserve_place_is_pending());
     }
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
@@ -4568,10 +4701,10 @@ static void test_salt_and_place(void)
                   "in the Mods tab makes it a new mod"));
     CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: This map's folder holds this mod twice (also in "
                   "maps\\Doors\\Doors Pack). Delete one of the two folders."));
-    CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."));
+    CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
     CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_EARLIER));
-    CHECK(log_has("bundle 'package-only' skipped: " "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."));
+    CHECK(log_has("bundle 'package-only' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
     CHECK(log_has("bundle 'bad-salt' skipped: The part of mod.json Snapmap+ writes is damaged. Delete the \"snapmap-plus\" "
                   "block and press Refresh to build the mod again."));
     CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));
@@ -5555,6 +5688,8 @@ int main(void)
     test_surface_gated_reload();
     test_surface_built_after_boot();
     test_requirements_general();
+    test_requirements_by_map();
+    test_many_providers();
     test_refresh();
     test_conflicts();
     test_editor_refs();

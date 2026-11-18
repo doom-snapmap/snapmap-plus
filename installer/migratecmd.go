@@ -40,6 +40,10 @@ func runStoreMigration(tool, dir, doom string) int {
 // or a conversion the installer could not finish. The DOOM folder comes from --doom or the install
 // record; the tool needs it to tell game files from mod files.
 func cmdMigrate(f flags) error {
+	if !storeConversion {
+		ui.OK("Nothing to convert: this release of Snapmap+ does not convert mods or maps made with earlier releases.")
+		return nil
+	}
 	dir := appDataDir()
 	if dir == "" {
 		return fmt.Errorf("couldn't find %%LOCALAPPDATA%%, where the Snapmap+ data folder lives")

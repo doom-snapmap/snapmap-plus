@@ -414,7 +414,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         return 0;
     }
     if (sh_json_object_get(&object, "id") || sh_json_object_get(&object, "bundle")) {
-        MM_ERR("the map was saved by an earlier Snapmap+; run the Snapmap+ installer again and it converts the map");
+        MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
         goto done;
     }
     {
@@ -1437,6 +1437,28 @@ static int mm_activate_load(const sh_modmanifest_list *rows)
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
 
+int sh_modmanifest_place_decided(void)
+{
+    sh_modmanifest_list rows;
+    int active;
+    char *names, *line;
+    memset(&rows, 0, sizeof rows);
+    if (!sh_modmanifest_current(&rows) || !rows.count) { sh_modmanifest_list_free(&rows); return 0; }
+    /* The rows alone: the load's placed names were read with the text, and a
+     * map that arrived with its mods has a row for each. */
+    mm_note_followed(&rows);
+    mm_scope_load(NULL, 0, &rows);
+    active = mm_activate_load(&rows);
+    names = mm_describe(&rows);
+    line = sh_textf("MODS: map manifest names %zu build(s)%s%s; listed and activated again in the place its gate decided",
+                    rows.count, rows.count ? ": " : "", names ? names : "");
+    backend_log(line ? line : "MODS: the map's rows were listed and activated again in the place its gate decided");
+    free(line);
+    free(names);
+    sh_modmanifest_list_free(&rows);
+    return active;
+}
+
 /* 1 when the text carries rows: the member's "mods" part. */
 static int mm_carries_rows(const char *json, size_t length)
 {
@@ -1672,6 +1694,53 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
     return 1;
 }
 
+/* The rows of the open map that the save's closure did not name although its
+ * entities still place names under their salt (the mod failed to build, or
+ * its folder is gone): kept as they are, so the next load still declares what
+ * the map places. 0 when memory runs out. */
+static int mm_save_keep_unserved(mm_save_ctx *ctx, char **names, size_t count)
+{
+    sh_modmanifest_list cur;
+    size_t i, k;
+    int ok = 1;
+    memset(&cur, 0, sizeof cur);
+    if (!sh_modmanifest_current(&cur)) { sh_modmanifest_list_free(&cur); return 1; }
+    for (i = 0; ok && i < cur.count; i++) {
+        const sh_modmanifest_row *r = &cur.rows[i];
+        int named = 0;
+        for (k = 0; k < ctx->list.count && !named; k++) named = !strcmp(ctx->list.rows[k].salt, r->salt);
+        if (named || !mm_row_placed(r, names, count)) continue;
+        ok = sh_modmanifest_list_add(&ctx->list, r);
+        if (ok) {
+            char *line = sh_textf("MODS: save manifest: %s is placed but no installed build serves it; its row is kept as it was", r->salt);
+            backend_log(line ? line : "MODS: save manifest: a placed mod no build serves keeps its row");
+            free(line);
+        }
+    }
+    sh_modmanifest_list_free(&cur);
+    return ok;
+}
+
+/* A save step failed (why): the save keeps the rows the open map has, so a
+ * map is never written without its declaration. NULL when it has none or they
+ * could not be written either. */
+static char *mm_save_fallback(const char *json, size_t length, size_t *out_length, const char *why)
+{
+    sh_modmanifest_list rows;
+    char err[192] = "", *out = NULL, *line;
+    size_t written = 0;
+    memset(&rows, 0, sizeof rows);
+    if (sh_modmanifest_current(&rows) && rows.count) out = sh_modmanifest_write(json, length, &rows, &written, err, sizeof err);
+    if (out) line = sh_textf("MODS: save manifest: %s; the save keeps the %zu row(s) the open map has", why, rows.count);
+    else if (rows.count) line = sh_textf("MODS: save manifest FAILED: %s, and the open map's %zu row(s) could not be written (%s)", why, rows.count, err[0] ? err : "unknown");
+    else line = sh_textf("MODS: save manifest: %s; the open map has no rows", why);
+    backend_log(line ? line : "MODS: save manifest: a step failed");
+    free(line);
+    if (out && out_length) *out_length = written;
+    sh_modmanifest_list_free(&rows);
+    return out;
+}
+
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length)
 {
     char **names = NULL;
@@ -1698,20 +1767,18 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
     if (failed) {
-        backend_log("MODS: save manifest skipped -- the saved map's JSON did not read cleanly; "
-                    "the save carries no manifest rows");
         sh_modmanifest_list_free(&attached);
-        return NULL;
+        return mm_save_fallback(json, length, out_length, "the saved map's JSON did not read cleanly");
     }
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
-    sh_modmanifest_names_free(names, count);
     if (!ctx.failed) mm_save_names(&ctx);
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_keep_unserved(&ctx, names, count)) ctx.failed = 1;
+    sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {
-        backend_log("MODS: save manifest skipped -- the serving layer reported an invalid bundle");
         sh_modmanifest_list_free(&ctx.list);
-        return NULL;
+        return mm_save_fallback(json, length, out_length, "the serving layer reported an invalid mod, or memory ran out");
     }
     /* What the map now lists: placed entities may have been added since the load. */
     if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
@@ -1730,12 +1797,12 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (slicer) {
             if (!mm_copy_list(&whole, &ctx.list)) ctx.failed = 1;
             for (i = 0; !ctx.failed && i < ctx.list.count; i++) cut += slicer(&ctx.list.rows[i]) == 1;
+            (void)slicer(NULL);   /* this save's rows are done: the slicer's arm was for one save */
         }
         if (ctx.failed) {
-            backend_log("MODS: save manifest skipped -- out of memory");
             sh_modmanifest_list_free(&ctx.list);
             sh_modmanifest_list_free(&whole);
-            return NULL;
+            return mm_save_fallback(json, length, out_length, "memory ran out");
         }
         if (cut) qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     }
@@ -1747,8 +1814,8 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
                         stale ? " (stale rows replaced)" : "", length, written);
         if (out_length) *out_length = written;
     } else {
-        line = sh_textf("MODS: save manifest FAILED (%s); the save carries no manifest rows for %s",
-                        err[0] ? err : "unknown", described && described[0] ? described : "its bundles");
+        line = sh_textf("MODS: save manifest: the rows for %s could not be written (%s)",
+                        described && described[0] ? described : "its mods", err[0] ? err : "unknown");
     }
     backend_log(line ? line : out ? "MODS: save manifest wrote its rows" : "MODS: save manifest FAILED");
     free(line);
@@ -1759,5 +1826,6 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (out) mm_set_current(whole.count ? &whole : &ctx.list);
     sh_modmanifest_list_free(&ctx.list);
     sh_modmanifest_list_free(&whole);
+    if (!out) out = mm_save_fallback(json, length, out_length, "the new rows could not be written");
     return out;
 }

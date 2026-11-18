@@ -327,7 +327,9 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
                        "map's own families and other boards; record 31 is the engine's); its materials draw with plain "
                        "textures", phase, f->name, f->bundle, SH_MODVT_LAST_USED);
                 if (ops->notice) {
-                    char *text = sh_modvt_full_notice(f->bundle);
+                    char *name = sh_modserve_bundle_name(f->bundle_hash);   /* never the salt */
+                    char *text = sh_modvt_full_notice(name);
+                    free(name);
                     if (text) ops->notice(ops->context, text);
                     free(text);
                 }

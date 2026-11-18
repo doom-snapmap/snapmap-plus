@@ -632,11 +632,21 @@ static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
                         why && end ? " (" : "", why && end ? (int)(end - why - 1) : 0, why ? why + 1 : "",
                         why && end ? ")" : "");
     }
-    if (mu_starts(c, "mod.json changed since it was built"))
-        return sh_text("The part of its mod.json that Snapmap+ writes was changed by hand; press Refresh to build it "
-                       "again.");
-    if (mu_ends(c, " is missing") || mu_ends(c, " is not the size mod.json records")) {
+    /* The builder's own: a mod.json changed since its last build (modbundle.c). */
+    if (mu_starts(c, "mod.json was edited after its last build"))
+        return sh_text("Its mod.json was changed after it was last built; press Refresh to build it again.");
+    if (mu_starts(c, "mod.json: ")) {
+        return mu_sentence_end(sh_textf("Its mod.json is not valid JSON (%s); fix it in a text editor and press Refresh", c + 10));
+    }
+    if (!strcmp(c, "cannot read mod.json"))
+        return sh_text("Its mod.json could not be read; close any program that has it open and press Refresh.");
+    /* A folder that holds a published map's cut (modstore.c): it stays with that map. */
+    if (!strcmp(c, SH_MB_SLICE_ROOT)) return mu_sentence_end(sh_text(c));
+    /* The store's checks of the built files (modstore.c). */
+    if (mu_ends(c, " is missing") || mu_ends(c, " is not the size mod.json records") || mu_ends(c, " is missing or unreadable") ||
+        mu_ends(c, " does not match mod.json (damaged or edited)")) {
         const char *cut = strstr(c, " is ");
+        if (!cut) cut = strstr(c, " does not ");
         return sh_textf("%.*s changed or went away after the mod was built; press Refresh to build it again.",
                         cut ? (int)(cut - c) : 0, c);
     }
@@ -644,6 +654,10 @@ static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
         return mu_sentence_end(sh_textf("This mod could not be built: %s", c));
     return sh_textf("This mod could not be built: %s; fix that in its folder and press Refresh.", c);
 }
+
+#ifdef SH_MODUI_TESTING
+char *sh_modui_test_plain_cause(const char *cause) { return mu_plain_cause(NULL, cause); }
+#endif
 
 /* ------------------------------------------------------------------ what a mod carries */
 

@@ -65,6 +65,10 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
 /* The loaded map's place (sh_modserve_place_*): a parse sets it, a failed
  * one puts it back. */
 static char *g_stub_place, *g_stub_place_prev;
+int sh_modserve_place_pending(void)
+{
+    return sh_modserve_place_load(SH_MODSERVE_PLACE_PUBLISHED);
+}
 int sh_modserve_place_load(const char *place)
 {
     free(g_stub_place_prev);

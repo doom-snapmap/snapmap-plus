@@ -23,6 +23,12 @@ const (
 	storeToolManifest = "TOOLS.sha256"
 )
 
+// storeConversion gates the store tool's conversion of earlier releases' mods folders and saved maps
+// at install and update, and the migrate command. It is off: decision 30 freezes that conversion as
+// unproven until the owner supplies mods and maps to test it with, and migrating mods from releases
+// before beta.26 is the future installer's job (the owner, 2026-11-17). The code stays; true restores it.
+var storeConversion = false
+
 // storeToolOut receives the tool's lines, indented; nil prints them through the output layer, under
 // the current section (tests replace it).
 var storeToolOut io.Writer
@@ -31,6 +37,9 @@ var storeToolOut io.Writer
 // check, then, when check finds work, migrate with the DOOM folder this install went into. It never
 // fails the install: a missing, altered or failing tool is a warning that says how to run it by hand.
 func migrateStore(bundleRoot, doom string) {
+	if !storeConversion {
+		return
+	}
 	dir := appDataDir()
 	if dir == "" {
 		return

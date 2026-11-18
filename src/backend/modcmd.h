@@ -5,7 +5,6 @@
  *                                  rebuild rule), then reread the mods folder into the serving index
  *   sh_mods palette rebuild        add Toybox rows of mods indexed after the first palette build
  *   sh_mods build "<folder>"       build a mod and write its mod.json's "snapmap-plus" block
- *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
  *   sh_mods install "<folder>"     build, copy into the mods folder under its own name, verify, rescan
  *   sh_mods list                   the mod folders and their state (a folder that does not build:
  *                                  its cause; it serves nothing until fixed)
@@ -60,8 +59,7 @@
                            "placing anything, 'sh_mods map remove \"<mod folder>\"' prints what removing that mod from the map " \
                            "deletes and '--yes' does it (one undo step), 'sh_mods uninstall \"<mod folder>\"' prints what " \
                            "uninstalling does (the open map cleaned of it, its undo history cleared, its Toybox rows, its " \
-                           "folder moved to the Windows Recycle Bin) and '--yes' does it, 'sh_mods rebuild \"<folder>\"' " \
-                           "builds a mod folder again and rescans."
+                           "folder moved to the Windows Recycle Bin) and '--yes' does it."   /* Rebuild is retired (decision 23): Refresh */
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_TAB: authoring. */
 #define SH_MODCMD_HELP_AUTHOR "Authoring: 'sh_mods new \"<name>\"' makes a mod folder named after the mod with a working " \
                               "example, 'sh_mods held [filter]' prints what the game was served under each name this " \

@@ -211,7 +211,8 @@ void sh_modpublish_test_set_cache_root(const char *root);
 int  sh_modpublish_test_delete_checks(void);      /* delete checks waiting for an answer */
 void sh_modpublish_test_age_delete_checks(unsigned long long ms);   /* make them older */
 void sh_modpublish_test_set_link_min_age(long long seconds);        /* default 3600 */
-void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the armed tag older */
+void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the armed tag and cut older */
+int  sh_modpublish_test_cut_armed(void);                             /* the next save's rows would be cut */
 #endif
 
 /* ------------------------------------------------------------ engine */

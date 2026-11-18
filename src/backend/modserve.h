@@ -575,11 +575,13 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
  * sh_mb_requirements_canonical): any cvar at any value, any single console
  * line, within the builder's bounds; this layer names none of them. A bundle
  * whose requirements the builder refuses is skipped with that first cause.
- * Bundles are taken in install order (built time, then folder name); one that
- * asks a cvar an earlier accepted bundle asks at another value loses, both
- * named once in the log, and none of its requirements is applied (its steps
- * are blocked):
- *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, the later install, loses ...
+ * Among the bundles whose requirements apply for the listing, the open map's
+ * rows are decided first, in row order, then the undeclared ones (an editor's
+ * Toybox rows, every bundle with no map open) in install order (built time,
+ * then folder name); one that asks a cvar a bundle decided before it asks at
+ * another value loses, both named once in the log, and none of its
+ * requirements is applied (its steps are blocked):
+ *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, listed after it in this map | which this map does not use | the later install, loses ...
  * Each accepted bundle's requirements are logged once, the first time an
  * index carries it with that text:
  *   MODS: requirements: g_useResourceBlackList=0 for <mod name>
@@ -779,9 +781,21 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   back (a parse that failed, a launch that was refused) and returns 1, or
  *   0 when nothing is remembered.
  * sh_modserve_place_get: the loaded map's place (malloc'd; NULL when memory
- *   runs out).
+ *   runs out); "" while it is pending.
+ * sh_modserve_place_pending: a published read's parse, whose place only the
+ *   gate that takes it can decide (the item is known at the read's
+ *   completion; the text carries no place of this machine's). Remembers the
+ *   place it replaces, as sh_modserve_place_load does. While pending a row
+ *   resolves only at its own build (or the build it was cut from) at the
+ *   root: the root's other build of its salt never stands in for it, so
+ *   nothing of that build is listed or activated before the gate decides
+ *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
+/* A published map whose item's place is not known (its parse before the gate,
+ * a launch no gate saw): a row resolves only at its own build at the root, never
+ * the root's other build of its salt. No folder can be named so. */
+#define SH_MODSERVE_PLACE_PUBLISHED SH_MODSERVE_PLACES "\\?"
 /* The cause of a folder in a map's place that the product did not receive:
  * a place holds only the builds a map brought, and nothing there is built. */
 #define SH_MODSERVE_PLACE_FRESH \
@@ -793,6 +807,8 @@ int  sh_modserve_place_set(const char *place);
 int  sh_modserve_place_load(const char *place);
 int  sh_modserve_place_restore(void);
 char *sh_modserve_place_get(void);
+int  sh_modserve_place_pending(void);
+int  sh_modserve_place_is_pending(void);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY
@@ -1015,6 +1031,10 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
  * and folder ("<name> (mods\<folder>)"), else its folder; "a mod" when no
  * bundle has that hash. */
 char *sh_modserve_bundle_label(const char *bundle_hash);
+/* The bundle at undle_hash as a player sentence names it (malloc'd): its
+ * name, else its folder's own name; "a mod" when no bundle has that hash.
+ * Never a salt, a hash or a path. */
+char *sh_modserve_bundle_name(const char *bundle_hash);
 
 /* Visit every admitted bundle whose mod.json author block carries keys the
  * product does not read itself (the manifest's "extra", such as "strings" and

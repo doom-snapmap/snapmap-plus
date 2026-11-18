@@ -3690,11 +3690,11 @@ void sh_mb_set_bank_need(sh_mb_bank_need_fn fn) { InterlockedExchangePointer((vo
  * decl that needs it. */
 static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
 {
-    enum { MB_BANKS_MAX = 16 };
+    /* As many banks as the mod's sounds need (decision 26: no count of its own). */
     sh_mb_bank_need_fn need = g_bank_need;
-    char banks[MB_BANKS_MAX][80], *ord[MB_BANKS_MAX];
-    const char *why[MB_BANKS_MAX];
-    size_t i, n = 0, k;
+    char (*banks)[80] = NULL, **ord = NULL;
+    const char **why = NULL;
+    size_t i, n = 0, k, cap = 0;
     if (!need) return;
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
@@ -3702,12 +3702,26 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
         if (!f->ptype || !f->pname || _stricmp(f->ptype, "sound") != 0) continue;
         if (!need(f->pname, bank, sizeof bank) || !bank[0]) continue;
         for (k = 0; k < n && strcmp(banks[k], bank); k++) {}
-        if (k < n || n == MB_BANKS_MAX) continue;
+        if (k < n) continue;
+        if (n == cap) {
+            size_t next = cap ? cap * 2 : 16;
+            char (*nb)[80] = (char (*)[80])realloc(banks, next * sizeof *banks);
+            const char **nw = nb ? (const char **)realloc((void *)why, next * sizeof *why) : NULL;
+            if (nb) banks = nb;
+            if (!nb || !nw) { mb_error(b, "out of memory listing the game's sound banks the mod needs"); free(banks); free((void *)why); return; }
+            why = nw;
+            cap = next;
+        }
         strcpy_s(banks[n], sizeof banks[n], bank);
         why[n] = f->pname;
         n++;
     }
-    if (!n) return;
+    if (!n || !(ord = (char **)malloc(n * sizeof *ord))) {
+        if (n) mb_error(b, "out of memory listing the game's sound banks the mod needs");
+        free(banks);
+        free((void *)why);
+        return;
+    }
     for (i = 0; i < n; i++) {
         ord[i] = banks[i];
         mb_note(b, "sound %s plays a game event only %s holds, a bank SnapMap skips; it is loaded once per session "
@@ -3721,6 +3735,9 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
     }
     mb_put(o, "]", 1);
     *first = 0;
+    free(ord);
+    free(banks);
+    free((void *)why);
 }
 
 /* The product block's "registries" object: what the

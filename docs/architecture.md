@@ -17,7 +17,7 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
-| Store tool | Migrates a mods folder of earlier releases; the installer runs it. | `src/store/store_tool.h` |
+| Store tool | Migrates a mods folder of earlier releases. The installer does not run it (`storeConversion`, off: decision 30 freezes it, and migrating releases before beta.26 is a future installer's job). | `src/store/store_tool.h` |
 | Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
@@ -648,7 +648,7 @@ These backend files share the work:
   format, or a retired author key: `id`, `key`, `shadows`, `stock`, `scope`,
   `player`, `extends`, `replaces`, `legacy`, `composes`, `schema`, a `hud`
   `schema`) is refused with one sentence, "This mod was made for an earlier
-  version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+  version of Snapmap+. This version does not read it yet."
   (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
   is damage the sentence names. A folder in the engine's layout (an
   `assets\` folder) is refused with the sentence naming the folders by
@@ -952,7 +952,7 @@ store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
 folder's identity from the block's `salt` only (`ms_parse_bundle`), and
 refuses every earlier shape with one sentence and the next step: a block of
 another format and `package.json` with "This mod was made for an earlier
-version of Snapmap+. Run the Snapmap+ installer again and it converts it.", a
+version of Snapmap+. This version does not read it yet.", a
 retired author key (`id`, `key`, `shadows`, `stock`, `scope`, `player`,
 `extends`, `replaces`, `legacy`, `composes`, `schema`, `hud.schema`) with the
 builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
@@ -3652,9 +3652,13 @@ bundle carrying only the two blacklist gates keeps the text and hash it had
 when they were the only accepted requirement. The product names no cvar or
 command; the bounds (`SH_MB_REQ_*` in `modbundle.h`) are syntax only, and the
 Community API's manifest check mirrors them. `modserve.c` takes the admitted
-bundles in install order and drops the requirements of one that asks a cvar an
-earlier one asks at another value (one `MODS: requirements: conflict:` line
-names both). Before every registration pass, at the Play re-check and after a
+bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
+every scope change): the open map's rows first, in row order, then the
+undeclared ones (an editor's Toybox rows; every bundle with no map open)
+oldest install first. One that asks a cvar a bundle decided before it asks at
+another value loses (one `MODS: requirements: conflict:` line names both), so
+a map's own mods decide its cvars the same way for every player, and a mod the
+map does not use never takes one from its rows. Before every registration pass, at the Play re-check and after a
 rescan on the main thread outside Play, it applies them: the deactivate lines of
 bundles whose requirements stopped, then each asked cvar set and read back
 (`idCVar::Set` with force, after `modserve_engine.c` refuses a read-only or
@@ -4467,6 +4471,27 @@ next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
 
 ### Published maps and missing mods
+
+A published read's place is this machine's fact about the item, which only the
+gate that takes the read can decide. Its parse sets the place pending
+(`sh_modserve_place_pending`, `SH_MODSERVE_PLACE_PUBLISHED`): a row resolves
+only at its own build at the root, never the root's other build of its salt.
+The gate that decides the place lists and activates the rows again there
+(`rows_resolve`, `sh_modmanifest_place_decided`). A published item serves the
+builds it was published with on every player's machine, its author's included,
+until the author publishes again (the owner, 2026-11-17); the author's edits
+serve in the editor and in a My Maps play.
+
+A lobby joiner whose map cannot be confirmed (it declined, the download failed
+or was refused, or it is downloading) leaves the lobby through the session's
+own leave call, the one `OnCacheMapForLobbyError` makes after its dialog
+(slot 0x2F0, checked byte for byte at bind on both renderers), so the host never
+starts it on a map it does not hold; a download finishes outside the lobby and
+the player is told to join again. A warm-cache join no gate of this process saw
+(or whose rows are not the ones last activated) is read cold again, so
+CacheReady's gate checks it. A joiner runs no mod script, so its scripts setting
+never refuses the host's map; a joiner whose map passed serves in the Play
+scope, as the host's launch does.
 
 A published map is native by default: the product touches its launch only when
 its text carries a manifest row (in its member) the asset rule does not find served (no

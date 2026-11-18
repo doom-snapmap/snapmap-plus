@@ -1220,12 +1220,10 @@ int main(int argc, char **argv)
         if (cause[0]) printf("    broken: %s\n", cause);
         /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
         CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         {
             /* An earlier version's builder part: the same sentence. */
             char older[MAX_PATH * 2];
@@ -1252,6 +1250,31 @@ int main(int argc, char **argv)
         mt_remove_tree(pkg);
         doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
         free(doc);
+    }
+
+    printf("-- the causes the builder and the store raise today, each one plain sentence with its next step\n");
+    {
+        static const struct { const char *cause, *want; } C[] = {
+            { "mod.json was edited after its last build; press Refresh in the Mods tab to build it again",
+              "Its mod.json was changed after it was last built; press Refresh to build it again." },
+            { "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl is missing or unreadable",
+              "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl changed or went away after the mod was built; press "
+              "Refresh to build it again." },
+            { "assets/x.decl does not match mod.json (damaged or edited)",
+              "assets/x.decl changed or went away after the mod was built; press Refresh to build it again." },
+            { "mod.json: unexpected '}' at byte 12",
+              "Its mod.json is not valid JSON (unexpected '}' at byte 12); fix it in a text editor and press Refresh." },
+            { "cannot read mod.json", "Its mod.json could not be read; close any program that has it open and press Refresh." },
+            { SH_MB_SLICE_ROOT, SH_MB_SLICE_ROOT "." },
+        };
+        size_t i;
+        for (i = 0; i < sizeof C / sizeof C[0]; i++) {
+            char *got = sh_modui_test_plain_cause(C[i].cause);
+            CHECK(got && !strcmp(got, C[i].want));
+            if (got && strcmp(got, C[i].want)) printf("    got: %s\n", got);
+            CHECK(got && !strstr(got, "could not be built"));
+            free(got);
+        }
     }
 
     printf("-- the plain words: salts, hashes and the internal words never reach a sentence\n");
@@ -1453,6 +1476,34 @@ int main(int argc, char **argv)
         load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
         n = sh_modserve_scope_hashes(listed, 4);
         CHECK(n == 1 && !_stricmp(listed[0], hash1));
+
+        /* A published read, whose place only its gate decides: the parse lists
+         * and activates the row's own build, never the root's other build of
+         * the salt. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        g_act_last_n = 0;
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD));
+        CHECK(g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* Its gate finds it a stranger's map (the item's place): the row's own
+         * build is listed and activated there. */
+        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+        g_act_last_n = 0;
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* The same read found to be the player's own published map: it follows
+         * the root, listed and activated again with the root's build. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        g_act_last_n = 0;
+        log_clear();
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], hash1));
+        CHECK(strstr(g_logbuf, "listed and activated again in the place its gate decided") != NULL);
         (void)sh_modserve_scope_set(NULL, 0, 0);
         sh_modserve_scope_enable(0);
         sh_modmanifest_reset();
