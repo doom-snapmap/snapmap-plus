@@ -5134,10 +5134,67 @@ computes the unit of a name a map places (an entityDef the mod adds, a Toybox
 row, a module, or `*` for the whole mod) when the map leaves the machine. Pure
 file and text work, no engine calls, any thread.
 
-Publish and export do not yet name units: rows still name whole builds. The
-content cache, a composition per row and the store's unit routes come later
-(SPEC-distribution DS-C, DS-T, DS-S). Today the builder only computes units,
-and `sh_unit_store` writes a manifest at `<mods>\.content\units\<hash>.json`.
+Publish and export do not yet compute the units of their rows (DS-T, DS-X): a
+map row names units once something pins it. `sh_unit_store` writes a manifest
+at `<mods>\.content\units\<hash>.json`. A unit's share of `mod.json` holds only
+the keys the player's build reads (requirements, strings, hud, companions,
+scenes, animation_events, attachment_tags), so a `version` or a note never
+moves its hash.
+
+### The map content cache
+
+Format 2 rows (`modmanifest.h`, SPEC-distribution 2.7, D6a): a pinned row names
+the units of the objects it places (`"objects"`, and `"whole"` for a map-level
+row); a local row (`"local": true`) follows the local folder of its namespace
+and names no unit until a publish or an export pins it. It carries the local
+`build` it was saved from only for the format 1 import path (the places of
+`mods\maps\`, still read for local rows until DS-X retires them). A save
+computes no unit: a pinned row the open map serves through its composition
+keeps its units; a row a local folder serves is written as a local row.
+
+`modcache.c` keeps one cache per machine at `<mods>\.content\`: each file once
+in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in
+`units\`, and per pinned row a composition at `served\<composition hash>\`, a
+built mod folder (`sh_unit_compose_ex`) whose files are hard links to the blobs
+or to a local mod's files of the same SHA-256 (D21; a local file is checked
+again whenever its size or time changed, D51), with `served\<hash>.json`
+saying what it holds. The composition hash (`sh_modmanifest_composition_hash`)
+is the pinned row's build hash in memory, and the serving index scans
+`.content\served\` as an area of its own, so the map scope declares the
+composition as it declares any build and a pinned row resolves to its
+composition only.
+
+Every map load (`sh_cache_on_load`, bound as the manifest's content step)
+composes the pinned rows whose composition is not on disk from what is here;
+an object whose unit is not here stands in (D60): every name the map places
+under the namespace that no present unit provides becomes an entityDef
+inheriting `snapmaps/unknown`, so the map, its logic and its saves keep the
+object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
+published-map gate treats a pinned row as missing until its composition is
+complete: it asks no question and probes nothing, fetches the absent units on
+the network worker (`sh_cache_prepare`: the store's status, the manifest, then
+the unit's archive when more than half of its bytes are missing, else each
+file, a broken-off file resumed by Range, every byte checked), composes again,
+says what the map plays without, and resumes. A joiner leaves the lobby while
+it downloads (D27). An editor open composes only from what is here and says S2.
+A module whose unit is absent is left out (a module stand-in is a live check).
+
+The sweep (`sh_cache_sweep`, at start on a thread of its own, and from the Mods
+tab) keeps every unit a kept map names (the game's `saved-maps` and, unless
+the player chose Remove content of maps you only played, `published-maps`),
+the open map's and those of uploads in progress, and removes the rest, then the
+files no remaining manifest names, then the compositions no kept map uses. It
+never touches a local mod's files and never runs on a timer. The Mods tab's
+"Map content on disk" (the `content` action) reports it from this computer
+alone.
+
+`sh_cache_publish_unit` uploads a unit the store lacks (begin, archives of at
+most one request, a larger file in parts, complete), whoever authored the mod;
+`modkey.c` holds the publishing key (ECDSA P-256 with CNG, the private half and
+the claim seed under DPAPI in `%LOCALAPPDATA%\snapmap-plus\publishing\`), signs
+every write and derives each map's claim secret. The publish hold, the claim
+and self-repair are DS-T; the key's backup, restore and the account name read
+are DS-K.
 
 The closure follows these rules:
 
@@ -5186,6 +5243,10 @@ first unit; the asked requests the store returns seed the units of the next
 publish.
 
 ### The mod store transport
+
+The store now speaks units (`modnet.h`, its units section: status, manifest, blob and archive reads with Range
+resume, begin, archives, parts, complete, signed claims with a rev, release, asked). It answers the build routes below
+with 410; the publish and download paths that still call them move to units in DS-T.
 
 The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
 (`modzip.c`, method 0, ZIP64 where a value needs it) named by the build hash at
