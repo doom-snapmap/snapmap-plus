@@ -4143,7 +4143,47 @@ static void mb_mark_edited(sh_mb_bundle *b)
     if (b->edits) (void)sh_dt_edits_files(b->edits, strlen(b->edits), mb_mark_edited_cb, b);
 }
 
-static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
+/* The names of the bundle's own namespace that a file needs and nothing resolves (the build's own resolution). */
+typedef struct mb_names { char **v; size_t n; } mb_names;
+
+static void mb_names_add(mb_names *s, const char *name)
+{
+    size_t i;
+    char **g;
+    for (i = 0; i < s->n; i++) if (!_stricmp(s->v[i], name)) return;
+    if (!(g = (char **)realloc(s->v, (s->n + 1) * sizeof *g))) return;
+    s->v = g;
+    if ((s->v[s->n] = sh_text(name)) != NULL) s->n++;
+}
+
+static void mb_names_free(mb_names *s)
+{
+    size_t i;
+    for (i = 0; i < s->n; i++) free(s->v[i]);
+    free(s->v);
+    memset(s, 0, sizeof *s);
+}
+
+/* An edit's entry is kept unless it names a name of the bundle's own namespace that nothing resolves: a unit, or a
+ * composition of units, carries the mod's edited copy of a DOOM decl whole, and its entries for the mod's other
+ * objects would name what is not served (R-LV2: the conductor's list named a demon the unit lacks). */
+static int mb_edit_entry_keep(void *context, const char *entry)
+{
+    const mb_names *absent = (const mb_names *)context;
+    const char *p;
+    size_t i;
+    if (!absent || !absent->n) return 1;
+    for (p = entry; (p = strchr(p, '"')) != NULL; ) {
+        const char *name = p + 1, *end = strchr(name, '"');
+        if (!end) break;
+        for (i = 0; i < absent->n; i++)
+            if (strlen(absent->v[i]) == (size_t)(end - name) && !_strnicmp(absent->v[i], name, (size_t)(end - name))) return 0;
+        p = end + 1;
+    }
+    return 1;
+}
+
+static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root, const mb_names *absent_own)
 {
     mb_buf o = {0};
     size_t i;
@@ -4205,6 +4245,18 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
                 mb_error(b, "%s does not parse as a decl (%s); the product derives the edits from the whole edited copy "
                          "of %s, so the copy must be a whole decl", f->path, cause, f->request);
             continue;
+        }
+        {
+            int dropped = 0;
+            char *kept = absent_own && absent_own->n
+                             ? sh_dt_edits_keep(json, strlen(json), mb_edit_entry_keep, (void *)absent_own, &counts, &dropped)
+                             : NULL;
+            if (kept && dropped) {
+                free(json);
+                json = kept;
+                mb_note(b, "edits %s: %d entr%s name%s objects of this mod it does not carry and %s left out", f->request,
+                        dropped, dropped == 1 ? "y" : "ies", dropped == 1 ? "s" : "", dropped == 1 ? "is" : "are");
+            } else free(kept);
         }
         f->edit = json;
         mb_put(&o, b->edit_files ? "," : "[", 1);
@@ -5347,6 +5399,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
+    mb_names absent_own = { NULL, 0 };
     const sh_mb_stock_ops *stock = mb_stock();
     mb_scripts scripts;
     mb_spell spell;
@@ -5662,6 +5715,9 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             b->needs.total++;
             if (got == 1) continue;
             b->needs.unresolved++;
+            if (got == 0 && f->shadowed && f->needs[k].name && b->id[0] && !_strnicmp(f->needs[k].name, "mods/", 5) &&
+                !_strnicmp(f->needs[k].name + 5, b->id, strlen(b->id)) && f->needs[k].name[5 + strlen(b->id)] == '/')
+                mb_names_add(&absent_own, f->needs[k].name);
             /* Game text brought along for completeness: what it names and no
              * archive holds, the game already plays without. */
             if (f->closure) continue;
@@ -5718,7 +5774,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
     mb_scripts_finish(b, &own, &scripts);
     mb_scripts_free(&scripts);
     mb_classify_all(b);
-    mb_derive_edits(b, root);
+    mb_derive_edits(b, root, &absent_own);
+    mb_names_free(&absent_own);
     mb_registries(b, root);
     mb_report(b);
     free(own.req);

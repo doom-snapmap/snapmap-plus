@@ -20,8 +20,10 @@
  * A unit is present when its manifest is in units\ and every file is a blob in files\ or a file of a local mod with
  * that SHA-256 (D21: a local mod serves someone else's map only by exact hash). A composition whose units are not
  * all present is composed with stand-ins (D60) for the absent objects: every name the map places under the row's
- * namespace that no present unit provides is an entityDef inheriting the stock snapmaps/unknown (R-DS2 5.2), so the
- * map, its logic and its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
+ * namespace that no present unit provides is an entityDef inheriting the stock snapmaps/unknown (R-DS2 5.2) with the
+ * class the map saved for its entity, and, for a placed entity, a palette row naming it with the reference slot
+ * counts the map saved (R-DS5: the map validator refuses an entity no palette row names), so the map, its logic and
+ * its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
  * composed again in full. An absent module is left out (its geometry is missing; R-DS2: a module stand-in is a live
  * check).
  *
@@ -132,6 +134,28 @@ typedef struct sh_cache_absent { const char *object, *mod; int cause; } sh_cache
 char *sh_cache_notice_text(const sh_cache_absent *absent, size_t n);
 /* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. */
 char *sh_cache_object_name(const char *root);
+
+/* Stand-ins (R-DS5), malloc'd decl texts. The entityDef: snapmaps/unknown with `cls`, the class the map saved for the
+ * entity (bare snapmaps/unknown for idEntity or no class). The palette row at
+ * decls/snapeditorentitydef/snapmapplus_standin/<path>.decl: entityDef `def_source` (the mod-relative
+ * "entities/<path>"), not placeable from the Toybox, movable and deletable, drawn as labelled bounds, inheriting the
+ * stock row DOOM gives `cls` with the same entity- and variable-reference slot counts (standin_rows.h), or that
+ * class's row with the counts written over it. */
+char *sh_cache_standin_def_text(const char *cls);
+/* Module stand-ins (D-A30). The record a pinned row carries for a placed mod module, from its snapModule decl text:
+ * {"name": `name`, "bounds": [x0,y0,z0,x1,y1,z1], "portals": [{"bounds": [...6], "dir": "PORTAL_DIR_..."}, ...]}
+ * (malloc'd; NULL when the text is not a module). Whoever pins a row (a publish, an export) records it; a save keeps it. */
+char *sh_cache_module_record(const char *name, const char *decl, size_t len);
+/* The pinning step's half (a publish or an export, when it pins `row`): every module of the row's namespace the map
+ * text places (instances[].moduleName under maps/modules/mods/<salt>/), each once, read by `read` (its decl text,
+ * malloc'd, or NULL) and recorded into row->modules. Returns the modules recorded, -1 on bad arguments or memory. */
+typedef char *(*sh_cache_read_fn)(void *context, const char *request, size_t *len);
+int   sh_cache_row_record_modules(struct sh_modmanifest_row *row, const char *map_json, size_t len, sh_cache_read_fn read,
+                                  void *context);
+/* The stand-in module decl for one record: the product's grid room of the record's size (*room, malloc'd, its
+ * moduleName) with the record's bounds and portals written over it (malloc'd; NULL when the record does not read). */
+char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room);
+char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs);
 
 /* ------------------------------------------------------------ the sweep (5.17) */
 

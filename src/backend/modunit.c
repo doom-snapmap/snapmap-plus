@@ -584,7 +584,8 @@ static char *uw_landpage(const char *t)
 }
 
 /* A material that draws from one of the mod's boards keeps the squares its virtualmapping covers (w, h, x, y as
- * fractions of the family's side; a family is 4 x 4 squares), or the whole family when the mapping cannot be read. */
+ * fractions of the family's side; a family is 4 x 4 squares) and square 1, or the whole family when the mapping
+ * cannot be read. */
 static void uw_board(uw *w, const char *engine)
 {
     char *family = uw_landpage(engine), *key;
@@ -604,6 +605,9 @@ static void uw_board(uw *w, const char *engine)
         if (r1 > 3) r1 = 3;
         for (r = r0; r <= r1; r++)
             for (c = c0; c <= c1; c++) want |= 1u << (r * 4 + c);
+        /* Square 1 too, always (D-A29): with no _q members, the family's coarsest page (mip 11) is read from square 1
+         * alone, so a cut without it has no page there (idMegaTexture2's page lookup, R-LV2 section 4). */
+        want |= 1u;
     }
     i = uw_lower_bound(w->fams, w->nfams, key);
     for (; i < w->nfams && !strcmp(w->fams[i].key, key); i++) {

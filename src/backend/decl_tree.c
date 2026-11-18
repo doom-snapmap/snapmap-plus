@@ -1774,6 +1774,90 @@ static void dt_counts_of(const dj *e, sh_dt_counts *c)
     }
 }
 
+/* A read JSON value written back. */
+static void dt_jvalue(dt_buf *b, const dj *v)
+{
+    int i;
+    if (!v) { dt_puts(b, "null"); return; }
+    switch (v->t) {
+    case DJ_STR: dt_jstr(b, v->s ? v->s : "", v->s ? v->n : 0); break;
+    case DJ_NUM: case DJ_LIT: if (v->s) dt_put(b, v->s, v->n); else dt_puts(b, "null"); break;
+    case DJ_ARR: case DJ_OBJ:
+        dt_put(b, v->t == DJ_ARR ? "[" : "{", 1);
+        for (i = 0; i < v->count; ++i) {
+            if (i) dt_put(b, ",", 1);
+            if (v->t == DJ_OBJ) { dt_jcstr(b, v->keys[i]); dt_put(b, ":", 1); }
+            dt_jvalue(b, v->items[i]);
+        }
+        dt_put(b, v->t == DJ_ARR ? "]" : "}", 1);
+        break;
+    default: dt_puts(b, "null"); break;
+    }
+}
+
+char *sh_dt_edits_keep(const char *element, size_t len, int (*keep)(void *context, const char *entry), void *context,
+                       sh_dt_counts *counts, int *dropped)
+{
+    dj *e = dj_parse(element, len);
+    const dj *ops = e ? dj_get(e, "ops") : NULL;
+    dt_buf o = { NULL, 0, 0, 0 };
+    sh_dt_counts c;
+    char tmp[160];
+    int i, k, first = 1, gone = 0;
+    if (dropped) *dropped = 0;
+    memset(&c, 0, sizeof c);
+    if (!e || e->t != DJ_OBJ || !ops || ops->t != DJ_ARR) { dj_free(e); return NULL; }
+    dt_puts(&o, "{");
+    for (i = 0; i < e->count; ++i) {
+        if (i) dt_puts(&o, ",");
+        dt_jcstr(&o, e->keys[i]);
+        dt_puts(&o, ":");
+        if (!strcmp(e->keys[i], "counts")) { dt_puts(&o, "\001"); continue; }   /* written once the ops are known */
+        if (strcmp(e->keys[i], "ops")) { dt_jvalue(&o, e->items[i]); continue; }
+        dt_puts(&o, "[");
+        for (k = 0; k < ops->count; ++k) {
+            const char *entry = dj_str(ops->items[k], "entry");
+            if (entry && keep && !keep(context, entry)) { gone++; continue; }
+            if (!first) dt_puts(&o, ",");
+            first = 0;
+            dt_jvalue(&o, ops->items[k]);
+            switch (dt_op_kind(dj_str(ops->items[k], "op"))) {
+            case OP_SET: c.set++; break;
+            case OP_REMOVE: c.remove++; break;
+            case OP_LIST: c.list++; break;
+            case OP_KEYED: c.keyed++; break;
+            case OP_BAG: c.bag++; break;
+            case OP_BAD: break;
+            default: c.drop++; break;
+            }
+        }
+        dt_puts(&o, "]");
+    }
+    dt_puts(&o, "}");
+    dj_free(e);
+    if (o.oom || !o.p) { free(o.p); return NULL; }
+    {
+        /* the counts in place of their mark */
+        char *out, *mark;
+        dt_buf w = { NULL, 0, 0, 0 };
+        dt_put(&o, "", 1);
+        mark = strchr(o.p, '\001');
+        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "{\"set\":%d,\"remove\":%d,\"list\":%d,\"keyed\":%d,\"bag\":%d,\"drop\":%d}",
+                    c.set, c.remove, c.list, c.keyed, c.bag, c.drop);
+        if (mark) {
+            dt_put(&w, o.p, (size_t)(mark - o.p));
+            dt_puts(&w, tmp);
+            dt_puts(&w, mark + 1);
+        } else dt_puts(&w, o.p);
+        free(o.p);
+        if (w.oom) { free(w.p); return NULL; }
+        out = dt_done(&w, NULL);
+        if (counts) *counts = c;
+        if (dropped) *dropped = gone;
+        return out;
+    }
+}
+
 int sh_dt_edits_files(const char *edits, size_t len,
                       void (*fn)(void *context, const char *file, const sh_dt_counts *counts), void *context)
 {

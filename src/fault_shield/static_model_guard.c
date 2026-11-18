@@ -176,6 +176,66 @@ static void smg_report(const uint8_t *backing, const char *why, int surface)
     backend_log(m);
 }
 
+/* ---------------------------------------------------------------------------
+ * A backing static model the product reloaded in place (a native/ replacement
+ * served or withdrawn by a map-scope change, R-DS5) keeps its pointer, and the
+ * update rebuilds a render model's copy only for a never-built marker (-1) or a
+ * changed backing pointer (VK 0x1414c54d0 / GL 0x1414b8a30: a moved reload
+ * counter alone re-looks the backing up and finds the same pointer). So each
+ * render model of a reloaded backing gets the never-built marker once, at its
+ * next update, and copies the table the reload made.
+ * ------------------------------------------------------------------------ */
+#define SMG_RELOADED_MAX 64
+#define SMG_REBUILT_MAX  4096
+static SRWLOCK         g_reload_lock = SRWLOCK_INIT;
+static const void     *g_reloaded[SMG_RELOADED_MAX];
+static volatile LONG   g_nreloaded;
+static const void     *g_rebuilt[SMG_REBUILT_MAX];
+static int             g_nrebuilt;
+static volatile LONG   g_rebuilds;
+
+void sh_static_model_reload_begin(void)
+{
+    AcquireSRWLockExclusive(&g_reload_lock);
+    InterlockedExchange(&g_nreloaded, 0);
+    g_nrebuilt = 0;
+    ReleaseSRWLockExclusive(&g_reload_lock);
+}
+
+int sh_static_model_reloaded(const void *backing)
+{
+    LONG i, n;
+    int added = 0;
+    if (!backing) return 0;
+    AcquireSRWLockExclusive(&g_reload_lock);
+    n = g_nreloaded;
+    for (i = 0; i < n && g_reloaded[i] != backing; ++i) {}
+    if (i == n && n < SMG_RELOADED_MAX) { g_reloaded[n] = backing; InterlockedExchange(&g_nreloaded, n + 1); added = 1; }
+    else if (i < n) added = 1;
+    ReleaseSRWLockExclusive(&g_reload_lock);
+    return added && g_counter != NULL;
+}
+
+long sh_static_model_rebuilds(void) { return g_rebuilds; }
+
+/* The never-built marker for a render model of a reloaded backing, once per reload. */
+static void smg_rebuild_if_reloaded(uint8_t *self, const void *backing)
+{
+    LONG i, n;
+    int k, hit = 0;
+    if (!InterlockedCompareExchange(&g_nreloaded, 0, 0) || !backing) return;
+    AcquireSRWLockExclusive(&g_reload_lock);
+    n = g_nreloaded;
+    for (i = 0; i < n && !hit; ++i) hit = g_reloaded[i] == backing;
+    for (k = 0; hit && k < g_nrebuilt; ++k) if (g_rebuilt[k] == self) hit = 0;
+    if (hit && g_nrebuilt < SMG_REBUILT_MAX) g_rebuilt[g_nrebuilt++] = self;
+    else hit = 0;   /* the table is full: no forced rebuild (it would repeat every update) */
+    ReleaseSRWLockExclusive(&g_reload_lock);
+    if (!hit) return;
+    __try { *(int *)(self + RMS_MARKER_OFF) = -1; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    InterlockedIncrement(&g_rebuilds);
+}
+
 static void smg_precheck(uint8_t *self)
 {
     const uint8_t *backing, *effective;
@@ -184,6 +244,8 @@ static void smg_precheck(uint8_t *self)
     const void *skin_seen, *skin;
     void *empty;
     if (!self || !g_counter) return;
+    __try { backing = *(const uint8_t *const *)(self + RMS_BACKING_OFF); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    smg_rebuild_if_reloaded(self, backing);
     __try {
         backing = *(const uint8_t *const *)(self + RMS_BACKING_OFF);
         marker = *(const int *)(self + RMS_MARKER_OFF);

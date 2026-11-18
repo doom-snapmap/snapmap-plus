@@ -74,6 +74,7 @@
 #include "script/script_hooks.h"   /* mod scripts' map gates */
 #include "clip_events.h"            /* clip events' Play gate */
 #include "attach_tags.h"            /* attachment tags' Play gate */
+#include "../fault_shield/static_model_guard.h"   /* static models reloaded in place rebuild their render models */
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -1518,10 +1519,12 @@ static void me_reparse_early(const char *phase, int in_heap)
 #define ME_RAW_MODEL 0
 #define ME_RAW_IMAGE 1
 #define ME_RAW_ANIM  2
+#define ME_RAW_SMODEL 3   /* a static model: the "model" list (idStaticModel) */
 typedef struct me_raw_name { const char *name, *request; int kind, hit, done; } me_raw_name;
 typedef struct me_raw {
     me_raw_name *names; int n, cap;
     int reloaded, models, images, anims, failed, faulted;
+    int smodels;          /* static models reloaded: the list's reload counter is moved once after the walk */
     int refused;          /* anims whose served bytes the engine's Load would refuse: the held one is kept */
     int anims_level1;     /* anims held below level 4: read from the current bytes at their next load */
     char first[700];
@@ -1531,6 +1534,7 @@ static int me_raw_kind(const char *type)
 {
     if (type && !_stricmp(type, "image")) return ME_RAW_IMAGE;
     if (type && !_stricmp(type, "anim")) return ME_RAW_ANIM;
+    if (type && !_stricmp(type, "model")) return ME_RAW_SMODEL;
     return ME_RAW_MODEL;
 }
 
@@ -1589,6 +1593,14 @@ static int me_anim_ready(me_raw *r, unsigned char *d, const me_raw_name *n)
     return ok;
 }
 
+/* A walk that may reload static models starts a reload pass of the static model guard (its render models rebuild). */
+static void me_raw_smodel_begin(const me_raw *r)
+{
+    int i;
+    for (i = 0; i < r->n; ++i)
+        if (r->names[i].kind == ME_RAW_SMODEL) { sh_static_model_reload_begin(); return; }
+}
+
 static void me_raw_one(void *context, const char *list_class, void *resource, const char *name)
 {
     me_raw *r = (me_raw *)context;
@@ -1597,10 +1609,15 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
     if (!_stricmp(list_class, "idImage")) kind = ME_RAW_IMAGE;
     else if (!_stricmp(list_class, "idMD6Model")) kind = ME_RAW_MODEL;
     else if (!_stricmp(list_class, "idMD6Anim")) kind = ME_RAW_ANIM;
+    else if (!_stricmp(list_class, "idStaticModel")) kind = ME_RAW_SMODEL;
     else return;
     for (i = 0; i < r->n; ++i) {
         unsigned char *d;
-        if (r->names[i].hit || r->names[i].kind != kind || !me_name_eq(r->names[i].name, name)) continue;
+        if (r->names[i].hit || r->names[i].kind != kind) continue;
+        if (kind == ME_RAW_SMODEL ? !sh_modserve_static_model_same(r->names[i].request ? r->names[i].request
+                                                                                      : r->names[i].name, name)
+                                  : !me_name_eq(r->names[i].name, name))
+            continue;
         r->names[i].hit = 1;
         d = (unsigned char *)resource;
         __try {
@@ -1614,6 +1631,8 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
             if (kind == ME_RAW_IMAGE) r->images++;
             else if (kind == ME_RAW_ANIM) r->anims++;
             else r->models++;
+            /* The backing keeps its pointer: its render models rebuild their copies at their next update. */
+            if (kind == ME_RAW_SMODEL) { r->smodels++; (void)sh_static_model_reloaded(d); }
             me_raw_note(r, name);
         } __except (me_fault_filter(GetExceptionCode())) {
             r->faulted++;
@@ -1702,6 +1721,7 @@ static void me_reload_ungated(const char *phase, int in_heap)
      * reload opens its own keeper (sh_modserve_inplace_keeper). */
     own = sh_modserve_inplace_keeper(g_mark_depth, r.n);
     if (own) me_closure_begin(&keeper);
+    me_raw_smodel_begin(&r);
     __try { (void)sh_modserve_resource_each(g_res_head, me_raw_one, &r); }
     __finally {
         if (own) me_closure_end(&keeper, phase, "gated reload");
@@ -1832,6 +1852,7 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     if (own) me_closure_begin(&keeper);
     __try {
         if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head) {
+            me_raw_smodel_begin(&c.raw);
             (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
             c.dependents = me_anim_dependents(&c.raw, &c.decls);
         }

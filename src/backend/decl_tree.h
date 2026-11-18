@@ -108,6 +108,11 @@ int sh_dt_counts_total(const sh_dt_counts *c);
 char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const char *copy, size_t copy_len,
                  sh_dt_counts *counts, char *cause, size_t cap);
 
+/* The edits element `element` with only the operations whose entry `keep` keeps (operations without an entry are
+ * kept), its counts recomputed (malloc'd; NULL when it does not read). *dropped: the operations left out. */
+char *sh_dt_edits_keep(const char *element, size_t len, int (*keep)(void *context, const char *entry), void *context,
+                       sh_dt_counts *counts, int *dropped);
+
 /* One declared bundle's edits for the apply, in row order. */
 typedef struct sh_dt_source {
     const char *key;                   /* its key (a choice names it) */

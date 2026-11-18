@@ -12,6 +12,9 @@
 #include "modzip.h"
 #include "map_carrier.h"
 #include "mp_json.h"
+#include "standin_rows.h"
+#include "decl_tree.h"
+#include "grid_room.h"
 #include "backend_log.h"
 #include "../common/text.h"
 
@@ -504,6 +507,8 @@ int sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long *m
 /* ------------------------------------------------------------ rows */
 
 typedef struct mc_absent { char *object, *mod; int cause; } mc_absent;
+/* What the map saved of a placed name: its entity's class and its reference slot counts (a stand-in keeps them). */
+typedef struct mc_placed_info { char *cls; int entrefs, varrefs, known; } mc_placed_info;
 typedef struct mc_row {
     char chash[SH_CACHE_HASH_HEX + 1];
     char salt[SH_MODMANIFEST_SALT_CAP];
@@ -512,6 +517,8 @@ typedef struct mc_row {
     char (*units)[SH_CACHE_HASH_HEX + 1];
     char **roots;
     char **placed; size_t nplaced;     /* names the map places under mods/<salt>/ */
+    mc_placed_info *pinfo;             /* per placed name, when the map text was read */
+    char *modules;                     /* the row's module records (D-A30), JSON, or NULL */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
     int notice;                        /* the absent objects wait for the notice */
 } mc_row;
@@ -526,8 +533,13 @@ static void mc_row_clear(mc_row *r)
     if (r->roots) for (i = 0; i < r->n; i++) free(r->roots[i]);
     free(r->roots);
     free(r->units);
-    for (i = 0; i < r->nplaced; i++) free(r->placed[i]);
+    for (i = 0; i < r->nplaced; i++) {
+        free(r->placed[i]);
+        if (r->pinfo) free(r->pinfo[i].cls);
+    }
     free(r->placed);
+    free(r->pinfo);
+    free(r->modules);
     for (i = 0; i < r->nabsent; i++) { free(r->absent[i].object); free(r->absent[i].mod); }
     free(r->absent);
     memset(r, 0, sizeof *r);
@@ -540,10 +552,63 @@ static mc_row *mc_row_find_locked(const char *chash)
     return NULL;
 }
 
+/* The map's entities under mods/: each one's inherit, class and reference slot counts (entityEntRefs and
+ * entityVarRefs rows keyed by uniqueId, the counts the map validator compares with the entity's palette row). */
+typedef struct mc_map_ent { const char *inherit, *cls; int entrefs, varrefs; } mc_map_ent;
+typedef struct mc_map_ents { mpj *doc; mc_map_ent *v; size_t n; } mc_map_ents;
+
+static int mc_csr_count(const mpj *mm, long long uid)
+{
+    const mpj *kv = mm ? mpj_get(mm, "keyValues") : NULL;
+    long long b, e;
+    if (!kv || kv->type != MPJ_ARR || uid < 0 || uid + 1 >= kv->n) return 0;
+    b = mpj_int(kv->items[uid]);
+    e = mpj_int(kv->items[uid + 1]);
+    return e > b ? (int)(e - b) : 0;
+}
+
+static void mc_map_ents_read(mc_map_ents *out, const char *json, size_t len)
+{
+    const mpj *ents, *refs, *er, *vr;
+    int i;
+    memset(out, 0, sizeof *out);
+    if (!json || !len || !(out->doc = mpj_parse(json, len))) return;
+    ents = mpj_get(out->doc, "entities");
+    refs = mpj_get(out->doc, "references");
+    er = refs ? mpj_get(refs, "entityEntRefs") : NULL;
+    vr = refs ? mpj_get(refs, "entityVarRefs") : NULL;
+    if (!ents || ents->type != MPJ_ARR || !ents->n) return;
+    if (!(out->v = (mc_map_ent *)calloc((size_t)ents->n, sizeof *out->v))) return;
+    for (i = 0; i < ents->n; i++) {
+        const mpj *def = mpj_get(ents->items[i], "entityDef"), *inh = def ? mpj_get(def, "inherit") : NULL,
+                  *cls = def ? mpj_get(def, "className") : NULL, *uid = mpj_get(ents->items[i], "uniqueId");
+        if (!inh || inh->type != MPJ_STR || _strnicmp(inh->text, "mods/", 5)) continue;
+        out->v[out->n].inherit = inh->text;
+        out->v[out->n].cls = cls && cls->type == MPJ_STR ? cls->text : "";
+        if (uid && mpj_is_num(uid)) {
+            out->v[out->n].entrefs = mc_csr_count(er, mpj_int(uid));
+            out->v[out->n].varrefs = mc_csr_count(vr, mpj_int(uid));
+        }
+        out->n++;
+    }
+}
+
+static void mc_map_ents_free(mc_map_ents *m)
+{
+    free(m->v);
+    mpj_free(m->doc);
+    memset(m, 0, sizeof *m);
+}
+
 void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, size_t placed_count)
 {
     size_t i, k;
+    mc_map_ents ents;
+    size_t text_len = 0;
+    const char *text = sh_modmanifest_content_text(&text_len);
     if (!rows) return;
+    /* Read once, outside the lock: what the map saved of its mod objects, for their stand-ins. */
+    mc_map_ents_read(&ents, text, text_len);
     AcquireSRWLockExclusive(&g_lock);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *row = &rows->rows[i];
@@ -572,6 +637,7 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
         strcpy_s(r->chash, sizeof r->chash, row->build);
         strcpy_s(r->salt, sizeof r->salt, row->salt);
         r->name = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
+        r->modules = row->modules ? sh_text(row->modules) : NULL;
         r->n = row->unit_count;
         r->units = row->unit_count ? calloc(row->unit_count, sizeof *r->units) : NULL;
         r->roots = row->unit_count ? (char **)calloc(row->unit_count, sizeof *r->roots) : NULL;
@@ -591,8 +657,21 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
                 if (r->placed[r->nplaced]) r->nplaced++;
             }
         }
+        if (r->nplaced && ents.n && (r->pinfo = (mc_placed_info *)calloc(r->nplaced, sizeof *r->pinfo)) != NULL) {
+            size_t p, e;
+            for (p = 0; p < r->nplaced; p++)
+                for (e = 0; e < ents.n; e++) {
+                    if (_stricmp(ents.v[e].inherit, r->placed[p])) continue;
+                    r->pinfo[p].cls = sh_text(ents.v[e].cls);
+                    r->pinfo[p].entrefs = ents.v[e].entrefs;
+                    r->pinfo[p].varrefs = ents.v[e].varrefs;
+                    r->pinfo[p].known = 1;
+                    break;
+                }
+        }
     }
     ReleaseSRWLockExclusive(&g_lock);
+    mc_map_ents_free(&ents);
 }
 
 int sh_cache_row_known(const char *chash)
@@ -786,6 +865,258 @@ static const char MC_ENTITY_STANDIN[] =
     "\tinherit = \"snapmaps/unknown\";\n"
     "}\n";
 
+/* The folder of the stand-in rows: decls/snapeditorentitydef/<this>/<the placed name's path>.decl. */
+#define MC_STANDIN_ROWS "snapmapplus_standin"
+
+/* 1 when `cls` reads as a class name (letters, digits, '_'), so it can be written into a decl. */
+static int mc_class_name(const char *cls)
+{
+    const char *c;
+    if (!cls || !*cls || strlen(cls) > 128) return 0;
+    for (c = cls; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_')) return 0;
+    return 1;
+}
+
+/* An absent placed object's entityDef: the stock snapmaps/unknown (idEntity, no model, no collision, no AI) with the
+ * class the map saved for the entity, so the definition is of the placed entity's own class with that class's
+ * defaults. An entity whose class is not idEntity derives from it, which is all the entityDef parse asks of an
+ * inherit (the product's timeline is the same shape on an unmodded game). For an idPlaceableSnapAIEncounter the
+ * default encounterToSpawn is NULL, and the engine then logs one level-4 line and never spawns (R-DS5). */
+char *sh_cache_standin_def_text(const char *cls)
+{
+    if (!mc_class_name(cls) || !strcmp(cls, "idEntity")) return sh_text(MC_ENTITY_STANDIN);
+    return sh_textf("{\n\tinherit = \"snapmaps/unknown\";\n\tclass = \"%s\";\n}\n", cls);
+}
+
+/* The stock row a stand-in row inherits for (cls, entrefs, varrefs): exactly that key, else the class's row with
+ * no references, else its first; NULL when DOOM has no row of that class. *exact 1 for the exact key. */
+static const char *mc_standin_base(const char *cls, int entrefs, int varrefs, int *exact)
+{
+    size_t i;
+    const char *any = NULL, *bare = NULL;
+    *exact = 0;
+    if (!cls) return NULL;
+    for (i = 0; i < SH_STANDIN_ROWS_N; i++) {
+        const sh_standin_row_base *b = &SH_STANDIN_ROWS[i];
+        if (strcmp(b->cls, cls)) continue;
+        if (b->entrefs == entrefs && b->varrefs == varrefs) { *exact = 1; return b->row; }
+        if (!any) any = b->row;
+        if (!bare && !b->entrefs && !b->varrefs) bare = b->row;
+    }
+    return bare ? bare : any;
+}
+
+char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs)
+{
+    int exact = 0;
+    const char *base = mc_standin_base(mc_class_name(cls) ? cls : NULL, entrefs, varrefs, &exact);
+    char *inherit = base ? sh_textf("\tinherit = \"%s\";\n", base) : sh_text(""), *refs = sh_text(""), *out;
+    /* Not an exact stock key: the counts the map saved are written over the base's, so the validator's comparison
+     * holds; the slots then have the base's paths up to its count and none past it. */
+    if (!exact) {
+        free(refs);
+        refs = sh_textf("\t\tentRefs = {\n\t\t\tnum = %d;\n\t\t}\n\t\tvarRefs = {\n\t\t\tnum = %d;\n\t\t}\n",
+                        entrefs < 0 ? 0 : entrefs, varrefs < 0 ? 0 : varrefs);
+    }
+    out = inherit && refs ? sh_textf("{\n%s"
+                                     "\tedit = {\n"
+                                     "\t\tentityDef = \"%s\";\n"
+                                     "\t\tdisplayNameTag = \"#str_sh_unknown\";\n"
+                                     "\t\tdisplayDescriptionTag = \"#str_sh_unknown_desc\";\n"
+                                     "\t\tflags = {\n"
+                                     "\t\t\tplaceable = false;\n"
+                                     "\t\t\teditable = true;\n"
+                                     "\t\t\tisMoveable = true;\n"
+                                     "\t\t\tisDeletable = true;\n"
+                                     "\t\t}\n"
+                                     "\t\trenderInfo = {\n"
+                                     "\t\t\talwaysDrawBounds = true;\n"
+                                     "\t\t\talwaysDrawLabel = true;\n"
+                                     "\t\t}\n"
+                                     "%s"
+                                     "\t}\n"
+                                     "}\n", inherit, def_source, refs)
+                              : NULL;
+    free(inherit);
+    free(refs);
+    return out;
+}
+
+/* ------------------------------------------------------------ module stand-ins (D-A30) */
+
+/* A number member of a decl block (0 when absent, as the decl's own default). */
+static double mc_dt_num(sh_dt_node *n, const char *key)
+{
+    sh_dt_node *c = n ? sh_dt_child(n, key) : NULL;
+    char buf[64];
+    if (!c || !c->val || !c->val_n || c->val_n >= sizeof buf) return 0;
+    memcpy(buf, c->val, c->val_n);
+    buf[c->val_n] = 0;
+    return atof(buf);
+}
+
+/* "bounds = { b = { b[0] = {x y z} b[1] = {x y z} } }" as six numbers into the text. */
+static void mc_bounds_json(char **t, sh_dt_node *bounds)
+{
+    sh_dt_node *b = bounds ? sh_dt_child(bounds, "b") : NULL, *lo = b ? sh_dt_child(b, "b[0]") : NULL,
+               *hi = b ? sh_dt_child(b, "b[1]") : NULL;
+    (void)sh_text_set(t, "%s[%g,%g,%g,%g,%g,%g]", *t ? *t : "", mc_dt_num(lo, "x"), mc_dt_num(lo, "y"), mc_dt_num(lo, "z"),
+                      mc_dt_num(hi, "x"), mc_dt_num(hi, "y"), mc_dt_num(hi, "z"));
+}
+
+char *sh_cache_module_record(const char *name, const char *decl, size_t len)
+{
+    char cause[256], *t = NULL;
+    sh_dt *tree;
+    sh_dt_node *module, *portals;
+    int i, first = 1;
+    if (!name || !decl || !(tree = sh_dt_parse(decl, len, cause, sizeof cause))) return NULL;
+    module = sh_dt_at(sh_dt_root(tree), "edit/module");
+    if (!module) { sh_dt_free(tree); return NULL; }
+    t = sh_text("{\"name\":\"");
+    (void)sh_text_set(&t, "%s%s\",\"bounds\":", t ? t : "", name);
+    mc_bounds_json(&t, sh_dt_child(module, "bounds"));
+    (void)sh_text_set(&t, "%s,\"portals\":[", t ? t : "");
+    portals = sh_dt_child(module, "portals");
+    for (i = 0; portals && i < portals->nkids; i++) {
+        sh_dt_node *item = portals->kids[i], *dir;
+        char d[64];
+        if (!item->block || item->key_n < 5 || _strnicmp(item->key, "item[", 5)) continue;
+        dir = sh_dt_child(item, "dir");
+        d[0] = 0;
+        if (dir && dir->val && dir->val_n > 2 && dir->val_n < sizeof d) {
+            memcpy(d, dir->val + 1, dir->val_n - 2);   /* the token's quotes off */
+            d[dir->val_n - 2] = 0;
+        }
+        (void)sh_text_set(&t, "%s%s{\"bounds\":", t ? t : "", first ? "" : ",");
+        mc_bounds_json(&t, sh_dt_child(item, "bounds"));
+        (void)sh_text_set(&t, "%s,\"dir\":\"%s\"}", t ? t : "", d);
+        first = 0;
+    }
+    (void)sh_text_set(&t, "%s]}", t ? t : "");
+    sh_dt_free(tree);
+    return t;
+}
+
+int sh_cache_row_record_modules(sh_modmanifest_row *row, const char *map_json, size_t len, sh_cache_read_fn read,
+                                void *context)
+{
+    mpj *m = map_json && len ? mpj_parse(map_json, len) : NULL;
+    const mpj *inst = m ? mpj_get(m, "instances") : NULL;
+    char prefix[SH_MODMANIFEST_SALT_CAP + 32], *out = NULL;
+    size_t pl;
+    int i, k, n = 0;
+    if (!row || !read) { mpj_free(m); return -1; }
+    if (!inst || inst->type != MPJ_ARR) { mpj_free(m); return 0; }
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "maps/modules/mods/%s/", row->salt);
+    pl = strlen(prefix);
+    for (i = 0; i < inst->n; i++) {
+        const mpj *name = mpj_get(inst->items[i], "moduleName");
+        size_t dl = 0;
+        char *decl, *rec;
+        int seen = 0;
+        if (!name || name->type != MPJ_STR || _strnicmp(name->text, prefix, pl)) continue;
+        for (k = 0; k < i && !seen; k++) {
+            const mpj *o = mpj_get(inst->items[k], "moduleName");
+            seen = o && o->type == MPJ_STR && !_stricmp(o->text, name->text);
+        }
+        if (seen || !(decl = read(context, name->text, &dl))) continue;
+        rec = sh_cache_module_record(name->text, decl, dl);
+        free(decl);
+        if (!rec) continue;
+        (void)sh_text_set(&out, "%s%s%s", out ? out : "[", n ? "," : "", rec);
+        free(rec);
+        n++;
+    }
+    mpj_free(m);
+    if (n) {
+        (void)sh_text_set(&out, "%s]", out);
+        if (!out) return -1;
+        free(row->modules);
+        row->modules = out;
+    }
+    return n;
+}
+
+/* The six numbers of a record's bounds array. */
+static int mc_six(const mpj *a, double v[6])
+{
+    int i;
+    if (!a || a->type != MPJ_ARR || a->n != 6) return 0;
+    for (i = 0; i < 6; i++) {
+        if (!mpj_is_num(a->items[i])) return 0;
+        v[i] = mpj_num(a->items[i]);
+    }
+    return 1;
+}
+
+static void mc_bounds_decl(char **t, const char *indent, const double v[6])
+{
+    (void)sh_text_set(t, "%s%sbounds = {\n%s\tb = {\n%s\t\tb[0] = {\n%s\t\t\tx = %g;\n%s\t\t\ty = %g;\n%s\t\t\tz = %g;\n"
+                      "%s\t\t}\n%s\t\tb[1] = {\n%s\t\t\tx = %g;\n%s\t\t\ty = %g;\n%s\t\t\tz = %g;\n%s\t\t}\n%s\t}\n%s}\n",
+                      *t ? *t : "", indent, indent, indent, indent, v[0], indent, v[1], indent, v[2], indent, indent, indent,
+                      v[3], indent, v[4], indent, v[5], indent, indent, indent);
+}
+
+/* The rebuilt blank room a module of these bounds stands in with: the product's grid room of the bounds' size
+ * (modern; clamped to the grid room's limits), "maps/modules/smpgrid/v1/m/<x>_<y>_<z>.decl". */
+static int mc_module_room(const double b[6], char *out, size_t cap)
+{
+    float req[3];
+    sh_grid_size size;
+    int i;
+    for (i = 0; i < 3; i++) req[i] = (float)(b[3 + i] - b[i] > 0 ? b[3 + i] - b[i] : 0);
+    if (!sh_grid_clamp(SH_GRID_MODERN, req, &size) || !sh_grid_name(&size, out, cap)) return 0;
+    return strcat_s(out, cap, ".decl") == 0;
+}
+
+char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room)
+{
+    mpj *r = mpj_parse(record_json, len);
+    const mpj *portals = r ? mpj_get(r, "portals") : NULL;
+    double b[6];
+    char name[160], *t = NULL;
+    int i, n = 0;
+    if (room) *room = NULL;
+    if (!r || !mc_six(mpj_get(r, "bounds"), b) || !portals || portals->type != MPJ_ARR || !mc_module_room(b, name, sizeof name)) {
+        mpj_free(r);
+        return NULL;
+    }
+    /* The room's own walls, floor and lights; the absent module's bounds and portals, so the map's instance, its
+     * door slots (RepairAndMigrate's door pass compares their count with the module's portals) and the entities
+     * inside keep their places. */
+    t = sh_textf("{\n\tinherit = \"%s\";\n\tedit = {\n\t\tmodule = {\n", name);
+    mc_bounds_decl(&t, "\t\t\t", b);
+    for (i = 0; i < portals->n; i++) if (mc_six(mpj_get(portals->items[i], "bounds"), b)) n++;
+    (void)sh_text_set(&t, "%s\t\t\tportals = {\n\t\t\t\tnum = %d;\n", t ? t : "", n);
+    for (i = 0, n = 0; i < portals->n; i++) {
+        const mpj *dir = mpj_get(portals->items[i], "dir");
+        char head[48];
+        if (!mc_six(mpj_get(portals->items[i], "bounds"), b)) continue;
+        _snprintf_s(head, sizeof head, _TRUNCATE, "\t\t\t\titem[%d] = {\n", n++);
+        (void)sh_text_set(&t, "%s%s", t ? t : "", head);
+        mc_bounds_decl(&t, "\t\t\t\t\t", b);
+        if (dir && dir->type == MPJ_STR && mc_class_name(dir->text))
+            (void)sh_text_set(&t, "%s\t\t\t\t\tdir = \"%s\";\n", t ? t : "", dir->text);
+        (void)sh_text_set(&t, "%s\t\t\t\t}\n", t ? t : "");
+    }
+    (void)sh_text_set(&t, "%s\t\t\t}\n\t\t}\n\t}\n}\n", t ? t : "");
+    if (room) *room = sh_text(name);
+    mpj_free(r);
+    return t;
+}
+
+/* The stock resolver, with the product's grid rooms as the game's: a module stand-in inherits one, and the product
+ * derives it from the installed blank room wherever it is asked for. */
+static int mc_stock_or_grid(void *context, const char *request)
+{
+    const sh_mb_resolver *inner = (const sh_mb_resolver *)context;
+    sh_grid_size size;
+    if (request && sh_grid_parse_name(request, &size)) return 1;
+    return inner && inner->stock ? inner->stock(inner->stock_context, request) : -1;   /* -1: not known, as no reader */
+}
+
 /* 1 when a present unit carries `path`. */
 static int mc_carried(const mc_unit *units, size_t n, const char *path)
 {
@@ -797,26 +1128,83 @@ static int mc_carried(const mc_unit *units, size_t n, const char *path)
     return 0;
 }
 
-typedef struct mc_extras { sh_unit_extra *v; char **paths; size_t n; } mc_extras;
+typedef struct mc_extras { sh_unit_extra *v; char **paths, **texts; size_t n; } mc_extras;
 
-static void mc_extra_add(mc_extras *e, const mc_unit *units, size_t nunits, char *path)
+/* Add the stand-in file `path` with `text` (both taken; the bare entity stand-in when text is NULL). */
+static void mc_extra_add_text(mc_extras *e, const mc_unit *units, size_t nunits, char *path, char *text)
 {
     size_t i;
-    if (!path) return;
-    for (i = 0; i < e->n; i++) if (!_stricmp(e->paths[i], path)) { free(path); return; }
-    if (mc_carried(units, nunits, path)) { free(path); return; }
+    if (!path) { free(text); return; }
+    for (i = 0; i < e->n; i++) if (!_stricmp(e->paths[i], path)) { free(path); free(text); return; }
+    if (mc_carried(units, nunits, path)) { free(path); free(text); return; }
+    if (!text && !(text = sh_text(MC_ENTITY_STANDIN))) { free(path); return; }
     {
         sh_unit_extra *gv = (sh_unit_extra *)realloc(e->v, (e->n + 1) * sizeof *gv);
         char **gp = gv ? (char **)realloc(e->paths, (e->n + 1) * sizeof *gp) : NULL;
+        char **gt = gp ? (char **)realloc(e->texts, (e->n + 1) * sizeof *gt) : NULL;
         if (gv) e->v = gv;
-        if (!gv || !gp) { free(path); return; }
-        e->paths = gp;
+        if (gp) e->paths = gp;
+        if (!gv || !gp || !gt) { free(path); free(text); return; }
+        e->texts = gt;
         e->paths[e->n] = path;
+        e->texts[e->n] = text;
         e->v[e->n].path = path;
-        e->v[e->n].text = MC_ENTITY_STANDIN;
-        e->v[e->n].len = sizeof MC_ENTITY_STANDIN - 1;
+        e->v[e->n].text = text;
+        e->v[e->n].len = strlen(text);
         e->n++;
     }
+}
+
+static void mc_extra_add(mc_extras *e, const mc_unit *units, size_t nunits, char *path)
+{
+    mc_extra_add_text(e, units, nunits, path, NULL);
+}
+
+/* D-A30: every module record of the row whose module no present unit carries gets the rebuilt blank room of its
+ * size with its bounds and portals (sh_cache_module_standin_text) at the module's own file, and a module info at its
+ * info's name inheriting the blank room's, so the module palette holds it. Returns the stand-ins added. */
+static int mc_module_standins(mc_extras *e, const mc_unit *units, size_t nunits, const char *salt, const char *modules)
+{
+    mpj *a = modules ? mpj_parse(modules, strlen(modules)) : NULL;
+    char prefix[SH_MODMANIFEST_SALT_CAP + 32];
+    size_t pl;
+    int i, added = 0;
+    if (!a || a->type != MPJ_ARR) { mpj_free(a); return 0; }
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "maps/modules/mods/%s/", salt);
+    pl = strlen(prefix);
+    for (i = 0; i < a->n; i++) {
+        const mpj *name = mpj_get(a->items[i], "name");
+        char *rest, *path, *info, *text, *room = NULL, *body, *c;
+        size_t rl;
+        if (!name || name->type != MPJ_STR || _strnicmp(name->text, prefix, pl) || !name->text[pl]) continue;
+        rest = sh_text(name->text + pl);
+        for (c = rest; c && *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+        if (!rest) continue;
+        rl = strlen(rest);
+        if (rl > 5 && !strcmp(rest + rl - 5, ".decl")) rest[rl - 5] = 0;
+        path = sh_textf("map-modules/%s.decl", rest);
+        info = sh_textf("decls/snapmoduleinfo/%s.decl", rest);
+        body = mpj_dump(a->items[i], NULL);
+        text = body ? sh_cache_module_standin_text(body, strlen(body), &room) : NULL;
+        if (path && text && !mc_carried(units, nunits, path)) {
+            char *stock_info = room ? sh_textf("{\n\tinherit = \"%s\";\n}\n", sh_grid_stock_name(SH_GRID_MODERN) + strlen("maps/modules/"))
+                                    : NULL;
+            mc_extra_add_text(e, units, nunits, path, text);
+            text = NULL;
+            path = NULL;
+            if (info && stock_info) { mc_extra_add_text(e, units, nunits, info, stock_info); info = NULL; stock_info = NULL; }
+            free(stock_info);
+            added++;
+        }
+        free(text);
+        free(body);
+        free(room);
+        free(path);
+        free(info);
+        free(rest);
+    }
+    mpj_free(a);
+    return added;
 }
 
 /* The sidecar beside a composition: what it holds. */
@@ -876,8 +1264,8 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     size_t *lens = NULL, nm = 0, i, k;
     char *dest = NULL, *staging = NULL, *side = NULL, *old = NULL, *reason = NULL;
     sh_mb_bundle out;
-    sh_mb_resolver resolver;
-    int ok = 0, complete = 1, had_complete = 0, here;
+    sh_mb_resolver resolver, inner;
+    int ok = 0, complete = 1, had_complete = 0, here, modules = 0;
     mc_src src;
 
     if (why) *why = NULL;
@@ -891,6 +1279,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             strcpy_s(snapshot.chash, sizeof snapshot.chash, r->chash);
             strcpy_s(snapshot.salt, sizeof snapshot.salt, r->salt);
             snapshot.name = sh_text(r->name ? r->name : r->salt);
+            snapshot.modules = r->modules ? sh_text(r->modules) : NULL;
             snapshot.n = r->n;
             snapshot.units = r->n ? calloc(r->n, sizeof *snapshot.units) : NULL;
             snapshot.roots = r->n ? (char **)calloc(r->n, sizeof *snapshot.roots) : NULL;
@@ -901,6 +1290,13 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             snapshot.placed = r->nplaced ? (char **)calloc(r->nplaced, sizeof *snapshot.placed) : NULL;
             for (i = 0; snapshot.placed && i < r->nplaced; i++) snapshot.placed[i] = sh_text(r->placed[i]);
             snapshot.nplaced = snapshot.placed ? r->nplaced : 0;
+            if (snapshot.nplaced && r->pinfo &&
+                (snapshot.pinfo = (mc_placed_info *)calloc(snapshot.nplaced, sizeof *snapshot.pinfo)) != NULL) {
+                for (i = 0; i < snapshot.nplaced; i++) {
+                    snapshot.pinfo[i] = r->pinfo[i];
+                    snapshot.pinfo[i].cls = r->pinfo[i].cls ? sh_text(r->pinfo[i].cls) : NULL;
+                }
+            }
         }
     }
     ReleaseSRWLockShared(&g_lock);
@@ -922,19 +1318,38 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
     if (here && !complete && mc_side_same(chash, units, snapshot.n)) { ok = 1; goto record; }   /* nothing new is here */
 
-    /* Stand-ins (D60) for what is absent: the absent roots that are entities, and every name the map places under
-     * the namespace that no present unit provides. */
+    /* Stand-ins (D60) for what is absent: every name the map places under the namespace that no present unit
+     * provides (first, so a placed name keeps its class and row), then the absent roots that are entities. */
     if (!complete) {
+        for (k = 0; k < snapshot.nplaced; k++) {
+            const char *rest = snapshot.placed[k] + strlen("mods/") + strlen(snapshot.salt) + 1;
+            const mc_placed_info *pi = snapshot.pinfo && snapshot.pinfo[k].known ? &snapshot.pinfo[k] : NULL;
+            char *lower = sh_text(rest), *c, *def_path, *def_source, *row_path;
+            for (c = lower; c && *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+            if (!lower) continue;
+            def_path = sh_textf("entities/%s.decl", lower);
+            def_source = sh_textf("entities/%s", lower);
+            /* What the map saved of the entity decides both stand-ins: the definition keeps its class, and a palette
+             * row names it with the reference slots the map saved, because the map validator (RepairAndMigrate)
+             * refuses a placed entity whose name no palette row carries, or whose slot counts differ from its
+             * row's (R-DS5; R-LV2's refusal was "not found in palette"). A map text not read: no row. */
+            if (mc_carried(units, snapshot.n, def_path)) { free(def_path); def_path = NULL; }
+            if (def_path) {
+                mc_extra_add_text(&extras, units, snapshot.n, def_path, sh_cache_standin_def_text(pi ? pi->cls : NULL));
+                if (pi && def_source) {
+                    row_path = sh_textf("decls/snapeditorentitydef/" MC_STANDIN_ROWS "/%s.decl", lower);
+                    mc_extra_add_text(&extras, units, snapshot.n, row_path,
+                                      sh_cache_standin_row_text(def_source, pi->cls, pi->entrefs, pi->varrefs));
+                }
+            }
+            free(def_source);
+            free(lower);
+        }
         for (i = 0; i < snapshot.n; i++) {
             if (units[i].state == 1 || !snapshot.roots[i]) continue;
             if (!strncmp(snapshot.roots[i], "entities/", 9)) mc_extra_add(&extras, units, snapshot.n, sh_textf("%s.decl", snapshot.roots[i]));
         }
-        for (k = 0; k < snapshot.nplaced; k++) {
-            const char *rest = snapshot.placed[k] + strlen("mods/") + strlen(snapshot.salt) + 1;
-            char *lower = sh_textf("entities/%s.decl", rest), *c;
-            for (c = lower; c && *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
-            mc_extra_add(&extras, units, snapshot.n, lower);
-        }
+        modules = mc_module_standins(&extras, units, snapshot.n, snapshot.salt, snapshot.modules);
     }
 
     dest = mc_path("served\\%s", chash);
@@ -957,6 +1372,12 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     }
     memset(&resolver, 0, sizeof resolver);
     if (g_resolver_set) resolver = g_resolver;
+    if (modules) {
+        /* A module stand-in inherits a grid room, which the game's archives do not list. */
+        inner = resolver;
+        resolver.stock = mc_stock_or_grid;
+        resolver.stock_context = &inner;
+    }
     src.units = units;
     src.n = snapshot.n;
     if (!sh_unit_compose_ex(manifests, lens, nm, mc_compose_source, &src, extras.v, extras.n, 1, snapshot.salt,
@@ -1018,8 +1439,9 @@ done:
     free(units);
     free((void *)manifests);
     free(lens);
-    for (i = 0; i < extras.n; i++) free(extras.paths[i]);
+    for (i = 0; i < extras.n; i++) { free(extras.paths[i]); free(extras.texts[i]); }
     free(extras.paths);
+    free(extras.texts);
     free(extras.v);
     free(dest);
     free(side);

@@ -2723,6 +2723,9 @@ static int ms_kind(const ms_file *f)
 {
     if (f->is_decl) return SH_MODSERVE_RF_DECL;
     if (f->ptype && !_stricmp(f->ptype, "baseModel")) return SH_MODSERVE_RF_MODEL;
+    /* A static model (a .bmodel) is reloaded in place like an md6 model: a session-held one (OpenGL keeps DOOM's
+     * props for the session) otherwise keeps the bytes it was first read with across maps (R-DS5). */
+    if (f->ptype && !_stricmp(f->ptype, "model")) return SH_MODSERVE_RF_MODEL;
     if (f->ptype && !_stricmp(f->ptype, "image")) return SH_MODSERVE_RF_IMAGE;
     /* Held anims (level 4) are reloaded in place at a map pass;
      * a skeleton has no in-place route and stays a restart. */
@@ -8015,6 +8018,18 @@ static int ms_name_file(const ms_index *x, const char *lower)
     }
     sh_mb_requests_free(keys, nm);
     return f;
+}
+
+int sh_modserve_static_model_same(const char *request, const char *list_name)
+{
+    char *keys[2];
+    int n, m, same = 0;
+    if (!request || !list_name) return 0;
+    if (!_stricmp(request, list_name)) return 1;
+    n = sh_mb_model_keys(list_name, keys, 2);
+    for (m = 0; m < n && !same; ++m) same = keys[m] && !_stricmp(keys[m], request);
+    sh_mb_requests_free(keys, n);
+    return same;
 }
 
 /* A name a manifest row lists resolves when the placed-name rule finds it
