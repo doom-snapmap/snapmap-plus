@@ -38,6 +38,14 @@ extern "C" {
 #define SH_TINT_MAX_TINT     16.0     /* the largest tint channel */
 #define SH_TINT_MAX_GLOW     64.0     /* the largest glow channel */
 #define SH_TINT_MAX_SECONDS  3600.0   /* the longest fade */
+/* e:glow(r, g, b, [seconds], [strength]): the glow added is the colour times the strength. A glow of full
+ * strength (1, what e:glow gave before the strength) washes the whole lit surface with the colour, which hides
+ * the surface under it at full blue. The default is a soft glow that leaves the surface readable, chosen from
+ * frames of the Tyrant and a stock Baron in a lit arena (snaphak-re R-CR1, glow (0, 0.6, 1)): 0.3 and 0.15
+ * still paint them nearly flat cyan, 0.08 glows clearly with the muscles, plates and horns readable, 0.04 and
+ * below read as a dim tint. */
+#define SH_TINT_GLOW_STRENGTH_DEFAULT 0.08
+#define SH_TINT_MAX_STRENGTH 16.0
 #define SH_TINT_PARMS        3
 #define SH_TINT_RECORDS      256
 #define SH_TINT_WASH_MIN     (-1.0f)  /* the wash never subtracts more than the colour it is added to */
@@ -122,6 +130,33 @@ static int sh_tint_check_seconds(const char *call, double seconds, char *err, si
         _snprintf_s(err, cap, _TRUNCATE, "\"%s\" needs the seconds to fade over from 0 to %g, got %g", call,
                     SH_TINT_MAX_SECONDS, seconds);
     return 0;
+}
+
+static int sh_tint_check_strength(const char *call, double strength, char *err, size_t cap)
+{
+    if (strength == strength && strength >= 0.0 && strength <= SH_TINT_MAX_STRENGTH) return 1;
+    if (err && cap)
+        _snprintf_s(err, cap, _TRUNCATE, "\"%s\" needs the strength from 0 to %g, got %g", call, SH_TINT_MAX_STRENGTH,
+                    strength);
+    return 0;
+}
+
+/* The glow a request adds: its colour times its strength. 1 when every channel stays within SH_TINT_MAX_GLOW;
+ * otherwise 0 and the sentence in `err` (the colour and the strength were each in range, their product is not). */
+static int sh_tint_glow_scaled(const char *call, float rgb[3], double strength, char *err, size_t cap)
+{
+    int i;
+    for (i = 0; i < 3; i++) {
+        double v = (double)rgb[i] * strength;
+        if (v > SH_TINT_MAX_GLOW) {
+            if (err && cap)
+                _snprintf_s(err, cap, _TRUNCATE, "\"%s\" glows at most %g in a channel, got %g (colour %g at strength %g)",
+                            call, SH_TINT_MAX_GLOW, v, (double)rgb[i], strength);
+            return 0;
+        }
+    }
+    for (i = 0; i < 3; i++) rgb[i] = (float)((double)rgb[i] * strength);
+    return 1;
 }
 
 /* The engine's fade length for a request: whole milliseconds, at least 1 (a fade of 0 would never move). */

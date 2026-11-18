@@ -2445,8 +2445,9 @@ the map, as any error does).
   `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
   `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
   `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
-  `e:tint(r, g, b, [seconds])` and `e:glow(r, g, b, [seconds])` (the entity's
-  look, below);
+  `e:tint(r, g, b, [seconds])` and `e:glow(r, g, b, [seconds], [strength])` (the
+  entity's look, below; a glow adds its colour times `strength`, a soft 0.08 when
+  none is given, so the surface stays readable under it);
   `entities_near(pos, radius)` (every entity in range, nearest first),
   `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface

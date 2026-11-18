@@ -571,7 +571,8 @@ static int l_players(lua_State *L)
 
 static sh_tint_table g_tint;
 
-/* tint(r, g, b, [seconds]) and glow(r, g, b, [seconds]): the entity's look (script_api_tint.h). Answers true when
+/* tint(r, g, b, [seconds]) and glow(r, g, b, [seconds], [strength]): the entity's look (script_api_tint.h); a
+ * glow adds its colour times its strength, SH_TINT_GLOW_STRENGTH_DEFAULT when none is given. Answers true when
  * the engine took all three parms, false when it did not (the entity has no render model, or an event is not the
  * game's), nil when the entity is gone or the game's render parms cannot be found. Every argument is checked
  * before the engine is touched. */
@@ -597,6 +598,14 @@ static int tint_call(lua_State *L, const char *call, int kind)
     if (sh_script_api_opt_number(L, 5, call, "the seconds to fade over", &seconds) &&
         !sh_tint_check_seconds(call, seconds, err, sizeof err))
         sh_script_refuse(L, "%s", err);
+    if (kind) {
+        /* glow's strength: the soft default unless the script names one (script_api_tint.h) */
+        double strength = SH_TINT_GLOW_STRENGTH_DEFAULT;
+        if (sh_script_api_opt_number(L, 6, call, "the strength", &strength) &&
+            !sh_tint_check_strength(call, strength, err, sizeof err))
+            sh_script_refuse(L, "%s", err);
+        if (!sh_tint_glow_scaled(call, rgb, strength, err, sizeof err)) sh_script_refuse(L, "%s", err);
+    }
     if (!ent || !e || !e->decl) return nil1(L);
     sh_tint_neutral(&from);
     sh_tint_parms(&from, a);
