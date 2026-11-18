@@ -5176,6 +5176,54 @@ static void test_composition_serves_its_map(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* The provider-miss reporter of a unit composition (block "units_of") reports a request under its namespace that
+ * nothing serves, but never a board member (squares or quarters) or a name of a kind no build carries (R-LV2: the
+ * Tyrant's unit reported 4 quarters and 90 .tga source names that the whole pack does not serve either). */
+static int g_miss_calls;
+static void miss_spy(const char *salt, const char *unit, const char *request, const char *by)
+{
+    (void)salt; (void)unit; (void)request; (void)by;
+    g_miss_calls++;
+}
+
+static void test_miss_reporter_skips_probes(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], served[MAX_PATH];
+    char *slash;
+    const char *list[1];
+    int was_on = sh_modserve_scope_enabled();
+    static const char CHASH[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    static const fx_file comp[] = {
+        { "generated/decls/entitydef/mods/ecompos1/x.decl", "{ }", -1, "entityDef", "mods/ecompos1/x", NULL, 'e' },
+    };
+    printf("-- a unit composition's misses: real ones reported, board members and source names not\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\missmap\\mods", top);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    mkdirs(served);
+    /* the block's "units_of" makes it a unit composition (the reporter arms for it) */
+    g_block_edits = "[], \"units_of\": [\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"]";
+    make_bundle(served, CHASH, "ecompos1", 'e', NULL, comp, 1, NULL);
+    g_block_edits = NULL;
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 1);
+    list[0] = CHASH;
+    (void)sh_modserve_scope_set(list, 1, 1);
+    sh_modserve_set_miss_reporter(miss_spy);
+    g_miss_calls = 0;
+    CHECK(sh_modserve_note_miss("virtualtextures/mods/ecompos1/board_q1.mega2") == 0);
+    CHECK(sh_modserve_note_miss("virtualtextures/mods/ecompos1/board_sq2.mega2") == 0);
+    CHECK(sh_modserve_note_miss("mods/ecompos1/effect/texture/misc/rays.tga") == 0);
+    CHECK(g_miss_calls == 0);
+    CHECK(sh_modserve_note_miss("generated/image/mods/ecompos1/effect/texture/misc/rays.bimage") == 1 && g_miss_calls == 1);
+    sh_modserve_set_miss_reporter(NULL);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(was_on);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 static void test_dependency_names(void)
 {
     char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65];
@@ -5878,6 +5926,7 @@ int main(void)
     test_resource_lock();
     test_row_served();
     test_dependency_names();
+    test_miss_reporter_skips_probes();
     test_composition_serves_its_map();
     test_bank_stems();
     test_namespace_maps();

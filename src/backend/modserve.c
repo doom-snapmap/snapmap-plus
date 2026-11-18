@@ -6457,8 +6457,13 @@ int sh_modserve_note_miss(const char *request)
     int i, b, fresh = 1;
     if (!request || !ms_request_salt(request, salt)) return 0;
     /* A board's squares a unit leaves out are left out on purpose: the engine draws a family with absent squares
-     * (R-DS2 5.1). */
-    if (sh_mb_vt_member(request, NULL, NULL)) return 0;
+     * (R-DS2 5.1), and its level-1 quarters (_q<N>) no build carries (R-LV2). A request of a kind no build can carry
+     * (an image's source spelling, .tga) is the engine's probe before the cooked name, never a file a unit lost. */
+    {
+        size_t n = strlen(request);
+        if (n > 6 && !_stricmp(request + n - 6, ".mega2")) return 0;
+    }
+    if (sh_mb_vt_member(request, NULL, NULL) || !sh_mb_extension_allowed(request)) return 0;
     InterlockedIncrement(&g_readers);
     x = g_index;
     for (b = 0; x && b < x->nbundles && !part; ++b) {
