@@ -34,7 +34,7 @@ param(
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
-                           "modbundle.c", "modsalt.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modlook.c", "sdk.c", "sdkparse.c", "sdkvalues.c", "modeffect.c", "modenv.c", "modwound.c", "sdk_runtime.c", "programs/programs_layered.c", "programs/programs_particles.c", "parmslots.c", "parmslots_rule.c", "particlemotion.c", "particlemotion_sim.c", "particlemotion_planes.c", "particlemotion_sigs.c", "cachewrites.c", "cachewrites_rule.c", "cachewrites_sigs.c", "clip_events.c", "clip_events_rule.c", "clip_events_sigs.c", "attach_tags.c", "attach_tags_rule.c", "attach_tags_sigs.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
+                           "modbundle.c", "modsalt.c", "modauthor.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modlook.c", "sdk.c", "sdkparse.c", "sdkvalues.c", "modeffect.c", "modenv.c", "modwound.c", "sdk_runtime.c", "programs/programs_layered.c", "programs/programs_particles.c", "parmslots.c", "parmslots_rule.c", "particlemotion.c", "particlemotion_sim.c", "particlemotion_planes.c", "particlemotion_sigs.c", "cachewrites.c", "cachewrites_rule.c", "cachewrites_sigs.c", "clip_events.c", "clip_events_rule.c", "clip_events_sigs.c", "attach_tags.c", "attach_tags_rule.c", "attach_tags_sigs.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
                            "modnet.c", "modsync.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
@@ -112,7 +112,7 @@ $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp file
 $outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
 $objDir = Join-Path $outDir "obj\backend"
 $buildLog = Join-Path $outDir "build.log"
-$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /I..\common" `
+$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /we4013 /MT /Z7 /Brepro $defs /I..\common" `
     -ObjDir $objDir -ObjDirArg "..\..\build\obj\backend\" -IncludeDirs @((Join-Path $here "..\common")) -Log $buildLog
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\backend\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $objArgs /Fe:..\..\build\$Out " +

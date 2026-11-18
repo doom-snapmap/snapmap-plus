@@ -1,0 +1,7 @@
+{
+	inherit = "logic/relay";
+	edit = {
+		displayNameTag = "#str_marker";
+		entityDef = "entities/probe/marker";
+	}
+}

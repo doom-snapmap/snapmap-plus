@@ -162,7 +162,11 @@ static mp_save g_save;
 static volatile LONG g_save_sequence;
 
 /* The publish save's cuts, summed: what their mods weigh whole, and what goes up. */
-static struct { unsigned long long whole, part; } g_cut;
+static struct {
+    unsigned long long whole, part;
+    int armed;                           /* PublishStart armed the next save's cut; that save consumes it */
+    ULONGLONG at;
+} g_cut;
 
 
 static void mp_save_clear(mp_save *s)
@@ -253,6 +257,8 @@ void sh_modpublish_save_seen(const char *text, size_t length)
         /* The cuts this save made (a publish's): their mods counted whole. */
         g_save.whole = g_save.bytes - (g_cut.part <= g_save.bytes ? g_cut.part : g_save.bytes) + g_cut.whole;
     }
+    /* The sizes belong to this save alone. */
+    g_cut.whole = g_cut.part = 0;
     if (rejected) {
         /* A row the reader refused names a mod the upload cannot know:
          * publishing would leave players without it, so the map is not
@@ -291,8 +297,11 @@ static int mp_slice_row(sh_modmanifest_row *row)
     char **asked = NULL;
     size_t nasked = 0;
     int cut;
-    if (!g_ops_set || !mp_on_main() || !row) return 0;
-    if (!g_tag.armed || GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) return 0;
+    if (!g_ops_set || !mp_on_main()) return 0;
+    /* The publish's own save is the first save after PublishStart: its end
+     * (row NULL) disarms, so no later save inside the window is cut. */
+    if (!row) { g_cut.armed = 0; return 0; }
+    if (!g_cut.armed || GetTickCount64() - g_cut.at > MP_TAG_ARM_MS) return 0;
     whole = row->size;
     /* What players of an earlier cut asked for and did not get goes too. */
     nasked = modsync_asked_for(row->salt, &asked);
@@ -309,6 +318,8 @@ void sh_modpublish_publish_started(const char *local_id)
 {
     if (!g_ops_set || !mp_on_main()) return;
     g_cut.whole = g_cut.part = 0;
+    g_cut.armed = 1;
+    g_cut.at = GetTickCount64();
     g_tag.armed = 1;
     g_tag.at = GetTickCount64();
     g_tag.local[0] = 0;
@@ -1481,7 +1492,8 @@ void sh_modpublish_test_age_delete_checks(unsigned long long ms)
     for (mp_check *c = g_checks; c; c = c->next) c->at -= ms;
 }
 void sh_modpublish_test_set_link_min_age(long long seconds) { g_link_min_age = seconds; }
-void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; }
+void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; g_cut.at -= ms; }
+int sh_modpublish_test_cut_armed(void) { return g_cut.armed && GetTickCount64() - g_cut.at <= MP_TAG_ARM_MS; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
 const char *sh_modpublish_test_provisional(void)
 {

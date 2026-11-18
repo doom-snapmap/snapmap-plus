@@ -5,7 +5,6 @@
  *                                  rebuild rule), then reread the mods folder into the serving index
  *   sh_mods palette rebuild        add Toybox rows of mods indexed after the first palette build
  *   sh_mods build "<folder>"       build a mod and write its mod.json's "snapmap-plus" block
- *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
  *   sh_mods install "<folder>"     build, copy into the mods folder under its own name, verify, rescan
  *   sh_mods list                   the mod folders and their state (a folder that does not build:
  *                                  its cause; it serves nothing until fixed)
@@ -60,8 +59,7 @@
                            "placing anything, 'sh_mods map remove \"<mod folder>\"' prints what removing that mod from the map " \
                            "deletes and '--yes' does it (one undo step), 'sh_mods uninstall \"<mod folder>\"' prints what " \
                            "uninstalling does (the open map cleaned of it, its undo history cleared, its Toybox rows, its " \
-                           "folder moved to the Windows Recycle Bin) and '--yes' does it, 'sh_mods rebuild \"<folder>\"' " \
-                           "builds a mod folder again and rescans."
+                           "folder moved to the Windows Recycle Bin) and '--yes' does it."   /* Rebuild is retired (decision 23): Refresh */
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_TAB: authoring. */
 #define SH_MODCMD_HELP_AUTHOR "Authoring: 'sh_mods new \"<name>\"' makes a mod folder named after the mod with a working " \
                               "example, 'sh_mods held [filter]' prints what the game was served under each name this " \
@@ -69,7 +67,7 @@
                               "which of the open map's mods' edits serves a field several of them set " \
                               "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty mod clears), 'sh_mods " \
                               "clip-events' lists the event rows the open map's mods add to their own clips " \
-                              "(mod.json \"clip_events\") and whether each md6Def carrying them is loaded, 'sh_mods attachment-tags' " \
+                              "(mod.json \"animation_events\") and whether each md6Def carrying them is loaded, 'sh_mods attachment-tags' " \
                               "lists the tag info the open map's mods give for their own attachments " \
                               "(mod.json \"attachment_tags\") the same way."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_AUTHOR (each under the console's 1 KiB line). */

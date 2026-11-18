@@ -1,10 +1,10 @@
 /* script_api_entity.c -- the entity and animation calls of mod scripts
  * (API version 1): spawn, players, and the entity methods
- *   e:pos() e:set_pos(v) e:yaw() e:set_yaw(deg) e:axis() e:velocity()
- *   e:set_velocity(v) e:health() e:set_health(n) e:alive() e:def()
+ *   e:position() e:set_position(v) e:yaw() e:set_yaw(deg) e:axis() e:velocity()
+ *   e:set_velocity(v) e:health() e:set_health(n) e:alive() e:definition()
  *   e:distance(other) e:is_player() e:remove() e:view_angle_to(other, [use_view_pos])
- *   e:anim_state(node, [via]) e:anim_force(node, [blend]) e:anim_finished()
- *   e:anim_current() e:anim_event(name) e:tint(r, g, b, [seconds]) e:glow(r, g, b, [seconds])
+ *   e:animation_state(node, [via]) e:force_animation(node, [blend]) e:animation_finished()
+ *   e:current_animation() e:animation_event(name) e:tint(r, g, b, [seconds]) e:glow(r, g, b, [seconds])
  * Reads work on any entity; a call that changes an entity works only on the
  * mod's own (placed from its entityDefs or spawned by its scripts), except
  * that any mod may heal a player. A removed entity answers nil (alive and
@@ -23,7 +23,7 @@
  *                     AI is parked in its script state); other entities: changeAnimState(Via) /
  *                     forceAnimState / animState_IsFinished. idAI2 does not handle the latter four
  *                     (its dispatcher and its parents' have no case for events 326..331).
- *   anim_current      the idAI2 animWeb's current node; anim_event and anim_finished are that node
+ *   current_animation      the idAI2 animWeb's current node; animation_event and animation_finished are that node
  *                     observed every frame against the last request (script_api_common.c)
  *   view angle        idPlayer: getViewAngles (its aim) and getViewPos; other entities: the axis forward
  *   tint, glow        the engine's lerpRenderParmFrom event (idEntity: it sets a render parm of the entity's
@@ -73,7 +73,7 @@ static int axis_of(void *ent, float out[9])
 static int l_pos(lua_State *L)
 {
     float v[3];
-    void *ent = sh_script_api_entity(L, 1, "pos", NULL);
+    void *ent = sh_script_api_entity(L, 1, "position", NULL);
     if (!origin_of(ent, v)) return nil1(L);
     sh_script_api_push_vec(L, v);
     return 1;
@@ -84,8 +84,8 @@ static int l_set_pos(lua_State *L)
     float v[3];
     const sh_script_engine *e = eng();
     void *ent;
-    sh_script_api_check_vec(L, 2, "set_pos", "the new position", v);
-    ent = sh_script_api_owned(L, 1, "set_pos", "move", NULL);
+    sh_script_api_check_vec(L, 2, "set_position", "the new position", v);
+    ent = sh_script_api_owned(L, 1, "set_position", "move", NULL);
     if (ent && e && e->place) e->place(ent, v, NULL);
     return 0;
 }
@@ -257,7 +257,7 @@ static int l_def(lua_State *L)
 {
     const sh_script_engine *e = eng();
     char own[SH_SCRIPT_SALT_CAP + 8], *name = NULL;
-    void *ent = sh_script_api_entity(L, 1, "def", NULL);
+    void *ent = sh_script_api_entity(L, 1, "definition", NULL);
     size_t n, cap;
     if (!ent || !e || !e->def_name) return nil1(L);
     /* the engine's name whole: read again with twice the room while it fills the buffer */
@@ -364,11 +364,11 @@ static void split_path(char *path, const char **sub, const char **state)
 
 static int l_anim_state(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "anim_state", "the animWeb node to play", TEXT_ANY);
+    const char *node = sh_script_api_check_text(L, 2, "animation_state", "the animWeb node to play", TEXT_ANY);
     const char *via = lua_isnoneornil(L, 3) ? NULL :
-                      sh_script_api_check_text(L, 3, "anim_state", "the node to pass through", TEXT_ANY);
+                      sh_script_api_check_text(L, 3, "animation_state", "the node to pass through", TEXT_ANY);
     sh_script_handle h = 0;
-    void *ent = sh_script_api_owned(L, 1, "anim_state", "animate", &h);
+    void *ent = sh_script_api_owned(L, 1, "animation_state", "animate", &h);
     char *dest, *vpath = NULL;
     if (!ent) return 0;
     dest = anim_path(ent, node);
@@ -402,16 +402,16 @@ static int l_anim_state(lua_State *L)
 
 static int l_anim_force(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "anim_force", "the animWeb node to play", TEXT_ANY);
+    const char *node = sh_script_api_check_text(L, 2, "force_animation", "the animWeb node to play", TEXT_ANY);
     double blend = 0;
     sh_script_handle h = 0;
     void *ent;
     char *dest;
     sh_script_earg a[4];
     int ms;
-    if (sh_script_api_opt_number(L, 3, "anim_force", "the blend time in seconds", &blend) && !(blend >= 0))
-        sh_script_refuse(L, "\"anim_force\" needs a blend time of 0 seconds or more, got %g", blend);
-    ent = sh_script_api_owned(L, 1, "anim_force", "animate", &h);
+    if (sh_script_api_opt_number(L, 3, "force_animation", "the blend time in seconds", &blend) && !(blend >= 0))
+        sh_script_refuse(L, "\"force_animation\" needs a blend time of 0 seconds or more, got %g", blend);
+    ent = sh_script_api_owned(L, 1, "force_animation", "animate", &h);
     if (!ent) return 0;
     ms = (int)(blend * 1000.0 + 0.5);
     dest = anim_path(ent, node);
@@ -435,7 +435,7 @@ static int l_anim_current(lua_State *L)
 {
     const sh_script_engine *e = eng();
     char *node;
-    void *ent = sh_script_api_entity(L, 1, "anim_current", NULL);
+    void *ent = sh_script_api_entity(L, 1, "current_animation", NULL);
     if (sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI || !e || !e->anim_node || !(node = e->anim_node(ent)))
         return nil1(L);
     lua_pushstring(L, node);
@@ -453,7 +453,7 @@ static const struct { const char *name; unsigned bit; } k_anim_events[] = {
 
 static int l_anim_event(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 2, "anim_event", "the event name", TEXT_ANY);
+    const char *name = sh_script_api_check_text(L, 2, "animation_event", "the event name", TEXT_ANY);
     const char *bare = _strnicmp(name, "AWCMD_EVENT_", 12) ? name : name + 12;
     sh_script_handle h = 0;
     void *ent;
@@ -462,9 +462,9 @@ static int l_anim_event(lua_State *L)
     for (i = 0; i < (int)(sizeof k_anim_events / sizeof k_anim_events[0]); i++)
         if (!_stricmp(bare, k_anim_events[i].name)) bit = k_anim_events[i].bit;
     if (!bit)
-        sh_script_refuse(L, "\"anim_event\" knows DEST_BLEND_START, DEST_REACHED, VIA_BLEND_IN_START, "
+        sh_script_refuse(L, "\"animation_event\" knows DEST_BLEND_START, DEST_REACHED, VIA_BLEND_IN_START, "
                             "VIA_BLEND_OUT_START and FINISHED, not \"%s\"", name);
-    ent = sh_script_api_entity(L, 1, "anim_event", &h);
+    ent = sh_script_api_entity(L, 1, "animation_event", &h);
     if (sh_script_api_kind(ent) != SH_SCRIPT_KIND_AI) return nil1(L);
     flags = sh_script_api_anim_flags(h, ent, &requested);
     lua_pushboolean(L, requested && (flags & bit) != 0);
@@ -474,7 +474,7 @@ static int l_anim_event(lua_State *L)
 static int l_anim_finished(lua_State *L)
 {
     sh_script_handle h = 0;
-    void *ent = sh_script_api_entity(L, 1, "anim_finished", &h);
+    void *ent = sh_script_api_entity(L, 1, "animation_finished", &h);
     int requested = 0;
     unsigned flags;
     if (!ent) return nil1(L);
@@ -795,8 +795,8 @@ static int l_set_environment(lua_State *L)
     char *em = rt->environment_emitter ? rt->environment_emitter(name) : NULL;
     if (!em) {
         if (!rt->environment_emitter) return nil1(L);
-        sh_script_refuse(L, "\"%s\" knows no environment \"%s\" of this mod; write one as an env decl whose first key "
-                            "is 'type environment'", call, lua_tostring(L, 1));
+        sh_script_refuse(L, "\"%s\" knows no environment \"%s\" of this mod; write one as environments/%s.decl "
+                            "whose first key is 'type environment'", call, lua_tostring(L, 1), lua_tostring(L, 1));
     }
     env_stop(L);
     if (!sh_script_api_has_room()) {
@@ -833,8 +833,8 @@ void sh_script_api_entity_register(void)
     static const struct { int kind; const char *name; lua_CFunction fn; } calls[] = {
         { SH_SCRIPT_API_GLOBAL, "spawn", l_spawn },
         { SH_SCRIPT_API_GLOBAL, "players", l_players },
-        { SH_SCRIPT_API_METHOD, "pos", l_pos },
-        { SH_SCRIPT_API_METHOD, "set_pos", l_set_pos },
+        { SH_SCRIPT_API_METHOD, "position", l_pos },
+        { SH_SCRIPT_API_METHOD, "set_position", l_set_pos },
         { SH_SCRIPT_API_METHOD, "yaw", l_yaw },
         { SH_SCRIPT_API_METHOD, "set_yaw", l_set_yaw },
         { SH_SCRIPT_API_METHOD, "axis", l_axis },
@@ -843,16 +843,16 @@ void sh_script_api_entity_register(void)
         { SH_SCRIPT_API_METHOD, "health", l_health },
         { SH_SCRIPT_API_METHOD, "set_health", l_set_health },
         { SH_SCRIPT_API_METHOD, "alive", l_alive },
-        { SH_SCRIPT_API_METHOD, "def", l_def },
+        { SH_SCRIPT_API_METHOD, "definition", l_def },
         { SH_SCRIPT_API_METHOD, "distance", l_distance },
         { SH_SCRIPT_API_METHOD, "is_player", l_is_player },
         { SH_SCRIPT_API_METHOD, "remove", l_remove },
         { SH_SCRIPT_API_METHOD, "view_angle_to", l_view_angle_to },
-        { SH_SCRIPT_API_METHOD, "anim_state", l_anim_state },
-        { SH_SCRIPT_API_METHOD, "anim_force", l_anim_force },
-        { SH_SCRIPT_API_METHOD, "anim_finished", l_anim_finished },
-        { SH_SCRIPT_API_METHOD, "anim_current", l_anim_current },
-        { SH_SCRIPT_API_METHOD, "anim_event", l_anim_event },
+        { SH_SCRIPT_API_METHOD, "animation_state", l_anim_state },
+        { SH_SCRIPT_API_METHOD, "force_animation", l_anim_force },
+        { SH_SCRIPT_API_METHOD, "animation_finished", l_anim_finished },
+        { SH_SCRIPT_API_METHOD, "current_animation", l_anim_current },
+        { SH_SCRIPT_API_METHOD, "animation_event", l_anim_event },
         { SH_SCRIPT_API_METHOD, "tint", l_tint },
         { SH_SCRIPT_API_METHOD, "glow", l_glow },
     };

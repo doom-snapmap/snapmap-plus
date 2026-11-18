@@ -217,7 +217,7 @@ float sh_ai_position_score(float dist_to_target, float ideal, float path_len, fl
 
 /* --------------------------------------- the calls the Tyrant's brain needs */
 
-/* anim_valid's test words (the TF_* words of an AnimationValid condition,
+/* animation_fits's test words (the TF_* words of an AnimationValid condition,
  * and the attack graph's VALIDATE_ANIM_DELTA), as bits. */
 #define SH_AI_TF_NAV_DIRECT        0x001u   /* the demon has a navigation path to where the clip ends */
 #define SH_AI_TF_NAV_ENDPOINT      0x002u   /* the clip ends on the ground */
@@ -632,7 +632,7 @@ int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_
                      int *n);
 int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
                          unsigned seed, int key_base, int *index);
-/* The path-cache key of animation `index` of `node` in an anim_valid query: each node takes its own block of
+/* The path-cache key of animation `index` of `node` in an animation_fits query: each node takes its own block of
  * 64 keys inside the demon's span, so two nodes asked in turn do not restart each other's path queries. */
 int sh_ai_anim_key(int key_base, const char *node, int index);
 /* The engine's path cache is keyed by an int: each demon's record gets
@@ -645,9 +645,9 @@ int sh_ai_anim_key(int key_base, const char *node, int index);
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine);
 
 /* Add the AI calls to every script state opened after this. Returns the
- * number of calls added. distance, anim_state and anim_force are the entity
+ * number of calls added. distance, animation_state and force_animation are the entity
  * calls' (script_api_entity.c), which work on any entity; on a demon
- * anim_state and anim_force come here. */
+ * animation_state and force_animation come here. */
 int sh_script_ai_register(void);
 
 /* Park the mod's own demon `ai` (handle h) and ask its body animWeb for
@@ -658,7 +658,7 @@ int sh_script_ai_register(void);
 int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms);
 
 /* The kinds of animation order (sh_script_ai_anim's `force`). FORCE is
- * ssaction_ForceAnimState; FORCE_VIA forces the via node of ai:anim_force_via
+ * ssaction_ForceAnimState; FORCE_VIA forces the via node of ai:force_animation_via
  * the same way; VIA_DEST is the change to its destination asked when the via
  * plays; CHANGE is ssaction_ChangeAnimState(Via). */
 enum { SH_AI_ORDER_CHANGE = 0, SH_AI_ORDER_FORCE = 1, SH_AI_ORDER_FORCE_VIA = 2, SH_AI_ORDER_VIA_DEST = 3 };

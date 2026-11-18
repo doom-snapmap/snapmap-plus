@@ -1,5 +1,0 @@
-{
-stageprogram	basicemissive
-diffusemap	"mods/sdkgood0/rune.tga"
-bloomcolor	curve { 0 { 0, 0, 0 }, 0.5 { 1, 0.3, 0 }, 1 { 0, 0, 0 }, loop yes }
-}

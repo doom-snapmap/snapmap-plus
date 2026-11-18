@@ -130,8 +130,8 @@ static int get_name(ectx *c, const sdk_group *g, sdk_word_id w, char *out, size_
     *have = 0;
     if (!it) return 1;
     if (it->count != 2 || (it->atoms[1].kind != SDK_A_WORD && it->atoms[1].kind != SDK_A_STRING))
-        FAIL(c, it->line, "'%s' needs a name, as in '%s mods/.../name' or '%s %s(\"...\")'.", sdk_word(w), sdk_word(w),
-             sdk_word(w), SDK_W(C_GAME));
+        FAIL(c, it->line, "'%s' needs one name: the mod's, beginning with its folder, or the game's, as in '%s %s:name'.",
+             sdk_word(w), sdk_word(w), SDK_W(C_GAME));
     sdk_text(&it->atoms[1], out, cap);
     *have = 1;
     return 1;
@@ -488,7 +488,7 @@ static int item_decal(ectx *c, const sdk_group *g, ev *e)
     static const sdk_word_id OWN[] = { SDK_F_MATERIAL, SDK_F_SIZE, SDK_F_DEPTH, SDK_F_ANGLE, SDK_F_GLOW,
                                        SDK_F_GLOWLASTS, SDK_F_COLOUR, SDK_F_STAYS };
     char mtr[200];
-    double depth = 16, angle = 0, glow[4] = { 0, 0, 0, 0 }, glowlasts = 0, colour[3];
+    double depth = 16, angle = 0, glow[4] = { 0, 0, 0, 0 }, glowlasts = 0;
     int have, hm, hdepth, stays = 0;
     if (!fields(c, g, "a decal", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
     if (!common(c, g, e, 10)) return 0;
@@ -649,8 +649,7 @@ static int item_named(ectx *c, const sdk_group *g, ev *e, const char *what, cons
 {
     static const sdk_word_id OWN[] = { SDK_F_USE, SDK_F_COLOUR, SDK_F_SIZE };
     char use[200];
-    double colour[3];
-    int hu, have;
+    int hu;
     if (!fields(c, g, what, OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
     if (!common(c, g, e, lasts)) return 0;
     e->type = type;
@@ -669,8 +668,7 @@ static int item_model(ectx *c, const sdk_group *g, ev *e)
 {
     static const sdk_word_id OWN[] = { SDK_F_MODEL, SDK_F_MATERIAL, SDK_F_COLOUR, SDK_F_SIZE };
     char model[200], mtr[200];
-    double colour[3];
-    int hm, hmt, have;
+    int hm, hmt;
     if (!fields(c, g, "a model", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
     if (!common(c, g, e, -1)) return 0;
     e->type = "FX_MODEL";
@@ -903,7 +901,7 @@ static double value_peak(const sdk_value *v)
     return m;
 }
 
-/* The stage's material: the author's, or a `look particle` material made from a bare image, compiled by modlook.c
+/* The stage's material: the author's, or a `type particle` material made from a bare image, compiled by modlook.c
  * and registered. */
 static int particle_material(ectx *c, const sdk_group *g, char *out, size_t cap)
 {
@@ -922,7 +920,7 @@ static int particle_material(ectx *c, const sdk_group *g, char *out, size_t cap)
         snprintf(out, cap, "%s", mtr);
         return 1;
     }
-    if (!hi) FAIL(c, g->line, "particles need an '%s' (or a '%s'), as in '%s mods/.../fx/ember.tga'.", SDK_W(F_IMAGE),
+    if (!hi) FAIL(c, g->line, "particles need an '%s' (or a '%s'), as in '%s images/fx/ember.tga'.", SDK_W(F_IMAGE),
                   SDK_W(F_MATERIAL), SDK_W(F_IMAGE));
     if ((li = fld(g, SDK_F_LIGHTING)) != NULL) {
         if (li->count == 2 && sdk_is(&li->atoms[1], SDK_W(V_LIT))) lit = 1;
@@ -936,7 +934,7 @@ static int particle_material(ectx *c, const sdk_group *g, char *out, size_t cap)
         int r;
         const char *name;
         sdk_fmt(gl, sizeof gl, glow);
-        snprintf(text, sizeof text, "{\nlook\tparticle\ntransmap\t\"%s\"\nlighting\t%s\nglow\t%s\n}\n", img,
+        snprintf(text, sizeof text, "{\ntype\tparticle\ntransmap\t\"%s\"\nlighting\t%s\nglow\t%s\n}\n", img,
                  lit ? "lit" : "unlit", gl);
         r = sh_look_compile(c->d->file, text, strlen(text), &compiled, &cn, why, sizeof why);
         if (r == SH_LOOK_OOM) { c->oom = 1; return 0; }
@@ -992,11 +990,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
                 }
             }
             if (!get_num(c, g, SDK_F_SIZE, &e->size, &e->has_size)) return 0;
-            {
-                double col[3];
-                int hc;
-                if (!get_colour(c, g, e)) return 0;
-            }
+            if (!get_colour(c, g, e)) return 0;
             {
                 int on, hon;
                 if (!get_flag(c, g, SDK_F_ONSCREEN, &on, &hon)) return 0;

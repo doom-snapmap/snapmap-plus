@@ -11,8 +11,7 @@
  * application/zip on a build PUT (415), Content-Length present (411), one
  * request at most one part (413), parts of exactly the part size but the
  * last, and the archive itself (422): a ZIP the product's reader opens,
- * holding mod.json whose build is the path's hash and one assets/<request>
- * entry per carried file its block lists, nothing else. GET and HEAD say how
+ * holding mod.json whose build is the path's hash and one entry per carried file, at its author path, its block lists, nothing else. GET and HEAD say how
  * many scripts a build carries (X-Mod-Scripts). A claim names stored builds
  * (409), any number of them; a re-claim needs the secret (403), a release of
  * an unknown claim is 404; a release deletes every build no live claim names
@@ -228,7 +227,7 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
         char *entry;
         if (b.files[i].stock) continue;
         carried++;
-        entry = sh_textf("assets/%s", b.files[i].request);   /* a request of any length */
+        entry = sh_textf("%s", b.files[i].path);   /* the author path, of any length */
         if (!entry || sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
         free(entry);
     }

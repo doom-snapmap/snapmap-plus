@@ -987,7 +987,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     ticks(4);
     CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
     /* The denial gate's cause 3: never published, and no folder at its hash. */
-    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed and was never published. "
+    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed, and the mod store does not have it. "
                            "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
     DeleteFileA(staged);

@@ -217,8 +217,8 @@ static void test_builder(void)
 {
     static const sh_mb_resolver resolver = { NULL, NULL, stock, NULL };
     static const char *const movies[] = {
-        "assets/generated/swf/mods/screensx/panel.bswf", "assets/generated/swf/mods/screensx/panel.bimage",
-        "assets/generated/swf/screens_tech/vega_flat.bswf", "assets/generated/swf/screens_tech/vega_flat.bimage", NULL };
+        "movies/panel.bswf",
+        "game/generated/swf/screens_tech/vega_flat.bswf", "game/generated/swf/screens_tech/vega_flat.bimage", NULL };
     char tmp[MAX_PATH];
     sh_mb_bundle b;
     size_t i, swf = 0;
@@ -243,29 +243,28 @@ static void test_builder(void)
                     "\"snapmap-plus\": {\"format\": 2, \"salt\": \"screensx\"}}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
     CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) &&
-          strstr(sh_mb_first_cause(&b), "assets/generated/swf/screens_tech/") &&
+          strstr(sh_mb_first_cause(&b), "game/generated/swf/screens_tech/") &&
           strstr(sh_mb_first_cause(&b), ": the game ships this file and a mod cannot replace it with other bytes; delete your "
-                                "copy and the mod borrows the game's, or put your version under a mods folder named like this mod folder"));
+                                "copy and the mod borrows the game's, or put your version in the mod's own folder for what it is and name it there"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
     if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     for (i = 0; i < b.file_count; i++) if (!strcmp(b.files[i].ptype, "swf")) swf++;
-    CHECK(b.file_count == 4 && swf == 2 && b.shadow_count == 2 && b.classes.replaces == 2);
+    CHECK(b.file_count == 3 && swf == 2 && b.shadow_count == 2 && b.classes.replaces == 2);
     sh_mb_free(&b);
     /* A .bswf outside generated/swf/ is not a carried type. */
-    put("assets/generated/image/mods/screensx/stray.bswf", "x");
-    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(sh_mb_first_cause(&b), "file type not allowed"));
+    put("images/stray.bswf", "x");
+    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(sh_mb_first_cause(&b), "images/stray.bswf: this folder holds .bimage files"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
 
-    drop("assets/generated/image/mods/screensx/stray.bswf");
+    drop("images/stray.bswf");
     for (i = 0; movies[i]; i++) drop(movies[i]);
     drop("mod.json");
     {
-        static const char *const dirs[] = { "assets\\generated\\image\\mods\\screensx", "assets\\generated\\image\\mods",
-            "assets\\generated\\image", "assets\\generated\\swf\\mods\\screensx", "assets\\generated\\swf\\mods",
-            "assets\\generated\\swf\\screens_tech", "assets\\generated\\swf", "assets\\generated", "assets", "", NULL };
+        static const char *const dirs[] = { "images", "movies", "game\\generated\\swf\\screens_tech",
+            "game\\generated\\swf", "game\\generated", "game", "", NULL };
         char path[MAX_PATH];
         for (i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_dir, dirs[i]); RemoveDirectoryA(path); }
         *strrchr(g_dir, '\\') = 0;

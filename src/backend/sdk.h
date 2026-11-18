@@ -1,6 +1,6 @@
 /* sdk.h -- the Graphics SDK's compilers, one entry point (docs/graphics-sdk.md).
  *
- * A mod's decl is read through the SDK when its first key says what it is: a material with `look` (modlook.h), an fx
+ * A mod's decl is read through the SDK when its first key says what it is: a material with `type` (modlook.h), an fx
  * decl with `type effect` (modeffect.h), an env decl with `type environment` (modenv.h), a gorewounds decl with
  * `type wound` (modwound.h). Any material may also write values that change over time (sdkvalues.h). The build checks each file with sh_sdk_compile (a mistake fails the
  * build with its sentence; the needs it returns join the file's own) and the server serves what it compiles

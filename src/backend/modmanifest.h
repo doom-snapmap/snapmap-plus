@@ -137,6 +137,13 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
  * modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
+/* A gate decided the loaded map's place after its parse (a published read's
+ * place is pending at parse; modserve.h sh_modserve_place_pending): the
+ * current rows are listed again through the map scope's hook and activated
+ * in the place now set, as the load would have with the place known.
+ * Returns the activation's result, 0 when the map has no rows. Main thread. */
+int sh_modmanifest_place_decided(void);
+
 /* The DeserializeFromJson step: read and keep the rows as the current
  * manifest, strip them, then activate them with the builds the map scope
  * lists beyond them (sh_modmanifest_set_listed; count 0 for a map without
@@ -185,7 +192,8 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * row's build, size and "of" with a cut of the build that the map needs; 0
  * leaves the row naming the whole build (every save but a publish's, and a
  * publish's row that ships whole). The open map's own record keeps the whole
- * builds either way. NULL unbinds. */
+ * builds either way. After a save's last row it is called once with NULL:
+ * that save is over (a publish's cut is armed for one save). NULL unbinds. */
 typedef int (*sh_modmanifest_slice_fn)(sh_modmanifest_row *row);
 void sh_modmanifest_set_slicer(sh_modmanifest_slice_fn slicer);
 

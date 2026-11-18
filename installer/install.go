@@ -246,7 +246,7 @@ func describeEarlier(doom, build string, prior *installRecord, legacy []string, 
 		return earlierInstall{"Snapmap+ " + ver, "An update: Snapmap+'s two files are replaced."}
 	}
 	plan := upperFirst(joinAnd(gone)) + " are removed, then Snapmap+'s two files for this build are installed."
-	if other && !present {
+	if other && !present && storeConversion {
 		plan += "\nThe store tool converts the overrides\\ packages of that release." // a retired package folder
 	}
 	return earlierInstall{"Snapmap+ " + ver + " with " + joinAnd(found), plan}

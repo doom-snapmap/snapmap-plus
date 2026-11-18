@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "modbundle.h"
+#include "modauthor.h"
 #include "mod_test_util.h"
 #include "modsalt.h"
 #include "strkeys.h"
@@ -38,11 +39,11 @@ static int log_has(const char *needle)
 
 /* The fixture's build hash (format 2). A change here is a change of the
  * canonical form or of the fixture. */
-#define GOLDEN_HASH "bc862690bd8d128d93ced2f8d95ef86afb8bbdabc5e36d83d8abedeebacbadee"
+#define GOLDEN_HASH "15d4f5d04c5d0c1fcf75f44919911adb0fe1dec4ba852361e8b405148ff3fafe"
 
 /* The fixture with only the two blacklist gates as requirements: the
  * general requirements canonicalise them to this text and hash. */
-#define GATES_GOLDEN_HASH "a25c4236910f6e994363fcb99258a0a4a4c5c55c539b024254a8e935b3e1980e"
+#define GATES_GOLDEN_HASH "58853ef48deb9a4906b2c126262c8678d9f9fc1f9aca2019c05b2a9a97f838d6"
 #define GATES_CANONICAL   "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"
 
 static int has_need(const sh_mb_file *f, const char *type, const char *name)
@@ -429,7 +430,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     f = find_file(&b, "generated/basemodel/md6/mods/alexrimp/imp_copy/assets/mesh/imp_copy.bmd6model");
     CHECK(f && !strcmp(f->ptype, "baseModel") && f->need_count == 0);
     /* An author key the builder does not know travels under extra. */
-    CHECK(b.extra && !strcmp(b.extra, "{\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}"));
+    CHECK(b.extra && !strcmp(b.extra, "{\"strings\":{\"english\":{\"alexrimp_mod_alex_r2_imp\":\"Imp copy\"}}}"));
     /* Format 2: no build counter, "id" the salt. */
     CHECK(strstr(b.canonical, "\"author\":\"alex\",\"extra\":{") == b.canonical + 1);
     CHECK(strstr(b.canonical, "\"format\":2,") && strstr(b.canonical, "\"id\":\"" SALT "\",") && !strstr(b.canonical, "\"build\""));
@@ -464,7 +465,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
      * folder's name, which is never read. */
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\Any Name At All", tmp);
     CHECK(mt_copy_tree(fixture, folder));
-    mt_write(folder, "mod.json", "{\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}},"
+    mt_write(folder, "mod.json", "{\"strings\":{\"english\":{\"mod_alex_r2_imp\":\"Imp copy\"}},"
                                  "\"author\":\"alex\",  \"name\":\"R2 Imp copy\"}");
     CHECK(sh_mb_build(folder, SALT, &RESOLVER, &again));
     CHECK(!strcmp(again.hash, b.hash));
@@ -481,7 +482,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     sh_mb_free(&again);
     mt_delete(folder, "package.json");
     mt_write(folder, "mod.json", "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
-                                 "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}");
+                                 "\"strings\":{\"english\":{\"mod_alex_r2_imp\":\"Imp copy\"}}}");
 
     /* Write, then read back: the author's bytes are kept and the canonical
      * text derived from mod.json is the golden one. */
@@ -497,7 +498,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     {
         char *own = text ? sh_mb_author_bytes((const char *)text, len, &blen_unused, NULL) : NULL;
         static const char pkg[] = "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
-                                  "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}";
+                                  "\"strings\":{\"english\":{\"mod_alex_r2_imp\":\"Imp copy\"}}}";
         CHECK(own && blen_unused == sizeof pkg - 1 && !memcmp(own, pkg, sizeof pkg - 1));
         CHECK(text && strstr((const char *)text, "\"snapmap-plus\": {\n    \"format\": 2,\n    \"salt\": \"" SALT "\",\n"));
         CHECK(text && strstr((const char *)text, "\"build\": \"") && strstr((const char *)text, "\"tree\": \"") &&
@@ -551,12 +552,12 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     /* Changed content: a new hash, the same "built". */
     Sleep(1100);
-    mt_append(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited\r\n");
+    mt_append(folder, "entities\\imp_copy.decl", "\r\n// edited\r\n");
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b) && strcmp(b.hash, hash1) && b.built == built1);
     CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
     sh_mb_free(&b);
     /* A build that fails writes the failed block: the salt, built and cause stay. */
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\broken.decl", "{\r\n\tinherit = \"x;\r\n");
+    mt_write(folder, "entities\\broken.decl", "{\r\n\tinherit = \"x;\r\n");
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b) && !strcmp(b.id, SALT) && b.built == built1 && strlen(b.tree) == 64);
     CHECK(HO(cause, sh_mb_write_failed(&b, folder, HO_P(0))));
     sh_mb_free(&b);
@@ -573,7 +574,7 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     sh_mb_free(&again);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);
     /* Fixed: it builds again from the failed block, "built" kept. */
-    mt_delete(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\broken.decl");
+    mt_delete(folder, "entities\\broken.decl");
     CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b) && b.built == built1 && !b.prev_hash[0]);
     sh_mb_free(&b);
     /* A block whose salt differs from the one given is refused. */
@@ -589,7 +590,7 @@ static void test_modjson(const char *fixture, const char *tmp)
 {
     static const char author[] =
         "\xef\xbb\xbf{\r\n\t\"name\" :  \"R2 Imp copy\",\r\n\t\"version\": \"1.0.0\",\r\n"
-        "\t\"author\": \"alex\",\r\n\t\"strings\": {\"english\": {\"#str_mod_alex_r2_imp\": \"Imp copy\"}},\r\n"
+        "\t\"author\": \"alex\",\r\n\t\"strings\": {\"english\": {\"mod_alex_r2_imp\": \"Imp copy\"}},\r\n"
         "\t\"x-notes\": [1, 2, {\"kept\": true}]   \r\n}\r\n";
     sh_mb_bundle b, again;
     char folder[MAX_PATH], path[MAX_PATH], cause[512], tree1[65], tree2[65];
@@ -639,9 +640,9 @@ static void test_modjson(const char *fixture, const char *tmp)
     /* Editing the author's part changes the tree hash. */
     mt_write(folder, "mod.json", "{\"version\":\"1.0.1\",\"name\":\"R2 Imp copy\"}");
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
-    /* Touching a file under assets changes it too. */
+    /* Touching a file of the mod changes it too. */
     mt_write(folder, "mod.json", author);
-    mt_append(folder, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n");
+    mt_append(folder, "entities\\imp_copy.decl", "\r\n");
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
     free(first);
 
@@ -701,12 +702,12 @@ static void test_identity(const char *fixture, const char *tmp)
     CHECK(HO(cause, sh_mb_descriptor_state_why(folder, HO_P(0))) == SH_MB_DESC_EARLIER && !strcmp(cause, SH_MB_EARLIER));
     mt_delete(folder, "package.json");
 
-    /* Files under another namespace than the salt. */
+    /* Texts that name another salt's files: the files sit under this mod's salt, so the names resolve to nothing. */
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\otherns", tmp);
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2,\"salt\":\"yyyyyyyy\"}}");
-    CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "is under mods/alexrimp/, which is neither this mod folder's name nor its salt");
+    /* the folder's texts name its files by their folders, so the same folder builds under any salt */
+    CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
     sh_mb_free(&b);
 
     /* The block a first scan writes: the author's bytes kept, its own
@@ -920,14 +921,14 @@ static void m_no_id(const char *f) { mt_write(f, "mod.json", "{\"name\":\"x\"}")
 static void m_no_name(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1.0.0\"}"); }
 static void m_bad_json(const char *f) { mt_write(f, "mod.json", "{\"name\":\"x\",\"name\":\"y\"}"); }
 static void m_strings_outside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/other/t\":\"x\"}}")); }
-static void m_strings_inside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_t\":\"x\"}}")); }
+static void m_strings_inside(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"t\":\"x\"}}")); }
 static void m_string_edits(const char *f)
 {
-    mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_t\":\"x\",\"SnapEntity_Demon_Baron\":\"Big\","
+    mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"t\":\"x\",\"SnapEntity_Demon_Baron\":\"Big\","
                                  "\"sh_bv_navigation_desc\":\"Mine\"}}"));
 }
 static void m_strings_slash(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"mods/alexrimp/t\":\"x\"}}")); }
-static void m_strings_bare(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"alexrimp_\":\"x\"}}")); }
+static void m_strings_bare(const char *f) { mt_write(f, "mod.json", DESC(",\"strings\":{\"en\":{\"has space\":\"x\"}}")); }
 static void m_bad_version(const char *f) { mt_write(f, "mod.json", "{\"version\":\"1/2\",\"name\":\"x\"}"); }
 static void m_reserved(const char *f) { mt_write(f, "mod.json", DESC(",\"files\":[]")); }
 static void m_float(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":1.5e1}")); }
@@ -973,17 +974,15 @@ static void m_req_general(const char *f)
 static void m_decal_only(const char *f)
 {
     char from[MAX_PATH * 2], to[MAX_PATH * 2];
-    _snprintf_s(from, sizeof from, _TRUNCATE, "%s%cassets%cgenerated%cimage%cmods%calexrimp%cimp_icon.bimage", f, 92, 92, 92,
-                92, 92, 92, 92);
-    _snprintf_s(to, sizeof to, _TRUNCATE, "%s%cassets%cgenerated%cdecalatlas%cmods%calexrimp%cimp_icon.bimage", f, 92, 92,
-                92, 92, 92, 92, 92);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\images\\imp_icon.bimage", f);
+    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\atlases\\decals\\imp_icon.bimage", f);
     mt_mkdirs_for(to);
     CHECK(MoveFileA(from, to));
 }
 static void m_bad_home(const char *f) { mt_write(f, "mod.json", DESC(",\"homepage\":\"ftp://x\"")); }
 static void m_both(const char *f) { mt_write(f, "package.json", DESC("")); }
 static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
-static void m_bad_ext(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\notes.txt", "x"); }
+static void m_bad_ext(const char *f) { mt_write(f, "entities\\notes.txt", "x"); }
 static void m_outside(const char *f) { mt_write(f, "readme.md", "x"); }
 static void m_scenes_x(const char *f) { mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alexrimp/n\":{}}")); }
 static int extra_refuses(const char *salt, const char *extra, size_t len, char **cause)
@@ -995,32 +994,32 @@ static int extra_refuses(const char *salt, const char *extra, size_t len, char *
     }
     return 1;
 }
-static void m_empty(const char *f) { mt_write(f, "assets\\generated\\image\\mods\\alexrimp\\empty.bimage", ""); }
-static void m_unns_decl(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
-static void m_unns_raw(const char *f) { mt_write(f, "assets\\generated\\image\\other\\x.bimage", "bytes"); }
-static void m_bad_type(const char *f) { mt_write(f, "assets\\generated\\decls\\nosuchtype\\mods\\alexrimp\\x.decl", "{\r\n}"); }
-static void m_ill_formed(const char *f) { mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\broken.decl", "{\r\n\tinherit = \"x;\r\n"); }
+static void m_empty(const char *f) { mt_write(f, "images\\empty.bimage", ""); }
+static void m_unns_decl(const char *f) { mt_write(f, "game\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
+static void m_unns_raw(const char *f) { mt_write(f, "game\\generated\\image\\other\\x.bimage", "bytes"); }
+static void m_bad_type(const char *f) { mt_write(f, "decls\\nosuchtype\\x.decl", "{\r\n}"); }
+static void m_ill_formed(const char *f) { mt_write(f, "entities\\broken.decl", "{\r\n\tinherit = \"x;\r\n"); }
 static void m_missing_need(const char *f)
 {
-    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\needy.decl",
+    mt_write(f, "entities\\needy.decl",
              "{\r\n\tinherit = \"mods/alexrimp/nothing_here\";\r\n}");
 }
 static void m_shadow_ok(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
 /* A shadow whose text keeps a stock animation name the game ships without. */
 static void m_shadow_dangling(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\md6def\\monster\\imp.md6.decl",
+    mt_write(f, "game\\generated\\decls\\md6def\\monster\\imp.md6.decl",
              "{\r\n\tevents {\r\n\t\tanim \"md6/monster/imp/nothing_here.md6anim\" {\r\n\t\t}\r\n\t}\r\n}");
 }
 static void m_shadow_not_stock(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
+    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
 }
 static void m_desc_plain(const char *f) { mt_write(f, "mod.json", DESC("")); }
 /* Author keys and a name with a tab: kept as written, built without warnings (the mod store
@@ -1034,7 +1033,7 @@ static void m_store_refuses(const char *f)
 static void m_shadow_undeclared(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
 /* Retired author keys: the intent keys of DESIGN-additive 2.4 and before. */
 static void m_replaces_declared(const char *f)
@@ -1048,27 +1047,27 @@ static void m_old_player(const char *f)
 static void m_old_extends(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"extends\":{\"entitydef/ai/conductor/coop/snapmap_default\":\"mods/alexrimp/conductor_entries\"}"));
-    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\conductor_entries.decl",
+    mt_write(f, "entities\\conductor_entries.decl",
              "{\r\n\tedit = {\r\n\t\taiTypeList = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"2097152\";\r\n"
              "\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
 }
 static void m_old_body_events(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"player\":{\"bodyEvents\":\"mods/alexrimp/body_events.md6\"}"));
-    mt_write(f, "assets\\generated\\decls\\md6def\\mods\\alexrimp\\body_events.md6.decl",
+    mt_write(f, "meshes\\body_events.md6.decl",
              "{\r\n\tevents {\r\n\t}\r\n}\r\n");
 }
 /* An edited copy outside the decl grammar. */
 static void m_copy_unparsed(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\t= 3;\r\n}");
+    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\t= 3;\r\n}");
 }
 /* A binary at a game name with other bytes. */
 static void m_binary_replace(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\cooked\\anim\\md6\\characters\\monsters\\imp\\base\\motion\\combat\\idle.bmd6anim", "not the game's bytes");
+    mt_write(f, "game\\cooked\\anim\\md6\\characters\\monsters\\imp\\base\\motion\\combat\\idle.bmd6anim", "not the game's bytes");
 }
 
 /* The game's texts of the decls the edits cases copy (a fake installed-content reader). */
@@ -1116,9 +1115,9 @@ static void m_nothing(const char *f) { (void)f; }
 /* Two levels of mod inheritance: child -> mid -> imp_copy. */
 static void m_chain(const char *f)
 {
-    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\mid.decl",
+    mt_write(f, "entities\\mid.decl",
              "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\tedit = {\r\n\t\thealth = 100;\r\n\t}\r\n}");
-    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\child.decl",
+    mt_write(f, "entities\\child.decl",
              "{\r\n\tinherit = \"mods/alexrimp/mid\";\r\n\tedit = {\r\n\t}\r\n}");
 }
 static void m_companions(const char *f)
@@ -1141,7 +1140,7 @@ static void m_scenes_missing(const char *f)
 }
 static void m_chain_broken(const char *f)
 {
-    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\child.decl",
+    mt_write(f, "entities\\child.decl",
              "{\r\n\tinherit = \"mods/alexrimp/mid\";\r\n}");
 }
 
@@ -1167,10 +1166,10 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_no_id, &b);
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
     sh_mb_free(&b);
-    /* Every strings key is <salt>_<name> (DECISIONS 5: no '/'). */
-    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key mods/other/t does not start with alexrimp_");
-    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key mods/alexrimp/t does not start with alexrimp_");
-    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_ does not start with alexrimp_");
+    /* Every strings key the author writes is a name of letters, digits and _ (the product puts <salt>_ in front: DECISIONS 5, no '/'). */
+    refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key alexrimp_mods/other/t ");
+    refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key alexrimp_mods/alexrimp/t ");
+    refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_has space ");
     /* DECISIONS 9: keys the game or Snapmap+ defines are string edits, unprefixed. */
     accepted(fixture, tmp, m_string_edits, &b);
     CHECK(b.errors == 0 && b.registries &&
@@ -1211,9 +1210,9 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_bad_home, &RESOLVER, "homepage");
     refused(fixture, tmp, m_no_desc, &RESOLVER, "the mod folder has no mod.json");
-    refused(fixture, tmp, m_bad_ext, &RESOLVER, "file type not allowed");
+    refused(fixture, tmp, m_bad_ext, &RESOLVER, "entities/notes.txt: this folder holds .decl files");
     {
-        /* Files beside mod.json and assets/ are ignored and never carried
+        /* Files beside mod.json are ignored and never carried
          * (DECISIONS 16), package.json among them. */
         sh_mb_bundle ok;
         size_t k;
@@ -1224,7 +1223,7 @@ static void test_refusals(const char *fixture, const char *tmp)
         accepted(fixture, tmp, m_scenes_x, &ok);
         sh_mb_free(&ok);
         accepted(fixture, tmp, m_outside, &ok);
-        for (k = 0; k < ok.file_count; k++) CHECK(strncmp(ok.files[k].path, "assets/", 7) == 0);
+        for (k = 0; k < ok.file_count; k++) CHECK(strchr(ok.files[k].path, '/') != NULL);
         sh_mb_free(&ok);
         accepted(fixture, tmp, m_both, &ok);
         sh_mb_free(&ok);
@@ -1328,9 +1327,9 @@ static void test_refusals(const char *fixture, const char *tmp)
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
     /* A binary at a game name with other bytes is refused. */
     refused(fixture, tmp, m_binary_replace, &RESOLVER,
-            "assets/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
+            "game/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
             "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
-            "version under a mods folder named like this mod folder and point your decls at it");
+            "version in the mod's own folder for what it is and name it there");
     /* Received content keeps a binary replacement: an import on its own thread. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
@@ -1525,6 +1524,13 @@ enum { RP_OK, RP_BAD_SUM, RP_BAD_MAGIC, RP_BAD_HASH, RP_BAD_VERSION, RP_BAD_LENG
        RP_NO_PERM, RP_NO_BIN, RP_BARE_NAME, RP_DOT_NAME, RP_INCLUDE, RP_PIPELINES, RP_GLSLBIN, RP_GLSL,
        RP_ORPHAN_PERM, RP_GL_BIN_SUM, RP_GL_BIN_OK, RP_ORPHAN_SPV };
 
+static void rp_rel(char *rel, size_t cap, const char *fmt, const char *name)
+{
+    char req[512];
+    _snprintf_s(req, sizeof req, _TRUNCATE, fmt, name);
+    mt_author("trpcases", req, rel, cap);
+}
+
 static void rp_case(const char *tmp, int which, const char *needle)
 {
     char folder[MAX_PATH];
@@ -1536,69 +1542,69 @@ static void rp_case(const char *tmp, int which, const char *needle)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\case%d", tmp, ++g_case);
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "mod.json", "{\"name\":\"render program probe\",\"snapmap-plus\":{\"format\":2,\"salt\":\"trpcases\"}}");
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/decls/renderprog/%s.decl", prog);
+    rp_rel(rel, sizeof rel, "generated/decls/renderprog/%s.decl", prog);
     rp_put(folder, rel, RP_DECL, strlen(RP_DECL));
     if (which != RP_NO_BIN) {
         n = rp_bin(buf, RP_DECL, which == RP_BAD_SUM ? 1u : 0u, which == RP_BAD_MAGIC ? 0xB68800AEu : 0xB68800ADu);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/%s_pc_vulkan.bin", prog);
+        rp_rel(rel, sizeof rel, "generated/renderprogs/%s_pc_vulkan.bin", prog);
         rp_put(folder, rel, buf, n);
     }
     n = rp_spv(buf, RP_VS, 4, 0, 0);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/%s.vspv", prog);
+    rp_rel(rel, sizeof rel, "generated/spirv/%s.vspv", prog);
     rp_put(folder, rel, buf, n);
     if (which != RP_NO_FSPV) {
         n = rp_spv(buf, RP_FS, which == RP_BAD_VERSION ? 3u : 4u, which == RP_BAD_HASH ? 1u : 0u, which == RP_BAD_LENGTH ? 4u : 0u);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/%s.fspv", prog);
+        rp_rel(rel, sizeof rel, "generated/spirv/%s.fspv", prog);
         rp_put(folder, rel, buf, n);
     }
     if (which != RP_NO_PERM) {
         const char *pp = which == RP_ORPHAN_PERM ? "mods/trpcases/other" : prog;
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001.decl", pp);
+        rp_rel(rel, sizeof rel, "generated/renderprogs/permutations/%s_0000000000000001.decl", pp);
         rp_put(folder, rel, RP_PERM, strlen(RP_PERM));
         n = rp_bin(buf, RP_PERM, 0, 0xB68800ADu);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", pp);
+        rp_rel(rel, sizeof rel, "generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", pp);
         rp_put(folder, rel, buf, n);
         n = rp_spv(buf, RP_VS, 4, 0, 0);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", pp);
+        rp_rel(rel, sizeof rel, "generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", pp);
         rp_put(folder, rel, buf, n);
         if (which != RP_NO_PERM_SPV) {
             n = rp_spv(buf, RP_FS, 4, 0, 0);
-            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", pp);
+            rp_rel(rel, sizeof rel, "generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", pp);
             rp_put(folder, rel, buf, n);
         }
     }
     if (which == RP_ORPHAN_PERM) {   /* the program's own permutation, so only the orphan is wrong */
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001.decl", prog);
+        rp_rel(rel, sizeof rel, "generated/renderprogs/permutations/%s_0000000000000001.decl", prog);
         rp_put(folder, rel, RP_PERM, strlen(RP_PERM));
         n = rp_bin(buf, RP_PERM, 0, 0xB68800ADu);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", prog);
+        rp_rel(rel, sizeof rel, "generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", prog);
         rp_put(folder, rel, buf, n);
         n = rp_spv(buf, RP_VS, 4, 0, 0);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", prog);
+        rp_rel(rel, sizeof rel, "generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", prog);
         rp_put(folder, rel, buf, n);
         n = rp_spv(buf, RP_FS, 4, 0, 0);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", prog);
+        rp_rel(rel, sizeof rel, "generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", prog);
         rp_put(folder, rel, buf, n);
     }
     if (which == RP_GL_BIN_SUM || which == RP_GL_BIN_OK) {
         n = rp_bin(buf, RP_DECL, which == RP_GL_BIN_SUM ? 2u : 0u, 0xB68800ADu);
-        rp_put(folder, "assets/generated/renderprogs/mods/trpcases/tint_pc.bin", buf, n);
+        rp_put(folder, "programs/tint_pc.bin", buf, n);
     }
     if (which == RP_ORPHAN_SPV) {
         n = rp_spv(buf, RP_FS, 4, 0, 0);
-        rp_put(folder, "assets/generated/spirv/mods/trpcases/unused.fspv", buf, n);
+        rp_put(folder, "programs/spirv/unused.fspv", buf, n);
     }
     if (which != RP_DOT_NAME) {
         if (which == RP_BARE_NAME)
-            mt_write(folder, "assets\\generated\\decls\\material\\mods\\trpcases\\tintmat.decl",
+            mt_write(folder, "materials\\tintmat.decl",
                      "{\r\nstageprogram\tmods/trpcases/tint\r\ntransmap\t_white\r\n}\r\n");
         else
-            mt_write(folder, "assets\\generated\\decls\\material\\mods\\trpcases\\tintmat.decl", RP_MAT);
+            mt_write(folder, "materials\\tintmat.decl", RP_MAT);
     }
-    if (which == RP_INCLUDE) rp_put(folder, "assets/decls/renderprogs/global.inc", "x", 1);
-    if (which == RP_PIPELINES) rp_put(folder, "assets/generated/vulkan_pipelines.bin", "x", 1);
-    if (which == RP_GLSLBIN) rp_put(folder, "assets/generated/glslbinaries/mods/trpcases/tint.bin", "x", 1);
-    if (which == RP_GLSL) rp_put(folder, "assets/generated/glsl/mods/trpcases/tint.fspv", "x", 1);
+    if (which == RP_INCLUDE) rp_put(folder, "game/decls/renderprogs/global.inc", "x", 1);
+    if (which == RP_PIPELINES) rp_put(folder, "game/generated/vulkan_pipelines.bin", "x", 1);
+    if (which == RP_GLSLBIN) rp_put(folder, "game/generated/glslbinaries/tint.bin", "x", 1);
+    if (which == RP_GLSL) rp_put(folder, "game/generated/glsl/tint.fspv", "x", 1);
 
     if (!needle) {
         CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
@@ -1757,11 +1763,11 @@ static void test_classes(const char *fixture, const char *tmp)
     unsigned char *text;
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\classes", tmp);
     CHECK(mt_copy_tree(fixture, folder));
-    mt_write(folder, "assets\\generated\\image\\mods\\alexrimp\\rock_copy.bimage", FAKE[0].text);   /* borrow */
-    mt_write(folder, "assets\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* surface */
-    mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
+    mt_write(folder, "images\\rock_copy.bimage", FAKE[0].text);   /* borrow */
+    mt_write(folder, "game\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* surface */
+    mt_write(folder, "game\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
              "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
-    mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
+    mt_write(folder, "game\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
              "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
     sh_mb_set_stock_ops(&ops);
     CHECK(sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
@@ -1821,7 +1827,7 @@ static void test_classes(const char *fixture, const char *tmp)
         char reg[MAX_PATH];
         _snprintf_s(reg, sizeof reg, _TRUNCATE, "%s\\classes-coop", tmp);
         CHECK(mt_copy_tree(fixture, reg));
-        mt_write(reg, "assets\\generated\\decls\\entitydef\\player\\coop.decl",
+        mt_write(reg, "game\\generated\\decls\\entitydef\\player\\coop.decl",
                  "{\r\n\tinherit = \"player/mp\";\r\n\tedit = {\r\n\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n"
                  "\t\tdamageGroups = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdamageScale = 1.5;\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
         CHECK(sh_mb_build(reg, SALT, &FAKE_RESOLVER, &back) && back.classes.replaces == 0 && back.classes.edits == 1 &&
@@ -1864,7 +1870,7 @@ static void test_classes(const char *fixture, const char *tmp)
         v = 16; memcpy(bank + 4, &v, 4);
         v = 0x71; memcpy(bank + 8, &v, 4);
         v = sh_mb_fnv1_lower("doom_ui", 7); memcpy(bank + 12, &v, 4);
-        rp_put(folder, "assets\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
+        rp_put(folder, "game\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
         CHECK(!sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
         CHECK_CAUSE(b, "so a mod cannot replace one");
         sh_mb_free(&b);
@@ -1877,7 +1883,7 @@ static void test_classes(const char *fixture, const char *tmp)
         sh_mb_set_stock_ops(&ops);
         _snprintf_s(fsm, sizeof fsm, _TRUNCATE, "%s\\classes_fsm", tmp);
         CHECK(mt_copy_tree(fixture, fsm));
-        mt_write(fsm, "assets\\generated\\decls\\aifsmmanager\\states\\spidermastermind.decl",
+        mt_write(fsm, "game\\generated\\decls\\aifsmmanager\\states\\spidermastermind.decl",
                  "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind\";\r\n"
                  "\t\t\t\t\tisRoot = false;\r\n\t\t\t\t\tfsmType = \"idAIFSM\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\tsubGraph = {\r\n"
                  "\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind_attacks\";\r\n\t\t\t\t\tisRoot = false;\r\n\t\t\t\t}\r\n"
@@ -1939,7 +1945,7 @@ static void test_rekey(void)
 /* A bare word naming a mod resource with '-' in it: the engine's breakable
  * and material lexers split it at '-' (the spider's smm_damage_gibs line 35
  * and its materials' transmap stages). Quoted, the same name is fine. */
-#define BARE_BREAKABLE "assets\\generated\\decls\\breakable\\mods\\alexrimp\\breakable\\gibs.decl"
+#define BARE_BREAKABLE "decls\\breakable\\breakable\\gibs.decl"
 static const char g_spider_breakable[] =
     "{\r\n\tbouncyness\t\t\t\t0.300000\r\n\tgravity\t\t\t\t\t0.000000 0.000000 -750.000000\r\n"
     "\texplosion {\r\n\t\tfx\t\t\t\t\t\t\tmods/alexrimp/fx/gore/smm-wound_pop\r\n"
@@ -1972,7 +1978,7 @@ static void test_bare_hyphen(const char *fixture, const char *tmp)
     CHECK(sh_mb_scan_bare_hyphen((const unsigned char *)g_spider_breakable, strlen(g_spider_breakable), bare_cb, &h) == 1);
     CHECK(h.n == 1 && h.line[0] == 5 && !strcmp(h.name[0], "mods/alexrimp/fx/gore/smm-wound_pop"));
     refused(fixture, tmp, m_bare_hyphen, &RESOLVER,
-            "assets/generated/decls/breakable/mods/alexrimp/breakable/gibs.decl line 5: "
+            "decls/breakable/breakable/gibs.decl line 5: "
             "'mods/alexrimp/fx/gore/smm-wound_pop' is written without quotes and contains '-', "
             "which the game splits at the hyphen; quote it (a decl name), or for a raw file use '_'");
     accepted(fixture, tmp, m_quoted_hyphen, &b);
@@ -1984,7 +1990,7 @@ static void test_bare_hyphen(const char *fixture, const char *tmp)
 static void m_registries(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "assets\\generated\\decls\\snapaiencounter\\mods\\alexrimp\\imp_enc.decl", "{\r\n\tedit = {\r\n\t}\r\n}");
+    mt_write(f, "decls\\snapaiencounter\\imp_enc.decl", "{\r\n\tedit = {\r\n\t}\r\n}");
 }
 static void test_registries(const char *fixture, const char *tmp)
 {

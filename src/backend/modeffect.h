@@ -5,7 +5,7 @@
  * long it lasts and how it fades. sh_effect_compile turns it into DOOM 2016's own fx decl, which the game's FX
  * manager plays item by item with its own code on both renderers (the action update VK FUN_1416f0240 / GL
  * FUN_1416f0bc0 switches on every item type). What an item needs and no author writes, the compiler derives
- * (sdk_register): a particles item's particle decl and its material (a `look particle` material compiled by
+ * (sdk_register): a particles item's particle decl and its material (a `type particle` material compiled by
  * modlook.c), a changing value's table. The file's needs name its emitter (sh_modprog_effect_emitter), the entityDef
  * the script calls spawn to play it at a point or on an entity.
  *

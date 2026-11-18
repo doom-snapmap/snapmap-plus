@@ -22,6 +22,8 @@
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "modsalt.h"
+#include "modauthor.h"   /* the mod folder an author writes and the engine names it stands for */
+#include "strkeys.h"
 #include "modstore.h"
 #include "modregistry.h"
 #include "decl_tree.h"
@@ -48,6 +50,7 @@ typedef struct ms_need { const char *type, *name; int file; } ms_need;   /* file
 typedef struct ms_file {
     int bundle;
     const char *request, *disk, *blob;
+    const char *path;                     /* its path in the mod folder, as the author names it (modauthor.h) */
     uint64_t size;
     const char *ptype, *pname, *reg;
     int is_decl, is_shadow, is_sedef, rank;
@@ -133,7 +136,8 @@ typedef struct ms_bundle {
     ms_req_cvar *req_cvars; int req_ncvars;
     const char **req_act; int req_nact;   /* console lines run when its requirements go live */
     const char **req_deact; int req_ndeact;   /* and when they stop */
-    const char *req_lost;                 /* a cvar an earlier install asks another value of, or NULL */
+    volatile LONG req_lost_to;            /* 1 + the bundle decided before it that asks one of its cvars at another
+                                             value (ms_req_conflicts), or 0 */
     volatile LONG req_live;               /* every cvar requirement read back as asked (read on any thread) */
     const char *req_cause;                /* why they are not live (main thread; the index's arena: a plan step
                                              may name it), or NULL */
@@ -226,6 +230,8 @@ static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len);
 static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
+static int ms_req_conflicts(ms_index *x);
+static int ms_req_same(const char *a, const char *b);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char *g_last_root;   /* the mods folder of the last build (malloc'd) */
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
@@ -404,11 +410,11 @@ static int ms_valid_hash(char *h)
     return 1;
 }
 
-/* A bundle-relative file path: assets/..., '/' separators, no traversal. */
+/* A bundle-relative file path: a folder of the mod and a file in it (modauthor.h), '/' separators, no traversal. */
 static int ms_valid_rel(const char *p)
 {
     size_t i, n = strlen(p);
-    if (n < 8 || n >= 512 || strncmp(p, "assets/", 7)) return 0;
+    if (n < 3 || n >= 512 || !strchr(p, '/') || p[0] == '/') return 0;
     if (strstr(p, "//") || strstr(p, "/./") || strstr(p, "/../") || p[n - 1] == '/' || p[n - 1] == '.') return 0;
     for (i = 0; i < n; ++i) {
         unsigned char c = (unsigned char)p[i];
@@ -646,7 +652,7 @@ static void ms_fail(ms_bundle *b, const char *fmt, ...)
 
 /* A bundle whose content waits for its requirements: it sets cvars, or an
  * earlier install holds one of them at another value. Lines alone never wait. */
-static int ms_req_needs(const ms_bundle *b) { return b->req_ncvars > 0 || b->req_lost != NULL; }
+static int ms_req_needs(const ms_bundle *b) { return b->req_ncvars > 0 || b->req_lost_to != 0; }
 
 static int ms_rank(const char *type)
 {
@@ -733,9 +739,12 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         return;
     }
     {
-        char *derived = ms_strdup(x, path + 7);
+        char *mapped = NULL, *derived;
+        /* the engine request the folder's path stands for (modauthor.h) */
+        if (!b->id || !sh_ma_request(b->id, path, &mapped, NULL)) { ms_fail(b, MS_DAMAGED, path); return; }
+        derived = ms_strdup(x, mapped);
+        free(mapped);
         if (!derived) { ms_fail(b, "out of memory"); return; }
-        ms_lower(derived);
         if (request) {
             ms_lower(request);
             if (strcmp(request, derived)) { ms_fail(b, MS_DAMAGED, path); return; }
@@ -748,6 +757,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     memset(f, 0, sizeof *f);
     f->bundle = (int)(b - x->bundles);
     f->request = request;
+    f->path = path;
     f->blob = blob;
     f->stock = stock;
     f->size = (uint64_t)size;
@@ -1084,6 +1094,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     free(extra.p);
     salt = ms_trim(salt);
     b->id = salt;
+    if (b->extra && salt && sh_salt_valid(salt, strlen(salt))) {
+        /* the author's part as the engine names it (modauthor.h), as the build read it */
+        size_t en = 0;
+        char *engine = sh_ma_json(salt, b->extra, strlen(b->extra), sh_strkey_is_edit, &en);
+        if (engine) { b->extra = ms_strndup(x, engine, en); free(engine); }
+    }
     b->name = ms_trim(name);
     b->installed_at = built;
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
@@ -1160,8 +1176,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
         if (got < 0)
-            ms_fail(b, "assets/%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
-                    f->request);
+            ms_fail(b, "%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
+                    f->path ? f->path : f->request);
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
@@ -2249,14 +2265,15 @@ static int ms_conflict_cmp(const void *a, const void *b)
  * order the static winner rules rank them (`ordered` 1, different bytes), the
  * root folder's build first (`ordered` 2, builds of one salt) or in index order
  * (identical bytes), so that the provider the open map declares serves the
- * path (ms_scope_compute). Up to 63 alternates; without memory the path keeps
- * only its winner. */
+ * path (ms_scope_compute). Every alternate (no count of its own, decision 26);
+ * without memory the path keeps only its winner, with a log line. */
 static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, int winner, int ordered)
 {
-    ms_key rest[64];
+    ms_key stack[64], *rest = j - i <= 64 ? stack : (ms_key *)malloc(sizeof(ms_key) * (size_t)(j - i));
     int k, m = 0;
-    for (k = i; k < j && m < 63; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
-    if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) return;
+    if (!rest) { ms_log("out of memory: %s is served by its first provider only", x->files[winner].request); return; }
+    for (k = i; k < j; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
+    if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) { if (rest != stack) free(rest); return; }
     x->files[winner].alt_first = x->nalts;
     x->files[winner].alt_count = m;
     while (m > 0) {
@@ -2270,6 +2287,7 @@ static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, 
         memmove(&rest[b], &rest[b + 1], sizeof *rest * (size_t)(m - b - 1));
         m--;
     }
+    if (rest != stack) free(rest);
 }
 
 /* Decide which files serve their request path. Returns 0 on allocation failure. */
@@ -3041,7 +3059,6 @@ typedef struct ms_reg_memo {
     struct ms_reg_memo *next;
 } ms_reg_memo;
 
-#define MS_REG_SOURCE_MAX 256
 typedef struct ms_scope_choice { char *slot, *key; } ms_scope_choice;   /* both malloc'd */
 static ms_scope_choice *g_scope_choice;   /* the open map's choices between mods' edits (g_scope_lock) */
 static int g_scope_nchoice;
@@ -3455,7 +3472,7 @@ static int ms_registry_compute(ms_index *x, int on)
             ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->reg_relevant || b->inert) continue;
             if (b->rank < 0) continue;
-            if (n < MS_REG_SOURCE_MAX) set[n++] = b;
+            set[n++] = b;   /* every serving bundle: no count of its own (decision 26) */
         }
         qsort(set, (size_t)n, sizeof *set, ms_reg_order);
         for (i = 0; i < n; ++i) {
@@ -3556,18 +3573,40 @@ static int ms_scope_compute(ms_index *x, int mark)
         }
         free(rank);
     }
+    /* Requirement conflicts among the bundles whose requirements now apply: the
+     * open map's rows first, in row order (ms_req_conflicts). */
+    if (ms_req_conflicts(x)) changed++;
     /* Registries from the bundles that now serve (ms_registry_compute). */
     if (ms_registry_compute(x, on)) changed++;
+    /* Every provider of a path takes part (no count of its own, decision 26):
+     * the per-path arrays are sized once to the most providers any path has. */
+    int pmax = 64, s_cand[64], s_d[64], s_unres[64], s_share[64], s_order[64];
+    long s_ok[64], s_ook[64];
+    int *h_cand = s_cand, *h_d = s_d, *h_unres = s_unres, *h_share = s_share, *h_order = s_order;
+    long *h_ok = s_ok, *h_ook = s_ook;
+    for (i = 0; i < x->nfiles; ++i) if (x->files[i].alt_count + 1 > pmax) pmax = x->files[i].alt_count + 1;
+    if (pmax > 64) {
+        int *ints = (int *)malloc(sizeof(int) * 5 * (size_t)pmax);
+        long *longs = ints ? (long *)malloc(sizeof(long) * 2 * (size_t)pmax) : NULL;
+        if (!ints || !longs) {
+            free(ints);
+            pmax = 64;
+            ms_log("scope: out of memory; a path with more than 64 providers is decided among its first 64");
+        } else {
+            h_cand = ints; h_d = ints + pmax; h_unres = ints + 2 * pmax; h_share = ints + 3 * pmax; h_order = ints + 4 * pmax;
+            h_ok = longs; h_ook = longs + pmax;
+        }
+    }
     /* Each path: the file that serves it now. */
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
-        int cand[64], nc = 0, d[64], nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
-        long ok[64];   /* per candidate: its row (declared), past every row (editor-time bundles), or -1 */
+        int *cand = h_cand, nc = 0, *d = h_d, nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
+        long *ok = h_ok;   /* per candidate: its row (declared), past every row (editor-time bundles), or -1 */
         LONG was;
         ms_body *body = NULL, *was_body;
         if (!f->served || !x->bundles[f->bundle].admitted) continue;
         cand[nc++] = i;
-        for (k = 0; k < f->alt_count && nc < 64; ++k) cand[nc++] = x->alts[f->alt_first + k];
+        for (k = 0; k < f->alt_count && nc < pmax; ++k) cand[nc++] = x->alts[f->alt_first + k];
         if (!on) best = i, why = MS_WHY_ONE;
         else {
             /* The providers that serve for the listing: the declared ones,
@@ -3595,7 +3634,7 @@ static int ms_scope_compute(ms_index *x, int mark)
                     if (body) why = MS_WHY_COMPOSED;
                 }
             } else if (nd > 1) {
-                int same = 1, unres[64], share[64], tie_un = 1, tie_sh = 1, bk = 0;
+                int same = 1, *unres = h_unres, *share = h_share, tie_un = 1, tie_sh = 1, bk = 0;
                 for (k = 1; k < nd && same; ++k)
                     same = ms_pick_same(x, d[0], NULL, d[k], NULL);
                 if (same) {
@@ -3622,8 +3661,8 @@ static int ms_scope_compute(ms_index *x, int mark)
                     /* Lists and bags of the declared providers' texts compose
                      * (never two builds of one salt: only one is declared). */
                     {
-                        int order[64], no = 0;
-                        long ook[64];
+                        int *order = h_order, no = 0;
+                        long *ook = h_ook;
                         order[no] = best; ook[no++] = ok[bk];
                         for (k = 0; k < nd; ++k) if (d[k] != best) { order[no] = d[k]; ook[no++] = ok[k]; }
                         for (k = 1; k < no; ++k)   /* the rest in row order */
@@ -3687,6 +3726,7 @@ static int ms_scope_compute(ms_index *x, int mark)
         InterlockedExchange(&f->refresh, 1);
         marked++;
     }
+    if (h_cand != s_cand) { free(h_cand); free(h_ok); }
     /* A registry path no bundle carries: its synthetic file is the key. */
     for (i = x->reg_first; x->reg_count && i < x->reg_first + x->reg_count; ++i) {
         ms_file *f = &x->files[i];
@@ -3789,6 +3829,7 @@ char *sh_modserve_place_norm(const char *place)
     const char *s = place;
     size_t pl = sizeof SH_MODSERVE_PLACES - 1, n;
     if (!place || !place[0]) return _strdup("");
+    if (!strcmp(place, SH_MODSERVE_PLACE_PUBLISHED)) return _strdup(place);
     /* "maps\<segment>", either slash, or the segment alone. */
     if (!_strnicmp(s, SH_MODSERVE_PLACES, pl) && (s[pl] == '\\' || s[pl] == '/')) s += pl + 1;
     if (!(seg = _strdup(s))) return NULL;
@@ -3864,9 +3905,32 @@ int sh_modserve_place_restore(void)
     return valid;
 }
 
+/* The place of a published read whose gate has not decided yet: under the
+ * places area, with a character no folder name can hold, so no folder of a
+ * salt is in it and a row resolves only at the root at its own build
+ * (ms_row_build_in). */
+#define MS_PLACE_PENDING SH_MODSERVE_PLACE_PUBLISHED
+
+int sh_modserve_place_pending(void)
+{
+    return ms_place_apply(MS_PLACE_PENDING, 1);
+}
+
+int sh_modserve_place_is_pending(void)
+{
+    int pending;
+    AcquireSRWLockShared(&g_place_lock);
+    pending = g_place && !strcmp(g_place, MS_PLACE_PENDING);
+    ReleaseSRWLockShared(&g_place_lock);
+    return pending;
+}
+
 char *sh_modserve_place_get(void)
 {
-    return ms_scope_place();
+    char *place = ms_scope_place();
+    /* A pending place is no place to record or install into. */
+    if (place && !strcmp(place, MS_PLACE_PENDING)) place[0] = 0;
+    return place;
 }
 
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -4007,7 +4071,7 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     out->names_live = (sv & MS_SV_NEW) != 0;
     out->surfaces_live = (sv & MS_SV_RESTORE) != 0;
     out->requirements = b->req_text && (b->req_ncvars || b->req_nact || b->req_ndeact);
-    out->requirements_live = out->requirements && !b->req_lost &&
+    out->requirements_live = out->requirements && !b->req_lost_to &&
                              !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
     out->editor_path = b->scope_editor;
     return 1;
@@ -4400,6 +4464,60 @@ static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *byte
     return f->disk && f->blob;
 }
 
+/* The mod's own strings keys as its author wrote them: the keys of the engine-named extra (sh_ma_json) that carry
+ * the salt, without it. */
+static int ms_own_keys(const ms_bundle *b, sh_ma_keys *out)
+{
+    char **all = NULL;
+    size_t n = 0, i, w = 0, sl;
+    out->keys = NULL;
+    out->count = 0;
+    if (!b->extra || !b->id || !b->id[0]) return 1;
+    if (!sh_ma_string_keys(b->extra, strlen(b->extra), NULL, &all, &n)) return 0;
+    sl = strlen(b->id);
+    for (i = 0; i < n; ++i) {
+        if (!strncmp(all[i], b->id, sl) && all[i][sl] == '_' && all[i][sl + 1]) {
+            memmove(all[i], all[i] + sl + 1, strlen(all[i] + sl + 1) + 1);
+            all[w++] = all[i];
+        } else free(all[i]);
+    }
+    out->keys = all;
+    out->count = w;
+    return 1;
+}
+
+/* Every decl a mod carries (its own and its edits of the game's), served as the engine names its names
+ * (modauthor.h): the rewritten bytes go under mods\.served\files\ by their hash, as a renamed bank's decls do, so
+ * every open, the ledger and the bank rename after this see the engine's text. A stock pointer is the game's own. */
+static void ms_engine_names(ms_index *x)
+{
+    int bi, i;
+    for (bi = 0; bi < x->nbundles; ++bi) {
+        ms_bundle *b = &x->bundles[bi];
+        sh_ma_keys keys;
+        int changed = 0;
+        if (!b->admitted || !b->id || !sh_salt_valid(b->id, strlen(b->id)) || b->file_count <= 0) continue;
+        if (!ms_own_keys(b, &keys)) { ms_log("bundle '%s': out of memory; its names are served as written", b->id); continue; }
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            unsigned char *bytes;
+            char *text;
+            size_t len = 0, tl = 0;
+            if (f->stock || !f->disk || (!f->is_decl && _strnicmp(f->request, "maps/modules/", 13))) continue;
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            if (!bytes) continue;
+            text = sh_ma_text(b->id, (const char *)bytes, len, sh_ma_keys_has, &keys, &tl);
+            HeapFree(GetProcessHeap(), 0, bytes);
+            if (!text) continue;
+            if (ms_serve_rewritten(x, f, (const unsigned char *)text, tl, NULL)) changed++;
+            else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+            free(text);
+        }
+        if (changed) ms_log("bundle '%s': %d decl(s) served with the mod's names as the engine names them", b->id, changed);
+        sh_ma_keys_free(keys.keys, keys.count);
+    }
+}
+
 static void ms_bank_stems(ms_index *x)
 {
     int bi;
@@ -4503,6 +4621,7 @@ int sh_modserve_index_build(const char *mods_root)
     }
     ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
+    ms_engine_names(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
@@ -4526,8 +4645,6 @@ int sh_modserve_index_build(const char *mods_root)
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
     old = g_index;
-    /* Requirement conflicts, the log lines, and what is live already. */
-    ms_req_index(x, old);
     if (old) {
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
@@ -4568,6 +4685,8 @@ int sh_modserve_index_build(const char *mods_root)
     AcquireSRWLockShared(&g_scope_lock);
     (void)ms_scope_compute(x, 0);
     ReleaseSRWLockShared(&g_scope_lock);
+    /* The log lines of the requirements the scope's conflicts left standing, and what is live already. */
+    ms_req_index(x, old);
     ms_scope_log(x, old);
     if (old) { ms_diff(x, old); ms_carry_forward(x, old); }
     x->prev = old;
@@ -5490,8 +5609,8 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     bundle = x->bundles[f->bundle].id;
     InterlockedExchange(&f->withdrawn, 1);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: assets/%s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
-               ms_label(&x->bundles[f->bundle]), f->request, why ? why : "the game could not use it");
+    ms_console("%s: %s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why ? why : "the game could not use it");
     return 1;
 }
 
@@ -6711,18 +6830,18 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
-                    ms_console("%s: its animation file assets/%s names the model %s, which SnapMap cannot load, so "
+                    ms_console("%s: its animation file %s names the model %s, which SnapMap cannot load, so "
                                "the game's own animation is used. Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: assets/%s was not loaded because it names the model %s, which SnapMap cannot "
+                    ms_console("%s: %s was not loaded because it names the model %s, which SnapMap cannot "
                                "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 }
                 free(model);
                 continue;
@@ -6822,8 +6941,8 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             {
                 char *nl = strpbrk(why, "\r\n");
                 if (nl) *nl = 0;
-                ms_console("%s: the game could not read assets/%s%s%s. Fix the file and press Refresh.",
-                           ms_label(&x->bundles[f->bundle]), f->request, why[0] ? ": " : "", why);
+                ms_console("%s: the game could not read %s%s%s. Fix the file and press Refresh.",
+                           ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why[0] ? ": " : "", why);
             }
         } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);
@@ -6938,12 +7057,120 @@ static void ms_stopped_set(const char *id, int stopped)
     strncpy_s(g_stopped[g_nstopped++], sizeof *g_stopped, id, _TRUNCATE);
 }
 
-/* Accepted: admitted, not lost to an earlier install, and in scope for the
- * current map (modserve.h, map scope). */
+/* Accepted: admitted, not lost a conflict (ms_req_conflicts), and in scope for
+ * the current map (modserve.h, map scope). */
 static int ms_req_accepted(const ms_bundle *b)
 {
-    return b->admitted && b->req_text && !b->req_lost && (b->req_ncvars || b->req_nact || b->req_ndeact) &&
+    return b->admitted && b->req_text && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
+           (b->req_ncvars || b->req_nact || b->req_ndeact) &&
            !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
+}
+
+/* The order in which requirements are decided: bundles the open map declares
+ * first, in its row order (rank), then the others (an editor's Toybox rows,
+ * or every bundle with no map open) oldest install first. 1 when bundle `a`
+ * is decided after bundle `b`. Install order never decides between two of a
+ * map's own rows, so every player of the map gets the same result. */
+static int ms_req_after(const ms_index *x, int a, int b)
+{
+    LONG ra = InterlockedCompareExchange((volatile LONG *)&x->bundles[a].rank, 0, 0);
+    LONG rb = InterlockedCompareExchange((volatile LONG *)&x->bundles[b].rank, 0, 0);
+    if ((ra >= 0) != (rb >= 0)) return rb >= 0;
+    if (ra >= 0) return ra > rb;
+    return ms_newer(x, a, b);
+}
+
+/* The bundles for which `keep` holds, in decision order (ms_req_after). */
+static int ms_req_order(const ms_index *x, int *order, int (*keep)(const ms_bundle *))
+{
+    int i, j, n = 0;
+    for (i = 0; i < x->nbundles; ++i) if (keep(&x->bundles[i])) order[n++] = i;
+    for (i = 1; i < n; ++i)
+        for (j = i; j > 0 && ms_req_after(x, order[j - 1], order[j]); --j) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    return n;
+}
+
+/* Its requirements apply for the current listing: admitted, asks cvars, in scope. */
+static int ms_req_contends(const ms_bundle *b)
+{
+    return b->admitted && b->req_text && b->req_ncvars > 0 &&
+           !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
+}
+
+/* The first cvar of `b` that `w` asks at another value: its index in each. */
+static int ms_req_clash(const ms_bundle *b, const ms_bundle *w, int *bk, int *wm)
+{
+    int k, m;
+    for (k = 0; k < b->req_ncvars; ++k)
+        for (m = 0; m < w->req_ncvars; ++m)
+            if (!_stricmp(w->req_cvars[m].name, b->req_cvars[k].name) &&
+                !ms_req_same(w->req_cvars[m].value, b->req_cvars[k].value)) {
+                *bk = k;
+                *wm = m;
+                return 1;
+            }
+    return 0;
+}
+
+/* "com_maxFps=60 lost to <mod>, ... which asks "120"" for a bundle that lost
+ * (malloc'd), or NULL. */
+static char *ms_req_lost_text(const ms_index *x, const ms_bundle *b)
+{
+    LONG to = InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0);
+    const ms_bundle *w;
+    int k = 0, m = 0;
+    if (!x || to <= 0 || to > x->nbundles) return NULL;
+    w = &x->bundles[to - 1];
+    if (!ms_req_clash(b, w, &k, &m)) return _strdup("a cvar lost a conflict");
+    if (w->rank >= 0 && b->rank >= 0)
+        return sh_textf("%s=%s lost to %s, which this map lists first and asks \"%s\"", b->req_cvars[k].name,
+                        b->req_cvars[k].value, ms_label(w), w->req_cvars[m].value);
+    if (w->rank >= 0)
+        return sh_textf("%s=%s lost to %s, which this map uses and asks \"%s\"", b->req_cvars[k].name,
+                        b->req_cvars[k].value, ms_label(w), w->req_cvars[m].value);
+    return sh_textf("%s=%s lost to %s, installed earlier, which asks \"%s\"", b->req_cvars[k].name,
+                    b->req_cvars[k].value, ms_label(w), w->req_cvars[m].value);
+}
+
+/* Requirement conflicts for the current listing (caller holds the build lock:
+ * ms_scope_compute). Only bundles whose requirements apply contend, in
+ * decision order (ms_req_after); one asking a cvar that a bundle decided
+ * before it asks at another value loses. A bundle the open map does not use
+ * never takes a cvar from one of its rows, and a row never loses to an
+ * install. Returns the bundles whose outcome changed. */
+static int ms_req_conflicts(ms_index *x)
+{
+    int *order, n, i, j, changed = 0;
+    if (!x || !x->nbundles) return 0;
+    order = (int *)malloc(sizeof(int) * (size_t)x->nbundles);
+    if (!order) return 0;
+    n = ms_req_order(x, order, ms_req_contends);
+    for (i = 0; i < x->nbundles; ++i)
+        if (!ms_req_contends(&x->bundles[i]) && InterlockedExchange(&x->bundles[i].req_lost_to, 0)) changed++;
+    for (i = 0; i < n; ++i) {
+        ms_bundle *b = &x->bundles[order[i]];
+        LONG to = 0, was;
+        int k = 0, m = 0;
+        for (j = 0; j < i && !to; ++j) {
+            const ms_bundle *e = &x->bundles[order[j]];
+            if (InterlockedCompareExchange((volatile LONG *)&e->req_lost_to, 0, 0)) continue;
+            if (ms_req_clash(b, e, &k, &m)) to = order[j] + 1;
+        }
+        was = InterlockedExchange(&b->req_lost_to, to);
+        if (was == to) continue;
+        changed++;
+        if (to) {
+            const ms_bundle *e = &x->bundles[to - 1];
+            ms_log("requirements: conflict: %s: %s asks \"%s\", %s asks \"%s\"; %s, %s, loses and its requirements are "
+                   "not applied", b->req_cvars[k].name, ms_label(b), b->req_cvars[k].value, ms_label(e),
+                   e->req_cvars[m].value, ms_label(b),
+                   e->rank >= 0 && b->rank >= 0 ? "listed after it in this map"
+                   : e->rank >= 0              ? "which this map does not use"
+                                               : "the later install");
+        }
+    }
+    free(order);
+    return changed;
 }
 
 /* Two values the engine would hold alike: the same text, or the same number. */
@@ -6999,8 +7226,10 @@ static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
     int k, unmet = 0;
     ms_text names = { NULL, 0, 0, 0 };
     char *text;
-    if (b->req_lost) {
-        text = sh_textf("requirement %s", b->req_lost);
+    if (InterlockedCompareExchange(&b->req_lost_to, 0, 0)) {
+        char *lost = ms_req_lost_text(x, b);
+        text = lost ? sh_textf("requirement %s", lost) : NULL;
+        free(lost);
         ms_req_cause_set(x, b, text ? text : "requirements are not live");
         free(text);
         InterlockedExchange(&b->req_live, 0);
@@ -7031,51 +7260,27 @@ static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
     InterlockedExchange(&b->req_live, unmet ? 0 : 1);
 }
 
-/* At index build: bundles in install order (ms_newer); one asking a cvar an
- * earlier accepted bundle asks at another value loses. Then the log lines
- * (once per bundle and requirements text) and the liveness the held state
- * already gives, so a bundle whose cvars a pass made live serves as live. */
+static int ms_req_has_text(const ms_bundle *b) { return b->admitted && b->req_text != NULL; }
+
+/* At index build, after the scope decided the conflicts (ms_req_conflicts):
+ * the log lines (once per bundle and requirements text) and the liveness the
+ * held state already gives, so a bundle whose cvars a pass made live serves
+ * as live. */
 static void ms_req_index(ms_index *x, const ms_index *old)
 {
-    int *order, n = 0, i, j, k, m;
+    int *order, n = 0, i, k;
     order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
     if (!order) return;
-    for (i = 0; i < x->nbundles; ++i)
-        if (x->bundles[i].admitted && x->bundles[i].req_text) order[n++] = i;
-    for (i = 1; i < n; ++i)   /* oldest install first */
-        for (j = i; j > 0 && ms_newer(x, order[j - 1], order[j]); --j) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
-    for (i = 0; i < n; ++i) {
-        ms_bundle *b = &x->bundles[order[i]];
-        for (k = 0; k < b->req_ncvars && !b->req_lost; ++k)
-            for (j = 0; j < i && !b->req_lost; ++j) {
-                const ms_bundle *e = &x->bundles[order[j]];
-                if (e->req_lost) continue;
-                for (m = 0; m < e->req_ncvars; ++m) {
-                    char *text;
-                    if (_stricmp(e->req_cvars[m].name, b->req_cvars[k].name) ||
-                        ms_req_same(e->req_cvars[m].value, b->req_cvars[k].value))
-                        continue;
-                    text = sh_textf("%s=%s lost to %s, installed earlier, which asks \"%s\"",
-                                    b->req_cvars[k].name, b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value);
-                    b->req_lost = text ? ms_strdup(x, text) : NULL;
-                    free(text);
-                    if (!b->req_lost) b->req_lost = "a cvar lost to an earlier install";
-                    ms_log("requirements: conflict: %s: %s asks \"%s\", %s asks \"%s\"; %s, the later install, loses "
-                           "and its requirements are not applied", b->req_cvars[k].name, ms_label(b),
-                           b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value, ms_label(b));
-                    break;
-                }
-            }
-    }
+    n = ms_req_order(x, order, ms_req_has_text);
     for (i = 0; i < n; ++i) {
         const ms_bundle *b = &x->bundles[order[i]];
         int seen = 0;
         if (old) {
             int o = ms_bundle_describe(old, b->hash, 1);
             seen = o >= 0 && old->bundles[o].req_text && !strcmp(old->bundles[o].req_text, b->req_text) &&
-                   !old->bundles[o].req_lost == !b->req_lost;
+                   !old->bundles[o].req_lost_to == !b->req_lost_to;
         }
-        if (seen || b->req_lost) continue;
+        if (seen || b->req_lost_to) continue;
         for (k = 0; k < b->req_ncvars; ++k)
             ms_log("requirements: %s=%s for %s", b->req_cvars[k].name, b->req_cvars[k].value, ms_label(b));
         if (b->req_nact || b->req_ndeact)
@@ -7172,13 +7377,12 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     if (!phase) phase = "plan";
     AcquireSRWLockExclusive(&g_req_lock);
     for (i = 0; i < g_nheld; ++i) g_held[i].needed = 0;
-    /* What the accepted bundles ask, earliest install naming each cvar. */
+    /* What the accepted bundles ask, the first in decision order (the open
+     * map's rows first, ms_req_after) naming each cvar. */
     if (x) {
-        int *order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1)), n = 0, j;
+        int *order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1)), n = 0;
         if (order) {
-            for (i = 0; i < x->nbundles; ++i) if (ms_req_accepted(&x->bundles[i])) order[n++] = i;
-            for (i = 1; i < n; ++i)
-                for (j = i; j > 0 && ms_newer(x, order[j - 1], order[j]); --j) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+            n = ms_req_order(x, order, ms_req_accepted);
             for (i = 0; i < n; ++i) {
                 const ms_bundle *b = &x->bundles[order[i]];
                 for (k = 0; k < b->req_ncvars; ++k) {
@@ -7474,19 +7678,21 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
         const ms_active *a;
         int off, stopped;
         const char *scope_why;
+        char *lost;
         if (!b->admitted || !b->req_text || (!b->req_ncvars && !b->req_nact && !b->req_ndeact)) continue;
         any = 1;
         a = ms_active_find(b->id);
         /* Each line is this bundle's own state for the open map: another
          * mod holding the same value does not make an inactive one live. */
-        off = !b->req_lost && InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
+        lost = b->req_lost_to ? ms_req_lost_text(x, b) : NULL;
+        off = !b->req_lost_to && InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
         stopped = !a && ms_stopped_find(b->id) >= 0;
         scope_why = sh_modserve_scope_map_open() ? "the open map does not use it" : "no map is open";
         for (k = 0; k < b->req_ncvars; ++k) {
             const ms_held *h = ms_held_find(b->req_cvars[k].name);
             const char *state;
             char *why;
-            if (b->req_lost) state = "refused", why = sh_textf(" (%s)", b->req_lost);
+            if (b->req_lost_to) state = "refused", why = sh_textf(" (%s)", lost ? lost : "a cvar lost a conflict");
             else if (off) {
                 state = "not active for this map";
                 if (h && h->needed && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value))
@@ -7507,7 +7713,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
             lines++;
         }
         for (k = 0; k < b->req_nact; ++k) {
-            const char *state = b->req_lost ? "not run (a cvar lost a conflict)"
+            const char *state = b->req_lost_to ? "not run (a cvar lost a conflict)"
                               : a ? (k < a->act_ran ? "ran" : "NOT run")
                               : off ? (stopped ? "ran, then stopped (not active for this map)" : "not run (not active for this map)")
                               : "runs at the next editor pass or map load";
@@ -7520,6 +7726,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
                         b->req_deact[k], stopped ? "ran when it stopped" : "runs when the mod stops");
             lines++;
         }
+        free(lost);
     }
     for (i = 0; i < g_nheld; ++i)
         if (!g_held[i].needed && g_held[i].owned) {
@@ -8608,6 +8815,22 @@ char *sh_modserve_bundle_label(const char *bundle_hash)
         if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
         if (b->name && b->name[0] && b->folder && b->folder[0]) return sh_textf("%s (mods\\%s)", b->name, b->folder);
         return sh_textf("mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
+    }
+    return sh_text("a mod");
+}
+
+char *sh_modserve_bundle_name(const char *bundle_hash)
+{
+    const ms_index *x = g_index;
+    int i;
+    for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        const char *leaf;
+        if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
+        if (b->name && b->name[0]) return sh_text(b->name);
+        leaf = b->folder ? strrchr(b->folder, '\\') : NULL;
+        leaf = leaf ? leaf + 1 : b->folder;
+        return sh_text(leaf && leaf[0] ? leaf : "a mod");
     }
     return sh_text("a mod");
 }

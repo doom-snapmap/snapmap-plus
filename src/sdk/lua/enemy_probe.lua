@@ -41,14 +41,14 @@ end
 -- world position -> fwd, left, up in e's frame
 local function rel(e, p)
   local f, l, u = axes(e)
-  local d = sub(p, e:pos())
+  local d = sub(p, e:position())
   return dot(d, f), dot(d, l), dot(d, u)
 end
 
 -- degrees between e's forward (flat) and the direction to p; signed, + to the left
 local function bearing(e, p)
   local f, l = axes(e)
-  local d = sub(p, e:pos())
+  local d = sub(p, e:position())
   return math.deg(math.atan(dot(d, l), dot(d, f)))
 end
 
@@ -71,7 +71,7 @@ function P.wrap(brain, opts)
 
   w.spawn = function(e)
     e.state.probe_next = 0
-    out(("probe spawn %s"):format(tostring(e:def())))
+    out(("probe spawn %s"):format(tostring(e:definition())))
     return brain.spawn(e)
   end
 
@@ -80,7 +80,7 @@ function P.wrap(brain, opts)
     if t >= (e.state.probe_next or 0) then
       e.state.probe_next = t + period
       local en = enemy_of(e)
-      local ok, anim = pcall(e.anim_current, e)
+      local ok, anim = pcall(e.current_animation, e)
       -- the engine's fire state rides on the pose line, so a state that should fire and does not shows why
       local fok, fs = pcall(weapon.state, e)
       local fire = "?"
@@ -89,7 +89,7 @@ function P.wrap(brain, opts)
           tostring(fs.pulled), tostring(fs.ready), tostring(fs.focus_valid), tostring(fs.on_target))
       end
       out(("probe pose t=%.2f yaw=%.1f enemy_bearing=%s enemy_dist=%s anim=%s fire=%s"):format(t, e:yaw(),
-        en and ("%.1f"):format(bearing(e, en:pos())) or "none",
+        en and ("%.1f"):format(bearing(e, en:position())) or "none",
         en and ("%.0f"):format(e:distance(en)) or "none", ok and tostring(anim) or "?", fire))
       for _, name in ipairs(tags) do
         local p = tag_of(e, name)
@@ -105,7 +105,7 @@ function P.wrap(brain, opts)
   end
 
   w.projectile = function(e, p, decl, origin, dir)
-    local o = origin or p:pos()
+    local o = origin or p:position()
     local best, best_d
     for _, name in ipairs(tags) do
       local tp = tag_of(e, name)
@@ -117,7 +117,7 @@ function P.wrap(brain, opts)
     local en = enemy_of(e)
     local aim = "none"
     if en and dir then
-      local to = sub(en:pos(), o)
+      local to = sub(en:position(), o)
       local n = len(to) * len(dir)
       if n > 0 then aim = ("%.1f"):format(deg(dot(to, dir) / n)) end
     end
@@ -133,7 +133,7 @@ function P.wrap(brain, opts)
     local a, b, c = rel(e, o)
     out(("probe shot %s %.1f %.1f %.1f | nearest %s %.1f | aim_error=%s | enemy_bearing=%s"):format(
       tostring(decl), a, b, c, tostring(best), best_d or -1, aim,
-      en and ("%.1f"):format(bearing(e, en:pos())) or "none"))
+      en and ("%.1f"):format(bearing(e, en:position())) or "none"))
     return brain.projectile(e, p, decl, origin, dir)
   end
 

@@ -34,7 +34,7 @@
  *                 check (VK 0x1404439D0);
  *   aim_point     the set-focus-to-position ae_selectAimFocusPoint uses
  *                 (VK 0x14041BBA0 / GL 0x14041AD60), foci 0, 2 and 3;
- *   anim_valid    the node's animations (VK 0x141712C60) and their total root
+ *   animation_fits    the node's animations (VK 0x141712C60) and their total root
  *                 motion (VK 0x1415C5290), tested with the world trace, the
  *                 ground under the end point and the path query;
  *   path_points   the path query above, its computed path read through a
@@ -2581,7 +2581,7 @@ static const char *check_node(lua_State *L, int idx, const char *call, const cha
     return s;
 }
 
-/* ai:anim_valid(node, tests, [side], [seed]) -> true, index | false | nil, "searching"
+/* ai:animation_fits(node, tests, [side], [seed]) -> true, index | false | nil, "searching"
  * Whether one of the node's animations fits where the demon stands: its root
  * motion, turned by the demon's facing, tested by the words of `tests`
  * (TF_NAV_DIRECT, TF_NAV_ENDPOINT, TF_CLAMP_TO_GROUND, TF_BOUNDS,
@@ -2592,7 +2592,7 @@ static const char *check_node(lua_State *L, int idx, const char *call, const cha
 static int l_anim_valid(lua_State *L)
 {
     sh_script_handle h = 0;
-    const char *node = check_node(L, 2, "anim_valid", "the animWeb node");
+    const char *node = check_node(L, 2, "animation_fits", "the animWeb node");
     const char *words = lua_isnoneornil(L, 3) ? "VALIDATE_ANIM_DELTA" : NULL;
     char bad[64];
     unsigned tests;
@@ -2602,27 +2602,27 @@ static int l_anim_valid(lua_State *L)
     ai_rec *r;
     if (!words) {
         if (lua_type(L, 3) != LUA_TSTRING)
-            sh_script_refuse(L, "\"anim_valid\" needs its tests as words, as \"TF_BOUNDS TF_NAV_ENDPOINT\", got %s",
+            sh_script_refuse(L, "\"animation_fits\" needs its tests as words, as \"TF_BOUNDS TF_NAV_ENDPOINT\", got %s",
                              luaL_typename(L, 3));
         words = lua_tostring(L, 3);
     }
     tests = sh_ai_tests_parse(words, bad, sizeof bad);
     if (!tests && bad[0])
-        sh_script_refuse(L, "\"anim_valid\" does not know the test \"%s\"; use TF_NAV_DIRECT, TF_NAV_ENDPOINT, "
+        sh_script_refuse(L, "\"animation_fits\" does not know the test \"%s\"; use TF_NAV_DIRECT, TF_NAV_ENDPOINT, "
                          "TF_CLAMP_TO_GROUND, TF_BOUNDS, TF_EYE_VISIBILITY, TF_MUZZLE_VISIBILITY, "
                          "TF_TRANSLATION_TO_ENEMY_FORCE, TF_AVOID_ENEMY_FOV or VALIDATE_ANIM_DELTA", bad);
     if (!lua_isnoneornil(L, 4)) {
         if (!lua_isinteger(L, 4) || lua_tointeger(L, 4) < 0 || lua_tointeger(L, 4) > 63)
-            sh_script_refuse(L, "\"anim_valid\" needs the animation to try as a whole number from 0 to 63");
+            sh_script_refuse(L, "\"animation_fits\" needs the animation to try as a whole number from 0 to 63");
         side = (int)lua_tointeger(L, 4);
     }
     if (!lua_isnoneornil(L, 5)) {
         if (!lua_isinteger(L, 5) || lua_tointeger(L, 5) < 1 || lua_tointeger(L, 5) > 0x7FFFFFFF)
-            sh_script_refuse(L, "\"anim_valid\" needs its order seed as a whole number from 1 to 2147483647");
+            sh_script_refuse(L, "\"animation_fits\" needs its order seed as a whole number from 1 to 2147483647");
         seed = (unsigned)lua_tointeger(L, 5);
     }
-    NEED_OP(L, anim_valid, "anim_valid");
-    ai = self_ai(L, "anim_valid", &h);
+    NEED_OP(L, anim_valid, "animation_fits");
+    ai = self_ai(L, "animation_fits", &h);
     if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
     st = g_engine->anim_valid(ai, node, tests, side, seed, &index);
     if (st == 1) { lua_pushboolean(L, 1); lua_pushinteger(L, index); return 2; }
@@ -2703,22 +2703,22 @@ static void force_via_step(void)
     }
 }
 
-/* ai:anim_force_via(dest, via, [blend]): play `via` now whatever the web is
+/* ai:force_animation_via(dest, via, [blend]): play `via` now whatever the web is
  * doing (blending `blend` seconds), then go to `dest` when it ends. Observed
- * like anim_force: anim_event VIA_BLEND_IN_START, VIA_BLEND_OUT_START,
+ * like force_animation: animation_event VIA_BLEND_IN_START, VIA_BLEND_OUT_START,
  * DEST_REACHED. */
 static int l_anim_force_via(lua_State *L)
 {
     sh_script_handle h = 0;
-    const char *dest = check_node(L, 2, "anim_force_via", "the node to end in");
-    const char *via = check_node(L, 3, "anim_force_via", "the node to force first");
+    const char *dest = check_node(L, 2, "force_animation_via", "the node to end in");
+    const char *via = check_node(L, 3, "force_animation_via", "the node to force first");
     double blend = 0;
     void *ai;
     int i, slot = -1;
     char *d, *v;
-    if (sh_script_api_opt_number(L, 4, "anim_force_via", "the blend time in seconds", &blend) && !(blend >= 0))
-        sh_script_refuse(L, "\"anim_force_via\" needs a blend time of 0 seconds or more, got %g", blend);
-    ai = self_ai(L, "anim_force_via", &h);
+    if (sh_script_api_opt_number(L, 4, "force_animation_via", "the blend time in seconds", &blend) && !(blend >= 0))
+        sh_script_refuse(L, "\"force_animation_via\" needs a blend time of 0 seconds or more, got %g", blend);
+    ai = self_ai(L, "force_animation_via", &h);
     if (!ai) return 0;
     for (i = 0; i < g_nforce; i++) if (g_force_via[i].handle == h) { slot = i; break; }
     sh_script_api_anim_request(h, dest, via);
@@ -3572,8 +3572,8 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "turn_done", l_turn_done },       { "laser_state", l_laser_state },
     { "recoil", l_recoil },             { "weapon_ready", l_weapon_ready },
     { "weapon_use", l_weapon_use },
-    { "aim_point", l_aim_point },       { "anim_valid", l_anim_valid },
-    { "anim_force_via", l_anim_force_via }, { "firing_position", l_firing_position },
+    { "aim_point", l_aim_point },       { "animation_fits", l_anim_valid },
+    { "force_animation_via", l_anim_force_via }, { "firing_position", l_firing_position },
     { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
     { "monster_type", l_monster_type }, { "pain_string", l_pain_string },
     { "block_pain", l_block_pain },
@@ -5435,7 +5435,7 @@ static int e_wound_damage_counts(void *ai, int on)
 
 static const sh_script_ai_engine k_engine;
 
-/* Path-cache keys of the compositions: 64 per demon (anim_valid +0, firing_position +32). */
+/* Path-cache keys of the compositions: 64 per demon (animation_fits +0, firing_position +32). */
 static int ai_key(void *ai)
 {
     return 0x40000000 | (int)((((uintptr_t)ai >> 4) & 0x3FF) << 15);   /* 2 * SH_AI_KEY_SPAN keys a demon */

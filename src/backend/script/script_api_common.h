@@ -175,8 +175,8 @@ void sh_script_api_world_register(void);
 /* ---------------------------------------------------------- the frame */
 
 /* Once per host game frame of a Play, before sh_script_tick: observe the
- * animation of every entity whose script asked for one (anim_event,
- * anim_finished). */
+ * animation of every entity whose script asked for one (animation_event,
+ * animation_finished). */
 void sh_script_api_frame(void);
 /* Run fn at the end of every sh_script_api_frame (the AI calls finish a
  * forced animation through a via node there). Up to 8; idempotent. */
@@ -276,7 +276,7 @@ sh_script_earg sh_script_earg_no_anim(void);
 
 /* --------------------------------------------- animation observation */
 
-/* The request a script made of an entity's animWeb (anim_state, anim_force),
+/* The request a script made of an entity's animWeb (animation_state, force_animation),
  * observed every frame from the node now playing. */
 #define SH_SCRIPT_ANIM_VIA_IN    0x01u   /* the via node became the node playing */
 #define SH_SCRIPT_ANIM_VIA_OUT   0x02u   /* after the via node, another node played */

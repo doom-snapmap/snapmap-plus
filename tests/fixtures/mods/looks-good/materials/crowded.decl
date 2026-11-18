@@ -1,0 +1,10 @@
+{
+	type			layered
+	layermask		images/tiles/mask.tga
+	layer1			images/tiles/pores.tga
+	layer1specular		images/tiles/spec.tga
+	baseheight		images/tiles/height.tga
+	burn			images/tiles/burnt.tga
+	burnglow		images/tiles/burnglow.tga
+	burnblood		images/tiles/burnblood.tga
+}

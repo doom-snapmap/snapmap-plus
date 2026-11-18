@@ -1,0 +1,8 @@
+{
+	type			particle
+	transmap		images/fx/embers.tga
+	lighting		lit
+	glow			4
+	glowmask		images/fx/embers_mask.tga
+	nearfade		{ 40, 8 }
+}

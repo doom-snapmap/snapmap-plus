@@ -266,9 +266,9 @@ static int make_sized(const char *path, unsigned long long size)
     return ok;
 }
 
-static const char *const A_FILES[] = { "assets/generated/image/mods/testalph/a.bimage", NULL };
+static const char *const A_FILES[] = { "images/a.bimage", NULL };
 static const char *const A_BYTES[] = { "alpha bytes for the publish test", NULL };
-static const char *const B_FILES[] = { "assets/generated/image/mods/testbeta/b.bimage", NULL };
+static const char *const B_FILES[] = { "images/b.bimage", NULL };
 static const char *const B_BYTES[] = { "beta bytes for the publish test", NULL };
 
 int main(int argc, char **argv)
@@ -715,6 +715,15 @@ int main(int argc, char **argv)
         sh_modpublish_test_age_tag_arm(20000);
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 6);
+        /* The cut is armed for the publish's own save only: that save's end
+         * disarms it, so a later save inside the window carries whole builds. */
+        sh_modpublish_publish_started(LOCAL_ID);
+        CHECK(sh_modpublish_test_cut_armed());
+        {
+            char *saved = sh_modmanifest_on_save(text, len, NULL);
+            CHECK(!sh_modpublish_test_cut_armed());
+            if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        }
         /* A publish whose save was not tagged says so at the hold. */
         mark = g_log_n;
         sh_modpublish_save_seen(text, len);

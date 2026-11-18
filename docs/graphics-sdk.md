@@ -3,24 +3,27 @@
 A mod describes how its things look in plain terms; Snapmap+ turns the description into DOOM 2016's own material
 and effect data. Where one of the game's own render programs draws the picture, the game's program is used. Where
 none can, one of Snapmap+'s two general programs is used, the layered surface or the particle shading. An author
-never names a program, a render parm, a texture slot or a renderer, and a look never fails to load because of a
+never names a program, a render parm, a texture slot or a renderer, and a material never fails to load because of a
 limit: the product packs and budgets it, and reports only a mistake in the description, in one sentence that says
 what to write instead.
 
 The SDK has these parts:
 
-- **Looks in data**: a material file whose first key is `look`. This guide covers the two looks that need more than
-  the game's own material keys: `look layered` (a surface built from tiled layers) and `look particle` (a particle
+- **Material types in data**: a material file whose first key is `type`. This guide covers the two types that need more than
+  the game's own material keys: `type layered` (a surface built from tiled layers) and `type particle` (a particle
   stage's shading). Any other material is written with the game's own keys, as before.
-- **Effects in data**: an fx decl whose first key is `type effect` names what plays in plain items: a light, a
-  decal, a shake, a flash, a screen image, a blur, a focus change, a flare, a trail, a model, a sound, a glow, an
-  environment change, wind and particles ([Effects](#effects), [Particles](#particles)). The product writes the
-  game's own fx decl from it. An fx decl written as the game writes them still works as before.
+- **Effects in data**: an effect (`effects/x.decl`) whose first key is `type effect` names what plays in plain
+  items: a light, a decal, a shake, a flash, a screen image, a blur, a focus change, a flare, a trail, a model, a
+  sound, a glow, an environment change, wind and particles ([Effects](#effects), [Particles](#particles)). The
+  product writes the game's own fx decl from it. An fx decl written as the game writes them still works as before.
 - **Values that change over time**: `pulse`, `flicker`, `fade` and `curve` wherever a number or a colour goes
   ([Values that change](#values-that-change-over-time)).
-- **Environments in data**: an env decl whose first key is `type environment` ([Environments](#environments)).
-- **Script calls**: `fx`, `fx_move`, `fx_stop`, `fx_hard_stops`, `set_environment`, `clear_environment` and the
-  entity calls `tint`, `glow` and `recolour` ([Scripts](#scripts)).
+- **Environments in data**: an environment (`environments/x.decl`) whose first key is `type environment`
+  ([Environments](#environments)).
+- **Wounds in data**: a wound site (`decls/gorewounds/x.decl`) whose first key is `type wound` ([Wounds](#wounds)).
+- **Script calls**: `play_effect`, `move_effect`, `stop_effect`, `end_effects_at_once`, `set_environment`,
+  `clear_environment` and the entity calls `tint`, `glow` and `recolour` ([Scripts](#scripts), and
+  [Mod scripts](architecture.md#mod-scripts-entity-animation-and-world-calls)).
 
 Every word an author writes is listed once in the product (`src/backend/sdkwords.h`), so the compilers, their
 mistakes and this guide name the same words.
@@ -34,20 +37,20 @@ through flesh in its cracks first.
 
 ```
 {
-	look			layered
+	type			layered
 	wounds			yes
 	// the base surface: the material's own keys, as for any skinned material (virtual texture, bloom, ...)
-	layermask		mods/abcdefgh/demon/body_mask.tga
-	layer1			mods/abcdefgh/tiles/pores.tga
-	layer1normal		mods/abcdefgh/tiles/pores_n.tga
-	layer1height		mods/abcdefgh/tiles/pores_h.tga
+	layermask		images/demon/body_mask.tga
+	layer1			images/tiles/pores.tga
+	layer1normal		images/tiles/pores_n.tga
+	layer1height		images/tiles/pores_h.tga
 	layer1repeat		20
-	layer2			mods/abcdefgh/tiles/rock.tga
-	layer2normal		mods/abcdefgh/tiles/rock_n.tga
+	layer2			images/tiles/rock.tga
+	layer2normal		images/tiles/rock_n.tga
 	layer2repeat		3
 	layer2weights		{ 0.2, 0.5, 0, 0, 1 }
 	layer3			{ 0.35, 0.05, 0.03 }
-	burn			mods/abcdefgh/tiles/burnt.tga
+	burn			images/tiles/burnt.tga
 	burnheat		{ 1, 0.07, 0 }
 }
 ```
@@ -82,7 +85,7 @@ Every field is optional; a field left out has the value in the table.
 | `burnnoise` | `{ tiling1, tiling2, speed1, speed2 }` | `{ 1, 4, 0.7, 0.4 }` | the embers' flicker: two scrolling noises, each with its own tiling and speed |
 | `burnheat` | `{ r, g, b }` | `{ 1, 0.07, 0 }` | the embers' colour |
 
-A layer that sets only numbers shows nothing: a look is drawn with the game's own skinned program unless it has a
+A layer that sets only numbers shows nothing: a layered material is drawn with the game's own skinned program unless it has a
 `layermask` and at least one layer image or colour (any of `layer<i>`, `layer<i>normal`, `layer<i>smoothness`,
 `layer<i>height`, `layer<i>specular`, `layer<i>glow`), a `burn` or a `baseglow`. A layer that has fields but no colour
 of its own leaves the base colour alone (unless you write its `weights`).
@@ -94,18 +97,18 @@ that asks for more than fits draws the ones that come last as their default: no 
 black specular or glow (the build log says which). Of the 190 layered and burning materials of DOOM Eternal's demons,
 one asks for more.
 
-## A particle look
+## A particle material
 
-A particle stage names a material; a material with `look particle` decides how that stage is shaded. The stage
+A particle stage names a material; a material with `type particle` decides how that stage is shaded. The stage
 itself (its image, colours, fades, flipbook and motion) stays in the particle decl.
 
 ```
 {
-	look			particle
-	transmap		mods/abcdefgh/fx/embers.tga
+	type			particle
+	transmap		images/fx/embers.tga
 	lighting		lit
 	glow			4
-	glowmask		mods/abcdefgh/fx/embers_mask.tga
+	glowmask		images/fx/embers_mask.tga
 	glowmaskcolour		{ 1, 0.4, 0.1 }
 	nearfade		{ 40, 8 }
 	softdistance		5
@@ -125,14 +128,14 @@ itself (its image, colours, fades, flipbook and motion) stays in the particle de
 | `depthoffset` | value | 0 | pushes the soft edge into thin parts of the image |
 | `litscale` | value | 1 | scales the light a `lit` particle takes |
 
-A particle look that sets none of `glowmask`, `gradient`, `nearfade`, `softdistance` and `depthoffset`, that is not
+A particle material that sets none of `glowmask`, `gradient`, `nearfade`, `softdistance` and `depthoffset`, that is not
 `explosion`, and (when `lit`) neither scales the light nor glows on its own (`litscale` other than 1, `glowmaskstrength`
 other than 0), is drawn with the game's own particle shading (lit or unlit), exactly as a stock particle material is;
 its `glow` is then the material's own brightness.
 
 ## Effects
 
-An effect is an fx decl of the mod (`generated/decls/fx/mods/<salt>/<name>.decl`) whose first key is `type effect`.
+An effect is a file in the mod's `effects/` folder (`effects/<name>.decl`) whose first key is `type effect`.
 It lists the items that play together. Each item says when it starts, how long it lasts and how it fades.
 
 ```
@@ -147,7 +150,7 @@ It lists the items that play together. Each item says when it starts, how long i
 		fadeout		0.5
 	}
 	decal {
-		material	game("textures/decals/blood_splatter/blood_splatter_01")
+		material	textures/decals/blood_splatter/blood_splatter_01
 		size		64
 		lasts		10
 		fadeout		2
@@ -163,7 +166,7 @@ It lists the items that play together. Each item says when it starts, how long i
 		reach		600
 	}
 	particles {
-		image		mods/abcdefgh/fx/ember.tga
+		image		images/fx/ember.tga
 		count		40
 		life		{ 0.5, 1 }
 		from		sphere 16
@@ -173,13 +176,14 @@ It lists the items that play together. Each item says when it starts, how long i
 		size		curve { 0 3, 0.3 8, 1 0 }
 	}
 	sound {
-		sound		game("effects/explosions/grenade_explosion_default")
+		sound		game:effects/explosions/grenade_explosion_default
 	}
 }
 ```
 
-A name in a field is one of the mod's own, written as it is (`mods/<salt>/...`), or one of the game's, written
-`game("...")`. A field left out keeps the game's own value for it, except where that draws nothing (a decal is given
+A name in a field is the mod's when it begins with one of the mod's folders (`images/fx/ember.tga`,
+`materials/rune`, `environments/hell_red`); any other name is the game's. A game name that begins like one of the
+mod's folders is written `game:` before it (`game:effects/...`); `game("...")` also names the game's. A field left out keeps the game's own value for it, except where that draws nothing (a decal is given
 10 seconds and 64 units, a light 300 units of reach).
 
 **Every item** takes these fields:
@@ -216,14 +220,14 @@ A name in a field is one of the mod's own, written as it is (`mods/<salt>/...`),
 | `model` | `model`, `material`, `colour`, `size` | a model |
 | `sound` | `sound`, `stops` (`yes`: stops with the item) | a sound |
 | `glow` | `colour` (three or four numbers), `strength`, `value` (the render parm, default `bloomcolor`), `stays` | fades one of the entity's own values |
-| `environment` | `use` (an env decl), or any field of an [environment](#environments) | changes how the level looks while it plays |
+| `environment` | `use` (one of the mod's environments, `environments/<name>`, or a game env decl), or any field of an [environment](#environments) | changes how the level looks while it plays |
 | `wind` | `strength`, `angle` | wind |
 | `particles` | [Particles](#particles), or `use` (a particle decl), `size`, `colour`, `onscreen` | particles |
 
 A colour is `{ r, g, b }`, or `{ r, g, b, opacity }`.
 
 An effect is played from a script ([Scripts](#scripts)), or named where the game names an fx (an entityDef's
-`fxDecl`): the product writes its fx decl under the same name, so nothing else changes.
+`fxDecl`, written `effects/<name>`): the product writes its fx decl under the same name, so nothing else changes.
 
 ## Particles
 
@@ -232,7 +236,7 @@ material when it names an `image`.
 
 ```
 particles {
-	image		mods/abcdefgh/fx/ember_sheet.tga
+	image		images/fx/ember_sheet.tga
 	frames		{ 4, 4 }		// a sheet of frames, played at framerate a second
 	framerate	12
 	count		300
@@ -282,7 +286,7 @@ game decodes from sRGB is decoded the same way, so a changing colour matches the
 
 ## Environments
 
-An environment is an env decl of the mod (`generated/decls/env/mods/<salt>/<name>.decl`) whose first key is
+An environment is a file in the mod's `environments/` folder (`environments/<name>.decl`) whose first key is
 `type environment`. It names what changes in the level's look; everything else stays the level's own.
 
 ```
@@ -305,14 +309,14 @@ An environment is an env decl of the mod (`generated/decls/env/mods/<salt>/<name
 }
 ```
 
-`set_environment("hell_red")` lays it over the players' views, blending in over `blend`; `clear_environment()`
+`set_environment("hell_red")` (the file `environments/hell_red.decl`) lays it over the players' views, blending in over `blend`; `clear_environment()`
 blends back to the level's own. An effect's `environment` item does the same for as long as the item plays. Each is
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
-says so); the env decl itself, used for an area, draws it changing.
+says so); the environment itself, used for an area, draws it changing.
 
 ## Wounds
 
-A wound is a gorewounds decl of the mod (`generated/decls/gorewounds/mods/<salt>/<name>.decl`) whose first key is
+A wound is a file in the mod's `decls/gorewounds/` folder (`decls/gorewounds/<name>.decl`) whose first key is
 `type wound`: one place a demon can be wounded. It is written over DOOM 2016's own default wound and bleeds with
 2016's blood (its spray effect, splatter decal and pool, at the game's most used values).
 
@@ -327,7 +331,7 @@ A wound is a gorewounds decl of the mod (`generated/decls/gorewounds/mods/<salt>
 	cuts		{ { 0, 4, 60, 12 } }	// spheres cut from the body: { x, y, z, radius }
 	blood		both			// spray, pool, both or none
 	at		gorefx_chest		// the joint the blood (and what it throws) comes from
-	throws		mods/abcdefgh/gibs/chest_chunk
+	throws		entities/gibs/chest_chunk
 	whilealive	yes			// opens while the demon lives
 }
 ```
@@ -336,7 +340,8 @@ The demon's gore graph names its wounds, as for any wound.
 
 ## Mistakes
 
-The build reads every look, effect, environment and wound and stops on a mistake with one sentence, for example:
+The build reads every typed material, effect, environment and wound and stops on a mistake with one sentence,
+for example:
 
 - `blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'.`
 - `blast.decl line 3: 'lihgt' is not an item of an effect; the nearest is 'light'.`
@@ -345,52 +350,50 @@ The build reads every look, effect, environment and wound and stops on a mistake
 - `hell_red.decl line 3: 'fgo' is not a field of an environment; the nearest is 'fog'.`
 - `rune.decl line 2: a material has no start, so 'bloomcolor' cannot fade once; write pulse, flicker, or a curve with 'loop yes', or fade the entity from a script.`
 
-For a look, for example:
+For a typed material, for example:
 
-- `body.decl line 7: 'layer5' is not a field of a layered look; a surface has layers 1 to 4.`
+- `body.decl line 7: 'layer5' is not a field of a layered material; a surface has layers 1 to 4.`
 - `embers.decl line 4: 'lighting' is 'glowing'; write unlit, lit or explosion.`
 - `body.decl line 9: 'layer2repeat' needs one number, as in 'layer2repeat 3'.`
-- `body.decl line 3: 'layer1nromal' is not a field of a layered look; the nearest is 'layer1normal'.`
+- `body.decl line 3: 'layer1nromal' is not a field of a layered material; the nearest is 'layer1normal'.`
 - `body.decl line 3: 'wounds' is 'maybe'; write yes or no.`
-- `body.decl line 3: 'look' must be the first key of the material; move it to the top.`
+- `body.decl line 3: 'type' must be the first key of the material; move it to the top.`
 
-Also a mistake: a `look` other than `layered` or `particle`, a field of the other look (`lighting` in a layered look),
+Also a mistake: a `type` other than `layered` or `particle`, a field of the other type (`lighting` in a layered material),
 and a field written in the wrong shape (a list where one number goes, three numbers where an image goes). A key that is
-not a look field and not close to one is left alone: it is the base material's own.
+not a field of the type and not close to one is left alone: it is the base material's own.
 
-Nothing about the game's limits is ever reported: the product fits every look into them.
+Nothing about the game's limits is ever reported: the product fits every material into them.
 
 ## Scripts
 
 | Call | Does |
 |---|---|
-| `fx(effect, pos, [dir], [options])` | plays one of the mod's [effects](#effects) at a point, facing `dir`; `options` `{ colour = { r, g, b } }` tints this play. When the game holds nearly all the entities it can, the effect is skipped (one line in the log), never an error |
-| `fx(effect, e, [joint], [options])` | plays it on an entity, following it (on one of its joints when named) |
-| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | the same for one of the mod's effect entities (an entityDef with an fx decl), as before; `fx_move` and `fx_stop` move and stop either |
+| `play_effect(effect, pos, [dir], [options])` | plays one of the mod's [effects](#effects) at a point, facing `dir`; `options` `{ colour = { r, g, b } }` tints this play. When the game holds nearly all the entities it can, the effect is skipped (one line in the log), never an error |
+| `play_effect(effect, demon, [joint], [options])` | plays it on an entity, following it (on one of its joints when named) |
+| `play_effect(effect, pos, [dir])`, `move_effect(e, pos, [dir])`, `stop_effect(e)` | the same for one of the mod's effect entities (an entity with an fx decl), as before; `move_effect` and `stop_effect` move and stop either |
 | `set_environment(name)`, `clear_environment()` | lays one of the mod's [environments](#environments) over the players' views, and takes it off, each over its `blend` |
-| `e:recolour{ primary = {r,g,b}, secondary = ..., pattern = { {r,g,b}, {r,g,b} }, scratches = ..., dirt = ..., glow = ..., seconds = s }` | recolours the game's colour regions of an entity whose surfaces have them (the multiplayer armour and weapon materials, and a mod's materials on the game's `skinvmtr_custom` program), fading over `seconds`; one model drawn in many colours |
-| `fx(e, condition)`, `fx_stop(e, condition)` | start or stop an entity's own fx |
+| `demon:recolour{ primary = {r,g,b}, secondary = ..., pattern = { {r,g,b}, {r,g,b} }, scratches = ..., dirt = ..., glow = ..., seconds = s }` | recolours the game's colour regions of an entity whose surfaces have them (the multiplayer armour and weapon materials, and a mod's materials on the game's `skinvmtr_custom` program), fading over `seconds`; one model drawn in many colours |
+| `play_effect(e, condition)`, `stop_effect(e, condition)` | start or stop an entity's own fx |
 | `e:tint(r, g, b, [seconds])` | washes the entity's surfaces toward a colour (`1, 1, 1` is none), fading over `seconds`; the game has no per-entity colour multiply, so a tint is a wash added over the lit surface, as the game's own highlights are |
 | `e:glow(r, g, b, [seconds], [strength])` | makes the entity's glowing parts and surfaces glow in that colour (`0, 0, 0` is none), fading over `seconds`; the glow added is the colour times `strength` (0 to 16). Without a strength it is a soft glow (0.08) that leaves the surface readable under it; `strength` 1 is the full glow, which washes the whole surface with the colour (`e:glow(0, 0.6, 1, 0.5, 1)` paints a demon flat cyan). Pass `nil` for `seconds` to give a strength without a fade |
 
 Both fade with the game's own render-parm fade (the `lerpRenderParmFrom` event), so a fade costs the script nothing
 per frame. Other effects on one entity (a light at it, a decal under it) are fx: put them in an fx decl and play it
-at the entity's position with `fx(effect, pos)`.
+at the entity's position with `play_effect(effect, pos)`.
 
 ## For converters
 
-Doomforge's adapters write looks in this same form: a converted demon's layered and particle materials are look
+Doomforge's adapters write materials in this same form: a converted demon's layered and particle materials are typed
 materials, so a hand-made mod and a converted one use one surface.
 
 ## How it is drawn (for maintainers)
 
-- `look layered` compiles to `snapmapplus/layered/skinvmtr` or `skinvmtrwounds` (the game's lit skinned programs with
+- `type layered` compiles to `snapmapplus/layered/skinvmtr` or `skinvmtrwounds` (the game's lit skinned programs with
   the layer blend added); its numbers go into a small per-material parameter image the product derives, so the
-  program takes no render-parm slot of the engine's 1,024. `look particle` compiles to `snapmapplus/particles/
+  program takes no render-parm slot of the engine's 1,024. `type particle` compiles to `snapmapplus/particles/
   uberparticles`, whose numbers are kept in keys the game's own particle program already holds. See
   [Render programs](architecture.md#render-programs).
-- Effects, particles, environments and values that change are compiled by `src/backend/sdk.c` and the files it calls (`modeffect.c`, `modenv.c`, `sdkvalues.c`); what they derive (particle decls, materials, tables, the fx an environment plays, an effect's emitter) is served by the product, and the build carries it as pointers. See [The Graphics SDK: effects, environments, values that change](architecture.md#the-graphics-sdk-effects-environments-values-that-change).
-- The look compiler is `src/backend/modlook.c`; the build validates with it and the server serves its output. A material
-  that is not a look but still writes the old layered or particle keys, or names the old program names, is rewritten
-  the way it always was, so mods built earlier draw unchanged. A look that compiles to the platform's layered program
+- Effects, particles, environments, wounds and values that change are compiled by `src/backend/sdk.c` and the files it calls (`modeffect.c`, `modenv.c`, `modwound.c`, `sdkvalues.c`); what they derive (particle decls, materials, tables, the fx an environment plays, an effect's emitter) is served by the product, and the build carries it as pointers. See [The Graphics SDK: effects, environments, values that change](architecture.md#the-graphics-sdk-effects-environments-values-that-change).
+- The compiler is `src/backend/modlook.c`; the build validates with it and the server serves its output. A material without a `type` is written in the game's own keys and is served as written. A material that compiles to the platform's layered program
   gets `packedspec 0` unless the material writes its own (the program reads the base pages unpacked).

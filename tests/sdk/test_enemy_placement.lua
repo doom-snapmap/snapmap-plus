@@ -22,11 +22,11 @@ local function ent(t)
     if v == nil then error("has no field named " .. path) end
     return v
   end
-  function e:pos() return t.pos end
+  function e:position() return t.pos end
   function e:is_player() return t.player == true end
   function e:monster_type() return t.demon and "heavy" or nil end
   function e:alive() return t.dead ~= true end
-  function e:distance(o) local a, b = t.pos, o:pos(); return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2) end
+  function e:distance(o) local a, b = t.pos, o:position(); return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2) end
   e.t = t
   world[#world + 1] = e
   return e
@@ -42,13 +42,13 @@ local function adapter()
   A.enemy = function(e) return enemy[e] end
   A.set_enemy = function(e, t) enemy[e] = t end
   A.alive = function(t) return t ~= nil and t:alive() end
-  A.pos = function(t) return t:pos() end
+  A.pos = function(t) return t:position() end
   A.distance = function(e, t) return e:distance(t) end
   A.can_see = function(e, t) return (seen[e] or {})[t] == true end
   A.entities_near = function(pos, r)
     local out = {}
     for _, x in ipairs(world) do
-      local p = x:pos()
+      local p = x:position()
       if p and math.sqrt((p.x - pos.x) ^ 2 + (p.y - pos.y) ^ 2) <= r then out[#out + 1] = x end
     end
     return out

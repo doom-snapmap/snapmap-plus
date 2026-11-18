@@ -1,0 +1,24 @@
+{
+	type		effect
+	light {
+		colour		{ 1, 0.45, 0.1 }
+		brightness	pulse { rate 3, low 2, high 6 }
+		reach		300
+		fadeout		0.5
+	}
+	shake {
+		strength	0.4
+		reach		800
+	}
+	particles {
+		image		images/fx/ember.tga
+		count		40
+		life		{ 0.5, 1 }
+		from		sphere 16
+		speed		100
+		spread		30
+		fall		-50
+		size		curve { 0 3, 0.3 8, 1 0 }
+		colour		{ 1, 0.6, 0.2 }
+	}
+}

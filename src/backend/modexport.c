@@ -8,6 +8,7 @@
 #include <limits.h>
 
 #include "modexport.h"
+#include "modauthor.h"
 #include "modstore.h"
 #include "modbundle.h"
 #include "modmanifest.h"
@@ -932,7 +933,7 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
         int put;
         if (strncmp(name, prefix, pl)) continue;
         rel = name + pl;
-        if (strcmp(rel, "mod.json") && strncmp(rel, "assets/", 7)) {
+        if (strcmp(rel, "mod.json") && !(strchr(rel, '/') && sh_ma_folder(rel, (size_t)(strchr(rel, '/') - rel)))) {
             me_log("MODS: import: %s is not part of a mod folder; left out", name);
             continue;
         }

@@ -154,7 +154,7 @@ static void test_layered_example(void)
 {
     /* the guide's example */
     static const char T[] =
-        "{\n\tlook\t\t\tlayered\n\twounds\t\t\tyes\n\t// the base surface\n\tdiffusemap\t\"mods/abcdefgh/body.tga\"\n"
+        "{\n\ttype\t\t\tlayered\n\twounds\t\t\tyes\n\t// the base surface\n\tdiffusemap\t\"mods/abcdefgh/body.tga\"\n"
         "\tlayermask\t\tmods/abcdefgh/demon/body_mask.tga\n"
         "\tlayer1\t\t\tmods/abcdefgh/tiles/pores.tga\n\tlayer1normal\t\tmods/abcdefgh/tiles/pores_n.tga\n"
         "\tlayer1height\t\tmods/abcdefgh/tiles/pores_h.tga\n\tlayer1repeat\t\t20\n"
@@ -166,7 +166,7 @@ static void test_layered_example(void)
     CHECK(x.r == SH_LOOK_CHANGED && x.out && x.n == strlen(x.out));
     if (!x.out) return;
     CHECK(!strcmp(unq(value(x.out, "ambientprogram", 0)), "snapmapplus/layered/skinvmtrwounds"));
-    CHECK(count_key(x.out, "ambientprogram") == 1 && count_key(x.out, "look") == 0 && count_key(x.out, "wounds") == 0);
+    CHECK(count_key(x.out, "ambientprogram") == 1 && count_key(x.out, "type") == 0 && count_key(x.out, "wounds") == 0);
     CHECK(!strcmp(value(x.out, "packedspec", 0), "0"));
     CHECK(!strcmp(value(x.out, "diffusemap", 0), "\"mods/abcdefgh/body.tga\""));      /* the base's keys pass through */
     CHECK(has(x.out, "// the base surface"));
@@ -192,7 +192,7 @@ static void test_layered_example(void)
 static void test_layered_defaults(void)
 {
     /* one layer and its mask: every other number is the guide's default */
-    static const char T[] = "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1 a.tga\n}\n";
+    static const char T[] = "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1 a.tga\n}\n";
     res x = compile("a.decl", T);
     float v[28][4];
     CHECK(x.r == SH_LOOK_CHANGED);
@@ -215,7 +215,7 @@ static void test_layered_fields(void)
 {
     /* every numeric field at a value of its own */
     static const char T[] =
-        "{\n\tlook layered\n\tlayermask m.tga\n"
+        "{\n\ttype layered\n\tlayermask m.tga\n"
         "\tlayer1 a.tga\n\tlayer1repeat 5\n\tlayer1tiling { 2, 3 }\n\tlayer1scroll { 0.5, 0.25 }\n\tlayer1coverage 0.8\n"
         "\tlayer1heightblend 0.6\n\tlayer1softness 0.1\n\tlayer1weights { 0.9, 0.8, 0.7, 0.6, 0.5 }\n"
         "\tlayer1specular { 0.1, 0.2, 0.3 }\n\tlayer1glow { 1, 0.5, 0.25 }\n"
@@ -251,7 +251,7 @@ static void test_values_as_images(void)
 {
     /* a value or a colour where an image is expected is a registered constant image of that colour */
     static const char T[] =
-        "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1 { 0.25, 0.5, 1 }\n\tlayer1smoothness 0.8\n\tlayer1height 0.3\n}\n";
+        "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1 { 0.25, 0.5, 1 }\n\tlayer1smoothness 0.8\n\tlayer1height 0.3\n}\n";
     res x = compile("a.decl", T);
     size_t n = 0;
     unsigned char *b;
@@ -285,7 +285,7 @@ static void test_values_as_images(void)
 static void test_base_height(void)
 {
     /* a base height image takes a shared place; a number is the constant */
-    static const char T[] = "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tbaseheight h.tga\n}\n";
+    static const char T[] = "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tbaseheight h.tga\n}\n";
     res x = compile("a.decl", T);
     float v[28][4];
     CHECK(x.r == SH_LOOK_CHANGED && x.out);
@@ -301,7 +301,7 @@ static void test_pool(void)
     res x;
     /* the order: burn, burnglow, burnblood, base height, then layers' specular and glow images */
     static const char A[] =
-        "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tburn t.tga\n\tburnglow bg.tga\n\tburnblood bb.tga\n\tbaseheight h.tga\n"
+        "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tburn t.tga\n\tburnglow bg.tga\n\tburnblood bb.tga\n\tbaseheight h.tga\n"
         "\tlayer1specular s.tga\n}\n";
     x = compile("body.decl", A);
     CHECK(x.r == SH_LOOK_CHANGED && x.out);
@@ -324,7 +324,7 @@ static void test_pool(void)
     /* without a burn the pool begins at the base height, then layer 1's specular, glow ... in layer order */
     {
         static const char B[] =
-            "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tlayer1glow g1.tga\n\tlayer1specular s1.tga\n\tlayer2 b.tga\n"
+            "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1 a.tga\n\tlayer1glow g1.tga\n\tlayer1specular s1.tga\n\tlayer2 b.tga\n"
             "\tlayer2specular s2.tga\n\tbaseheight h.tga\n}\n";
         x = compile("body.decl", B);
         CHECK(x.r == SH_LOOK_CHANGED && x.out && vectors(x.out, v));
@@ -341,43 +341,43 @@ static void test_stock_routes(void)
 {
     res x;
     /* nothing a layer can show on: the game's own skinned program, the base keys only */
-    x = compile("a.decl", "{\n\tlook layered\n\tdiffusemap \"d.tga\"\n}\n");
+    x = compile("a.decl", "{\n\ttype layered\n\tdiffusemap \"d.tga\"\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "ambientprogram", 0), "skinvmtr") && count_key(x.out, "layerparms") == 0 &&
-          !strcmp(value(x.out, "diffusemap", 0), "\"d.tga\"") && count_key(x.out, "look") == 0);
+          !strcmp(value(x.out, "diffusemap", 0), "\"d.tga\"") && count_key(x.out, "type") == 0);
     release(&x);
-    x = compile("a.decl", "{\n\tlook layered\n\twounds yes\n\tlayer1repeat 3\n\tlayer1 a.tga\n}\n");     /* no mask: no layer shows */
+    x = compile("a.decl", "{\n\ttype layered\n\twounds yes\n\tlayer1repeat 3\n\tlayer1 a.tga\n}\n");     /* no mask: no layer shows */
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "ambientprogram", 0), "skinvmtrwounds") && count_key(x.out, "layerparms") == 0 &&
           count_key(x.out, "blendlayer1albedomap") == 0 && count_key(x.out, "wounds") == 0 && count_key(x.out, "layer1") == 0);
     release(&x);
-    x = compile("a.decl", "{\n\tlook layered\n\tlayermask m.tga\n\tlayer1repeat 3\n}\n");            /* a mask, no layer */
+    x = compile("a.decl", "{\n\ttype layered\n\tlayermask m.tga\n\tlayer1repeat 3\n}\n");            /* a mask, no layer */
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "ambientprogram", 0), "skinvmtr") && count_key(x.out, "layerblendmask") == 0);
     release(&x);
     /* a burn needs the platform program on its own */
-    x = compile("a.decl", "{\n\tlook layered\n\tburn t.tga\n}\n");
+    x = compile("a.decl", "{\n\ttype layered\n\tburn t.tga\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && has(value(x.out, "ambientprogram", 0), "snapmapplus/layered/skinvmtr") && count_key(x.out, "layerparms") == 1);
     release(&x);
     /* particles: the game's own shading for lit and unlit */
-    x = compile("a.decl", "{\n\tlook particle\n\ttransmap \"t.tga\"\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\ttransmap \"t.tga\"\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "stageprogram", 0), "transsortblend") && count_key(x.out, "particleuberparms1") == 0 &&
           !strcmp(value(x.out, "transmap", 0), "\"t.tga\""));
     release(&x);
-    x = compile("a.decl", "{\n\tlook particle\n\tlighting lit\n\tglow 4\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tlighting lit\n\tglow 4\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "stageprogram", 0), "particleshighq") && !strcmp(value(x.out, "emissive", 0), "4"));
     release(&x);
     /* a lit or explosion particle carries the light atlas program; an unlit one (as the game's unlit stock) does not */
-    x = compile("a.decl", "{\n\tlook particle\n\tlighting lit\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tlighting lit\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "particlelightatlasprogram", 0), "particlelightatlas") && count_key(x.out, "particlelightatlasprogram") == 1);
     release(&x);
-    x = compile("a.decl", "{\n\tlook particle\n\tlighting lit\n\tlitscale 2\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tlighting lit\n\tlitscale 2\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && count_key(x.out, "particlelightatlasprogram") == 1);
     release(&x);
-    x = compile("a.decl", "{\n\tlook particle\n\tlighting explosion\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tlighting explosion\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && count_key(x.out, "particlelightatlasprogram") == 1);
     release(&x);
-    x = compile("a.decl", "{\n\tlook particle\n\tlighting lit\n\tparticlelightatlasprogram \"mine\"\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tlighting lit\n\tparticlelightatlasprogram \"mine\"\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && count_key(x.out, "particlelightatlasprogram") == 1 && !strcmp(value(x.out, "particlelightatlasprogram", 0), "\"mine\""));
     release(&x);
-    x = compile("a.decl", "{\n\tlook particle\n\tnearfade { 40, 8 }\n}\n");
+    x = compile("a.decl", "{\n\ttype particle\n\tnearfade { 40, 8 }\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && count_key(x.out, "particlelightatlasprogram") == 0);
     release(&x);
     /* each of these needs the platform program */
@@ -387,7 +387,7 @@ static void test_stock_routes(void)
         size_t i;
         for (i = 0; i < sizeof need / sizeof need[0]; i++) {
             char t[200];
-            snprintf(t, sizeof t, "{\n\tlook particle\n\t%s\n}\n", need[i]);
+            snprintf(t, sizeof t, "{\n\ttype particle\n\t%s\n}\n", need[i]);
             x = compile("a.decl", t);
             CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(unq(value(x.out, "stageprogram", 0)), "snapmapplus/particles/uberparticles") &&
                   count_key(x.out, "particleuberparms1") == 1);
@@ -401,7 +401,7 @@ static void test_stock_routes(void)
 static void test_particle_fields(void)
 {
     static const char T[] =
-        "{\n\tlook\t\t\tparticle\n\ttransmap\t\tmods/abcdefgh/fx/embers.tga\n\tlighting\t\tlit\n\tglow\t\t\t4\n"
+        "{\n\ttype\t\t\tparticle\n\ttransmap\t\tmods/abcdefgh/fx/embers.tga\n\tlighting\t\tlit\n\tglow\t\t\t4\n"
         "\tglowmask\t\tmods/abcdefgh/fx/embers_mask.tga\n\tglowmaskcolour\t{ 1, 0.4, 0.1 }\n\tglowmaskstrength\t2\n"
         "\tnearfade\t\t{ 40, 8 }\n\tsoftdistance\t5\n\tdepthoffset\t1.5\n\tlitscale\t0.5\n\temissive\t3\n}\n";
     res x = compile("embers.decl", T);
@@ -417,10 +417,10 @@ static void test_particle_fields(void)
     CHECK(vec_is(x.out, "smokebrightness", 2, 0, 0, 0));
     CHECK(!strcmp(unq(value(x.out, "particleemissivemap", 0)), "mods/abcdefgh/fx/embers_mask.tga"));
     CHECK(!strcmp(unq(value(x.out, "transmap", 0)), "mods/abcdefgh/fx/embers.tga") || !strcmp(value(x.out, "transmap", 0), "mods/abcdefgh/fx/embers.tga"));
-    CHECK(count_key(x.out, "look") == 0 && count_key(x.out, "glow") == 0 && count_key(x.out, "lighting") == 0);
+    CHECK(count_key(x.out, "type") == 0 && count_key(x.out, "glow") == 0 && count_key(x.out, "lighting") == 0);
     release(&x);
     /* the explosion: the gradient's colours, mode 4; unlit and defaults */
-    x = compile("e.decl", "{\n\tlook particle\n\tlighting explosion\n\tgradient { 1, 0.1, 0, 0.5, 0.2, 0.1 }\n\tglow 10\n}\n");
+    x = compile("e.decl", "{\n\ttype particle\n\tlighting explosion\n\tgradient { 1, 0.1, 0, 0.5, 0.2, 0.1 }\n\tglow 10\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out);
     if (x.out) {
         CHECK(vec_is(x.out, "particleuberparms1", 0, 0, 4, 0) && vec_is(x.out, "particleuberparms2", 1, 0.1f, 0, 0) &&
@@ -429,7 +429,7 @@ static void test_particle_fields(void)
         CHECK(count_key(x.out, "particleemissivemap") == 0);
     }
     release(&x);
-    x = compile("u.decl", "{\n\tlook particle\n\tsoftdistance 3\n}\n");
+    x = compile("u.decl", "{\n\ttype particle\n\tsoftdistance 3\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out);
     if (x.out) {
         CHECK(vec_is(x.out, "particleuberparms1", 0, 0, 0, 0) && vec_is(x.out, "particleuberparms2", 1, 1, 1, 0) &&
@@ -437,7 +437,7 @@ static void test_particle_fields(void)
     }
     release(&x);
     /* a lit stage that scales the light or glows on its own needs the platform program too */
-    x = compile("l.decl", "{\n\tlook particle\n\tlighting lit\n\tlitscale 2\n}\n");
+    x = compile("l.decl", "{\n\ttype particle\n\tlighting lit\n\tlitscale 2\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out && count_key(x.out, "particleuberparms1") == 1);
     release(&x);
 }
@@ -457,37 +457,37 @@ static void mistake(const char *text, const char *want)
 static void test_mistakes(void)
 {
     /* the guide's three */
-    mistake("{\n\tlook layered\n\twounds yes\n\n\tlayermask m.tga\n\tlayer1 a.tga\n\tlayer1repeat 2\n\tlayer5 b.tga\n}\n",
-            "body.decl line 8: 'layer5' is not a field of a layered look; a surface has layers 1 to 4.");
-    mistake("{\n\tlook layered\n\tlayer2repeat { 3, 4 }\n}\n", "body.decl line 3: 'layer2repeat' needs one number, as in 'layer2repeat 3'.");
+    mistake("{\n\ttype layered\n\twounds yes\n\n\tlayermask m.tga\n\tlayer1 a.tga\n\tlayer1repeat 2\n\tlayer5 b.tga\n}\n",
+            "body.decl line 8: 'layer5' is not a field of a layered material; a surface has layers 1 to 4.");
+    mistake("{\n\ttype layered\n\tlayer2repeat { 3, 4 }\n}\n", "body.decl line 3: 'layer2repeat' needs one number, as in 'layer2repeat 3'.");
     {
-        res x = compile("mods/x/embers.decl", "{\n\tlook particle\n\ttransmap t.tga\n\tlighting glowing\n}\n");
+        res x = compile("mods/x/embers.decl", "{\n\ttype particle\n\ttransmap t.tga\n\tlighting glowing\n}\n");
         CHECK(x.r == SH_LOOK_MISTAKE && !strcmp(x.why, "embers.decl line 4: 'lighting' is 'glowing'; write unlit, lit or explosion."));
         release(&x);
     }
-    mistake("{\n\tlook layered\n\tlayer0 a.tga\n}\n", "body.decl line 3: 'layer0' is not a field of a layered look; a surface has layers 1 to 4.");
-    mistake("{\n\tlook layered\n\tlayer12normal a.tga\n}\n", "body.decl line 3: 'layer12normal' is not a field of a layered look; a surface has layers 1 to 4.");
-    mistake("{\n\tlook layered\n\tlayer1nromal a.tga\n}\n", "body.decl line 3: 'layer1nromal' is not a field of a layered look; the nearest is 'layer1normal'.");
-    mistake("{\n\tlook layered\n\tlayermsk a.tga\n}\n", "body.decl line 3: 'layermsk' is not a field of a layered look; the nearest is 'layermask'.");
-    mistake("{\n\tlook layered\n\tburnheet { 1, 0, 0 }\n}\n", "body.decl line 3: 'burnheet' is not a field of a layered look; the nearest is 'burnheat'.");
-    mistake("{\n\tlook layered\n\twounds maybe\n}\n", "body.decl line 3: 'wounds' is 'maybe'; write yes or no.");
-    mistake("{\n\tlook layered\n\tlayer1tiling 3\n}\n", "body.decl line 3: 'layer1tiling' needs two numbers in braces, as in 'layer1tiling { 2, 2 }'.");
-    mistake("{\n\tlook layered\n\tlayer1weights { 1, 1 }\n}\n", "body.decl line 3: 'layer1weights' needs five numbers in braces, as in 'layer1weights { 1, 1, 1, 1, 1 }'.");
-    mistake("{\n\tlook layered\n\tlayermask 3\n}\n", "body.decl line 3: 'layermask' needs an image path, as in 'layermask mods/abcdefgh/demon/body_mask.tga'.");
-    mistake("{\n\tlook layered\n\tlayer1 { 1, 2 }\n}\n", "body.decl line 3: 'layer1' needs an image path or three numbers in braces, as in 'layer1 { 0.35, 0.05, 0.03 }'.");
-    mistake("{\n\tlook layered\n\tlayer1height { 1 }\n}\n", "body.decl line 3: 'layer1height' needs an image path or one number, as in 'layer1height 0.5'.");
-    mistake("{\n\tlook layered\n\tlayer1repeat\n}\n", "body.decl line 3: 'layer1repeat' needs one number, as in 'layer1repeat 3'.");
-    mistake("{\n\tlook layered\n\tburnnoise { 1, 2, 3 }\n}\n", "body.decl line 3: 'burnnoise' needs four numbers in braces, as in 'burnnoise { 1, 4, 0.7, 0.4 }'.");
-    mistake("{\n\tlook layered\n\tlighting lit\n}\n", "body.decl line 3: 'lighting' is not a field of a layered look; it belongs to a particle look.");
-    mistake("{\n\tlook particle\n\tlayer1 a.tga\n}\n", "body.decl line 3: 'layer1' is not a field of a particle look; it belongs to a layered look.");
-    mistake("{\n\tlook particle\n\tlighting\tlit\n\tnearfade { 40 }\n}\n", "body.decl line 4: 'nearfade' needs two numbers in braces, as in 'nearfade { 40, 8 }'.");
-    mistake("{\n\tlook particle\n\tglow { 1 }\n}\n", "body.decl line 3: 'glow' needs one number, as in 'glow 4'.");
-    mistake("{\n\tlook particle\n\tglowmask 5\n}\n", "body.decl line 3: 'glowmask' needs an image path, as in 'glowmask mods/abcdefgh/fx/embers_mask.tga'.");
-    mistake("{\n\tlook particle\n\tgradient { 1, 2, 3 }\n}\n", "body.decl line 3: 'gradient' needs six numbers in braces, as in 'gradient { 1, 0.5, 0, 1, 0.1, 0 }'.");
-    mistake("{\n\tlook particle\n\tsoftdistanse 5\n}\n", "body.decl line 3: 'softdistanse' is not a field of a particle look; the nearest is 'softdistance'.");
-    mistake("{\n\tlook layered\n\tlayer2rpeat 2\n}\n", "body.decl line 3: 'layer2rpeat' is not a field of a layered look; the nearest is 'layer2repeat'.");
-    mistake("{\n\tlook layered\n\tburntilng { 1, 1 }\n}\n", "body.decl line 3: 'burntilng' is not a field of a layered look; the nearest is 'burntiling'.");
-    mistake("{\n\tlook particle\n\tnearfaed { 40, 8 }\n}\n", "body.decl line 3: 'nearfaed' is not a field of a particle look; the nearest is 'nearfade'.");
+    mistake("{\n\ttype layered\n\tlayer0 a.tga\n}\n", "body.decl line 3: 'layer0' is not a field of a layered material; a surface has layers 1 to 4.");
+    mistake("{\n\ttype layered\n\tlayer12normal a.tga\n}\n", "body.decl line 3: 'layer12normal' is not a field of a layered material; a surface has layers 1 to 4.");
+    mistake("{\n\ttype layered\n\tlayer1nromal a.tga\n}\n", "body.decl line 3: 'layer1nromal' is not a field of a layered material; the nearest is 'layer1normal'.");
+    mistake("{\n\ttype layered\n\tlayermsk a.tga\n}\n", "body.decl line 3: 'layermsk' is not a field of a layered material; the nearest is 'layermask'.");
+    mistake("{\n\ttype layered\n\tburnheet { 1, 0, 0 }\n}\n", "body.decl line 3: 'burnheet' is not a field of a layered material; the nearest is 'burnheat'.");
+    mistake("{\n\ttype layered\n\twounds maybe\n}\n", "body.decl line 3: 'wounds' is 'maybe'; write yes or no.");
+    mistake("{\n\ttype layered\n\tlayer1tiling 3\n}\n", "body.decl line 3: 'layer1tiling' needs two numbers in braces, as in 'layer1tiling { 2, 2 }'.");
+    mistake("{\n\ttype layered\n\tlayer1weights { 1, 1 }\n}\n", "body.decl line 3: 'layer1weights' needs five numbers in braces, as in 'layer1weights { 1, 1, 1, 1, 1 }'.");
+    mistake("{\n\ttype layered\n\tlayermask 3\n}\n", "body.decl line 3: 'layermask' needs an image path, as in 'layermask mods/abcdefgh/demon/body_mask.tga'.");
+    mistake("{\n\ttype layered\n\tlayer1 { 1, 2 }\n}\n", "body.decl line 3: 'layer1' needs an image path or three numbers in braces, as in 'layer1 { 0.35, 0.05, 0.03 }'.");
+    mistake("{\n\ttype layered\n\tlayer1height { 1 }\n}\n", "body.decl line 3: 'layer1height' needs an image path or one number, as in 'layer1height 0.5'.");
+    mistake("{\n\ttype layered\n\tlayer1repeat\n}\n", "body.decl line 3: 'layer1repeat' needs one number, as in 'layer1repeat 3'.");
+    mistake("{\n\ttype layered\n\tburnnoise { 1, 2, 3 }\n}\n", "body.decl line 3: 'burnnoise' needs four numbers in braces, as in 'burnnoise { 1, 4, 0.7, 0.4 }'.");
+    mistake("{\n\ttype layered\n\tlighting lit\n}\n", "body.decl line 3: 'lighting' is not a field of a layered material; it belongs to a particle material.");
+    mistake("{\n\ttype particle\n\tlayer1 a.tga\n}\n", "body.decl line 3: 'layer1' is not a field of a particle material; it belongs to a layered material.");
+    mistake("{\n\ttype particle\n\tlighting\tlit\n\tnearfade { 40 }\n}\n", "body.decl line 4: 'nearfade' needs two numbers in braces, as in 'nearfade { 40, 8 }'.");
+    mistake("{\n\ttype particle\n\tglow { 1 }\n}\n", "body.decl line 3: 'glow' needs one number, as in 'glow 4'.");
+    mistake("{\n\ttype particle\n\tglowmask 5\n}\n", "body.decl line 3: 'glowmask' needs an image path, as in 'glowmask mods/abcdefgh/fx/embers_mask.tga'.");
+    mistake("{\n\ttype particle\n\tgradient { 1, 2, 3 }\n}\n", "body.decl line 3: 'gradient' needs six numbers in braces, as in 'gradient { 1, 0.5, 0, 1, 0.1, 0 }'.");
+    mistake("{\n\ttype particle\n\tsoftdistanse 5\n}\n", "body.decl line 3: 'softdistanse' is not a field of a particle material; the nearest is 'softdistance'.");
+    mistake("{\n\ttype layered\n\tlayer2rpeat 2\n}\n", "body.decl line 3: 'layer2rpeat' is not a field of a layered material; the nearest is 'layer2repeat'.");
+    mistake("{\n\ttype layered\n\tburntilng { 1, 1 }\n}\n", "body.decl line 3: 'burntilng' is not a field of a layered material; the nearest is 'burntiling'.");
+    mistake("{\n\ttype particle\n\tnearfaed { 40, 8 }\n}\n", "body.decl line 3: 'nearfaed' is not a field of a particle material; the nearest is 'nearfade'.");
     /* a game material key is not a misspelt field, whatever it resembles */
     {
         static const char *const stock[] = { "woundbloodblend t.tga", "woundtexture t.tga", "bloomcolor { 1, 1, 1, 1 }", "hdrbloomcolorfilter 1",
@@ -496,23 +496,23 @@ static void test_mistakes(void)
         for (i = 0; i < sizeof stock / sizeof stock[0]; i++) {
             char t[200];
             res x, y;
-            snprintf(t, sizeof t, "{\n\tlook layered\n\tlayer1 a.tga\n\t%s\n}\n", stock[i]);
+            snprintf(t, sizeof t, "{\n\ttype layered\n\tlayer1 a.tga\n\t%s\n}\n", stock[i]);
             x = compile("a.decl", t);
             CHECK(x.r == SH_LOOK_CHANGED && x.out && has(x.out, stock[i]));
             release(&x);
-            snprintf(t, sizeof t, "{\n\tlook particle\n\ttransmap t.tga\n\t%s\n}\n", stock[i]);
+            snprintf(t, sizeof t, "{\n\ttype particle\n\ttransmap t.tga\n\t%s\n}\n", stock[i]);
             y = compile("a.decl", t);
             CHECK(y.r == SH_LOOK_CHANGED && y.out && has(y.out, stock[i]));
             release(&y);
         }
     }
-    mistake("{\n\tdiffusemap d.tga\n\tlook layered\n}\n", "body.decl line 3: 'look' must be the first key of the material; move it to the top.");
-    mistake("{\n\tlook glossy\n}\n", "body.decl line 2: 'look' is 'glossy'; write layered or particle.");
+    mistake("{\n\tdiffusemap d.tga\n\ttype layered\n}\n", "body.decl line 3: 'type' must be the first key of the material; move it to the top.");
+    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered or particle.");
     /* the first mistake is the one reported, by its line; a comment or a quoted value does not hide a field */
-    mistake("{\n\tlook layered\n\t// layer5 is not here\n\tlayer1repeat 2 // fine\n\tlayer9 a.tga\n\tlayer1scroll 2\n}\n",
-            "body.decl line 5: 'layer9' is not a field of a layered look; a surface has layers 1 to 4.");
+    mistake("{\n\ttype layered\n\t// layer5 is not here\n\tlayer1repeat 2 // fine\n\tlayer9 a.tga\n\tlayer1scroll 2\n}\n",
+            "body.decl line 5: 'layer9' is not a field of a layered material; a surface has layers 1 to 4.");
     /* CRLF text counts the same lines */
-    mistake("{\r\n\tlook layered\r\n\tlayer5 a.tga\r\n}\r\n", "body.decl line 3: 'layer5' is not a field of a layered look; a surface has layers 1 to 4.");
+    mistake("{\r\n\ttype layered\r\n\tlayer5 a.tga\r\n}\r\n", "body.decl line 3: 'layer5' is not a field of a layered material; a surface has layers 1 to 4.");
 }
 
 static void test_not_looks(void)
@@ -531,7 +531,7 @@ static void test_not_looks(void)
     release(&x);
 }
 
-/* ------------------------------------------------------------------------------------------ old keys ---- */
+/* ------------------------------------------------------------------------------------------ old keys, served as written ---- */
 
 static char *g_fixtures;
 static char *read_fixture(const char *name, size_t *n)
@@ -553,55 +553,24 @@ static char *read_fixture(const char *name, size_t *n)
     return t;
 }
 
-/* `text` with the old program names renamed. */
-static char *renamed(const char *text)
-{
-    static const char *const old[2] = { "snapmapplus/multilayer/", "snapmapplus/eternal/" };
-    static const char *const now[2] = { "snapmapplus/layered/", "snapmapplus/particles/" };
-    char *o = (char *)malloc(strlen(text) * 2 + 16);
-    size_t i = 0, n = 0;
-    while (text[i]) {
-        int k, did = 0;
-        for (k = 0; k < 2 && !did; k++)
-            if (!_strnicmp(text + i, old[k], strlen(old[k]))) { n += (size_t)sprintf(o + n, "%s", now[k]); i += strlen(old[k]); did = 1; }
-        if (!did) o[n++] = text[i++];
-    }
-    o[n] = 0;
-    return o;
-}
-
 static void test_legacy(void)
 {
     static const char *const names[4] = { "legacy_head.decl", "legacy_wounds.decl", "legacy_particle_unlit.decl", "legacy_particle_explosion.decl" };
     int i;
+    /* a material written with the old keys and program names has no type, so it is served exactly as written */
     for (i = 0; i < 4; i++) {
-        size_t n = 0, ln = 0;
-        char *t = read_fixture(names[i], &n), *legacy = NULL, *want;
+        size_t n = 0;
+        char *t = read_fixture(names[i], &n);
         res x;
         if (!t) continue;
         x = compile(names[i], t);
-        /* the old keys are read as the look they say and compiled as a look: no old key is left, and the stored vectors the
-         * old rewrite would have written are written by the look branch */
-        CHECK(sh_modprog_legacy_material(t, n, &legacy, &ln) == 1 && legacy);
-        want = renamed(legacy);
-        CHECK(x.r == SH_LOOK_CHANGED && x.out && (has(x.out, "layerparms") || has(x.out, "particleuberparms3")));
-        CHECK(x.out && !has(x.out, "eternalparticle") && !has(x.out, "multiblendalbedoscale") &&
-              !has(x.out, "layerstilingfactor") && !has(x.out, "blendlayer0heightmap"));
-        CHECK(x.out && !has(x.out, "snapmapplus/multilayer/") && !has(x.out, "snapmapplus/eternal/"));
-        if (x.out) {
-            res again = compile(names[i], x.out);
-            CHECK(again.r == SH_LOOK_SAME);                      /* nothing left to move */
-            release(&again);
-        }
-        free(want);
-        free(legacy);
+        CHECK(x.r == SH_LOOK_SAME && x.out == NULL);
         release(&x);
         free(t);
     }
-    /* only an old program name: renamed, nothing else touched */
     {
         res x = compile("a.decl", "{\n\tambientprogram \"snapmapplus/multilayer/skinvmtr\"\n\tdiffusemap d.tga\n}\n");
-        CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(x.out, "{\n\tambientprogram \"snapmapplus/layered/skinvmtr\"\n\tdiffusemap d.tga\n}\n"));
+        CHECK(x.r == SH_LOOK_SAME && x.out == NULL);
         release(&x);
     }
 }
@@ -611,7 +580,7 @@ static void test_legacy(void)
 static void test_determinism(void)
 {
     static const char T[] =
-        "{\n\tlook layered\n\twounds yes\n\tlayermask m.tga\n\tlayer1 { 0.1, 0.2, 0.3 }\n\tlayer2 b.tga\n\tburn t.tga\n\tlayer2glow g.tga\n}\n";
+        "{\n\ttype layered\n\twounds yes\n\tlayermask m.tga\n\tlayer1 { 0.1, 0.2, 0.3 }\n\tlayer2 b.tga\n\tburn t.tga\n\tlayer2glow g.tga\n}\n";
     res a = compile("a.decl", T), b;
     char *first = NULL;
     CHECK(a.r == SH_LOOK_CHANGED && a.out);
@@ -655,7 +624,7 @@ int main(int argc, char **argv)
     test_mistakes();
     test_not_looks();
     if (g_fixtures) test_legacy();
-    else printf("-- old material keys: no fixtures given (fixtures=<dir>); skipped\n");
+    else printf("-- old material keys served as written: no fixtures given (fixtures=<dir>); skipped\n");
     test_determinism();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -17,7 +17,7 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
-| Store tool | Migrates a mods folder of earlier releases; the installer runs it. | `src/store/store_tool.h` |
+| Store tool | Migrates a mods folder of earlier releases. The installer does not run it (`storeConversion`, off: decision 30 freezes it, and migrating releases before beta.26 is a future installer's job). | `src/store/store_tool.h` |
 | Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
@@ -495,7 +495,9 @@ Installer updates and uninstall preserve player configuration.
 ## Mods
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
-holding `mod.json` and an `assets/` tree at the engine's own request paths.
+holding `mod.json` and folders named for what its files are (see
+[The mod folder](#the-mod-folder)); the product maps each file and every name
+its texts write to the engine's request paths and names under the mod's salt.
 Mods reach other machines two ways: each build a published map names is
 uploaded to the Community API's mod store as one archive when the map is
 published, and a player who opens that map is asked first and downloads only
@@ -504,7 +506,7 @@ what they approve in the dialog, verified against the map's row (`modnet.c`,
 [Published maps and missing mods](#published-maps-and-missing-mods)); that
 transport is for publications only. An exported rawmap or prefab is a ZIP that
 carries each mod exactly as it sits in the mods folder, its folder with
-`mod.json` and `assets/` (`modexport.c`), and importing one is the ordinary
+`mod.json` and its folders by kind (`modexport.c`), and importing one is the ordinary
 install of those folders, so sharing stays offline; every rawmap save of a map
 that names mods writes that ZIP beside the JSON (see
 [Rawmaps that name mods](#rawmaps-that-name-mods) and
@@ -514,6 +516,59 @@ migration below, never served or written, and moved to the Recycle Bin once
 everything in it is in `mods\`; no `package-cache` or `package-staging`
 folder is created.
 
+### The mod folder
+
+The author's guide is [authoring.md](authoring.md); this is the contract (`modauthor.c`, R-NM1). A mod folder is
+`mod.json` and top-level folders by kind. Each file's path in the folder maps to one engine request (`sh_ma_request`;
+the inverse, `sh_ma_path`, names a request in causes and the Files view), with the salt inserted after the kind's
+engine root:
+
+| Folder (extension) | Engine request |
+|---|---|
+| `materials/`, `effects/`, `environments/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef,sound}/mods/<salt>/<rest>` |
+| `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
+| `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
+| `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
+| `images/` (`.bimage`); `atlases/decals|lights|transparency/` | `generated/image/`; `generated/decalatlas|lightatlas|transsortatlas/` + `mods/<salt>/<rest>` |
+| `movies/` (`.bswf`, `.bimage`) | `generated/swf/mods/<salt>/<rest>` |
+| `scripts/`, `scripts/lib/` (`.lua`) | `mods/<salt>/scripts/<rest>` |
+| `programs/` (`.decl`, `.bin`), `programs/permutations/`, `programs/spirv/`, `programs/spirv/permutations/` | `generated/decls/renderprog/`, `generated/renderprogs/`, `generated/renderprogs/permutations/`, `generated/spirv/`, `generated/spirv/generated/renderprogs/permutations/` + `mods/<salt>/<rest>` |
+| `map-modules/` (any), `map-modules/palettes/<p>/`, a `.baas_*` | `maps/modules/mods/<salt>/<rest>`, `maps/modules/palettes/<p>/mods/<salt>/<rest>`, `generated/maps/modules/mods/<salt>/<rest>` |
+| `virtual-textures/` (`.mega2`, `.pages`) | `virtualtextures/mods/<salt>/<rest>` |
+| `decls/<type>/` (`.decl`; not a type with a folder of its own) | `generated/decls/<type>/mods/<salt>/<rest>` |
+| `game/<request>` | `<request>` (a game path; refused under `mods/`) |
+
+A folder named `assets` is refused with one sentence (the game's layout, which a mod folder no longer uses), and so
+is any other unknown top-level folder; a file beside `mod.json` and a dot folder are not the mod's. The recorded
+`path` of a file (the block's `files` and `stock` entries, the bundle's `sh_mb_file.path`, sync and export archive
+entries) is its path in the folder; the request is derived from it and the salt. A closure pointer's path is
+`game/<request>`.
+
+Names (`sh_ma_text`, `sh_ma_engine_name`): in a decl text and in `mod.json`'s author part, a run of name characters
+(`[A-Za-z0-9_./$+@~-]`, starting after a character that is not one) that begins with a folder prefix is the mod's
+and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<rest>`, `animations/` and a `meshes/`
+name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
+`scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
+`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `game:<name>` is written `<name>` (the
+installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
+and so is the quoted name of `game("...")`, the Graphics SDK's other spelling of a game name (`ma_in_game_call`).
+`#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
+language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
+builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
+build's `mod.json`). Scripts are not rewritten: a script's names are resolved by its calls (`sh_script_check_name`).
+A text may still spell an engine name (`mods/<salt>/x`): it is served as written.
+
+The builder reads every decl through the rewrite (`mb_engine_text`: the needs scan, the look compile, the closure,
+the stock comparison of a `game/` copy and the derived edits all see the engine's text), and the file's identity
+(its SHA-256 in the block) stays the author's bytes. The serving index serves the rewritten text: `ms_engine_names`
+writes each changed decl under `mods\.served\files\<sha16>.decl` and points the file there, before the bank rename,
+so every open, the look filter and the ledger read the engine's bytes, as for a renamed bank. Salting a folder
+writes only its block: nothing on disk carries the salt, a copy needs no move, and a text that does spell
+`mods/<old salt>/` is rekeyed in every mod folder (`ms_rk_entry`). Install lower-cases the names of every author
+folder. The offline proof is `tests/served_cli.c`: it builds every folder of a root and lists each served request
+with the SHA-256 of the bytes the engine is handed (R-NM1: the Tyrant and the owner's development lane, 1,302 of
+1,305 and 1,260 of 1,262 requests identical, the rest scripts changed by the script API's renames).
+
 These backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
@@ -522,11 +577,13 @@ These backend files share the work:
   It reads and writes `mod.json` and the product record (below). A mod's
   identity is its salt (`modsalt.c`): eight characters `[a-z][a-z0-9]{7}`
   given once, recorded in the builder block, never read from the folder's
-  name, which is the author's to change at any time. New names live under
-  `mods/<salt>/` (a salt has one spelling in decl text and cooked paths), and
-  every strings key is `<salt>_<name>` (letters, digits and `_`; no `/`, since
-  the engine's string ids were only ever exercised with `[a-z0-9_]`), which a
-  decl references as `#str_<salt>_<name>`. A strings key the game's language
+  name, which is the author's to change at any time. The engine's names for
+  the mod's things live under `mods/<salt>/` (a salt has one spelling in
+  engine requests) and every strings key reaches the engine as `<salt>_<name>`
+  (letters, digits and `_`; no `/`, since the engine's string ids were only
+  ever exercised with `[a-z0-9_]`); the author writes neither: a decl names
+  its own files by folder and a string as `#str_<key>`, and the name rule above
+  rewrites both at build and serve. A strings key the game's language
   table or the product's built-in table already defines (`strkeys.c`: the
   game's keys compiled in as hashes from the supported build's English table,
   `strkeys_game.h`, and the baked set) is a string edit: it keeps that name, any
@@ -557,9 +614,9 @@ These backend files share the work:
   `generated/decls/` only (`ms_registry_files`), and a permutation is opened
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
-  `mods/<salt>/`. Of the 494 permutation decls the installed archives hold,
+  `mods/<salt>/` (in the folder, under `programs/`). Of the 494 permutation decls the installed archives hold,
   324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 11 (`SH_MB_RULES`):
-  files beside `mod.json` and `assets\` are ignored, and campaign content derives its requirements, so
+  files beside `mod.json` are ignored, and campaign content derives its requirements, so
   every own folder is built again once.
 
   Lengths: the product puts no bound of its own on a name, author,
@@ -577,7 +634,7 @@ These backend files share the work:
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
-  `strings`, `hud`, `scenes`, `companions`, `clip_events`, `attachment_tags`; any other key is kept in the manifest's
+  `strings`, `hud`, `scenes`, `companions`, `animation_events`, `attachment_tags`; any other key is kept in the manifest's
   `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
@@ -592,11 +649,11 @@ These backend files share the work:
   format, or a retired author key: `id`, `key`, `shadows`, `stock`, `scope`,
   `player`, `extends`, `replaces`, `legacy`, `composes`, `schema`, a `hud`
   `schema`) is refused with one sentence, "This mod was made for an earlier
-  version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+  version of Snapmap+. This version does not read it yet."
   (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
-  is damage the sentence names, and a file under `mods/<x>/` for another `x`
-  than the folder's name or salt is refused naming the file
-  (`sh_mb_salt_paths_check`). Files beside `mod.json` and `assets\` (a README,
+  is damage the sentence names. A folder in the engine's layout (an
+  `assets\` folder) is refused with the sentence naming the folders by
+  kind. Files beside `mod.json` (a README,
   `desktop.ini`, a `.git` folder) are ignored and never carried. A mod that
   brings campaign content (a closure pointer or a surface) gets the
   requirement `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 derived by
@@ -607,13 +664,15 @@ These backend files share the work:
   cause in the Mods tab.
   `sh_mb_build` takes the salt from the block, or from its caller for a folder
   not salted yet; `sh_mb_salt_modjson` writes the block a first scan gives a
-  folder (`{"format": 2, "salt": ...}`) and rewrites the author's own
-  references to `mods/<from>/` (`sh_mb_rekey_text`, `sh_mb_rekey_path`: the
-  folder's leaf, or a copy's old salt). The readers of earlier shapes live
+  folder (`{"format": 2, "salt": ...}`); it rewrites no text, because no
+  text carries the salt. The readers of earlier shapes live
   only in the store tool (`modbundle_old.c`, `sh_mb_old_load`), which converts
-  existing folders once at update; the game DLL never links them. The Mods
+  existing folders once at update; the game DLL never links them. What they
+  write is the engine's layout, and the build now refuses it until the
+  installer also lays a converted folder out by kind (owner, 2026-11-17:
+  converting releases' mods is the installer's, not yet done). The Mods
   tab's New mod writes an example that places and plays untouched: an
-  entityDef `mods/<salt>/example_crate` with the game's SnapMap `crate01`
+  entityDef `entities/example_crate` with the game's SnapMap `crate01`
   model, its Toybox row (`snapEditorEntityDef`, nothing binary: the game's
   `prop/new/crate01` row field for field but its names and its `entityDef`,
   so it names no `renderInfo.renderModelName`, which only rows whose entity
@@ -874,7 +933,7 @@ These backend files share the work:
   a copy to My Maps that the map service would reject, as in
   [Publishing a map with mods](#publishing-a-map-with-mods).
 
-The store. A folder is `mod.json` plus `assets\`. `mod.json` is format 2
+The store. A folder is `mod.json` plus folders by kind (above). `mod.json` is format 2
 (above): every key but `snapmap-plus` is the author's, and `snapmap-plus` is
 the builder's, the whole built manifest with its salt, rules, built time,
 tree hash, build hash, cause while failing, the derived `classes` counts
@@ -894,7 +953,7 @@ store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
 folder's identity from the block's `salt` only (`ms_parse_bundle`), and
 refuses every earlier shape with one sentence and the next step: a block of
 another format and `package.json` with "This mod was made for an earlier
-version of Snapmap+. Run the Snapmap+ installer again and it converts it.", a
+version of Snapmap+. This version does not read it yet.", a
 retired author key (`id`, `key`, `shadows`, `stock`, `scope`, `player`,
 `extends`, `replaces`, `legacy`, `composes`, `schema`, `hud.schema`) with the
 builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
@@ -907,7 +966,7 @@ the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
 is derived from both blocks in memory, for the hash and for the upload. There is no
 blob store and there are no hard links: a mod's files live in its own
-`assets\` only.
+folders only.
 
 Identity is the salt (`modsalt.h`), never the folder name: an author may
 rename any folder at any time and the next scan reads the same salt. A folder
@@ -925,36 +984,18 @@ everything else, and one salt has one folder there.
 The scan (`sh_ms_sync`), at boot, on Refresh, and after an install, a download
 or New mod; there is no folder watcher. Under the store lock it:
 
-1. salts every root folder with no builder block (`sh_ms_assign_salt` with
-   `from` its folder name): a new salt (`sh_salt_generate_except`, never one a
-   folder of the store holds), every reference to `mods/<folder name>/` in its
-   own files rewritten to `mods/<salt>/` (decl text and any other text, the
-   folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
-   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s references and
-   its block `{"format": 2, "salt": ...}`). Its strings keys gain the salt's
-   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced;
-   a string edit keeps its name),
-   and every `#str_<key>` reference in its own text files, `mod.json` among
-   them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
-   writes plain keys in a new folder; a binary file naming one of them refuses
-   the folder as a binary naming `mods/<folder name>/` does. A sound bank
-   named `<folder name>_x.bnk` is renamed `<salt>_x.bnk` and its 4-byte BKHD
-   id set to FNV-1 of the new name; a bank whose id does not match its name
-   has it corrected. The same move runs before every later build of a root
-   folder (`ms_rehome`, DECISIONS 20) with the salt kept: files under
-   `mods/<folder name>/`, references to it, new plain strings keys and banks
-   named for the folder follow the salt, the builder block stays, binaries are
-   left to the build, and nothing is written when nothing is under the name.
-   A folder name that is a salt of the store names that mod and is never moved;
-   renaming a folder changes nothing already moved. Everything is read and rewritten in
-   memory first, staged beside the folder as `<name>.staging-<pid>` (unchanged
-   files hard-linked), then swapped in with two renames under the same name, the
-   second undone on failure; the folder as it was goes to the Recycle Bin. A
-   binary file naming `mods/<folder name>/` ("<file> names mods/<x>/ inside a
-   binary file, which Snapmap+ cannot rewrite"), files under another mod's
-   `mods/<x>/`, a file that cannot be read, two files landing on one path or a
-   refused rename leave the folder exactly as it was, refused alone with that
-   cause (`MODS: store: <folder> refused: ...`);
+1. salts every root folder with no builder block (`sh_ms_assign_salt`): a new
+   salt (`sh_salt_generate_except`, never one a folder of the store holds),
+   written as the block `{"format": 2, "salt": ...}` (`sh_mb_salt_modjson`) and
+   nothing else. No file is moved or rewritten, because no file or text carries
+   the salt: an author writes the folder names and plain strings keys, and the
+   salt is added when the engine is handed a text (see [The mod folder](#the-mod-folder)).
+   A salt a text spells as `mods/<old salt>/` (a copy of a mod whose texts
+   spell its engine names) is rekeyed in every mod folder (`ms_rk_entry`).
+   A sound bank `sounds/<stem>.bnk` is served under the engine's name
+   `<salt>_<stem>` by the serving index, never renamed in the folder. A folder name that is a salt of the store names that mod; renaming a
+   folder changes nothing. A file that cannot be read refuses the folder alone
+   with that cause (`MODS: store: <folder> refused: ...`);
 2. settles a salt two root folders carry (a copied folder): the folder the
    record's `salts` section names (the one that held it at the last scan)
    keeps it, else the folder created first, never the build time (an Explorer
@@ -962,7 +1003,7 @@ or New mod; there is no folder watcher. Under the store lock it:
    line each ("mods\<b> is a copy of mods\<a>; it is a new mod now");
    until then the listing shows the copy refused with that reason;
 3. builds every root folder whose block's tree hash (`sh_mb_tree_hash`: the
-   author's bytes and the size and time of every file under `assets\`) or rules
+   author's bytes and the size and time of every file in the mod's folders) or rules
    (`SH_MB_RULES`) differ from the folder's, or whose last build failed
    (`sh_ms_sync_pending` counts them, with the folders of steps 1 and 2). Place
    folders are never built.
@@ -970,7 +1011,10 @@ or New mod; there is no folder watcher. Under the store lock it:
 A folder in an earlier shape (a format-1 block, `package.json`, a retired
 author key) is listed with its plain reason ("This mod folder is not in a shape
 Snapmap+ can build: ...") and nothing in it is written; the installer's store
-tool converts every such folder it finds each time it runs.
+tool converts every such folder it finds each time it runs. A converted folder
+is in the engine's layout (`assets\`), which the build now refuses until the
+installer also lays it out by kind (owner, 2026-11-17: converting releases'
+mods is the installer's, not yet done).
 
 Places (rule 4). A build the product receives for a map lives in the map's
 place, `mods\maps\<segment>\<mod name>\`: the segment is `sh_ms_title_segment`
@@ -1029,10 +1073,10 @@ and there are no aliases.
 
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
-example crate at `mods/<salt>/example_crate` and its Toybox row, and the row's
-strings in `mod.json` keyed `<salt>_category`, `<salt>_example_crate_name` and
-`<salt>_example_crate_desc` (referenced `#str_<salt>_...`); the scan that
-follows builds it.
+example crate at `entities/example_crate.decl` and its Toybox row, and the row's
+strings in `mod.json` keyed `category`, `example_crate_name` and
+`example_crate_desc` (referenced `#str_category`, ...; the engine is handed
+them with the salt); the scan that follows builds it.
 
 The map's place (DECISIONS 11). Where a map finds its mods is a fact of the
 map, never a global setting. A place is `""` (the root of `mods\`: the
@@ -1195,16 +1239,19 @@ else the folder named after the key, else the first by path), never from a
 `built` time (DECISIONS 15). A kept folder's author part is cut free of the
 block, the retired author keys and a hud `schema` (every other byte kept),
 salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
-(the same rewrite as the first scan's: paths, texts, strings keys
-`<salt>_<key>` and their `#str_` references) from a view of `mod.json` and
-`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id and every text of the folder that names one (decls, mod.json),
+(the engine's layout of its day: paths, texts, strings keys
+`<salt>_<key>` and their `#str_` references, from a view of `mod.json` and
+`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id and every text of the folder that names one (decls, mod.json)),
 every other file beside them copied unchanged (DECISIONS 16), and built there
 by the real builder over the store's installed bundles and the game's archives
 (`sh_modstock_exists`, replacements kept, stock-bank needs recorded through `sh_mb_set_bank_need(sh_mbi_bundle_need)` as the game records them). A build that fails, or a salting the
 folder refuses (the folder is then copied as it is with a fresh salt), is
 written as a failed build (`sh_mb_write_failed`) with the builder's plain cause
 (DECISIONS 14). The work folder is swapped in under the folder's own name and
-the folder as it was goes to the Recycle Bin; only a folder whose descriptor
+the folder as it was goes to the Recycle Bin. That output is in the engine's
+layout, and the build now refuses it until the installer also lays a converted
+folder out by kind (owner, 2026-11-17: converting releases' mods is the
+installer's, not yet done); only a folder whose descriptor
 does not read is left as it was. Folders that need another one's names are
 tried again after it. The record section `converted` keeps `keys` (old key to
 salt), `builds` (every old build hash to its salt: the folders', the removed
@@ -1268,7 +1315,7 @@ and at the end of an install, a download and New mod; an author's edit in a
 folder shows after the next Refresh.
 
 The rebuild rule: a root folder is built again when its tree hash (the author's bytes of `mod.json`
-and the path, size and time of every file under `assets\`) or the builder's rules differ from
+and the path, size and time of every file in the mod's folders) or the builder's rules differ from
 its block's, or its last build failed; that runs on a rescan (the Mods tab, `sh_mods rescan`,
 an install) and at boot (`sh_ms_boot_sync`): after the boot index, a thread of
 its own checks the trees and, when a folder is not built yet or changed while
@@ -1412,8 +1459,8 @@ two layers and keeps the first writer of each key (case-insensitive): the
 `strings.en` object of every admitted bundle's author block (root folders
 before maps' places, then by salt, then folder, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
-`#str_` prefix decls use (a mod's own keys are `<salt>_<name>`, which the
-builder enforces), and only `en` is read. A mod's own keys come only from a
+`#str_` prefix decls use (a mod's own keys reach the table as `<salt>_<name>`,
+the name rule's rewrite), and only `en` is read. A mod's own keys come only from a
 build that serves its names for the open map (`sh_modserve_bundle_scope`
 `names_live`), so the root's build and a downloaded map's build of one salt
 never compete: the map shows its own build's text. A string edit (a key the game or the
@@ -1464,13 +1511,14 @@ decl's own name, so a decl whose stem is a stock event's (an alias) plays that
 stock sound with no bank, and one whose event lives in the mod's own bank
 plays once that bank is loaded. The builder makes a `soundShader` or `sound`
 key naming `mods/...` a need of type `sound`; a stock event name is not a need.
-A bank is admitted only as `sound/soundbanks/pc/<stem>.bnk` (Wwise opens banks
-by file name in that one folder), with the stem `<id>_<rest>` (the id's `.` and
-`-` as `_`), letters, digits and `_` only, and without `_sp`, `_snapmaps` or
+A bank is a file `sounds/<stem>.bnk` in the mod folder, and the engine is
+handed it only as `sound/soundbanks/pc/<salt>_<stem>.bnk` (Wwise opens banks
+by file name in that one folder), the file name letters, digits and `_` only,
+and without `_sp`, `_snapmaps` or
 `initial`, which the engine's listed-bank filter skips in some game mode; its
-BKHD chunk must be version 113 and carry the id the game loads it as, FNV-1 of
-the lower-cased stem, so a renamed bank is refused rather than loading under
-the wrong id. A bank is always carried: never a stock pointer, never a shadow.
+BKHD chunk must be version 113. The build does not check the chunk's id
+against the name (R-NM1; the earlier build refused a renamed bank). A bank is
+always carried: never a stock pointer, never a shadow.
 A converted first-generation package keeps its banks as plain files.
 
 Wwise reads banks with its own `CreateFileW`, not through the provider, and
@@ -1545,7 +1593,8 @@ tab's facts show each needed bank and whether it loaded.
 
 ### Render programs
 
-A mod can ship a new render program `mods/<salt>/<name>` (no `.` in the last
+A mod can ship a new render program `programs/<name>` in its folder (the engine's
+`mods/<salt>/<name>`; no `.` in the last
 component) and a material that names it in quotes; the engine opens every file
 of it through the provider and needs no restart. The builder checks what the
 engine checks (`mb_check_renderprogs`): each `_pc_vulkan.bin` (and an OpenGL
@@ -1577,7 +1626,7 @@ which shows the variant this GPU binds.
 Snapmap+ provides render programs of its own, `snapmapplus/layered/skinvmtr`
 and `snapmapplus/layered/skinvmtrwounds` (`modprog.c`, `modprog.h`), which a
 mod's material names like any program; the material that names one is written as
-a `look layered` material (see [the Graphics SDK](graphics-sdk.md)). Each is the
+a `type layered` material (see [the Graphics SDK](graphics-sdk.md)). Each is the
 game's lit skinned virtual-texture program of the same base name with a layered
 surface added: the material's own layer, read from its virtual-texture pages, is
 blended with up to four tiled layers, one per channel of `layerblendmask`, by a
@@ -1599,9 +1648,9 @@ image (a DOOM 2016 `.bimage`), `sh_modprog_register_param_image` serves it at
 product's container (the same vectors, the same path), and `SH_MODPROG_ML_PARMS`
 names the vectors by the material keys they had. Layer 0's height has no sampler
 of its own: vector 9 says whether it is a constant or the red channel of an
-extra map. A material emitted with the old keys (the 28 vectors and
-`blendlayer0heightmap`) is rewritten into the image by
-`sh_modprog_legacy_material`. A burning surface (the `isember` materials) also
+extra map. A material written with the old keys (the 28 vectors and
+`blendlayer0heightmap`) is no longer converted (R-NM1); write a `type layered`
+material. A burning surface (the `isember` materials) also
 burns after the blend, by the wound cap's blood level, and adds embers flickered
 by the view's own `magnificationclouds` noise (the base program's sampler; the
 burn adds no texture), its burnt tile, cap blood and layer-0 glow image in the
@@ -1669,8 +1718,7 @@ writes `particleuberparms` only for a material whose stage program it remaps to
 `uberparticles`, never for a material that names this program.)
 `SH_MODPROG_EP_PARMS` names the keys the constants had as render parms
 (`eternalparticle`, `eternalparticlefade`, `eternalparticlecolor`,
-`eternalparticlecolor2`), and `sh_modprog_legacy_material` rewrites a material that
-writes them. The rule is documented in `src/backend/programs/shaders/particles.rp`,
+`eternalparticlecolor2`), and a material that writes them is no longer converted (R-NM1). The rule is documented in `src/backend/programs/shaders/particles.rp`,
 the one source of both renderers' text. A liquid stage keeps the game's own
 blood shading.
 
@@ -1680,7 +1728,7 @@ The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal
 
 A mod describes a surface or a particle stage in plain terms and the product writes the engine's material for it
 ([the guide](graphics-sdk.md)). The compiler is `modlook.c` (`sh_look_compile`, pure text work): a material whose first
-key is `look` with the value `layered` or `particle` is read field by field (every field optional, the guide's
+key is `type` with the value `layered` or `particle` is read field by field (every field optional, the guide's
 defaults) and written as the keys of the two programs above, its other lines passing through unchanged. A layered look
 becomes `ambientprogram "snapmapplus/layered/skinvmtr"` (or `skinvmtrwounds`), each layer image under its
 `blendlayer<i>...map` key, the mask as `layerblendmask`, the 28 vectors as the parameter image named by `layerparms`,
@@ -1692,8 +1740,8 @@ with nothing the game's shading lacks) the material names `skinvmtr`, `skinvmtrw
 `particleshighq` and the product's programs are not involved. A value or a colour where an image is expected becomes a
 constant image, 4 x 4 RGBA16F, registered beside the parameter image at
 `generated/image/snapmapplus/look/c<16 hex digits of its SHA-256>.bimage` (`sh_modprog_register_const_image`; the
-same colour, the same path). A material that is not a look but writes the old keys or program names goes through
-`sh_modprog_legacy_material` and the rename, so an earlier mod draws unchanged. A mistake in a look is one sentence
+same colour, the same path). A material that is not a look is not converted (R-NM1): one that writes the old keys
+is the author's to rewrite as a `type layered` material. A mistake in a look is one sentence
 naming the file, the line, the field and what to write (`SH_LOOK_MISTAKE`); a limit of the game never is.
 
 Two hooks use it. The builder reads every material decl of a mod through it (`sh_mb_set_look_compiler`, set in
@@ -1714,7 +1762,7 @@ apart from the decls it registers): the request path's type folder picks the com
 `sdkparse.c` reads the author grammar (a brace group of items, each a row of words, numbers, names and nested
 groups).
 
-- **An effect** (`modeffect.c`): an fx decl whose first key is `type effect` becomes the game's fx decl, one event
+- **An effect** (`modeffect.c`): an fx decl (`effects/<name>.decl`) whose first key is `type effect` becomes the game's fx decl, one event
   per item, written as the game's own editor writes its fx (a key the author leaves out is left out, so the engine's
   default holds; a decal gets a duration and a size, the engine draws none without). The game's FX manager plays every
   item type in one function on both renderers (VK `FUN_1416f0240` / GL `FUN_1416f0bc0`), so an effect draws with the
@@ -1724,13 +1772,13 @@ groups).
   GENERIC; a curve is CURVE_GENERIC, `val0 x table(t) + val1`, its table in the decl's `tableDecls`; 2016 multiplies
   the direction's x, y and z by `speed[0..2]`, so a speed goes on all three; gravity is half the acceleration, the
   origin adding `gravity x age^2`). A speed range, drag and bounce are written as Snapmap+'s simulated motion (the
-  section below). An `image` becomes a `look particle` material compiled by `modlook.c` and derived too.
+  section below). An `image` becomes a `type particle` material compiled by `modlook.c` and derived too.
 - **Values that change over time** (`sdkvalues.c`): on a material, every line `key pulse|flicker|curve { ... }` of any
   mod material becomes the game's register program (`tempN` lines over `time`, the game's `sintable` for a pulse,
   `random_smooth03` for a flicker, a derived table for a curve; every vector key of a parm block is an expression,
   VK `0x141a035e0` / GL `0x141a1f680`). The temporaries are the game's own 128, which already hold their slots. A
   colour key the parser decodes from sRGB (43 parms) has its numbers decoded the same way.
-- **An environment** (`modenv.c`): an env decl whose first key is `type environment` becomes the game's env decl
+- **An environment** (`modenv.c`): an env decl (`environments/<name>.decl`) whose first key is `type environment` becomes the game's env decl
   (inherit `default`, a `renderParms` block of the keys it names) and, derived, the fx `set_environment` plays: one
   `FX_ENV_CHANGE` item per 16 values, looping, its fades the environment's `blend` (the view's own override, set at the
   start and released at the stop, case 0xb of the FX manager). The compiled env decl's first line names that fx.
@@ -1748,13 +1796,13 @@ closure brings every derived decl along as a pointer to the product's container;
 fx and env text as it serves a look. `sdk_cli` (`tests/sdk_cli.c`) compiles SDK files outside the game and writes
 what they derive.
 
-**The script calls** ask the server through `sdk_runtime.c` (`sh_script_set_sdk_runtime`): `fx(name, ...)` asks
-whether the mod's fx decl `name` is an SDK effect (its served text, `sh_modserve_serve_identity`, starts with the
+**The script calls** ask the server through `sdk_runtime.c` (`sh_script_set_sdk_runtime`): `play_effect(name, ...)` asks
+whether the mod's fx decl `name` (`effects/<name>.decl`) is an SDK effect (its served text, `sh_modserve_serve_identity`, starts with the
 mark; asking compiles it, which registers what it derives) and spawns its emitter at the point, or at the entity and
 binds it (`bind`, or `bindToJoint` with a joint), with `setColor` for a colour; `set_environment` spawns the emitter
 of the fx the environment's first line names and keeps it, `clear_environment` removes it. When the game holds nearly
 all its entities (`sh_script_api_has_room`), an effect or an environment is skipped with one log line instead of
-refused. `e:recolour` sends `lerpRenderParmFrom` for each region's `custom*albedo` parm (the customization colours
+refused. `demon:recolour` sends `lerpRenderParmFrom` for each region's `custom*albedo` parm (the customization colours
 the engine itself writes per render entity, VK `FUN_140fdeb70` / `FUN_140fdf770`).
 
 #### Render parm slots are never refused
@@ -1902,7 +1950,7 @@ model, without replacing any game file (`clip_events.{c,h}`,
 the carrier, that inherits the model the clip plays on
 (`init { inherit "player/mp/tp_body_mp.md6" }`) and lists the rows in its
 `events { anim "<clip>" { event ... } }` blocks, and names it in the author
-key `"clip_events": ["mods/<folder name>/.../rows.md6"]`. The engine parses
+key `"animation_events": ["meshes/.../rows.md6"]` (the carrier's name in the mod folder, `meshes/.../rows.md6.decl`). The engine parses
 the carrier with its own md6Def parser, so every event type is available with
 its own argument types; the product never builds an event.
 
@@ -1947,7 +1995,7 @@ by the query's own pattern, which is unique (`sh_ce_site_resolve`). The
 windows are whole and position independent. A site that does not resolve
 records `Clip events` off (`These features are unavailable in this session:
 Clip events.`), and each Play whose mods list clip events then logs one line
-per mod: `<mod>: its clips play without the events it adds (clip_events):
+per mod: `<mod>: its clips play without the events it adds (animation_events):
 Clip events is unavailable in this session.`
 
 The detours are prepared at boot and committed, all three or none, at the
@@ -2013,12 +2061,12 @@ model (`init { inherit "player/mp/tp_body_mp.md6" }`), lists the info in a
 top-level `props` block of the engine's own form
 
 ```
-props { prop "mods/<salt>/gun.md6" {
+props { prop "meshes/gun.md6" {
           tag "hand_r" { trans ( x y z ) rot ( x y z w ) parent "<joint>" } } }
 ```
 
 and names it in the author key `"attachment_tags":
-["mods/<folder name>/.../tags.md6"]`. The engine parses the carrier with its
+["meshes/.../tags.md6"]` (the carrier's name in the mod folder). The engine parses the carrier with its
 own md6Def parser, so the product never builds a tag.
 
 The build (`sh_at_build_registry`, registered with the builder through
@@ -2156,7 +2204,7 @@ for the engine-capability facility once it carries hook rows.
 
 ### Mod scripts
 
-A mod may carry Lua scripts: `assets/mods/<salt>/scripts/*.lua` (entry files)
+A mod may carry Lua scripts: `scripts/*.lua` (entry files)
 and `scripts/lib/*.lua` (loaded only by `require`). They run during Play, on
 the host only, one sandboxed state per mod per map, and only inside one tick
 on the game thread: every engine hook posts a record and the tick delivers it.
@@ -2179,7 +2227,7 @@ last five off when mod scripts are). A failed install never stops another
 feature.
 
 - **In the build.** A script is a carried file of kind `script` (provides type
-  `script`): `assets/mods/<salt>/scripts/<name>.lua` or
+  `script`): `scripts/<name>.lua` or
   `scripts/lib/<name>.lua`, `<name>` of `[A-Za-z0-9_-]`; a `.lua` anywhere else
   is refused. It is hashed into the build like every file and the engine never
   opens it. `modbundle.c` checks each one: UTF-8 text without a NUL byte, not
@@ -2202,12 +2250,12 @@ feature.
   nothing. An author file at one of the Script node row's two paths is refused
   (`SH_MB_SCRIPT_NODE_RESERVED`). Builder rules 11.
   A build that carries a script is never sliced (`sh_mb_sliceable`): its
-  scripts may build names while running. First-scan salting rewrites
-  `mods/<folder>/` inside a `.lua` like any text file. Archives (publish,
+  scripts may build names while running. Scripts are never rewritten with the salt (the name rule leaves them
+  alone). Archives (publish,
   download, rawmap and prefab exports and imports, installs) carry scripts as
   the files they are, under their lower-case game names (every carried path is
-  recorded that way, whatever its spelling on disk, and a new folder's install
-  writes its `assets\` tree in lower case, so an uppercase letter never refuses
+  recorded that way, whatever its spelling on disk, and an install
+  writes the names of every author folder in lower case, so an uppercase letter never refuses
   a mod).
 - **States.** The Play gate prepares the map's scripted mods
   (`sh_script_map_open`: the provider's mods, their file source and the map
@@ -2251,7 +2299,7 @@ feature.
   `xpcall` handler is not run after one (Lua calls it from inside the hook,
   with hooks off). What remains is the engine's: the game holds at most
   16,382 entities at once and one more is a fatal engine error, so `spawn`,
-  `fx(effect, pos)`, `explode` with an effect and `ai:fire` refuse ("cannot
+  `play_effect(effect, pos)`, `explode` with an effect and `ai:fire` refuse ("cannot
   add an entity now: the game holds at most 16382 entities at once and nearly
   all are in use; remove some first") when fewer than 256 slots are free (the
   free count is read once a frame; each script spawn or launch takes one);
@@ -2305,7 +2353,7 @@ feature.
   serving it there carry scripts (`sh_modpub_rawmap_scripts_off`, asked by
   `sh_rawmap_prepare_reload` before the engine sees the text).
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
-  `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
+  `on.animation(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
   `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
   refused (`sh_script_check_name` applies the same rule to every API call).
@@ -2489,18 +2537,18 @@ one plain sentence at the calling script line (it stops the mod's scripts for
 the map, as any error does).
 
 - **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; no count or rate
-  of its own, only the engine's entity table, Bounds above), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
-  `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
-  `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
-  `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
-  `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
-  `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
-  `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
-  `e:tint(r, g, b, [seconds])` and `e:glow(r, g, b, [seconds], [strength])` (the
+  of its own, only the engine's entity table, Bounds above), `players()`; `entity:position()`, `entity:set_position(v)`, `entity:yaw()`,
+  `entity:set_yaw(deg)`, `entity:axis()` (forward, left, up), `entity:velocity()`,
+  `entity:set_velocity(v)`, `entity:health()`, `entity:set_health(n)`, `entity:alive()`,
+  `entity:definition()` (the mod's own names as the script writes them), `entity:distance(other)`,
+  `entity:is_player()`, `entity:remove()`, `entity:view_angle_to(other, [use_view_pos])`;
+  `entity:animation_state(node, [via])`, `entity:force_animation(node, [blend])`,
+  `entity:animation_finished()`, `entity:current_animation()`, `entity:animation_event(name)`;
+  `entity:tint(r, g, b, [seconds])` and `entity:glow(r, g, b, [seconds], [strength])` (the
   entity's look, below; a glow adds its colour times `strength`, a soft 0.08 when
   none is given, so the surface stays readable under it);
   `entities_near(pos, radius)` (every entity in range, nearest first),
-  `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
+  `trace(from, to, [radius], [ignore])`, `ground_below(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
   flat enough to stand on, normal at least 0.7 up; it does not consult the
   navigation areas), `difficulty()` (idGameLocal vtable +0x670, the game's
@@ -2554,13 +2602,13 @@ the map, as any error does).
   groups register with `sh_script_api_on_frame` (the AI calls finish a forced
   animation through a via node there).
 - **Animation.** idAI2 ignores the stock `changeAnimState` events, so on a
-  demon `anim_state` and `anim_force` hand the request to the AI calls
+  demon `animation_state` and `force_animation` hand the request to the AI calls
   (`sh_script_ai_anim`): the demon is parked (below) and
   `ssaction_ChangeAnimState(Via)` or `ssaction_ForceAnimState` runs at once.
   A bare state name takes the AI's current subweb.
-  `anim_current` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
-  node index). `anim_event` (DEST_BLEND_START, DEST_REACHED,
-  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `anim_finished` are
+  `current_animation` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
+  node index). `animation_event` (DEST_BLEND_START, DEST_REACHED,
+  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `animation_finished` are
   that node, observed every frame (`sh_script_api_frame`, before the tick)
   against the last request. Other entities use the stock `changeAnimState`,
   `forceAnimState` and `animState_IsFinished` events.
@@ -2614,9 +2662,9 @@ is touched, and a removed demon answers nil.
   against the game's event:
   `move_to(pos, [tolerance], [flags])` (`ssaction_SetWalkState` walking or
   running, then `ssaction_MoveToPoint`; `strafe` or `aim_while_moving` first
-  aims at the enemy with `setFocus`), `move_to_entity(e)` (the same to the
+  aims at the enemy with `setFocus`), `move_to_entity(entity)` (the same to the
   entity's position, given again when it has moved 32 inches; the engine's
-  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
+  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(entity)`
   (`setFocus`), `face(pos, [{ travel = inches }])` (a zero-length
   `ssaction_MoveToPoint` with align; its tolerance is the arrival radius of
   the engine's turn-clip query, which for a turn in place rejects a clip whose
@@ -2624,7 +2672,7 @@ is touched, and a removed demon answers nil.
   `ANIMQUERY_REJECT_OVERSHOOT`, VK 0x141AD9E90 / GL 0x141AF40E0; the default
   0.1 picks clips that turn in place, `travel` admits a demon's own stepping
   turns; with `travel` an entity target turns toward where it stands),
-  `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
+  `aim_at(entity | nil)`, `set_enemy([entity])` (`setEnemy` locked, or
   `setPlayerEnemy` closest), `trigger(on, [hand])`
   (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
   name, as the entityDef's startingInventory names it, or its index;
@@ -2885,12 +2933,12 @@ is touched, and a removed demon answers nil.
   never ends a perch on its own. The jump, the pose and the hold are the
   script's and unproven in the game; the walk and the blocking volumes are the
   engine's. The contract is at the top of the file.
-- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
+- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(entity)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
   the demon's eye to 40 inches above `e`'s origin, so a wall between them
   answers false), `aware()`
-  (`hasAwarenessOfEnemy`), `awareness([e])` (`GetAwareness` on the perception
+  (`hasAwarenessOfEnemy`), `awareness([entity])` (`GetAwareness` on the perception
   at ai+0x29A88: unaware, lost, suspected, confirmed), `angle_to(t)`
   (physics origin and axis), `move_done()` (the move FSM status
   word at *(ai+0x23198)+0xD20, read as `Shared_MoveDone` and
@@ -2915,7 +2963,7 @@ is touched, and a removed demon answers nil.
   +0x1B4), the "cooldown" test of the can-fire check (VK 0x1404439D0);
   `aim_point(pos | nil)` calls the set-focus-to-position
   `ae_selectAimFocusPoint` uses (VK 0x14041BBA0, foci 0, 2 and 3);
-  `anim_valid(node, tests, [side], [seed])` reads the node's animations (VK
+  `animation_fits(node, tests, [side], [seed])` reads the node's animations (VK
   0x141712C60) and their total root motion (VK 0x1415C5290), turns it by the
   demon's facing (by the direction to its enemy with
   `TF_TRANSLATION_TO_ENEMY_FORCE`) and tests the end point with the ground
@@ -2923,7 +2971,7 @@ is touched, and a removed demon answers nil.
   eye and weapon height, the enemy's view centre (20 degrees) and the path
   query, as the test words ask (every animation in turn without `side`, in an order
   shuffled by `seed` when given, as DOOM Eternal's query shuffles them; each node's
-  path queries under keys of their own); `anim_force_via(dest, via, [blend])` forces
+  path queries under keys of their own); `force_animation_via(dest, via, [blend])` forces
   `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
   `path_points(pos)` is the path query's computed path, read by a detour of
@@ -2951,7 +2999,7 @@ is touched, and a removed demon answers nil.
   until the game clock passes the time. The per-demon pain records are read
   lock-free by spawn id from the threads the engine runs pain on. Each detour
   is committed on the game thread at the first call that needs it.
-- **Shared with the entity calls.** `distance`, `anim_state` and `anim_force`
+- **Shared with the entity calls.** `distance`, `animation_state` and `force_animation`
   are the entity calls' and work on any entity; on a demon the two animation
   calls come back here (`sh_script_ai_anim`), which parks it first.
 - **Orders around a step of the engine's.** A turn in place, a step and an
@@ -2966,9 +3014,9 @@ is touched, and a removed demon answers nil.
   engine's idle watchdog restarts it after a second in the idle node
   (measured on a ported demon: four to seven restarts in 100 s of a fight,
   every turn after the first late, and moves that never began). So an
-  `anim_state` given while such a stage waits is held back and given the
+  `animation_state` given while such a stage waits is held back and given the
   frame the stage has ended, the web having played the step out first in any
-  case; a move order drops a held one. `anim_force` is given at once and the
+  case; a move order drops a held one. `force_animation` is given at once and the
   step's command is then ended the engine's way, with the context's own
   set-active-wait-handle (VK 0x1405223F0), which gives the command its done
   event and the status INTERRUPTED as every command sent through the context
@@ -3015,8 +3063,8 @@ what the game's own code and SnapMap's wired logic reach, and an SDK written
 in Lua (a demon's brain, a player's suit) needs no private path into the
 engine.
 
-- **Fields** (`script_reflect.{c,h}`, `script_api_reflect.{c,h}`). `e:get(path)`,
-  `e:set(path, value)`, `e:fields([path])`, `e:class()` and `enum(name)` walk
+- **Fields** (`script_reflect.{c,h}`, `script_api_reflect.{c,h}`). `entity:get(path)`,
+  `entity:set(path, value)`, `entity:fields([path])`, `entity:class()` and `enum(name)` walk
   the game's own type tables (`typeinfo.c`: a class's size, superclass and
   fields; an enum's members), so any reflected field of any entity is read
   and written by name and Snapmap+ holds no offset for it. A path is names
@@ -3028,22 +3076,22 @@ engine.
   editor properties are fields of its `idPlaceableSnapAIEncounter`
   (`spawnBehavior`, `gameTeam`, `encounterMods.healthMod`, `staggerEnabled`,
   `entity` for the demon it spawned).
-- **Engine events** (`script_api_game.c`). `e:event(name, ...)` runs any of the
-  game's events on an entity and returns its result; `e:post(name, ...)`
-  queues it; `event_args(name)` lists what it takes. The argument format is
+- **Engine events** (`script_api_game.c`). `entity:run_event(name, ...)` runs any of the
+  game's events on an entity and returns its result; `entity:queue_event(name, ...)`
+  queues it; `event_arguments(name)` lists what it takes. The argument format is
   the game's own, read from the live registry at the call (whole numbers,
   true/false, numbers, positions, angles, colors, text, entities, decls); the
   leading "animation" argument of an `ae_` event is filled in. Only the few
   events that carry a kill record (`notice_` events with a `7`) cannot be
   sent.
-- **SnapMap events.** `e:signal(event[, activator])` fires one of SnapMap's
+- **SnapMap events.** `entity:signal(event[, activator])` fires one of SnapMap's
   own events on an object, so everything wired to that output runs
   (`FireOutput`); `on.signal(event, fn)` hears every object of the map fire
   it (one detour on the walk over an object's listeners, placed when a script
   first asks). Event names are the editor's (`ai_killed`, `trigger_touched`,
   `logic_fired`: the `snapListenerEvent_t` enum, any case, with or without
   `SNAP_EVENT_`).
-- **Cvars and decls.** `cvar(name)` reads and `cvar(name, value)` sets a cvar;
+- **Cvars and decls.** `console_variable(name)` reads and `console_variable(name, value)` sets a cvar;
   `decl(type, name)` gives a decl object with `get`, `set`, `fields`, `name`
   and `type` (its class is the game's `idDecl<Type>`). Both outlive a map, so
   what a script sets is put back when the map ends (the runtime runs each
@@ -3059,20 +3107,20 @@ names is the mod's own, or the game's through `game("...")`
 refused with one plain sentence. An attacker is any entity; without one the
 damage comes from the world entity, as a trigger's does.
 
-- **Calls.** `damage(e, damage, [attacker], [from])` and `e:damage(...)` (the
+- **Calls.** `damage(entity, damage, [attacker], [from])` and `entity:damage(...)` (the
   entity's own `damage` event: decl, direction angles, activator);
   `hitscan(from, dir, damage, [range], [attacker])` (the game trace, then the
   damage event on what it hits; answers `{pos, normal, entity}` or nil);
   `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the
   decl's own radius, which queues the deferred radius damage the game applies
   that frame); `explode(pos, damage, [effect], [attacker])` (radius damage and
-  an effect entity); `fx(e, condition)` / `fx_stop(e, condition)`
+  an effect entity); `play_effect(entity, condition)` / `stop_effect(entity, condition)`
   (a condition of the entity's own fx decl: on an AI or a player
   `ae_startFX_Networked` / `ae_stopFX_Networked`, started on every machine;
   on any other entity, such as an effect entity, which answers neither
-  event, the engine's own entity StartFX / StopFX); `fx(effect, pos, [dir])`,
-  `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
-  through `spawn` and its caps, removed by `fx_stop`); `fx_hard_stops([effect])`
+  event, the engine's own entity StartFX / StopFX); `play_effect(effect, pos, [dir])`,
+  `move_effect(entity, pos, [dir])`, `stop_effect(entity)` (an effect entity of the mod placed
+  through `spawn` and its caps, removed by `stop_effect`); `end_effects_at_once([effect])`
   (the mod's fx decl of that name, or every fx decl of the mod, ends the way
   DOOM Eternal ends an effect, for content made for that game. The game's FX
   manager stops one action through one function, VK 0x1416EEEF0 / GL
@@ -3101,14 +3149,14 @@ damage comes from the world entity, as a trigger's does.
   returns without calling the game; every other request goes to the game.
   If only one of the two hooks can be installed the other still serves and
   one log line says which is missing; names are kept for the map the
-  scripts run in); `sound(e, sound,
-  [channel])` (`startSoundShader`); `e:tag(name)` (a tag of a demon's md6Def,
+  scripts run in); `sound(entity, sound,
+  [channel])` (`startSoundShader`); `entity:tag(name)` (a tag of a demon's md6Def,
   a named point with a parent joint and its own offset and rotation, found
   as the engine finds aim and focus tags: the model decl's `_info` prop row,
   VK 0x1416CE1E0 / GL 0x1416CEE90, placed in world space by VK 0x1415EFAA0 /
   GL 0x1415F0CA0; otherwise a joint, from the base dispatcher's getJoint
   events; the position and forward direction);
-  `e:pain()` (the pain reaction an idAI2 is in, idAI2 `+0x5060`, nil once the
+  `entity:pain()` (the pain reaction an idAI2 is in, idAI2 `+0x5060`, nil once the
   engine's pain state clears it); `ai:fire(projectile, tag or joint, target)`
   (`ae_launchProjectileAtTarget` run at once with no animation; answers the
   projectile, caught by the launch hook; a position target is reached by
@@ -3117,9 +3165,9 @@ damage comes from the world entity, as a trigger's does.
   `idProjectile::Launch` the tag's place and the axis toward the target: the
   projectile, its launch effects and its trail start on the tag);
   `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
-  name that is not a tag, since the engine aims only at tags; `p:steer(target, [speed])`
+  name that is not a tag, since the engine aims only at tags; `projectile:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
-  `p:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
+  `projectile:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
   a projectile one of the mod's entities launched. A script may hold `p` for
   as long as it likes: once the projectile is gone `p:steer`, `p:explode` and
   `p:pos` answer nil and `p:alive` false, as every call on a removed entity
@@ -3131,7 +3179,7 @@ damage comes from the world entity, as a trigger's does.
   `on.death(name, fn(self, hit))` once per entity; `on.pain(name, fn(self,
   reaction, damage, attacker))` when the engine starts a pain reaction
   (`PAIN_FALTER`, `PAIN_STAGGER`, ...), with the decl and attacker of the
-  entity's last hit; `on.anim(name, notify, fn(self))` for an md6 row
+  entity's last hit; `on.animation(name, notify, fn(self))` for an md6 row
   `ae_notify "<notify>"`; `on.frame_event(name, command, fn(self, args))` for a
   row `ae_notify "<command>:<a>:<b>"` (args `{a, b}`, numbers as numbers);
   `on.projectile(name, fn(self, p, decl, origin, dir))` for every projectile
@@ -3282,8 +3330,9 @@ limit check; for a multiplayer map they cover the arena, so it fits the native
 ### Mod virtual-texture boards
 
 A mod's lit materials draw from the mod's own virtual-texture board: its own
-mega2 family (`virtualtextures/mods/<salt>/<name>_sq<N>.mega2`), named by the
-materials' `landpagefile "mods/<salt>/<name>"`, read by the stock `skinvmtr`
+mega2 family (`virtual-textures/<name>_sq<N>.mega2` in the folder, the engine's
+`virtualtextures/mods/<salt>/<name>_sq<N>.mega2`), named by the
+materials' `landpagefile "virtual-textures/<name>"` (the engine's `mods/<salt>/<name>`), read by the stock `skinvmtr`
 and `skinvmtrwounds` render programs unmodified. Nothing of a mod goes into the
 game's own board, and no game file changes.
 
@@ -3655,9 +3704,13 @@ bundle carrying only the two blacklist gates keeps the text and hash it had
 when they were the only accepted requirement. The product names no cvar or
 command; the bounds (`SH_MB_REQ_*` in `modbundle.h`) are syntax only, and the
 Community API's manifest check mirrors them. `modserve.c` takes the admitted
-bundles in install order and drops the requirements of one that asks a cvar an
-earlier one asks at another value (one `MODS: requirements: conflict:` line
-names both). Before every registration pass, at the Play re-check and after a
+bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
+every scope change): the open map's rows first, in row order, then the
+undeclared ones (an editor's Toybox rows; every bundle with no map open)
+oldest install first. One that asks a cvar a bundle decided before it asks at
+another value loses (one `MODS: requirements: conflict:` line names both), so
+a map's own mods decide its cvars the same way for every player, and a mod the
+map does not use never takes one from its rows. Before every registration pass, at the Play re-check and after a
 rescan on the main thread outside Play, it applies them: the deactivate lines of
 bundles whose requirements stopped, then each asked cvar set and read back
 (`idCVar::Set` with force, after `modserve_engine.c` refuses a read-only or
@@ -4173,8 +4226,8 @@ map's choices).
   the product derives the edits from the whole edited copy"); a game text the
   reader cannot supply; a binary at a game name with other bytes ("<path>: the
   game ships this file and a mod cannot replace it with other bytes; delete
-  your copy and the mod borrows the game's, or put your version under
-  mods/<salt>/ and point your decls at it"; a binary at a name the game does
+  your copy and the mod borrows the game's, or put your version in
+  the mod's own folder for its kind and point your decls at it"; a binary at a name the game does
   not ship keeps "the game has no file of that name for it to replace"),
   except in a folder the product received (origin `download`, `delivery`,
   `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
@@ -4273,7 +4326,10 @@ bridge's install (`sh_modstock_set_install`):
   era B pack without one, its folder name; `sh_ms_assign_salt`, which also names
   its strings `<salt>_<key>`) and built under the current rules with its
   replacements kept, so a pack that only built under the retired `legacy`
-  relaxations is refused alone with its cause. Moved again into the folder an
+  relaxations is refused alone with its cause. The result is in the engine's
+  layout (`assets/`), which the build now refuses until the installer also
+  lays a converted folder out by kind (owner, 2026-11-17: converting releases'
+  mods is the installer's, not yet done). Moved again into the folder an
   earlier pass made of the same tree (the record's `trees`), it keeps that
   folder's salt (`sh_ms_assign_salt_as`). Two folders with one id are both built,
   each in its own folder with its own salt, and the duplicate is reported;
@@ -4467,6 +4523,27 @@ next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
 
 ### Published maps and missing mods
+
+A published read's place is this machine's fact about the item, which only the
+gate that takes the read can decide. Its parse sets the place pending
+(`sh_modserve_place_pending`, `SH_MODSERVE_PLACE_PUBLISHED`): a row resolves
+only at its own build at the root, never the root's other build of its salt.
+The gate that decides the place lists and activates the rows again there
+(`rows_resolve`, `sh_modmanifest_place_decided`). A published item serves the
+builds it was published with on every player's machine, its author's included,
+until the author publishes again (the owner, 2026-11-17); the author's edits
+serve in the editor and in a My Maps play.
+
+A lobby joiner whose map cannot be confirmed (it declined, the download failed
+or was refused, or it is downloading) leaves the lobby through the session's
+own leave call, the one `OnCacheMapForLobbyError` makes after its dialog
+(slot 0x2F0, checked byte for byte at bind on both renderers), so the host never
+starts it on a map it does not hold; a download finishes outside the lobby and
+the player is told to join again. A warm-cache join no gate of this process saw
+(or whose rows are not the ones last activated) is read cold again, so
+CacheReady's gate checks it. A joiner runs no mod script, so its scripts setting
+never refuses the host's map; a joiner whose map passed serves in the Play
+scope, as the host's launch does.
 
 A published map is native by default: the product touches its launch only when
 its text carries a manifest row (in its member) the asset rule does not find served (no
@@ -4701,7 +4778,7 @@ The ZIP (`modexport.h`) carries the map and each mod its rows name
 ```
 <name>.json                the map text, its snapmap-plus member included, named after the ZIP
 mods/<folder>/mod.json     the last segment of the mod's folder below mods\ (" (2)" when two
-mods/<folder>/assets/...   carried mods share it), mod.json and carried files byte for byte
+mods/<folder>/<kind>/...    carried mods share it), mod.json and carried files byte for byte
 ```
 
 A mod in an organizing folder (`mods\campaign-interactables\campaign-interactables-1\`),
@@ -4714,7 +4791,7 @@ the build the author plays, and its rows are moved to that build. There is no `e
 `bundle.canonical.json`: the rows name the builds, and each carried `mod.json`
 records its own salt and build hash in its builder block. A stock pointer is an
 entry of `mod.json`; installed game content is never written into the ZIP, so a
-pointer whose bytes an author's folder holds under `assets\` travels without
+pointer whose bytes an author's folder holds in its folders travels without
 them.
 
 Importing it (`modexport_read`; a carried folder no row names is left out)
@@ -4886,7 +4963,7 @@ write one ZIP, also for a prefab that uses no mods, in a map's layout
 ```
 <name>.json                the prefab file, its block naming the builds carried
 mods/<folder>/mod.json     each mod the block's rows name, as its folder (the last segment
-mods/<folder>/assets/...   of its folder below mods\), mod.json and files byte for byte
+mods/<folder>/<kind>/...    of its folder below mods\), mod.json and files byte for byte
 ```
 
 There is no `export.json`, no sidecar and no bundle manifest: the prefab's own
@@ -5138,7 +5215,7 @@ claims it.
 The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
 (`modzip.c`, method 0, ZIP64 where a value needs it) named by the build hash at
 `/mods/build/<hash>`, holding the folder's `mod.json`, the whole file, and
-`assets/<request>` for every carried file its block lists. Stock pointers are
+its path in the mod folder (`materials/x.decl`) for every carried file its block lists. Stock pointers are
 never in it: their bytes are the player's own game. `modnet.c` speaks the
 routes: `HEAD` (held, with the archive's size and `X-Mod-Scripts`, the
 number of script files the build carries, or 404, or 451), `PUT`

@@ -118,7 +118,7 @@
 /* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
  * SH_MB_SHAPE is its first part, which readers of a cause match on. */
 #define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
-#define SH_MB_EARLIER         SH_MB_SHAPE "Run the Snapmap+ installer again and it converts it."
+#define SH_MB_EARLIER         SH_MB_SHAPE "This version does not read it yet."
 #define SH_MB_ID_MAX          64u
 /* No count, size or length limit on a mod (DECISIONS 26): its files, one
  * file, its total, its mod.json, its name, author and homepage, and a
@@ -150,9 +150,10 @@ typedef struct sh_mb_need {
 } sh_mb_need;
 
 typedef struct sh_mb_file {
-    char *path;            /* "assets/" + request: a build records the game name, lower case with '/',
-                              whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
-    char *request;         /* path below assets/, lower-cased: what the provider is asked for */
+    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, game/<path>), lower
+                              case with '/', whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
+    char *request;         /* the engine's request path the path stands for (sh_ma_request), lower-cased: what the
+                              provider is asked for */
     char  blob[SH_MB_HASH_HEX + 1];
     unsigned long long size;
     char *ptype;           /* provides.type */
@@ -165,7 +166,7 @@ typedef struct sh_mb_file {
     int stock;             /* a stock pointer: blob is the installed bytes' SHA-256, nothing is carried */
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
-    int absent;            /* a stock pointer with no file under assets/ (a closure pointer, or a received build's) */
+    int absent;            /* a stock pointer with no file in the folder (a closure pointer, or a received build's) */
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
@@ -247,6 +248,10 @@ typedef struct sh_mb_bundle {
     unsigned edit_files;
     char **notes;          /* builder: report lines (replacements, closure, edits) */
     size_t note_count, note_cap;
+    /* builder: the mod's own strings keys as the author writes them (sh_ma_string_keys), sorted; a decl's
+     * #str_<key> of one of them is the mod's string */
+    char **own_keys;
+    size_t own_key_count;
 } sh_mb_bundle;
 
 /* Whether two decl texts are one text: line ends are not content, so CRLF
@@ -606,10 +611,10 @@ typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t 
 void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
 
 /* The registries "clipEvents" of a build (clip_events.h, sh_ce_build_registry): from the author's
- * "clip_events" names, the mod's salt and a reader of its md6Def texts by decl name (1 with a malloc'd text,
+ * "animation_events" names, the mod's salt and a reader of its md6Def texts by decl name (1 with a malloc'd text,
  * 0 not one of its md6Defs, -1 unreadable); every entry or clip it leaves out is one warning through `warn`,
  * and the build goes on. Returns a JSON array (malloc'd) or NULL; *oom on memory failure. NULL (the
- * default) records nothing for "clip_events". */
+ * default) records nothing for "animation_events". */
 typedef int (*sh_mb_text_fn)(void *context, const char *name, char **text, size_t *len);
 typedef char *(*sh_mb_clip_events_fn)(const char *salt, const char *const *names, int n, sh_mb_text_fn text,
                                       void *text_ctx, void (*warn)(void *context, const char *line), void *warn_ctx,

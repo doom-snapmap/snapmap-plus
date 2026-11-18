@@ -721,17 +721,16 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
     sh_modmanifest_list_free(&rows);
 }
 
-/* A hand-made mod folder (no builder block): one decl under mods/<folder>/,
- * which the first Refresh rewrites to the salt it gives the folder. */
+/* A hand-made mod folder (no builder block): one entity decl; the first Refresh gives the folder its salt. */
 static void put_fresh_mod(const char *folder, const char *name, const char *leaf, const char *body)
 {
-    char desc[512], rel[300];
+    char desc[512];
+    (void)leaf;
     _snprintf_s(desc, sizeof desc, _TRUNCATE, "{\"name\":\"%s\",\"version\":\"1.0.0\",\"author\":\"tester\","
                 "\"description\":\"A test mod.\"}", name);
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "mod.json", desc);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\twin.decl", leaf);
-    mt_write(folder, rel, body);
+    mt_write(folder, "entities\\twin.decl", body);
 }
 
 /* A ZIP at `path` holding `n` entries (name, text). */
@@ -916,7 +915,7 @@ static void test_places_stay(const char *tmp)
     CHECK(sh_ms_set_root(root));
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\stay\\built", tmp);
     mt_write(src, "mod.json", "{\"name\":\"Crate\"}");
-    mt_write(src, "assets\\generated\\image\\mods\\cratebox\\a.bimage", "crate bytes");
+    mt_write(src, "images\\a.bimage", "crate bytes");
     memset(&b, 0, sizeof b);
     CHECK(sh_mb_build(src, "cratebox", NULL, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
     sh_mb_free(&b);
@@ -1132,7 +1131,7 @@ int main(int argc, char **argv)
     printf("-- install a ZIP: its mods are unpacked and installed; a ZIP without a mod or not a ZIP says so\n");
     {
         char zip[MAX_PATH * 2];
-        static const char *const names[] = { "zipped/mod.json", "zipped/assets/generated/decls/entitydef/mods/zipped/zipped.decl",
+        static const char *const names[] = { "zipped/mod.json", "zipped/entities/zipped.decl",
                                              "readme.txt" };
         static const char *const texts[] = { "{\"name\":\"Zipped\",\"author\":\"tester\"}",
                                              "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tzipped = 1;\r\n}\r\n", "hello" };
@@ -1193,9 +1192,8 @@ int main(int argc, char **argv)
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);
-        /* Its reference followed the salt; the folder kept its name. */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\twin.decl", salt_a);
-        CHECK(mt_has(a, path));
+        /* The files stay where the author put them; the folder kept its name. */
+        CHECK(mt_has(a, "entities\\twin.decl"));
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: mod mods\\twin_a (Twin A): ready\n"));
         CHECK(has(dr, "MODS: doctor: mod mods\\twin_a: carries 1 of the same files as mods\\twin_b; both are mods of their own\n"));
@@ -1210,7 +1208,7 @@ int main(int argc, char **argv)
         _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\old_shape", g_root);
         CreateDirectoryA(old, NULL);
         mt_write(old, "mod.json", "{\"id\":\"alex.old\",\"name\":\"Old\",\"version\":\"1.0.0\"}");
-        mt_write(old, "assets\\generated\\decls\\entitydef\\mods\\alex.old\\x.decl", "{\r\n}\r\n");
+        mt_write(old, "entities\\x.decl", "{\r\n}\r\n");
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\packaged", g_root);
         CreateDirectoryA(pkg, NULL);
         mt_write(pkg, "package.json", "{\"id\":\"alex.pkg\",\"version\":\"1.0.0\"}");
@@ -1222,12 +1220,10 @@ int main(int argc, char **argv)
         if (cause[0]) printf("    broken: %s\n", cause);
         /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
         CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                             "converts it."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         {
             /* An earlier version's builder part: the same sentence. */
             char older[MAX_PATH * 2];
@@ -1254,6 +1250,31 @@ int main(int argc, char **argv)
         mt_remove_tree(pkg);
         doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
         free(doc);
+    }
+
+    printf("-- the causes the builder and the store raise today, each one plain sentence with its next step\n");
+    {
+        static const struct { const char *cause, *want; } C[] = {
+            { "mod.json was edited after its last build; press Refresh in the Mods tab to build it again",
+              "Its mod.json was changed after it was last built; press Refresh to build it again." },
+            { "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl is missing or unreadable",
+              "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl changed or went away after the mod was built; press "
+              "Refresh to build it again." },
+            { "assets/x.decl does not match mod.json (damaged or edited)",
+              "assets/x.decl changed or went away after the mod was built; press Refresh to build it again." },
+            { "mod.json: unexpected '}' at byte 12",
+              "Its mod.json is not valid JSON (unexpected '}' at byte 12); fix it in a text editor and press Refresh." },
+            { "cannot read mod.json", "Its mod.json could not be read; close any program that has it open and press Refresh." },
+            { SH_MB_SLICE_ROOT, SH_MB_SLICE_ROOT "." },
+        };
+        size_t i;
+        for (i = 0; i < sizeof C / sizeof C[0]; i++) {
+            char *got = sh_modui_test_plain_cause(C[i].cause);
+            CHECK(got && !strcmp(got, C[i].want));
+            if (got && strcmp(got, C[i].want)) printf("    got: %s\n", got);
+            CHECK(got && !strstr(got, "could not be built"));
+            free(got);
+        }
     }
 
     printf("-- the plain words: salts, hashes and the internal words never reach a sentence\n");
@@ -1455,6 +1476,34 @@ int main(int argc, char **argv)
         load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
         n = sh_modserve_scope_hashes(listed, 4);
         CHECK(n == 1 && !_stricmp(listed[0], hash1));
+
+        /* A published read, whose place only its gate decides: the parse lists
+         * and activates the row's own build, never the root's other build of
+         * the salt. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        g_act_last_n = 0;
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD));
+        CHECK(g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* Its gate finds it a stranger's map (the item's place): the row's own
+         * build is listed and activated there. */
+        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+        g_act_last_n = 0;
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* The same read found to be the player's own published map: it follows
+         * the root, listed and activated again with the root's build. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        g_act_last_n = 0;
+        log_clear();
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], hash1));
+        CHECK(strstr(g_logbuf, "listed and activated again in the place its gate decided") != NULL);
         (void)sh_modserve_scope_set(NULL, 0, 0);
         sh_modserve_scope_enable(0);
         sh_modmanifest_reset();
@@ -1623,8 +1672,7 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_FILES, "twin_a");
         CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"twin_a\",\"name\":\"Twin A\",\"cause\":\"\""));
         CHECK(has(doc, "\"path\":\"mod.json\"") && has(doc, "\"class\":\"descriptor\""));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "\"path\":\"assets/generated/decls/entitydef/mods/%s/twin.decl\"", salt_a);
-        CHECK(has(doc, path));   /* the salt appears in the Files view's paths */
+        CHECK(has(doc, "\"path\":\"entities/twin.decl\""));   /* the Files view's paths are the author's: no salt */
         free(doc);
         _snprintf_s(arg, sizeof arg, _TRUNCATE, "twin_a\tmod.json");
         doc = run_doc(SH_MODS_ACT_FILE_TEXT, arg);
@@ -1643,7 +1691,7 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":true,\"message\":\"Created Crate Pack in mods\\\\Crate Pack. Its Example crate is in the Toybox. "
                        "After you change its files, press Refresh to see the change.\""));
         CHECK(has(doc, "\"key\":\"Crate Pack\""));
-        CHECK(has(doc, "\"file\":\"assets/generated/decls/snapeditorentitydef/mods/"));
+        CHECK(has(doc, "\"file\":\"decls/snapeditorentitydef/example_crate.decl\""));
         CHECK(doc_prose_ok(doc));
         free(doc);
         doc = list_doc();
@@ -1694,7 +1742,7 @@ int main(int argc, char **argv)
         _snprintf_s(nn, sizeof nn, _TRUNCATE, "%s\\noname", g_root);
         CreateDirectoryA(nn, NULL);
         mt_write(nn, "mod.json", "{\"name\":\"\"}");
-        mt_write(nn, "assets\\generated\\decls\\entitydef\\mods\\noname\\nn.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}\r\n");
+        mt_write(nn, "entities\\nn.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}\r\n");
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         doc = list_doc();
         row_salt(doc, "noname", s, sizeof s);
@@ -1740,9 +1788,9 @@ int main(int argc, char **argv)
             "local which = \"pickups/spin\"\r\non.damage(which, function(self, hit) end)\r\n";   /* a name set while running */
         _snprintf_s(sm, sizeof sm, _TRUNCATE, "%s\\doorlogic", g_root);
         put_fresh_mod(sm, "Door Logic", "doorlogic", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tdoor = 1;\r\n}\r\n");
-        mt_write(sm, "assets\\generated\\decls\\entitydef\\mods\\doorlogic\\pickups\\spin.decl",
+        mt_write(sm, "entities\\pickups\\spin.decl",
                  "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tspin = 1;\r\n}\r\n");
-        mt_write(sm, "assets\\mods\\doorlogic\\scripts\\door.lua", DOOR);
+        mt_write(sm, "scripts\\door.lua", DOOR);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         doc = list_doc();
         row_salt(doc, "doorlogic", s, sizeof s);
@@ -1759,19 +1807,19 @@ int main(int argc, char **argv)
 
         /* The Files view: the script is text, its path under the salt; its text reads. */
         doc = run_doc(SH_MODS_ACT_FILES, "doorlogic");
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"assets/mods/%s/scripts/door.lua\",", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"scripts/door.lua\",%s", "");
         p = doc ? strstr(doc, lua) : NULL;
         CHECK(p != NULL);
         CHECK(p && !strncmp(strstr(p, "\"kind\":"), "\"kind\":\"text\"", 13));
         free(doc);
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tassets/mods/%s/scripts/door.lua", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tscripts/door.lua%s", "");
         doc = run_doc(SH_MODS_ACT_FILE_TEXT, lua);
         CHECK(has(doc, "\"ok\":true") && has(doc, "on.input(\\\"switch_used\\\"") && has(doc, "\"cause\":\"\""));
         free(doc);
 
         /* A syntax error: the row's cause is the script's own sentence with file and line, and the
          * Files view puts it on that file. */
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "scripts\\door.lua%s", "");
         mt_write(sm, lua, "api = 1\r\non.input(\"switch_used\", function()\r\n  BROKEN\r\n");
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         doc = list_doc();
@@ -1781,15 +1829,15 @@ int main(int argc, char **argv)
         CHECK(doc_prose_ok(doc));
         free(doc);
         doc = run_doc(SH_MODS_ACT_FILES, "doorlogic");
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"assets/mods/%s/scripts/door.lua\",", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "\"path\":\"scripts/door.lua\",%s", "");
         p = doc ? strstr(doc, lua) : NULL;
         CHECK(p && strstr(p, "\"cause\":\"scripts\\\\door.lua line 4: ") && strstr(p, "\"cause\":\"scripts") < strstr(p, "}"));
         free(doc);
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tassets/mods/%s/scripts/door.lua", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "doorlogic\tscripts/door.lua%s", "");
         doc = run_doc(SH_MODS_ACT_FILE_TEXT, lua);
         CHECK(has(doc, "\"cause\":\"scripts\\\\door.lua line 4: "));
         free(doc);
-        _snprintf_s(lua, sizeof lua, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", s);
+        _snprintf_s(lua, sizeof lua, _TRUNCATE, "scripts\\door.lua%s", "");
         mt_write(sm, lua, DOOR);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
 

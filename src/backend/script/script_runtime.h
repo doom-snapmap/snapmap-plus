@@ -161,7 +161,7 @@ int sh_script_started(void);
  * engine hooks with handles from the handle table:
  *   SH_SCRIPT_EV_DAMAGE  self, other = attacker, third = inflictor, amount, text = damage decl, text2 = location
  *   SH_SCRIPT_EV_DEATH   self, other = attacker, third = inflictor, text = damage decl
- *   SH_SCRIPT_EV_ANIM    self, text = the ae_notify string; on.anim handlers get it whole, and a text
+ *   SH_SCRIPT_EV_ANIM    self, text = the ae_notify string; on.animation handlers get it whole, and a text
  *                        "<command>:<a>:<b>" also reaches on.frame_event(name, command, fn(self, args))
  *                        with args = { a, b } (a piece that reads as a number is a number)
  *   SH_SCRIPT_EV_INPUT   self = the Script node, other = activator, text = the node's name
@@ -207,7 +207,7 @@ void sh_script_set_console(sh_script_line_fn fn, void *context);
 /* ------------------------------------------------------------- API seam */
 
 /* Functions other modules add to every state opened after the call: a
- * global (spawn, players, ...) or an entity method (e:pos(), self:move_to).
+ * global (spawn, players, ...) or an entity method (e:position(), self:move_to).
  * Call before sh_script_map_start, from one thread. Returns 1, or 0 when the
  * table is full or the name is not usable. */
 #define SH_SCRIPT_API_GLOBAL 1

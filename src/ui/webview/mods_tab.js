@@ -71,7 +71,7 @@ var modsTab = (function () {
     surface: 'A game file SnapMap cannot see on its own',
     '': 'Not part of the mod; Snapmap+ ignores it'
   };
-  var NOT_SERVED_TITLE = 'Snapmap+ builds a mod from mod.json and its assets folder when you press Refresh; this file is not in that build.';
+  var NOT_SERVED_TITLE = 'Snapmap+ builds a mod from mod.json and its folders (materials, meshes, scripts and the rest) when you press Refresh; this file is not in that build.';
   /* Where a game file's bytes come from: the archive the install bridge matched. */
   var FILE_SOURCES = {
     gameresources: "from the game's campaign and multiplayer files",
@@ -81,11 +81,11 @@ var modsTab = (function () {
   };
   /* The quiet line above a new mod's example: its first steps. */
   var NEW_MOD_HINT = "Place Example crate from the Toybox in your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods tab.";
-  /* How an author names their own files and strings: by the mod's folder name, never its salt
-     (Refresh files them under the mod). One sentence, where the author sees it. */
+  /* How an author names their own files and strings: by the folder for what each is, never the salt
+     (Refresh files them under the mod, modauthor.h). One sentence, where the author sees it. */
   function folderRuleText(folder) {
     var f = str(folder) || "<the mod's folder name>";
-    return 'Put new files under assets\\mods\\' + f + '\\, and in your files write mods/' + f + '/ and plain string names.';
+    return 'Put each new file in the folder for what it is (materials, images, meshes, animations, effects, entities, sounds, scripts), and in your files name it by that folder and its path, as in materials/crate.';
   }
   var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.';
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
@@ -1079,7 +1079,7 @@ var modsTab = (function () {
     function howTo(box, empty) {
       var card = el('div', 'mods-howto');
       card.appendChild(el('div', 'mods-howto-head', 'How mods work'));
-      card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and an assets\\ folder.'));
+      card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and folders for what its files are: materials\\, meshes\\, scripts\\ and the rest.'));
       card.appendChild(el('p', '', folderRuleText('')));
       card.appendChild(el('p', '', 'Maps record which mods they use. Players who open one are offered the download, which is listed under the map\'s name.'));
       card.appendChild(el('p', '', REFRESH_TEXT));
@@ -1220,7 +1220,7 @@ var modsTab = (function () {
        states and the log in place; the details pane is drawn again only when the selected mod's
        state changed. */
     var sl = {visible: false, timer: null, salt: '', lines: [], total: 0, box: null, stateNode: null, copy: null, copyWanted: ''};
-    function firstScript(b) { return 'assets/mods/' + b.salt.toLowerCase() + '/scripts/'; }
+    function firstScript(b) { return 'scripts/'; }
     function logLines(b) { return sl.salt && b && sl.salt.toLowerCase() === b.salt.toLowerCase() ? sl.lines : null; }
     function renderScriptLog(box, b) {
       var s = section(box, 'scriptLog', 'Script log');
@@ -1829,7 +1829,7 @@ var modsTab = (function () {
         if (!ok) { fm.error = message || 'The files could not be read.'; renderFiles(); return; }
         fm.data = normFiles(data);
         var pick = fileOf(fm.want) ? fm.want : '';
-        /* a folder asked for ("assets/mods/<salt>/scripts/"): its file with a problem, else its first */
+        /* a folder asked for ("scripts/"): its file with a problem, else its first */
         if (!pick && /\/$/.test(fm.want)) {
           var under = fm.data.files.filter(function (f) { return f.path.toLowerCase().indexOf(fm.want.toLowerCase()) === 0; });
           under.forEach(function (f) { if (!pick && f.cause) pick = f.path; });

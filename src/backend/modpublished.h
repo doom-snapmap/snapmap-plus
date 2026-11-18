@@ -101,6 +101,15 @@ void sh_modpublished_poll(void);
 /* 1 while a map is held (asking, fetching or resuming). */
 int sh_modpublished_holding(void);
 
+/* 1 while a held map's own resume runs (its parse keeps the place the hold
+ * decided; rawmap.c). */
+int sh_modpublished_resuming(void);
+
+/* A published item serves the builds it was published with, on every
+ * player's machine, its author's included, until its author publishes again
+ * (the owner, 2026-11-17: an edited map is another map). The author's edits
+ * serve in the editor and in a My Maps play of their own map. */
+
 /* The mod system's one notice queue: `text` (under 256 bytes) is raised
  * with a single Accept button by the tick once the dialog surface is idle
  * and no question is up; a later notice replaces one not raised yet. Used
@@ -341,6 +350,24 @@ typedef struct sh_modpub_ops {
      * and its offer to replace the map with its published version are
      * dismissed (recovery.h shield_note_refused_load). NULL counts as none. */
     void (*refused_load)(void *c);
+    /* A gate decided the place of the map its parse filled (place_set ran):
+     * the loaded map's rows are listed and activated again in that place
+     * (modmanifest.h sh_modmanifest_place_decided), since its parse could not
+     * know it. Returns what the activation returns. NULL counts as none. */
+    int  (*rows_resolve)(void *c);
+    /* A lobby joiner whose map cannot be confirmed now (declined, refused,
+     * failed, or downloading) leaves the lobby the engine's own way, as its
+     * read-error handler does for a map the service does not have. NULL
+     * counts as none. */
+    void (*leave_lobby)(void *c, int hook, void *owner);
+    /* A joiner's warm cache answer this process never gated: the cold read is
+     * started instead (the read toward CacheReady, whose gate checks the
+     * map's mods). Returns 1 when the read started. NULL counts as none. */
+    int  (*cold_read)(void *c, void *owner, const char *id, const char *revision);
+    /* A joiner's map passed its gate: the joiner serves in the Play scope
+     * from here, as a hub launch does (modui.h sh_modui_scope_launch). NULL
+     * counts as none. */
+    void (*scope_play)(void *c, const char *why);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it

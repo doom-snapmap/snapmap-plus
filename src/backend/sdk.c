@@ -82,7 +82,7 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
     if (!strcmp(type, "env")) return sh_env_compile(path, text, len, out, out_len, why, why_len, needs, notes);
     if (!strcmp(type, "gorewounds")) return sh_wound_compile(path, text, len, out, out_len, why, why_len);
     {
-        /* a material: its values that change over time, then its look */
+        /* a material: its values that change over time, then its type */
         char *v = NULL, *l = NULL, *ln = NULL;
         size_t vn = 0, lnn = 0;
         int rv = sdk_values_material_text(path, text, len, &v, &vn, why, why_len), rl;
