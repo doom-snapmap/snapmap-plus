@@ -1247,6 +1247,75 @@ static void test_requirements_general(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* A map's requirements are decided by the mods it uses, in its row order:
+ * an earlier install the map does not use never takes a cvar from one of its
+ * rows, and two rows give the same result whichever was installed first. */
+static void test_requirements_by_map(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], h_b[65], h_c[65];
+    char *slash;
+    const char *list[2];
+    sh_modserve_gates r;
+    static const char *const OLD = "{\"cvars\": {\"com_maxFps\": 120}}";
+    static const char *const B = "{\"cvars\": {\"com_maxFps\": 60}}";
+    static const char *const C = "{\"cvars\": {\"com_maxFps\": 30}}";
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\reqmap\\mods", top);
+    mkdirs(root);
+    make_gen(root, "aold0000", 'a', OLD, 100);
+    make_gen(root, "bmine000", 'b', B, 200);
+    make_gen(root, "cmine000", 'c', C, 300);
+    hash64('b', h_b);
+    hash64('c', h_c);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 3);
+
+    /* The map uses bmine000 only, in the editor: its row wins over the earlier
+     * install it does not use (whose Toybox row keeps its requirements here). */
+    list[0] = h_b;
+    log_clear();
+    (void)sh_modserve_scope_set(list, 1, 1);
+    CHECK(log_has("MODS: requirements: conflict: com_maxFps: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
+                  "this map does not use, loses"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: aold0000: cvar com_maxFps=120: refused (com_maxFps=120 lost to bmine000, which "
+                           "this map uses and asks \"60\")\n") != NULL);
+    /* Its Play: only the map's own mods apply. */
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "60") && r.live == 1);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
+
+    /* Two rows asking one cvar: the first row wins, in either order, whatever
+     * the install order (bmine000 was installed before cmine000). */
+    list[0] = h_c;
+    list[1] = h_b;
+    (void)sh_modserve_scope_set(list, 2, 1);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: refused (com_maxFps=60 lost to cmine000, which "
+                           "this map lists first and asks \"30\")\n") != NULL);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
+    list[0] = h_b;
+    list[1] = h_c;
+    (void)sh_modserve_scope_set(list, 2, 1);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
+
+    /* No map open: no map decides, and the earliest install wins as before. */
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && !strcmp(g_text_val[0], "120"));
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 /* ------------------------------------------------------------------ conflicts (lane MG2) */
 
 char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
@@ -5541,6 +5610,7 @@ int main(void)
     test_surface_gated_reload();
     test_surface_built_after_boot();
     test_requirements_general();
+    test_requirements_by_map();
     test_refresh();
     test_conflicts();
     test_editor_refs();
