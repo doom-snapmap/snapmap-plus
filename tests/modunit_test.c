@@ -425,6 +425,36 @@ static void test_mod_share(const char *top)
         sh_unit_free(&u);
     }
     sh_mb_free(&b);
+
+    /* D-A16: an author's "version" (or any key nothing serves) is never part of a unit, so bumping it keeps the
+     * unit's hash. */
+    {
+        char hash1[SH_MB_HASH_HEX + 1] = "", hash2[SH_MB_HASH_HEX + 1] = "";
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\share_version", top);
+        write_pack(folder);
+        mt_write(folder, "mod.json",
+                 "{\n  \"name\": \"Crates and barrels\",\n  \"version\": \"1.0\",\n  \"notes\": {\"a\": 1},\n"
+                 "  \"strings\": { \"en\": { \"crate_name\": \"Crate\", \"barrel_name\": \"Barrel\" } }\n}\n");
+        if (build(folder, &b)) {
+            if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
+                CHECK(!strstr(u.manifest, "version") && !strstr(u.manifest, "notes"));
+                memcpy(hash1, u.hash, sizeof hash1);
+                sh_unit_free(&u);
+            }
+            sh_mb_free(&b);
+        }
+        mt_write(folder, "mod.json",
+                 "{\n  \"name\": \"Crates and barrels\",\n  \"version\": \"2.7\",\n  \"notes\": {\"b\": 2},\n"
+                 "  \"strings\": { \"en\": { \"crate_name\": \"Crate\", \"barrel_name\": \"Barrel\" } }\n}\n");
+        if (build(folder, &b)) {
+            if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
+                memcpy(hash2, u.hash, sizeof hash2);
+                sh_unit_free(&u);
+            }
+            sh_mb_free(&b);
+        }
+        CHECK(hash1[0] && !strcmp(hash1, hash2));
+    }
 }
 
 /* ------------------------------------------------------------------ 11 */

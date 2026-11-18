@@ -1262,7 +1262,9 @@ static int uw_names_kept(const uw *w, const char *body)
     return hit;
 }
 
-/* The unit's share of the author's mod.json (modunit.h). */
+/* The unit's share of the author's mod.json (modunit.h): only the keys the player's build and serving read
+ * (requirements, strings, hud, companions, scenes, animation_events, attachment_tags), cut to the kept files where
+ * entries name defs. Any other key changes nothing served, so it is left out and never moves the unit's hash. */
 static void uw_mod_share(uw *w, ub *o)
 {
     static const char *const presentation[] = { "name", "description", "author", "homepage", SH_MB_BLOCK_KEY, NULL };
@@ -1311,8 +1313,10 @@ static void uw_mod_share(uw *w, ub *o)
                 if (v->items[k] && v->items[k]->type == MPJ_STR && uw_names_kept(w, v->items[k]->text) &&
                     !mpj_push(kept, mpj_clone(v->items[k])))
                     w->oom = 1;
+        } else if (!strcmp(key, "requirements")) {
+            kept = mpj_clone(v);   /* mod-wide: whole */
         } else {
-            kept = mpj_clone(v);   /* requirements, and any key this version does not cut: whole */
+            continue;   /* a key nothing serves ("version", a note): never part of the unit's identity (D-A16) */
         }
         if (!kept) { w->oom = 1; continue; }
         if ((kept->type == MPJ_OBJ || kept->type == MPJ_ARR) && !kept->n && v->n) { mpj_free(kept); continue; }

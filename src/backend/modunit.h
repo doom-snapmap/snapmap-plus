@@ -50,8 +50,9 @@
  *    "mod":{...},"root":{"kind","name"},"spelled"?:"<namespace>"}
  * files and game sorted by path; a game entry's "at" is the mod's own path where the build holds DOOM's bytes at a
  * name of its own (a borrow), "source" the archive that holds it ("gameresources", "snap_gameresources", "loose") or
- * "product"; "mod" the author's mod.json without name, description, author and homepage, with its strings, hud,
- * companions, scenes, animation_events and attachment_tags cut to the entries the kept files name; "spelled" the
+ * "product"; "mod" the author's mod.json keys the player's build reads: requirements whole, and strings, hud,
+ * companions, scenes, animation_events and attachment_tags cut to the entries the kept files name (any other key,
+ * "version" included, changes nothing served and is left out, so it never moves the hash); "spelled" the
  * namespace the unit's carried binaries spell, when they spell one.
  *
  * The proof (sh_unit_of): every carried file is the build's own bytes (each is read and hashed against the build),
