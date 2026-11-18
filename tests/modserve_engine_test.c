@@ -33,6 +33,9 @@ static int log_has(const char *needle) { return strstr(g_log, needle) != NULL; }
 
 /* ------------------------------------------------------------------ link stand-ins */
 
+static int g_smodel_begins, g_smodel_reloads;
+void sh_static_model_reload_begin(void) { g_smodel_begins++; }
+int sh_static_model_reloaded(const void *backing) { (void)backing; g_smodel_reloads++; return 1; }
 void sh_modhud_scene_play_begin(void) {}
 void sh_modscene_place_play_begin(void) {}
 int sh_modstock_exists(const char *request) { (void)request; return 0; }
@@ -291,12 +294,34 @@ static void test_reparse_drops_type_info(void)
     CHECK(r.reparsed == 1 && def->loads == 1 && g_typeinfo_dropped == 1);
 }
 
+/* R-DS5: a refresh item of type "model" (a .bmodel) is a static model; a walk holding one begins a reload pass of
+ * the static model guard, and one without none. */
+static void test_static_model_kind(void)
+{
+    me_raw r;
+    me_raw_name n[2];
+    memset(&r, 0, sizeof r);
+    memset(n, 0, sizeof n);
+    CHECK(me_raw_kind("model") == ME_RAW_SMODEL && me_raw_kind("baseModel") == ME_RAW_MODEL &&
+          me_raw_kind("image") == ME_RAW_IMAGE && me_raw_kind("anim") == ME_RAW_ANIM);
+    r.names = n;
+    r.cap = 2;
+    (void)me_raw_collect(&r, "baseModel", "md6/x.md6mesh", "generated/basemodel/x.bmd6model", "b");
+    g_smodel_begins = 0;
+    me_raw_smodel_begin(&r);
+    CHECK(g_smodel_begins == 0);
+    (void)me_raw_collect(&r, "model", "cooked/model/models/x.bmodel", "cooked/model/models/x.bmodel", "b");
+    me_raw_smodel_begin(&r);
+    CHECK(g_smodel_begins == 1 && r.names[1].kind == ME_RAW_SMODEL);
+}
+
 int main(void)
 {
     test_op_load_levels();
     test_reparse_drops_type_info();
     test_keep_ref_map_heap();
     test_held_model_kept();
+    test_static_model_kind();
     if (g_failed) {
         fprintf(stderr, "modserve_engine_test: %d check(s) failed\n--- log ---\n%s", g_failed, g_log);
         return 1;
