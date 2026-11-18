@@ -2518,8 +2518,8 @@ static void ms_salts_note(const char *const *salts, const char *const *names, si
  * same line while the Toybox previewed or the crosshair hovered the crate
  * with the block left out. */
 #define MS_EXAMPLE_DECL "example_crate"
-#define MS_EXAMPLE_DEF_DIR "assets\\generated\\decls\\entitydef\\mods\\"
-#define MS_EXAMPLE_ROW_DIR "assets\\generated\\decls\\snapeditorentitydef\\mods\\"
+#define MS_EXAMPLE_DEF_DIR "entities\\"
+#define MS_EXAMPLE_ROW_DIR "decls\\snapeditorentitydef\\"
 
 static const char MS_EXAMPLE_DEF[] =
     "{\r\n"
@@ -2548,16 +2548,16 @@ static const char MS_EXAMPLE_DEF[] =
     "\t}\r\n"
     "}\r\n";
 
-/* Each %s is the salt. */
+/* Written in the mod's own names (modauthor.h): no salt. */
 static const char MS_EXAMPLE_ROW[] =
     "{\r\n"
     "\tinherit = \"prop/prop_base\";\r\n"
     "\tedit = {\r\n"
     "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\r\n"
-    "\t\tcategoryNameTag = \"#str_%s_category\";\r\n"
-    "\t\tdisplayNameTag = \"#str_%s_" MS_EXAMPLE_DECL "_name\";\r\n"
-    "\t\tdisplayDescriptionTag = \"#str_%s_" MS_EXAMPLE_DECL "_desc\";\r\n"
-    "\t\tentityDef = \"mods/%s/" MS_EXAMPLE_DECL "\";\r\n"
+    "\t\tcategoryNameTag = \"#str_category\";\r\n"
+    "\t\tdisplayNameTag = \"#str_" MS_EXAMPLE_DECL "_name\";\r\n"
+    "\t\tdisplayDescriptionTag = \"#str_" MS_EXAMPLE_DECL "_desc\";\r\n"
+    "\t\tentityDef = \"entities/" MS_EXAMPLE_DECL "\";\r\n"
     "\t\trenderInfo = {\r\n"
     "\t\t\tsize = {\r\n"
     "\t\t\t\tx = 54.3767967224;\r\n"
@@ -2586,14 +2586,15 @@ static int ms_write_example(const wchar_t *dir, const char *salt, char **rel_out
     char *rel, *text;
     wchar_t *path;
     int ok;
-    if (!(rel = sh_textf(MS_EXAMPLE_DEF_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt))) return 0;
+    (void)salt;
+    if (!(rel = sh_textf(MS_EXAMPLE_DEF_DIR MS_EXAMPLE_DECL ".decl"))) return 0;
     path = ms_wjoin_utf8(dir, rel);
     free(rel);
     ok = path && ms_mkdirs_parent(path) && ms_write_text(path, MS_EXAMPLE_DEF, sizeof MS_EXAMPLE_DEF - 1);
     free(path);
     if (!ok) return 0;
-    text = sh_textf(MS_EXAMPLE_ROW, salt, salt, salt, salt);
-    rel = sh_textf(MS_EXAMPLE_ROW_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt);
+    text = sh_text(MS_EXAMPLE_ROW);
+    rel = sh_textf(MS_EXAMPLE_ROW_DIR MS_EXAMPLE_DECL ".decl");
     path = rel ? ms_wjoin_utf8(dir, rel) : NULL;
     ok = text && path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
     free(path);
@@ -2659,7 +2660,7 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
     if (!dir) { ms_cause(cause, "out of memory"); goto done; }
     if (!ms_new_salt(salt, NULL)) { ms_cause(cause, "Windows could not supply the random numbers that name a new mod; restart the game and "
                                                      "try again"); goto done; }
-    assets = ms_wjoin(dir, L"assets");
+    assets = _wcsdup(dir);
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) {
         ms_cause(cause, "cannot create the folder mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
@@ -2667,13 +2668,13 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
     }
     /* The author's part holds what the files cannot say; the block the salt,
      * which never changes afterwards. The example's Toybox text is author
-     * text: its strings, keyed <salt>_<name> (no '/' in a string key). */
+     * text: its strings, keyed by plain names the product gives the salt (no '/' in a string key). */
     if (example)
         strings = sh_textf("  \"strings\": {\r\n    \"en\": {\r\n"
-                           "      \"%s_category\": \"%s\",\r\n"
-                           "      \"%s_" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
-                           "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
-                           "    }\r\n  },\r\n", salt, esc, salt, salt);
+                           "      \"category\": \"%s\",\r\n"
+                           "      \"" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
+                           "      \"" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
+                           "    }\r\n  },\r\n", esc);
     else strings = _strdup("");
     text = strings ? sh_textf("{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
                               "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",

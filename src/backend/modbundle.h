@@ -150,9 +150,10 @@ typedef struct sh_mb_need {
 } sh_mb_need;
 
 typedef struct sh_mb_file {
-    char *path;            /* "assets/" + request: a build records the game name, lower case with '/',
-                              whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
-    char *request;         /* path below assets/, lower-cased: what the provider is asked for */
+    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, game/<path>), lower
+                              case with '/', whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
+    char *request;         /* the engine's request path the path stands for (sh_ma_request), lower-cased: what the
+                              provider is asked for */
     char  blob[SH_MB_HASH_HEX + 1];
     unsigned long long size;
     char *ptype;           /* provides.type */
@@ -165,7 +166,7 @@ typedef struct sh_mb_file {
     int stock;             /* a stock pointer: blob is the installed bytes' SHA-256, nothing is carried */
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
-    int absent;            /* a stock pointer with no file under assets/ (a closure pointer, or a received build's) */
+    int absent;            /* a stock pointer with no file in the folder (a closure pointer, or a received build's) */
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
@@ -247,6 +248,10 @@ typedef struct sh_mb_bundle {
     unsigned edit_files;
     char **notes;          /* builder: report lines (replacements, closure, edits) */
     size_t note_count, note_cap;
+    /* builder: the mod's own strings keys as the author writes them (sh_ma_string_keys), sorted; a decl's
+     * #str_<key> of one of them is the mod's string */
+    char **own_keys;
+    size_t own_key_count;
 } sh_mb_bundle;
 
 /* Whether two decl texts are one text: line ends are not content, so CRLF

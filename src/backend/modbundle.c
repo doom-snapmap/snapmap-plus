@@ -15,6 +15,7 @@
 #include "modprog.h"    /* SH_MODPROG_CONTAINER: the render programs the product derives */
 #include "modlook.h"    /* sh_look_compile: the Graphics SDK's looks, checked and scanned as the engine reads them */
 #include "modsalt.h"
+#include "modauthor.h"  /* the mod folder an author writes and the engine names it stands for */
 #include "strkeys.h"   /* string edits: keys the game or the product defines (DECISIONS 9) */
 #include "companion.h"
 #include "mp_json.h"
@@ -912,18 +913,14 @@ char *sh_mb_script_file_name(const char *request)
 
 char *sh_mb_script_where(const char *child, const char *salt, const char *folder)
 {
-    size_t n = salt ? strlen(salt) : 0;
     char *where, *out, *p;
-    if (!folder || !folder[0]) folder = "<this mod's folder>";
-    if (n && child && !_strnicmp(child, "assets/mods/", 12) && !_strnicmp(child + 12, salt, n) && child[12 + n] == '/')
-        where = sh_textf("assets/mods/%s/%s", folder, child + 13 + n);
-    else
-        where = sh_text(child ? child : "");
+    (void)salt;
+    (void)folder;
+    where = sh_text(child ? child : "");
     if (!where) return NULL;
     for (p = where; *p; p++) if (*p == '/') *p = '\\';
-    out = sh_textf("%s: a script goes in this mod's own scripts folder, assets\\mods\\%s\\scripts\\ for the files that "
-                   "run or assets\\mods\\%s\\scripts\\lib\\ for the files loaded with require; move it there", where,
-                   folder, folder);
+    out = sh_textf("%s: a script goes in the mod's scripts folder, scripts\\ for the files that run or scripts\\lib\\ "
+                   "for the files loaded with require, named with letters, digits, _ and -; move it there", where);
     free(where);
     return out;
 }
@@ -1289,11 +1286,9 @@ int sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *ste
     if (version != SH_MB_BANK_VERSION)
         return mb_cause(cause, "%s.bnk is a Wwise bank of version %u, and this game reads only version %u; export "
                         "it with the Wwise version DOOM uses", stem, (unsigned)version, (unsigned)SH_MB_BANK_VERSION);
-    want = sh_mb_fnv1_lower(stem, strlen(stem));
-    if (id != want)
-        return mb_cause(cause, "%s.bnk carries bank id %u, but the game loads it by its name as id %u; press "
-                        "Refresh and Snapmap+ corrects the id", stem, (unsigned)id, (unsigned)want);
-
+    /* The id is the serving index's to give (ms_bank_stems: the bank is served under a stem of its own hash) */
+    (void)id;
+    (void)want;
     return 1;
 }
 
@@ -1939,7 +1934,31 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->first_cause);
     free(b->first_warning);
     free(b->state_cause);
+    sh_ma_keys_free(b->own_keys, b->own_key_count);
     memset(b, 0, sizeof *b);
+}
+
+/* The text of one of the mod's own files as the engine reads it (modauthor.h): every name of the mod written as the
+ * engine names it. Takes `raw` (from mb_read_wfile) and returns the text to read (raw itself, or a new heap block
+ * with raw freed), *len updated; NULL when out of memory (raw freed). */
+static unsigned char *mb_engine_text(const sh_mb_bundle *b, unsigned char *raw, size_t *len)
+{
+    sh_ma_keys keys;
+    size_t n = 0;
+    char *t;
+    unsigned char *out;
+    if (!raw || !b->id[0]) return raw;
+    keys.keys = b->own_keys;
+    keys.count = b->own_key_count;
+    t = sh_ma_text(b->id, (const char *)raw, *len, sh_ma_keys_has, &keys, &n);
+    if (!t) {
+        if (n == (size_t)-1) { free(raw); return NULL; }
+        return raw;
+    }
+    out = (unsigned char *)t;   /* malloc'd and NUL-terminated, as mb_read_wfile's */
+    *len = n;
+    free(raw);
+    return out;
 }
 
 /* One report line of the build (sh_mb_bundle.notes). */
@@ -2508,7 +2527,7 @@ static int mb_set_shadows(sh_mb_bundle *b, const mbj *arr)
         s = mb_strdup(v->s);
         if (!s) { mb_error(b, "out of memory"); return 0; }
         if (mb_starts(s, "assets/")) {
-            mb_error(b, "shadows entry %s must be a request path, without assets/", s);
+            mb_error(b, "shadows entry %s must be a request path", s);
             free(s);
             return 0;
         }
@@ -2745,19 +2764,30 @@ typedef struct mb_walk {
 
 static const char *mb_rp_forbidden(const char *request);
 
-/* One file found under assets\ at `child` ("assets/..."). */
+/* One file found in one of the mod's folders at `child` ("materials/...", "game/...": modauthor.h). */
 static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
 {
     char *cause = NULL;
-    const char *request = child + 7;   /* below "assets/" */
-    char *req_lower = mb_strdup(request);
+    char *req_lower = NULL, *path_lower = mb_strdup(child);
     sh_mb_file *f;
     /* With a stock reader a file of a type a bundle cannot carry is refused
      * only after it is found not to be a copy of installed content. */
     int defer = w->stock;
     int deferred = 0;
-    if (!req_lower) { mb_error(w->b, "out of memory"); return; }
-    mb_lower(req_lower);
+    if (!path_lower) { mb_error(w->b, "out of memory"); return; }
+    mb_lower(path_lower);
+    if (!sh_mb_check_request(path_lower, &cause)) {
+        mb_error(w->b, "%s: %s", child, cause);
+        free(cause);
+        free(path_lower);
+        return;
+    }
+    if (!sh_ma_request(w->b->id, path_lower, &req_lower, &cause)) {
+        if (cause) mb_error(w->b, "%s", cause);
+        free(cause);
+        free(path_lower);
+        return;
+    }
     if (!sh_mb_check_request(req_lower, &cause)) {
         mb_error(w->b, "%s: %s", child, cause);
     } else if (mb_rp_forbidden(req_lower)) {
@@ -2778,10 +2808,11 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
     } else if ((f = mb_add_file(w->b)) == NULL) {
         mb_error(w->b, "out of memory");
     } else {
-        /* DECISIONS 13: the recorded path is the game name, lower
-         * case with '/', whatever the spelling on disk (Windows
-         * opens it either way); archives and installs use it. */
-        f->path = sh_textf("assets/%s", req_lower);
+        /* DECISIONS 13: the recorded path is lower case with '/',
+         * whatever the spelling on disk (Windows opens it either way);
+         * archives and installs use it. */
+        f->path = path_lower;
+        path_lower = NULL;
         f->request = req_lower;
         req_lower = NULL;
         f->size = size;
@@ -2791,9 +2822,10 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
     }
     free(cause);
     free(req_lower);
+    free(path_lower);
 }
 
-/* Every file below `dir` (rel "assets"), any depth: a folder holds as many
+/* Every file below `dir` (rel: the folder's name), any depth: a folder holds as many
  * levels as Windows' path length allows, so the walk keeps its pending
  * folders on the heap rather than recursing. */
 typedef struct mb_walk_dir_item { wchar_t *dir; char *rel; } mb_walk_dir_item;
@@ -2858,31 +2890,40 @@ static void mb_walk_top(mb_walk *w)
     WIN32_FIND_DATAW fd;
     wchar_t *pattern = mb_wjoin(w->root, L"*");
     HANDLE h;
-    int have_assets = 0;
     if (!pattern) { mb_error(w->b, "out of memory"); return; }
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
     free(pattern);
     if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder: %s", sh_reason_win32(GetLastError(), "the mod folder", 0)); return; }
     do {
         char *name;
-        /* Only mod.json and assets\ are the mod (DECISIONS 16): anything else
-         * beside them (a README, desktop.ini, a .git folder) is ignored and
-         * never carried. */
-        if (_wcsicmp(fd.cFileName, L"assets") != 0 || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        /* The mod is mod.json and its folders by what things are (modauthor.h, DECISIONS 16): a file beside
+         * mod.json (a README, desktop.ini) and a folder whose name starts with '.' (.git) are ignored and never
+         * carried; any other folder is a mistake the build names. */
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) { mb_error(w->b, "out of memory"); continue; }
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-            mb_error(w->b, "assets is a link to another folder; make it a real folder and press Refresh");
+        if (!_stricmp(name, "assets")) {
+            mb_error(w->b, "assets holds the game's own folder layout, which a mod folder no longer uses; put each file "
+                     "in the folder for what it is (materials, images, meshes, animations, effects, particles, "
+                     "entities, sounds, scripts, decls, game) and press Refresh");
+        } else if (!sh_ma_folder(name, strlen(name))) {
+            mb_error(w->b, "%s is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
+                     "effects, particles, entities, sounds, movies, scripts, modules, virtual-textures, atlases, decls "
+                     "or game; rename it and press Refresh", name);
+        } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            mb_error(w->b, "%s is a link to another folder; make it a real folder and press Refresh", name);
         } else {
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
-            have_assets = 1;
-            if (sub) { mb_walk_dir(w, sub, "assets"); free(sub); }
+            char *rel = sh_text(name);
+            if (rel) mb_lower(rel);
+            if (sub && rel) mb_walk_dir(w, sub, rel);
             else mb_error(w->b, "out of memory");
+            free(sub);
+            free(rel);
         }
         free(name);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    if (!have_assets) mb_error(w->b, "the mod folder has no assets folder; put the mod's files in assets and press Refresh");
 }
 
 /* ------------------------------------------------------ needs, namespace ---- */
@@ -3301,7 +3342,7 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
     if (!req) { mb_error(rp->b, "out of memory"); return; }
     bin = mb_rp_find(rp, req);
     if (!bin) {
-        MB_RP_ERR(strict, "%s ships no assets/%s: Vulkan needs the cooked program", decl->path, req);
+        MB_RP_ERR(strict, "%s ships no game/%s: Vulkan needs the cooked program", decl->path, req);
         free(req);
         return;
     }
@@ -3318,7 +3359,7 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
             /* With the stage texts unknown, only the two stages every
              * drawing program has are required. */
             if (r == 1 || k < 2)
-                MB_RP_ERR(strict, "%s needs assets/%s (its %s stage): the engine stops with \"not found\" when it binds",
+                MB_RP_ERR(strict, "%s needs game/%s (its %s stage): the engine stops with \"not found\" when it binds",
                           decl->path, req, stage_name[k]);
             free(req);
             continue;
@@ -3528,6 +3569,7 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
     full = mb_file_wpath(root, f->path);
     copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
     free(full);
+    copy = mb_engine_text(b, copy, &clen);
     if (copy && sh_mb_text_same(game, glen, copy, clen)) {
         char *source = mb_strdup(f->request);
         if (!source) {
@@ -3731,6 +3773,7 @@ static int mb_ce_text(void *context, const char *name, char **text, size_t *len)
         path = mb_file_wpath(c->root, f->path);
         data = path ? mb_read_wfile(path, MB_ANY_SIZE, len) : NULL;
         free(path);
+        data = mb_engine_text(c->b, data, len);
         if (!data) return -1;
         *text = (char *)data;
         return 1;
@@ -3995,6 +4038,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         full = mb_file_wpath(root, f->path);
         copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
         free(full);
+        copy = mb_engine_text(b, copy, &clen);
         if (!copy) { mb_error(b, "cannot read %s", f->path); continue; }
         if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK ||
             sh_mb_stock_read(f->request, sha, &stock, &slen, f->path, NULL) != SH_MB_STOCK_OK) {
@@ -4198,6 +4242,7 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
         free(wrel);
         if (full) text = mb_read_wfile(full, MB_ANY_SIZE, &len);
         free(full);
+        text = mb_engine_text(c->b, text, &len);
         if (!text) return 0;
     }
     /* `key [=] value` at any depth: a source field naming the image, and
@@ -4405,7 +4450,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     f = mb_add_file(b);
     if (!f) { free(name); mb_error(b, "out of memory"); return 0; }
     idx = b->file_count - 1;
-    f->path = sh_textf("assets/%s", request);
+    f->path = sh_ma_path(b->id, request);   /* game/<request>: the game's own file at its own path */
     f->request = mb_strdup(request);
     f->stock_source = mb_strdup(request);
     f->ptype = mb_strdup(type);
@@ -5176,6 +5221,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(text, len, f->blob);
             got = len;
+            /* read as the engine will: the mod's names as the engine names them */
+            if (!(text = mb_engine_text(b, text, &len))) { mb_error(b, "out of memory"); free(full); continue; }
             if (!sh_decl_text_well_formed(text, len)) {
                 mb_error(b, "%s is not a well-formed decl (unbalanced braces, quotes or comments, or a NUL byte)", f->path);
             } else if (f->is_module) {
@@ -5304,13 +5351,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                  * also simply go: the mod then borrows the game's. */
                 if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !g_mb_keep_here) {
                     mb_error(b, "%s: the game ships this file and a mod cannot replace it with other bytes; delete your "
-                             "copy and the mod borrows the game's, or put your version under a mods folder named like "
-                             "this mod folder and point your decls at it", f->path);
+                             "copy and the mod borrows the game's, or put your version in the mod's own folder for what it "
+                             "is and name it there", f->path);
                 } else if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {
-                    mb_error(b, "%s: %s, and the game has no file of that name for it to replace; move it under "
-                             "assets\\<its game folder>\\mods\\<this folder's name>\\ and press Refresh", f->path, why);
+                    mb_error(b, "%s: %s, and the game has no file of that name for it to replace; move it to the mod's own "
+                             "folder for what it is and press Refresh", f->path, why);
                 } else {
                     mb_error(b, "%s: %s, and Snapmap+ could not read the game's files to tell whether it replaces "
                              "one; start DOOM normally and press Refresh", f->path, why);
@@ -5329,7 +5376,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         if (!b->files[i].is_module) continue;
         info = sh_mb_module_info_request(b->files[i].request);
         if (!info || !mb_req_has(&own, info))
-            mb_error(b, "%s: a snapModule needs its snapModuleInfo assets/%s in the same mod", b->files[i].path,
+            mb_error(b, "%s: a snapModule needs its snapModuleInfo %s in the same mod", b->files[i].path,
                      info ? info : "?");
         free(info);
     }
@@ -5647,13 +5694,13 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         mb_error(b, MB_BLOCK_EDITED);
         return 0;
     }
-    if (path->t != MBJ_STR || strlen(path->s) != path->n || !mb_starts(path->s, "assets/")) {
+    if (path->t != MBJ_STR || strlen(path->s) != path->n) {
         mb_error(b, MB_BLOCK_EDITED);
         return 0;
     }
-    expect = mb_strdup(path->s + 7);
-    if (!expect) { mb_error(b, "out of memory"); return 0; }
-    mb_lower(expect);
+    /* the engine request the folder's path stands for (modauthor.h) */
+    expect = NULL;
+    if (!sh_ma_request(b->id, path->s, &expect, NULL)) { mb_error(b, MB_BLOCK_EDITED); return 0; }
     if (!sh_mb_check_request(expect, NULL)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     pt = prov->t == MBJ_OBJ ? mbj_get(prov, "type") : NULL;
@@ -5702,7 +5749,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         f->stock = 1;
         f->stock_source = mb_strdup(src->s);
         f->closure = closure && closure->b;
-        f->absent = f->closure;   /* derived each build, never a file under assets/ */
+        f->absent = f->closure;   /* derived each build, never a file in the folder */
         b->stock_count++;
         if (!f->stock_source) { mb_error(b, "out of memory"); return 0; }
     }
@@ -5869,6 +5916,25 @@ static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int 
     if (!text) { mb_error(out, "cannot read mod.json"); return 0; }
     root = mbj_parse(text, len, &cause);
     if (!root) { mb_error(out, "mod.json: %s", cause ? cause : "out of memory"); free(cause); return 0; }
+    {
+        /* The author's part read as the engine names it (modauthor.h), as the build read it. */
+        const mbj *block = mbj_get(root, SH_MB_BLOCK_KEY), *salt = block ? mbj_get(block, "salt") : NULL;
+        if (salt && salt->t == MBJ_STR && sh_salt_valid(salt->s, salt->n)) {
+            char id[SH_SALT_LEN + 1], *engine;
+            size_t en = 0;
+            mbj *again;
+            memcpy(id, salt->s, SH_SALT_LEN);
+            id[SH_SALT_LEN] = 0;
+            if (!sh_ma_string_keys(text, len, sh_strkey_is_edit, &out->own_keys, &out->own_key_count)) {
+                mbj_free(root);
+                mb_error(out, "out of memory");
+                return 0;
+            }
+            engine = sh_ma_json(id, text, len, sh_strkey_is_edit, &en);
+            if (engine && (again = mbj_parse(engine, en, NULL)) != NULL) { mbj_free(root); root = again; }
+            free(engine);
+        }
+    }
     ok = mb_load_root(out, root, check);
     mbj_free(root);
     return ok;
@@ -6738,8 +6804,24 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
                 mb_error(out, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
             } else {
                 const char *id = bs ? bs->s : salt;
+                size_t en = 0;
+                char *engine;
                 memcpy(out->id, id, SH_SALT_LEN);
                 out->id[SH_SALT_LEN] = 0;
+                /* The author's part read as the engine names it (modauthor.h): the mod's names under its salt and
+                 * its strings keys <salt>_<key>. The file itself keeps the author's text. */
+                if (!sh_ma_string_keys((const char *)text, len, sh_strkey_is_edit, &out->own_keys, &out->own_key_count))
+                    mb_error(out, "out of memory");
+                engine = sh_ma_json(out->id, (const char *)text, len, sh_strkey_is_edit, &en);
+                if (engine) {
+                    mbj *again = mbj_parse(engine, en, NULL);
+                    if (again) {
+                        mbj_free(rootj);
+                        rootj = again;
+                        block = mbj_get(rootj, SH_MB_BLOCK_KEY);
+                    } else mb_error(out, "out of memory");
+                    free(engine);
+                } else if (en == (size_t)-1) mb_error(out, "out of memory");
                 if (mb_descriptor_root(out, rootj, block, 1) && block) {
                     /* "built": the first successful build of this salt in this folder. */
                     pt = mbj_get(block, "built");
@@ -6890,8 +6972,26 @@ int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
     sh_sha256_update(&s, "snapmap-plus tree 1\n", 20);
     sh_sha256_update(&s, own, own_len);
     sh_sha256_update(&s, "\n", 1);
-    assets = mb_wjoin(root, L"assets");
-    if (assets) { mb_tree_walk(&l, assets, "assets"); free(assets); }
+    /* every folder of the mod (modauthor.h), and any other folder but a dot folder, whose files the build reads or
+     * names in its cause */
+    assets = mb_wjoin(root, L"*");
+    if (assets) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileExW(assets, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+        free(assets);
+        while (h != INVALID_HANDLE_VALUE) {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.') {
+                wchar_t *sub = mb_wjoin(root, fd.cFileName);
+                char *rel = sh_mb_utf8(fd.cFileName);
+                if (rel) mb_lower(rel);
+                if (sub && rel) mb_tree_walk(&l, sub, rel);
+                else l.failed = 1;
+                free(sub);
+                free(rel);
+            }
+            if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+        }
+    } else l.failed = 1;
     if (l.failed) goto done;
     if (l.n > 1) qsort(l.e, l.n, sizeof *l.e, mb_tent_cmp);
     for (i = 0; i < l.n; i++) {
