@@ -192,7 +192,8 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * row's build, size and "of" with a cut of the build that the map needs; 0
  * leaves the row naming the whole build (every save but a publish's, and a
  * publish's row that ships whole). The open map's own record keeps the whole
- * builds either way. NULL unbinds. */
+ * builds either way. After a save's last row it is called once with NULL:
+ * that save is over (a publish's cut is armed for one save). NULL unbinds. */
 typedef int (*sh_modmanifest_slice_fn)(sh_modmanifest_row *row);
 void sh_modmanifest_set_slicer(sh_modmanifest_slice_fn slicer);
 

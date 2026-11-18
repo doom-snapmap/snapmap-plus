@@ -1069,8 +1069,10 @@ static int pv(const char *json, sh_modmanifest_row *row, char *err, size_t cap)
 {
     return sh_modmanifest_parse_value(json, strlen(json), row, err, cap);
 }
+static int g_cut_ends;   /* the save's end (row NULL) */
 static int fake_slicer(sh_modmanifest_row *row)
 {
+    if (!row) { g_cut_ends++; return 0; }
     g_cut_calls++;
     if (strcmp(row->salt, "alexpink")) return 0;
     strcpy_s(row->of, sizeof row->of, row->build);
@@ -1109,9 +1111,9 @@ static void part_rows(void)
     g_installed_count = 2;
     sh_modmanifest_reset();
     sh_modmanifest_set_slicer(fake_slicer);
-    g_cut_calls = 0;
+    g_cut_calls = g_cut_ends = 0;
     out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
-    CHECK(out && g_cut_calls == 1);
+    CHECK(out && g_cut_calls == 1 && g_cut_ends == 1);   /* each row once, then the save's end */
     CHECK(out && sh_modmanifest_read(out, n, &rows, NULL) == 1 && !strcmp(rows.rows[0].build, HASH_CUT) &&
           !strcmp(rows.rows[0].of, HASH_A) && rows.rows[0].size == 99 && rows.rows[0].name_count == 2);
     CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A) && !cur.rows[0].of[0]);

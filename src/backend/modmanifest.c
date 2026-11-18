@@ -1797,6 +1797,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (slicer) {
             if (!mm_copy_list(&whole, &ctx.list)) ctx.failed = 1;
             for (i = 0; !ctx.failed && i < ctx.list.count; i++) cut += slicer(&ctx.list.rows[i]) == 1;
+            (void)slicer(NULL);   /* this save's rows are done: the slicer's arm was for one save */
         }
         if (ctx.failed) {
             sh_modmanifest_list_free(&ctx.list);
