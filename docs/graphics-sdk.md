@@ -7,15 +7,23 @@ never names a program, a render parm, a texture slot or a renderer, and a look n
 limit: the product packs and budgets it, and reports only a mistake in the description, in one sentence that says
 what to write instead.
 
-The SDK has three parts:
+The SDK has these parts:
 
 - **Looks in data**: a material file whose first key is `look`. This guide covers the two looks that need more than
   the game's own material keys: `look layered` (a surface built from tiled layers) and `look particle` (a particle
   stage's shading). Any other material is written with the game's own keys, as before.
-- **Effects in data**: the game's fx decls (particles, lights, decals, render-parm fades, screen shakes, ribbons,
-  flares), written as the game writes them and played with the script calls below.
-- **Script calls**: `fx`, `fx_move`, `fx_stop`, `fx_hard_stops` and the entity calls `tint` and `glow`
-  (see [Mod scripts](architecture.md#mod-scripts-entity-animation-and-world-calls)).
+- **Effects in data**: an fx decl whose first key is `type effect` names what plays in plain items: a light, a
+  decal, a shake, a flash, a screen image, a blur, a focus change, a flare, a trail, a model, a sound, a glow, an
+  environment change, wind and particles ([Effects](#effects), [Particles](#particles)). The product writes the
+  game's own fx decl from it. An fx decl written as the game writes them still works as before.
+- **Values that change over time**: `pulse`, `flicker`, `fade` and `curve` wherever a number or a colour goes
+  ([Values that change](#values-that-change-over-time)).
+- **Environments in data**: an env decl whose first key is `type environment` ([Environments](#environments)).
+- **Script calls**: `fx`, `fx_move`, `fx_stop`, `fx_hard_stops`, `set_environment`, `clear_environment` and the
+  entity calls `tint`, `glow` and `recolour` ([Scripts](#scripts)).
+
+Every word an author writes is listed once in the product (`src/backend/sdkwords.h`), so the compilers, their
+mistakes and this guide name the same words.
 
 ## A layered surface
 
@@ -122,9 +130,198 @@ A particle look that sets none of `glowmask`, `gradient`, `nearfade`, `softdista
 other than 0), is drawn with the game's own particle shading (lit or unlit), exactly as a stock particle material is;
 its `glow` is then the material's own brightness.
 
+## Effects
+
+An effect is an fx decl of the mod (`generated/decls/fx/mods/<salt>/<name>.decl`) whose first key is `type effect`.
+It lists the items that play together. Each item says when it starts, how long it lasts and how it fades.
+
+```
+{
+	type		effect
+	lasts		2			// every item that names no lasts of its own lasts 2 seconds
+	light {
+		colour		{ 1, 0.45, 0.1 }
+		brightness	flicker { rate 8, low 3, high 6 }
+		reach		300
+		flicker		fire
+		fadeout		0.5
+	}
+	decal {
+		material	game("textures/decals/blood_splatter/blood_splatter_01")
+		size		64
+		lasts		10
+		fadeout		2
+	}
+	shake {
+		strength	0.4
+		lasts		0.5
+		reach		800			// players farther away feel nothing
+	}
+	flash {
+		brightness	0.6
+		lasts		0.2
+		reach		600
+	}
+	particles {
+		image		mods/abcdefgh/fx/ember.tga
+		count		40
+		life		{ 0.5, 1 }
+		from		sphere 16
+		speed		{ 80, 160 }
+		spread		30
+		fall		-50
+		size		curve { 0 3, 0.3 8, 1 0 }
+	}
+	sound {
+		sound		game("effects/explosions/grenade_explosion_default")
+	}
+}
+```
+
+A name in a field is one of the mod's own, written as it is (`mods/<salt>/...`), or one of the game's, written
+`game("...")`. A field left out keeps the game's own value for it, except where that draws nothing (a decal is given
+10 seconds and 64 units, a light 300 units of reach).
+
+**Every item** takes these fields:
+
+| Field | Value | What it does |
+|---|---|---|
+| `starts` | seconds, or `{ least, most }` | waits before the item starts (the game draws between the two) |
+| `lasts` | seconds | how long it plays (the effect's own `lasts` for an item that names none) |
+| `fadein`, `fadeout` | seconds | how long it takes to fade in and out (for particles: fractions of each particle's life) |
+| `repeats` | `yes` / `no` | starts again when it ends, while the effect plays |
+| `restarts` | `yes` / `no` | starts again when it is asked to start while it plays |
+| `reach`, `fadesfrom` | units | (not a light) how far a shake, flash or flare reaches, and where it starts to weaken |
+| `offset` | `{ x, y, z }` | where it plays, from the effect's place |
+| `turn` | `{ pitch, yaw, roll }` | turns it from the effect's facing |
+| `follows` | `yes` / `no` | follows the effect when it moves |
+| `facing` | `follows`, `fixed`, `parent` | how it faces: with the effect, fixed, or with the entity the effect is on |
+| `at` | a tag, or `{ tag, tag, ... }` | on an entity's own effect: the tags it plays at |
+| `everytag` | `yes` / `no` | plays at every tag of `at` (`no`: the one the game picks) |
+| `when`, `until` | a condition, or `{ ... }` | on an entity's own effect: the conditions that start and stop it (`spawn_start`, `death_1`, ...) |
+
+**The items** and their own fields:
+
+| Item | Fields | What it draws |
+|---|---|---|
+| `light` | `colour`, `brightness` (a number or a [changing value](#values-that-change-over-time)), `reach` (units, or `{ x, y, z }`), `flicker` (`none`, `flicker`, `fire`), `shape` (a light material), `shine` (specular), `shadows` (`yes`/`no`), `seenfrom` (units) | a light |
+| `decal` | `material`, `size`, `depth`, `angle`, `glow` (`{ r, g, b, strength }`), `glowlasts` (seconds), `colour`, `stays` (`yes`/`no`) | a decal projected where the effect faces |
+| `shake` | `strength`, `angles` (`{ pitch, yaw, roll }`), `move` (`{ x, y, z }`), `use` (one of the game's advanced shakes) | shakes the view of every player in reach |
+| `flash` | `brightness` | flashes the view of every player in reach |
+| `screen` | `material`, `colour`, `tiles` (`{ x, y }`), `mirror`, `bottom` | an image over the view |
+| `blur` | `strength`, `style` (`radial`, `soft`) | blurs the view |
+| `focus` | `near`, `focus`, `far` | depth of field |
+| `flare` | `use` (a flare), `size`, `colour` | a lens flare |
+| `trail` | `use` (a ribbon) | a trail |
+| `model` | `model`, `material`, `colour`, `size` | a model |
+| `sound` | `sound`, `stops` (`yes`: stops with the item) | a sound |
+| `glow` | `colour` (three or four numbers), `strength`, `value` (the render parm, default `bloomcolor`), `stays` | fades one of the entity's own values |
+| `environment` | `use` (an env decl), or any field of an [environment](#environments) | changes how the level looks while it plays |
+| `wind` | `strength`, `angle` | wind |
+| `particles` | [Particles](#particles), or `use` (a particle decl), `size`, `colour`, `onscreen` | particles |
+
+A colour is `{ r, g, b }`, or `{ r, g, b, opacity }`.
+
+An effect is played from a script ([Scripts](#scripts)), or named where the game names an fx (an entityDef's
+`fxDecl`): the product writes its fx decl under the same name, so nothing else changes.
+
+## Particles
+
+A `particles` item describes particles of its own. The product writes the game's particle decl for it, and its
+material when it names an `image`.
+
+```
+particles {
+	image		mods/abcdefgh/fx/ember_sheet.tga
+	frames		{ 4, 4 }		// a sheet of frames, played at framerate a second
+	framerate	12
+	count		300
+	life		{ 0.6, 1.4 }		// seconds, each particle between the two
+	from		sphere 24		// point, sphere r, ring r, disc r, box { x, y, z }; 'surface' before it: the surface only
+	direction	up			// up or outward; turn the item to aim it elsewhere
+	spread		25			// degrees
+	speed		{ 80, 160 }
+	fall		400			// units a second squared; below 0 rises
+	drag		0.5			// slows each particle toward still air (a second)
+	size		curve { 0 4, 0.3 10, 1 0 }	// over each particle's life
+	colour		fade { from { 1, 0.8, 0.3 }, to { 0.6, 0.05, 0 } }
+	opacity		1
+	fadein		0.1			// fractions of the life
+	fadeout		0.4
+	angle		{ 0, 360 }		// each particle's starting angle
+	faces		camera			// camera, motion (stretched along its flight), ground, free
+	lighting	unlit			// unlit or lit (with an image)
+	glow		2			// how bright the image is (with an image)
+	bounce		0.3			// bounces off the surfaces under and behind the effect; stick, or none
+	burst		yes			// every particle at once (no: spread over a life)
+	repeats		yes			// emits for as long as the effect plays
+}
+```
+
+`size`, `colour` and `opacity` take a number (or a colour), two numbers (each particle between them), or a
+[changing value](#values-that-change-over-time) over the particle's life. A speed range, drag and bounce are
+Snapmap+'s simulated particle motion (see [architecture.md](architecture.md#simulated-particle-motion)); everything else is
+the game's own particle stage. A stage with very many particles is drawn on the CPU today; the product will choose
+the game's GPU stages for it once that path is measured (the build log says which it took).
+
+## Values that change over time
+
+Wherever a number or a colour goes, write one of these instead:
+
+| Form | Example | Means |
+|---|---|---|
+| `pulse` | `bloomcolor pulse { rate 2, low { 0, 0, 0 }, high { 1, 0.5, 0 } }` | a smooth rise and fall, `rate` times a second |
+| `flicker` | `brightness flicker { rate 10, low 0.6, high 1 }` | a random smooth wobble |
+| `fade` | `colour fade { from { 1, 1, 1 }, to { 1, 0, 0 }, over 3 }` | once, from one value to another (on an effect item or a particle) |
+| `curve` | `size curve { 0 2, 0.2 8, 1 0 }` | points `time value`; on a material the time is seconds and `loop yes` is needed; on a particle 0 to 1 of its life |
+
+On a material the value is the game's own register program over time and a table, so it costs no script time: any
+of the material's vector keys may change (`bloomcolor`, `color`, the base material's keys of a look). A material has
+no start, so it takes `pulse`, `flicker` and a looping `curve`; fade an entity from a script instead. A colour key the
+game decodes from sRGB is decoded the same way, so a changing colour matches the same colour written as a constant.
+
+## Environments
+
+An environment is an env decl of the mod (`generated/decls/env/mods/<salt>/<name>.decl`) whose first key is
+`type environment`. It names what changes in the level's look; everything else stays the level's own.
+
+```
+{
+	type		environment
+	fog		{ 0.35, 0.05, 0.03 }
+	fogdensity	0.03
+	fogstart	200
+	fogend		4000
+	bloom		1.5
+	exposure	{ 2, 10 }		// the darkest and the brightest the eye adapts to
+	saturation	0.6
+	tint		{ 1, 0.9, 0.8 }
+	brightness	1.1
+	vignette	pulse { rate 1, low 0.4, high 0.8 }
+	vignettecolour	{ 0.2, 0, 0 }
+	grain		0.03
+	fringe		0.1			// colour fringes at the screen's edge
+	blend		1.5			// seconds to blend in and out
+}
+```
+
+`set_environment("hell_red")` lays it over the players' views, blending in over `blend`; `clear_environment()`
+blends back to the level's own. An effect's `environment` item does the same for as long as the item plays. Each is
+undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
+says so); the env decl itself, used for an area, draws it changing.
+
 ## Mistakes
 
-The build reads every look and stops on a mistake with one sentence, for example:
+The build reads every look, effect and environment and stops on a mistake with one sentence, for example:
+
+- `blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'.`
+- `blast.decl line 3: 'lihgt' is not an item of an effect; the nearest is 'light'.`
+- `blast.decl line 3: a decal needs its 'material', as in 'material game("textures/decals/blood_splatter/blood_splatter_01")'.`
+- `blast.decl line 3: 'pulse' of 'brightness' needs both 'low' and 'high', as in 'pulse { rate 2, low 0.2, high 1 }'.`
+- `hell_red.decl line 3: 'fgo' is not a field of an environment; the nearest is 'fog'.`
+- `rune.decl line 2: a material has no start, so 'bloomcolor' cannot fade once; write pulse, flicker, or a curve with 'loop yes', or fade the entity from a script.`
+
+For a look, for example:
 
 - `body.decl line 7: 'layer5' is not a field of a layered look; a surface has layers 1 to 4.`
 - `embers.decl line 4: 'lighting' is 'glowing'; write unlit, lit or explosion.`
@@ -143,7 +340,11 @@ Nothing about the game's limits is ever reported: the product fits every look in
 
 | Call | Does |
 |---|---|
-| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | play one of the mod's fx decls at a point (lights, decals, particles, shakes: whatever the fx holds) |
+| `fx(effect, pos, [dir], [options])` | plays one of the mod's [effects](#effects) at a point, facing `dir`; `options` `{ colour = { r, g, b } }` tints this play. When the game holds nearly all the entities it can, the effect is skipped (one line in the log), never an error |
+| `fx(effect, e, [joint], [options])` | plays it on an entity, following it (on one of its joints when named) |
+| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | the same for one of the mod's effect entities (an entityDef with an fx decl), as before; `fx_move` and `fx_stop` move and stop either |
+| `set_environment(name)`, `clear_environment()` | lays one of the mod's [environments](#environments) over the players' views, and takes it off, each over its `blend` |
+| `e:recolour{ primary = {r,g,b}, secondary = ..., pattern = { {r,g,b}, {r,g,b} }, scratches = ..., dirt = ..., glow = ..., seconds = s }` | recolours the game's colour regions of an entity whose surfaces have them (the multiplayer armour and weapon materials, and a mod's materials on the game's `skinvmtr_custom` program), fading over `seconds`; one model drawn in many colours |
 | `fx(e, condition)`, `fx_stop(e, condition)` | start or stop an entity's own fx |
 | `e:tint(r, g, b, [seconds])` | washes the entity's surfaces toward a colour (`1, 1, 1` is none), fading over `seconds`; the game has no per-entity colour multiply, so a tint is a wash added over the lit surface, as the game's own highlights are |
 | `e:glow(r, g, b, [seconds], [strength])` | makes the entity's glowing parts and surfaces glow in that colour (`0, 0, 0` is none), fading over `seconds`; the glow added is the colour times `strength` (0 to 16). Without a strength it is a soft glow (0.08) that leaves the surface readable under it; `strength` 1 is the full glow, which washes the whole surface with the colour (`e:glow(0, 0.6, 1, 0.5, 1)` paints a demon flat cyan). Pass `nil` for `seconds` to give a strength without a fade |
@@ -164,7 +365,8 @@ materials, so a hand-made mod and a converted one use one surface.
   program takes no render-parm slot of the engine's 1,024. `look particle` compiles to `snapmapplus/particles/
   uberparticles`, whose numbers are kept in keys the game's own particle program already holds. See
   [Render programs](architecture.md#render-programs).
-- The compiler is `src/backend/modlook.c`; the build validates with it and the server serves its output. A material
+- Effects, particles, environments and values that change are compiled by `src/backend/sdk.c` and the files it calls (`modeffect.c`, `modenv.c`, `sdkvalues.c`); what they derive (particle decls, materials, tables, the fx an environment plays, an effect's emitter) is served by the product, and the build carries it as pointers. See [The Graphics SDK: effects, environments, values that change](architecture.md#the-graphics-sdk-effects-environments-values-that-change).
+- The look compiler is `src/backend/modlook.c`; the build validates with it and the server serves its output. A material
   that is not a look but still writes the old layered or particle keys, or names the old program names, is rewritten
   the way it always was, so mods built earlier draw unchanged. A look that compiles to the platform's layered program
   gets `packedspec 0` unless the material writes its own (the program reads the base pages unpacked).
