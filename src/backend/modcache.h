@@ -110,6 +110,11 @@ int   sh_cache_row_known(const char *chash);
 /* 1 when a unit's pointer from `source` (its "game" entry) is checked against this install's bytes before the unit
  * is used; 0 for the product's own container, whose files this product derives again where they serve. */
 int   sh_cache_pointer_checked(const char *source);
+/* A unit file's transfer that failed in the network (a reset connection, a timeout, the store busy: 429, 5xx) is
+ * tried again, resumed from what arrived, after a pause that doubles: the milliseconds to wait before try ATTEMPT + 1
+ * (ATTEMPT counts from 0), or -1 when CODE is not such a failure or the tries are spent. One reset connection among
+ * a unit's hundreds of files no longer ends the map's download (R-LV4: staging reset one file of 500). */
+int   sh_cache_net_retry_ms(int code, int attempt);
 /* 1 when the composition `chash` is on disk and complete (every unit present when it was made). */
 int   sh_cache_composed(const char *chash, int *complete);
 

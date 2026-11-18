@@ -1467,18 +1467,38 @@ static int mc_net_cause(int code, const modnet_result *r)
     return SH_CACHE_ABSENT_UNREACHABLE;
 }
 
-/* One blob into files\, resumed from partial\, checked; one retry after a bad download (N22). 0, or a cause. */
+int sh_cache_net_retry_ms(int code, int attempt)
+{
+    if (attempt < 0 || attempt >= 4) return -1;
+    switch (code) {
+    case MODNET_E_NET: case MODNET_E_TIMEOUT: case MODNET_E_RATE: case MODNET_E_UNAVAILABLE:
+        return 250 << attempt;   /* 250, 500, 1000, 2000 ms */
+    default:
+        return -1;
+    }
+}
+
+/* One blob into files\, resumed from partial\, checked; one retry after a bad download (N22), and up to four after a
+ * failure in the network (sh_cache_net_retry_ms). 0, or a cause. */
 static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_io *io)
 {
     char *dir = mc_path("partial"), *part = mc_path("partial\\%s.part", sha);
-    int tries, cause = SH_CACHE_ABSENT_UNREACHABLE;
+    int tries, net = 0, cause = SH_CACHE_ABSENT_UNREACHABLE;
     if (!dir || !part || !mc_mkdirs(dir)) { free(dir); free(part); return SH_CACHE_ABSENT_DISK; }
     for (tries = 0; tries < 2; tries++) {
         unsigned long long have = 0;
         modnet_result r;
-        int code;
+        int code, wait;
         if (!mc_exists(part, &have) || have > size) have = 0;
         code = modnet_get_blob(sha, part, have, io, &r);
+        if (code != MODNET_OK && (wait = sh_cache_net_retry_ms(code, net)) >= 0) {
+            mc_logf("MODS: content: a unit's file %.16s stopped (%s); tried again in %d ms", sha,
+                    r.message ? r.message : modnet_code_text(code), wait);
+            Sleep((DWORD)wait);
+            net++;
+            tries--;   /* a network retry is not one of the bad-download tries */
+            continue;
+        }
         if (code != MODNET_OK) {
             cause = mc_net_cause(code, &r);
             if (code == MODNET_E_CANCELLED) cause = -1;

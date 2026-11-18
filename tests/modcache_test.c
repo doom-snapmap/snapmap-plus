@@ -210,6 +210,21 @@ static void test_pointer_sources(void)
     CHECK(sh_cache_pointer_checked("product") == 0);
 }
 
+static void test_net_retry(void)
+{
+    printf("-- a unit file stopped by the network is tried again, four times, the pause doubling\n");
+    CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 0) == 250);   /* winhttp 12030: the connection reset (R-LV4) */
+    CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 3) == 2000);
+    CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 4) == -1);    /* the tries are spent */
+    CHECK(sh_cache_net_retry_ms(MODNET_E_TIMEOUT, 1) == 500);
+    CHECK(sh_cache_net_retry_ms(MODNET_E_RATE, 0) == 250);
+    CHECK(sh_cache_net_retry_ms(MODNET_E_UNAVAILABLE, 2) == 1000);
+    CHECK(sh_cache_net_retry_ms(MODNET_E_NOT_FOUND, 0) == -1);   /* an answer, not a failure */
+    CHECK(sh_cache_net_retry_ms(MODNET_E_BLOCKED, 0) == -1);
+    CHECK(sh_cache_net_retry_ms(MODNET_E_CANCELLED, 0) == -1);   /* the player said no */
+    CHECK(sh_cache_net_retry_ms(MODNET_OK, 0) == -1);
+}
+
 static void test_composition_hash(void)
 {
     const char *a[] = { "1111111111111111111111111111111111111111111111111111111111111111",
@@ -736,6 +751,7 @@ int main(void)
     sh_cache_set_resolver(&g_game);
     printf("-- composition hash\n");
     test_pointer_sources();
+    test_net_retry();
     test_composition_hash();
     printf("-- format 2 rows\n");
     test_rows_format2();
