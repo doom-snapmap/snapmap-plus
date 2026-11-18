@@ -20,8 +20,10 @@
  * A unit is present when its manifest is in units\ and every file is a blob in files\ or a file of a local mod with
  * that SHA-256 (D21: a local mod serves someone else's map only by exact hash). A composition whose units are not
  * all present is composed with stand-ins (D60) for the absent objects: every name the map places under the row's
- * namespace that no present unit provides is an entityDef inheriting the stock snapmaps/unknown (R-DS2 5.2), so the
- * map, its logic and its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
+ * namespace that no present unit provides is an entityDef inheriting the stock snapmaps/unknown (R-DS2 5.2) with the
+ * class the map saved for its entity, and, for a placed entity, a palette row naming it with the reference slot
+ * counts the map saved (R-DS5: the map validator refuses an entity no palette row names), so the map, its logic and
+ * its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
  * composed again in full. An absent module is left out (its geometry is missing; R-DS2: a module stand-in is a live
  * check).
  *
@@ -132,6 +134,15 @@ typedef struct sh_cache_absent { const char *object, *mod; int cause; } sh_cache
 char *sh_cache_notice_text(const sh_cache_absent *absent, size_t n);
 /* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. */
 char *sh_cache_object_name(const char *root);
+
+/* Stand-ins (R-DS5), malloc'd decl texts. The entityDef: snapmaps/unknown with `cls`, the class the map saved for the
+ * entity (bare snapmaps/unknown for idEntity or no class). The palette row at
+ * decls/snapeditorentitydef/snapmapplus_standin/<path>.decl: entityDef `def_source` (the mod-relative
+ * "entities/<path>"), not placeable from the Toybox, movable and deletable, drawn as labelled bounds, inheriting the
+ * stock row DOOM gives `cls` with the same entity- and variable-reference slot counts (standin_rows.h), or that
+ * class's row with the counts written over it. */
+char *sh_cache_standin_def_text(const char *cls);
+char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs);
 
 /* ------------------------------------------------------------ the sweep (5.17) */
 

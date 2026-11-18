@@ -1689,6 +1689,16 @@ void sh_modmanifest_load_refuse(const char *sentence)
     free(line);
 }
 
+/* The map text of the content step running on this thread (sh_modmanifest_content_text). */
+static __declspec(thread) const char *t_content_text;
+static __declspec(thread) size_t t_content_length;
+
+const char *sh_modmanifest_content_text(size_t *length)
+{
+    if (length) *length = t_content_text ? t_content_length : 0;
+    return t_content_text;
+}
+
 void sh_modmanifest_content_for(const char *json, size_t length, const sh_modmanifest_list *rows)
 {
     sh_modmanifest_content_fn content = g_content;
@@ -1699,7 +1709,11 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
     for (i = 0; i < rows->count; i++) pinned |= rows->rows[i].pinned;
     if (!pinned) return;
     placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
+    t_content_text = json;
+    t_content_length = length;
     content(rows, placed, failed ? 0 : placed_count);
+    t_content_text = NULL;
+    t_content_length = 0;
     sh_modmanifest_names_free(placed, placed_count);
 }
 

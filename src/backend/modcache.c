@@ -12,6 +12,7 @@
 #include "modzip.h"
 #include "map_carrier.h"
 #include "mp_json.h"
+#include "standin_rows.h"
 #include "backend_log.h"
 #include "../common/text.h"
 
@@ -504,6 +505,8 @@ int sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long *m
 /* ------------------------------------------------------------ rows */
 
 typedef struct mc_absent { char *object, *mod; int cause; } mc_absent;
+/* What the map saved of a placed name: its entity's class and its reference slot counts (a stand-in keeps them). */
+typedef struct mc_placed_info { char *cls; int entrefs, varrefs, known; } mc_placed_info;
 typedef struct mc_row {
     char chash[SH_CACHE_HASH_HEX + 1];
     char salt[SH_MODMANIFEST_SALT_CAP];
@@ -512,6 +515,7 @@ typedef struct mc_row {
     char (*units)[SH_CACHE_HASH_HEX + 1];
     char **roots;
     char **placed; size_t nplaced;     /* names the map places under mods/<salt>/ */
+    mc_placed_info *pinfo;             /* per placed name, when the map text was read */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
     int notice;                        /* the absent objects wait for the notice */
 } mc_row;
@@ -526,8 +530,12 @@ static void mc_row_clear(mc_row *r)
     if (r->roots) for (i = 0; i < r->n; i++) free(r->roots[i]);
     free(r->roots);
     free(r->units);
-    for (i = 0; i < r->nplaced; i++) free(r->placed[i]);
+    for (i = 0; i < r->nplaced; i++) {
+        free(r->placed[i]);
+        if (r->pinfo) free(r->pinfo[i].cls);
+    }
     free(r->placed);
+    free(r->pinfo);
     for (i = 0; i < r->nabsent; i++) { free(r->absent[i].object); free(r->absent[i].mod); }
     free(r->absent);
     memset(r, 0, sizeof *r);
@@ -540,10 +548,63 @@ static mc_row *mc_row_find_locked(const char *chash)
     return NULL;
 }
 
+/* The map's entities under mods/: each one's inherit, class and reference slot counts (entityEntRefs and
+ * entityVarRefs rows keyed by uniqueId, the counts the map validator compares with the entity's palette row). */
+typedef struct mc_map_ent { const char *inherit, *cls; int entrefs, varrefs; } mc_map_ent;
+typedef struct mc_map_ents { mpj *doc; mc_map_ent *v; size_t n; } mc_map_ents;
+
+static int mc_csr_count(const mpj *mm, long long uid)
+{
+    const mpj *kv = mm ? mpj_get(mm, "keyValues") : NULL;
+    long long b, e;
+    if (!kv || kv->type != MPJ_ARR || uid < 0 || uid + 1 >= kv->n) return 0;
+    b = mpj_int(kv->items[uid]);
+    e = mpj_int(kv->items[uid + 1]);
+    return e > b ? (int)(e - b) : 0;
+}
+
+static void mc_map_ents_read(mc_map_ents *out, const char *json, size_t len)
+{
+    const mpj *ents, *refs, *er, *vr;
+    int i;
+    memset(out, 0, sizeof *out);
+    if (!json || !len || !(out->doc = mpj_parse(json, len))) return;
+    ents = mpj_get(out->doc, "entities");
+    refs = mpj_get(out->doc, "references");
+    er = refs ? mpj_get(refs, "entityEntRefs") : NULL;
+    vr = refs ? mpj_get(refs, "entityVarRefs") : NULL;
+    if (!ents || ents->type != MPJ_ARR || !ents->n) return;
+    if (!(out->v = (mc_map_ent *)calloc((size_t)ents->n, sizeof *out->v))) return;
+    for (i = 0; i < ents->n; i++) {
+        const mpj *def = mpj_get(ents->items[i], "entityDef"), *inh = def ? mpj_get(def, "inherit") : NULL,
+                  *cls = def ? mpj_get(def, "className") : NULL, *uid = mpj_get(ents->items[i], "uniqueId");
+        if (!inh || inh->type != MPJ_STR || _strnicmp(inh->text, "mods/", 5)) continue;
+        out->v[out->n].inherit = inh->text;
+        out->v[out->n].cls = cls && cls->type == MPJ_STR ? cls->text : "";
+        if (uid && mpj_is_num(uid)) {
+            out->v[out->n].entrefs = mc_csr_count(er, mpj_int(uid));
+            out->v[out->n].varrefs = mc_csr_count(vr, mpj_int(uid));
+        }
+        out->n++;
+    }
+}
+
+static void mc_map_ents_free(mc_map_ents *m)
+{
+    free(m->v);
+    mpj_free(m->doc);
+    memset(m, 0, sizeof *m);
+}
+
 void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, size_t placed_count)
 {
     size_t i, k;
+    mc_map_ents ents;
+    size_t text_len = 0;
+    const char *text = sh_modmanifest_content_text(&text_len);
     if (!rows) return;
+    /* Read once, outside the lock: what the map saved of its mod objects, for their stand-ins. */
+    mc_map_ents_read(&ents, text, text_len);
     AcquireSRWLockExclusive(&g_lock);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *row = &rows->rows[i];
@@ -591,8 +652,21 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
                 if (r->placed[r->nplaced]) r->nplaced++;
             }
         }
+        if (r->nplaced && ents.n && (r->pinfo = (mc_placed_info *)calloc(r->nplaced, sizeof *r->pinfo)) != NULL) {
+            size_t p, e;
+            for (p = 0; p < r->nplaced; p++)
+                for (e = 0; e < ents.n; e++) {
+                    if (_stricmp(ents.v[e].inherit, r->placed[p])) continue;
+                    r->pinfo[p].cls = sh_text(ents.v[e].cls);
+                    r->pinfo[p].entrefs = ents.v[e].entrefs;
+                    r->pinfo[p].varrefs = ents.v[e].varrefs;
+                    r->pinfo[p].known = 1;
+                    break;
+                }
+        }
     }
     ReleaseSRWLockExclusive(&g_lock);
+    mc_map_ents_free(&ents);
 }
 
 int sh_cache_row_known(const char *chash)
@@ -786,6 +860,84 @@ static const char MC_ENTITY_STANDIN[] =
     "\tinherit = \"snapmaps/unknown\";\n"
     "}\n";
 
+/* The folder of the stand-in rows: decls/snapeditorentitydef/<this>/<the placed name's path>.decl. */
+#define MC_STANDIN_ROWS "snapmapplus_standin"
+
+/* 1 when `cls` reads as a class name (letters, digits, '_'), so it can be written into a decl. */
+static int mc_class_name(const char *cls)
+{
+    const char *c;
+    if (!cls || !*cls || strlen(cls) > 128) return 0;
+    for (c = cls; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_')) return 0;
+    return 1;
+}
+
+/* An absent placed object's entityDef: the stock snapmaps/unknown (idEntity, no model, no collision, no AI) with the
+ * class the map saved for the entity, so the definition is of the placed entity's own class with that class's
+ * defaults. An entity whose class is not idEntity derives from it, which is all the entityDef parse asks of an
+ * inherit (the product's timeline is the same shape on an unmodded game). For an idPlaceableSnapAIEncounter the
+ * default encounterToSpawn is NULL, and the engine then logs one level-4 line and never spawns (R-DS5). */
+char *sh_cache_standin_def_text(const char *cls)
+{
+    if (!mc_class_name(cls) || !strcmp(cls, "idEntity")) return sh_text(MC_ENTITY_STANDIN);
+    return sh_textf("{\n\tinherit = \"snapmaps/unknown\";\n\tclass = \"%s\";\n}\n", cls);
+}
+
+/* The stock row a stand-in row inherits for (cls, entrefs, varrefs): exactly that key, else the class's row with
+ * no references, else its first; NULL when DOOM has no row of that class. *exact 1 for the exact key. */
+static const char *mc_standin_base(const char *cls, int entrefs, int varrefs, int *exact)
+{
+    size_t i;
+    const char *any = NULL, *bare = NULL;
+    *exact = 0;
+    if (!cls) return NULL;
+    for (i = 0; i < SH_STANDIN_ROWS_N; i++) {
+        const sh_standin_row_base *b = &SH_STANDIN_ROWS[i];
+        if (strcmp(b->cls, cls)) continue;
+        if (b->entrefs == entrefs && b->varrefs == varrefs) { *exact = 1; return b->row; }
+        if (!any) any = b->row;
+        if (!bare && !b->entrefs && !b->varrefs) bare = b->row;
+    }
+    return bare ? bare : any;
+}
+
+char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs)
+{
+    int exact = 0;
+    const char *base = mc_standin_base(mc_class_name(cls) ? cls : NULL, entrefs, varrefs, &exact);
+    char *inherit = base ? sh_textf("\tinherit = \"%s\";\n", base) : sh_text(""), *refs = sh_text(""), *out;
+    /* Not an exact stock key: the counts the map saved are written over the base's, so the validator's comparison
+     * holds; the slots then have the base's paths up to its count and none past it. */
+    if (!exact) {
+        free(refs);
+        refs = sh_textf("\t\tentRefs = {\n\t\t\tnum = %d;\n\t\t}\n\t\tvarRefs = {\n\t\t\tnum = %d;\n\t\t}\n",
+                        entrefs < 0 ? 0 : entrefs, varrefs < 0 ? 0 : varrefs);
+    }
+    out = inherit && refs ? sh_textf("{\n%s"
+                                     "\tedit = {\n"
+                                     "\t\tentityDef = \"%s\";\n"
+                                     "\t\tdisplayNameTag = \"#str_sh_unknown\";\n"
+                                     "\t\tdisplayDescriptionTag = \"#str_sh_unknown_desc\";\n"
+                                     "\t\tflags = {\n"
+                                     "\t\t\tplaceable = false;\n"
+                                     "\t\t\teditable = true;\n"
+                                     "\t\t\tisMoveable = true;\n"
+                                     "\t\t\tisDeletable = true;\n"
+                                     "\t\t}\n"
+                                     "\t\trenderInfo = {\n"
+                                     "\t\t\talwaysDrawBounds = true;\n"
+                                     "\t\t\talwaysDrawLabel = true;\n"
+                                     "\t\t}\n"
+                                     "%s"
+                                     "\t}\n"
+                                     "}\n", inherit, def_source, refs)
+                              : NULL;
+    free(inherit);
+    free(refs);
+    return out;
+}
+
 /* 1 when a present unit carries `path`. */
 static int mc_carried(const mc_unit *units, size_t n, const char *path)
 {
@@ -797,26 +949,36 @@ static int mc_carried(const mc_unit *units, size_t n, const char *path)
     return 0;
 }
 
-typedef struct mc_extras { sh_unit_extra *v; char **paths; size_t n; } mc_extras;
+typedef struct mc_extras { sh_unit_extra *v; char **paths, **texts; size_t n; } mc_extras;
 
-static void mc_extra_add(mc_extras *e, const mc_unit *units, size_t nunits, char *path)
+/* Add the stand-in file `path` with `text` (both taken; the bare entity stand-in when text is NULL). */
+static void mc_extra_add_text(mc_extras *e, const mc_unit *units, size_t nunits, char *path, char *text)
 {
     size_t i;
-    if (!path) return;
-    for (i = 0; i < e->n; i++) if (!_stricmp(e->paths[i], path)) { free(path); return; }
-    if (mc_carried(units, nunits, path)) { free(path); return; }
+    if (!path) { free(text); return; }
+    for (i = 0; i < e->n; i++) if (!_stricmp(e->paths[i], path)) { free(path); free(text); return; }
+    if (mc_carried(units, nunits, path)) { free(path); free(text); return; }
+    if (!text && !(text = sh_text(MC_ENTITY_STANDIN))) { free(path); return; }
     {
         sh_unit_extra *gv = (sh_unit_extra *)realloc(e->v, (e->n + 1) * sizeof *gv);
         char **gp = gv ? (char **)realloc(e->paths, (e->n + 1) * sizeof *gp) : NULL;
+        char **gt = gp ? (char **)realloc(e->texts, (e->n + 1) * sizeof *gt) : NULL;
         if (gv) e->v = gv;
-        if (!gv || !gp) { free(path); return; }
-        e->paths = gp;
+        if (gp) e->paths = gp;
+        if (!gv || !gp || !gt) { free(path); free(text); return; }
+        e->texts = gt;
         e->paths[e->n] = path;
+        e->texts[e->n] = text;
         e->v[e->n].path = path;
-        e->v[e->n].text = MC_ENTITY_STANDIN;
-        e->v[e->n].len = sizeof MC_ENTITY_STANDIN - 1;
+        e->v[e->n].text = text;
+        e->v[e->n].len = strlen(text);
         e->n++;
     }
+}
+
+static void mc_extra_add(mc_extras *e, const mc_unit *units, size_t nunits, char *path)
+{
+    mc_extra_add_text(e, units, nunits, path, NULL);
 }
 
 /* The sidecar beside a composition: what it holds. */
@@ -901,6 +1063,13 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             snapshot.placed = r->nplaced ? (char **)calloc(r->nplaced, sizeof *snapshot.placed) : NULL;
             for (i = 0; snapshot.placed && i < r->nplaced; i++) snapshot.placed[i] = sh_text(r->placed[i]);
             snapshot.nplaced = snapshot.placed ? r->nplaced : 0;
+            if (snapshot.nplaced && r->pinfo &&
+                (snapshot.pinfo = (mc_placed_info *)calloc(snapshot.nplaced, sizeof *snapshot.pinfo)) != NULL) {
+                for (i = 0; i < snapshot.nplaced; i++) {
+                    snapshot.pinfo[i] = r->pinfo[i];
+                    snapshot.pinfo[i].cls = r->pinfo[i].cls ? sh_text(r->pinfo[i].cls) : NULL;
+                }
+            }
         }
     }
     ReleaseSRWLockShared(&g_lock);
@@ -922,18 +1091,36 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
     if (here && !complete && mc_side_same(chash, units, snapshot.n)) { ok = 1; goto record; }   /* nothing new is here */
 
-    /* Stand-ins (D60) for what is absent: the absent roots that are entities, and every name the map places under
-     * the namespace that no present unit provides. */
+    /* Stand-ins (D60) for what is absent: every name the map places under the namespace that no present unit
+     * provides (first, so a placed name keeps its class and row), then the absent roots that are entities. */
     if (!complete) {
+        for (k = 0; k < snapshot.nplaced; k++) {
+            const char *rest = snapshot.placed[k] + strlen("mods/") + strlen(snapshot.salt) + 1;
+            const mc_placed_info *pi = snapshot.pinfo && snapshot.pinfo[k].known ? &snapshot.pinfo[k] : NULL;
+            char *lower = sh_text(rest), *c, *def_path, *def_source, *row_path;
+            for (c = lower; c && *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+            if (!lower) continue;
+            def_path = sh_textf("entities/%s.decl", lower);
+            def_source = sh_textf("entities/%s", lower);
+            /* What the map saved of the entity decides both stand-ins: the definition keeps its class, and a palette
+             * row names it with the reference slots the map saved, because the map validator (RepairAndMigrate)
+             * refuses a placed entity whose name no palette row carries, or whose slot counts differ from its
+             * row's (R-DS5; R-LV2's refusal was "not found in palette"). A map text not read: no row. */
+            if (mc_carried(units, snapshot.n, def_path)) { free(def_path); def_path = NULL; }
+            if (def_path) {
+                mc_extra_add_text(&extras, units, snapshot.n, def_path, sh_cache_standin_def_text(pi ? pi->cls : NULL));
+                if (pi && def_source) {
+                    row_path = sh_textf("decls/snapeditorentitydef/" MC_STANDIN_ROWS "/%s.decl", lower);
+                    mc_extra_add_text(&extras, units, snapshot.n, row_path,
+                                      sh_cache_standin_row_text(def_source, pi->cls, pi->entrefs, pi->varrefs));
+                }
+            }
+            free(def_source);
+            free(lower);
+        }
         for (i = 0; i < snapshot.n; i++) {
             if (units[i].state == 1 || !snapshot.roots[i]) continue;
             if (!strncmp(snapshot.roots[i], "entities/", 9)) mc_extra_add(&extras, units, snapshot.n, sh_textf("%s.decl", snapshot.roots[i]));
-        }
-        for (k = 0; k < snapshot.nplaced; k++) {
-            const char *rest = snapshot.placed[k] + strlen("mods/") + strlen(snapshot.salt) + 1;
-            char *lower = sh_textf("entities/%s.decl", rest), *c;
-            for (c = lower; c && *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
-            mc_extra_add(&extras, units, snapshot.n, lower);
         }
     }
 
@@ -1018,8 +1205,9 @@ done:
     free(units);
     free((void *)manifests);
     free(lens);
-    for (i = 0; i < extras.n; i++) free(extras.paths[i]);
+    for (i = 0; i < extras.n; i++) { free(extras.paths[i]); free(extras.texts[i]); }
     free(extras.paths);
+    free(extras.texts);
     free(extras.v);
     free(dest);
     free(side);

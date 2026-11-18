@@ -93,6 +93,9 @@ int  sh_modmanifest_composition_hash(const char *salt, const char *const *units,
  * places. It remembers the pinned rows and composes those whose composition is not on disk from what is here. */
 typedef void (*sh_modmanifest_content_fn)(const struct sh_modmanifest_list *rows, char *const *placed, size_t count);
 void sh_modmanifest_set_content(sh_modmanifest_content_fn fn);
+/* Inside the content step, the map text it runs for (its length in *length), so the step can read what the map
+ * saved of each placed object (its class and reference slots, for a stand-in); NULL outside the step. */
+const char *sh_modmanifest_content_text(size_t *length);
 /* Run the content step for a map text's pinned rows (`rows` read from `json`), with the names the map places, as
  * a load does before its rows resolve. A rawmap's mod check calls it before its hold, which fetches a pinned row's
  * units only when the content cache knows the row. */

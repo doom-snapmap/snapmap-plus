@@ -406,6 +406,97 @@ static void test_cache(const char *top)
         CHECK(!sh_cache_take_notice());
     }
 
+    /* R-DS5: the stand-ins keep what the map saved of each placed entity. Its definition keeps the entity's class, and
+     * a palette row names it with the map's reference slot counts, inheriting DOOM's own row of that class and those
+     * counts (or the class's row with the counts written over it), so the map validator finds the entity in the
+     * palette and its slots match: the map loads. */
+    {
+        char mods5[MAX_PATH * 2];
+        static const char map[] =
+            "{\"entities\":["
+            "{\"entityDef\":{\"className\":\"idInteractable\",\"inherit\":\"mods/" SALT "/barrel\"},\"uniqueId\":0},"
+            "{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT "/demons/lamp\"},\"uniqueId\":1},"
+            "{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT "/demons/lamp2\"},\"uniqueId\":2},"
+            "{\"entityDef\":{\"className\":\"idEntity\",\"inherit\":\"mods/" SALT "/plain\"},\"uniqueId\":3},"
+            "{\"entityDef\":{\"className\":\"bad\\\"class\",\"inherit\":\"mods/" SALT "/odd\"},\"uniqueId\":4}],"
+            "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,1,1,3,3,3],\"values\":[5,0,0]},"
+            "\"entityVarRefs\":{\"keyValues\":[0,4,4,4,4,4],\"values\":[1,2,3,4]}}}";
+        sh_modmanifest_list list;
+        _snprintf_s(mods5, sizeof mods5, _TRUNCATE, "%s\\player5\\mods", top);
+        CreateDirectoryA(mods5, NULL);
+        sh_cache_set_mods_root(mods5);
+        download(&crate, &b, pack, 1);
+        (void)sh_cache_take_notice();
+        memset(&list, 0, sizeof list);
+        CHECK(sh_modmanifest_list_add(&list, &rows[0]));
+        sh_modmanifest_set_content(sh_cache_on_load);
+        sh_modmanifest_content_for(map, sizeof map - 1, &list);
+        sh_modmanifest_set_content(NULL);
+        sh_modmanifest_list_free(&list);
+        CHECK(sh_cache_composed(chash, &complete) && !complete);
+        CHECK(!sh_modmanifest_content_text(NULL));   /* only inside the step */
+
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "inherit = \"snapmaps/unknown\";") && strstr(t, "class = \"idInteractable\";"));
+        free(t);
+        _snprintf_s(path, sizeof path, _TRUNCATE,
+                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\barrel.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "inherit = \"interactives/tripod_panel\";") && strstr(t, "entityDef = \"entities/barrel\";") &&
+              strstr(t, "placeable = false;") && strstr(t, "isMoveable = true;") && !strstr(t, "entRefs"));
+        free(t);
+
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\demons\\lamp.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "class = \"idPlaceableSnapAIEncounter\";"));
+        free(t);
+        _snprintf_s(path, sizeof path, _TRUNCATE,
+                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "inherit = \"demons/demon_base\";") && strstr(t, "entityDef = \"entities/demons/lamp\";") &&
+              !strstr(t, "entRefs"));
+        free(t);
+        /* Counts DOOM gives no row of the class: the class's row, with the map's counts written over it. */
+        _snprintf_s(path, sizeof path, _TRUNCATE,
+                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp2.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "inherit = \"demons/demon_base\";") && strstr(t, "entRefs = {\n\t\t\tnum = 2;") &&
+              strstr(t, "varRefs = {\n\t\t\tnum = 0;"));
+        free(t);
+        /* idEntity: the bare stock stand-in; a class the decl text cannot carry: the same. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\plain.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "snapmaps/unknown") && !strstr(t, "class ="));
+        free(t);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\odd.decl", mods5, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "snapmaps/unknown") && !strstr(t, "class ="));
+        free(t);
+        /* The present crate is served from its unit, not stood in for. */
+        _snprintf_s(path, sizeof path, _TRUNCATE,
+                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mods5, chash);
+        CHECK(!mt_exists(path));
+        t = sh_cache_take_notice();
+        CHECK(t != NULL);
+        free(t);
+        /* The composition built and validated with the rows: the builder admits them as the bundle's editor rows. */
+        {
+            sh_mb_bundle sb;
+            size_t r;
+            int rows_found = 0;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods5, chash);
+            memset(&sb, 0, sizeof sb);
+            CHECK(sh_mb_load_folder(path, &sb) && sb.validated);
+            for (r = 0; r < sb.file_count; r++)
+                if (sb.files[r].ptype && !_stricmp(sb.files[r].ptype, "snapEditorEntityDef") && sb.files[r].pname &&
+                    !_strnicmp(sb.files[r].pname, "mods/" SALT "/snapmapplus_standin/", strlen("mods/" SALT "/snapmapplus_standin/")))
+                    rows_found++;
+            CHECK(rows_found == 5);
+            sh_mb_free(&sb);
+        }
+    }
+
     /* A local mod serves a stranger's unit only by exact hash (D21), checked again when the file changes (D51). */
     {
         char mods4[MAX_PATH * 2], local[MAX_PATH * 2], img[MAX_PATH * 3];
