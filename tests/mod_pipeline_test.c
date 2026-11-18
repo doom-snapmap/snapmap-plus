@@ -292,7 +292,10 @@ static void fresh_mod(const char *fixture, const char *root)
     CHECK(sh_modserve_bundle_state(b.hash, NULL) == 1);
     for (i = 0; i < (int)b.file_count; i++) {
         CHECK(sh_modserve_lookup(b.files[i].request, &hit) == 1);
-        if (strstr(b.files[i].request, "alexrimp")) CHECK(hit.size == b.files[i].size);
+        /* a carried file is served whole; a decl's names as the engine names them (modauthor.h), so its size is the
+         * engine text's, which is never shorter than the author's */
+        if (strstr(b.files[i].request, "alexrimp"))
+            CHECK(b.files[i].is_decl ? hit.size >= b.files[i].size : hit.size == b.files[i].size);
     }
 
     /* Editor rows: both sedefs, after the decls they need. */
