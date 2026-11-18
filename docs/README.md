@@ -9,6 +9,8 @@ Explains how to develop and ship Snapmap+, and how its major components work tog
 | Guide | Purpose |
 |---|---|
 | [contributing.md](contributing.md) | Setup, builds, tests, review and releases. |
+| [authoring.md](authoring.md) | The mod folder, how a mod names its files, and a worked example. |
+| [graphics-sdk.md](graphics-sdk.md) | Material types and effects a mod describes in plain terms. |
 | [architecture.md](architecture.md) | Component boundaries, threading, ownership and the DLL interface. |
 | [webview-ui.md](webview-ui.md) | Frontend modules, messages, embedding and preview. |
 | [packaging.md](packaging.md) | Shipped files, runtime dependencies and player-data ownership. |

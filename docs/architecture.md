@@ -495,7 +495,9 @@ Installer updates and uninstall preserve player configuration.
 ## Mods
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
-holding `mod.json` and an `assets/` tree at the engine's own request paths.
+holding `mod.json` and folders named for what its files are (see
+[The mod folder](#the-mod-folder)); the product maps each file and every name
+its texts write to the engine's request paths and names under the mod's salt.
 Mods reach other machines two ways: each build a published map names is
 uploaded to the Community API's mod store as one archive when the map is
 published, and a player who opens that map is asked first and downloads only
@@ -513,6 +515,58 @@ that names mods writes that ZIP beside the JSON (see
 migration below, never served or written, and moved to the Recycle Bin once
 everything in it is in `mods\`; no `package-cache` or `package-staging`
 folder is created.
+
+### The mod folder
+
+The author's guide is [authoring.md](authoring.md); this is the contract (`modauthor.c`, R-NM1). A mod folder is
+`mod.json` and top-level folders by kind. Each file's path in the folder maps to one engine request (`sh_ma_request`;
+the inverse, `sh_ma_path`, names a request in causes and the Files view), with the salt inserted after the kind's
+engine root:
+
+| Folder (extension) | Engine request |
+|---|---|
+| `materials/`, `effects/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,particle,entitydef,sound}/mods/<salt>/<rest>` |
+| `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
+| `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
+| `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
+| `images/` (`.bimage`); `atlases/decals|lights|transparency/` | `generated/image/`; `generated/decalatlas|lightatlas|transsortatlas/` + `mods/<salt>/<rest>` |
+| `movies/` (`.bswf`, `.bimage`) | `generated/swf/mods/<salt>/<rest>` |
+| `scripts/`, `scripts/lib/` (`.lua`) | `mods/<salt>/scripts/<rest>` |
+| `programs/` (`.decl`, `.bin`), `programs/permutations/`, `programs/spirv/`, `programs/spirv/permutations/` | `generated/decls/renderprog/`, `generated/renderprogs/`, `generated/renderprogs/permutations/`, `generated/spirv/`, `generated/spirv/generated/renderprogs/permutations/` + `mods/<salt>/<rest>` |
+| `map-modules/` (any), `map-modules/palettes/<p>/`, a `.baas_*` | `maps/modules/mods/<salt>/<rest>`, `maps/modules/palettes/<p>/mods/<salt>/<rest>`, `generated/maps/modules/mods/<salt>/<rest>` |
+| `virtual-textures/` (`.mega2`, `.pages`) | `virtualtextures/mods/<salt>/<rest>` |
+| `decls/<type>/` (`.decl`; not a type with a folder of its own) | `generated/decls/<type>/mods/<salt>/<rest>` |
+| `game/<request>` | `<request>` (a game path; refused under `mods/`) |
+
+A folder named `assets` is refused with one sentence (the game's layout, which a mod folder no longer uses), and so
+is any other unknown top-level folder; a file beside `mod.json` and a dot folder are not the mod's. The recorded
+`path` of a file (the block's `files` and `stock` entries, the bundle's `sh_mb_file.path`, sync and export archive
+entries) is its path in the folder; the request is derived from it and the salt. A closure pointer's path is
+`game/<request>`.
+
+Names (`sh_ma_text`, `sh_ma_engine_name`): in a decl text and in `mod.json`'s author part, a run of name characters
+(`[A-Za-z0-9_./$+@~-]`, starting after a character that is not one) that begins with a folder prefix is the mod's
+and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<rest>`, `animations/` and a `meshes/`
+name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
+`scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
+`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `game:<name>` is written `<name>` (the
+installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes).
+`#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
+language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
+builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
+build's `mod.json`). Scripts are not rewritten: a script's names are resolved by its calls (`sh_script_check_name`).
+A text may still spell an engine name (`mods/<salt>/x`): it is served as written.
+
+The builder reads every decl through the rewrite (`mb_engine_text`: the needs scan, the look compile, the closure,
+the stock comparison of a `game/` copy and the derived edits all see the engine's text), and the file's identity
+(its SHA-256 in the block) stays the author's bytes. The serving index serves the rewritten text: `ms_engine_names`
+writes each changed decl under `mods\.served\files\<sha16>.decl` and points the file there, before the bank rename,
+so every open, the look filter and the ledger read the engine's bytes, as for a renamed bank. Salting a folder
+writes only its block: nothing on disk carries the salt, a copy needs no move, and a text that does spell
+`mods/<old salt>/` is rekeyed in every mod folder (`ms_rk_entry`). Install lower-cases the names of every author
+folder. The offline proof is `tests/served_cli.c`: it builds every folder of a root and lists each served request
+with the SHA-256 of the bytes the engine is handed (R-NM1: the Tyrant and the owner's development lane, 1,302 of
+1,305 and 1,260 of 1,262 requests identical, the rest scripts changed by the script API's renames).
 
 These backend files share the work:
 
