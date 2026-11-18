@@ -129,7 +129,7 @@ const char *sh_modprog_register_const_image(const float rgba[4]);
  * on failure. Served, owned and listed as the parameter image is. */
 const char *sh_modprog_register_decl(const char *type, const char *text);
 
-/* An SDK effect's emitter: the entityDef snapmapplus/effect/<fx name> (inherit func/fx, fxDecl the fx), which the
+/* An SDK effect's emitter: the entityDef snapmapplus/effect/<fx name> (inherit func/fx, fxEffect the fx), which the
  * product serves from its path alone, at generated/decls/entitydef/snapmapplus/effect/<fx name>.decl. malloc'd. */
 char *sh_modprog_effect_emitter(const char *fx_name);
 

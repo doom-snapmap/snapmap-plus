@@ -55,6 +55,7 @@ typedef struct ms_file {
     const char *ptype, *pname, *reg;
     int is_decl, is_shadow, is_sedef, rank;
     int is_restore;                       /* a stock pointer restoring installed content under its own name */
+    int product;                          /* such a pointer to a decl the product derives (ms_product_request) */
     int need_first, need_count;
     int served;
     const unsigned char *body;            /* composed bytes served instead of the disk file (arena), or NULL */
@@ -228,6 +229,7 @@ static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static int ms_bundle_describe(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
+static int ms_product_request(const char *request);
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len);
 static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
@@ -803,6 +805,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     if (!ptype || !pname) { ms_fail(b, "out of memory"); return; }
     f->ptype = ptype;
     f->pname = pname;
+    f->product = f->is_restore && f->is_decl && ms_product_request(request);
     /* Namespace: new names live under mods/<salt>/ (ONE-SHAPE rule 1, the
      * builder's sh_mb_salt_paths_check). Raw files (and skins decls, which
      * are named by their mesh path) may sit deeper, below a folder of their
@@ -5022,6 +5025,19 @@ static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
 }
 
 static sh_modserve_material_fn volatile g_material_filter;
+static int (*volatile g_product_owner)(const char *request);
+
+void sh_modserve_set_product_owner(int (*owns)(const char *request))
+{
+    InterlockedExchangePointer((PVOID volatile *)&g_product_owner, (PVOID)owns);
+}
+
+static int ms_product_request(const char *request)
+{
+    int (*owns)(const char *) = (int (*)(const char *))InterlockedCompareExchangePointer((PVOID volatile *)&g_product_owner,
+                                                                                       NULL, NULL);
+    return sh_mb_product_decl(request) || (owns && owns(request) == 1);
+}
 
 void sh_modserve_set_material_filter(sh_modserve_material_fn fn)
 {
@@ -5191,6 +5207,30 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
     return r;
 }
 
+/* A decl the product derives from a mod's file (a particle, its material, a table, an environment's fx) exists in the
+ * product only once that file has been compiled in this process (sdk.h: compiling registers what it derives), and a
+ * plan loads it before the file that needs it. So a read of such a pointer that finds nothing first compiles the
+ * served files that need it (through the material filter, ms_look_of), and the pointers that need it in turn, then
+ * reads again. Returns how many files it compiled. */
+static int ms_derive(const ms_index *x, const ms_file *f, int depth)
+{
+    int i, k, n = 0;
+    if (!x || !f->product || depth > 4) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *d = &x->files[i];
+        if (d == f || !d->served || !d->is_decl) continue;
+        for (k = 0; k < d->need_count; ++k) {
+            const ms_need *nd = &x->needs[d->need_first + k];
+            size_t len = 0;
+            if (_stricmp(nd->type, f->ptype) || _stricmp(nd->name, f->pname)) continue;
+            if (d->stock) n += ms_derive(x, d, depth + 1);
+            else if (ms_look_of(d, &len)) n++;
+            break;
+        }
+    }
+    return n;
+}
+
 static int ms_open(const char *request, unsigned char **bytes, size_t *length)
 {
     sh_modserve_serve_fn listen;
@@ -5218,6 +5258,7 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
     if (buf && !body) InterlockedIncrement(&g_cache_hits);
     else if (!buf) {
         buf = ms_file_raw(f, &len);
+        if (!buf && f->product && ms_derive(x, f, 0)) buf = ms_file_raw(f, &len);
         if (!buf) {
             InterlockedIncrement(&g_open_failures);
             if (!InterlockedExchange((volatile LONG *)&f->fail_logged, 1)) {
@@ -5369,11 +5410,25 @@ static int ms_need_blocks(const char *name)
  * game parses it, never reloaded by a plan). A surface (a stock pointer at the game's own path: the game's
  * bytes under the game's name, sh_mb_stock_restore) is never planned by any
  * pass: the provider serves it whenever the game parses it, at the game's
- * own time and level, so no pass registers or re-parses it. */
+ * own time and level, so no pass registers or re-parses it. The one exception
+ * is a pointer to a decl the product derives (ms_product_planned). */
+/* A pointer to a decl the product derives (an SDK effect's emitter, a derived particle, material, table or fx, a
+ * platform program, its permutations and render parms) restores a name no archive lists: below the engine's lifecycle
+ * state 2 DeclFind finds a name only through a registered source (VK 0x14155ae90), so such a pointer is planned as a
+ * mod's own decl is, its needs first (R-GS3). MS_PLAN_PRODUCT_PROGRAMS 0 is the fallback (D-A22): the SDK's derived
+ * decls only, the programs and render parms left to the engine's demand load as before. */
+#define MS_PLAN_PRODUCT_PROGRAMS 1
+static int ms_product_planned(const ms_file *f)
+{
+    if (!f->product) return 0;
+    if (!MS_PLAN_PRODUCT_PROGRAMS && (!_stricmp(f->ptype, "renderProg") || !_stricmp(f->ptype, "renderParm"))) return 0;
+    return 1;
+}
+
 static int ms_plannable(const ms_index *x, const ms_file *f)
 {
     (void)x;
-    return f->is_decl && !f->edit && !ms_surface(f) && !f->is_shadow;
+    return f->is_decl && !f->edit && (!ms_surface(f) || ms_product_planned(f)) && !f->is_shadow;
 }
 
 /* Collect `roots` and the closure of bundle-provided decls they need into an

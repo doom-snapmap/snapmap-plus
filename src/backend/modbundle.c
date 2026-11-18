@@ -1203,6 +1203,18 @@ int sh_mb_stock_restore(const char *request, const char *source)
            rn == sn + 5 && _strnicmp(slash + 1, source, sn) == 0 && _stricmp(slash + 1 + sn, ".decl") == 0;
 }
 
+int sh_mb_product_decl(const char *request)
+{
+    const char *slash, *name;
+    size_t rn = request ? strlen(request) : 0, pn = sizeof SH_MB_PRODUCT_ROOT - 1;
+    if (rn < 22 || _strnicmp(request, "generated/decls/", 16) != 0 || !mb_iends(request, rn, ".decl")) return 0;
+    slash = strchr(request + 16, '/');
+    if (!slash || slash == request + 16) return 0;
+    name = slash + 1;
+    return _strnicmp(name, SH_MB_PRODUCT_ROOT, pn) == 0 && (name[pn] == '/' || name[pn] == '_') &&
+           strlen(name) > pn + 1 + 5;
+}
+
 /* maps/modules/<path>.decl outside maps/modules/palettes/: a snapModule decl. */
 static int mb_is_module_request(const char *r)
 {

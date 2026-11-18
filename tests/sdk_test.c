@@ -524,7 +524,7 @@ static void test_emitter_served(void)
     free(em);
     CHECK(sh_modprog_owns("generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl"));
     CHECK(sh_modprog_read("generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl", &b, &n) == SH_MB_STOCK_OK);
-    CHECK(b && n && !memcmp(b, "{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxDecl = \"mods/abcdefgh/blast\";\n\t}\n}\n", n));
+    CHECK(b && n && !memcmp(b, "{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxEffect = \"mods/abcdefgh/blast\";\n\t}\n}\n", n));
     if (b) HeapFree(GetProcessHeap(), 0, b);
     {
         const char *name = sh_modprog_register_decl("Table", "{ { 0, 1 } }\n");

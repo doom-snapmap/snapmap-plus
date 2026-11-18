@@ -1795,13 +1795,27 @@ groups).
 first 16 hex digits of the SHA-256 of its type and text, at `generated/decls/<type>/snapmapplus/sdk/<hex>.decl`
 (`snapmapplus_sdk_<hex>` for a table, since a material expression names its table without a '/'); the same file
 gives the same names at build and at serve. An effect's **emitter**, the entityDef the script calls spawn, is
-`snapmapplus/effect/<fx name>` (inherit `func/fx`, `fxDecl` the effect), derived from its path alone so it is served
-before anything has compiled the effect. The builder reads material, fx and env decls through `sh_sdk_compile`
+`snapmapplus/effect/<fx name>` (inherit `func/fx`, `fxEffect` the effect), derived from its path alone so it is served
+before anything has compiled the effect. `fxEffect` is the field `idEntityFx` plays when it spawns (unless `startOff`),
+as every stock `func/fx` child names its effect; `fxDecl` is an actor's condition-driven fx, which only an event starts,
+so an emitter written with it spawned and played nothing (R-GS3). The builder reads material, fx and env decls through `sh_sdk_compile`
 (`sh_mb_set_sdk_compiler`): a mistake fails the build with its sentence, the needs are scanned from the compiled text
 (an effect's tables, flares and envs, a particle decl's `tableDecls`, a material expression's derived table), and
 the needs a compile returns join the file's own (an effect's emitter, an environment's fx and its emitter), so the
 closure brings every derived decl along as a pointer to the product's container; the server serves the compiled
-fx and env text as it serves a look. `sdk_cli` (`tests/sdk_cli.c`) compiles SDK files outside the game and writes
+fx and env text as it serves a look.
+
+**Derived decls are registered like the mod's own.** A pointer to a decl the product derives (a name under
+`snapmapplus/` or `snapmapplus_`, `sh_mb_product_decl`, or a file `sh_modprog_owns` answers for, such as the platform
+programs' texture render parms; `sh_modserve_set_product_owner`) restores a name no archive lists. Below the engine's
+lifecycle state 2, `DeclFind` finds a name it holds no resource for only through a registered source (VK
+`0x14155ae90`; from state 2 the existence probe answers), so such a pointer is a step of every plan, the map pass's
+and the editor's, registered and loaded as the mod's own decls are, its needs first (`ms_product_planned` in
+`modserve.c`; `MS_PLAN_PRODUCT_PROGRAMS 0` leaves the programs and render parms to the engine's demand load). The
+other stock pointers at the game's own names stay surfaces, never planned. A derived decl exists in the product only
+once the file that derives it has been compiled in this process, and a plan loads it before that file: a read of such
+a pointer that finds nothing compiles the served files that need it first (`ms_derive`), then reads again. The
+Tyrant's map pass is its 586 own steps and 24 of the product's (3 programs, 21 render parms). `sdk_cli` (`tests/sdk_cli.c`) compiles SDK files outside the game and writes
 what they derive.
 
 **The script calls** ask the server through `sdk_runtime.c` (`sh_script_set_sdk_runtime`): `play_effect(name, ...)` asks
