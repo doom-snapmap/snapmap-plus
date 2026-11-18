@@ -425,13 +425,24 @@ static int f_rows_resolve(void *c)
     return 0;
 }
 
+/* A joiner taken out of the lobby, a cold read started, the Play scope set. */
+static int g_leaves, g_cold_reads, g_cold_ok = 1, g_scope_plays;
+static void f_leave_lobby(void *c, int hook, void *owner) { (void)c; (void)hook; (void)owner; g_leaves++; }
+static int f_cold_read(void *c, void *owner, const char *id, const char *revision)
+{
+    (void)c; (void)owner; (void)id; (void)revision;
+    g_cold_reads++;
+    return g_cold_ok;
+}
+static void f_scope_play(void *c, const char *why) { (void)c; (void)why; g_scope_plays++; }
+
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
     f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts,
-    f_progress, f_fetch_cause, f_refused_load, f_rows_resolve
+    f_progress, f_fetch_cause, f_refused_load, f_rows_resolve, f_leave_lobby, f_cold_read, f_scope_play
 };
 
 static void reset(void)
@@ -447,6 +458,8 @@ static void reset(void)
     sh_modmanifest_reset();
     g_rows_resolves = 0;
     g_rows_resolved_in[0] = 0;
+    g_leaves = g_cold_reads = g_scope_plays = 0;
+    g_cold_ok = 1;
 }
 
 /* What the DeserializeFromJson detour does: the manifest step, the parse, the
@@ -767,6 +780,34 @@ static void downloads_are_for_a_map(void)
 
 static void own_published_map_follows_own_folder(void)
 {
+#if SH_MODPUB_COOP_PUBLISHED_BUILDS
+    printf("-- the author's own published map serves its published builds, as every player's does (the co-op rule)\n");
+    /* The author edited the mod after publishing (the root holds the salt at
+     * another build): the published item serves the build it was published
+     * with, fetched into the item's place as a stranger's would be, so host
+     * and joiners serve the same bytes. */
+    reset();
+    F.titled = 1;
+    F.own_item = 1;
+    F.root_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding());
+    F.answer = 1;
+    tick(1);
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.fetch_place[0] && F.resumes == 1);   /* into the item's place, not the root */
+
+    /* Unedited (the root holds the published build): served from the root, nothing fetched. */
+    reset();
+    F.titled = 1;
+    F.own_item = 1;
+    F.installed_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    tick(5);
+    CHECK(F.asks == 0 && F.fetch_calls == 0);
+#else
     printf("-- the author's own published map follows the root folders; nothing is downloaded\n");
     /* The author's own published map: its context is own, so a root folder
      * of the salt serves the row whatever its build; nothing is asked and
@@ -792,6 +833,7 @@ static void own_published_map_follows_own_folder(void)
     tick(1);
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && !F.fetch_place[0] && F.installed_a);   /* into the root */
+#endif
 
     /* A My Maps play is the player's own: the root folder serves it. */
     reset();
@@ -991,46 +1033,92 @@ static void joiner_host_mismatch_drops(void)
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     CHECK(!sh_modpublished_holding() && F.hold_ui == 0);
 
+    /* Yes: the question says the joiner leaves the lobby while the mods
+     * download, and it does, so the host never starts it on a map it does not
+     * hold; when they are installed it is told to join again (no resume). */
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
+    CHECK(strstr(F.last_ask, "You leave the lobby while they download; join it again when they are installed.") != NULL);
+    CHECK(g_leaves == 0);
     F.answer = 1;
-    F.host_ok = 0;   /* the host switched maps during the download */
+    tick(1);
+    CHECK(g_leaves == 1);
     tick_until_idle();
-    CHECK(F.fetch_calls == 1 && F.resumes == 0 && F.activations == 0 && F.drop_ui == 1);
+    CHECK(F.fetch_calls == 1 && F.resumes == 0 && g_leaves == 1 && g_scope_plays == 0);
     tick(2);
-    CHECK(strstr(F.last_ask, "the host changed maps while they downloaded. Join the lobby again.") != NULL);
+    CHECK(!strcmp(F.last_ask, "The map's mods are installed. Join the lobby again to play it."));
 
+    /* No: the joiner leaves the lobby at once, with the sentence naming the mod. */
     reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 2;
+    tick(3);
+    CHECK(!sh_modpublished_holding() && g_leaves == 1 && F.fetch_calls == 0 && F.resumes == 0);
+
+    /* A failed download leaves the lobby too. */
+    reset();
+    F.install_on_fetch = 0;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
     F.answer = 1;
     tick_until_idle();
-    CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_READY);
+    CHECK(!sh_modpublished_holding() && g_leaves == 1 && F.resumes == 0);
+
+    /* A joiner runs no mod script, so its scripts setting never refuses the
+     * host's map: with scripts off and scripted builds in place, it passes. */
+    reset();
+    F.scripts_off = 1;
+    F.served_scripts = 3;
+    F.installed_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(g_leaves == 0 && !sh_modpublished_holding());
+    /* Its map passed for the lobby it is in: it serves in the Play scope, as the host's launch does. */
+    CHECK(g_scope_plays == 1);
 }
 
 static void warm_cache_joiner(void)
 {
-    printf("-- the warm-cache joiner branch uses the manifest seen for that item\n");
+    printf("-- the warm-cache joiner branch: a map no gate of this process saw is read again and gated\n");
     reset();
-    /* Never seen: not gated. */
+    /* Never seen (cached in an earlier session): read cold, so CacheReady's gate checks it. */
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0);
+    CHECK(g_cold_reads == 1 && !sh_modpublished_holding());
+    /* With no way to read it again, the old pass (and its log line) stands. */
+    g_cold_ok = 0;
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 1);
+    g_cold_ok = 1;
     /* A browser read of the item, declined. */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1); F.answer = 2; tick(1); tick(2); F.answer = 0;
     CHECK(!sh_modpublished_holding());
-    /* Joining that item's lobby with the map cached: held, asked, resumed by a read. */
+    /* Joining that item's lobby with the map cached, seen with missing mods,
+     * and its rows the ones last read: held and asked; Yes leaves the lobby. */
+    g_cold_reads = 0;
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0);
-    CHECK(sh_modpublished_holding());
+    CHECK(sh_modpublished_holding() && g_cold_reads == 0);
     tick(2);
     F.answer = 1;
+    tick(1);
     tick_until_idle();
-    CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_LOBBY && !strcmp(F.resume_id, METADATA));
-    /* Another revision of the item is a different map. */
-    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev2") == 1);
+    CHECK(g_leaves == 1 && F.resumes == 0);
+    /* Seen, nothing missing now, but another map was loaded since: read again. */
+    parse(SH_MODPUB_PARSE_OTHER, VANILLA, MAP);
+    g_cold_reads = 0;
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0 && g_cold_reads == 1);
+    /* Seen, nothing missing, its rows the ones last listed: passes, in the Play scope. */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    g_cold_reads = g_scope_plays = 0;
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 1);
+    CHECK(g_cold_reads == 0 && g_scope_plays == 1);
+    /* Another revision of the item is a different map, never seen: read cold. */
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev2") == 0 && g_cold_reads == 1);
 }
 
 static void my_maps_play(void)

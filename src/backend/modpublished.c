@@ -419,6 +419,7 @@ typedef struct pub_hold {
     int progress_shown;                  /* the progress line is up */
     int cancel_asked;                    /* the one "Keep downloading?" question was raised */
     int cancelled;                       /* the player answered No to it */
+    int left_lobby;                      /* a joiner's hold: the joiner left the lobby (pub_leave_lobby) */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -431,6 +432,24 @@ static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" :
 static const char *pub_not_done(int hook) { return pub_is_prefab(hook) ? "The prefab was not placed." : "The map was not loaded."; }
 /* A hold the rawmap layer or a prefab started: no engine completion behind it. */
 static int pub_is_local(int hook) { return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE; }
+/* A lobby joiner's read of the host's map (cold or warm). A joiner runs no mod
+ * script (only the host does, script_hooks.c), so its own scripts setting
+ * never refuses the map. */
+static int pub_is_joiner(int hook) { return hook == SH_MODPUB_CACHE_READY || hook == SH_MODPUB_CACHE_LOBBY; }
+/* What a joiner's question adds: the joiner leaves the lobby while the mods
+ * download, so the host never starts it on a map it does not hold yet. */
+#define PUB_JOINER_LEAVES "You leave the lobby while they download; join it again when they are installed."
+
+/* A joiner whose map cannot be confirmed now (declined, refused, failed, or
+ * downloading) leaves the lobby the engine's way, once: the host never
+ * starts it on a map it does not hold. */
+static void pub_leave_lobby(pub_hold *h, int hook, void *owner)
+{
+    if (!pub_is_joiner(hook) || (h && h->left_lobby)) return;
+    if (h) h->left_lobby = 1;
+    pub_log("MODS: the joiner leaves the lobby: its map's mods are not installed");
+    if (g_ops.leave_lobby) g_ops.leave_lobby(g_ops.context, hook, owner);
+}
 
 /* A refused launch leaves nothing declared. */
 static void pub_launch_refused(int hook)
@@ -684,7 +703,8 @@ static void pub_hold_question(const pub_hold *h, char *out, size_t cap)
 {
     const char **names = pub_missing_names(h);
     char scripts[PUB_TEXT_CAP] = "";
-    if (h->missing_scripts && g_ops.scripts_approval)
+    if (pub_is_joiner(h->hook)) strcpy_s(scripts, sizeof scripts, PUB_JOINER_LEAVES);
+    else if (h->missing_scripts && g_ops.scripts_approval)
         g_ops.scripts_approval(g_ops.context, h->missing_scripts, scripts, sizeof scripts);
     pub_compose_question(out, cap, pub_thing(h->hook), names, names ? h->missing_count : 0, h->missing_bytes, scripts);
     free((void *)names);
@@ -737,6 +757,7 @@ static void pub_drop(const char *notice, const char *why)
              g_hold.id && g_hold.id[0] ? g_hold.id : "local map", why);
     pub_progress_hide(&g_hold);
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, g_hold.hook, g_hold.owner);
+    pub_leave_lobby(&g_hold, g_hold.hook, g_hold.owner);
     hook = g_hold.hook;
     pub_hold_free();
     pub_launch_refused(hook);
@@ -885,16 +906,16 @@ nomem:
  * arrived with its mods (it has a place; the player's own maps have none)
  * whose builds carry scripts is not loaded, however its mods got here. The
  * launch is refused with the setting's sentence. 1 when refused. */
-static int pub_scripts_off(const char *place, const sh_modmanifest_list *rows)
+static int pub_scripts_off(int hook, const char *place, const sh_modmanifest_list *rows)
 {
-    return place && place[0] && rows && rows->count && g_ops.scripted_maps_allowed &&
+    return !pub_is_joiner(hook) && place && place[0] && rows && rows->count && g_ops.scripted_maps_allowed &&
            !g_ops.scripted_maps_allowed(g_ops.context) && g_ops.served_scripts &&
            g_ops.served_scripts(g_ops.context, rows, place);
 }
 
 static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh_modmanifest_list *rows)
 {
-    if (!pub_scripts_off(place, rows)) return 0;
+    if (!pub_scripts_off(hook, place, rows)) return 0;
     pub_logf("MODS: %s: the map's mods include scripts and the player turned scripts off; it is not loaded",
              pub_hook_name(hook));
     if (owner && g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
@@ -903,6 +924,31 @@ static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh
     pub_print(SH_MODUI_SCRIPTS_OFF);
     pub_notice(SH_MODUI_SCRIPTS_OFF);
     return 1;
+}
+
+/* 1 when the current manifest's rows are `rows` (same salts and builds, in order). */
+static int pub_current_is(const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_list now;
+    int same;
+    memset(&now, 0, sizeof now);
+    if (!sh_modmanifest_current(&now)) { sh_modmanifest_list_free(&now); return 0; }
+    same = now.count == rows->count;
+    for (size_t i = 0; same && i < rows->count; i++)
+        same = !strcmp(now.rows[i].salt, rows->rows[i].salt) && !_stricmp(now.rows[i].build, rows->rows[i].build);
+    sh_modmanifest_list_free(&now);
+    return same;
+}
+
+/* A joiner's map passed its gate for the lobby it is in: the joiner serves
+ * in the Play scope from here, as the host's launch does. */
+static void pub_joiner_ready(int hook, const char *item, const char *revision)
+{
+    if (!pub_is_joiner(hook) || !g_ops.scope_play) return;
+    if (hook == SH_MODPUB_CACHE_READY &&
+        (!g_ops.host_matches || !g_ops.host_matches(g_ops.context, pub_s(item), pub_s(revision))))
+        return;
+    g_ops.scope_play(g_ops.context, "lobby join");
 }
 
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
@@ -917,6 +963,17 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
 
     if (hook == SH_MODPUB_CACHE_LOBBY) {
         pub_seen *seen = pub_seen_find(id, revision);
+        /* A warm answer no gate of this process saw (the map was cached in an
+         * earlier session, or by a path no gate took), or a seen map whose
+         * rows are not the ones last listed and activated: the cold read
+         * runs instead, and its CacheReady gate checks the mods, decides the
+         * place and activates them, as for a first join. */
+        if ((!seen || (seen->rows.count && !pub_current_is(&seen->rows))) && g_ops.cold_read &&
+            g_ops.cold_read(g_ops.context, owner, pub_s(id), pub_s(revision))) {
+            pub_logf("MODS: lobby map '%s' revision '%s' is cached; %s, so it is read again and gated", pub_s(id),
+                     pub_s(revision), seen ? "the mods last activated are another map's" : "this session never saw its manifest");
+            return 0;
+        }
         if (!seen) {
             pub_logf("MODS: lobby map '%s' revision '%s' is cached; this session never saw its manifest, "
                      "so it is not gated", id ? id : "", revision ? revision : "");
@@ -925,6 +982,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (pub_refuse_scripts(hook, owner, seen->place, &seen->rows)) return 0;
         if (!seen->rows.count || !pub_count_missing(&seen->rows, seen->place)) {
             pub_place_decided(seen->place);
+            pub_joiner_ready(hook, id, revision);
             return 1;
         }
         begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, seen->place, &seen->rows, NULL);
@@ -932,6 +990,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
             if (begun < 0) {
                 pub_log("MODS: the cached lobby map needs mods and could not be held; it is refused");
                 pub_launch_refused(hook);
+                pub_leave_lobby(NULL, hook, owner);
                 pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
             }
             return begun == 0;
@@ -982,7 +1041,10 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
      * map this machine published finds its mods at the root, as the
      * player's own maps do; a My Maps play uses the place the map records. */
     if (pub_is_completion(hook)) {
-        int own = item && item[0] && g_ops.own_item && g_ops.own_item(g_ops.context, item);
+        /* The co-op rule (modpublished.h): a published item serves its
+         * published builds, the author's own included. */
+        int own = !SH_MODPUB_COOP_PUBLISHED_BUILDS && item && item[0] && g_ops.own_item &&
+                  g_ops.own_item(g_ops.context, item);
         if (record->rows.count && !own &&
             (!g_ops.item_place || !g_ops.item_place(g_ops.context, pub_s(title), pub_s(item), &place))) {
             free(place);
@@ -1000,6 +1062,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_record_clear(record);   /* consumed */
         if (rows) pub_place_decided_load(pub_s(place));
         else pub_place_decided(pub_s(place));
+        pub_joiner_ready(hook, item, rev);
         passed = 1;
         goto out;
     }
@@ -1020,11 +1083,12 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
         if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, owner);
         pub_launch_refused(hook);
+        pub_leave_lobby(NULL, hook, owner);
         pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
         passed = 0;
         goto out;
     }
-    if (!begun) { pub_place_decided_load(pub_s(place)); passed = 1; goto out; }
+    if (!begun) { pub_place_decided_load(pub_s(place)); pub_joiner_ready(hook, item, rev); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
              pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
@@ -1328,6 +1392,15 @@ static void pub_resume(size_t installed)
         pub_hold_free();
         return;
     }
+    /* A joiner left the lobby to download (pub_leave_lobby): it joins again,
+     * and that join finds the mods in the map's place. */
+    if (h->left_lobby) {
+        pub_logf("MODS: the held %s of '%s' installed %u mod(s); the joiner left the lobby to download them",
+                 pub_hook_name(h->hook), pub_s(h->id), (unsigned)installed);
+        pub_hold_free();
+        pub_notice("The map's mods are installed. Join the lobby again to play it.");
+        return;
+    }
     /* A rawmap hold has no screen of its own; the reopen asks the editor itself. */
     if (h->hook != SH_MODPUB_RAWMAP_LOAD && g_ops.owner_current &&
         !g_ops.owner_current(g_ops.context, h->hook, h->owner, h->extra, h->token)) {
@@ -1463,7 +1536,7 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
 
 int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *place)
 {
-    if (!g_ops_set || !pub_scripts_off(place, rows)) return 0;
+    if (!g_ops_set || !pub_scripts_off(SH_MODPUB_RAWMAP_LOAD, place, rows)) return 0;
     pub_logf("MODS: rawmap load: the map's mods include scripts and the player turned scripts off; it is not opened");
     return 1;
 }
@@ -1701,7 +1774,8 @@ static void pub_probe_finish(void)
         }
         /* The player turned scripts off: such a map is neither downloaded
          * nor played, and the sentence says what to turn on and where. */
-        if (h->missing_scripts && g_ops.scripted_maps_allowed && !g_ops.scripted_maps_allowed(g_ops.context)) {
+        if (h->missing_scripts && !pub_is_joiner(h->hook) && g_ops.scripted_maps_allowed &&
+            !g_ops.scripted_maps_allowed(g_ops.context)) {
             pub_print(SH_MODUI_SCRIPTS_OFF);
             pub_drop(SH_MODUI_SCRIPTS_OFF, "the map's mods include scripts and the player turned scripts off");
             free(verdicts);
@@ -1771,7 +1845,11 @@ void sh_modpublished_poll(void)
         if (answer == PUB_DIALOG_PENDING) break;
         if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
         h->ticket = 0;
-        if (answer == PUB_DIALOG_ACCEPTED) { pub_start_fetch(); break; }
+        if (answer == PUB_DIALOG_ACCEPTED) {
+            pub_leave_lobby(h, h->hook, h->owner);   /* a joiner downloads outside the lobby */
+            pub_start_fetch();
+            break;
+        }
         if ((names = pub_missing_names(h)) != NULL) {
             pub_names_line(list, sizeof list, names, h->missing_count);
             free((void *)names);
@@ -1928,6 +2006,7 @@ static struct {
     const char *wait_text;
     eng_new_fn op_new;
     void *vft_ok, *vft_fail, *ready_fn, *fail_fn;
+    size_t slot_leave;                   /* the session's leave-lobby slot, as fail_fn calls it; 0 when unproven */
     eng_read_fn read;
     volatile LONG ready;
 } g_eng;
@@ -2533,6 +2612,37 @@ static void eng_launch_refused(void *c, int hook)
 
 static void eng_refused_load(void *c) { (void)c; shield_note_refused_load(); }
 
+/* The joiner leaves the lobby through the session's own leave call, the one
+ * the read-error handler makes after its dialog (eng_bind checks it). */
+static void eng_leave_lobby(void *c, int hook, void *owner)
+{
+    (void)c; (void)hook; (void)owner;
+    if (!g_eng.slot_leave || !g_eng.session_slot) return;
+    __try {
+        void *session = *g_eng.session_slot;
+        if (session) ((void (*)(void *))(*(void ***)session)[g_eng.slot_leave])(session);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: leaving the lobby faulted");
+    }
+}
+
+static int eng_cold_read(void *manager, const char *id, const char *revision);
+static void eng_scope_play(const char *why);
+
+static int eng_cold_read_op(void *c, void *owner, const char *id, const char *revision)
+{
+    sh_process_heap_scope scope;
+    int ran = 0;
+    (void)c;
+    if (!owner || !sh_process_heap_enter(&g_eng.heap, &scope)) return 0;
+    __try { ran = eng_cold_read(owner, id, revision); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the lobby map's fresh read faulted"); ran = 0; }
+    (void)sh_process_heap_leave(&scope);
+    return ran;
+}
+
+static void eng_scope_play_op(void *c, const char *why) { (void)c; eng_scope_play(why); }
+
 static int eng_rows_resolve(void *c)
 {
     (void)c;
@@ -2549,7 +2659,8 @@ static const sh_modpub_ops ENG_OPS = {
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
-    eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve
+    eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve, eng_leave_lobby,
+    eng_cold_read_op, eng_scope_play_op
 };
 
 /* ------------------------------------------------------------ detours */
@@ -2754,6 +2865,18 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
             !(g_eng.vft_fail = eng_rip(lobby + 0xD2, "\x48\x8d\x0d", 3)) ||
             !(g_eng.fail_fn = eng_rip(lobby + 0xE0, "\x48\x8d\x0d", 3)) ||
             eng_call(lobby + 0xFD) != (void *)read) return 0;
+        /* The read-error handler (VK 0x140FA1E80, GL 0x140FA13B0; same bytes on both):
+         * on a 404 it raises dialog 0xA2, then +0x90 loads the session global
+         * CacheReady reads, +0x97 its vtable and +0x9A calls slot 0x2F0, which
+         * leaves the lobby. The leave is used alone (no dialog), and only when
+         * every byte of that sequence holds; else a joiner cannot be taken out. */
+        g_eng.slot_leave = 0;
+        if (!memcmp(g_eng.fail_fn, "\x41\x81\xf8\x94\x01\x00\x00", 7) &&
+            eng_rip((const uint8_t *)g_eng.fail_fn + 0x90, "\x48\x8b\x0d", 3) == (void *)g_eng.session_slot &&
+            !memcmp((const uint8_t *)g_eng.fail_fn + 0x97, "\x48\x8b\x01", 3) &&
+            !memcmp((const uint8_t *)g_eng.fail_fn + 0x9A, "\xff\x90", 2))
+            g_eng.slot_leave = eng_vcall_slot((const uint8_t *)g_eng.fail_fn + 0x9A);
+        if (!g_eng.slot_leave) backend_log("MODS: the lobby's leave call did not verify; a joiner without its mods stays in the lobby");
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     g_eng.ready_fn = (void *)ready;
     g_eng.read = (eng_read_fn)read;

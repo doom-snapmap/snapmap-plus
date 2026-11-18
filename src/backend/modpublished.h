@@ -105,6 +105,19 @@ int sh_modpublished_holding(void);
  * decided; rawmap.c). */
 int sh_modpublished_resuming(void);
 
+/* The co-op rule (DESIGN-additive goal 2, M5 over M3 in a lobby; the
+ * manager's recommendation, pending the owner's confirmation): a published
+ * item, launched from the hub or joined in a lobby, serves the builds it was
+ * published with, on every player's machine and the author's own included.
+ * The author's edits are served in the editor and in a My Maps play of the
+ * author's own map, and reach players when the author republishes. A launch
+ * cannot tell whether anyone will join, so the rule holds for every launch
+ * of a published item. 0 restores the earlier rule (the author's own
+ * published map follows the author's root folders). */
+#ifndef SH_MODPUB_COOP_PUBLISHED_BUILDS
+#define SH_MODPUB_COOP_PUBLISHED_BUILDS 1
+#endif
+
 /* The mod system's one notice queue: `text` (under 256 bytes) is raised
  * with a single Accept button by the tick once the dialog surface is idle
  * and no question is up; a later notice replaces one not raised yet. Used
@@ -350,6 +363,19 @@ typedef struct sh_modpub_ops {
      * (modmanifest.h sh_modmanifest_place_decided), since its parse could not
      * know it. Returns what the activation returns. NULL counts as none. */
     int  (*rows_resolve)(void *c);
+    /* A lobby joiner whose map cannot be confirmed now (declined, refused,
+     * failed, or downloading) leaves the lobby the engine's own way, as its
+     * read-error handler does for a map the service does not have. NULL
+     * counts as none. */
+    void (*leave_lobby)(void *c, int hook, void *owner);
+    /* A joiner's warm cache answer this process never gated: the cold read is
+     * started instead (the read toward CacheReady, whose gate checks the
+     * map's mods). Returns 1 when the read started. NULL counts as none. */
+    int  (*cold_read)(void *c, void *owner, const char *id, const char *revision);
+    /* A joiner's map passed its gate: the joiner serves in the Play scope
+     * from here, as a hub launch does (modui.h sh_modui_scope_launch). NULL
+     * counts as none. */
+    void (*scope_play)(void *c, const char *why);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it
