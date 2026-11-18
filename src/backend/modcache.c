@@ -1479,7 +1479,13 @@ static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_
         int code;
         if (!mc_exists(part, &have) || have > size) have = 0;
         code = modnet_get_blob(sha, part, have, io, &r);
-        if (code != MODNET_OK) { cause = mc_net_cause(code, &r); if (code == MODNET_E_CANCELLED) cause = -1; break; }
+        if (code != MODNET_OK) {
+            cause = mc_net_cause(code, &r);
+            if (code == MODNET_E_CANCELLED) cause = -1;
+            else mc_logf("MODS: content: a unit's file %.16s did not download (%s; HTTP %d, %llu of %llu bytes here)", sha,
+                         r.message ? r.message : modnet_code_text(code), r.status, have + r.received, size);
+            break;
+        }
         if (sh_cache_put_blob(part, sha, size)) { cause = 0; break; }
         /* the bytes were not the blob's: discarded by put_blob; once more from the start */
     }
@@ -1609,7 +1615,12 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
             mc_unit u;
             if (w < nwant && want[w] == snapshot.units[i]) {
                 int state = states[w++];
-                if (st != MODNET_OK) { causes[i] = st == MODNET_E_CANCELLED ? SH_CACHE_ABSENT_UNREACHABLE : mc_net_cause(st, &r); continue; }
+                if (st != MODNET_OK) {
+                    causes[i] = st == MODNET_E_CANCELLED ? SH_CACHE_ABSENT_UNREACHABLE : mc_net_cause(st, &r);
+                    mc_logf("MODS: content: the store's state of unit %.16s was not read (%s; HTTP %d)", snapshot.units[i],
+                            r.message ? r.message : modnet_code_text(st), r.status);
+                    continue;
+                }
                 if (state == MODNET_UNIT_REMOVED) { causes[i] = SH_CACHE_ABSENT_REMOVED; continue; }
                 if (state == MODNET_UNIT_MISSING) {
                     /* Not in the store: what is here may still compose it (a local mod's files and the manifest). */
@@ -1621,7 +1632,13 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
                     unsigned char *bytes = NULL;
                     size_t len = 0;
                     int g = modnet_get_unit(snapshot.units[i], &bytes, &len, io, &r);
-                    if (g != MODNET_OK) { causes[i] = mc_net_cause(g, &r); mc_unit_free(&u); continue; }
+                    if (g != MODNET_OK) {
+                        causes[i] = mc_net_cause(g, &r);
+                        mc_logf("MODS: content: unit %.16s's manifest did not download (%s; HTTP %d)", snapshot.units[i],
+                                r.message ? r.message : modnet_code_text(g), r.status);
+                        mc_unit_free(&u);
+                        continue;
+                    }
                     if (!sh_cache_put_manifest(snapshot.units[i], bytes, len)) { causes[i] = SH_CACHE_ABSENT_DISK; free(bytes); mc_unit_free(&u); continue; }
                     free(bytes);
                     mc_unit_free(&u);
