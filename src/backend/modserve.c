@@ -129,7 +129,7 @@ typedef struct ms_bundle {
     const char *dir, *folder, *id, *hash, *name;
     const char *extra;                    /* the author block's other keys as JSON, or NULL */
     const char *place;                    /* "maps\<segment>" for a folder in a map's place; NULL at the root */
-    const char *slice_of;                 /* the build it was cut from (author "slice-of"), NULL for a whole build */
+    const char *unit;                     /* a composition (block "units_of"): its first unit's hash, NULL for a mod */
     int admitted, first_file, file_count;
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
     const char *req_text;                 /* canonical requirements (sh_mb_requirements_canonical), or NULL */
@@ -156,6 +156,7 @@ typedef struct ms_bundle {
     const char *registries;               /* the product block's "registries" object (JSON), or NULL */
     const char *edits;                    /* the product block's "edits" array (JSON, derived edits), or NULL */
     size_t edits_len;
+    const char *spelled;                  /* the block's "spelled": the namespace its binaries spell, or NULL */
 } ms_bundle;
 
 /* A mod as a line names it: the author's name, else its folder, else its salt. */
@@ -1034,7 +1035,6 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "author") || !strcmp(key, "homepage")) continue;
         else {
-            if (!strcmp(key, SH_MB_SLICE_KEY)) b->slice_of = ms_jstr(x, v, ve, 64);
             /* Everything else is the author's, kept for the readers of
              * "extra" (strids.c, modhud.c, companions, scenes). */
             if (!strcmp(key, "hud") && v < ve && *v == '{') {
@@ -1071,6 +1071,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
                 else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
+                else if (!strcmp(key, "spelled")) b->spelled = ms_jstr(x, v, ve, 32);
+                else if (!strcmp(key, "units_of") && v < ve && *v == '[') {
+                    /* a composition of units (modunit.h): the unit a miss is reported for is its first */
+                    ms_json a = { v, ve };
+                    if (ms_jenter(&a, '[') && ms_jnext(&a, ']')) b->unit = ms_jstr(x, a.p, ms_jskip(a.p, a.e), 64);
+                }
                 else if (!strcmp(key, "scripts") && v < ve && *v == '{') {
                     /* "node": true, a script registers an input: the mod gets its Script node row. */
                     ms_json s = { v, ve };
@@ -1123,8 +1129,6 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     }
     else if (state_cause && state_cause[0]) ms_fail(b, "not built: %s", state_cause);
     else if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
-    /* A map's own part of a mod serves that map from its place, never as the whole mod. */
-    else if (b->slice_of && !b->place) ms_fail(b, SH_MB_SLICE_ROOT);
     if (!b->id) b->id = "";
     if (!b->cause && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
     if (shadows_v && !b->cause) {
@@ -1490,7 +1494,9 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
     if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_PLACES)) {
-        /* The places area: each child folder is a map's place, walked as its own area. */
+        /* The places area of the builds a format 1 map brought (mods\maps\<segment>, before units): read for those
+         * maps' local rows until the import and download paths that write it move to the content cache (DS-T, DS-X);
+         * a pinned row never resolves here. Each child folder is a map's place, walked as its own area. */
         ms_scan_item places = *at;
         size_t first = stack->n, i;
         ms_scan_list_folder(&places, stack);
@@ -1523,6 +1529,13 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     b->first_file = x->nfiles;
     if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
     else ms_parse_bundle(x, b);
+    if (!b->cause && b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) {
+        /* A composition (modcache.h) is named by its composition hash, its folder's name: the hash a pinned map row
+         * names. */
+        if (strlen(leaf) == SH_MODSERVE_HASH_HEX && strspn(leaf, "0123456789abcdef") == SH_MODSERVE_HASH_HEX)
+            b->hash = ms_strdup(x, leaf);
+        else ms_fail(b, "it is not a composition of the content cache");
+    }
     if (b->cause) {
         /* Failure isolation: drop this bundle's rows, keep everything else. */
         x->nfiles = mark_files;
@@ -1545,6 +1558,24 @@ static void ms_scan_folder(ms_index *x, const char *top)
     ms_scan_list_folder(&root, &stack);
     free(root.dir);
     free(root.rel);
+    /* The content cache's compositions (modcache.h): each folder of .content\served is one map row's units, a
+     * bundle of the content area, served only for a map that declares it. */
+    {
+        ms_scan_item served;
+        const char *area = ms_strdup(x, SH_MODSERVE_CONTENT);
+        size_t first = stack.n, i;
+        served.dir = sh_textf("%s\\%s\\served", top, SH_MODSERVE_CONTENT);
+        served.rel = sh_textf("%s\\served", SH_MODSERVE_CONTENT);
+        served.place = area;
+        served.kind = MS_SCAN_FOLDER;
+        served.top = 0;
+        if (served.dir && served.rel && area) {
+            ms_scan_list_folder(&served, &stack);
+            for (i = first; i < stack.n; i++) stack.d[i].place = area;
+        }
+        free(served.dir);
+        free(served.rel);
+    }
     while (stack.n) {
         ms_scan_item at = stack.d[--stack.n];
         if (at.kind == MS_SCAN_FOLDER) ms_scan_list_folder(&at, &stack);
@@ -1578,6 +1609,7 @@ static void ms_one_per_area(ms_index *x)
             const ms_bundle *o = &x->bundles[k];
             int first;
             if (k == i || !o->admitted || strcmp(o->id, b->id) || !ms_same_area(o, b)) continue;
+            if (b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) break;   /* compositions: one per map row */
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
             if (b->place)
@@ -4328,6 +4360,77 @@ int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem
     return 1;
 }
 
+int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count)
+{
+    size_t at = 0;
+    int changed = 0;
+    if (!bytes || !count) return 0;
+    while (at + 8 <= len) {
+        uint32_t size;
+        memcpy(&size, bytes + at + 4, 4);
+        if (size > len - at - 8) return changed;   /* a damaged chunk: what came before stays */
+        if (!memcmp(bytes + at, "HIRC", 4) && size >= 4) {
+            const size_t end = at + 8 + size;
+            size_t o = at + 12;
+            uint32_t n, i;
+            memcpy(&n, bytes + at + 8, 4);
+            for (i = 0; i < n && o + 5 <= end; ++i) {
+                uint32_t body, id;
+                size_t k;
+                memcpy(&body, bytes + o + 1, 4);
+                if (body > end - o - 5) break;
+                if (bytes[o] == 4 && body >= 4) {      /* an Event: its id is the FNV-1 of its name */
+                    memcpy(&id, bytes + o + 5, 4);
+                    for (k = 0; k < count; ++k)
+                        if (from[k] == id) { memcpy(bytes + o + 5, &to[k], 4); changed++; break; }
+                }
+                o += 5 + (size_t)body;
+            }
+        }
+        at += 8 + (size_t)size;
+    }
+    return changed;
+}
+
+/* The bank event ids of bundle `b`'s own sound decls, as the author's bank holds them and as the engine posts them:
+ * a decl served as mods/<salt>/<dir>/<salt>_<leaf> starts the event play_<salt>_<leaf>, which the author's bank
+ * names play_<leaf> (modauthor.h; SPEC-distribution D12). *from and *to malloc'd; the count, 0 when it has none. */
+static size_t ms_sound_events(const ms_index *x, const ms_bundle *b, uint32_t **from, uint32_t **to)
+{
+    char root[SH_MB_ID_MAX + 40];
+    size_t n = 0, cap = 0, sl = strlen(b->id), rl;
+    int i;
+    *from = *to = NULL;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "generated/decls/sound/mods/%s/", b->id);
+    rl = strlen(root);
+    for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        const char *leaf, *dot;
+        char name[512];
+        size_t ll;
+        if (f->stock || _strnicmp(f->request, root, rl)) continue;
+        leaf = strrchr(f->request, '/') + 1;
+        dot = strrchr(leaf, '.');
+        ll = dot ? (size_t)(dot - leaf) : strlen(leaf);
+        if (ll <= sl + 1 || _strnicmp(leaf, b->id, sl) || leaf[sl] != '_' || ll + 6 > sizeof name) continue;
+        if (n == cap) {
+            size_t grow = cap ? cap * 2 : 64;
+            uint32_t *gf = (uint32_t *)realloc(*from, grow * sizeof *gf), *gt;
+            if (!gf) break;
+            *from = gf;
+            if (!(gt = (uint32_t *)realloc(*to, grow * sizeof *gt))) break;
+            *to = gt;
+            cap = grow;
+        }
+        _snprintf_s(name, sizeof name, _TRUNCATE, "play_%.*s", (int)(ll - sl - 1), leaf + sl + 1);
+        (*from)[n] = sh_mb_fnv1_lower(name, strlen(name));
+        _snprintf_s(name, sizeof name, _TRUNCATE, "play_%.*s", (int)ll, leaf);
+        (*to)[n] = sh_mb_fnv1_lower(name, strlen(name));
+        n++;
+    }
+    return n;
+}
+
 /* Create every directory of `path` (a file path) below the mods root. */
 static int ms_mkdirs_for(const char *path)
 {
@@ -4518,6 +4621,49 @@ static void ms_engine_names(ms_index *x)
     }
 }
 
+size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, const char *to)
+{
+    size_t i, hits = 0;
+    if (!bytes || !from || !to || strlen(from) != 8 || strlen(to) != 8 || !strcmp(from, to)) return 0;
+    for (i = 1; i + 9 <= len; ++i) {
+        int after = bytes[i - 1] == '/' || (i >= 5 && !memcmp(bytes + i - 5, "#str_", 5));
+        if (!after || memcmp(bytes + i, from, 8) || (bytes[i + 8] != '/' && bytes[i + 8] != '_')) continue;
+        memcpy(bytes + i, to, 8);
+        hits++;
+        i += 8;
+    }
+    return hits;
+}
+
+/* A mod whose binaries spell another namespace than its salt (a copy given a new salt; SPEC-distribution D12): every
+ * file it serves, binary or text, has that namespace mapped to the salt, length for length, under mods\.served\. */
+static void ms_respelled(ms_index *x)
+{
+    int bi, i;
+    for (bi = 0; bi < x->nbundles; ++bi) {
+        ms_bundle *b = &x->bundles[bi];
+        int changed = 0;
+        if (!b->admitted || !b->id || !b->spelled || !sh_salt_valid(b->spelled, strlen(b->spelled)) ||
+            !_stricmp(b->spelled, b->id) || b->file_count <= 0)
+            continue;
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            unsigned char *bytes;
+            size_t len = 0;
+            if (f->stock || !f->disk) continue;
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            if (!bytes) continue;
+            if (sh_modserve_respell(bytes, len, b->spelled, b->id)) {
+                if (ms_serve_rewritten(x, f, bytes, len, NULL)) changed++;
+                else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+            }
+            HeapFree(GetProcessHeap(), 0, bytes);
+        }
+        if (changed) ms_log("bundle '%s': %d file(s) served with the namespace their bytes spell mapped to the mod's", b->id,
+                            changed);
+    }
+}
+
 static void ms_bank_stems(ms_index *x)
 {
     int bi;
@@ -4526,12 +4672,17 @@ static void ms_bank_stems(ms_index *x)
         /* One entry per bank the bundle carries: as many as it has. */
         char (*stems)[SH_MB_BANK_STEM_MAX + 1] = NULL, (*renamed)[SH_MB_BANK_STEM_MAX + 20] = NULL;
         int n = 0, i, k;
+        uint32_t *ev_from = NULL, *ev_to = NULL;
+        size_t nev;
         if (!b->admitted || !b->hash || strlen(b->hash) != 64 || !b->id || b->file_count <= 0) continue;
+        nev = ms_sound_events(x, b, &ev_from, &ev_to);
         stems = calloc((size_t)b->file_count, sizeof *stems);
         renamed = calloc((size_t)b->file_count, sizeof *renamed);
         if (!stems || !renamed) {
             free(stems);
             free(renamed);
+            free(ev_from);
+            free(ev_to);
             ms_log("bundle '%s': out of memory; its banks keep their names", b->id);
             continue;
         }
@@ -4545,10 +4696,17 @@ static void ms_bank_stems(ms_index *x)
                 ms_log("bundle '%s': %s has no recorded hash; it keeps its name", b->id, f->request);
                 continue;
             }
-            /* The bank's own hash names it: two builds
-             * with one bank's bytes share it, and Wwise loads it once. */
-            _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
             bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            /* The bank's own hash names it: two builds
+             * with one bank's bytes share it, and Wwise loads it once. Its
+             * events take the mod's namespace first (ms_sound_events), and
+             * the hash is of those bytes, so a bank written with its events
+             * under the namespace is served as the same bank. */
+            if (bytes && nev && sh_modserve_bank_events(bytes, len, ev_from, ev_to, nev)) {
+                char sha[SH_MB_HASH_HEX + 1];
+                sh_mb_sha256_hex(bytes, len, sha);
+                _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, sha);
+            } else _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
             if (!bytes || !sh_modserve_bank_patch_id(bytes, len, renamed[n])) {
                 if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
                 ms_log("bundle '%s': %s cannot be served under a stem of its own (unreadable or not a BKHD bank); it keeps "
@@ -4569,6 +4727,8 @@ static void ms_bank_stems(ms_index *x)
             ms_log("bundle '%s': bank %s.bnk served as %s.bnk (a stem of its own to Wwise)", b->id, stem, renamed[n]);
             n++;
         }
+        free(ev_from);
+        free(ev_to);
         if (!n) { free(stems); free(renamed); continue; }
         /* The bundle's served decls naming a bank follow the rename. */
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
@@ -4622,6 +4782,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
     ms_engine_names(x);
+    ms_respelled(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
@@ -6215,66 +6376,33 @@ static char *ms_asker(void)
     return out;
 }
 
-/* Whether the build a cut came from carries `lower` (a request, lower case):
- * the cut's source.json (modslice.h), the source's canonical manifest, lists
- * every file as "request":"<request>". A request the whole build never had
- * (the engine trying a second spelling) is not a file the cut left out.
- * Under g_miss_lock; the texts read stay for the process. */
-typedef struct ms_source { char hash[SH_MODSERVE_HASH_HEX + 1]; char *text; } ms_source;
-static ms_source *g_sources;
-static int g_nsources, g_csources;
-
-static int ms_source_has(const char *hash, const char *dir, const char *lower)
-{
-    int i;
-    char *needle, *path;
-    const char *text = NULL;
-    for (i = 0; i < g_nsources && !text; i++) if (!strcmp(g_sources[i].hash, hash)) text = g_sources[i].text;
-    if (!text) {
-        size_t len = 0;
-        if (!(path = sh_textf("%s\\" SH_MB_SLICE_SOURCE, dir))) return 0;
-        text = (const char *)sh_mb_read_file(path, (size_t)-1, &len);
-        free(path);
-        if (!text || !ms_grow((void **)&g_sources, &g_csources, g_nsources + 1, sizeof *g_sources)) {
-            free((void *)text);
-            return 0;
-        }
-        strcpy_s(g_sources[g_nsources].hash, sizeof g_sources[g_nsources].hash, hash);
-        g_sources[g_nsources++].text = (char *)text;
-    }
-    if (!(needle = sh_textf("\"request\":\"%s\"", lower))) return 0;
-    i = strstr(text, needle) != NULL;
-    free(needle);
-    return i;
-}
-
 int sh_modserve_note_miss(const char *request)
 {
     const ms_index *x;
-    const ms_bundle *cut = NULL;
-    char salt[SH_MODSERVE_HASH_HEX + 1], hash[SH_MODSERVE_HASH_HEX + 1], *lower, *label = NULL, *by, *dir = NULL;
+    const ms_bundle *part = NULL;
+    char salt[SH_MODSERVE_HASH_HEX + 1], hash[SH_MODSERVE_HASH_HEX + 1], *lower, *label = NULL, *by;
     const char *shown = NULL;
     sh_modserve_miss_fn fn = g_miss_fn;
     int i, b, fresh = 1;
     if (!request || !ms_request_salt(request, salt)) return 0;
+    /* A board's squares a unit leaves out are left out on purpose: the engine draws a family with absent squares
+     * (R-DS2 5.1). */
+    if (sh_mb_vt_member(request, NULL, NULL)) return 0;
     InterlockedIncrement(&g_readers);
     x = g_index;
-    for (b = 0; x && b < x->nbundles && !cut; ++b) {
+    for (b = 0; x && b < x->nbundles && !part; ++b) {
         const ms_bundle *bd = &x->bundles[b];
-        if (bd->admitted && bd->slice_of && bd->id && !strcmp(bd->id, salt) && bd->rank >= 0) cut = bd;
+        if (bd->admitted && bd->unit && bd->id && !strcmp(bd->id, salt) && bd->rank >= 0) part = bd;
     }
-    if (cut) {
-        strcpy_s(hash, sizeof hash, cut->hash);
-        label = _strdup(ms_label(cut));
-        dir = cut->dir ? _strdup(cut->dir) : NULL;
+    if (part) {
+        strcpy_s(hash, sizeof hash, part->unit);
+        label = _strdup(ms_label(part));
     }
     InterlockedDecrement(&g_readers);
-    if (!cut) return 0;
-    if (!label || !dir || !(lower = _strdup(request))) { free(label); free(dir); return 0; }
+    if (!part) return 0;
+    if (!label || !(lower = _strdup(request))) { free(label); return 0; }
     ms_lower(lower);
     AcquireSRWLockExclusive(&g_miss_lock);
-    if (!ms_source_has(hash, dir, lower)) fresh = 0;
-    free(dir);
     for (i = 0; i < g_nmiss && fresh; i++) fresh = strcmp(g_miss[i].hash, hash) || strcmp(g_miss[i].request, lower);
     if (fresh && ms_grow((void **)&g_miss, &g_cmiss, g_nmiss + 1, sizeof *g_miss)) {
         strcpy_s(g_miss[g_nmiss].hash, sizeof g_miss[g_nmiss].hash, hash);
@@ -7641,8 +7769,11 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
          * use, whose requirements are off (req_off). */
         int g = ms_scoped(x, s->file);
         const ms_bundle *b = ms_gate_of(x, &x->files[g >= 0 ? g : s->file]);
-        /* A step registered while its requirements were live stays ready. */
-        if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
+        /* A step registered while its requirements were live stays ready. A mod whose cvar lost to another mod the map
+         * uses (D-A24) is still served: its decls register and its rows place; only its value is not applied, and the
+         * log and the Mods tab say which mod's value the map uses. */
+        if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
+            !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
             x->files[s->file].reg_state != 1) {
             s->blocked = b->req_cause && b->req_cause[0] ? b->req_cause : "requirements are not live";
             plan->blocked++;
@@ -7859,10 +7990,9 @@ static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, con
 
 /* The one place resolver (modserve.h, DECISIONS 1 and 11): the build that
  * serves a row of a map whose place is `place` ("" the root): the root folder
- * of the salt at the row's hash, or at the build the row's files were cut
- * from ("of"); then, with a place, that place's folder of the salt at the
- * row's hash, and without one, the root folder of the salt at any build.
- * Never another map's place. -1 when none: the row is missing. */
+ * of the salt at the row's hash; then, with a place, that place's folder of
+ * the salt at the row's hash, and without one, the root folder of the salt at
+ * any build. Never another map's place. -1 when none: the row is missing. */
 static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, const char *place)
 {
     char salt[SH_MODMANIFEST_SALT_CAP];
@@ -7870,10 +8000,10 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
     if (!x || !row || !sh_salt_valid(row->salt, strlen(row->salt))) return -1;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
+    /* A pinned row is served by its composition only: a local mod never stands in for a map's units (D21); its
+     * files serve the composition by exact hash instead (modcache.h). */
+    if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
-    /* A row naming part of a build: the root's whole build it was cut from
-     * serves it as well. */
-    if (at < 0 && row->of[0]) at = ms_salt_in(x, salt, row->of, "");
     if (at >= 0) return at;
     if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
     return ms_salt_in(x, salt, NULL, "");

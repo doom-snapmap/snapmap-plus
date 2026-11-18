@@ -967,12 +967,6 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         ms_entry_cause(e, why);
         goto done;
     }
-    if (e->bundle.slice_of[0] && !e->place[0]) {
-        /* A map's own part of a mod, copied to the top of mods\ by hand. */
-        e->refused = 1;
-        ms_entry_cause(e, SH_MB_SLICE_ROOT);
-        goto done;
-    }
     e->validated = e->bundle.validated;
     e->sizes_ok = 1;
     for (i = 0; i < e->bundle.file_count; i++) {
@@ -2936,11 +2930,7 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
     }
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
-    if (sh_mb_build(folder, NULL, &chain_resolver, b) && b->slice_of[0]) {
-        /* A map's own part of a mod never serves as the whole mod. */
-        b->errors++;
-        sh_mb_set_first_cause(b, SH_MB_SLICE_ROOT);
-    }
+    (void)sh_mb_build(folder, NULL, &chain_resolver, b);
     if (b->errors) {
         sh_ms_list_free(&list);
         /* The cause goes into the block: the Mods tab shows it, and the folder
@@ -3206,7 +3196,6 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
     if (!sh_mb_build(folder, NULL, &chain_resolver, &b)) { ms_cause(cause, "%s", sh_mb_first_cause(&b)); goto done; }
-    if (!place && b.slice_of[0]) { ms_cause(cause, SH_MB_SLICE_ROOT); goto done; }
     if (place) {
         const sh_ms_entry *have;
         int r = sh_ms_place_folder(place, b.name, b.id, &name);

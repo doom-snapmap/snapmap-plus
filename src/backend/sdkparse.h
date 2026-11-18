@@ -1,7 +1,7 @@
 /* sdkparse.h -- the Graphics SDK's author grammar, shared by its compilers (modeffect.c, modenv.c, sdkvalues.c).
  *
  * An SDK file is one brace group. A group holds items, one per line (or separated by commas); an item is a row of
- * atoms: words, numbers, quoted names, `game("...")` names and nested groups. So
+ * atoms: words, numbers, quoted names, `native("...")` names and nested groups. So
  *
  *     {
  *         type        effect
@@ -29,7 +29,7 @@ typedef struct sdk_atom {
     const char *p;     /* the text (a word, a number as written, a string's contents) */
     size_t n;
     double num;        /* SDK_A_NUMBER */
-    int game;          /* SDK_A_STRING written game("..."): one of the game's own names */
+    int game;          /* SDK_A_STRING written native("...") or native:<name>: one of DOOM's own names */
     sdk_group *group;  /* SDK_A_GROUP */
     size_t line;
 } sdk_atom;

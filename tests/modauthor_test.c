@@ -81,7 +81,8 @@ int main(void)
     req("environments/hell_red.decl", "generated/decls/env/mods/abcdefgh/hell_red.decl");
     req("particles/sparks.decl", "generated/decls/particle/mods/abcdefgh/sparks.decl");
     req("entities/boss.decl", "generated/decls/entitydef/mods/abcdefgh/boss.decl");
-    req("sounds/play_roar.decl", "generated/decls/sound/mods/abcdefgh/play_roar.decl");
+    req("sounds/play_roar.decl", "generated/decls/sound/mods/abcdefgh/abcdefgh_play_roar.decl");
+    req("sounds/imp/play_roar.decl", "generated/decls/sound/mods/abcdefgh/imp/abcdefgh_play_roar.decl");
     req("sounds/boss.bnk", "sound/soundbanks/pc/abcdefgh_boss.bnk");
     req("images/rock.bimage", "generated/image/mods/abcdefgh/rock.bimage");
     req("atlases/decals/blood.bimage", "generated/decalatlas/mods/abcdefgh/blood.bimage");
@@ -110,7 +111,7 @@ int main(void)
     req("programs/spirv/tint.fspv", "generated/spirv/mods/abcdefgh/tint.fspv");
     req("programs/spirv/permutations/tint_0000000000000001.vspv",
         "generated/spirv/generated/renderprogs/permutations/mods/abcdefgh/tint_0000000000000001.vspv");
-    req("game/generated/decls/entitydef/ai/conductor.decl", "generated/decls/entitydef/ai/conductor.decl");
+    req("native/generated/decls/entitydef/ai/conductor.decl", "generated/decls/entitydef/ai/conductor.decl");
     {
         char *r = NULL;
         CHECK(sh_ma_request(S, "Materials\\Body.DECL", &r, NULL) && r && !strcmp(r, "generated/decls/material/mods/abcdefgh/body.decl"));
@@ -124,11 +125,11 @@ int main(void)
     refused("assets/generated/decls/material/x.decl", "is not one of a mod's folders");
     refused("materials/body.txt", "holds .decl files");
     refused("sounds/music/boss.bnk", "goes in sounds/ itself");
-    refused("game/generated/decls/material/mods/abcdefgh/x.decl", "game/ holds the game's own files");
+    refused("native/generated/decls/material/mods/abcdefgh/x.decl", "native/ holds DOOM's own files the mod changes");
     /* a closure pointer to one of the product's own decls that names a mod (an SDK effect's emitter) is not a mod's */
-    req("game/generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl",
+    req("native/generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl",
         "generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl");
-    refused("game/generated/decls/material/mods/abcdefgh/snapmapplus/x.decl", "game/ holds the game's own files");
+    refused("native/generated/decls/material/mods/abcdefgh/snapmapplus/x.decl", "native/ holds DOOM's own files the mod changes");
     refused("atlases/x.bimage", "decals/, lights/ and transparency/");
 
     /* the names a text writes */
@@ -144,7 +145,7 @@ int main(void)
     name("decls/damage/stomp", "mods/abcdefgh/stomp");
     name("programs/tint", "mods/abcdefgh/tint");
     name("environments/hell_red", "mods/abcdefgh/hell_red");
-    name("game:effects/explosion", "effects/explosion");
+    name("native:effects/explosion", "effects/explosion");
     name("art/decals/x", NULL);
     name("models/monsters/imp/imp", NULL);
     name("materials/", NULL);
@@ -153,15 +154,15 @@ int main(void)
     /* a whole text */
     text("{\n\tdiffusemap\timages/rock.tga\n\tmodel \"meshes/rock.lwo\"\n}\n",
          "{\n\tdiffusemap\tmods/abcdefgh/rock.tga\n\tmodel \"mods/abcdefgh/rock.lwo\"\n}\n", &own);
-    text("x \"game:effects/burn\" y art/decals/a.tga\n", "x \"effects/burn\" y art/decals/a.tga\n", &own);
+    text("x \"native:effects/burn\" y art/decals/a.tga\n", "x \"effects/burn\" y art/decals/a.tga\n", &own);
     text("name = \"#str_boss_name\"; other = \"#str_snapentity_crate\";",
          "name = \"#str_abcdefgh_boss_name\"; other = \"#str_snapentity_crate\";", &own);
     text("textures/materials/x materials/x_y", "textures/materials/x mods/abcdefgh/x_y", &own);
     text("addnormals(images/a.tga, images/b.tga)", "addnormals(mods/abcdefgh/a.tga, mods/abcdefgh/b.tga)", &own);
     text("// see materials/body\n", "// see mods/abcdefgh/body\n", &own);
-    /* game("...") is the Graphics SDK's other spelling of a game name: left as written */
-    text("sound game(\"effects/boom\") use effects/x", "sound game(\"effects/boom\") use mods/abcdefgh/x", &own);
-    text("sound game( \"effects/boom\")", NULL, &own);
+    /* native("...") is the Graphics SDK's other spelling of a DOOM name: left as written */
+    text("sound native(\"effects/boom\") use effects/x", "sound native(\"effects/boom\") use mods/abcdefgh/x", &own);
+    text("sound native( \"effects/boom\")", NULL, &own);
     text("nothing of the mod here: mods/abcdefgh/body stays", NULL, &own);
 
     /* mod.json's author part */

@@ -1,0 +1,175 @@
+/* modcache.h -- the map content cache (SPEC-distribution 2.11, 5.7-5.9, 5.17, D21-D26, D50-D52, D60).
+ *
+ * One cache per machine, <mods>\.content\ (a dot folder the mods scan never reads):
+ *   files\<sha[0:2]>\<sha256>      blobs, read-only, each stored once by its SHA-256, checked when it arrives
+ *   units\<unit hash>.json         unit manifests, their exact bytes (modunit.h), checked against the hash
+ *   served\<composition hash>\     a composition: one map row's units under its namespace, built (modbundle.h),
+ *                                  every file a hard link to its blob (or to a local mod's file of that SHA-256),
+ *                                  so it costs no bytes; the serving index admits it as a bundle served only when a
+ *                                  map declares it
+ *   served\<composition hash>.json what the composition holds: its units, the units it stands in for, its namespace
+ *   partial\<sha256>.part          an interrupted download, resumed by Range
+ *   kept.json                      the kept maps' references (5.17), cached by file size and time
+ *
+ * A pinned map row (modmanifest.h) names units; its composition hash is
+ *   SHA-256("snapmap-plus/composition/1\n" + unit format + "\n" + namespace + "\n" + each unit hash in byte order,
+ *           each followed by "\n")
+ * which is also the row's build hash, so the serving index finds the composition by it. The same units under the
+ * same namespace compose the same served bytes on every machine that knows the units' format (D22a).
+ *
+ * A unit is present when its manifest is in units\ and every file is a blob in files\ or a file of a local mod with
+ * that SHA-256 (D21: a local mod serves someone else's map only by exact hash). A composition whose units are not
+ * all present is composed with stand-ins (D60) for the absent objects: every name the map places under the row's
+ * namespace that no present unit provides is an entityDef inheriting the stock snapmaps/unknown (R-DS2 5.2), so the
+ * map, its logic and its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
+ * composed again in full. An absent module is left out (its geometry is missing; R-DS2: a module stand-in is a live
+ * check).
+ *
+ * Nothing here runs on the engine's main thread except sh_cache_compose_now (a composition from present units, the
+ * editor's open) and the queries. Downloads (sh_cache_prepare) run on the network worker. */
+#ifndef SNAPMAP_PLUS_MODCACHE_H
+#define SNAPMAP_PLUS_MODCACHE_H
+
+#include <stddef.h>
+#include "modnet.h"
+#include "modbundle.h"
+
+struct sh_modmanifest_row;
+struct sh_modmanifest_list;
+
+#define SH_CACHE_DIR        ".content"
+#define SH_CACHE_HASH_HEX   64
+
+/* Why an object of a map is absent: the notice causes of SPEC section 8, in the order the most actionable comes first
+ * (S2, S4, S6, S4b, S5, S3), and a disk that filled (N15). */
+enum {
+    SH_CACHE_ABSENT_OFFLINE = 1,     /* S2: not on this computer, and the store was not asked (offline, the editor) */
+    SH_CACHE_ABSENT_UNREACHABLE,     /* S4: the store could not be reached */
+    SH_CACHE_ABSENT_NEWER,           /* S6: a unit format, or a product file, this Snapmap+ does not have */
+    SH_CACHE_ABSENT_GAME,            /* S4b: a DOOM file of another game revision */
+    SH_CACHE_ABSENT_NOT_IN_STORE,    /* S5: never uploaded, or still queued */
+    SH_CACHE_ABSENT_REMOVED,         /* S3: moderation removed it */
+    SH_CACHE_ABSENT_DISK             /* N15: not enough free disk space */
+};
+
+/* The cache's folder: <mods root>\.content (modstore.h sh_ms_root), or the folder tests set. malloc'd. */
+char *sh_cache_root(void);
+/* Tests and tools: use `mods_root`'s .content (NULL: the product's). Also the mods root local mods are found in. */
+void  sh_cache_set_mods_root(const char *mods_root);
+
+/* Bound at install (dllmain.c): the mods root (modstore.h sh_ms_root), the builder's resolver a composition builds
+ * with (the store's own), and the index rescan run after a load composed something. */
+void  sh_cache_set_store_root(const char *(*fn)(void));
+void  sh_cache_set_resolver(const sh_mb_resolver *resolver);
+void  sh_cache_set_rescan(int (*rescan)(void));
+/* The map manifest's content step (modmanifest.h sh_modmanifest_set_content): notes the rows, composes every pinned
+ * row whose composition is not on disk (or stood in for units that are here now), and rescans when it made one. */
+void  sh_cache_on_load(const struct sh_modmanifest_list *rows, char *const *placed, size_t count);
+/* 1 while a composition stood in for objects whose notice has not been taken. */
+int   sh_cache_notice_pending(void);
+/* Forget the pending notice (a gate took the load: its own fetch decides what is absent). */
+void  sh_cache_notice_drop(void);
+
+/* The composition hash of `units` (unit hashes, any order, duplicates ignored) under `salt`. 1 on success. */
+int   sh_cache_composition_hash(const char *salt, const char *const *units, size_t count, char out[SH_CACHE_HASH_HEX + 1]);
+
+/* ------------------------------------------------------------ blobs and manifests */
+
+/* The blob's path when the cache holds it (malloc'd), else NULL. */
+char *sh_cache_blob_path(const char *sha);
+/* Move the file at `from` into files\ when its SHA-256 and size are `sha` and `size` (deleted otherwise). 1 held. */
+int   sh_cache_put_blob(const char *from, const char *sha, unsigned long long size);
+/* Write a manifest whose SHA-256 is `hash`. 1 written or already there; 0 when the bytes are not the unit's. */
+int   sh_cache_put_manifest(const char *hash, const void *bytes, size_t len);
+/* The manifest's bytes (malloc'd, checked against the hash), or NULL. */
+char *sh_cache_manifest(const char *hash, size_t *len);
+
+/* A local mod's file with this SHA-256 and size (its path, malloc'd), or NULL: how an installed mod holding the
+ * exact unit serves it (D21). The default looks through every built mod folder of the mods root; tests may bind
+ * their own. */
+typedef char *(*sh_cache_local_fn)(void *context, const char *sha, unsigned long long size);
+void  sh_cache_set_local(sh_cache_local_fn fn, void *context);
+/* Forget the local mods' files (after a mods scan: the next question reads them again). */
+void  sh_cache_local_changed(void);
+
+/* A unit's state: 1 present, 0 its manifest is here but `missing` files (bytes in *missing_bytes) are not, -1 no
+ * manifest, -2 a unit format this product does not know. */
+int   sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long *missing_bytes,
+                          unsigned long long *bytes);
+
+/* ------------------------------------------------------------ rows */
+
+/* The rows of a map being loaded: each pinned row is remembered by its composition hash with its units and the
+ * names the map places under its namespace (`placed`, the map's placed names), so a later step (the gate's fetch,
+ * the editor's stand-ins) composes it. Any thread. */
+void  sh_cache_note_rows(const struct sh_modmanifest_list *rows, char *const *placed, size_t placed_count);
+/* 1 when `chash` is a pinned row noted from a map. */
+int   sh_cache_row_known(const char *chash);
+/* 1 when the composition `chash` is on disk and complete (every unit present when it was made). */
+int   sh_cache_composed(const char *chash, int *complete);
+
+/* Compose the noted row `chash` from what is here, with stand-ins for what is not (no download). `cause` is the
+ * absence cause given to objects whose units are not here (SH_CACHE_ABSENT_OFFLINE for the editor's open). 1 when a
+ * composition is on disk; 0 with *why (malloc'd). Main thread or worker. */
+int   sh_cache_compose_now(const char *chash, int cause, char **why);
+
+/* The gate's fetch (a worker thread): for the noted row `chash`, ask the store about the units that are not here,
+ * download the ones it holds (each blob checked, a broken-off file resumed), then compose (with stand-ins for what
+ * stayed absent). Returns 0 when a composition is on disk (the map loads), else a MODNET_E_ code. */
+int   sh_cache_prepare(const char *chash, const modnet_io *io);
+
+/* The notice of the objects the last compositions stood in for, once (malloc'd), or NULL: the first fitting line
+ * of S2-S6 naming every absent object (SPEC section 8). */
+char *sh_cache_take_notice(void);
+
+/* An absent object, for the sentence. */
+typedef struct sh_cache_absent { const char *object, *mod; int cause; } sh_cache_absent;
+/* The one sentence for `n` absent objects (malloc'd): the most actionable cause's (S2, S4, S6, S4b, S5, S3)
+ * naming all of them, "the Tyrant" or "3 objects from 2 mods (the Tyrant, the Marauder and the Hell Guard)". */
+char *sh_cache_notice_text(const sh_cache_absent *absent, size_t n);
+/* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. */
+char *sh_cache_object_name(const char *root);
+
+/* ------------------------------------------------------------ the sweep (5.17) */
+
+typedef struct sh_cache_sweep_stats {
+    size_t maps, units_kept, units_removed, blobs_removed, served_removed;
+    unsigned long long bytes_kept, bytes_removed;
+} sh_cache_sweep_stats;
+
+/* The kept maps' folders: the game's saved-maps and published-maps (NULL: the game's own, under
+ * %LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps). Tests set their own. */
+void  sh_cache_set_map_folders(const char *saved, const char *published);
+/* References: every unit a kept map names (saved maps; published-map texts unless `drop_played`, which is "Remove
+ * content of maps you only played"), the open map's rows, and `held` (uploads in progress). Removes manifests no
+ * reference names, then blobs no remaining manifest names, then compositions no kept map's row uses. Never touches a
+ * local mod's files, never runs on a timer. 1 done. */
+int   sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out);
+
+/* The sweep at start (dllmain.c), on a thread of its own. */
+void  sh_cache_sweep_async(void);
+
+/* ------------------------------------------------------------ the Mods tab (2.10) */
+
+/* Map content on disk: one call per kept map with what its rows hold, then the storage line ("Map content: 1.3 GB
+ * for 14 maps."). Lines are plain text; never a hash, salt or path (I11). Returns the lines. */
+typedef void (*sh_cache_line_fn)(void *context, const char *line);
+int   sh_cache_report(sh_cache_line_fn fn, void *context);
+/* The storage line alone (malloc'd). */
+char *sh_cache_storage_line(void);
+
+/* ------------------------------------------------------------ uploading a unit (5.3 steps 2-6) */
+
+typedef struct sh_cache_upload_stats {
+    int held;                    /* the store holds the unit now */
+    unsigned requests, archives, parts;
+    unsigned long long bytes_sent;
+} sh_cache_upload_stats;
+
+/* Send the unit `hash` the store lacks (its manifest here, its files in the cache or a local mod): begin, then the
+ * missing files in archives of at most one request each (a larger file in parts), then complete. Whoever authored
+ * the mod: units are verified by hash (5.3). MODNET_OK when the store holds it; else a MODNET_E_ code with *why. */
+int   sh_cache_publish_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, sh_cache_upload_stats *stats,
+                            char **why);
+
+#endif /* SNAPMAP_PLUS_MODCACHE_H */

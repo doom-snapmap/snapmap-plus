@@ -231,9 +231,7 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
         if (!entry || sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
         free(entry);
     }
-    /* Part of a build carries the source build's canonical manifest too. */
-    if (!bad && b.slice_of[0] && sh_zip_reader_find(&zr, SH_MB_SLICE_SOURCE) < 0) bad = "part of a build without its source";
-    if (!bad && zr.n != carried + 1 + (b.slice_of[0] ? 1 : 0)) bad = "the archive holds entries mod.json does not list";
+    if (!bad && zr.n != carried + 1) bad = "the archive holds entries mod.json does not list";
     if (!bad) *scripts = b.script_files;
     free(text);
     sh_mb_free(&b);

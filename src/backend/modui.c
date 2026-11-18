@@ -9,6 +9,7 @@
 #include "snapmap_plus_iface.h"
 #include "../common/text.h"
 #include "modui.h"
+#include "modcache.h"
 #include "feature_health.h"
 #include "modbundle.h"
 #include "modstore.h"
@@ -640,8 +641,6 @@ static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
     }
     if (!strcmp(c, "cannot read mod.json"))
         return sh_text("Its mod.json could not be read; close any program that has it open and press Refresh.");
-    /* A folder that holds a published map's cut (modstore.c): it stays with that map. */
-    if (!strcmp(c, SH_MB_SLICE_ROOT)) return mu_sentence_end(sh_text(c));
     /* The store's checks of the built files (modstore.c). */
     if (mu_ends(c, " is missing") || mu_ends(c, " is not the size mod.json records") || mu_ends(c, " is missing or unreadable") ||
         mu_ends(c, " does not match mod.json (damaged or edited)")) {
@@ -1234,8 +1233,6 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     title = mu_place_title(e);
     mu_kstr(b, "placeTitle", title ? title : "", 0);
     free(title);
-    /* Only the files of the mod that map uses: it stays with that map. */
-    mu_kbool(b, "part", e->loaded && e->bundle.slice_of[0], 0);
     {
         char *desc = e->loaded ? mu_extra_string(bd, "description") : NULL;
         mu_kstr(b, "description", desc ? desc : "", 0);
@@ -2357,6 +2354,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
     case SH_MODS_ACT_NEW_MOD: return "newMod";
     case SH_MODS_ACT_ADD_MINE: return "addToMine";
+    case SH_MODS_ACT_CONTENT: return "content";
     default: return "unknown";
     }
 }
@@ -4886,6 +4884,47 @@ static void mu_remove_tree(const wchar_t *dir)
     RemoveDirectoryW(dir);
 }
 
+/* content (SPEC-distribution 2.10): the map content on disk, one line per kept or played map's mod and the storage
+ * line ("Map content: 1.3 GB for 14 maps."), from this computer alone (the Mods tab never asks the store). With arg
+ * "removePlayed", Remove content of maps you only played first (5.17). */
+typedef struct mu_lines { mu_buf *b; int n; } mu_lines;
+static void mu_content_line(void *context, const char *line)
+{
+    mu_lines *l = (mu_lines *)context;
+    if (l->n++) mu_putn(l->b, ",", 1);
+    mu_str(l->b, line);
+}
+
+static int mu_content(const char *arg)
+{
+    const int action = SH_MODS_ACT_CONTENT;
+    char *storage, *message = NULL;
+    mu_buf b;
+    mu_lines lines;
+    int swept = arg && !strcmp(arg, "removePlayed");
+    if (swept) {
+        sh_cache_sweep_stats st;
+        double mb;
+        memset(&st, 0, sizeof st);
+        (void)sh_cache_sweep(1, NULL, 0, &st);
+        mb = (double)st.bytes_removed / (1024.0 * 1024.0);
+        message = st.bytes_removed ? sh_textf("Removed %.1f MB of content of maps you only played; playing one of them again gets it back.", mb)
+                                   : sh_text("No map you only played had content to remove.");
+    }
+    storage = sh_cache_storage_line();
+    memset(&b, 0, sizeof b);
+    mu_result_head(&b, action, 1, message ? message : storage ? storage : "");
+    mu_kstr(&b, "storage", storage ? storage : "", 0);
+    mu_key(&b, "lines", 0);
+    mu_putn(&b, "[", 1);
+    lines.b = &b;
+    lines.n = 0;
+    (void)sh_cache_report(mu_content_line, &lines);
+    mu_putn(&b, "]", 1);
+    free(storage);
+    free(message);
+    return mu_result_tail(&b);
+}
 /* addToMine (arg: a folder of a downloaded map's mods): copy it to the root
  * of mods\ as one of the player's own mods, which their own maps can then use
  * A salt the root already holds is that folder. */
@@ -5275,6 +5314,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_new_mod(arg);
     case SH_MODS_ACT_ADD_MINE:
         return mu_add_mine(arg);
+    case SH_MODS_ACT_CONTENT:
+        return mu_content(arg);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

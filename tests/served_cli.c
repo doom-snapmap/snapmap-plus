@@ -28,6 +28,15 @@
 
 void backend_log(const char *message) { (void)message; }
 
+/* The served request of a bank whose request begins `prefix` ("sound/soundbanks/pc/<stem>."). */
+typedef struct bank_find { const char *prefix; char *found; } bank_find;
+static void bank_found(void *ctx, const char *request, uint64_t size, const char *bundle_id, const char *bundle_hash)
+{
+    bank_find *q = (bank_find *)ctx;
+    (void)size; (void)bundle_id; (void)bundle_hash;
+    if (!q->found && request && !_strnicmp(request, q->prefix, strlen(q->prefix))) q->found = _strdup(request);
+}
+
 #include "../src/backend/nav_bake.h"
 void sh_nav_bake_source_update_begin(void) {}
 void sh_nav_bake_source_update_end(int committed) { (void)committed; }
@@ -129,8 +138,10 @@ int main(int argc, char **argv)
                     const sh_mb_file *fl = &b.files[i];
                     char stem[300], req[400];
                     if (fl->edited) continue;   /* an edited copy is never served: its derived file is */
+                    /* a bank: the index names it by the hash of the bytes it serves (modserve.c ms_bank_stems), asked
+                     * for once the index is built */
                     if (sh_mb_bank_stem(fl->request, stem, sizeof stem) && !fl->stock)
-                        _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s.%.16s.bnk", stem, fl->blob);
+                        _snprintf_s(req, sizeof req, _TRUNCATE, "\x01sound/soundbanks/pc/%s.", stem);
                     else strcpy_s(req, sizeof req, fl->request);
                     if (nreq == capreq) {
                         size_t cap = capreq ? capreq * 2 : 1024;
@@ -150,6 +161,13 @@ int main(int argc, char **argv)
     sh_modprog_reset();
     sh_modserve_set_material_filter(sh_look_compile);
     if (sh_modserve_index_build(root) < 0) { fprintf(stderr, "the serving index was refused\n"); return 1; }
+    for (i = 0; i < nreq; i++) {
+        bank_find q = { reqs[i] + 1, NULL };
+        if (reqs[i][0] != 1) continue;
+        sh_modserve_each_served(bank_found, &q);
+        free(reqs[i]);
+        reqs[i] = q.found ? q.found : _strdup("sound/soundbanks/pc/(not in the index).bnk");
+    }
     /* A file the product derives from another (a material's parameter image) is served once that one has been read,
      * as the engine reads them: every request is opened once first, then listed. */
     for (i = 0; i < nreq; i++) {

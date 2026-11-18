@@ -420,9 +420,9 @@ static void families(void)
     mt_write(c, "virtual-textures\\fam.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "file type not allowed") != NULL);
     mt_delete(c, "virtual-textures\\fam.mega2");
-    mt_write(c, "game\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");   /* another mod's name: a mod folder cannot spell it */
-    CHECK(strstr(build_cause(c, cause, sizeof cause), "game/ holds the game's own files at the game's own paths") != NULL || (printf("  cause: %s\n", cause), 0));
-    mt_delete(c, "game\\virtualtextures\\mods\\other\\fam_sq1.mega2");
+    mt_write(c, "native\\virtualtextures\\mods\\other\\fam_sq1.mega2", "MEGA");   /* another mod's name: a mod folder cannot spell it */
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "native/ holds DOOM's own files the mod changes, at DOOM's own paths") != NULL || (printf("  cause: %s\n", cause), 0));
+    mt_delete(c, "native\\virtualtextures\\mods\\other\\fam_sq1.mega2");
     mt_write(c, "virtual-textures\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
     CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested board name */
     mt_remove_tree(c);

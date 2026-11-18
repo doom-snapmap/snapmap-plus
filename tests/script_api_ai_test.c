@@ -1666,7 +1666,7 @@ static void test_lasers_and_rear_feet(void)
         "  if step ~= 1 then return end\n"
         "  print('add ' .. tostring(self:laser_add('laser_source_1')))\n"
         "  print('add2 ' .. tostring(self:laser_add('muzzlereference', 'ai/tyrant/main_beam')))\n"
-        "  print('add3 ' .. tostring(self:laser_add('muzzlereference', game('revenant/laser1'))))\n"
+        "  print('add3 ' .. tostring(self:laser_add('muzzlereference', native('revenant/laser1'))))\n"
         "  print('remove ' .. tostring(self:laser_remove('laser_source_1')))\n"
         "  print('feet ' .. tostring(self:rear_footsteps('impacteffect/footsteps/ai_tyrant', 'impacteffect/footsteps/ai_tyrant_metal')))\n"
         "end)\n"));

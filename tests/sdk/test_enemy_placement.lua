@@ -42,7 +42,7 @@ local function adapter()
   A.enemy = function(e) return enemy[e] end
   A.set_enemy = function(e, t) enemy[e] = t end
   A.alive = function(t) return t ~= nil and t:alive() end
-  A.pos = function(t) return t:position() end
+  A.position = function(t) return t:position() end
   A.distance = function(e, t) return e:distance(t) end
   A.can_see = function(e, t) return (seen[e] or {})[t] == true end
   A.entities_near = function(pos, r)

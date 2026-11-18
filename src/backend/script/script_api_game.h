@@ -26,7 +26,7 @@
  *   entities()             every entity of the map now, players first (filter
  *                          with e:definition(), e:class() or e:get(...)).
  *   decl(type, name)       a decl of the mod, or of the game with
- *                          game("..."): d:get(path), d:set(path, value),
+ *                          native("..."): d:get(path), d:set(path, value),
  *                          d:fields([path]), d:name(), d:type(). What a
  *                          script sets in a decl is put back when the map
  *                          ends.

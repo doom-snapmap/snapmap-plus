@@ -454,8 +454,8 @@ static void test_fresh_folder_refusals(const char *tmp)
     _snprintf_s(foreign, sizeof foreign, _TRUNCATE, "%s\\foreignprobe", root);
     fb_make(foreign, "someoneelse");
     mt_write(foreign, "mod.json", "{\"name\":\"Foreign\"}");
-    /* another mod's name cannot be spelled in a mod folder: game/ refuses mods/ */
-    mt_write(foreign, "game\\generated\\decls\\entitydef\\mods\\someoneelse\\x.decl", "{\r\n}");
+    /* another mod's name cannot be spelled in a mod folder: native/ refuses mods/ */
+    mt_write(foreign, "native\\generated\\decls\\entitydef\\mods\\someoneelse\\x.decl", "{\r\n}");
     _snprintf_s(good, sizeof good, _TRUNCATE, "%s\\goodprobe", root);
     fb_make(good, "goodprobe");
     dir_names(bin, before, sizeof before);
@@ -475,7 +475,7 @@ static void test_fresh_folder_refusals(const char *tmp)
           strstr(e->cause, "New mod"));
     if (e) printf("   %s\n", e->cause);
     e = find_entry(&list, "foreignprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "game/ holds the game's own files at the game's own paths") &&
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "native/ holds DOOM's own files the mod changes, at DOOM's own paths") &&
           strstr(e->cause, "mods/someoneelse/"));
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
@@ -739,11 +739,11 @@ static void test_place_folders(const char *fixture, const char *tmp)
         dir_names(path, names, sizeof names);
         CHECK(!strcmp(names, "R2 Imp copy;"));
     }
-    /* A build with a file at another mod's name (a game/ path under mods/) is refused; nothing placed. */
+    /* A build with a file at another mod's name (a native/ path under mods/) is refused; nothing placed. */
     CHECK(mt_copy_tree(fixture, src2));
-    mt_write(src2, "game\\generated\\decls\\entitydef\\mods\\otherimp\\x.decl", "{\r\n}");
+    mt_write(src2, "native\\generated\\decls\\entitydef\\mods\\otherimp\\x.decl", "{\r\n}");
     CHECK(!HO2(name, cause, sh_ms_install_placed(src2, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "game/ holds the game's own files"));
+          strstr(cause, "native/ holds DOOM's own files the mod changes"));
     /* The same title for another map: a place of its own. */
     CHECK(HOS(dir, sh_ms_place_dir(&other)) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
     CHECK(HO2(name, cause, sh_ms_install_placed(src, &other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
@@ -1376,50 +1376,6 @@ static void test_install_to_root(const char *tmp)
     printf("   %s\n", cause);
 }
 
-/* A published map's own part of a mod (author "slice-of", modslice.h) is
- * never one of the player's own mods: a root folder carrying it fails its
- * build with one sentence, and Add to my mods refuses it from its place. */
-static void test_part_never_at_root(const char *tmp)
-{
-    char root[MAX_PATH], dir[MAX_PATH * 2], src[MAX_PATH * 2], place[MAX_PATH * 2], name[HO_TEXT + 1], cause[HO_TEXT];
-    static const char PART[] = "{\"name\":\"part\",\"slice-of\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}";
-    sh_ms_sync_stats ss;
-    sh_ms_install_stats st;
-    sh_mb_bundle b;
-    sh_ms_list l;
-    const sh_ms_entry *e;
-    int usable = 1;
-    printf("-- part of a mod: never a root folder, never added to the player's own\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\partroot\\mods", tmp);
-    CHECK(sh_ms_set_root(root));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\part", root);
-    mt_write(dir, "mod.json", PART);
-    mt_write(dir, "images\\a.bimage", "bytes of the part");
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
-    CHECK(entry_of("part", NULL, NULL, &usable) && !usable);
-    CHECK(sh_ms_enumerate(&l));
-    e = find_entry(&l, "part");
-    CHECK(e && e->cause && !strcmp(e->cause, SH_MB_SLICE_ROOT));
-    sh_ms_list_free(&l);
-    /* Built where a download puts it and offered to the root: refused, nothing copied. */
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\partsrc", tmp);
-    mt_write(src, "mod.json", PART);
-    mt_write(src, "images\\a.bimage", "bytes of the part");
-    memset(&b, 0, sizeof b);
-    CHECK(sh_mb_build(src, "pkcut001", &RESOLVER, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
-    CHECK(!strcmp(b.slice_of, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-    sh_mb_free(&b);
-    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep\\x", root);
-    mt_mkdirs_for(place);
-    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep\\part", root);
-    CHECK(MoveFileA(src, place));
-    CHECK(!HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
-          !strcmp(cause, SH_MB_SLICE_ROOT));
-    CHECK(sh_ms_enumerate(&l));
-    CHECK(find_entry(&l, "maps\\Keep\\part") != NULL && find_entry(&l, "part (2)") == NULL);
-    sh_ms_list_free(&l);
-}
-
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], name[HO_TEXT + 1];
@@ -1512,7 +1468,6 @@ int main(int argc, char **argv)
     test_ordinary_names(tmp);
     test_rehome(tmp);
     test_install_to_root(tmp);
-    test_part_never_at_root(tmp);
     test_boot_sync(fixture, tmp);
     test_boot_release(tmp);
     sh_ms_set_root(NULL);

@@ -850,7 +850,7 @@ static int g_gate_val[2], g_gate_pending[2], g_gate_has_pending[2];
 static int g_gate_mode;          /* SH_MODSERVE_GATE_SET, _QUEUED, or 0 to refuse */
 static int g_gate_reads, g_gate_sets, g_gate_drains, g_gate_lines;
 #define FAKE_TEXT 4
-static const char *const FAKE_NAMES[FAKE_TEXT] = { "com_maxFps", "r_fancy", "ro_locked", "g_label" };
+static const char *const FAKE_NAMES[FAKE_TEXT] = { "com_showFPS", "r_fancy", "ro_locked", "g_label" };
 static char g_text_val[FAKE_TEXT][64];
 static char g_events[8192];
 static void event(const char *e)
@@ -998,7 +998,7 @@ static void build_requirements_fixture(const char *root)
      * number, a line holding two commands, an unknown key. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"9lives\": \"0\"}},\n  ";
     make_bundle(root, "bad cvar", "badx0000", '3', NULL, one, 1, NULL);
-    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxFps\": 0.5}},\n  ";
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_showFPS\": 0.5}},\n  ";
     make_bundle(root, "bad value", "badx0000", '4', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"dlls\": {\"x\": \"0\"}},\n  ";
     make_bundle(root, "bad key", "badx0000", '5', NULL, one, 1, NULL);
@@ -1033,7 +1033,7 @@ static void test_requirements(void)
     CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for imgonly0") == 1);
     CHECK(log_count("MODS: requirements:") == 3);
     CHECK(log_has("bundle 'bad cvar' skipped: requirements.cvars key 9lives is not a cvar name"));
-    CHECK(log_has("bundle 'bad value' skipped: requirements.cvars.com_maxFps must be a string, an integer or a boolean"));
+    CHECK(log_has("bundle 'bad value' skipped: requirements.cvars.com_showFPS must be a string, an integer or a boolean"));
     CHECK(log_has("bundle 'bad key' skipped: requirements key dlls is not supported (cvars, commands)"));
     CHECK(log_has("bundle 'bad line' skipped: requirements.commands.activate[0] must be one console command"));
     CHECK(!log_has("plainmod' skipped"));
@@ -1160,11 +1160,11 @@ static void test_requirements_general(void)
     char *slash;
     sh_modserve_plan p;
     sh_modserve_gates r;
-    static const char *const A = "{\"cvars\": {\"r_fancy\": true, \"com_maxFps\": 120}, \"commands\": "
+    static const char *const A = "{\"cvars\": {\"r_fancy\": true, \"com_showFPS\": 120}, \"commands\": "
                                  "{\"deactivate\": [\"echo first off\"], \"activate\": [\"echo first on\", \" bind x \\\"say hi\\\" \"]}}";
-    static const char *const B = "{\"cvars\": {\"com_maxFps\": \"60\"}, \"commands\": {\"activate\": [\"echo second on\"]}}";
+    static const char *const B = "{\"cvars\": {\"com_showFPS\": \"60\"}, \"commands\": {\"activate\": [\"echo second on\"]}}";
     static const char *const C = "{\"cvars\": {\"ro_locked\": \"1\"}}";
-    static const char *const D = "{\"cvars\": {\"com_maxFps\": \"120.0\", \"g_label\": \"two words\"}}";
+    static const char *const D = "{\"cvars\": {\"com_showFPS\": \"120.0\", \"g_label\": \"two words\"}}";
     static const char *const E = "{\"commands\": {\"deactivate\": [\"echo e off\"]}}";
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
@@ -1187,11 +1187,11 @@ static void test_requirements_general(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 5);
     /* The later install asking another value loses, both named. */
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: bsecond0 asks \"60\", afirst00 asks \"120\"; "
+    CHECK(log_has("MODS: requirements: conflict: com_showFPS: bsecond0 asks \"60\", afirst00 asks \"120\"; "
                   "bsecond0, the later install, loses"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120 for afirst00") && log_has("MODS: requirements: r_fancy=1 for afirst00"));
+    CHECK(log_has("MODS: requirements: com_showFPS=120 for afirst00") && log_has("MODS: requirements: r_fancy=1 for afirst00"));
     CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for afirst00"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for dsame000") && !log_has("for bsecond0"));
+    CHECK(log_has("MODS: requirements: com_showFPS=120.0 for dsame000") && !log_has("for bsecond0"));
     CHECK(sh_modserve_requirements() == 4);
 
     log_clear();
@@ -1205,31 +1205,33 @@ static void test_requirements_general(void)
     CHECK(log_has("MODS: requirements: afirst00: command \"echo first on\""));
     CHECK(log_has("MODS: requirements: afirst00: command \"bind x \"say hi\"\""));
     CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0) is not live: the engine marks it read-only"));
-    /* Only the bundles whose requirements are not live are blocked. */
+    /* Only the bundles whose requirements are not live are blocked. A mod whose cvar lost to another is served all the
+     * same (D-A24): its row registers, only its value is not applied. */
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 5);
     log_clear();
-    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 3);
-    CHECK(log_has("(bsecond0) BLOCKED: requirement com_maxFps=60 lost to afirst00, installed earlier, which asks \"120\""));
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 4);
+    CHECK(!log_has("(bsecond0) BLOCKED"));
     CHECK(log_has("(clocked0) BLOCKED: requirement ro_locked=1 is not live"));
     CHECK(ev_first("R:snapEditorEntityDef:mods/afirst00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/dsame000/thing") >= 0 &&
-          ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0);
+          ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/bsecond0/thing") >= 0);
+    CHECK(!strcmp(g_text_val[0], "120"));   /* the first mod's value applies */
     sh_modserve_plan_free(&p);
     /* Nothing runs twice. */
     CHECK(g_gate_lines == 2 && !log_has("command \""));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 8);
-    CHECK(strstr(g_report, "requirements: afirst00: cvar com_maxFps=120: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00: cvar com_showFPS=120: live\n") != NULL);
     CHECK(strstr(g_report, "requirements: dsame000: cvar g_label=two words: live\n") != NULL);
     CHECK(strstr(g_report, "requirements: afirst00: activate command \"echo first on\": ran\n") != NULL);
     CHECK(strstr(g_report, "requirements: afirst00: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
-    CHECK(strstr(g_report, "requirements: bsecond0: cvar com_maxFps=60: refused (com_maxFps=60 lost to afirst00") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0: cvar com_showFPS=60: refused (com_showFPS=60 lost to afirst00") != NULL);
     CHECK(strstr(g_report, "requirements: bsecond0: activate command \"echo second on\": not run") != NULL);
     CHECK(strstr(g_report, "requirements: clocked0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
     CHECK(strstr(g_report, "requirements: elines00: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
 
     /* afirst00 and bsecond0 go: afirst00's deactivate line runs, r_fancy is
-     * restored, com_maxFps stays (dsame000 asks the same number). */
+     * restored, com_showFPS stays (dsame000 asks the same number). */
     CHECK(sh_modserve_index_build(root2) == 3);
     log_clear();
     g_events[0] = 0;
@@ -1239,7 +1241,7 @@ static void test_requirements_general(void)
     CHECK(!strcmp(g_text_val[1], "0") && log_has("requirement released: r_fancy restored to 0"));
     CHECK(!strcmp(g_text_val[0], "120") && r.restored == 1);
 
-    /* Nothing installed asks anything: com_maxFps and g_label return to what
+    /* Nothing installed asks anything: com_showFPS and g_label return to what
      * they displaced, elines00's line runs, and nothing is held. */
     CHECK(sh_modserve_index_build(plain_root) == 1);
     g_events[0] = 0;
@@ -1261,9 +1263,9 @@ static void test_requirements_by_map(void)
     char *slash;
     const char *list[2];
     sh_modserve_gates r;
-    static const char *const OLD = "{\"cvars\": {\"com_maxFps\": 120}}";
-    static const char *const B = "{\"cvars\": {\"com_maxFps\": 60}}";
-    static const char *const C = "{\"cvars\": {\"com_maxFps\": 30}}";
+    static const char *const OLD = "{\"cvars\": {\"com_showFPS\": 120}}";
+    static const char *const B = "{\"cvars\": {\"com_showFPS\": 60}}";
+    static const char *const C = "{\"cvars\": {\"com_showFPS\": 30}}";
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -1283,13 +1285,13 @@ static void test_requirements_by_map(void)
     list[0] = h_b;
     log_clear();
     (void)sh_modserve_scope_set(list, 1, 1);
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
+    CHECK(log_has("MODS: requirements: conflict: com_showFPS: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
                   "this map does not use, loses"));
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
-    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: aold0000: cvar com_maxFps=120: refused (com_maxFps=120 lost to bmine000, which "
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_showFPS=60: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: aold0000: cvar com_showFPS=120: refused (com_showFPS=120 lost to bmine000, which "
                            "this map uses and asks \"60\")\n") != NULL);
     /* Its Play: only the map's own mods apply. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
@@ -1302,9 +1304,19 @@ static void test_requirements_by_map(void)
     list[1] = h_b;
     (void)sh_modserve_scope_set(list, 2, 1);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    {
+        /* Both mods' rows register in the map (D-A24): the one that lost the cvar is not blocked, so its placed
+         * entity resolves and the map opens; the first row's value applies. */
+        sh_modserve_plan pm;
+        sh_modserve_plan_editor(&pm);
+        log_clear();
+        (void)sh_modserve_plan_run_gated(&pm, &g_ev, &g_gates, "map load", &r);
+        CHECK(!log_has("BLOCKED") && pm.blocked == 0);
+        sh_modserve_plan_free(&pm);
+    }
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
-    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: refused (com_maxFps=60 lost to cmine000, which "
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_showFPS=60: refused (com_showFPS=60 lost to cmine000, which "
                            "this map lists first and asks \"30\")\n") != NULL);
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "30"));
@@ -4711,8 +4723,8 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
-    /* The mod folder cannot name another salt's file: it would be a game/ path under mods/. */
-    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (game/" SP_THING "). "
+    /* The mod folder cannot name another salt's file: it would be a native/ path under mods/. */
+    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (native/" SP_THING "). "
                   "Press Refresh to build the mod again."));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
@@ -4780,118 +4792,6 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\saltplace", top);
-    remove_tree(path);
-    CHECK(sh_modserve_index_build(g_root) >= 0);
-}
-
-/* A published map's part of a mod (modslice.h): served from the map's place
- * to that map alone, the root's whole build it was cut from serving the row
- * as well; never a root folder; a file it left out that the game asks for is
- * noted once, with the build it came from saying it had that file. */
-static char g_miss_salt[16], g_miss_hash[65], g_miss_request[200];
-static int g_miss_reports;
-static void part_report(const char *salt, const char *cut, const char *request, const char *by)
-{
-    (void)by;
-    g_miss_reports++;
-    strcpy_s(g_miss_salt, sizeof g_miss_salt, salt);
-    strcpy_s(g_miss_hash, sizeof g_miss_hash, cut);
-    strncpy_s(g_miss_request, sizeof g_miss_request, request, _TRUNCATE);
-}
-
-#define PT_THING "generated/decls/entitydef/mods/kpart000/thing.decl"
-#define PT_GONE  "generated/decls/entitydef/mods/kpart000/gone.decl"
-
-static void test_part_rows(void)
-{
-    static const fx_file whole[] = {
-        { PT_THING, "entityDef thing { whole }", -1, "entityDef", "mods/kpart000/thing", NULL, '1' },
-        { PT_GONE, "entityDef gone { }", -1, "entityDef", "mods/kpart000/gone", NULL, '2' },
-    };
-    static const fx_file part[] = {
-        { PT_THING, "entityDef thing { whole }", -1, "entityDef", "mods/kpart000/thing", NULL, '1' },
-    };
-    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], hw[65], hp[65], extra[200], source[400], *slash;
-    sh_modserve_bundle_ref ref;
-    sh_modmanifest_row row;
-    const char *list[1];
-    char ap_thing[200], ap_gone[200];
-    {
-        char *a = sh_ma_path("kpart000", PT_THING), *b = sh_ma_path("kpart000", PT_GONE);
-        _snprintf_s(ap_thing, sizeof ap_thing, _TRUNCATE, "%s", a ? a : "");
-        _snprintf_s(ap_gone, sizeof ap_gone, _TRUNCATE, "%s", b ? b : "");
-        free(a);
-        free(b);
-    }
-    printf("-- part of a build: a published map's own, served to that map only\n");
-    strcpy_s(top, sizeof top, g_root);
-    slash = strrchr(top, '\\');
-    if (slash) *slash = 0;
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\partplace\\mods", top);
-    mkdirs(root);
-    hash64('a', hw);
-    hash64('b', hp);
-    g_bundle_name = "Pack";
-    _snprintf_s(extra, sizeof extra, _TRUNCATE, "\"" SH_MB_SLICE_KEY "\": \"%s\",", hw);
-    g_bundle_extra = extra;
-    make_bundle(root, "maps\\Arena\\Pack", "kpart000", 'b', NULL, part, 1, NULL);
-    make_bundle(root, "Copied by hand", "kpart000", 'b', NULL, part, 1, NULL);
-    g_bundle_extra = NULL;
-    g_bundle_name = NULL;
-    /* What the build it was cut from held, beside the place's mod.json. */
-    _snprintf_s(source, sizeof source, _TRUNCATE, "{\"files\":[{\"path\":\"%s\",\"request\":\"%s\"},"
-                "{\"path\":\"%s\",\"request\":\"%s\"}],\"id\":\"kpart000\"}", ap_thing, PT_THING, ap_gone, PT_GONE);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Arena\\Pack\\" SH_MB_SLICE_SOURCE, root);
-    write_file(path, source, strlen(source));
-    sh_modserve_scope_enable(0);
-    log_clear();
-    CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(log_has("bundle 'Copied by hand' skipped: " SH_MB_SLICE_ROOT));
-    sh_modserve_scope_enable(1);
-
-    /* The map's row names the part and the build it was cut from. */
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.salt, sizeof row.salt, "kpart000");
-    strcpy_s(row.build, sizeof row.build, hp);
-    strcpy_s(row.of, sizeof row.of, hw);
-    CHECK(sh_modserve_row_build_in(&row, "maps\\Arena", &ref) && !strcmp(ref.hash, hp) && !strcmp(ref.place, "maps\\Arena"));
-    sh_modserve_bundle_ref_free(&ref);
-    CHECK(!sh_modserve_row_build_in(&row, "maps\\Other", &ref));   /* never another map's */
-    CHECK(!sh_modserve_row_build_in(&row, "", &ref));              /* never the player's own maps */
-    /* The root's whole build at "of" serves the row without a download. */
-    make_bundle(root, "Pack", "kpart000", 'a', NULL, whole, 2, NULL);
-    CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(sh_modserve_row_build_in(&row, "maps\\Arena", &ref) && !strcmp(ref.hash, hw) && !ref.place[0]);
-    sh_modserve_bundle_ref_free(&ref);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Pack", root);
-    remove_tree(path);
-    CHECK(sh_modserve_index_build(root) == 1);
-
-    /* Played: a request the part left out, which the whole build had, is noted once. */
-    sh_modserve_set_miss_reporter(part_report);
-    g_miss_reports = 0;
-    CHECK(sh_modserve_note_miss(PT_GONE) == 0);   /* no map declares the part yet */
-    CHECK(sh_modserve_place_set("maps\\Arena") >= 0);
-    list[0] = hp;
-    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
-    log_clear();
-    CHECK(sh_modserve_note_miss(PT_GONE) == 1 && g_miss_reports == 1);
-    CHECK(!strcmp(g_miss_salt, "kpart000") && !strcmp(g_miss_hash, hp) && !strcmp(g_miss_request, PT_GONE));
-    CHECK(log_has("Pack came with this map without " PT_GONE "; the map goes on without it"));
-    CHECK(sh_modserve_note_miss(PT_GONE) == 0 && g_miss_reports == 1);   /* once */
-    /* A second spelling the whole build never had, and another mod's file: not noted. */
-    CHECK(sh_modserve_note_miss("generated/decls/entitydef/mods/kpart000/never.decl") == 0);
-    CHECK(sh_modserve_note_miss("generated/decls/entitydef/mods/kother00/gone.decl") == 0);
-    CHECK(g_miss_reports == 1);
-    {
-        int lines = sh_modserve_misses_report(NULL, NULL);
-        CHECK(lines >= 1);
-    }
-    sh_modserve_set_miss_reporter(NULL);
-    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
-    sh_modserve_scope_enable(0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\partplace", top);
     remove_tree(path);
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
@@ -5128,15 +5028,79 @@ static void test_dependency_names(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* A bank of 42 bytes: BKHD (id `bank_id`) and a HIRC holding one Event `event` and one Sound object 0x1234. */
+static void ns_bank(unsigned char out[42], uint32_t bank_id, uint32_t event)
+{
+    uint32_t v;
+    memset(out, 0, 42);
+    memcpy(out, "BKHD", 4); v = 8; memcpy(out + 4, &v, 4); v = 0x71; memcpy(out + 8, &v, 4); memcpy(out + 12, &bank_id, 4);
+    memcpy(out + 16, "HIRC", 4); v = 18; memcpy(out + 20, &v, 4); v = 2; memcpy(out + 24, &v, 4);
+    out[28] = 4; v = 4; memcpy(out + 29, &v, 4); memcpy(out + 33, &event, 4);      /* the Event: its id only */
+    out[37] = 2; v = 0; memcpy(out + 38, &v, 4);                                    /* a Sound with an empty body */
+}
+
+/* SPEC-distribution D12: a sound decl's event takes the namespace at serve, and a namespace a file spells is mapped
+ * to the mod's, length for length. */
+static void test_namespace_maps(void)
+{
+    unsigned char a[42], b2[42], text[] = "x mods/oldsalt1/a mods/oldsalt1/oldsalt1_play_x #str_oldsalt1_k xoldsalt1/ "
+                                          "mods/oldsalt12/z";
+    uint32_t from = sh_mb_fnv1_lower("play_hit", 8), to = sh_mb_fnv1_lower("play_bbank000_hit", 17), other = 0x1234;
+    printf("-- the namespace of sound events and of spelled names\n");
+    ns_bank(a, 7, from);
+    ns_bank(b2, 7, to);
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 1 && !memcmp(a, b2, sizeof a));
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);               /* nothing left to map */
+    ns_bank(a, 7, other);
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);               /* another event stays */
+    a[20] = 0xFF;                                                                   /* a damaged HIRC size */
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);
+    CHECK(sh_modserve_respell(text, sizeof text - 1, "oldsalt1", "newsalt1") == 4);
+    CHECK(!strcmp((const char *)text, "x mods/newsalt1/a mods/newsalt1/newsalt1_play_x #str_newsalt1_k xoldsalt1/ "
+                                      "mods/oldsalt12/z"));
+    CHECK(sh_modserve_respell(text, sizeof text - 1, "newsalt1", "newsalt1") == 0);
+    {
+        /* Served: a bank written with its event outside the namespace (play_hit) is the bank written inside it
+         * (play_bbank000_hit), so the two serve the same bytes under the same stem. */
+        static const char DECL[] = "sound mods/bbank000/bbank000_hit {\r\n\tinherit = \"default\";\r\n}";
+        static const fx_file files[] = {
+            { "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, 42, "soundBank", "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, '1' },
+            { "generated/decls/sound/mods/bbank000/bbank000_hit.decl", DECL, -1, "sound", "mods/bbank000/bbank000_hit", NULL, '2' },
+        };
+        char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], sha[65], req[160], *slash;
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        sh_modserve_hit hit;
+        strcpy_s(top, sizeof top, g_root);
+        slash = strrchr(top, '\\');
+        if (slash) *slash = 0;
+        _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\nsbanks\\mods", top);
+        mkdirs(root);
+        make_bundle(root, "bbank000", "bbank000", '5', NULL, files, 2, NULL);
+        ns_bank(a, sh_mb_fnv1_lower("bbank000_sfx", 12), from);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bbank000\\sounds\\sfx.bnk", root);
+        write_file(path, (const char *)a, sizeof a);
+        sh_modserve_scope_enable(0);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 1);
+        ns_bank(b2, sh_mb_fnv1_lower("bbank000_sfx", 12), to);
+        sh_mb_sha256_hex(b2, sizeof b2, sha);
+        _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/bbank000_sfx.%.16s.bnk", sha);
+        CHECK(sh_modserve_lookup(req, &hit));
+        CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == sizeof b2 && !memcmp(bytes + 16, b2 + 16, sizeof b2 - 16));
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    }
+}
+
 /* Per-build bank stems (DESIGN-additive 6): a bundle's bank is served under
  * <stem>.<hash16>.bnk with its BKHD id rewritten, and its decl naming the
  * bank follows; another build of the key is another bank to Wwise. */
 static void test_bank_stems(void)
 {
-    static const char DECL[] = "sound mods/bbank000/hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_hit\";\r\n}";
+    static const char DECL[] = "sound mods/bbank000/bbank000_hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_bbank000_hit\";\r\n}";
     static const fx_file files[] = {
         { "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, 24, "soundBank", "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, '1' },
-        { "generated/decls/sound/mods/bbank000/hit.decl", DECL, -1, "sound", "mods/bbank000/hit", NULL, '2' },
+        { "generated/decls/sound/mods/bbank000/bbank000_hit.decl", DECL, -1, "sound", "mods/bbank000/bbank000_hit", NULL, '2' },
     };
     char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], req[160], h[65], stem[64];
     unsigned char bank[24], *bytes = NULL;
@@ -5190,7 +5154,7 @@ static void test_bank_stems(void)
         {
             char want[200];
             _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s.bnk\";", stem);
-            CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/hit.decl"), want) != NULL);
+            CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/bbank000_hit.decl"), want) != NULL);
         }
     }
     /* The served copies no build needs any more, and a temporary a crashed
@@ -5715,11 +5679,11 @@ int main(void)
     test_serving_build_needs();
     test_additive_compose();
     test_salt_and_place();
-    test_part_rows();
     test_resource_lock();
     test_row_served();
     test_dependency_names();
     test_bank_stems();
+    test_namespace_maps();
     test_index_retire();
     test_store_root_utf8();
     strcpy_s(top, sizeof top, g_root);

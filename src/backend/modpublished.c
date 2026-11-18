@@ -46,6 +46,7 @@
 #include <string.h>
 
 #include "modpublished.h"
+#include "modcache.h"
 #include "modui.h"
 #include "plain_reason.h"
 #include "modmanifest.h"
@@ -156,6 +157,8 @@ static void pub_notes_gated(void)
     if (!g_notes_held) return;
     g_notes_held = 0;
     (void)sh_modmanifest_load_notes_flush(0);
+    /* The gate's own fetch decides what the map plays without (modcache.h). */
+    if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
 }
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
@@ -173,6 +176,8 @@ static int pub_row_state(const sh_modmanifest_row *row, const char *place, const
 
 static int pub_row_served(const sh_modmanifest_row *row, const char *place)
 {
+    /* A pinned row whose composition stands in for objects is fetched again at a play (modcache.h). */
+    if (row && row->pinned && g_ops.content_complete && !g_ops.content_complete(g_ops.context, row)) return 0;
     return pub_row_state(row, place, NULL, NULL) == SH_MODPUB_ROW_SERVED;
 }
 
@@ -421,6 +426,7 @@ typedef struct pub_hold {
     int cancel_asked;                    /* the one "Keep downloading?" question was raised */
     int cancelled;                       /* the player answered No to it */
     int left_lobby;                      /* a joiner's hold: the joiner left the lobby (pub_leave_lobby) */
+    int units;                           /* every missing row names units: fetched with no probe or question */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -620,6 +626,11 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
     if (hash_out && hash_cap) hash_out[0] = 0;
     if (why) *why = NULL;
     if (!row || !g_ops_set) return 0;
+    if (row->pinned) {
+        /* Units nothing here holds and no stand-in could take: the map loads without them (modcache.h). */
+        if (why) *why = sh_textf("This map is playing without %s, which is not on this computer. Connect to the internet and open the map again to get it.", pub_title(row));
+        return 0;
+    }
     /* The editor opens the author's own map: its rows follow the root
      * folders (sh_modserve_row_build), so a row nothing serves names a salt
      * no root folder holds. Nothing substitutes for it. */
@@ -782,7 +793,7 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) { (void)sh_modmanifest_load_notes_flush(0); return; }
     if (!pub_on_main()) { g_record.valid = 0; return; }
     pub_record_clear(&g_record);
-    g_notes_held = sh_modmanifest_load_notes_pending() > 0;
+    g_notes_held = sh_modmanifest_load_notes_pending() > 0 || (g_ops.content_pending && g_ops.content_pending(g_ops.context));
     g_notes_frame = g_frame;
     /* The same map launched again while its hold asks or downloads (the
      * player pressed Play once more, or the browser re-issued the request):
@@ -872,6 +883,10 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
         h->missing_bytes += h->rows.rows[i].size;
     }
     if (!h->missing_count) { pub_hold_free(); return 0; }
+    /* Rows that name units (SPEC-distribution 5.7): no store probe and no question; their content is fetched at
+     * once, and whatever cannot be had stands in (modcache.h). */
+    h->units = 1;
+    for (size_t i = 0; i < h->missing_count; i++) if (!h->rows.rows[h->missing[i]].pinned) h->units = 0;
     h->hook = hook; h->owner = owner; h->extra = extra;
     if (!(h->id = sh_text(pub_s(id))) || !(h->revision = sh_text(pub_s(revision)))) goto nomem;
     h->token = g_ops.hold_token ? g_ops.hold_token(g_ops.context, hook, owner, extra) : 0;
@@ -1387,6 +1402,12 @@ static void pub_finish(void)
         return;
     }
     free(cause);
+    if (g_ops.content_notice) {
+        /* What the map plays without, in one sentence (S2-S6), once it has loaded. */
+        char *said = g_ops.content_notice(g_ops.context);
+        if (said) { pub_print(said); pub_notice(said); }
+        free(said);
+    }
     pub_resume(h->missing_count);
 }
 
@@ -1418,8 +1439,12 @@ static void pub_resume(size_t installed)
     if (h->left_lobby) {
         pub_logf("MODS: the held %s of '%s' installed %u mod(s); the joiner left the lobby to download them",
                  pub_hook_name(h->hook), pub_s(h->id), (unsigned)installed);
-        pub_hold_free();
-        pub_notice("The map's mods are installed. Join the lobby again to play it.");
+        {
+            int units = h->units;
+            pub_hold_free();
+            pub_notice(units ? "The map's mod content is here. Join the lobby again to play it."
+                             : "The map's mods are installed. Join the lobby again to play it.");
+        }
         return;
     }
     /* A rawmap hold has no screen of its own; the reopen asks the editor itself. */
@@ -1830,6 +1855,11 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
+        } else if (g_ops.content_notice) {
+            /* An editor open composed stand-ins (modcache.h): its one notice (S2). */
+            char *said = g_ops.content_notice(g_ops.context);
+            if (said) pub_notice(said);
+            free(said);
         }
         free(refusal);
     }
@@ -1839,6 +1869,18 @@ void sh_modpublished_poll(void)
 
     switch (h->state) {
     case HOLD_PROBING:
+        if (!h->job && h->units) {
+            /* D27: a joiner downloads outside the lobby, so the match is not held up. */
+            if (pub_is_joiner(h->hook)) {
+                char *said = sh_textf("This map's mod content is downloading (%.0f MB). You left the lobby so the match is not "
+                                      "held up; join again when it is done.", (double)h->missing_bytes / (1024.0 * 1024.0));
+                pub_leave_lobby(h, h->hook, h->owner);
+                if (said) pub_notice(said);
+                free(said);
+            }
+            pub_start_fetch();
+            break;
+        }
         if (!h->job) { pub_start_probe(); break; }
         if (!InterlockedCompareExchange(&h->job->done, 0, 0)) break;
         pub_probe_finish();
@@ -2190,6 +2232,12 @@ static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *pla
     g_eng_fetch_hash[0] = 0;
     free(g_eng_fetch_source);
     g_eng_fetch_source = NULL;
+    if (sh_cache_row_known(row->build)) {
+        /* A row that names units: fetched into the content cache and composed (stand-ins for what cannot be had). */
+        int rc = sh_cache_prepare(row->build, &io);
+        if (rc) pub_logf("MODS: the content of %s could not be prepared (%d)", pub_title(row), rc);
+        return rc == MODNET_E_CANCELLED ? rc : 0;
+    }
     if (modexport_fetch_build(row, place, &io, &st, &where)) {
         if (where && where[0])
             pub_logf("MODS: %s is served by mods\\%s%s", pub_title(row), where,
@@ -2674,6 +2722,16 @@ static int eng_rows_resolve(void *c)
     }
 }
 
+static int eng_content_complete(void *c, const sh_modmanifest_row *row)
+{
+    int complete = 0;
+    (void)c;
+    return row && sh_cache_composed(row->build, &complete) && complete;
+}
+static char *eng_content_notice(void *c) { (void)c; return sh_cache_take_notice(); }
+static int eng_content_pending(void *c) { (void)c; return sh_cache_notice_pending(); }
+static void eng_content_drop(void *c) { (void)c; sh_cache_notice_drop(); }
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
@@ -2681,7 +2739,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
     eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve, eng_leave_lobby,
-    eng_cold_read_op, eng_scope_play_op
+    eng_cold_read_op, eng_scope_play_op, eng_content_complete, eng_content_notice, eng_content_pending, eng_content_drop
 };
 
 /* ------------------------------------------------------------ detours */

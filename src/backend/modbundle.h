@@ -28,6 +28,8 @@
  *                                      "node": true when a script registers an input
  *                                      (sh_script_node_registers_input): the serving index then
  *                                      serves the mod's Script node row (script_node.h)
+ *     "spelled": "<salt>",             the namespace the carried binaries spell (sh_mb_bundle.spelled), when any
+ *     "units_of": ["<unit hash>", ...], a composition's units (modunit.h), kept by every later build
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
@@ -112,8 +114,9 @@
  * (a folder that failed only on a .lua file builds now). 11: the scripts
  * member records whether the mod gets its Script node row ("node"). 12:
  * files beside mod.json and assets are ignored, and campaign content derives
- * its requirements. */
-#define SH_MB_RULES           12
+ * its requirements. 13: native/ holds DOOM's changed files (SPEC-distribution
+ * 3.10), a sound decl's leaf takes the namespace, and "spelled". */
+#define SH_MB_RULES           13
 
 /* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
  * SH_MB_SHAPE is its first part, which readers of a cause match on. */
@@ -132,17 +135,6 @@
 /* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
  * console line, as many and as long as the author writes (DECISIONS 26). */
 #define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's builder block */
-/* The author key a cut of a build carries (modslice.h): the source build's
- * hash, 64 lowercase hex. Kept in "extra", so it is inside the build hash. A
- * folder carrying it holds only the files one published map uses: the store
- * serves it to that map alone and never takes it as one of the player's own
- * mods (SH_MB_SLICE_ROOT). */
-#define SH_MB_SLICE_KEY       "slice-of"
-/* Beside such a folder's mod.json: the canonical manifest of the build it was
- * cut from, whose SHA-256 is "slice-of". */
-#define SH_MB_SLICE_SOURCE    "source.json"
-#define SH_MB_SLICE_ROOT      "This mod folder holds only the files one published map uses, so it cannot be one of " \
-                              "your own mods; it stays with that map"
 
 typedef struct sh_mb_need {
     char *type;            /* engine spelling: md6Def, baseModel, anim, material, ... */
@@ -150,7 +142,7 @@ typedef struct sh_mb_need {
 } sh_mb_need;
 
 typedef struct sh_mb_file {
-    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, game/<path>), lower
+    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, native/<path>), lower
                               case with '/', whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
     char *request;         /* the engine's request path the path stands for (sh_ma_request), lower-cased: what the
                               provider is asked for */
@@ -171,6 +163,9 @@ typedef struct sh_mb_file {
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
     int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */
+    char **events;         /* builder: DOOM's sound events the text names (soundShader "play_x"), for the stock-bank
+                              question (registries "banks"); not needs: every event is a sound decl with no file */
+    size_t event_count;
 } sh_mb_file;
 
 /* Per-file classification. Decided from the
@@ -225,7 +220,10 @@ typedef struct sh_mb_bundle {
     char  prev_hash[SH_MB_HASH_HEX + 1];   /* sh_mb_build: the build hash the folder's block named before this
                                               build, "" when none */
     char  tree[SH_MB_HASH_HEX + 1];   /* block "tree": the folder's tree hash when built, "" when absent */
-    char  slice_of[SH_MB_HASH_HEX + 1];   /* author "slice-of": the build this one was cut from, "" when whole */
+    /* block "units_of": a composition's units (modunit.h sh_unit_compose), the unit hashes whose files the folder
+     * holds; NULL for a mod folder. A build keeps what the folder's block named. */
+    char **units_of;
+    size_t units_of_count;
     long long built;       /* block "built": the first successful build of this salt in this folder, 0 when none */
     int   validated;       /* 1 when the block records no "cause" (a build without errors) */
     int   rules;           /* block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */
@@ -252,6 +250,10 @@ typedef struct sh_mb_bundle {
      * #str_<key> of one of them is the mod's string */
     char **own_keys;
     size_t own_key_count;
+    /* The namespace the mod's carried binaries spell (a converter's mesh naming its skeleton mods/<salt>/...), ""
+     * when they spell none: the block's "spelled" (SPEC-distribution D12). When it is not the mod's salt (a copy
+     * given a new one), the serving index maps it to the salt in every file it serves, length for length. */
+    char spelled[SH_MB_ID_MAX + 1];
 } sh_mb_bundle;
 
 /* Whether two decl texts are one text: line ends are not content, so CRLF
@@ -647,11 +649,6 @@ void sh_mb_set_attach_tags(sh_mb_clip_events_fn fn);
 typedef void (*sh_mb_script_call_fn)(void *context, int what, const char *event, const char *name, size_t name_len,
                                      int line);
 void sh_mb_script_scan(const char *text, size_t len, sh_mb_script_call_fn fn, void *context);
-
-/* 0 when the bundle carries a script: a per-map slice would drop names its
- * scripts build while running, so the slicer ships such a build whole (D1
- * slicing step 5's whole-build fallback); else 1. */
-int  sh_mb_sliceable(const sh_mb_bundle *bundle);
 
 /* Kinds a bundle admits only as stock pointers, never as carried bytes:
  * .sbsp, .ambientsh, .tome and .pages (per-map engine files, never authored

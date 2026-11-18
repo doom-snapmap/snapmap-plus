@@ -565,7 +565,7 @@ static const char *anchor_name(lua_State *L)
     return p;
 }
 
-const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game)
+static const char *check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game, int sound)
 {
     shs_mod *m = shs_mod_of(L);
     const char *name, *buf;
@@ -605,9 +605,25 @@ const char *sh_script_check_name(lua_State *L, int arg, const char *call, int al
             sh_script_refuse(L, "\"%s\" can only use this mod's own content; \"%s\" belongs to another mod", call, name);
         return anchor_name(L);                         /* already the full name */
     }
-    lua_pushfstring(L, "mods/%s/%s", m->salt, buf);
+    if (sound) {
+        /* a sound decl's leaf carries the namespace (modauthor.h: sounds/a/play_x is mods/<salt>/a/<salt>_play_x) */
+        const char *leaf = strrchr(buf, '/');
+        leaf = leaf ? leaf + 1 : buf;
+        lua_pushfstring(L, "mods/%s/%s%s_%s", m->salt, lua_pushlstring(L, buf, (size_t)(leaf - buf)), m->salt, leaf);
+        lua_remove(L, -2);
+    } else lua_pushfstring(L, "mods/%s/%s", m->salt, buf);
     lua_remove(L, -2);
     return anchor_name(L);
+}
+
+const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game)
+{
+    return check_name(L, arg, call, allow_game, is_game, 0);
+}
+
+const char *sh_script_check_sound_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game)
+{
+    return check_name(L, arg, call, allow_game, is_game, 1);
 }
 
 /* --------------------------------------------------------- registration */

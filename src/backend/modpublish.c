@@ -119,23 +119,13 @@ void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes)
     else _snprintf_s(out, cap, _TRUNCATE, "%.1f MB", mb);
 }
 
-void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigned long long bytes,
-                                    unsigned long long whole)
+void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigned long long bytes)
 {
-    char size[32], all[32];
+    char size[32];
     if (!out || !cap) return;
     if (cap > MP_TEXT_CAP) cap = MP_TEXT_CAP;
     if (bytes) sh_modpublish_size_text(size, sizeof size, bytes);
     else strcpy_s(size, sizeof size, "size unknown");
-    if (whole > bytes) {
-        /* The map uses only part of some mod: the question says what goes up. */
-        sh_modpublish_size_text(all, sizeof all, whole);
-        _snprintf_s(out, cap, _TRUNCATE,
-                    "This map uses %u mod%s and needs %s of %s %s of files. Upload those to the mod store so other "
-                    "players can download them? You are asked this only once.", (unsigned)count, count == 1 ? "" : "s",
-                    size, count == 1 ? "its" : "their", all);
-        return;
-    }
     _snprintf_s(out, cap, _TRUNCATE,
                 "This map uses %u mod%s (%s). Upload %s to the mod store so other players can download %s? "
                 "You are asked this only once.", (unsigned)count, count == 1 ? "" : "s", size, count == 1 ? "it" : "them",
@@ -152,21 +142,13 @@ typedef struct mp_save {
     size_t count;                              /* distinct bundles named */
     char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;                  /* their sizes, summed */
-    unsigned long long whole;                  /* the same with each mod the map uses part of counted whole */
-    int carrier;                               /* the text carries the snapmap-plus member */
+   int carrier;                               /* the text carries the snapmap-plus member */
     int unreadable;                            /* rows the reader refused, or the read failed: never published */
     char *unreadable_name;                     /* the first refused row's mod name (malloc'd), NULL when it has none */
 } mp_save;
 
 static mp_save g_save;
 static volatile LONG g_save_sequence;
-
-/* The publish save's cuts, summed: what their mods weigh whole, and what goes up. */
-static struct {
-    unsigned long long whole, part;
-    int armed;                           /* PublishStart armed the next save's cut; that save consumes it */
-    ULONGLONG at;
-} g_cut;
 
 
 static void mp_save_clear(mp_save *s)
@@ -254,11 +236,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
             g_save.bytes += rows.rows[i].size;
         }
         g_save.count = rows.count;
-        /* The cuts this save made (a publish's): their mods counted whole. */
-        g_save.whole = g_save.bytes - (g_cut.part <= g_save.bytes ? g_cut.part : g_save.bytes) + g_cut.whole;
     }
-    /* The sizes belong to this save alone. */
-    g_cut.whole = g_cut.part = 0;
     if (rejected) {
         /* A row the reader refused names a mod the upload cannot know:
          * publishing would leave players without it, so the map is not
@@ -287,39 +265,9 @@ static struct {
     unsigned long tagged_sequence;   /* the save whose metadata got (or had) the tag */
 } g_tag;
 
-/* The cut the publish save makes of each mod the map uses only part of
- * (modmanifest.h sh_modmanifest_set_slicer, modsync_cut_row): only while a
- * publish is armed, so every other save, export and copy carries whole
- * builds. */
-static int mp_slice_row(sh_modmanifest_row *row)
-{
-    unsigned long long whole;
-    char **asked = NULL;
-    size_t nasked = 0;
-    int cut;
-    if (!g_ops_set || !mp_on_main()) return 0;
-    /* The publish's own save is the first save after PublishStart: its end
-     * (row NULL) disarms, so no later save inside the window is cut. */
-    if (!row) { g_cut.armed = 0; return 0; }
-    if (!g_cut.armed || GetTickCount64() - g_cut.at > MP_TAG_ARM_MS) return 0;
-    whole = row->size;
-    /* What players of an earlier cut asked for and did not get goes too. */
-    nasked = modsync_asked_for(row->salt, &asked);
-    cut = modsync_cut_row(row, (const char *const *)asked, nasked, NULL);
-    modsync_asked_free(asked, nasked);
-    if (cut) {
-        g_cut.whole += whole;
-        g_cut.part += row->size;
-    }
-    return cut;
-}
-
 void sh_modpublish_publish_started(const char *local_id)
 {
     if (!g_ops_set || !mp_on_main()) return;
-    g_cut.whole = g_cut.part = 0;
-    g_cut.armed = 1;
-    g_cut.at = GetTickCount64();
     g_tag.armed = 1;
     g_tag.at = GetTickCount64();
     g_tag.local[0] = 0;
@@ -530,7 +478,6 @@ static int mp_job_run(void *context, const modnet_io *io)
         }
         mp_refs_free(refs, count);
         job->left = modsync_pending_count();
-        (void)modsync_slices_tidy();
         /* What players of this machine's published maps asked for and did
          * not get: the Mods tab shows it beside the map, and the next publish
          * of that map carries it. */
@@ -648,8 +595,7 @@ typedef struct mp_hold {
     int count;
     char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;
-    unsigned long long whole;                  /* bytes with every mod the map uses part of counted whole */
-    size_t length;
+   size_t length;
     int ticket;
     int waited;
     mp_job *job;
@@ -823,8 +769,7 @@ int sh_modpublish_after_save(void *editor)
     memcpy(h->hashes, g_save.hashes, g_save.count * sizeof(*h->hashes));
     h->count = (int)g_save.count;
     h->bytes = g_save.bytes;
-    h->whole = g_save.whole;
-    h->length = g_save.length;
+   h->length = g_save.length;
     h->editor = editor;
     h->token = token;
     h->save_sequence = g_save.sequence;
@@ -1339,8 +1284,8 @@ static void mp_upload_finished(void)
 static int mp_upload_question(mp_hold *h, char *text, size_t cap)
 {
     if (g_ops.upload_question)
-        return g_ops.upload_question(g_ops.context, h->editor, (size_t)h->count, h->bytes, h->whole);
-    sh_modpublish_compose_question(text, cap, (size_t)h->count, h->bytes, h->whole);
+        return g_ops.upload_question(g_ops.context, h->editor, (size_t)h->count, h->bytes);
+    sh_modpublish_compose_question(text, cap, (size_t)h->count, h->bytes);
     return g_ops.ask ? g_ops.ask(g_ops.context, MP_GDM_ID, MP_BUTTONS_YES_NO, text) : 0;
 }
 
@@ -1463,7 +1408,6 @@ void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops)
 {
     if (ops) { g_ops = *ops; g_ops_set = 1; }
     else { memset(&g_ops, 0, sizeof g_ops); g_ops_set = 0; }
-    sh_modmanifest_set_slicer(ops ? mp_slice_row : NULL);
 }
 void sh_modpublish_test_reset(void)
 {
@@ -1492,8 +1436,7 @@ void sh_modpublish_test_age_delete_checks(unsigned long long ms)
     for (mp_check *c = g_checks; c; c = c->next) c->at -= ms;
 }
 void sh_modpublish_test_set_link_min_age(long long seconds) { g_link_min_age = seconds; }
-void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; g_cut.at -= ms; }
-int sh_modpublish_test_cut_armed(void) { return g_cut.armed && GetTickCount64() - g_cut.at <= MP_TAG_ARM_MS; }
+void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
 const char *sh_modpublish_test_provisional(void)
 {
@@ -1713,8 +1656,8 @@ static void eng_editor_notice(void *c, void *editor, const char *text)
  * through engine_dialog, raised over the editor. Its behaviour inside the
  * editor, where a shell dialog may activate the browser
  * (fault_shield/engine_layout.h), needs a live check. */
-/* A file a cut left out that a player's game asked for: told to the store
- * for the map's author, on a pool thread (one small request; the game
+/* A file a unit left out that a player's game asked for: told to the store
+ * for the publishers of the unit, on a pool thread (one small request; the game
  * never waits for it). */
 typedef struct eng_asked { char hash[MODNET_HASH_HEX + 1]; char *request, *by; } eng_asked;
 
@@ -1730,12 +1673,12 @@ static DWORD WINAPI eng_asked_send(LPVOID p)
     return 0;
 }
 
-static void eng_report_asked(const char *salt, const char *cut_hash, const char *request, const char *by)
+static void eng_report_asked(const char *salt, const char *unit, const char *request, const char *by)
 {
     eng_asked *a = (eng_asked *)calloc(1, sizeof *a);
     (void)salt;
-    if (!a || !modnet_valid_hash(cut_hash)) { free(a); return; }
-    strcpy_s(a->hash, sizeof a->hash, cut_hash);
+    if (!a || !modnet_valid_hash(unit)) { free(a); return; }
+    strcpy_s(a->hash, sizeof a->hash, unit);
     a->request = sh_text(request);
     a->by = sh_text(by ? by : "");
     if (!a->request || !a->by || !QueueUserWorkItem(eng_asked_send, a, WT_EXECUTEDEFAULT)) {
@@ -1745,12 +1688,11 @@ static void eng_report_asked(const char *salt, const char *cut_hash, const char 
     }
 }
 
-static int eng_upload_question_dialog(void *c, void *editor, size_t count, unsigned long long bytes,
-                                      unsigned long long whole)
+static int eng_upload_question_dialog(void *c, void *editor, size_t count, unsigned long long bytes)
 {
     char text[MP_TEXT_CAP];
     (void)c; (void)editor;
-    sh_modpublish_compose_question(text, sizeof text, count, bytes, whole);
+    sh_modpublish_compose_question(text, sizeof text, count, bytes);
     return sh_engine_dialog_ask(MP_GDM_ID, MP_BUTTONS_YES_NO, text);
 }
 
@@ -2199,8 +2141,7 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     for (size_t i = 0; i < ENG_HOOKS; i++) if (!g_eng.original[i]) goto failed;
     for (size_t i = 0; i < ENG_HOOKS; i++) if (hook_commit(g_eng.original[i]) != B2_PATCH_OK) goto failed;
     sh_rawmap_set_save_observer(eng_save_observer);
-    sh_modmanifest_set_slicer(mp_slice_row);
-    sh_modserve_set_miss_reporter(eng_report_asked);
+   sh_modserve_set_miss_reporter(eng_report_asked);
     InterlockedExchange(&g_eng.ready, 1);
     backend_log("MODS: publish hooks installed (upload at publish, search tag, claim at the feed post, release at "
                 "unpublish and at a delete whose item is no longer published, copy-to-My-Maps size gate)");

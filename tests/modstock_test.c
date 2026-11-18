@@ -243,7 +243,7 @@ static void make_mod(const char *dir, const char *extra_json)
     put_req(dir, SALT_STOCK, REQ_COPY, IMG_B, sizeof IMG_B);
     put_req(dir, SALT_STOCK, REQ_OWN, OWN, sizeof OWN);
     /* The earlier fixture also carried REQ_TOME, a .tome named under the mod's own folder (the game's tome as a
-     * pointer). A mod folder cannot spell that name now: game/ refuses mods/ and no folder takes a .tome. */
+     * pointer). A mod folder cannot spell that name now: native/ refuses mods/ and no folder takes a .tome. */
 }
 
 static void test_builder(const char *tmp)

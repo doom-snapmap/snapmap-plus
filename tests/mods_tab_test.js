@@ -79,7 +79,7 @@ const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', '
              'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate',
-             'modsScriptedMaps', 'modsScriptedMapsLabel', 'modsScriptedMapsNote'];
+             'modsScriptedMaps', 'modsScriptedMapsLabel', 'modsScriptedMapsNote', 'modsContent'];
 const GONE = ['modsRebuildBtn', 'modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsMigrateBtn', 'modsVerifyBtn'];
 const str = v => typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v));
@@ -443,7 +443,8 @@ test('show rescans once; the list waits for the answer', () => {
   answer(h, v4);
   assert.equal(h.toasts.length, 0, 'a successful rescan on show says nothing');
   h.ui.show();
-  assert.equal(h.sent.length, 2, 'showing the tab again rereads the folder');
+  assert.equal(h.sent.filter(m => m.action === 'rescan').length, 2, 'showing the tab again rereads the folder');
+  assert.equal(h.sent.filter(m => m.action === 'content').length, 1, 'and the map content is read once the first list arrived');
   assert.equal(h.ui.onMessage({kind: 'other'}), false);
 });
 test('two kinds of groups: Your mods with its folders, and one group per downloaded map', () => {
@@ -622,17 +623,14 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
-test('a map that uses only part of a mod: no Add to my mods, and a file players lacked said beside the published map', () => {
+test('a file players lacked is said beside the published map', () => {
   const data = clone(v4);
-  data.mods.find(b => b.key === 'maps\\Hell Guard Arena\\Hell Guards').part = true;
   data.map.asked = [{mod: 'Hell Guards', request: 'generated/decls/entitydef/mods/urdebxyn/staff_fx.decl', by: 'mods/urdebxyn/staff'},
                     {mod: '', request: 'generated/image/mods/urdebxyn/glow.bimage', by: ''}];
   const h = live(data);
   h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
-  assert.equal(h.nodes.modsUseBtn.style.display, 'none', 'the files one map uses stay with that map');
-  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
-  h.ui.select('maps\\Hell Guard Arena\\Lava Floor');
   assert.equal(h.nodes.modsUseBtn.textContent, 'Add to my mods');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
   h.nodes.modsMapBtn.click();
   const lines = section(h, 'asked', h.nodes.modsMapHost).all('mods-line').map(n => n.textContent);
   assert.deepEqual(lines, [
@@ -1226,8 +1224,44 @@ test('page contract', () => {
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
                    '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile',
-                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps', '"part"', '"asked"'])
+                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps', '"asked"'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
+});
+test('map content on disk: the storage line and lines render, the button removes what was only played', () => {
+  const sentFor = [];
+  const store = m => {
+    if (m.action !== 'content') return [];
+    const swept = m.arg === 'removePlayed';
+    sentFor.push(m.arg || '');
+    const lines = swept ? [] : ['A map you kept: Eternal Demons, 3 objects, 205.8 MB (40.1 MB of it shared with other maps).', 'A map you played: Hell Arena, 1.1 GB.'];
+    const storage = swept ? 'Map content: 205.8 MB for 1 map.' : 'Map content: 1.3 GB for 14 maps.';
+    const message = swept ? 'Removed 1.1 GB of content of maps you only played; playing one of them again gets it back.' : storage;
+    return [{kind: 'modsActionResult', action: 'content', ok: true, message, data: {action: 'content', ok: true, message, storage, lines}}];
+  };
+  const h = harness({store});
+  h.ui.onMessage({kind: 'mods', data: v4});
+  assert.equal(h.nodes.modsContent.children.length, 0, 'nothing shows before the first answer');
+  h.ui.show();
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: ''}});
+  h.ui.onMessage({kind: 'mods', data: v4});
+  const box = h.nodes.modsContent;
+  assert.deepEqual(sentFor, [''], 'the section is read once the fresh list arrives');
+  assert.equal(box.all('mods-content-title')[0].textContent, 'Map content on disk');
+  assert.equal(box.all('mods-content-storage')[0].textContent, 'Map content: 1.3 GB for 14 maps.');
+  assert.deepEqual(box.all('mods-content-line').map(n => n.textContent),
+                   ['A map you kept: Eternal Demons, 3 objects, 205.8 MB (40.1 MB of it shared with other maps).', 'A map you played: Hell Arena, 1.1 GB.']);
+  assert.ok(!/\b(store|hash|salt)\b|[A-Z]:[\\/]/i.test(box.textContent), 'no store, hash, salt or path in the words');
+  const btn = box.tags('button')[0];
+  assert.equal(btn.textContent, 'Remove content of maps you only played');
+  btn.click();
+  assert.deepEqual(h.sent.filter(m => m.action === 'content'),
+                   [{cmd: 'modsAction', action: 'content'}, {cmd: 'modsAction', action: 'content', arg: 'removePlayed'}]);
+  assert.equal(h.nodes.modsStatus.textContent, 'Removed 1.1 GB of content of maps you only played; playing one of them again gets it back.');
+  assert.equal(h.nodes.modsStatus.className, 'mods-status ok');
+  assert.equal(h.toasts.length, 1);
+  assert.equal(h.ui.state().busy, '');
+  assert.equal(box.all('mods-content-storage')[0].textContent, 'Map content: 205.8 MB for 1 map.', 'the section follows the result');
+  assert.equal(box.all('mods-content-line').length, 0);
 });
 test('host and interface contract', () => {
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));

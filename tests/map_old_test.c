@@ -198,7 +198,7 @@ static void edges(void)
         "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],\"string\":["
         VAR("door_label", "Open") "," VAR("smp.bounds.v1", "1;20000") "," VAR("String 2", "bound by index") "]}}";
     static const char current[] =
-        "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\",\"size\":1}]}}";
+        "{\"entities\":[],\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\",\"name\":\"\",\"size\":1,\"local\":true,\"build\":\"" HASH_A "\",\"names\":[]}]}}";
     sh_map_old old;
     char err[200], *out;
     size_t n = 0;

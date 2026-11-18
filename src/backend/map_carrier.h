@@ -3,7 +3,7 @@
  * Snapmap+'s per-map data lives in the map's own file, in one root member the
  * engine does not declare, and never in the author's variable table:
  *
- *   "snapmap-plus":{"format":1,
+ *   "snapmap-plus":{"format":2,
  *       "mods":[<row>,...],
  *       "place":"<segment>",
  *       "settings":{"render":"<text>","bounds":"<text>"},
@@ -11,7 +11,7 @@
  *               "digest":"<16 hex>","geom":"<16 hex>",
  *               "data":["<base64 chunk>",...]},...]}
  *
- *   format    the number 1. Any other value, or a member that is not an
+ *   format    the number 2 (1, before units, is read: its rows are local rows). Any other value, or a member that is not an
  *             object, or a known part of the wrong type (mods and nav arrays,
  *             settings an object, place a string), makes the whole member
  *             malformed: it is logged, read as absent and removed, and the

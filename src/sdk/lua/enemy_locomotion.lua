@@ -119,8 +119,8 @@
 -- the surface's normal. Not measured: the engine's silhouette visibility (the share of sample
 -- points stands in), its dead-end test, and whether a held pose looks right: only a live game says.
 --
--- Adapter calls used: pos, now, trace, nav_ground, entities_near, move_to, move_done, stop, place,
--- surface_hold; optional: trace_demon, path_to(e, point), walk_speed(e), alive(e), def, forward.
+-- Adapter calls used: position, now, trace, ground_below, entities_near, move_to, move_done, stop, place,
+-- surface_hold; optional: trace_demon, path_to(e, point), walk_speed(e), alive(e), definition, forward.
 --
 -- A new mode (flight, swimming) is one more provider:
 --   L.register("fly", { find =, go =, tick =, arrived =, leave =, find_all = })
@@ -252,7 +252,7 @@ end
 
 -- ---------------------------------------------------------------------------------- ground
 L.register("ground", {
-  find = function(self, e, target, parms) return { mode = "ground", pos = parms.pos or self.A.pos(target) } end,
+  find = function(self, e, target, parms) return { mode = "ground", pos = parms.pos or self.A.position(target) } end,
   go = function(self, e, dest) self.A.move_to(e, dest.pos, dest.flags) end,
   arrived = function(self, e) return self.A.move_done(e) end,
   leave = function() end,
@@ -301,7 +301,7 @@ end
 local function visibility(self, from, target, parms)
   if not target then return nil end
   local A = self.A
-  local base = A.pos(target)
+  local base = A.position(target)
   local heights = parms.visibilityHeights or SIGHT_HEIGHTS
   local seen = 0
   for _, h in ipairs(heights) do
@@ -340,14 +340,14 @@ local function make_spot(self, e, target, parms, hit_pos, normal, id)
   local pos = add(hit_pos, mul(normal, radius))
   if holder_of(self, id) ~= nil and holder_of(self, id) ~= e then return reject(parms, "held") end
   if not room_ok(self, hit_pos, normal, radius) then return reject(parms, "no room") end
-  local distance = target and len(sub(A.pos(target), pos)) or nil
+  local distance = target and len(sub(A.position(target), pos)) or nil
   if distance then
     if parms.minDistanceFromEnemy and distance < parms.minDistanceFromEnemy then return reject(parms, "too near") end
     if parms.maxDistanceFromEnemy and distance > parms.maxDistanceFromEnemy then return reject(parms, "too far") end
   end
   local vis = visibility(self, pos, target, parms)
   if not sight_ok(vis, parms) then return reject(parms, "not seen") end
-  local node = A.nav_ground(kind == "ceiling" and pos or add(pos, mul(normal, radius)))
+  local node = A.ground_below(kind == "ceiling" and pos or add(pos, mul(normal, radius)))
   if not node then return reject(parms, "no ground") end
   local path, travel
   -- the demon has to be able to walk to the floor point: the engine's own path, which knows the
@@ -355,7 +355,7 @@ local function make_spot(self, e, target, parms, hit_pos, normal, id)
   if A.path_to then
     path = A.path_to(e, node)
     if not path then return reject(parms, "unreachable") end
-    local straight = len(sub(node, A.pos(e)))
+    local straight = len(sub(node, A.position(e)))
     if path > math.max(straight, radius) * (parms.maxDetour or L.DETOUR) then return reject(parms, "detour") end
     local speed = walk_speed(self, e, parms)
     if speed then
@@ -366,7 +366,7 @@ local function make_spot(self, e, target, parms, hit_pos, normal, id)
   if not jump_ok(self, node, pos) then return reject(parms, "jump blocked") end
   return { mode = "perch", id = id, pos = pos, normal = normal, kind = kind, node = node, base = node,
            path = path, travel = travel, visibility = vis, distance = distance,
-           score = distance or len(sub(pos, A.pos(e))) }
+           score = distance or len(sub(pos, A.position(e))) }
 end
 
 --- Every spot the demon could perch on now, best first (see the contract). The cooldown is not
@@ -374,7 +374,7 @@ end
 function L.perch_spots(self, e, target, parms)
   parms = parms or {}
   local A, out, seen = self.A, {}, {}
-  local from = A.pos(e)
+  local from = A.position(e)
   local reach = parms.searchRadius or perch_parm(self, "reach")
   local function consider(hit_pos, normal, id)
     if seen[id] then return end
@@ -385,9 +385,9 @@ function L.perch_spots(self, e, target, parms)
   -- the map author's own Perch objects
   local def = perch_parm(self, "spot_def")
   for _, x in ipairs(A.entities_near(from, reach) or {}) do
-    local name = A.def and A.def(x) or nil
+    local name = A.definition and A.definition(x) or nil
     if name and name:sub(-#def) == def then
-      local p, fwd = A.pos(x), A.forward(x)
+      local p, fwd = A.position(x), A.forward(x)
       if p and fwd then consider(p, fwd, "placed:" .. tostring(x)) end
     end
   end
@@ -399,10 +399,10 @@ function L.perch_spots(self, e, target, parms)
     local a = i * 2 * math.pi / rays
     local dir = v(math.cos(a), math.sin(a), 0)
     local wall = solid(A, head, add(head, mul(dir, reach)))
-    if wall then consider(wall.pos, wall.normal, string.format("wall:%d:%d:%d", wall.pos.x // 64, wall.pos.y // 64, wall.pos.z // 64)) end
+    if wall then consider(wall.position, wall.normal, string.format("wall:%d:%d:%d", wall.position.x // 64, wall.position.y // 64, wall.position.z // 64)) end
     local mid = add(from, mul(dir, reach * 0.5))
     local top = solid(A, add(mid, v(0, 0, 32)), add(mid, v(0, 0, reach)))
-    if top then consider(top.pos, top.normal, string.format("ceil:%d:%d", top.pos.x // 64, top.pos.y // 64)) end
+    if top then consider(top.position, top.normal, string.format("ceil:%d:%d", top.position.x // 64, top.position.y // 64)) end
   end
   table.sort(out, function(a, b) if a.score ~= b.score then return a.score < b.score end return a.id < b.id end)
   return out
@@ -457,7 +457,7 @@ function L:at_node(e, radius)
   if not spot or self.claims[spot.id] ~= e then return false end
   local p = s.perch
   if p and p.phase ~= "approach" then return false end
-  local d = len(sub(A.pos(e), spot.node))
+  local d = len(sub(A.position(e), spot.node))
   if not A.move_done(e) then return false, d end
   return d <= (radius or perch_parm(self, "arrive_radius")), d
 end
@@ -535,7 +535,7 @@ end
 -- ---- mounting, holding, dismounting ---------------------------------------------------
 local function begin_mount(self, e, s, spot, facing)
   local A = self.A
-  local p = { dest = spot, phase = "mount", t = 0, from = A.pos(e) }
+  local p = { dest = spot, phase = "mount", t = 0, from = A.position(e) }
   if type(facing) == "number" then p.face = L.facing_direction(spot, facing % self:facing_count(), self:facing_count())
   elseif type(facing) == "table" then p.face = sub(facing, spot.pos) end
   s.perch, s.mode = p, "perch"
@@ -548,7 +548,7 @@ function L:mount(e, spot, facing)
   local s, A = self:st(e), self.A
   if not self:has("perch") then return false, "no perch mode" end
   if s.perch and s.perch.phase ~= "approach" then return false, "already on a surface" end
-  if len(sub(A.pos(e), spot.node)) > perch_parm(self, "mount_reach") then return false, "not at the node" end
+  if len(sub(A.position(e), spot.node)) > perch_parm(self, "mount_reach") then return false, "not at the node" end
   local ok, why = self:reserve(e, spot)
   if not ok then return false, why end
   begin_mount(self, e, s, spot, facing)
@@ -584,7 +584,7 @@ L.register("perch", {
       if not A.move_done(e) then return end
       -- the engine's move ended: if it left the demon short of the floor point (a blocked way), the
       -- perch is given up rather than jumped to from the wrong place
-      if len(sub(A.pos(e), p.dest.node)) > perch_parm(self, "mount_reach") then
+      if len(sub(A.position(e), p.dest.node)) > perch_parm(self, "mount_reach") then
         self.claims[p.dest.id] = nil
         s.reserved, s.perch, s.mode = nil, nil, "ground"
         start_cooldown(self, e)
@@ -639,7 +639,7 @@ L.register("perch", {
     elseif p.phase == "dismount" then
       if on_grounded then p.on_grounded = on_grounded end
     else
-      p.phase, p.t, p.from, p.on_grounded = "dismount", 0, self.A.pos(e), on_grounded
+      p.phase, p.t, p.from, p.on_grounded = "dismount", 0, self.A.position(e), on_grounded
       start_cooldown(self, e)
     end
   end,

@@ -488,6 +488,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_NEW_MOD            22    /* arg: a display name: a new mod folder with a working example, then the rescan (any thread) */
 #define SH_MODS_ACT_APPLY              23    /* main thread: finish the file action that ran off it (its "apply": true) */
 #define SH_MODS_ACT_ADD_MINE           24    /* arg: a downloaded map's mod folder: copy it to the root as one of your mods (any thread) */
+#define SH_MODS_ACT_CONTENT            25    /* arg: "" map content on disk; "removePlayed": Remove content of maps you only played, then it (any thread) */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

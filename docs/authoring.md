@@ -24,10 +24,28 @@ its identity and keeps its names apart from the game's and from every other mod'
 | `virtual-textures/` | a private virtual-texture family (`vt-baker.md`) | |
 | `atlases/decals/`, `atlases/lights/`, `atlases/transparency/` | atlas images a converter writes | |
 | `decls/<kind>/` | every other kind of decl, in a folder named as the game names the kind: `decls/damage/`, `decls/snapeditorentitydef/` (Toybox rows), `decls/breakable/` | |
-| `game/` | the game's own files your mod changes or carries, at the game's own path: `game/generated/decls/entitydef/ai/conductor.decl` | |
+| `native/` | DOOM's own files your mod changes, at DOOM's own path: `native/generated/decls/entitydef/ai/conductor.decl` | |
 
-A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. Any other
-folder is a mistake the build names.
+A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. A file in
+any other top-level folder (`assets/` and `game/` included) is a mistake the build names, file by file.
+
+### `native/`
+
+`native/` holds only the DOOM files you change, each at DOOM's own path below it. The DOOM files your mod uses without
+changing them are found by the build and never copied; a copy that is the same as DOOM's own file is not needed, and
+the build says so. A binary in `native/` (a model, an image) replaces DOOM's file only in the maps that use the mod.
+
+A file that is not in a folder of the mod gets one of two sentences, depending on whether DOOM holds a file at that
+path:
+
+- `This mod was not built: <path> is in none of the mod's folders, and DOOM has no file at that path. Put each file in
+  the folder for its kind: ...` (the sentence lists the folders, each with an example).
+- `This mod was not built: <path> is DOOM's own file, outside native/. If you changed it, move it to native/<path>; if
+  you did not, delete it: the build finds DOOM's files the mod uses by itself.`
+
+A file in `native/` at a path DOOM does not hold is the mod's own, not DOOM's, and the build says where it belongs:
+`This mod was not built: native/<path> is not one of DOOM's files, so it is the mod's own; move it to <the folder for
+its kind>.`
 
 ## Names
 
@@ -39,15 +57,20 @@ folder is a mistake the build names.
 - `models/monsters/imp/imp_skin`, `textures/guis/...`, `art/...` and every other name are the game's own, written as
   the game writes them.
 - The game keeps a few names that begin like one of your folders (452 under `effects/`, one under `particles/`). To
-  name one of those, write `game:` before it: `game:effects/explosion`.
+  name one of those, write `native:` before it: `native:effects/explosion`.
 - Strings: a key in `mod.json`'s `strings` is yours, and a decl names it `#str_<key>`. A key that is one of the game's
   own changes the game's text where your mod is used.
 - In a script a call that takes one of your mod's things takes its name without the folder (`play_effect("sparks",
-  pos)` plays `effects/sparks.decl`, `spawn("crate", pos)` places `entities/crate.decl`); `game("...")` names the
-  game's.
+  pos)` plays `effects/sparks.decl`, `spawn("crate", pos)` places `entities/crate.decl`); `native("...")` names
+  DOOM's.
 
-A name of your mod that names nothing your mod has stops the build with the file that names it (an image a
-virtual-textured material names, and a name the game's own text also writes, are reported without stopping it).
+### A sound's event name
+
+A sound decl is named for the Wwise event it plays: `sounds/hit.decl` plays the event `play_hit`, so in a bank of your
+own name that event `play_hit`. Snapmap+ keeps your mod's events apart from DOOM's and from every other mod's; you never
+write anything for that, in the decl, the bank, a text (`sounds/hit`) or a script (`sound(self, "hit")`). To play one
+of DOOM's own events, name it by its event name (`soundShader = "play_arcade_ui_17";`): every DOOM event is a sound of
+that name.
 
 ## A small mod from an empty folder
 

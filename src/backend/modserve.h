@@ -129,6 +129,13 @@ typedef struct sh_modserve_hit {
 char *sh_modserve_bank_rename_text(const char *text, size_t len, const char *stem, const char *renamed, size_t *out_len);
 /* Rewrite a bank's BKHD id to FNV-1 of `stem` in place. 1 done, 0 not a BKHD bank. Pure. */
 int  sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem);
+/* Rewrite every HIRC Event id of a bank that equals from[k] to to[k] in place (the namespace of a mod's sound
+ * events: modserve.c ms_sound_events). The count rewritten. Pure. */
+int  sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count);
+/* Map the namespace `from` (8 characters) to `to` in place wherever the bytes spell it as a name part: after a '/'
+ * or "#str_", before a '/' or '_' (mods/<from>/x, .../<from>_play_x, #str_<from>_key). Length-preserving and
+ * byte-exact (SPEC-distribution D12). The count mapped. Pure. */
+size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, const char *to);
 
 /* Constant-time, allocation-free lookup of an engine request path (any case,
  * either separator). Returns 1 and fills *out (when non-NULL) for a served
@@ -654,8 +661,9 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
 int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
 /* Block the steps of bundles whose cvar requirements are not live (first
- * cause "requirement <cvar>=<value> is not live", or the conflict it lost),
- * except steps already registered. Returns how many were blocked. */
+ * cause "requirement <cvar>=<value> is not live"), except steps already registered. A bundle whose cvar lost a
+ * conflict to another the map uses is not blocked (D-A24): it is served, only its value is not applied (the conflict
+ * line and the requirements report name who won). Returns how many were blocked. */
 int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates);
 
 /* sh_modserve_requirements_apply, then sh_modserve_plan_run: no
@@ -786,12 +794,15 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   gate that takes it can decide (the item is known at the read's
  *   completion; the text carries no place of this machine's). Remembers the
  *   place it replaces, as sh_modserve_place_load does. While pending a row
- *   resolves only at its own build (or the build it was cut from) at the
+ *   resolves only at its own build at the
  *   root: the root's other build of its salt never stands in for it, so
  *   nothing of that build is listed or activated before the gate decides
  *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
  * Any thread. */
-#define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
+#define SH_MODSERVE_PLACES    "maps"   /* the places area of format 1 maps (being retired, DS-T/DS-X) */
+/* The content cache's area (modcache.h): <store root>\.content\served\<composition hash>\, one bundle per pinned map
+ * row, named by its composition hash; a pinned row resolves to its composition only. */
+#define SH_MODSERVE_CONTENT   ".content"
 /* A published map whose item's place is not known (its parse before the gate,
  * a launch no gate saw): a row resolves only at its own build at the root, never
  * the root's other build of its salt. No folder can be named so. */
@@ -943,19 +954,21 @@ typedef struct sh_modserve_bundle_ref {
 /* Filled refs hold malloc'd text: release each with sh_modserve_bundle_ref_free. */
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
 
-/* A published map that uses part of a mod (modslice.h) carries only the
- * files its cut found it needs. A file the game then asks for that the cut
- * left out is a defect of the cut: the map plays on if the game can, and
- * the asked name is recorded. The provider (overrides.c) calls
- * sh_modserve_note_miss with every request it found nowhere; one under
- * mods/<salt>/ of a mod the open map declares by a cut is noted once per map,
- * with the name of the load that asked for it when the main thread's open
- * loads say (`by`, else ""), logged:
+/* A map's object served from its units (a composition, modunit.h, block
+ * "units_of") carries only the files its closure found it needs. A file the
+ * game then asks for that the composition lacks is a defect of the closure:
+ * the map plays on if the game can, and the asked name is recorded. The
+ * provider (overrides.c) calls sh_modserve_note_miss with every request it
+ * found nowhere; one under mods/<salt>/ of a composition (a board square
+ * aside: a unit leaves the squares its materials do not draw out on purpose)
+ * is noted once per process, with the name of the load that asked for it
+ * when the main thread's open loads say (`by`, else ""), logged:
  *   MODS: <mod name> came with this map without <request>, which <by> asked for; the map goes on without it
- * and handed to the bound reporter (modpublished.c: the store keeps it for
- * the map's author, who sees it beside the published map and corrects it by
- * publishing again). Returns 1 when noted now, 0 otherwise. Any thread. */
-typedef void (*sh_modserve_miss_fn)(const char *salt, const char *cut_hash, const char *request, const char *by);
+ * and handed to the bound reporter with the composition's first unit
+ * (modpublish.c: the store keeps it for the publishers of maps that claim the
+ * unit, whose next publish carries the file, SPEC-distribution 3.8). Returns
+ * 1 when noted now, 0 otherwise. Any thread. */
+typedef void (*sh_modserve_miss_fn)(const char *salt, const char *unit, const char *request, const char *by);
 void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn);
 int  sh_modserve_note_miss(const char *request);
 /* The misses noted since the process started: one "<mod name>: <request>"

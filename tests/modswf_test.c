@@ -218,7 +218,7 @@ static void test_builder(void)
     static const sh_mb_resolver resolver = { NULL, NULL, stock, NULL };
     static const char *const movies[] = {
         "movies/panel.bswf",
-        "game/generated/swf/screens_tech/vega_flat.bswf", "game/generated/swf/screens_tech/vega_flat.bimage", NULL };
+        "native/generated/swf/screens_tech/vega_flat.bswf", "native/generated/swf/screens_tech/vega_flat.bimage", NULL };
     char tmp[MAX_PATH];
     sh_mb_bundle b;
     size_t i, swf = 0;
@@ -234,19 +234,14 @@ static void test_builder(void)
     logical("generated/swf/x.bswf", "swf", "swf/x.swf");
     logical("generated/swf/screens_tech/vega_flat.bimage", "file", "generated/swf/screens_tech/vega_flat.bimage");
 
-    /* A stock screen replaced by bytes of the mod's own is a binary at a game
-     * name: no structure to merge, so a build refuses it (DESIGN-additive
-     * 2.4); content the product received keeps it as a replacement. */
+    /* A stock screen replaced by bytes of the mod's own is a binary at a DOOM
+     * path under native/: no structure to merge, so it is a replacement
+     * (SPEC-distribution 3.10), served only to maps that use the mod. */
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modswf_test_%lu\\alex.screens", tmp, GetCurrentProcessId());
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Screens\", "
                     "\"snapmap-plus\": {\"format\": 2, \"salt\": \"screensx\"}}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
-    CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) &&
-          strstr(sh_mb_first_cause(&b), "game/generated/swf/screens_tech/") &&
-          strstr(sh_mb_first_cause(&b), ": the game ships this file and a mod cannot replace it with other bytes; delete your "
-                                "copy and the mod borrows the game's, or put your version in the mod's own folder for what it is and name it there"));
-    sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
     if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
@@ -263,8 +258,8 @@ static void test_builder(void)
     for (i = 0; movies[i]; i++) drop(movies[i]);
     drop("mod.json");
     {
-        static const char *const dirs[] = { "images", "movies", "game\\generated\\swf\\screens_tech",
-            "game\\generated\\swf", "game\\generated", "game", "", NULL };
+        static const char *const dirs[] = { "images", "movies", "native\\generated\\swf\\screens_tech",
+            "native\\generated\\swf", "native\\generated", "native", "", NULL };
         char path[MAX_PATH];
         for (i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_dir, dirs[i]); RemoveDirectoryA(path); }
         *strrchr(g_dir, '\\') = 0;

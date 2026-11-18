@@ -525,7 +525,8 @@ engine root:
 
 | Folder (extension) | Engine request |
 |---|---|
-| `materials/`, `effects/`, `environments/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef,sound}/mods/<salt>/<rest>` |
+| `materials/`, `effects/`, `environments/`, `particles/`, `entities/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef}/mods/<salt>/<rest>` |
+| `sounds/` (`.decl`) | `generated/decls/sound/mods/<salt>/<dirs>/<salt>_<leaf>.decl` (the leaf is the Wwise event name every mod shares, so it takes the namespace; a text name `sounds/x` is `mods/<salt>/<salt>_x`; `sh_ma_request`, `sh_ma_engine_name`, `sh_ma_path`) |
 | `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
 | `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
 | `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
@@ -536,22 +537,26 @@ engine root:
 | `map-modules/` (any), `map-modules/palettes/<p>/`, a `.baas_*` | `maps/modules/mods/<salt>/<rest>`, `maps/modules/palettes/<p>/mods/<salt>/<rest>`, `generated/maps/modules/mods/<salt>/<rest>` |
 | `virtual-textures/` (`.mega2`, `.pages`) | `virtualtextures/mods/<salt>/<rest>` |
 | `decls/<type>/` (`.decl`; not a type with a folder of its own) | `generated/decls/<type>/mods/<salt>/<rest>` |
-| `game/<request>` | `<request>` (a game path; refused under `mods/`) |
+| `native/<request>` | `<request>` (DOOM's own path for a file the mod changes; refused under `mods/`) |
 
-A folder named `assets` is refused with one sentence (the game's layout, which a mod folder no longer uses), and so
-is any other unknown top-level folder; a file beside `mod.json` and a dot folder are not the mod's. The recorded
+A file in a top-level folder that is none of the mod's (`assets/` and `game/` included) is refused per file with one
+of two sentences (`sh_ma_outside_cause`): "<path> is in none of the mod's folders, and DOOM has no file at that path"
+with the folders and an example for each, or, when DOOM holds that path, "<path> is DOOM's own file, outside native/"
+with what to do. A `native/` file at a path DOOM does not hold is refused with the folder of its kind
+(`sh_ma_kind_path`); a non-decl `native/` file at a path DOOM holds with other bytes is a replacement (class REPLACE,
+served only to maps that use the mod), and one identical to DOOM's own warns that the mod does not need it. A file beside `mod.json` and a dot folder are not the mod's. The recorded
 `path` of a file (the block's `files` and `stock` entries, the bundle's `sh_mb_file.path`, sync and export archive
 entries) is its path in the folder; the request is derived from it and the salt. A closure pointer's path is
-`game/<request>`.
+`native/<request>`.
 
 Names (`sh_ma_text`, `sh_ma_engine_name`): in a decl text and in `mod.json`'s author part, a run of name characters
 (`[A-Za-z0-9_./$+@~-]`, starting after a character that is not one) that begins with a folder prefix is the mod's
 and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<rest>`, `animations/` and a `meshes/`
 name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
 `scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
-`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `game:<name>` is written `<name>` (the
+`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `native:<name>` is written `<name>` (the
 installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
-and so is the quoted name of `game("...")`, the Graphics SDK's other spelling of a game name (`ma_in_game_call`).
+and so is the quoted name of `native("...")`, the Graphics SDK's other spelling of a DOOM name (`ma_in_native_call`).
 `#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
 language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
 builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
@@ -559,7 +564,7 @@ build's `mod.json`). Scripts are not rewritten: a script's names are resolved by
 A text may still spell an engine name (`mods/<salt>/x`): it is served as written.
 
 The builder reads every decl through the rewrite (`mb_engine_text`: the needs scan, the look compile, the closure,
-the stock comparison of a `game/` copy and the derived edits all see the engine's text), and the file's identity
+the stock comparison of a `native/` copy and the derived edits all see the engine's text), and the file's identity
 (its SHA-256 in the block) stays the author's bytes. The serving index serves the rewritten text: `ms_engine_names`
 writes each changed decl under `mods\.served\files\<sha16>.decl` and points the file there, before the bank rename,
 so every open, the look filter and the ledger read the engine's bytes, as for a renamed bank. Salting a folder
@@ -615,9 +620,10 @@ These backend files share the work:
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
   `mods/<salt>/` (in the folder, under `programs/`). Of the 494 permutation decls the installed archives hold,
-  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 11 (`SH_MB_RULES`):
-  files beside `mod.json` are ignored, and campaign content derives its requirements, so
-  every own folder is built again once.
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 13 (`SH_MB_RULES`):
+  files beside `mod.json` are ignored, campaign content derives its requirements, `native/` holds DOOM's changed files, a
+  sound decl's leaf takes the namespace and the block may carry `spelled` (the namespace the carried binaries spell),
+  so every own folder is built again once.
 
   Lengths: the product puts no bound of its own on a name, author,
   homepage, request path, folder path, nesting depth, cause or script path.
@@ -651,9 +657,9 @@ These backend files share the work:
   `schema`) is refused with one sentence, "This mod was made for an earlier
   version of Snapmap+. This version does not read it yet."
   (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
-  is damage the sentence names. A folder in the engine's layout (an
-  `assets\` folder) is refused with the sentence naming the folders by
-  kind. Files beside `mod.json` (a README,
+  is damage the sentence names. A file in the engine's layout
+  (an `assets\` folder) is refused by name with one of the two sentences of
+  "The mod folder" above. Files beside `mod.json` (a README,
   `desktop.ini`, a `.git` folder) are ignored and never carried. A mod that
   brings campaign content (a closure pointer or a surface) gets the
   requirement `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 derived by
@@ -1505,11 +1511,13 @@ instead of failing it.
 
 ### Mod sounds
 
-A sound decl a mod carries (`generated/decls/sound/mods/<salt>/<stem>.decl`)
-names the Wwise event `play_<stem>`: the engine computes the event id from the
-decl's own name, so a decl whose stem is a stock event's (an alias) plays that
-stock sound with no bank, and one whose event lives in the mod's own bank
-plays once that bank is loaded. The builder makes a `soundShader` or `sound`
+A sound decl a mod carries (`generated/decls/sound/mods/<salt>/<salt>_<stem>.decl`,
+the author's `sounds/<stem>.decl`) names the Wwise event `play_<salt>_<stem>`: the
+engine computes the event id from the decl's own name, and the leaf takes the
+namespace because every mod's event names would otherwise be the same as
+DOOM's. The author's bank names the event `play_<stem>`; serving rewrites the
+bank's HIRC event ids to the namespaced ones (`sh_modserve_bank_events`), and
+the decl plays once that bank is loaded. The builder makes a `soundShader` or `sound`
 key naming `mods/...` a need of type `sound`; a stock event name is not a need.
 A bank is a file `sounds/<stem>.bnk` in the mod folder, and the engine is
 handed it only as `sound/soundbanks/pc/<salt>_<stem>.bnk` (Wwise opens banks
@@ -2249,8 +2257,8 @@ feature.
   row, `dynamic` counting names set while running); the author part declares
   nothing. An author file at one of the Script node row's two paths is refused
   (`SH_MB_SCRIPT_NODE_RESERVED`). Builder rules 11.
-  A build that carries a script is never sliced (`sh_mb_sliceable`): its
-  scripts may build names while running. Scripts are never rewritten with the salt (the name rule leaves them
+  A unit walks scripts like any file (see [Units](#units)): their literals
+  are names, since they may build names while running. Scripts are never rewritten with the salt (the name rule leaves them
   alone). Archives (publish,
   download, rawmap and prefab exports and imports, installs) carry scripts as
   the files they are, under their lower-case game names (every carried path is
@@ -2355,7 +2363,7 @@ feature.
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
   `on.animation(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
-  `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
+  `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `native(...)` names are
   refused (`sh_script_check_name` applies the same rule to every API call).
   Names, notify strings and node names compare without case.
 - **Queue and tick.** Hooks on any thread post records to the mod's queue
@@ -2530,7 +2538,7 @@ map's own logic, as wired logic is, so every call works on any entity of the
 map: the mod's own (placed from its entityDefs or spawned by its scripts, which
 the handle table records under the mod and its `on.spawn` and other entity
 handlers hear), the game's and another mod's. A name is the mod's own content;
-`game("...")` names the game's wherever a name is taken (`spawn`, the damage,
+`native("...")` names DOOM's wherever a name is taken (`spawn`, the damage,
 projectile and sound decls, `decl`). A removed entity answers nil.
 Every argument is checked before the engine is touched, and every refusal is
 one plain sentence at the calling script line (it stops the mod's scripts for
@@ -3102,7 +3110,7 @@ engine.
 
 `script_api_combat.{c,h}` adds the combat calls; the hooks that deliver what
 happens to a mod's entities are in `script_hooks.c` (below). A decl a call
-names is the mod's own, or the game's through `game("...")`
+names is the mod's own, or DOOM's through `native("...")`
 (`sh_script_check_name`), looked up by type; a name that does not exist is
 refused with one plain sentence. An attacker is any entity; without one the
 damage comes from the world entity, as a trigger's does.
@@ -3708,7 +3716,9 @@ bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
 every scope change): the open map's rows first, in row order, then the
 undeclared ones (an editor's Toybox rows; every bundle with no map open)
 oldest install first. One that asks a cvar a bundle decided before it asks at
-another value loses (one `MODS: requirements: conflict:` line names both), so
+another value loses (one `MODS: requirements: conflict:` line names both): its value is not applied, but the mod is
+still served, its decls registered and its rows placeable, so a map that uses both opens and plays with the first
+mod's value (the requirements report says which won). So
 a map's own mods decide its cvars the same way for every player, and a mod the
 map does not use never takes one from its rows. Before every registration pass, at the Play re-check and after a
 rescan on the main thread outside Play, it applies them: the deactivate lines of
@@ -4327,7 +4337,7 @@ bridge's install (`sh_modstock_set_install`):
   its strings `<salt>_<key>`) and built under the current rules with its
   replacements kept, so a pack that only built under the retired `legacy`
   relaxations is refused alone with its cause. The result is in the engine's
-  layout (`assets/`), which the build now refuses until the installer also
+  layout (`assets/`), which the build refuses (a file outside the mod's folders) until the installer also
   lays a converted folder out by kind (owner, 2026-11-17: converting releases'
   mods is the installer's, not yet done). Moved again into the folder an
   earlier pass made of the same tree (the record's `trees`), it keeps that
@@ -5011,9 +5021,8 @@ sentence. It changes nothing.
 
 What is sent: the builds the published map names in its manifest rows
 (`<salt>@<build hash>`), one archive per build the store lacks, and only
-those, at publish time; of a mod the map uses only part of, the row names the
-cut of the files it needs (see [Part of a mod in a published
-map](#part-of-a-mod-in-a-published-map)). The `SerializeToJson` detour reports each save's
+those, at publish time; a row names a whole build (units are not yet named,
+see [Units](#units)). The `SerializeToJson` detour reports each save's
 final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
 state's callback that runs before the first request to the map service, is
 detoured (`modpublish.c`). A save without rows publishes natively. A text over
@@ -5111,106 +5120,133 @@ keeps the builds on the store until that claim succeeds. Releasing it first
 would let the store delete a build the retry then has to upload again. The
 worker logs the counts.
 
-### Part of a mod in a published map
+### Units
 
-A published map carries, of each mod it uses, only the files it needs
-(`modslice.c`, `modsync_cut_row`), so a player of a map that places one
-object of a large pack downloads that object's files and not the pack. Nobody
-sees a word for it: the row names a build like any other, the publish question
-says what goes up ("This map uses 2 mods and needs 1.2 MB of their 147.0 MB
-of files. Upload those ..."), and the download question states the archive's
-size.
+A unit is the closure of one placed object inside one mod build (`modunit.h`,
+whose header comment is the source of the rules): the files the object needs
+from the mod, the DOOM and product files it uses, and its share of the author's
+`mod.json`. It is named by the SHA-256 of its canonical manifest (keys sorted
+by their UTF-8 bytes, no whitespace), so it never changes, and the same object
+from two builds whose closure did not change is the same unit. Nothing in it
+names the mod's salt, name, author or description, so one unit serves under any
+namespace. Nothing enumerates a mod's objects ahead of time: `sh_unit_of`
+computes the unit of a name a map places (an entityDef the mod adds, a Toybox
+row, a module, or `*` for the whole mod) when the map leaves the machine. Pure
+file and text work, no engine calls, any thread.
 
-The cut point is the publish's own save. `PublishStart` arms it
-(`sh_modpublish_publish_started`); the `SerializeToJson` step
-(`sh_modmanifest_on_save`) hands every row it writes to the bound slicer
-(`sh_modmanifest_set_slicer`, `mp_slice_row` in `modpublish.c`), which cuts it
-only while the arm is fresh. Every other save, every rawmap and prefab
-export and the open map's own record keep whole builds, and the player's own
-maps always follow the root build (a cut row's own map resolves to the root at
-any build, like any row of an own map).
+Publish and export do not yet compute the units of their rows (DS-T, DS-X): a
+map row names units once something pins it. `sh_unit_store` writes a manifest
+at `<mods>\.content\units\<hash>.json`. A unit's share of `mod.json` holds only
+the keys the player's build reads (requirements, strings, hud, companions,
+scenes, animation_events, attachment_tags), so a `version` or a note never
+moves its hash.
 
-The needed set (`sh_slice_needed`) is static and deterministic, from the
-row's placed names and the root folder's build. A map-level row (attached:
-the map uses the mod as a whole), a build with scripts (`sh_mb_sliceable`: a
-script builds names while it runs) and a row with no placed name ship whole.
-Otherwise the walk starts from every file a placed name names, the Toybox rows
-(`snapEditorEntityDef`) of the mod whose bytes name a placed name, and what
-players of an earlier cut asked for (below); always kept are every file at a
-game name that is not an editor tweak (the edited copies, whose edits apply per
-map, and a received build's replacements) and every decl of a type the game
-finds by number rather than by name (`snapAIScore`, `snapAIEncounter`,
-`snapAIEncounterTable`, which the conductor numbers); never kept are editor
-tweaks and the closure pointers the cut's own build derives again. From each
-kept file the walk follows every need the build recorded (companions and scene
-spawns included) and every name its bytes spell under `mods/<salt>/`, text and
-binary alike (a decl's tokens, a mesh's materials, a movie's dictionary): a
-spelled name, read with its last segment's extensions and anything after `$`
-cut and every character but `[a-z0-9/._]` as `_`, reaches the file of that
-name and the file of each of its leading folders (a node path inside an
-animWeb names the animWeb). A stock pointer the folder holds (a borrow or a
-surface) is walked by its needs alone, its bytes being the game's. A reached
-file brings its whole unit: every member of a virtual-texture family (so a
-mod's texture board travels whole), every sound bank once a sound decl is
-kept, every render program once one is, and a module's every file below its own
-name. A reached file that cannot be read, or one of a kind the walk does not
-read, ships the whole build. When the needed set holds every carried file
-but the editor tweaks, or its files and the source's list of files
-(`source.json`, below) come to more than three quarters of the whole build's
-carried bytes, the whole build ships: a second archive of nearly the same size
-saves a player little, and the cut costs the save its build.
+### The map content cache
 
-The cut (`sh_slice_cut`) stages the kept files under
-`mods\.slices\<cut hash>\` (a dot folder no scan reads), with `mod.json`
-holding the source's author part plus the author key `slice-of`
-(`SH_MB_SLICE_KEY`, the source build's hash) and `source.json`
-(`SH_MB_SLICE_SOURCE`, the source build's canonical manifest, whose SHA-256 is
-`slice-of`) beside it; builds it against the game alone (no other mod); and
-proves it: the build succeeds, every carried file is the source's own bytes,
-and every need a kept file resolved inside the source resolves inside the cut.
-Any failure ships the whole build with one `MODS: publish: <mod> goes with the
-map whole: <why>` line. Because `slice-of` is an author key it is in the
-canonical manifest: two maps that need the same files of one build name one
-hash and share one archive, and the key cannot be edited away. The row is
-`{"mod":"<salt>@<cut hash>","of":"<source hash>",...}` with the cut's carried
-size. The publish's upload finds the staged folder by its hash
-(`msy_slice_find`), sends `source.json` with the archive, and removes the folder
-once its upload and claim are done; a queued upload keeps it, and the launch
-removes any other (`modsync_slices_tidy`).
+Format 2 rows (`modmanifest.h`, SPEC-distribution 2.7, D6a): a pinned row names
+the units of the objects it places (`"objects"`, and `"whole"` for a map-level
+row); a local row (`"local": true`) follows the local folder of its namespace
+and names no unit until a publish or an export pins it. It carries the local
+`build` it was saved from only for the format 1 import path (the places of
+`mods\maps\`, still read for local rows until DS-X retires them). A save
+computes no unit: a pinned row the open map serves through its composition
+keeps its units; a row a local folder serves is written as a local row.
 
-Serving: the one place resolver takes the root folder of the salt at the row's
-hash or at its `of`, so a player who has the whole mod at that build downloads
-nothing; else the map's place. A cut is never a root folder: the scan refuses
-a folder with `slice-of` at the root (`SH_MB_SLICE_ROOT`, in `modstore.c` and
-the serving index), Add to my mods and every install to the root refuse it
-with the same sentence, and the Mods tab offers no Add to my mods for it
-(`part`). A download verifies the archive as any build and also that its
-`slice-of` is the row's `of` and its `source.json` hashes to it, and keeps
-`source.json` beside `mod.json`. A map without a place (My Maps) cannot use a
-cut: the fetch says so in one sentence (`MODSYNC_PART_ONLY`) and downloads
-nothing.
+`modcache.c` keeps one cache per machine at `<mods>\.content\`: each file once
+in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in
+`units\`, and per pinned row a composition at `served\<composition hash>\`, a
+built mod folder (`sh_unit_compose_ex`) whose files are hard links to the blobs
+or to a local mod's files of the same SHA-256 (D21; a local file is checked
+again whenever its size or time changed, D51), with `served\<hash>.json`
+saying what it holds. The composition hash (`sh_modmanifest_composition_hash`)
+is the pinned row's build hash in memory, and the serving index scans
+`.content\served\` as an area of its own, so the map scope declares the
+composition as it declares any build and a pinned row resolves to its
+composition only.
 
-The miss: the provider (`ov_open_body`) calls `sh_modserve_note_miss` for
-every request it found nowhere. One under `mods/<salt>/` of a mod the open map
-declares by a cut, which the source build had (its `source.json` lists it), is
-a defect of the cut: the map plays on if the game can, and the request is
-noted once per cut with the name of the load that asked for it (the main
-thread's open loads, `sh_modserve_attrib_enter`), logged (`<mod> came with
-this map without <request>, which <load> asked for; the map goes on without
-it`), listed by `sh_mods status`, and posted to the store
-(`modnet_report_asked`, `POST /mods/build/<cut>/asked`, a pool thread; only
-the request and the asking name are sent). The author's launch job asks the
-store, for every claim it holds, what players asked for
-(`modsync_asked_refresh`, `POST /mods/asked` with the claim's secret) and keeps
-it in the record's `asked` section; the Mods tab's map view lists each under
-"Missing for players" beside the published map ("Players of this map were
-missing <file> from <mod>, which <load> asks for. Publish the map again and it
-goes with the map."), and the next publish's cut of that mod seeds the walk
-with every request asked of it (`modsync_asked_for`), so republishing carries
-it; the re-claim replaces the earlier cut, which the store deletes once nothing
-claims it.
+Every map load (`sh_cache_on_load`, bound as the manifest's content step)
+composes the pinned rows whose composition is not on disk from what is here;
+an object whose unit is not here stands in (D60): every name the map places
+under the namespace that no present unit provides becomes an entityDef
+inheriting `snapmaps/unknown`, so the map, its logic and its saves keep the
+object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
+published-map gate treats a pinned row as missing until its composition is
+complete: it asks no question and probes nothing, fetches the absent units on
+the network worker (`sh_cache_prepare`: the store's status, the manifest, then
+the unit's archive when more than half of its bytes are missing, else each
+file, a broken-off file resumed by Range, every byte checked), composes again,
+says what the map plays without, and resumes. A joiner leaves the lobby while
+it downloads (D27). An editor open composes only from what is here and says S2.
+A module whose unit is absent is left out (a module stand-in is a live check).
+
+The sweep (`sh_cache_sweep`, at start on a thread of its own, and from the Mods
+tab) keeps every unit a kept map names (the game's `saved-maps` and, unless
+the player chose Remove content of maps you only played, `published-maps`),
+the open map's and those of uploads in progress, and removes the rest, then the
+files no remaining manifest names, then the compositions no kept map uses. It
+never touches a local mod's files and never runs on a timer. The Mods tab's
+"Map content on disk" (the `content` action) reports it from this computer
+alone.
+
+`sh_cache_publish_unit` uploads a unit the store lacks (begin, archives of at
+most one request, a larger file in parts, complete), whoever authored the mod;
+`modkey.c` holds the publishing key (ECDSA P-256 with CNG, the private half and
+the claim seed under DPAPI in `%LOCALAPPDATA%\snapmap-plus\publishing\`), signs
+every write and derives each map's claim secret. The publish hold, the claim
+and self-repair are DS-T; the key's backup, restore and the account name read
+are DS-K.
+
+The closure follows these rules:
+
+- Seeds: the root's file; for an entityDef, the Toybox rows that place it;
+  every DOOM file the mod changes that is not an editor tweak, in every unit
+  (edits and replacements apply wherever the mod is used), though they never
+  reach the mod's own entityDefs (a registry names every object); decls of a
+  type the game finds by enumeration (`sh_unit_enumerated_type`: the AI scores
+  and encounters, which the conductor numbers) travel with the def the
+  conductor's changed copy pairs their `aiType` with; `animation_events` and
+  `attachment_tags` md6Defs travel in every unit; and the requests players
+  asked for and did not get (`sh_unit_env.asked`, from the store), kept with
+  the unit that holds the decl that asked, or with every unit when none is
+  named.
+- Edges: every need the build recorded for a kept file; every name a kept text
+  spells, read as the engine reads it (`sh_unit_key`); every name a kept binary
+  spells, under the namespace it was written with (the block's `spelled`). A
+  name reaches the file of that name with its extensions cut and the file of
+  each of its leading folders.
+- Whole kinds: a sound bank holding the event of a kept sound decl (a bank
+  chosen once per event); a render program with its permutations and SPIR-V; a
+  module's every file below its own name; a model with its mesh and skeleton.
+- Scripts: an entry script comes with the defs it binds or names in a literal;
+  every module a kept script requires; every string literal of a kept script is
+  a name of the mod and, ending in `/`, `_`, `-` or `.`, a prefix of names.
+- Boards: a virtual texture is cut at the square. A material's `landpagefile`
+  and `virtualmapping` decide which `_sq<N>.mega2` squares are kept.
+- Pointers: DOOM and product files a kept file reaches, with their SHA-256 and
+  archive (`at` is the mod's own path where the folder holds DOOM's bytes). A
+  pointer is never carried.
+- The `mod` share is mod.json's author keys but `name`, `description`,
+  `author` and `homepage`, filtered to the kept files.
+- There is no size rule: a unit is as big as its closure.
+
+The proof: every carried file is the build's own bytes, and every need a kept
+file resolves inside the build resolves inside the unit. A unit that fails is
+the builder's defect, and the caller ships the whole build for that row.
+
+A composition (`sh_unit_compose`) is a mod folder built from units: every
+carried file of every unit, each checked against its SHA-256 as it is copied,
+a `mod.json` of the merged shares under a salt and a display name, built
+against the game alone, with the block's `units_of` naming the units. The
+provider's miss report (`sh_modserve_note_miss`) fires only for a composition's
+namespace (an absent board square excepted), reported with the composition's
+first unit; the asked requests the store returns seed the units of the next
+publish.
 
 ### The mod store transport
+
+The store now speaks units (`modnet.h`, its units section: status, manifest, blob and archive reads with Range
+resume, begin, archives, parts, complete, signed claims with a rev, release, asked). It answers the build routes below
+with 410; the publish and download paths that still call them move to units in DS-T.
 
 The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
 (`modzip.c`, method 0, ZIP64 where a value needs it) named by the build hash at
@@ -5226,11 +5262,9 @@ chunk at a time with progress, of any size), `POST /mods/claim`
 number of builds, 409 when a build is not stored) and `POST /mods/release`,
 after which the store deletes every build no claim names. There is no blob
 store and no manifest of its own: two mods with the same files are two
-archives. Part of a build (a published map's cut, see [Part of a mod in a
-published map](#part-of-a-mod-in-a-published-map)) is an archive like any
-other plus `source.json`; `POST /mods/build/<hash>/asked {"request","by"}`
-(`modnet_report_asked`) tells the store a player's game lacked a file of such
-a part, and `POST /mods/asked {"claim","secret"}` (`modnet_list_asked`) lists
+archives. `POST /mods/build/<hash>/asked {"request","by"}`
+(`modnet_report_asked`) tells the store a player's game lacked a file a
+composition's namespace asked for, and `POST /mods/asked {"claim","secret"}` (`modnet_list_asked`) lists
 those reports for the claim's holder.
 
 Nothing limits a build (DECISIONS 26). One request body is the platform's

@@ -547,6 +547,8 @@ function previewMods(o) {
                                        : result(false, 'The browser preview has no files for this mod.')];
   if (a === 'modFileText') return [result(true, '', {key: key, path: path, productBlock: path === 'mod.json',
                                                      text: "// Browser preview: in the game this is the file's text.\r\n"})];
+  if (a === 'content') return [result(true, 'Map content: 1.3 GB for 14 maps.', {storage: 'Map content: 1.3 GB for 14 maps.',
+    lines: ['A map you kept: Eternal Demons, 3 objects, 205.8 MB (40.1 MB of it shared with other maps).']})];
   return [result(false, 'Browser preview: this runs in the game.')];
 }
 function previewHandle(o) {

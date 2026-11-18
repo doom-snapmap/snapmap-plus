@@ -8,7 +8,7 @@
  * not carry (another mod's included), a name in another mod's namespace, and
  * any script when no compile check is registered. The static pass records
  * what the scripts bind in the builder block ("scripts"), which survives a
- * write and a load; a build with scripts is never sliceable. A new folder's
+ * write and a load. A new folder's
  * first install lowercases every path below assets\ and rewrites mods/<folder>/
  * inside its .lua like any text (DECISIONS 13, 6); the serving index lists the
  * scripts with their recorded hashes and serves those bytes; the publish
@@ -215,13 +215,13 @@ static void test_builds(void)
     good_mod(dir, sizeof dir);
     CHECK(build(dir, &b));
     if (b.errors) fprintf(stderr, "  %s\n", sh_mb_first_cause(&b));
-    CHECK(b.script_files == 2 && b.warnings == 0);
+    /* the entry spells the engine's name of its own mod once (line 5): D14 warns, one warning, and still builds */
+    CHECK(b.script_files == 2 && b.warnings == 1 && b.first_warning && strstr(b.first_warning, "line 5 writes mods/" SALT "/ai/door"));
     CHECK(b.scripts && !strcmp(b.scripts, "{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],\"name\":\"ai/door\"}],"
                                          "\"files\":2,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
     if (b.scripts) printf("  scripts: %s\n", b.scripts);
     f = find_file(&b, "mods/" SALT "/scripts/door.lua");
     CHECK(f && f->ptype && !strcmp(f->ptype, "script") && f->cls == SH_MB_CLASS_ADD && !f->stock);
-    CHECK(!sh_mb_sliceable(&b));
     CHECK(HO(rel, sh_mb_write(&b, dir, HO_P(0))));
     memset(&back, 0, sizeof back);
     if (!sh_mb_load_folder(dir, &back)) fprintf(stderr, "  load: %s\n", sh_mb_first_cause(&back));
@@ -230,11 +230,11 @@ static void test_builds(void)
     sh_mb_free(&back);
     sh_mb_free(&b);
 
-    printf("-- a mod without scripts records none and may be sliced\n");
+    printf("-- a mod without scripts records none\n");
     good_mod(dir, sizeof dir);
     mt_delete(dir, ENTRY);
     mt_delete(dir, LIB);
-    CHECK(build(dir, &b) && !b.scripts && b.script_files == 0 && sh_mb_sliceable(&b));
+    CHECK(build(dir, &b) && !b.scripts && b.script_files == 0);
     sh_mb_free(&b);
 
     printf("-- a bound name the mod does not define is a warning with the line\n");

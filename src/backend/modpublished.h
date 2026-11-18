@@ -368,6 +368,14 @@ typedef struct sh_modpub_ops {
      * from here, as a hub launch does (modui.h sh_modui_scope_launch). NULL
      * counts as none. */
     void (*scope_play)(void *c, const char *why);
+    /* The content cache (modcache.h), for rows that name units. content_complete: 1 when a pinned row's composition is
+     * on disk with nothing stood in (NULL counts as yes). content_notice: the one sentence of what the loaded map plays
+     * without (S2-S6), once (malloc'd), or NULL. content_pending: 1 while such a sentence waits. content_drop: forget
+     * it (a gate took the load). NULL counts as none. */
+    int  (*content_complete)(void *c, const sh_modmanifest_row *row);
+    char *(*content_notice)(void *c);
+    int  (*content_pending)(void *c);
+    void (*content_drop)(void *c);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it

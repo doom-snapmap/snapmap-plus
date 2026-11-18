@@ -123,7 +123,7 @@ static int get_flag(ectx *c, const sdk_group *g, sdk_word_id w, int *out, int *h
     FAIL(c, it->line, "'%s' is %s or %s.", sdk_word(w), SDK_W(V_YES), SDK_W(V_NO));
 }
 
-/* A name: a word or a quoted name (the mod's own, as written) or game("...") (the game's). */
+/* A name: a word or a quoted name (the mod's own, as written) or native("...") (DOOM's). */
 static int get_name(ectx *c, const sdk_group *g, sdk_word_id w, char *out, size_t cap, int *have)
 {
     const sdk_item *it = fld(g, w);
