@@ -508,8 +508,11 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
             out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
             memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
         } else if (ml == SH_MODMANIFEST_SALT_LEN) {
+            char build[SH_MODMANIFEST_HASH_CAP];
             memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN + 1);
             strcpy_s(out->build, sizeof out->build, SH_MODMANIFEST_LOCAL_BUILD);
+            if (mm_member_text(&object, "build", build, sizeof build, 0) && sh_modmanifest_valid_hash(build, strlen(build)))
+                strcpy_s(out->build, sizeof out->build, build);
         } else {
             MM_ERR("row has no valid mod");
             goto done;
@@ -645,7 +648,10 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         mm_put(&t, "}", 1);
         if (whole) { mm_put(&t, ",\"whole\":", 9); mm_put_quoted(&t, whole); }
     } else {
-        mm_put(&t, ",\"local\":true,\"names\":[", 23);
+        mm_put(&t, ",\"local\":true", 13);
+        /* The local build it was saved from: what a format 1 import installs (until DS-X moves imports to units). */
+        if (strcmp(row->build, SH_MODMANIFEST_LOCAL_BUILD)) { mm_put(&t, ",\"build\":\"", 10); mm_put(&t, row->build, strlen(row->build)); mm_put(&t, "\"", 1); }
+        mm_put(&t, ",\"names\":[", 10);
         for (i = 0; i < row->name_count; i++) {
             if (i) mm_put(&t, ",", 1);
             mm_put_quoted(&t, row->names[i]);

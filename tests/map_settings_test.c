@@ -21,7 +21,7 @@ void backend_log(const char *s) { (void)s; logs++; }
     "\"boolean\":[],\"string\":[" strings "],\"~type\":\"idSnapVariables\"},\"version\":111" member "}"
 #define MAP(alloc, strings) MAPM(alloc, strings, "")
 /* The member as a save writes it (map_carrier.h). */
-#define SET(body) ",\"snapmap-plus\":{\"format\":1,\"settings\":{" body "}}"
+#define SET(body) ",\"snapmap-plus\":{\"format\":2,\"settings\":{" body "}}"
 #define BOTH SET("\"render\":\"4;0\",\"bounds\":\"1;32671\"")
 
 static void on_both(sh_map_settings *s)
@@ -118,7 +118,7 @@ int main(void)
         HeapFree(GetProcessHeap(), 0, b);
         /* A root with no member at all gains one without a leading comma. */
         b = put("{}", &on, &r);
-        assert(b && !strcmp(b, "{\"snapmap-plus\":{\"format\":1,\"settings\":{\"render\":\"4;0\",\"bounds\":\"1;32671\"}}}"));
+        assert(b && !strcmp(b, "{\"snapmap-plus\":{\"format\":2,\"settings\":{\"render\":\"4;0\",\"bounds\":\"1;32671\"}}}"));
         HeapFree(GetProcessHeap(), 0, b);
     }
 
@@ -134,7 +134,7 @@ int main(void)
         assert(b && !strcmp(b,
             "{\n  \"variables\": {\n    \"allocCount\": [0, 0, 0, 0, 1],\n    \"string\": [\n"
             "      {\"info\": {\"name\": \"String 1\", \"~type\": \"snapVarInfo_t\"}, \"initialValue\": \"x\"}\n"
-            "    ]\n  },\"snapmap-plus\":{\"format\":1,\"settings\":{\"render\":\"4;0\"}}\n}\n"));
+            "    ]\n  },\"snapmap-plus\":{\"format\":2,\"settings\":{\"render\":\"4;0\"}}\n}\n"));
         take(b, &s, &r);
         assert(r.member && sh_map_render_unlocked(&s.render));
         HeapFree(GetProcessHeap(), 0, b);

@@ -1494,8 +1494,17 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
     if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_PLACES)) {
-        /* The retired places area (mods\maps\, before the content cache): never read; a map's content is its units,
-         * composed in the content cache (modcache.h). */
+        /* The places area of the builds a format 1 map brought (mods\maps\<segment>, before units): read for those
+         * maps' local rows until the import and download paths that write it move to the content cache (DS-T, DS-X);
+         * a pinned row never resolves here. Each child folder is a map's place, walked as its own area. */
+        ms_scan_item places = *at;
+        size_t first = stack->n, i;
+        ms_scan_list_folder(&places, stack);
+        for (i = first; i < stack->n; i++) {
+            stack->d[i].kind = MS_SCAN_FOLDER;
+            stack->d[i].top = 0;
+            stack->d[i].place = ms_strdup(x, stack->d[i].rel);
+        }
         return;
     }
     probe = sh_textf("%s\\mod.json", at->dir);
@@ -7991,9 +8000,9 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
     /* A pinned row is served by its composition only: a local mod never stands in for a map's units (D21); its
      * files serve the composition by exact hash instead (modcache.h). */
     if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
-    (void)place;   /* places are retired: a local row follows the root folder of its namespace */
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
     if (at >= 0) return at;
+    if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
     return ms_salt_in(x, salt, NULL, "");
 }
 

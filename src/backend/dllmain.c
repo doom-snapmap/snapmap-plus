@@ -36,6 +36,8 @@
 #include "modhud_scene.h"
 #include "modscene_place.h"
 #include "modstore.h"
+#include "modcache.h"
+#include "modmanifest.h"
 #include "modstock.h"
 #include "modlook.h"
 #include "sdk.h"
@@ -225,6 +227,13 @@ static void install_features(const sig_result *results, size_t db)
         memset(&boot_r, 0, sizeof boot_r);
         boot_r.stock = boot_stock_exists;
         (void)sh_ms_boot_sync(&boot_r, sh_modserve_index_rescan, 1);
+        /* The map content cache (modcache.h): compositions build as the store builds, the index admits them, and
+         * every load composes its rows' units; at start the cache drops what no kept map names (5.17). */
+        sh_cache_set_store_root(sh_ms_root);
+        sh_cache_set_resolver(&boot_r);
+        sh_cache_set_rescan(sh_modserve_index_rescan);
+        sh_modmanifest_set_content(sh_cache_on_load);
+        sh_cache_sweep_async();
     }
 
     /* Inject custom #str_ entries before the first top-level language-table sort,

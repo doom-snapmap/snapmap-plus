@@ -1226,6 +1226,8 @@ void sh_cache_on_load(const sh_modmanifest_list *rows, char *const *placed, size
 {
     size_t i, made = 0;
     if (!rows) return;
+    sh_cache_notice_drop();   /* only this load's rows say what it plays without */
+    sh_cache_local_changed(); /* the local mods' files as they are now (a Refresh may have rebuilt them) */
     sh_cache_note_rows(rows, placed, count);
     for (i = 0; i < rows->count; i++) {
         char *why = NULL;
@@ -1553,4 +1555,135 @@ int sh_cache_report(sh_cache_line_fn fn, void *context)
     free(line);
     free(rep.files.v);
     return (int)rep.lines;
+}
+
+/* The sweep at start, off the boot thread. */
+static DWORD WINAPI mc_sweep_thread(LPVOID unused)
+{
+    (void)unused;
+    (void)sh_cache_sweep(0, NULL, 0, NULL);
+    return 0;
+}
+
+void sh_cache_sweep_async(void)
+{
+    HANDLE h = CreateThread(NULL, 0, mc_sweep_thread, NULL, 0, NULL);
+    if (h) CloseHandle(h);
+}
+/* ------------------------------------------------------------ upload (5.3 steps 2-6) */
+
+/* Read a whole file (UTF-8 path) into memory; NULL when it cannot be read. */
+static unsigned char *mc_read_all(const char *path, unsigned long long size, size_t *len)
+{
+    return sh_mb_read_file(path, (size_t)size + 1, len);
+}
+
+int sh_cache_publish_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, sh_cache_upload_stats *stats,
+                          char **why)
+{
+    mc_unit u;
+    char (*missing)[MODNET_HASH_HEX + 1] = NULL;
+    size_t nmissing = 0, i, f;
+    int held = 0, code;
+    modnet_result r;
+    sh_cache_upload_stats st;
+    char *dir = mc_path("partial");
+    memset(&st, 0, sizeof st);
+    if (why) *why = NULL;
+    mc_unit_load(&u, hash);
+    if (u.state == -1 || u.state == -2) { mc_unit_free(&u); free(dir); if (why) *why = sh_text("the unit's manifest is not here"); return MODNET_E_ARG; }
+    code = modnet_begin_unit(hash, u.bytes, u.len, signer, &held, &missing, &nmissing, io, &r);
+    st.requests += r.requests;
+    if (code != MODNET_OK) goto done;
+    if (held) { st.held = 1; goto done; }
+    /* The blobs the store lacks: those larger than one request in parts, the rest in archives of at most one request,
+     * each with unit.json. Every file is read from here (the cache, or a local mod's file of that SHA-256). */
+    {
+        sh_zip_writer w;
+        char *zpath = NULL;
+        unsigned long long in_zip = 0;
+        int open = 0;
+        memset(&w, 0, sizeof w);
+        w.h = INVALID_HANDLE_VALUE;
+        for (i = 0; i <= nmissing && code == MODNET_OK; i++) {
+            const mc_file *file = NULL;
+            char *src = NULL;
+            int flush = i == nmissing;
+            if (!flush) {
+                for (f = 0; f < u.nfiles && !file; f++) if (!strcmp(u.files[f].sha, missing[i])) file = &u.files[f];
+                if (!file || !(src = mc_source_of(file->sha, file->size))) {
+                    code = MODNET_E_ARG;
+                    if (why) *why = sh_textf("%s is not on this computer", file ? file->path : "a file of the unit");
+                    free(src);
+                    break;
+                }
+                if (file->size > MODNET_ONE_REQUEST_MAX - (1u << 20)) {
+                    code = modnet_put_blob(file->sha, src, file->size, signer, io, &r);
+                    st.requests += r.requests;
+                    st.bytes_sent += r.sent;
+                    st.parts += r.parts;
+                    free(src);
+                    continue;
+                }
+                flush = open && in_zip + file->size + 65536 > MODNET_ONE_REQUEST_MAX - (1u << 20);
+            }
+            if (flush && open) {
+                unsigned long long size = w.off;
+                int ok = sh_zip_writer_finish(&w), now = 0;
+                if (w.h != INVALID_HANDLE_VALUE) { size = w.off; FlushFileBuffers(w.h); CloseHandle(w.h); w.h = INVALID_HANDLE_VALUE; }
+                sh_zip_writer_free(&w);
+                open = 0;
+                if (!ok) { code = MODNET_E_ARG; if (why) *why = sh_text("the upload could not be written"); free(src); break; }
+                code = modnet_put_unit_archive(hash, zpath, size, signer, &now, io, &r);
+                st.requests += r.requests;
+                st.bytes_sent += r.sent;
+                st.archives++;
+                mc_delete(zpath);
+                free(zpath);
+                zpath = NULL;
+                in_zip = 0;
+                if (code != MODNET_OK) { free(src); break; }
+            }
+            if (i == nmissing) { free(src); break; }
+            if (!open) {
+                wchar_t *wz;
+                zpath = sh_textf("%s\\%s.upload-%lu.zip", dir ? dir : ".", hash, GetCurrentThreadId());
+                wz = zpath && dir && mc_mkdirs(dir) ? sh_mb_wpath(zpath) : NULL;
+                if (!wz || !sh_zip_writer_open(&w, wz) || !sh_zip_writer_add(&w, "unit.json", u.bytes, u.len)) {
+                    free(wz);
+                    code = MODNET_E_ARG;
+                    if (why) *why = sh_text("the upload could not be written");
+                    free(src);
+                    break;
+                }
+                free(wz);
+                open = 1;
+            }
+            {
+                size_t len = 0;
+                unsigned char *bytes = mc_read_all(src, file->size, &len);
+                if (!bytes || len != file->size || !sh_zip_writer_add(&w, file->path, bytes, len)) {
+                    code = MODNET_E_ARG;
+                    if (why) *why = sh_textf("%s could not be read", file->path);
+                }
+                in_zip += file->size;
+                free(bytes);
+            }
+            free(src);
+        }
+        if (open) { sh_zip_writer_free(&w); if (zpath) mc_delete(zpath); }
+        free(zpath);
+    }
+    if (code == MODNET_OK) {
+        code = modnet_complete_unit(hash, signer, io, &r);
+        st.requests += r.requests;
+        if (code == MODNET_OK) st.held = 1;
+    }
+done:
+    if (code != MODNET_OK && why && !*why) *why = sh_text(r.message ? r.message : modnet_code_text(code));
+    if (stats) *stats = st;
+    free(missing);
+    mc_unit_free(&u);
+    free(dir);
+    return code;
 }

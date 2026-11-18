@@ -241,9 +241,9 @@ static void test_rows_format2(void)
     strcpy_s(local.build, sizeof local.build, "3333333333333333333333333333333333333333333333333333333333333333");
     CHECK(sh_modmanifest_row_add_name(&local, "mods/" SALT "/crate"));
     v = sh_modmanifest_format_value(&local, &len);
-    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"names\":[\"mods/" SALT "/crate\"]}"));
+    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"build\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"names\":[\"mods/" SALT "/crate\"]}"));
     CHECK(v && sh_modmanifest_parse_value(v, len, &back, err, sizeof err) && !back.pinned &&
-          !strcmp(back.build, SH_MODMANIFEST_LOCAL_BUILD));
+          !strcmp(back.build, "3333333333333333333333333333333333333333333333333333333333333333"));
     free(v);
     sh_modmanifest_row_free(&back);
     /* A format 1 row is a local row at its build (D7). */

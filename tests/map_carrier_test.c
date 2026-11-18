@@ -31,7 +31,7 @@ static const char ENGINE[] = ENGINE_HEAD "}";
 #define MODS "[{\"mod\":\"aaaabbbb@x\",\"size\":1,\"names\":[]}]"
 #define SETTINGS "{\"render\":\"4;0\",\"bounds\":\"1;32671\"}"
 #define NAV "[{\"module\":\"a/b\",\"class\":\"monster48\",\"digest\":\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":[\"QUJD\",\"RUZH\"]}]"
-#define MEMBER(parts) ",\"snapmap-plus\":{\"format\":1" parts "}"
+#define MEMBER(parts) ",\"snapmap-plus\":{\"format\":2" parts "}"
 
 static char *put(const char *json, const char *part, const char *value, size_t *n, char *err, size_t cap)
 {
@@ -124,7 +124,7 @@ static void placement(void)
         CHECK(out && !strcmp(out, "{\"version\":111}"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
         out = put(first, "settings", "{}", &n, err, sizeof err);
-        CHECK(out && !strcmp(out, "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"mods\":[],\"settings\":{}}}"));
+        CHECK(out && !strcmp(out, "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"mods\":[],\"settings\":{}}}"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
     }
     {
@@ -135,7 +135,7 @@ static void placement(void)
     }
     /* The only member. */
     out = put("{}", "mods", "[]", &n, err, sizeof err);
-    CHECK(out && !strcmp(out, "{\"snapmap-plus\":{\"format\":1,\"mods\":[]}}"));
+    CHECK(out && !strcmp(out, "{\"snapmap-plus\":{\"format\":2,\"mods\":[]}}"));
     if (out) {
         char *back = sh_carrier_strip(out, n, &n);
         CHECK(back && !strcmp(back, "{}"));
@@ -178,7 +178,7 @@ static void malformed(void)
     static const char *const bad[] = {
         "{\"version\":111,\"snapmap-plus\":[1,2]}",                                   /* not an object */
         "{\"version\":111,\"snapmap-plus\":{\"mods\":[]}}",                            /* no format */
-        "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"mods\":[]}}",               /* another format */
+        "{\"version\":111,\"snapmap-plus\":{\"format\":3,\"mods\":[]}}",               /* another format */
         "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"mods\":\"garbage\"}}",      /* a part of the wrong type */
         "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"settings\":[]}}",
         "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"nav\":{}}}",
@@ -195,7 +195,7 @@ static void malformed(void)
         if (out) HeapFree(GetProcessHeap(), 0, out);
         /* A save replaces it with a good one. */
         out = put(bad[i], "mods", "[]", &n, err, sizeof err);
-        CHECK(out && !strcmp(out, "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"mods\":[]}}"));
+        CHECK(out && !strcmp(out, "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"mods\":[]}}"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
         {
             char line[200];
@@ -208,7 +208,7 @@ static void malformed(void)
         static const char future[] = "{\"snapmap-plus\":{\"format\":1,\"later\":{\"x\":[1]},\"mods\":[]}}";
         CHECK(sh_carrier_view_read(future, sizeof future - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT && v.mods.present);
         out = put(future, "nav", "[]", &n, err, sizeof err);
-        CHECK(out && !strcmp(out, "{\"snapmap-plus\":{\"format\":1,\"mods\":[],\"nav\":[]}}"));
+        CHECK(out && !strcmp(out, "{\"snapmap-plus\":{\"format\":2,\"mods\":[],\"nav\":[]}}"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
     }
 }

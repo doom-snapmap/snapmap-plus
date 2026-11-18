@@ -842,7 +842,7 @@ static void test_carrier(void)
         CHECK(strstr(saved, "\"string\":[]") && strstr(saved, "\"allocCount\":[0,0,0,0,0,0,0,0,0,16]"));
         CHECK(!memcmp(saved, base, base_len - 1));
         {
-            static const char lead[] = ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE
+            static const char lead[] = ",\"snapmap-plus\":{\"format\":2,\"nav\":[{\"module\":\"" BASE_MODULE
                                        "\",\"class\":\"monster48\",\"digest\":\"";
             CHECK(!strncmp(saved + base_len - 1, lead, sizeof lead - 1));
         }

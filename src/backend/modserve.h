@@ -798,7 +798,7 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   nothing of that build is listed or activated before the gate decides
  *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
  * Any thread. */
-#define SH_MODSERVE_PLACES    "maps"   /* the retired places area under the store root: never read */
+#define SH_MODSERVE_PLACES    "maps"   /* the places area of format 1 maps (being retired, DS-T/DS-X) */
 /* The content cache's area (modcache.h): <store root>\.content\served\<composition hash>\, one bundle per pinned map
  * row, named by its composition hash; a pinned row resolves to its composition only. */
 #define SH_MODSERVE_CONTENT   ".content"

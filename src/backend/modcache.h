@@ -146,6 +146,9 @@ void  sh_cache_set_map_folders(const char *saved, const char *published);
  * local mod's files, never runs on a timer. 1 done. */
 int   sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out);
 
+/* The sweep at start (dllmain.c), on a thread of its own. */
+void  sh_cache_sweep_async(void);
+
 /* ------------------------------------------------------------ the Mods tab (2.10) */
 
 /* Map content on disk: one call per kept map with what its rows hold, then the storage line ("Map content: 1.3 GB
@@ -154,5 +157,19 @@ typedef void (*sh_cache_line_fn)(void *context, const char *line);
 int   sh_cache_report(sh_cache_line_fn fn, void *context);
 /* The storage line alone (malloc'd). */
 char *sh_cache_storage_line(void);
+
+/* ------------------------------------------------------------ uploading a unit (5.3 steps 2-6) */
+
+typedef struct sh_cache_upload_stats {
+    int held;                    /* the store holds the unit now */
+    unsigned requests, archives, parts;
+    unsigned long long bytes_sent;
+} sh_cache_upload_stats;
+
+/* Send the unit `hash` the store lacks (its manifest here, its files in the cache or a local mod): begin, then the
+ * missing files in archives of at most one request each (a larger file in parts), then complete. Whoever authored
+ * the mod: units are verified by hash (5.3). MODNET_OK when the store holds it; else a MODNET_E_ code with *why. */
+int   sh_cache_publish_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, sh_cache_upload_stats *stats,
+                            char **why);
 
 #endif /* SNAPMAP_PLUS_MODCACHE_H */

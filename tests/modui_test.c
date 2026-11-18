@@ -55,6 +55,13 @@ void backend_log(const char *message)
 }
 static void log_clear(void) { g_logat = 0; g_logbuf[0] = 0; }
 
+/* Link stubs for the map-content cache (modcache.c is not in this test's sources). */
+#include "modcache.h"
+int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out)
+{ (void)drop_played; (void)held; (void)held_count; if (out) memset(out, 0, sizeof *out); return 1; }
+int sh_cache_report(sh_cache_line_fn fn, void *context) { (void)fn; (void)context; return 0; }
+char *sh_cache_storage_line(void) { return _strdup("Map content: 0 KB for 0 maps."); }
+
 /* The map manifest's load step activates bundles through the serving layer's
  * engine half; the tab only reads the record it keeps. */
 static int g_activations;

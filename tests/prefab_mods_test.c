@@ -489,14 +489,14 @@ static void comments(const char *lib)
         CHECK(put_file(p, COMMENTED));
         CHECK(sh_prefab_mods_record(COMMENTED, sizeof COMMENTED - 1, p, NULL) == 1);
         text = slurp(p, &len);
-        CHECK(text && !strstr(text, "/*") && strstr(block_of(text, len), "\"mods\":[{\"mod\":\"testdoor@"));
+        CHECK(text && !strstr(text, "/*") && strstr(block_of(text, len), "\"mods\":[{\"mod\":\"testdoor\""));
         CHECK(engine_bytes_are(p, OBJECT_PREFAB));
         free(text);
         DeleteFileA(p);
     }
 }
 
-static const char BLOCK_HEAD[] = "{\"format\":1,\"description\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"testdoor@";
+static const char BLOCK_HEAD[] = "{\"format\":1,\"description\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"testdoor\"";
 
 static void recording(const char *lib, const sh_modmanifest_row *door)
 {

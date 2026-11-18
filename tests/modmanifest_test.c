@@ -216,8 +216,8 @@ static void value_round_trip(void)
     value = sh_modmanifest_format_value(&row, &n);
     CHECK(value && n == strlen(value));
     {
-        static const char expect[] = "{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"Pink Imp\","
-                                     "\"size\":11782,\"names\":[\"mods/alexpink/imp\",";
+        static const char expect[] = "{\"mod\":\"alexpink\",\"name\":\"Pink Imp\","
+                                     "\"size\":11782,\"local\":true,\"build\":\"" HASH_A "\",\"names\":[\"mods/alexpink/imp\",";
         CHECK(value && !strncmp(value, expect, sizeof expect - 1));
     }
     CHECK(value && sh_modmanifest_parse_value(value, n, &back, err, sizeof err));
@@ -307,9 +307,9 @@ static void text_round_trip_and_order(void)
     CHECK(string_rows(written) == 2 && alloc_string_count(written, &count) && count == 2);
     CHECK(!memcmp(written, MAP, sizeof MAP - 2));
     CHECK(!strcmp(written + sizeof MAP - 2,
-                  ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"\","
-                  "\"size\":11782,\"names\":[\"mods/alexpink/imp\"]},{\"mod\":\"bobroom1@" HASH_B
-                  "\",\"name\":\"\",\"size\":4096,\"names\":[]}]}}"));
+                  ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\",\"name\":\"\","
+                  "\"size\":11782,\"local\":true,\"build\":\"" HASH_A "\",\"names\":[\"mods/alexpink/imp\"]},{\"mod\":\"bobroom1\","
+                  "\"name\":\"\",\"size\":4096,\"local\":true,\"build\":\"" HASH_B "\",\"names\":[]}]}}"));
 
     CHECK(sh_modmanifest_read(written, wlen, &back, &rejected) == 2 && rejected == 0 && back.count == 2);
     CHECK(back.count == 2 && !strcmp(back.rows[0].salt, "alexpink") && !strcmp(back.rows[1].build, HASH_B) &&
@@ -382,7 +382,7 @@ static void all_parts(void)
     CHECK(saved != NULL);
     if (saved) {
         CHECK(!memcmp(saved, MAP, sizeof MAP - 2) && string_rows(saved) == 2);
-        CHECK(strstr(saved, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\"") != NULL);
+        CHECK(strstr(saved, ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\"") != NULL && strstr(saved, "\"build\":\"" HASH_A "\"") != NULL);
         CHECK(sh_carrier_part(saved, sn, "settings", &from, &to) == 1 && to - from == sizeof SETTINGS - 1 &&
               !memcmp(saved + from, SETTINGS, to - from));
         CHECK(sh_carrier_part(saved, sn, "nav", &from, &to) == 1 && to - from == sizeof NAV - 1);
@@ -554,7 +554,7 @@ static void save_closure(void)
         CHECK(sh_modmanifest_read(out, n, &back, NULL) == 1 && back.count == 1);
         CHECK(back.count == 1 && !strcmp(back.rows[0].build, HASH_A) && back.rows[0].name_count == 2 &&
               back.rows[0].size == 11782 && !strcmp(back.rows[0].salt, "alexpink"));
-        CHECK(string_rows(out) == 2 && strstr(out, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@"));
+        CHECK(string_rows(out) == 2 && strstr(out, ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\""));
         sh_modmanifest_list_free(&back);
 
         /* Saving the saved text again gives the same bytes. */
@@ -572,7 +572,7 @@ static void save_closure(void)
             size_t n2 = 0;
             char *kept = sh_modmanifest_on_save(out, n, &n2);
             sh_modmanifest_list cur;
-            CHECK(kept && strstr(kept, "\"mod\":\"alexpink@" HASH_A "\"") != NULL);
+            CHECK(kept && strstr(kept, "\"mod\":\"alexpink\"") != NULL && strstr(kept, "\"build\":\"" HASH_A "\"") != NULL);
             CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !strcmp(cur.rows[0].salt, "alexpink"));
             sh_modmanifest_list_free(&cur);
             if (kept) HeapFree(GetProcessHeap(), 0, kept);
@@ -601,11 +601,11 @@ static void save_closure(void)
             g_installed = INSTALLED;
             g_installed_count = 1;
             first = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n2);
-            CHECK(first && strstr(first, "\"mod\":\"alexpink@") != NULL);
+            CHECK(first && strstr(first, "\"mod\":\"alexpink\"") != NULL);
             g_installed = BAD;
             g_installed_count = 2;
             kept = first ? sh_modmanifest_on_save(first, n2, &n2) : NULL;
-            CHECK(kept && strstr(kept, "\"mod\":\"alexpink@" HASH_A "\"") != NULL);
+            CHECK(kept && strstr(kept, "\"mod\":\"alexpink\"") != NULL && strstr(kept, "\"build\":\"" HASH_A "\"") != NULL);
             if (first) HeapFree(GetProcessHeap(), 0, first);
             if (kept) HeapFree(GetProcessHeap(), 0, kept);
             g_installed = INSTALLED;
@@ -623,7 +623,7 @@ static void save_closure(void)
         unsigned count = 9;
         g_installed_count = 2;
         out = sh_modmanifest_on_save(room, sizeof room - 1, &n);
-        CHECK(out && strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"bobroom1@") &&
+        CHECK(out && strstr(out, "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"bobroom1\"") &&
               string_rows(out) == 0 && alloc_string_count(out, &count) && count == 0);
         if (out) HeapFree(GetProcessHeap(), 0, out);
     }
@@ -807,8 +807,8 @@ static void map_level(void)
     free(value);
     row.attached = 1;
     value = sh_modmanifest_format_value(&row, &vlen);
-    CHECK(value && !strcmp(value, "{\"mod\":\"alexhand@" HASH_C "\",\"name\":\"\","
-                                  "\"size\":512,\"names\":[],\"attached\":true}"));
+    CHECK(value && !strcmp(value, "{\"mod\":\"alexhand\",\"name\":\"\","
+                                  "\"size\":512,\"local\":true,\"build\":\"" HASH_C "\",\"names\":[],\"attached\":true}"));
     CHECK(value && sh_modmanifest_parse_value(value, vlen, &back, err, sizeof err) && back.attached == 1);
     sh_modmanifest_row_free(&back);
     free(value);
@@ -909,7 +909,7 @@ static void map_level(void)
     CHECK(sh_modmanifest_current_attach(&back) == 1);
     sh_modmanifest_row_free(&back);
     saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &slen);
-    CHECK(saved && strstr(saved, "{\"mod\":\"eringone@" HASH_E "\"") && strstr(saved, "{\"mod\":\"alexpink@"));
+    CHECK(saved && strstr(saved, "{\"mod\":\"eringone\"") && strstr(saved, "\"build\":\"" HASH_E "\"") && strstr(saved, "{\"mod\":\"alexpink\""));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
