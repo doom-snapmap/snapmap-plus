@@ -50,7 +50,7 @@ void sdk_fmt(char *out, size_t cap, double v)
 {
     char *e;
     if (v > -5e-8 && v < 5e-8) { snprintf(out, cap, "0"); return; }
-    snprintf(out, cap, "%.7g", v);
+    snprintf(out, cap, "%.9g", v);
     if (strchr(out, 'e')) { snprintf(out, cap, "%.10f", v); }
     if (strchr(out, '.')) {
         e = out + strlen(out) - 1;

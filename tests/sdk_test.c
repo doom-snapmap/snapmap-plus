@@ -203,14 +203,14 @@ static void test_effect_items(void)
     /* the light: colour every component written, the fire light material, the effect's lasts */
     CHECK(!strcmp(kv(x.out, "lightMtr", 0), "lights/fire_light_01"));
     CHECK(!strcmp(kv(x.out, "intensity", 0), "5"));
-    CHECK(!strcmp(kv(x.out, "duration", 0), "1"));       /* the light's own default (an item's lasts wins over the effect's) */
+    CHECK(!strcmp(kv(x.out, "duration", 0), "2"));       /* the effect's lasts, for an item that names none */
     CHECK(!strcmp(kv(x.out, "fadeOutTime", 0), "0.5"));
     CHECK(has(x.out, "\t\t\t\tcolor = {\n\t\t\t\t\tx = 1;\n\t\t\t\t\ty = 0.45;\n\t\t\t\t\tz = 0.1;\n\t\t\t\t\tw = 1;\n"));
     CHECK(has(x.out, "radius = {\n\t\t\t\t\t\tx = 300;\n\t\t\t\t\t\ty = 300;\n\t\t\t\t\t\tz = 300;"));
     /* the decal */
     CHECK(!strcmp(kv(x.out, "decalMtr", 0), "textures/decals/blood_splatter/blood_splatter_01"));
     CHECK(!strcmp(kv(x.out, "size", 0), "64"));
-    CHECK(!strcmp(kv(x.out, "depth", 0), "16"));
+    CHECK(!has(x.out, "depth ="));                       /* left out: the engine's own */
     /* shake and flash by distance */
     CHECK(!strcmp(kv(x.out, "magnitude", 0), "0.4"));
     CHECK(!strcmp(kv(x.out, "distance", 0), "800"));
@@ -284,7 +284,7 @@ static void test_effect_environment_item(void)
         CHECK(has(x.out, "parm = \"automaxexposure\";") == 0);
         CHECK(has(x.out, "parm = \"autoexposuremax\";"));
         /* the fog colour is sRGB-decoded as the env decl's own parse decodes it */
-        for (i = 0; i < 1; i++) CHECK(has(x.out, "x = 0.2140411;"));
+        for (i = 0; i < 1; i++) CHECK(has(x.out, "x = 0.21404114;"));
         CHECK(count(x.out, "fadeInTime = 0.5;") == 2 && count(x.out, "duration = 3;") == 2);
         release(&x);
     }
@@ -466,8 +466,8 @@ static void test_material_values(void)
     /* registers start after the material's own temp3 */
     CHECK(has(x.out, "\ttemp4\t2\n\ttemp5\ttime * temp4\n\ttemp6\tsintable[temp5]\n"));
     CHECK(has(x.out, "\tbloomcolor.x\ttemp8 + temp9\n") && has(x.out, "\tbloomcolor.z\t"));
-    /* bloomcolor is an sRGB parm: 0.5 decodes to 0.2140411, so its middle is 0.1070206 */
-    CHECK(has(x.out, "0.1070206"));
+    /* bloomcolor is an sRGB parm: 0.5 decodes to 0.21404114, so its middle is 0.10702057 */
+    CHECK(has(x.out, "0.10702057"));
     CHECK(has(x.out, "snapmapplus_sdk_") && count_type("table") == 1);
     CHECK(!has(x.out, "pulse"));
     CHECK(has(x.out, "stageprogram\tbasicemissive\n"));

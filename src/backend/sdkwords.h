@@ -22,14 +22,17 @@
     /* timing and placement, any item (and `lasts` on the effect) */                                               \
     X(F_STARTS, "starts") X(F_LASTS, "lasts") X(F_FADEIN, "fadein") X(F_FADEOUT, "fadeout") X(F_REPEATS, "repeats") \
     X(F_OFFSET, "offset") X(F_AT, "at") X(F_WHEN, "when") X(F_REACH, "reach") X(F_FADESFROM, "fadesfrom")          \
-    X(F_TURN, "turn")                                                                                              \
+    X(F_TURN, "turn") X(F_FOLLOWS, "follows") X(F_FACING, "facing") X(F_RESTARTS, "restarts") X(F_UNTIL, "until") \
+    X(F_EVERYTAG, "everytag")                                                                                      \
+    X(V_FIXED, "fixed") X(V_PARENT, "parent")                                                                      \
     /* item fields */                                                                                              \
     X(F_COLOUR, "colour") X(F_BRIGHTNESS, "brightness") X(F_FLICKER, "flicker") X(F_SHAPE, "shape")                \
     X(F_SHINE, "shine") X(F_SHADOWS, "shadows") X(F_IMAGE, "image") X(F_MATERIAL, "material") X(F_SIZE, "size")    \
     X(F_DEPTH, "depth") X(F_ANGLE, "angle") X(F_GLOW, "glow") X(F_GLOWLASTS, "glowlasts") X(F_STAYS, "stays")      \
     X(F_STRENGTH, "strength") X(F_STYLE, "style") X(F_TILES, "tiles") X(F_MIRROR, "mirror") X(F_BOTTOM, "bottom")  \
     X(F_NEAR, "near") X(F_FOCUS, "focus") X(F_FAR, "far") X(F_USE, "use") X(F_MODEL, "model") X(F_SOUND, "sound")  \
-    X(F_STOPS, "stops") X(F_VALUE, "value")                                                                        \
+    X(F_STOPS, "stops") X(F_VALUE, "value") X(F_SEENFROM, "seenfrom") X(F_ONSCREEN, "onscreen") X(F_ANGLES, "angles")   \
+    X(F_MOVE, "move")                                                                        \
     /* light flicker presets, shake and blur styles */                                                             \
     X(V_NONE, "none") X(V_FIRE, "fire") X(V_RADIAL, "radial") X(V_SOFT, "soft") X(V_YES, "yes") X(V_NO, "no")      \
     /* particles */                                                                                                \

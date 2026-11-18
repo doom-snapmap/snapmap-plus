@@ -137,6 +137,9 @@ static int get_name(ectx *c, const sdk_group *g, sdk_word_id w, char *out, size_
     return 1;
 }
 
+/* An item's colour: { r, g, b } or { r, g, b, opacity } (opacity 1 when left out). */
+static int get_colour(ectx *c, const sdk_group *g, struct ev *e);
+
 static int get_value(ectx *c, const sdk_group *g, sdk_word_id w, int dmin, int dmax, sdk_value *v, int *have)
 {
     const sdk_item *it = fld(g, w);
@@ -188,9 +191,27 @@ typedef struct ev {
     char name[40];
     double dur, d0, d1, fin, fout, dist, fsd, size, col[4], off[3], turn[3];
     int has_dur, has_delay, loop, has_fin, has_fout, has_dist, has_fsd, has_size, has_col, has_off, has_turn;
-    char tag[96], when[96];
+    int follows, restarts, ntags, nwhen, nuntil, everytag;
+    const char *rotation;
+    char tag[8][96], when[8][96], until[8][96];
     sdk_buf parms;
 } ev;
+
+static int get_colour(ectx *c, const sdk_group *g, ev *e)
+{
+    const sdk_item *it = fld(g, SDK_F_COLOUR);
+    double x[4];
+    int n, k;
+    if (!it) return 1;
+    n = it->count == 2 ? sdk_numbers(&it->atoms[1], x, 4) : 0;
+    if (n != 3 && n != 4)
+        FAIL(c, it->line, "'%s' needs three numbers, as in '%s { 1, 0.5, 0.2 }', or four with the opacity last.",
+             SDK_W(F_COLOUR), SDK_W(F_COLOUR));
+    e->has_col = 1;
+    for (k = 0; k < 3; k++) e->col[k] = x[k];
+    e->col[3] = n == 4 ? x[3] : 1;
+    return 1;
+}
 
 static void write_ev(sdk_buf *b, int index, const ev *e)
 {
@@ -199,6 +220,7 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
     put_str(b, 4, "type", e->type);
     if (e->has_dur) put_num(b, 4, "duration", e->dur);
     if (e->has_delay) { double d[2] = { e->d0, e->d1 }; put_vec(b, 4, "delay", "xy", d, 2); }
+    if (e->restarts) put_word(b, 4, "restart", "true");
     if (e->loop) put_word(b, 4, "looping", "true");
     if (e->has_fin) put_num(b, 4, "fadeInTime", e->fin);
     if (e->has_fout) put_num(b, 4, "fadeOutTime", e->fout);
@@ -206,19 +228,34 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
     if (e->has_dist) put_num(b, 4, "distance", e->dist);
     if (e->has_size) put_num(b, 4, "size", e->size);
     if (e->has_col) put_vec(b, 4, "color", "xyzw", e->col, 4);
-    put_open(b, 4, "startCondition");
-    put_num(b, 5, "num", 1);
-    put_str(b, 5, "item[0]", e->when[0] ? e->when : "FX_NONE");
-    put_close(b, 4);
-    put_open(b, 4, "stopCondition");
-    put_num(b, 5, "num", 1);
-    put_str(b, 5, "item[0]", "FX_NONE");
-    put_close(b, 4);
+    {
+        int k, w;
+        for (w = 0; w < 2; w++) {
+            int n = w ? e->nuntil : e->nwhen;
+            put_open(b, 4, w ? "stopCondition" : "startCondition");
+            put_num(b, 5, "num", n ? n : 1);
+            if (!n) put_str(b, 5, "item[0]", "FX_NONE");
+            for (k = 0; k < n; k++) {
+                char item[16];
+                snprintf(item, sizeof item, "item[%d]", k);
+                put_str(b, 5, item, w ? e->until[k] : e->when[k]);
+            }
+            put_close(b, 4);
+        }
+    }
+    if (e->everytag) put_str(b, 4, "multiTagUseType", e->everytag > 0 ? "FX_MULTI_TAG_USE_ALL" : "FX_MULTI_TAG_USE_EXPLICIT");
+    if (e->follows) put_str(b, 4, "originType", "FX_ORG_TRACK_POS");
     if (e->has_off) put_vec(b, 4, "offset", "xyz", e->off, 3);
-    if (e->tag[0]) {
+    if (e->rotation) put_str(b, 4, "rotationType", e->rotation);
+    if (e->ntags) {
+        int k;
         put_open(b, 4, "tagNames");
-        put_num(b, 5, "num", 1);
-        put_str(b, 5, "item[0]", e->tag);
+        put_num(b, 5, "num", e->ntags);
+        for (k = 0; k < e->ntags; k++) {
+            char item[16];
+            snprintf(item, sizeof item, "item[%d]", k);
+            put_str(b, 5, item, e->tag[k]);
+        }
         put_close(b, 4);
     }
     if (e->has_turn) {
@@ -235,16 +272,62 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
 /* ------------------------------------------------------------------------------- the common fields ---- */
 
 static const sdk_word_id COMMON[] = { SDK_F_STARTS, SDK_F_LASTS, SDK_F_FADEIN, SDK_F_FADEOUT, SDK_F_REPEATS,
-                                      SDK_F_OFFSET, SDK_F_AT, SDK_F_WHEN, SDK_F_TURN };
+                                      SDK_F_OFFSET, SDK_F_AT, SDK_F_WHEN, SDK_F_TURN, SDK_F_FOLLOWS, SDK_F_FACING,
+                                      SDK_F_RESTARTS, SDK_F_REACH, SDK_F_FADESFROM, SDK_F_UNTIL, SDK_F_EVERYTAG };
 #define NCOMMON (int)(sizeof COMMON / sizeof COMMON[0])
 
-/* The common fields into e; `lasts_default` < 0: no duration unless written. */
+/* A condition name or up to eight in braces, written as the game spells them (FX_ added when left out, upper case). */
+static int conditions(ectx *c, const sdk_group *g, sdk_word_id w, char out[8][96], int *n)
+{
+    const sdk_item *it = fld(g, w);
+    size_t q;
+    *n = 0;
+    if (!it) return 1;
+    if (it->count == 2 && (it->atoms[1].kind == SDK_A_WORD || it->atoms[1].kind == SDK_A_STRING)) {
+        char x[80];
+        sdk_text(&it->atoms[1], x, sizeof x);
+        snprintf(out[0], 96, "%s%s", _strnicmp(x, "FX_", 3) ? "FX_" : "", x);
+        *n = 1;
+    } else if (it->count == 2 && it->atoms[1].kind == SDK_A_GROUP && it->atoms[1].group->count >= 1 &&
+               it->atoms[1].group->count <= 8) {
+        for (q = 0; q < it->atoms[1].group->count; q++) {
+            const sdk_item *x = &it->atoms[1].group->items[q];
+            char y[80];
+            if (x->count != 1 || (x->atoms[0].kind != SDK_A_WORD && x->atoms[0].kind != SDK_A_STRING))
+                FAIL(c, it->line, "'%s' takes a condition name, or up to eight in braces.", sdk_word(w));
+            sdk_text(&x->atoms[0], y, sizeof y);
+            snprintf(out[q], 96, "%s%s", _strnicmp(y, "FX_", 3) ? "FX_" : "", y);
+        }
+        *n = (int)it->atoms[1].group->count;
+    } else FAIL(c, it->line, "'%s' takes a condition name, or up to eight in braces.", sdk_word(w));
+    for (q = 0; q < (size_t)*n; q++) {
+        char *s;
+        for (s = out[q]; *s; s++) *s = (char)toupper((unsigned char)*s);
+    }
+    return 1;
+}
+
+/* The common fields into e; `lasts_default` < 0: no duration unless written. `reach` and `fadesfrom` are the distance
+ * a screen item reaches and where it starts to weaken, on any item but a light (whose reach is its radius). */
 static int common(ectx *c, const sdk_group *g, ev *e, double lasts_default)
 {
+    if (strcmp(e->type ? e->type : "", "FX_LIGHT")) {
+        if (!get_num(c, g, SDK_F_REACH, &e->dist, &e->has_dist)) return 0;
+        if (!get_num(c, g, SDK_F_FADESFROM, &e->fsd, &e->has_fsd)) return 0;
+    }
     int have, flag = 0;
     double lo, hi;
-    if (!get_range(c, g, SDK_F_STARTS, &lo, &hi, &have)) return 0;
-    if (have) { e->has_delay = 1; e->d0 = lo; e->d1 = hi; }
+    {
+        /* the delay: one number, or the two the game draws between, in the order written */
+        const sdk_item *s = fld(g, SDK_F_STARTS);
+        double x[2];
+        int n = s && s->count == 2 ? sdk_numbers(&s->atoms[1], x, 2) : 0;
+        (void)lo; (void)hi;
+        if (s && n == 1) { e->has_delay = 1; e->d0 = e->d1 = x[0]; }
+        else if (s && n == 2) { e->has_delay = 1; e->d0 = x[0]; e->d1 = x[1]; }
+        else if (s) FAIL(c, s->line, "'%s' needs a number or two (the least and the most), as in '%s { 0.1, 0.3 }'.",
+                         SDK_W(F_STARTS), SDK_W(F_STARTS));
+    }
     if (!get_num(c, g, SDK_F_LASTS, &e->dur, &e->has_dur)) return 0;
     if (!e->has_dur && lasts_default >= 0) { e->dur = lasts_default; e->has_dur = 1; }
     if (!get_num(c, g, SDK_F_FADEIN, &e->fin, &e->has_fin)) return 0;
@@ -253,15 +336,43 @@ static int common(ectx *c, const sdk_group *g, ev *e, double lasts_default)
     e->loop = have && flag;
     if (!get_vec(c, g, SDK_F_OFFSET, 3, 0, e->off, &e->has_off)) return 0;
     if (!get_vec(c, g, SDK_F_TURN, 3, 0, e->turn, &e->has_turn)) return 0;
-    if (!get_name(c, g, SDK_F_AT, e->tag, sizeof e->tag, &have)) return 0;
+    if (!get_flag(c, g, SDK_F_FOLLOWS, &e->follows, &have)) return 0;
+    if (!get_flag(c, g, SDK_F_RESTARTS, &e->restarts, &have)) return 0;
     {
-        char w[80];
-        if (!get_name(c, g, SDK_F_WHEN, w, sizeof w, &have)) return 0;
-        if (have) {
-            size_t i;
-            snprintf(e->when, sizeof e->when, "%s%s", _strnicmp(w, "FX_", 3) ? "FX_" : "", w);
-            for (i = 0; e->when[i]; i++) e->when[i] = (char)toupper((unsigned char)e->when[i]);
+        const sdk_item *f = fld(g, SDK_F_FACING);
+        if (f) {
+            if (f->count == 2 && sdk_is(&f->atoms[1], SDK_W(F_FOLLOWS))) e->rotation = "FX_ROT_TRACK_AXIS";
+            else if (f->count == 2 && sdk_is(&f->atoms[1], SDK_W(V_FIXED))) e->rotation = "FX_ROT_EXPLICIT_ANGLES";
+            else if (f->count == 2 && sdk_is(&f->atoms[1], SDK_W(V_PARENT))) e->rotation = "FX_ROT_TRACK_AXIS_PARENT";
+            else FAIL(c, f->line, "'%s' is %s, %s or %s.", SDK_W(F_FACING), SDK_W(F_FOLLOWS), SDK_W(V_FIXED), SDK_W(V_PARENT));
         }
+    }
+    {
+        /* one tag, or a group of tags */
+        const sdk_item *at = fld(g, SDK_F_AT);
+        if (at) {
+            size_t q;
+            if (at->count == 2 && (at->atoms[1].kind == SDK_A_WORD || at->atoms[1].kind == SDK_A_STRING)) {
+                sdk_text(&at->atoms[1], e->tag[0], sizeof e->tag[0]);
+                e->ntags = 1;
+            } else if (at->count == 2 && at->atoms[1].kind == SDK_A_GROUP && at->atoms[1].group->count &&
+                       at->atoms[1].group->count <= 8) {
+                for (q = 0; q < at->atoms[1].group->count; q++) {
+                    const sdk_item *x = &at->atoms[1].group->items[q];
+                    if (x->count != 1 || (x->atoms[0].kind != SDK_A_WORD && x->atoms[0].kind != SDK_A_STRING))
+                        FAIL(c, at->line, "'%s' takes a tag name, or up to eight in braces.", SDK_W(F_AT));
+                    sdk_text(&x->atoms[0], e->tag[q], sizeof e->tag[q]);
+                }
+                e->ntags = (int)at->atoms[1].group->count;
+            } else FAIL(c, at->line, "'%s' takes a tag name, or up to eight in braces.", SDK_W(F_AT));
+        }
+    }
+    if (!conditions(c, g, SDK_F_WHEN, e->when, &e->nwhen)) return 0;
+    if (!conditions(c, g, SDK_F_UNTIL, e->until, &e->nuntil)) return 0;
+    {
+        int every;
+        if (!get_flag(c, g, SDK_F_EVERYTAG, &every, &have)) return 0;
+        if (have) e->everytag = every ? 1 : -1;
     }
     return 1;
 }
@@ -287,18 +398,16 @@ static int fields(ectx *c, const sdk_group *g, const char *what, const sdk_word_
 static int item_light(ectx *c, const sdk_group *g, ev *e)
 {
     static const sdk_word_id OWN[] = { SDK_F_COLOUR, SDK_F_BRIGHTNESS, SDK_F_REACH, SDK_F_FLICKER, SDK_F_SHAPE,
-                                       SDK_F_SHINE, SDK_F_SHADOWS };
+                                       SDK_F_SHINE, SDK_F_SHADOWS, SDK_F_SEENFROM };
     double reach[3] = { 300, 300, 300 }, shine = 1, colour[3] = { 1, 1, 1 };
     sdk_value bright;
-    char shape[160] = "lights/gaus", table[96] = "";
+    char shape[160] = "", table[96] = "";
     int have, flag, hb;
     const sdk_item *fl;
     if (!fields(c, g, "a light", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 1)) return 0;
     e->type = "FX_LIGHT";
-    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, colour, &have)) return 0;
-    e->has_col = 1;
-    e->col[0] = colour[0]; e->col[1] = colour[1]; e->col[2] = colour[2]; e->col[3] = 1;
+    if (!common(c, g, e, -1)) return 0;
+    if (!get_colour(c, g, e)) return 0;
     if (!get_value(c, g, SDK_F_BRIGHTNESS, 1, 1, &bright, &hb)) return 0;
     if (!hb) { memset(&bright, 0, sizeof bright); bright.form = SDK_VAL_CONST; bright.dims = 1; bright.c[0] = 5; }
     if (!get_vec(c, g, SDK_F_REACH, 3, 1, reach, &have)) return 0;
@@ -316,7 +425,7 @@ static int item_light(ectx *c, const sdk_group *g, ev *e)
         if (have) snprintf(shape, sizeof shape, "%s", s);
     }
     if (!get_flag(c, g, SDK_F_SHADOWS, &flag, &have)) return 0;
-    if (have && !flag) put_word(&e->parms, 4, "noshadows", "true");
+    if (have) put_word(&e->parms, 4, "noshadows", flag ? "false" : "true");
     /* a brightness that changes: the item's intensity table, its peak as the intensity */
     {
         double peak = bright.c[0];
@@ -359,10 +468,16 @@ static int item_light(ectx *c, const sdk_group *g, ev *e)
         }
         put_open(&e->parms, 4, "lightParms");
         put_vec(&e->parms, 5, "radius", "xyz", reach, 3);
-        put_num(&e->parms, 5, "intensity", peak);
+        if (hb) put_num(&e->parms, 5, "intensity", peak);
         if (shine != 1) put_num(&e->parms, 5, "specularScale", shine);
+        {
+            double seen;
+            int hseen;
+            if (!get_num(c, g, SDK_F_SEENFROM, &seen, &hseen)) return 0;
+            if (hseen) put_num(&e->parms, 5, "maxVisibleRange", seen);
+        }
         if (table[0]) put_str(&e->parms, 5, "intensityTable", table);
-        put_str(&e->parms, 5, "lightMtr", shape);
+        if (shape[0]) put_str(&e->parms, 5, "lightMtr", shape);
         put_close(&e->parms, 4);
     }
     return 1;
@@ -374,7 +489,7 @@ static int item_decal(ectx *c, const sdk_group *g, ev *e)
                                        SDK_F_GLOWLASTS, SDK_F_COLOUR, SDK_F_STAYS };
     char mtr[200];
     double depth = 16, angle = 0, glow[4] = { 0, 0, 0, 0 }, glowlasts = 0, colour[3];
-    int have, hm, stays = 0;
+    int have, hm, hdepth, stays = 0;
     if (!fields(c, g, "a decal", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
     if (!common(c, g, e, 10)) return 0;
     e->type = "FX_DECAL";
@@ -389,16 +504,15 @@ static int item_decal(ectx *c, const sdk_group *g, ev *e)
     e->has_size = 1;
     e->size = 64;
     if (!get_num(c, g, SDK_F_SIZE, &e->size, &have)) return 0;
-    if (!get_num(c, g, SDK_F_DEPTH, &depth, &have)) return 0;
+    if (!get_num(c, g, SDK_F_DEPTH, &depth, &hdepth)) return 0;
     if (!get_num(c, g, SDK_F_ANGLE, &angle, &have)) return 0;
     if (!get_vec(c, g, SDK_F_GLOW, 4, 0, glow, &have)) return 0;
     if (!get_num(c, g, SDK_F_GLOWLASTS, &glowlasts, &have)) return 0;
-    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, colour, &have)) return 0;
-    if (have) { e->has_col = 1; e->col[0] = colour[0]; e->col[1] = colour[1]; e->col[2] = colour[2]; e->col[3] = 1; }
+    if (!get_colour(c, g, e)) return 0;
     if (!get_flag(c, g, SDK_F_STAYS, &stays, &have)) return 0;
     put_open(&e->parms, 4, "decalParms");
     if (angle) put_num(&e->parms, 5, "angle", angle);
-    put_num(&e->parms, 5, "depth", depth);
+    if (hdepth) put_num(&e->parms, 5, "depth", depth);
     if (glowlasts > 0) put_num(&e->parms, 5, "emissiveLifetime", glowlasts * 1000);
     if (glow[3] > 0) put_vec(&e->parms, 5, "emissiveTint", "xyzw", glow, 4);
     put_str(&e->parms, 5, "decalMtr", mtr);
@@ -409,22 +523,35 @@ static int item_decal(ectx *c, const sdk_group *g, ev *e)
 
 static int item_shake(ectx *c, const sdk_group *g, ev *e)
 {
-    static const sdk_word_id OWN[] = { SDK_F_STRENGTH, SDK_F_REACH, SDK_F_FADESFROM, SDK_F_USE };
+    static const sdk_word_id OWN[] = { SDK_F_STRENGTH, SDK_F_REACH, SDK_F_FADESFROM, SDK_F_USE, SDK_F_ANGLES, SDK_F_MOVE };
     double s = 0.05;
     char use[200];
-    int have, hu;
+    int hu, hs;
     if (!fields(c, g, "a shake", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 0.4)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_SCREEN_SHAKE";
-    if (!get_num(c, g, SDK_F_STRENGTH, &s, &have)) return 0;
-    if (!get_num(c, g, SDK_F_REACH, &e->dist, &e->has_dist)) return 0;
-    if (!get_num(c, g, SDK_F_FADESFROM, &e->fsd, &e->has_fsd)) return 0;
-    if (!e->has_dist) { e->has_dist = 1; e->dist = 1000; }
+    if (!get_num(c, g, SDK_F_STRENGTH, &s, &hs)) return 0;
     if (!get_name(c, g, SDK_F_USE, use, sizeof use, &hu)) return 0;
-    put_open(&e->parms, 4, "screenShakeParms");
-    if (hu) put_str(&e->parms, 5, "advancedShakeDecl", use);
-    else put_num(&e->parms, 5, "magnitude", s);
-    put_close(&e->parms, 4);
+    {
+        double ang[3], mv[3];
+        int ha, hm;
+        if (!get_vec(c, g, SDK_F_ANGLES, 3, 0, ang, &ha)) return 0;
+        if (!get_vec(c, g, SDK_F_MOVE, 3, 0, mv, &hm)) return 0;
+        if (hu || hs || ha || hm) {
+            put_open(&e->parms, 4, "screenShakeParms");
+            if (hs) put_num(&e->parms, 5, "magnitude", s);
+            if (ha) {
+                put_open(&e->parms, 5, "maxAngles");
+                put_num(&e->parms, 6, "pitch", ang[0]);
+                put_num(&e->parms, 6, "yaw", ang[1]);
+                put_num(&e->parms, 6, "roll", ang[2]);
+                put_close(&e->parms, 5);
+            }
+            if (hm) put_vec(&e->parms, 5, "maxOffset", "xyz", mv, 3);
+            if (hu) put_str(&e->parms, 5, "advancedShakeDecl", use);
+            put_close(&e->parms, 4);
+        }
+    }
     return 1;
 }
 
@@ -434,15 +561,14 @@ static int item_flash(ectx *c, const sdk_group *g, ev *e)
     double x = 0.6;
     int have;
     if (!fields(c, g, "a flash", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 0.2)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_SCREEN_FLASH";
     if (!get_num(c, g, SDK_F_BRIGHTNESS, &x, &have)) return 0;
-    if (!get_num(c, g, SDK_F_REACH, &e->dist, &e->has_dist)) return 0;
-    if (!get_num(c, g, SDK_F_FADESFROM, &e->fsd, &e->has_fsd)) return 0;
-    if (!e->has_dist) { e->has_dist = 1; e->dist = 1000; }
-    put_open(&e->parms, 4, "screenFlashParms");
-    put_num(&e->parms, 5, "exposure", x);
-    put_close(&e->parms, 4);
+    if (have) {
+        put_open(&e->parms, 4, "screenFlashParms");
+        put_num(&e->parms, 5, "exposure", x);
+        put_close(&e->parms, 4);
+    }
     return 1;
 }
 
@@ -451,20 +577,20 @@ static int item_screen(ectx *c, const sdk_group *g, ev *e)
     static const sdk_word_id OWN[] = { SDK_F_MATERIAL, SDK_F_COLOUR, SDK_F_TILES, SDK_F_MIRROR, SDK_F_BOTTOM };
     char mtr[200];
     double tint[4] = { 1, 1, 1, 1 }, tiles[2];
-    int have, hm, ht, mirror = 0, bottom = 0;
+    int have, hm, ht, hc, mirror = 0, bottom = 0;
     if (!fields(c, g, "a screen image", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 1)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_SCREEN_OVERLAY";
     if (!get_name(c, g, SDK_F_MATERIAL, mtr, sizeof mtr, &hm)) return 0;
     if (!hm) FAIL(c, g->line, "a screen image needs its '%s', as in '%s %s(\"textures/effects/misc/screen_player_damage_02\")'.",
                   SDK_W(F_MATERIAL), SDK_W(F_MATERIAL), SDK_W(C_GAME));
-    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, tint, &have)) return 0;
+    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, tint, &hc)) return 0;
     if (!get_vec(c, g, SDK_F_TILES, 2, 0, tiles, &ht)) return 0;
     if (!get_flag(c, g, SDK_F_MIRROR, &mirror, &have)) return 0;
     if (!get_flag(c, g, SDK_F_BOTTOM, &bottom, &have)) return 0;
     put_open(&e->parms, 4, "screenOverlayParms");
     put_str(&e->parms, 5, "overlay", mtr);
-    put_vec(&e->parms, 5, "tint", "rgba", tint, 4);
+    if (hc) put_vec(&e->parms, 5, "tint", "rgba", tint, 4);
     if (ht) put_vec(&e->parms, 5, "tileDimensions", "xy", tiles, 2);
     if (mirror) put_word(&e->parms, 5, "mirrorTiles", "true");
     if (bottom) put_word(&e->parms, 5, "bottomOnly", "true");
@@ -479,18 +605,19 @@ static int item_blur(ectx *c, const sdk_group *g, ev *e)
     int have, soft = 0;
     const sdk_item *st;
     if (!fields(c, g, "a blur", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 0.5)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     if ((st = fld(g, SDK_F_STYLE)) != NULL) {
         if (st->count == 2 && sdk_is(&st->atoms[1], SDK_W(V_SOFT))) soft = 1;
         else if (!(st->count == 2 && sdk_is(&st->atoms[1], SDK_W(V_RADIAL))))
             FAIL(c, st->line, "'%s' is %s or %s.", SDK_W(F_STYLE), SDK_W(V_RADIAL), SDK_W(V_SOFT));
     }
-    if (soft) s = 0.01;
     if (!get_num(c, g, SDK_F_STRENGTH, &s, &have)) return 0;
     e->type = soft ? "FX_BLUR_GAUSSIAN" : "FX_BLUR_RADIAL";
-    put_open(&e->parms, 4, soft ? "blurGaussianParms" : "blurRadial2Parms");
-    put_num(&e->parms, 5, "radius", s);
-    put_close(&e->parms, 4);
+    if (have) {
+        put_open(&e->parms, 4, soft ? "blurGaussianParms" : "blurRadial2Parms");
+        put_num(&e->parms, 5, "radius", s);
+        put_close(&e->parms, 4);
+    }
     return 1;
 }
 
@@ -500,16 +627,20 @@ static int item_focus(ectx *c, const sdk_group *g, ev *e)
     double n = 0, f = 0, far = 0;
     int have;
     if (!fields(c, g, "a focus", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 1)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_DEPTH_OF_FIELD";
-    if (!get_num(c, g, SDK_F_NEAR, &n, &have)) return 0;
-    if (!get_num(c, g, SDK_F_FOCUS, &f, &have)) return 0;
-    if (!get_num(c, g, SDK_F_FAR, &far, &have)) return 0;
-    put_open(&e->parms, 4, "depthOfFieldParms");
-    put_num(&e->parms, 5, "nearDepth", n);
-    put_num(&e->parms, 5, "farDepth", far);
-    put_num(&e->parms, 5, "focusDepth", f);
-    put_close(&e->parms, 4);
+    int hn, hf, hr;
+    if (!get_num(c, g, SDK_F_NEAR, &n, &hn)) return 0;
+    if (!get_num(c, g, SDK_F_FOCUS, &f, &hf)) return 0;
+    if (!get_num(c, g, SDK_F_FAR, &far, &hr)) return 0;
+    (void)have;
+    if (hn || hf || hr) {
+        put_open(&e->parms, 4, "depthOfFieldParms");
+        if (hn) put_num(&e->parms, 5, "nearDepth", n);
+        if (hr) put_num(&e->parms, 5, "farDepth", far);
+        if (hf) put_num(&e->parms, 5, "focusDepth", f);
+        put_close(&e->parms, 4);
+    }
     return 1;
 }
 
@@ -525,8 +656,7 @@ static int item_named(ectx *c, const sdk_group *g, ev *e, const char *what, cons
     e->type = type;
     if (!get_name(c, g, SDK_F_USE, use, sizeof use, &hu)) return 0;
     if (!hu) FAIL(c, g->line, "%s needs '%s' and the name of the one to play.", what, SDK_W(F_USE));
-    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, colour, &have)) return 0;
-    if (have) { e->has_col = 1; e->col[0] = colour[0]; e->col[1] = colour[1]; e->col[2] = colour[2]; e->col[3] = 1; }
+    if (!get_colour(c, g, e)) return 0;
     if (!get_num(c, g, SDK_F_SIZE, &e->size, &e->has_size)) return 0;
     put_open(&e->parms, 4, block);
     put_str(&e->parms, 5, key, use);
@@ -542,13 +672,12 @@ static int item_model(ectx *c, const sdk_group *g, ev *e)
     double colour[3];
     int hm, hmt, have;
     if (!fields(c, g, "a model", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 1)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_MODEL";
     if (!get_name(c, g, SDK_F_MODEL, model, sizeof model, &hm)) return 0;
     if (!hm) FAIL(c, g->line, "a model needs its '%s'.", SDK_W(F_MODEL));
     if (!get_name(c, g, SDK_F_MATERIAL, mtr, sizeof mtr, &hmt)) return 0;
-    if (!get_vec(c, g, SDK_F_COLOUR, 3, 0, colour, &have)) return 0;
-    if (have) { e->has_col = 1; e->col[0] = colour[0]; e->col[1] = colour[1]; e->col[2] = colour[2]; e->col[3] = 1; }
+    if (!get_colour(c, g, e)) return 0;
     if (!get_num(c, g, SDK_F_SIZE, &e->size, &e->has_size)) return 0;
     put_open(&e->parms, 4, "modelParms");
     put_str(&e->parms, 5, "modelName", model);
@@ -583,7 +712,7 @@ static int item_glow(ectx *c, const sdk_group *g, ev *e)
     int have, stays = 0, k;
     const sdk_item *ci;
     if (!fields(c, g, "a glow", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 1)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_RENDERPARM";
     if (!get_name(c, g, SDK_F_VALUE, parm, sizeof parm, &have)) return 0;
     if ((ci = fld(g, SDK_F_COLOUR)) != NULL) {
@@ -594,10 +723,12 @@ static int item_glow(ectx *c, const sdk_group *g, ev *e)
         for (k = 0; k < n; k++) colour[k] = x[k];
     }
     if (!get_num(c, g, SDK_F_STRENGTH, &s, &have)) return 0;
+    if (ci || have) {
+        e->has_col = 1;
+        for (k = 0; k < 3; k++) e->col[k] = colour[k] * s;
+        e->col[3] = colour[3];
+    }
     if (!get_flag(c, g, SDK_F_STAYS, &stays, &have)) return 0;
-    e->has_col = 1;
-    for (k = 0; k < 3; k++) e->col[k] = colour[k] * s;
-    e->col[3] = colour[3];
     put_open(&e->parms, 4, "renderParmParms");
     put_str(&e->parms, 5, "declRenderParm", parm);
     if (stays) put_word(&e->parms, 5, "forceValueWhenStopped", "true");
@@ -611,16 +742,19 @@ static int item_wind(ectx *c, const sdk_group *g, ev *e)
     double s = 1, a = 0, st[2];
     int have;
     if (!fields(c, g, "a wind", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
-    if (!common(c, g, e, 2)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     e->type = "FX_WIND";
-    if (!get_num(c, g, SDK_F_STRENGTH, &s, &have)) return 0;
-    if (!get_num(c, g, SDK_F_ANGLE, &a, &have)) return 0;
+    int hs, ha;
+    if (!get_num(c, g, SDK_F_STRENGTH, &s, &hs)) return 0;
+    if (!get_num(c, g, SDK_F_ANGLE, &a, &ha)) return 0;
+    (void)have;
     st[0] = st[1] = s;
-    put_open(&e->parms, 4, "windParms");
-    put_num(&e->parms, 5, "angle", a);
-    put_num(&e->parms, 5, "multiplier", 1);
-    put_vec(&e->parms, 5, "strength", "xy", st, 2);
-    put_close(&e->parms, 4);
+    if (hs || ha) {
+        put_open(&e->parms, 4, "windParms");
+        if (ha) put_num(&e->parms, 5, "angle", a);
+        if (hs) put_vec(&e->parms, 5, "strength", "xy", st, 2);
+        put_close(&e->parms, 4);
+    }
     return 1;
 }
 
@@ -628,14 +762,16 @@ static int item_wind(ectx *c, const sdk_group *g, ev *e)
  * over items by the caller: this writes the first 16, *rest the count left). */
 static int item_environment(ectx *c, const sdk_group *g, ev *e, sdk_env_parm *p, int *np)
 {
-    static const char *skipw[16];
+    static const char *skipw[24];
     char use[200];
     int hu, k = 0, n;
     skipw[k++] = SDK_W(F_STARTS); skipw[k++] = SDK_W(F_LASTS); skipw[k++] = SDK_W(F_FADEIN);
     skipw[k++] = SDK_W(F_FADEOUT); skipw[k++] = SDK_W(F_REPEATS); skipw[k++] = SDK_W(F_OFFSET);
     skipw[k++] = SDK_W(F_AT); skipw[k++] = SDK_W(F_WHEN); skipw[k++] = SDK_W(F_TURN); skipw[k++] = SDK_W(F_USE);
+    skipw[k++] = SDK_W(F_REACH); skipw[k++] = SDK_W(F_FADESFROM); skipw[k++] = SDK_W(F_UNTIL); skipw[k++] = SDK_W(F_EVERYTAG);
+    skipw[k++] = SDK_W(F_FOLLOWS); skipw[k++] = SDK_W(F_FACING); skipw[k++] = SDK_W(F_RESTARTS);
     skipw[k] = NULL;
-    if (!common(c, g, e, 2)) return 0;
+    if (!common(c, g, e, -1)) return 0;
     if (!get_name(c, g, SDK_F_USE, use, sizeof use, &hu)) return 0;
     n = sdk_env_parms(c->d, g, "an environment item", skipw, p, c->why, c->why_len);
     if (n < 0) { c->failed = 1; return 0; }
@@ -820,7 +956,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
                                        SDK_F_FRAMERATE, SDK_F_COUNT, SDK_F_LIFE, SDK_F_BURST, SDK_F_FROM,
                                        SDK_F_DIRECTION, SDK_F_SPREAD, SDK_F_SPEED, SDK_F_FALL, SDK_F_DRAG, SDK_F_SIZE,
                                        SDK_F_COLOUR, SDK_F_OPACITY, SDK_F_BRIGHTNESS, SDK_F_ANGLE, SDK_F_FACES,
-                                       SDK_F_BOUNCE };
+                                       SDK_F_BOUNCE, SDK_F_USE, SDK_F_ONSCREEN };
     sdk_buf s = { 0 }, decl = { 0 };
     char mtr[200], tables[16][96];
     int ntables = 0, have, burst = 0, cycles = 1, hs, hc, ho, outward = 0, simulate = 0, bounce = 0, stick = 0;
@@ -833,6 +969,45 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
     if (!fields(c, g, "particles", OWN, (int)(sizeof OWN / sizeof OWN[0]))) return 0;
     if (!common(c, g, e, -1)) return 0;
     e->type = "FX_PARTICLE";
+    {
+        /* one of the game's particle decls (or the mod's) played as it is: the item's size scales it */
+        char use[200];
+        int hu;
+        if (!get_name(c, g, SDK_F_USE, use, sizeof use, &hu)) return 0;
+        if (hu) {
+            size_t q;
+            for (q = 0; q < g->count; q++) {
+                const sdk_item *x = &g->items[q];
+                int ok = 0;
+                size_t k;
+                if (!x->count) continue;
+                for (k = 0; k < (size_t)NCOMMON; k++) if (sdk_is(&x->atoms[0], sdk_word(COMMON[k]))) ok = 1;
+                if (sdk_is(&x->atoms[0], SDK_W(F_USE)) || sdk_is(&x->atoms[0], SDK_W(F_SIZE)) || sdk_is(&x->atoms[0], SDK_W(F_COLOUR)) ||
+                    sdk_is(&x->atoms[0], SDK_W(F_ONSCREEN))) ok = 1;
+                if (!ok) {
+                    char w[64];
+                    sdk_text(&x->atoms[0], w, sizeof w);
+                    FAIL(c, x->line, "particles that '%s' a decl take only its timing, '%s' and '%s'; '%s' describes particles of their own.",
+                         SDK_W(F_USE), SDK_W(F_SIZE), SDK_W(F_COLOUR), w);
+                }
+            }
+            if (!get_num(c, g, SDK_F_SIZE, &e->size, &e->has_size)) return 0;
+            {
+                double col[3];
+                int hc;
+                if (!get_colour(c, g, e)) return 0;
+            }
+            {
+                int on, hon;
+                if (!get_flag(c, g, SDK_F_ONSCREEN, &on, &hon)) return 0;
+                put_open(&e->parms, 4, "particleParms");
+                put_str(&e->parms, 5, "declPrt", use);
+                if (hon && on) put_word(&e->parms, 5, "isScreenPrt", "true");
+                put_close(&e->parms, 4);
+            }
+            return 1;
+        }
+    }
     /* the common fadein / fadeout of particles are fractions of each particle's life */
     if (e->has_fin) { fin = e->fin; e->has_fin = 0; }
     if (e->has_fout) { fout = e->fout; e->has_fout = 0; }
@@ -1199,7 +1374,7 @@ int sh_effect_compile(const char *path, const char *text, size_t len, char **out
             case SDK_IT_SCREEN: ok = item_screen(&c, g, e); break;
             case SDK_IT_BLUR: ok = item_blur(&c, g, e); break;
             case SDK_IT_FOCUS: ok = item_focus(&c, g, e); break;
-            case SDK_IT_FLARE: ok = item_named(&c, g, e, "a flare", "FX_FLARE", "flareParms", "declFlare", 1); break;
+            case SDK_IT_FLARE: ok = item_named(&c, g, e, "a flare", "FX_FLARE", "flareParms", "declFlare", -1); break;
             case SDK_IT_TRAIL: ok = item_named(&c, g, e, "a trail", "FX_RIBBON", "ribbonParms", "declRibbon", -1); break;
             case SDK_IT_MODEL: ok = item_model(&c, g, e); break;
             case SDK_IT_SOUND: ok = item_sound(&c, g, e); break;

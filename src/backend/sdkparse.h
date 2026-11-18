@@ -83,7 +83,8 @@ void sdk_say(char *why, size_t why_len, const sdk_doc *d, size_t line, const cha
 typedef struct sdk_buf { char *p; size_t n, cap; int oom; } sdk_buf;
 void sdk_put(sdk_buf *b, const char *s, size_t n);
 void sdk_printf(sdk_buf *b, const char *fmt, ...);
-/* A float as the decl writers write it: up to 7 significant digits, no trailing zeros, "0" for zero. */
+/* A number as the decl writers write it: 9 significant digits (a 32-bit float read back exactly), no trailing zeros,
+ * "0" for zero. */
 void sdk_fmt(char *out, size_t cap, double v);
 
 #endif /* SNAPMAP_PLUS_SDKPARSE_H */
