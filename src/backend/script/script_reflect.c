@@ -386,3 +386,59 @@ done:
     free(sofar);
     return ok;
 }
+
+/* sh_rf_bounds (script_reflect.h). The physics object is reached by name; the clip model pointer is read at the
+ * field's own offset whatever the type tables spell for it (the actor's pointer pair is described as one
+ * "idClipModel" of 16 bytes, not as two pointers). */
+static int clip_of(const sh_rf_host *h, const uint8_t *phys, const char *pcls, const uint8_t **clip)
+{
+    sh_rf_field f;
+    uint32_t i, n;
+    *clip = NULL;
+    if (sh_rf_find_field(h, pcls, "clipModels", &f)) n = f.size / (uint32_t)sizeof(void *);
+    else if (sh_rf_find_field(h, pcls, "clipModel", &f)) n = 1;
+    else return 0;
+    if (n == 0 || n > 8) n = 1;
+    for (i = 0; i < n; i++) {
+        const uint8_t *p = NULL;
+        if (!h->read(h->ctx, phys + f.offset + i * sizeof(void *), (void *)&p, sizeof p)) return 0;
+        if (p) { *clip = p; return 1; }
+    }
+    return 1;
+}
+
+int sh_rf_bounds(const sh_rf_host *h, const void *object, const char *cls, float mins[3], float maxs[3],
+                 char *err, size_t err_cap)
+{
+    static const char *const k_phys[] = { "aiVolatile.physics.object", "defaultPhysicsObj" };
+    const uint8_t *clip = NULL;
+    sh_rf_field bf;
+    float b[6];
+    size_t k;
+    int i, found = 0;
+    if (!h || !h->read || !object || !cls) { set_err(err, err_cap, "the game's type information is not available"); return 0; }
+    for (k = 0; k < sizeof k_phys / sizeof k_phys[0] && !clip; k++) {
+        sh_rf_loc loc;
+        char e2[64];
+        memset(&loc, 0, sizeof loc);
+        if (!sh_rf_resolve(h, object, cls, k_phys[k], &loc, e2, sizeof e2)) continue;
+        if (loc.kind == SH_RF_STRUCT && loc.type && clip_of(h, loc.addr, loc.type, &clip)) found = 1;
+        sh_rf_loc_free(&loc);
+    }
+    if (!found) { set_err(err, err_cap, "the %s has no physics with a collision model", cls); return 0; }
+    if (!clip) { set_err(err, err_cap, "the %s has no collision model now", cls); return 0; }
+    if (!sh_rf_find_field(h, "idClipModel", "bounds", &bf) || bf.size < sizeof b) {
+        set_err(err, err_cap, "the game does not describe a collision model's bounds");
+        return 0;
+    }
+    if (!h->read(h->ctx, clip + bf.offset, b, sizeof b)) { set_err(err, err_cap, "the collision model could not be read"); return 0; }
+    for (i = 0; i < 3; i++) {
+        if (!(b[i] == b[i]) || !(b[i + 3] == b[i + 3]) || b[i] > b[i + 3] || b[i] < -1e6f || b[i + 3] > 1e6f) {
+            set_err(err, err_cap, "the %s's collision box is not set", cls);
+            return 0;
+        }
+        mins[i] = b[i];
+        maxs[i] = b[i + 3];
+    }
+    return 1;
+}
