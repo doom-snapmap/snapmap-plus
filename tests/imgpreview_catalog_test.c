@@ -109,6 +109,8 @@ static void check_mip_choice(void)
     CHECK(bim_pick_mip(image, BIM_MIP0 + HEAD + 8, &m) == 0);
 }
 
+static int list_into(int kind, char *out, size_t cap);   /* defined below */
+
 static void check_direct_image_preview(void)
 {
     unsigned char image[0x46] = {0};

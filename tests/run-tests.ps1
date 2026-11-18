@@ -309,7 +309,9 @@ $units = [ordered]@{}
 foreach ($t in $tests) {
     $defs = if ($t.defs) { " $($t.defs)" } else { "" }
     $cxx  = if ($t.cxx)  { " /EHsc /std:c++17" } else { "" }
-    $flags = "/nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs"
+    # /we4013: a call to a function with no declaration in scope is an error, not an int-returning guess (a missing
+# include once truncated a returned pointer to 32 bits and crashed a suite; R-NM1).
+$flags = "/nologo /O2 /MT /we4013 /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs"
     $hash = (-join ($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($flags)) | ForEach-Object { $_.ToString("x2") })).Substring(0, 12)
     $setDir = Join-Path $cache $hash
     $t.objs = @()

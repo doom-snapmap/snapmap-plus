@@ -112,7 +112,7 @@ $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp file
 $outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
 $objDir = Join-Path $outDir "obj\backend"
 $buildLog = Join-Path $outDir "build.log"
-$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /I..\common" `
+$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /we4013 /MT /Z7 /Brepro $defs /I..\common" `
     -ObjDir $objDir -ObjDirArg "..\..\build\obj\backend\" -IncludeDirs @((Join-Path $here "..\common")) -Log $buildLog
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\backend\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $objArgs /Fe:..\..\build\$Out " +
