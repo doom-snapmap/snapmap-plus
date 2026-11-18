@@ -850,7 +850,7 @@ static int g_gate_val[2], g_gate_pending[2], g_gate_has_pending[2];
 static int g_gate_mode;          /* SH_MODSERVE_GATE_SET, _QUEUED, or 0 to refuse */
 static int g_gate_reads, g_gate_sets, g_gate_drains, g_gate_lines;
 #define FAKE_TEXT 4
-static const char *const FAKE_NAMES[FAKE_TEXT] = { "com_maxFps", "r_fancy", "ro_locked", "g_label" };
+static const char *const FAKE_NAMES[FAKE_TEXT] = { "com_showFPS", "r_fancy", "ro_locked", "g_label" };
 static char g_text_val[FAKE_TEXT][64];
 static char g_events[8192];
 static void event(const char *e)
@@ -998,7 +998,7 @@ static void build_requirements_fixture(const char *root)
      * number, a line holding two commands, an unknown key. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"9lives\": \"0\"}},\n  ";
     make_bundle(root, "bad cvar", "badx0000", '3', NULL, one, 1, NULL);
-    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxFps\": 0.5}},\n  ";
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_showFPS\": 0.5}},\n  ";
     make_bundle(root, "bad value", "badx0000", '4', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"dlls\": {\"x\": \"0\"}},\n  ";
     make_bundle(root, "bad key", "badx0000", '5', NULL, one, 1, NULL);
@@ -1033,7 +1033,7 @@ static void test_requirements(void)
     CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for imgonly0") == 1);
     CHECK(log_count("MODS: requirements:") == 3);
     CHECK(log_has("bundle 'bad cvar' skipped: requirements.cvars key 9lives is not a cvar name"));
-    CHECK(log_has("bundle 'bad value' skipped: requirements.cvars.com_maxFps must be a string, an integer or a boolean"));
+    CHECK(log_has("bundle 'bad value' skipped: requirements.cvars.com_showFPS must be a string, an integer or a boolean"));
     CHECK(log_has("bundle 'bad key' skipped: requirements key dlls is not supported (cvars, commands)"));
     CHECK(log_has("bundle 'bad line' skipped: requirements.commands.activate[0] must be one console command"));
     CHECK(!log_has("plainmod' skipped"));
@@ -1160,11 +1160,11 @@ static void test_requirements_general(void)
     char *slash;
     sh_modserve_plan p;
     sh_modserve_gates r;
-    static const char *const A = "{\"cvars\": {\"r_fancy\": true, \"com_maxFps\": 120}, \"commands\": "
+    static const char *const A = "{\"cvars\": {\"r_fancy\": true, \"com_showFPS\": 120}, \"commands\": "
                                  "{\"deactivate\": [\"echo first off\"], \"activate\": [\"echo first on\", \" bind x \\\"say hi\\\" \"]}}";
-    static const char *const B = "{\"cvars\": {\"com_maxFps\": \"60\"}, \"commands\": {\"activate\": [\"echo second on\"]}}";
+    static const char *const B = "{\"cvars\": {\"com_showFPS\": \"60\"}, \"commands\": {\"activate\": [\"echo second on\"]}}";
     static const char *const C = "{\"cvars\": {\"ro_locked\": \"1\"}}";
-    static const char *const D = "{\"cvars\": {\"com_maxFps\": \"120.0\", \"g_label\": \"two words\"}}";
+    static const char *const D = "{\"cvars\": {\"com_showFPS\": \"120.0\", \"g_label\": \"two words\"}}";
     static const char *const E = "{\"commands\": {\"deactivate\": [\"echo e off\"]}}";
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
@@ -1187,11 +1187,11 @@ static void test_requirements_general(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 5);
     /* The later install asking another value loses, both named. */
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: bsecond0 asks \"60\", afirst00 asks \"120\"; "
+    CHECK(log_has("MODS: requirements: conflict: com_showFPS: bsecond0 asks \"60\", afirst00 asks \"120\"; "
                   "bsecond0, the later install, loses"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120 for afirst00") && log_has("MODS: requirements: r_fancy=1 for afirst00"));
+    CHECK(log_has("MODS: requirements: com_showFPS=120 for afirst00") && log_has("MODS: requirements: r_fancy=1 for afirst00"));
     CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for afirst00"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for dsame000") && !log_has("for bsecond0"));
+    CHECK(log_has("MODS: requirements: com_showFPS=120.0 for dsame000") && !log_has("for bsecond0"));
     CHECK(sh_modserve_requirements() == 4);
 
     log_clear();
@@ -1205,31 +1205,33 @@ static void test_requirements_general(void)
     CHECK(log_has("MODS: requirements: afirst00: command \"echo first on\""));
     CHECK(log_has("MODS: requirements: afirst00: command \"bind x \"say hi\"\""));
     CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0) is not live: the engine marks it read-only"));
-    /* Only the bundles whose requirements are not live are blocked. */
+    /* Only the bundles whose requirements are not live are blocked. A mod whose cvar lost to another is served all the
+     * same (D-A24): its row registers, only its value is not applied. */
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 5);
     log_clear();
-    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 3);
-    CHECK(log_has("(bsecond0) BLOCKED: requirement com_maxFps=60 lost to afirst00, installed earlier, which asks \"120\""));
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 4);
+    CHECK(!log_has("(bsecond0) BLOCKED"));
     CHECK(log_has("(clocked0) BLOCKED: requirement ro_locked=1 is not live"));
     CHECK(ev_first("R:snapEditorEntityDef:mods/afirst00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/dsame000/thing") >= 0 &&
-          ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0);
+          ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/bsecond0/thing") >= 0);
+    CHECK(!strcmp(g_text_val[0], "120"));   /* the first mod's value applies */
     sh_modserve_plan_free(&p);
     /* Nothing runs twice. */
     CHECK(g_gate_lines == 2 && !log_has("command \""));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 8);
-    CHECK(strstr(g_report, "requirements: afirst00: cvar com_maxFps=120: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00: cvar com_showFPS=120: live\n") != NULL);
     CHECK(strstr(g_report, "requirements: dsame000: cvar g_label=two words: live\n") != NULL);
     CHECK(strstr(g_report, "requirements: afirst00: activate command \"echo first on\": ran\n") != NULL);
     CHECK(strstr(g_report, "requirements: afirst00: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
-    CHECK(strstr(g_report, "requirements: bsecond0: cvar com_maxFps=60: refused (com_maxFps=60 lost to afirst00") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0: cvar com_showFPS=60: refused (com_showFPS=60 lost to afirst00") != NULL);
     CHECK(strstr(g_report, "requirements: bsecond0: activate command \"echo second on\": not run") != NULL);
     CHECK(strstr(g_report, "requirements: clocked0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
     CHECK(strstr(g_report, "requirements: elines00: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
 
     /* afirst00 and bsecond0 go: afirst00's deactivate line runs, r_fancy is
-     * restored, com_maxFps stays (dsame000 asks the same number). */
+     * restored, com_showFPS stays (dsame000 asks the same number). */
     CHECK(sh_modserve_index_build(root2) == 3);
     log_clear();
     g_events[0] = 0;
@@ -1239,7 +1241,7 @@ static void test_requirements_general(void)
     CHECK(!strcmp(g_text_val[1], "0") && log_has("requirement released: r_fancy restored to 0"));
     CHECK(!strcmp(g_text_val[0], "120") && r.restored == 1);
 
-    /* Nothing installed asks anything: com_maxFps and g_label return to what
+    /* Nothing installed asks anything: com_showFPS and g_label return to what
      * they displaced, elines00's line runs, and nothing is held. */
     CHECK(sh_modserve_index_build(plain_root) == 1);
     g_events[0] = 0;
@@ -1261,9 +1263,9 @@ static void test_requirements_by_map(void)
     char *slash;
     const char *list[2];
     sh_modserve_gates r;
-    static const char *const OLD = "{\"cvars\": {\"com_maxFps\": 120}}";
-    static const char *const B = "{\"cvars\": {\"com_maxFps\": 60}}";
-    static const char *const C = "{\"cvars\": {\"com_maxFps\": 30}}";
+    static const char *const OLD = "{\"cvars\": {\"com_showFPS\": 120}}";
+    static const char *const B = "{\"cvars\": {\"com_showFPS\": 60}}";
+    static const char *const C = "{\"cvars\": {\"com_showFPS\": 30}}";
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -1283,13 +1285,13 @@ static void test_requirements_by_map(void)
     list[0] = h_b;
     log_clear();
     (void)sh_modserve_scope_set(list, 1, 1);
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
+    CHECK(log_has("MODS: requirements: conflict: com_showFPS: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
                   "this map does not use, loses"));
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
-    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: aold0000: cvar com_maxFps=120: refused (com_maxFps=120 lost to bmine000, which "
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_showFPS=60: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: aold0000: cvar com_showFPS=120: refused (com_showFPS=120 lost to bmine000, which "
                            "this map uses and asks \"60\")\n") != NULL);
     /* Its Play: only the map's own mods apply. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
@@ -1302,9 +1304,19 @@ static void test_requirements_by_map(void)
     list[1] = h_b;
     (void)sh_modserve_scope_set(list, 2, 1);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "30"));
+    {
+        /* Both mods' rows register in the map (D-A24): the one that lost the cvar is not blocked, so its placed
+         * entity resolves and the map opens; the first row's value applies. */
+        sh_modserve_plan pm;
+        sh_modserve_plan_editor(&pm);
+        log_clear();
+        (void)sh_modserve_plan_run_gated(&pm, &g_ev, &g_gates, "map load", &r);
+        CHECK(!log_has("BLOCKED") && pm.blocked == 0);
+        sh_modserve_plan_free(&pm);
+    }
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
-    CHECK(strstr(g_report, "requirements: bmine000: cvar com_maxFps=60: refused (com_maxFps=60 lost to cmine000, which "
+    CHECK(strstr(g_report, "requirements: bmine000: cvar com_showFPS=60: refused (com_showFPS=60 lost to cmine000, which "
                            "this map lists first and asks \"30\")\n") != NULL);
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "30"));

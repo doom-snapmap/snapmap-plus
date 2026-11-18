@@ -7769,8 +7769,11 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
          * use, whose requirements are off (req_off). */
         int g = ms_scoped(x, s->file);
         const ms_bundle *b = ms_gate_of(x, &x->files[g >= 0 ? g : s->file]);
-        /* A step registered while its requirements were live stays ready. */
-        if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
+        /* A step registered while its requirements were live stays ready. A mod whose cvar lost to another mod the map
+         * uses (D-A24) is still served: its decls register and its rows place; only its value is not applied, and the
+         * log and the Mods tab say which mod's value the map uses. */
+        if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
+            !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
             x->files[s->file].reg_state != 1) {
             s->blocked = b->req_cause && b->req_cause[0] ? b->req_cause : "requirements are not live";
             plan->blocked++;

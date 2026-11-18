@@ -1728,7 +1728,8 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
     int ok = 0, made = 0, oom = 0;
     if (why) *why = NULL;
     if (out) memset(out, 0, sizeof *out);
-    if (!manifests || !lens || !count || !source || !salt || !sh_salt_valid(salt, strlen(salt)) || !dest || !out) {
+    if ((count && (!manifests || !lens)) || (!count && !extra_count) || !source || !salt || !sh_salt_valid(salt, strlen(salt)) ||
+        !dest || !out) {
         if (why) *why = sh_text("nothing to compose");
         return 0;
     }
@@ -1854,7 +1855,7 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
         sh_text_set(&reason, "it does not build on its own: %s", sh_mb_first_cause(out));
         goto done;
     }
-    out->units_of = (char **)calloc(count, sizeof *out->units_of);
+    out->units_of = (char **)calloc(count ? count : 1, sizeof *out->units_of);
     if (!out->units_of) { oom = 1; goto done; }
     for (u = 0; u < count; u++) {
         char hash[SH_MB_HASH_HEX + 1];

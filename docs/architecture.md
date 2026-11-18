@@ -3716,7 +3716,9 @@ bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
 every scope change): the open map's rows first, in row order, then the
 undeclared ones (an editor's Toybox rows; every bundle with no map open)
 oldest install first. One that asks a cvar a bundle decided before it asks at
-another value loses (one `MODS: requirements: conflict:` line names both), so
+another value loses (one `MODS: requirements: conflict:` line names both): its value is not applied, but the mod is
+still served, its decls registered and its rows placeable, so a map that uses both opens and plays with the first
+mod's value (the requirements report says which won). So
 a map's own mods decide its cvars the same way for every player, and a mod the
 map does not use never takes one from its rows. Before every registration pass, at the Play re-check and after a
 rescan on the main thread outside Play, it applies them: the deactivate lines of

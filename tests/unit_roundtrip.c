@@ -250,6 +250,61 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 2a. A player who has most of the files already (another map brought them): only the rest is fetched, file by
+     * file, and a file a closed game left half downloaded resumes from where it stopped (Range). */
+    {
+        char root_d[MAX_PATH], from[MAX_PATH * 2], to[MAX_PATH * 2], dir[MAX_PATH * 2];
+        size_t i, skipped = 0, kept = 0;
+        _snprintf_s(root_d, sizeof root_d, _TRUNCATE, "%s\\partial", work);
+        CreateDirectoryA(root_d, NULL);
+        _snprintf_s(root_d, sizeof root_d, _TRUNCATE, "%s\\partial\\mods", work);
+        CreateDirectoryA(root_d, NULL);
+        sh_cache_set_mods_root(root_d);
+        sh_cache_put_manifest(ua.hash, ua.manifest, ua.manifest_len);
+        for (i = 0; i < g_pack.file_count; i++) {
+            const sh_mb_file *f = &g_pack.files[i];
+            if (!ua.keep[i] || f->stock || f->absent) continue;
+            _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\.content\\files\\%.2s\\%s", root_b, f->blob, f->blob);
+            if (skipped < 3 && f->size > 100000) {
+                if (skipped == 0) {
+                    /* half of it, as a broken-off download leaves it */
+                    HANDLE src = CreateFileA(from, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL), dst;
+                    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\partial", root_d);
+                    { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content", root_d); CreateDirectoryA(c, NULL); }
+                    CreateDirectoryA(dir, NULL);
+                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s.part", dir, f->blob);
+                    dst = CreateFileA(to, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+                    if (src != INVALID_HANDLE_VALUE && dst != INVALID_HANDLE_VALUE) {
+                        DWORD want = (DWORD)(f->size / 2), got = 0, put = 0;
+                        unsigned char *buf = (unsigned char *)malloc(want);
+                        if (buf && ReadFile(src, buf, want, &got, NULL)) WriteFile(dst, buf, got, &put, NULL);
+                        free(buf);
+                    }
+                    if (src != INVALID_HANDLE_VALUE) CloseHandle(src);
+                    if (dst != INVALID_HANDLE_VALUE) CloseHandle(dst);
+                }
+                skipped++;
+                continue;
+            }
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files\\%.2s", root_d, f->blob);
+            { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content", root_d); CreateDirectoryA(c, NULL);
+              _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content\\files", root_d); CreateDirectoryA(c, NULL); }
+            CreateDirectoryA(dir, NULL);
+            _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", dir, f->blob);
+            if (CopyFileA(from, to, FALSE)) kept++;
+        }
+        memset(&list, 0, sizeof list);
+        sh_modmanifest_list_add(&list, &row1);
+        sh_cache_note_rows(&list, NULL, 0);
+        sh_modmanifest_list_free(&list);
+        code = sh_cache_prepare(row1.build, &io);
+        {
+            char d[160];
+            _snprintf_s(d, sizeof d, _TRUNCATE, "%zu files here, 3 fetched (one resumed from half)", kept);
+            step(code == 0 && sh_cache_composed(row1.build, &complete) && complete, "player: the files it lacks fetched one by one, one resumed", d);
+        }
+    }
+
     /* 2b. A third player with no connection to the store: the map loads with a stand-in for the object and one
      * notice (S4 at a play, whose fetch found the store unreachable; S2 at an editor open, which asks no store). */
     {
@@ -285,6 +340,7 @@ int main(int argc, char **argv)
         modnet_set_base_url(store);
     }
 
+    sh_cache_set_mods_root(root_b);
     /* 3. The player remixes map 1: the unit is held, nothing uploads; a claim of their own, their key. */
     {
         const char *units[1] = { ua.hash };

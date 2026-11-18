@@ -661,8 +661,9 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
 int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
 /* Block the steps of bundles whose cvar requirements are not live (first
- * cause "requirement <cvar>=<value> is not live", or the conflict it lost),
- * except steps already registered. Returns how many were blocked. */
+ * cause "requirement <cvar>=<value> is not live"), except steps already registered. A bundle whose cvar lost a
+ * conflict to another the map uses is not blocked (D-A24): it is served, only its value is not applied (the conflict
+ * line and the requirements report name who won). Returns how many were blocked. */
 int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates);
 
 /* sh_modserve_requirements_apply, then sh_modserve_plan_run: no

@@ -1077,7 +1077,14 @@ static int mc_fetch_archive(const mc_unit *u, const modnet_io *io)
     if (!dir || !part || !mc_mkdirs(dir)) { free(dir); free(part); return SH_CACHE_ABSENT_DISK; }
     if (!mc_exists(part, &have)) have = 0;
     code = modnet_get_unit_archive(u->hash, part, have, io, &r);
-    if (code != MODNET_OK) { free(dir); free(part); return code == MODNET_E_CANCELLED ? -1 : mc_net_cause(code, &r); }
+    if (code != MODNET_OK) {
+        free(dir);
+        free(part);
+        if (code == MODNET_E_CANCELLED) return -1;
+        /* The files one by one instead: what stopped the archive decides nothing yet. */
+        mc_logf("MODS: content: a unit's archive did not download (%s); it is fetched file by file", r.message ? r.message : modnet_code_text(code));
+        return 1;
+    }
     memset(&z, 0, sizeof z);
     if (!sh_zip_reader_open(&z, part, &cause_text)) {
         mc_logf("MODS: content: a unit's archive did not read (%s); it is fetched file by file", cause_text ? cause_text : "?");
