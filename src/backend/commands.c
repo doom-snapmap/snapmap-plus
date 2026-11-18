@@ -37,6 +37,7 @@
 #include "prefab_mods.h"
 #include "script/script_console.h"
 #include "particlemotion.h"
+#include "../fault_shield/static_model_guard.h"
 
 /* Engine call contracts. */
 
@@ -1647,6 +1648,22 @@ static void h_sh_particles(idCmdArgs *a)
     }
 }
 
+/* The static model guard's counts since the start: render models rebuilt after their backing static model was
+ * reloaded in place (a mod's native/ model at a scope change), render models drawn empty because their table was
+ * not a static model's, and session static models whose surface reload was moved to process heap 0. */
+static void h_sh_staticmodels(idCmdArgs *a)
+{
+    char line[256], logged[300];
+    (void)a;
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "render models rebuilt after a reload %ld, drawn empty by the guard %ld, reloads moved to process heap 0 %ld",
+                sh_static_model_rebuilds(), sh_static_model_guard_fires(), sh_static_model_heap_moves());
+    sh_printf("%s
+", line);
+    _snprintf_s(logged, sizeof logged, _TRUNCATE, "STATIC MODELS: counts: %s", line);
+    backend_log(logged);
+}
+
 /* Resize the selected Grid Room through the inspector's own path (format
  * clamp, boundary fit, native edit, read back). Prints the size and the
  * adapter's sentence for the edit: applied, unchanged, limited or refused. */
@@ -1712,6 +1729,7 @@ static void h_sh_overrides_off(idCmdArgs *a)
 #endif
 
 static const cmd_entry CMD_TABLE[] = {
+    { "sh_staticmodels",      (void *)h_sh_staticmodels, "What the static model guard has done since the start: render models rebuilt after a reloaded static model, drawn empty, and reloads moved to process heap 0 (also in the backend log)." },
     { "sh_particles",         (void *)h_sh_particles, "What Snapmap+'s simulated particle motion has drawn since the start: particles moved, against the scene's surfaces, died on a surface, children drawn at their parent (also in the backend log). sh_particles trace N writes the next N simulated particles to the backend log." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
