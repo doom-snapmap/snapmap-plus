@@ -5122,9 +5122,11 @@ static void test_row_served(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
-/* The names a map's placed entities give the save closure: a model an edit
- * state names reaches the bundle that carries or unlocks it; a shadow of
- * editor-time content names no bundle; a gameplay shadow still does. */
+/* The names a map's placed entities give the save closure: a replacement of
+ * a DOOM binary (native/) never pulls its mod into a map, whether the map names
+ * it or reaches it through another file's needs (D-A3, D-A27: only a row
+ * declares it); a shadow of editor-time content names no bundle; a decl edit of
+ * a DOOM name (a gameplay shadow) still does. */
 typedef struct dep_seen { char names[512]; int bundles; } dep_seen;
 static void dep_visit(void *context, const char *id, const char *hash, unsigned long long size,
                       const char *name)
@@ -5169,15 +5171,15 @@ static void test_dependency_names(void)
         const char *lift[] = { "func/lift" };
         const char *imp[] = { "monster/imp" };
         const char *all[] = { "func/lift", "models/modular/airlock/air_lock_shell.lwo", "monster/imp", "snapmaps/props/stock" };
-        CHECK(modserve_bundles_for_names(lwo, 1, out, 4) == 1 && !strcmp(out[0], ha));
-        CHECK(modserve_bundles_for_names(upper, 1, out, 4) == 1 && !strcmp(out[0], ha));
-        CHECK(modserve_bundles_for_names(cooked, 1, out, 4) == 1 && !strcmp(out[0], ha));
+        CHECK(modserve_bundles_for_names(lwo, 1, out, 4) == 0);      /* a replaced DOOM model pulls nothing */
+        CHECK(modserve_bundles_for_names(upper, 1, out, 4) == 0);
+        CHECK(modserve_bundles_for_names(cooked, 1, out, 4) == 0);
         CHECK(modserve_bundles_for_names(other, 1, out, 4) == 0);
         CHECK(modserve_bundles_for_names(lift, 1, out, 4) == 0);   /* an editor-time shadow is no dependency */
-        CHECK(modserve_bundles_for_names(imp, 1, out, 4) == 1 && !strcmp(out[0], hc));
+        CHECK(modserve_bundles_for_names(imp, 1, out, 4) == 1 && !strcmp(out[0], hc));   /* a decl edit still pulls */
         memset(&seen, 0, sizeof seen);
-        CHECK(modserve_bundles_for_names_visit(all, 4, dep_visit, &seen) == 2);
-        CHECK(strstr(seen.names, "models/modular/airlock/air_lock_shell.lwo;") && strstr(seen.names, "monster/imp;"));
+        CHECK(modserve_bundles_for_names_visit(all, 4, dep_visit, &seen) == 1);
+        CHECK(!strstr(seen.names, "air_lock_shell") && strstr(seen.names, "monster/imp;"));
         CHECK(!strstr(seen.names, "func/lift") && !strstr(seen.names, "stock") && seen.bundles == 0);
     }
     CHECK(sh_modserve_index_build(g_root) >= 6);

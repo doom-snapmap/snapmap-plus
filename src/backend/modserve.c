@@ -943,6 +943,15 @@ static int ms_editor_shadow(const ms_file *f)
     return f->is_shadow && ms_editor_time(f->request);
 }
 
+/* A replacement of a DOOM binary (native/, class REPLACE): it serves only in
+ * maps that declare its mod by a row (D-A3, D-A27), so reaching DOOM's file
+ * never pulls the mod into a map or its save. A decl edit of a DOOM name keeps
+ * the reach rule. */
+static int ms_replacement(const ms_file *f)
+{
+    return f->is_shadow && !f->is_decl;
+}
+
 /* A growable text for the "extra" object. */
 typedef struct ms_text { char *p; size_t n, cap; int oom; } ms_text;
 
@@ -8237,7 +8246,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
         free(lower);
-        if (f >= 0 && ms_editor_shadow(&x->files[f])) continue;
+        if (f >= 0 && (ms_editor_shadow(&x->files[f]) || ms_replacement(&x->files[f]))) continue;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     while (qh < nq) {
@@ -8249,7 +8258,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         }
         for (k = 0; k < f->need_count; ++k) {
             int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
-            if (p >= 0 && !seen_file[p]) { seen_file[p] = 1; queue[nq++] = p; }
+            if (p >= 0 && !seen_file[p] && !ms_replacement(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
     free(seen_file); free(seen_bundle); free(queue);
@@ -8277,7 +8286,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
         free(lower);
-        if (f < 0 || ms_editor_shadow(&x->files[f])) continue;
+        if (f < 0 || ms_editor_shadow(&x->files[f]) || ms_replacement(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
         if (!seen_bundle[x->files[f].bundle]) { seen_bundle[x->files[f].bundle] = 1; found++; }
@@ -8294,7 +8303,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         }
         for (k = 0; k < f->need_count; ++k) {
             int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
-            if (p >= 0 && !seen_file[p]) { seen_file[p] = 1; queue[nq++] = p; }
+            if (p >= 0 && !seen_file[p] && !ms_replacement(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
     free(seen_file); free(seen_bundle); free(queue);
