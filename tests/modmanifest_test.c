@@ -564,16 +564,52 @@ static void save_closure(void)
             CHECK(again && n2 == n && !strcmp(again, out));
             if (again) HeapFree(GetProcessHeap(), 0, again);
         }
-        /* Nothing placed needs a bundle any more: the stale row goes, no row is added. */
+        /* No installed build serves the placed imp any more (its mod failed to
+         * build, or its folder is gone): the save keeps the row the map has,
+         * so the next load still declares what it places. */
         g_installed_count = 0;
         {
             size_t n2 = 0;
-            char *clean = sh_modmanifest_on_save(out, n, &n2);
+            char *kept = sh_modmanifest_on_save(out, n, &n2);
             sh_modmanifest_list cur;
-            CHECK(clean && !strstr(clean, "snapmap-plus") && !strcmp(clean, MAP));
-            CHECK(sh_modmanifest_current(&cur) == 0);   /* and its rows go with them */
+            CHECK(kept && strstr(kept, "\"mod\":\"alexpink@" HASH_A "\"") != NULL);
+            CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !strcmp(cur.rows[0].salt, "alexpink"));
             sh_modmanifest_list_free(&cur);
+            if (kept) HeapFree(GetProcessHeap(), 0, kept);
+        }
+        /* Nothing of it is placed any more: the row goes, no row is added. */
+        {
+            static const char bare[] = "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\","
+                                       "\"inherit\":\"snapmaps/visblockers/industrial/cap_01\",\"name\":\"\"}}],"
+                                       "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+            size_t n2 = 0;
+            char *clean = sh_modmanifest_on_save(bare, sizeof bare - 1, &n2);
+            sh_modmanifest_list cur;
+            (void)cur;
+            CHECK(!clean || !strstr(clean, "snapmap-plus"));
             if (clean) HeapFree(GetProcessHeap(), 0, clean);
+        }
+        /* A save step that fails (the serving layer names an invalid mod) never
+         * writes the map without its rows: the open map's rows are kept. */
+        {
+            static const installed BAD[] = {
+                { "alexpink", "Pink Imp", "1.0.0", HASH_A, 11782, { "mods/alexpink/imp", NULL, NULL, NULL } },
+                { "NOT A SALT", "Bad", "1", HASH_B, 1, { "mods/alexpink/skin", NULL, NULL, NULL } },
+            };
+            size_t n2 = 0;
+            char *first, *kept;
+            g_installed = INSTALLED;
+            g_installed_count = 1;
+            first = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n2);
+            CHECK(first && strstr(first, "\"mod\":\"alexpink@") != NULL);
+            g_installed = BAD;
+            g_installed_count = 2;
+            kept = first ? sh_modmanifest_on_save(first, n2, &n2) : NULL;
+            CHECK(kept && strstr(kept, "\"mod\":\"alexpink@" HASH_A "\"") != NULL);
+            if (first) HeapFree(GetProcessHeap(), 0, first);
+            if (kept) HeapFree(GetProcessHeap(), 0, kept);
+            g_installed = INSTALLED;
+            sh_modmanifest_reset();
         }
         HeapFree(GetProcessHeap(), 0, out);
     }
@@ -866,13 +902,14 @@ static void map_level(void)
     CHECK(g_scope_attached == 0 && g_scope_rows == 1);
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
-    /* A map-level row alone (no placed mod, nothing served for it) is still written. */
+    /* A map-level row (nothing served for it) is still written, beside the placed imp's row,
+     * which no build serves now and is kept as it was. */
     g_installed_count = 0;
     make_row(&back, "eringone", "3", HASH_E, 9);
     CHECK(sh_modmanifest_current_attach(&back) == 1);
     sh_modmanifest_row_free(&back);
     saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &slen);
-    CHECK(saved && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"eringone@" HASH_E "\""));
+    CHECK(saved && strstr(saved, "{\"mod\":\"eringone@" HASH_E "\"") && strstr(saved, "{\"mod\":\"alexpink@"));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
