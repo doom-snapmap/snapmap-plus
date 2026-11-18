@@ -38,6 +38,7 @@
 #include "modstore.h"
 #include "modstock.h"
 #include "modlook.h"
+#include "modprog.h"
 #include "sdk.h"
 #include "sdk_runtime.h"
 #include "modpublished.h"
@@ -211,6 +212,8 @@ static void install_features(const sig_result *results, size_t db)
     /* A mod's material, effect and environment are served as the Graphics SDK compiles them (sdk.h): a look, values
      * that change, an effect's fx decl, an environment's env decl. */
     sh_modserve_set_material_filter(sh_sdk_serve_compile);
+    /* What the product derives itself is registered by every pass as a mod's own decl is (R-GS3). */
+    sh_modserve_set_product_owner(sh_modprog_owns);
     sh_mb_set_look_compiler(sh_look_compile_notes);
     sh_mb_set_sdk_compiler(sh_sdk_compile);           /* the build refuses a mistake in any of them */
     sh_sdk_runtime_install();                         /* the script calls that play them */

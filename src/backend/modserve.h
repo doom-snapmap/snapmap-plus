@@ -1266,6 +1266,13 @@ typedef int (*sh_modserve_material_fn)(const char *path, const char *text, size_
                                        char *why, size_t why_len);
 void sh_modserve_set_material_filter(sh_modserve_material_fn fn);
 
+/* Which requests the product derives itself (modprog.h sh_modprog_owns, set by the backend before the first index).
+ * A stock pointer to a decl the product derives restores a name no archive lists, so every pass registers it as it
+ * registers a mod's own decls (R-GS3): a decl named under SH_MB_PRODUCT_ROOT (modbundle.h sh_mb_product_decl), or one
+ * this answers for (the platform programs' texture render parms, named as the engine names a material's textures).
+ * Unset (the native tests), the name alone decides. */
+void sh_modserve_set_product_owner(int (*owns)(const char *request));
+
 /* What sh_modserve_open would serve for `request` now, without serving it:
  * 1 with the bundle hash and either the file's SHA-256 (*file_hash) or, for a
  * composed text, its bytes (*body, *body_len; index memory, valid for the

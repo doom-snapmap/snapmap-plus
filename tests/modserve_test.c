@@ -168,6 +168,14 @@ static const char *g_bundle_name;
  * same name (modbundle.h sh_mb_stock_restore), or NULL. */
 static const char *g_fx_restore;
 static const char *g_fx_restore2;   /* a second one, or NULL */
+static const char *const *g_fx_restores;   /* more, NULL-terminated, or NULL */
+static int fx_is_restore(const char *path)
+{
+    const char *const *r;
+    if ((g_fx_restore && !strcmp(g_fx_restore, path)) || (g_fx_restore2 && !strcmp(g_fx_restore2, path))) return 1;
+    for (r = g_fx_restores; r && *r; ++r) if (!strcmp(*r, path)) return 1;
+    return 0;
+}
 /* Write <root>\<folder>\mod.json (an author block and its format-2 builder
  * block, keyed by the salt `id`) and its files. A folder under
  * <root>\maps\<segment>\ sits in that map's place. `state` is the old
@@ -204,7 +212,7 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
         char *author = sh_ma_path(id, f->path);
         _snprintf_s(ap, sizeof ap, _TRUNCATE, "%s", author ? author : "");
         free(author);
-        if ((g_fx_restore && !strcmp(g_fx_restore, f->path)) || (g_fx_restore2 && !strcmp(g_fx_restore2, f->path)))
+        if (fx_is_restore(f->path))
             at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                               "      {\"path\": \"%s\", \"stock\": {\"source\": \"%s\", \"sha256\": \"%s\"}, "
                               "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
@@ -3034,6 +3042,153 @@ static void test_surfaces_never_parsed(void)
     sf_leave();
 }
 
+/* R-GS3: the decls the product derives for a mod (an SDK effect's emitter, a derived particle and its table, a
+ * platform program) are stock pointers to names no archive lists, so they are planned as the mod's own decls are,
+ * needs first, in the map pass and the editor pass; a game surface still is not. The fake engine loads a step as the
+ * engine does, reading its file through the provider: in a fresh process nothing has compiled the effect yet, so
+ * the derived particle and table exist only once the read compiles the file that needs them. */
+#define PD_FX   "generated/decls/fx/mods/pdmod000/blast.decl"
+#define PD_EMIT "generated/decls/entitydef/snapmapplus/effect/mods/pdmod000/blast.decl"
+#define PD_PRT  "generated/decls/particle/snapmapplus/sdk/0123456789abcdef.decl"
+#define PD_TAB  "generated/decls/table/snapmapplus_sdk_fedcba9876543210.decl"
+#define PD_MAT  "generated/decls/material/mods/pdmod000/skin.decl"
+#define PD_PROG "generated/decls/renderprog/snapmapplus/layered/skinvmtr.decl"
+#define PD_SURF "generated/decls/material/models/monsters/pd/body.decl"
+#define PD_ROW  "generated/decls/snapeditorentitydef/mods/pdmod000/skin.decl"
+static int g_pd_derived, g_pd_compiles;
+static int pd_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    const char *body;
+    (void)c; (void)sha;
+    if (!_stricmp(source, PD_EMIT)) body = "{ inherit = \"func/fx\"; edit = { fxEffect = \"mods/pdmod000/blast\"; } }";
+    else if (!_stricmp(source, PD_PROG)) body = "renderProg skinvmtr";
+    else if (!_stricmp(source, PD_SURF)) body = "{ diffusemap models/monsters/pd/body }";
+    else if (!_stricmp(source, PD_PRT) && g_pd_derived) body = "{ stages { } }";
+    else if (!_stricmp(source, PD_TAB) && g_pd_derived) body = "{ { 0, 1 } }";
+    else return SH_MB_STOCK_ABSENT;   /* a derived decl nothing has compiled in this process */
+    *len = strlen(body);
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len);
+    memcpy(*bytes, body, *len);
+    return SH_MB_STOCK_OK;
+}
+/* The SDK compiler's part: compiling the effect registers what it derives (sdk.h). */
+static int pd_filter(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why, size_t why_len)
+{
+    (void)text; (void)len; (void)why; (void)why_len;
+    if (_stricmp(path, PD_FX)) return 0;
+    g_pd_derived = 1;
+    g_pd_compiles++;
+    *out = _strdup("{ editEvents { } }");
+    *out_len = *out ? strlen(*out) : 0;
+    return 1;
+}
+static int pd_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    char req[300], *p;
+    unsigned char *bytes = NULL;
+    size_t n = 0;
+    (void)c;
+    call_log(persist ? "P" : "L", type, name);
+    _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/%s/%s.decl", type, name);
+    for (p = req; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    *lifetime = persist ? 4 : 1;
+    if (sh_modserve_open(req, &bytes, &n) != 1 || !bytes) { call_log("UNREAD", type, name); *state = 0x01; return 0; }
+    HeapFree(GetProcessHeap(), 0, bytes);
+    *state = 0xa0;
+    return 1;
+}
+static const sh_modserve_engine_ops g_pd_ops = { NULL, fake_source, fake_register, pd_load };
+
+static void test_product_decls_planned(void)
+{
+    static const char *const restores[] = { PD_EMIT, PD_PRT, PD_TAB, PD_PROG, PD_SURF, NULL };
+    static const fx_file pd[] = {
+        { PD_FX, "{ type effect }", -1, "fx", "mods/pdmod000/blast",
+          "[{\"type\":\"entityDef\",\"name\":\"snapmapplus/effect/mods/pdmod000/blast\"},"
+          "{\"type\":\"particle\",\"name\":\"snapmapplus/sdk/0123456789abcdef\"},"
+          "{\"type\":\"material\",\"name\":\"models/monsters/pd/body\"}]", '1' },
+        { PD_EMIT, NULL, -1, "entityDef", "snapmapplus/effect/mods/pdmod000/blast", NULL, '2' },
+        { PD_PRT, NULL, -1, "particle", "snapmapplus/sdk/0123456789abcdef",
+          "[{\"type\":\"table\",\"name\":\"snapmapplus_sdk_fedcba9876543210\"}]", '3' },
+        { PD_TAB, NULL, -1, "table", "snapmapplus_sdk_fedcba9876543210", NULL, '4' },
+        { PD_MAT, "{ ambientprogram snapmapplus/layered/skinvmtr }", -1, "material", "mods/pdmod000/skin",
+          "[{\"type\":\"renderProg\",\"name\":\"snapmapplus/layered/skinvmtr\"}]", '5' },
+        { PD_PROG, NULL, -1, "renderProg", "snapmapplus/layered/skinvmtr", NULL, '6' },
+        { PD_SURF, NULL, -1, "material", "models/monsters/pd/body", NULL, '7' },
+        { PD_ROW, "{ edit = { model = \"mods/pdmod000/skin\"; } }", -1, "snapEditorEntityDef", "mods/pdmod000/skin",
+          "[{\"type\":\"material\",\"name\":\"mods/pdmod000/skin\"}]", '8' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], h[65], *slash;
+    const char *hashes[1];
+    sh_modserve_plan map, ed;
+    sh_mb_stock_ops ops;
+    int ready;
+    printf("-- decls the product derives: planned as the mod's own, needs first; a derived decl read before its effect compiled\n");
+    CHECK(sh_mb_product_decl(PD_EMIT) && sh_mb_product_decl(PD_PRT) && sh_mb_product_decl(PD_TAB) && sh_mb_product_decl(PD_PROG));
+    CHECK(!sh_mb_product_decl(PD_SURF) && !sh_mb_product_decl(PD_FX) &&
+          !sh_mb_product_decl("generated/decls/material/snapmapplusx/a.decl") &&
+          !sh_mb_product_decl("generated/image/snapmapplus/look/c0123456789abcdef.bimage"));
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\product-decls\\mods", top);
+    mkdirs(root);
+    memset(&ops, 0, sizeof ops);
+    ops.read = pd_read;
+    sh_mb_set_stock_ops(&ops);
+    sh_modserve_set_material_filter(pd_filter);
+    g_fx_restores = restores;
+    make_bundle(root, "pdmod000", "pdmod000", 'd', NULL, pd, (int)(sizeof pd / sizeof pd[0]), NULL);
+    g_fx_restores = NULL;
+    g_pd_derived = g_pd_compiles = 0;
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_test_reset_registration();
+    /* still pointers outside the namespace, served and claimed by the existence probe */
+    CHECK(sh_modserve_is_surface(PD_EMIT) == 1 && sh_modserve_is_surface(PD_SURF) == 1);
+    CHECK(sh_modserve_probe_claims(PD_EMIT) == 1 && sh_modserve_probe_claims(PD_PRT) == 1);
+
+    /* The map pass: every decl the mod reaches, the product's included, the game's surface not. */
+    hashes[0] = hash64('d', h);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 6);
+    CHECK(step_index(&map, "material", "models/monsters/pd/body") < 0);
+    CHECK(step_index(&map, "table", "snapmapplus_sdk_fedcba9876543210") >= 0 &&
+          step_index(&map, "table", "snapmapplus_sdk_fedcba9876543210") < step_index(&map, "particle", "snapmapplus/sdk/0123456789abcdef"));
+    CHECK(step_index(&map, "particle", "snapmapplus/sdk/0123456789abcdef") >= 0 &&
+          step_index(&map, "particle", "snapmapplus/sdk/0123456789abcdef") < step_index(&map, "fx", "mods/pdmod000/blast"));
+    CHECK(step_index(&map, "entityDef", "snapmapplus/effect/mods/pdmod000/blast") >= 0 &&
+          step_index(&map, "entityDef", "snapmapplus/effect/mods/pdmod000/blast") < step_index(&map, "fx", "mods/pdmod000/blast"));
+    CHECK(step_index(&map, "renderProg", "snapmapplus/layered/skinvmtr") >= 0 &&
+          step_index(&map, "renderProg", "snapmapplus/layered/skinvmtr") < step_index(&map, "material", "mods/pdmod000/skin"));
+    /* Run in a fresh process: the particle and its table are loaded before the effect, and their reads compile it. */
+    g_calls[0] = 0;
+    g_already = NULL;
+    ready = sh_modserve_plan_run(&map, &g_pd_ops, "map");
+    CHECK(ready == map.count);
+    if (ready != map.count || strstr(g_calls, "UNREAD")) printf("  calls: %s\n", g_calls);
+    CHECK(strstr(g_calls, "R:entityDef:snapmapplus/effect/mods/pdmod000/blast;") && strstr(g_calls, "R:particle:snapmapplus/sdk/0123456789abcdef;") &&
+          strstr(g_calls, "R:table:snapmapplus_sdk_fedcba9876543210;") && strstr(g_calls, "R:renderProg:snapmapplus/layered/skinvmtr;"));
+    /* loaded (kept: the bundle adds an editor row, so all of it is the editor closure), read without a miss */
+    CHECK(strstr(g_calls, "P:particle:snapmapplus/sdk/0123456789abcdef;") && !strstr(g_calls, "UNREAD"));
+    CHECK(!strstr(g_calls, "models/monsters/pd/body"));
+    CHECK(g_pd_derived == 1 && g_pd_compiles == 1);   /* compiled once, by the first read that needed it */
+    sh_modserve_plan_free(&map);
+
+    /* The editor pass: the row's closure brings the program, registered before the material that names it. */
+    sh_modserve_test_reset_registration();
+    CHECK(sh_modserve_plan_editor(&ed) == 3);
+    CHECK(step_index(&ed, "renderProg", "snapmapplus/layered/skinvmtr") >= 0 &&
+          step_index(&ed, "renderProg", "snapmapplus/layered/skinvmtr") < step_index(&ed, "material", "mods/pdmod000/skin"));
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_run(&ed, &g_pd_ops, "editor") == ed.count && strstr(g_calls, "P:renderProg:snapmapplus/layered/skinvmtr;"));
+    sh_modserve_plan_free(&ed);
+
+    sh_modserve_set_material_filter(NULL);
+    sh_mb_set_stock_ops(NULL);
+    sh_modserve_test_reset_registration();
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
 /* What a cold hub launch runs, with the engine faked: the parse's map pass,
  * then the gate's pre-load pass (the editor rows and their closure, then
  * what the declared builds still lack), then what the level load runs (its
@@ -5701,6 +5856,7 @@ int main(void)
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();
+    test_product_decls_planned();
     test_launch_preload();
     test_refusals();
     test_permanent_first_parse();

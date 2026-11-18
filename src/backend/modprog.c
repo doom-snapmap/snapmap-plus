@@ -2032,9 +2032,11 @@ static char *mp_emitter_fx(const char *path)
     return mp_dupn(path + hn, n - hn - 5);
 }
 
+/* idEntityFx plays the fx its own field fxEffect names when it spawns (unless startOff), as every stock func/fx child
+ * names its effect; fxDecl is the generic entity's condition-driven fx, which only an event starts (R-GS3). */
 static char *mp_emitter_text(const char *fx, size_t *len)
 {
-    char *t = sh_textf("{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxDecl = \"%s\";\n\t}\n}\n", fx);
+    char *t = sh_textf("{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxEffect = \"%s\";\n\t}\n}\n", fx);
     if (t && len) *len = strlen(t);
     return t;
 }

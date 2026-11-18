@@ -112,8 +112,9 @@
  * (a folder that failed only on a .lua file builds now). 11: the scripts
  * member records whether the mod gets its Script node row ("node"). 12:
  * files beside mod.json and assets are ignored, and campaign content derives
- * its requirements. */
-#define SH_MB_RULES           12
+ * its requirements. 14: an SDK effect's emitter names its fx as idEntityFx
+ * plays it (fxEffect), so every emitter pointer's hash is new. */
+#define SH_MB_RULES           14
 
 /* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
  * SH_MB_SHAPE is its first part, which readers of a cause match on. */
@@ -664,6 +665,17 @@ int  sh_mb_pointer_only_kind(const char *request);
  * generated/decls/<type>/<source>.decl for an own-path decl source (a
  * material such as maps/.../mega.decl, which models name with ".decl"). */
 int  sh_mb_stock_restore(const char *request, const char *source);
+
+/* The name root of everything the product derives itself (modprog.h SH_MODPROG_CONTAINER): the platform programs
+ * and their render parms, the looks' images, the Graphics SDK's derived decls and effect emitters. No game file is
+ * named under it. */
+#define SH_MB_PRODUCT_ROOT "snapmapplus"
+
+/* 1 when `request` is a decl the product derives: generated/decls/<type>/snapmapplus/<...>.decl, or
+ * generated/decls/<type>/snapmapplus_<...>.decl (a derived table, whose name has no '/'). A stock pointer to one
+ * restores a name no archive lists, so the engine holds no source for it: the serving layer registers it in every
+ * pass as it registers a mod's own decls (modserve.c ms_plannable). */
+int  sh_mb_product_decl(const char *request);
 
 /* For a snapModule decl request maps/modules/<path>.decl, the snapModuleInfo
  * request it needs (generated/decls/snapmoduleinfo/<path>.decl), malloc'd;

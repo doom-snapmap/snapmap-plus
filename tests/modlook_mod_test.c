@@ -481,11 +481,58 @@ static void test_serve(const char *tmp)
     (void)log_has;
 }
 
+/* The registration plan run against a fake engine that loads a decl the way the engine does: by reading its file
+ * through the provider (sh_modserve_open). A step whose file cannot be read is logged UNREAD and fails. */
+static char g_sdk_hash[SH_MB_HASH_HEX + 1];
+static char g_plan_calls[16384];
+static void plan_log(const char *kind, const char *type, const char *name)
+{
+    size_t at = strlen(g_plan_calls);
+    _snprintf_s(g_plan_calls + at, sizeof g_plan_calls - at, _TRUNCATE, "%s:%s:%s;", kind, type, name);
+}
+static int rd_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
+static int rd_register(void *c, const char *type, const char *name, const char *reg)
+{
+    (void)c; (void)reg;
+    plan_log("R", type, name);
+    return 1;
+}
+static int rd_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    char req[400], *q;
+    unsigned char *bytes = NULL;
+    size_t n = 0;
+    (void)c;
+    *lifetime = persist ? 4 : 1;
+    _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/%s/%s.decl", type, name);
+    for (q = req; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a');
+    if (sh_modserve_open(req, &bytes, &n) != 1 || !bytes || !n) {
+        plan_log("UNREAD", type, name);
+        *state = 0x01;
+        return 0;
+    }
+    HeapFree(GetProcessHeap(), 0, bytes);
+    plan_log("L", type, name);
+    *state = 0xa0;
+    return 1;
+}
+/* what the game holds, for a plan's model check (an animWeb naming a model) */
+static int rd_stock(void *c, const char *request) { (void)c; return g_doom_registered ? sh_modstock_exists(request) : 0; }
+static const sh_modserve_engine_ops g_read_ops = { NULL, rd_source, rd_register, rd_load, rd_stock };
+/* The first step of `type` whose name starts with `prefix`, or -1. */
+static int plan_has(const sh_modserve_plan *p, const char *type, const char *prefix)
+{
+    int i;
+    for (i = 0; i < p->count; i++)
+        if (!_stricmp(p->steps[i].type, type) && !_strnicmp(p->steps[i].name, prefix, strlen(prefix))) return i;
+    return -1;
+}
+
 /* ------------------------------------------------------------------ 3. a real converted mod */
 
 static void test_tyrant(const char *tmp)
 {
-    char copy[MAX_PATH], leaf[MAX_PATH];
+    char copy[MAX_PATH], leaf[MAX_PATH], root[MAX_PATH];
     sh_mb_bundle b;
     DWORD a = g_tyrant[0] ? GetFileAttributesA(g_tyrant) : INVALID_FILE_ATTRIBUTES;
     size_t i, looks = 0, mats = 0, notes = 0;
@@ -500,7 +547,9 @@ static void test_tyrant(const char *tmp)
     }
     /* built from a copy: the folder is read, never written */
     _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "tyrant-pg1-after");
-    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\%s", tmp, leaf);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\tyrmods", tmp);
+    CreateDirectoryA(root, NULL);
+    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\%s", root, leaf);
     CHECK(mt_copy_tree(g_tyrant, copy));
     sh_mb_set_look_compiler(sh_look_compile_notes);
     ok = sh_mb_build(copy, NULL, &g_resolver, &b);
@@ -535,6 +584,78 @@ static void test_tyrant(const char *tmp)
     printf("   %u material(s), %u compiled as looks, %u note(s)\n", (unsigned)mats, (unsigned)looks, (unsigned)notes);
     CHECK(ok);
     CHECK(b.errors == 0);
+    /* Its map pass (R-GS3): its own decls, then the product's programs and render parms it reaches, planned too and
+     * readable in plan order in a fresh process (the programs derive from the installed game's own). */
+    if (ok) {
+        char *cause = NULL;
+        const char *hashes[1];
+        sh_modserve_plan p;
+        int own = 0, prod = 0, progs = 0, parms = 0, ready, k, first_mat = -1, last_prog = -1;
+        char hash[SH_MB_HASH_HEX + 1];
+        CHECK(HO(cause, sh_mb_write(&b, copy, HO_P(0))));
+        strcpy_s(hash, sizeof hash, b.hash);
+        sh_modprog_reset();
+        sh_modserve_set_material_filter(sh_sdk_serve_compile);
+        CHECK(sh_modserve_index_build(root) == 1);
+        hashes[0] = hash;
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, NULL) > 0);
+        for (k = 0; k < p.count; k++) {
+            char req[400];
+            _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/%s/%s.decl", p.steps[k].type, p.steps[k].name);
+            if (sh_mb_product_decl(req) || sh_modprog_owns(req)) {
+                prod++;
+                if (!_stricmp(p.steps[k].type, "renderProg")) { progs++; last_prog = k; }
+                else if (!_stricmp(p.steps[k].type, "renderParm")) parms++;
+            } else {
+                own++;
+                if (first_mat < 0 && (!_stricmp(p.steps[k].type, "material") || !_stricmp(p.steps[k].type, "material2"))) first_mat = k;
+            }
+        }
+        g_plan_calls[0] = 0;
+        ready = sh_modserve_plan_run(&p, &g_read_ops, "map");
+        printf("   map pass: %d step(s), %d of its own, %d of the product's (%d render programs, %d render parms); %d ready\n",
+               p.count, own, prod, progs, parms, ready);
+        /* every program is loaded before each material that names it (all sources are registered before any load) */
+        CHECK(progs > 0);
+        {
+            int late = 0, naming = 0, m, q;
+            for (m = 0; m < p.count; m++) {
+                char req[400];
+                unsigned char *t = NULL;
+                size_t tn = 0;
+                if (_stricmp(p.steps[m].type, "material") && _stricmp(p.steps[m].type, "material2")) continue;
+                _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/%s/%s.decl", p.steps[m].type, p.steps[m].name);
+                for (q = 0; req[q]; q++) if (req[q] >= 'A' && req[q] <= 'Z') req[q] = (char)(req[q] - 'A' + 'a');
+                if (sh_modserve_open(req, &t, &tn) != 1 || !t) continue;
+                for (q = 0; q < p.count; q++) {
+                    char *z;
+                    if (_stricmp(p.steps[q].type, "renderProg") || _strnicmp(p.steps[q].name, "snapmapplus/", 12)) continue;
+                    z = (char *)HeapAlloc(GetProcessHeap(), 0, tn + 1);
+                    if (!z) continue;
+                    memcpy(z, t, tn);
+                    z[tn] = 0;
+                    if (strstr(z, p.steps[q].name)) { naming++; if (q > m) late++; }
+                    HeapFree(GetProcessHeap(), 0, z);
+                }
+                HeapFree(GetProcessHeap(), 0, t);
+            }
+            printf("   %d material/program pair(s) named; %d with the program after the material\n", naming, late);
+            CHECK(naming > 0 && late == 0);
+        }
+        (void)first_mat; (void)last_prog;
+        for (k = 0; k < p.count; k++)
+            if (p.steps[k].ready != 1) printf("   not ready: %s %s%s%s\n", p.steps[k].type, p.steps[k].name,
+                                              p.steps[k].blocked ? ": " : "", p.steps[k].blocked ? p.steps[k].blocked : "");
+        CHECK(ready == p.count);
+        CHECK(!strstr(g_plan_calls, "UNREAD"));
+        if (strstr(g_plan_calls, "UNREAD")) {
+            const char *u = strstr(g_plan_calls, "UNREAD");
+            fprintf(stderr, "tyrant plan: first unread %.200s\n", u);
+        }
+        sh_modserve_plan_free(&p);
+        sh_modserve_index_retire();
+        sh_modserve_set_material_filter(NULL);
+    }
     sh_mb_free(&b);
 }
 
@@ -602,7 +723,38 @@ static void test_sdk(const char *tmp)
         if (b.needs.unresolved) fprintf(stderr, "sdk: %d unresolved needs\n", (int)b.needs.unresolved);
     }
     CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
+    strcpy_s(g_sdk_hash, sizeof g_sdk_hash, b.hash);
     sh_mb_free(&b);
+
+    /* The registration plan a map pass runs, with the engine faked as it reads (each load opens its file through the
+     * provider), in a fresh process: nothing has compiled the effect, so the derived decls exist only once a read
+     * compiles the file that needs them (R-GS3). */
+    if (g_doom_registered) {
+        sh_modserve_plan p;
+        const char *hashes[1];
+        int ready;
+        hashes[0] = g_sdk_hash;
+        sh_modprog_reset();
+        sh_modserve_set_material_filter(sh_sdk_serve_compile);
+        CHECK(sh_modserve_index_build(root) == 1);
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, NULL) > 0);
+        if (g_verbose) { int q; for (q = 0; q < p.count; q++) printf("    step %d: %s %s\n", q, p.steps[q].type, p.steps[q].name); }
+        CHECK(plan_has(&p, "entityDef", "snapmapplus/effect/mods/" SDK_SALT "/blast") >= 0);
+        CHECK(plan_has(&p, "particle", "snapmapplus/sdk/") >= 0 && plan_has(&p, "material", "snapmapplus/sdk/") >= 0);
+        CHECK(plan_has(&p, "table", "snapmapplus_sdk_") >= 0);
+        CHECK(plan_has(&p, "fx", "snapmapplus/sdk/") >= 0 && plan_has(&p, "entityDef", "snapmapplus/effect/snapmapplus/sdk/") >= 0);
+        /* needs first: the derived particle before the effect that plays it, its material and table before it */
+        CHECK(plan_has(&p, "particle", "snapmapplus/sdk/") < plan_has(&p, "fx", "mods/" SDK_SALT "/blast"));
+        CHECK(plan_has(&p, "material", "snapmapplus/sdk/") < plan_has(&p, "particle", "snapmapplus/sdk/"));
+        CHECK(plan_has(&p, "fx", "snapmapplus/sdk/") < plan_has(&p, "env", "mods/" SDK_SALT "/hell_red"));
+        g_plan_calls[0] = 0;
+        ready = sh_modserve_plan_run(&p, &g_read_ops, "map");
+        CHECK(ready == p.count);
+        CHECK(!strstr(g_plan_calls, "UNREAD"));
+        if (ready != p.count || strstr(g_plan_calls, "UNREAD")) fprintf(stderr, "sdk plan: %d of %d ready: %s\n", ready, p.count, g_plan_calls);
+        sh_modserve_plan_free(&p);
+        sh_modserve_index_retire();
+    }
 
     /* served as compiled */
     sh_modserve_set_material_filter(sh_sdk_serve_compile);
@@ -623,7 +775,8 @@ static void test_sdk(const char *tmp)
     /* the emitter answers through the product: a pointer of the bundle (with the game) */
     if (g_doom_registered) {
         CHECK(open_text("generated/decls/entitydef/snapmapplus/effect/mods/" SDK_SALT "/blast.decl", &served, &sn));
-        CHECK(served && has((const char *)served, "fxDecl = \"mods/" SDK_SALT "/blast\""));
+        CHECK(served && has((const char *)served, "fxEffect = \"mods/" SDK_SALT "/blast\""));
+        CHECK(served && !has((const char *)served, "fxDecl"));
         if (served) HeapFree(GetProcessHeap(), 0, served);
         served = NULL;
     }
@@ -663,6 +816,7 @@ int main(int argc, char **argv)
     if (!g_fixtures[0] || !g_fixtures_prog[0]) { fprintf(stderr, "usage: fixtures=<dir> fixtures_prog=<dir>\n"); return 2; }
     if (!mt_temp_dir("modlookmod", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
     sh_mb_set_script_check(sh_script_compile_check);   /* a converted mod carries scripts, as the product builds them */
+    sh_modserve_set_product_owner(sh_modprog_owns);    /* what the product derives, as dllmain.c sets it */
     test_build(tmp);
     test_serve(tmp);
     if (g_doom[0] && strcmp(g_doom, "nodoom")) {
