@@ -27,4 +27,15 @@ int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_resu
 /* Reloads moved to process heap 0 this session. */
 long sh_static_model_heap_moves(void);
 
+/* A backing static model reloaded in place keeps its pointer, so the engine's
+ * update would keep each render model's copy of the old table. Begin a reload
+ * pass (forgets the last one's models), then name each backing reloaded: every
+ * render model of it is given the never-built marker once, at its next update
+ * through the guard, and copies the new table. sh_static_model_reloaded returns
+ * 1 when the guard is armed to do so. */
+void sh_static_model_reload_begin(void);
+int  sh_static_model_reloaded(const void *backing);
+/* Render models rebuilt that way this session. */
+long sh_static_model_rebuilds(void);
+
 #endif /* SHIELD_STATIC_MODEL_GUARD_H */

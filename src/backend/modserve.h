@@ -1135,7 +1135,11 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
  * a new decl name registers at the next map load of a map that names its
  * bundle, a new editor row at 'sh_mods palette rebuild'. */
 #define SH_MODSERVE_RF_DECL  1
-#define SH_MODSERVE_RF_MODEL 2   /* baseModel */
+#define SH_MODSERVE_RF_MODEL 2   /* baseModel, and a static model (provides type "model", a .bmodel) */
+/* 1 when `list_name`, a name the engine's static model list ("model", idStaticModel) holds (models/x.lwo), is the
+ * model whose cooked request is `request` (cooked/model/models/x.bmodel), by the builder's model keys
+ * (sh_mb_model_keys); a refresh reloads that list entry in place. */
+int sh_modserve_static_model_same(const char *request, const char *list_name);
 #define SH_MODSERVE_RF_IMAGE 3
 #define SH_MODSERVE_RF_ANIM  4   /* anim (cooked/anim/<stem>.bmd6anim): reloaded at a map pass only */
 

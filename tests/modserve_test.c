@@ -1934,6 +1934,42 @@ static void test_refresh(void)
     (void)sh_modserve_index_build(root);
 }
 
+/* R-DS5: a native/ replacement of a DOOM static model is reloaded in place when the open map's scope changes who
+ * serves it, as an md6 model is (OpenGL keeps a session prop loaded across maps and drew DOOM's bytes in a map that
+ * declares the replacement). The refresh offers it as a model, and the engine's list entry is found by its name. */
+static void test_static_model_refresh(void)
+{
+    static const fx_file sm[] = {
+        { "cooked/model/models/snapmaps/props/new/crate01.bmodel", "BARRELBYTES", -1, "model",
+          "cooked/model/models/snapmaps/props/new/crate01.bmodel", NULL, 's' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], *slash;
+    sh_modserve_diff d;
+    rf_seen s;
+    printf("-- a replaced DOOM static model is reloaded in place, found in the model list by its name\n");
+    CHECK(sh_modserve_static_model_same("cooked/model/models/snapmaps/props/new/crate01.bmodel",
+                                        "models/snapmaps/props/new/crate01.lwo"));
+    CHECK(sh_modserve_static_model_same("cooked/model/models/snapmaps/props/new/crate01.bmodel",
+                                        "MODELS/Snapmaps/Props/New/Crate01.LWO"));
+    CHECK(!sh_modserve_static_model_same("cooked/model/models/snapmaps/props/new/crate01.bmodel",
+                                         "models/snapmaps/props/new/crate02.lwo"));
+    CHECK(!sh_modserve_static_model_same(NULL, "models/x.lwo"));
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\smodel\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "smodel00", "smodel00", 'd', "\"cooked/model/models/snapmaps/props/new/crate01.bmodel\"", sm, 1, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed_models == 1 && d.changed_restart == 0);
+    memset(&s, 0, sizeof s);
+    (void)sh_modserve_each_refresh(rf_visit, &s);
+    CHECK(strstr(s.order, "2:model:cooked/model/models/snapmaps/props/new/crate01.bmodel:now;") != NULL);
+    if (!strstr(s.order, "2:model:")) fprintf(stderr, "  refresh: %s\n", s.order);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 static void test_compose_unit(void)
 {
     const char *t[3];
@@ -5926,6 +5962,7 @@ int main(void)
     test_resource_lock();
     test_row_served();
     test_dependency_names();
+    test_static_model_refresh();
     test_miss_reporter_skips_probes();
     test_composition_serves_its_map();
     test_bank_stems();
