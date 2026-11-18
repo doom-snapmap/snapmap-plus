@@ -29,6 +29,9 @@ typedef struct sdk_env_parm {
 
 #define SDK_ENV_MAX 48
 
+/* The first line of a compiled environment: a comment naming the fx set_environment plays (sdk_runtime.c). */
+#define SH_ENV_MARK "// Snapmap+ environment fx"
+
 /* The values a group of environment fields sets, in field order; `skip` names fields the caller reads itself (NULL
  * terminated, or NULL). Returns the count (0..SDK_ENV_MAX), or -1 with a sentence (an unknown field and its nearest, a
  * wrong shape). `what` names the group in sentences ("an environment"). */

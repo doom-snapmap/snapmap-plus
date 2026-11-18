@@ -251,9 +251,21 @@ static int f_tag(void *ent, const char *name, float pos[3], float axis[9])
     return 1;
 }
 
+/* a render parm decl by its name (the recolour regions) */
+static fdecl g_parms[8];
+static void *f_decl(const char *type, const char *name)
+{
+    int i;
+    if (strcmp(type, "renderParm")) return NULL;
+    for (i = 0; i < 8; i++) {
+        if (!g_parms[i].name[0]) { strcpy_s(g_parms[i].type, sizeof g_parms[i].type, type); strcpy_s(g_parms[i].name, sizeof g_parms[i].name, name); }
+        if (!strcmp(g_parms[i].name, name)) return &g_parms[i];
+    }
+    return NULL;
+}
 static const sh_script_engine k_engine = {
     f_resolve, f_spawn_id, f_slots, f_slot_spawn_id, f_kind, f_origin, f_axis, f_place, f_def_name, f_event,
-    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time, NULL, NULL, f_tag
+    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time, NULL, NULL, f_tag, NULL, NULL, NULL, f_decl
 };
 
 /* the combat engine */
@@ -494,6 +506,63 @@ static void test_effects_sound(void)
     CHECK(has(g_log, "sound\ttrue\ttrue"));
     CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,0);"));
     CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,7);"));
+}
+
+/* The Graphics SDK's calls: an SDK effect played at a point and on an entity's joint with a colour, an environment set
+ * and cleared, an entity recoloured (sh_script_sdk_runtime faked: the server's answers). */
+static char *fake_effect(const char *fx)
+{
+    size_t n = strlen(fx);
+    char *r;
+    if (n < 6 || strcmp(fx + n - 6, "/blast")) return NULL;
+    r = (char *)malloc(n + 32);
+    if (r) sprintf_s(r, n + 32, "snapmapplus/effect/%s", fx);
+    return r;
+}
+static char *fake_env(const char *env)
+{
+    size_t n = strlen(env);
+    if (n < 5 || strcmp(env + n - 5, "/hell")) return NULL;
+    return _strdup("snapmapplus/effect/snapmapplus/sdk/0123456789abcdef");
+}
+static int g_sdk_logs;
+static void fake_log(const char *line) { (void)line; g_sdk_logs++; }
+
+static void test_sdk_calls(void)
+{
+    sh_script_sdk_runtime rt = { fake_effect, fake_env, fake_log };
+    sh_script_set_sdk_runtime(&rt);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local a = fx('blast', {x = 1, y = 2, z = 3})\n"
+        "  print('at', a:def(), a:pos().x)\n"
+        "  local b = fx('blast', self, 'head', { colour = {1, 0.5, 0} })\n"
+        "  print('on', b:def())\n"
+        "  local c = fx('blast', self)\n"
+        "  print('old', fx('fx/beam_impact', {x = 0, y = 0, z = 0}):def())\n"
+        "  print('env', set_environment('hell'), clear_environment())\n"
+        "  print('recolour', self:recolour{ primary = {1, 0, 0}, pattern = { {0, 0, 1}, {1, 1, 1} }, seconds = 2 })\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    log_now();
+    CHECK(has(g_log, "at\tsnapmapplus/effect/mods/" SALT "/blast\t1.0"));
+    CHECK(has(g_log, "on\tsnapmapplus/effect/mods/" SALT "/blast"));
+    CHECK(has(g_events, "bindToJoint@snapmapplus/effect/mods/" SALT "/blast(e:mods/" SALT "/ai/brute,'','head',0);"));
+    CHECK(has(g_events, "setColor@snapmapplus/effect/mods/" SALT "/blast(1,0.5,0);"));
+    CHECK(has(g_events, "bind@snapmapplus/effect/mods/" SALT "/blast(e:mods/" SALT "/ai/brute);"));
+    /* a name that is not an SDK effect plays as before: the mod's effect entity */
+    CHECK(has(g_log, "old\tfx/beam_impact"));
+    CHECK(has(g_log, "env\ttrue\ttrue"));
+    CHECK(has(g_events, "post remove@snapmapplus/effect/snapmapplus/sdk/0123456789abcdef();"));
+    CHECK(has(g_log, "recolour\ttrue"));
+    CHECK(has(g_events, "lerpRenderParmFrom@mods/" SALT "/ai/brute(d:customprimaryalbedo,v1 0 0,1,v1 0 0,1,2000);"));
+    CHECK(has(g_events, "lerpRenderParmFrom@mods/" SALT "/ai/brute(d:custompatternalbedo1,v1 1 1,1,v1 1 1,1,2000);"));
+    refused("api = 1\non.spawn('ai/brute', function(self) set_environment('nowhere') end)\n", "2",
+            "knows no environment \"nowhere\" of this mod; write one as an env decl");
+    refused("api = 1\non.spawn('ai/brute', function(self) self:recolour{ primry = {1, 0, 0} } end)\n", "2",
+            "knows no region \"primry\"; write primary");
+    sh_script_set_sdk_runtime(NULL);
+    CHECK(g_sdk_logs == 0);
 }
 
 /* The hard stop rule: which stops end an action at once, which sound requests are held, which decls are named,
@@ -907,6 +976,7 @@ int main(void)
     test_damage();
     test_hitscan_radius();
     test_effects_sound();
+    test_sdk_calls();
     test_fx_hard_stops();
     test_tag_pain_sight();
     test_tags();

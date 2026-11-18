@@ -9,6 +9,8 @@
 #ifndef SNAPMAP_PLUS_SDKWORDS_H
 #define SNAPMAP_PLUS_SDKWORDS_H
 
+#include <math.h>
+
 #define SDK_WORDS(X)                                                                                               \
     /* the first key of every SDK file, and its kinds */                                                           \
     X(TYPE, "type") X(KIND_EFFECT, "effect") X(KIND_ENVIRONMENT, "environment")                                    \
@@ -61,8 +63,28 @@ typedef enum sdk_word_id {
     SDK_WORD_COUNT
 } sdk_word_id;
 
-/* The word an author writes for `id`. */
-const char *sdk_word(sdk_word_id id);
+/* The word an author writes for `id`. Header only, so every caller (the compilers, the script calls) reads the one
+ * table without linking anything. */
+static __inline const char *sdk_word(sdk_word_id id)
+{
+    static const char *const words[SDK_WORD_COUNT] = {
+#define SDK_WORD_TEXT(id_, w_) w_,
+        SDK_WORDS(SDK_WORD_TEXT)
+#undef SDK_WORD_TEXT
+    };
+    return (unsigned)id < SDK_WORD_COUNT ? words[id] : "";
+}
+
+/* The parser's sRGB decode of a colour parm's constant (VK 0x141a035e0 / GL 0x141a1f680): below 0 (or NaN) 0, from 1
+ * up 1, else the sRGB curve. A colour the SDK writes where no parser decodes it (an fx value, a per-entity parm) is
+ * decoded the same way, so it draws as the same constant in a material would. */
+static __inline double sdk_srgb_decode(double x)
+{
+    if (!(x > 0)) return 0;
+    if (x >= 1) return 1;
+    if (x <= 0.04045) return x / 12.92;
+    return pow((x + 0.055) / 1.055, 2.4);
+}
 #define SDK_W(id) sdk_word(SDK_##id)
 
 #endif /* SNAPMAP_PLUS_SDKWORDS_H */

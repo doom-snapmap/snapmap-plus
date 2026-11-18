@@ -39,6 +39,7 @@
 #include "modstock.h"
 #include "modlook.h"
 #include "sdk.h"
+#include "sdk_runtime.h"
 #include "modpublished.h"
 #include "modpublish.h"
 #include "budget_table.h"
@@ -212,6 +213,7 @@ static void install_features(const sig_result *results, size_t db)
     sh_modserve_set_material_filter(sh_sdk_serve_compile);
     sh_mb_set_look_compiler(sh_look_compile_notes);
     sh_mb_set_sdk_compiler(sh_sdk_compile);           /* the build refuses a mistake in any of them */
+    sh_sdk_runtime_install();                         /* the script calls that play them */
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
     (void)sh_modserve_index_boot();

@@ -24,6 +24,10 @@ int sh_effect_compile(const char *path, const char *text, size_t len, char **out
 /* 1 when `text` is an SDK effect (its first key is `type effect`). */
 int sh_effect_is(const char *text, size_t len);
 
+/* The first line of a compiled effect (a comment the engine's lexer skips): how a served fx decl says it is an SDK
+ * effect. */
+#define SH_EFFECT_MARK "// Snapmap+ effect"
+
 /* Particles the GPU draws when a stage has this many or more and the GPU can draw it as written (CPU otherwise). */
 #define SH_EFFECT_GPU_COUNT 256
 

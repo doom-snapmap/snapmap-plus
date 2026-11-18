@@ -7,16 +7,6 @@
 
 #include "sdkparse.h"
 
-/* ------------------------------------------------------------------------------------------ the words ---- */
-
-static const char *const g_words[SDK_WORD_COUNT] = {
-#define SDK_WORD_TEXT(id, w) w,
-    SDK_WORDS(SDK_WORD_TEXT)
-#undef SDK_WORD_TEXT
-};
-
-const char *sdk_word(sdk_word_id id) { return (unsigned)id < SDK_WORD_COUNT ? g_words[id] : ""; }
-
 /* ------------------------------------------------------------------------------------------- buffers ---- */
 
 void sdk_put(sdk_buf *b, const char *s, size_t n)

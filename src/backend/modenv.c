@@ -219,6 +219,7 @@ static int compile(const char *path, const char *text, size_t len, char **out, s
     n = sdk_env_parms(&d, d.root, "an environment", skip, p, why, why_len);
     if (n < 0) { sdk_doc_free(&d); return SH_LOOK_MISTAKE; }
     sdk_printf(&b, "{\n\tinherit {\n\t\tdefault\n\t}\n\trenderParms {\n");
+    /* the fx set_environment plays is named in the first line (sdk_runtime.c), once it is known below */
     {
         char t[32];
         sdk_fmt(t, sizeof t, blend);
@@ -239,6 +240,13 @@ static int compile(const char *path, const char *text, size_t len, char **out, s
         free(fx);
         if (!name) { sdk_doc_free(&d); free(b.p); return SH_LOOK_OOM; }
         if (moment) *moment = _strdup(name);
+        {
+            char *marked = sh_textf(SH_ENV_MARK " %s\n%s", name, b.p);
+            if (!marked) { sdk_doc_free(&d); free(b.p); return SH_LOOK_OOM; }
+            free(b.p);
+            b.p = marked;
+            b.n = strlen(marked);
+        }
         if (needs) {
             char *em = sh_modprog_effect_emitter(name);
             *needs = em ? sh_textf("fx %s\nentityDef %s\n", name, em) : NULL;

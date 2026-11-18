@@ -194,7 +194,7 @@ static void test_effect_items(void)
 {
     res x = compile(FX, EXAMPLE);
     CHECK(x.r == SH_LOOK_CHANGED);
-    CHECK(x.out && !strncmp(x.out, "{\n\tedit = {\n\t\teditEvents = {\n\t\t\tnum = 5;", 39));
+    CHECK(x.out && !strncmp(x.out, SH_EFFECT_MARK "\n{\n\tedit = {\n\t\teditEvents = {\n\t\t\tnum = 5;", strlen(SH_EFFECT_MARK) + 40));
     CHECK(!strcmp(kv(x.out, "type", 0), "FX_LIGHT"));
     CHECK(!strcmp(kv(x.out, "type", 1), "FX_DECAL"));
     CHECK(!strcmp(kv(x.out, "type", 2), "FX_SCREEN_SHAKE"));
@@ -426,7 +426,8 @@ static void test_environment(void)
     sdk_set_register(capture);
     x = compile(ENV, t);
     CHECK(x.r == SH_LOOK_CHANGED);
-    CHECK(x.out && !strncmp(x.out, "{\n\tinherit {\n\t\tdefault\n\t}\n\trenderParms {\n", 41));
+    CHECK(x.out && !strncmp(x.out, SH_ENV_MARK " snapmapplus/sdk/", strlen(SH_ENV_MARK) + 17));
+    CHECK(x.out && has(x.out, "\n{\n\tinherit {\n\t\tdefault\n\t}\n\trenderParms {\n"));
     CHECK(has(x.out, "\tfogColor\t{ 0.35, 0.05, 0.03 }\n"));
     CHECK(has(x.out, "\tbloomWeight0\t0.3\n") && has(x.out, "\tbloomWeight5\t1.5\n"));
     CHECK(has(x.out, "\tautoExposureMin\t2\n") && has(x.out, "\tautoExposureMax\t10\n"));

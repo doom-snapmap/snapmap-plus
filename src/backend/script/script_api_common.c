@@ -457,6 +457,24 @@ void sh_script_api_check_room(lua_State *L, const char *call)
     if (g_room > 0) g_room--;
 }
 
+static sh_script_sdk_runtime g_sdk_runtime;
+
+void sh_script_set_sdk_runtime(const sh_script_sdk_runtime *rt)
+{
+    if (rt) g_sdk_runtime = *rt;
+    else memset(&g_sdk_runtime, 0, sizeof g_sdk_runtime);
+}
+
+const sh_script_sdk_runtime *sh_script_sdk_runtime_get(void) { return &g_sdk_runtime; }
+
+int sh_script_api_has_room(void)
+{
+    if (g_room < 0) read_room();
+    if (g_room >= 0 && g_room <= SH_SCRIPT_ENGINE_RESERVE) return 0;
+    if (g_room > 0) g_room--;
+    return 1;
+}
+
 void sh_script_api_frame(void)
 {
     int i;

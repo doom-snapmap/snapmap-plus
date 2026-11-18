@@ -1232,7 +1232,8 @@ int sh_effect_compile(const char *path, const char *text, size_t len, char **out
     if (!nev) { sdk_say(why, why_len, &d, d.root->line, "an effect needs at least one item (light, decal, shake, ...)."); goto mistake; }
     if (lasts >= 0)
         for (k = 0; k < nev; k++) if (!evs[k].has_dur && strcmp(evs[k].type, "FX_SOUND") && strcmp(evs[k].type, "FX_PARTICLE")) { evs[k].has_dur = 1; evs[k].dur = lasts; }
-    sdk_printf(&b, "{\n\tedit = {\n\t\teditEvents = {\n\t\t\tnum = %d;\n", nev);
+    /* the first line marks an SDK effect for the calls that play it (sdk_runtime.c) */
+    sdk_printf(&b, SH_EFFECT_MARK "\n{\n\tedit = {\n\t\teditEvents = {\n\t\t\tnum = %d;\n", nev);
     for (k = 0; k < nev; k++) write_ev(&b, k, &evs[k]);
     sdk_printf(&b, "\t\t}\n\t}\n}\n");
     for (k = 0; k < nev; k++) free(evs[k].parms.p);

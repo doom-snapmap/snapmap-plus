@@ -143,6 +143,18 @@ int sh_script_api_ground_trace(int (*trace)(const float from[3], const float to[
 void sh_script_api_set_engine(const sh_script_engine *engine);
 const sh_script_engine *sh_script_api_engine(void);
 
+/* The Graphics SDK's files as the server holds them (sdk_runtime.c), for the calls that play them: the fx (fx(effect,
+ * ...)) and env (set_environment) decls a mod wrote with `type effect` and `type environment`. Each answers the
+ * entityDef to spawn (malloc'd), or NULL when the mod has no such SDK file. Opening the file through the server also
+ * compiles it, which registers what it derives. Unset (the tests that do not install one), every answer is NULL. */
+typedef struct sh_script_sdk_runtime {
+    char *(*effect_emitter)(const char *fx_name);       /* "mods/<salt>/<name>" */
+    char *(*environment_emitter)(const char *env_name); /* "mods/<salt>/<name>" */
+    void  (*log)(const char *line);                     /* the backend log, for a skip that is never an error */
+} sh_script_sdk_runtime;
+void sh_script_set_sdk_runtime(const sh_script_sdk_runtime *rt);
+const sh_script_sdk_runtime *sh_script_sdk_runtime_get(void);
+
 /* Boot (the backend): resolve the private signatures and the decl registry
  * from the shared results, fill the engine table and register every call of
  * the entity, animation, world and time groups. Commits nothing. Returns 1
@@ -189,6 +201,15 @@ int sh_script_api_world_trace(const float from[3], const float to[3], float end[
 #define SH_SCRIPT_ENGINE_ENTITIES 16382
 #define SH_SCRIPT_ENGINE_RESERVE  256
 void sh_script_api_check_room(lua_State *L, const char *call);
+
+/* The same check without the refusal: 1 (and one slot taken) when there is room, 0 when the game is near its
+ * entity limit. For a call whose entity is decoration (an effect), which is skipped instead of refused: a limit never
+ * reaches the author or the player as an error. */
+int sh_script_api_has_room(void);
+
+/* Spawns the entityDef `def` (a full name: this mod's or one the product serves) at `pos` facing `yaw` degrees,
+ * recorded as this mod's entity, and pushes it (or nil). Raises only for an engine refusal with a reason. */
+int sh_script_api_spawn_def(lua_State *L, const char *def, const float pos[3], double yaw);
 
 /* The game clock in milliseconds (idGameLocal vtable +0x220). 1 when read. */
 int sh_script_api_now_ms(int *ms);

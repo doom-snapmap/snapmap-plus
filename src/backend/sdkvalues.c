@@ -42,14 +42,7 @@ int sdk_parm_is_srgb(const char *name, size_t n)
     return 0;
 }
 
-/* The parser's decode (VK 0x141a035e0): below 0 (or NaN) 0, from 1 up 1, else the sRGB curve. */
-double sdk_srgb_to_linear(double x)
-{
-    if (!(x > 0)) return 0;
-    if (x >= 1) return 1;
-    if (x <= 0.04045) return x / 12.92;
-    return pow((x + 0.055) / 1.055, 2.4);
-}
+double sdk_srgb_to_linear(double x) { return sdk_srgb_decode(x); }
 
 /* ------------------------------------------------------------------------------------------ reading ---- */
 
