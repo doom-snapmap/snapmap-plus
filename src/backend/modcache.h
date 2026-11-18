@@ -105,6 +105,9 @@ int   sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long 
 void  sh_cache_note_rows(const struct sh_modmanifest_list *rows, char *const *placed, size_t placed_count);
 /* 1 when `chash` is a pinned row noted from a map. */
 int   sh_cache_row_known(const char *chash);
+/* 1 when a unit's pointer from `source` (its "game" entry) is checked against this install's bytes before the unit
+ * is used; 0 for the product's own container, whose files this product derives again where they serve. */
+int   sh_cache_pointer_checked(const char *source);
 /* 1 when the composition `chash` is on disk and complete (every unit present when it was made). */
 int   sh_cache_composed(const char *chash, int *complete);
 

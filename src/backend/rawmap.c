@@ -178,6 +178,10 @@ static char *g_held;                   /* process heap */
 static size_t g_held_len;
 static char *g_held_path;             /* malloc'd */
 static int g_held_ready;
+/* 1 when the last read returned a resumed hold's text: that load has had its fetch, so it is never held again (R-LV2:
+ * a pinned row whose units could not be had stayed missing, and every resume held the load again, without end). */
+static int g_read_resumed;
+static int g_held_fetched;            /* the held text is a hold's, resumed after its fetch (not an import's) */
 
 /* Hold `text` (process heap, taken) read from `path`. When the path cannot be
  * kept for want of memory, nothing is held: the resume reads the file again. */
@@ -192,6 +196,7 @@ static void held_keep(char *text, size_t len, const char *path)
     g_held_len = len;
     g_held_path = kept;
     g_held_ready = 0;
+    g_held_fetched = 0;
     ReleaseSRWLockExclusive(&g_held_lock);
     if (old) HeapFree(GetProcessHeap(), 0, old);
     free(old_path);
@@ -249,7 +254,11 @@ static char *read_source_file_why(size_t *out_len, char **why, int *importing)
         rawmap_why(why, "the game ran out of memory; restart the game and try again");
         return NULL;
     }
-    held = held_take(path, out_len);
+    {
+        int fetched = g_held_fetched;
+        held = held_take(path, out_len);
+        g_read_resumed = held != NULL && fetched;
+    }
     if (held) {
         line = sh_textf("RAWMAP: %s: the resumed load uses the map its hold read; not read again", path);
         backend_log(line ? line : "RAWMAP: the resumed load uses the map its hold read; not read again");
@@ -850,6 +859,15 @@ int sh_rawmap_prepare_reload(char **why)
         free(path);
         return rc;
     }
+    if (missing && g_read_resumed) {
+        /* Its fetch already ran and its notice was given: a pinned row opens with its stand-ins, anything else the
+         * engine reports. Holding it again would fetch again without end. */
+        line = sh_textf("RAWMAP: %s still misses %u mod(s) after its download; it opens with what is here", path,
+                        (unsigned)missing);
+        backend_log(line ? line : "RAWMAP: the resumed load still misses mods; it opens with what is here");
+        free(line);
+        missing = 0;
+    }
     if (missing) {
         char *sentence;
         line = sh_textf("RAWMAP: open held -- %s names %u mod(s) that are not installed; the engine never sees it",
@@ -902,6 +920,7 @@ int sh_rawmap_reopen_after_mods(char **note)
     const char *name = rawmap_base_name(path);
     if (note) *note = NULL;
     held_mark_ready(path);   /* the reload below parses the bytes the hold checked */
+    g_held_fetched = 1;
     if (sh_editor_frame_request_reload(&msg)) {
         line = sh_textf("RAWMAP: %s opens again now that its mods are installed", rawmap_s(path));
         backend_log(line ? line : "RAWMAP: the rawmap opens again now that its mods are installed");

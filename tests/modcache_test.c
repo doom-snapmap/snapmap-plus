@@ -201,6 +201,15 @@ static char *read_text(const char *path)
 
 /* ------------------------------------------------------------ tests */
 
+static void test_pointer_sources(void)
+{
+    printf("-- a unit's pointers into the product's container are not checked against DOOM's files\n");
+    CHECK(sh_cache_pointer_checked("snap_gameresources") == 1);
+    CHECK(sh_cache_pointer_checked("gameresources") == 1);
+    CHECK(sh_cache_pointer_checked("snapmapplus") == 0);   /* what the walker writes (modprog.h) */
+    CHECK(sh_cache_pointer_checked("product") == 0);
+}
+
 static void test_composition_hash(void)
 {
     const char *a[] = { "1111111111111111111111111111111111111111111111111111111111111111",
@@ -524,6 +533,7 @@ int main(void)
     sh_mb_set_script_check(script_ok);
     sh_cache_set_resolver(&g_game);
     printf("-- composition hash\n");
+    test_pointer_sources();
     test_composition_hash();
     printf("-- format 2 rows\n");
     test_rows_format2();

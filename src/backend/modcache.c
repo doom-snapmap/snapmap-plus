@@ -8,6 +8,7 @@
 #include "modmanifest.h"
 #include "modunit.h"
 #include "modbundle.h"
+#include "modprog.h"
 #include "modzip.h"
 #include "map_carrier.h"
 #include "mp_json.h"
@@ -1119,6 +1120,15 @@ static int mc_fetch_archive(const mc_unit *u, const modnet_io *io)
 }
 
 /* The game's files a unit points to must be this game's bytes (N14). 1 when they are. */
+int sh_cache_pointer_checked(const char *source)
+{
+    /* The product's container (modprog.h) holds files the installed product derives from DOOM's and the mod's own;
+     * a unit names them by the bytes the publishing product derived, which this product derives again where they
+     * serve (R-LV2: the walker writes the container's own name, "snapmapplus", which the check never matched, so
+     * every unit reaching a platform program or look image was refused as needing other DOOM files). */
+    return !(source && (!strcmp(source, SH_MODPROG_CONTAINER) || !strcmp(source, "product")));
+}
+
 static int mc_game_ok(const mc_unit *u)
 {
     mpj *m = mpj_parse(u->bytes, u->len);
@@ -1128,7 +1138,7 @@ static int mc_game_ok(const mc_unit *u)
         const mpj *p = mpj_get(game->items[i], "path"), *s = mpj_get(game->items[i], "sha256"), *src = mpj_get(game->items[i], "source");
         unsigned long long size = 0;
         if (!p || p->type != MPJ_STR || !s || s->type != MPJ_STR) continue;
-        if (src && mpj_str_is(src, "product")) continue;   /* the product's own derived files: checked where they serve */
+        if (src && src->type == MPJ_STR && !sh_cache_pointer_checked(src->text)) continue;   /* the product's own */
         {
             char *cause = NULL;
             int v = sh_mb_stock_verify(p->text, s->text, &size, p->text, &cause);

@@ -1101,6 +1101,31 @@ static void a_held_zip_is_imported_once(void)
     mods_end();
 }
 
+static void a_resumed_load_is_never_held_again(void)
+{
+    char staged[MAX_PATH], why[256];
+    printf("\n-- a resumed rawmap load that still misses its mods opens with what is here, never held again\n");
+    mods_begin();
+    R.store = 1;
+    CHECK(write_file("rawmap_resumed_once.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
+    CHECK(strstr(why, "checking whether it can download them") != NULL);
+    ticks(3);
+    R.answer = 1;
+    ticks(3);
+    CHECK(R.fetches == 1 && R.resumes == 1);
+    /* The mod is still not served when the resumed load reads (a pinned row's units that could not be had). */
+    R.installed = 0;
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 1 && g_prepared && R.fetches == 1);
+    sh_rawmap_reload_done(0, 0);
+    /* A new load of the file is a new hold. */
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
+    ticks(4);
+    sh_rawmap_swap_set_source(NULL);
+    mods_end();
+}
+
 static void a_rawmap_whose_mods_are_installed_loads(void)
 {
     char staged[MAX_PATH];
@@ -1537,6 +1562,7 @@ int main(void)
     a_rawmap_without_its_mods_never_reaches_the_engine();
     a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
     a_held_zip_is_imported_once();
+    a_resumed_load_is_never_held_again();
     a_rawmap_whose_mods_are_installed_loads();
     a_rawmap_open_takes_its_own_rows_and_then_its_own_id();
     a_save_with_mods_writes_the_zip_beside_the_json();
