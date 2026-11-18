@@ -1,0 +1,6 @@
+{
+	type		effect
+	light {
+		brigthness	5
+	}
+}

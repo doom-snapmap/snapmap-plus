@@ -4764,7 +4764,10 @@ static const unsigned char *ms_look_of(const ms_file *f, size_t *len)
     LONG state;
     int r;
     *len = 0;
-    if (!f->is_decl || f->stock || !f->ptype || (_stricmp(f->ptype, "material") && _stricmp(f->ptype, "material2")))
+    /* materials (a look, values that change), and the Graphics SDK's effects and environments (sdk.h) */
+    if (!f->is_decl || f->stock || !f->ptype ||
+        (_stricmp(f->ptype, "material") && _stricmp(f->ptype, "material2") && _stricmp(f->ptype, "fx") &&
+         _stricmp(f->ptype, "env")))
         return NULL;
     state = InterlockedCompareExchange(&m->look_state, 0, 0);
     if (state == 1) return NULL;

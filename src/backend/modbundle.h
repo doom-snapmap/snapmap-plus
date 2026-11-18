@@ -783,6 +783,14 @@ typedef int (*sh_mb_look_fn)(const char *path, const char *text, size_t len, cha
                              size_t why_len, char **notes);
 void sh_mb_set_look_compiler(sh_mb_look_fn fn);
 
+/* The Graphics SDK's compilers (sdk.h sh_sdk_compile), set by the backend: when set, the build reads each material,
+ * fx and env decl through it instead (an effect's or an environment's mistake fails the build with its sentence), and
+ * each `type name` line of *needs joins the file's needs (an effect's emitter, an environment's fx), so the closure
+ * brings the product's derived decls along as pointers. */
+typedef int (*sh_mb_sdk_fn)(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                            size_t why_len, char **notes, char **needs);
+void sh_mb_set_sdk_compiler(sh_mb_sdk_fn fn);
+
 /* Bare (unquoted) words that name a mod resource ("mods/...") and contain
  * '-': the engine's breakable and material lexers split them. The callback
  * receives the 1-based line and the word (not NUL-terminated). Returns the

@@ -122,6 +122,17 @@ const char *sh_modprog_register_param_image(const float vec[][4], unsigned count
  * same path), valid until sh_modprog_reset; NULL on failure. Served and listed as the parameter image is. */
 const char *sh_modprog_register_const_image(const float rgba[4]);
 
+/* The Graphics SDK's derived decls (sdk.h): registers `text` as a decl of `type` (the engine's spelling, any case) to
+ * be served and returns its name: snapmapplus/sdk/<16 lowercase hex digits of the SHA-256 of the type and the text>,
+ * snapmapplus_sdk_<hex> for a table (a material expression names its table, so the name has no '/'), at
+ * generated/decls/<type lower case>/<name>.decl; the same text gives the same name. Valid until sh_modprog_reset; NULL
+ * on failure. Served, owned and listed as the parameter image is. */
+const char *sh_modprog_register_decl(const char *type, const char *text);
+
+/* An SDK effect's emitter: the entityDef snapmapplus/effect/<fx name> (inherit func/fx, fxDecl the fx), which the
+ * product serves from its path alone, at generated/decls/entitydef/snapmapplus/effect/<fx name>.decl. malloc'd. */
+char *sh_modprog_effect_emitter(const char *fx_name);
+
 /* A material that writes the OLD keys, rewritten so that it draws the same: for a particle material the four
  * eternalparticle* vectors and eternalparticleemissivemap into particleuberparms1..3, emissive, smokebrightness and
  * particleemissivemap (merged field by field with any of those lines the material has; see particles.rp for where each

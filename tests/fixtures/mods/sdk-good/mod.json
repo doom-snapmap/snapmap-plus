@@ -1,0 +1,9 @@
+{
+  "name": "SDK fixture sdkgood0",
+  "author": "fixture",
+
+  "snapmap-plus": {
+    "format": 2,
+    "salt": "sdkgood0"
+  }
+}

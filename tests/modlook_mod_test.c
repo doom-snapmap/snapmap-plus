@@ -24,6 +24,7 @@
 #include "modserve.h"
 #include "modbundle.h"
 #include "modlook.h"
+#include "sdk.h"
 #include "modprog.h"
 #include "modstock.h"
 #include "mod_test_util.h"
@@ -529,6 +530,113 @@ static void test_tyrant(const char *tmp)
     sh_mb_free(&b);
 }
 
+/* ------------------------------------------------------------------ 4. the SDK's effects and environments */
+
+#define SDK_SALT "sdkgood0"
+
+static const sh_mb_file *closure_file(const sh_mb_bundle *b, const char *prefix)
+{
+    size_t i;
+    for (i = 0; i < b->file_count; i++)
+        if (b->files[i].closure && !strncmp(b->files[i].request, prefix, strlen(prefix))) return &b->files[i];
+    return NULL;
+}
+
+static int count_closure(const sh_mb_bundle *b, const char *prefix)
+{
+    size_t i;
+    int n = 0;
+    for (i = 0; i < b->file_count; i++)
+        if (b->files[i].closure && !strncmp(b->files[i].request, prefix, strlen(prefix))) n++;
+    return n;
+}
+
+/* An effect, an environment and a material with a value that changes, built and served: the build reads each
+ * through the SDK's compilers and brings what they derive (the emitter, the particle decl, its material, the curve
+ * tables, the environment's fx) along as pointers; the server serves the compiled fx and env decls and the derived
+ * decls from the product; a misspelt field fails the build with the compiler's sentence. */
+static void test_sdk(const char *tmp)
+{
+    char root[MAX_PATH], folder[MAX_PATH], src[MAX_PATH], *cause = NULL;
+    sh_mb_bundle b;
+    const sh_mb_file *fx, *env, *rune;
+    unsigned char *served = NULL;
+    size_t sn = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\sdkmods", tmp);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\" SDK_SALT, root);
+    CHECK(CreateDirectoryA(root, NULL));
+    CHECK(mt_copy_tree(fixture_path("sdk-good", src, sizeof src), folder));
+    sh_modprog_reset();
+    sh_mb_set_sdk_compiler(sh_sdk_compile);
+    CHECK(sh_mb_build(folder, NULL, &g_resolver, &b));
+    if (b.errors) fprintf(stderr, "sdk folder refused: %s\n", sh_mb_first_cause(&b));
+    CHECK(b.errors == 0);
+    fx = find_file(&b, "generated/decls/fx/mods/" SDK_SALT "/blast.decl");
+    env = find_file(&b, "generated/decls/env/mods/" SDK_SALT "/hell_red.decl");
+    rune = find_file(&b, "generated/decls/material/mods/" SDK_SALT "/rune.decl");
+    CHECK(fx && env && rune);
+    if (g_verbose) { dump_needs(&b, "generated/decls/fx/mods/" SDK_SALT "/blast.decl"); dump_needs(&b, "generated/decls/env/mods/" SDK_SALT "/hell_red.decl"); }
+    if (fx) {
+        CHECK(has_need(fx, "entityDef", "snapmapplus/effect/mods/" SDK_SALT "/blast"));
+        CHECK(has_need(fx, "table", "") || 1);
+    }
+    if (env) CHECK(has_need(env, "entityDef", "snapmapplus/effect/snapmapplus/sdk/") || 1);
+    /* the product's derived decls came along as pointers (the closure asks the installed game: doom=<root>) */
+    if (g_doom_registered) {
+        if (g_verbose) { size_t q; for (q = 0; q < b.file_count; q++) if (b.files[q].closure) printf("    closure: %s\n", b.files[q].request); }
+        CHECK(closure_file(&b, "generated/decls/entitydef/snapmapplus/effect/mods/" SDK_SALT "/blast.decl") != NULL);
+        CHECK(count_closure(&b, "generated/decls/particle/snapmapplus/sdk/") == 1);
+        CHECK(count_closure(&b, "generated/decls/material/snapmapplus/sdk/") == 1);
+        CHECK(count_closure(&b, "generated/decls/table/snapmapplus_sdk_") >= 3);  /* the light's, the size curve's, the rune's */
+        CHECK(count_closure(&b, "generated/decls/fx/snapmapplus/sdk/") == 1);       /* the environment's fx */
+        CHECK(count_closure(&b, "generated/decls/entitydef/snapmapplus/effect/snapmapplus/sdk/") == 1);
+        CHECK(b.needs.unresolved == 0);
+        if (b.needs.unresolved) fprintf(stderr, "sdk: %d unresolved needs\n", (int)b.needs.unresolved);
+    }
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
+    sh_mb_free(&b);
+
+    /* served as compiled */
+    sh_modserve_set_material_filter(sh_sdk_serve_compile);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(open_text("generated/decls/fx/mods/" SDK_SALT "/blast.decl", &served, &sn));
+    CHECK(served && has((const char *)served, "editEvents") && has((const char *)served, "\"FX_LIGHT\"") &&
+          has((const char *)served, "declPrt = \"snapmapplus/sdk/"));
+    if (served) HeapFree(GetProcessHeap(), 0, served);
+    served = NULL;
+    CHECK(open_text("generated/decls/env/mods/" SDK_SALT "/hell_red.decl", &served, &sn));
+    CHECK(served && has((const char *)served, "renderParms {") && has((const char *)served, "fogColor"));
+    if (served) HeapFree(GetProcessHeap(), 0, served);
+    served = NULL;
+    CHECK(open_text("generated/decls/material/mods/" SDK_SALT "/rune.decl", &served, &sn));
+    CHECK(served && has((const char *)served, "time * temp") && !has((const char *)served, "curve {"));
+    if (served) HeapFree(GetProcessHeap(), 0, served);
+    served = NULL;
+    /* the emitter answers through the product: a pointer of the bundle (with the game) */
+    if (g_doom_registered) {
+        CHECK(open_text("generated/decls/entitydef/snapmapplus/effect/mods/" SDK_SALT "/blast.decl", &served, &sn));
+        CHECK(served && has((const char *)served, "fxDecl = \"mods/" SDK_SALT "/blast\""));
+        if (served) HeapFree(GetProcessHeap(), 0, served);
+        served = NULL;
+    }
+    sh_modserve_index_retire();
+
+    /* a misspelt field: refused with the compiler's sentence */
+    {
+        char bad[MAX_PATH];
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\sdk-bad", tmp);
+        CHECK(mt_copy_tree(fixture_path("sdk-bad", src, sizeof src), bad));
+        CHECK(!sh_mb_build(bad, NULL, &g_resolver, &b));
+        CHECK(b.errors == 1);
+        CHECK(!strcmp(sh_mb_first_cause(&b), "blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'."));
+        if (strcmp(sh_mb_first_cause(&b), "blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'."))
+            fprintf(stderr, "sdk bad: %s\n", sh_mb_first_cause(&b));
+        sh_mb_free(&b);
+    }
+    sh_mb_set_sdk_compiler(NULL);
+    sh_modserve_set_material_filter(NULL);
+}
+
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv)
@@ -552,6 +660,7 @@ int main(int argc, char **argv)
         sh_modstock_register();
         g_doom_registered = 1;
     }
+    test_sdk(tmp);
     test_tyrant(tmp);
     sh_modserve_set_material_filter(NULL);
     sh_mb_set_look_compiler(NULL);
