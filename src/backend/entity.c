@@ -503,20 +503,48 @@ static int32_t player_spawns(const uint8_t *player)
     return n;
 }
 
-/* Every main frame: a cheat turned on is set again after the same player's spawn reset it (cheatkeep.h). */
-void sh_player_cheats_frame(void)
+/* cmdSystem +0x50 BufferCommandText (VK 0x141AA3780; the daemon's console route uses the same slot): the text
+ * runs at the next command-buffer drain, inside the game's frame. */
+#define VSLOT_BUFFER_CMD_TEXT 0x50
+static volatile LONG g_cheat_keep_queued;
+
+/* sh_cheatkeep (internal): runs from the command buffer, where the game manager is current. Finds the local
+ * player and sets the cheats turned on again when the same player has spawned since (cheatkeep.h). */
+void h_cheatkeep(idCmdArgs *a)
 {
     void *gm, *player;
     int32_t spawns;
     uint8_t set = 0;
+    (void)a;
+    InterlockedExchange(&g_cheat_keep_queued, 0);
     if (!sh_cheat_keep_active(&g_cheat_keep)) return;
-    if (!(gm = get_gamemgr()) || !(player = gm_find_entity(gm, "player1"))) return;
-    if ((spawns = player_spawns((const uint8_t *)player)) < 0) return;
+    if (!(gm = get_gamemgr()) || !(player = gm_find_entity(gm, "player1")) ||
+        (spawns = player_spawns((const uint8_t *)player)) < 0) {
+        memset(&g_cheat_keep, 0, sizeof g_cheat_keep);   /* no player: the Play has ended; the next asks again */
+        return;
+    }
     __try {
         set = sh_cheat_keep_frame(&g_cheat_keep, player, spawns, (uint8_t *)player + PLAYER_CHEAT_FLAGS_OFF,
                                   (uint8_t *)player + PLAYER_NOCLIP_OFF);
     } __except (EXCEPTION_EXECUTE_HANDLER) { set = 0; }
     if (set) backend_log("cheats: the player spawned and its cheats were reset; the ones turned on are on again");
+}
+
+/* Every main frame (idCommonLocal::Frame, outside the game's frame: the game manager slot is empty there, measured
+ * R-LV3): while a cheat is turned on, the player it was turned on for is checked for a new spawn by its spawn count,
+ * a read only; on a change sh_cheatkeep is queued, which does the checked work inside the game's frame. */
+void sh_player_cheats_frame(void)
+{
+    int32_t spawns;
+    typedef void (*buffer_text_fn)(void *cmdsys, const char *text);
+    buffer_text_fn fn;
+    if (!sh_cheat_keep_active(&g_cheat_keep) || InterlockedCompareExchange(&g_cheat_keep_queued, 0, 0)) return;
+    spawns = player_spawns((const uint8_t *)g_cheat_keep.player);
+    if (spawns == g_cheat_keep.spawns) return;
+    if (!g_cmdsys || !(fn = (buffer_text_fn)read_vfn(g_cmdsys, VSLOT_BUFFER_CMD_TEXT))) return;
+    InterlockedExchange(&g_cheat_keep_queued, 1);
+    __try { fn(g_cmdsys, "sh_cheatkeep\n"); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_cheat_keep_queued, 0); }
 }
 
 /* Toggle a runtime player bit in a live map/playtest; command arguments are ignored. A bit turned on stays on

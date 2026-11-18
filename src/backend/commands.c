@@ -1458,6 +1458,7 @@ void h_infinitehealth(idCmdArgs *a);
 void h_noplayerdeath(idCmdArgs *a);
 void h_noplayerkill(idCmdArgs *a);
 void h_notarget(idCmdArgs *a);
+void h_cheatkeep(idCmdArgs *a);
 
 /* Reflection handlers bind through typeinfo's signed dependencies. */
 void h_cs_fieldinfo(idCmdArgs *a);
@@ -1738,6 +1739,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "noPlayerDeath",       (void *)h_noplayerdeath,  "Toggle no-death (the player cannot die) for the local player." },
     { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
+    { "sh_cheatkeep",        (void *)h_cheatkeep,      "Internal: sets the player cheats turned on again after the player's spawn reset them (queued by Snapmap+ itself)." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
       "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh reads' counts what the editor has cost it; 'sh_navmesh detail' adds the bake's internal state." },
 
