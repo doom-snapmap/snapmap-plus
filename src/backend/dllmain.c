@@ -196,7 +196,7 @@ static void install_features(const sig_result *results, size_t db)
     sh_mb_set_script_check(sh_script_compile_check);
     /* A mod's "scenes" and "hud" blocks are checked when it is built. */
     sh_mb_set_extra_check(sh_modcontent_check);
-    /* and its "clip_events" recorded, a bad entry left out with a warning (clip_events.h) */
+    /* and its "animation_events" recorded, a bad entry left out with a warning (clip_events.h) */
     sh_mb_set_clip_events(sh_ce_build_registry);
     /* and its "attachment_tags" likewise (attach_tags.h) */
     sh_mb_set_attach_tags(sh_at_build_registry);

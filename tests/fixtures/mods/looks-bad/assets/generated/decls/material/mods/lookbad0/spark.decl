@@ -1,5 +1,5 @@
 {
-	look			particle
+	type			particle
 	transmap		mods/lookbad0/fx/spark.tga
 	lighting		unlit
 	glow			2

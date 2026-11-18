@@ -71,7 +71,7 @@ int main(void)
     char *j;
     const char *json =
         "{\"name\": \"Boss\", \"strings\": {\"en\": {\"boss_name\": \"Boss\", \"snapentity_crate\": \"Box\"}},"
-        " \"clip_events\": {\"meshes/boss.md6\": {\"walk\": \"#str_boss_name\"}},"
+        " \"animation_events\": {\"meshes/boss.md6\": {\"walk\": \"#str_boss_name\"}},"
         " \"snapmap-plus\": {\"format\": 2, \"salt\": \"abcdefgh\", \"files\": [{\"path\": \"materials/body.decl\"}]}}";
 
     /* the folders and the engine paths they stand for, both ways */

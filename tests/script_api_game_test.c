@@ -228,25 +228,25 @@ static void test_events(void)
 {
     run("api = 1\n"
         "local d, o = ent(0), ent(1)\n"
-        "d:event('setOrigin', { x = 1, y = 2, z = 3 })\n"
-        "o:event('activate', d)\n"
-        "o:event('activate', nil)\n"
-        "o:event('damage', decl('snapAIEncounter', game('enc/baron')), { pitch = 0, yaw = 90, roll = 0 }, 12.5, 2, d, true)\n"
-        "d:event('ae_sound', decl('snapAIEncounter', 'enc/tyrant'))\n"
-        "d:event('ae_sound', nil)\n"
-        "d:event('setColor', { r = 1, g = 0.5, b = 0 })\n"
-        "d:event('setColor', { 0, 0, 1, 0.25 })\n"
-        "d:event('notice_hit', o, 7)\n"
-        "d:event('ae_playAnim', 'combat/attack', 'go', 'hand_r')\n"
-        "print('posted', d:post('activate', o))\n"
-        "print('health', d:event('getHealth'))\n"
-        "print('name', d:event('getName'))\n"
-        "print('enemy', d:event('getEnemy') == o)\n"
-        "print('decl', d:event('getDamageDecl'))\n"
-        "local a = d:event('getAngles') print('angles', a.pitch, a.yaw, a.roll)\n"
-        "print('on', d:event('isOn'))\n"
-        "print('nothing', d:event('setOrigin', { 0, 0, 0 }))\n"
-        "print('args', table.concat(event_args('damage'), ','), #event_args('getHealth'), table.concat(event_args('ae_sound'), ','), event_args('nope'))\n");
+        "d:run_event('setOrigin', { x = 1, y = 2, z = 3 })\n"
+        "o:run_event('activate', d)\n"
+        "o:run_event('activate', nil)\n"
+        "o:run_event('damage', decl('snapAIEncounter', game('enc/baron')), { pitch = 0, yaw = 90, roll = 0 }, 12.5, 2, d, true)\n"
+        "d:run_event('ae_sound', decl('snapAIEncounter', 'enc/tyrant'))\n"
+        "d:run_event('ae_sound', nil)\n"
+        "d:run_event('setColor', { r = 1, g = 0.5, b = 0 })\n"
+        "d:run_event('setColor', { 0, 0, 1, 0.25 })\n"
+        "d:run_event('notice_hit', o, 7)\n"
+        "d:run_event('ae_playAnim', 'combat/attack', 'go', 'hand_r')\n"
+        "print('posted', d:queue_event('activate', o))\n"
+        "print('health', d:run_event('getHealth'))\n"
+        "print('name', d:run_event('getName'))\n"
+        "print('enemy', d:run_event('getEnemy') == o)\n"
+        "print('decl', d:run_event('getDamageDecl'))\n"
+        "local a = d:run_event('getAngles') print('angles', a.pitch, a.yaw, a.roll)\n"
+        "print('on', d:run_event('isOn'))\n"
+        "print('nothing', d:run_event('setOrigin', { 0, 0, 0 }))\n"
+        "print('args', table.concat(event_arguments('damage'), ','), #event_arguments('getHealth'), table.concat(event_arguments('ae_sound'), ','), event_arguments('nope'))\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(g_events, "setOrigin@own(v1 2 3);"));
     CHECK(has(g_events, "activate@other(E:own);activate@other(E:none);"));
@@ -266,18 +266,18 @@ static void test_events(void)
     CHECK(has(g_log, "nothing\n"));
     CHECK(has(g_log, "args\tdecl,angles,number,number,entity,true or false\t0\tdecl\tnil"));
 
-    refused("api = 1\nent(0):event('explodeNow')\n", "\"event\" found no event named explodeNow in the game");
-    refused("api = 1\nent(0):event('setOrigin')\n", "\"event\" got 0 values for setOrigin, which takes 1 (position)");
-    refused("api = 1\nent(0):event('getHealth', 1, 2)\n", "\"event\" got 2 values for getHealth, which takes 0 (nothing)");
-    refused("api = 1\nent(0):event('setOrigin', 'here')\n", "\"event\" needs a position as value 1 of setOrigin, got text");
-    refused("api = 1\nent(0):event('activate', 5)\n", "\"event\" needs an entity as value 1 of activate, got a number");
-    refused("api = 1\nent(0):event('notice_hit', nil, 1)\n",
-            "\"event\" needs an entity that is still in the map as value 1 of notice_hit");
-    refused("api = 1\nent(0):event('notice_hit', ent(1), 1.5)\n",
-            "\"event\" needs a whole number as value 2 of notice_hit, got a number");
-    refused("api = 1\nent(0):event('ae_sound', 'snd')\n", "\"event\" needs a decl as value 1 of ae_sound, got text");
-    refused("api = 1\nent(0):post('notice_PlayerDeath', ent(1), 1, 2, 3, 4)\n",
-            "\"post\" cannot send notice_PlayerDeath: value 5 is of a kind only the game makes");
+    refused("api = 1\nent(0):run_event('explodeNow')\n", "\"run_event\" found no event named explodeNow in the game");
+    refused("api = 1\nent(0):run_event('setOrigin')\n", "\"run_event\" got 0 values for setOrigin, which takes 1 (position)");
+    refused("api = 1\nent(0):run_event('getHealth', 1, 2)\n", "\"run_event\" got 2 values for getHealth, which takes 0 (nothing)");
+    refused("api = 1\nent(0):run_event('setOrigin', 'here')\n", "\"run_event\" needs a position as value 1 of setOrigin, got text");
+    refused("api = 1\nent(0):run_event('activate', 5)\n", "\"run_event\" needs an entity as value 1 of activate, got a number");
+    refused("api = 1\nent(0):run_event('notice_hit', nil, 1)\n",
+            "\"run_event\" needs an entity that is still in the map as value 1 of notice_hit");
+    refused("api = 1\nent(0):run_event('notice_hit', ent(1), 1.5)\n",
+            "\"run_event\" needs a whole number as value 2 of notice_hit, got a number");
+    refused("api = 1\nent(0):run_event('ae_sound', 'snd')\n", "\"run_event\" needs a decl as value 1 of ae_sound, got text");
+    refused("api = 1\nent(0):queue_event('notice_PlayerDeath', ent(1), 1, 2, 3, 4)\n",
+            "\"queue_event\" cannot send notice_PlayerDeath: value 5 is of a kind only the game makes");
 }
 
 static void test_signals(void)
@@ -308,10 +308,10 @@ static void test_signals(void)
 static void test_cvars(void)
 {
     run("api = 1\n"
-        "print('read', cvar('g_gravity'), cvar('ai_name'), cvar('g_scale'), math.type(cvar('g_gravity')))\n"
-        "print('set', cvar('g_gravity', 400), cvar('ai_name', 'tyrant'), cvar('g_scale', true))\n"
-        "cvar('g_gravity', 300)\n"
-        "print('now', cvar('g_gravity'), cvar('ai_name'), cvar('g_scale'))\n");
+        "print('read', console_variable('g_gravity'), console_variable('ai_name'), console_variable('g_scale'), math.type(console_variable('g_gravity')))\n"
+        "print('set', console_variable('g_gravity', 400), console_variable('ai_name', 'tyrant'), console_variable('g_scale', true))\n"
+        "console_variable('g_gravity', 300)\n"
+        "print('now', console_variable('g_gravity'), console_variable('ai_name'), console_variable('g_scale'))\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "read\t1066\tdoom\t0.5\tinteger"));
     CHECK(has(g_log, "set\ttrue\ttrue\ttrue"));
@@ -320,9 +320,9 @@ static void test_cvars(void)
     sh_script_map_end();                                 /* put back as they were before the map */
     CHECK(!strcmp(g_cvars_fake[0].value, "1066") && !strcmp(g_cvars_fake[1].value, "doom") && !strcmp(g_cvars_fake[2].value, "0.5"));
 
-    refused("api = 1\ncvar('g_nope')\n", "\"cvar\" found no cvar named g_nope in the game");
-    refused("api = 1\ncvar('fs_basepath', 'C:')\n", "\"cvar\" cannot set fs_basepath: the game only takes it when it starts");
-    refused("api = 1\ncvar('g_gravity', {})\n", "\"cvar\" needs the value as a number, true or false, or text, got a table");
+    refused("api = 1\nconsole_variable('g_nope')\n", "\"console_variable\" found no cvar named g_nope in the game");
+    refused("api = 1\nconsole_variable('fs_basepath', 'C:')\n", "\"console_variable\" cannot set fs_basepath: the game only takes it when it starts");
+    refused("api = 1\nconsole_variable('g_gravity', {})\n", "\"console_variable\" needs the value as a number, true or false, or text, got a table");
 }
 
 static void test_decls(void)

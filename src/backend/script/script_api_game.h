@@ -3,15 +3,15 @@
  * decl. With e:get and e:set (script_api_reflect.h) they give a script what
  * the game's own code and SnapMap's wired logic have.
  *
- *   e:event(name, ...)     run an engine event on the entity now and return
+ *   e:run_event(name, ...)     run an engine event on the entity now and return
  *                          its result (a number, text, a position, an entity,
  *                          a decl's name) or nothing. The values are the
  *                          event's own arguments, in order: whole numbers,
  *                          true/false, numbers, text, positions {x, y, z},
  *                          angles {pitch, yaw, roll}, colors {r, g, b, a},
  *                          entities (nil for none) and decls (from decl()).
- *   e:post(name, ...)      the same, queued for the end of this frame.
- *   event_args(name)       what an event takes, as a list of words ("number",
+ *   e:queue_event(name, ...)      the same, queued for the end of this frame.
+ *   event_arguments(name)       what an event takes, as a list of words ("number",
  *                          "entity", ...), or nil when the game has no such
  *                          event.
  *   e:signal(event[, by])  fire a SnapMap event on the entity, as the game
@@ -20,11 +20,11 @@
  *                          e:signal("ai_killed"), e:signal("trigger_touched", player).
  *   on.signal(event, fn)   (the runtime's) fn(entity, activator) whenever any
  *                          object of the map fires that SnapMap event.
- *   cvar(name)             a cvar's value (a number when it reads as one).
- *   cvar(name, value)      set it for this map; it is put back when the map
+ *   console_variable(name)             a cvar's value (a number when it reads as one).
+ *   console_variable(name, value)      set it for this map; it is put back when the map
  *                          ends.
  *   entities()             every entity of the map now, players first (filter
- *                          with e:def(), e:class() or e:get(...)).
+ *                          with e:definition(), e:class() or e:get(...)).
  *   decl(type, name)       a decl of the mod, or of the game with
  *                          game("..."): d:get(path), d:set(path, value),
  *                          d:fields([path]), d:name(), d:type(). What a

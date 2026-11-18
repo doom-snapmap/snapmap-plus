@@ -7,13 +7,13 @@
  * Covers: damage and e:damage (the engine event and its arguments, the world
  * as attacker when none is given), hitscan hits and misses, radius_damage,
  * explode with and without an effect, fx on an entity's own fx decl and as a
- * placed effect (fx_move, fx_stop), sound and its channels, tag and
+ * placed effect (move_effect, stop_effect), sound and its channels, tag and
  * can_see_from, pain, fire at an entity and at a position (the projectile it
  * returns, steer, explode); every refusal is one plain sentence naming the
  * file and line (another mod's or the game's decl, a decl the mod lacks, an
  * attacker that is not the mod's, a projectile the mod did not launch, a
  * condition the game does not have); the hooks' records reach on.damage,
- * on.death, on.anim, on.frame_event, on.pain and on.projectile with their
+ * on.death, on.animation, on.frame_event, on.pain and on.projectile with their
  * values; the records the hooks keep (last hit, first death, launches), each
  * released with its entity; a script holding projectiles as long as it likes:
  * 300 alive at once steered every frame, 5,000 alive steered in one frame,
@@ -444,13 +444,13 @@ static void test_hitscan_radius(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
         "  local h = hitscan({x = 0, y = 0, z = 10}, {x = 1, y = 0, z = 0}, 'damage/beam', nil, self)\n"
-        "  print('hit', h.pos.x, h.normal.x, h.entity:def())\n"
+        "  print('hit', h.pos.x, h.normal.x, h.entity:definition())\n"
         "  print('miss', hitscan({x = 0, y = 0, z = 10}, {x = 0, y = 1, z = 0}, 'damage/beam'))\n"
         "  print('short', hitscan({x = 0, y = 0, z = 10}, {x = 1, y = 0, z = 0}, 'damage/beam', 50))\n"
         "  print('radius', radius_damage({x = 5, y = 6, z = 7}, 'damage/rock', self))\n"
         "  print('world', radius_damage(self, 'damage/rock'))\n"
         "  local fx = explode({x = 1, y = 2, z = 3}, 'damage/rock', 'fx/blast', self)\n"
-        "  print('explode', fx:def(), fx:pos().x)\n"
+        "  print('explode', fx:definition(), fx:position().x)\n"
         "  print('bare', explode({x = 1, y = 2, z = 3}, 'damage/rock'))\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
@@ -469,12 +469,12 @@ static void test_effects_sound(void)
 {
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
-        "  print('fx', fx(self, 'FX_CINEMATIC_8'), fx_stop(self, 'FX_CINEMATIC_8'))\n"
-        "  local e = fx('fx/beam_impact', {x = 10, y = 0, z = 0}, {x = 0, y = 1, z = 0})\n"
-        "  print('placed', e:def(), e:pos().x, math.floor(e:yaw() + 0.5))\n"
-        "  print('moved', fx_move(e, {x = 20, y = 0, z = 0}, {x = -1, y = 0, z = 0}), e:pos().x, math.floor(e:yaw() + 0.5))\n"
-        "  print('effect', fx(e, 'FX_CINEMATIC_8'), fx_stop(e, 'FX_NONE'))\n"
-        "  print('stopped', fx_stop(e))\n"
+        "  print('fx', play_effect(self, 'FX_CINEMATIC_8'), stop_effect(self, 'FX_CINEMATIC_8'))\n"
+        "  local e = play_effect('fx/beam_impact', {x = 10, y = 0, z = 0}, {x = 0, y = 1, z = 0})\n"
+        "  print('placed', e:definition(), e:position().x, math.floor(e:yaw() + 0.5))\n"
+        "  print('moved', move_effect(e, {x = 20, y = 0, z = 0}, {x = -1, y = 0, z = 0}), e:position().x, math.floor(e:yaw() + 0.5))\n"
+        "  print('effect', play_effect(e, 'FX_CINEMATIC_8'), stop_effect(e, 'FX_NONE'))\n"
+        "  print('stopped', stop_effect(e))\n"
         "  print('sound', sound(self, 'brute/roar'), sound(self, 'brute/roar', 'weapon'))\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
@@ -566,8 +566,8 @@ static void test_fx_hard_stops(void)
     g_hard_asked = 0;
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
-        "  print('one', fx_hard_stops('character/brute'))\n"
-        "  print('all', fx_hard_stops())\n"
+        "  print('one', end_effects_at_once('character/brute'))\n"
+        "  print('all', end_effects_at_once())\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "one\ttrue"));
@@ -579,7 +579,7 @@ static void test_fx_hard_stops(void)
     /* without the hook nothing is named and the call says so */
     sh_fx_hard_reset();
     g_hard_hook = 0;
-    run("api = 1\non.spawn('ai/brute', function(self)\n  print('off', fx_hard_stops())\nend)\n");
+    run("api = 1\non.spawn('ai/brute', function(self)\n  print('off', end_effects_at_once())\nend)\n");
     CHECK(has(log_now(), "off\tfalse"));
     CHECK(sh_fx_hard_count() == 0);
     g_hard_hook = 1;
@@ -624,7 +624,7 @@ static void test_tags(void)
         "  print('sight', self:can_see_from(ent(2), 'laser_source_1'))\n"
         "  local p = self:fire('rocket', 'laser_source_1', ent(2))\n"
         "  local v = p:velocity()\n"
-        "  print('from tag', p:pos().x, p:pos().z, math.floor(v.y + 0.5), math.floor(v.z + 0.5))\n"
+        "  print('from tag', p:position().x, p:position().z, math.floor(v.y + 0.5), math.floor(v.z + 0.5))\n"
         "  local f = p:axis().forward\n"
         "  print('faces', (f.x * v.x + f.y * v.y + f.z * v.z) > 0.99 * math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z))\n"
         "end)\n");
@@ -645,7 +645,7 @@ static void test_fire(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
         "  local p = self:fire('rocket', 'muzzle', ent(2))\n"
-        "  print('fired', p:def(), p:pos().x, p:pos().z)\n"
+        "  print('fired', p:definition(), p:position().x, p:position().z)\n"
         "  print('steer', p:steer({x = 10, y = 0, z = 1000}))\n"
         "  local v = p:velocity(); print('vel', math.floor(v.x + 0.5), math.floor(v.z + 0.5))\n"
         "  print('fast', p:steer(ent(2), 1200))\n"
@@ -681,16 +681,16 @@ static void test_refusals(void)
             "3", "\"hitscan\" needs a direction that is not zero");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 1, y = 0, z = 0}, 'damage/rock', 0)\nend)\n",
             "3", "\"hitscan\" needs a range of at least 1, got 0");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(self, 'FX_NOPE')\nend)\n",
-            "3", "\"fx\" knows no effect condition \"FX_NOPE\"; use one of the FX_ conditions the entity's fx decl lists");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx(42)\nend)\n",
-            "3", "\"fx\" needs an entity and an effect condition, or the name of one of this mod's effect entities and a position; got number");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_stop(self)\nend)\n",
-            "3", "\"fx_stop\" without a condition removes an effect made by fx(effect, pos)");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_hard_stops('mods/othersalt/character/x')\nend)\n",
-            "3", "\"fx_hard_stops\" can only use this mod's own content");
-    refused("api = 1\non.spawn('ai/brute', function(self)\n  fx_move(ent(3), {x = 1, y = 2, z = 3})\nend)\n",
-            "3", "\"fx_move\" moves an effect made by fx(effect, pos); this entity is not one");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  play_effect(self, 'FX_NOPE')\nend)\n",
+            "3", "\"play_effect\" knows no effect condition \"FX_NOPE\"; use one of the FX_ conditions the entity's fx decl lists");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  play_effect(42)\nend)\n",
+            "3", "\"play_effect\" needs an entity and an effect condition, or the name of one of this mod's effect entities and a position; got number");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  stop_effect(self)\nend)\n",
+            "3", "\"stop_effect\" without a condition removes an effect made by play_effect(effect, pos)");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  end_effects_at_once('mods/othersalt/character/x')\nend)\n",
+            "3", "\"end_effects_at_once\" can only use this mod's own content");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  move_effect(ent(3), {x = 1, y = 2, z = 3})\nend)\n",
+            "3", "\"move_effect\" moves an effect made by play_effect(effect, pos); this entity is not one");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  sound(self, 'brute/roar', 'loud')\nend)\n",
             "3", "\"sound\" knows no channel \"loud\"; use any, voice, body, weapon or item");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):fire('rocket', 'muzzle', ent(2))\nend)\n",
@@ -717,21 +717,21 @@ static void test_hook_records(void)
     sh_script_handle self, imp, player, rocket;
     run("api = 1\n"
         "on.damage('ai/brute', function(self, hit)\n"
-        "  print('damage', hit.amount, hit.damage, hit.location, hit.attacker:def(), hit.inflictor:def(), hit.direction.y)\n"
+        "  print('damage', hit.amount, hit.damage, hit.location, hit.attacker:definition(), hit.inflictor:definition(), hit.direction.y)\n"
         "end)\n"
-        "on.death('ai/brute', function(self, hit) print('death', hit.damage, hit.attacker:def()) end)\n"
-        "on.anim('ai/brute', 'throw', function(self) print('anim throw') end)\n"
-        "on.anim('ai/brute', 'fsm_window:Combat:0.5', function(self) print('anim whole') end)\n"
+        "on.death('ai/brute', function(self, hit) print('death', hit.damage, hit.attacker:definition()) end)\n"
+        "on.animation('ai/brute', 'throw', function(self) print('anim throw') end)\n"
+        "on.animation('ai/brute', 'fsm_window:Combat:0.5', function(self) print('anim whole') end)\n"
         "on.frame_event('ai/brute', 'FSM_Window', function(self, args)\n"
         "  if #args == 1 then print('long frame', #args[1]) return end\n"
         "  print('frame', #args, args[1], args[2] + 1, math.type(args[2]))\n"
         "end)\n"
         "on.frame_event('ai/brute', 'throw', function(self, args) print('frame throw', #args) end)\n"
         "on.pain('ai/brute', function(self, reaction, damage, attacker)\n"
-        "  print('pain', reaction, damage, attacker and attacker:def())\n"
+        "  print('pain', reaction, damage, attacker and attacker:definition())\n"
         "end)\n"
         "on.projectile('ai/brute', function(self, p, decl, origin, dir)\n"
-        "  print('projectile', p:def(), decl, origin.x, dir.x)\n"
+        "  print('projectile', p:definition(), decl, origin.x, dir.x)\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     mod = sh_script_hooks_mod_find(SALT);
@@ -814,7 +814,7 @@ static void test_projectiles_held(void)
         "on.spawn('ai/brute', function(self)\n"
         "  local p = self:fire('rocket', 'muzzle', ent(2))\n"
         "  after(0.05, function()\n"
-        "    print('gone', p:steer({x = 1, y = 2, z = 3}), p:explode(), p:pos(), p:alive(), tostring(p:steer(ent(2), 900)))\n"
+        "    print('gone', p:steer({x = 1, y = 2, z = 3}), p:explode(), p:position(), p:alive(), tostring(p:steer(ent(2), 900)))\n"
         "  end)\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);

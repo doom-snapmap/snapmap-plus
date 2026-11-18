@@ -1,5 +1,5 @@
 {
-	look			particle
+	type			particle
 	transmap		mods/lookgood/fx/embers.tga
 	lighting		lit
 	glow			4

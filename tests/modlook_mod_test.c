@@ -2,12 +2,12 @@
  * bundle by the builder (sh_mb_build with sh_mb_set_look_compiler) and the same folder served by the provider through
  * its material filter (sh_modserve_set_material_filter), the two hooks dllmain.c installs.
  *
- * Build: a folder of a layered look (a layer image, a colour layer, a burn), a particle look of the platform route and
+ * Build: a folder of a layered material (a layer image, a colour layer, a burn), a particle material of the platform route and
  * one of the stock route, a material that is not a look, builds; its needs are the folder's own images and the game's
  * names, never a file the product derives (snapmapplus/layered/*, snapmapplus/particles/*, snapmapplus/look/*); the
  * report carries the look notes; a copy with one wrong field fails with exactly the compiler's sentence.
  * Serve: each look material is served as it compiles, the derived images it names are readable through
- * sh_modprog_read, a material that is not a look is served byte for byte and an old-key material is served rewritten.
+ * sh_modprog_read, a material that is not a look, or that writes the old keys, is served byte for byte as written.
  * A real converted mod (Doomforge's Tyrant, when the folder is on this computer) builds offline.
  *
  *   modlook_mod_test.exe [fixtures=<tests\fixtures\mods>] [fixtures_prog=<tests\fixtures\modprog>]
@@ -273,7 +273,7 @@ static void test_build(const char *tmp)
     /* a deliberately wrong copy: one field misspelled, refused with exactly the compiler's one sentence */
     {
         char bad[MAX_PATH], src[MAX_PATH];
-        const char *want = "body.decl line 7: 'layer1nromal' is not a field of a layered look; the nearest is 'layer1normal'.";
+        const char *want = "body.decl line 7: 'layer1nromal' is not a field of a layered material; the nearest is 'layer1normal'.";
         _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\looks-bad", tmp);
         CHECK(mt_copy_tree(fixture_path("looks-bad", src, sizeof src), bad));
         CHECK(!sh_mb_build(bad, NULL, &g_resolver, &b));
@@ -379,8 +379,7 @@ static void test_serve(const char *tmp)
             /* the served text is the compiled text, not the author's file */
             CHECK(sn == want_n && !memcmp(served, want, sn));
             CHECK(!(sn == fn && !memcmp(served, file, fn)));
-            CHECK(!has((const char *)served, "look\t") || !has((const char *)served, "\tlook ") || 1);
-            CHECK(value((const char *)served, "look")[0] == 0);
+            CHECK(value((const char *)served, "type")[0] == 0);
             if (!strcmp(LOOKS[i], "body") || !strcmp(LOOKS[i], "crowded")) {
                 char prog[600], parms[600];
                 strcpy_s(prog, sizeof prog, value((const char *)served, "ambientprogram"));
@@ -438,19 +437,12 @@ static void test_serve(const char *tmp)
     free(file);
     if (served) { HeapFree(GetProcessHeap(), 0, served); served = NULL; }
 
-    /* an old-key material is served rewritten: the old program names and keys are the new ones */
+    /* a material written with the old keys has no type: it is served byte for byte, as written */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "legacy_head.decl");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\material\\mods\\" GOOD_SALT "\\legacy_head.decl", folder);
     file = read_whole(path, &fn);
     CHECK(file && has((const char *)file, "snapmapplus/multilayer/skinvmtr"));
-    CHECK(open_text(req, &served, &sn) == 1 && served);
-    if (served && file) {
-        CHECK(!(sn == fn && !memcmp(served, file, fn)));
-        CHECK(!has((const char *)served, "snapmapplus/multilayer/"));
-        CHECK(has((const char *)served, "snapmapplus/layered/"));
-        CHECK(!has((const char *)served, "layerstilingfactor"));
-        CHECK(value((const char *)served, "layerparms")[0] != 0);
-    }
+    CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
     if (served) { HeapFree(GetProcessHeap(), 0, served); served = NULL; }
 
@@ -504,7 +496,7 @@ static void test_tyrant(const char *tmp)
         mats++;
     }
     for (i = 0; i < b.note_count; i++) { notes++; printf("   note: %s\n", b.notes[i]); }
-    /* the materials compiled as looks: each file that is a look has `look` as its first key */
+    /* the materials compiled as looks: each file that is a look has `type` as its first key */
     for (i = 0; i < b.file_count; i++) {
         const sh_mb_file *f = &b.files[i];
         char path[MAX_PATH * 2], *p;
@@ -520,7 +512,7 @@ static void test_tyrant(const char *tmp)
         while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
         if (*q == '{') q++;
         while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
-        if (!_strnicmp((const char *)q, "look", 4) && (q[4] == ' ' || q[4] == '\t')) looks++;
+        if (!_strnicmp((const char *)q, "type", 4) && (q[4] == ' ' || q[4] == '\t')) looks++;
         free(t);
     }
     printf("   %u material(s), %u compiled as looks, %u note(s)\n", (unsigned)mats, (unsigned)looks, (unsigned)notes);

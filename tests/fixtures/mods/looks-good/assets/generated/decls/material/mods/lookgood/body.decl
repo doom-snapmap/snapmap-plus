@@ -1,5 +1,5 @@
 {
-	look			layered
+	type			layered
 	wounds			yes
 	diffusemap		"mods/lookgood/body.tga"
 	layermask		mods/lookgood/tiles/mask.tga

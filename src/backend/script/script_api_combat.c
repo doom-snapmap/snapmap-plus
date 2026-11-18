@@ -643,7 +643,7 @@ static int place_effect(lua_State *L, int ent_index, const float pos[3], const f
 {
     const sh_script_engine *e = eng();
     float ax[9], d[3];
-    void *ent = sh_script_api_entity(L, ent_index, "fx", NULL);
+    void *ent = sh_script_api_entity(L, ent_index, "play_effect", NULL);
     if (!ent || !e || !e->place) return 0;
     if (dir) {
         memcpy(d, dir, 12);
@@ -667,21 +667,21 @@ static int fx_condition(lua_State *L, int arg, const char *call)
 }
 
 /* An actor (an AI, a player) starts and stops its effects by the animation events its clips use. Any other entity
- * (an effect entity made by fx(effect, pos) or explode) answers neither event: the engine's own entity call. */
+ * (an effect entity made by play_effect(effect, pos) or explode) answers neither event: the engine's own entity call. */
 static int fx_by_entity_call(void *ent)
 {
     int kind = sh_script_api_kind(ent);
     return kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER;
 }
 
-/* fx(e, condition) or fx(effect, pos, [dir]) */
+/* play_effect(e, condition) or play_effect(effect, pos, [dir]) */
 static int l_fx(lua_State *L)
 {
     if (luaL_testudata(L, 1, "entity")) {
         sh_script_earg a[2];
         int cond;
-        void *ent = sh_script_api_owned(L, 1, "fx", "start effects on", NULL);
-        cond = fx_condition(L, 2, "fx");
+        void *ent = sh_script_api_owned(L, 1, "play_effect", "start effects on", NULL);
+        cond = fx_condition(L, 2, "play_effect");
         if (!ent || cond < 0) return bool1(L, 0);
         if (fx_by_entity_call(ent)) return bool1(L, CE(start_fx) && g_ce.start_fx(ent, cond));
         a[0] = sh_script_earg_no_anim();
@@ -691,10 +691,10 @@ static int l_fx(lua_State *L)
         float pos[3], dir[3];
         int have_dir;
         if (lua_type(L, 1) != LUA_TSTRING)
-            sh_script_refuse(L, "\"fx\" needs an entity and an effect condition, or the name of one of this mod's "
+            sh_script_refuse(L, "\"play_effect\" needs an entity and an effect condition, or the name of one of this mod's "
                                 "effect entities and a position; got %s", lua_isnoneornil(L, 1) ? "nothing" : luaL_typename(L, 1));
-        sh_script_api_check_vec(L, 2, "fx", "where to show the effect", pos);
-        have_dir = sh_script_api_opt_vec(L, 3, "fx", "the direction the effect faces", dir);
+        sh_script_api_check_vec(L, 2, "play_effect", "where to show the effect", pos);
+        have_dir = sh_script_api_opt_vec(L, 3, "play_effect", "the direction the effect faces", dir);
         lua_settop(L, 3);
         call_spawn(L, 1, pos, have_dir ? atan2((double)dir[1], (double)dir[0]) * 180.0 / PI : 0.0);
         if (lua_isnil(L, -1)) return 1;
@@ -704,32 +704,32 @@ static int l_fx(lua_State *L)
     }
 }
 
-/* fx_move(e, pos, [dir]) */
+/* move_effect(e, pos, [dir]) */
 static int l_fx_move(lua_State *L)
 {
     float pos[3], dir[3];
     int have_dir;
-    sh_script_api_owned(L, 1, "fx_move", "move", NULL);
-    sh_script_api_check_vec(L, 2, "fx_move", "where to move the effect", pos);
-    have_dir = sh_script_api_opt_vec(L, 3, "fx_move", "the direction the effect faces", dir);
+    sh_script_api_owned(L, 1, "move_effect", "move", NULL);
+    sh_script_api_check_vec(L, 2, "move_effect", "where to move the effect", pos);
+    have_dir = sh_script_api_opt_vec(L, 3, "move_effect", "the direction the effect faces", dir);
     if (!effects_has(L, 1))
-        sh_script_refuse(L, "\"fx_move\" moves an effect made by fx(effect, pos); this entity is not one");
+        sh_script_refuse(L, "\"move_effect\" moves an effect made by play_effect(effect, pos); this entity is not one");
     return bool1(L, place_effect(L, 1, pos, have_dir ? dir : NULL));
 }
 
-/* fx_stop(e, [condition]) */
+/* stop_effect(e, [condition]) */
 static int l_fx_stop(lua_State *L)
 {
-    void *ent = sh_script_api_owned(L, 1, "fx_stop", "stop effects on", NULL);
+    void *ent = sh_script_api_owned(L, 1, "stop_effect", "stop effects on", NULL);
     if (lua_isnoneornil(L, 2)) {
         if (!effects_has(L, 1))
-            sh_script_refuse(L, "\"fx_stop\" without a condition removes an effect made by fx(effect, pos); for an "
+            sh_script_refuse(L, "\"stop_effect\" without a condition removes an effect made by play_effect(effect, pos); for an "
                                 "entity's own effect give the condition it was started with");
         if (!ent) return bool1(L, 0);
         return bool1(L, sh_script_api_post(ent, "remove", NULL, 0));
     } else {
         sh_script_earg a[2];
-        int cond = fx_condition(L, 2, "fx_stop");
+        int cond = fx_condition(L, 2, "stop_effect");
         if (!ent || cond < 0) return bool1(L, 0);
         if (fx_by_entity_call(ent)) return bool1(L, CE(stop_fx) && g_ce.stop_fx(ent, cond));
         a[0] = sh_script_earg_no_anim();
@@ -738,7 +738,7 @@ static int l_fx_stop(lua_State *L)
     }
 }
 
-/* fx_hard_stops([effect]): the hard stop rule (script_api_combat.h) for one fx decl of this mod, or for all of
+/* end_effects_at_once([effect]): the hard stop rule (script_api_combat.h) for one fx decl of this mod, or for all of
  * them. true when the rule is in place for it. */
 static int l_fx_hard_stops(lua_State *L)
 {
@@ -748,7 +748,7 @@ static int l_fx_hard_stops(lua_State *L)
         lua_pushfstring(L, "mods/%s/", sh_script_salt(L));
         name = lua_tostring(L, -1);
     } else {
-        name = sh_script_check_name(L, 1, "fx_hard_stops", 0, NULL);
+        name = sh_script_check_name(L, 1, "end_effects_at_once", 0, NULL);
     }
     if (!CE(fx_hard_stops) || !g_ce.fx_hard_stops()) return bool1(L, 0);
     return bool1(L, sh_fx_hard_add(name));
@@ -1019,10 +1019,10 @@ void sh_script_combat_register(void)
         { SH_SCRIPT_API_GLOBAL, "radius_damage", l_radius_damage },
         { SH_SCRIPT_API_GLOBAL, "damage", l_damage },
         { SH_SCRIPT_API_GLOBAL, "explode", l_explode },
-        { SH_SCRIPT_API_GLOBAL, "fx", l_fx },
-        { SH_SCRIPT_API_GLOBAL, "fx_move", l_fx_move },
-        { SH_SCRIPT_API_GLOBAL, "fx_stop", l_fx_stop },
-        { SH_SCRIPT_API_GLOBAL, "fx_hard_stops", l_fx_hard_stops },
+        { SH_SCRIPT_API_GLOBAL, "play_effect", l_fx },
+        { SH_SCRIPT_API_GLOBAL, "move_effect", l_fx_move },
+        { SH_SCRIPT_API_GLOBAL, "stop_effect", l_fx_stop },
+        { SH_SCRIPT_API_GLOBAL, "end_effects_at_once", l_fx_hard_stops },
         { SH_SCRIPT_API_GLOBAL, "sound", l_sound },
         { SH_SCRIPT_API_METHOD, "damage", l_damage },
         { SH_SCRIPT_API_METHOD, "tag", l_tag },
@@ -1256,7 +1256,7 @@ static int c_stop_fx(void *ent, int condition)
 }
 
 /* The FX manager's stop of one action. For an action of a decl named with
- * fx_hard_stops that the rule ends at once, the fading bit is set before the
+ * end_effects_at_once that the rule ends at once, the fading bit is set before the
  * game's own stop runs: its fade branch is then skipped and it ends and
  * clears the action in this frame, as it does for a second stop. */
 typedef void (*fx_action_stop_fn)(void *mgr, int index, int now, unsigned char immediate, unsigned char recycle);
@@ -1287,7 +1287,7 @@ static void fx_action_stop_detour(void *mgr, int index, int now, unsigned char i
 
 /* The FX manager's request of one action, eight arguments (four in registers,
  * four on the stack), all forwarded unchanged. A request of a sound item of a
- * decl named with fx_hard_stops whose sound is playing is not passed on
+ * decl named with end_effects_at_once whose sound is playing is not passed on
  * (sh_fx_sound_held): the game would re-arm the action and start a second
  * sound over the first, which it never stops. */
 typedef void (*fx_action_request_fn)(void *mgr, intptr_t index, void *a3, void *a4, intptr_t a5, intptr_t a6,
@@ -1326,20 +1326,20 @@ static int fx_request_hook(void)
     if (g_fx_request_failed) return 0;
     if (!g_fx_request_target) {
         g_fx_request_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session: the game function "
+        combat_log("Mod scripts: end_effects_at_once leaves sound requests to the game in this session: the game function "
                    "it needs was not found in this executable.");
         return 0;
     }
     if (memcmp((const void *)g_fx_request_target, k_combat_fx_request_prologue, SH_COMBAT_FX_REQUEST_STOLEN)) {
         g_fx_request_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session: the game function "
+        combat_log("Mod scripts: end_effects_at_once leaves sound requests to the game in this session: the game function "
                    "it needs is not the expected one (another tool may have changed it).");
         return 0;
     }
     tramp = hook_prepare((void *)g_fx_request_target, (void *)fx_action_request_detour, SH_COMBAT_FX_REQUEST_STOLEN);
     if (!tramp) {
         g_fx_request_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session; the hook could not "
+        combat_log("Mod scripts: end_effects_at_once leaves sound requests to the game in this session; the hook could not "
                    "be prepared (%s).", hook_last_failure());
         return 0;
     }
@@ -1347,11 +1347,11 @@ static int fx_request_hook(void)
     if (hook_commit(tramp) != B2_PATCH_OK) {
         if (hook_unpatch(tramp)) g_fx_request_orig = NULL;
         g_fx_request_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops leaves sound requests to the game in this session; the hook could not "
+        combat_log("Mod scripts: end_effects_at_once leaves sound requests to the game in this session; the hook could not "
                    "be installed.");
         return 0;
     }
-    combat_log("SCRIPTS: fx_hard_stops request hook installed at %p", (void *)g_fx_request_target);
+    combat_log("SCRIPTS: end_effects_at_once request hook installed at %p", (void *)g_fx_request_target);
     return 1;
 }
 
@@ -1363,14 +1363,14 @@ static int fx_stop_hook(void)
     if (g_fx_stop_failed || !g_fx_stop_target) return 0;
     if (memcmp((const void *)g_fx_stop_target, k_combat_fx_stop_prologue, SH_COMBAT_FX_STOP_STOLEN)) {
         g_fx_stop_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops is unavailable in this session: the game function it needs is not the "
+        combat_log("Mod scripts: end_effects_at_once is unavailable in this session: the game function it needs is not the "
                    "expected one (another tool may have changed it).");
         return 0;
     }
     tramp = hook_prepare((void *)g_fx_stop_target, (void *)fx_action_stop_detour, SH_COMBAT_FX_STOP_STOLEN);
     if (!tramp) {
         g_fx_stop_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops is unavailable in this session; the hook could not be prepared (%s).",
+        combat_log("Mod scripts: end_effects_at_once is unavailable in this session; the hook could not be prepared (%s).",
                    hook_last_failure());
         return 0;
     }
@@ -1378,10 +1378,10 @@ static int fx_stop_hook(void)
     if (hook_commit(tramp) != B2_PATCH_OK) {
         if (hook_unpatch(tramp)) g_fx_stop_orig = NULL;
         g_fx_stop_failed = 1;
-        combat_log("Mod scripts: fx_hard_stops is unavailable in this session; the hook could not be installed.");
+        combat_log("Mod scripts: end_effects_at_once is unavailable in this session; the hook could not be installed.");
         return 0;
     }
-    combat_log("SCRIPTS: fx_hard_stops hook installed at %p", (void *)g_fx_stop_target);
+    combat_log("SCRIPTS: end_effects_at_once hook installed at %p", (void *)g_fx_stop_target);
     return 1;
 }
 
@@ -1443,10 +1443,10 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_STOP_FX], &r) == SIG_OK)
         g_ent_stop_fx = (ent_fx_fn)r.addr;
     if (!g_ent_start_fx || !g_ent_stop_fx)
-        combat_off("the game's entity effect calls were not found in this executable, so fx(e, condition) and "
-                   "fx_stop(e, condition) do nothing on an effect entity");
+        combat_off("the game's entity effect calls were not found in this executable, so play_effect(e, condition) and "
+                   "stop_effect(e, condition) do nothing on an effect entity");
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_FX_ACTION_STOP], &r) == SIG_OK)
-        g_fx_stop_target = (fx_action_stop_fn)r.addr;   /* without it and the request fx_hard_stops answers false */
+        g_fx_stop_target = (fx_action_stop_fn)r.addr;   /* without it and the request end_effects_at_once answers false */
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_FX_ACTION_REQUEST], &r) == SIG_OK)
         g_fx_request_target = (fx_action_request_fn)r.addr;   /* without it sound requests stay the game's */
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
@@ -1471,7 +1471,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
     if (!g_fx_table || g_fx_count < 2 || g_fx_count > FX_MAX) {
         g_fx_table = NULL;
         g_fx_count = 0;
-        combat_off("the game's effect conditions were not found in this executable, so fx(e, condition) refuses "
+        combat_off("the game's effect conditions were not found in this executable, so play_effect(e, condition) refuses "
                    "every condition");
     }
     sh_script_combat_set_engine(&engine);

@@ -14,20 +14,20 @@ on.think("ai/brute", function(self)
   local d = self:distance(p)
   if d < 120 then
     self.state.busy = true
-    self:anim_state("melee")
+    self:animation_state("melee")
   elseif self:can_see(p) and now() > (self.state.next_throw or 0) then
     self.state.busy = true
     self.state.next_throw = now() + 3
-    self:anim_state("throw")
+    self:animation_state("throw")
   else
     self:move_to_entity(p)
   end
 end)
 
-on.anim("ai/brute", "throw", function(self)
+on.animation("ai/brute", "throw", function(self)
   self:fire("brute/rock", "hand_r", self:enemy())
 end)
 
-on.anim("ai/brute", "attack_done", function(self)
+on.animation("ai/brute", "attack_done", function(self)
   self.state.busy = false
 end)

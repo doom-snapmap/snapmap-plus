@@ -9,9 +9,9 @@
  *   radius_damage(pos, damage, [attacker])
  *   damage(e, damage, [attacker], [from])     e:damage(damage, [attacker], [from])
  *   explode(pos, damage, [effect], [attacker]) -> the effect entity or nil
- *   fx(e, condition)                           fx_stop(e, condition)
- *   fx(effect, pos, [dir]) -> e                fx_move(e, pos, [dir])   fx_stop(e)
- *   fx_hard_stops([effect]) -> boolean         (effect: an fx decl; none: every fx decl of this mod)
+ *   play_effect(e, condition)                           stop_effect(e, condition)
+ *   play_effect(effect, pos, [dir]) -> e                move_effect(e, pos, [dir])   stop_effect(e)
+ *   end_effects_at_once([effect]) -> boolean         (effect: an fx decl; none: every fx decl of this mod)
  *   sound(e, sound, [channel])
  *   e:tag(name) -> pos, forward                e:pain() -> reaction or nil
  *     (name: a tag of a demon's md6Def, else a joint)
@@ -45,13 +45,13 @@
  *   steer            setLinearVelocity on the projectile, at its current speed unless one is given
  *   p:explode        the projectile's own Explode (idProjectile vtable +0xAA0: VK 0x140F38240,
  *                    GL 0x140F37700) with no collision, as the projectile's fuse does
- *   fx(e, cond)      on an AI or a player ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'):
+ *   play_effect(e, cond)      on an AI or a player ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'):
  *                    the entity's fx decl, started on every machine. Any other entity (an effect entity)
  *                    answers neither event: idEntity StartFX / StopFX (VK 0x14082C270 / 0x14082D1D0, GL
  *                    0x14082B430 / 0x14082C390), which start and stop the condition on its FX manager
- *   fx(effect, pos)  the mod's entityDef spawned through spawn() (its caps), placed and turned to `dir`;
- *                    fx_stop removes it
- *   fx_hard_stops    a detour of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870:
+ *   play_effect(effect, pos)  the mod's entityDef spawned through spawn() (its caps), placed and turned to `dir`;
+ *                    stop_effect removes it
+ *   end_effects_at_once    a detour of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870:
  *                    manager, action index, time, immediate, recycle), installed at the first call. For an
  *                    action of a named decl it skips the fade the game gives a stopped action where DOOM
  *                    Eternal's stop gives none (see "Hard stops" below); every other stop runs unchanged.
@@ -137,7 +137,7 @@ void sh_script_combat_reset(void);
  * acts on them only at the end of their own duration; lights, particles,
  * sounds and ribbons fade as the game's do. And an action the stop reaches
  * while it still waits out its delay is started later with a fade factor
- * below zero, with which a particle draws nothing. fx_hard_stops gives the
+ * below zero, with which a particle draws nothing. end_effects_at_once gives the
  * named decls that rule: the first kinds end at once, and a particle or a
  * light stopped inside its delay ends there and is never started.
  *
@@ -147,7 +147,7 @@ void sh_script_combat_reset(void);
  * unstopped, and one that loops in its sound event plays for good. DOOM
  * Eternal requests an item again only when nothing of it is running, or when
  * the item allows a restart before its end (the item's byte at +0x26, which
- * this game names forceLoopRestart). Under fx_hard_stops a request of a
+ * this game names forceLoopRestart). Under end_effects_at_once a request of a
  * named decl's sound item whose action is requested and has started, with
  * that byte clear, is not passed to the game; every other request is. A
  * sound still inside its delay has not started, so the game's own re-arm of

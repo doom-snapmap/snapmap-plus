@@ -309,7 +309,7 @@ void sh_clip_events_play_begin(void)
 {
     int oom = 0, i, k;
     sh_ce_registry *r = ce_build_registry(&oom);
-    if (oom) ce_log("MODS: clip-events: out of memory while reading the mods' clip_events; some clips play without "
+    if (oom) ce_log("MODS: clip-events: out of memory while reading the mods' animation_events; some clips play without "
                     "the events their mods add");
     if (!r || !r->n) {
         if (r) { sh_ce_registry_free(r); free(r); }
@@ -321,7 +321,7 @@ void sh_clip_events_play_begin(void)
         for (i = 0; i < r->n; i++) {
             for (k = 0; k < i && strcmp(r->rows[k].salt, r->rows[i].salt); k++) {}
             if (k == i)
-                ce_log("MODS: clip-events: %s: its clips play without the events it adds (clip_events): Clip events is "
+                ce_log("MODS: clip-events: %s: its clips play without the events it adds (animation_events): Clip events is "
                        "unavailable in this session.", r->rows[i].label);
         }
         sh_ce_registry_free(r);
@@ -351,7 +351,7 @@ void sh_clip_events_command(sh_ce_line_fn line, void *context)
     if (!reg) reg = preview = ce_build_registry(&oom);
     if (!reg || !reg->n) {
         line(context, oom ? "MODS: clip-events: out of memory" :
-             "MODS: clip-events: the open map's mods add no event rows to their clips (no mod.json \"clip_events\" "
+             "MODS: clip-events: the open map's mods add no event rows to their clips (no mod.json \"animation_events\" "
              "in the builds it serves)");
         if (preview) { sh_ce_registry_free(preview); free(preview); }
         return;

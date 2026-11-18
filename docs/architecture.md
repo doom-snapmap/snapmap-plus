@@ -577,7 +577,7 @@ These backend files share the work:
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
-  `strings`, `hud`, `scenes`, `companions`, `clip_events`, `attachment_tags`; any other key is kept in the manifest's
+  `strings`, `hud`, `scenes`, `companions`, `animation_events`, `attachment_tags`; any other key is kept in the manifest's
   `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
@@ -1851,7 +1851,7 @@ model, without replacing any game file (`clip_events.{c,h}`,
 the carrier, that inherits the model the clip plays on
 (`init { inherit "player/mp/tp_body_mp.md6" }`) and lists the rows in its
 `events { anim "<clip>" { event ... } }` blocks, and names it in the author
-key `"clip_events": ["mods/<folder name>/.../rows.md6"]`. The engine parses
+key `"animation_events": ["mods/<folder name>/.../rows.md6"]`. The engine parses
 the carrier with its own md6Def parser, so every event type is available with
 its own argument types; the product never builds an event.
 
@@ -1896,7 +1896,7 @@ by the query's own pattern, which is unique (`sh_ce_site_resolve`). The
 windows are whole and position independent. A site that does not resolve
 records `Clip events` off (`These features are unavailable in this session:
 Clip events.`), and each Play whose mods list clip events then logs one line
-per mod: `<mod>: its clips play without the events it adds (clip_events):
+per mod: `<mod>: its clips play without the events it adds (animation_events):
 Clip events is unavailable in this session.`
 
 The detours are prepared at boot and committed, all three or none, at the
@@ -2200,7 +2200,7 @@ feature.
   `xpcall` handler is not run after one (Lua calls it from inside the hook,
   with hooks off). What remains is the engine's: the game holds at most
   16,382 entities at once and one more is a fatal engine error, so `spawn`,
-  `fx(effect, pos)`, `explode` with an effect and `ai:fire` refuse ("cannot
+  `play_effect(effect, pos)`, `explode` with an effect and `ai:fire` refuse ("cannot
   add an entity now: the game holds at most 16382 entities at once and nearly
   all are in use; remove some first") when fewer than 256 slots are free (the
   free count is read once a frame; each script spawn or launch takes one);
@@ -2254,7 +2254,7 @@ feature.
   serving it there carry scripts (`sh_modpub_rawmap_scripts_off`, asked by
   `sh_rawmap_prepare_reload` before the engine sees the text).
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
-  `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
+  `on.animation(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
   `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
   refused (`sh_script_check_name` applies the same rule to every API call).
@@ -2438,18 +2438,18 @@ one plain sentence at the calling script line (it stops the mod's scripts for
 the map, as any error does).
 
 - **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; no count or rate
-  of its own, only the engine's entity table, Bounds above), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
+  of its own, only the engine's entity table, Bounds above), `players()`; `e:position()`, `e:set_position(v)`, `e:yaw()`,
   `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
   `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
-  `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
+  `e:definition()` (the mod's own names as the script writes them), `e:distance(other)`,
   `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
-  `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
-  `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
+  `e:animation_state(node, [via])`, `e:force_animation(node, [blend])`,
+  `e:animation_finished()`, `e:current_animation()`, `e:animation_event(name)`;
   `e:tint(r, g, b, [seconds])` and `e:glow(r, g, b, [seconds], [strength])` (the
   entity's look, below; a glow adds its colour times `strength`, a soft 0.08 when
   none is given, so the surface stays readable under it);
   `entities_near(pos, radius)` (every entity in range, nearest first),
-  `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
+  `trace(from, to, [radius], [ignore])`, `ground_below(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
   flat enough to stand on, normal at least 0.7 up; it does not consult the
   navigation areas), `difficulty()` (idGameLocal vtable +0x670, the game's
@@ -2503,13 +2503,13 @@ the map, as any error does).
   groups register with `sh_script_api_on_frame` (the AI calls finish a forced
   animation through a via node there).
 - **Animation.** idAI2 ignores the stock `changeAnimState` events, so on a
-  demon `anim_state` and `anim_force` hand the request to the AI calls
+  demon `animation_state` and `force_animation` hand the request to the AI calls
   (`sh_script_ai_anim`): the demon is parked (below) and
   `ssaction_ChangeAnimState(Via)` or `ssaction_ForceAnimState` runs at once.
   A bare state name takes the AI's current subweb.
-  `anim_current` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
-  node index). `anim_event` (DEST_BLEND_START, DEST_REACHED,
-  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `anim_finished` are
+  `current_animation` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
+  node index). `animation_event` (DEST_BLEND_START, DEST_REACHED,
+  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `animation_finished` are
   that node, observed every frame (`sh_script_api_frame`, before the tick)
   against the last request. Other entities use the stock `changeAnimState`,
   `forceAnimState` and `animState_IsFinished` events.
@@ -2864,7 +2864,7 @@ is touched, and a removed demon answers nil.
   +0x1B4), the "cooldown" test of the can-fire check (VK 0x1404439D0);
   `aim_point(pos | nil)` calls the set-focus-to-position
   `ae_selectAimFocusPoint` uses (VK 0x14041BBA0, foci 0, 2 and 3);
-  `anim_valid(node, tests, [side], [seed])` reads the node's animations (VK
+  `animation_fits(node, tests, [side], [seed])` reads the node's animations (VK
   0x141712C60) and their total root motion (VK 0x1415C5290), turns it by the
   demon's facing (by the direction to its enemy with
   `TF_TRANSLATION_TO_ENEMY_FORCE`) and tests the end point with the ground
@@ -2872,7 +2872,7 @@ is touched, and a removed demon answers nil.
   eye and weapon height, the enemy's view centre (20 degrees) and the path
   query, as the test words ask (every animation in turn without `side`, in an order
   shuffled by `seed` when given, as DOOM Eternal's query shuffles them; each node's
-  path queries under keys of their own); `anim_force_via(dest, via, [blend])` forces
+  path queries under keys of their own); `force_animation_via(dest, via, [blend])` forces
   `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
   `path_points(pos)` is the path query's computed path, read by a detour of
@@ -2900,7 +2900,7 @@ is touched, and a removed demon answers nil.
   until the game clock passes the time. The per-demon pain records are read
   lock-free by spawn id from the threads the engine runs pain on. Each detour
   is committed on the game thread at the first call that needs it.
-- **Shared with the entity calls.** `distance`, `anim_state` and `anim_force`
+- **Shared with the entity calls.** `distance`, `animation_state` and `force_animation`
   are the entity calls' and work on any entity; on a demon the two animation
   calls come back here (`sh_script_ai_anim`), which parks it first.
 - **Orders around a step of the engine's.** A turn in place, a step and an
@@ -2915,9 +2915,9 @@ is touched, and a removed demon answers nil.
   engine's idle watchdog restarts it after a second in the idle node
   (measured on a ported demon: four to seven restarts in 100 s of a fight,
   every turn after the first late, and moves that never began). So an
-  `anim_state` given while such a stage waits is held back and given the
+  `animation_state` given while such a stage waits is held back and given the
   frame the stage has ended, the web having played the step out first in any
-  case; a move order drops a held one. `anim_force` is given at once and the
+  case; a move order drops a held one. `force_animation` is given at once and the
   step's command is then ended the engine's way, with the context's own
   set-active-wait-handle (VK 0x1405223F0), which gives the command its done
   event and the status INTERRUPTED as every command sent through the context
@@ -2977,9 +2977,9 @@ engine.
   editor properties are fields of its `idPlaceableSnapAIEncounter`
   (`spawnBehavior`, `gameTeam`, `encounterMods.healthMod`, `staggerEnabled`,
   `entity` for the demon it spawned).
-- **Engine events** (`script_api_game.c`). `e:event(name, ...)` runs any of the
-  game's events on an entity and returns its result; `e:post(name, ...)`
-  queues it; `event_args(name)` lists what it takes. The argument format is
+- **Engine events** (`script_api_game.c`). `e:run_event(name, ...)` runs any of the
+  game's events on an entity and returns its result; `e:queue_event(name, ...)`
+  queues it; `event_arguments(name)` lists what it takes. The argument format is
   the game's own, read from the live registry at the call (whole numbers,
   true/false, numbers, positions, angles, colors, text, entities, decls); the
   leading "animation" argument of an `ae_` event is filled in. Only the few
@@ -2992,7 +2992,7 @@ engine.
   first asks). Event names are the editor's (`ai_killed`, `trigger_touched`,
   `logic_fired`: the `snapListenerEvent_t` enum, any case, with or without
   `SNAP_EVENT_`).
-- **Cvars and decls.** `cvar(name)` reads and `cvar(name, value)` sets a cvar;
+- **Cvars and decls.** `console_variable(name)` reads and `console_variable(name, value)` sets a cvar;
   `decl(type, name)` gives a decl object with `get`, `set`, `fields`, `name`
   and `type` (its class is the game's `idDecl<Type>`). Both outlive a map, so
   what a script sets is put back when the map ends (the runtime runs each
@@ -3015,13 +3015,13 @@ damage comes from the world entity, as a trigger's does.
   `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the
   decl's own radius, which queues the deferred radius damage the game applies
   that frame); `explode(pos, damage, [effect], [attacker])` (radius damage and
-  an effect entity); `fx(e, condition)` / `fx_stop(e, condition)`
+  an effect entity); `play_effect(e, condition)` / `stop_effect(e, condition)`
   (a condition of the entity's own fx decl: on an AI or a player
   `ae_startFX_Networked` / `ae_stopFX_Networked`, started on every machine;
   on any other entity, such as an effect entity, which answers neither
-  event, the engine's own entity StartFX / StopFX); `fx(effect, pos, [dir])`,
-  `fx_move(e, pos, [dir])`, `fx_stop(e)` (an effect entity of the mod placed
-  through `spawn` and its caps, removed by `fx_stop`); `fx_hard_stops([effect])`
+  event, the engine's own entity StartFX / StopFX); `play_effect(effect, pos, [dir])`,
+  `move_effect(e, pos, [dir])`, `stop_effect(e)` (an effect entity of the mod placed
+  through `spawn` and its caps, removed by `stop_effect`); `end_effects_at_once([effect])`
   (the mod's fx decl of that name, or every fx decl of the mod, ends the way
   DOOM Eternal ends an effect, for content made for that game. The game's FX
   manager stops one action through one function, VK 0x1416EEEF0 / GL
@@ -3080,7 +3080,7 @@ damage comes from the world entity, as a trigger's does.
   `on.death(name, fn(self, hit))` once per entity; `on.pain(name, fn(self,
   reaction, damage, attacker))` when the engine starts a pain reaction
   (`PAIN_FALTER`, `PAIN_STAGGER`, ...), with the decl and attacker of the
-  entity's last hit; `on.anim(name, notify, fn(self))` for an md6 row
+  entity's last hit; `on.animation(name, notify, fn(self))` for an md6 row
   `ae_notify "<notify>"`; `on.frame_event(name, command, fn(self, args))` for a
   row `ae_notify "<command>:<a>:<b>"` (args `{a, b}`, numbers as numbers);
   `on.projectile(name, fn(self, p, decl, origin, dir))` for every projectile

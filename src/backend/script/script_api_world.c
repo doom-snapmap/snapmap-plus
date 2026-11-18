@@ -2,7 +2,7 @@
  *   entities_near(pos, radius) -> the entities within radius, nearest first
  *   trace(from, to, [radius], [ignore]) -> what a line (or a thick line) from
  *                                          `from` to `to` hits, or nil
- *   nav_ground(pos) -> the point on the ground under pos, or nil
+ *   ground_below(pos) -> the point on the ground under pos, or nil
  *   difficulty() -> the game's difficulty, 0 easy .. 4 nightmare
  *   noting() -> true while a development tool listens for notes
  *   note(text) -> hands the listener one line; does nothing when none listens
@@ -19,7 +19,7 @@
  *                   line is also stopped by what stops a demon and not a shot: a Blocking Box with
  *                   Block Demons ticked (its contents gain 0x20010), so a script that places or flies
  *                   a demon itself honours the map's blocking volumes.
- *   nav_ground      the same trace straight down from 16 inches above pos for 4,096 inches; the first
+ *   ground_below      the same trace straight down from 16 inches above pos for 4,096 inches; the first
  *                   surface hit counts when it is flat enough to stand on (normal at least 0.7 up),
  *                   sh_script_api_ground_trace. It does not consult the navigation areas.
  *   difficulty      idGameLocal vtable +0x670, the game's own difficulty (the g_gameDifficulty cvar when
@@ -173,12 +173,12 @@ static int l_trace(lua_State *L)
     return 1;
 }
 
-/* nav_ground(pos) -> the point on the ground under pos, or nil */
+/* ground_below(pos) -> the point on the ground under pos, or nil */
 static int l_nav_ground(lua_State *L)
 {
     const sh_script_engine *e = sh_script_api_engine();
     float pos[3], at[3];
-    if (!sh_script_api_check_point(L, 1, "nav_ground", "the position to look under", pos) || !e || !e->ground ||
+    if (!sh_script_api_check_point(L, 1, "ground_below", "the position to look under", pos) || !e || !e->ground ||
         !e->ground(pos, at)) {
         lua_pushnil(L);
         return 1;
@@ -232,7 +232,7 @@ void sh_script_api_world_register(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities_near", l_entities_near);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "trace", l_trace);
-    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "nav_ground", l_nav_ground);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ground_below", l_nav_ground);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "difficulty", l_difficulty);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "noting", l_noting);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "note", l_note);

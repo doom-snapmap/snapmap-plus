@@ -16,7 +16,7 @@
  * stop lines, and a removed demon answering nil.
  *
  * The calls the Tyrant's brain needs: recoil, weapon_ready, aim_point,
- * anim_valid, anim_force_via, firing_position, path_points, spline_clear,
+ * animation_fits, force_animation_via, firing_position, path_points, spline_clear,
  * monster_type, pain_string, block_pain through scripts; their compositions
  * (sh_ai_firing_run, sh_ai_spline_run, sh_ai_anim_valid_run) over fake
  * primitives with a wall in the world; can_see and find_position against
@@ -466,7 +466,7 @@ static const sh_script_ai_engine g_fake = {
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
- * (anim_force_via) and velocity (spline_clear's prediction). */
+ * (force_animation_via) and velocity (spline_clear's prediction). */
 static void *c_resolve(uint32_t id) { return id < NENT && g_ent[id].live ? &g_ent[id] : NULL; }
 static uint32_t c_spawn_id(void *e) { return e ? (uint32_t)idx_of(e) : SH_SCRIPT_SPAWN_ID_NONE; }
 static int c_kind(void *e) { return ((fent *)e)->is_ai ? SH_SCRIPT_KIND_AI : SH_SCRIPT_KIND_OTHER; }
@@ -1014,12 +1014,12 @@ static void test_compositions(void)
     sh_ai_spline_query sq;
     float out[3], pts[20][3], st_t[2], st_v[2];
     int idx = -1, n = 0;
-    printf("-- the compositions: anim_valid, firing_position, spline_clear\n");
+    printf("-- the compositions: animation_fits, firing_position, spline_clear\n");
     world();
     g_ent[1].enemy = 2;
     g_ent[2].origin[0] = 600; g_ent[2].origin[1] = 0;
     g_ent[2].yaw = 180;                                   /* the enemy looks back at the demon */
-    /* anim_valid: both side steps fit an open floor; the first one is the answer */
+    /* animation_fits: both side steps fit an open floor; the first one is the answer */
     CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 1 && idx == 0);
     CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, 1, 0, 0, &idx) == 1 && idx == 1);
     /* with a seed every animation is still tried, in an order the seed shuffles: both steps come first by turns */
@@ -1149,10 +1149,10 @@ static void test_brain_calls(void)
         "    print('use ' .. tostring(self:weapon_use('recoil:')) .. ' ' .. tostring(self:weapon_use('other')))\n"
         "    print('ready ' .. tostring(self:weapon_ready()))\n"
         "    self:aim_point({x = 1, y = 2, z = 3})\n"
-        "    print('valid ' .. tostring(self:anim_valid('evade/side', 'TF_NAV_ENDPOINT TF_BOUNDS', 1)))\n"
-        "    print('valid2 ' .. tostring(self:anim_valid('evade/side')))\n"
-        "    print('valid3 ' .. tostring(self:anim_valid('evade/still', 'VALIDATE_ANIM_DELTA')))\n"
-        "    print('valid4 ' .. table.concat({tostring(select(1, self:anim_valid('evade/none'))), select(2, self:anim_valid('evade/none'))}, ' '))\n"
+        "    print('valid ' .. tostring(self:animation_fits('evade/side', 'TF_NAV_ENDPOINT TF_BOUNDS', 1)))\n"
+        "    print('valid2 ' .. tostring(self:animation_fits('evade/side')))\n"
+        "    print('valid3 ' .. tostring(self:animation_fits('evade/still', 'VALIDATE_ANIM_DELTA')))\n"
+        "    print('valid4 ' .. table.concat({tostring(select(1, self:animation_fits('evade/none'))), select(2, self:animation_fits('evade/none'))}, ' '))\n"
         "    local p, why = self:path_points({x = 30, y = 40, z = 0})\n"
         "    print('pts ' .. tostring(p) .. ' ' .. tostring(why))\n"
         "    print('mt ' .. tostring(ent(4):monster_type()) .. ' ' .. tostring(ent(3):monster_type()) .. ' ' .. tostring(self:monster_type()))\n"
@@ -1733,10 +1733,10 @@ static void test_brain_refusals(void)
     expect_stop("self:recoil(2)", "\"recoil\" needs a weight from 0 (no recoil) to 1 (full), got 2");
     expect_stop("self:weapon_use(5)", "\"weapon_use\" needs the entry's name (a string)");
     expect_stop("self:aim_point(5)", "\"aim_point\" needs a position");
-    expect_stop("self:anim_valid('evade/side', 'TF_FLY')", "\"anim_valid\" does not know the test \"TF_FLY\"");
-    expect_stop("self:anim_valid('a b')", "\"anim_valid\": \"a b\" is not an animWeb node name");
-    expect_stop("self:anim_valid('evade/side', 'TF_BOUNDS', -1)", "\"anim_valid\" needs the animation to try as a whole number");
-    expect_stop("self:anim_force_via('idle', nil)", "\"anim_force_via\" needs the node to force first as \"subweb/state\" text, got nothing");
+    expect_stop("self:animation_fits('evade/side', 'TF_FLY')", "\"animation_fits\" does not know the test \"TF_FLY\"");
+    expect_stop("self:animation_fits('a b')", "\"animation_fits\": \"a b\" is not an animWeb node name");
+    expect_stop("self:animation_fits('evade/side', 'TF_BOUNDS', -1)", "\"animation_fits\" needs the animation to try as a whole number");
+    expect_stop("self:force_animation_via('idle', nil)", "\"force_animation_via\" needs the node to force first as \"subweb/state\" text, got nothing");
     expect_stop("self:firing_position({ kind = 'best' })", "\"firing_position\": kind is \"any\", \"new\", \"superior\" or \"reposition\"");
     expect_stop("self:firing_position({ near = 5 })", "\"firing_position\" knows target, kind, min, max, ideal, visible, count, path_weight and parms, not \"near\"");
     expect_stop("self:spline_clear(ent(2), 'shallow_right', 1)", "\"spline_clear\" needs the spline as a table");
@@ -1747,21 +1747,21 @@ static void test_brain_refusals(void)
     expect_stop("self:block_pain('falter', 9999)", "\"block_pain\" needs seconds from 0 to 600, got 9999");
 }
 
-/* anim_force_via: the via node is forced now; when the web has played it
+/* force_animation_via: the via node is forced now; when the web has played it
  * and moved on, the destination is asked for; the observer reports the
  * via's blend in and out, then the destination. */
 static void test_anim_force_via(void)
 {
     const char *log;
-    printf("-- anim_force_via\n");
+    printf("-- force_animation_via\n");
     CHECK(start(
         "api = 1\n"
         "local step = 0\n"
         "on.think('ai/brute', function(self)\n"
         "  step = step + 1\n"
-        "  if step == 1 then self:anim_force_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
-        "  print('s' .. step .. ' ' .. tostring(self:anim_event('VIA_BLEND_IN_START')) .. ' ' ..\n"
-        "        tostring(self:anim_event('VIA_BLEND_OUT_START')) .. ' ' .. tostring(self:anim_event('DEST_REACHED')))\n"
+        "  if step == 1 then self:force_animation_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
+        "  print('s' .. step .. ' ' .. tostring(self:animation_event('VIA_BLEND_IN_START')) .. ' ' ..\n"
+        "        tostring(self:animation_event('VIA_BLEND_OUT_START')) .. ' ' .. tostring(self:animation_event('DEST_REACHED')))\n"
         "end)\n"));
     strcpy(g_ent[1].node, "rocket_combat/walk");
     tick();                                                  /* forced */
@@ -1815,8 +1815,8 @@ static void test_orders_around_a_step(void)
         "on.think('ai/brute', function(self)\n"
         "  step = step + 1\n"
         "  if step == 1 then self:hold() end\n"
-        "  if step == 2 then print('hold ' .. tostring(self:hold())); self:anim_state('shoot/combo_cycle') end\n"
-        "  if step == 3 then self:anim_state('shoot/combo_hold', 'shoot/combo_fire') end\n"
+        "  if step == 2 then print('hold ' .. tostring(self:hold())); self:animation_state('shoot/combo_cycle') end\n"
+        "  if step == 3 then self:animation_state('shoot/combo_hold', 'shoot/combo_fire') end\n"
         "end)\n"));
     g_ent[1].body_rot = 1;
     tick();                                              /* held: clear_move, idle order */
@@ -1843,8 +1843,8 @@ static void test_orders_around_a_step(void)
         "local step = 0\n"
         "on.think('ai/brute', function(self)\n"
         "  step = step + 1\n"
-        "  if step == 1 then self:anim_state('rocket_combat/idle'); self:anim_force('pain/left', 0.1) end\n"
-        "  if step == 2 then self:anim_state('rocket_combat/idle'); self:move_to({x = 100, y = 0, z = 0}) end\n"
+        "  if step == 1 then self:animation_state('rocket_combat/idle'); self:force_animation('pain/left', 0.1) end\n"
+        "  if step == 2 then self:animation_state('rocket_combat/idle'); self:move_to({x = 100, y = 0, z = 0}) end\n"
         "end)\n"));
     g_ent[1].moving = 1; g_ent[1].stage = SH_AI_STAGE_MOVE_STEP; g_ent[1].waiting = 1;
     g_ent[1].interrupts = 0;
@@ -1936,7 +1936,7 @@ static void test_pain_stub(void)
 }
 
 /* test only: ai_anim(self, node, [via], [blend_ms]) is what the entity calls
- * anim_state and anim_force do for a demon (sh_script_ai_anim). */
+ * animation_state and force_animation do for a demon (sh_script_ai_anim). */
 static int t_ai_anim(lua_State *L)
 {
     uint64_t h = sh_script_check_entity(L, 1, "ai_anim");
@@ -2111,10 +2111,10 @@ static void test_eternal_interrupts(void)
         "local step = 0\n"
         "on.think('ai/brute', function(self)\n"
         "  step = step + 1\n"
-        "  if step == 1 then self:anim_state('rocket_combat/walk') end\n"
-        "  if step == 2 then print('intr ' .. tostring(self:eternal_interrupts())); self:anim_state('melee') end\n"
-        "  if step == 3 then self:anim_force('pain/left', 0.1) end\n"
-        "  if step == 4 then self:anim_force_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
+        "  if step == 1 then self:animation_state('rocket_combat/walk') end\n"
+        "  if step == 2 then print('intr ' .. tostring(self:eternal_interrupts())); self:animation_state('melee') end\n"
+        "  if step == 3 then self:force_animation('pain/left', 0.1) end\n"
+        "  if step == 4 then self:force_animation_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
         "end)\n"));
     strcpy(g_ent[1].node, "rocket_combat/run");
     tick(); tick(); tick(); tick();

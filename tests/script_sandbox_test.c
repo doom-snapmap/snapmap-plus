@@ -623,7 +623,7 @@ static void test_dispatch(void)
         "on.think('ai/child', function(self, dt) self.state.hp = self.state.hp + 1 print('think ' .. self.state.hp .. ' ' .. dt) end)\n"
         "on.damage('ai/base', function(self, hit) print('damage ' .. hit.amount .. ' ' .. hit.damage .. ' ' .. hit.location .. ' ' .. handle(hit.attacker) .. ' ' .. tostring(hit.inflictor)) end)\n"
         "on.death('mods/aaaaaaaa/ai/child', function(self, hit) print('death ' .. tostring(hit.attacker)) end)\n"
-        "on.anim('ai/child', 'Throw', function(self) print('anim throw') end)\n"
+        "on.animation('ai/child', 'Throw', function(self) print('anim throw') end)\n"
         "on.remove('ai/child', function(self) print('removed ' .. handle(self)) end)\n"
         "on.input('Count_Switch', function(node, activator) print('input ' .. handle(node) .. ' ' .. handle(activator)) end)\n"
         "on.input('door_opened', function(node) end)\n"
@@ -1135,8 +1135,8 @@ static void test_reason_table(void)
     CHECK(!strcmp(what, "\"move_to\" needs a number as its first value, got nil"));
     HOV2(what, todo, sh_script_reason("bad argument #2 to 'insert' (position out of bounds)", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"insert\" cannot use its second value (position out of bounds)"));
-    HOV2(what, todo, sh_script_reason("calling 'pos' on bad self (entity expected, got table)", HO_P(0), HO_P(1)));
-    CHECK(!strcmp(what, "\"pos\" needs an entity as the value before the colon, got a table"));
+    HOV2(what, todo, sh_script_reason("calling 'position' on bad self (entity expected, got table)", HO_P(0), HO_P(1)));
+    CHECK(!strcmp(what, "\"position\" needs an entity as the value before the colon, got a table"));
     HOV2(what, todo, sh_script_reason("attempt to load a binary chunk (mode is 't')", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "the file is compiled Lua, not script text, so it did not run"));
     HOV2(what, todo, sh_script_reason("'=' expected near 'x'", HO_P(0), HO_P(1)));
