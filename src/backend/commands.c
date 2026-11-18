@@ -1658,8 +1658,7 @@ static void h_sh_staticmodels(idCmdArgs *a)
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "render models rebuilt after a reload %ld, drawn empty by the guard %ld, reloads moved to process heap 0 %ld",
                 sh_static_model_rebuilds(), sh_static_model_guard_fires(), sh_static_model_heap_moves());
-    sh_printf("%s
-", line);
+    sh_printf("%s\n", line);
     _snprintf_s(logged, sizeof logged, _TRUNCATE, "STATIC MODELS: counts: %s", line);
     backend_log(logged);
 }
