@@ -473,7 +473,7 @@ static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t
     (void)placed;
     g_subst_calls++;
     if (!strcmp(row->salt, "alexgone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
-    ho_set(why, "This map needs nobodyhr, which is not installed and was never published.");
+    ho_set(why, "This map needs nobodyhr, which is not installed, and the mod store does not have it.");
     return 0;
 }
 
