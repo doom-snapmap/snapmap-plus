@@ -12,22 +12,29 @@
  *
  * The closure, from the root:
  *   seeds    the root's file; for an entityDef, the mod's Toybox rows that place it; every DOOM file the mod changes
- *            that is not an editor tweak (edits and replacements apply wherever the mod is used); every decl of a
- *            type the game finds by enumeration (SH_UNIT_ENUMERATED) that names none of the mod's entityDefs, and,
- *            once one of the mod's entityDefs is kept, the enumerated decls that name it; the requests players
- *            asked for and did not get (sh_unit_env.asked) that the build holds, kept with the unit that holds the
- *            decl that asked (`by`), or with every unit when no decl is named
+ *            that is not an editor tweak (edits and replacements apply wherever the mod is used), whose edges never
+ *            reach the mod's own entityDefs (such a file, the conductor's list, names every object; each comes from
+ *            its own root); the md6Defs mod.json's animation_events and attachment_tags name (the product adds them
+ *            to the player of every map that uses the mod); every decl of a type the game finds by enumeration
+ *            (sh_unit_enumerated_type) that is tied to none of the mod's entityDefs, and, once one of them is kept,
+ *            the enumerated decls tied to it: by a need, or by its AI type (aiType, memberType), which a DOOM file
+ *            the mod changes pairs with the def in one block; the requests players asked for and did not get
+ *            (sh_unit_env.asked) that the build holds, kept with the unit that holds the decl that asked (`by`), or
+ *            with every unit when no decl is named
  *   edges    every need the build recorded for a kept file; every name a kept text spells under the mod's namespace
  *            (a decl read as the engine reads it, with its names in the author's spelling mapped to the engine's,
  *            so the prefix rule of modauthor.h decides) and every name a kept binary spells under the namespace it
  *            was written with (the build's "spelled"); a name reaches the file of that name with its extensions cut
  *            (so an image's every extension) and the file of each of its leading folders (a node of an animWeb names
  *            the animWeb)
- *   whole    once reached: a sound bank that holds the event of a kept sound decl; a render program with its
+ *   whole    once reached: a sound bank for each kept sound decl's event (the one bank that holds it, or, when
+ *            several do, one of them unless a kept bank already holds it), with the sound decls of all its events (the
+ *            serving index names a bank's events by the decls beside it); a render program with its
  *            permutations, cooked binaries and SPIR-V; a module's every file below its own name; a model with its
  *            mesh and skeleton (the build's needs already say so)
- *   scripts  an entry script that binds a kept entityDef (or binds a name only while it runs, once any entityDef is
- *            kept); every module a kept script requires; every string literal of a kept script as a name of the
+ *   scripts  an entry script that binds a kept entityDef or names one in a string literal (one that binds a name
+ *            only while it runs, or names none of the mod's defs, once any entityDef is kept); every module a kept
+ *            script requires; every string literal of a kept script as a name of the
  *            mod (in the author's spelling, the engine's, mod-relative, or after a decl type's folder) and, when it
  *            ends in '/', '_', '-' or '.', as a prefix of names
  *   boards   a virtual-texture family is cut at the square: a material that names its family by landpagefile keeps
