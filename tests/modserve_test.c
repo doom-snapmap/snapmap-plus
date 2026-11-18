@@ -171,6 +171,7 @@ static const char *g_fx_restore2;   /* a second one, or NULL */
  * block, keyed by the salt `id`) and its files. A folder under
  * <root>\maps\<segment>\ sits in that map's place. `state` is the old
  * .state.json shape, mapped to the block's cause and built. */
+static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
                         const char *shadows, const fx_file *files, int n, const char *state)
 {
@@ -184,7 +185,7 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                       "{\n  \"name\": \"%s\",\n  %s\n"
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\"",
-                      g_bundle_name ? g_bundle_name : id, extra, id, hash64(hash_digit, h));
+                      g_bundle_name ? g_bundle_name : id, extra, id, g_bundle_hash ? g_bundle_hash : hash64(hash_digit, h));
     if (state) {
         const char *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (c) {
@@ -1314,6 +1315,44 @@ static void test_requirements_by_map(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && !strcmp(g_text_val[0], "120"));
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
+/* No count of the product's own on the providers of one path (decision 26):
+ * seventy mods carry the same game file, and a map that uses only the last of
+ * them is served by it. Before, a path kept 63 alternates and the scope looked
+ * at 64 candidates, so the seventieth never served. */
+#define MANY_DECL "generated/decls/entitydef/monster/revenant.decl"
+static void test_many_providers(void)
+{
+    static const fx_file other[] = { { MANY_DECL, "entityDef rev { other }", -1, "entityDef", "monster/revenant", NULL, 'a' } };
+    static const fx_file last[] = { { MANY_DECL, "entityDef rev { last! }", -1, "entityDef", "monster/revenant", NULL, 'b' } };
+    char top[MAX_PATH], root[MAX_PATH], salt[16], hash[65], last_hash[65];
+    const char *list[1];
+    char *slash;
+    sh_modserve_hit hit;
+    int i;
+    printf("-- seventy mods carry one game file: the one the map uses serves it, however many there are\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\many\\mods", top);
+    mkdirs(root);
+    for (i = 0; i < 70; ++i) {
+        _snprintf_s(salt, sizeof salt, _TRUNCATE, "many%04d", i);
+        _snprintf_s(hash, sizeof hash, _TRUNCATE, "%064x", i + 1);
+        g_bundle_hash = hash;
+        make_bundle(root, salt, salt, '0', "\"" MANY_DECL "\"", i == 69 ? last : other, 1, "{\"installedAt\": 100}");
+        if (i == 69) strcpy_s(last_hash, sizeof last_hash, hash);
+    }
+    g_bundle_hash = NULL;
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 70);
+    sh_modserve_scope_enable(1);
+    list[0] = last_hash;
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+    CHECK(sh_modserve_lookup(MANY_DECL, &hit) && !strcmp(hit.bundle_id, "many0069"));
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
 }
 
 /* ------------------------------------------------------------------ conflicts (lane MG2) */
@@ -5636,6 +5675,7 @@ int main(void)
     test_surface_built_after_boot();
     test_requirements_general();
     test_requirements_by_map();
+    test_many_providers();
     test_refresh();
     test_conflicts();
     test_editor_refs();

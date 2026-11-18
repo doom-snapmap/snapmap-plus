@@ -2252,14 +2252,15 @@ static int ms_conflict_cmp(const void *a, const void *b)
  * order the static winner rules rank them (`ordered` 1, different bytes), the
  * root folder's build first (`ordered` 2, builds of one salt) or in index order
  * (identical bytes), so that the provider the open map declares serves the
- * path (ms_scope_compute). Up to 63 alternates; without memory the path keeps
- * only its winner. */
+ * path (ms_scope_compute). Every alternate (no count of its own, decision 26);
+ * without memory the path keeps only its winner, with a log line. */
 static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, int winner, int ordered)
 {
-    ms_key rest[64];
+    ms_key stack[64], *rest = j - i <= 64 ? stack : (ms_key *)malloc(sizeof(ms_key) * (size_t)(j - i));
     int k, m = 0;
-    for (k = i; k < j && m < 63; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
-    if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) return;
+    if (!rest) { ms_log("out of memory: %s is served by its first provider only", x->files[winner].request); return; }
+    for (k = i; k < j; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
+    if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) { if (rest != stack) free(rest); return; }
     x->files[winner].alt_first = x->nalts;
     x->files[winner].alt_count = m;
     while (m > 0) {
@@ -2273,6 +2274,7 @@ static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, 
         memmove(&rest[b], &rest[b + 1], sizeof *rest * (size_t)(m - b - 1));
         m--;
     }
+    if (rest != stack) free(rest);
 }
 
 /* Decide which files serve their request path. Returns 0 on allocation failure. */
@@ -3044,7 +3046,6 @@ typedef struct ms_reg_memo {
     struct ms_reg_memo *next;
 } ms_reg_memo;
 
-#define MS_REG_SOURCE_MAX 256
 typedef struct ms_scope_choice { char *slot, *key; } ms_scope_choice;   /* both malloc'd */
 static ms_scope_choice *g_scope_choice;   /* the open map's choices between mods' edits (g_scope_lock) */
 static int g_scope_nchoice;
@@ -3458,7 +3459,7 @@ static int ms_registry_compute(ms_index *x, int on)
             ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->reg_relevant || b->inert) continue;
             if (b->rank < 0) continue;
-            if (n < MS_REG_SOURCE_MAX) set[n++] = b;
+            set[n++] = b;   /* every serving bundle: no count of its own (decision 26) */
         }
         qsort(set, (size_t)n, sizeof *set, ms_reg_order);
         for (i = 0; i < n; ++i) {
@@ -3564,16 +3565,35 @@ static int ms_scope_compute(ms_index *x, int mark)
     if (ms_req_conflicts(x)) changed++;
     /* Registries from the bundles that now serve (ms_registry_compute). */
     if (ms_registry_compute(x, on)) changed++;
+    /* Every provider of a path takes part (no count of its own, decision 26):
+     * the per-path arrays are sized once to the most providers any path has. */
+    int pmax = 64, s_cand[64], s_d[64], s_unres[64], s_share[64], s_order[64];
+    long s_ok[64], s_ook[64];
+    int *h_cand = s_cand, *h_d = s_d, *h_unres = s_unres, *h_share = s_share, *h_order = s_order;
+    long *h_ok = s_ok, *h_ook = s_ook;
+    for (i = 0; i < x->nfiles; ++i) if (x->files[i].alt_count + 1 > pmax) pmax = x->files[i].alt_count + 1;
+    if (pmax > 64) {
+        int *ints = (int *)malloc(sizeof(int) * 5 * (size_t)pmax);
+        long *longs = ints ? (long *)malloc(sizeof(long) * 2 * (size_t)pmax) : NULL;
+        if (!ints || !longs) {
+            free(ints);
+            pmax = 64;
+            ms_log("scope: out of memory; a path with more than 64 providers is decided among its first 64");
+        } else {
+            h_cand = ints; h_d = ints + pmax; h_unres = ints + 2 * pmax; h_share = ints + 3 * pmax; h_order = ints + 4 * pmax;
+            h_ok = longs; h_ook = longs + pmax;
+        }
+    }
     /* Each path: the file that serves it now. */
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
-        int cand[64], nc = 0, d[64], nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
-        long ok[64];   /* per candidate: its row (declared), past every row (editor-time bundles), or -1 */
+        int *cand = h_cand, nc = 0, *d = h_d, nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
+        long *ok = h_ok;   /* per candidate: its row (declared), past every row (editor-time bundles), or -1 */
         LONG was;
         ms_body *body = NULL, *was_body;
         if (!f->served || !x->bundles[f->bundle].admitted) continue;
         cand[nc++] = i;
-        for (k = 0; k < f->alt_count && nc < 64; ++k) cand[nc++] = x->alts[f->alt_first + k];
+        for (k = 0; k < f->alt_count && nc < pmax; ++k) cand[nc++] = x->alts[f->alt_first + k];
         if (!on) best = i, why = MS_WHY_ONE;
         else {
             /* The providers that serve for the listing: the declared ones,
@@ -3601,7 +3621,7 @@ static int ms_scope_compute(ms_index *x, int mark)
                     if (body) why = MS_WHY_COMPOSED;
                 }
             } else if (nd > 1) {
-                int same = 1, unres[64], share[64], tie_un = 1, tie_sh = 1, bk = 0;
+                int same = 1, *unres = h_unres, *share = h_share, tie_un = 1, tie_sh = 1, bk = 0;
                 for (k = 1; k < nd && same; ++k)
                     same = ms_pick_same(x, d[0], NULL, d[k], NULL);
                 if (same) {
@@ -3628,8 +3648,8 @@ static int ms_scope_compute(ms_index *x, int mark)
                     /* Lists and bags of the declared providers' texts compose
                      * (never two builds of one salt: only one is declared). */
                     {
-                        int order[64], no = 0;
-                        long ook[64];
+                        int *order = h_order, no = 0;
+                        long *ook = h_ook;
                         order[no] = best; ook[no++] = ok[bk];
                         for (k = 0; k < nd; ++k) if (d[k] != best) { order[no] = d[k]; ook[no++] = ok[k]; }
                         for (k = 1; k < no; ++k)   /* the rest in row order */
@@ -3693,6 +3713,7 @@ static int ms_scope_compute(ms_index *x, int mark)
         InterlockedExchange(&f->refresh, 1);
         marked++;
     }
+    if (h_cand != s_cand) { free(h_cand); free(h_ok); }
     /* A registry path no bundle carries: its synthetic file is the key. */
     for (i = x->reg_first; x->reg_count && i < x->reg_first + x->reg_count; ++i) {
         ms_file *f = &x->files[i];
