@@ -93,6 +93,10 @@ int  sh_modmanifest_composition_hash(const char *salt, const char *const *units,
  * places. It remembers the pinned rows and composes those whose composition is not on disk from what is here. */
 typedef void (*sh_modmanifest_content_fn)(const struct sh_modmanifest_list *rows, char *const *placed, size_t count);
 void sh_modmanifest_set_content(sh_modmanifest_content_fn fn);
+/* Run the content step for a map text's pinned rows (`rows` read from `json`), with the names the map places, as
+ * a load does before its rows resolve. A rawmap's mod check calls it before its hold, which fetches a pinned row's
+ * units only when the content cache knows the row. */
+void sh_modmanifest_content_for(const char *json, size_t length, const struct sh_modmanifest_list *rows);
 /* The placeholder build of a local row (64 zeros): it never names a build, so the resolver takes the local folder. */
 #define SH_MODMANIFEST_LOCAL_BUILD "0000000000000000000000000000000000000000000000000000000000000000"
 

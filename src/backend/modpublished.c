@@ -1572,6 +1572,10 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     if (!g_ops_set || !text || !length) return 0;
     at = pub_text_place(text, length);
     sh_modmanifest_read(text, length, rows, &rejected);
+    /* A pinned row's units are fetched into the content cache only when the cache knows the row: a rawmap's rows
+     * are noted here, before its hold, as a load notes them before they resolve (R-LV2: the hold took the retired
+     * build route and the store's 410 ended the load). */
+    sh_modmanifest_content_for(text, length, rows);
     missing = 0;
     for (size_t i = 0; i < rows->count; i++)
         if (!pub_row_served(&rows->rows[i], pub_s(at))) missing++;

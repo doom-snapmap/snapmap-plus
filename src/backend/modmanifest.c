@@ -1689,6 +1689,20 @@ void sh_modmanifest_load_refuse(const char *sentence)
     free(line);
 }
 
+void sh_modmanifest_content_for(const char *json, size_t length, const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_content_fn content = g_content;
+    size_t i, placed_count = 0;
+    int pinned = 0, failed = 0;
+    char **placed = NULL;
+    if (!content || !rows) return;
+    for (i = 0; i < rows->count; i++) pinned |= rows->rows[i].pinned;
+    if (!pinned) return;
+    placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
+    content(rows, placed, failed ? 0 : placed_count);
+    sh_modmanifest_names_free(placed, placed_count);
+}
+
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length)
 {
     sh_modmanifest_list list = {0};
@@ -1707,17 +1721,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     }
     sh_modmanifest_read(json, length, &list, &rejected);
     /* Pinned rows: the content cache composes what it can before the rows resolve (modcache.h). */
-    if (g_content) {
-        size_t i, placed_count = 0;
-        int pinned = 0, failed = 0;
-        char **placed = NULL;
-        for (i = 0; i < list.count; i++) pinned |= list.rows[i].pinned;
-        if (pinned) {
-            placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
-            g_content(&list, placed, failed ? 0 : placed_count);
-            sh_modmanifest_names_free(placed, placed_count);
-        }
-    }
+    sh_modmanifest_content_for(json, length, &list);
 
     names = mm_describe(&list);
     /* The map scope first: the bundles' shadows and requirements are live

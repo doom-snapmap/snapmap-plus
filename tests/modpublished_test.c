@@ -1366,6 +1366,46 @@ static void tick_until_probed(void)
     for (int i = 0; i < 4000 && sh_modpub_test_state() == 4; i++) { F.ticks++; sh_modpublished_poll(); Sleep(1); }
 }
 
+/* A rawmap's pinned rows reach the content step before its hold (R-LV2): the hold fetches a row's units into the
+ * content cache only when the cache knows the row, so a rawmap whose rows were not noted took the retired build
+ * route. The step gets the pinned row and the names the map places. */
+static struct { int calls; size_t rows, pinned, placed; char first[96]; } g_content_seen;
+static void content_spy(const sh_modmanifest_list *rows, char *const *placed, size_t count)
+{
+    size_t i;
+    g_content_seen.calls++;
+    g_content_seen.rows = rows ? rows->count : 0;
+    for (i = 0; rows && i < rows->count; i++) g_content_seen.pinned += rows->rows[i].pinned ? 1 : 0;
+    g_content_seen.placed = count;
+    if (count && placed[0]) strcpy_s(g_content_seen.first, sizeof g_content_seen.first, placed[0]);
+}
+
+static void rawmap_pinned_rows_reach_the_content_step(void)
+{
+    static const char PINNED[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idProp_Coop\",\"inherit\":\"mods/" SALT_A "/crate\","
+        "\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\"},\"uniqueId\":1,\"~type\":\"idSnapEntity\"}],"
+        "\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+        ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT_A "\",\"name\":\"Pink\",\"size\":42,"
+        "\"objects\":{\"entities/crate\":\"" HASH_A "\"}}]}}";
+    sh_modmanifest_list rows;
+    char place[HO_TEXT];
+    printf("-- a rawmap's pinned rows reach the content step before its hold\n");
+    reset();
+    memset(&g_content_seen, 0, sizeof g_content_seen);
+    sh_modmanifest_set_content(content_spy);
+    (void)HOZ(place, sh_modpub_rawmap_missing(PINNED, strlen(PINNED), &rows, HO_P(0)));
+    CHECK(g_content_seen.calls == 1 && g_content_seen.rows == 1 && g_content_seen.pinned == 1);
+    CHECK(g_content_seen.placed == 1 && !strcmp(g_content_seen.first, "mods/" SALT_A "/crate"));
+    sh_modmanifest_list_free(&rows);
+    /* A map with only format 1 rows has nothing for the step. */
+    memset(&g_content_seen, 0, sizeof g_content_seen);
+    (void)HOZ(place, sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, HO_P(0)));
+    CHECK(g_content_seen.calls == 0);
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_set_content(NULL);
+}
+
 static void rawmap_missing_counts_rows(void)
 {
     sh_modmanifest_list rows;
@@ -1912,6 +1952,7 @@ int main(void)
     scripts_off_at_launch();
     rawmap_scripts_follow_the_setting();
     rawmap_missing_counts_rows();
+    rawmap_pinned_rows_reach_the_content_step();
     a_map_carries_its_place();
     one_notice_queue();
     rawmap_store_lacks_refuses();
