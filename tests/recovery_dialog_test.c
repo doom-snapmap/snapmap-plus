@@ -19,7 +19,7 @@ static void *shell[8];
 static void *shell_slot;
 static void fake_clear(void *self, void *block);
 
-static int dialog_asks, dialog_can_ask, main_frames;
+static int dialog_asks, dialog_can_ask, main_frames, cheat_frames;
 static const char *dialog_text;
 
 int sh_engine_dialog_can_ask(void) { return dialog_can_ask; }
@@ -30,6 +30,7 @@ void sh_engine_dialog_release(int ticket) { (void)ticket; }
 sh_patch_status code_patch(void *at, const uint8_t *expect, const uint8_t *bytes, size_t n, sh_patch_handle *h)
 { (void)at; (void)expect; (void)bytes; (void)n; if (h) h->live = 1; return B2_PATCH_OK; }
 void sh_commands_main_frame(void) { main_frames++; }
+void sh_player_cheats_frame(void) { cheat_frames++; }
 void *hook_prepare(void *target, void *detour, size_t stolen)
 { (void)detour; (void)stolen; return target; }
 sh_patch_status hook_commit(void *original) { (void)original; return B2_PATCH_OK; }
@@ -108,7 +109,7 @@ static void reset(void)
     g_armed = 0;
     g_damaged_text = NULL; g_damaged_wait = 0; g_damaged_ticket = 0;
     g_refusal_frames = 0;
-    dialog_asks = dialog_can_ask = main_frames = 0;
+    dialog_asks = dialog_can_ask = main_frames = cheat_frames = 0;
     dialog_text = NULL;
     memset(&g_eng, 0, sizeof g_eng);
     g_state = g_frames = 0;
@@ -256,6 +257,7 @@ static void test_damaged_notice(void)
     CHECK(frame_detour(shell) == 123);
     CHECK(dialog_asks == 1);                       /* one notice per dismissal */
     CHECK(main_frames == 3);                       /* the console registration tick runs every frame */
+    CHECK(cheat_frames == 3);                      /* and the kept player cheats' check */
 }
 
 /* After a refusal the dismissed notices are not replaced: Snapmap+ already
