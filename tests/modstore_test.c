@@ -454,12 +454,15 @@ static void test_fresh_folder_refusals(const char *tmp)
     _snprintf_s(foreign, sizeof foreign, _TRUNCATE, "%s\\foreignprobe", root);
     fb_make(foreign, "someoneelse");
     mt_write(foreign, "mod.json", "{\"name\":\"Foreign\"}");
+    /* another mod's name cannot be spelled in a mod folder: game/ refuses mods/ */
+    mt_write(foreign, "game\\generated\\decls\\entitydef\\mods\\someoneelse\\x.decl", "{\r\n}");
     _snprintf_s(good, sizeof good, _TRUNCATE, "%s\\goodprobe", root);
     fb_make(good, "goodprobe");
     dir_names(bin, before, sizeof before);
     mj0 = slurp(bin, "mod.json", NULL);
     g_logged = 0;
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 2);
+    /* the foreign folder is salted (nothing in the salting reads a file) and then refused by its build */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 2 && ss.rebuilt == 1 && ss.failed == 2);
     dir_names(bin, after, sizeof after);
     mj1 = slurp(bin, "mod.json", NULL);
     CHECK(!strcmp(before, after) && same_text(mj0, mj1));   /* byte for byte */
@@ -472,8 +475,8 @@ static void test_fresh_folder_refusals(const char *tmp)
           strstr(e->cause, "New mod"));
     if (e) printf("   %s\n", e->cause);
     e = find_entry(&list, "foreignprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") &&
-          strstr(e->cause, "not this folder's name"));
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "game/ holds the game's own files at the game's own paths") &&
+          strstr(e->cause, "mods/someoneelse/"));
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
     /* Called directly: refused with the cause; an already salted folder answers 0. */
@@ -736,17 +739,11 @@ static void test_place_folders(const char *fixture, const char *tmp)
         dir_names(path, names, sizeof names);
         CHECK(!strcmp(names, "R2 Imp copy;"));
     }
-    /* A build whose texts name another salt's files is refused; nothing placed. */
+    /* A build with a file at another mod's name (a game/ path under mods/) is refused; nothing placed. */
     CHECK(mt_copy_tree(fixture, src2));
-    t = slurp(src2, "mod.json", NULL);
-    {
-        char *s = t ? strstr(t, "alexrimp") : NULL;
-        if (s) memcpy(s, "otherimp", 8);
-        if (t) mt_write(src2, "mod.json", t);
-    }
-    free(t);
+    mt_write(src2, "game\\generated\\decls\\entitydef\\mods\\otherimp\\x.decl", "{\r\n}");
     CHECK(!HO2(name, cause, sh_ms_install_placed(src2, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "which resolves to nothing"));
+          strstr(cause, "game/ holds the game's own files"));
     /* The same title for another map: a place of its own. */
     CHECK(HOS(dir, sh_ms_place_dir(&other)) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
     CHECK(HO2(name, cause, sh_ms_install_placed(src, &other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));

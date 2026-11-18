@@ -666,7 +666,8 @@ static void test_builder(void)
         memcpy(full, head, 16);
         memset(full + 16, 0, 8);
         CHECK(HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", HO_P(0))));
-        CHECK(!HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", HO_P(0))) && strstr(cause, "Snapmap+ corrects the id"));
+        /* the id in the header is not checked: the serving index gives the bank its stem's id */
+        CHECK(HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", HO_P(0))));
         full[8] = 0x78;
         CHECK(!HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", HO_P(0))) && strstr(cause, "version 120"));
         full[0] = 'X';
@@ -729,7 +730,7 @@ static void test_builder(void)
 
     /* Bank refusals. */
     put_bank(BANK, "p6probes_sfx", 0x71, 1);
-    build_expect(0, "Snapmap+ corrects the id");
+    build_expect(1, "");   /* a header id that is not the stem's builds: the serving index patches it */
     put_bank(BANK, "p6probes_sfx", 0x78, 0);
     build_expect(0, "version 120");
     put_bank(BANK, "p6probes_sfx", 0x71, 0);

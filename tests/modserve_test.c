@@ -3143,7 +3143,7 @@ static void test_refusals(void)
     CHECK(sh_modserve_withdraw("generated/decls/animweb/mods/dzpack00/fine.decl", "animWeb", "mods/dzpack00/fine",
                                "the game refused its bytes; the game's own decl is restored") == 1);
     CHECK(log_has("MODS: withdrawn: animWeb 'mods/dzpack00/fine' (dzpack00): the game refused its bytes"));
-    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: assets/generated/decls/animweb/mods/dzpack00/fine.decl was not "
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dzpack00: decls/animweb/fine.decl was not "
                                  "loaded: the game refused its bytes; the game's own decl is restored. Fix the file and press "
                                  "Refresh in the Mods tab.") != NULL);
     CHECK(!sh_modserve_lookup("generated/decls/animweb/mods/dzpack00/fine.decl", NULL));

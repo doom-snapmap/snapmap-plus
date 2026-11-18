@@ -319,7 +319,7 @@ static void test_builder(const char *tmp, const char *install)
     make_module_mod(dir, R_DECL, 0, MODULE_TEXT);
     CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 1);
-    CHECK_CAUSE(b, "a snapModule needs its snapModuleInfo assets/" R_INFO " in the same mod");
+    CHECK_CAUSE(b, "a snapModule needs its snapModuleInfo decls/snapmoduleinfo/arena.decl in the same mod");
     sh_mb_free(&b);
     /* A module outside maps/modules/mods/<id>/: this rule first, then its missing snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_ns", tmp);
