@@ -56,7 +56,7 @@ var modsTab = (function () {
      Windows Recycle Bin. */
   var ACTIONS = ['install', 'rescan', 'openFolder', 'openFile', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                 'modFiles', 'modFileText', 'newMod'];
+                 'modFiles', 'modFileText', 'newMod', 'content'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
   var READS = {modFiles: true, modFileText: true};
   /* What each file of a mod is to the game, as one phrase (the backend's "class"). */
@@ -722,6 +722,9 @@ var modsTab = (function () {
     var fm = {open: false, key: '', data: null, loading: false, error: '', sel: '', text: null, asked: '', filter: '',
               dirs: {}, want: '', hint: '', opener: null, closeBtn: null, list: null, pane: null, visible: [],
               titleNode: null, stateNode: null, selNode: null};
+    /* Map content on disk: the backend's content answer (the storage line and one line per map), and
+       whether the next answer is the result of the Remove button. */
+    var content = {storage: '', lines: [], known: false}, contentSweep = false, contentDue = false;
     var reveal = '';   /* a mod the last action made or installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
@@ -817,7 +820,8 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
-                     newMod: 'Making the new mod...', addToMine: 'Copying it into your mods...'};
+                     newMod: 'Making the new mod...', addToMine: 'Copying it into your mods...',
+                     content: 'Removing the content of maps you only played...'};
 
     function selectedMod() {
       for (var i = 0; i < model.mods.length; i++) if (model.mods[i].key === selectedKey) return model.mods[i];
@@ -889,7 +893,50 @@ var modsTab = (function () {
     function setBusy(action) {
       busy = action || '';
       renderButtons();
+      renderContent();
       if (busy) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
+    }
+
+    /* ---- Map content on disk: read-only lines from the backend's content action, and one button. */
+    function renderContent() {
+      var host = byId('modsContent');
+      if (!host) return;
+      clear(host);
+      if (!content.known) return;
+      host.appendChild(el('div', 'mods-content-title', 'Map content on disk'));
+      if (content.storage) host.appendChild(el('div', 'mods-content-storage', content.storage));
+      if (content.lines.length) {
+        var list = el('div', 'mods-content-lines');
+        list.setAttribute('role', 'list');
+        content.lines.forEach(function (t) {
+          var row = el('div', 'mods-content-line', t);
+          row.setAttribute('role', 'listitem');
+          list.appendChild(row);
+        });
+        host.appendChild(list);
+      }
+      var b = el('button', 'btn mods-content-remove', 'Remove content of maps you only played');
+      b.type = 'button';
+      b.title = 'Maps you kept are not touched; playing one of the others again gets its content back';
+      b.disabled = !!busy;
+      b.addEventListener('click', function () { contentSweep = true; if (!act('content', 'removePlayed')) contentSweep = false; });
+      host.appendChild(b);
+    }
+    function askContent() {
+      contentDue = false;
+      if (!busy) read('content');
+    }
+    function onContentResult(ok, message, data) {
+      var swept = contentSweep;
+      contentSweep = false;
+      if (ok) {
+        content = {storage: str(data.storage), lines: arr(data.lines).map(str).filter(Boolean), known: true};
+      }
+      if (swept) {
+        setBusy('');
+        setStatus(message, ok ? 'ok' : 'err');
+        if (message) env.toast(message, ok ? 'ok' : 'err');
+      } else renderContent();
     }
 
     /* ---- the list: two kinds of groups, every row shown mounted. "Your mods" holds the player's
@@ -1944,6 +1991,7 @@ var modsTab = (function () {
       if (busy || waiting) return false;
       waiting = true;
       quiet = true;
+      contentDue = true;
       setBusy('rescan');
       env.post(actionMessage('rescan'));
       if (!loaded) renderList();
@@ -1963,6 +2011,7 @@ var modsTab = (function () {
       }
       renderAll();
       syncScriptPoll();
+      if (contentDue) askContent();
       /* The page's other parts that read the mods (the Entities tab's script labels). */
       if (env.changed) env.changed();
     }
@@ -1971,6 +2020,7 @@ var modsTab = (function () {
       var message = str(d.message || data.message), ok = d.ok === true || data.ok === true;
       /* The Files view's reads: answered to the modal only, never to the busy state or the status line. */
       if (has(READS, action)) { onFilesResult(action, ok, message, data); return true; }
+      if (action === 'content') { onContentResult(ok, message, data); return true; }
       var wasQuiet = quiet && action === 'rescan';
       quiet = false;
       setBusy('');

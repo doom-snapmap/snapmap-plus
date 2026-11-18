@@ -3041,6 +3041,7 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
     case SH_MODS_ACT_NEW_MOD:            return L"newMod";
     case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
+    case SH_MODS_ACT_CONTENT:            return L"content";
     default:                      return L"";
     }
 }
@@ -3048,7 +3049,7 @@ static const wchar_t *ui_mods_action_name(int action)
 /* The Files view's reads change nothing, so no fresh document follows them. */
 static bool ui_mods_read_only(int action)
 {
-    return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT;
+    return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT || action == SH_MODS_ACT_CONTENT;
 }
 
 static int ui_mods_action_code(const std::wstring &name)
@@ -3066,6 +3067,7 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
     if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
     if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
+    if (name == L"content")             return SH_MODS_ACT_CONTENT;
     return 0;
 }
 

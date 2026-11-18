@@ -677,6 +677,12 @@
   .mods-status.ok { color: var(--ok); }
   .mods-status.err { color: var(--danger); }
   .mods-status.busy { font-style: italic; }
+  .mods-content { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+  .mods-content:empty { display: none; }
+  .mods-content-title { color: var(--text); font-weight: 600; }
+  .mods-content-storage { color: var(--text); }
+  .mods-content-lines { display: flex; flex-direction: column; gap: 1px; max-height: 120px; overflow: auto; color: var(--muted); font-size: 10px; line-height: 1.4; }
+  .mods-content-remove { align-self: flex-start; }
   .mods-root { color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-error { color: var(--danger); font-style: normal; }
   .mods-side { display: flex; flex-direction: column; gap: 12px; user-select: text; -webkit-user-select: text; }
