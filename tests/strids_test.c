@@ -286,9 +286,13 @@ static int compare_record(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
+/* The engine's sort ignores its first argument (the comparator object); the
+ * product's own resort passes the descriptor, the game's parser a functor on
+ * its stack (VK 0x140280920). */
 static void fake_sort(void *ctx, void *rows, unsigned int count, unsigned int radix)
 {
-    CHECK(ctx == &g_dictionary && rows == g_records && radix == 0x20);
+    (void)ctx;
+    CHECK(radix == 0x20);
     qsort(rows, count, 32, compare_record);
     g_sorts++;
     if (g_sort_fault) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
@@ -726,11 +730,16 @@ static void test_namespaced_keys(void)
 }
 
 
+/* The game's own sort of its dictionary, as its parser makes it: the first
+ * argument is a comparator object on the parser's stack (a local
+ * idLangDict::idSort_ByID), not the descriptor; only the rows say which list
+ * is sorted. */
 static void invoke_sort_hook(void)
 {
     int before = g_sorts;
+    void *sort_by_id[1] = { NULL };
     CHECK(g_hook_detour != NULL);
-    g_hook_detour(&g_dictionary, g_records, g_dictionary.count, 0x20);
+    g_hook_detour(sort_by_id, g_records, g_dictionary.count, 0x20);
     CHECK(g_sorts == before + 1);
 }
 
@@ -806,6 +815,15 @@ static void test_sort_hook_recovery(void)
     CHECK(strstr(g_log, "the game rebuilt its string table") != NULL);
     for (unsigned int i = 1; i < g_dictionary.count; i++)
         CHECK(*(unsigned int *)g_records[i-1] <= *(unsigned int *)g_records[i]);
+    /* A sort of another list of the same kind passes through: no rows are added to the dictionary. */
+    {
+        static unsigned char other[2][32];
+        void *sort_by_id[1] = { NULL };
+        unsigned int rows = g_dictionary.count;
+        g_log[0] = '\0';
+        g_hook_detour(sort_by_id, other, 0, 0x20);
+        CHECK(g_dictionary.count == rows && g_log[0] == '\0');
+    }
     /* where the process heap cannot be selected, the next main-thread pass re-adds them */
     g_dictionary.count = 0;
     g_push_ignored = 1;

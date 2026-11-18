@@ -857,16 +857,31 @@ static void reinject_in_sort(void **arr, uint32_t *count)
     }
 }
 
+/* Whether a sort orders the game's dictionary: its rows are the descriptor's
+ * live array. The engine's own sort passes a comparator object of its stack as
+ * the first argument (the dictionary parser, VK 0x140280920: a local
+ * idLangDict::idSort_ByID, then the wrapper 0x140281d50 with the list's array
+ * and count), never the descriptor, so the rows decide, not the context. */
+static int sort_is_dictionary(const void *arr)
+{
+    __try {
+        return arr != NULL && arr == *(void *const *)g_table_desc;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 /* Sort detour. Installation normally injects first; a later top-level sort
- * re-adds this injector's rows (reinject_in_sort); recursive sorts pass
- * through.
+ * of the dictionary (the game's rebuild: a language load as the editor or a
+ * map starts) re-adds this injector's rows (reinject_in_sort); recursive sorts
+ * and sorts of other lists pass through.
  */
 static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
 {
     if (g_sort_orig == NULL) return;   /* defensive: never happens once installed */
 
     LONG depth = InterlockedIncrement(&g_in_sort);
-    if (depth == 1 && InterlockedCompareExchange(&g_injected, 0, 0) != 0 && ctx == g_table_desc)
+    if (depth == 1 && InterlockedCompareExchange(&g_injected, 0, 0) != 0 && g_table_desc && sort_is_dictionary(arr))
         reinject_in_sort(&arr, &count);
     else if (depth == 1 && InterlockedCompareExchange(&g_injected, 1, 0) == 0) {
         /* If this top-level sort wins the latch, append now and let this
