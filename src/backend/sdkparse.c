@@ -223,6 +223,14 @@ static int lx_atom(lx *x, sdk_atom *a)
             x->bad = 1;
             return -1;
         }
+        /* game:name (R-NM1's name rule: the game's own name, where it begins like one of the mod's folders) */
+        if (a->n > 5 && !_strnicmp(a->p, "game:", 5)) {
+            a->kind = SDK_A_STRING;
+            a->game = 1;
+            a->p += 5;
+            a->n -= 5;
+            return 1;
+        }
         {
             char tmp[64];
             if (a->n < sizeof tmp) {

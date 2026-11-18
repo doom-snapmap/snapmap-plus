@@ -150,6 +150,13 @@ static void test_parse(void)
         sdk_doc_free(&d);
     }
     {
+        const char *u = "{ name game:effects/blast }";
+        CHECK(sdk_parse("x.decl", u, strlen(u), &d, why, sizeof why) == 1);
+        CHECK(d.root->items[0].atoms[1].kind == SDK_A_STRING && d.root->items[0].atoms[1].game &&
+              d.root->items[0].atoms[1].n == 13 && !strncmp(d.root->items[0].atoms[1].p, "effects/blast", 13));
+        sdk_doc_free(&d);
+    }
+    {
         char kind[16];
         const char *u = "// a comment\n{\n\t// another\n\ttype\tenvironment\n}";
         CHECK(sdk_first_type(u, strlen(u), kind, sizeof kind) && !strcmp(kind, "environment"));
