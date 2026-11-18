@@ -65,8 +65,16 @@ static void test_another_player_forgets(void)
     assert(k.want[0] == 0x04 && k.player == &player_b);
 }
 
+/* DOOM's target queries skip a player whose noTarget bit is set; ai:enemy gives no enemy then. */
+static void test_no_target_flag(void)
+{
+    assert(sh_player_flags_no_target(0x20) && sh_player_flags_no_target(0x25));
+    assert(!sh_player_flags_no_target(0x00) && !sh_player_flags_no_target(0x1f) && !sh_player_flags_no_target(0xdf));
+}
+
 int main(void)
 {
+    test_no_target_flag();
     test_a_spawn_does_not_undo_a_cheat();
     test_engine_writes_between_spawns_stand();
     test_off_and_two_bytes();

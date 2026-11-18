@@ -2955,7 +2955,7 @@ is touched, and a removed demon answers nil.
   never ends a perch on its own. The jump, the pose and the hold are the
   script's and unproven in the game; the walk and the blocking volumes are the
   engine's. The contract is at the top of the file.
-- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(entity)`
+- **Queries.** `enemy()` (the idEntityPtr at ai+0x25050; nil for a player with noTarget on, as DOOM's own target queries skip it), `can_see(entity)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from
   the demon's eye to 40 inches above `e`'s origin, so a wall between them

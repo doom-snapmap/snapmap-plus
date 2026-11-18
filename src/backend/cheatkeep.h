@@ -33,4 +33,14 @@ uint8_t sh_cheat_keep_frame(sh_cheat_keep *k, const void *player, int32_t spawns
 /* Whether anything is asked for (so the frame can skip finding the player). */
 int sh_cheat_keep_active(const sh_cheat_keep *k);
 
+/* idPlayer's cheat-flags byte and its noTarget bit (the enforcement bits the commands toggle). */
+#define SH_PLAYER_CHEAT_FLAGS_OFF 0x45ea8u
+#define SH_PLAYER_CHEAT_NOTARGET  0x20u
+
+/* DOOM's own target queries skip a player whose noTarget bit is set (VK FUN_1407E7670 and FUN_1409CFBC0 test
+ * player+0x45EA8 & 0x20 and refuse it), while the AI's enemy field may still hold that player: a SnapMap
+ * encounter gives its demons the player as enemy at spawn. A stock demon then does not attack; a demon whose
+ * script reads the enemy field must be given no enemy (ai:enemy, script_api_ai.c). */
+static __inline int sh_player_flags_no_target(uint8_t flags) { return (flags & SH_PLAYER_CHEAT_NOTARGET) != 0; }
+
 #endif

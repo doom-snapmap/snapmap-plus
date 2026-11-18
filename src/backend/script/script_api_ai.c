@@ -3621,6 +3621,7 @@ int sh_script_ai_register(void)
 #include "../entity.h"
 #include "../hook.h"
 #include "../typeinfo.h"
+#include "../cheatkeep.h"
 #include "script_hooks.h"
 #include "script_api_common.h"
 
@@ -3767,12 +3768,20 @@ static int e_yaw(void *entity, float *deg)
     return ok;
 }
 
+/* The demon's enemy as DOOM's own target queries see it: a player with noTarget on is no target
+ * (cheatkeep.h sh_player_flags_no_target), though the enemy field still names it. */
 static void *e_enemy(void *ai)
 {
     void *e = NULL;
+    uint8_t flags = 0;
     if (!g_ptr_get) return NULL;
     __try { e = g_ptr_get((uint8_t *)ai + SH_AI_OFF_ENEMY); }
     __except (av_only(GetExceptionCode())) { e = NULL; }
+    if (e && sh_script_api_kind(e) == SH_SCRIPT_KIND_PLAYER) {
+        __try { flags = *((const uint8_t *)e + SH_PLAYER_CHEAT_FLAGS_OFF); }
+        __except (av_only(GetExceptionCode())) { flags = 0; }
+        if (sh_player_flags_no_target(flags)) return NULL;
+    }
     return e;
 }
 
