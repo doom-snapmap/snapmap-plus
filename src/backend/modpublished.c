@@ -594,15 +594,15 @@ char *sh_modpub_gate_wording(int verdict, const char *subject, const char *title
     switch (verdict) {
     case SH_MODPUB_GATE_GONE:
         return sh_textf("This %s needs %s, which is no longer available: its author unpublished it, or it was removed. "
-                        "This is permanent on this machine.%s", what, t, end);
+                        "It can be downloaded again only if its author publishes it again.%s", what, t, end);
     case SH_MODPUB_GATE_UNREACHABLE:
         reason = sh_reason(SH_REASON_STORE, store_code, NULL, 0);
         out = sh_textf("This %s needs %s, which could not be downloaded: %s.%s", what, t, pub_s(reason), end);
         free(reason);
         return out;
     case SH_MODPUB_GATE_NEVER_PUBLISHED:
-        return sh_textf("This %s needs %s, which is not installed and was never published. Restore its folder from the "
-                        "Recycle Bin or load the %s.%s", what, t, prefab ? "prefab's ZIP export" : "map's rawmap ZIP", end);
+        return sh_textf("This %s needs %s, which is not installed, and the mod store does not have it. Restore its "
+                        "folder from the Recycle Bin or load the %s.%s", what, t, prefab ? "prefab's ZIP export" : "map's rawmap ZIP", end);
     case SH_MODPUB_GATE_GAME_REVISION:
         return sh_textf("This %s needs %s, which needs a file this game does not hold (%s): a different game revision. "
                         "This is permanent on this machine.%s", what, t, source && source[0] ? source : "a game file", end);
@@ -623,7 +623,7 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
      * folders (sh_modserve_row_build), so a row nothing serves names a salt
      * no root folder holds. Nothing substitutes for it. */
     if (why) {
-        const char *key = row->salt, *title = pub_title(row);
+        const char *title = pub_title(row);
         /* The store was not asked, so the note says only what this computer
          * knows; the gate's words ("no longer available", "never published")
          * are said where the store is asked, at Play. A map whose placed
@@ -637,7 +637,7 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
                 free(*why);
                 *why = sh_textf("This map needs %s, which is not installed on this computer, so the editor cannot open "
                                 "the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps "
-                                "to get it from the mod store.", k ? key : title);
+                                "to get it from the mod store.", k ? "one of its mods" : title);
                 if (!*why || strlen(*why) < PUB_TEXT_CAP) break;
             }
         } else
@@ -652,7 +652,7 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
 static const char *pub_title(const sh_modmanifest_row *row)
 {
     const char *name = sh_modmanifest_row_name(row);
-    return name[0] ? name : row->salt[0] ? row->salt : "a mod";
+    return name[0] ? name : "a mod";   /* never the salt (decision 18) */
 }
 
 /* Was the map (or this build) published? Every map-service hook is; a My
@@ -690,7 +690,7 @@ static const char **pub_missing_names(const pub_hold *h)
     if (!names) return NULL;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        names[i] = sh_modmanifest_row_name(row)[0] ? row->name : row->salt;
+        names[i] = pub_title(row);
     }
     return names;
 }
@@ -1193,7 +1193,7 @@ static int pub_job_rows(pub_job *job, const pub_hold *h)
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         strcpy_s(job->hashes[i], sizeof job->hashes[i], row->build);
         strcpy_s(job->salts[i], sizeof job->salts[i], row->salt);
-        if (!(job->names[i] = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : row->salt))) return 0;
+        if (!(job->names[i] = sh_text(pub_title(row)))) return 0;
     }
     return 1;
 }
@@ -1336,7 +1336,15 @@ static void pub_finish(void)
             if (g_ops.fetch_cause && g_ops.fetch_cause(g_ops.context, job->hashes[job->failed_index], &said) && said &&
                 said[0]) {
                 size_t n = strlen(said);
+                char *open;
                 while (n && (said[n - 1] == '.' || said[n - 1] == ' ')) said[--n] = 0;
+                /* The cause's closing detail (which salt, build or file the
+                 * check found) is the log's, never the player's. */
+                pub_logf("MODS: the download of %s failed: %s", job->names[job->failed_index], said);
+                if (n && said[n - 1] == ')' && (open = strrchr(said, '(')) != NULL && open > said && open[-1] == ' ') {
+                    open[-1] = 0;
+                    n = strlen(said);
+                }
                 line = sh_textf("%s could not be downloaded and installed: %s. %s", job->names[job->failed_index], said,
                                 pub_not_done(h->hook));
             } else {
@@ -1449,7 +1457,7 @@ static void pub_print(const char *line)
  * no name). Borrowed from the row. */
 static const char *pub_row_label(const sh_modmanifest_row *row)
 {
-    return sh_modmanifest_row_name(row)[0] ? row->name : row->salt;
+    return pub_title(row);
 }
 
 /* mode 0: the store lacks them; 1: the store could not be reached; 2 (a

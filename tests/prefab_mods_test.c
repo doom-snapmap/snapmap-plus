@@ -732,7 +732,7 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(r == SH_PREFAB_MODS_HELD);
     tick(3);
     CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which is not installed and was never published. "
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which is not installed, and the mod store does not have it. "
                                 "Restore its folder from the Recycle Bin or load the prefab's ZIP export. The prefab was not "
                                 "placed."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
@@ -1502,7 +1502,7 @@ static void gate_end_to_end(const char *tmp)
     CHECK(sh_modserve_index_build(author) >= 3);
     e_hold(&gone, 0);
     CHECK(!strcmp(F.last_print, "This map needs Gone Mod, which is no longer available: its author "
-                                "unpublished it, or it was removed. This is permanent on this machine."));
+                                "unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print) && F.fetches == 0);
     printf("    cause 1: %s\n", F.last_ask);
 
@@ -1511,7 +1511,7 @@ static void gate_end_to_end(const char *tmp)
     CHECK(sh_ms_remove_folder(path));
     CHECK(sh_modserve_index_build(author) >= 2);
     e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs Never Mod, which is not installed and was never published. "
+    CHECK(!strcmp(F.last_ask, "This map needs Never Mod, which is not installed, and the mod store does not have it. "
                               "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
     printf("    cause 3: %s\n", F.last_ask);

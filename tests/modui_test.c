@@ -1256,6 +1256,31 @@ int main(int argc, char **argv)
         free(doc);
     }
 
+    printf("-- the causes the builder and the store raise today, each one plain sentence with its next step\n");
+    {
+        static const struct { const char *cause, *want; } C[] = {
+            { "mod.json was edited after its last build; press Refresh in the Mods tab to build it again",
+              "Its mod.json was changed after it was last built; press Refresh to build it again." },
+            { "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl is missing or unreadable",
+              "assets/generated/decls/entitydef/mods/abcdefgh/imp.decl changed or went away after the mod was built; press "
+              "Refresh to build it again." },
+            { "assets/x.decl does not match mod.json (damaged or edited)",
+              "assets/x.decl changed or went away after the mod was built; press Refresh to build it again." },
+            { "mod.json: unexpected '}' at byte 12",
+              "Its mod.json is not valid JSON (unexpected '}' at byte 12); fix it in a text editor and press Refresh." },
+            { "cannot read mod.json", "Its mod.json could not be read; close any program that has it open and press Refresh." },
+            { SH_MB_SLICE_ROOT, SH_MB_SLICE_ROOT "." },
+        };
+        size_t i;
+        for (i = 0; i < sizeof C / sizeof C[0]; i++) {
+            char *got = sh_modui_test_plain_cause(C[i].cause);
+            CHECK(got && !strcmp(got, C[i].want));
+            if (got && strcmp(got, C[i].want)) printf("    got: %s\n", got);
+            CHECK(got && !strstr(got, "could not be built"));
+            free(got);
+        }
+    }
+
     printf("-- the plain words: salts, hashes and the internal words never reach a sentence\n");
     {
         CHECK(prose_ok("Install a folder."));

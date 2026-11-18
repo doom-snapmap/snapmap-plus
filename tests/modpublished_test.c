@@ -1434,11 +1434,11 @@ static void rawmap_store_lacks_refuses(void)
     tick_until_probed();
     CHECK(F.store_calls == 2);           /* both asked, so the denial can name every one */
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0 && F.activations == 0);
-    CHECK(!strcmp(F.last_print, "This map needs bob.room, which is not installed and was never published. "
+    CHECK(!strcmp(F.last_print, "This map needs bob.room, which is not installed, and the mod store does not have it. "
                                 "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     tick(2);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
-    CHECK(!strcmp(F.last_ask, "This map needs bob.room, which is not installed and was never published. "
+    CHECK(!strcmp(F.last_ask, "This map needs bob.room, which is not installed, and the mod store does not have it. "
                               "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
 
     printf("-- a store that cannot be reached: cause 2, nothing downloaded\n");
@@ -1529,7 +1529,7 @@ static void gate_editor_substitutes(void)
     /* A row without a name says its salt. */
     row.name[0] = 0;
     CHECK(HO(why, sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, HO_P(0))) == 0 &&
-          !strncmp(why, "This map needs alexpink, which", 30));
+          !strncmp(why, "This map needs a mod, which", 27));
     reset();
 }
 
@@ -1634,7 +1634,7 @@ static void gate_decision_and_wording(void)
 
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_GONE, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0));
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k), which is no longer available: its "
-                        "author unpublished it, or it was removed. This is permanent on this machine."));
+                        "author unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0));
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k), which could not be downloaded: the mod "
                         "store did not answer; try again in a few minutes."));
@@ -1648,14 +1648,13 @@ static void gate_decision_and_wording(void)
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "x", NULL, MODNET_E_HTTP));
     CHECK(strstr(text, "the address in mods.store answered, but not as the mod store; check the mods.store setting") != NULL);
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0));
-    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k), which is not installed and was never "
-                        "published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k), which is not installed, and the mod store does not have it. Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_GAME_REVISION, "map", "Hell Guards (hell-guards-7f3k)", ROCK, 0));
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k), which needs a file this game does not "
                         "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent on "
                         "this machine."));
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "prefab", "door-kit", NULL, 0));
-    CHECK(!strcmp(text, "This prefab needs door-kit, which is not installed and was never published. Restore "
+    CHECK(!strcmp(text, "This prefab needs door-kit, which is not installed, and the mod store does not have it. Restore "
                         "its folder from the Recycle Bin or load the prefab's ZIP export. The prefab was not placed."));
     HOS(text, sh_modpub_gate_wording(SH_MODPUB_GATE_OBTAIN, "map", "x", NULL, 0));
     CHECK(!text[0]);
@@ -1688,14 +1687,14 @@ static void gate_causes_through_the_hold(void)
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 1 && F.metadata_frees == 1);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is no longer available: its author "
-                              "unpublished it, or it was removed. This is permanent on this machine."));
+                              "unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
     CHECK(!strcmp(F.last_print, F.last_ask));
     /* A joiner's check words it the same (the lobby path holds the host's map). */
     reset();
     F.store_a = 0;
     published_denial(SH_MODPUB_CACHE_READY);
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is no longer available: its author "
-                              "unpublished it, or it was removed. This is permanent on this machine."));
+                              "unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
     /* A My Maps map published from this machine (a claim names the bundle). */
     reset();
     F.store_a = 0;
@@ -1724,7 +1723,7 @@ static void gate_causes_through_the_hold(void)
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
     CHECK(F.launch_refused == 0);   /* held: not refused yet */
     tick(3);
-    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is not installed and was never published. "
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is not installed, and the mod store does not have it. "
                               "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     /* The denial refused the launch: its parse's rows must not stay declared (ADD-V4a H3). */
     CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_LOCAL_OFFLINE && F.drop_ui == 1);
@@ -1735,8 +1734,7 @@ static void gate_causes_through_the_hold(void)
     CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
     sh_modmanifest_list_free(&rows);
     tick(3);
-    CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp, which is not installed and was never "
-                              "published. Restore its folder from the Recycle Bin or load the prefab's ZIP export. The "
+    CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp, which is not installed, and the mod store does not have it. Restore its folder from the Recycle Bin or load the prefab's ZIP export. The "
                               "prefab was not placed."));
     CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a placement is not a launch */
 
@@ -1844,7 +1842,7 @@ static void gate_own_substitutes(void)
     tick(3);
     CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_BROWSER_PLAY);
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is no longer available: its "
-                              "author unpublished it, or it was removed. This is permanent on this machine."));
+                              "author unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
     sh_modmanifest_set_editor_load(0);
 
     printf("-- own content with no root folder of the salt asks the store; two mods, one served\n");
@@ -1866,8 +1864,7 @@ static void gate_own_substitutes(void)
     parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
     tick(3);
-    CHECK(F.resumes == 0 && F.launch_refused == 1 && strstr(F.last_ask, "This map needs bob.room, which is not "
-                                                                        "installed and was never published.") == F.last_ask);
+    CHECK(F.resumes == 0 && F.launch_refused == 1 && strstr(F.last_ask, "This map needs bob.room, which is not installed, and the mod store does not have it.") == F.last_ask);
     CHECK(!strstr(F.last_ask, "more mod"));
 
     printf("-- a rawmap load and a prefab placement follow the root folders the same way\n");

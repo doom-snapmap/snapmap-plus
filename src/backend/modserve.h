@@ -1025,6 +1025,10 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
  * and folder ("<name> (mods\<folder>)"), else its folder; "a mod" when no
  * bundle has that hash. */
 char *sh_modserve_bundle_label(const char *bundle_hash);
+/* The bundle at undle_hash as a player sentence names it (malloc'd): its
+ * name, else its folder's own name; "a mod" when no bundle has that hash.
+ * Never a salt, a hash or a path. */
+char *sh_modserve_bundle_name(const char *bundle_hash);
 
 /* Visit every admitted bundle whose mod.json author block carries keys the
  * product does not read itself (the manifest's "extra", such as "strings" and

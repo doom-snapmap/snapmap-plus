@@ -8725,3 +8725,19 @@ char *sh_modserve_bundle_label(const char *bundle_hash)
     }
     return sh_text("a mod");
 }
+
+char *sh_modserve_bundle_name(const char *bundle_hash)
+{
+    const ms_index *x = g_index;
+    int i;
+    for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        const char *leaf;
+        if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
+        if (b->name && b->name[0]) return sh_text(b->name);
+        leaf = b->folder ? strrchr(b->folder, '\\') : NULL;
+        leaf = leaf ? leaf + 1 : b->folder;
+        return sh_text(leaf && leaf[0] ? leaf : "a mod");
+    }
+    return sh_text("a mod");
+}
