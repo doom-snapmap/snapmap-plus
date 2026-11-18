@@ -426,10 +426,11 @@ for ($i = 0; $i -lt $nativeCount; $i++) {
     if ($codes[$i] -ne 0) { Write-Host "[FAIL] $($j.name) (exit $($codes[$i]))"; $fail++ }
     else { Write-Host "[ok]   $($j.name)" }
 }
-if ($fail -gt 0) { Write-Host ""; Write-Host "$fail native test(s) FAILED"; exit 1 }
-Write-Host ""; Write-Host "all native tests passed ($($tests.Count))"
+# A native failure is reported after the JavaScript results, so one failing native suite never hides them.
+if ($fail -gt 0) { Write-Host ""; Write-Host "$fail native test(s) FAILED" }
+else { Write-Host ""; Write-Host "all native tests passed ($($tests.Count))" }
 
-if ($Only.Count) { exit 0 }
+if ($Only.Count) { if ($fail -gt 0) { exit 1 }; exit 0 }
 
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
 $jsFail = 0
@@ -439,5 +440,5 @@ for ($i = $nativeCount; $i -lt $runJobs.Count; $i++) {
     if ($codes[$i] -ne 0) { Write-Host "[FAIL] $($j.name) (exit $($codes[$i]))"; $jsFail++ }
     else { Write-Host "[ok]   $($j.name)" }
 }
-if ($jsFail -gt 0) { exit 1 }
-Write-Host "all JavaScript tests passed ($($jsTests.Count))"
+if ($jsFail -gt 0) { Write-Host "$jsFail JavaScript test(s) FAILED" } else { Write-Host "all JavaScript tests passed ($($jsTests.Count))" }
+if ($fail -gt 0 -or $jsFail -gt 0) { exit 1 }
