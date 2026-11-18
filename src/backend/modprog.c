@@ -1,5 +1,6 @@
 /* modprog.c -- render programs the product derives from the installed game's own (modprog.h). */
 #include <windows.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1953,7 +1954,7 @@ int sh_modprog_param_image(const float vec[][4], unsigned count, unsigned char *
 }
 
 /* The registered images (under g_lock): path and bytes. */
-typedef struct mp_img { char *path; unsigned char *bytes; size_t len; } mp_img;
+typedef struct mp_img { char *path; unsigned char *bytes; size_t len; char *name; } mp_img;
 static mp_img *g_imgs;
 static size_t g_nimgs, g_cimgs;
 
@@ -1977,19 +1978,117 @@ static long mp_image_find(const char *path)
     return -1;
 }
 
+static const char *mp_register_path(char *path, unsigned char *b, size_t n);
+
 /* Registers `b` (malloc'd; taken, or freed on failure) under MP_IMAGE_HEAD, `tag`, the first 16 hex digits of its
  * SHA-256 and .bimage; the path, or NULL. */
 static const char *mp_register(const char *tag, unsigned char *b, size_t n)
 {
     sh_sha256 h;
     char hex[17], *path;
-    const char *r = NULL;
-    long at;
     sh_sha256_init(&h);
     sh_sha256_update(&h, b, n);
     sh_sha256_hex(&h, hex, 16);
     path = sh_textf(MP_IMAGE_HEAD "%s%s.bimage", tag, hex);
     if (!path) { free(b); return NULL; }
+    return mp_register_path(path, b, n);
+}
+
+/* ------------------------------------------------------------------------------ the SDK's derived decls ---- */
+/* The Graphics SDK's compilers (sdk.h) derive decls an author never writes: a particle decl and its material from an
+ * effect's particles, a decal material from a bare image, a curve's table, the fx an environment plays. Each is named
+ * by the first 16 hex digits of the SHA-256 of its text, so the build and the server derive the same name from the
+ * same file; a table's name has no '/', since a material expression names its table (`name[temp1]`). An effect's
+ * emitter, the entityDef the script calls spawn, is named after its fx decl and derived from its path alone, so it is
+ * served before anything has compiled the effect. */
+
+#define MP_DECL_HEAD      "generated/decls/"
+#define MP_DECL_SDK       "snapmapplus/sdk/"
+#define MP_DECL_TABLE     "snapmapplus_sdk_"
+#define MP_EMITTER_HEAD   "generated/decls/entitydef/snapmapplus/effect/"
+#define MP_EMITTER_PREFIX "snapmapplus/effect/"
+
+/* 1 when the path has the shape of a derived decl: generated/decls/<type>/(snapmapplus/sdk/|snapmapplus_sdk_)<hex>.decl */
+static int mp_decl_shape(const char *path)
+{
+    size_t hn = strlen(MP_DECL_HEAD), i;
+    const char *s, *h;
+    if (_strnicmp(path, MP_DECL_HEAD, hn)) return 0;
+    s = strchr(path + hn, '/');
+    if (!s) return 0;
+    s++;
+    if (!_strnicmp(s, MP_DECL_SDK, strlen(MP_DECL_SDK))) h = s + strlen(MP_DECL_SDK);
+    else if (!_strnicmp(s, MP_DECL_TABLE, strlen(MP_DECL_TABLE))) h = s + strlen(MP_DECL_TABLE);
+    else return 0;
+    for (i = 0; i < 16; i++) if (!isxdigit((unsigned char)h[i])) return 0;
+    return !_stricmp(h + 16, ".decl");
+}
+
+/* The fx decl an emitter path names (malloc'd, lower case as the path holds it), or NULL. */
+static char *mp_emitter_fx(const char *path)
+{
+    size_t hn = strlen(MP_EMITTER_HEAD), n = strlen(path);
+    if (n <= hn + 5 || _strnicmp(path, MP_EMITTER_HEAD, hn) || _stricmp(path + n - 5, ".decl")) return NULL;
+    return mp_dupn(path + hn, n - hn - 5);
+}
+
+static char *mp_emitter_text(const char *fx, size_t *len)
+{
+    char *t = sh_textf("{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxDecl = \"%s\";\n\t}\n}\n", fx);
+    if (t && len) *len = strlen(t);
+    return t;
+}
+
+const char *sh_modprog_register_decl(const char *type, const char *text)
+{
+    sh_sha256 h;
+    char hex[17], folder[64], *path;
+    const char *r;
+    size_t i, n;
+    unsigned char *b;
+    int table;
+    if (!type || !text || !*type || strlen(type) >= sizeof folder) return NULL;
+    for (i = 0; type[i]; i++) folder[i] = (char)tolower((unsigned char)type[i]);
+    folder[i] = 0;
+    table = !strcmp(folder, "table");
+    n = strlen(text);
+    sh_sha256_init(&h);
+    sh_sha256_update(&h, folder, strlen(folder));
+    sh_sha256_update(&h, "\n", 1);
+    sh_sha256_update(&h, text, n);
+    sh_sha256_hex(&h, hex, 16);
+    path = sh_textf(MP_DECL_HEAD "%s/%s%s.decl", folder, table ? MP_DECL_TABLE : MP_DECL_SDK, hex);
+    if (!path) return NULL;
+    if (!(b = (unsigned char *)malloc(n ? n : 1))) { free(path); return NULL; }
+    memcpy(b, text, n);
+    if (!(r = mp_register_path(path, b, n))) return NULL;
+    /* the decl's name: the path between the type folder and ".decl", kept beside the path */
+    {
+        long at;
+        const char *name = NULL;
+        AcquireSRWLockExclusive(&g_lock);
+        if ((at = mp_image_find(r)) >= 0) {
+            if (!g_imgs[at].name) {
+                size_t s = strlen(MP_DECL_HEAD) + strlen(folder) + 1, e = strlen(g_imgs[at].path) - 5;
+                g_imgs[at].name = mp_dupn(g_imgs[at].path + s, e - s);
+            }
+            name = g_imgs[at].name;
+        }
+        ReleaseSRWLockExclusive(&g_lock);
+        return name;
+    }
+}
+
+char *sh_modprog_effect_emitter(const char *fx_name)
+{
+    return fx_name ? sh_textf(MP_EMITTER_PREFIX "%s", fx_name) : NULL;
+}
+
+/* Registers `b` (taken) under `path` (taken); the registry's copy of the path, or NULL. */
+static const char *mp_register_path(char *path, unsigned char *b, size_t n)
+{
+    const char *r = NULL;
+    long at;
     AcquireSRWLockExclusive(&g_lock);
     if ((at = mp_image_find(path)) >= 0) {
         r = g_imgs[at].path;
@@ -2003,6 +2102,7 @@ static const char *mp_register(const char *tag, unsigned char *b, size_t n)
             g_imgs[g_nimgs].path = path;
             g_imgs[g_nimgs].bytes = b;
             g_imgs[g_nimgs].len = n;
+            g_imgs[g_nimgs].name = NULL;
             r = g_imgs[g_nimgs++].path;
             path = NULL;
             b = NULL;
@@ -2095,7 +2195,11 @@ int sh_modprog_owns(const char *path)
     int r;
     if (!path) return 0;
     if (mp_parm_of(path) >= 0) return 1;
-    if (mp_image_shape(path)) {
+    {
+        char *fx = mp_emitter_fx(path);
+        if (fx) { free(fx); return 1; }
+    }
+    if (mp_image_shape(path) || mp_decl_shape(path)) {
         AcquireSRWLockExclusive(&g_lock);
         r = mp_image_find(path) >= 0;
         ReleaseSRWLockExclusive(&g_lock);
@@ -2139,7 +2243,21 @@ static int mp_read_new(const char *path, unsigned char **bytes, size_t *len)
         *len = t;
         return SH_MB_STOCK_OK;
     }
-    if (mp_image_shape(path)) {
+    {
+        char *fx = mp_emitter_fx(path), *t;
+        size_t tn = 0;
+        if (fx) {
+            t = mp_emitter_text(fx, &tn);
+            free(fx);
+            if (!t) return SH_MB_STOCK_UNAVAILABLE;
+            *bytes = mp_heap_copy(t, tn);
+            free(t);
+            if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+            *len = tn;
+            return SH_MB_STOCK_OK;
+        }
+    }
+    if (mp_image_shape(path) || mp_decl_shape(path)) {
         long at;
         AcquireSRWLockExclusive(&g_lock);
         if ((at = mp_image_find(path)) >= 0) {
@@ -2228,7 +2346,7 @@ void sh_modprog_reset(void)
     g_files = NULL;
     g_nfiles = g_cfiles = 0;
     memset(g_done, 0, sizeof g_done);
-    for (i = 0; i < g_nimgs; i++) { free(g_imgs[i].path); free(g_imgs[i].bytes); }
+    for (i = 0; i < g_nimgs; i++) { free(g_imgs[i].path); free(g_imgs[i].bytes); free(g_imgs[i].name); }
     free(g_imgs);
     g_imgs = NULL;
     g_nimgs = g_cimgs = 0;

@@ -508,25 +508,19 @@ static int l_anim_finished(lua_State *L)
 
 /* -------------------------------------------------------------- spawn */
 
-static int l_spawn(lua_State *L)
+/* Spawns `def` and records it for the mod; `is_game` when the name is one of the game's (or one the product
+ * serves), which the spawn hook does not record by itself. `shown` names it in a refusal. */
+static int spawn_recorded(lua_State *L, const char *def, const char *shown, const float pos[3], double yaw, int is_game)
 {
     const sh_script_engine *e = eng();
-    const char *def;
-    float pos[3];
-    double yaw = 0;
     const char *why = NULL;
     void *ent;
     int mod = -1;
     sh_script_handle h;
-    int is_game = 0;
-    def = sh_script_check_name(L, 1, "spawn", 1, &is_game);
-    sh_script_api_check_vec(L, 2, "spawn", "where to spawn", pos);
-    sh_script_api_opt_number(L, 3, "spawn", "the facing in degrees", &yaw);
-    sh_script_api_check_room(L, "spawn");
     if (!e || !e->spawn) return nil1(L);
     ent = e->spawn(def, pos, (float)fmod(yaw, 360.0), &why);
     if (!ent) {
-        if (why) sh_script_refuse(L, "\"spawn\" could not spawn \"%s\": %s", lua_tostring(L, 1), why);
+        if (why) sh_script_refuse(L, "\"spawn\" could not spawn \"%s\": %s", shown, why);
         return nil1(L);
     }
     h = e->spawn_id ? sh_script_handles_find(e->spawn_id(ent), &mod) : 0;
@@ -542,6 +536,24 @@ static int l_spawn(lua_State *L)
     }
     sh_script_push_entity(L, h);
     return 1;
+}
+
+int sh_script_api_spawn_def(lua_State *L, const char *def, const float pos[3], double yaw)
+{
+    return spawn_recorded(L, def, def, pos, yaw, 1);
+}
+
+static int l_spawn(lua_State *L)
+{
+    const char *def;
+    float pos[3];
+    double yaw = 0;
+    int is_game = 0;
+    def = sh_script_check_name(L, 1, "spawn", 1, &is_game);
+    sh_script_api_check_vec(L, 2, "spawn", "where to spawn", pos);
+    sh_script_api_opt_number(L, 3, "spawn", "the facing in degrees", &yaw);
+    sh_script_api_check_room(L, "spawn");
+    return spawn_recorded(L, def, lua_tostring(L, 1), pos, yaw, is_game);
 }
 
 /* ------------------------------------------------------------ players */
@@ -634,6 +646,183 @@ static int tint_call(lua_State *L, const char *call, int kind)
     return 1;
 }
 
+/* -------------------------------------------------------- recolour (Graphics SDK) */
+
+/* e:recolour{ primary = {r,g,b}, secondary = ..., pattern = { {r,g,b}, {r,g,b} }, scratches = ..., dirt = ...,
+ * glow = ..., seconds = s }: DOOM 2016's colour regions (the customization template, skinvmtr_custom and its
+ * family), which the engine itself writes per render entity (VK FUN_140fdeb70 / FUN_140fdf770, through the same
+ * per-entity parm set as lerpRenderParmFrom). A colour is written as a material's constant reads (sRGB decoded); a
+ * region keeps its last colour per entity so a fade starts from it, the first fade from the colour itself. Answers
+ * true when every parm was sent. On an entity whose surfaces have no colour regions nothing changes. */
+#include "../sdkwords.h"
+
+typedef struct recolour_rec { sh_script_handle h; int parm; float v[4]; } recolour_rec;
+static recolour_rec g_recolour[512];
+static int g_recolour_next;
+
+static recolour_rec *recolour_find(sh_script_handle h, int parm, int make)
+{
+    int i;
+    for (i = 0; i < (int)(sizeof g_recolour / sizeof g_recolour[0]); i++)
+        if (g_recolour[i].h == h && g_recolour[i].parm == parm) return &g_recolour[i];
+    if (!make) return NULL;
+    i = g_recolour_next;
+    g_recolour_next = (g_recolour_next + 1) % (int)(sizeof g_recolour / sizeof g_recolour[0]);
+    g_recolour[i].h = h;
+    g_recolour[i].parm = parm;
+    return &g_recolour[i];
+}
+
+static int read_colour(lua_State *L, int idx, const char *call, const char *what, float out[4])
+{
+    int k, n;
+    if (!lua_istable(L, idx)) sh_script_refuse(L, "\"%s\" needs %s as { r, g, b }, got %s", call, what, luaL_typename(L, idx));
+    n = (int)lua_rawlen(L, idx);
+    if (n < 3 || n > 4) sh_script_refuse(L, "\"%s\" needs %s as { r, g, b }", call, what);
+    out[3] = 1.0f;
+    for (k = 0; k < n; k++) {
+        double x;
+        lua_rawgeti(L, idx, k + 1);
+        if (!lua_isnumber(L, -1)) sh_script_refuse(L, "\"%s\" needs numbers in %s", call, what);
+        x = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        if (!(x >= 0.0 && x <= 1.0)) sh_script_refuse(L, "\"%s\" needs %s from 0 to 1, got %g", call, what, x);
+        out[k] = k < 3 ? (float)sdk_srgb_decode(x) : (float)x;
+    }
+    return 1;
+}
+
+static int l_recolour(lua_State *L)
+{
+    static const struct { sdk_word_id word; const char *parm[2]; } REGIONS[] = {
+        { SDK_R_PRIMARY, { "customprimaryalbedo", NULL } },     { SDK_R_SECONDARY, { "customsecondaryalbedo", NULL } },
+        { SDK_R_PATTERN, { "custompatternalbedo0", "custompatternalbedo1" } },
+        { SDK_R_SCRATCHES, { "customscratchalbedo", NULL } },   { SDK_R_DIRT, { "customdirtalbedo", NULL } },
+        { SDK_R_GLOW, { "custombloomalbedo", NULL } },
+    };
+    const char *call = SDK_W(C_RECOLOUR);
+    const sh_script_engine *e = eng();
+    sh_script_handle h;
+    void *ent = sh_script_api_owned(L, 1, call, "recolour", &h);
+    double seconds = 0;
+    int ms, ok = 1, r, i;
+    if (!lua_istable(L, 2))
+        sh_script_refuse(L, "\"%s\" takes a table of colours, as in e:%s{ %s = { 1, 0, 0 } }", call, call, SDK_W(R_PRIMARY));
+    /* every key is a region or the seconds */
+    lua_pushnil(L);
+    while (lua_next(L, 2)) {
+        const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
+        int known = k && !strcmp(k, SDK_W(R_SECONDS));
+        for (r = 0; k && r < (int)(sizeof REGIONS / sizeof REGIONS[0]); r++) if (!strcmp(k, sdk_word(REGIONS[r].word))) known = 1;
+        if (!known)
+            sh_script_refuse(L, "\"%s\" knows no region \"%s\"; write %s, %s, %s, %s, %s or %s, and %s", call,
+                             k ? k : "(a number)", SDK_W(R_PRIMARY), SDK_W(R_SECONDARY), SDK_W(R_PATTERN),
+                             SDK_W(R_SCRATCHES), SDK_W(R_DIRT), SDK_W(R_GLOW), SDK_W(R_SECONDS));
+        lua_pop(L, 1);
+    }
+    lua_getfield(L, 2, SDK_W(R_SECONDS));
+    if (!lua_isnil(L, -1)) {
+        if (!lua_isnumber(L, -1)) sh_script_refuse(L, "\"%s\" needs the seconds as a number", call);
+        seconds = lua_tonumber(L, -1);
+        if (!(seconds >= 0.0 && seconds <= SH_TINT_MAX_SECONDS))
+            sh_script_refuse(L, "\"%s\" needs the seconds to fade over from 0 to %g, got %g", call, SH_TINT_MAX_SECONDS, seconds);
+    }
+    lua_pop(L, 1);
+    if (!ent || !e || !e->decl) return nil1(L);
+    ms = sh_tint_duration_ms(seconds);
+    for (r = 0; r < (int)(sizeof REGIONS / sizeof REGIONS[0]); r++) {
+        float c[2][4];
+        int n = REGIONS[r].parm[1] ? 2 : 1;
+        if (lua_getfield(L, 2, sdk_word(REGIONS[r].word)) == LUA_TNIL) { lua_pop(L, 1); continue; }
+        if (n == 2) {
+            if (!lua_istable(L, -1) || lua_rawlen(L, -1) != 2)
+                sh_script_refuse(L, "\"%s\" needs %s as two colours, { { r, g, b }, { r, g, b } }", call, sdk_word(REGIONS[r].word));
+            for (i = 0; i < 2; i++) {
+                lua_rawgeti(L, -1, i + 1);
+                read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[i]);
+                lua_pop(L, 1);
+            }
+        } else read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[0]);
+        lua_pop(L, 1);
+        for (i = 0; i < n; i++) {
+            void *decl = e->decl("renderParm", REGIONS[r].parm[i]);
+            recolour_rec *rec = recolour_find(h, r * 2 + i, 1);
+            sh_script_earg ev[6];
+            float from[4];
+            if (!decl) { ok = 0; continue; }
+            memcpy(from, rec->h == h && (rec->v[0] || rec->v[1] || rec->v[2] || rec->v[3]) ? rec->v : c[i], sizeof from);
+            memset(ev, 0, sizeof ev);
+            ev[0].type = 'd'; ev[0].p = decl;
+            ev[1] = sh_script_earg_vec(from);
+            ev[2] = sh_script_earg_float(from[3]);
+            ev[3] = sh_script_earg_vec(c[i]);
+            ev[4] = sh_script_earg_float(c[i][3]);
+            ev[5] = sh_script_earg_int(ms);
+            if (!sh_script_api_event(ent, "lerpRenderParmFrom", ev, 6, NULL)) ok = 0;
+            memcpy(rec->v, c[i], sizeof rec->v);
+        }
+    }
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+/* ------------------------------------------------- environments (Graphics SDK) */
+
+/* set_environment(name): the mod's environment (an env decl written `type environment`, modenv.h) laid over the
+ * level's own on the players' views, blending in over its `blend`: the fx it compiles to (FX_ENV_CHANGE items, the
+ * view's own override, VK FUN_1416f0240 case 0xb) played by its emitter. clear_environment() stops it, which
+ * releases the values with the same blend. One environment of a mod at a time; a new one replaces the last. Near the
+ * entity limit it is skipped with a log line, never an error. */
+#define SHS_REG_ENV "sh.sdk.environment"
+
+static void env_stop(lua_State *L)
+{
+    if (lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_ENV) != LUA_TNIL) {
+        void *ent = sh_script_api_entity(L, lua_gettop(L), SDK_W(C_CLEAR_ENVIRONMENT), NULL);
+        if (ent) sh_script_api_post(ent, "remove", NULL, 0);
+    }
+    lua_pop(L, 1);
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, SHS_REG_ENV);
+}
+
+static int l_set_environment(lua_State *L)
+{
+    const char *call = SDK_W(C_SET_ENVIRONMENT);
+    const char *name = sh_script_check_name(L, 1, call, 0, NULL);
+    const sh_script_sdk_runtime *rt = sh_script_sdk_runtime_get();
+    float origin[3] = { 0, 0, 0 };
+    char *em = rt->environment_emitter ? rt->environment_emitter(name) : NULL;
+    if (!em) {
+        if (!rt->environment_emitter) return nil1(L);
+        sh_script_refuse(L, "\"%s\" knows no environment \"%s\" of this mod; write one as environments/%s.decl "
+                            "whose first key is 'type environment'", call, lua_tostring(L, 1), lua_tostring(L, 1));
+    }
+    env_stop(L);
+    if (!sh_script_api_has_room()) {
+        free(em);
+        if (rt->log) rt->log("Mod scripts: an environment was not set because the game holds nearly all the entities it can");
+        return nil1(L);
+    }
+    lua_pushstring(L, em);
+    free(em);
+    sh_script_api_spawn_def(L, lua_tostring(L, -1), origin, 0.0);
+    lua_remove(L, -2);
+    if (lua_isnil(L, -1)) return 1;
+    lua_pushvalue(L, -1);
+    lua_setfield(L, LUA_REGISTRYINDEX, SHS_REG_ENV);
+    lua_pop(L, 1);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_clear_environment(lua_State *L)
+{
+    env_stop(L);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static int l_tint(lua_State *L) { return tint_call(L, "tint", 0); }
 static int l_glow(lua_State *L) { return tint_call(L, "glow", 1); }
 
@@ -669,4 +858,8 @@ void sh_script_api_entity_register(void)
     };
     size_t i;
     for (i = 0; i < sizeof calls / sizeof calls[0]; i++) sh_script_api_add(calls[i].kind, calls[i].name, calls[i].fn);
+    /* the Graphics SDK's calls, named from its words table (sdkwords.h) */
+    sh_script_api_add(SH_SCRIPT_API_METHOD, SDK_W(C_RECOLOUR), l_recolour);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_SET_ENVIRONMENT), l_set_environment);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_CLEAR_ENVIRONMENT), l_clear_environment);
 }

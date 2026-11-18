@@ -674,7 +674,86 @@ static int fx_by_entity_call(void *ent)
     return kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER;
 }
 
-/* play_effect(e, condition) or play_effect(effect, pos, [dir]) */
+/* One of the mod's Graphics SDK effects (an fx decl written `type effect`, modeffect.h): its emitter spawned at a
+ * point, or at an entity and bound to it (to one of its joints when named); `options` { colour = {r, g, b} } tints
+ * this play (the effect entity's setColor: the FX manager's systemColor times each light's and model's colour, VK
+ * FUN_1416f0240). When the game is near its entity limit the effect is skipped, with one log line a map, never an
+ * error. Leaves the effect entity (or nil) on the stack. */
+static int g_effect_skipped_logged;
+
+static int play_sdk_effect(lua_State *L, const char *emitter)
+{
+    const sh_script_engine *e = eng();
+    float pos[3], dir[3], axis[9];
+    int have_dir = 0, at_entity = luaL_testudata(L, 2, "entity") != NULL, opt = 0, top;
+    void *master = NULL;
+    const char *joint = NULL;
+    if (at_entity) {
+        master = sh_script_api_owned(L, 2, "play_effect", "play an effect on", NULL);
+        if (!master || !e || !e->origin || !e->origin(master, pos)) { lua_pushnil(L); return 1; }
+        if (lua_type(L, 3) == LUA_TSTRING) { joint = lua_tostring(L, 3); opt = 4; }
+        else opt = 3;
+    } else {
+        sh_script_api_check_vec(L, 2, "play_effect", "where to show the effect", pos);
+        /* a third table is the options when it names one, else the direction */
+        if (lua_istable(L, 3) && lua_getfield(L, 3, "colour") != LUA_TNIL) { lua_pop(L, 1); opt = 3; }
+        else {
+            if (lua_istable(L, 3)) lua_pop(L, 1);
+            have_dir = sh_script_api_opt_vec(L, 3, "play_effect", "the direction the effect faces", dir);
+            opt = 4;
+        }
+    }
+    if (!sh_script_api_has_room()) {
+        if (!g_effect_skipped_logged) {
+            if (sh_script_sdk_runtime_get()->log) sh_script_sdk_runtime_get()->log("Mod scripts: an effect was not played because the game holds nearly all the entities it can; "
+                        "effects play again when entities are freed");
+            g_effect_skipped_logged = 1;
+        }
+        lua_pushnil(L);
+        return 1;
+    }
+    sh_script_api_spawn_def(L, emitter, pos, have_dir ? atan2((double)dir[1], (double)dir[0]) * 180.0 / PI : 0.0);
+    top = lua_gettop(L);
+    if (lua_isnil(L, top)) return 1;
+    if (have_dir) place_effect(L, top, pos, dir);
+    (void)axis;
+    {
+        void *fx = sh_script_api_entity(L, top, "play_effect", NULL);
+        if (fx && master) {
+            sh_script_earg a[4];
+            if (joint) {
+                a[0] = sh_script_earg_entity(master);
+                a[1] = sh_script_earg_text('s', "");
+                a[2] = sh_script_earg_text('s', joint);
+                a[3] = sh_script_earg_int(0);
+                (void)sh_script_api_event(fx, "bindToJoint", a, 4, NULL);
+            } else {
+                a[0] = sh_script_earg_entity(master);
+                (void)sh_script_api_event(fx, "bind", a, 1, NULL);
+            }
+        }
+        if (fx && opt && lua_istable(L, opt)) {
+            if (lua_getfield(L, opt, "colour") == LUA_TTABLE) {
+                float c[3];
+                int k;
+                sh_script_earg a[3];
+                for (k = 0; k < 3; k++) {
+                    lua_rawgeti(L, -1, k + 1);
+                    c[k] = lua_isnumber(L, -1) ? (float)lua_tonumber(L, -1) : 1.0f;
+                    lua_pop(L, 1);
+                }
+                for (k = 0; k < 3; k++) a[k] = sh_script_earg_float(c[k]);
+                (void)sh_script_api_event(fx, "setColor", a, 3, NULL);
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_settop(L, top);
+    effects_mark(L, top);
+    return 1;
+}
+
+/* play_effect(e, condition) or play_effect(effect, pos, [dir], [options]) or play_effect(effect, e, [joint], [options]) */
 static int l_fx(lua_State *L)
 {
     if (luaL_testudata(L, 1, "entity")) {
@@ -693,6 +772,24 @@ static int l_fx(lua_State *L)
         if (lua_type(L, 1) != LUA_TSTRING)
             sh_script_refuse(L, "\"play_effect\" needs an entity and an effect condition, or the name of one of this mod's "
                                 "effect entities and a position; got %s", lua_isnoneornil(L, 1) ? "nothing" : luaL_typename(L, 1));
+        {
+            /* one of the mod's Graphics SDK effects: its emitter */
+            const sh_script_sdk_runtime *rt = sh_script_sdk_runtime_get();
+            if (rt->effect_emitter) {
+                char *full = sh_textf("mods/%s/%s", sh_script_salt(L), lua_tostring(L, 1)), *em;
+                em = full && strncmp(lua_tostring(L, 1), "mods/", 5) ? rt->effect_emitter(full) :
+                     (full ? rt->effect_emitter(lua_tostring(L, 1)) : NULL);
+                free(full);
+                if (em) {
+                    int r;
+                    lua_pushstring(L, em);
+                    free(em);
+                    lua_replace(L, 1);
+                    r = play_sdk_effect(L, lua_tostring(L, 1));
+                    return r;
+                }
+            }
+        }
         sh_script_api_check_vec(L, 2, "play_effect", "where to show the effect", pos);
         have_dir = sh_script_api_opt_vec(L, 3, "play_effect", "the direction the effect faces", dir);
         lua_settop(L, 3);

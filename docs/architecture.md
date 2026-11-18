@@ -525,7 +525,7 @@ engine root:
 
 | Folder (extension) | Engine request |
 |---|---|
-| `materials/`, `effects/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,particle,entitydef,sound}/mods/<salt>/<rest>` |
+| `materials/`, `effects/`, `environments/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef,sound}/mods/<salt>/<rest>` |
 | `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
 | `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
 | `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
@@ -550,7 +550,8 @@ and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<r
 name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
 `scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
 `mods/<salt>/<rest>`. Every other name is the game's and is left as written; `game:<name>` is written `<name>` (the
-installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes).
+installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
+and so is the quoted name of `game("...")`, the Graphics SDK's other spelling of a game name (`ma_in_game_call`).
 `#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
 language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
 builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
@@ -1752,6 +1753,57 @@ text, so every open and the ledger see the same bytes while the build's identity
 a mistake at serve time (the build already refused it) serves the file as it holds it with one log line. `look_cli`
 (`tests/look_cli.c`, built by `tests/run-tests.ps1`) compiles one decl outside the game and writes the text and the
 images it derived.
+
+#### The Graphics SDK: effects, environments, values that change
+
+The other SDK files are compiled the same way, through one entry point (`sdk.c`, `sh_sdk_compile`, pure text work
+apart from the decls it registers): the request path's type folder picks the compiler. Every author word is in
+`sdkwords.h` (one table: renaming a word there renames it in the compilers, their sentences and the script calls);
+`sdkparse.c` reads the author grammar (a brace group of items, each a row of words, numbers, names and nested
+groups).
+
+- **An effect** (`modeffect.c`): an fx decl (`effects/<name>.decl`) whose first key is `type effect` becomes the game's fx decl, one event
+  per item, written as the game's own editor writes its fx (a key the author leaves out is left out, so the engine's
+  default holds; a decal gets a duration and a size, the engine draws none without). The game's FX manager plays every
+  item type in one function on both renderers (VK `FUN_1416f0240` / GL `FUN_1416f0bc0`), so an effect draws with the
+  game's own code. The compiled text's first line is `// Snapmap+ effect`.
+- **Particles** inside an effect become a particle decl the product derives: one CPU stage from the plain fields,
+  following the game's own reading of a stage (a size is PARAMETRIC_EVAL from birth to death unless it is a range,
+  GENERIC; a curve is CURVE_GENERIC, `val0 x table(t) + val1`, its table in the decl's `tableDecls`; 2016 multiplies
+  the direction's x, y and z by `speed[0..2]`, so a speed goes on all three; gravity is half the acceleration, the
+  origin adding `gravity x age^2`). A speed range, drag and bounce are written as Snapmap+'s simulated motion (the
+  section below). An `image` becomes a `type particle` material compiled by `modlook.c` and derived too.
+- **Values that change over time** (`sdkvalues.c`): on a material, every line `key pulse|flicker|curve { ... }` of any
+  mod material becomes the game's register program (`tempN` lines over `time`, the game's `sintable` for a pulse,
+  `random_smooth03` for a flicker, a derived table for a curve; every vector key of a parm block is an expression,
+  VK `0x141a035e0` / GL `0x141a1f680`). The temporaries are the game's own 128, which already hold their slots. A
+  colour key the parser decodes from sRGB (43 parms) has its numbers decoded the same way.
+- **An environment** (`modenv.c`): an env decl (`environments/<name>.decl`) whose first key is `type environment` becomes the game's env decl
+  (inherit `default`, a `renderParms` block of the keys it names) and, derived, the fx `set_environment` plays: one
+  `FX_ENV_CHANGE` item per 16 values, looping, its fades the environment's `blend` (the view's own override, set at the
+  start and released at the stop, case 0xb of the FX manager). The compiled env decl's first line names that fx.
+
+**Derived decls.** What a compile derives is registered with modprog (`sh_modprog_register_decl`): named by the
+first 16 hex digits of the SHA-256 of its type and text, at `generated/decls/<type>/snapmapplus/sdk/<hex>.decl`
+(`snapmapplus_sdk_<hex>` for a table, since a material expression names its table without a '/'); the same file
+gives the same names at build and at serve. An effect's **emitter**, the entityDef the script calls spawn, is
+`snapmapplus/effect/<fx name>` (inherit `func/fx`, `fxDecl` the effect), derived from its path alone so it is served
+before anything has compiled the effect. The builder reads material, fx and env decls through `sh_sdk_compile`
+(`sh_mb_set_sdk_compiler`): a mistake fails the build with its sentence, the needs are scanned from the compiled text
+(an effect's tables, flares and envs, a particle decl's `tableDecls`, a material expression's derived table), and
+the needs a compile returns join the file's own (an effect's emitter, an environment's fx and its emitter), so the
+closure brings every derived decl along as a pointer to the product's container; the server serves the compiled
+fx and env text as it serves a look. `sdk_cli` (`tests/sdk_cli.c`) compiles SDK files outside the game and writes
+what they derive.
+
+**The script calls** ask the server through `sdk_runtime.c` (`sh_script_set_sdk_runtime`): `play_effect(name, ...)` asks
+whether the mod's fx decl `name` (`effects/<name>.decl`) is an SDK effect (its served text, `sh_modserve_serve_identity`, starts with the
+mark; asking compiles it, which registers what it derives) and spawns its emitter at the point, or at the entity and
+binds it (`bind`, or `bindToJoint` with a joint), with `setColor` for a colour; `set_environment` spawns the emitter
+of the fx the environment's first line names and keeps it, `clear_environment` removes it. When the game holds nearly
+all its entities (`sh_script_api_has_room`), an effect or an environment is skipped with one log line instead of
+refused. `demon:recolour` sends `lerpRenderParmFrom` for each region's `custom*albedo` parm (the customization colours
+the engine itself writes per render entity, VK `FUN_140fdeb70` / `FUN_140fdf770`).
 
 #### Render parm slots are never refused
 

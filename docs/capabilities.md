@@ -971,6 +971,16 @@ Beyond the manifest entries above, the backend `XINPUT1_4.dll` also bundles **cv
 working, connected or not), and the resident **fault-shield**. See [`README.md`](../README.md)
 and [`fidelity.md`](fidelity.md).
 
+The backend carries the **Graphics SDK** ([the guide](graphics-sdk.md)): a mod's materials may be typed
+(`type layered`, `type particle`) and may write values that change over time (`pulse`, `flicker`, `curve`); its
+effects (`effects/x.decl`, `type effect`: lights, decals, shakes, flashes, screen images, blurs, flares, trails,
+models, sounds, glows, environment changes, wind and particles in plain items), environments
+(`environments/x.decl`, `type environment`) and wound sites (`decls/gorewounds/x.decl`, `type wound`) are written in
+plain fields. The build compiles each into the game's own decls (a mistake fails the build with one sentence) and the
+server serves what the game reads; scripts play effects at a point or on an entity (`play_effect`), lay an
+environment over the view (`set_environment`, `clear_environment`) and recolour an entity's colour regions
+(`demon:recolour`).
+
 The backend also carries **mod scripts**: a mod's `scripts\*.lua` run during Play,
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.

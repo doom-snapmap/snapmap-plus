@@ -1660,6 +1660,14 @@ typedef struct mb_scan {
     int depth;
 } mb_scan;
 
+/* 1 when a referenced name is a mod's ("mods/...") or one the Graphics SDK derives ("snapmapplus/..." or
+ * "snapmapplus_sdk_..."). */
+static int mb_sdk_or_mod(const char *v, size_t vn)
+{
+    return (vn > 5 && mb_ieq_n(v, 5, "mods/")) || (vn > 12 && mb_ieq_n(v, 12, "snapmapplus/")) ||
+           (vn > 16 && mb_ieq_n(v, 16, "snapmapplus_sdk_"));
+}
+
 static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
 {
     const char *k = key->p, *v = val->p;
@@ -1678,6 +1686,20 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     if (sc->is_material && mb_iends(k, kn, "program") && (quoted || val->kind == TK_WORD)) {
         sc->fn(sc->ctx, "renderProg", v, vn);
         return;
+    }
+    /* A material's register program names a table the Graphics SDK derived (sdkvalues.c: `temp5
+     * snapmapplus_sdk_<hex>[temp2]`): the table is a need. Stock tables in expressions stay unscanned. */
+    if (!quoted && sc->is_material && val->kind == TK_WORD) {
+        const char *t = NULL;
+        size_t i, pn = strlen("snapmapplus_sdk_");
+        for (i = 0; i + pn <= vn; i++)
+            if (!_strnicmp(v + i, "snapmapplus_sdk_", pn) && (i == 0 || !isalnum((unsigned char)v[i - 1]))) { t = v + i; break; }
+        if (t) {
+            size_t tn = 0;
+            while (t + tn < v + vn && (isalnum((unsigned char)t[tn]) || t[tn] == '_')) tn++;
+            sc->fn(sc->ctx, "table", t, tn);
+            return;
+        }
     }
     /* old-key materials rewrite the layerparms image unquoted; the build must see it as it sees a quoted one */
     if (!quoted && sc->is_material && mb_ieq_n(k, kn, "layerparms")) { sc->fn(sc->ctx, "image", v, vn); return; }
@@ -1703,8 +1725,24 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         if (mb_ieq_n(k, kn, "declPrt")) { sc->fn(sc->ctx, "particle", v, vn); return; }
         if (mb_ieq_n(k, kn, "declRibbon")) { sc->fn(sc->ctx, "ribbon", v, vn); return; }
         if (mb_ieq_n(k, kn, "lightMtr") || mb_ieq_n(k, kn, "decalMtr")) { sc->fn(sc->ctx, "material", v, vn); return; }
+        /* The tables, flares and envs an effect names, when they are the mod's or the product's (the Graphics SDK's
+         * derived ones: snapmapplus_sdk_<hex>, snapmapplus/sdk/<hex>); the game's own stay unscanned, as before. */
+        if (mb_sdk_or_mod(v, vn)) {
+            if (mb_ieq_n(k, kn, "intensityTable") || mb_ieq_n(k, kn, "sizeTable") || mb_ieq_n(k, kn, "customTable1") ||
+                mb_ieq_n(k, kn, "customTable2") || (kn > 11 && mb_ieq_n(k, 11, "offsetTable")) ||
+                (kn > 11 && mb_ieq_n(k, 11, "rotateTable"))) { sc->fn(sc->ctx, "table", v, vn); return; }
+            if (mb_ieq_n(k, kn, "declFlare")) { sc->fn(sc->ctx, "flare", v, vn); return; }
+            if (mb_ieq_n(k, kn, "declEnv")) { sc->fn(sc->ctx, "env", v, vn); return; }
+            if (mb_ieq_n(k, kn, "overlay")) { sc->fn(sc->ctx, "material", v, vn); return; }
+        }
     }
     if (sc->is_emitter && mb_ieq_n(k, kn, "material")) { sc->fn(sc->ctx, "material", v, vn); return; }
+    /* a particle decl's curve tables (edit.tableDecls item[N]), the mod's or the product's */
+    if (sc->is_emitter && parent && mb_ieq_n(parent, parent_n, "tableDecls") && kn > 5 && mb_ieq_n(k, 5, "item[") &&
+        mb_sdk_or_mod(v, vn)) {
+        sc->fn(sc->ctx, "table", v, vn);
+        return;
+    }
     if (sc->is_entitydef && mb_iends(v, vn, ".swf")) { sc->fn(sc->ctx, "swf", v, vn); return; }
     if (sc->is_md6) {
         if (mb_ieq_n(k, kn, "mesh")) { sc->fn(sc->ctx, "baseModel", v, vn); return; }
@@ -1870,6 +1908,10 @@ typedef struct mb_bare_ctx { sh_mb_bundle *b; const sh_mb_file *f; } mb_bare_ctx
 static sh_mb_look_fn volatile g_mb_look;
 
 void sh_mb_set_look_compiler(sh_mb_look_fn fn) { InterlockedExchangePointer((PVOID volatile *)&g_mb_look, (PVOID)fn); }
+
+static sh_mb_sdk_fn volatile g_mb_sdk;
+
+void sh_mb_set_sdk_compiler(sh_mb_sdk_fn fn) { InterlockedExchangePointer((PVOID volatile *)&g_mb_sdk, (PVOID)fn); }
 
 static void mb_bare_cb(void *context, int line, const char *name, size_t len)
 {
@@ -2908,7 +2950,8 @@ static void mb_walk_top(mb_walk *w)
                      "entities, sounds, scripts, programs, decls, game) and press Refresh");
         } else if (!sh_ma_folder(name, strlen(name))) {
             mb_error(w->b, "%s is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-                     "effects, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, programs, decls "
+                     "effects, environments, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, "
+                     "programs, decls "
                      "or game; rename it and press Refresh", name);
         } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             mb_error(w->b, "%s is a link to another folder; make it a real folder and press Refresh", name);
@@ -5252,8 +5295,39 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 /* A material is read as the engine will read it: a look compiled (a mistake in one stops the
                  * build with its sentence), a material of the old keys rewritten. */
                 sh_mb_look_fn look_fn = (sh_mb_look_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_look, NULL, NULL);
-                int refused = 0;
-                if (look_fn && (!strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2"))) {
+                sh_mb_sdk_fn sdk_fn = (sh_mb_sdk_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_sdk, NULL, NULL);
+                int refused = 0, is_mat = !strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2");
+                char *sdk_needs = NULL;
+                if (sdk_fn && (is_mat || !strcmp(f->ptype, "fx") || !strcmp(f->ptype, "env") || !strcmp(f->ptype, "gorewounds"))) {
+                    /* the SDK's compilers: a look, an effect, an environment, values that change; the request path
+                     * names the decl's type and name (an effect's emitter is named after it) */
+                    char why[400];
+                    int lr = sdk_fn(f->request, (const char *)text, len, &look, &look_len, why, sizeof why, &notes,
+                                    &sdk_needs);
+                    if (lr == SH_LOOK_MISTAKE) {
+                        /* the sentence names the file by its base name; the build names the file */
+                        mb_error(b, "%s", why);
+                        refused = 1;
+                    } else if (lr == SH_LOOK_OOM) { mb_error(b, "out of memory"); refused = 1; }
+                    for (char *n = notes; n && *n;) {
+                        char *e = strchr(n, '\n');
+                        if (e) *e = 0;
+                        mb_note(b, "%s", n);
+                        n = e ? e + 1 : NULL;
+                    }
+                    free(notes);
+                    notes = NULL;
+                    for (char *n = sdk_needs; !refused && n && *n;) {
+                        char *e = strchr(n, '\n'), *sp = strchr(n, ' ');
+                        if (e) *e = 0;
+                        if (sp && (!e || sp < e)) {
+                            *sp = 0;
+                            mb_need_cb(&nc, n, sp + 1, strlen(sp + 1));
+                        }
+                        n = e ? e + 1 : NULL;
+                    }
+                    free(sdk_needs);
+                } else if (look_fn && is_mat) {
                     char why[400];
                     int lr = look_fn(f->path, (const char *)text, len, &look, &look_len, why, sizeof why, &notes);
                     if (lr == SH_LOOK_MISTAKE) { mb_error(b, "%s", why); refused = 1; }

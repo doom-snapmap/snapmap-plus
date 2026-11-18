@@ -78,6 +78,7 @@ int main(void)
     req("materials/body.decl", "generated/decls/material/mods/abcdefgh/body.decl");
     req("materials/demon/skin.decl", "generated/decls/material/mods/abcdefgh/demon/skin.decl");
     req("effects/explosion.decl", "generated/decls/fx/mods/abcdefgh/explosion.decl");
+    req("environments/hell_red.decl", "generated/decls/env/mods/abcdefgh/hell_red.decl");
     req("particles/sparks.decl", "generated/decls/particle/mods/abcdefgh/sparks.decl");
     req("entities/boss.decl", "generated/decls/entitydef/mods/abcdefgh/boss.decl");
     req("sounds/play_roar.decl", "generated/decls/sound/mods/abcdefgh/play_roar.decl");
@@ -118,11 +119,16 @@ int main(void)
         CHECK(!sh_ma_request(S, "readme.txt", &r, NULL) && !r);   /* beside mod.json: not the mod's */
     }
     refused("decls/material/body.decl", "goes in materials/");
+    refused("decls/env/hell_red.decl", "goes in environments/");
     refused("material/body.decl", "is not one of a mod's folders");
     refused("assets/generated/decls/material/x.decl", "is not one of a mod's folders");
     refused("materials/body.txt", "holds .decl files");
     refused("sounds/music/boss.bnk", "goes in sounds/ itself");
     refused("game/generated/decls/material/mods/abcdefgh/x.decl", "game/ holds the game's own files");
+    /* a closure pointer to one of the product's own decls that names a mod (an SDK effect's emitter) is not a mod's */
+    req("game/generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl",
+        "generated/decls/entitydef/snapmapplus/effect/mods/abcdefgh/blast.decl");
+    refused("game/generated/decls/material/mods/abcdefgh/snapmapplus/x.decl", "game/ holds the game's own files");
     refused("atlases/x.bimage", "decals/, lights/ and transparency/");
 
     /* the names a text writes */
@@ -137,6 +143,7 @@ int main(void)
     name("movies/hud.swf", "swf/mods/abcdefgh/hud.swf");
     name("decls/damage/stomp", "mods/abcdefgh/stomp");
     name("programs/tint", "mods/abcdefgh/tint");
+    name("environments/hell_red", "mods/abcdefgh/hell_red");
     name("game:effects/explosion", "effects/explosion");
     name("art/decals/x", NULL);
     name("models/monsters/imp/imp", NULL);
@@ -152,6 +159,9 @@ int main(void)
     text("textures/materials/x materials/x_y", "textures/materials/x mods/abcdefgh/x_y", &own);
     text("addnormals(images/a.tga, images/b.tga)", "addnormals(mods/abcdefgh/a.tga, mods/abcdefgh/b.tga)", &own);
     text("// see materials/body\n", "// see mods/abcdefgh/body\n", &own);
+    /* game("...") is the Graphics SDK's other spelling of a game name: left as written */
+    text("sound game(\"effects/boom\") use effects/x", "sound game(\"effects/boom\") use mods/abcdefgh/x", &own);
+    text("sound game( \"effects/boom\")", NULL, &own);
     text("nothing of the mod here: mods/abcdefgh/body stays", NULL, &own);
 
     /* mod.json's author part */

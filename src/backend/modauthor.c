@@ -16,6 +16,7 @@ typedef struct ma_row { const char *folder; const char *ext; const char *root; }
 static const ma_row MA_ROWS[] = {
     { "materials",               ".decl",      "generated/decls/material/" },
     { "effects",                 ".decl",      "generated/decls/fx/" },
+    { "environments",            ".decl",      "generated/decls/env/" },
     { "particles",               ".decl",      "generated/decls/particle/" },
     { "entities",                ".decl",      "generated/decls/entitydef/" },
     { "sounds",                  ".decl",      "generated/decls/sound/" },
@@ -50,14 +51,14 @@ static const ma_row MA_ROWS[] = {
 
 /* The decl folders that have a folder of their own; decls/<one of these>/ is refused with where it goes. */
 static const struct { const char *type; const char *folder; } MA_NAMED[] = {
-    { "material", "materials" }, { "fx", "effects" }, { "particle", "particles" }, { "entitydef", "entities" },
+    { "material", "materials" }, { "fx", "effects" }, { "env", "environments" }, { "particle", "particles" }, { "entitydef", "entities" },
     { "sound", "sounds" }, { "md6def", "meshes" }, { "renderprog", "programs" },
 };
 #define MA_NNAMED (sizeof MA_NAMED / sizeof MA_NAMED[0])
 
 static const char MA_FOLDERS_SENTENCE[] =
-    "materials, images, meshes, animations, effects, particles, entities, sounds, movies, scripts, map-modules, "
-    "virtual-textures, atlases, programs, decls and game";
+    "materials, images, meshes, animations, effects, environments, particles, entities, sounds, movies, scripts, "
+    "map-modules, virtual-textures, atlases, programs, decls and game";
 
 static int ma_starts(const char *s, const char *p) { return _strnicmp(s, p, strlen(p)) == 0; }
 
@@ -86,7 +87,7 @@ static int ma_fail(char **cause, const char *fmt, const char *a, const char *b)
 
 int sh_ma_folder(const char *name, size_t n)
 {
-    static const char *const top[] = { "materials", "images", "meshes", "animations", "effects", "particles",
+    static const char *const top[] = { "materials", "images", "meshes", "animations", "effects", "environments", "particles",
                                        "entities", "sounds", "movies", "scripts", "map-modules", "virtual-textures",
                                        "atlases", "programs", "decls", "game", NULL };
     size_t i;
@@ -112,7 +113,10 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
     if (ma_starts(p, SH_MA_GAME)) {
         rest = p + 5;
         if (!*rest) { free(p); return ma_fail(cause, "%s: name the game's file under game/", path, NULL); }
-        if (ma_starts(rest, "mods/") || strstr(rest, "/mods/")) {
+        /* a mod's namespace under game/ is refused; a name of the product's own (snapmapplus/..., a closure pointer
+         * such as an SDK effect's emitter snapmapplus/effect/mods/<salt>/x) is not a mod's */
+        const char *ns = strstr(rest, "/mods/"), *prod = strstr(rest, "/snapmapplus/");
+        if (ma_starts(rest, "mods/") || (ns && !(prod && prod < ns))) {
             free(p);
             return ma_fail(cause, "%s: game/ holds the game's own files at the game's own paths; put your mod's own "
                            "files in its folders (%s)", path, MA_FOLDERS_SENTENCE);
@@ -208,8 +212,8 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
         return 0;
     }
     ma_fail(cause, "%s: '%s' is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-            "effects, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, programs, "
-            "decls or game", path, p);
+            "effects, environments, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, "
+            "programs, decls or game", path, p);
     free(p);
     return 0;
 }
@@ -264,7 +268,7 @@ static int ma_name_char(unsigned char c)
 
 /* The name prefixes: a folder and the engine's spelling before the salt ("%s" is the salt). */
 static const struct { const char *folder; const char *engine; } MA_NAMES[] = {
-    { "materials/", "mods/%s/" }, { "effects/", "mods/%s/" }, { "particles/", "mods/%s/" },
+    { "materials/", "mods/%s/" }, { "effects/", "mods/%s/" }, { "environments/", "mods/%s/" }, { "particles/", "mods/%s/" },
     { "entities/", "mods/%s/" }, { "sounds/", "mods/%s/" }, { "images/", "mods/%s/" },
     { "animations/", "md6/mods/%s/" }, { "movies/", "swf/mods/%s/" }, { "scripts/", "mods/%s/scripts/" },
     { "map-modules/", "maps/modules/mods/%s/" }, { "virtual-textures/", "mods/%s/" }, { "programs/", "mods/%s/" },
@@ -325,6 +329,19 @@ static int ma_key_char(unsigned char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
+/* 1 when the name at t[i] is the quoted argument of game("...") (the Graphics SDK's other spelling of a game name,
+ * sdkparse.h): it names the game's, as game:<name> does, and is left as written. */
+static int ma_in_game_call(const char *t, size_t i)
+{
+    size_t k = i;
+    if (k == 0 || t[k - 1] != '"') return 0;
+    k--;
+    while (k > 0 && (t[k - 1] == ' ' || t[k - 1] == '\t')) k--;
+    if (k == 0 || t[k - 1] != '(') return 0;
+    k--;
+    return k >= 4 && !_strnicmp(t + k - 4, "game", 4) && (k == 4 || !ma_name_char((unsigned char)t[k - 5]));
+}
+
 /* Rewrites t[0..len) into b; returns 1 when anything changed. */
 static int ma_rewrite(const char *salt, const char *t, size_t len, sh_ma_key_fn own_key, void *ctx, ma_buf *b)
 {
@@ -347,6 +364,10 @@ static int ma_rewrite(const char *salt, const char *t, size_t len, sh_ma_key_fn 
                 continue;
             }
             i = k;
+            continue;
+        }
+        if (start && ma_name_char(c) && c != '/' && c != '.' && ma_in_game_call(t, i)) {
+            while (i < len && ma_name_char((unsigned char)t[i])) i++;
             continue;
         }
         if (start && ma_name_char(c) && c != '/' && c != '.') {

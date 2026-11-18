@@ -13,6 +13,7 @@ its identity and keeps its names apart from the game's and from every other mod'
 | `meshes/` | models (`<name>.md6.decl`), their meshes (`.bmd6model`) and skeletons (`.bmd6skl`), static models (`.bmodel`), destructible models (`.dmodel`), particle models (`.pmodel`) | md6Def, model |
 | `animations/` | animation clips (`.bmd6anim`) | anim |
 | `effects/` | effects (`.decl`): lights, decals, particles, shakes, ribbons, played together | fx |
+| `environments/` | environments (`.decl`): fog, bloom, colour and the rest of how the level looks, laid over the view ([Graphics SDK](graphics-sdk.md#environments)) | env |
 | `particles/` | particle systems (`.decl`) | particle |
 | `entities/` | entity definitions (`.decl`): a demon, a prop, a pickup | entityDef |
 | `sounds/` | sound definitions (`.decl`) and Wwise banks (`.bnk`, in `sounds/` itself) | sound |
