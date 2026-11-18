@@ -95,7 +95,11 @@ int main(void)
     req("scripts/boss.lua", "mods/abcdefgh/scripts/boss.lua");
     req("scripts/lib/brain.lua", "mods/abcdefgh/scripts/lib/brain.lua");
     req("virtual-textures/boss_sq1.mega2", "virtualtextures/mods/abcdefgh/boss_sq1.mega2");
-    req("modules/room.decl", "maps/modules/mods/abcdefgh/room.decl");
+    req("map-modules/room.decl", "maps/modules/mods/abcdefgh/room.decl");
+    req("map-modules/room/_combo/world.bcm", "maps/modules/mods/abcdefgh/room/_combo/world.bcm");
+    req("map-modules/room.baas_monster48", "generated/maps/modules/mods/abcdefgh/room.baas_monster48");
+    req("map-modules/palettes/mega_blessed/room.bmodel", "maps/modules/palettes/mega_blessed/mods/abcdefgh/room.bmodel");
+    req("movies/hud.bimage", "generated/swf/mods/abcdefgh/hud.bimage");
     req("decls/damage/stomp.decl", "generated/decls/damage/mods/abcdefgh/stomp.decl");
     req("decls/snapeditorentitydef/boss.decl", "generated/decls/snapeditorentitydef/mods/abcdefgh/boss.decl");
     req("programs/tint.decl", "generated/decls/renderprog/mods/abcdefgh/tint.decl");

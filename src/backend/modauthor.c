@@ -32,7 +32,8 @@ static const ma_row MA_ROWS[] = {
     { "animations",              ".bmd6anim",  "cooked/anim/md6/" },
     { "movies",                  ".bswf",      "generated/swf/" },
     { "virtual-textures",        ".mega2",     "virtualtextures/" },
-    { "modules",                 ".decl",      "maps/modules/" },
+    { "virtual-textures",        ".pages",     "virtualtextures/" },
+    { "movies",                  ".bimage",    "generated/swf/" },
     /* a render program: its decl, its cooked stages, its permutations and their SPIR-V, each where the engine opens it */
     { "programs/spirv/permutations", ".vspv",  "generated/spirv/generated/renderprogs/permutations/" },
     { "programs/spirv/permutations", ".fspv",  "generated/spirv/generated/renderprogs/permutations/" },
@@ -55,7 +56,7 @@ static const struct { const char *type; const char *folder; } MA_NAMED[] = {
 #define MA_NNAMED (sizeof MA_NAMED / sizeof MA_NAMED[0])
 
 static const char MA_FOLDERS_SENTENCE[] =
-    "materials, images, meshes, animations, effects, particles, entities, sounds, movies, scripts, modules, "
+    "materials, images, meshes, animations, effects, particles, entities, sounds, movies, scripts, map-modules, "
     "virtual-textures, atlases, programs, decls and game";
 
 static int ma_starts(const char *s, const char *p) { return _strnicmp(s, p, strlen(p)) == 0; }
@@ -86,7 +87,7 @@ static int ma_fail(char **cause, const char *fmt, const char *a, const char *b)
 int sh_ma_folder(const char *name, size_t n)
 {
     static const char *const top[] = { "materials", "images", "meshes", "animations", "effects", "particles",
-                                       "entities", "sounds", "movies", "scripts", "modules", "virtual-textures",
+                                       "entities", "sounds", "movies", "scripts", "map-modules", "virtual-textures",
                                        "atlases", "programs", "decls", "game", NULL };
     size_t i;
     for (i = 0; top[i]; ++i)
@@ -140,8 +141,25 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
         free(p);
         return *request ? 1 : ma_fail(cause, "out of memory", NULL, NULL);
     }
-    if (ma_starts(p, "decls/")) {
-        char *type = p + 6, *tslash = strchr(type, '/');
+    if (ma_starts(p, "map-modules/")) {
+        /* a SnapMap module: its decl and the files the engine opens beside it, a palette's model under the palette,
+         * its navigation under generated/ */
+        rest = p + 12;
+        if (!*rest) { free(p); return ma_fail(cause, "%s: name the module's file", path, NULL); }
+        if (ma_starts(rest, "palettes/")) {
+            char *ps = strchr(rest + 9, '/');
+            if (ps && ps[1]) {
+                *request = sh_textf("maps/modules/palettes/%.*s/mods/%s/%s", (int)(ps - (rest + 9)), rest + 9, salt, ps + 1);
+                free(p);
+                return *request ? 1 : ma_fail(cause, "out of memory", NULL, NULL);
+            }
+        }
+        if (ext && !_strnicmp(ext, ".baas_", 6)) *request = sh_textf("generated/maps/modules/mods/%s/%s", salt, rest);
+        else *request = sh_textf("maps/modules/mods/%s/%s", salt, rest);
+        free(p);
+        return *request ? 1 : ma_fail(cause, "out of memory", NULL, NULL);
+    }
+    if (ma_starts(p, "decls/")) {        char *type = p + 6, *tslash = strchr(type, '/');
         if (!tslash || tslash == type || !tslash[1]) {
             free(p);
             return ma_fail(cause, "%s: decls/ holds one folder per kind of decl, named as the game names it (for "
@@ -190,7 +208,7 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
         return 0;
     }
     ma_fail(cause, "%s: '%s' is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-            "effects, particles, entities, sounds, movies, scripts, modules, virtual-textures, atlases, programs, "
+            "effects, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, programs, "
             "decls or game", path, p);
     free(p);
     return 0;
@@ -209,8 +227,13 @@ char *sh_ma_path(const char *salt, const char *request)
     if (ma_starts(r, "sound/soundbanks/pc/") && !_strnicmp(r + 20, salt, strlen(salt)) && r[20 + strlen(salt)] == '_' &&
         !strchr(r + 20, '/'))
         return sh_textf("sounds/%s", r + 21 + strlen(salt));
-    if (ma_starts(r, "generated/decls/")) {
-        const char *type = r + 16, *ts = strchr(type, '/');
+    if (ma_starts(r, "generated/maps/modules/") && ma_starts(r + 23, own)) return sh_textf("map-modules/%s", r + 23 + ol);
+    if (ma_starts(r, "maps/modules/") && ma_starts(r + 13, own)) return sh_textf("map-modules/%s", r + 13 + ol);
+    if (ma_starts(r, "maps/modules/palettes/")) {
+        const char *ps = strchr(r + 22, '/');
+        if (ps && ma_starts(ps + 1, own)) return sh_textf("map-modules/palettes/%.*s/%s", (int)(ps - (r + 22)), r + 22, ps + 1 + ol);
+    }
+    if (ma_starts(r, "generated/decls/")) {        const char *type = r + 16, *ts = strchr(type, '/');
         if (ts && ma_starts(ts + 1, own)) {
             size_t tl = (size_t)(ts - type);
             for (i = 0; i < MA_NNAMED; ++i)
@@ -244,7 +267,7 @@ static const struct { const char *folder; const char *engine; } MA_NAMES[] = {
     { "materials/", "mods/%s/" }, { "effects/", "mods/%s/" }, { "particles/", "mods/%s/" },
     { "entities/", "mods/%s/" }, { "sounds/", "mods/%s/" }, { "images/", "mods/%s/" },
     { "animations/", "md6/mods/%s/" }, { "movies/", "swf/mods/%s/" }, { "scripts/", "mods/%s/scripts/" },
-    { "modules/", "maps/modules/mods/%s/" }, { "virtual-textures/", "mods/%s/" }, { "programs/", "mods/%s/" },
+    { "map-modules/", "maps/modules/mods/%s/" }, { "virtual-textures/", "mods/%s/" }, { "programs/", "mods/%s/" },
 };
 #define MA_NNAMES (sizeof MA_NAMES / sizeof MA_NAMES[0])
 
@@ -476,6 +499,37 @@ char *sh_ma_json(const char *salt, const char *text, size_t len, sh_ma_game_key_
     if (!sh_ma_string_keys(text, len, is_game_key, &c.keys, &c.nkeys)) { if (out_len) *out_len = (size_t)-1; return NULL; }
     ma_json_walk(text, len, ma_json_rewrite_cb, &c);
     sh_ma_keys_free(c.keys, c.nkeys);
+    if (!c.changed) { free(b.p); return NULL; }
+    ma_put(&b, text + c.copied, len - c.copied);
+    if (b.oom) { free(b.p); if (out_len) *out_len = (size_t)-1; return NULL; }
+    if (out_len) *out_len = b.n;
+    return b.p;
+}
+
+/* The inverse of the strings-key half of sh_ma_json: a key of a `strings` language object written <salt>_<key> back
+ * to <key>, for mod.json written from a build known only by its manifest (modbundle.c mb_author_synth). */
+static void ma_unkey_cb(void *vctx, const char *s, size_t n, int is_key, int is_strings_key)
+{
+    ma_json_ctx *c = (ma_json_ctx *)vctx;
+    size_t at = (size_t)(s - c->text), sl = strlen(c->salt);
+    (void)is_key;
+    if (!is_strings_key || n <= sl + 1 || strncmp(s, c->salt, sl) || s[sl] != '_') return;
+    ma_put(c->b, c->text + c->copied, at - c->copied);
+    c->copied = at + sl + 1;
+    c->changed = 1;
+}
+
+char *sh_ma_json_author_keys(const char *salt, const char *text, size_t len, size_t *out_len)
+{
+    ma_buf b = { NULL, 0, 0, 0 };
+    ma_json_ctx c;
+    if (out_len) *out_len = 0;
+    if (!salt || !text) return NULL;
+    memset(&c, 0, sizeof c);
+    c.salt = salt;
+    c.text = text;
+    c.b = &b;
+    ma_json_walk(text, len, ma_unkey_cb, &c);
     if (!c.changed) { free(b.p); return NULL; }
     ma_put(&b, text + c.copied, len - c.copied);
     if (b.oom) { free(b.p); if (out_len) *out_len = (size_t)-1; return NULL; }

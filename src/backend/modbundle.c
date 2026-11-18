@@ -2905,10 +2905,10 @@ static void mb_walk_top(mb_walk *w)
         if (!_stricmp(name, "assets")) {
             mb_error(w->b, "assets holds the game's own folder layout, which a mod folder no longer uses; put each file "
                      "in the folder for what it is (materials, images, meshes, animations, effects, particles, "
-                     "entities, sounds, scripts, decls, game) and press Refresh");
+                     "entities, sounds, scripts, programs, decls, game) and press Refresh");
         } else if (!sh_ma_folder(name, strlen(name))) {
             mb_error(w->b, "%s is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-                     "effects, particles, entities, sounds, movies, scripts, modules, virtual-textures, atlases, decls "
+                     "effects, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, programs, decls "
                      "or game; rename it and press Refresh", name);
         } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             mb_error(w->b, "%s is a link to another folder; make it a real folder and press Refresh", name);
@@ -5375,9 +5375,12 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         char *info;
         if (!b->files[i].is_module) continue;
         info = sh_mb_module_info_request(b->files[i].request);
-        if (!info || !mb_req_has(&own, info))
+        if (!info || !mb_req_has(&own, info)) {
+            char *where = info ? sh_ma_path(b->id, info) : NULL;
             mb_error(b, "%s: a snapModule needs its snapModuleInfo %s in the same mod", b->files[i].path,
-                     info ? info : "?");
+                     where ? where : info ? info : "?");
+            free(where);
+        }
         free(info);
     }
 
@@ -6602,6 +6605,12 @@ static char *mb_author_synth(const sh_mb_bundle *b, size_t *out_len)
     if (o.oom) { free(o.p); return NULL; }
     pretty = mb_pretty(o.p, o.n);
     free(o.p);
+    if (pretty && b->id[0]) {
+        /* the manifest holds the engine's strings keys (<salt>_<key>); the author writes <key> */
+        size_t an = 0;
+        char *author = sh_ma_json_author_keys(b->id, pretty, strlen(pretty), &an);
+        if (author) { free(pretty); pretty = author; }
+    }
     if (pretty && out_len) *out_len = strlen(pretty);
     return pretty;
 }

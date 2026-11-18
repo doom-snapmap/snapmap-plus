@@ -50,6 +50,7 @@ typedef struct ms_need { const char *type, *name; int file; } ms_need;   /* file
 typedef struct ms_file {
     int bundle;
     const char *request, *disk, *blob;
+    const char *path;                     /* its path in the mod folder, as the author names it (modauthor.h) */
     uint64_t size;
     const char *ptype, *pname, *reg;
     int is_decl, is_shadow, is_sedef, rank;
@@ -753,6 +754,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     memset(f, 0, sizeof *f);
     f->bundle = (int)(b - x->bundles);
     f->request = request;
+    f->path = path;
     f->blob = blob;
     f->stock = stock;
     f->size = (uint64_t)size;
@@ -1171,8 +1173,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
         if (got < 0)
-            ms_fail(b, "assets/%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
-                    f->request);
+            ms_fail(b, "%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
+                    f->path ? f->path : f->request);
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
@@ -5553,8 +5555,8 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     bundle = x->bundles[f->bundle].id;
     InterlockedExchange(&f->withdrawn, 1);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: assets/%s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
-               ms_label(&x->bundles[f->bundle]), f->request, why ? why : "the game could not use it");
+    ms_console("%s: %s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why ? why : "the game could not use it");
     return 1;
 }
 
@@ -6774,18 +6776,18 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
-                    ms_console("%s: its animation file assets/%s names the model %s, which SnapMap cannot load, so "
+                    ms_console("%s: its animation file %s names the model %s, which SnapMap cannot load, so "
                                "the game's own animation is used. Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: assets/%s was not loaded because it names the model %s, which SnapMap cannot "
+                    ms_console("%s: %s was not loaded because it names the model %s, which SnapMap cannot "
                                "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
-                               ms_label(&x->bundles[f->bundle]), f->request, model);
+                               ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 }
                 free(model);
                 continue;
@@ -6885,8 +6887,8 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             {
                 char *nl = strpbrk(why, "\r\n");
                 if (nl) *nl = 0;
-                ms_console("%s: the game could not read assets/%s%s%s. Fix the file and press Refresh.",
-                           ms_label(&x->bundles[f->bundle]), f->request, why[0] ? ": " : "", why);
+                ms_console("%s: the game could not read %s%s%s. Fix the file and press Refresh.",
+                           ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why[0] ? ": " : "", why);
             }
         } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);

@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "modstore.h"
+#include "modauthor.h"
 #include "config_json.h"
 #include "mp_json.h"
 #include "backend_log.h"
@@ -1521,7 +1522,7 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
     char *name, *child, *moved = NULL;
     wchar_t *path;
     ms_rk_file *f;
-    int changed = 0, in_assets;
+    int changed = 0, in_assets, in_mod;
     if (!wcscmp(fd->cFileName, L".") || !wcscmp(fd->cFileName, L"..")) return;
     name = sh_mb_utf8(fd->cFileName);
     if (!name) { ms_rk_fail(r, "a file name under %s is not valid Unicode", rel[0] ? rel : "the folder"); return; }
@@ -1540,6 +1541,11 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
         return;
     }
     in_assets = !_strnicmp(child, "assets/", 7);
+    /* a file of the mod's folders (modauthor.h): its texts follow the salt where they spell the engine's names */
+    {
+        const char *slash = strchr(child, '/');
+        in_mod = in_assets || (slash && sh_ma_folder(child, (size_t)(slash - child)));
+    }
     if (in_assets && r->leaf) {
         /* "assets/x/mods/<from>/y" -> "assets/x/mods/<salt>/y"; a
          * directory is probed with a trailing '/' so its own last
@@ -1581,10 +1587,10 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
         pending->d[pending->n].rel = child;
         pending->n++;
         return;
-    } else if (!in_assets) {
-        /* Outside mod.json and assets\ (a README, desktop.ini): the
+    } else if (!in_mod) {
+        /* Outside mod.json and the mod's folders (a README, desktop.ini): the
          * build ignores it, and so does the move. */
-    } else if (sh_mb_bank_stem(child + 7, NULL, 0)) {
+    } else if (in_assets && sh_mb_bank_stem(child + 7, NULL, 0)) {
         ms_rk_bank(r, f, path, child);
     } else {
         size_t len = 0;
@@ -1794,19 +1800,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         modjson = sh_mb_salt_modjson(author, alen, from, salt, &mlen);
         if (!modjson) { ms_cause(cause, "mod.json is not one JSON object { ... }; correct it and press Refresh"); goto done; }
     }
-    /* Its strings keys gain the salt's prefix, and every #str_ reference
-     * to them in its own text files (mod.json among them) follows. */
-    keyed = sh_mb_salt_strings(modjson, mlen, from_name ? NULL : from, salt, &skeys, &nskeys, &i);
-    if (!keyed) { ms_cause(cause, "mod.json is not valid JSON; correct it and press Refresh"); goto done; }
-    free(modjson);
-    modjson = keyed;
-    mlen = i;
-    keyed = NULL;
-    if (nskeys) {
-        srefs = sh_mb_restr_text(modjson, mlen, skeys, nskeys, &keyed, &i);
-        if (srefs == (size_t)-1) { ms_cause(cause, "out of memory"); goto done; }
-        if (srefs) { free(modjson); modjson = keyed; mlen = i; keyed = NULL; }
-    }
+    /* Its strings keys stay as the author wrote them: the build and the serving index give them the salt
+     * (modauthor.h), so nothing on disk changes for them. */
     r.skeys = skeys;
     r.nskeys = nskeys;
     r.refs = (unsigned)drefs;
@@ -2503,6 +2498,14 @@ static void ms_salts_note(const char *const *salts, const char *const *names, si
 
 /* ---------------------------------------------------------- new mod ---- */
 
+/* A top-level folder of a mod (modauthor.h): its files' names are written lower case at install, as the build records them. */
+static int ms_author_folder(const wchar_t *name)
+{
+    char *u = sh_mb_utf8(name);
+    int r = u && sh_ma_folder(u, strlen(u));
+    free(u);
+    return r;
+}
 /* New mod's example: a crate that places and plays
  * untouched. Its entityDef is the game's SnapMap crate01 under the mod's salt,
  * its Toybox row is the game's crate01 row (snapeditorentitydef
@@ -2998,7 +3001,7 @@ static int ms_copy_tree(const wchar_t *src_top, const wchar_t *dst_top, char **c
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
                     ok = ms_cause(cause, "a symbolic link or junction is not allowed in a mod folder");
                 } else {
-                    int sub = cur.lower || (top && !_wcsicmp(fd.cFileName, L"assets"));
+                    int sub = cur.lower || (top && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && ms_author_folder(fd.cFileName));
                     wchar_t *name = _wcsdup(fd.cFileName), *from, *to;
                     size_t k;
                     for (k = 0; sub && name && name[k]; k++)

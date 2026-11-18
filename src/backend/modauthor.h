@@ -1,8 +1,8 @@
-﻿/* modauthor.h -- the mod folder an author writes, and the engine names it stands for (docs/architecture.md, "The mod
+/* modauthor.h -- the mod folder an author writes, and the engine names it stands for (docs/architecture.md, "The mod
  * folder"; docs/graphics-sdk.md for a worked example).
  *
  * An author's mod folder holds mod.json and folders by what things are: materials/, images/, meshes/, animations/,
- * effects/, particles/, entities/, sounds/, movies/, scripts/, modules/, virtual-textures/, atlases/<kind>/ and
+ * effects/, particles/, entities/, sounds/, movies/, scripts/, map-modules/, virtual-textures/, atlases/<kind>/ and
  * decls/<type>/ for every other kind of decl, plus game/ for the game's own files the mod changes or carries, at the
  * game's own path. The author never writes the salt: the product maps each path to the engine's request path
  * (`materials/body.decl` -> `generated/decls/material/mods/<salt>/body.decl`) and rewrites every name the mod's texts
@@ -54,6 +54,9 @@ char *sh_ma_text(const char *salt, const char *text, size_t len, sh_ma_key_fn ow
 /* The author's part of mod.json as the engine names it: sh_ma_text on every string, and every key of a `strings`
  * language object that is not one of the game's (is_game_key) written <salt>_<key>. Same return as sh_ma_text. */
 char *sh_ma_json(const char *salt, const char *text, size_t len, sh_ma_game_key_fn is_game_key, size_t *out_len);
+
+/* sh_ma_json's strings keys back to the author's spelling (<salt>_<key> -> <key>); same return as sh_ma_text. */
+char *sh_ma_json_author_keys(const char *salt, const char *text, size_t len, size_t *out_len);
 
 /* The mod's own strings keys in mod.json's author text (every key of a `strings` language object that is_game_key
  * does not claim), sorted, without duplicates: *keys malloc'd array of malloc'd strings, *count. 1, or 0 when out of
