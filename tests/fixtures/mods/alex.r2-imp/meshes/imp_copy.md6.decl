@@ -1,6 +1,6 @@
 {
 	init {
-		mesh "md6/mods/alexrimp/imp_copy/assets/mesh/imp_copy.md6mesh"
+		mesh "meshes/imp_copy/assets/mesh/imp_copy.md6mesh"
 		offset ( 0 0 0 )
 		calcRefBoundsFromJoints 0
 	}

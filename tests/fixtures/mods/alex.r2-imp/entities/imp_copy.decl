@@ -2,7 +2,7 @@
 	inherit = "snapmaps/placeablesnapaiencounter/imp";
 	edit = {
 		renderModelInfo = {
-			model = "mods/alexrimp/imp_copy.md6";
+			model = "meshes/imp_copy.md6";
 		}
 	}
 }

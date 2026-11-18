@@ -692,16 +692,22 @@ static char *mu_bundle_text(const sh_mb_bundle *b, const char *tag)
 {
     mpj *x;
     const mpj *s, *en;
-    char *out = NULL;
+    char *out = NULL, *own;
     int i;
     if (!b->extra || !tag) return NULL;
     if (!_strnicmp(tag, "#str_", 5)) tag += 5;
+    /* the bundle holds a key of the mod's own as the engine names it (<salt>_<key>, modauthor.h); a decl in the
+     * folder writes it as the author does */
+    own = b->id[0] ? sh_textf("%s_%s", b->id, tag) : NULL;
     x = mpj_parse(b->extra, strlen(b->extra));
     s = x ? mpj_get(x, "strings") : NULL;
     en = s && s->type == MPJ_OBJ ? mpj_get(s, "en") : NULL;
     for (i = 0; en && en->type == MPJ_OBJ && i < en->n && !out; i++)
-        if (!_stricmp(en->keys[i], tag) && en->items[i] && en->items[i]->type == MPJ_STR) out = sh_mm_decode(en->items[i]->text);
+        if ((!_stricmp(en->keys[i], tag) || (own && !_stricmp(en->keys[i], own))) && en->items[i] &&
+            en->items[i]->type == MPJ_STR)
+            out = sh_mm_decode(en->items[i]->text);
     mpj_free(x);
+    free(own);
     return out;
 }
 

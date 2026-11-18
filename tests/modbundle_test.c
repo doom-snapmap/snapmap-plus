@@ -39,11 +39,11 @@ static int log_has(const char *needle)
 
 /* The fixture's build hash (format 2). A change here is a change of the
  * canonical form or of the fixture. */
-#define GOLDEN_HASH "6035f7bc1ab991f53e8857c32b8d105e39279e6efb9847c4cd77a663930fa92f"
+#define GOLDEN_HASH "15d4f5d04c5d0c1fcf75f44919911adb0fe1dec4ba852361e8b405148ff3fafe"
 
 /* The fixture with only the two blacklist gates as requirements: the
  * general requirements canonicalise them to this text and hash. */
-#define GATES_GOLDEN_HASH "8b8d105df57fbeea880a184608a1d620fc5c2121c98c71ce76391e7eba2e4134"
+#define GATES_GOLDEN_HASH "58853ef48deb9a4906b2c126262c8678d9f9fc1f9aca2019c05b2a9a97f838d6"
 #define GATES_CANONICAL   "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"
 
 static int has_need(const sh_mb_file *f, const char *type, const char *name)
@@ -706,8 +706,8 @@ static void test_identity(const char *fixture, const char *tmp)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\otherns", tmp);
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2,\"salt\":\"yyyyyyyy\"}}");
-    CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, "needs entityDef mods/alexrimp/imp_copy, which resolves to nothing");
+    /* the folder's texts name its files by their folders, so the same folder builds under any salt */
+    CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
     sh_mb_free(&b);
 
     /* The block a first scan writes: the author's bytes kept, its own

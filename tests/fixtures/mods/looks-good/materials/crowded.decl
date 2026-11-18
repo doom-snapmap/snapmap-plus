@@ -1,10 +1,10 @@
 {
 	type			layered
-	layermask		mods/lookgood/tiles/mask.tga
-	layer1			mods/lookgood/tiles/pores.tga
-	layer1specular		mods/lookgood/tiles/spec.tga
-	baseheight		mods/lookgood/tiles/height.tga
-	burn			mods/lookgood/tiles/burnt.tga
-	burnglow		mods/lookgood/tiles/burnglow.tga
-	burnblood		mods/lookgood/tiles/burnblood.tga
+	layermask		images/tiles/mask.tga
+	layer1			images/tiles/pores.tga
+	layer1specular		images/tiles/spec.tga
+	baseheight		images/tiles/height.tga
+	burn			images/tiles/burnt.tga
+	burnglow		images/tiles/burnglow.tga
+	burnblood		images/tiles/burnblood.tga
 }

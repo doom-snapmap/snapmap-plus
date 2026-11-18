@@ -24,6 +24,7 @@
 #include "modserve.h"
 #include "modbundle.h"
 #include "modlook.h"
+#include "modauthor.h"
 #include "modprog.h"
 #include "modstock.h"
 #include "mod_test_util.h"
@@ -302,6 +303,17 @@ static int open_text(const char *request, unsigned char **bytes, size_t *len)
     return sh_modserve_open(request, bytes, len);
 }
 
+/* A file of the folder as the engine is handed it: its names written as the engine names them (modauthor.h). */
+static unsigned char *engine_whole(const char *path, size_t *n)
+{
+    unsigned char *raw = read_whole(path, n);
+    size_t en = 0;
+    char *t = raw ? sh_ma_text(GOOD_SALT, (const char *)raw, *n, NULL, NULL, &en) : NULL;
+    if (!t) return raw;
+    free(raw);
+    *n = en;
+    return (unsigned char *)t;
+}
 static void test_serve(const char *tmp)
 {
     char root[MAX_PATH], folder[MAX_PATH], src[MAX_PATH], path[MAX_PATH], *cause = NULL;
@@ -370,9 +382,13 @@ static void test_serve(const char *tmp)
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "%s.decl", LOOKS[i]);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\%s.decl", folder, LOOKS[i]);
         for (p = path; *p; p++) if (*p == '/') *p = '\\';
-        file = read_whole(path, &fn);
+        file = engine_whole(path, &fn);
         CHECK(file != NULL);
         CHECK(open_text(req, &served, &sn) == 1 && served);
+        if (served) {   /* a NUL after the bytes, for the text helpers below */
+            unsigned char *z = (unsigned char *)HeapReAlloc(GetProcessHeap(), 0, served, sn + 1);
+            if (z) { served = z; served[sn] = 0; }
+        }
         r = sh_look_compile(req, (const char *)file, fn, &want, &want_n, why, sizeof why);
         CHECK(r == SH_LOOK_CHANGED && want);
         if (served && want) {
@@ -432,7 +448,7 @@ static void test_serve(const char *tmp)
     /* a material that is not a look is served byte for byte */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "plain.decl");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\plain.decl", folder);
-    file = read_whole(path, &fn);
+    file = engine_whole(path, &fn);
     CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
     if (served) { HeapFree(GetProcessHeap(), 0, served); served = NULL; }
@@ -440,7 +456,7 @@ static void test_serve(const char *tmp)
     /* a material written with the old keys has no type: it is served byte for byte, as written */
     _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "legacy_head.decl");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\legacy_head.decl", folder);
-    file = read_whole(path, &fn);
+    file = engine_whole(path, &fn);
     CHECK(file && has((const char *)file, "snapmapplus/multilayer/skinvmtr"));
     CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
     free(file);
@@ -454,7 +470,7 @@ static void test_serve(const char *tmp)
         sh_modserve_index_build(root);   /* a new index forgets the derived texts */
         _snprintf_s(req, sizeof req, _TRUNCATE, MAT_DIR "body.decl");
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\materials\\body.decl", folder);
-        file = read_whole(path, &fn);
+        file = engine_whole(path, &fn);
         CHECK(file && open_text(req, &served, &sn) == 1 && served && sn == fn && !memcmp(served, file, fn));
         free(file);
         if (served) HeapFree(GetProcessHeap(), 0, served);
@@ -527,6 +543,8 @@ int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
     int i;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     for (i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "fixtures=", 9)) strcpy_s(g_fixtures, sizeof g_fixtures, argv[i] + 9);
         else if (!strncmp(argv[i], "fixtures_prog=", 14)) strcpy_s(g_fixtures_prog, sizeof g_fixtures_prog, argv[i] + 14);
