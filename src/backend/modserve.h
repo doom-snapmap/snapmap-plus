@@ -790,6 +790,10 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
+/* A published map whose item's place is not known (its parse before the gate,
+ * a launch no gate saw): a row resolves only at its own build at the root, never
+ * the root's other build of its salt. No folder can be named so. */
+#define SH_MODSERVE_PLACE_PUBLISHED SH_MODSERVE_PLACES "\\?"
 /* The cause of a folder in a map's place that the product did not receive:
  * a place holds only the builds a map brought, and nothing there is built. */
 #define SH_MODSERVE_PLACE_FRESH \

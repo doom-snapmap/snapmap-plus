@@ -105,18 +105,10 @@ int sh_modpublished_holding(void);
  * decided; rawmap.c). */
 int sh_modpublished_resuming(void);
 
-/* The co-op rule (DESIGN-additive goal 2, M5 over M3 in a lobby; the
- * manager's recommendation, pending the owner's confirmation): a published
- * item, launched from the hub or joined in a lobby, serves the builds it was
- * published with, on every player's machine and the author's own included.
- * The author's edits are served in the editor and in a My Maps play of the
- * author's own map, and reach players when the author republishes. A launch
- * cannot tell whether anyone will join, so the rule holds for every launch
- * of a published item. 0 restores the earlier rule (the author's own
- * published map follows the author's root folders). */
-#ifndef SH_MODPUB_COOP_PUBLISHED_BUILDS
-#define SH_MODPUB_COOP_PUBLISHED_BUILDS 1
-#endif
+/* A published item serves the builds it was published with, on every
+ * player's machine, its author's included, until its author publishes again
+ * (the owner, 2026-11-17: an edited map is another map). The author's edits
+ * serve in the editor and in a My Maps play of their own map. */
 
 /* The mod system's one notice queue: `text` (under 256 bytes) is raised
  * with a single Accept button by the tick once the dialog surface is idle

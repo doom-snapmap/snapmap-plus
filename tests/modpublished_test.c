@@ -673,6 +673,19 @@ static void launch_boundary(void)
     tick(1);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
 
+    /* A published read no gate saw serves its published builds: the root's
+     * other build of the salt (the author's edited folder) never stands in,
+     * so the launch is held for the published build. A My Maps map's own
+     * parse still follows the root. */
+    reset();
+    F.root_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 0 && sh_modpublished_holding());
+    reset();
+    F.root_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1 && !sh_modpublished_holding());
+
     /* Installed mods, a parse a gate already decided, a parse of an earlier
      * frame (the lobby's relaunch from the cache) and another map object all
      * launch unchanged. */
@@ -780,8 +793,7 @@ static void downloads_are_for_a_map(void)
 
 static void own_published_map_follows_own_folder(void)
 {
-#if SH_MODPUB_COOP_PUBLISHED_BUILDS
-    printf("-- the author's own published map serves its published builds, as every player's does (the co-op rule)\n");
+    printf("-- the author's own published map serves its published builds, as every player's does (fixed until its author publishes again)\n");
     /* The author edited the mod after publishing (the root holds the salt at
      * another build): the published item serves the build it was published
      * with, fetched into the item's place as a stranger's would be, so host
@@ -807,33 +819,6 @@ static void own_published_map_follows_own_folder(void)
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     tick(5);
     CHECK(F.asks == 0 && F.fetch_calls == 0);
-#else
-    printf("-- the author's own published map follows the root folders; nothing is downloaded\n");
-    /* The author's own published map: its context is own, so a root folder
-     * of the salt serves the row whatever its build; nothing is asked and
-     * nothing downloaded, and the row is left as it is (the next save writes
-     * the root build). */
-    reset();
-    F.titled = 1;
-    F.own_item = 1;
-    F.root_a = 1;
-    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
-    CHECK(F.place_sets == 1 && !F.loaded_place[0]);
-    CHECK(!sh_modpublished_holding() && !F.hold_ui);
-    tick(5);
-    CHECK(F.asks == 0 && F.fetch_calls == 0);
-
-    /* Own, but no root folder holds the salt: it is fetched as any map is. */
-    reset();
-    F.own_item = 1;
-    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
-    F.answer = 1;
-    tick(1);
-    tick_until_idle();
-    CHECK(F.fetch_calls == 1 && !F.fetch_place[0] && F.installed_a);   /* into the root */
-#endif
 
     /* A My Maps play is the player's own: the root folder serves it. */
     reset();

@@ -3816,6 +3816,7 @@ char *sh_modserve_place_norm(const char *place)
     const char *s = place;
     size_t pl = sizeof SH_MODSERVE_PLACES - 1, n;
     if (!place || !place[0]) return _strdup("");
+    if (!strcmp(place, SH_MODSERVE_PLACE_PUBLISHED)) return _strdup(place);
     /* "maps\<segment>", either slash, or the segment alone. */
     if (!_strnicmp(s, SH_MODSERVE_PLACES, pl) && (s[pl] == '\\' || s[pl] == '/')) s += pl + 1;
     if (!(seg = _strdup(s))) return NULL;
@@ -3895,7 +3896,7 @@ int sh_modserve_place_restore(void)
  * places area, with a character no folder name can hold, so no folder of a
  * salt is in it and a row resolves only at the root at its own build
  * (ms_row_build_in). */
-#define MS_PLACE_PENDING SH_MODSERVE_PLACES "\\?"
+#define MS_PLACE_PENDING SH_MODSERVE_PLACE_PUBLISHED
 
 int sh_modserve_place_pending(void)
 {

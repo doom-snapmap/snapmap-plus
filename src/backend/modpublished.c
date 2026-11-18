@@ -49,6 +49,7 @@
 #include "modui.h"
 #include "plain_reason.h"
 #include "modmanifest.h"
+#include "modserve.h"
 #include "map_carrier.h"
 #include "../common/text.h"
 
@@ -1041,11 +1042,10 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
      * map this machine published finds its mods at the root, as the
      * player's own maps do; a My Maps play uses the place the map records. */
     if (pub_is_completion(hook)) {
-        /* The co-op rule (modpublished.h): a published item serves its
-         * published builds, the author's own included. */
-        int own = !SH_MODPUB_COOP_PUBLISHED_BUILDS && item && item[0] && g_ops.own_item &&
-                  g_ops.own_item(g_ops.context, item);
-        if (record->rows.count && !own &&
+        /* A published item serves the builds it was published with, for every
+         * player and the author too (the owner, 2026-11-17): the author's edits
+         * reach it only by publishing again. */
+        if (record->rows.count &&
             (!g_ops.item_place || !g_ops.item_place(g_ops.context, pub_s(title), pub_s(item), &place))) {
             free(place);
             place = NULL;
@@ -1108,7 +1108,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     const char *place;
     char *owned;
     size_t missing;
-    int begun = -1, passed;
+    int begun = -1, passed, published;
     if (!g_ops_set || !pub_is_launch(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
@@ -1123,13 +1123,24 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     owned = record->place;
     record->place = NULL;
     place = pub_s(owned);
+    /* A published read serves its published builds (the co-op rule, owner
+     * 2026-11-17): with no item to name its place, its rows resolve only at
+     * their own builds, never the author's root at another build. A download
+     * still lands at the root, at the row's build. */
+    published = record->kind == SH_MODPUB_PARSE_PUBLISHED_ONLINE || record->kind == SH_MODPUB_PARSE_PUBLISHED_OFFLINE;
     if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
-    missing = pub_count_missing(&record->rows, place);
-    if (!missing) { pub_record_clear(record); pub_place_decided_load(place); passed = 1; goto out; }
+    missing = pub_count_missing(&record->rows, published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place);
+    if (!missing) {
+        pub_record_clear(record);
+        pub_place_decided_load(published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place);
+        passed = 1;
+        goto out;
+    }
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
              record->sequence, record->map, (unsigned)missing);
     if (hook == SH_MODPUB_LOBBY_LAUNCH)
-        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", place, &record->rows, record);
+        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place,
+                               &record->rows, record);
     pub_record_clear(record);
     if (begun > 0) {
         pub_logf("MODS: %s needs %u missing mod(s) (%llu bytes); held for the player's answer", pub_hook_name(hook),
@@ -1261,7 +1272,9 @@ static void pub_start_fetch(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = calloc(1, sizeof(*job));
-    if (!job || !pub_job_rows(job, h) || !(job->place = sh_text(pub_s(h->place)))) {
+    /* A published map with no item place fetches to the root, at the row's build. */
+    const char *into = !strcmp(pub_s(h->place), SH_MODSERVE_PLACE_PUBLISHED) ? "" : pub_s(h->place);
+    if (!job || !pub_job_rows(job, h) || !(job->place = sh_text(into))) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded: Snapmap+ ran out of memory. %s Restart DOOM and try again.",
                     pub_thing(h->hook), pub_not_done(h->hook));
