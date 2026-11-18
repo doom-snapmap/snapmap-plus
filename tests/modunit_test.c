@@ -313,10 +313,79 @@ static void test_proof(const char *top)
     sh_mb_free(&b);
 }
 
-/* 6 (registry and enumerated decls, a native/ edited copy of the conductor list) is not here: the builder derives an
- * edited copy's edits against the game's own text, and without the stock reader (modstock registration) it refuses
- * the build: "the game's generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl cannot be read, so the
- * edits this copy makes cannot be derived". */
+/* 6: a native/ edited copy of the conductor list. The builder derives the copy's edits against the game's own text,
+ * read here from a fake installed-content reader. The pack's edits name both objects; a composition of the crate's
+ * unit alone keeps only the crate's entry (R-DS5: a unit's copy of a changed DOOM decl keeps the entries for what it
+ * carries, so the conductor never names a demon the map was not given). */
+#define CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
+static const char g_conductor_stock[] =
+    "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 1;\n"
+    "\t\t\titem[0] = {\n\t\t\t\taiType = \"1\";\n\t\t\t\tentityDef = \"ai/demon/imp\";\n\t\t\t}\n\t\t}\n\t}\n}\n";
+static int cs_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    (void)c;
+    if (_stricmp(source, CONDUCTOR)) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(g_conductor_stock, strlen(g_conductor_stock), sha);
+    *size = strlen(g_conductor_stock);
+    return SH_MB_STOCK_OK;
+}
+static int cs_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    (void)c; (void)sha;
+    if (_stricmp(source, CONDUCTOR)) return SH_MB_STOCK_ABSENT;
+    *len = strlen(g_conductor_stock);
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, g_conductor_stock, *len);
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops g_conductor_ops = { NULL, NULL, cs_identify, NULL, cs_read };
+
+typedef struct src_ctx { const char *folder, *swap_path, *swap_file; } src_ctx;
+static char *source_of(void *context, const char *path);
+
+static void test_registry_edits(const char *top)
+{
+    char folder[MAX_PATH * 2], dest[MAX_PATH * 2], *why = NULL;
+    sh_mb_bundle b, out;
+    sh_unit u;
+    const char *manifests[1];
+    size_t lens[1];
+    src_ctx ctx;
+
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\registry", top);
+    _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s\\registry_comp", top);
+    write_pack(folder);
+    mt_write(folder, "native\\generated\\decls\\entitydef\\ai\\conductor\\coop\\snapmap_default.decl",
+             "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 3;\n"
+             "\t\t\titem[0] = {\n\t\t\t\taiType = \"1\";\n\t\t\t\tentityDef = \"ai/demon/imp\";\n\t\t\t}\n"
+             "\t\t\titem[1] = {\n\t\t\t\taiType = \"2\";\n\t\t\t\tentityDef = \"mods/" SALT "/crate\";\n\t\t\t}\n"
+             "\t\t\titem[2] = {\n\t\t\t\taiType = \"4\";\n\t\t\t\tentityDef = \"mods/" SALT "/barrel\";\n\t\t\t}\n"
+             "\t\t}\n\t}\n}\n");
+    sh_mb_set_stock_ops(&g_conductor_ops);
+    if (!build(folder, &b)) { sh_mb_set_stock_ops(NULL); return; }
+    if (!b.edits) fprintf(stderr, "  pack edits: none (%s)\n", sh_mb_first_warning(&b) ? sh_mb_first_warning(&b) : "-");
+    /* The pack carries both objects: both entries are its edits. */
+    CHECK(b.edits && strstr(b.edits, "mods/" SALT "/crate") && strstr(b.edits, "mods/" SALT "/barrel"));
+    if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
+        CHECK(kept(&b, &u, "native/" CONDUCTOR) == 1);
+        manifests[0] = u.manifest;
+        lens[0] = u.manifest_len;
+        ctx.folder = folder;
+        ctx.swap_path = NULL;
+        ctx.swap_file = NULL;
+        memset(&out, 0, sizeof out);
+        CHECK(sh_unit_compose(manifests, lens, 1, source_of, &ctx, SALT, "Composed", &g_game, dest, &out, &why));
+        if (why) { fprintf(stderr, "compose: %s\n", why); free(why); why = NULL; }
+        CHECK(out.edits && strstr(out.edits, "mods/" SALT "/crate") && !strstr(out.edits, "mods/" SALT "/barrel"));
+        CHECK(out.edits && strstr(out.edits, "\"counts\":{\"set\":0,\"remove\":0,\"list\":1,"));
+        if (out.edits && strstr(out.edits, "barrel")) fprintf(stderr, "  composed edits: %s\n", out.edits);
+        sh_mb_free(&out);
+        sh_unit_free(&u);
+    }
+    sh_mb_free(&b);
+    sh_mb_set_stock_ops(NULL);
+}
 
 /* ------------------------------------------------------------------ 7 */
 
@@ -335,20 +404,26 @@ static void test_boards(const char *top)
     add_object(folder, "lever", 400, "landpagefile \"mods/" SALT "/board\"\n");
     put_binary(folder, "virtual-textures\\board_sq1.mega2", NULL, 100, 1);
     put_binary(folder, "virtual-textures\\board_sq6.mega2", NULL, 100, 2);
+    put_binary(folder, "virtual-textures\\board_sq11.mega2", NULL, 100, 3);
     if (!build(folder, &b)) return;
     if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
         CHECK(kept(&b, &u, "virtual-textures/board_sq1.mega2") == 1);
         CHECK(kept(&b, &u, "virtual-textures/board_sq6.mega2") == 0);
+        CHECK(kept(&b, &u, "virtual-textures/board_sq11.mega2") == 0);
         sh_unit_free(&u);
     }
+    /* D-A29: an object drawing from square 6 alone keeps square 1 too, the only source of the family's coarsest
+     * page when it has no _q members; no other square comes with it. */
     if (unit(&b, folder, "mods/" SALT "/barrel", &u)) {
-        CHECK(kept(&b, &u, "virtual-textures/board_sq1.mega2") == 0);
+        CHECK(kept(&b, &u, "virtual-textures/board_sq1.mega2") == 1);
         CHECK(kept(&b, &u, "virtual-textures/board_sq6.mega2") == 1);
+        CHECK(kept(&b, &u, "virtual-textures/board_sq11.mega2") == 0);
         sh_unit_free(&u);
     }
     if (unit(&b, folder, "mods/" SALT "/lever", &u)) {
         CHECK(kept(&b, &u, "virtual-textures/board_sq1.mega2") == 1);
         CHECK(kept(&b, &u, "virtual-textures/board_sq6.mega2") == 1);
+        CHECK(kept(&b, &u, "virtual-textures/board_sq11.mega2") == 1);
         sh_unit_free(&u);
     }
     sh_mb_free(&b);
@@ -463,8 +538,6 @@ static void test_mod_share(const char *top)
 
 /* ------------------------------------------------------------------ 11 */
 
-typedef struct src_ctx { const char *folder, *swap_path, *swap_file; } src_ctx;
-
 static char *source_of(void *ctx, const char *path)
 {
     const src_ctx *c = (const src_ctx *)ctx;
@@ -573,6 +646,7 @@ int main(void)
     test_closure(top);
     test_identity(top);
     test_proof(top);
+    test_registry_edits(top);
     test_boards(top);
     test_scripts(top);
     test_asked(top);
