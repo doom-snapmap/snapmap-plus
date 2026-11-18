@@ -262,10 +262,13 @@ int sh_script_owns_entity(lua_State *L, uint64_t handle);
  * return the full name, valid for the next seven resolutions of this state
  * (the stack is left as it was): "ai/tyrant" -> "mods/<salt>/ai/tyrant"; "mods/<salt>/..." with this
  * mod's own salt is accepted as written. Any other "mods/..." name is
- * refused. A game("...") reference resolves to the game name when allow_game
+ * refused. A native("...") reference resolves to DOOM's name when allow_game
  * (then *is_game = 1) and is refused otherwise. Raises a plain error naming
  * `call` on any refusal, before the caller touches the engine. */
 const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game);
+/* The same for a sound decl: a short name's leaf takes the namespace ("play_x" -> "mods/<salt>/<salt>_play_x"), as
+ * the builder names the mod's sounds/ files (modauthor.h). */
+const char *sh_script_check_sound_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game);
 
 /* Raise a plain error at the calling script line: `fmt` is one sentence the
  * stop line shows as written ("\"spawn\" can only spawn this mod's

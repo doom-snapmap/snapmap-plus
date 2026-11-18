@@ -112,7 +112,7 @@ static int l_decl(lua_State *L)
     if (!ptr)
         return sh_script_refuse(L, is_game ? "\"decl\" found no %s decl named %s in the game"
                                            : "\"decl\" found no %s decl \"%s\" in this mod; a decl of the game is "
-                                             "decl(type, game(name))", type, is_game ? full : lua_tostring(L, 2));
+                                             "decl(type, native(name))", type, is_game ? full : lua_tostring(L, 2));
     d = (decl_ud *)lua_newuserdatauv(L, sizeof *d, 0);
     memset(d, 0, sizeof *d);
     d->ptr = ptr;

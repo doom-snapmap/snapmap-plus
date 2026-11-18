@@ -285,7 +285,53 @@ unsigned char *sh_mb_read_file(const char *path, size_t max, size_t *out_len)
     return r;
 }
 
+/* The namespaces a binary spells: every mods/<salt>/ in its bytes (a chunk's last 13 bytes are kept for the next). */
+typedef struct mb_spell { const char *own; char found[SH_MB_ID_MAX + 1]; unsigned char tail[13]; size_t ntail; } mb_spell;
+
+static int mb_spell_salt_char(unsigned char c, int first) { return (c >= 'a' && c <= 'z') || (!first && c >= '0' && c <= '9'); }
+
+static void mb_spell_at(mb_spell *sp, const unsigned char *p, size_t n, size_t limit)
+{
+    size_t i, k;
+    for (i = 0; i + 14 <= n && i < limit; ++i) {
+        if (memcmp(p + i, "mods/", 5) || p[i + 13] != '/') continue;
+        for (k = 0; k < 8 && mb_spell_salt_char(p[i + 5 + k], k == 0); ++k) {}
+        if (k < 8) continue;
+        /* a namespace other than the mod's own wins: it is the one serving has to map */
+        if (!sp->found[0] || (sp->own && !strncmp(sp->found, sp->own, 8) && strncmp((const char *)p + i + 5, sp->own, 8))) {
+            memcpy(sp->found, p + i + 5, 8);
+            sp->found[8] = 0;
+        }
+    }
+}
+
+static void mb_spell_feed(mb_spell *sp, const unsigned char *buf, size_t got)
+{
+    unsigned char win[26];
+    size_t head = got < 13 ? got : 13;
+    if (sp->ntail) {
+        memcpy(win, sp->tail, sp->ntail);
+        memcpy(win + sp->ntail, buf, head);
+        mb_spell_at(sp, win, sp->ntail + head, sp->ntail);
+    }
+    mb_spell_at(sp, buf, got, got);
+    if (got >= 13) { memcpy(sp->tail, buf + got - 13, 13); sp->ntail = 13; }
+    else {
+        size_t keep = sp->ntail + got > 13 ? 13 - got : sp->ntail;
+        memmove(sp->tail, sp->tail + sp->ntail - keep, keep);
+        memcpy(sp->tail + keep, buf, got);
+        sp->ntail = keep + got;
+    }
+}
+
+static int mb_hash_wfile_spell(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1], mb_spell *sp);
+
 static int mb_hash_wfile(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1])
+{
+    return mb_hash_wfile_spell(path, size, out, NULL);
+}
+
+static int mb_hash_wfile_spell(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1], mb_spell *sp)
 {
     HANDLE h;
     unsigned char *buf;
@@ -303,6 +349,7 @@ static int mb_hash_wfile(const wchar_t *path, unsigned long long *size, char out
         if (!ReadFile(h, buf, MB_READ_CHUNK, &got, NULL)) { ok = 0; break; }
         if (got == 0) break;
         sh_sha256_update(&s, buf, got);
+        if (sp) mb_spell_feed(sp, buf, got);
         total += got;
     }
     free(buf);
@@ -660,6 +707,10 @@ static int mbj_canon(const mbj *v, mb_buf *b, char **cause)
     }
     return 0;
 }
+
+/* The type sh_mb_scan_needs reports a sound of DOOM's own named by its event with (compared by address): no file
+ * holds it, so it is not a need (mb_need_cb keeps it in the file's events). */
+static const char MB_SOUND_EVENT[] = "soundEvent";
 
 /* ------------------------------------------------- decl type spellings ---- */
 /* generated/decls/<folder>/ to the engine's type name, from the 13954591
@@ -1763,6 +1814,12 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         sc->fn(sc->ctx, "sound", v, vn);
         return;
     }
+    /* DOOM's own event, named by itself: not a need (no file), but the stock-bank question asks about it */
+    if ((mb_ieq_n(k, kn, "soundShader") || mb_ieq_n(k, kn, "sound")) && vn > 5 &&
+        (mb_ieq_n(v, 5, "play_") || mb_ieq_n(v, 5, "stop_"))) {
+        sc->fn(sc->ctx, MB_SOUND_EVENT, v, vn);
+        return;
+    }
     /* renderModelInfo customMaterial names the material the decl's model is
      * drawn with, so the plan registers it before the entityDef that names it. */
     if (mb_ieq_n(k, kn, "customMaterial")) { sc->fn(sc->ctx, "material", v, vn); return; }
@@ -1950,6 +2007,8 @@ static void mb_file_free(sh_mb_file *f)
     free(f->edit);
     for (i = 0; i < f->need_count; i++) { free(f->needs[i].type); free(f->needs[i].name); }
     free(f->needs);
+    for (i = 0; i < f->event_count; i++) free(f->events[i]);
+    free(f->events);
 }
 
 void sh_mb_free(sh_mb_bundle *b)
@@ -2370,6 +2429,14 @@ typedef struct mb_need_ctx { sh_mb_file *file; int oom; } mb_need_ctx;
 static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
 {
     mb_need_ctx *c = (mb_need_ctx *)ctx;
+    if (type == MB_SOUND_EVENT) {
+        sh_mb_file *f = c->file;
+        char **g = (char **)realloc(f->events, (f->event_count + 1) * sizeof *g);
+        if (!g || !(g[f->event_count] = mb_strndup(name, n))) { if (g) f->events = g; c->oom = 1; return; }
+        f->events = g;
+        f->event_count++;
+        return;
+    }
     if (!mb_add_need(c->file, type, name, n)) c->oom = 1;
 }
 
@@ -2802,11 +2869,13 @@ typedef struct mb_walk {
     wchar_t *root;          /* the mod folder, long form */
     const char *folder;     /* its name, as the author named it (UTF-8) */
     int stock;              /* a stock reader is registered: defer type and size refusals */
+    const sh_mb_resolver *r;/* whether DOOM holds a path (D14's two sentences); may be NULL */
+    int outside;            /* walking a folder that is none of the mod's: every file is refused (D14) */
 } mb_walk;
 
 static const char *mb_rp_forbidden(const char *request);
 
-/* One file found in one of the mod's folders at `child` ("materials/...", "game/...": modauthor.h). */
+/* One file found in one of the mod's folders at `child` ("materials/...", "native/...": modauthor.h). */
 static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
 {
     char *cause = NULL;
@@ -2818,6 +2887,15 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
     int deferred = 0;
     if (!path_lower) { mb_error(w->b, "out of memory"); return; }
     mb_lower(path_lower);
+    if (w->outside) {
+        /* D14 (SPEC-distribution 3.10): the file is named, and the sentence says whether it is DOOM's own */
+        int dooms = w->r && w->r->stock && w->r->stock(w->r->stock_context, path_lower) == 1;
+        char *why = sh_ma_outside_cause(child, dooms);
+        mb_error(w->b, "%s", why ? why : "out of memory");
+        free(why);
+        free(path_lower);
+        return;
+    }
     if (!sh_mb_check_request(path_lower, &cause)) {
         mb_error(w->b, "%s: %s", child, cause);
         free(cause);
@@ -2944,23 +3022,17 @@ static void mb_walk_top(mb_walk *w)
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) { mb_error(w->b, "out of memory"); continue; }
-        if (!_stricmp(name, "assets")) {
-            mb_error(w->b, "assets holds the game's own folder layout, which a mod folder no longer uses; put each file "
-                     "in the folder for what it is (materials, images, meshes, animations, effects, particles, "
-                     "entities, sounds, scripts, programs, decls, game) and press Refresh");
-        } else if (!sh_ma_folder(name, strlen(name))) {
-            mb_error(w->b, "%s is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-                     "effects, environments, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, "
-                     "programs, decls "
-                     "or game; rename it and press Refresh", name);
-        } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             mb_error(w->b, "%s is a link to another folder; make it a real folder and press Refresh", name);
         } else {
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
             char *rel = sh_text(name);
             if (rel) mb_lower(rel);
+            /* a folder that is none of the mod's: each file in it is refused by name (D14) */
+            w->outside = !sh_ma_folder(name, strlen(name));
             if (sub && rel) mb_walk_dir(w, sub, rel);
             else mb_error(w->b, "out of memory");
+            w->outside = 0;
             free(sub);
             free(rel);
         }
@@ -3385,7 +3457,7 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
     if (!req) { mb_error(rp->b, "out of memory"); return; }
     bin = mb_rp_find(rp, req);
     if (!bin) {
-        MB_RP_ERR(strict, "%s ships no game/%s: Vulkan needs the cooked program", decl->path, req);
+        MB_RP_ERR(strict, "%s ships no native/%s: Vulkan needs the cooked program", decl->path, req);
         free(req);
         return;
     }
@@ -3402,7 +3474,7 @@ static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, cons
             /* With the stage texts unknown, only the two stages every
              * drawing program has are required. */
             if (r == 1 || k < 2)
-                MB_RP_ERR(strict, "%s needs game/%s (its %s stage): the engine stops with \"not found\" when it binds",
+                MB_RP_ERR(strict, "%s needs native/%s (its %s stage): the engine stops with \"not found\" when it binds",
                           decl->path, req, stage_name[k]);
             free(req);
             continue;
@@ -3739,25 +3811,32 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
     const char **why = NULL;
     size_t i, n = 0, k, cap = 0;
     if (!need) return;
+    /* A sound is its decl's name: one of the mod's own (whose event carries the namespace, so it is the mod's
+     * bank's), or one of DOOM's a text names, such as a stock event's own name (every event is a sound decl). */
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
-        char bank[80];
-        if (!f->ptype || !f->pname || _stricmp(f->ptype, "sound") != 0) continue;
-        if (!need(f->pname, bank, sizeof bank) || !bank[0]) continue;
-        for (k = 0; k < n && strcmp(banks[k], bank); k++) {}
-        if (k < n) continue;
-        if (n == cap) {
-            size_t next = cap ? cap * 2 : 16;
-            char (*nb)[80] = (char (*)[80])realloc(banks, next * sizeof *banks);
-            const char **nw = nb ? (const char **)realloc((void *)why, next * sizeof *why) : NULL;
-            if (nb) banks = nb;
-            if (!nb || !nw) { mb_error(b, "out of memory listing the game's sound banks the mod needs"); free(banks); free((void *)why); return; }
-            why = nw;
-            cap = next;
+        size_t q;
+        for (q = 0; q <= f->event_count; q++) {
+            char bank[80];
+            const char *name = q < f->event_count ? f->events[q] : f->pname;
+            const char *type = q < f->event_count ? "sound" : f->ptype;
+            if (!type || !name || _stricmp(type, "sound") != 0) continue;
+            if (!need(name, bank, sizeof bank) || !bank[0]) continue;
+            for (k = 0; k < n && strcmp(banks[k], bank); k++) {}
+            if (k < n) continue;
+            if (n == cap) {
+                size_t next = cap ? cap * 2 : 16;
+                char (*nb)[80] = (char (*)[80])realloc(banks, next * sizeof *banks);
+                const char **nw = nb ? (const char **)realloc((void *)why, next * sizeof *why) : NULL;
+                if (nb) banks = nb;
+                if (!nb || !nw) { mb_error(b, "out of memory listing the game's sound banks the mod needs"); free(banks); free((void *)why); return; }
+                why = nw;
+                cap = next;
+            }
+            strcpy_s(banks[n], sizeof banks[n], bank);
+            why[n] = name;
+            n++;
         }
-        strcpy_s(banks[n], sizeof banks[n], bank);
-        why[n] = f->pname;
-        n++;
     }
     if (!n || !(ord = (char **)malloc(n * sizeof *ord))) {
         if (n) mb_error(b, "out of memory listing the game's sound banks the mod needs");
@@ -4510,7 +4589,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     f = mb_add_file(b);
     if (!f) { free(name); mb_error(b, "out of memory"); return 0; }
     idx = b->file_count - 1;
-    f->path = sh_ma_path(b->id, request);   /* game/<request>: the game's own file at its own path */
+    f->path = sh_ma_path(b->id, request);   /* native/<request>: DOOM's own file at its own path */
     f->request = mb_strdup(request);
     f->stock_source = mb_strdup(request);
     f->ptype = mb_strdup(type);
@@ -5216,15 +5295,66 @@ static void mb_derive_requirements(sh_mb_bundle *b, int report)
     mbj_free(req);
 }
 
+/* SPEC-distribution 3.10: a native/ file whose bytes are DOOM's own is a pointer, never carried, and the build says the
+ * mod does not need it. Only where that is true: content SnapMap sees (snap_gameresources, a loose file), or campaign
+ * content another file of the mod names, which the closure finds by itself; a campaign file nothing names is what
+ * makes it reach SnapMap, so it is needed. */
+static void mb_warn_native_same(sh_mb_bundle *b)
+{
+    size_t i, j, k;
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        char where[32] = "";
+        int unneeded = 0;
+        if (!f->stock || f->absent || !f->path || !mb_starts(f->path, SH_MA_NATIVE)) continue;
+        if (f->stock_source && sh_mb_stock_container(f->stock_source, f->blob, where, sizeof where) &&
+            strcmp(where, "gameresources") != 0)
+            unneeded = 1;
+        for (j = 0; !unneeded && f->ptype && f->pname && j < b->file_count; j++) {
+            const sh_mb_file *g = &b->files[j];
+            if (j == i) continue;
+            for (k = 0; k < g->need_count && !unneeded; k++)
+                unneeded = g->needs[k].type && g->needs[k].name && !_stricmp(g->needs[k].type, f->ptype) &&
+                           !_stricmp(g->needs[k].name, f->pname);
+        }
+        if (unneeded) mb_warn(b, "%s is the same as DOOM's own file, so the mod does not need it.", f->path);
+    }
+}
+
+/* A text of the mod that spells one of its names as the engine does (mods/<salt>/x): served as written, it breaks
+ * when the mod gets another salt, so the build says to write the name by its folder (R-NM1, "Not done"). One warning
+ * per file, at the first such name; the namespace it spells counts for "spelled". */
+static void mb_spelled_text(sh_mb_bundle *b, const sh_mb_file *f, const unsigned char *t, size_t n, mb_spell *sp)
+{
+    size_t i, k, line = 1;
+    mb_spell_at(sp, t, n, n);
+    for (i = 0; i + 14 <= n; ++i) {
+        if (t[i] == '\n') line++;
+        if (memcmp(t + i, "mods/", 5) || t[i + 13] != '/' || (i && t[i - 1] != '"' && t[i - 1] != ' ' &&
+                                                                t[i - 1] != '\t' && t[i - 1] != '(' && t[i - 1] != '='))
+            continue;
+        for (k = 0; k < 8 && mb_spell_salt_char(t[i + 5 + k], k == 0); ++k) {}
+        if (k < 8 || strncmp((const char *)t + i + 5, b->id, 8)) continue;
+        for (k = i + 14; k < n && (isalnum(t[k]) || t[k] == '_' || t[k] == '/' || t[k] == '.' || t[k] == '-'); ++k) {}
+        mb_warn(b, "%s line %u writes %.*s, the engine's spelling of one of this mod's names; write it by the mod's "
+                "folder for its kind (entities/, materials/, sounds/, ...) and Snapmap+ names it for the engine",
+                f->path, (unsigned)line, (int)(k - i), (const char *)t + i);
+        return;
+    }
+}
+
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
     const sh_mb_stock_ops *stock = mb_stock();
     mb_scripts scripts;
+    mb_spell spell;
     size_t i, k;
 
     memset(&scripts, 0, sizeof scripts);
+    memset(&spell, 0, sizeof spell);
+    spell.own = b->id;
     _snprintf_s(ns_decl, sizeof ns_decl, _TRUNCATE, "mods/%s/", b->id);
     _snprintf_s(ns_raw, sizeof ns_raw, _TRUNCATE, "/mods/%s/", b->id);
 
@@ -5281,6 +5411,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(text, len, f->blob);
             got = len;
+            mb_spelled_text(b, f, text, len, &spell);
             /* read as the engine will: the mod's names as the engine names them */
             if (!(text = mb_engine_text(b, text, &len))) { mb_error(b, "out of memory"); free(full); continue; }
             if (!sh_decl_text_well_formed(text, len)) {
@@ -5368,11 +5499,12 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(text, len, f->blob);
             got = len;
+            mb_spelled_text(b, f, text, len, &spell);
             scripts.files++;
             scripts.bytes += len;
             if (got == f->size) mb_script_file(b, i, text, len, &scripts);
             free(text);
-        } else if (!mb_hash_wfile(full, &got, f->blob)) {
+        } else if (!mb_hash_wfile_spell(full, &got, f->blob, &spell)) {
             mb_error(b, "cannot read %s", f->path);
             free(full);
             continue;
@@ -5435,20 +5567,24 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                              f->path);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
-                /* A decl at a game name is an edited copy (mb_derive_edits);
-                 * a binary has no structure to diff and the game loads it by
-                 * its fixed name, so it is refused, except in a folder the
-                 * product received. The game ships the file, so the copy can
-                 * also simply go: the mod then borrows the game's. */
-                if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !g_mb_keep_here) {
-                    mb_error(b, "%s: the game ships this file and a mod cannot replace it with other bytes; delete your "
-                             "copy and the mod borrows the game's, or put your version in the mod's own folder for what it "
-                             "is and name it there", f->path);
-                } else if (got == 1) {
+                /* A changed DOOM file (native/, SPEC-distribution 3.10): a decl
+                 * is an edited copy (mb_derive_edits), any other kind a
+                 * replacement, served at DOOM's name only in maps that use
+                 * the mod (a shadow, the serving index's map scope; manager
+                 * decision D-A3). A native/ path DOOM does not hold is no
+                 * change to anything of DOOM's: it is the mod's own and goes
+                 * in its kind's folder (D-A5). */
+                if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {
-                    mb_error(b, "%s: %s, and the game has no file of that name for it to replace; move it to the mod's own "
-                             "folder for what it is and press Refresh", f->path, why);
+                    char *own_path = sh_ma_kind_path(f->request);
+                    if (own_path)
+                        mb_error(b, "This mod was not built: %s is not one of DOOM's files, so it is the mod's own; move "
+                                 "it to %s.", f->path, own_path);
+                    else
+                        mb_error(b, "This mod was not built: %s is not one of DOOM's files, so it is the mod's own. %s",
+                                 f->path, sh_ma_kind_list());
+                    free(own_path);
                 } else {
                     mb_error(b, "%s: %s, and Snapmap+ could not read the game's files to tell whether it replaces "
                              "one; start DOOM normally and press Refresh", f->path, why);
@@ -5458,6 +5594,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         }
     }
 
+    memcpy(b->spelled, spell.found, sizeof b->spelled);
     mb_companion_needs(b);
     mb_scene_needs(b);
 
@@ -5577,6 +5714,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         }
         mb_twin_reset(&twin);
     }
+    mb_warn_native_same(b);
     mb_scripts_finish(b, &own, &scripts);
     mb_scripts_free(&scripts);
     mb_classify_all(b);
@@ -5877,7 +6015,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 {
     static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
-                                         "registries", "rules", "salt", "scripts", "shadows", "stock", "tree", "warnings", NULL };
+                                         "registries", "rules", "salt", "scripts", "shadows", "spelled", "stock", "tree", "warnings", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i;
     if (root->t != MBJ_OBJ) { mb_error(out, MB_BLOCK_EDITED); return 0; }
@@ -5926,6 +6064,9 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     }
     if (!mb_is_hex64(bundle)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     if (!mb_descriptor_root(out, root, block, 0)) return 0;
+    v = mbj_get(block, "spelled");
+    if (v && (v->t != MBJ_STR || !sh_salt_valid(v->s, v->n))) { mb_error(out, MB_BLOCK_EDITED); return 0; }
+    if (v) { memcpy(out->spelled, v->s, SH_SALT_LEN); out->spelled[SH_SALT_LEN] = 0; }
     v = mbj_get(block, "registries");
     if (v) {
         mb_buf rb = {0};
@@ -6620,6 +6761,7 @@ static char *mb_block_text(const sh_mb_bundle *b)
     mb_puts(&o, b->registries ? b->registries : "{}");
     if (b->edits) { mb_puts(&o, ",\"edits\":"); mb_puts(&o, b->edits); }
     if (b->scripts) { mb_puts(&o, ",\"scripts\":"); mb_puts(&o, b->scripts); }
+    if (b->spelled[0]) { mb_puts(&o, ",\"spelled\":"); mb_put_jcstr(&o, b->spelled); }
     if (b->shadow_count) {
         mb_puts(&o, ",\"shadows\":[");
         for (i = 0; i < b->shadow_count; i++) {
@@ -6949,6 +7091,8 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
         w.folder = sh_mb_utf8(leaf ? leaf + 1 : root);
     }
     w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
+    w.r = resolver;
+    w.outside = 0;
     mb_walk_top(&w);
     free((void *)w.folder);
     if (!out->errors) {

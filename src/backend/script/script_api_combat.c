@@ -427,9 +427,10 @@ static void *check_decl(lua_State *L, int arg, const char *call, const char *typ
     void *decl;
     int is_game = 0;
     if (lua_type(L, arg) != LUA_TSTRING && !lua_isuserdata(L, arg))
-        sh_script_refuse(L, "\"%s\" needs %s (the name of a %s decl of this mod, or of the game with game(name)), "
+        sh_script_refuse(L, "\"%s\" needs %s (the name of a %s decl of this mod, or of DOOM's with native(name)), "
                             "got %s", call, what, type, lua_isnoneornil(L, arg) ? "nothing" : luaL_typename(L, arg));
-    full = sh_script_check_name(L, arg, call, 1, &is_game);
+    full = strcmp(type, "sound") ? sh_script_check_name(L, arg, call, 1, &is_game)
+                                 : sh_script_check_sound_name(L, arg, call, 1, &is_game);
     if (!CE(decl)) return NULL;
     decl = g_ce.decl(type, full);
     if (!decl && is_game)
@@ -582,7 +583,7 @@ static int l_hitscan(lua_State *L)
         hit = e->resolve(t.hit_spawn_id);
     if (hit) damage_event(hit, decl, dir, attacker, !lua_isnoneornil(L, 5));
     lua_createtable(L, 0, 3);
-    sh_script_api_push_vec(L, t.end); lua_setfield(L, -2, "pos");
+    sh_script_api_push_vec(L, t.end); lua_setfield(L, -2, "position");
     sh_script_api_push_vec(L, t.normal); lua_setfield(L, -2, "normal");
     if (hit) { sh_script_api_push_engine_entity(L, hit); lua_setfield(L, -2, "entity"); }
     return 1;

@@ -62,7 +62,7 @@
     X(R_DIRT, "dirt") X(R_GLOW, "glow") X(R_SECONDS, "seconds")                                                    \
     /* script calls (R-NM1's names) */                       \
     X(C_PLAY_EFFECT, "play_effect") X(C_SET_ENVIRONMENT, "set_environment") X(C_CLEAR_ENVIRONMENT, "clear_environment")     \
-    X(C_ENVIRONMENT_AREA, "environment_area") X(C_RECOLOUR, "recolour") X(C_GAME, "game")
+    X(C_ENVIRONMENT_AREA, "environment_area") X(C_RECOLOUR, "recolour") X(C_GAME, "native")
 
 typedef enum sdk_word_id {
 #define SDK_WORD_ENUM(id, w) SDK_##id,

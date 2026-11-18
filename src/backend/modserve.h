@@ -129,6 +129,13 @@ typedef struct sh_modserve_hit {
 char *sh_modserve_bank_rename_text(const char *text, size_t len, const char *stem, const char *renamed, size_t *out_len);
 /* Rewrite a bank's BKHD id to FNV-1 of `stem` in place. 1 done, 0 not a BKHD bank. Pure. */
 int  sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem);
+/* Rewrite every HIRC Event id of a bank that equals from[k] to to[k] in place (the namespace of a mod's sound
+ * events: modserve.c ms_sound_events). The count rewritten. Pure. */
+int  sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count);
+/* Map the namespace `from` (8 characters) to `to` in place wherever the bytes spell it as a name part: after a '/'
+ * or "#str_", before a '/' or '_' (mods/<from>/x, .../<from>_play_x, #str_<from>_key). Length-preserving and
+ * byte-exact (SPEC-distribution D12). The count mapped. Pure. */
+size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, const char *to);
 
 /* Constant-time, allocation-free lookup of an engine request path (any case,
  * either separator). Returns 1 and fills *out (when non-NULL) for a served

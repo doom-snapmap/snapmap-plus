@@ -33,7 +33,7 @@ local function trace(from, to, also)
       local a, b = V.dot(pl.n, from) - pl.d, V.dot(pl.n, to) - pl.d
       if a > 0.001 and b < 0 then
         local t = a / (a - b)
-        if not best or t < best.t then best = { t = t, pos = V.add(from, V.mul(dir, t)), normal = pl.n } end
+        if not best or t < best.t then best = { t = t, position = V.add(from, V.mul(dir, t)), normal = pl.n } end
       end
     end
   end
@@ -44,12 +44,12 @@ local clock, moving, placed, held, things = 0, {}, {}, {}, {}
 local function adapter()
   local A = {}
   A.now = function() return clock end
-  A.pos = function(e) return e.pos end
+  A.position = function(e) return e.pos end
   A.forward = function(e) return e.forward end
-  A.def = function(e) return e.def end
+  A.definition = function(e) return e.def end
   A.alive = function(e) return not dead[e] end
   A.trace = function(from, to) return trace(from, to) end
-  A.nav_ground = function(p) return V.new(p.x, p.y, 0) end
+  A.ground_below = function(p) return V.new(p.x, p.y, 0) end
   A.entities_near = function() return things end
   A.move_to = function(e, pos) move_calls = move_calls + 1; moving[e] = pos end
   A.move_done = function(e) return moving[e] == nil end

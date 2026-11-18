@@ -156,6 +156,7 @@ typedef struct ms_bundle {
     const char *registries;               /* the product block's "registries" object (JSON), or NULL */
     const char *edits;                    /* the product block's "edits" array (JSON, derived edits), or NULL */
     size_t edits_len;
+    const char *spelled;                  /* the block's "spelled": the namespace its binaries spell, or NULL */
 } ms_bundle;
 
 /* A mod as a line names it: the author's name, else its folder, else its salt. */
@@ -1071,6 +1072,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
                 else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
+                else if (!strcmp(key, "spelled")) b->spelled = ms_jstr(x, v, ve, 32);
                 else if (!strcmp(key, "scripts") && v < ve && *v == '{') {
                     /* "node": true, a script registers an input: the mod gets its Script node row. */
                     ms_json s = { v, ve };
@@ -4328,6 +4330,77 @@ int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem
     return 1;
 }
 
+int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count)
+{
+    size_t at = 0;
+    int changed = 0;
+    if (!bytes || !count) return 0;
+    while (at + 8 <= len) {
+        uint32_t size;
+        memcpy(&size, bytes + at + 4, 4);
+        if (size > len - at - 8) return changed;   /* a damaged chunk: what came before stays */
+        if (!memcmp(bytes + at, "HIRC", 4) && size >= 4) {
+            const size_t end = at + 8 + size;
+            size_t o = at + 12;
+            uint32_t n, i;
+            memcpy(&n, bytes + at + 8, 4);
+            for (i = 0; i < n && o + 5 <= end; ++i) {
+                uint32_t body, id;
+                size_t k;
+                memcpy(&body, bytes + o + 1, 4);
+                if (body > end - o - 5) break;
+                if (bytes[o] == 4 && body >= 4) {      /* an Event: its id is the FNV-1 of its name */
+                    memcpy(&id, bytes + o + 5, 4);
+                    for (k = 0; k < count; ++k)
+                        if (from[k] == id) { memcpy(bytes + o + 5, &to[k], 4); changed++; break; }
+                }
+                o += 5 + (size_t)body;
+            }
+        }
+        at += 8 + (size_t)size;
+    }
+    return changed;
+}
+
+/* The bank event ids of bundle `b`'s own sound decls, as the author's bank holds them and as the engine posts them:
+ * a decl served as mods/<salt>/<dir>/<salt>_<leaf> starts the event play_<salt>_<leaf>, which the author's bank
+ * names play_<leaf> (modauthor.h; SPEC-distribution D12). *from and *to malloc'd; the count, 0 when it has none. */
+static size_t ms_sound_events(const ms_index *x, const ms_bundle *b, uint32_t **from, uint32_t **to)
+{
+    char root[SH_MB_ID_MAX + 40];
+    size_t n = 0, cap = 0, sl = strlen(b->id), rl;
+    int i;
+    *from = *to = NULL;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "generated/decls/sound/mods/%s/", b->id);
+    rl = strlen(root);
+    for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        const char *leaf, *dot;
+        char name[512];
+        size_t ll;
+        if (f->stock || _strnicmp(f->request, root, rl)) continue;
+        leaf = strrchr(f->request, '/') + 1;
+        dot = strrchr(leaf, '.');
+        ll = dot ? (size_t)(dot - leaf) : strlen(leaf);
+        if (ll <= sl + 1 || _strnicmp(leaf, b->id, sl) || leaf[sl] != '_' || ll + 6 > sizeof name) continue;
+        if (n == cap) {
+            size_t grow = cap ? cap * 2 : 64;
+            uint32_t *gf = (uint32_t *)realloc(*from, grow * sizeof *gf), *gt;
+            if (!gf) break;
+            *from = gf;
+            if (!(gt = (uint32_t *)realloc(*to, grow * sizeof *gt))) break;
+            *to = gt;
+            cap = grow;
+        }
+        _snprintf_s(name, sizeof name, _TRUNCATE, "play_%.*s", (int)(ll - sl - 1), leaf + sl + 1);
+        (*from)[n] = sh_mb_fnv1_lower(name, strlen(name));
+        _snprintf_s(name, sizeof name, _TRUNCATE, "play_%.*s", (int)ll, leaf);
+        (*to)[n] = sh_mb_fnv1_lower(name, strlen(name));
+        n++;
+    }
+    return n;
+}
+
 /* Create every directory of `path` (a file path) below the mods root. */
 static int ms_mkdirs_for(const char *path)
 {
@@ -4518,6 +4591,49 @@ static void ms_engine_names(ms_index *x)
     }
 }
 
+size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, const char *to)
+{
+    size_t i, hits = 0;
+    if (!bytes || !from || !to || strlen(from) != 8 || strlen(to) != 8 || !strcmp(from, to)) return 0;
+    for (i = 1; i + 9 <= len; ++i) {
+        int after = bytes[i - 1] == '/' || (i >= 5 && !memcmp(bytes + i - 5, "#str_", 5));
+        if (!after || memcmp(bytes + i, from, 8) || (bytes[i + 8] != '/' && bytes[i + 8] != '_')) continue;
+        memcpy(bytes + i, to, 8);
+        hits++;
+        i += 8;
+    }
+    return hits;
+}
+
+/* A mod whose binaries spell another namespace than its salt (a copy given a new salt; SPEC-distribution D12): every
+ * file it serves, binary or text, has that namespace mapped to the salt, length for length, under mods\.served\. */
+static void ms_respelled(ms_index *x)
+{
+    int bi, i;
+    for (bi = 0; bi < x->nbundles; ++bi) {
+        ms_bundle *b = &x->bundles[bi];
+        int changed = 0;
+        if (!b->admitted || !b->id || !b->spelled || !sh_salt_valid(b->spelled, strlen(b->spelled)) ||
+            !_stricmp(b->spelled, b->id) || b->file_count <= 0)
+            continue;
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            unsigned char *bytes;
+            size_t len = 0;
+            if (f->stock || !f->disk) continue;
+            bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            if (!bytes) continue;
+            if (sh_modserve_respell(bytes, len, b->spelled, b->id)) {
+                if (ms_serve_rewritten(x, f, bytes, len, NULL)) changed++;
+                else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+            }
+            HeapFree(GetProcessHeap(), 0, bytes);
+        }
+        if (changed) ms_log("bundle '%s': %d file(s) served with the namespace their bytes spell mapped to the mod's", b->id,
+                            changed);
+    }
+}
+
 static void ms_bank_stems(ms_index *x)
 {
     int bi;
@@ -4526,12 +4642,17 @@ static void ms_bank_stems(ms_index *x)
         /* One entry per bank the bundle carries: as many as it has. */
         char (*stems)[SH_MB_BANK_STEM_MAX + 1] = NULL, (*renamed)[SH_MB_BANK_STEM_MAX + 20] = NULL;
         int n = 0, i, k;
+        uint32_t *ev_from = NULL, *ev_to = NULL;
+        size_t nev;
         if (!b->admitted || !b->hash || strlen(b->hash) != 64 || !b->id || b->file_count <= 0) continue;
+        nev = ms_sound_events(x, b, &ev_from, &ev_to);
         stems = calloc((size_t)b->file_count, sizeof *stems);
         renamed = calloc((size_t)b->file_count, sizeof *renamed);
         if (!stems || !renamed) {
             free(stems);
             free(renamed);
+            free(ev_from);
+            free(ev_to);
             ms_log("bundle '%s': out of memory; its banks keep their names", b->id);
             continue;
         }
@@ -4545,10 +4666,17 @@ static void ms_bank_stems(ms_index *x)
                 ms_log("bundle '%s': %s has no recorded hash; it keeps its name", b->id, f->request);
                 continue;
             }
-            /* The bank's own hash names it: two builds
-             * with one bank's bytes share it, and Wwise loads it once. */
-            _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
             bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
+            /* The bank's own hash names it: two builds
+             * with one bank's bytes share it, and Wwise loads it once. Its
+             * events take the mod's namespace first (ms_sound_events), and
+             * the hash is of those bytes, so a bank written with its events
+             * under the namespace is served as the same bank. */
+            if (bytes && nev && sh_modserve_bank_events(bytes, len, ev_from, ev_to, nev)) {
+                char sha[SH_MB_HASH_HEX + 1];
+                sh_mb_sha256_hex(bytes, len, sha);
+                _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, sha);
+            } else _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
             if (!bytes || !sh_modserve_bank_patch_id(bytes, len, renamed[n])) {
                 if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
                 ms_log("bundle '%s': %s cannot be served under a stem of its own (unreadable or not a BKHD bank); it keeps "
@@ -4569,6 +4697,8 @@ static void ms_bank_stems(ms_index *x)
             ms_log("bundle '%s': bank %s.bnk served as %s.bnk (a stem of its own to Wwise)", b->id, stem, renamed[n]);
             n++;
         }
+        free(ev_from);
+        free(ev_to);
         if (!n) { free(stems); free(renamed); continue; }
         /* The bundle's served decls naming a bank follow the rename. */
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
@@ -4622,6 +4752,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
     ms_engine_names(x);
+    ms_respelled(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {

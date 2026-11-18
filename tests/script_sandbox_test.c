@@ -629,7 +629,7 @@ static void test_dispatch(void)
         "on.input('door_opened', function(node) end)\n"
         "assert(resolve('ai/x') == 'mods/aaaaaaaa/ai/x')\n"
         "assert(resolve('mods/aaaaaaaa/ai/x') == 'mods/aaaaaaaa/ai/x')\n"
-        "assert(select(2, resolve(game('fx/impacts/rocket'), true)) == true)\n");
+        "assert(select(2, resolve(native('fx/impacts/rocket'), true)) == true)\n");
     file_add("bbbbbbbb", "main.lua", "api = 1\non.think('ai/child', function(self) print('b think') end)\n");
     {
         sh_script_mod_desc d[2] = { { "aaaaaaaa", "Mod A" }, { "bbbbbbbb", "Mod B" } };
@@ -714,7 +714,7 @@ static void test_dispatch(void)
     CHECK(!strcmp(stop_of("aaaaaaaa"), "Script stopped: Test Mod, scripts\\main.lua line 2: \"on.spawn\" can only use "
                                        "this mod's own content; \"mods/bbbbbbbb/ai/x\" belongs to another mod."));
     sh_script_map_end();
-    run_one("api = 1\non.think(game('ai/imp'), function() end)\n");
+    run_one("api = 1\non.think(native('ai/imp'), function() end)\n");
     CHECK(strstr(stop_of("aaaaaaaa"), "\"on.think\" can only use this mod's own content, not the game's \"ai/imp\"") != NULL);
     sh_script_map_end();
     run_one("api = 1\non.spawn('ai/x', 5)\n");

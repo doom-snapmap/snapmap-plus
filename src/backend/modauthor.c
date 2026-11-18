@@ -58,7 +58,7 @@ static const struct { const char *type; const char *folder; } MA_NAMED[] = {
 
 static const char MA_FOLDERS_SENTENCE[] =
     "materials, images, meshes, animations, effects, environments, particles, entities, sounds, movies, scripts, "
-    "map-modules, virtual-textures, atlases, programs, decls and game";
+    "map-modules, virtual-textures, atlases, programs, decls and native";
 
 static int ma_starts(const char *s, const char *p) { return _strnicmp(s, p, strlen(p)) == 0; }
 
@@ -89,11 +89,74 @@ int sh_ma_folder(const char *name, size_t n)
 {
     static const char *const top[] = { "materials", "images", "meshes", "animations", "effects", "environments", "particles",
                                        "entities", "sounds", "movies", "scripts", "map-modules", "virtual-textures",
-                                       "atlases", "programs", "decls", "game", NULL };
+                                       "atlases", "programs", "decls", "native", NULL };
     size_t i;
     for (i = 0; top[i]; ++i)
         if (strlen(top[i]) == n && _strnicmp(top[i], name, n) == 0) return 1;
     return 0;
+}
+
+/* D14 (SPEC-distribution 3.10, the owner's words): the folders, each with one example. */
+#define MA_KIND_LIST                                                                                                    \
+    "Put each file in the folder for its kind: entities/ for entities (entities/imp.decl), materials/ for materials "  \
+    "(materials/imp_skin.decl), images/ for images (images/imp_skin.bimage), meshes/ for models "                      \
+    "(meshes/imp.md6.decl), animations/ for animation clips (animations/imp_walk.bmd6anim), effects/ for effects "     \
+    "(effects/imp_sparks.decl), particles/ for particle systems (particles/imp_smoke.decl), sounds/ for sounds and "   \
+    "their banks (sounds/imp.bnk), scripts/ for Lua scripts (scripts/imp.lua), movies/ for Flash movies "              \
+    "(movies/imp_hud.bswf), programs/ for render programs (programs/imp_glow.decl), map-modules/ for SnapMap modules " \
+    "(map-modules/imp_arena.decl), virtual-textures/ for a texture board (virtual-textures/imp.pages), environments/ " \
+    "for environments (environments/imp_fog.decl), atlases/decals/ for decal atlases a converter writes "              \
+    "(atlases/decals/imp.bimage), and decls/ with the kind's name for any other decl (decls/damage/imp_claw.decl)."
+
+const char *sh_ma_kind_list(void) { return MA_KIND_LIST; }
+
+char *sh_ma_outside_cause(const char *path, int dooms)
+{
+    const char *p = path ? path : "";
+    if (dooms)
+        return sh_textf("This mod was not built: %s is DOOM's own file, outside native/. If you changed it, move it to "
+                        "native/%s; if you did not, delete it: the build finds DOOM's files the mod uses by itself.", p, p);
+    return sh_textf("This mod was not built: %s is in none of the mod's folders, and DOOM has no file at that path. "
+                    MA_KIND_LIST " A file that changes one of DOOM's own files goes in native/ at DOOM's own path for it "
+                    "(for example native/generated/decls/entitydef/ai/conductor.decl); DOOM's files you use without "
+                    "changing them are found by the build and never need copying.", p);
+}
+
+char *sh_ma_kind_path(const char *request)
+{
+    size_t i, n;
+    const char *r = request ? request : "", *ext = strrchr(r, '.');
+    if (ext && strchr(ext, '/')) ext = NULL;
+    n = strlen(r);
+    if (ma_starts(r, "sound/soundbanks/pc/") && ma_ends(r, n, ".bnk") && !strchr(r + 20, '/'))
+        return sh_textf("sounds/%s", r + 20);
+    if (ma_starts(r, "maps/modules/") && r[13]) return sh_textf("map-modules/%s", r + 13);
+    if (ma_starts(r, "generated/decls/")) {
+        const char *type = r + 16, *ts = strchr(type, '/');
+        size_t tl;
+        if (!ts || ts == type || !ts[1] || !ma_ends(r, n, ".decl")) return NULL;
+        tl = (size_t)(ts - type);
+        for (i = 0; i < MA_NNAMED; ++i)
+            if (strlen(MA_NAMED[i].type) == tl && !_strnicmp(type, MA_NAMED[i].type, tl))
+                return sh_textf("%s/%s", MA_NAMED[i].folder, ts + 1);
+        return sh_textf("decls/%.*s/%s", (int)tl, type, ts + 1);
+    }
+    for (i = 0; i < MA_NROWS; ++i) {
+        size_t rl = strlen(MA_ROWS[i].root);
+        if (_strnicmp(r, MA_ROWS[i].root, rl) || !r[rl] || !ext || _stricmp(ext, MA_ROWS[i].ext)) continue;
+        return sh_textf("%s/%s", MA_ROWS[i].folder, r + rl);
+    }
+    return NULL;
+}
+
+/* `root` + "mods/<salt>/" + rest with "<salt>_" before its last part: a sound's engine name (a decl name or a request
+ * path; rest is rn bytes, its directories kept). */
+static char *ma_sound_name(const char *root, const char *salt, const char *rest, size_t rn)
+{
+    const char *leaf = rest, *q;
+    for (q = rest; q < rest + rn; ++q) if (*q == '/') leaf = q + 1;
+    return sh_textf("%smods/%s/%.*s%s_%.*s", root, salt, (int)(leaf - rest), rest, salt, (int)(rn - (size_t)(leaf - rest)),
+                    leaf);
 }
 
 int sh_ma_request(const char *salt, const char *path, char **request, char **cause)
@@ -110,15 +173,15 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
     n = strlen(p);
     ext = strrchr(p, '.');
     if (ext && strchr(ext, '/')) ext = NULL;
-    if (ma_starts(p, SH_MA_GAME)) {
-        rest = p + 5;
-        if (!*rest) { free(p); return ma_fail(cause, "%s: name the game's file under game/", path, NULL); }
-        /* a mod's namespace under game/ is refused; a name of the product's own (snapmapplus/..., a closure pointer
+    if (ma_starts(p, SH_MA_NATIVE)) {
+        rest = p + 7;
+        if (!*rest) { free(p); return ma_fail(cause, "%s: name DOOM's file under native/, at DOOM's own path", path, NULL); }
+        /* a mod's namespace under native/ is refused; a name of the product's own (snapmapplus/..., a closure pointer
          * such as an SDK effect's emitter snapmapplus/effect/mods/<salt>/x) is not a mod's */
         const char *ns = strstr(rest, "/mods/"), *prod = strstr(rest, "/snapmapplus/");
         if (ma_starts(rest, "mods/") || (ns && !(prod && prod < ns))) {
             free(p);
-            return ma_fail(cause, "%s: game/ holds the game's own files at the game's own paths; put your mod's own "
+            return ma_fail(cause, "%s: native/ holds DOOM's own files the mod changes, at DOOM's own paths; put the mod's own "
                            "files in its folders (%s)", path, MA_FOLDERS_SENTENCE);
         }
         *request = sh_text(rest);
@@ -186,6 +249,13 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
         free(p);
         return *request ? 1 : ma_fail(cause, "out of memory", NULL, NULL);
     }
+    if (ma_starts(p, "sounds/") && ma_ends(p, n, ".decl") && n > 12) {
+        /* a sound decl's name is its Wwise event (play_ + its last part), which every mod shares: the leaf
+         * carries the namespace (sounds/a/play_x.decl -> generated/decls/sound/mods/<salt>/a/<salt>_play_x.decl) */
+        *request = ma_sound_name("generated/decls/sound/", salt, p + 7, n - 7);
+        free(p);
+        return *request ? 1 : ma_fail(cause, "out of memory", NULL, NULL);
+    }
     for (i = 0; i < MA_NROWS; ++i) {
         size_t fl = strlen(MA_ROWS[i].folder);
         if (strncmp(p, MA_ROWS[i].folder, fl) || p[fl] != '/') continue;
@@ -213,7 +283,7 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
     }
     ma_fail(cause, "%s: '%s' is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
             "effects, environments, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, "
-            "programs, decls or game", path, p);
+            "programs, decls or native", path, p);
     free(p);
     return 0;
 }
@@ -224,7 +294,7 @@ char *sh_ma_path(const char *salt, const char *request)
     size_t i, ol;
     const char *r = request ? request : "", *ext = strrchr(r, '.');
     if (ext && strchr(ext, '/')) ext = NULL;
-    if (!salt) return sh_textf(SH_MA_GAME "%s", r);
+    if (!salt) return sh_textf(SH_MA_NATIVE "%s", r);
     _snprintf_s(own, sizeof own, _TRUNCATE, "mods/%s/", salt);
     ol = strlen(own);
     if (ma_starts(r, own) && ma_starts(r + ol, "scripts/")) return sh_text(r + ol);
@@ -240,6 +310,15 @@ char *sh_ma_path(const char *salt, const char *request)
     if (ma_starts(r, "generated/decls/")) {        const char *type = r + 16, *ts = strchr(type, '/');
         if (ts && ma_starts(ts + 1, own)) {
             size_t tl = (size_t)(ts - type);
+            if (tl == 5 && !_strnicmp(type, "sound", 5)) {
+                /* the leaf carries the namespace (sh_ma_request); one without it is no author path's */
+                const char *rest = ts + 1 + ol, *leaf = strrchr(rest, '/');
+                size_t sl = strlen(salt);
+                leaf = leaf ? leaf + 1 : rest;
+                if (!_strnicmp(leaf, salt, sl) && leaf[sl] == '_' && leaf[sl + 1])
+                    return sh_textf("sounds/%.*s%s", (int)(leaf - rest), rest, leaf + sl + 1);
+                return sh_textf(SH_MA_NATIVE "%s", r);
+            }
             for (i = 0; i < MA_NNAMED; ++i)
                 if (strlen(MA_NAMED[i].type) == tl && !_strnicmp(type, MA_NAMED[i].type, tl))
                     return sh_textf("%s/%s", MA_NAMED[i].folder, ts + 1 + ol);
@@ -253,7 +332,7 @@ char *sh_ma_path(const char *salt, const char *request)
         if (!ext || _stricmp(ext, MA_ROWS[i].ext)) continue;
         return sh_textf("%s/%s", MA_ROWS[i].folder, r + rl + ol);
     }
-    return sh_textf(SH_MA_GAME "%s", r);
+    return sh_textf(SH_MA_NATIVE "%s", r);
 }
 
 /* ------------------------------------------------------------------------------------------- the names ---- */
@@ -269,7 +348,7 @@ static int ma_name_char(unsigned char c)
 /* The name prefixes: a folder and the engine's spelling before the salt ("%s" is the salt). */
 static const struct { const char *folder; const char *engine; } MA_NAMES[] = {
     { "materials/", "mods/%s/" }, { "effects/", "mods/%s/" }, { "environments/", "mods/%s/" }, { "particles/", "mods/%s/" },
-    { "entities/", "mods/%s/" }, { "sounds/", "mods/%s/" }, { "images/", "mods/%s/" },
+    { "entities/", "mods/%s/" }, { "images/", "mods/%s/" },   /* sounds/ is decided apart (ma_sound_name) */
     { "animations/", "md6/mods/%s/" }, { "movies/", "swf/mods/%s/" }, { "scripts/", "mods/%s/scripts/" },
     { "map-modules/", "maps/modules/mods/%s/" }, { "virtual-textures/", "mods/%s/" }, { "programs/", "mods/%s/" },
 };
@@ -279,7 +358,7 @@ char *sh_ma_engine_name(const char *salt, const char *name, size_t n)
 {
     size_t i;
     if (!salt || !name || !n) return NULL;
-    if (n > 5 && !_strnicmp(name, "game:", 5)) return sh_textn(name + 5, n - 5);
+    if (n > 7 && !_strnicmp(name, "native:", 7)) return sh_textn(name + 7, n - 7);
     if (n > 7 && !_strnicmp(name, "meshes/", 7)) {
         const char *rest = name + 7;
         size_t rn = n - 7;
@@ -287,6 +366,7 @@ char *sh_ma_engine_name(const char *salt, const char *name, size_t n)
             return sh_textf("md6/mods/%s/%.*s", salt, (int)rn, rest);
         return sh_textf("mods/%s/%.*s", salt, (int)rn, rest);
     }
+    if (n > 7 && !_strnicmp(name, "sounds/", 7)) return ma_sound_name("", salt, name + 7, n - 7);
     if (n > 6 && !_strnicmp(name, "decls/", 6)) {
         const char *type = name + 6, *ts = memchr(type, '/', n - 6);
         if (!ts || ts == type || (size_t)(ts + 1 - name) >= n) return NULL;
@@ -329,9 +409,9 @@ static int ma_key_char(unsigned char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-/* 1 when the name at t[i] is the quoted argument of game("...") (the Graphics SDK's other spelling of a game name,
- * sdkparse.h): it names the game's, as game:<name> does, and is left as written. */
-static int ma_in_game_call(const char *t, size_t i)
+/* 1 when the name at t[i] is the quoted argument of native("...") (the Graphics SDK's other spelling of a DOOM name,
+ * sdkparse.h): it names DOOM's, as native:<name> does, and is left as written. */
+static int ma_in_native_call(const char *t, size_t i)
 {
     size_t k = i;
     if (k == 0 || t[k - 1] != '"') return 0;
@@ -339,7 +419,7 @@ static int ma_in_game_call(const char *t, size_t i)
     while (k > 0 && (t[k - 1] == ' ' || t[k - 1] == '\t')) k--;
     if (k == 0 || t[k - 1] != '(') return 0;
     k--;
-    return k >= 4 && !_strnicmp(t + k - 4, "game", 4) && (k == 4 || !ma_name_char((unsigned char)t[k - 5]));
+    return k >= 6 && !_strnicmp(t + k - 6, "native", 6) && (k == 6 || !ma_name_char((unsigned char)t[k - 7]));
 }
 
 /* Rewrites t[0..len) into b; returns 1 when anything changed. */
@@ -366,15 +446,15 @@ static int ma_rewrite(const char *salt, const char *t, size_t len, sh_ma_key_fn 
             i = k;
             continue;
         }
-        if (start && ma_name_char(c) && c != '/' && c != '.' && ma_in_game_call(t, i)) {
+        if (start && ma_name_char(c) && c != '/' && c != '.' && ma_in_native_call(t, i)) {
             while (i < len && ma_name_char((unsigned char)t[i])) i++;
             continue;
         }
         if (start && ma_name_char(c) && c != '/' && c != '.') {
             size_t k = i;
             char *eng;
-            /* game:<name> is one run: the colon joins the two */
-            if (len - i > 5 && !_strnicmp(t + i, "game:", 5) && ma_name_char((unsigned char)t[i + 5])) k = i + 5;
+            /* native:<name> is one run: the colon joins the two */
+            if (len - i > 7 && !_strnicmp(t + i, "native:", 7) && ma_name_char((unsigned char)t[i + 7])) k = i + 7;
             while (k < len && ma_name_char((unsigned char)t[k])) k++;
             if (k > i && (eng = sh_ma_engine_name(salt, t + i, k - i)) != NULL) {
                 ma_put(b, t + copied, i - copied);

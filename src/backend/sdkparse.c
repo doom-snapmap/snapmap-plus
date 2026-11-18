@@ -199,8 +199,8 @@ static int lx_atom(lx *x, sdk_atom *a)
         while (x->pos < x->len && word_char(x->t[x->pos])) x->pos++;
         a->p = x->t + s;
         a->n = x->pos - s;
-        /* game("name") */
-        if (a->n == 4 && !_strnicmp(a->p, "game", 4) && x->pos < x->len && x->t[x->pos] == '(') {
+        /* native("name") */
+        if (a->n == 6 && !_strnicmp(a->p, "native", 6) && x->pos < x->len && x->t[x->pos] == '(') {
             size_t q = x->pos + 1, qs;
             while (q < x->len && (x->t[q] == ' ' || x->t[q] == '\t')) q++;
             if (q < x->len && x->t[q] == '"') {
@@ -219,16 +219,16 @@ static int lx_atom(lx *x, sdk_atom *a)
                     }
                 }
             }
-            sdk_say(x->why, x->why_len, x->d, x->line, "write one of the game's names as game(\"name\").");
+            sdk_say(x->why, x->why_len, x->d, x->line, "write one of DOOM's names as native(\"name\").");
             x->bad = 1;
             return -1;
         }
-        /* game:name (R-NM1's name rule: the game's own name, where it begins like one of the mod's folders) */
-        if (a->n > 5 && !_strnicmp(a->p, "game:", 5)) {
+        /* native:name (R-NM1's name rule: DOOM's own name, where it begins like one of the mod's folders) */
+        if (a->n > 7 && !_strnicmp(a->p, "native:", 7)) {
             a->kind = SDK_A_STRING;
             a->game = 1;
-            a->p += 5;
-            a->n -= 5;
+            a->p += 7;
+            a->n -= 7;
             return 1;
         }
         {

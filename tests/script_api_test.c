@@ -528,13 +528,13 @@ static void test_world(void)
         "  print('near', #near, table.concat(d, ' '))\n"
         "  print('none', #entities_near({x = -9000, y = 0, z = 0}, 10))\n"
         "  local hit = trace({x = 0, y = 0, z = 0}, {x = 200, y = 0, z = 0})\n"
-        "  print('hit', hit.pos.x, hit.normal.x, hit.fraction, hit.entity:definition())\n"
+        "  print('hit', hit.position.x, hit.normal.x, hit.fraction, hit.entity:definition())\n"
         "  print('miss', trace({x = 0, y = 0, z = 0}, {x = 50, y = 0, z = 0}))\n"
         "  print('beside', trace({x = 0, y = 60, z = 0}, {x = 200, y = 60, z = 0}))\n"
         "  local thick = trace({x = 0, y = 60, z = 0}, {x = 200, y = 60, z = 0}, 20)\n"
-        "  print('thick', thick and thick.pos.x, thick and thick.pos.y)\n"
+        "  print('thick', thick and thick.position.x, thick and thick.position.y)\n"
         "  print('ignored', trace({x = 0, y = 0, z = 0}, {x = 200, y = 0, z = 0}, 0, ent(5)))\n"
-        "  print('from entity', trace(self, {x = 200, y = 0, z = 0}).pos.x)\n"
+        "  print('from entity', trace(self, {x = 200, y = 0, z = 0}).position.x)\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "near\t4\tai/brute props/crate decor/wall player/sp"));
@@ -699,8 +699,8 @@ static void test_trace_as_demon(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
         "  local a, b = {x = 0, y = 0, z = 10}, {x = 200, y = 0, z = 10}\n"
-        "  print('shot', trace(a, b).pos.x)\n"
-        "  print('demon', trace(a, b, nil, nil, 'demon').pos.x, trace(a, b, 0, nil, 'demon').normal.x)\n"
+        "  print('shot', trace(a, b).position.x)\n"
+        "  print('demon', trace(a, b, nil, nil, 'demon').position.x, trace(a, b, 0, nil, 'demon').normal.x)\n"
         "end)\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "shot\t100.0"));

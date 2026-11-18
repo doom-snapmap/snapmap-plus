@@ -608,8 +608,8 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
 }
 
 #define BANK "sounds/sfx.bnk"   /* served as sound/soundbanks/pc/p6probes_sfx.bnk */
-#define SND  "sounds/p6probes_far.decl"
-#define SNDSP "sounds/wpn_sp_plasma_flyby_lp.decl"
+#define SND  "sounds/far.decl"
+#define SNDSP "entities/sp_speaker.decl"   /* names DOOM's event, filed only by the _sp bank */
 #define ENT  "entities/speaker_far.decl"
 #define DESC "{\"version\": \"1.0.0\", \"name\": \"Sound probe\"}"
 #define SALT "p6probes"   /* the salt every build here is given */
@@ -692,12 +692,12 @@ static void test_builder(void)
     CHECK(b.registries && !strstr(b.registries, "\"banks\""));
     sh_mb_free(&b);
 
-    /* registries "banks": a sound decl whose event (the alias of its last
-     * component) only the _sp bank files. */
+    /* registries "banks": a text that names DOOM's event (every event is a sound decl of its own name) that only
+     * the _sp bank files. A mod's own sound decl cannot alias it: its leaf takes the namespace. */
     sh_mbi_reset();
     CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
     sh_mb_set_bank_need(sh_mbi_bundle_need);
-    put(SNDSP, "{\n\tinherit = \"default\";\n}\n");
+    put(SNDSP, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"play_wpn_sp_plasma_flyby_lp\";\n\t}\n}\n");
     CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
     if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     CHECK(b.registries && !strncmp(b.registries, "{\"banks\":[\"doom_weapon_sp.bnk\"]", 31));
@@ -737,9 +737,9 @@ static void test_builder(void)
     put_bank("sounds/spider.bnk", "p6probes_spider", 0x71, 0);
     build_expect(0, "contains _sp, _snapmaps or initial");
     drop("sounds/spider.bnk");
-    put_bank("game/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
+    put_bank("native/sound/soundbanks/pc/other_sfx.bnk", "other_sfx", 0x71, 0);
     build_expect(0, "must start with this mod folder's name and _");
-    drop("game/sound/soundbanks/pc/other_sfx.bnk");
+    drop("native/sound/soundbanks/pc/other_sfx.bnk");
     put_bank("sounds/sub/x.bnk", "p6probes_x", 0x71, 0);
     build_expect(0, "a sound bank goes in sounds/ itself");
     drop("sounds/sub/x.bnk");
@@ -753,8 +753,8 @@ static void test_builder(void)
     drop(BANK); drop(SND); drop(ENT); drop("mod.json");
     {
         static const char *const dirs[] = {
-            "sounds\\sub", "sounds", "entities", "game\\sound\\soundbanks\\pc", "game\\sound\\soundbanks",
-            "game\\sound", "game", "", NULL };
+            "sounds\\sub", "sounds", "entities", "native\\sound\\soundbanks\\pc", "native\\sound\\soundbanks",
+            "native\\sound", "native", "", NULL };
         char path[MAX_PATH];
         size_t i;
         for (i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_dir, dirs[i]); RemoveDirectoryA(path); }

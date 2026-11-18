@@ -176,14 +176,14 @@ It lists the items that play together. Each item says when it starts, how long i
 		size		curve { 0 3, 0.3 8, 1 0 }
 	}
 	sound {
-		sound		game:effects/explosions/grenade_explosion_default
+		sound		native:effects/explosions/grenade_explosion_default
 	}
 }
 ```
 
 A name in a field is the mod's when it begins with one of the mod's folders (`images/fx/ember.tga`,
 `materials/rune`, `environments/hell_red`); any other name is the game's. A game name that begins like one of the
-mod's folders is written `game:` before it (`game:effects/...`); `game("...")` also names the game's. A field left out keeps the game's own value for it, except where that draws nothing (a decal is given
+mod's folders is written `native:` before it (`native:effects/...`); `native("...")` also names DOOM's. A field left out keeps the game's own value for it, except where that draws nothing (a decal is given
 10 seconds and 64 units, a light 300 units of reach).
 
 **Every item** takes these fields:
@@ -345,7 +345,7 @@ for example:
 
 - `blast.decl line 4: 'brigthness' is not a field of a light; the nearest is 'brightness'.`
 - `blast.decl line 3: 'lihgt' is not an item of an effect; the nearest is 'light'.`
-- `blast.decl line 3: a decal needs its 'material', as in 'material game("textures/decals/blood_splatter/blood_splatter_01")'.`
+- `blast.decl line 3: a decal needs its 'material', as in 'material native("textures/decals/blood_splatter/blood_splatter_01")'.`
 - `blast.decl line 3: 'pulse' of 'brightness' needs both 'low' and 'high', as in 'pulse { rate 2, low 0.2, high 1 }'.`
 - `hell_red.decl line 3: 'fgo' is not a field of an environment; the nearest is 'fog'.`
 - `rune.decl line 2: a material has no start, so 'bloomcolor' cannot fade once; write pulse, flicker, or a curve with 'loop yes', or fade the entity from a script.`

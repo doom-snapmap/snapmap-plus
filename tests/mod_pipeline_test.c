@@ -417,9 +417,9 @@ static void skins_namespace(const char *root)
     }
     sh_mb_free(&b);
     CHECK(sh_modserve_index_build(mods) == 1);
-    /* A skins decl outside the namespace is still refused. */
-    mt_write(folder, "game\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
-    CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(sh_mb_first_cause(&b), "skins decl"));
+    /* A skins decl in native/ at a path DOOM does not hold is still refused (it is the mod's own, D14). */
+    mt_write(folder, "native\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
+    CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(sh_mb_first_cause(&b), "native/generated/decls/skins/md6/other/imp.md6mesh.decl is not one of DOOM's files, so it is the mod's own; move it to "));
     sh_mb_free(&b);
 }
 

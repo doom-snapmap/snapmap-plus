@@ -231,7 +231,7 @@ static void test_events(void)
         "d:run_event('setOrigin', { x = 1, y = 2, z = 3 })\n"
         "o:run_event('activate', d)\n"
         "o:run_event('activate', nil)\n"
-        "o:run_event('damage', decl('snapAIEncounter', game('enc/baron')), { pitch = 0, yaw = 90, roll = 0 }, 12.5, 2, d, true)\n"
+        "o:run_event('damage', decl('snapAIEncounter', native('enc/baron')), { pitch = 0, yaw = 90, roll = 0 }, 12.5, 2, d, true)\n"
         "d:run_event('ae_sound', decl('snapAIEncounter', 'enc/tyrant'))\n"
         "d:run_event('ae_sound', nil)\n"
         "d:run_event('setColor', { r = 1, g = 0.5, b = 0 })\n"
@@ -328,7 +328,7 @@ static void test_cvars(void)
 static void test_decls(void)
 {
     run("api = 1\n"
-        "local mine, stock = decl('snapAIEncounter', 'enc/tyrant'), decl('snapAIEncounter', game('enc/baron'))\n"
+        "local mine, stock = decl('snapAIEncounter', 'enc/tyrant'), decl('snapAIEncounter', native('enc/baron'))\n"
         "print('names', mine:name(), stock:name(), mine:type())\n"
         "print('values', mine:get('value'), stock:get('value'), mine:get().value, #mine:fields())\n"
         "print('same', mine == decl('snapAIEncounter', 'enc/tyrant'), mine == stock)\n"
@@ -344,9 +344,9 @@ static void test_decls(void)
     CHECK(g_enc.value == 9 && g_enc2.value == 4);
 
     refused("api = 1\ndecl('snapAIEncounter', 'enc/none')\n",
-            "\"decl\" found no snapAIEncounter decl \"enc/none\" in this mod; a decl of the game is decl(type, game(name))");
-    refused("api = 1\ndecl('snapAIEncounter', game('enc/none'))\n", "\"decl\" found no snapAIEncounter decl named enc/none in the game");
-    refused("api = 1\ndecl('weird', game('enc/baron')):get('value')\n",
+            "\"decl\" found no snapAIEncounter decl \"enc/none\" in this mod; a decl of the game is decl(type, native(name))");
+    refused("api = 1\ndecl('snapAIEncounter', native('enc/none'))\n", "\"decl\" found no snapAIEncounter decl named enc/none in the game");
+    refused("api = 1\ndecl('weird', native('enc/baron')):get('value')\n",
             "\"get\" cannot look inside a weird decl: the game does not describe that type");
     refused("api = 1\ndecl('snapAIEncounter', 'enc/tyrant'):set('valu', 1)\n",
             "\"set\" could not write \"valu\": idDeclSnapAIEncounter has no field named valu");

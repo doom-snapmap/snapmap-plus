@@ -139,11 +139,11 @@ Client-side only; no map data changes.
 
 A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding `mod.json` and folders named for what the
 files in them are (`materials/`, `images/`, `meshes/`, `animations/`, `effects/`, `entities/`, `sounds/`,
-`scripts/`, `game/` and the rest; the table is in [the author's guide](authoring.md)) of already-cooked
+`scripts/`, `native/` and the rest; the table is in [the author's guide](authoring.md)) of already-cooked
 idTech 6 files. Converting assets from other games is Doomforge's job, not this product's. Each mod has a
 salt, eight letters and digits it is given once, the first time Snapmap+ sees the folder, and you never
 write it: a name in the mod's texts that begins with one of its folders is the mod's own
-(`materials/crate_glow`), every other name is the game's, `game:` before a name says it is the game's
+(`materials/crate_glow`), every other name is the game's, `native:` before a name says it is DOOM's
 when it begins like one of your folders, and a strings key of yours is written plain (`imp_blue_name`,
 referenced `#str_imp_blue_name`). When the engine is handed the mod, its names are under `mods/<salt>/` and
 its keys are `<salt>_<name>`; nothing in the folder carries the salt. A key the game
@@ -156,15 +156,16 @@ the mod replaces is derived from its path (the bundle's `shadows`). A shadow may
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.
 
-To change a game file, put your edited copy of it at the game's own path under `game/`; `mod.json` says nothing
+To change a game file, put your edited copy of it at the game's own path under `native/`; `mod.json` says nothing
 about it. The builder records what your copy changes against the game's text (fields set and removed,
 list entries, named entries such as an AI graph or a body clip, added rows) and the build log says
 "edits <path>: N operations". The copy itself is never served: a map that uses the mod gets the game's
 text with your edits and those of every other mod it uses, so two mods that add to one list or one
 body both apply. A copy that differs from the game's only in line endings (CRLF or LF, a final newline)
 is the game's own file and is borrowed, not edited. A copy that does not read as a decl is refused with
-the line it stops at, and a binary at a game name with other bytes (a model, an image) is refused: put
-it in the folder for its kind and point your decls at it, or delete your copy and the mod borrows the game's. A render program's permutation decl is text, but an
+the line it stops at. A binary at a game name with other bytes (a model, an image) replaces the game's file,
+in the maps that use the mod only; a binary identical to the game's is not needed, and the build says so. A file
+in `native/` at a path the game does not hold is the mod's own and is refused with the folder it belongs in. A render program's permutation decl is text, but an
 edited one is refused too, since the game file cannot be generated per map: delete the copy, or ship
 your program whole under `programs/`. A material that names a shader only the campaign ships
 brings the shader's whole program along from the player's install (its decl, compiled files and
@@ -439,7 +440,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   them, is not run by this release (decision 30; converting releases before beta.26 is a future
   installer's job).
 - A mod can carry cooked Flash movies (`.bswf`, with their `.bimage` atlases) in
-  `movies/`: a replacement for a stock movie is your copy at the game's own path under `game/generated/swf/`, a new movie lives in
+  `movies/`: a replacement for a stock movie is your copy at the game's own path under `native/generated/swf/`, a new movie lives in
   `movies/`. They load whenever the game asks for the movie, in the editor and in
   Play; a replaced movie the game already holds changes at the next map load, and one held since
   startup after a restart.
@@ -575,9 +576,10 @@ on their files. A map whose mods need Snapmap+ features records the version it n
         props { prop "meshes/weapons/gun.md6" {
           tag "hand_r" { trans ( 0 0 0 ) rot ( 0 0 0 1 ) parent "Rhand" } } } }
 - A mod can carry sounds: a sound decl under `sounds/` plays the Wwise
-  event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
+  event its name gives (`sounds/<stem>.decl` plays `play_<stem>`, served as `<salt>_<stem>.decl` and posting
+  `play_<salt>_<stem>`), so it can reuse any stock sound without a
   bank, and a mod's own Wwise bank (`sounds/<name>.bnk`, which the engine is handed as
-  `<salt>_<name>.bnk`, built with Wwise or
+  `<salt>_<name>.bnk`; name its events `play_<stem>` and Snapmap+ renames them to the namespace; built with Wwise or
   snaphak-re's `make_bank.py`) is loaded into the game when the editor is first opened or a map
   loads, and right away when the mod is installed during a session; each map load takes the bank
   from the build of the mod that map uses, so a downloaded map that carries its own build of a
@@ -988,7 +990,7 @@ API version 1 registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damag
 `on.pain`, `on.animation`, `on.frame_event`, `on.projectile`, `on.input`, `on.map_start`, `on.map_end`),
 keeps game time
 (`now`, `after`, `every`, `run`, `wait`) and writes the mod's script log (`print`, `warn`). With
-entities and the world it can `spawn` its own entities and the game's (`game("...")` names the
+entities and the world it can `spawn` its own entities and the game's (`native("...")` names the
 game's own content wherever a name is taken), read any entity's position, facing, velocity, health
 and animation, move, turn, push, heal, animate and remove any entity of the map, find `players()`,
 `entities()` and `entities_near`, and `trace` lines through the world. Beyond the purpose-built

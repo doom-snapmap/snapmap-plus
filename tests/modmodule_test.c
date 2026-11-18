@@ -321,12 +321,12 @@ static void test_builder(const char *tmp, const char *install)
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "a snapModule needs its snapModuleInfo decls/snapmoduleinfo/arena.decl in the same mod");
     sh_mb_free(&b);
-    /* A module outside maps/modules/mods/<id>/: this rule first, then its missing snapModuleInfo. */
+    /* A module outside maps/modules/mods/<id>/ is at a path DOOM does not hold under native/: refused with its folder, then its missing snapModuleInfo. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_ns", tmp);
     make_module_mod(dir, "maps/modules/other/" ID "/arena.decl", 0, MODULE_TEXT);
     CHECK(!sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
     CHECK(b.errors == 2);
-    CHECK_CAUSE(b, "a snapModule decl must be maps/modules/mods/<this folder's name>/<name>.decl");
+    CHECK_CAUSE(b, "native/maps/modules/other/" ID "/arena.decl is not one of DOOM's files, so it is the mod's own; move it to map-modules/other/" ID "/arena.decl.");
     sh_mb_free(&b);
     /* A malformed module decl. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_bad", tmp);

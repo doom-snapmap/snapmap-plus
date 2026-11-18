@@ -28,6 +28,7 @@
  *                                      "node": true when a script registers an input
  *                                      (sh_script_node_registers_input): the serving index then
  *                                      serves the mod's Script node row (script_node.h)
+ *     "spelled": "<salt>",             the namespace the carried binaries spell (sh_mb_bundle.spelled), when any
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
@@ -112,8 +113,9 @@
  * (a folder that failed only on a .lua file builds now). 11: the scripts
  * member records whether the mod gets its Script node row ("node"). 12:
  * files beside mod.json and assets are ignored, and campaign content derives
- * its requirements. */
-#define SH_MB_RULES           12
+ * its requirements. 13: native/ holds DOOM's changed files (SPEC-distribution
+ * 3.10), a sound decl's leaf takes the namespace, and "spelled". */
+#define SH_MB_RULES           13
 
 /* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
  * SH_MB_SHAPE is its first part, which readers of a cause match on. */
@@ -150,7 +152,7 @@ typedef struct sh_mb_need {
 } sh_mb_need;
 
 typedef struct sh_mb_file {
-    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, game/<path>), lower
+    char *path;            /* the file's path in the mod folder (modauthor.h: materials/body.decl, native/<path>), lower
                               case with '/', whatever the spelling on disk (DECISIONS 13); a loaded block's as written */
     char *request;         /* the engine's request path the path stands for (sh_ma_request), lower-cased: what the
                               provider is asked for */
@@ -171,6 +173,9 @@ typedef struct sh_mb_file {
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
     int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */
+    char **events;         /* builder: DOOM's sound events the text names (soundShader "play_x"), for the stock-bank
+                              question (registries "banks"); not needs: every event is a sound decl with no file */
+    size_t event_count;
 } sh_mb_file;
 
 /* Per-file classification. Decided from the
@@ -252,6 +257,10 @@ typedef struct sh_mb_bundle {
      * #str_<key> of one of them is the mod's string */
     char **own_keys;
     size_t own_key_count;
+    /* The namespace the mod's carried binaries spell (a converter's mesh naming its skeleton mods/<salt>/...), ""
+     * when they spell none: the block's "spelled" (SPEC-distribution D12). When it is not the mod's salt (a copy
+     * given a new one), the serving index maps it to the salt in every file it serves, length for length. */
+    char spelled[SH_MB_ID_MAX + 1];
 } sh_mb_bundle;
 
 /* Whether two decl texts are one text: line ends are not content, so CRLF

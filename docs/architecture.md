@@ -525,7 +525,8 @@ engine root:
 
 | Folder (extension) | Engine request |
 |---|---|
-| `materials/`, `effects/`, `environments/`, `particles/`, `entities/`, `sounds/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef,sound}/mods/<salt>/<rest>` |
+| `materials/`, `effects/`, `environments/`, `particles/`, `entities/` (`.decl`) | `generated/decls/{material,fx,env,particle,entitydef}/mods/<salt>/<rest>` |
+| `sounds/` (`.decl`) | `generated/decls/sound/mods/<salt>/<dirs>/<salt>_<leaf>.decl` (the leaf is the Wwise event name every mod shares, so it takes the namespace; a text name `sounds/x` is `mods/<salt>/<salt>_x`; `sh_ma_request`, `sh_ma_engine_name`, `sh_ma_path`) |
 | `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
 | `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
 | `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
@@ -536,22 +537,26 @@ engine root:
 | `map-modules/` (any), `map-modules/palettes/<p>/`, a `.baas_*` | `maps/modules/mods/<salt>/<rest>`, `maps/modules/palettes/<p>/mods/<salt>/<rest>`, `generated/maps/modules/mods/<salt>/<rest>` |
 | `virtual-textures/` (`.mega2`, `.pages`) | `virtualtextures/mods/<salt>/<rest>` |
 | `decls/<type>/` (`.decl`; not a type with a folder of its own) | `generated/decls/<type>/mods/<salt>/<rest>` |
-| `game/<request>` | `<request>` (a game path; refused under `mods/`) |
+| `native/<request>` | `<request>` (DOOM's own path for a file the mod changes; refused under `mods/`) |
 
-A folder named `assets` is refused with one sentence (the game's layout, which a mod folder no longer uses), and so
-is any other unknown top-level folder; a file beside `mod.json` and a dot folder are not the mod's. The recorded
+A file in a top-level folder that is none of the mod's (`assets/` and `game/` included) is refused per file with one
+of two sentences (`sh_ma_outside_cause`): "<path> is in none of the mod's folders, and DOOM has no file at that path"
+with the folders and an example for each, or, when DOOM holds that path, "<path> is DOOM's own file, outside native/"
+with what to do. A `native/` file at a path DOOM does not hold is refused with the folder of its kind
+(`sh_ma_kind_path`); a non-decl `native/` file at a path DOOM holds with other bytes is a replacement (class REPLACE,
+served only to maps that use the mod), and one identical to DOOM's own warns that the mod does not need it. A file beside `mod.json` and a dot folder are not the mod's. The recorded
 `path` of a file (the block's `files` and `stock` entries, the bundle's `sh_mb_file.path`, sync and export archive
 entries) is its path in the folder; the request is derived from it and the salt. A closure pointer's path is
-`game/<request>`.
+`native/<request>`.
 
 Names (`sh_ma_text`, `sh_ma_engine_name`): in a decl text and in `mod.json`'s author part, a run of name characters
 (`[A-Za-z0-9_./$+@~-]`, starting after a character that is not one) that begins with a folder prefix is the mod's
 and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<rest>`, `animations/` and a `meshes/`
 name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
 `scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
-`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `game:<name>` is written `<name>` (the
+`mods/<salt>/<rest>`. Every other name is the game's and is left as written; `native:<name>` is written `<name>` (the
 installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
-and so is the quoted name of `game("...")`, the Graphics SDK's other spelling of a game name (`ma_in_game_call`).
+and so is the quoted name of `native("...")`, the Graphics SDK's other spelling of a DOOM name (`ma_in_native_call`).
 `#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
 language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
 builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
@@ -559,7 +564,7 @@ build's `mod.json`). Scripts are not rewritten: a script's names are resolved by
 A text may still spell an engine name (`mods/<salt>/x`): it is served as written.
 
 The builder reads every decl through the rewrite (`mb_engine_text`: the needs scan, the look compile, the closure,
-the stock comparison of a `game/` copy and the derived edits all see the engine's text), and the file's identity
+the stock comparison of a `native/` copy and the derived edits all see the engine's text), and the file's identity
 (its SHA-256 in the block) stays the author's bytes. The serving index serves the rewritten text: `ms_engine_names`
 writes each changed decl under `mods\.served\files\<sha16>.decl` and points the file there, before the bank rename,
 so every open, the look filter and the ledger read the engine's bytes, as for a renamed bank. Salting a folder
@@ -615,9 +620,10 @@ These backend files share the work:
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
   `mods/<salt>/` (in the folder, under `programs/`). Of the 494 permutation decls the installed archives hold,
-  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 11 (`SH_MB_RULES`):
-  files beside `mod.json` are ignored, and campaign content derives its requirements, so
-  every own folder is built again once.
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 13 (`SH_MB_RULES`):
+  files beside `mod.json` are ignored, campaign content derives its requirements, `native/` holds DOOM's changed files, a
+  sound decl's leaf takes the namespace and the block may carry `spelled` (the namespace the carried binaries spell),
+  so every own folder is built again once.
 
   Lengths: the product puts no bound of its own on a name, author,
   homepage, request path, folder path, nesting depth, cause or script path.
@@ -651,9 +657,9 @@ These backend files share the work:
   `schema`) is refused with one sentence, "This mod was made for an earlier
   version of Snapmap+. This version does not read it yet."
   (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
-  is damage the sentence names. A folder in the engine's layout (an
-  `assets\` folder) is refused with the sentence naming the folders by
-  kind. Files beside `mod.json` (a README,
+  is damage the sentence names. A file in the engine's layout
+  (an `assets\` folder) is refused by name with one of the two sentences of
+  "The mod folder" above. Files beside `mod.json` (a README,
   `desktop.ini`, a `.git` folder) are ignored and never carried. A mod that
   brings campaign content (a closure pointer or a surface) gets the
   requirement `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 derived by
@@ -1505,11 +1511,13 @@ instead of failing it.
 
 ### Mod sounds
 
-A sound decl a mod carries (`generated/decls/sound/mods/<salt>/<stem>.decl`)
-names the Wwise event `play_<stem>`: the engine computes the event id from the
-decl's own name, so a decl whose stem is a stock event's (an alias) plays that
-stock sound with no bank, and one whose event lives in the mod's own bank
-plays once that bank is loaded. The builder makes a `soundShader` or `sound`
+A sound decl a mod carries (`generated/decls/sound/mods/<salt>/<salt>_<stem>.decl`,
+the author's `sounds/<stem>.decl`) names the Wwise event `play_<salt>_<stem>`: the
+engine computes the event id from the decl's own name, and the leaf takes the
+namespace because every mod's event names would otherwise be the same as
+DOOM's. The author's bank names the event `play_<stem>`; serving rewrites the
+bank's HIRC event ids to the namespaced ones (`sh_modserve_bank_events`), and
+the decl plays once that bank is loaded. The builder makes a `soundShader` or `sound`
 key naming `mods/...` a need of type `sound`; a stock event name is not a need.
 A bank is a file `sounds/<stem>.bnk` in the mod folder, and the engine is
 handed it only as `sound/soundbanks/pc/<salt>_<stem>.bnk` (Wwise opens banks
@@ -2355,7 +2363,7 @@ feature.
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
   `on.animation(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
-  `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
+  `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `native(...)` names are
   refused (`sh_script_check_name` applies the same rule to every API call).
   Names, notify strings and node names compare without case.
 - **Queue and tick.** Hooks on any thread post records to the mod's queue
@@ -2530,7 +2538,7 @@ map's own logic, as wired logic is, so every call works on any entity of the
 map: the mod's own (placed from its entityDefs or spawned by its scripts, which
 the handle table records under the mod and its `on.spawn` and other entity
 handlers hear), the game's and another mod's. A name is the mod's own content;
-`game("...")` names the game's wherever a name is taken (`spawn`, the damage,
+`native("...")` names DOOM's wherever a name is taken (`spawn`, the damage,
 projectile and sound decls, `decl`). A removed entity answers nil.
 Every argument is checked before the engine is touched, and every refusal is
 one plain sentence at the calling script line (it stops the mod's scripts for
@@ -3102,7 +3110,7 @@ engine.
 
 `script_api_combat.{c,h}` adds the combat calls; the hooks that deliver what
 happens to a mod's entities are in `script_hooks.c` (below). A decl a call
-names is the mod's own, or the game's through `game("...")`
+names is the mod's own, or DOOM's through `native("...")`
 (`sh_script_check_name`), looked up by type; a name that does not exist is
 refused with one plain sentence. An attacker is any entity; without one the
 damage comes from the world entity, as a trigger's does.
@@ -4327,7 +4335,7 @@ bridge's install (`sh_modstock_set_install`):
   its strings `<salt>_<key>`) and built under the current rules with its
   replacements kept, so a pack that only built under the retired `legacy`
   relaxations is refused alone with its cause. The result is in the engine's
-  layout (`assets/`), which the build now refuses until the installer also
+  layout (`assets/`), which the build refuses (a file outside the mod's folders) until the installer also
   lays a converted folder out by kind (owner, 2026-11-17: converting releases'
   mods is the installer's, not yet done). Moved again into the folder an
   earlier pass made of the same tree (the record's `trees`), it keeps that

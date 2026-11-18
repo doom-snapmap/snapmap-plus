@@ -163,7 +163,7 @@ static int l_trace(lua_State *L)
     }
     if (!have || !(best.fraction < 1.0f)) { lua_pushnil(L); return 1; }
     lua_createtable(L, 0, 4);
-    sh_script_api_push_vec(L, best.end);   lua_setfield(L, -2, "pos");
+    sh_script_api_push_vec(L, best.end);   lua_setfield(L, -2, "position");
     sh_script_api_push_vec(L, best.normal); lua_setfield(L, -2, "normal");
     lua_pushnumber(L, best.fraction);       lua_setfield(L, -2, "fraction");
     if (best.hit_spawn_id != SH_SCRIPT_SPAWN_ID_NONE && best.hit_spawn_id != SH_SCRIPT_SPAWN_ID_WORLD && e->resolve) {

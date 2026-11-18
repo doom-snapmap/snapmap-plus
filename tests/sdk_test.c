@@ -144,13 +144,13 @@ static void test_parse(void)
         CHECK(has(why, "never closed"));
     }
     {
-        const char *u = "{ name game(\"lights/gaus\") }";
+        const char *u = "{ name native(\"lights/gaus\") }";
         CHECK(sdk_parse("x.decl", u, strlen(u), &d, why, sizeof why) == 1);
         CHECK(d.root->items[0].atoms[1].kind == SDK_A_STRING && d.root->items[0].atoms[1].game);
         sdk_doc_free(&d);
     }
     {
-        const char *u = "{ name game:effects/blast }";
+        const char *u = "{ name native:effects/blast }";
         CHECK(sdk_parse("x.decl", u, strlen(u), &d, why, sizeof why) == 1);
         CHECK(d.root->items[0].atoms[1].kind == SDK_A_STRING && d.root->items[0].atoms[1].game &&
               d.root->items[0].atoms[1].n == 13 && !strncmp(d.root->items[0].atoms[1].p, "effects/blast", 13));
@@ -177,7 +177,7 @@ static const char *EXAMPLE =
     "\t\tfadeout\t\t0.5\n"
     "\t}\n"
     "\tdecal {\n"
-    "\t\tmaterial\tgame(\"textures/decals/blood_splatter/blood_splatter_01\")\n"
+    "\t\tmaterial\tnative(\"textures/decals/blood_splatter/blood_splatter_01\")\n"
     "\t\tsize\t\t64\n"
     "\t\tlasts\t\t10\n"
     "\t\tfadeout\t\t2\n"
@@ -193,7 +193,7 @@ static const char *EXAMPLE =
     "\t\treach\t\t600\n"
     "\t}\n"
     "\tsound {\n"
-    "\t\tsound\t\tgame(\"effects/explosions/grenade_explosion_default\")\n"
+    "\t\tsound\t\tnative(\"effects/explosions/grenade_explosion_default\")\n"
     "\t}\n"
     "}\n";
 
@@ -240,16 +240,16 @@ static void test_effect_more_items(void)
 {
     const char *t =
         "{\n type effect\n"
-        " screen { material game(\"textures/effects/misc/screen_player_damage_02\")\n colour { 1, 0, 0 }\n tiles { 0.5, 0.5 }\n mirror yes }\n"
+        " screen { material native(\"textures/effects/misc/screen_player_damage_02\")\n colour { 1, 0, 0 }\n tiles { 0.5, 0.5 }\n mirror yes }\n"
         " blur { style soft\n strength 0.02 }\n"
         " blur { strength 200 }\n"
         " focus { near 10\n focus 200\n far 2000 }\n"
-        " flare { use game(\"flares/explosionflare\")\n size 0.75 }\n"
-        " trail { use game(\"plasma_freeze\") }\n"
-        " model { model game(\"models/effects/muzzleflash/plasma_round.lwo\")\n size 2 }\n"
+        " flare { use native(\"flares/explosionflare\")\n size 0.75 }\n"
+        " trail { use native(\"plasma_freeze\") }\n"
+        " model { model native(\"models/effects/muzzleflash/plasma_round.lwo\")\n size 2 }\n"
         " glow { colour { 0, 0.6, 1 }\n strength 0.5\n fadein 0.2\n fadeout 0.5 }\n"
         " wind { strength 3\n angle 90 }\n"
-        " environment { use game(\"grenade_hit\") }\n"
+        " environment { use native(\"grenade_hit\") }\n"
         " light { at fx_chest\n when spawn_start\n offset { 0, 0, 32 }\n starts { 0.1, 0.3 }\n repeats yes }\n"
         "}\n";
     res x = compile(FX, t);
@@ -361,7 +361,7 @@ static void test_particles(void)
 
 static void test_particles_plain(void)
 {
-    const char *t = "{\n type effect\n particles { material game(\"textures/effects/particles/sparks/spark_single\")\n"
+    const char *t = "{\n type effect\n particles { material native(\"textures/effects/particles/sparks/spark_single\")\n"
                     " count 5\n fall 100\n bounce 0.4 }\n}\n";
     res x;
     const char *prt;
@@ -386,14 +386,14 @@ static void test_effect_mistakes(void)
         { "{\n type effect\n lihgt { }\n}\n", "blast.decl line 3: 'lihgt' is not an item of an effect; the nearest is 'light'." },
         { "{\n type effect\n light { brigthness 4 }\n}\n", "blast.decl line 3: 'brigthness' is not a field of a light; the nearest is 'brightness'." },
         { "{\n type effect\n shake {\n strength { 1, 2 }\n }\n}\n", "blast.decl line 4: 'strength' needs one number, as in 'strength 2'." },
-        { "{\n type effect\n decal { size 10 }\n}\n", "blast.decl line 3: a decal needs its 'material', as in 'material game(\"textures/decals/blood_splatter/blood_splatter_01\")'." },
+        { "{\n type effect\n decal { size 10 }\n}\n", "blast.decl line 3: a decal needs its 'material', as in 'material native(\"textures/decals/blood_splatter/blood_splatter_01\")'." },
         { "{\n type effect\n light { flicker strobe }\n}\n", "blast.decl line 3: 'flicker' is none, flicker or fire; to change the brightness yourself, write 'brightness pulse { ... }'." },
         { "{\n type effect\n particles { image x.tga\n from cube 4 }\n}\n", "blast.decl line 4: 'from' is point, sphere r, ring r, disc r or box { x, y, z }, with 'surface' before it for the surface only." },
         { "{\n type effect\n light { brightness pulse { rate 2, low 1 } }\n}\n", "blast.decl line 3: 'pulse' of 'brightness' needs both 'low' and 'high', as in 'pulse { rate 2, low 0.2, high 1 }'." },
         { "{\n type effect\n}\n", "blast.decl line 1: an effect needs at least one item (light, decal, shake, ...)." },
         { "{\n type effect\n light 4\n}\n", "blast.decl line 3: 'light' takes its fields in braces, as in 'light { ... }'." },
         { "{\n type effect\n light { repeats maybe }\n}\n", "blast.decl line 3: 'repeats' is yes or no." },
-        { "{\n type effect\n environment { use game(\"x\")\n fog { 1, 0, 0 } }\n}\n", "blast.decl line 3: an environment item uses one environment or names its values, not both." },
+        { "{\n type effect\n environment { use native(\"x\")\n fog { 1, 0, 0 } }\n}\n", "blast.decl line 3: an environment item uses one environment or names its values, not both." },
         { "{\n type effect\n environment { fgo { 1, 0, 0 } }\n}\n", "blast.decl line 3: 'fgo' is not a field of an environment item; the nearest is 'fog'." },
     };
     size_t i;

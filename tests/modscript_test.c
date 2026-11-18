@@ -215,7 +215,8 @@ static void test_builds(void)
     good_mod(dir, sizeof dir);
     CHECK(build(dir, &b));
     if (b.errors) fprintf(stderr, "  %s\n", sh_mb_first_cause(&b));
-    CHECK(b.script_files == 2 && b.warnings == 0);
+    /* the entry spells the engine's name of its own mod once (line 5): D14 warns, one warning, and still builds */
+    CHECK(b.script_files == 2 && b.warnings == 1 && b.first_warning && strstr(b.first_warning, "line 5 writes mods/" SALT "/ai/door"));
     CHECK(b.scripts && !strcmp(b.scripts, "{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],\"name\":\"ai/door\"}],"
                                          "\"files\":2,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
     if (b.scripts) printf("  scripts: %s\n", b.scripts);

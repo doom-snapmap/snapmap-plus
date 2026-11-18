@@ -215,17 +215,17 @@ static int game_tostring(lua_State *L)
     return 1;
 }
 
-static int sb_game(lua_State *L)
+static int sb_native(lua_State *L)
 {
     size_t n, i;
     const char *s = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
     if (!s || !n)
-        return sh_script_refuse(L, "\"game\" needs the name of a game decl, as game(\"fx/impacts/rocket\")");
+        return sh_script_refuse(L, "\"native\" needs the name of one of DOOM's decls, as native(\"fx/impacts/rocket\")");
     for (i = 0; i < n; i++) {
         char c = s[i];
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
               c == '_' || c == '-' || c == '.' || c == '/' || c == '\\'))
-            return sh_script_refuse(L, "\"game\" was given \"%s\", which is not a usable name", s);
+            return sh_script_refuse(L, "\"native\" was given \"%s\", which is not a usable name", s);
     }
     lua_newuserdatauv(L, 1, 1);
     lua_pushvalue(L, 1);
@@ -602,7 +602,7 @@ void shs_open_libs(lua_State *L, uint64_t seed)
     lua_pushcfunction(L, sb_warn); lua_setfield(L, -2, "warn");
     lua_pushcfunction(L, sb_require); lua_setfield(L, -2, "require");
     lua_pushcfunction(L, sb_now); lua_setfield(L, -2, "now");
-    lua_pushcfunction(L, sb_game); lua_setfield(L, -2, "game");
+    lua_pushcfunction(L, sb_native); lua_setfield(L, -2, "native");
     lua_pushcfunction(L, sb_after); lua_setfield(L, -2, "after");
     lua_pushcfunction(L, sb_every); lua_setfield(L, -2, "every");
     lua_pushcfunction(L, sb_run); lua_setfield(L, -2, "run");

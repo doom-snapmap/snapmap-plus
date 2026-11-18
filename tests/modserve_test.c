@@ -4711,8 +4711,8 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
-    /* The mod folder cannot name another salt's file: it would be a game/ path under mods/. */
-    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (game/" SP_THING "). "
+    /* The mod folder cannot name another salt's file: it would be a native/ path under mods/. */
+    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (native/" SP_THING "). "
                   "Press Refresh to build the mod again."));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
@@ -5128,15 +5128,79 @@ static void test_dependency_names(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* A bank of 42 bytes: BKHD (id `bank_id`) and a HIRC holding one Event `event` and one Sound object 0x1234. */
+static void ns_bank(unsigned char out[42], uint32_t bank_id, uint32_t event)
+{
+    uint32_t v;
+    memset(out, 0, 42);
+    memcpy(out, "BKHD", 4); v = 8; memcpy(out + 4, &v, 4); v = 0x71; memcpy(out + 8, &v, 4); memcpy(out + 12, &bank_id, 4);
+    memcpy(out + 16, "HIRC", 4); v = 18; memcpy(out + 20, &v, 4); v = 2; memcpy(out + 24, &v, 4);
+    out[28] = 4; v = 4; memcpy(out + 29, &v, 4); memcpy(out + 33, &event, 4);      /* the Event: its id only */
+    out[37] = 2; v = 0; memcpy(out + 38, &v, 4);                                    /* a Sound with an empty body */
+}
+
+/* SPEC-distribution D12: a sound decl's event takes the namespace at serve, and a namespace a file spells is mapped
+ * to the mod's, length for length. */
+static void test_namespace_maps(void)
+{
+    unsigned char a[42], b2[42], text[] = "x mods/oldsalt1/a mods/oldsalt1/oldsalt1_play_x #str_oldsalt1_k xoldsalt1/ "
+                                          "mods/oldsalt12/z";
+    uint32_t from = sh_mb_fnv1_lower("play_hit", 8), to = sh_mb_fnv1_lower("play_bbank000_hit", 17), other = 0x1234;
+    printf("-- the namespace of sound events and of spelled names\n");
+    ns_bank(a, 7, from);
+    ns_bank(b2, 7, to);
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 1 && !memcmp(a, b2, sizeof a));
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);               /* nothing left to map */
+    ns_bank(a, 7, other);
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);               /* another event stays */
+    a[20] = 0xFF;                                                                   /* a damaged HIRC size */
+    CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 0);
+    CHECK(sh_modserve_respell(text, sizeof text - 1, "oldsalt1", "newsalt1") == 4);
+    CHECK(!strcmp((const char *)text, "x mods/newsalt1/a mods/newsalt1/newsalt1_play_x #str_newsalt1_k xoldsalt1/ "
+                                      "mods/oldsalt12/z"));
+    CHECK(sh_modserve_respell(text, sizeof text - 1, "newsalt1", "newsalt1") == 0);
+    {
+        /* Served: a bank written with its event outside the namespace (play_hit) is the bank written inside it
+         * (play_bbank000_hit), so the two serve the same bytes under the same stem. */
+        static const char DECL[] = "sound mods/bbank000/bbank000_hit {\r\n\tinherit = \"default\";\r\n}";
+        static const fx_file files[] = {
+            { "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, 42, "soundBank", "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, '1' },
+            { "generated/decls/sound/mods/bbank000/bbank000_hit.decl", DECL, -1, "sound", "mods/bbank000/bbank000_hit", NULL, '2' },
+        };
+        char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], sha[65], req[160], *slash;
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        sh_modserve_hit hit;
+        strcpy_s(top, sizeof top, g_root);
+        slash = strrchr(top, '\\');
+        if (slash) *slash = 0;
+        _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\nsbanks\\mods", top);
+        mkdirs(root);
+        make_bundle(root, "bbank000", "bbank000", '5', NULL, files, 2, NULL);
+        ns_bank(a, sh_mb_fnv1_lower("bbank000_sfx", 12), from);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bbank000\\sounds\\sfx.bnk", root);
+        write_file(path, (const char *)a, sizeof a);
+        sh_modserve_scope_enable(0);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 1);
+        ns_bank(b2, sh_mb_fnv1_lower("bbank000_sfx", 12), to);
+        sh_mb_sha256_hex(b2, sizeof b2, sha);
+        _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/bbank000_sfx.%.16s.bnk", sha);
+        CHECK(sh_modserve_lookup(req, &hit));
+        CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == sizeof b2 && !memcmp(bytes + 16, b2 + 16, sizeof b2 - 16));
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    }
+}
+
 /* Per-build bank stems (DESIGN-additive 6): a bundle's bank is served under
  * <stem>.<hash16>.bnk with its BKHD id rewritten, and its decl naming the
  * bank follows; another build of the key is another bank to Wwise. */
 static void test_bank_stems(void)
 {
-    static const char DECL[] = "sound mods/bbank000/hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_hit\";\r\n}";
+    static const char DECL[] = "sound mods/bbank000/bbank000_hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_bbank000_hit\";\r\n}";
     static const fx_file files[] = {
         { "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, 24, "soundBank", "sound/soundbanks/pc/bbank000_sfx.bnk", NULL, '1' },
-        { "generated/decls/sound/mods/bbank000/hit.decl", DECL, -1, "sound", "mods/bbank000/hit", NULL, '2' },
+        { "generated/decls/sound/mods/bbank000/bbank000_hit.decl", DECL, -1, "sound", "mods/bbank000/bbank000_hit", NULL, '2' },
     };
     char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], req[160], h[65], stem[64];
     unsigned char bank[24], *bytes = NULL;
@@ -5190,7 +5254,7 @@ static void test_bank_stems(void)
         {
             char want[200];
             _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s.bnk\";", stem);
-            CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/hit.decl"), want) != NULL);
+            CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/bbank000_hit.decl"), want) != NULL);
         }
     }
     /* The served copies no build needs any more, and a temporary a crashed
@@ -5720,6 +5784,7 @@ int main(void)
     test_row_served();
     test_dependency_names();
     test_bank_stems();
+    test_namespace_maps();
     test_index_retire();
     test_store_root_utf8();
     strcpy_s(top, sizeof top, g_root);

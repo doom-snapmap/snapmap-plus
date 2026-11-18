@@ -995,8 +995,8 @@ static int extra_refuses(const char *salt, const char *extra, size_t len, char *
     return 1;
 }
 static void m_empty(const char *f) { mt_write(f, "images\\empty.bimage", ""); }
-static void m_unns_decl(const char *f) { mt_write(f, "game\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
-static void m_unns_raw(const char *f) { mt_write(f, "game\\generated\\image\\other\\x.bimage", "bytes"); }
+static void m_unns_decl(const char *f) { mt_write(f, "native\\generated\\decls\\entitydef\\other\\thing.decl", "{\r\n}"); }
+static void m_unns_raw(const char *f) { mt_write(f, "native\\generated\\image\\other\\x.bimage", "bytes"); }
 static void m_bad_type(const char *f) { mt_write(f, "decls\\nosuchtype\\x.decl", "{\r\n}"); }
 static void m_ill_formed(const char *f) { mt_write(f, "entities\\broken.decl", "{\r\n\tinherit = \"x;\r\n"); }
 static void m_missing_need(const char *f)
@@ -1007,19 +1007,19 @@ static void m_missing_need(const char *f)
 static void m_shadow_ok(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+    mt_write(f, "native\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
 /* A shadow whose text keeps a stock animation name the game ships without. */
 static void m_shadow_dangling(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\generated\\decls\\md6def\\monster\\imp.md6.decl",
+    mt_write(f, "native\\generated\\decls\\md6def\\monster\\imp.md6.decl",
              "{\r\n\tevents {\r\n\t\tanim \"md6/monster/imp/nothing_here.md6anim\" {\r\n\t\t}\r\n\t}\r\n}");
 }
 static void m_shadow_not_stock(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
+    mt_write(f, "native\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
 }
 static void m_desc_plain(const char *f) { mt_write(f, "mod.json", DESC("")); }
 /* Author keys and a name with a tab: kept as written, built without warnings (the mod store
@@ -1033,7 +1033,7 @@ static void m_store_refuses(const char *f)
 static void m_shadow_undeclared(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+    mt_write(f, "native\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
 /* Retired author keys: the intent keys of DESIGN-additive 2.4 and before. */
 static void m_replaces_declared(const char *f)
@@ -1061,13 +1061,13 @@ static void m_old_body_events(const char *f)
 static void m_copy_unparsed(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\t= 3;\r\n}");
+    mt_write(f, "native\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\t= 3;\r\n}");
 }
 /* A binary at a game name with other bytes. */
 static void m_binary_replace(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
-    mt_write(f, "game\\cooked\\anim\\md6\\characters\\monsters\\imp\\base\\motion\\combat\\idle.bmd6anim", "not the game's bytes");
+    mt_write(f, "native\\cooked\\anim\\md6\\characters\\monsters\\imp\\base\\motion\\combat\\idle.bmd6anim", "not the game's bytes");
 }
 
 /* The game's texts of the decls the edits cases copy (a fake installed-content reader). */
@@ -1229,14 +1229,16 @@ static void test_refusals(const char *fixture, const char *tmp)
         sh_mb_free(&ok);
     }
     refused(fixture, tmp, m_empty, &RESOLVER, "empty file");
-    refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/<this folder's name>/");
-    refused(fixture, tmp, m_unns_raw, &RESOLVER, "is not under a mods folder named like this mod folder");
+    refused(fixture, tmp, m_unns_decl, &RESOLVER, "native/generated/decls/entitydef/other/thing.decl is not one of DOOM's "
+            "files, so it is the mod's own; move it to entities/other/thing.decl.");
+    refused(fixture, tmp, m_unns_raw, &RESOLVER, "native/generated/image/other/x.bimage is not one of DOOM's files, so it "
+            "is the mod's own; move it to images/other/x.bimage.");
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
-    /* Additive mods: a file at a name outside the namespace must be a game
-     * name. */
-    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "outside mods/<this folder's name>/, and the game has no file of that name");
+    /* Additive mods: a native/ file must be at a DOOM path (D14). */
+    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "native/generated/decls/entitydef/monster/not_stock.decl is not "
+            "one of DOOM's files, so it is the mod's own; move it to entities/monster/not_stock.decl.");
     {
         char plain[65];
         accepted(fixture, tmp, m_desc_plain, &b);
@@ -1325,11 +1327,11 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_copy_unparsed, &RESOLVER,
             "imp.decl does not parse as a decl (line 2: expected a key, found '='); the product derives the edits from the "
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
-    /* A binary at a game name with other bytes is refused. */
-    refused(fixture, tmp, m_binary_replace, &RESOLVER,
-            "game/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
-            "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
-            "version in the mod's own folder for what it is and name it there");
+    /* A binary at a DOOM path with other bytes is a replacement (SPEC-distribution 3.10), not a refusal. */
+    sh_mb_keep_replacements_here(0);
+    accepted(fixture, tmp, m_binary_replace, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1 && b.classes.replaces == 1 && !b.edits);
+    sh_mb_free(&b);
     /* Received content keeps a binary replacement: an import on its own thread. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
@@ -1486,7 +1488,7 @@ static void rp_be32(unsigned char *p, unsigned v)
 #define RP_FS "#version 450 core\nlayout( location = 0 ) out vec4 o;\nvoid main() { o = vec4( 1.0 ); }\n"
 #define RP_DECL "{\r\n\tparms {\r\n\t\tstageSort\tsortEmit\r\n\t}\r\n}"
 #define RP_PERM "{\r\n\tpermutations {\r\n\t\tdefault AMD_VK_EXTENSIONS\r\n\t}\r\n}"
-#define RP_MAT "{\r\nstageprogram\t\"mods/trpcases/tint\"\r\ntransmap\t_white\r\n}\r\n"
+#define RP_MAT "{\r\nstageprogram\t\"programs/tint\"\r\ntransmap\t_white\r\n}\r\n"
 
 /* A cooked program: magic, checksum of `decl`, 16 bytes standing in for the
  * parm blocks, three stage records and the 36-byte trailer. */
@@ -1597,14 +1599,14 @@ static void rp_case(const char *tmp, int which, const char *needle)
     if (which != RP_DOT_NAME) {
         if (which == RP_BARE_NAME)
             mt_write(folder, "materials\\tintmat.decl",
-                     "{\r\nstageprogram\tmods/trpcases/tint\r\ntransmap\t_white\r\n}\r\n");
+                     "{\r\nstageprogram\tprograms/tint\r\ntransmap\t_white\r\n}\r\n");
         else
             mt_write(folder, "materials\\tintmat.decl", RP_MAT);
     }
-    if (which == RP_INCLUDE) rp_put(folder, "game/decls/renderprogs/global.inc", "x", 1);
-    if (which == RP_PIPELINES) rp_put(folder, "game/generated/vulkan_pipelines.bin", "x", 1);
-    if (which == RP_GLSLBIN) rp_put(folder, "game/generated/glslbinaries/tint.bin", "x", 1);
-    if (which == RP_GLSL) rp_put(folder, "game/generated/glsl/tint.fspv", "x", 1);
+    if (which == RP_INCLUDE) rp_put(folder, "native/decls/renderprogs/global.inc", "x", 1);
+    if (which == RP_PIPELINES) rp_put(folder, "native/generated/vulkan_pipelines.bin", "x", 1);
+    if (which == RP_GLSLBIN) rp_put(folder, "native/generated/glslbinaries/tint.bin", "x", 1);
+    if (which == RP_GLSL) rp_put(folder, "native/generated/glsl/tint.fspv", "x", 1);
 
     if (!needle) {
         CHECK(sh_mb_build(folder, NULL, &RESOLVER, &b));
@@ -1741,6 +1743,59 @@ static int fake_stock_exists(void *ctx, const char *request)
 }
 static const sh_mb_resolver FAKE_RESOLVER = { NULL, NULL, fake_stock_exists, NULL };
 
+static int fake_container_snap(void *ctx, const char *source, const char *sha, char *out, size_t cap)
+{
+    (void)ctx; (void)sha;
+    if (!fake_find(source)) return SH_MB_STOCK_ABSENT;
+    strcpy_s(out, cap, "snap_gameresources");
+    return SH_MB_STOCK_OK;
+}
+
+static int has_warning(const sh_mb_bundle *b, const char *needle)
+{
+    size_t i;
+    for (i = 0; i < b->warning_list_count; i++) if (strstr(b->warning_list[i], needle)) return 1;
+    return 0;
+}
+
+/* SPEC-distribution 3.10 and D12: a native/ copy of DOOM's own bytes warns; a text that writes the mod's engine name
+ * warns; the namespace a binary spells is the block's "spelled", read back from mod.json. */
+static void test_native_and_spelled(const char *tmp)
+{
+    static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read, fake_container_snap };
+    sh_mb_bundle b, back;
+    char folder[MAX_PATH], cause[512];
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\native_same", tmp);
+    mt_write(folder, "mod.json", "{\"name\": \"Native\"}");
+    mt_write(folder, "native\\generated\\image\\stock\\rock.bimage", FAKE[0].text);
+    mt_write(folder, "meshes\\crate.bmodel", "bin\x01mods/oldsalt1/crate_skin\x02");
+    mt_write(folder, "entities\\crate.decl", "{\r\n\tinherit = \"mods/" SALT "/base\";\r\n}");
+    mt_write(folder, "entities\\base.decl", "{\r\n}");
+    sh_mb_set_stock_ops(&ops);
+    CHECK(sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  native_same refused: %s\n", sh_mb_first_cause(&b));
+    CHECK(has_warning(&b, "native/generated/image/stock/rock.bimage is the same as DOOM's own file, so the mod does not "
+                          "need it."));
+    CHECK(has_warning(&b, "entities/crate.decl line 2 writes mods/" SALT "/base, the engine's spelling"));
+    CHECK(!strcmp(b.spelled, "oldsalt1"));
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
+    memset(&back, 0, sizeof back);
+    CHECK(sh_mb_load_folder(folder, &back) && !strcmp(back.spelled, "oldsalt1"));
+    sh_mb_free(&back);
+    sh_mb_free(&b);
+    /* a folder that is none of the mod's: each file is named, in the form for a DOOM path or not */
+    mt_write(folder, "generated\\image\\stock\\rock.bimage", FAKE[0].text);
+    mt_write(folder, "entites\\imp.decl", "{\r\n}");
+    CHECK(!sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
+    CHECK(b.errors == 2);
+    CHECK(strstr(sh_mb_first_cause(&b), "This mod was not built: entites/imp.decl is in none of the mod's folders") ||
+          strstr(sh_mb_first_cause(&b), "This mod was not built: generated/image/stock/rock.bimage is DOOM's own file, "
+                                        "outside native/. If you changed it, move it to "
+                                        "native/generated/image/stock/rock.bimage"));
+    sh_mb_free(&b);
+    sh_mb_set_stock_ops(NULL);
+}
+
 static int count_class(const sh_mb_bundle *b, int cls)
 {
     size_t i;
@@ -1764,10 +1819,10 @@ static void test_classes(const char *fixture, const char *tmp)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\classes", tmp);
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "images\\rock_copy.bimage", FAKE[0].text);   /* borrow */
-    mt_write(folder, "game\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* surface */
-    mt_write(folder, "game\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
+    mt_write(folder, "native\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* surface */
+    mt_write(folder, "native\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
              "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
-    mt_write(folder, "game\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
+    mt_write(folder, "native\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
              "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
     sh_mb_set_stock_ops(&ops);
     CHECK(sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
@@ -1827,7 +1882,7 @@ static void test_classes(const char *fixture, const char *tmp)
         char reg[MAX_PATH];
         _snprintf_s(reg, sizeof reg, _TRUNCATE, "%s\\classes-coop", tmp);
         CHECK(mt_copy_tree(fixture, reg));
-        mt_write(reg, "game\\generated\\decls\\entitydef\\player\\coop.decl",
+        mt_write(reg, "native\\generated\\decls\\entitydef\\player\\coop.decl",
                  "{\r\n\tinherit = \"player/mp\";\r\n\tedit = {\r\n\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n"
                  "\t\tdamageGroups = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdamageScale = 1.5;\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
         CHECK(sh_mb_build(reg, SALT, &FAKE_RESOLVER, &back) && back.classes.replaces == 0 && back.classes.edits == 1 &&
@@ -1870,7 +1925,7 @@ static void test_classes(const char *fixture, const char *tmp)
         v = 16; memcpy(bank + 4, &v, 4);
         v = 0x71; memcpy(bank + 8, &v, 4);
         v = sh_mb_fnv1_lower("doom_ui", 7); memcpy(bank + 12, &v, 4);
-        rp_put(folder, "game\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
+        rp_put(folder, "native\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
         CHECK(!sh_mb_build(folder, SALT, &FAKE_RESOLVER, &b));
         CHECK_CAUSE(b, "so a mod cannot replace one");
         sh_mb_free(&b);
@@ -1883,7 +1938,7 @@ static void test_classes(const char *fixture, const char *tmp)
         sh_mb_set_stock_ops(&ops);
         _snprintf_s(fsm, sizeof fsm, _TRUNCATE, "%s\\classes_fsm", tmp);
         CHECK(mt_copy_tree(fixture, fsm));
-        mt_write(fsm, "game\\generated\\decls\\aifsmmanager\\states\\spidermastermind.decl",
+        mt_write(fsm, "native\\generated\\decls\\aifsmmanager\\states\\spidermastermind.decl",
                  "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind\";\r\n"
                  "\t\t\t\t\tisRoot = false;\r\n\t\t\t\t\tfsmType = \"idAIFSM\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\tsubGraph = {\r\n"
                  "\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind_attacks\";\r\n\t\t\t\t\tisRoot = false;\r\n\t\t\t\t}\r\n"
@@ -2024,6 +2079,7 @@ int main(int argc, char **argv)
     test_record_read_failure(tmp);
     test_refusals(full, tmp);
     test_classes(full, tmp);
+    test_native_and_spelled(tmp);
     test_rekey();
     test_registries(full, tmp);
     test_bare_hyphen(full, tmp);

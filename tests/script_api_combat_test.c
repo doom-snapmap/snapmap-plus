@@ -85,7 +85,7 @@ static fdecl g_decls[] = {
     { "damage", "mods/" SALT "/damage/rock" },
     { "damage", "mods/" SALT "/damage/beam" },
     { "projectile", "mods/" SALT "/rocket" },
-    { "sound", "mods/" SALT "/brute/roar" },
+    { "sound", "mods/" SALT "/brute/" SALT "_roar" },
     { "damage", "mods/othermod/damage/rock" },
 };
 
@@ -456,7 +456,7 @@ static void test_hitscan_radius(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
         "  local h = hitscan({x = 0, y = 0, z = 10}, {x = 1, y = 0, z = 0}, 'damage/beam', nil, self)\n"
-        "  print('hit', h.pos.x, h.normal.x, h.entity:definition())\n"
+        "  print('hit', h.position.x, h.normal.x, h.entity:definition())\n"
         "  print('miss', hitscan({x = 0, y = 0, z = 10}, {x = 0, y = 1, z = 0}, 'damage/beam'))\n"
         "  print('short', hitscan({x = 0, y = 0, z = 10}, {x = 1, y = 0, z = 0}, 'damage/beam', 50))\n"
         "  print('radius', radius_damage({x = 5, y = 6, z = 7}, 'damage/rock', self))\n"
@@ -504,8 +504,8 @@ static void test_effects_sound(void)
     CHECK(has(g_log, "stopped\ttrue"));
     CHECK(has(g_events, "post remove@mods/" SALT "/fx/beam_impact();"));
     CHECK(has(g_log, "sound\ttrue\ttrue"));
-    CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,0);"));
-    CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/roar,7);"));
+    CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/" SALT "_roar,0);"));
+    CHECK(has(g_events, "startSoundShader@mods/" SALT "/ai/brute(d:mods/" SALT "/brute/" SALT "_roar,7);"));
 }
 
 /* The Graphics SDK's calls: an SDK effect played at a point and on an entity's joint with a colour, an environment set
@@ -745,7 +745,7 @@ static void test_refusals(void)
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1), 'damage/rock', 'self')\nend)\n",
             "3", "\"damage\" needs the attacker as an entity, got text");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1))\nend)\n",
-            "3", "\"damage\" needs the damage (the name of a damage decl of this mod, or of the game with game(name)), got nothing");
+            "3", "\"damage\" needs the damage (the name of a damage decl of this mod, or of DOOM's with native(name)), got nothing");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 0, y = 0, z = 0}, 'damage/rock')\nend)\n",
             "3", "\"hitscan\" needs a direction that is not zero");
     refused("api = 1\non.spawn('ai/brute', function(self)\n  hitscan(self, {x = 1, y = 0, z = 0}, 'damage/rock', 0)\nend)\n",

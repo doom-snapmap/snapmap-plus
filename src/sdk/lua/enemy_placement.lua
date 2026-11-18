@@ -118,7 +118,7 @@ function P.acquire(A, e, b)
     local players = rawget(_G, "players")
     for _, p in ipairs(players and players() or {}) do consider(p) end
     if REAL[P.team(e)] then
-      for _, x in ipairs(A.entities_near(A.pos(e), P.SIGHT) or {}) do
+      for _, x in ipairs(A.entities_near(A.position(e), P.SIGHT) or {}) do
         if not x:is_player() and is_demon(x) then consider(x) end
       end
     end
@@ -150,7 +150,7 @@ function P.install(A)
   A.move_to_entity = function(e, t, radius, flags)
     local s = P.of(e)
     if s.behavior == "defend" and s.home then
-      local tp = A.pos(t)
+      local tp = A.position(t)
       if tp then
         local c = P.clamp(tp, s.home, P.DEFEND_RADIUS)
         if c ~= tp then return move_to(e, c, flags) end

@@ -418,7 +418,7 @@ static const char *const R_FILES[] = { "images/rock.bimage", "images/own.bimage"
 static const char *const R_BYTES[] = { ROCK, "the rock mod's own bytes", NULL };
 static const char *const C_FILES[] = { "images/c.bimage", NULL };
 static const char *const C_BYTES[] = { "gamma bytes", NULL };
-static const char *const E_FILES[] = { "game/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
+static const char *const E_FILES[] = { "native/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
 static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
 
 /* ---------------------------------------- part of a build (modslice.h) ---- */
@@ -499,7 +499,7 @@ static void test_parts(const char *tmp)
     list[0] = mod;
     CHECK(modsync_upload_builds(list, 1, "item-part", NULL, &st) && st.builds_sent == 1);
     CHECK(stored_entries(cut, SH_MB_SLICE_SOURCE, &has) == 4 && has);
-    CHECK(stored_entries(cut, "game/" P_BARREL_ICON, &has) == 4 && !has);
+    CHECK(stored_entries(cut, "native/" P_BARREL_ICON, &has) == 4 && !has);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s", cut);
     CHECK(!dir_exists(author, rel));
     /* A second map that places the crate: one hash, nothing sent. */
