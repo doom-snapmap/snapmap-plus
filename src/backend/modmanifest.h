@@ -63,6 +63,11 @@ typedef struct sh_modmanifest_row {
     size_t unit_count;
     char (*units)[SH_MOD_HASH_CHARS + 1];   /* malloc'd: the objects' units in root order, then "whole" */
     char **roots;          /* malloc'd, parallel to units: the author root name, "*" for whole */
+    /* A pinned row's "modules" (SPEC-distribution 2.7, D-A30): a JSON array, one record per placed mod module, with
+     * what its stand-in needs when its unit cannot be had: {"name": the moduleName the map places, "bounds":
+     * [x0,y0,z0,x1,y1,z1], "portals": [{"bounds": [...6], "dir": "PORTAL_DIR_..."}, ...]} (sh_cache_module_record).
+     * Kept as written (malloc'd), NULL for none. */
+    char *modules;
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {

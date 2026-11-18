@@ -38,6 +38,7 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     free(row->names);
     free(row->name);
     free(row->choices);
+    free(row->modules);
     if (row->roots) for (i = 0; i < row->unit_count; i++) free(row->roots[i]);
     free(row->roots);
     free(row->units);
@@ -45,6 +46,7 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     row->name_count = 0;
     row->name = NULL;
     row->choices = NULL;
+    row->modules = NULL;
     row->roots = NULL;
     row->units = NULL;
     row->unit_count = 0;
@@ -171,11 +173,13 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
     slot->name_count = 0;
     slot->name = NULL;
     slot->choices = NULL;
+    slot->modules = NULL;
     slot->roots = NULL;
     slot->units = NULL;
     slot->unit_count = 0;
     slot->pinned = 0;
-    if ((row->name && !(slot->name = sh_text(row->name))) || (row->choices && !(slot->choices = sh_text(row->choices)))) {
+    if ((row->name && !(slot->name = sh_text(row->name))) || (row->choices && !(slot->choices = sh_text(row->choices))) ||
+        (row->modules && !(slot->modules = sh_text(row->modules)))) {
         sh_modmanifest_row_free(slot);
         return 0;
     }
@@ -489,7 +493,8 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     if (err && err_cap) err[0] = 0;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
-    if (!json || !length || !sh_native_json_parse_object(json, length, 4, &object)) {
+    /* Depth 8: a module record (D-A30) nests its portals' bounds five levels below the row. */
+    if (!json || !length || !sh_native_json_parse_object(json, length, 8, &object)) {
         MM_ERR("row value is not a JSON object");
         return 0;
     }
@@ -564,6 +569,12 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                 free((void *)units);
                 sh_json_object_free(&oo);
                 if (!good) { MM_ERR("row '%s' names its objects' units wrongly", out->salt); goto done; }
+                /* What a module stand-in needs (D-A30): kept as written; one that does not read is dropped and the
+                 * row stays (an absent module is then left out, as before). */
+                {
+                    const char *modules = sh_json_object_get(&object, "modules");
+                    if (modules && *modules == '[') out->modules = sh_text(modules);
+                }
             }
         }
     }
@@ -647,6 +658,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         }
         mm_put(&t, "}", 1);
         if (whole) { mm_put(&t, ",\"whole\":", 9); mm_put_quoted(&t, whole); }
+        if (row->modules && row->modules[0] == '[') { mm_put(&t, ",\"modules\":", 11); mm_put(&t, row->modules, strlen(row->modules)); }
     } else {
         mm_put(&t, ",\"local\":true", 13);
         /* The local build it was saved from: what a format 1 import installs (until DS-X moves imports to units). */
@@ -1908,6 +1920,8 @@ static int mm_save_pins(mm_save_ctx *ctx)
             ok = sh_modmanifest_row_pin(r, (const char *const *)c->roots, units, c->unit_count);
             free((void *)units);
             if (ok && !sh_modmanifest_row_name(r)[0] && c->name) ok = sh_modmanifest_row_set_name(r, c->name);
+            /* The module records travel with the units (D-A30): a save keeps them as the load read them. */
+            if (ok && c->modules && !r->modules) ok = (r->modules = sh_text(c->modules)) != NULL;
             if (ok && c->size) r->size = c->size;
             if (ok && c->attached) r->attached = 1;
             break;

@@ -309,6 +309,18 @@ static void test_notices(void)
     free(t);
 }
 
+/* The module decls a pinning step reads: the hall only. */
+static const char *g_module_decl;
+static char *read_module(void *context, const char *request, size_t *len)
+{
+    char *t;
+    (void)context;
+    if (!g_module_decl || !strstr(request, "/rooms/hall.decl")) return NULL;
+    *len = strlen(g_module_decl);
+    if ((t = (char *)malloc(*len + 1)) != NULL) memcpy(t, g_module_decl, *len + 1);
+    return t;
+}
+
 static void test_cache(const char *top)
 {
     char pack[MAX_PATH * 2], mods[MAX_PATH * 2], mods2[MAX_PATH * 2], path[MAX_PATH * 3], chash[65], chash2[65], *t;
@@ -495,6 +507,105 @@ static void test_cache(const char *top)
             CHECK(rows_found == 5);
             sh_mb_free(&sb);
         }
+    }
+
+    /* D-A30: a placed mod module whose unit cannot be had (its height under the grid room's least, 432, is raised to it). The row records its bounds and portals (read from its decl
+     * by sh_cache_module_record when the row is pinned); the composition serves the product's blank room of that
+     * size at the module's name with those bounds and portals (the map's door slots keep their count), and a module
+     * info for the module palette. The record survives the row's write and read, so a save keeps it. */
+    {
+        char mods6[MAX_PATH * 2], *rec, *arr, *room = NULL;
+        static const char decl[] =
+            "{\n\tedit = {\n\t\tmodule = {\n\t\t\tname = \"modules/hall.map\";\n"
+            "\t\t\tbounds = {\n\t\t\t\tb = {\n\t\t\t\t\tb[0] = {\n\t\t\t\t\t\tx = -512;\n\t\t\t\t\t\ty = -256;\n\t\t\t\t\t}\n"
+            "\t\t\t\t\tb[1] = {\n\t\t\t\t\t\tx = 512;\n\t\t\t\t\t\ty = 768;\n\t\t\t\t\t\tz = 384;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n"
+            "\t\t\tportals = {\n\t\t\t\tnum = 2;\n"
+            "\t\t\t\titem[0] = {\n\t\t\t\t\tbounds = {\n\t\t\t\t\t\tb = {\n\t\t\t\t\t\t\tb[0] = {\n\t\t\t\t\t\t\t\tx = -128;\n"
+            "\t\t\t\t\t\t\t\ty = 768;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tb[1] = {\n\t\t\t\t\t\t\t\tx = 128;\n\t\t\t\t\t\t\t\ty = 768;\n"
+            "\t\t\t\t\t\t\t\tz = 256;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t\tdir = \"PORTAL_DIR_POS_X\";\n\t\t\t\t}\n"
+            "\t\t\t\titem[1] = {\n\t\t\t\t\tbounds = {\n\t\t\t\t\t\tb = {\n\t\t\t\t\t\t\tb[0] = {\n\t\t\t\t\t\t\t\tx = 512;\n"
+            "\t\t\t\t\t\t\t\ty = 0;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tb[1] = {\n\t\t\t\t\t\t\t\tx = 512;\n\t\t\t\t\t\t\t\ty = 256;\n"
+            "\t\t\t\t\t\t\t\tz = 256;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t\tdir = \"PORTAL_DIR_POS_Y\";\n\t\t\t\t}\n"
+            "\t\t\t}\n\t\t}\n\t}\n}\n";
+        rec = sh_cache_module_record("maps/modules/mods/" SALT "/rooms/hall.decl", decl, sizeof decl - 1);
+        CHECK(rec && !strcmp(rec, "{\"name\":\"maps/modules/mods/" SALT "/rooms/hall.decl\",\"bounds\":[-512,-256,0,512,768,384],"
+                                  "\"portals\":[{\"bounds\":[-128,768,0,128,768,256],\"dir\":\"PORTAL_DIR_POS_X\"},"
+                                  "{\"bounds\":[512,0,0,512,256,256],\"dir\":\"PORTAL_DIR_POS_Y\"}]}"));
+        if (rec) printf("  module record: %s\n", rec);
+        CHECK(!sh_cache_module_record("x", "{\n\tedit = {\n\t}\n}\n", 18));   /* not a module */
+        t = rec ? sh_cache_module_standin_text(rec, strlen(rec), &room) : NULL;
+        CHECK(t && room && !strcmp(room, "maps/modules/smpgrid/v1/m/1024_1024_432.decl") &&
+              strstr(t, "inherit = \"maps/modules/smpgrid/v1/m/1024_1024_432.decl\";") && strstr(t, "num = 2;") &&
+              strstr(t, "dir = \"PORTAL_DIR_POS_Y\";") && strstr(t, "x = -128;"));
+        if (room && strcmp(room, "maps/modules/smpgrid/v1/m/1024_1024_432.decl")) printf("  room: %s\n", room);
+        free(t);
+        free(room);
+
+        /* The pinning step records each module of the namespace the map places, once; a stock module is not one. */
+        {
+            static const char map[] =
+                "{\"instances\":[{\"moduleName\":\"maps/modules/mods/" SALT "/rooms/hall.decl\"},"
+                "{\"moduleName\":\"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl\"},"
+                "{\"moduleName\":\"maps/modules/mods/" SALT "/rooms/hall.decl\"},"
+                "{\"moduleName\":\"maps/modules/mods/" SALT "/rooms/gone.decl\"}]}";
+            g_module_decl = decl;
+            CHECK(sh_cache_row_record_modules(&rows[0], map, sizeof map - 1, read_module, NULL) == 1);
+            arr = rows[0].modules;
+            CHECK(arr && rec && arr[0] == '[' && !strncmp(arr + 1, rec, strlen(rec)) && !strcmp(arr + 1 + strlen(rec), "]"));
+        }
+        /* The row carries the records whole through a write and a read. */
+        {
+            size_t vl = 0;
+            char *v = sh_modmanifest_format_value(&rows[0], &vl);
+            CHECK(v && strstr(v, ",\"modules\":[{\"name\":\"maps/modules/mods/" SALT "/rooms/hall.decl\""));
+            {
+                sh_modmanifest_row back;
+                sh_modmanifest_list copy;
+                char err[200];
+                memset(&back, 0, sizeof back);
+                memset(&copy, 0, sizeof copy);
+                CHECK(v && sh_modmanifest_parse_value(v, vl, &back, err, sizeof err) && back.modules &&
+                      !strcmp(back.modules, arr));
+                CHECK(sh_modmanifest_list_add(&copy, &back) && copy.rows[0].modules && !strcmp(copy.rows[0].modules, arr));
+                sh_modmanifest_list_free(&copy);
+                sh_modmanifest_row_free(&back);
+            }
+            free(v);
+        }
+
+        _snprintf_s(mods6, sizeof mods6, _TRUNCATE, "%s\\player6\\mods", top);
+        CreateDirectoryA(mods6, NULL);
+        sh_cache_set_mods_root(mods6);
+        download(&crate, &b, pack, 1);
+        (void)sh_cache_take_notice();
+        load_rows(rows, 1, placed, 2);
+        CHECK(sh_cache_composed(chash, &complete) && !complete);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\map-modules\\rooms\\hall.decl", mods6, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "smpgrid/v1/m/1024_1024_432.decl") && strstr(t, "PORTAL_DIR_POS_X"));
+        free(t);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\decls\\snapmoduleinfo\\rooms\\hall.decl", mods6, chash);
+        t = read_text(path);
+        CHECK(t && strstr(t, "inherit = \"ind_dlc/ind_totally_blank_room_4x\";"));
+        free(t);
+        {
+            sh_mb_bundle mb;
+            size_t r;
+            int module_found = 0;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods6, chash);
+            memset(&mb, 0, sizeof mb);
+            CHECK(sh_mb_load_folder(path, &mb) && mb.validated);
+            for (r = 0; r < mb.file_count; r++)
+                if (mb.files[r].request && !_stricmp(mb.files[r].request, "maps/modules/mods/" SALT "/rooms/hall.decl")) module_found = 1;
+            CHECK(module_found);
+            sh_mb_free(&mb);
+        }
+        t = sh_cache_take_notice();
+        CHECK(t != NULL);
+        free(t);
+        rows[0].modules = NULL;
+        free(arr);
+        free(rec);
     }
 
     /* A local mod serves a stranger's unit only by exact hash (D21), checked again when the file changes (D51). */

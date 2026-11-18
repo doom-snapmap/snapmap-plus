@@ -142,6 +142,19 @@ char *sh_cache_object_name(const char *root);
  * stock row DOOM gives `cls` with the same entity- and variable-reference slot counts (standin_rows.h), or that
  * class's row with the counts written over it. */
 char *sh_cache_standin_def_text(const char *cls);
+/* Module stand-ins (D-A30). The record a pinned row carries for a placed mod module, from its snapModule decl text:
+ * {"name": `name`, "bounds": [x0,y0,z0,x1,y1,z1], "portals": [{"bounds": [...6], "dir": "PORTAL_DIR_..."}, ...]}
+ * (malloc'd; NULL when the text is not a module). Whoever pins a row (a publish, an export) records it; a save keeps it. */
+char *sh_cache_module_record(const char *name, const char *decl, size_t len);
+/* The pinning step's half (a publish or an export, when it pins `row`): every module of the row's namespace the map
+ * text places (instances[].moduleName under maps/modules/mods/<salt>/), each once, read by `read` (its decl text,
+ * malloc'd, or NULL) and recorded into row->modules. Returns the modules recorded, -1 on bad arguments or memory. */
+typedef char *(*sh_cache_read_fn)(void *context, const char *request, size_t *len);
+int   sh_cache_row_record_modules(struct sh_modmanifest_row *row, const char *map_json, size_t len, sh_cache_read_fn read,
+                                  void *context);
+/* The stand-in module decl for one record: the product's grid room of the record's size (*room, malloc'd, its
+ * moduleName) with the record's bounds and portals written over it (malloc'd; NULL when the record does not read). */
+char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room);
 char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs);
 
 /* ------------------------------------------------------------ the sweep (5.17) */
