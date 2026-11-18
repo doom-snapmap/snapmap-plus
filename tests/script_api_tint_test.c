@@ -136,10 +136,40 @@ static void test_table(void)
     CHECK(sh_tint_is_neutral(&from));
 }
 
+/* glow's strength: the colour times the strength; no strength is the soft default, an explicit 1 is the full
+ * glow e:glow gave before the strength (its wash the whole colour), and the product stays within the glow's range. */
+static void test_glow_strength(void)
+{
+    char err[200];
+    float rgb[3] = { 0.0f, 0.6f, 1.0f };
+    sh_tint_state s;
+    sh_tint_parm p[SH_TINT_PARMS];
+    CHECK(SH_TINT_GLOW_STRENGTH_DEFAULT > 0.0 && SH_TINT_GLOW_STRENGTH_DEFAULT < 1.0);
+    CHECK(sh_tint_glow_scaled("glow", rgb, SH_TINT_GLOW_STRENGTH_DEFAULT, err, sizeof err));
+    CHECK(near3(rgb, 0.0f, (float)(0.6 * SH_TINT_GLOW_STRENGTH_DEFAULT), (float)SH_TINT_GLOW_STRENGTH_DEFAULT));
+    sh_tint_neutral(&s);
+    memcpy(s.glow, rgb, sizeof rgb);
+    sh_tint_parms(&s, p);
+    /* the soft default washes the surface with only part of the colour */
+    CHECK(p[2].v[2] > 0.0f && p[2].v[2] < 1.0f && near3(p[1].v, 1.0f, 1.0f + rgb[1], 1.0f + rgb[2]));
+    rgb[0] = 0.0f; rgb[1] = 0.6f; rgb[2] = 1.0f;
+    CHECK(sh_tint_glow_scaled("glow", rgb, 1.0, err, sizeof err) && near3(rgb, 0.0f, 0.6f, 1.0f));
+    rgb[0] = 0.0f; rgb[1] = 0.6f; rgb[2] = 1.0f;
+    CHECK(sh_tint_glow_scaled("glow", rgb, 0.0, err, sizeof err) && near3(rgb, 0.0f, 0.0f, 0.0f));
+    rgb[0] = 8.0f; rgb[1] = 0.0f; rgb[2] = 0.0f;
+    CHECK(!sh_tint_glow_scaled("glow", rgb, 16.0, err, sizeof err) && rgb[0] == 8.0f);
+    CHECK(!strcmp(err, "\"glow\" glows at most 64 in a channel, got 128 (colour 8 at strength 16)"));
+    CHECK(sh_tint_check_strength("glow", 0.0, err, sizeof err) && sh_tint_check_strength("glow", 16.0, err, sizeof err));
+    CHECK(!sh_tint_check_strength("glow", -0.1, err, sizeof err));
+    CHECK(!strcmp(err, "\"glow\" needs the strength from 0 to 16, got -0.1"));
+    CHECK(!sh_tint_check_strength("glow", NAN, err, sizeof err));
+}
+
 int main(void)
 {
     test_parms();
     test_arguments();
+    test_glow_strength();
     test_fade();
     test_table();
     printf(g_fail ? "script_api_tint_test: FAILED\n" : "script_api_tint_test: ok\n");

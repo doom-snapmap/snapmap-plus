@@ -146,7 +146,7 @@ Nothing about the game's limits is ever reported: the product fits every look in
 | `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | play one of the mod's fx decls at a point (lights, decals, particles, shakes: whatever the fx holds) |
 | `fx(e, condition)`, `fx_stop(e, condition)` | start or stop an entity's own fx |
 | `e:tint(r, g, b, [seconds])` | washes the entity's surfaces toward a colour (`1, 1, 1` is none), fading over `seconds`; the game has no per-entity colour multiply, so a tint is a wash added over the lit surface, as the game's own highlights are |
-| `e:glow(r, g, b, [seconds])` | makes the entity's glowing parts and surfaces glow in that colour (`0, 0, 0` is none), fading over `seconds` |
+| `e:glow(r, g, b, [seconds], [strength])` | makes the entity's glowing parts and surfaces glow in that colour (`0, 0, 0` is none), fading over `seconds`; the glow added is the colour times `strength` (0 to 16). Without a strength it is a soft glow (0.08) that leaves the surface readable under it; `strength` 1 is the full glow, which washes the whole surface with the colour (`e:glow(0, 0.6, 1, 0.5, 1)` paints a demon flat cyan). Pass `nil` for `seconds` to give a strength without a fade |
 
 Both fade with the game's own render-parm fade (the `lerpRenderParmFrom` event), so a fade costs the script nothing
 per frame. Other effects on one entity (a light at it, a decal under it) are fx: put them in an fx decl and play it

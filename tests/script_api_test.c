@@ -25,6 +25,7 @@
 #include "script/script_hooks.h"
 #include "script/script_api_common.h"
 #include "script/script_api_ai.h"
+#include "script/script_api_tint.h"   /* glow's default strength */
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -731,7 +732,7 @@ static void test_tint(void)
         "on.spawn('ai/brute', function(self)\n"
         "  local imp = ent(1)\n"
         "  imp:tint(0.5, 0.5, 0.5)\n"
-        "  imp:glow(1, 0, 0, 2)\n"
+        "  imp:glow(1, 0, 0, 2, 1)\n"
         "end)\n"
         "on.think('ai/brute', function(self)\n"
         "  if now() > 6.9 and not done then\n"
@@ -747,6 +748,20 @@ static void test_tint(void)
     frame(1000);
     frame(1000);
     CHECK(has(g_events, "lerpRenderParmFrom(bloomcolor,2 1 1,1,1 1 1,1,1);"));
+    /* no strength: the soft default, the colour times SH_TINT_GLOW_STRENGTH_DEFAULT */
+    run("api = 1\non.spawn('ai/brute', function(self)\n  print('soft', ent(1):glow(1, 0, 0))\nend)\n");
+    CHECK(has(log_now(), "soft\ttrue"));
+    {
+        char want[160];
+        _snprintf_s(want, sizeof want, _TRUNCATE, "lerpRenderParmFrom(bloomcolor,1 1 1,1,%g 1 1,1,1);",
+                    (double)(float)(1.0 + (double)(float)SH_TINT_GLOW_STRENGTH_DEFAULT));
+        CHECK(has(g_events, want));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "lerpRenderParmFrom(highlightcolor,0 0 0,0,%g 0 0,0,1);",
+                    (double)(float)SH_TINT_GLOW_STRENGTH_DEFAULT);
+        CHECK(has(g_events, want));
+    }
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):glow(1, 1, 1, 0, -2)\nend)\n",
+            "3", "\"glow\" needs the strength from 0 to 16, got -2");
     /* wrong arguments: one plain sentence at the calling line, nothing sent */
     refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(1):tint(1, 1)\nend)\n",
             "3", "\"tint\" needs the blue as a number");
