@@ -4235,6 +4235,31 @@ static void test_additive_same_key(void)
         CHECK(sh_modserve_place_restore() == 1);
         HOS(now, sh_modserve_place_get());
         CHECK(!now[0] && sh_modserve_place_restore() == 0);
+
+        /* A published read before its gate decides the place: a row resolves
+         * only at the root at its own build. The root's other build of the
+         * salt never stands in (a stranger's map at build 6 with the root at
+         * build 7), the place reads as none, and a failed parse puts back the
+         * place it replaced. */
+        strcpy_s(row.build, sizeof row.build, h1);
+        CHECK(sh_modserve_place_pending() >= 0 && sh_modserve_place_is_pending());
+        CHECK(!sh_modserve_row_build(&row, &ref));
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0]);
+        list[0] = h1;
+        CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+        CHECK(sh_modserve_bundle_scope(h1, &si) && !si.listed && sh_modserve_bundle_scope(h2, &si) && !si.listed);
+        CHECK(!sh_modserve_lookup(AD_OLD, NULL));   /* the root build's names still serve the Toybox, unlisted */
+        strcpy_s(row.build, sizeof row.build, h2);   /* the root's own build at the row's hash: it answers */
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
+        /* The gate decides the item's place: its build serves the map. */
+        strcpy_s(row.build, sizeof row.build, h1);
+        CHECK(sh_modserve_place_set("maps\\Fork map") >= 0 && !sh_modserve_place_is_pending());
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
+        CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && sh_modserve_lookup(AD_OLD, NULL));
+        CHECK(sh_modserve_place_set(NULL) >= 0 && sh_modserve_place_pending() >= 0 && sh_modserve_place_restore() == 1);
+        HOS(now, sh_modserve_place_get());
+        CHECK(!now[0] && !sh_modserve_place_is_pending());
     }
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);

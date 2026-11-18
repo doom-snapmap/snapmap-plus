@@ -779,7 +779,15 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   back (a parse that failed, a launch that was refused) and returns 1, or
  *   0 when nothing is remembered.
  * sh_modserve_place_get: the loaded map's place (malloc'd; NULL when memory
- *   runs out).
+ *   runs out); "" while it is pending.
+ * sh_modserve_place_pending: a published read's parse, whose place only the
+ *   gate that takes it can decide (the item is known at the read's
+ *   completion; the text carries no place of this machine's). Remembers the
+ *   place it replaces, as sh_modserve_place_load does. While pending a row
+ *   resolves only at its own build (or the build it was cut from) at the
+ *   root: the root's other build of its salt never stands in for it, so
+ *   nothing of that build is listed or activated before the gate decides
+ *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
 /* The cause of a folder in a map's place that the product did not receive:
@@ -793,6 +801,8 @@ int  sh_modserve_place_set(const char *place);
 int  sh_modserve_place_load(const char *place);
 int  sh_modserve_place_restore(void);
 char *sh_modserve_place_get(void);
+int  sh_modserve_place_pending(void);
+int  sh_modserve_place_is_pending(void);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY

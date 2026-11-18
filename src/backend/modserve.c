@@ -3870,9 +3870,32 @@ int sh_modserve_place_restore(void)
     return valid;
 }
 
+/* The place of a published read whose gate has not decided yet: under the
+ * places area, with a character no folder name can hold, so no folder of a
+ * salt is in it and a row resolves only at the root at its own build
+ * (ms_row_build_in). */
+#define MS_PLACE_PENDING SH_MODSERVE_PLACES "\\?"
+
+int sh_modserve_place_pending(void)
+{
+    return ms_place_apply(MS_PLACE_PENDING, 1);
+}
+
+int sh_modserve_place_is_pending(void)
+{
+    int pending;
+    AcquireSRWLockShared(&g_place_lock);
+    pending = g_place && !strcmp(g_place, MS_PLACE_PENDING);
+    ReleaseSRWLockShared(&g_place_lock);
+    return pending;
+}
+
 char *sh_modserve_place_get(void)
 {
-    return ms_scope_place();
+    char *place = ms_scope_place();
+    /* A pending place is no place to record or install into. */
+    if (place && !strcmp(place, MS_PLACE_PENDING)) place[0] = 0;
+    return place;
 }
 
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)

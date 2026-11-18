@@ -1437,6 +1437,28 @@ static int mm_activate_load(const sh_modmanifest_list *rows)
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
 
+int sh_modmanifest_place_decided(void)
+{
+    sh_modmanifest_list rows;
+    int active;
+    char *names, *line;
+    memset(&rows, 0, sizeof rows);
+    if (!sh_modmanifest_current(&rows) || !rows.count) { sh_modmanifest_list_free(&rows); return 0; }
+    /* The rows alone: the load's placed names were read with the text, and a
+     * map that arrived with its mods has a row for each. */
+    mm_note_followed(&rows);
+    mm_scope_load(NULL, 0, &rows);
+    active = mm_activate_load(&rows);
+    names = mm_describe(&rows);
+    line = sh_textf("MODS: map manifest names %zu build(s)%s%s; listed and activated again in the place its gate decided",
+                    rows.count, rows.count ? ": " : "", names ? names : "");
+    backend_log(line ? line : "MODS: the map's rows were listed and activated again in the place its gate decided");
+    free(line);
+    free(names);
+    sh_modmanifest_list_free(&rows);
+    return active;
+}
+
 /* 1 when the text carries rows: the member's "mods" part. */
 static int mm_carries_rows(const char *json, size_t length)
 {

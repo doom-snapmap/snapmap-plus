@@ -1455,6 +1455,34 @@ int main(int argc, char **argv)
         load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
         n = sh_modserve_scope_hashes(listed, 4);
         CHECK(n == 1 && !_stricmp(listed[0], hash1));
+
+        /* A published read, whose place only its gate decides: the parse lists
+         * and activates the row's own build, never the root's other build of
+         * the salt. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        g_act_last_n = 0;
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD));
+        CHECK(g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* Its gate finds it a stranger's map (the item's place): the row's own
+         * build is listed and activated there. */
+        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+        g_act_last_n = 0;
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], OLD) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
+        /* The same read found to be the player's own published map: it follows
+         * the root, listed and activated again with the root's build. */
+        CHECK(sh_modserve_place_pending() >= 0);
+        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
+        CHECK(sh_modserve_place_set(NULL) >= 0);
+        g_act_last_n = 0;
+        log_clear();
+        CHECK(sh_modmanifest_place_decided() >= 0);
+        n = sh_modserve_scope_hashes(listed, 4);
+        CHECK(n == 1 && !_stricmp(listed[0], hash1) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], hash1));
+        CHECK(strstr(g_logbuf, "listed and activated again in the place its gate decided") != NULL);
         (void)sh_modserve_scope_set(NULL, 0, 0);
         sh_modserve_scope_enable(0);
         sh_modmanifest_reset();

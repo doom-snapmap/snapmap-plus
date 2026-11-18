@@ -211,6 +211,15 @@ static void pub_place_decided(const char *place)
     if (g_ops.place_set) g_ops.place_set(g_ops.context, pub_s(g_launch_place));
 }
 
+/* A gate decided the place of the map whose parse it took: the parse could
+ * not know it (a published read's place is pending, rawmap.c), so the loaded
+ * map's rows are listed and activated again there (rows_resolve). */
+static void pub_place_decided_load(const char *place)
+{
+    pub_place_decided(place);
+    if (g_ops.rows_resolve) (void)g_ops.rows_resolve(g_ops.context);
+}
+
 int sh_modpub_launch_place(char **out)
 {
     int set = g_launch_set;
@@ -739,6 +748,11 @@ int sh_modpublished_holding(void)
     return g_hold.state != HOLD_IDLE;
 }
 
+int sh_modpublished_resuming(void)
+{
+    return InterlockedCompareExchange(&g_resuming, 0, 0) != 0;
+}
+
 void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int parsed)
 {
     sh_modmanifest_list rows;
@@ -982,8 +996,10 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     passed = -1;
     if (pub_refuse_scripts(hook, owner, pub_s(place), &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
     if (!record->rows.count || !record->missing) {
+        int rows = record->rows.count > 0;
         pub_record_clear(record);   /* consumed */
-        pub_place_decided(pub_s(place));
+        if (rows) pub_place_decided_load(pub_s(place));
+        else pub_place_decided(pub_s(place));
         passed = 1;
         goto out;
     }
@@ -1008,7 +1024,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         passed = 0;
         goto out;
     }
-    if (!begun) { pub_place_decided(pub_s(place)); passed = 1; goto out; }
+    if (!begun) { pub_place_decided_load(pub_s(place)); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
              pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
@@ -1045,7 +1061,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     place = pub_s(owned);
     if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
     missing = pub_count_missing(&record->rows, place);
-    if (!missing) { pub_record_clear(record); pub_place_decided(place); passed = 1; goto out; }
+    if (!missing) { pub_record_clear(record); pub_place_decided_load(place); passed = 1; goto out; }
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
              record->sequence, record->map, (unsigned)missing);
     if (hook == SH_MODPUB_LOBBY_LAUNCH)
@@ -1058,7 +1074,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
         passed = 0;
         goto out;
     }
-    if (begun == 0) { pub_place_decided(place); passed = 1; goto out; }
+    if (begun == 0) { pub_place_decided_load(place); passed = 1; goto out; }
     /* Never hand the engine a published map whose mods are absent. An offline
      * launch has no map object left to resume with, so it is refused. */
     pub_logf("MODS: the %s was refused: its mods are not installed and it cannot be held", pub_hook_name(hook));
@@ -2517,13 +2533,23 @@ static void eng_launch_refused(void *c, int hook)
 
 static void eng_refused_load(void *c) { (void)c; shield_note_refused_load(); }
 
+static int eng_rows_resolve(void *c)
+{
+    (void)c;
+    __try { return sh_modmanifest_place_decided(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: listing the map's rows in the place its gate decided faulted");
+        return -1;
+    }
+}
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
-    eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load
+    eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve
 };
 
 /* ------------------------------------------------------------ detours */

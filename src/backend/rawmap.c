@@ -372,13 +372,26 @@ static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted
     }
 }
 
+/* What kind of read the current parse is (modpublished.h), classified at the
+ * detour's entry by the engine caller's return address. */
+static __declspec(thread) int g_parse_kind;
+
 /* The map's place (modserve.h, DECISIONS 11): read from its member and made
  * the loaded map's before anything resolves its rows; a map without one is
- * the player's own and finds its mods at the root. */
+ * the player's own and finds its mods at the root. A published read's place
+ * is this machine's fact about the item, which only the gate that takes the
+ * read can decide: until it does the place is pending, so no build of the
+ * root that the map does not name is listed or activated for it. The parse
+ * inside a held map's resume keeps the place its hold decided. */
 static void place_prepare_guarded(const char *json, size_t len)
 {
     char *place = NULL;
     __try {
+        if (sh_modpublished_resuming()) return;
+        if (g_parse_kind == SH_MODPUB_PARSE_PUBLISHED_ONLINE || g_parse_kind == SH_MODPUB_PARSE_PUBLISHED_OFFLINE) {
+            (void)sh_modserve_place_pending();
+            return;
+        }
         if (sh_carrier_place(json, len, &place) != 1) { free(place); place = NULL; }
         (void)sh_modserve_place_load(place ? place : "");
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -681,10 +694,6 @@ static char *prepare_map_buffer(const char *json, int *refused)
     if (current) HeapFree(GetProcessHeap(), 0, current);
     return bare;
 }
-
-/* What kind of read the current parse is (modpublished.h), classified at the
- * detour's entry by the engine caller's return address. */
-static __declspec(thread) int g_parse_kind;
 
 /* ------------------------------------------------------------ opening a rawmap
  * A rawmap opens only through the editor reload (editor_frame.c): the reload

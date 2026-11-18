@@ -101,6 +101,10 @@ void sh_modpublished_poll(void);
 /* 1 while a map is held (asking, fetching or resuming). */
 int sh_modpublished_holding(void);
 
+/* 1 while a held map's own resume runs (its parse keeps the place the hold
+ * decided; rawmap.c). */
+int sh_modpublished_resuming(void);
+
 /* The mod system's one notice queue: `text` (under 256 bytes) is raised
  * with a single Accept button by the tick once the dialog surface is idle
  * and no question is up; a later notice replaces one not raised yet. Used
@@ -341,6 +345,11 @@ typedef struct sh_modpub_ops {
      * and its offer to replace the map with its published version are
      * dismissed (recovery.h shield_note_refused_load). NULL counts as none. */
     void (*refused_load)(void *c);
+    /* A gate decided the place of the map its parse filled (place_set ran):
+     * the loaded map's rows are listed and activated again in that place
+     * (modmanifest.h sh_modmanifest_place_decided), since its parse could not
+     * know it. Returns what the activation returns. NULL counts as none. */
+    int  (*rows_resolve)(void *c);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it

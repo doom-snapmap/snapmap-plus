@@ -414,13 +414,24 @@ static int f_place_norm(void *c, const char *place, char **out)
 static int g_refused_loads;
 static void f_refused_load(void *c) { (void)c; ++g_refused_loads; }
 
+/* The rows listed and activated again in the place a gate decided. */
+static int g_rows_resolves;
+static char g_rows_resolved_in[64];
+static int f_rows_resolve(void *c)
+{
+    (void)c;
+    g_rows_resolves++;
+    strcpy_s(g_rows_resolved_in, sizeof g_rows_resolved_in, F.loaded_place);
+    return 0;
+}
+
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
     f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts,
-    f_progress, f_fetch_cause, f_refused_load
+    f_progress, f_fetch_cause, f_refused_load, f_rows_resolve
 };
 
 static void reset(void)
@@ -434,6 +445,8 @@ static void reset(void)
     F.store_a = F.store_b = 1;
     sh_modpub_test_set_ops(&OPS);
     sh_modmanifest_reset();
+    g_rows_resolves = 0;
+    g_rows_resolved_in[0] = 0;
 }
 
 /* What the DeserializeFromJson detour does: the manifest step, the parse, the
@@ -505,6 +518,7 @@ static void vanilla_and_installed_pass_through(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, VANILLA, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     CHECK(!sh_modpublished_holding() && !F.hold_ui && !F.metadata_copies);
+    CHECK(g_rows_resolves == 0);   /* no rows: nothing to list again */
     tick(5);
     CHECK(F.asks == 0);
 
@@ -513,6 +527,8 @@ static void vanilla_and_installed_pass_through(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     CHECK(!sh_modpublished_holding() && !F.hold_ui && !F.metadata_copies);
+    /* Its parse could not know the item's place: the gate that decided it lists and activates the rows there. */
+    CHECK(g_rows_resolves == 1 && !strcmp(g_rows_resolved_in, F.loaded_place) && F.place_sets == 1);
     tick(5);
     CHECK(F.asks == 0 && F.activations == 0 && F.resumes == 0);
 
@@ -522,7 +538,7 @@ static void vanilla_and_installed_pass_through(void)
     F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
-    CHECK(sh_modpublished_holding() && F.place_sets == 0);   /* a held map changes nothing yet */
+    CHECK(sh_modpublished_holding() && F.place_sets == 0 && g_rows_resolves == 0);   /* a held map changes nothing yet */
     tick(1);
     CHECK(F.asks == 1 && !strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
 
