@@ -805,11 +805,37 @@ static void uw_literal_def(uw *w, const char *s, size_t n, void *ctx)
     for (i = 0; i < m; i++) if (cand[i]) { uw_defs_named(w, cand[i], strlen(cand[i]), (uw_script *)ctx); free(cand[i]); }
 }
 
+/* A literal spelled as a Lua module name is a module the script may require by a name it computes or passes on:
+ * require(spec.attacks), pcall(require, "x"), require(cfg.x or "x") (R-LV2: the Tyrant's unit lacked
+ * eternal_attacks.lua, which its brain spec names as attacks = "eternal_attacks", and the brain stopped). It reaches
+ * scripts/lib/<name>.lua when the mod has it, as a require would; a module name's dots are folders. */
+static void uw_literal_module(uw *w, const char *s, size_t n, void *ctx)
+{
+    size_t i;
+    char *req, *p;
+    (void)ctx;
+    if (!n || n > 200 || s[0] == '.' || s[n - 1] == '.') return;
+    for (i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+              ch == '.'))
+            return;
+    }
+    req = sh_textf("mods/%s/scripts/lib/%.*s.lua", w->salt, (int)n, s);
+    if (!req) { w->oom = 1; return; }
+    for (p = req + strlen("mods/") + strlen(w->salt) + strlen("/scripts/lib/"); *p && strcmp(p, ".lua"); p++)
+        if (*p == '.') *p = '/';
+    for (p = req; *p; p++) *p = (char)uw_lower((unsigned char)*p);
+    uw_reach_request(w, req);
+    free(req);
+}
+
 static void uw_script_visit(uw *w, const unsigned char *t, size_t n)
 {
     uw_scan_ctx c = { w, NULL };
     sh_mb_script_scan((const char *)t, n, uw_require_cb, &c);
     uw_lua_literals(w, (const char *)t, n, uw_literal_reach, NULL);
+    uw_lua_literals(w, (const char *)t, n, uw_literal_module, NULL);
 }
 
 /* A kept entityDef keeps the entry scripts attached to it, the entry scripts attached to none of the mod's defs
