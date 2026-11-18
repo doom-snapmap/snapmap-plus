@@ -17,9 +17,10 @@ import (
 // and any file of another tool the scenario seeded), nothing else. Runtime folders the DLLs write
 // while the game runs (snapmap-plus\logs, snapmap-plus\crash) are never present in a simulation.
 //
-// Data folder, installed: snapmap-plus.exe, snapmap-plus-store.exe and install.json, plus the
-// player's data; install.json starts with its version key, names this DOOM folder and the pair, and
-// records both executables with the hashes on disk; cache\installer holds only what install.json
+// Data folder, installed: snapmap-plus.exe and install.json, plus the player's data, and
+// snapmap-plus-store.exe only while the store conversion is on (installer storeConversion);
+// install.json starts with its version key, names this DOOM folder and the pair, and
+// records each executable present with the hash on disk; cache\installer holds only what install.json
 // records (backups of files that were not ours, replaced images still to remove). Uninstalled: none
 // of the installer's files remain. Either way every --keep file (the player's data) is still there.
 
@@ -37,9 +38,15 @@ var playerData = map[string]string{
 	// The store tool moves the packages of the retired overrides\ folder into mods\ and then sends
 	// overrides\ to the Recycle Bin; a folder it could not empty stays.
 	"overrides": "player data (retired package folder; the store tool empties and retires it)",
+	// An earlier release's recycle bin of mods; the store tool retires it, and with the conversion off it stays.
+	"removed-mods": "player data (an earlier release's recycle bin; kept while the store conversion is off)",
 }
 
 var installerFiles = map[string]bool{"snapmap-plus.exe": true, "snapmap-plus-store.exe": true, "install.json": true}
+
+// requiredInstallerFiles are present after every install; the store tool is placed only while the
+// store conversion is on.
+var requiredInstallerFiles = []string{"snapmap-plus.exe", "install.json"}
 
 type simRecord struct {
 	Version   string   `json:"version"`
@@ -204,7 +211,7 @@ func cmdCheck(args []string, w io.Writer) (bool, error) {
 		fmt.Fprintf(w, "      %-52s %s\n", rel, label)
 	}
 	if phase == "installed" {
-		for name := range installerFiles {
+		for _, name := range requiredInstallerFiles {
 			if _, err := os.Stat(filepath.Join(data, name)); err != nil {
 				fail("the data folder lacks %s", name)
 			}
@@ -223,6 +230,9 @@ func cmdCheck(args []string, w io.Writer) (bool, error) {
 			}
 			for _, name := range []string{"snapmap-plus.exe", "snapmap-plus-store.exe"} {
 				e, ok := rec.Executables[name]
+				if name == "snapmap-plus-store.exe" && !ok && !exists(filepath.Join(data, name)) {
+					continue // not placed: the store conversion is off
+				}
 				sum, _, err := fileSHA256(filepath.Join(data, name))
 				if !ok || err != nil || !strings.EqualFold(e.SHA256, sum) {
 					fail("install.json does not record %s with the hash on disk", name)
