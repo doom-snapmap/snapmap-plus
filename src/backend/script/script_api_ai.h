@@ -82,8 +82,29 @@ enum sh_ai_ev {
     SH_AI_EV_AE_PULL_TRIGGER,        /* ae_aIPullTrigger           4sb   */
     SH_AI_EV_ENABLE_BODY_ROTATION,   /* enableBodyRotation         b     */
     SH_AI_EV_ENABLE_HEAD_TRACKING,   /* enableHeadTracking         b     */
+    SH_AI_EV_TEMP_MEMORY_REMOVE,     /* tempMemory_Remove          s     */
     SH_AI_EV_COUNT
 };
+
+/* A SnapMap order (R-SM1 finding 3, read on both renderers: work/SM2/evidence/vk-dc-0x140439680.json and its
+ * siblings). SnapMap's Follow action (idSnapMapAction_FollowPath) writes it into the demon's temp memory for the
+ * stock FSM, whose snapmap state takes it and removes the entry: a path entity, a goal entity, or a position. A
+ * demon its own script drives reads it here and removes it as the stock state does. */
+#define SH_AI_ORDER_NONE      0
+#define SH_AI_ORDER_PATH      1   /* snapmap_forceFollowPath: the first info/path node of a path */
+#define SH_AI_ORDER_ENTITY    2   /* snapmap_forceFollowEntity: an entity to follow */
+#define SH_AI_ORDER_POSITION  3   /* snapmap_forceMoveToPosition: a point, three slots */
+extern const char *const SH_AI_ORDER_KEYS[4];   /* the keys, by kind ([0] NULL) */
+typedef struct sh_ai_order {
+    int      kind;
+    uint32_t spawn_id;           /* PATH, ENTITY: the target's spawn id */
+    float    pos[3];             /* POSITION */
+} sh_ai_order;
+/* The temp memory's layout (idAI2 +0x25B30, both renderers; VK 0x1403D4120 finds a key's slots): 256 32-bit
+ * values, then at +0x400 256 keys (each a pointer to its interned text). */
+#define SH_AI_OFF_TEMP_MEMORY  0x25B30u
+#define SH_AI_TEMP_SLOTS       256
+#define SH_AI_TEMP_KEYS        0x400u
 
 typedef struct sh_ai_event_def {
     const char *name;
@@ -524,7 +545,18 @@ typedef struct sh_script_ai_engine {
      * landed inside its own hit spheres (sh_wound_count_step); on 0: by the
      * game's own rule again. 1 set, -1 unavailable. */
     int      (*wound_damage_counts)(void *ai, int on);
+    /* The SnapMap order waiting in the demon's temp memory (sh_ai_order_find
+     * on its slots, AI +0x25B30 on both renderers): 1 with it, 0 none, -1
+     * unreadable. It stays there until the caller removes it. */
+    int      (*snapmap_order)(void *ai, sh_ai_order *out);
 } sh_script_ai_engine;
+
+/* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key
+ * text (an interned GAME_STRING; NULL for an empty or unreadable slot) and
+ * `values[i]` its 32-bit value, n slots. The first order key found wins: an
+ * entity order's value is the target's spawn id; a position order spans
+ * three slots of one key (x, y, z as floats). 1 with *out, 0 none. */
+int sh_ai_order_find(const char *const *keys, const uint32_t *values, int n, sh_ai_order *out);
 
 /* Posed legs. The game poses a leg by a rig: it solves thigh and shin from
  * the hip to a target joint and swivels the knee by a pole joint, and its own

@@ -167,9 +167,15 @@ static void ev_cat(const char *s)
     if (strlen(g_events) + strlen(s) + 2 < sizeof g_events) strcat(g_events, s);
 }
 
+/* The temp memory of every fake demon: the order SnapMap's Follow left (tempMemory_Remove takes it, f_event). */
+static sh_ai_order g_order;
+
 static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 {
     if (ev == SH_AI_EV_GET_MONSTER_TYPE) { if (ret) *ret = ((fent *)e)->monster; return 1; }
+    if (ev == SH_AI_EV_TEMP_MEMORY_REMOVE && n == 1 && g_order.kind &&
+        !strcmp(args[0].s, SH_AI_ORDER_KEYS[g_order.kind]))
+        g_order.kind = SH_AI_ORDER_NONE;
     char line[256];
     int i;
     CHECK(sh_ai_args_fit(SH_AI_EVENTS[ev].format, args, n));
@@ -447,6 +453,14 @@ static int f_gore_init(void *ai)
     return 1;
 }
 
+static int f_snapmap_order(void *ai, sh_ai_order *out)
+{
+    (void)ai;
+    if (g_order.kind == SH_AI_ORDER_NONE) return 0;
+    *out = g_order;
+    return 1;
+}
+
 static const sh_script_ai_engine g_fake = {
     f_entity, f_handle_of, f_is_ai, f_origin, f_yaw, f_event, f_park, f_enemy, f_awareness,
     f_move_status, f_trigger, f_path, f_frame,
@@ -456,7 +470,7 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts
+    f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2359,11 +2373,48 @@ static void test_wound_damage_counts(void)
     sh_script_map_end();
 }
 
+/* SnapMap's Follow orders: the temp memory's order found (pure), then taken by ai:snapmap_order() through the
+ * game's own tempMemory_Remove, once. */
+static void test_snapmap_order(void)
+{
+    const char *keys[8] = { NULL, "ai_combat_state", "snapmap_forceFollowPath", NULL,
+                            "snapmap_forceMoveToPosition", "snapmap_forceMoveToPosition", "snapmap_forceMoveToPosition", NULL };
+    uint32_t values[8] = { 0, 9, 2, 0, 0, 0, 0, 0 };
+    float p[3] = { 10.5f, -20.0f, 3.0f };
+    sh_ai_order o;
+    const char *log;
+    printf("-- SnapMap's Follow orders reach a script-driven demon and are taken once\n");
+    memcpy(values + 4, p, sizeof p);
+    CHECK(sh_ai_order_find(keys, values, 8, &o) == 1 && o.kind == SH_AI_ORDER_PATH && o.spawn_id == 2);
+    keys[2] = NULL;
+    CHECK(sh_ai_order_find(keys, values, 8, &o) == 1 && o.kind == SH_AI_ORDER_POSITION && o.pos[0] == 10.5f &&
+          o.pos[1] == -20.0f && o.pos[2] == 3.0f);
+    keys[6] = "other";   /* a position needs its three slots */
+    CHECK(sh_ai_order_find(keys, values, 8, &o) == 0 && o.kind == SH_AI_ORDER_NONE);
+    g_events[0] = 0;
+    memset(&g_order, 0, sizeof g_order);
+    g_order.kind = SH_AI_ORDER_ENTITY;
+    g_order.spawn_id = 2;
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  local o = self:snapmap_order()\n"
+        "  if o then print('order ' .. o.kind .. ' ' .. tostring(o.target == ent(2))) else print('no order') end\n"
+        "end)\n"));
+    tick();
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "order entity true\nno order\n") != NULL);
+    CHECK(strstr(g_events, "1:tempMemory_Remove(snapmap_forceFollowEntity)\n") != NULL);
+    if (g_fail) printf("order log:\n%s\nevents:\n%s", log, g_events);
+    sh_script_map_end();
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 53);
+    CHECK(sh_script_ai_register() == 54);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2387,6 +2438,7 @@ int main(int argc, char **argv)
     test_face_travel();
     test_sight_against_a_wall();
     test_brain_calls();
+    test_snapmap_order();
     test_brain_refusals();
     test_fire_calls();
     test_fire_refusals();

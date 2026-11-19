@@ -2864,6 +2864,17 @@ is touched, and a removed demon answers nil.
   0x141643050 / GL 0x141643B60, `ScriptAfDeleteConstraint`), which sets the
   figure to rebuild. Each answers nil or false and a reason when the part
   is missing; `tests/script_api_body_test.c` covers them on fake types.
+  `snapmap_order()` takes the order SnapMap's Follow action
+  (`idSnapMapAction_FollowPath`) left for the demon: the action writes
+  `snapmap_forceFollowPath` (a path node), `snapmap_forceFollowEntity` (an
+  entity) or `snapmap_forceMoveToPosition` (three float slots) into the AI's
+  temp memory (+0x25B30 on both renderers: 256 32-bit values, then 256 key
+  pointers to interned names at +0x400; VK 0x140439710, 0x140439680,
+  0x1404397A0), and the stock FSM's snapmap state takes the entry and removes
+  it. The call reads the slots (`sh_ai_order_find`, an entity order's value is
+  its spawn id), removes the entry with the game's own `tempMemory_Remove`
+  event, and answers nil or `{kind, target | pos}`; the Enemy SDK's
+  `enemy_snapmap.lua` follows it.
   `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
   game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
   (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
@@ -2960,7 +2971,7 @@ is touched, and a removed demon answers nil.
   `enemy_sdk.bind` calls the brain's `bind(def)` first, where the brain names its
   breakables.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
-  `enemy_placement`, `enemy_locomotion` and `enemy_probe`, required by name
+  `enemy_snapmap`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:
   `equip`, `fire_mode`, `pull`, `release`, `trigger`, `pulled`, `ready`,
   `on_target`, `focus`, `hold`, `state` and `tick`, each one of the calls
@@ -4359,14 +4370,45 @@ map's choices).
   sources set to different values is a clash. Each source's line closes its
   sum: `N edit(s) from X: A applied, M already held, C superseded by <key>'s
   choice` (or `by <key> (row order)`) for the operations that lost a clash.
-- **The conductor.** The one rule per file: each `aiTypeList` item a source
-  added whose `aiType` is a number that is not a stock `SPAWN_AI_TYPE_*` bit gets
-  a bit assigned per map, the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
-  (`1 << 19` up to `1 << 29`, eleven per map), in row order then by the name of
-  the encounter decl whose `memberType` names the author's number, so two packs
-  never claim one bit; every `snapAiEncounter` `memberType` and `snapAiScore`
-  `aiType` of that bundle naming the author's number is served rewritten to the
-  assigned bit (the same synthetic body mechanism, on the bundle's own file).
+- **The conductor.** Each `aiTypeList` item a source added whose `aiType`
+  holds a number that is not a stock `SPAWN_AI_TYPE_*` bit is a ported demon:
+  it gets a spawn type of its own per map, the lowest free above
+  `SPAWN_AI_TYPE_ZOMBIE_UNWILLING` (`1 << 19` up to `1 << 29`, eleven per
+  map), in row order then by the name of the encounter decl whose `memberType`
+  names the author's number, so two packs never claim one bit. The stock flags
+  the item names beside its number (`aiType = "SPAWN_AI_TYPE_BARON 1048576";`)
+  say which stock demon it stands in for: the item is served with its own type
+  alone and the kill score reads the stand-in (below). Every number a bundle
+  wrote is served as its type wherever that bundle wrote it: its own
+  `snapAiEncounter` `memberType`s and `snapAiScore` `aiType`s (the synthetic
+  body mechanism, on the bundle's own file) and every `memberType` or `aiType`
+  its edits of game files set (its `globalAIMods` row; a stock encounter's
+  member it joins), rewritten in its edits before the apply
+  (`sh_modregistry_rewrite_edits`). With every free type taken, a further
+  ported demon shares the type of the first one standing in for the same stock
+  demon, else the first one, with one line naming both (a degrade, never a
+  refusal).
+- **Spawn types compose.** An encounter member's `memberType` is a set of
+  flags: when several sources set one member (or one `memberList` whose
+  statements differ only in `memberType` values), the values compose as the
+  union of their words in row order instead of clashing (`decl_tree.c`
+  `dt_union_types`), so two mods' demons that each join a stock encounter
+  beside their stand-in both do.
+- **The editor's encounter pickers grow.** The Single Demon Encounter, the
+  Encounter List and the Miniboss event's boss list
+  (`SH_MR_GROWN_LISTS`) offer every single-demon encounter (one `memberType`)
+  an installed mod's root build carries, after the game's (the owner,
+  2026-11-19: an installed mod grows SnapMap's lists; a grown list never
+  declares a mod, a map is modded only when it references the mod's entity).
+  They are registry files whenever such an encounter is installed, generated
+  also when no map declares anything.
+- **The kill score.** `kill_score.c` detours the map's Player Score switch
+  (Vulkan `0x140890390`, OpenGL `0x14088F2C0`, one signature; its window holds
+  one short conditional jump the hook relocates): a spawn type the listing gave
+  a ported demon is read as the stock type its conductor row stands in for
+  (`sh_modserve_spawn_type_standin`, published lock-free at every registry
+  compute), so the author's Gameplay Settings field of that class applies;
+  every stock type reaches the switch unchanged.
 - **Clashes.** A slot is `<type>/<decl name>/<path>`
   (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; a keyed entry adds its
   name, a named block segment is `word:name`). Two sources setting one slot to

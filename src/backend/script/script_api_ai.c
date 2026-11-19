@@ -100,9 +100,35 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "ae_aIPullTrigger",            "4sb" },
     { "enableBodyRotation",          "b" },
     { "enableHeadTracking",          "b" },
+    { "tempMemory_Remove",           "s" },
 };
 
 /* ------------------------------------------------------------------ pure */
+
+const char *const SH_AI_ORDER_KEYS[4] = {
+    NULL, "snapmap_forceFollowPath", "snapmap_forceFollowEntity", "snapmap_forceMoveToPosition",
+};
+
+int sh_ai_order_find(const char *const *keys, const uint32_t *values, int n, sh_ai_order *out)
+{
+    int i, k;
+    if (!keys || !values || !out) return 0;
+    memset(out, 0, sizeof *out);
+    for (i = 0; i < n; ++i) {
+        if (!keys[i]) continue;
+        for (k = SH_AI_ORDER_PATH; k <= SH_AI_ORDER_POSITION; ++k) {
+            if (strcmp(keys[i], SH_AI_ORDER_KEYS[k])) continue;
+            if (k == SH_AI_ORDER_POSITION) {
+                if (i + 2 >= n || !keys[i + 1] || !keys[i + 2] || strcmp(keys[i + 1], keys[i]) ||
+                    strcmp(keys[i + 2], keys[i])) break;
+                memcpy(out->pos, values + i, sizeof out->pos);
+            } else out->spawn_id = values[i];
+            out->kind = k;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 int sh_ai_args_fit(const char *format, const sh_ai_arg *args, int n)
 {
@@ -3470,6 +3496,37 @@ static int l_destructible(lua_State *L)
     return 1;
 }
 
+/* ai:snapmap_order(): the order SnapMap's Follow action gave the demon, taken as the stock FSM takes it (the
+ * entry leaves the demon's temp memory): nil when none waits, else a table with kind "path" (target: the first
+ * node of the path), "entity" (target: the entity to follow) or "position" (pos: the point). A demon its own
+ * script drives follows it; the stock FSM never sees the entry. */
+static int l_snapmap_order(lua_State *L)
+{
+    static const char *const kinds[4] = { NULL, "path", "entity", "position" };
+    sh_ai_order o;
+    sh_ai_arg a;
+    void *ai;
+    NEED_OP(L, snapmap_order, "snapmap_order");
+    ai = self_ai(L, "snapmap_order", NULL);
+    if (!ai || g_engine->snapmap_order(ai, &o) != 1) { lua_pushnil(L); return 1; }
+    memset(&a, 0, sizeof a);
+    a.type = 's';
+    a.s = SH_AI_ORDER_KEYS[o.kind];
+    (void)run(ai, SH_AI_EV_TEMP_MEMORY_REMOVE, &a, 1, NULL);
+    lua_createtable(L, 0, 3);
+    lua_pushstring(L, kinds[o.kind]);
+    lua_setfield(L, -2, "kind");
+    if (o.kind == SH_AI_ORDER_POSITION) {
+        push_vec(L, o.pos);
+        lua_setfield(L, -2, "pos");
+    } else {
+        sh_script_handle h = sh_script_handles_find(o.spawn_id, NULL);
+        if (!h) h = sh_script_handles_ref(o.spawn_id);
+        if (h) { sh_script_push_entity(L, h); lua_setfield(L, -2, "target"); }
+    }
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3501,6 +3558,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "posed_legs", l_posed_legs },
     { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
     { "wound_damage_counts", l_wound_damage_counts },
+    { "snapmap_order", l_snapmap_order },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3775,6 +3833,31 @@ static int e_held(void *ai, int hand, char *decl, size_t cap)
         if (name) { strncpy_s(decl, cap, name, _TRUNCATE); v = 1; }
     } __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
+}
+
+/* The demon's temp memory read whole (its 256 key pointers, each key's text copied while it is readable), then
+ * sh_ai_order_find. The keys are interned GAME_STRINGs the engine never frees. */
+static int e_snapmap_order(void *ai, sh_ai_order *out)
+{
+    static char text[SH_AI_TEMP_SLOTS][32];
+    const char *keys[SH_AI_TEMP_SLOTS];
+    uint32_t values[SH_AI_TEMP_SLOTS];
+    int i, ok = 1;
+    __try {
+        const uint8_t *mem = (const uint8_t *)ai + SH_AI_OFF_TEMP_MEMORY;
+        memcpy(values, mem, sizeof values);
+        for (i = 0; i < SH_AI_TEMP_SLOTS; ++i) {
+            const char *k = *(const char * const *)(mem + SH_AI_TEMP_KEYS + (size_t)i * 8);
+            keys[i] = NULL;
+            /* only keys that begin like an order are copied (the rest are other states' entries) */
+            if (k && k[0] == 's' && !strncmp(k, "snapmap_force", 13)) {
+                strncpy_s(text[i], sizeof text[i], k, _TRUNCATE);
+                keys[i] = text[i];
+            }
+        }
+    } __except (av_only(GetExceptionCode())) { ok = 0; }
+    if (!ok) return -1;
+    return sh_ai_order_find(keys, values, SH_AI_TEMP_SLOTS, out);
 }
 
 static int e_trigger_state(void *ai, int hand)
@@ -5350,7 +5433,7 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts
+    e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
