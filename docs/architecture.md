@@ -4691,8 +4691,9 @@ raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
 map needs <name>, which is not installed on this computer, so the editor
 cannot open the map. Restore the mod's folder from the Recycle Bin, or play
 the map from My Maps to get it from the mod store." (My Maps Play holds and
-asks the store, above.) An editor open does not itself fetch: it has no hold
-point before the engine's load.
+asks the store, above.) An editor open has no hold point before the engine's
+load, so a build row is not fetched there; a pinned row's units are asked for
+after the open, with the map open (see [The map content cache](#the-map-content-cache)).
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be
@@ -5188,10 +5189,17 @@ published-map gate treats a pinned row as missing until its composition is
 complete: it asks no question and probes nothing, fetches the absent units on
 the network worker (`sh_cache_prepare`: the store's status, the manifest, then
 the unit's archive when more than half of its bytes are missing, else each
-file, a broken-off file resumed by Range, every byte checked), composes again,
-says what the map plays without, and resumes. A joiner leaves the lobby while
-it downloads (D27). An editor open composes only from what is here and says S2.
-A module whose unit is absent is left out (a module stand-in is a live check).
+file, a broken-off file resumed by Range, every byte checked), composes again
+(the composition's sidecar records each absent unit's cause, the store's
+answer), and resumes; the resumed load says once what the map plays without,
+with the cause the fetch recorded, never the hold and the load both. A joiner
+leaves the lobby while it downloads (D27). An editor open (My Maps, a
+rawmap) composes from what is here, then asks the store for the units it stood
+in for on the network worker, with no question (`SH_MODPUB_EDITOR_OPEN`: the
+map is open, so nothing waits); what arrives is served in the open map through
+the refresh after a rescan, and the open's one notice is what the store could
+not supply, or, when the editor shows the new objects only at the next open,
+that they are here.
 
 The sweep (`sh_cache_sweep`, at start on a thread of its own, and from the Mods
 tab) keeps every unit a kept map names (the local saves of My Maps, read
