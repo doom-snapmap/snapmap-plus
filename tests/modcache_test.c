@@ -195,6 +195,12 @@ static DWORD links_of(const char *path)
     return n;
 }
 
+static void write_file(const char *path, const char *bytes, size_t len)
+{
+    FILE *f = NULL;
+    if (!fopen_s(&f, path, "wb") && f) { fwrite(bytes, 1, len, f); fclose(f); }
+}
+
 static char *read_text(const char *path)
 {
     size_t len = 0;
@@ -769,6 +775,37 @@ static void test_cache(const char *top)
         CHECK(t && !strncmp(t, "Map content: ", 13) && strstr(t, "for 2 maps."));
         if (t) printf("  %s\n", t);
         free(t);
+        /* A download cut short (a joiner left the lobby, the game closed) leaves partial files: one of a kept map's
+         * unit resumes the next time; one of content no kept map names goes once nothing wrote it for an hour; a
+         * fresh one (a download running now) stays. */
+        {
+            static const char stale[] = "1111111111111111111111111111111111111111111111111111111111111111.zip.part";
+            static const char fresh[] = "2222222222222222222222222222222222222222222222222222222222222222.part";
+            char pdir[MAX_PATH * 2], kept_part[MAX_PATH * 2], one_path[MAX_PATH * 2];
+            FILETIME old_time;
+            SYSTEMTIME sys = { 2020, 1, 3, 1, 0, 0, 0, 0 };
+            HANDLE h;
+            _snprintf_s(pdir, sizeof pdir, _TRUNCATE, "%s\\.content\\partial", mods);
+            CreateDirectoryA(pdir, NULL);
+            _snprintf_s(kept_part, sizeof kept_part, _TRUNCATE, "%s\\%s.zip.part", pdir, crate.hash);
+            write_file(kept_part, "x", 1);
+            _snprintf_s(one_path, sizeof one_path, _TRUNCATE, "%s\\%s", pdir, stale);
+            write_file(one_path, "x", 1);
+            SystemTimeToFileTime(&sys, &old_time);
+            h = CreateFileA(one_path, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING, 0, NULL);
+            if (h != INVALID_HANDLE_VALUE) { SetFileTime(h, NULL, NULL, &old_time); CloseHandle(h); }
+            h = CreateFileA(kept_part, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING, 0, NULL);
+            if (h != INVALID_HANDLE_VALUE) { SetFileTime(h, NULL, NULL, &old_time); CloseHandle(h); }
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", pdir, fresh);
+            write_file(path, "x", 1);
+            CHECK(sh_cache_sweep(0, NULL, 0, &st));
+            CHECK(st.partials_removed == 1);
+            CHECK(GetFileAttributesA(one_path) == INVALID_FILE_ATTRIBUTES);     /* no kept map's, untouched: gone */
+            CHECK(GetFileAttributesA(kept_part) != INVALID_FILE_ATTRIBUTES);    /* the crate's: resumes */
+            CHECK(GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES);         /* written now: a running download */
+            DeleteFileA(kept_part);
+            DeleteFileA(path);
+        }
         CHECK(sh_cache_sweep(1, NULL, 0, &st));      /* Remove content of maps you only played */
         CHECK(st.units_removed == 1 && st.served_removed == 1 && sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == -1);
         CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);

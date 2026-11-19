@@ -4644,12 +4644,13 @@ builds it was published with on every player's machine, its author's included,
 until the author publishes again (the owner, 2026-11-17); the author's edits
 serve in the editor and in a My Maps play.
 
-A lobby joiner whose map cannot be confirmed (it declined, the download failed
-or was refused, or it is downloading) leaves the lobby through the session's
-own leave call, the one `OnCacheMapForLobbyError` makes after its dialog
+A lobby joiner whose map names units downloads them in the lobby (see "Co-op
+lobbies for modded maps" below). A joiner whose map cannot be confirmed
+otherwise (an earlier shape's build it declined, a download that failed or was
+refused, content that is not all to be had) leaves the lobby through the
+session's own leave call, the one `OnCacheMapForLobbyError` makes after its dialog
 (slot 0x2F0, checked byte for byte at bind on both renderers), so the host never
-starts it on a map it does not hold; a download finishes outside the lobby and
-the player is told to join again. A warm-cache join no gate of this process saw
+starts it on a map it does not hold; the player is told to join again. A warm-cache join no gate of this process saw
 (or whose rows are not the ones last activated) is read cold again, so
 CacheReady's gate checks it. A joiner runs no mod script, so its scripts setting
 never refuses the host's map; a joiner whose map passed serves in the Play
@@ -4817,6 +4818,82 @@ player's own mod (`sh_ms_install_to_root`, from a copy unpacked in `%TEMP%`;
 a place that already holds this very build is installed from there with no
 download). The resume checks every row against the asset rule again, in the
 same place.
+
+### Co-op lobbies for modded maps
+
+`modlobby.c`. When a host starts a co-op lobby on a published map whose content
+comes from the mod store, friends who join download that content in the lobby
+and stay in it; the host's Start waits until every player holds it, the host
+sees who is still getting it, and nobody enters the map with part of its
+content. DOOM 2016's SnapMap lobby already carries everything this needs, read
+in the engine on both renderers (R-CO1):
+
+- The map check. The host asks each peer that joins for the lobby's map
+  (reliable 4) and records the peer's map-verify state 1 until the peer answers
+  that it holds the map (reliable 0x2C, sent by `PublishedMapCacheReady`). A
+  joiner's CacheReady gate (above) stays held while the map's units download,
+  so the joiner does not answer until its content is here. For a modded map,
+  verify state 1 is "does not hold this map's content yet".
+- The start. The lobby screen's Start (`TryToStartMatch`) arms the lobby
+  controller's countdown (5 s when every player is ready, else 15 s), and the
+  countdown's end starts the match (the controller's start step, which calls
+  the session's StartMatch). The engine never waits for a peer that has not
+  answered: it sends that peer START_LOADING anyway. The product holds both:
+  Start while a peer of a modded map's lobby has not answered, with one
+  sentence in the game's own dialog ("The match starts when every player has
+  this map's mod content. Still getting it: Sam (40%)."), and the countdown's
+  end when a player joined during it, which puts the controller back in its
+  idle state the way its own pump drops a countdown when players leave.
+- Who is getting what. A joiner tells its host its state in the lobby's ready
+  command (game reliable 0xB6: its lobby user and one byte), sent through the
+  lobby screen's own sender. The host's lobby applies 0 toggle, 1 set and 2
+  unset to the player's ready flag and ignores every other byte; the product
+  uses the bytes it ignores: 0x80 + percent while downloading (steps of 5 %),
+  0xF0 once the content is here, 0xF1 when it cannot be had. A host with the
+  product reads them where the engine applies the command
+  (`SetLobbyUserReady`, idLobby vtable +0x210), and shows "Waiting for this
+  map's mod content: Sam 40%, Robin." in the lobby's progress line while anyone
+  is pending. A host without the product ignores them.
+- The joiner's start. A joiner loads when its acting lobby's start byte
+  (+0xF58A) is set (`State_Game_Lobby_Peer`). If that happens while its content
+  is still downloading (a host without the product, a match already running),
+  the product clears the byte, and the joiner leaves the lobby the engine's way,
+  keeps downloading, and is told to join again.
+
+Everything is keyed on the receiver: the host holds its start only when the
+lobby's map (its launch parameters' item and revision) was seen by a gate of
+this process with content rows (`sh_modpub_lobby_map_modded`). A vanilla map, a
+map that needs no mod and a multiplayer lobby run exactly as the engine runs
+them, and a vanilla map's joiner sends nothing.
+
+How a download in the lobby ends:
+
+| What happens | The joiner | The host |
+|---|---|---|
+| The content arrives whole | answers the map check (CacheReady runs), says 0xF0 | its Start runs |
+| A unit cannot be had (the store refused it, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons, which was removed from the mod store." | the player leaves; its Start runs for the others |
+| The joiner left, was kicked, or the host cancelled or left the lobby | the download stops: "You are no longer in the lobby, so this map's mod content stopped downloading. It continues from where it stopped the next time you join." | nothing waits |
+| The host chose another map, or a playlist moved on | the old download stops without a word; the new map's request brings its own | asks every peer again (verify 1) and waits for the new map |
+| The lobby started anyway | leaves, keeps downloading, "join the lobby again when it is done" | (a host without the product) |
+| The game closed or crashed | the partial files stay in `.content\partial\` and the next download resumes from them by Range | the peer drops |
+
+A partial download is never served: a file reaches `files\` only whole and
+checked. The cache sweep removes partial files of content no kept map names
+that nothing has written for an hour (a running download writes all the time).
+
+| Site | Vulkan / OpenGL RVA | Steal | What it does |
+|---|---|---|---|
+| `SnapmapLobbyTryToStartMatch` | 0x108EB20 / 0x108DC70 | 16 | holds the Start of a modded map's lobby while a peer has not answered |
+| `LobbyControllerStartMatch` | 0xF8BDA0 / 0xF8B290 | 16 | holds the countdown's end; the controller goes back to idle |
+| `LobbySetUserReady` | 0x180D340 / 0x180E130 | 18 | notes a joiner's state byte; runs unchanged for every byte |
+| `SessionStateGameLobbyPeer` | 0x19937B0 / 0x1988000 | 16 | clears a joiner's start byte while its content downloads |
+| `SnapmapLobbySendReadyCommand` | 0x108B940 / 0x108AA90 | called | sends the joiner's state byte (screen +0x18: the shell's manager) |
+| `LobbyPeerConfirmsMap` | 0x18032C0 / 0x1803EC0 | read | its bytes fix the peer records (+0xB728, stride 0x4B8, verify +4) |
+
+The bind checks every offset it relies on in these functions' bytes (the session
+global, the game lobby slot +0x210, the parameters slot +0x2B8, the 0xB6 command,
+the acting lobby call and its start byte, the peer records and the users list
++0x4E20) and installs nothing when one differs.
 
 ### Rawmaps that name mods
 
@@ -5289,7 +5366,10 @@ check fetched alone), composes again
 (the composition's sidecar records each absent unit's cause, the store's
 answer), and resumes; the resumed load says once what the map plays without,
 with the cause the fetch recorded, never the hold and the load both. A joiner
-leaves the lobby while it downloads (D27). An editor open (My Maps, a
+downloads in the lobby, and the host's start waits for it (see "Co-op lobbies
+for modded maps"). A map's content downloads with the progress line only: the
+"Keep downloading?" question is for the builds of earlier shapes alone (D-A36).
+An editor open (My Maps, a
 rawmap) composes from what is here, then asks the store for the units it stood
 in for on the network worker, with no question (`SH_MODPUB_EDITOR_OPEN`: the
 map is open, so nothing waits); what arrives is served in the open map through

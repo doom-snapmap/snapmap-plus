@@ -401,8 +401,13 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   was on does not open again once it is off, with the same sentence. Yes downloads only what you approve in the dialog,
   verified by hash, installs it beside what you have, and starts the map, with no word about
   versions or builds; No leaves the map unloaded with that sentence. Joining a lobby
-  asks the same way and checks that the host still runs that map before going on. Maps whose mods
-  are installed, and maps without mods, start exactly as before.
+  for a map of an earlier shape asks the same way and checks that the host still runs that map
+  before going on. Joining a co-op lobby whose map's content comes from the mod store asks nothing:
+  you stay in the lobby while it downloads, the host sees "Waiting for this map's mod content: Sam
+  40%." and the host's Start waits until every player has it ("The match starts when every player
+  has this map's mod content."). A player whose content cannot all be had leaves the lobby with one
+  sentence and can join again later. Maps whose mods are installed, and maps without mods, start
+  exactly as before.
 - A build that cannot be obtained stops that map (or rawmap, or prefab) from loading, in exactly
   one of four causes, each said in the game's own dialog and in one console line, before anything
   is asked or downloaded:

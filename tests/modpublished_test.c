@@ -26,6 +26,7 @@
 #include "../src/backend/modnet.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
+#include "../src/backend/modlobby.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -1524,6 +1525,201 @@ static void a_held_load_says_its_notice_once(void)
     CHECK(said_notice("This map is playing without the Tyrant", 38));
 }
 
+/* ---- co-op lobbies (SPEC 5.11, owner 2026-11-19; modlobby.h) ------------------------------------------------- */
+
+/* What the joiner told its host (modlobby.h codes), and where its lobby stands. */
+static struct { unsigned codes[64]; int count; int place; } g_lobby;
+static void f_lobby_report(void *c, unsigned code)
+{
+    (void)c;
+    if (g_lobby.count < 64) g_lobby.codes[g_lobby.count] = code;
+    g_lobby.count++;
+}
+static int f_lobby_state(void *c, const char *id, const char *revision) { (void)c; (void)id; (void)revision; return g_lobby.place; }
+static unsigned last_code(void) { return g_lobby.count ? g_lobby.codes[(g_lobby.count < 64 ? g_lobby.count : 64) - 1] : 0; }
+static int sent_code(unsigned code)
+{
+    for (int i = 0; i < g_lobby.count && i < 64; i++) if (g_lobby.codes[i] == code) return 1;
+    return 0;
+}
+
+static void use_lobby(void)
+{
+    use_content();
+    g_ops_content.lobby_report = f_lobby_report;
+    g_ops_content.lobby_state = f_lobby_state;
+    sh_modpub_test_set_ops(&g_ops_content);
+    memset(&g_lobby, 0, sizeof g_lobby);
+    g_lobby.place = SH_MODPUB_LOBBY_SAME;
+    g_content.armed = 1;
+    g_content.served = 1;       /* a composed row serves; incomplete until its fetch (content_complete) */
+}
+
+/* A joiner reads the host's pinned map (its CacheReady is held). */
+static void join_pinned(void)
+{
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+}
+
+/* The worker is inside the fetch. */
+static void wait_fetching(void)
+{
+    for (int i = 0; i < 400 && !F.fetch_calls; i++) Sleep(5);
+}
+
+static void coop_lobby_joiner_downloads_in_the_lobby(void)
+{
+    printf("-- co-op: a joiner downloads its map's content in the lobby, tells the host, and answers when it is here\n");
+    reset();
+    use_lobby();
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    join_pinned();
+    tick(1);
+    /* D27 left the lobby here; now it stays, says nothing, and the host hears it is downloading. */
+    CHECK(g_leaves == 0 && !sh_modpub_test_notice()[0]);
+    CHECK(sent_code(SH_MODLOBBY_CODE_PROGRESS));
+    CHECK(F.resumes == 0);                       /* no answer to the host's map check while it downloads */
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    tick(1);
+    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_READY);   /* CacheReady: the answer */
+    CHECK(last_code() == SH_MODLOBBY_CODE_HOLDS && g_leaves == 0);
+    CHECK(F.asks == 0);                          /* no question, no "Keep downloading?" (D-A36) */
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+
+    printf("-- co-op: a joiner whose map's content is here tells the host at once; a vanilla map's host hears nothing\n");
+    reset();
+    use_lobby();
+    g_content.complete = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(g_lobby.count == 1 && last_code() == SH_MODLOBBY_CODE_HOLDS);
+    reset();
+    use_lobby();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, VANILLA, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(g_lobby.count == 0);
+}
+
+static void coop_lobby_joiner_cannot_get_it(void)
+{
+    printf("-- co-op: a joiner whose map's content is not all to be had tells the host and leaves, in one sentence\n");
+    reset();
+    use_lobby();
+    g_content.absent_after_fetch = 1;            /* the store refused a unit: it stands in */
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && F.resumes == 0 && g_leaves == 1);
+    CHECK(last_code() == SH_MODLOBBY_CODE_FAILED);
+    CHECK(said_notice("You left the lobby: this map cannot be played without the Tyrant from Eternal Demons: the mod "
+                      "store could not be reached.", 104));
+    CHECK(!strstr(F.last_ask, HASH_A) && !strstr(sh_modpub_test_notice(), HASH_A));   /* no hash in player text */
+
+    printf("-- co-op: a failed download (network, disk, hash) tells the host and leaves the lobby\n");
+    reset();
+    use_lobby();
+    F.fetch_fails = -4;                          /* MODNET_E_NET */
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.resumes == 0 && g_leaves == 1 && sent_code(SH_MODLOBBY_CODE_FAILED));
+    CHECK(!sh_modpublished_holding());
+}
+
+static void coop_lobby_joiner_follows_its_lobby(void)
+{
+    printf("-- co-op: the joiner is no longer in the lobby (left, kicked, the host left): the download stops\n");
+    reset();
+    use_lobby();
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    join_pinned();
+    tick(1);
+    wait_fetching();
+    CHECK(sh_modpublished_holding() && F.fetch_calls == 1);
+    g_lobby.place = SH_MODPUB_LOBBY_GONE;
+    tick(1);
+    CHECK(!sh_modpublished_holding() && g_leaves == 0 && F.resumes == 0);
+    for (int i = 0; i < 400 && !F.fetch_cancelled; i++) Sleep(5);
+    CHECK(F.fetch_cancelled == 1);               /* the worker stopped; its partial files stay for the next time */
+    CHECK(said_notice("You are no longer in the lobby, so this map's mod content stopped downloading.", 77));
+    CHECK(!F.progress_up);
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+
+    printf("-- co-op: the host chose another map: the old download stops without a word\n");
+    reset();
+    use_lobby();
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    join_pinned();
+    tick(1);
+    wait_fetching();
+    g_lobby.place = SH_MODPUB_LOBBY_OTHER_MAP;
+    tick(1);
+    CHECK(!sh_modpublished_holding() && g_leaves == 0 && !sh_modpub_test_notice()[0] && !F.progress_up);
+    for (int i = 0; i < 400 && !F.fetch_cancelled; i++) Sleep(5);
+    CHECK(F.fetch_cancelled == 1);
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+
+    printf("-- co-op: the lobby asks the joiner to load before its content is here: it leaves and keeps downloading\n");
+    reset();
+    use_lobby();
+    CHECK(sh_modpub_joiner_start_held() == 0);  /* no hold: the load runs */
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    join_pinned();
+    tick(1);
+    CHECK(sh_modpub_joiner_start_held() == 1);
+    tick(1);
+    CHECK(g_leaves == 1 && sh_modpublished_holding());
+    CHECK(said_notice("The host started the match before this map's mod content was here", 65));
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.resumes == 0 && g_leaves == 1);      /* it joins again; the join finds the content */
+    CHECK(said_notice("The map's mod content is here. Join the lobby again to play it.", 63));
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+}
+
+static void coop_lobby_map_is_modded(void)
+{
+    printf("-- co-op: a lobby is a modded map's when a gate saw its map with content rows\n");
+    reset();
+    use_lobby();
+    CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev1"));      /* never seen */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, VANILLA, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev1"));      /* vanilla */
+    g_content.complete = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(sh_modpub_lobby_map_modded(METADATA, "rev1"));
+    CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev2"));
+}
+
+/* D-A36 (R-LV6): a rawmap's units downloaded with "Keep downloading?" raised after two seconds. A map's content
+ * downloads with a progress line only. */
+static void units_download_without_a_question(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a rawmap's content downloads with a progress line and no question\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    CHECK(sh_modpub_rawmap_missing(PINNED_MAP, strlen(PINNED_MAP), &rows, NULL) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick(1);
+    Sleep(2200);                                 /* past PUB_PROGRESS_MS */
+    tick(3);
+    CHECK(F.asks == 0 && F.progress_shows >= 1);
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    CHECK(F.resumes == 1);
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+}
+
 /* R-LV4: a map opened from My Maps whose Tyrant could not be had never asked the store again. An editor open that
  * stands in for objects asks the store at once, with no question, and its one notice is the answer. */
 static void editor_open_fetches_its_content(void)
@@ -2159,6 +2355,11 @@ int main(void)
     editor_open_missing_placed_mod();
     a_held_load_says_its_notice_once();
     editor_open_fetches_its_content();
+    coop_lobby_joiner_downloads_in_the_lobby();
+    coop_lobby_joiner_cannot_get_it();
+    coop_lobby_joiner_follows_its_lobby();
+    coop_lobby_map_is_modded();
+    units_download_without_a_question();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

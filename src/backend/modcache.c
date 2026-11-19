@@ -124,6 +124,22 @@ static int mc_exists(const char *path, unsigned long long *size)
     return ok;
 }
 
+/* 1 when the file was last written more than `seconds` ago. */
+static int mc_untouched_for(const char *path, unsigned long long seconds)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    FILETIME now;
+    ULARGE_INTEGER t, n;
+    wchar_t *w = sh_mb_wpath(path);
+    int ok = w && GetFileAttributesExW(w, GetFileExInfoStandard, &a);
+    free(w);
+    if (!ok) return 0;
+    GetSystemTimeAsFileTime(&now);
+    t.LowPart = a.ftLastWriteTime.dwLowDateTime; t.HighPart = a.ftLastWriteTime.dwHighDateTime;
+    n.LowPart = now.dwLowDateTime; n.HighPart = now.dwHighDateTime;
+    return n.QuadPart > t.QuadPart && (n.QuadPart - t.QuadPart) / 10000000ull > seconds;
+}
+
 static int mc_dir_exists(const char *path)
 {
     wchar_t *w = sh_mb_wpath(path);
@@ -2027,11 +2043,13 @@ static void mc_kept_read(mc_kept *k, int drop_played)
     free(published);
 }
 
+#define MC_PARTIAL_IDLE_S 3600ull   /* a partial download nobody wrote for this long is not running */
+
 int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out)
 {
     mc_kept kept;
     mc_set blobs = { 0 };
-    char *udir = mc_path("units"), *sdir = mc_path("served"), *fdir = mc_path("files");
+    char *udir = mc_path("units"), *sdir = mc_path("served"), *fdir = mc_path("files"), *pdir = mc_path("partial");
     char **names;
     size_t n, i;
     sh_cache_sweep_stats st;
@@ -2117,10 +2135,27 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         free(path);
     }
     mc_list_free(names, names ? n : 0);
+    /* A download cut short (the player left a lobby, the game closed, the network dropped) leaves its partial file, and
+     * the next download of the same file resumes from it. Once no kept map names its unit or file, and nothing has
+     * written it for an hour (a running download writes all the time), it goes too: nothing partial outlives the maps
+     * that wanted it. */
+    names = pdir ? mc_list(pdir, "*.part", 0, &n) : NULL;
+    for (i = 0; names && i < n; i++) {
+        char key[SH_CACHE_HASH_HEX + 1], *path;
+        if (strlen(names[i]) < 64) continue;
+        memcpy(key, names[i], 64);
+        key[64] = 0;
+        if (!mc_hex64(key) || mc_set_has(&kept.units, key) || mc_set_has(&blobs, key)) continue;
+        path = sh_textf("%s\\%s", pdir, names[i]);
+        if (path && mc_untouched_for(path, MC_PARTIAL_IDLE_S) && mc_delete(path)) st.partials_removed++;
+        free(path);
+    }
+    mc_list_free(names, names ? n : 0);
     ReleaseSRWLockExclusive(&g_disk);
-    mc_logf("MODS: content: the sweep kept %zu unit(s) of %zu map(s) and removed %zu unit(s), %zu file(s) (%llu bytes) "
-            "and %zu composition(s)%s", st.units_kept, st.maps, st.units_removed, st.blobs_removed, st.bytes_removed,
-            st.served_removed, drop_played ? "; content of maps only played was removed" : "");
+    mc_logf("MODS: content: the sweep kept %zu unit(s) of %zu map(s) and removed %zu unit(s), %zu file(s) (%llu bytes), "
+            "%zu composition(s) and %zu partial download(s)%s", st.units_kept, st.maps, st.units_removed, st.blobs_removed,
+            st.bytes_removed, st.served_removed, st.partials_removed,
+            drop_played ? "; content of maps only played was removed" : "");
 done:
     if (out) *out = st;
     free(kept.units.v);
@@ -2129,6 +2164,7 @@ done:
     free(udir);
     free(sdir);
     free(fdir);
+    free(pdir);
     return 1;
 }
 
