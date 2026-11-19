@@ -38,9 +38,6 @@
 extern "C" {
 #endif
 
-/* The namespace every mod prop lives under; a prop whose name does not start with it is never looked at. */
-#define SH_AT_PROP_ROOT     "mods/"
-#define SH_AT_PROP_ROOT_LEN 5
 /* The author key of mod.json and the registries member the builder writes. */
 #define SH_AT_AUTHOR_KEY    "attachment_tags"
 #define SH_AT_REGISTRY_KEY  "attachmentTags"

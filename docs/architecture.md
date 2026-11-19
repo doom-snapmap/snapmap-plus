@@ -2161,6 +2161,59 @@ warnings, the registry and the chain rule it reuses; `attach_tags_sigs_test`
 the site and its window on both executables; `detour_windows_test` audits the
 window with every other site.
 
+### The sync clock
+
+Every participant of a mod demon's sync (a glory kill, a berserk kill) runs on
+the player's animation clock (`sync_clock.{c,h}`, `sync_clock_rule.c`,
+`sync_clock_sigs.c`). When the game's tick rate changes (the adaptive tick,
+nearly every frame of a SnapMap Play), the engine re-anchors every running
+animation leaf so it keeps its frame: a loop in idGameLocal's frame calls one
+re-anchor for the local player's animators and for each entity of the game's
+animated list, with a precision. The player and every entity that is not an
+idAI2 get `g_fixupForAdaptiveTick_PrecisionMode == 2`; an idAI2 gets
+`mode == 2 || mode == 1`, and the cvar's default is 1. The two paths drift
+apart by about 8 % (the imprecise one keeps a negative start fraction whose
+rounding moves the start earlier at each change), so in a sync the demon (an
+AI) runs ahead of the player, the sync entity and the helper bodies. DOOM
+2016's own kills last about 1.3 s and hide it; a ported demon's six-second
+kill ends with the player released half a second before the demon falls.
+
+The rule: while a sync whose TARGET participant is a mod's entity (its
+entityDef under `mods/`) is working, every participant's animator re-anchors
+with the precision the loop gives the player. The player and the non-AI
+participants already have it, so the mod's demon is what changes. Nothing of
+the player changes, and a sync with a stock target is left as it is.
+
+| Site | VK | GL | Window |
+|---|---|---|---|
+| `AnimReanchor` | 0x15D1940 | 0x15D2D60 | 15 |
+
+`void f(animator, const int *now, int hz, int old_hz, bool precise, bool
+is_ai)`; its only callers are the eight calls of the loop (VK 0x14038E920, GL
+0x14038E1C0). One 49-byte pattern, unique in each executable. The prologue
+opens with `test rcx,rcx; jz <end>`, so the window relocates that jz
+(`hook_prepare_relative_jcc`: the inverse short jump over an absolute jump to
+the same target). The detour is prepared at boot and committed at the first
+Play that serves a mod. It passes every call through unless its precision
+differs from the player's (the cvar's value, at idCVar +0x30, the field the loop
+reads); only then does it look the animator up in the pass's set, rebuilt once
+per pass (one `now` and one rate): each player's `mostRecentSyncEntity`
+followed by its spawn id; while that sync entity `isCurrentlyWorking`, its
+`activeParticipants` (`instance`, `data->type`) and each participant's animator
+(the entity's vtable +0x948, the call the loop makes). The fields are placed
+through the game's type tables at the Play gate. `idPlayer.syncMaster` stays
+empty during a glory kill; `mostRecentSyncEntity` names the kill's sync entity
+from its start and `isCurrentlyWorking` holds for the kill's length (read live,
+Vulkan). A field or the cvar not found records the feature off with one line.
+
+`sh_mods sync-clock` prints the state, the precision mode and this Play's mod
+syncs and re-anchors moved; the diagnostic build logs each mod sync as it
+starts, `sync-clock: <sync entity> (target <entityDef>): <n> participant
+animator(s) re-anchor on the player's clock`. `sync_clock_test` covers the
+rule; `sync_clock_sigs_test` the site, its relocated jz and its eight callers on
+both executables; `detour_windows_test` audits the window with every other
+site; `hook_test` the jz relocation.
+
 ### Owner-bound companions
 
 A bundle's `companions` key (author block of `mod.json`, kept under `extra`)

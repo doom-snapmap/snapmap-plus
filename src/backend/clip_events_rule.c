@@ -61,7 +61,12 @@ int sh_ce_clip_of_mod(const char *clip, const char *salt)
 
 int sh_ce_def_of_mod(const char *md6def, const char *salt)
 {
-    return ce_under(md6def, "mods/", 5, salt);
+    return ce_under(md6def, SH_CE_DECL_ROOT, SH_CE_DECL_ROOT_LEN, salt);
+}
+
+int sh_ce_decl_under_mods(const char *name)
+{
+    return ce_prefix(name, SH_CE_DECL_ROOT, SH_CE_DECL_ROOT_LEN);
 }
 
 /* ------------------------------------------------------------ md6Def text */

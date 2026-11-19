@@ -22,6 +22,7 @@
 #include "modui.h"
 #include "clip_events.h"
 #include "attach_tags.h"
+#include "sync_clock.h"
 #include "../common/text.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
@@ -738,6 +739,11 @@ void h_sh_mods(idCmdArgs *a)
     if (!_stricmp(verb, "attachment-tags")) {
         /* The tag info the open map's mods give for their own attachments (attach_tags.h), for the test bench. */
         sh_attach_tags_command(mc_doctor_line, NULL);
+        return;
+    }
+    if (!_stricmp(verb, "sync-clock")) {
+        /* Whether a mod demon's syncs run on the player's animation clock this Play (sync_clock.h), for the test bench. */
+        sh_sync_clock_command(mc_doctor_line, NULL);
         return;
     }
     if (!_stricmp(verb, "doctor")) {

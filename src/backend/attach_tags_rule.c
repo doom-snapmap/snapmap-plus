@@ -27,11 +27,7 @@ static int at_name_cmp(const char *a, const char *b)
 
 int sh_at_under_mods(const char *prop)
 {
-    size_t i;
-    if (!prop) return 0;
-    for (i = 0; i < SH_AT_PROP_ROOT_LEN; i++)
-        if (!prop[i] || at_fold(prop[i]) != SH_AT_PROP_ROOT[i]) return 0;
-    return 1;
+    return sh_ce_decl_under_mods(prop);
 }
 
 int sh_at_prop_of_mod(const char *prop, const char *salt)

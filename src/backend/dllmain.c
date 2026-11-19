@@ -69,6 +69,7 @@
 #include "cachewrites.h"
 #include "clip_events.h"
 #include "attach_tags.h"
+#include "sync_clock.h"
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "modvt.h"
@@ -416,6 +417,10 @@ static void install_features(const sig_result *results, size_t db)
      * for their own attachments. */
     if (overrides_installed) (void)sh_attach_tags_install(g_doom_base);
     else sh_feature_off(SH_FEATURE_ATTACHMENT_TAGS, "mods are not served");
+    /* The sync clock (sync_clock.h): the animation re-anchor, detoured at the first Play that serves a mod, so every
+     * participant of a mod demon's sync re-anchors as the player does. */
+    if (overrides_installed) (void)sh_sync_clock_install(g_doom_base);
+    else sh_feature_off(SH_FEATURE_SYNC_CLOCK, "mods are not served");
 
     /* Mod scripts (script/script_hooks.h): the frame hook, the spawn subscriber
      * on the companions' CallSpawn chain and the map-end subscriber; the frame

@@ -39,6 +39,7 @@
 #define SH_FEATURE_MOD_SCENES      "mod scenes"
 #define SH_FEATURE_CLIP_EVENTS     "Clip events"
 #define SH_FEATURE_ATTACHMENT_TAGS "Attachment tags"
+#define SH_FEATURE_SYNC_CLOCK      "one animation clock for a mod demon's kills"
 #define SH_FEATURE_MOD_SCRIPTS     "mod scripts"
 #define SH_FEATURE_SCRIPT_NODES    "Script nodes"
 #define SH_FEATURE_SCRIPT_DEMONS   "demons driven by scripts"

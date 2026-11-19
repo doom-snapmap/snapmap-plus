@@ -189,11 +189,53 @@ static void relative_call_preserves_execution(void)
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
+/* A prologue that opens with a null test (test ecx,ecx; jz rel32) keeps both of its paths through the trampoline:
+ * the taken jump reaches the original target and the fall-through runs the rest of the window. */
+static void relative_jcc_preserves_both_paths(void)
+{
+    unsigned char *page = VirtualAlloc(NULL, 256, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    unsigned char original[24];
+    int baseline = hook_owned_count();
+    CHECK(page != NULL); if (!page) return;
+    for (int direction = -1; direction <= 1; direction += 2) {
+        unsigned char *code = page + (direction < 0 ? 128 : 0);
+        unsigned char *taken = page + (direction < 0 ? 0 : 128);
+        int32_t displacement = (int32_t)(taken - (code + 8));
+        volatile int tag = 0;
+        memset(original, 0x90, sizeof(original));
+        memcpy(original, "\x85\xc9\x0f\x84", 4);               /* test ecx,ecx; jz rel32 */
+        memcpy(original + 4, &displacement, 4);
+        memcpy(original + 8, "\x8b\xc1\x03\xc0\x48\x87\xc0\x90\xc3", 9);   /* mov eax,ecx; add eax,eax; nop; nop; ret */
+        memcpy(taken, "\xb8\xf9\xff\xff\xff\xc3", 6);         /* mov eax,-7; ret */
+        memcpy(code, original, sizeof(original));
+        FlushInstructionCache(GetCurrentProcess(), page, 256);
+        CHECK(((scratch_fn)code)(21, &tag) == 42 && ((scratch_fn)code)(0, &tag) == -7);
+        CHECK(!hook_prepare_relative_jcc(code, detour, 16, SIZE_MAX));
+        CHECK(!hook_prepare_relative_jcc(code, detour, 16, 0));    /* not a conditional jump */
+        CHECK(!hook_prepare_relative_jcc(code, detour, 16, 12));   /* past the window */
+        published_original = (scratch_fn)hook_prepare_relative_jcc(code, detour, 16, 2);
+        CHECK(published_original != NULL);
+        if (published_original) {
+            CHECK(!memcmp(code, original, sizeof(original)));
+            CHECK(published_original(37, &tag) == 74 && published_original(0, &tag) == -7);
+            CHECK(hook_commit((void *)published_original) == B2_PATCH_OK);
+            CHECK(((scratch_fn)code)(21, &tag) == 1042 && ((scratch_fn)code)(0, &tag) == 993);
+            CHECK(hook_unpatch((void *)published_original)); published_original = NULL;
+            CHECK(!memcmp(code, original, sizeof(original)));
+        }
+        displacement = 4; memcpy(code + 4, &displacement, 4);       /* a jump into the window */
+        CHECK(!hook_prepare_relative_jcc(code, detour, 16, 2));
+    }
+    CHECK(hook_owned_count() == baseline);
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
 int main(void)
 {
     rip_lea_preserves_addresses();
     rip_load_preserves_values();
     relative_call_preserves_execution();
+    relative_jcc_preserves_both_paths();
     unsigned char *code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     scratch_fn target = (scratch_fn)code;
     volatile int tag = 0;

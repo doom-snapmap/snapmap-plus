@@ -31,6 +31,12 @@ void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t lo
  * into the stolen interval are refused. Useful for native stack-probe prologues. */
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset);
 
+/* Expand one caller-verified near conditional jump (0F 8x rel32) at jcc_offset
+ * into the inverse short jump over an absolute jump to the same target. Other
+ * stolen instructions must be whole and position-independent; a jump into the
+ * stolen interval is refused. For a prologue that opens with a null test. */
+void *hook_prepare_relative_jcc(void *target, void *detour, size_t stolen, size_t jcc_offset);
+
 /* Publish the trampoline in the detour's original callback BEFORE committing.
  * The prologue is written with every other thread suspended and outside it
  * (code_patch). Commit never releases ownership. A failed commit must be
