@@ -52,6 +52,7 @@
 #include "modmanifest.h"
 #include "modserve.h"
 #include "map_carrier.h"
+#include "modlobby.h"   /* the state codes a lobby joiner sends its host */
 #include "../common/text.h"
 
 /* The fetch and the worker come from modsync.c and modnet.c: the fetch
@@ -430,6 +431,9 @@ typedef struct pub_hold {
     int cancelled;                       /* the player answered No to it */
     int left_lobby;                      /* a joiner's hold: the joiner left the lobby (pub_leave_lobby) */
     int units;                           /* every missing row names units: fetched with no probe or question */
+    int in_lobby;                        /* a joiner's units download while it stays in the lobby (SPEC 5.11) */
+    int start_held;                      /* the lobby asked it to load before its content was here: it leaves */
+    int reported;                        /* the last state code sent to the host (modlobby.h), 0 none */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -438,11 +442,13 @@ static sh_modpub_prefab_ready_fn g_prefab_ready;
 static int pub_is_prefab(int hook) { return hook == SH_MODPUB_PREFAB_PLACE; }
 /* "map" or "prefab", for the messages a hold shows. */
 static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" : "map"; }
-/* The sentence that says nothing happened. */
+static int pub_is_joiner(int hook);
+/* The sentence that says nothing happened. A joiner's hold that is dropped leaves the lobby (pub_drop). */
 static const char *pub_not_done(int hook)
 {
     return pub_is_prefab(hook) ? "The prefab was not placed." : hook == SH_MODPUB_EDITOR_OPEN ? "The map stays open without it."
-                                                                                            : "The map was not loaded.";
+         : pub_is_joiner(hook) ? "You left the lobby so the match is not held up; join it again later."
+                               : "The map was not loaded.";
 }
 /* A hold the rawmap layer, a prefab or an open editor map started: no engine completion behind it. */
 static int pub_is_local(int hook)
@@ -466,6 +472,14 @@ static void pub_leave_lobby(pub_hold *h, int hook, void *owner)
     if (h) h->left_lobby = 1;
     pub_log("MODS: the joiner leaves the lobby: its map's mods are not installed");
     if (g_ops.leave_lobby) g_ops.leave_lobby(g_ops.context, hook, owner);
+}
+
+/* The joiner's content state for the host (modlobby.h), each change once. */
+static void pub_report(pub_hold *h, unsigned code)
+{
+    if (h && h->reported == (int)code) return;
+    if (h) h->reported = (int)code;
+    if (g_ops.lobby_report) g_ops.lobby_report(g_ops.context, code);
 }
 
 /* A refused launch leaves nothing declared. */
@@ -969,13 +983,16 @@ static int pub_current_is(const sh_modmanifest_list *rows)
 
 /* A joiner's map passed its gate for the lobby it is in: the joiner serves
  * in the Play scope from here, as the host's launch does. */
-static void pub_joiner_ready(int hook, const char *item, const char *revision)
+static void pub_joiner_ready(int hook, const char *item, const char *revision, int modded)
 {
-    if (!pub_is_joiner(hook) || !g_ops.scope_play) return;
+    if (!pub_is_joiner(hook)) return;
     if (hook == SH_MODPUB_CACHE_READY &&
         (!g_ops.host_matches || !g_ops.host_matches(g_ops.context, pub_s(item), pub_s(revision))))
         return;
-    g_ops.scope_play(g_ops.context, "lobby join");
+    /* A modded map's host shows this member as holding its content (modlobby.h); its answer to the map check
+     * follows. A vanilla map's lobby is told nothing. */
+    if (modded) pub_report(NULL, SH_MODLOBBY_CODE_HOLDS);
+    if (g_ops.scope_play) g_ops.scope_play(g_ops.context, "lobby join");
 }
 
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
@@ -1009,7 +1026,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (pub_refuse_scripts(hook, owner, seen->place, &seen->rows)) return 0;
         if (!seen->rows.count || !pub_count_missing(&seen->rows, seen->place)) {
             pub_place_decided(seen->place);
-            pub_joiner_ready(hook, id, revision);
+            pub_joiner_ready(hook, id, revision, seen->rows.count > 0);
             return 1;
         }
         begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, seen->place, &seen->rows, NULL);
@@ -1088,7 +1105,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_record_clear(record);   /* consumed */
         if (rows) pub_place_decided_load(pub_s(place));
         else pub_place_decided(pub_s(place));
-        pub_joiner_ready(hook, item, rev);
+        pub_joiner_ready(hook, item, rev, rows);
         passed = 1;
         goto out;
     }
@@ -1114,7 +1131,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         passed = 0;
         goto out;
     }
-    if (!begun) { pub_place_decided_load(pub_s(place)); pub_joiner_ready(hook, item, rev); passed = 1; goto out; }
+    if (!begun) { pub_place_decided_load(pub_s(place)); pub_joiner_ready(hook, item, rev, 1); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
              pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
@@ -1284,9 +1301,16 @@ static void pub_progress_step(pub_hold *h, pub_job *job)
             h->progress_shown = 1;
         }
         free(line);
+        /* A joiner downloading in the lobby tells its host how far it is, over every row of the download. */
+        if (h->in_lobby && job->count) {
+            unsigned long long part = total > 0 ? (unsigned long long)(done * 1000 / total) : 0;
+            pub_report(h, sh_modlobby_progress_code((unsigned long long)current * 1000 + (part > 1000 ? 1000 : part),
+                                                    (unsigned long long)job->count * 1000));
+        }
     }
-    /* An open map holds nothing up while its content downloads, so nothing is asked about it. */
-    if (h->hook != SH_MODPUB_EDITOR_OPEN && !h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask &&
+    /* A map's content downloads with no question, a progress line only (D-A36), and an open map holds nothing up
+     * while its content downloads: the question is for the builds of earlier shapes alone. */
+    if (!h->units && h->hook != SH_MODPUB_EDITOR_OPEN && !h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask &&
         g_ops.can_ask(g_ops.context) && g_ops.ask) {
         _snprintf_s(text, sizeof text, _TRUNCATE, "Downloading the %s's mods; the progress shows on screen and on the "
                     "console. Keep downloading? No cancels it and installs nothing more.", pub_thing(h->hook));
@@ -1392,12 +1416,50 @@ static int pub_editor_fetch(void)
     return begun;
 }
 
+static char *pub_content_said(void);
+
+/* A joiner downloading in the lobby enters the match only with every unit its map names: stand-ins would not be the
+ * host's served bytes (its snapshot templates would differ, a fatal mismatch). 1 when the content is whole and the host
+ * is told so; else the joiner tells the host it failed and leaves the lobby with one sentence (the fallback, D27). */
+static int pub_joiner_content_whole(pub_hold *h)
+{
+    char *said;
+    for (size_t i = 0; i < h->missing_count; i++) {
+        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
+        if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        pub_report(h, SH_MODLOBBY_CODE_FAILED);
+        /* The composition's own sentence says what is absent and why (S2-S6): "This map is playing without the Tyrant
+         * from Eternal Demons, which was removed from the mod store." A joiner does not play it: it leaves. */
+        said = pub_content_said();
+        {
+            static const char lead[] = "This map is playing without ";
+            char *line = said && !strncmp(said, lead, sizeof lead - 1)
+                       ? sh_textf("You left the lobby: this map cannot be played without %s", said + sizeof lead - 1) : NULL;
+            if (!line || strlen(line) >= PUB_TEXT_CAP) {
+                free(line);
+                line = sh_text("Some of this map's mod content could not be downloaded, and the match cannot be played "
+                               "without it. You left the lobby so the match is not held up; join it again later.");
+            }
+            if (said) pub_logf("MODS: lobby join: %s", said);
+            pub_drop(line ? line : "This map's mod content could not be downloaded. You left the lobby.",
+                     "a joiner's units are not all here");
+            free(line);
+        }
+        free(said);
+        return 0;
+    }
+    pub_report(h, SH_MODLOBBY_CODE_HOLDS);
+    return 1;
+}
+
 static void pub_finish(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = h->job;
     char *line, *cause = NULL;
 
+    /* A joiner whose download failed tells its host before it leaves the lobby (pub_drop). */
+    if (job->failed_index >= 0 && h->in_lobby) pub_report(h, SH_MODLOBBY_CODE_FAILED);
     if (job->failed_index >= 0) {
         /* The gate decides a failed fetch too: the bundle left the store, the
          * store stopped answering, or its borrows name game bytes this
@@ -1464,6 +1526,7 @@ static void pub_finish(void)
         return;
     }
     if (g_ops.rescan) (void)g_ops.rescan(g_ops.context);
+    if (h->in_lobby && !pub_joiner_content_whole(h)) return;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         free(cause);
@@ -1942,6 +2005,59 @@ static void pub_probe_finish(void)
     free(verdicts);
 }
 
+/* A joiner downloading in the lobby follows its lobby (SPEC 5.11). The lobby asked it to load before the content was
+ * here (sh_modpub_joiner_start_held): it leaves, keeps downloading and is told to join again. It is in no lobby now
+ * (it left or was kicked, the host cancelled or left): the download stops, and what it fetched stays in the cache's
+ * partial files and resumes from there the next time. The lobby moved to another map: this one is not wanted any more;
+ * the new map's request brings its own hold. 1 when the hold ended or changed. */
+static int pub_lobby_check(pub_hold *h)
+{
+    int where;
+    if (h->start_held) {
+        char *said = sh_textf("The host started the match before this map's mod content was here, so you left the lobby. "
+                              "It keeps downloading (%.0f MB); join the lobby again when it is done.",
+                              (double)h->missing_bytes / (1024.0 * 1024.0));
+        h->in_lobby = 0;
+        h->start_held = 0;
+        pub_leave_lobby(h, h->hook, h->owner);
+        if (said) pub_notice(said);
+        free(said);
+        return 1;
+    }
+    where = g_ops.lobby_state ? g_ops.lobby_state(g_ops.context, pub_s(h->id), pub_s(h->revision)) : SH_MODPUB_LOBBY_SAME;
+    if (where == SH_MODPUB_LOBBY_SAME) return 0;
+    h->job->cancel = 1;
+    pub_progress_hide(h);
+    if (where == SH_MODPUB_LOBBY_GONE) {
+        pub_logf("MODS: the joiner is no longer in the lobby of '%s'; its download stops and resumes the next time",
+                 pub_s(h->id));
+        pub_hold_free();
+        pub_notice("You are no longer in the lobby, so this map's mod content stopped downloading. It continues from "
+                   "where it stopped the next time you join.");
+    } else {
+        pub_logf("MODS: the lobby moved from '%s' to another map; its download stops", pub_s(h->id));
+        pub_hold_free();
+    }
+    return 1;
+}
+
+int sh_modpub_joiner_start_held(void)
+{
+    pub_hold *h = &g_hold;
+    if (!g_ops_set || h->state == HOLD_IDLE || !h->in_lobby) return 0;
+    if (!h->start_held) pub_log("MODS: the lobby asked this joiner to load before its map's content was here; it leaves");
+    h->start_held = 1;
+    return 1;
+}
+
+int sh_modpub_lobby_map_modded(const char *item, const char *revision)
+{
+    pub_seen *seen;
+    if (!item || !item[0] || !revision) return 0;
+    seen = pub_seen_find(item, revision);
+    return seen && seen->rows.count > 0;
+}
+
 void sh_modpublished_poll(void)
 {
     pub_hold *h = &g_hold;
@@ -1978,13 +2094,11 @@ void sh_modpublished_poll(void)
     switch (h->state) {
     case HOLD_PROBING:
         if (!h->job && h->units) {
-            /* D27: a joiner downloads outside the lobby, so the match is not held up. */
+            /* SPEC 5.11 (owner, 2026-11-19): a joiner downloads in the lobby. It does not answer the host's map check
+             * until the content is here, so the host's start waits for it (modlobby.h); the host sees its progress. */
             if (pub_is_joiner(h->hook)) {
-                char *said = sh_textf("This map's mod content is downloading (%.0f MB). You left the lobby so the match is not "
-                                      "held up; join again when it is done.", (double)h->missing_bytes / (1024.0 * 1024.0));
-                pub_leave_lobby(h, h->hook, h->owner);
-                if (said) pub_notice(said);
-                free(said);
+                h->in_lobby = 1;
+                pub_report(h, SH_MODLOBBY_CODE_PROGRESS);
             }
             pub_start_fetch();
             break;
@@ -2041,6 +2155,7 @@ void sh_modpublished_poll(void)
     }
     case HOLD_FETCHING: {
         pub_job *job = h->job;
+        if (h->in_lobby && pub_lobby_check(h)) break;
         if (!InterlockedCompareExchange(&job->done, 0, 0)) {
             if (!h->cancelled) pub_progress_step(h, job);
             break;
@@ -2853,6 +2968,32 @@ static int eng_content_refresh(void *c)
     return rf.needs_map_reload > 0 || rf.needs_restart > 0 || rf.pending > 0 ? 2 : 1;
 }
 
+static void eng_lobby_report(void *c, unsigned code) { (void)c; sh_modlobby_send(code); }
+
+#define ENG_LOBBY_TYPE 0x1E80   /* idLobby: its type, 0 party, 1 game, 2 dedicated (the host's map check reads it) */
+
+/* Where the joiner's lobby stands: the session's active lobby (+0x348) must be a game lobby whose launch parameters
+ * still name the held map (eng_host_matches reads the same). */
+static int eng_lobby_state(void *c, const char *id, const char *revision)
+{
+    int type = -1;
+    (void)c;
+    __try {
+        void *session = g_eng.session_slot ? *g_eng.session_slot : NULL, *lobby;
+        lobby = session ? ((void *(*)(void *))(*(void ***)session)[g_eng.slot_lobby])(session) : NULL;
+        if (lobby) type = *(const int *)((const uint8_t *)lobby + ENG_LOBBY_TYPE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { type = -1; }
+    /* 1 the game lobby, 2 a dedicated one; the party lobby (0) or none: this machine left the match's lobby. */
+    if (type != 1 && type != 2) return SH_MODPUB_LOBBY_GONE;
+    return eng_host_matches(c, id, revision) ? SH_MODPUB_LOBBY_SAME : SH_MODPUB_LOBBY_OTHER_MAP;
+}
+
+void sh_modpublished_lobby_line(const char *text)
+{
+    if (!InterlockedCompareExchange(&g_eng.ready, 0, 0)) return;
+    eng_progress(NULL, 0, NULL, text);
+}
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
@@ -2861,7 +3002,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
     eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve, eng_leave_lobby,
     eng_cold_read_op, eng_scope_play_op, eng_content_complete, eng_content_notice, eng_content_pending, eng_content_drop,
-    eng_content_refresh
+    eng_content_refresh, eng_lobby_report, eng_lobby_state
 };
 
 /* ------------------------------------------------------------ detours */

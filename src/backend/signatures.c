@@ -1392,6 +1392,39 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 56 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 "
       "49 8B D8 48 8B FA 48 8B F1 48 8D 4C 24 20 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 4C 8B 08 48 8B C8 41",
       0xFA0400u, 0xF9F930u },
+    /* Co-op lobbies for modded maps (modlobby.c, R-CO1). Unique on both build 13954591 executables; read in Ghidra
+     * on each; steal windows audited by detour_windows_test. */
+    { "SnapmapLobbyTryToStartMatch", /* idMenuScreen_Shell_SnapmapLobby::TryToStartMatch (screen): the lobby's Start;
+                                    * arms the controller's 5 or 15 s countdown. Steal 16. */
+      "48 89 74 24 18 48 89 7C 24 20 55 48 8D 6C 24 A9 48 81 EC F0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
+      "48 89 45 47 48 8B 41 18 48 8B F9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? "
+      "48 8B F0 48 85 C0", 0x108EB20u, 0x108DC70u },
+    { "LobbyControllerStartMatch", /* idLobbyController's start step at the countdown's end (controller): session
+                                    * StartMatch (+0x270), then CONNECTING or IN_GAME. Steal 16. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 45 33 C0 48 8B 0D ?? ?? ?? ?? 33 D2 48 8B 01 FF 90 70 02 00 00 "
+      "48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 58 48 8B 0D ?? ?? ?? ?? 8B F8 48 8B 11 FF 52 78 84 C0",
+      0xF8BDA0u, 0xF8B290u },
+    { "LobbySetUserReady",         /* idLobby vtable +0x210 (lobby, lobbyUserID, command): 0 toggle, 1 set, 2 unset
+                                    * the user's ready byte (+0x66D); any other command changes nothing. Steal 18. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 41 8B F8 48 8B D9 45 33 C0 E8 ?? ?? ?? ?? 48 63 F0 85 C0 "
+      "0F 88 ?? ?? ?? ?? 48 8B 13 48 8B CB FF 52 30 3B F0 7D 74 48 8B 83 20 4E 00 00 48 8B 14 F0",
+      0x180D340u, 0x180E130u },
+    { "SessionStateGameLobbyPeer", /* idSessionLocal::State_Game_Lobby_Peer (session): a joiner loads when its acting
+                                    * lobby's start byte (+0xF58A) is set. Steal 16. */
+      "48 89 5C 24 18 48 89 7C 24 20 55 48 8D 6C 24 A9 48 81 EC E0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
+      "48 89 45 47 48 8B 01 48 8B D9 FF 90 A0 07 00 00 48 8B 03 48 8B CB 40 32 FF FF 90 70 05 00 00",
+      0x19937B0u, 0x1988000u },
+    { "SnapmapLobbySendReadyCommand", /* the lobby screen's ready sender (screen, command): game reliable 0xB6 with
+                                    * the local lobby user and one byte to the host, or the host's own apply. Called,
+                                    * not detoured. */
+      "40 55 57 41 56 48 8D AC 24 40 E1 FF FF B8 C0 1F 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 85 A0 1E 00 00 48 8B 41 18 44 8B F2 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ??",
+      0x108B940u, 0x108AA90u },
+    { "LobbyPeerConfirmsMap",      /* the host's reliable 0x2C handler (lobby, peer): "NET: Peer %d confirms having
+                                    * map."; its bytes fix the peer records (+0xB728, stride 0x4B8, verify +4). Read
+                                    * only. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 63 FA 48 8B F1 48 69 DF B8 04 00 00 48 03 99 28 B7 00 00 "
+      "83 3B 02 75 49", 0x18032C0u, 0x1803EC0u },
     { "LaunchLocalSnapMapForOfflinePlay", /* (manager, localSavedModel*, idSnapMap*): My Maps play, offline
                                     * only; its caller (VK fd2080) parses into a stack map. Steal 22. */
       "40 55 53 56 57 41 56 48 8D AC 24 50 FF FF FF 48 81 EC B0 01 00 00 48 C7 44 24 28 FE FF FF FF",

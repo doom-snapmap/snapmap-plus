@@ -381,7 +381,38 @@ typedef struct sh_modpub_ops {
      * the new compositions (the index was rescanned; modserve.h sh_modserve_refresh_after_rescan). 1 the objects show
      * now, 2 they show when the map is opened again, 0 nothing changed, -1 unavailable. NULL counts as -1. */
     int  (*content_refresh)(void *c);
+    /* A lobby joiner's content state for the host (modlobby.h SH_MODLOBBY_CODE_*), sent in the ready command's byte
+     * the engine ignores. NULL counts as none. */
+    void (*lobby_report)(void *c, unsigned code);
+    /* Where the joiner's lobby stands for the held map `id`/`revision`: an sh_modpub_lobby_place. NULL counts as
+     * SH_MODPUB_LOBBY_SAME. */
+    int  (*lobby_state)(void *c, const char *id, const char *revision);
 } sh_modpub_ops;
+
+/* A joiner's lobby, as lobby_state answers it. */
+enum sh_modpub_lobby_place {
+    SH_MODPUB_LOBBY_GONE = 0,        /* this machine is in no game lobby now (it left, was kicked, the host left) */
+    SH_MODPUB_LOBBY_SAME = 1,        /* the lobby still hosts the held map */
+    SH_MODPUB_LOBBY_OTHER_MAP = 2    /* the lobby hosts another map now (the host chose one, or a playlist moved on) */
+};
+
+/* ------------------------------------------------------------ co-op lobbies (modlobby.h)
+ * A joiner whose map names units downloads them in the lobby, with no question and no leave: its CacheReady stays held,
+ * so it does not answer the host's map check, and the host's start waits for it (modlobby.h). The joiner tells the host
+ * its progress, that the content is here, or that it failed. Only a download that cannot succeed (the content is not
+ * all to be had, or the fetch failed) leaves the lobby the engine's way, the fallback of SPEC 5.11; so does a start the
+ * host sends before the content is here (sh_modpub_joiner_start_held). Leaving the lobby otherwise (the joiner leaves
+ * or is kicked, the host cancels or leaves) stops the download: what it fetched stays in the cache's partial files and
+ * resumes from there the next time. */
+
+/* 1 when the published map `item` at `revision` was seen by a gate of this process with rows of content: a lobby on it
+ * is a modded map's lobby, whose start the host holds for its members (modlobby.h). */
+int sh_modpub_lobby_map_modded(const char *item, const char *revision);
+
+/* The joiner's lobby asked it to load (its start byte is set): 1 when a joiner's map content is still downloading in
+ * the lobby, so it must not load. The joiner then leaves the lobby at the next tick, keeps downloading, and is told to
+ * join again when the content is here. 0 lets the load run. Main thread. */
+int sh_modpub_joiner_start_held(void);
 
 /* The place the next launch serves from, as the last gate or hold decided it
  * for the map it let through: 1 with it in *out (malloc'd; consumed), 0 when
@@ -493,6 +524,9 @@ char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *m
  * Install after the DeserializeFromJson detour and the engine dialog. Returns
  * 1 when the gates are armed. */
 int sh_modpublished_install(const sig_result *results, size_t count, const uint8_t *module_base);
+/* The lobby's progress line (the shell manager's, where a joiner's download shows): `text` shows or replaces it, NULL
+ * takes it down. The host's waiting line (modlobby.h). Main thread. */
+void sh_modpublished_lobby_line(const char *text);
 #endif
 
 #ifdef SH_MODPUBLISHED_TESTING
