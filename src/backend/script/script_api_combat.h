@@ -55,6 +55,8 @@
  *                    distances ahead, the nearest, time = distance over speed), over every projectile instead
  *                    of the demon's tracked list.
  *   steer            setLinearVelocity on the projectile, at its current speed unless one is given
+ *   p:gravity        the engine's setGravity event (one vector) on the projectile, straight down at the rate
+ *                    given: it falls at its source game's gravity whatever the map's
  *   p:explode        the projectile's own Explode (idProjectile vtable +0xAA0: VK 0x140F38240,
  *                    GL 0x140F37700) with no collision, as the projectile's fuse does
  *   play_effect(e, cond)      on an AI or a player ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'):

@@ -781,6 +781,27 @@ static void test_launch(void)
             "3", "\"launch\" works on demons; this entity is not one");
 }
 
+static void test_gravity(void)
+{
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local p = self:launch('rocket', 'muzzle', {x = 300, y = 0, z = 450})\n"
+        "  print('pulled', p:gravity(1066))\n"
+        "  print('free', p:gravity(0))\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    /* the engine's setGravity event on the projectile, the vector straight down */
+    CHECK(has(g_events, "setGravity@projectile/stock_rocket(v0 0 -1066);"));
+    CHECK(has(g_events, "setGravity@projectile/stock_rocket(v0 0 -0);") || has(g_events, "setGravity@projectile/stock_rocket(v0 0 0);"));
+    CHECK(has(log_now(), "pulled\ttrue"));
+    CHECK(has(g_log, "free\ttrue"));
+    refused("api = 1\non.spawn('ai/brute', function(self)\n"
+            "  local p = self:launch('rocket', 'muzzle', {x = 1, y = 0, z = 0})\n  p:gravity(-5)\nend)\n",
+            "4", "\"gravity\" needs a gravity of 0 or more, got -5");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):gravity(1066)\nend)\n",
+            "3", "\"gravity\" works on a projectile this mod's entities launched; this entity is not one");
+}
+
 static void test_incoming(void)
 {
     double enter = 0, leave = 0;
@@ -1070,6 +1091,7 @@ int main(void)
     test_tags();
     test_fire();
     test_launch();
+    test_gravity();
     test_incoming();
     test_refusals();
     test_hook_records();
