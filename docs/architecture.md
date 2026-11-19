@@ -4388,6 +4388,13 @@ map's choices).
   ported demon shares the type of the first one standing in for the same stock
   demon, else the first one, with one line naming both (a degrade, never a
   refusal).
+- **A map pins its types.** A save writes each ported demon's type on its
+  mod's row as a registry choice, slot `spawnAIType_t/<bit>/<encounter decl
+  name>` keyed by the mod's salt (`SH_MR_PIN`, `modmanifest.c`
+  `mm_choices_save`, from `sh_modserve_spawn_pins`); a load gives that bit to
+  that encounter's demon first while it is free, and the other demons take the
+  lowest free ones. So a mask the map saved (the AI Filter's, below) keeps
+  meaning the same demon whatever other mods are installed or removed.
 - **Spawn types compose.** An encounter member's `memberType` is a set of
   flags: when several sources set one member (or one `memberList` whose
   statements differ only in `memberType` values), the values compose as the
@@ -4396,14 +4403,28 @@ map's choices).
   beside their stand-in both do.
 - **The editor's encounter pickers grow.** The Single Demon Encounter, the
   Encounter List and the Miniboss event's boss list
-  (`SH_MR_GROWN_LISTS`) offer every single-demon encounter (one `memberType`)
-  an installed mod's root build carries, after the game's (the owner,
+  (`SH_MR_GROWN_LISTS`) offer every encounter an installed mod's root build
+  spawns from a Toybox placeable of its own (`idPlaceableSnapAIEncounter`,
+  `sh_modregistry_placeable_encounter`; never the encounters a port adds to the
+  lists SnapMap chooses from), after the game's (the owner,
   2026-11-19: an installed mod grows SnapMap's lists; a grown list never
   declares a mod, a map is modded only when it references the mod's entity).
   They are registry files whenever such an encounter is installed, generated
   also when no map declares anything, in the editor only: in Play no
   undeclared mod serves, so the game's lists serve there, and a level load
   still templates no undeclared mod's entityDef (`level_templates.c`).
+- **The AI Filter's "Include AI" flags grow.** The bitflag widget offers,
+  reads and writes a type only by the name of a `spawnAIType_t` member (13954591,
+  both renderers: a value whose `enumValue` names no member gets no checkbox, a
+  saved word that names none is ignored, and a bit with no member is not
+  written). So the product adds one member per free bit to the game's enum,
+  `SPAWN_AI_TYPE_MOD_19` to `SPAWN_AI_TYPE_MOD_29` (`sh_typeinfo_enum_extend`,
+  a product copy of the member array the enum record points at; the game's own
+  array is never written), and in the editor the flag picker
+  (`SH_MR_FLAG_PICKER`) offers each type the map gives a ported demon by that
+  member, labelled with its encounter's `displayStringId` and
+  `descriptionStringId`. With no declared mod there is no type, so the picker
+  is the game's; it names no entityDef, so a level load stays isolated.
 - **A stock entity is its stock row's** (D-A44). A mod's Toybox row whose
   entityDef is also a stock row's sorts beside it in an unstable order, so
   load and paste could bind every stock entity of that kind to the mod's row.

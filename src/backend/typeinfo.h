@@ -89,5 +89,9 @@ int sh_typeinfo_class(const char *name, uint32_t *size, const char **super);
 int sh_typeinfo_class_field(const char *name, uint32_t index, sh_ti_field *out);
 /* The index-th member of an enum; 0 past the last or when `name` is no enum. */
 int sh_typeinfo_enum_member(const char *name, uint32_t index, const char **member, long long *value);
+/* Add members to the game's enum `name` (names[i] with values[i]; the strings must outlive the session): the
+ * enum's lookups by name and by value see them from then on. A name the enum holds already is skipped. Returns the
+ * members added, 0 when none could be (or all were there), -1 when the type system or the enum is not there yet. */
+int sh_typeinfo_enum_extend(const char *name, const char *const *names, const long long *values, int n);
 
 #endif /* BACKEND_B2_TYPEINFO_H */

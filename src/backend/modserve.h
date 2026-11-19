@@ -854,6 +854,15 @@ int  sh_modserve_level_hides(const char *name);
  * kill_score.h). */
 unsigned sh_modserve_spawn_type_standin(unsigned type);
 
+/* The ported demons' types the current listing gave, as the map pins them
+ * (modregistry.h SH_MR_PIN): fn(salt, slot) per type. Returns the count. */
+int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const char *slot), void *context);
+/* The type system's enum extension (typeinfo.h sh_typeinfo_enum_extend), bound
+ * at install: the registry adds the free bits' spawnAIType_t members through it
+ * (modregistry.h, the AI Filter's flags). Unbound (the tests) nothing is added. */
+typedef int (*sh_modserve_enum_extend_fn)(const char *name, const char *const *names, const long long *values, int n);
+void sh_modserve_set_enum_extend(sh_modserve_enum_extend_fn fn);
+
 typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
     int automatic;           /* "always" because it shadows editor-time content */

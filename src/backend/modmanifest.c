@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "modmanifest.h"
+#include "modregistry.h"   /* SH_MR_PIN: a ported demon's pinned type */
 #include "sha256.h"
 #include "modserve.h"
 #include "modsalt.h"
@@ -1205,7 +1206,18 @@ static void mm_choices_load(const sh_modmanifest_list *rows)
     (void)mm_choices_push(0);
 }
 
-/* At a save: each choice on the row of the salt it names. */
+/* A ported demon's type the listing gave, pinned on the row of its mod (modregistry.h SH_MR_PIN): a row the map
+ * does not have pins nothing (its demon is not in the map). */
+static void mm_pin_one(void *context, const char *salt, const char *slot)
+{
+    sh_modmanifest_list *rows = (sh_modmanifest_list *)context;
+    size_t i;
+    for (i = 0; rows && salt && slot && i < rows->count; i++)
+        if (!strcmp(rows->rows[i].salt, salt)) { (void)mm_choice_add(&rows->rows[i].choices, slot, salt); return; }
+}
+
+/* At a save: each choice on the row of the salt it names, and every ported demon's type of the listing pinned on
+ * its mod's row (the choices' earlier pins give way to the types the map has now). */
 static void mm_choices_save(sh_modmanifest_list *rows)
 {
     char *lines, *slot, *key;
@@ -1215,8 +1227,10 @@ static void mm_choices_save(sh_modmanifest_list *rows)
     lines = g_choices ? sh_text(g_choices) : NULL;
     ReleaseSRWLockShared(&g_current_lock);
     for (i = 0; i < rows->count; i++) { free(rows->rows[i].choices); rows->rows[i].choices = NULL; }
+    (void)sh_modserve_spawn_pins(mm_pin_one, rows);
     for (p = lines; mm_choice_next(&p, &slot, &key);) {
         int placed = 0;
+        if (!_strnicmp(slot, SH_MR_PIN, strlen(SH_MR_PIN))) { free(slot); free(key); continue; }
         for (i = 0; i < rows->count && !placed; i++)
             if (!strcmp(rows->rows[i].salt, key))
                 placed = mm_choice_add(&rows->rows[i].choices, slot, key);

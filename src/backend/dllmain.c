@@ -245,6 +245,8 @@ static void install_features(const sig_result *results, size_t db)
     }
     /* What a map uses of Snapmap+ itself flags it at every save (map_uses.h). */
     sh_modmanifest_set_uses(sh_map_uses);
+    /* The free spawn-type bits' enum members, for the AI Filter's flags (modregistry.h). */
+    sh_modserve_set_enum_extend(sh_typeinfo_enum_extend);
 
     /* Inject custom #str_ entries before the first top-level language-table sort,
      * after the serving index so the first pass already carries the admitted

@@ -595,6 +595,51 @@ int sh_typeinfo_enum_member(const char *name, uint32_t index, const char **membe
     return 1;
 }
 
+/* The enum record keeps {name, flags, members}; the members are {name, value} pairs ending with a NULL name
+ * (ENUM_MEMBERS_OFF, ENUM_MEMBER_STRIDE: read in FindEnumByName and the enum string helpers on both renderers,
+ * 13954591). The extension is a product-owned copy of the members with the new ones before the terminator, and the
+ * record is pointed at it; the game's own array is never written. */
+typedef struct ti_member { const char *name; uint64_t value; } ti_member;
+
+int sh_typeinfo_enum_extend(const char *name, const char *const *names, const long long *values, int n)
+{
+    void *reflect = ti_get_reflect(), *en;
+    const uint8_t *members;
+    ti_member *copy;
+    uint32_t have = 0, i;
+    int add = 0, k;
+    DWORD old;
+    if (!reflect || !name || n < 0) return -1;
+    en = ti_find_enum(reflect, name);
+    if (!en || !(members = (const uint8_t *)ti_read_ptr(en, ENUM_MEMBERS_OFF))) return -1;
+    while (have < TI_WALK_CAP && ti_read_cstr(members + (size_t)have * ENUM_MEMBER_STRIDE, EMEMBER_NAME_OFF)) have++;
+    if (have >= TI_WALK_CAP) return 0;
+    copy = (ti_member *)calloc((size_t)have + (size_t)n + 1, sizeof *copy);
+    if (!copy) return 0;
+    for (i = 0; i < have; i++) {
+        uint32_t v = 0;
+        copy[i].name = ti_read_cstr(members + (size_t)i * ENUM_MEMBER_STRIDE, EMEMBER_NAME_OFF);
+        (void)ti_read_u32(members + (size_t)i * ENUM_MEMBER_STRIDE, EMEMBER_VALUE_OFF, &v);
+        copy[i].value = v;
+    }
+    for (k = 0; k < n; k++) {
+        int held = 0;
+        if (!names[k] || !names[k][0]) continue;
+        for (i = 0; i < have + (uint32_t)add && !held; i++) held = !_stricmp(copy[i].name, names[k]);
+        if (held) continue;                    /* already a member (a second install): nothing to add */
+        copy[have + (uint32_t)add].name = names[k];
+        copy[have + (uint32_t)add].value = (uint32_t)values[k];
+        add++;
+    }
+    if (!add) { free(copy); return 0; }
+    if (!VirtualProtect((uint8_t *)en + ENUM_MEMBERS_OFF, sizeof(void *), PAGE_READWRITE, &old)) { free(copy); return 0; }
+    __try { *(ti_member **)((uint8_t *)en + ENUM_MEMBERS_OFF) = copy; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { add = 0; }
+    VirtualProtect((uint8_t *)en + ENUM_MEMBERS_OFF, sizeof(void *), old, &old);
+    if (!add) free(copy);                      /* kept for the session once the record points at it */
+    return add;
+}
+
 int sh_typeinfo_collect_inherits(const char ***out)
 {
     const uint8_t *mgr = (const uint8_t *)g_resource_mgr_ctx;

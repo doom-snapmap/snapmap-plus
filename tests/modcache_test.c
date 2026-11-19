@@ -43,6 +43,8 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, 
 { (void)names; (void)count; (void)visit; (void)context; return 0; }
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
 { (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
+int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const char *slot), void *context)
+{ (void)fn; (void)context; return 0; }
 
 static int game_exists(void *ctx, const char *request) { (void)ctx; return strstr(request, "mods/") ? 0 : 1; }
 static const sh_mb_resolver g_game = { NULL, NULL, game_exists, NULL };

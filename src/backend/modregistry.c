@@ -416,6 +416,125 @@ char *sh_modregistry_append_list(const char *text, size_t len, const char *list,
     return mr_done(&b, out_len);
 }
 
+const char *sh_modregistry_flag_name(unsigned bit, char *buf, size_t cap)
+{
+    int b;
+    for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST; ++b)
+        if (bit == (1u << b)) {
+            if (!buf || !cap) return NULL;
+            _snprintf_s(buf, cap, _TRUNCATE, "SPAWN_AI_TYPE_MOD_%d", b);
+            return buf;
+        }
+    return NULL;
+}
+
+int sh_modregistry_decl_string(const char *text, size_t len, const char *key, char *buf, size_t cap)
+{
+    size_t pos = 0;
+    mr_tok prev = { MT_END, 0, 0 }, prev2 = { MT_END, 0, 0 };
+    if (buf && cap) buf[0] = 0;
+    if (!text || !key || !buf || !cap) return 0;
+    for (;;) {
+        mr_tok k = mr_next(text, len, &pos);
+        if (k.kind == MT_END) return 0;
+        if (k.kind == MT_STR && prev.kind == MT_EQ && mr_word_is(text, &prev2, key)) {
+            size_t n = k.n >= 2 ? k.n - 2 : 0;
+            if (n >= cap) n = cap - 1;
+            memcpy(buf, text + k.at + 1, n);
+            buf[n] = 0;
+            return 1;
+        }
+        prev2 = prev;
+        prev = k;
+    }
+}
+
+int sh_modregistry_placeable_encounter(const char *text, size_t len, char *buf, size_t cap)
+{
+    char cls[64];
+    if (buf && cap) buf[0] = 0;
+    if (!sh_modregistry_decl_string(text, len, "class", cls, sizeof cls) || _stricmp(cls, "idPlaceableSnapAIEncounter"))
+        return 0;
+    return sh_modregistry_decl_string(text, len, "encounterToSpawn", buf, cap) && buf[0];
+}
+
+char *sh_modregistry_append_flags(const char *text, size_t len, const sh_mr_flag *flags, int n, size_t *out_len)
+{
+    size_t open, close, pos, line_start, num_at = 0, num_len = 0;
+    int count = 0, added = 0, k, num = -1;
+    char indent[64];
+    mr_buf b = { NULL, 0, 0, 0 }, items = { NULL, 0, 0, 0 };
+    mr_tok prev = { MT_END, 0, 0 }, prev2 = { MT_END, 0, 0 };
+    if (!text || !flags || n <= 0 || !mr_find_block(text, len, 0, len, "values", 2, &open, &close)) return NULL;
+    indent[0] = 0;
+    pos = open + 1;
+    for (;;) {
+        mr_tok t = mr_next(text, close, &pos);
+        if (t.kind == MT_END) break;
+        if (t.kind == MT_WORD && prev.kind == MT_EQ && mr_word_is(text, &prev2, "num")) {
+            num_at = t.at;
+            num_len = t.n;
+            num = atoi(text + t.at);
+        }
+        if (t.kind == MT_WORD && t.n > 5 && !_strnicmp(text + t.at, "item[", 5)) {
+            size_t s = t.at;
+            count++;
+            while (s > open && text[s - 1] != '\n') s--;
+            if (t.at - s < sizeof indent) { memcpy(indent, text + s, t.at - s); indent[t.at - s] = 0; }
+        }
+        prev2 = prev;
+        prev = t;
+    }
+    if (!indent[0]) {          /* an empty list: one level deeper than its closing brace */
+        size_t s = close;
+        while (s > open && text[s - 1] != '\n') s--;
+        if (close - s + 1 < sizeof indent) { memcpy(indent, text + s, close - s); indent[close - s] = '\t'; indent[close - s + 1] = 0; }
+    }
+    /* New items go on their own lines before the closing brace's line. */
+    line_start = close;
+    while (line_start > open && text[line_start - 1] != '\n') line_start--;
+    for (pos = line_start; pos < close; ++pos)
+        if (text[pos] != ' ' && text[pos] != '\t') return NULL;
+    if (num < 0) num = count;
+    for (k = 0; k < n; ++k) {
+        const char *v = flags[k].value;
+        size_t l = v ? strlen(v) : 0, at;
+        int held = 0, d;
+        char line[1024];
+        if (!l) continue;
+        for (at = open; at + l + 2 <= close && !held; ++at)
+            held = text[at] == '"' && text[at + l + 1] == '"' && !_strnicmp(text + at + 1, v, l);
+        for (d = 0; d < k && !held; ++d) held = flags[d].value && !_stricmp(flags[d].value, v);
+        if (held) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%sitem[%d] = {\n%s\tenumValue = \"%s\";\n", indent, num + added,
+                    indent, v);
+        mr_puts(&items, line);
+        if (flags[k].label && flags[k].label[0]) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "%s\tlabel = \"%s\";\n", indent, flags[k].label);
+            mr_puts(&items, line);
+        }
+        if (flags[k].description && flags[k].description[0]) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "%s\tdescription = \"%s\";\n", indent, flags[k].description);
+            mr_puts(&items, line);
+        }
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s}\n", indent);
+        mr_puts(&items, line);
+        added++;
+    }
+    if (!added || items.oom) { free(items.p); return NULL; }
+    if (num_at && num_at < line_start) {
+        char nb[16];
+        _snprintf_s(nb, sizeof nb, _TRUNCATE, "%d", num + added);
+        mr_put(&b, text, num_at);
+        mr_puts(&b, nb);
+        mr_put(&b, text + num_at + num_len, line_start - (num_at + num_len));
+    } else mr_put(&b, text, line_start);
+    mr_put(&b, items.p, items.n);
+    free(items.p);
+    mr_put(&b, text + line_start, len - line_start);
+    return mr_done(&b, out_len);
+}
+
 /* ------------------------------------------------------------------ generation */
 
 static void mr_line(sh_mr_result *r, const char *fmt, ...)
@@ -581,8 +700,28 @@ static char *mr_unquote(const sh_dt_node *n)
  * holds a number that is not a stock bit gets a bit assigned per map (its
  * stock words are the demon it stands in for), and that source's encounters
  * and scores are served with it. */
-static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *r)
+/* The bit a map pinned for a source's encounter (a choice SH_MR_PIN "<bit>/<encounter>" keyed by the source's
+ * salt), 0 for none. */
+static unsigned mr_pin(const sh_mr_choice *choices, int nchoices, const char *key, const char *encounter)
 {
+    size_t pl = strlen(SH_MR_PIN);
+    int i;
+    for (i = 0; encounter && key && i < nchoices; ++i) {
+        const char *s = choices[i].slot;
+        char *end;
+        long b;
+        if (!s || !choices[i].key || _strnicmp(s, SH_MR_PIN, pl) || _stricmp(choices[i].key, key)) continue;
+        b = strtol(s + pl, &end, 10);
+        if (*end != '/' || b < SH_MR_BIT_FIRST || b > SH_MR_BIT_LAST || _stricmp(end + 1, encounter)) continue;
+        return 1u << b;
+    }
+    return 0;
+}
+
+static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_choice *choices, int nchoices,
+                        sh_mr_result *r)
+{
+    unsigned taken = 0;
     sh_dt_node *list = sh_dt_at(sh_dt_root(t), "edit/aiTypeList");
     sh_dt_node **items = NULL;
     int i, s, nitems = 0;
@@ -639,14 +778,26 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
         }
     }
     if (r->nentries) qsort(r->entries, (size_t)r->nentries, sizeof *r->entries, mr_entry_cmp);
+    /* The map's pins first: a pinned bit stays with its demon while it is free. */
     for (i = 0; i < r->nentries; ++i) {
         sh_mr_entry *e = &r->entries[i];
-        int q, with = -1;
-        if (SH_MR_BIT_FIRST + i <= SH_MR_BIT_LAST) { e->bit = 1u << (SH_MR_BIT_FIRST + i); continue; }
+        unsigned pin = mr_pin(choices, nchoices, src[e->source].key, e->encounter);
+        if (pin && !(taken & pin)) { e->bit = pin; e->pinned = 1; taken |= pin; }
+    }
+    for (i = 0; i < r->nentries; ++i) {
+        sh_mr_entry *e = &r->entries[i];
+        int q, b, with = -1;
+        if (e->pinned) continue;
+        for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST && !e->bit; ++b)
+            if (!(taken & (1u << b))) { e->bit = 1u << b; taken |= e->bit; }
+        if (e->bit) continue;
         /* No free type left: the first ported demon standing in for the same stock demon shares it, else the
          * first ported demon (a degrade, never a refusal). */
-        for (q = 0; q < SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1 && with < 0; ++q)
-            if (e->standin && r->entries[q].standin == e->standin) with = q;
+        for (q = 0; q < r->nentries && with < 0; ++q)
+            if (q != i && !r->entries[q].shared && r->entries[q].bit && e->standin &&
+                r->entries[q].standin == e->standin) with = q;
+        for (q = 0; q < r->nentries && with < 0; ++q)
+            if (q != i && !r->entries[q].shared && r->entries[q].bit) with = q;
         if (with < 0) with = 0;
         e->bit = r->entries[with].bit;
         e->shared = 1;
@@ -677,9 +828,10 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, sh_mr_result *
         size_t f;
         for (f = 0; f < sizeof MR_SPAWN_FLAGS / sizeof MR_SPAWN_FLAGS[0] && !like; ++f)
             if (r->entries[i].standin & MR_SPAWN_FLAGS[f].bit) like = MR_SPAWN_FLAGS[f].name;
-        mr_line(r, "conductor: aiType %u -> %s (%s, %s, authored %u%s%s)", r->entries[i].bit, r->entries[i].def,
+        mr_line(r, "conductor: aiType %u -> %s (%s, %s, authored %u%s%s%s)", r->entries[i].bit, r->entries[i].def,
                 src[r->entries[i].source].who, r->entries[i].encounter ? r->entries[i].encounter : "no encounter",
-                r->entries[i].authored, like ? ", stands in for " : "", like ? like : "");
+                r->entries[i].authored, like ? ", stands in for " : "", like ? like : "",
+                r->entries[i].pinned ? ", pinned by the map" : "");
     }
     /* Each source's encounters and scores, rewritten to the bits assigned. */
     for (s = 0; s < n; ++s) {
@@ -729,6 +881,52 @@ static int mr_conductor_serve(sh_dt *t)
     return 1;
 }
 
+/* The flag picker offers each entry's type (one value per bit), labelled with its encounter's strings. */
+static int mr_grow_flags(sh_mr_result *out, const sh_mr_source *src, int k, const sh_mr_target *targets)
+{
+    typedef struct { char name[32], label[256], desc[256]; } mr_flag_text;
+    sh_mr_flag *flags = (sh_mr_flag *)calloc((size_t)out->nentries, sizeof *flags);
+    mr_flag_text *txt = (mr_flag_text *)calloc((size_t)out->nentries, sizeof *txt);
+    int i, nf = 0;
+    if (!flags || !txt) { free(flags); free(txt); return 0; }
+    for (i = 0; i < out->nentries; ++i) {
+        const sh_mr_entry *e = &out->entries[i];
+        const sh_mr_source *s = &src[e->source];
+        int d;
+        if (e->shared || !sh_modregistry_flag_name(e->bit, txt[nf].name, sizeof txt[nf].name)) continue;
+        for (d = 0; e->encounter && d < s->ndecls; ++d)
+            if (!s->decls[d].score && s->decls[d].name && !_stricmp(s->decls[d].name, e->encounter)) {
+                (void)sh_modregistry_decl_string(s->decls[d].text, s->decls[d].len, "displayStringId", txt[nf].label,
+                                                 sizeof txt[nf].label);
+                (void)sh_modregistry_decl_string(s->decls[d].text, s->decls[d].len, "descriptionStringId",
+                                                 txt[nf].desc, sizeof txt[nf].desc);
+                break;
+            }
+        flags[nf].value = txt[nf].name;
+        flags[nf].label = txt[nf].label;
+        flags[nf].description = txt[nf].desc;
+        nf++;
+    }
+    if (nf) {
+        size_t glen = 0;
+        const char *base = out->text[k] ? out->text[k] : targets[k].text;
+        size_t blen = out->text[k] ? out->len[k] : targets[k].len;
+        char *g = base ? sh_modregistry_append_flags(base, blen, flags, nf, &glen) : NULL, *game;
+        if (g) {
+            free(out->text[k]);
+            out->text[k] = g;
+            out->len[k] = glen;
+            game = sh_dt_game_name(targets[k].request);
+            mr_line(out, "%s: the AI Filter's Include AI offers the map's %d ported demon type(s) too",
+                    game ? game : targets[k].request, nf);
+            free(game);
+        }
+    }
+    free(flags);
+    free(txt);
+    return 1;
+}
+
 static int mr_is_grown_list(const char *request)
 {
     int i;
@@ -768,7 +966,7 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
         sh_dt *t;
         if (!targets[k].text || _stricmp(targets[k].request, SH_MB_REGISTRY_CONDUCTOR)) continue;
         t = sh_dt_apply(targets[k].request, targets[k].text, targets[k].len, ds, n, dc, nchoices, NULL);
-        if (t && !mr_conductor(t, src, n, out)) { sh_dt_free(t); goto oom; }
+        if (t && !mr_conductor(t, src, n, choices, nchoices, out)) { sh_dt_free(t); goto oom; }
         sh_dt_free(t);
     }
     /* Then every source's edits speak of the types assigned to the numbers it wrote. */
@@ -828,6 +1026,8 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
                 free(game);
             }
         }
+        if (grown && out->nentries && !_stricmp(targets[k].request, SH_MR_FLAG_PICKER) &&
+            !mr_grow_flags(out, src, k, targets)) goto oom;
         if (!out->text[k]) continue;
         if (!_stricmp(targets[k].request, SH_MB_REGISTRY_BODY)) {
             int srcs = 0;   /* sources whose edits name the body (identical ones merge) */

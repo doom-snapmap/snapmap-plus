@@ -982,6 +982,16 @@ static void map_level(void)
 
 static int g_choice_calls, g_choice_n, g_choice_recompute;
 static char g_choice_last[512];
+/* The ported demons' types the serving layer gives (mm_choices_save pins them): set by a test. */
+static const char *g_pin_salt[4], *g_pin_slot[4];
+static int g_npins;
+int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const char *slot), void *context)
+{
+    int i;
+    for (i = 0; i < g_npins; i++) if (fn) fn(context, g_pin_salt[i], g_pin_slot[i]);
+    return g_npins;
+}
+
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
 {
     int i;
@@ -1094,6 +1104,22 @@ static void choices(void)
     CHECK(saved && strstr(saved, "\"choices\":{\"weapons/weapon/zion/player/sp/pistol\":\"alexpink\"}"));
     CHECK(saved && !strstr(saved, "carolgon"));
     CHECK(g_mods_lines >= 1);
+    /* The save pins each ported demon's type on its mod's row: an earlier pin gives way to the type the listing
+     * has now, and a type of a mod the map has no row of pins nothing. */
+    {
+        char *pinned;
+        size_t plen = 0;
+        CHECK(sh_modmanifest_current_choose("spawnAIType_t/20/mods/bobroom1/single_x", "bobroom1") == 1);
+        g_pin_salt[0] = "bobroom1"; g_pin_slot[0] = "spawnAIType_t/22/mods/bobroom1/single_x";
+        g_pin_salt[1] = "carolgon"; g_pin_slot[1] = "spawnAIType_t/23/mods/carolgon/single_y";
+        g_npins = 2;
+        pinned = engine ? sh_modmanifest_on_save(engine, elen, &plen) : NULL;
+        CHECK(pinned && strstr(pinned, "\"spawnAIType_t/22/mods/bobroom1/single_x\":\"bobroom1\"") &&
+              !strstr(pinned, "spawnAIType_t/20/") && !strstr(pinned, "spawnAIType_t/23/"));
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+        g_npins = 0;
+        CHECK(sh_modmanifest_current_choose("spawnAIType_t/20/mods/bobroom1/single_x", NULL) == 1);
+    }
     if (saved) {
         /* Reloaded: the same choices (minus the dropped one). */
         char *again;

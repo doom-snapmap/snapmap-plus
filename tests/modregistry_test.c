@@ -851,6 +851,92 @@ static void test_contract(void)
     free(eb);
 }
 
+/* ------------------------------------------------------------------ pinned types and the flag picker (R-SM3) */
+
+static const char STOCK_FLAGS[] =
+    "{\n\tedit = {\n\t\tenumType = \"spawnAIType_t\";\n\t\tvalues = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n"
+    "\t\t\t\tenumValue = \"SPAWN_AI_TYPE_IMP\";\n\t\t\t\tlabel = \"#str_snapentity_demon_imp\";\n\t\t\t}\n\t\t}\n\t}\n}\n";
+
+static void test_pins_and_flags(void)
+{
+    static const char ENC_A[] = "{ edit = { memberList = { num = 1; item[0] = { memberType = \"2097152\"; } } "
+                                "displayStringId = \"#str_aaaaaaaa_port_name\"; descriptionStringId = \"#str_aaaaaaaa_port_desc\"; } }";
+    static const char ENC_B[] = "{ edit = { memberList = { num = 1; item[0] = { memberType = \"2097152\"; } } "
+                                "displayStringId = \"#str_bbbbbbbb_port_name\"; } }";
+    sh_mr_target tg[2] = { { REQ_CONDUCTOR, STOCK_CONDUCTOR, sizeof STOCK_CONDUCTOR - 1 },
+                           { SH_MR_FLAG_PICKER, STOCK_FLAGS, sizeof STOCK_FLAGS - 1 } };
+    sh_mr_decl da[1] = { { "mods/aaaaaaaa/single_a", ENC_A, sizeof ENC_A - 1, 0, 1 } };
+    sh_mr_decl db[1] = { { "mods/bbbbbbbb/single_b", ENC_B, sizeof ENC_B - 1, 0, 2 } };
+    const char *grown[1] = { "mods/aaaaaaaa/single_a" };
+    sh_mr_choice pin_b = { "spawnAIType_t/25/mods/bbbbbbbb/single_b", "bbbbbbbb" };
+    sh_mr_choice both[2] = { { "spawnAIType_t/25/mods/aaaaaaaa/single_a", "aaaaaaaa" },
+                             { "spawnAIType_t/25/mods/bbbbbbbb/single_b", "bbbbbbbb" } };
+    sh_mr_choice other_salt = { "spawnAIType_t/25/mods/bbbbbbbb/single_b", "cccccccc" };
+    sh_mr_source src[2];
+    sh_mr_result r;
+    char buf[64];
+    char *ea = port_edits(2097152u, "SPAWN_AI_TYPE_BARON", "mods/aaaaaaaa/ai/demon/a");
+    char *eb = port_edits(2097152u, "SPAWN_AI_TYPE_IMP", "mods/bbbbbbbb/ai/demon/b");
+    printf("-- pinned types and the AI Filter's flag picker\n");
+    CHECK(sh_modregistry_flag_name(1u << 19, buf, sizeof buf) && !strcmp(buf, "SPAWN_AI_TYPE_MOD_19"));
+    CHECK(sh_modregistry_flag_name(1u << 29, buf, sizeof buf) && !strcmp(buf, "SPAWN_AI_TYPE_MOD_29"));
+    CHECK(!sh_modregistry_flag_name(1u << 18, buf, sizeof buf) && !sh_modregistry_flag_name(3u << 19, buf, sizeof buf));
+    CHECK(sh_modregistry_decl_string(ENC_A, sizeof ENC_A - 1, "displayStringId", buf, sizeof buf) &&
+          !strcmp(buf, "#str_aaaaaaaa_port_name") &&
+          !sh_modregistry_decl_string(ENC_B, sizeof ENC_B - 1, "descriptionStringId", buf, sizeof buf) && !buf[0]);
+    CHECK(sh_modregistry_slot_valid(pin_b.slot));
+    /* the pickers grow with what a mod's Toybox placeable spawns, never with its wave encounters */
+    {
+        static const char PL[] = "{ class = \"idPlaceableSnapAIEncounter\"; editorVars { placeable = false; } "
+                                 "edit = { encounterToSpawn = \"mods/aaaaaaaa/single_a\"; } }";
+        static const char NOT[] = "{ class = \"idAI2\"; edit = { encounterToSpawn = \"x\"; } }";
+        CHECK(sh_modregistry_placeable_encounter(PL, sizeof PL - 1, buf, sizeof buf) && !strcmp(buf, "mods/aaaaaaaa/single_a"));
+        CHECK(!sh_modregistry_placeable_encounter(NOT, sizeof NOT - 1, buf, sizeof buf) && !buf[0]);
+        CHECK(!sh_modregistry_placeable_encounter(ENC_A, sizeof ENC_A - 1, buf, sizeof buf));
+    }
+    CHECK(ea && eb);
+    if (!ea || !eb) { free(ea); free(eb); return; }
+    memset(src, 0, sizeof src);
+    src[0].key = "aaaaaaaa"; src[0].who = "A"; src[0].edits = ea; src[0].edits_len = strlen(ea);
+    src[0].decls = da; src[0].ndecls = 1;
+    src[1].key = "bbbbbbbb"; src[1].who = "B"; src[1].edits = eb; src[1].edits_len = strlen(eb);
+    src[1].decls = db; src[1].ndecls = 1;
+    /* without a pin: the lowest free types in row order */
+    CHECK(sh_modregistry_generate(src, 2, tg, 2, NULL, 0, NULL, 0, &r));
+    CHECK(r.nentries == 2 && r.entries[0].bit == (1u << 19) && r.entries[1].bit == (1u << 20) && !r.entries[1].pinned);
+    /* in Play (no grown lists) the flag picker is the game's */
+    CHECK(!r.text[1]);
+    sh_modregistry_result_free(&r);
+    /* the map's pin keeps B's type though A comes first; A takes the lowest free one */
+    CHECK(sh_modregistry_generate(src, 2, tg, 2, &pin_b, 1, NULL, 0, &r));
+    CHECK(r.nentries == 2 && r.entries[1].bit == (1u << 25) && r.entries[1].pinned && r.entries[0].bit == (1u << 19) &&
+          !r.entries[0].pinned && r.text[0] && strstr(r.text[0], "aiType = \"33554432\";"));
+    sh_modregistry_result_free(&r);
+    /* two pins on one bit: the first in row order keeps it, the other takes the lowest free type */
+    CHECK(sh_modregistry_generate(src, 2, tg, 2, both, 2, NULL, 0, &r));
+    CHECK(r.nentries == 2 && r.entries[0].bit == (1u << 25) && r.entries[0].pinned && r.entries[1].bit == (1u << 19) &&
+          !r.entries[1].pinned);
+    sh_modregistry_result_free(&r);
+    /* a pin names its mod by salt: another mod's pin is not this one's */
+    CHECK(sh_modregistry_generate(src, 2, tg, 2, &other_salt, 1, NULL, 0, &r));
+    CHECK(r.nentries == 2 && !r.entries[0].pinned && !r.entries[1].pinned && r.entries[1].bit == (1u << 20));
+    sh_modregistry_result_free(&r);
+    /* in the editor the flag picker offers each port's type by its member, labelled with its encounter's strings */
+    CHECK(sh_modregistry_generate(src, 2, tg, 2, &pin_b, 1, grown, 1, &r));
+    CHECK(r.text[1] && strstr(r.text[1], "num = 3;") && strstr(r.text[1], "enumValue = \"SPAWN_AI_TYPE_IMP\";") &&
+          strstr(r.text[1], "\t\t\titem[1] = {\n\t\t\t\tenumValue = \"SPAWN_AI_TYPE_MOD_19\";\n"
+                            "\t\t\t\tlabel = \"#str_aaaaaaaa_port_name\";\n"
+                            "\t\t\t\tdescription = \"#str_aaaaaaaa_port_desc\";\n\t\t\t}\n") &&
+          strstr(r.text[1], "enumValue = \"SPAWN_AI_TYPE_MOD_25\";\n\t\t\t\tlabel = \"#str_bbbbbbbb_port_name\";\n\t\t\t}\n"));
+    sh_modregistry_result_free(&r);
+    /* vanilla: no declared mod gives no type, so the picker is the game's even in the editor */
+    CHECK(sh_modregistry_generate(NULL, 0, tg, 2, NULL, 0, grown, 1, &r));
+    CHECK(!r.text[0] && !r.text[1] && !r.nentries);
+    sh_modregistry_result_free(&r);
+    free(ea);
+    free(eb);
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
@@ -862,6 +948,7 @@ int main(int argc, char **argv)
     mkdirs(g_top);
     test_text();
     test_contract();
+    test_pins_and_flags();
     test_body_clip_count();
     test_generation();
     test_map_add_remove();

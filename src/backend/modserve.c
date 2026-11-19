@@ -3101,6 +3101,8 @@ typedef struct ms_reg_memo {
     int nlines, nsources;
     int *gate;                            /* per registry file: the source bundle whose requirement gates gate its text, or -1 */
     unsigned standin[32];                 /* per spawn-type bit assigned to a ported demon: the stock bits it stands in for */
+    int npins;                            /* the types it gave, to pin on a save (sh_modserve_spawn_pins) */
+    const char **pin_salt, **pin_slot;
     struct ms_reg_memo *next;
 } ms_reg_memo;
 
@@ -3199,10 +3201,13 @@ static void ms_mark_edits(ms_index *x)
 }
 
 /* The single-demon encounters of the installed mods (their root folders'
- * builds): each snapAiEncounter a mod carries under its own salt with one
- * member. The editor's encounter pickers offer them (SH_MR_GROWN_LISTS, the
- * owner's rule: an installed mod grows SnapMap's lists, and a grown list never
- * declares a mod; a map is modded only when it references the mod's entity). */
+ * builds): each snapAiEncounter a mod's own Toybox placeable spawns (an
+ * idPlaceableSnapAIEncounter entityDef's encounterToSpawn), never the
+ * encounters a mod adds to the lists SnapMap chooses from (a port's wave
+ * encounters). The editor's encounter pickers offer them (SH_MR_GROWN_LISTS,
+ * the owner's rule: an installed mod grows SnapMap's lists, and a grown list
+ * never declares a mod; a map is modded only when it references the mod's
+ * entity). */
 static char *ms_reg_text(const ms_file *f, size_t *len);
 
 static int ms_registry_grown(ms_index *x)
@@ -3216,16 +3221,25 @@ static int ms_registry_grown(ms_index *x)
         if (!b->admitted || b->place) continue;
         for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
             const ms_file *f = &x->files[k];
-            size_t len = 0, at;
-            char *t;
-            int members = 0;
-            if (!f->served || f->edit || f->is_shadow || !ms_is_type(f->ptype, "snapAiEncounter") || !f->pname) continue;
+            size_t len = 0;
+            char *t, spawn[512];
+            int q;
+            if (!f->served || f->edit || f->is_shadow || !ms_is_type(f->ptype, "entityDef") || !f->pname) continue;
             if (!(t = ms_reg_text(f, &len))) continue;
-            for (at = 0; at + 10 <= len; ++at) if (!_strnicmp(t + at, "memberType", 10)) members++;
+            q = sh_modregistry_placeable_encounter(t, len, spawn, sizeof spawn);
             HeapFree(GetProcessHeap(), 0, t);
-            if (members != 1) continue;
-            if (!ms_grow((void **)&names, &cap, n + 1, sizeof(char *))) { free(names); return 0; }
-            names[n++] = f->pname;
+            if (!q) continue;
+            for (q = b->first_file; q < b->first_file + b->file_count; ++q) {
+                const ms_file *e = &x->files[q];
+                int d, held = 0;
+                if (!e->served || e->edit || e->is_shadow || !ms_is_type(e->ptype, "snapAiEncounter") || !e->pname ||
+                    _stricmp(e->pname, spawn)) continue;
+                for (d = 0; d < n && !held; ++d) held = !_stricmp(names[d], e->pname);
+                if (held) break;
+                if (!ms_grow((void **)&names, &cap, n + 1, sizeof(char *))) { free(names); return 0; }
+                names[n++] = e->pname;
+                break;
+            }
         }
     }
     if (n) {
@@ -3252,6 +3266,7 @@ static int ms_registry_files(ms_index *x)
             (void)sh_dt_edits_files(x->bundles[i].edits, x->bundles[i].edits_len, ms_req_list_add, &l);
     if (!ms_registry_grown(x)) goto oom;
     for (i = 0; x->ngrown && i < SH_MR_GROWN_LIST_COUNT; ++i) ms_req_list_add(&l, SH_MR_GROWN_LISTS[i], NULL);
+    if (x->ngrown) ms_req_list_add(&l, SH_MR_FLAG_PICKER, NULL);
     if (l.oom) goto oom;
     if (l.n > 1) qsort(l.reqs, (size_t)l.n, sizeof *l.reqs, ms_req_cmp);
     /* The pseudo-bundle one past the count. */
@@ -3501,6 +3516,23 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
         int b;
         for (b = 19; b < 32; ++b) if (bit == (1u << b) && !m->standin[b]) m->standin[b] = r.entries[i].standin;
     }
+    if (r.nentries) {
+        m->pin_salt = (const char **)ms_alloc(x, sizeof(char *) * (size_t)r.nentries);
+        m->pin_slot = (const char **)ms_alloc(x, sizeof(char *) * (size_t)r.nentries);
+        for (i = 0; m->pin_salt && m->pin_slot && i < r.nentries; ++i) {
+            const sh_mr_entry *e = &r.entries[i];
+            char slot[600];
+            int b;
+            if (e->shared || !e->encounter || !src[e->source].key) continue;
+            for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST && e->bit != (1u << b); ++b) {}
+            if (b > SH_MR_BIT_LAST) continue;
+            _snprintf_s(slot, sizeof slot, _TRUNCATE, "%s%d/%s", SH_MR_PIN, b, e->encounter);
+            if (!sh_modregistry_slot_valid(slot)) continue;
+            m->pin_salt[m->npins] = ms_strdup(x, src[e->source].key);
+            m->pin_slot[m->npins] = ms_strdup(x, slot);
+            if (m->pin_salt[m->npins] && m->pin_slot[m->npins]) m->npins++;
+        }
+    }
     m->body = (ms_body **)ms_alloc(x, sizeof(ms_body *) * (size_t)(x->reg_count ? x->reg_count : 1));
     m->gate = (int *)ms_alloc(x, sizeof(int) * (size_t)(x->reg_count ? x->reg_count : 1));
     if (!m->body || !m->gate) { m = NULL; goto done; }
@@ -3564,6 +3596,50 @@ static int ms_reg_same(const ms_index *x, const ms_reg_memo *a, const ms_reg_mem
     return 1;
 }
 
+/* The game's spawnAIType_t gains a member per free bit (sh_modregistry_flag_name), once: the AI Filter's flag
+ * picker offers, reads and writes a type only by the name of a member (modregistry.h), and a map's saved mask names
+ * a ported demon's type by it. The type system's call is bound at install (dllmain.c); retried until it answers. */
+static sh_modserve_enum_extend_fn g_enum_extend;
+
+void sh_modserve_set_enum_extend(sh_modserve_enum_extend_fn fn) { g_enum_extend = fn; }
+
+static void ms_spawn_type_members(void)
+{
+    static volatile LONG done;
+    static char names[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1][32];
+    const char *list[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1];
+    long long values[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1];
+    int b, n = 0, r;
+    if (!g_enum_extend || InterlockedCompareExchange(&done, 0, 0)) return;
+    for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST; ++b) {
+        if (!sh_modregistry_flag_name(1u << b, names[n], sizeof names[n])) continue;
+        list[n] = names[n];
+        values[n++] = (long long)(1u << b);
+    }
+    r = g_enum_extend("spawnAIType_t", list, values, n);
+    if (r < 0) return;                     /* the type system is not up yet */
+    InterlockedExchange(&done, 1);
+    if (r > 0) ms_log("registry: spawnAIType_t holds %d member(s) for ported demons' types (SPAWN_AI_TYPE_MOD_%d .. %d)",
+                      r, SH_MR_BIT_FIRST, SH_MR_BIT_LAST);
+    else ms_log("registry: spawnAIType_t takes no member for ported demons' types (it holds them already, or its record is not writable)");
+}
+
+int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const char *slot), void *context)
+{
+    ms_index *x;
+    const ms_reg_memo *m;
+    int i, n = 0;
+    AcquireSRWLockShared(&g_build_lock);
+    x = g_index;
+    m = x ? x->reg_cur : NULL;
+    for (i = 0; m && i < m->npins; ++i) {
+        if (fn) fn(context, m->pin_salt[i], m->pin_slot[i]);
+        n++;
+    }
+    ReleaseSRWLockShared(&g_build_lock);
+    return n;
+}
+
 /* The registries of the current listing (caller holds the scope and build
  * locks): the bundles that serve and edit a game file, in row order
  * (editor-time bundles after the rows, by key), memoized. With map scope off
@@ -3582,6 +3658,7 @@ static int ms_registry_compute(ms_index *x, int on)
         for (i = 0; i < 32; ++i) InterlockedExchange(&g_spawn_standin[i], 0);
         return 0;
     }
+    if (on) ms_spawn_type_members();
     if (on) {
         set = (ms_bundle **)malloc(sizeof(ms_bundle *) * (size_t)(x->nbundles ? x->nbundles : 1));
         if (!set) return 0;
