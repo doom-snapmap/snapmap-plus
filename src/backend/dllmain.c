@@ -45,6 +45,7 @@
 #include "sdk.h"
 #include "sdk_runtime.h"
 #include "modpublished.h"
+#include "modlobby.h"
 #include "modpublish.h"
 #include "budget_table.h"
 #include "map_render.h"
@@ -390,6 +391,10 @@ static void install_features(const sig_result *results, size_t db)
     need(sh_modpublished_install(results, db, g_doom_base), "published maps cannot be checked for their mods",
          SH_FEATURE_PUBLISHING, NULL, NULL);
     need(sh_modpublish_install(results, db, g_doom_base), "publishing cannot carry mods",
+         SH_FEATURE_PUBLISHING, NULL, NULL);
+    /* Co-op lobbies for modded maps: the host's start waits for every player's map content, a joiner downloads in
+     * the lobby (modlobby.h); needs the published-map gates above. */
+    need(sh_modlobby_install(results, db, g_doom_base), "a co-op lobby cannot wait for its players' map content",
          SH_FEATURE_PUBLISHING, NULL, NULL);
 
     /* Bind dependencies for the already-registered entity commands. */

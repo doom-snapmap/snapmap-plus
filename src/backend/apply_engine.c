@@ -13,6 +13,7 @@
 #include "../common/text.h"
 #include "apply_engine.h"
 #include "modpublished.h"
+#include "modlobby.h"
 #include "modpublish.h"
 #include "modui.h"
 #include "typeinfo.h"
@@ -3133,6 +3134,7 @@ void sh_apply_prefab_poll_play(void)
     /* Held published or My Maps launches: the question, its answer, the fetch
      * and the resume. Runs in menus too, where the editor frame does not. */
     sh_modpublished_poll();
+    sh_modlobby_poll();     /* a modded map's lobby: the host's line of who is still getting its content */
     sh_modpublish_poll();   /* held publishes, their uploads and claims */
     sh_rawmap_poll_main();  /* a rawmap save's "share the .zip" toast and console line */
     /* Mods: an uninstalled mod the open map needs again (Ctrl+Z, a load, a

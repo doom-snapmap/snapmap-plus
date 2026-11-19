@@ -171,6 +171,7 @@ char *sh_cache_standin_row_text(const char *def_source, const char *cls, int ent
 
 typedef struct sh_cache_sweep_stats {
     size_t maps, units_kept, units_removed, blobs_removed, served_removed;
+    size_t partials_removed;     /* partial downloads of content no kept map names, untouched for an hour */
     size_t unreadable;           /* kept maps or map folders that did not read: the sweep then removed nothing */
     unsigned long long bytes_kept, bytes_removed;
 } sh_cache_sweep_stats;
@@ -182,7 +183,9 @@ void  sh_cache_set_map_folders(const char *saved, const char *published);
 /* References: every unit a kept map names (the local saves of My Maps, the only copy of a map saved offline; the cloud
  * copies; the published-map texts unless `drop_played`, which is "Remove content of maps you only played"), the open
  * map's rows, and `held` (uploads in progress). Removes manifests no reference names, then blobs no remaining manifest
- * names, then compositions no kept map's row uses. A kept map whose text is there and does not read, or a folder of
+ * names, then compositions no kept map's row uses, then partial downloads (partial\, a download cut short resumes
+ * from them) whose unit or file no reference names and that nothing wrote for an hour. A kept map whose text is there
+ * and does not read, or a folder of
  * them that cannot be listed, may use anything here, so the sweep then removes nothing (I5: content a kept map uses
  * is never removed). Never touches a local mod's files, never runs on a timer. 1 done. */
 int   sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out);
