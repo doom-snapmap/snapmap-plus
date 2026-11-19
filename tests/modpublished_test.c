@@ -1504,6 +1504,24 @@ static void a_held_load_says_its_notice_once(void)
     parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
     tick(2);
     CHECK(g_content.said == 1);
+
+    printf("-- a rawmap whose hold could not get its content does not ask the store again when it reopens\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.absent_after_fetch = 1;
+    CHECK(sh_modpub_rawmap_missing(PINNED_MAP, strlen(PINNED_MAP), &rows, NULL) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick_until_idle();
+    CHECK(F.resumes == 1 && F.fetch_calls == 1);
+    g_content.pending = 1;                         /* the reopen still stands in: the store could not supply it */
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(2);
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && g_content.said == 1);   /* R-LV6: it fetched twice and said its notice after the second */
+    CHECK(said_notice("This map is playing without the Tyrant", 38));
 }
 
 /* R-LV4: a map opened from My Maps whose Tyrant could not be had never asked the store again. An editor open that

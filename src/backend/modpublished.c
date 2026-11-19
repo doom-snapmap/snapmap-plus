@@ -151,6 +151,9 @@ static unsigned long g_frame;
  * takes it drops them; a later frame's poll logs them, since no gate did. */
 static int g_notes_held;
 static unsigned long g_notes_frame;
+/* A rawmap hold asked the store for its map's content and resumed: the reopen's editor parse has been asked for
+ * already, so it does not ask again (R-LV6: one load sent two fetches to an unreachable store); its notice is said. */
+static int g_reopen_asked;
 
 static void pub_notes_gated(void)
 {
@@ -1575,6 +1578,7 @@ static void pub_resume(size_t installed)
     {
         /* A rawmap opens again on a later editor frame, whose load says its notice (sh_modpublished_poll). */
         char *said = h->hook != SH_MODPUB_RAWMAP_LOAD ? pub_content_said() : NULL;
+        if (h->hook == SH_MODPUB_RAWMAP_LOAD) g_reopen_asked = 1;
         pub_hold_free();
         if (said) pub_notice(said);
         free(said);
@@ -1956,7 +1960,7 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
-        } else if (pub_editor_fetch()) {
+        } else if (!g_reopen_asked && pub_editor_fetch()) {
             /* The open's notice is the store's answer (pub_editor_fetched). */
         } else if (g_ops.content_notice) {
             /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
@@ -1965,6 +1969,7 @@ void sh_modpublished_poll(void)
             free(said);
         }
         free(refusal);
+        g_reopen_asked = 0;
     }
     if (h->state == HOLD_IDLE && !g_notice && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
@@ -2088,6 +2093,7 @@ void sh_modpub_test_reset(void)
     pub_notice_clear(); g_notice_ticket = 0; g_notice_waited = 0;
     free(g_launch_place); g_launch_place = NULL; g_launch_set = 0;
     InterlockedExchange(&g_resuming, 0);
+    g_reopen_asked = 0;
 }
 int sh_modpub_test_state(void) { return g_hold.state; }
 const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
