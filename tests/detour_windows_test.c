@@ -22,6 +22,7 @@
 #include "clip_events.h"
 #include "attach_tags.h"
 #include "sync_clock.h"
+#include "level_templates.h"
 #include "../src/fault_shield/engine_layout.h"
 
 /* RVA_FRAME is an SH_RVA pair; evaluate it for the image under test rather
@@ -37,7 +38,8 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
                  SITE_PARTICLE /* a private signature of particlemotion_sigs.c */,
                  SITE_CACHE /* a private signature of cachewrites_sigs.c */,
                  SITE_ATTACH /* a private signature of attach_tags_sigs.c */,
-                 SITE_SYNC /* a private signature of sync_clock_sigs.c */ };
+                 SITE_SYNC /* a private signature of sync_clock_sigs.c */,
+                 SITE_LEVEL /* the call in a private signature of level_templates_sigs.c */ };
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
@@ -134,6 +136,7 @@ static const site SITES[] = {
     { "clip_events.c",        "Md6EventsOfType",            SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "clip_events.c",        "Md6EventsOfType2",           SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "attach_tags.c",        "TagInfoLookup",              SITE_ATTACH, 0, 15, REPLAYS, 0 },
+    { "level_templates.c",    "SnapshotTemplateWalk",       SITE_LEVEL, SH_LT_WALK_CALL, SH_LT_STOLEN, REPLAYS, 0 },
     { "sync_clock.c",         "AnimReanchor",               SITE_SYNC, 0, 15, RELOCATES_AT, 3 },
     { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleContext",            SITE_PARTICLE, 0, 15, REPLAYS, 0 },
@@ -380,7 +383,18 @@ static void check_image(const char *path)
             }
             code = (const uint8_t *)own.addr + s->offset;
         }
-        if (s->kind == SITE_CALL_IN_SIG) {
+        if (s->kind == SITE_LEVEL) {
+            sig_result own;
+            size_t k;
+            for (k = 0; SH_LEVEL_TEMPLATES_SIGNATURES[k].name && strcmp(SH_LEVEL_TEMPLATES_SIGNATURES[k].name, s->name); k++) {}
+            if (!SH_LEVEL_TEMPLATES_SIGNATURES[k].name ||
+                sig_resolve_one(base, &SH_LEVEL_TEMPLATES_SIGNATURES[k], &own) != SIG_OK || !own.addr) {
+                report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
+                continue;
+            }
+            code = (const uint8_t *)own.addr + s->offset;
+        }
+        if (s->kind == SITE_CALL_IN_SIG || s->kind == SITE_LEVEL) {
             int32_t rel;
             if (code[0] != 0xE8) {
                 report(label, s->owner, s->name, 0, s->stolen, 0, "", "no call at the recorded offset", 0);
@@ -442,7 +456,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
-    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 },
+    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 },
     { "backend\\particlemotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 
