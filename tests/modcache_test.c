@@ -803,6 +803,18 @@ static void test_cache(const char *top)
             CHECK(t && strstr(t, "for 2 maps."));
             if (t) printf("  %s\n", t);
             free(t);
+            /* R-LV6: a map saved by an earlier Snapmap+ (a row with "id", "version" and "bundle", before units existed)
+             * names no unit: it reads, and does not keep the sweep from removing anything. */
+            {
+                const char *old = "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"bare-hands\","
+                                  "\"version\":\"1.2.0\",\"bundle\":\"f34fd3eba67a6817553afe4bbde142f87c58716dfdf67de5a5ca230f9fb47fb7\","
+                                  "\"size\":3824}]}}";
+                FILE *f = NULL;
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\eeee_ffff_map.decl", saved);
+                if (!fopen_s(&f, path, "wb") && f) { fwrite(old, 1, strlen(old), f); fclose(f); }
+                CHECK(sh_cache_sweep(1, NULL, 0, &st));
+                CHECK(st.unreadable == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+            }
             write_slot(saves, "FEDCBA98765432100123", "", NULL, 64);
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\aaaa_bbbb_map.decl", saved);
             CHECK(DeleteFileA(path));   /* the crate is now no map's ... */

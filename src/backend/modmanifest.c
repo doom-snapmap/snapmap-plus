@@ -484,6 +484,21 @@ static size_t mm_choice_count(const char *lines)
 /* row value                                                             */
 /* ==================================================================== */
 
+/* A row object of an earlier Snapmap+ shape: an "id" or "bundle" member (before units existed; it names no unit). */
+static int mm_earlier_shape(const sh_json_object *object)
+{
+    return sh_json_object_get(object, "id") || sh_json_object_get(object, "bundle");
+}
+
+/* The same test on a row's text, for the reader's count of earlier rows. */
+static int mm_earlier_row(const char *json, size_t length)
+{
+    sh_json_object object = {0};
+    int earlier = sh_native_json_parse_object(json, length, 8, &object) && mm_earlier_shape(&object);
+    sh_json_object_free(&object);
+    return earlier;
+}
+
 int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_row *out,
                                char *err, size_t err_cap)
 {
@@ -498,7 +513,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         MM_ERR("row value is not a JSON object");
         return 0;
     }
-    if (sh_json_object_get(&object, "id") || sh_json_object_get(&object, "bundle")) {
+    if (mm_earlier_shape(&object)) {
         MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
         goto done;
     }
@@ -745,7 +760,11 @@ static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_li
     while (sh_carrier_array_next(&cursor, to, &elem, &elem_len) == 1) {
         sh_modmanifest_row row;
         if (*elem == '{' && mm_product_entry(elem, elem_len, &out->uses)) continue;
-        if (*elem != '{' || !sh_modmanifest_parse_value(elem, elem_len, &row, NULL, 0)) { (*bad)++; continue; }
+        if (*elem != '{' || !sh_modmanifest_parse_value(elem, elem_len, &row, NULL, 0)) {
+            (*bad)++;
+            if (*elem == '{' && mm_earlier_row(elem, elem_len)) out->earlier++;
+            continue;
+        }
         if (!mm_merge_row(out, &row)) (*bad)++;
         read++;
     }

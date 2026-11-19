@@ -80,6 +80,9 @@ typedef struct sh_modmanifest_list {
      * writes it and the `mods` search tag (PLATFORM, Vanilla stays vanilla: a resized module and a custom navmesh
      * are mods), and drops both when the map no longer uses them. */
     unsigned uses;
+    /* Rows of an earlier Snapmap+ shape ("id" or "bundle" members, before units existed): refused and counted in the
+     * reader's `rejected` as well, but known to name no unit, so a map that has only these uses no map content. */
+    unsigned earlier;
 } sh_modmanifest_list;
 
 #define SH_MODMANIFEST_PRODUCT              "snapmap-plus"

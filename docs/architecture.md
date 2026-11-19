@@ -5303,7 +5303,8 @@ removes the rest, then the files no remaining manifest names, then the
 compositions no kept map uses. A kept map whose text is there and does not
 read (a slot that does not decode, a row that does not parse, a folder that
 cannot be listed) may use anything, so that sweep removes nothing and says
-why. It never touches a local mod's files and never runs on a timer. The Mods tab's
+why. A row of an earlier Snapmap+ shape (`id`, `bundle`) is refused but names no
+unit, so it does not count (`sh_modmanifest_list.earlier`). It never touches a local mod's files and never runs on a timer. The Mods tab's
 "Map content on disk" (the `content` action) reports it from this computer
 alone.
 
