@@ -3251,10 +3251,13 @@ damage comes from the world entity, as a trigger's does.
   speed, the test of DOOM Eternal's incoming-projectile query);
   `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
   name that is not a tag, since the engine aims only at tags; `projectile:steer(target, [speed])`
-  (`setLinearVelocity`, at the projectile's speed unless one is given) and
-  `projectile:explode()` (the projectile's own Explode, vtable `+0xAA0`), both only for
+  (`setLinearVelocity`, at the projectile's speed unless one is given),
+  `projectile:gravity(units per second squared)` (the engine's `setGravity` event with
+  the vector straight down: the projectile falls at its source game's rate whatever the
+  map's gravity, so an arc a script solved under that gravity holds) and
+  `projectile:explode()` (the projectile's own Explode, vtable `+0xAA0`), all only for
   a projectile one of the mod's entities launched. A script may hold `p` for
-  as long as it likes: once the projectile is gone `p:steer`, `p:explode` and
+  as long as it likes: once the projectile is gone `p:steer`, `p:gravity`, `p:explode` and
   `p:pos` answer nil and `p:alive` false, as every call on a removed entity
   does, and the mod runs on. `ai:fire` parks the demon first
   (`sh_script_ai_park`), as a move does.

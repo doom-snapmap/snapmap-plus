@@ -1020,6 +1020,25 @@ static int l_steer(lua_State *L)
     return bool1(L, steer_to(p, point, speed));
 }
 
+/* p:gravity(units per second squared): the projectile falls at that rate from
+ * now on, whatever the map's gravity, so a script that solved its arc under
+ * its source game's gravity throws it there. The engine's setGravity event
+ * (one vector argument; the entity's physics takes it, 13954591 event 245)
+ * with the vector straight down; 0 lets it fly unpulled. */
+static int l_p_gravity(lua_State *L)
+{
+    double g = sh_script_api_check_number(L, 2, "gravity", "the gravity in units per second squared");
+    float down[3];
+    sh_script_earg a;
+    void *p;
+    if (!(g >= 0)) sh_script_refuse(L, "\"gravity\" needs a gravity of 0 or more, got %g", g);
+    p = own_projectile(L, 1, "gravity");
+    if (!p) return nil1(L);
+    down[0] = 0; down[1] = 0; down[2] = (float)-g;
+    a = sh_script_earg_vec(down);
+    return bool1(L, sh_script_api_event(p, "setGravity", &a, 1, NULL));
+}
+
 /* p:explode() */
 static int l_p_explode(lua_State *L)
 {
@@ -1278,6 +1297,7 @@ void sh_script_combat_register(void)
         { SH_SCRIPT_API_METHOD, "launch", l_launch },
         { SH_SCRIPT_API_METHOD, "incoming_projectiles", l_incoming },
         { SH_SCRIPT_API_METHOD, "steer", l_steer },
+        { SH_SCRIPT_API_METHOD, "gravity", l_p_gravity },
         { SH_SCRIPT_API_METHOD, "explode", l_p_explode },
     };
     int i;
