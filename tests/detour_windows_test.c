@@ -21,6 +21,7 @@
 #include "cachewrites.h"
 #include "clip_events.h"
 #include "attach_tags.h"
+#include "sync_clock.h"
 #include "../src/fault_shield/engine_layout.h"
 
 /* RVA_FRAME is an SH_RVA pair; evaluate it for the image under test rather
@@ -35,11 +36,12 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
                  SITE_CLIP /* an event lookup of clip_events_sigs.c, resolved with its query check */,
                  SITE_PARTICLE /* a private signature of particlemotion_sigs.c */,
                  SITE_CACHE /* a private signature of cachewrites_sigs.c */,
-                 SITE_ATTACH /* a private signature of attach_tags_sigs.c */ };
+                 SITE_ATTACH /* a private signature of attach_tags_sigs.c */,
+                 SITE_SYNC /* a private signature of sync_clock_sigs.c */ };
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
-    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load or E8 at reloc is rewritten by the hook */
+    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load, E8 or near Jcc at reloc is rewritten by the hook */
     STUB_PADDING      /* a never-replayed stub: its ret at reloc is followed by int3 padding */
 };
 
@@ -132,6 +134,7 @@ static const site SITES[] = {
     { "clip_events.c",        "Md6EventsOfType",            SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "clip_events.c",        "Md6EventsOfType2",           SITE_CLIP, 0, 16, REPLAYS, 0 },
     { "attach_tags.c",        "TagInfoLookup",              SITE_ATTACH, 0, 15, REPLAYS, 0 },
+    { "sync_clock.c",         "AnimReanchor",               SITE_SYNC, 0, 15, RELOCATES_AT, 3 },
     { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleContext",            SITE_PARTICLE, 0, 15, REPLAYS, 0 },
     { "cachewrites.c",        "AtomicWrite",                SITE_CACHE, 0, 21, REPLAYS, 0 },
@@ -367,6 +370,16 @@ static void check_image(const char *path)
             }
             code = (const uint8_t *)own.addr + s->offset;
         }
+        if (s->kind == SITE_SYNC) {
+            sig_result own;
+            if (strcmp(SH_SYNC_CLOCK_SIGNATURES[0].name, s->name) || s->stolen != SH_SC_STOLEN ||
+                s->reloc != SH_SC_JCC_OFFSET ||
+                sig_resolve_one(base, &SH_SYNC_CLOCK_SIGNATURES[0], &own) != SIG_OK || !own.addr) {
+                report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
+                continue;
+            }
+            code = (const uint8_t *)own.addr + s->offset;
+        }
         if (s->kind == SITE_CALL_IN_SIG) {
             int32_t rel;
             if (code[0] != 0xE8) {
@@ -415,7 +428,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\algo.c", 1 }, { "backend\\apply_engine.c", 1 }, { "backend\\commands.c", 2 },
     { "backend\\editor_frame.c", 2 }, { "backend\\engine_dialog.c", 1 },
     { "backend\\grid_room_editor.c", 5 }, { "backend\\grid_room_native.c", 4 },
-    { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 4 },
+    { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 5 },
     { "backend\\nav_menu.c", 4 },
     { "backend\\nav_play.c", 2 }, { "backend\\nav_preview.c", 2 },
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
@@ -429,14 +442,15 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
-    { "backend\\attach_tags.c", 1 },
+    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 },
     { "backend\\particlemotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 
 static int count_calls(const char *text)
 {
     static const char *const tokens[] = { "hook_prepare(", "hook_prepare_rip_lea(", "hook_prepare_rip_load(",
-                                          "hook_prepare_relative_call(", "sh_prepare_detour_sig(" };
+                                          "hook_prepare_relative_call(", "hook_prepare_relative_jcc(",
+                                          "sh_prepare_detour_sig(" };
     int n = 0;
     for (size_t t = 0; t < sizeof tokens / sizeof tokens[0]; t++)
         for (const char *p = strstr(text, tokens[t]); p; p = strstr(p + 1, tokens[t])) n++;

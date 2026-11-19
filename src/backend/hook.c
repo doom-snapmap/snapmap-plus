@@ -1,6 +1,6 @@
 /* Reversible 14-byte absolute detours. Callers choose instruction boundaries.
  * Explicit preparation variants relocate one verified RIP-relative LEA, one
- * RIP-relative 64-bit load or one relative call. */
+ * RIP-relative 64-bit load, one relative call or one conditional jump. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -39,7 +39,7 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
 {
     uint8_t original[48];
     size_t emitted = stolen;
-    uintptr_t call_target = 0;
+    uintptr_t rel_target = 0;   /* the absolute target of a relocated call or conditional jump */
     if (!target || !detour || stolen < 14 || stolen > 48) {
         g_last_failure = "bad argument or stolen length outside 14..48";
         return NULL;
@@ -68,9 +68,17 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
         int32_t displacement;
         if (offset > stolen - 5 || original[offset] != 0xe8) return NULL;
         memcpy(&displacement, original + offset + 1, sizeof(displacement));
-        call_target = (uintptr_t)target + offset + 5 + (intptr_t)displacement;
-        if (call_target >= (uintptr_t)target && call_target < (uintptr_t)target + stolen) return NULL;
+        rel_target = (uintptr_t)target + offset + 5 + (intptr_t)displacement;
+        if (rel_target >= (uintptr_t)target && rel_target < (uintptr_t)target + stolen) return NULL;
         emitted += 11;
+    } else if (relocation == 4) {
+        /* 0F 8x rel32: a near conditional jump; its target must lie outside the window */
+        int32_t displacement;
+        if (offset > stolen - 6 || original[offset] != 0x0f || (original[offset + 1] & 0xf0) != 0x80) return NULL;
+        memcpy(&displacement, original + offset + 2, sizeof(displacement));
+        rel_target = (uintptr_t)target + offset + 6 + (intptr_t)displacement;
+        if (rel_target >= (uintptr_t)target && rel_target < (uintptr_t)target + stolen) return NULL;
+        emitted += 10;
     }
 
     patch_record *rec = NULL;
@@ -123,8 +131,15 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
     } else if (relocation == 2) {
         memcpy(tramp, original, offset);
         memcpy(tramp + offset, "\xff\x15\x02\x00\x00\x00\xeb\x08", 8);
-        memcpy(tramp + offset + 8, &call_target, sizeof(call_target));
+        memcpy(tramp + offset + 8, &rel_target, sizeof(rel_target));
         memcpy(tramp + offset + 16, original + offset + 5, stolen - offset - 5);
+    } else if (relocation == 4) {
+        /* the inverse condition as a short jump over an absolute jump to the target: no register, flags read only */
+        memcpy(tramp, original, offset);
+        tramp[offset] = (uint8_t)(0x70 | ((original[offset + 1] & 0x0f) ^ 1));
+        tramp[offset + 1] = 14;
+        write_absjmp(tramp + offset + 2, (void *)rel_target);
+        memcpy(tramp + offset + 16, original + offset + 6, stolen - offset - 6);
     } else {
         memcpy(tramp, original, stolen);
     }
@@ -170,6 +185,12 @@ void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t lo
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset)
 {
     return prepare(target, detour, stolen, call_offset, 2);
+}
+
+void *hook_prepare_relative_jcc(void *target, void *detour, size_t stolen, size_t jcc_offset)
+{
+    if (jcc_offset == SIZE_MAX) return NULL;
+    return prepare(target, detour, stolen, jcc_offset, 4);
 }
 
 static patch_record *find_record(void *tramp)

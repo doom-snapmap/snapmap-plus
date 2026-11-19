@@ -204,6 +204,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `attach_tags_sigs_test.c`, given `-Doom`/`-DoomAlt`, checks the tag-info
   lookup at its recorded RVA, its pattern's uniqueness, its prologue and its
   window.
+- `sync_clock_test.c` covers the sync clock's pure half (`sync_clock_rule.c`):
+  the `mods/` decl test, a mod demon's sync (every participant's animator, once,
+  on the player's clock), a stock target never, and one re-anchor's precision
+  in each mode. `sync_clock_sigs_test.c`, given `-Doom`/`-DoomAlt`, checks the
+  re-anchor at its recorded RVA, its pattern's uniqueness, the relocated jz of
+  its window and its eight callers in the adaptive-tick loop.
 - `modprog_test.c` covers the layered render programs (`modprog.h`): the
   decl and stage-text patches, the SPIR-V splice of the generated blend into a
   stand-in lit program (`fixtures/modprog/lit.frag`, compiled into

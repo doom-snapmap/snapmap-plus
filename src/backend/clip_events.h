@@ -33,6 +33,9 @@ extern "C" {
 /* The namespace every mod clip lives under; a clip whose name does not start with it is never looked at. */
 #define SH_CE_CLIP_ROOT     "md6/mods/"
 #define SH_CE_CLIP_ROOT_LEN 9
+/* The namespace every mod decl lives under (an entityDef, an md6Def). */
+#define SH_CE_DECL_ROOT     "mods/"
+#define SH_CE_DECL_ROOT_LEN 5
 /* The author key of mod.json and the registries member the builder writes. */
 #define SH_CE_AUTHOR_KEY    "animation_events"
 #define SH_CE_REGISTRY_KEY  "clipEvents"
@@ -49,6 +52,8 @@ int sh_ce_under_mods(const char *clip);
 int sh_ce_clip_of_mod(const char *clip, const char *salt);
 /* 1 when `md6def` is a decl name under mods/<salt>/. */
 int sh_ce_def_of_mod(const char *md6def, const char *salt);
+/* 1 when the decl `name` is under mods/ (any case, either slash): a mod's decl, never a stock one. */
+int sh_ce_decl_under_mods(const char *name);
 /* Name equality as the engine's resource names compare: any case, '\' as '/'. */
 int sh_ce_name_eq(const char *a, const char *b);
 
