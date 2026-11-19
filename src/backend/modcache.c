@@ -1648,9 +1648,10 @@ static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
     unsigned char *mask = NULL;
     size_t mask_len = 0, f, lacking = 0;
     char *dir = mc_path("partial"), *part = NULL, *cause_text = NULL;
-    unsigned long long have = 0;
+    unsigned long long have = 0, started = GetTickCount64();
     modnet_result r;
     sh_zip_reader z;
+    size_t stored = 0;
     int code = MODNET_OK, cause = 0, net = 0;
     if (u->state == 0 && u->nfiles) {
         mask_len = (u->nfiles + 7) / 8;
@@ -1722,10 +1723,16 @@ static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
         if (!bytes) continue;
         tmp = mc_path("partial\\%s.part", u->files[f].sha);
         if (!tmp || !mc_write(tmp, bytes, len)) cause = SH_CACHE_ABSENT_DISK;
-        else (void)sh_cache_put_blob(tmp, u->files[f].sha, u->files[f].size);
+        else if (sh_cache_put_blob(tmp, u->files[f].sha, u->files[f].size)) stored++;
         free(tmp);
         free(bytes);
     }
+    /* What one archive brought, so a live check reads the requests and the time a unit took (R-LV6). */
+    (void)mc_exists(part, &have);
+    mc_logf("MODS: content: unit %.16s's archive: %zu file(s) stored of %zu in the unit, %llu bytes, %s, "
+            "%d network retr%s, %.1f s", hash, stored, u->state >= 0 ? u->nfiles : 0, have,
+            mask ? "the files this computer lacked (a mask)" : "every file", net, net == 1 ? "y" : "ies",
+            (double)(GetTickCount64() - started) / 1000.0);
     sh_zip_reader_close(&z);
     mc_delete(part);
 done:

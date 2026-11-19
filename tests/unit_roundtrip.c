@@ -33,7 +33,15 @@
 #include "../src/backend/nav_bake.h"
 #include "../src/backend/script/script_runtime.h"
 
-void backend_log(const char *message) { if (message && strstr(message, "content")) printf("  log: %s\n", message); }
+/* The archive lines modcache logs: how many archive requests a step made and what the last one brought. */
+static int g_archives;
+static char g_archive_line[512];
+void backend_log(const char *message)
+{
+    if (!message || !strstr(message, "content")) return;
+    printf("  log: %s\n", message);
+    if (strstr(message, "'s archive: ")) { g_archives++; strcpy_s(g_archive_line, sizeof g_archive_line, message); }
+}
 void sh_nav_bake_source_update_begin(void) {}
 void sh_nav_bake_source_update_end(int committed) { (void)committed; }
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped, unsigned char **out_bytes, size_t *out_len)
@@ -234,7 +242,14 @@ int main(int argc, char **argv)
         sh_cache_note_rows(&list, NULL, 0);
         sh_modmanifest_list_free(&list);
         t0 = now_s();
+        g_archives = 0;
         code = sh_cache_prepare(row1.build, &io);
+        {
+            char want[96];
+            _snprintf_s(want, sizeof want, _TRUNCATE, " of %zu in the unit", ua.files);   /* stored: its distinct blobs */
+            step(g_archives == 1 && strstr(g_archive_line, want) && strstr(g_archive_line, "every file"),
+                 "player: one archive request brought every file of the unit", g_archive_line);
+        }
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", root_b, row1.build);
         memset(&c, 0, sizeof c);
         step(code == 0 && sh_cache_composed(row1.build, &complete) && complete && sh_mb_load_folder(path, &c),
@@ -298,11 +313,14 @@ int main(int argc, char **argv)
         sh_modmanifest_list_add(&list, &row1);
         sh_cache_note_rows(&list, NULL, 0);
         sh_modmanifest_list_free(&list);
+        g_archives = 0;
         code = sh_cache_prepare(row1.build, &io);
         {
             char d[160];
             _snprintf_s(d, sizeof d, _TRUNCATE, "%zu files here, 3 in one archive request", kept);
             step(code == 0 && sh_cache_composed(row1.build, &complete) && complete, "player: the files it lacks arrive in one request", d);
+            step(g_archives == 1 && strstr(g_archive_line, "(a mask)") && !strstr(g_archive_line, ": 0 file(s) stored"),
+                 "player: the one archive request was a mask of what this computer lacked", g_archive_line);
         }
     }
 
