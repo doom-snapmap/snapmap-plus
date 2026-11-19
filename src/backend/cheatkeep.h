@@ -10,6 +10,14 @@
  * player's spawn count changes (a spawn reset its cheats) the bits asked for are set again. Nothing else is
  * touched: the engine's own writes between spawns (the environment suit's fake death and revive set and clear
  * noTarget) are left alone, and a different player entity (the next Play) starts with nothing asked for.
+ *
+ * The keep belongs to one Play and ends with it, before the engine frees that Play's player. The editor's return
+ * from Play (idSnapEditorLocal vtable +0x18, VK FUN_141189190, GL FUN_1411882f0) executes "disconnect" at once
+ * (cmdSystem +0x48 runs ExecuteCommandText, +0x78), which frees the game and its player, and then sets the
+ * editor's active flag (+9) in the same call; a session that leaves its map frees them in CancelMapChange. The
+ * check between two main frames (sh_cheat_keep_poll) therefore asks first whether a Play is still on, from the
+ * editor's flag, and reads the held player only then; CancelMapChange ends the keep at its entry
+ * (sh_cheat_keep_end). Before this, every exit from Play read the freed player once (R-LV7 Q5).
  * Pure: no engine access, so the rule is tested on its own (tests/cheatkeep_test.c). */
 #ifndef SH_CHEATKEEP_H
 #define SH_CHEATKEEP_H
@@ -32,6 +40,17 @@ uint8_t sh_cheat_keep_frame(sh_cheat_keep *k, const void *player, int32_t spawns
 
 /* Whether anything is asked for (so the frame can skip finding the player). */
 int sh_cheat_keep_active(const sh_cheat_keep *k);
+
+/* The Play the keep belongs to has ended: forget the player and the bits asked for. */
+void sh_cheat_keep_end(sh_cheat_keep *k);
+
+/* The check between two main frames, outside the game's frame. in_play is the editor's flag read now: 1 a SnapMap
+ * Play is on, 0 the editor is active again (that Play has ended and its player is freed), -1 unknown. Only when a
+ * Play is on is the held player's spawn count read, through spawns_of (which may fault and return -1); otherwise
+ * the keep ends and nothing is read. Returns 1 when that count differs from the one the bits were set at (the
+ * caller queues the in-frame work), else 0. */
+typedef int32_t (*sh_cheat_keep_spawns_fn)(const void *player);
+int sh_cheat_keep_poll(sh_cheat_keep *k, int in_play, sh_cheat_keep_spawns_fn spawns_of);
 
 /* idPlayer's cheat-flags byte and its noTarget bit (the enforcement bits the commands toggle). */
 #define SH_PLAYER_CHEAT_FLAGS_OFF 0x45ea8u

@@ -17,6 +17,8 @@
 #include "engine_build.h"
 #include "typeinfo.h"
 #include "cheatkeep.h"
+#include "script/script_hooks.h"
+#include "../fault_shield/load_screen_stop.h"
 
 /* Engine call contracts. */
 
@@ -520,7 +522,7 @@ void h_cheatkeep(idCmdArgs *a)
     if (!sh_cheat_keep_active(&g_cheat_keep)) return;
     if (!(gm = get_gamemgr()) || !(player = gm_find_entity(gm, "player1")) ||
         (spawns = player_spawns((const uint8_t *)player)) < 0) {
-        memset(&g_cheat_keep, 0, sizeof g_cheat_keep);   /* no player: the Play has ended; the next asks again */
+        sh_cheat_keep_end(&g_cheat_keep);   /* no player: the Play has ended; the next asks again */
         return;
     }
     __try {
@@ -530,17 +532,29 @@ void h_cheatkeep(idCmdArgs *a)
     if (set) backend_log("cheats: the player spawned and its cheats were reset; the ones turned on are on again");
 }
 
+static int32_t held_player_spawns(const void *player)
+{
+    return player_spawns((const uint8_t *)player);
+}
+
+/* CancelMapChange, at its entry on the main thread (load_screen_stop.h): the session leaves its map and the engine
+ * is about to free the Play's player, so the keep ends first. */
+static void cheat_keep_map_end(int during_load)
+{
+    (void)during_load;
+    sh_cheat_keep_end(&g_cheat_keep);
+}
+
 /* Every main frame (idCommonLocal::Frame, outside the game's frame: the game manager slot is empty there, measured
- * R-LV3): while a cheat is turned on, the player it was turned on for is checked for a new spawn by its spawn count,
- * a read only; on a change sh_cheatkeep is queued, which does the checked work inside the game's frame. */
+ * R-LV3): while a cheat is turned on and a Play is still on (the editor's flag, cheatkeep.h), the player it was
+ * turned on for is checked for a new spawn by its spawn count, a read only; on a change sh_cheatkeep is queued,
+ * which does the checked work inside the game's frame. Once the Play has ended the keep ends unread. */
 void sh_player_cheats_frame(void)
 {
-    int32_t spawns;
     typedef void (*buffer_text_fn)(void *cmdsys, const char *text);
     buffer_text_fn fn;
     if (!sh_cheat_keep_active(&g_cheat_keep) || InterlockedCompareExchange(&g_cheat_keep_queued, 0, 0)) return;
-    spawns = player_spawns((const uint8_t *)g_cheat_keep.player);
-    if (spawns == g_cheat_keep.spawns) return;
+    if (!sh_cheat_keep_poll(&g_cheat_keep, sh_script_hooks_in_play(), held_player_spawns)) return;
     if (!g_cmdsys || !(fn = (buffer_text_fn)read_vfn(g_cmdsys, VSLOT_BUFFER_CMD_TEXT))) return;
     InterlockedExchange(&g_cheat_keep_queued, 1);
     __try { fn(g_cmdsys, "sh_cheatkeep\n"); }
@@ -595,6 +609,7 @@ int sh_entity_install(const sig_result *results, size_t n, const uint8_t *module
 
     g_gamemgr_slot = sh_resolve_gamemgr_slot(results, n, module_base);
     g_cmdsys       = cmdsys;
+    (void)sh_load_screen_stop_add_map_end(cheat_keep_map_end);
     g_spawn_by_def = (spawn_by_def_fn)sig_addr_by_name(results, n, "SpawnByEntityDef");
     g_map_getter   = (map_getter_fn)sig_addr_by_name(results, n, "MapGetter");
     g_map_writer   = (map_writer_fn)sig_addr_by_name(results, n, "MapWriter");

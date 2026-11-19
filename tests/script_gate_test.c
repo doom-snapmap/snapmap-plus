@@ -51,7 +51,7 @@ void *sh_entity_gamemgr(void) { return NULL; }
 int sh_companions_def_chain(void *entity, const char **names, int cap) { (void)entity; (void)names; (void)cap; return 0; }
 int sh_companions_spawn_ready(void) { return 0; }
 void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_wanted_fn wanted) { (void)fn; (void)wanted; }
-void sh_load_screen_stop_set_map_end(sh_map_end_fn fn) { (void)fn; }
+int sh_load_screen_stop_add_map_end(sh_map_end_fn fn) { (void)fn; return 1; }
 int sh_script_api_install(const sig_result *results, size_t count, const uint8_t *module_base)
 { (void)results; (void)count; (void)module_base; return 0; }
 int sh_script_combat_install(const sig_result *results, size_t count, const uint8_t *module_base)

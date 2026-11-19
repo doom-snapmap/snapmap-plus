@@ -47,13 +47,14 @@ static int thread_still_drawing(void)
     }
 }
 
-static sh_map_end_fn g_map_end = NULL;
+#define MAP_END_MAX 4
+static sh_map_end_fn g_map_end[MAP_END_MAX];   /* the subscribers, in the order they were added */
 
 static void sh_cancel_map_change_detour(void *common, uint8_t arg)
 {
-    int drawing = thread_still_drawing();
-    sh_map_end_fn map_end = g_map_end;
-    if (map_end) map_end(drawing);
+    int drawing = thread_still_drawing(), i;
+    for (i = 0; i < MAP_END_MAX; i++)
+        if (g_map_end[i]) g_map_end[i](drawing);
     if (drawing) {
         LONG n = InterlockedIncrement(&g_stops);
         if (n <= 8) {
@@ -138,9 +139,13 @@ int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *re
     return 1;
 }
 
-void sh_load_screen_stop_set_map_end(sh_map_end_fn fn)
+int sh_load_screen_stop_add_map_end(sh_map_end_fn fn)
 {
-    g_map_end = fn;
+    int i;
+    if (!fn) return 0;
+    for (i = 0; i < MAP_END_MAX; i++) if (g_map_end[i] == fn) return 1;
+    for (i = 0; i < MAP_END_MAX; i++) if (!g_map_end[i]) { g_map_end[i] = fn; return 1; }
+    return 0;
 }
 
 int sh_load_screen_stop_armed(void)

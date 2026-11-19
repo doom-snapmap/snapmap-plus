@@ -32,13 +32,16 @@ static const uint8_t k_cancel_map_change_prologue[LOAD_SCREEN_STOP_STOLEN] = {
 /* Return 1 when armed (or already armed), 0 when not installed. */
 int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *results, size_t count);
 
-/* The map-end subscriber (mod scripts, script/script_hooks.h): called on the
- * engine main thread at every CancelMapChange, before the loading screen is
- * stopped and before the original runs, with during_load 1 when the
- * loading-screen thread was still drawing (a failed load). Set once at boot;
- * NULL clears. Called only while the detour is armed. */
+/* The map-end subscribers (mod scripts, script/script_hooks.h; the player
+ * cheats kept over a spawn, cheatkeep.h): each called on the engine main
+ * thread at every CancelMapChange, in the order added, before the loading
+ * screen is stopped and before the original runs (which frees the game and
+ * its entities), with during_load 1 when the loading-screen thread was still
+ * drawing (a failed load). Added once at boot; adding one twice keeps one.
+ * Returns 1 when subscribed, 0 when fn is NULL or the four places are taken.
+ * Called only while the detour is armed. */
 typedef void (*sh_map_end_fn)(int during_load);
-void sh_load_screen_stop_set_map_end(sh_map_end_fn fn);
+int sh_load_screen_stop_add_map_end(sh_map_end_fn fn);
 
 /* 1 once the detour is committed, else 0. The redirect policy reads it. */
 int sh_load_screen_stop_armed(void);

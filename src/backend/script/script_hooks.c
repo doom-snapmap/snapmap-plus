@@ -1121,7 +1121,7 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
                        "so only entities placed in the map reach scripts");
     sh_script_source_install();
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
-    sh_load_screen_stop_set_map_end(sh_script_hooks_map_cancel);
+    (void)sh_load_screen_stop_add_map_end(sh_script_hooks_map_cancel);
     g_resolved = 1;
     backend_log("SCRIPTS: engine side resolved; the frame hook is installed at the first map with scripts");
     return 1;

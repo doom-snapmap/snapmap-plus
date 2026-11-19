@@ -18,6 +18,21 @@ int sh_cheat_keep_active(const sh_cheat_keep *k)
     return k && k->player && (k->want[0] || k->want[1]);
 }
 
+void sh_cheat_keep_end(sh_cheat_keep *k)
+{
+    if (k) memset(k, 0, sizeof *k);
+}
+
+int sh_cheat_keep_poll(sh_cheat_keep *k, int in_play, sh_cheat_keep_spawns_fn spawns_of)
+{
+    if (!sh_cheat_keep_active(k) || !spawns_of) return 0;
+    if (in_play != 1) {                                 /* the Play is over, or cannot be told: read nothing */
+        sh_cheat_keep_end(k);
+        return 0;
+    }
+    return spawns_of(k->player) != k->spawns;
+}
+
 uint8_t sh_cheat_keep_frame(sh_cheat_keep *k, const void *player, int32_t spawns, uint8_t *flags, uint8_t *noclip)
 {
     uint8_t set = 0;
