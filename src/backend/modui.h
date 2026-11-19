@@ -346,9 +346,6 @@ int  sh_modui_scripted_maps_allowed(void);
 /* The hub launch state machine (modui.c): "none", "launched", "loading",
  * "playing", "running" or "ended". */
 const char *sh_modui_test_launch_state(void);
-/* Where saved maps are read (SNAPMAPS<id>\game.details under each child
- * folder); NULL restores Saved Games\id Software\DOOM\base\savegame.user. */
-void sh_modui_test_set_saves_root(const char *path);
 /* The Mods tab's sentence for a build or store cause (malloc'd; NULL for none). */
 char *sh_modui_test_plain_cause(const char *cause);
 #endif

@@ -5194,11 +5194,16 @@ it downloads (D27). An editor open composes only from what is here and says S2.
 A module whose unit is absent is left out (a module stand-in is a live check).
 
 The sweep (`sh_cache_sweep`, at start on a thread of its own, and from the Mods
-tab) keeps every unit a kept map names (the game's `saved-maps` and, unless
-the player chose Remove content of maps you only played, `published-maps`),
-the open map's and those of uploads in progress, and removes the rest, then the
-files no remaining manifest names, then the compositions no kept map uses. It
-never touches a local mod's files and never runs on a timer. The Mods tab's
+tab) keeps every unit a kept map names (the local saves of My Maps, read
+through `saved_maps.c`, the one reader of the game's save slots, since a map
+saved offline exists only there; the cloud copies in the game's `saved-maps`;
+and, unless the player chose Remove content of maps you only played,
+`published-maps`), the open map's and those of uploads in progress, and
+removes the rest, then the files no remaining manifest names, then the
+compositions no kept map uses. A kept map whose text is there and does not
+read (a slot that does not decode, a row that does not parse, a folder that
+cannot be listed) may use anything, so that sweep removes nothing and says
+why. It never touches a local mod's files and never runs on a timer. The Mods tab's
 "Map content on disk" (the `content` action) reports it from this computer
 alone.
 

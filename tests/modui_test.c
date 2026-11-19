@@ -24,6 +24,7 @@
 
 #include "snapmap_plus_iface.h"
 #include "modui.h"
+#include "saved_maps.h"
 /* Any build hash: the asked list names the build a player lacked a file of. */
 #define HASH1_FOR_ASKED "1111111111111111111111111111111111111111111111111111111111111111"
 #include "modstore.h"
@@ -942,7 +943,7 @@ static void test_places_stay(const char *tmp)
     /* No saved map of the player records either place. */
     _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\stay\\saves", tmp);
     CreateDirectoryA(saves, NULL);
-    sh_modui_test_set_saves_root(saves);
+    sh_saved_maps_set_root(saves);
     /* What the product does at start: both places are still there. */
     (void)sh_ms_recover_work();
     free(run_doc(SH_MODS_ACT_RESCAN, NULL));
@@ -964,7 +965,7 @@ static void test_places_stay(const char *tmp)
     CHECK(!mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod.json", src);
     CHECK(mt_exists(dir));
-    sh_modui_test_set_saves_root(NULL);
+    sh_saved_maps_set_root(NULL);
     CHECK(sh_ms_set_root(g_root));
     free(run_doc(SH_MODS_ACT_RESCAN, NULL));
 }
@@ -1520,7 +1521,7 @@ int main(int argc, char **argv)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPSABCDEF0123456789ABCD", saves);
     mt_write(path, "game.details", "checksum=1\r\nitemId=6ae40b378bf5037d3d63bd23\r\nmetadata={\"localId\":\"ABCDEF0123456789ABCD\","
                                    "\"name\":\"Imp Arena\",\"lastModified\":1793364363900,\"tags\":[\"mods\"]}\r\nmodified=1793364363900\r\n");
-    sh_modui_test_set_saves_root(saves);
+    sh_saved_maps_set_root(saves);
     {
         char claims[400];
         _snprintf_s(claims, sizeof claims, _TRUNCATE,
@@ -1670,7 +1671,7 @@ int main(int argc, char **argv)
     }
     g_map_on = 0;
     sh_modmanifest_reset();
-    sh_modui_test_set_saves_root(NULL);
+    sh_saved_maps_set_root(NULL);
 
     printf("-- the Files view: the folder's files, mod.json without the part Snapmap+ writes\n");
     {

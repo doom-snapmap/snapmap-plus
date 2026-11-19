@@ -16,6 +16,7 @@
 #include "decl_tree.h"
 #include "grid_room.h"
 #include "backend_log.h"
+#include "saved_maps.h"
 #include "../common/text.h"
 
 /* ------------------------------------------------------------ state */
@@ -1757,62 +1758,48 @@ static void mc_set_add(mc_set *s, const char *h)
     strcpy_s(s->v[s->n++], SH_CACHE_HASH_HEX + 1, h);
 }
 
-/* The pinned rows of one map text: units into `units`, composition hashes into `comps`. */
-static size_t mc_map_refs(const char *path, mc_set *units, mc_set *comps, unsigned long long *bytes_out)
+/* What the kept maps use (5.17, D52): every unit and composition their pinned rows name. A kept map whose text is
+ * there and does not read (a file that cannot be opened, a slot that does not decode, a row that does not parse) is
+ * counted in `unreadable`: what it uses is unknown, so the sweep removes nothing while there is one. */
+typedef struct mc_kept { mc_set units, comps; size_t maps, unreadable; } mc_kept;
+
+static void mc_kept_text(mc_kept *k, const char *text, size_t len)
 {
-    size_t len = 0, i, k, n = 0;
-    unsigned char *text = sh_mb_read_file(path, (size_t)1 << 31, &len);
+    size_t i, u, pinned = 0;
+    unsigned rejected = 0;
     sh_modmanifest_list rows;
-    if (!text) return 0;
     memset(&rows, 0, sizeof rows);
-    if (sh_carrier_part((const char *)text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read((const char *)text, len, &rows, NULL);
+    if (sh_carrier_part(text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read(text, len, &rows, &rejected);
+    if (rejected) k->unreadable++;
     for (i = 0; i < rows.count; i++) {
         if (!rows.rows[i].pinned) continue;
-        n++;
-        mc_set_add(comps, rows.rows[i].build);
-        for (k = 0; k < rows.rows[i].unit_count; k++) mc_set_add(units, rows.rows[i].units[k]);
+        pinned++;
+        mc_set_add(&k->comps, rows.rows[i].build);
+        for (u = 0; u < rows.rows[i].unit_count; u++) mc_set_add(&k->units, rows.rows[i].units[u]);
     }
-    (void)bytes_out;
+    if (pinned) k->maps++;
     sh_modmanifest_list_free(&rows);
-    free(text);
-    return n;
 }
 
-/* Every *.decl in `dir`. */
-static size_t mc_scan_maps(const char *dir, mc_set *units, mc_set *comps)
-{
-    char *pattern = dir ? sh_textf("%s\\*.decl", dir) : NULL;
-    wchar_t *wp = pattern ? sh_mb_wpath(pattern) : NULL;
-    WIN32_FIND_DATAW fd;
-    HANDLE h = wp ? FindFirstFileW(wp, &fd) : INVALID_HANDLE_VALUE;
-    size_t maps = 0;
-    while (h != INVALID_HANDLE_VALUE) {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            char *leaf = sh_mb_utf8(fd.cFileName), *path = leaf ? sh_textf("%s\\%s", dir, leaf) : NULL;
-            if (path && mc_map_refs(path, units, comps, NULL)) maps++;
-            free(path);
-            free(leaf);
-        }
-        if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
-    }
-    free(wp);
-    free(pattern);
-    return maps;
-}
-
-/* The files of `dir` matching `pattern` (leaf names, malloc'd array of malloc'd). */
-static char **mc_list(const char *dir, const char *pattern, int dirs, size_t *count)
+/* The files of `dir` matching `pattern` (leaf names, malloc'd array of malloc'd). *failed (optional) is set when the
+ * folder is there and cannot be listed. */
+static char **mc_list_ex(const char *dir, const char *pattern, int dirs, size_t *count, int *failed)
 {
     char *pat = sh_textf("%s\\%s", dir, pattern), **out = NULL;
     wchar_t *wp = pat ? sh_mb_wpath(pat) : NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h = wp ? FindFirstFileW(wp, &fd) : INVALID_HANDLE_VALUE;
     size_t n = 0;
+    if (h == INVALID_HANDLE_VALUE && failed) {
+        DWORD e = wp ? GetLastError() : ERROR_OUTOFMEMORY;
+        if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && e != ERROR_NO_MORE_FILES) *failed = 1;
+    }
     while (h != INVALID_HANDLE_VALUE) {
         int isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         if (fd.cFileName[0] != L'.' && isdir == dirs) {
             char **g = (char **)realloc(out, (n + 1) * sizeof *g);
             if (g) { out = g; if ((out[n] = sh_mb_utf8(fd.cFileName)) != NULL) n++; }
+            else if (failed) *failed = 1;
         }
         if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
     }
@@ -1822,35 +1809,93 @@ static char **mc_list(const char *dir, const char *pattern, int dirs, size_t *co
     return out;
 }
 
+static char **mc_list(const char *dir, const char *pattern, int dirs, size_t *count)
+{
+    return mc_list_ex(dir, pattern, dirs, count, NULL);
+}
+
 static void mc_list_free(char **v, size_t n) { size_t i; for (i = 0; i < n; i++) free(v[i]); free(v); }
+
+/* Every map text (*.decl) of one of the game's map folders. */
+static void mc_kept_dir(mc_kept *k, const char *dir)
+{
+    char **names;
+    size_t n, i;
+    int failed = 0;
+    if (!dir) return;
+    names = mc_list_ex(dir, "*.decl", 0, &n, &failed);
+    if (failed) k->unreadable++;
+    for (i = 0; names && i < n; i++) {
+        size_t len = 0;
+        char *path;
+        unsigned char *text;
+        path = sh_textf("%s\\%s", dir, names[i]);
+        text = path ? sh_mb_read_file(path, (size_t)1 << 31, &len) : NULL;
+        if (text) mc_kept_text(k, (const char *)text, len);
+        else k->unreadable++;
+        free(text);
+        free(path);
+    }
+    mc_list_free(names, names ? n : 0);
+}
+
+static void mc_kept_slot(void *context, const char *local_id, const char *item_id, const char *text, size_t len)
+{
+    (void)local_id;
+    (void)item_id;
+    mc_kept_text((mc_kept *)context, text, len);
+}
+
+/* The kept maps (2.12): the player's local saves (My Maps slots, the only copy of a map saved offline), the cloud
+ * copies of saved maps, and, unless `drop_played`, the published maps the game keeps. */
+static void mc_kept_read(mc_kept *k, int drop_played)
+{
+    char *saved, *published;
+    size_t bad = 0;
+    AcquireSRWLockShared(&g_lock);
+    saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
+    published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
+    ReleaseSRWLockShared(&g_lock);
+    if (sh_saved_maps_each(mc_kept_slot, k, &bad) < 0) k->unreadable++;
+    k->unreadable += bad;
+    mc_kept_dir(k, saved);
+    if (!drop_played) mc_kept_dir(k, published);
+    free(saved);
+    free(published);
+}
 
 int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out)
 {
-    mc_set units = { 0 }, comps = { 0 }, blobs = { 0 };
-    char *saved, *published, *udir = mc_path("units"), *sdir = mc_path("served"), *fdir = mc_path("files");
+    mc_kept kept;
+    mc_set blobs = { 0 };
+    char *udir = mc_path("units"), *sdir = mc_path("served"), *fdir = mc_path("files");
     char **names;
     size_t n, i;
     sh_cache_sweep_stats st;
     sh_modmanifest_list cur;
     memset(&st, 0, sizeof st);
-    AcquireSRWLockShared(&g_lock);
-    saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
-    published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
-    ReleaseSRWLockShared(&g_lock);
+    memset(&kept, 0, sizeof kept);
     /* The references (5.17). */
-    st.maps += mc_scan_maps(saved, &units, &comps);
-    if (!drop_played) st.maps += mc_scan_maps(published, &units, &comps);
+    mc_kept_read(&kept, drop_played);
     memset(&cur, 0, sizeof cur);
     if (sh_modmanifest_current(&cur)) {
         for (i = 0; i < cur.count; i++) {
             size_t k;
             if (!cur.rows[i].pinned) continue;
-            mc_set_add(&comps, cur.rows[i].build);
-            for (k = 0; k < cur.rows[i].unit_count; k++) mc_set_add(&units, cur.rows[i].units[k]);
+            mc_set_add(&kept.comps, cur.rows[i].build);
+            for (k = 0; k < cur.rows[i].unit_count; k++) mc_set_add(&kept.units, cur.rows[i].units[k]);
         }
     }
     sh_modmanifest_list_free(&cur);
-    for (i = 0; held && i < held_count; i++) mc_set_add(&units, held[i]);
+    for (i = 0; held && i < held_count; i++) mc_set_add(&kept.units, held[i]);
+    st.maps = kept.maps;
+    if (kept.unreadable) {
+        /* A kept map that does not read may use any unit here: nothing is removed until it reads (I5). */
+        mc_logf("MODS: content: the sweep removed nothing: %zu kept map(s) or map folder(s) could not be read, so what "
+                "they use is not known", kept.unreadable);
+        st.unreadable = kept.unreadable;
+        goto done;
+    }
 
     AcquireSRWLockExclusive(&g_disk);
     /* Manifests no reference names; the blobs every remaining manifest names. */
@@ -1862,7 +1907,7 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         if (len != 69 || strcmp(names[i] + 64, ".json")) { free(path); continue; }
         memcpy(hash, names[i], 64);
         hash[64] = 0;
-        if (!mc_set_has(&units, hash)) { if (mc_delete(path)) st.units_removed++; free(path); continue; }
+        if (!mc_set_has(&kept.units, hash)) { if (mc_delete(path)) st.units_removed++; free(path); continue; }
         st.units_kept++;
         {
             mc_unit u;
@@ -1899,7 +1944,7 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     for (i = 0; names && i < n; i++) {
         char hash[SH_CACHE_HASH_HEX + 1], *path = sh_textf("%s\\%s", sdir, names[i]);
         int stale = strlen(names[i]) != 64;
-        if (!stale) { memcpy(hash, names[i], 65); stale = !mc_hex64(hash) || !mc_set_has(&comps, hash); }
+        if (!stale) { memcpy(hash, names[i], 65); stale = !mc_hex64(hash) || !mc_set_has(&kept.comps, hash); }
         if (path && stale && mc_rmtree(path)) {
             char *side = strlen(names[i]) == 64 ? sh_textf("%s.json", path) : NULL;
             if (side) mc_delete(side);
@@ -1913,12 +1958,11 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     mc_logf("MODS: content: the sweep kept %zu unit(s) of %zu map(s) and removed %zu unit(s), %zu file(s) (%llu bytes) "
             "and %zu composition(s)%s", st.units_kept, st.maps, st.units_removed, st.blobs_removed, st.bytes_removed,
             st.served_removed, drop_played ? "; content of maps only played was removed" : "");
+done:
     if (out) *out = st;
-    free(units.v);
-    free(comps.v);
+    free(kept.units.v);
+    free(kept.comps.v);
     free(blobs.v);
-    free(saved);
-    free(published);
     free(udir);
     free(sdir);
     free(fdir);
@@ -1935,18 +1979,20 @@ static void mc_size_text(char *out, size_t cap, unsigned long long bytes)
     else _snprintf_s(out, cap, _TRUNCATE, "%.0f KB", v / 1024.0);
 }
 
-/* Each kept map's rows: one line per row, and the totals. */
-typedef struct mc_report { sh_cache_line_fn fn; void *ctx; mc_set files; unsigned long long total; size_t maps, lines; } mc_report;
+/* Each kept map's rows: one line per row, and the totals. A local save's cloud copy in saved-maps (its leaf begins
+ * with the slot's cloud item id) is the same map and is not reported again. */
+typedef struct mc_report {
+    sh_cache_line_fn fn; void *ctx; mc_set files; unsigned long long total; size_t maps, lines;
+    char **items; size_t nitems;      /* the local saves' cloud item ids */
+} mc_report;
 
-static void mc_report_map(mc_report *rep, const char *path, const char *kind)
+static void mc_report_text(mc_report *rep, const char *text, size_t len, const char *kind)
 {
-    size_t len = 0, i, k, f;
-    unsigned char *text = sh_mb_read_file(path, (size_t)1 << 31, &len);
+    size_t i, k, f;
     sh_modmanifest_list rows;
     int counted = 0;
-    if (!text) return;
     memset(&rows, 0, sizeof rows);
-    if (sh_carrier_part((const char *)text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read((const char *)text, len, &rows, NULL);
+    if (sh_carrier_part(text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read(text, len, &rows, NULL);
     for (i = 0; i < rows.count; i++) {
         const sh_modmanifest_row *row = &rows.rows[i];
         unsigned long long bytes = 0, shared = 0;
@@ -1975,18 +2021,44 @@ static void mc_report_map(mc_report *rep, const char *path, const char *kind)
         free(line);
     }
     sh_modmanifest_list_free(&rows);
-    free(text);
 }
 
-static void mc_report_dir(mc_report *rep, const char *dir, const char *kind)
+static void mc_report_slot(void *context, const char *local_id, const char *item_id, const char *text, size_t len)
+{
+    mc_report *rep = (mc_report *)context;
+    (void)local_id;
+    if (item_id && item_id[0]) {
+        char **g = (char **)realloc(rep->items, (rep->nitems + 1) * sizeof *g);
+        if (g) { rep->items = g; if ((g[rep->nitems] = sh_text(item_id)) != NULL) rep->nitems++; }
+    }
+    mc_report_text(rep, text, len, "kept");
+}
+
+static int mc_report_copy(const mc_report *rep, const char *leaf)
+{
+    size_t i, n;
+    for (i = 0; i < rep->nitems; i++) {
+        n = strlen(rep->items[i]);
+        if (!_strnicmp(leaf, rep->items[i], n) && leaf[n] == '_') return 1;
+    }
+    return 0;
+}
+
+static void mc_report_dir(mc_report *rep, const char *dir, const char *kind, int copies)
 {
     char **names;
     size_t n, i;
     if (!dir) return;
     names = mc_list(dir, "*.decl", 0, &n);
     for (i = 0; names && i < n; i++) {
-        char *path = sh_textf("%s\\%s", dir, names[i]);
-        if (path) mc_report_map(rep, path, kind);
+        size_t len = 0;
+        char *path;
+        unsigned char *text;
+        if (copies && mc_report_copy(rep, names[i])) continue;
+        path = sh_textf("%s\\%s", dir, names[i]);
+        text = path ? sh_mb_read_file(path, (size_t)1 << 31, &len) : NULL;
+        if (text) mc_report_text(rep, (const char *)text, len, kind);
+        free(text);
         free(path);
     }
     mc_list_free(names, names ? n : 0);
@@ -1995,12 +2067,18 @@ static void mc_report_dir(mc_report *rep, const char *dir, const char *kind)
 static void mc_report_run(mc_report *rep)
 {
     char *saved, *published;
+    size_t i;
     AcquireSRWLockShared(&g_lock);
     saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
     published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
     ReleaseSRWLockShared(&g_lock);
-    mc_report_dir(rep, saved, "kept");
-    mc_report_dir(rep, published, "played");
+    (void)sh_saved_maps_each(mc_report_slot, rep, NULL);
+    mc_report_dir(rep, saved, "kept", 1);
+    mc_report_dir(rep, published, "played", 0);
+    for (i = 0; i < rep->nitems; i++) free(rep->items[i]);
+    free(rep->items);
+    rep->items = NULL;
+    rep->nitems = 0;
     free(saved);
     free(published);
 }

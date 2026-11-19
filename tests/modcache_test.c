@@ -21,6 +21,7 @@
 #include "modserve.h"
 #include "modcache.h"
 #include "modkey.h"
+#include "saved_maps.h"
 #include "mod_test_util.h"
 
 #define SALT  "pk7salt1"
@@ -200,6 +201,46 @@ static char *read_text(const char *path)
 }
 
 /* ------------------------------------------------------------ tests */
+
+/* A local save slot as the game writes it: <saves>\<profile>\SNAPMAPS<id>\map.decl (a 4-byte checksum, then zlib of
+ * the map's JSON, written here as stored DEFLATE blocks) and game.details naming its cloud item. `text` NULL writes
+ * a map.decl that does not decode. */
+static void write_slot(const char *saves, const char *id, const char *item, const char *text, size_t len)
+{
+    char dir[MAX_PATH * 2], path[MAX_PATH * 2];
+    unsigned char *z;
+    size_t at = 0, off = 0;
+    unsigned long a = 1, bsum = 0;
+    FILE *f = NULL;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\76561198000000001", saves);
+    CreateDirectoryA(saves, NULL);
+    CreateDirectoryA(dir, NULL);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\76561198000000001\\SNAPMAPS%s", saves, id);
+    CreateDirectoryA(dir, NULL);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\game.details", dir);
+    if (!fopen_s(&f, path, "wb") && f) { fprintf(f, "checksum=1\nitemId=%s\nmetadata={\"name\":\"t\"}\nmodified=0\n", item); fclose(f); }
+    z = (unsigned char *)malloc(4 + 2 + len + (len / 65535 + 1) * 5 + 4 + 16);
+    if (!z) return;
+    memset(z, 0, 4);
+    at = 4;
+    z[at++] = 0x78;
+    z[at++] = text ? 0x01 : 0x02;   /* a header the reader refuses: the slot does not decode */
+    do {
+        size_t n = len - off > 65535 ? 65535 : len - off;
+        z[at++] = (unsigned char)(off + n == len ? 1 : 0);
+        z[at++] = (unsigned char)(n & 0xff); z[at++] = (unsigned char)(n >> 8);
+        z[at++] = (unsigned char)(~n & 0xff); z[at++] = (unsigned char)((~n >> 8) & 0xff);
+        if (text) memcpy(z + at, text + off, n);
+        at += n;
+        off += n;
+    } while (off < len);
+    for (off = 0; text && off < len; off++) { a = (a + (unsigned char)text[off]) % 65521; bsum = (bsum + a) % 65521; }
+    a |= bsum << 16;
+    z[at++] = (unsigned char)(a >> 24); z[at++] = (unsigned char)(a >> 16); z[at++] = (unsigned char)(a >> 8); z[at++] = (unsigned char)a;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\map.decl", dir);
+    if (!fopen_s(&f, path, "wb") && f) { fwrite(z, 1, at, f); fclose(f); }
+    free(z);
+}
 
 static void test_pointer_sources(void)
 {
@@ -651,7 +692,7 @@ static void test_cache(const char *top)
     /* The sweep: what no kept map names goes; a map only played keeps its content until "Remove content of maps
      * you only played". */
     {
-        char saved[MAX_PATH * 2], played[MAX_PATH * 2], err[128], *map;
+        char saved[MAX_PATH * 2], played[MAX_PATH * 2], saves[MAX_PATH * 2], err[128], *map;
         const char *body = "{\"entities\":[]}";
         sh_modmanifest_list one;
         sh_cache_sweep_stats st;
@@ -664,6 +705,10 @@ static void test_cache(const char *top)
         CreateDirectoryA(saved, NULL);
         CreateDirectoryA(played, NULL);
         sh_cache_set_map_folders(saved, played);
+        /* The local saves are this test's own folder, empty for now. */
+        _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\player\\saves", top);
+        CreateDirectoryA(saves, NULL);
+        sh_saved_maps_set_root(saves);
         row_of(&crate_row, SALT, only, 1);
         memset(&one, 0, sizeof one);
         CHECK(sh_modmanifest_list_add(&one, &crate_row));
@@ -706,6 +751,40 @@ static void test_cache(const char *top)
             download(&barrel, &b, pack, 1);
             CHECK(sh_cache_sweep(1, held, 1, &st) && sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);
         }
+        /* R-DS6: a map saved offline exists only in its local slot (My Maps), and its unit stays; its cloud copy in
+         * saved-maps is the same map, reported once. A slot that does not decode may use anything: nothing goes. */
+        {
+            sh_modmanifest_row barrel_row;
+            const sh_unit *bonly[1] = { &barrel };
+            row_of(&barrel_row, SALT, bonly, 1);
+            memset(&one, 0, sizeof one);
+            CHECK(sh_modmanifest_list_add(&one, &barrel_row));
+            map = sh_modmanifest_write(body, strlen(body), &one, &len, err, sizeof err);
+            CHECK(map != NULL);
+            if (map) write_slot(saves, "0123456789ABCDEF0123", "aaaa", map, len);
+            free(map);
+            sh_modmanifest_list_free(&one);
+            sh_modmanifest_row_free(&barrel_row);
+            CHECK(sh_cache_sweep(1, NULL, 0, &st));
+            CHECK(st.unreadable == 0 && sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);   /* failed before */
+            CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+            t = sh_cache_storage_line();
+            /* The slot, its cloud copy aaaa_bbbb (the slot's item is aaaa: not counted again) and the map played. */
+            CHECK(t && strstr(t, "for 2 maps."));
+            if (t) printf("  %s\n", t);
+            free(t);
+            write_slot(saves, "FEDCBA98765432100123", "", NULL, 64);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\aaaa_bbbb_map.decl", saved);
+            CHECK(DeleteFileA(path));   /* the crate is now no map's ... */
+            CHECK(sh_cache_sweep(1, NULL, 0, &st));
+            CHECK(st.unreadable == 1 && st.units_removed == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000001\\SNAPMAPSFEDCBA98765432100123\\map.decl", saves);
+            CHECK(DeleteFileA(path));   /* ... and once every kept map reads, it goes */
+            CHECK(sh_cache_sweep(1, NULL, 0, &st));
+            CHECK(st.unreadable == 0 && st.units_removed == 1 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == -1);
+            CHECK(sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);
+        }
+        sh_saved_maps_set_root(NULL);
         sh_modmanifest_row_free(&crate_row);
     }
     sh_modmanifest_row_free(&rows[0]);

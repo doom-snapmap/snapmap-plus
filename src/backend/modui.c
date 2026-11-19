@@ -25,7 +25,7 @@
 #include "editor_delete.h"
 #include <shlobj.h>
 #include <time.h>
-#include "raw_deflate.h"
+#include "saved_maps.h"
 #include "modbankinfo.h"
 #include "modzip.h"
 #ifndef SH_MODUI_PURE
@@ -1708,34 +1708,7 @@ static void mu_map_attribute(mu_map *mp)
     }
 }
 
-/* ---- the saved map's details */
-
-static char *g_saves_root;   /* tests: the saves folder (malloc'd); NULL the default */
-
-#ifdef SH_MODUI_TESTING
-void sh_modui_test_set_saves_root(const char *path)
-{
-    free(g_saves_root);
-    g_saves_root = path ? _strdup(path) : NULL;
-}
-#endif
-
-/* The game's saves folder (malloc'd), or NULL. */
-static char *mu_saves_root(void)
-{
-    PWSTR saved = NULL;
-    char *utf8, *out;
-    if (g_saves_root) return _strdup(g_saves_root);
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_SavedGames, 0, NULL, &saved)) || !saved) return NULL;
-    utf8 = sh_mb_utf8(saved);
-    CoTaskMemFree(saved);
-    if (!utf8) return NULL;
-    out = sh_textf("%s\\id Software\\DOOM\\base\\savegame.user", utf8);
-    free(utf8);
-    return out;
-}
-
-/* FindFirstFileW on a UTF-8 pattern (the saves root is UTF-8). */
+/* FindFirstFileW on a UTF-8 pattern. */
 static HANDLE mu_find_first(const char *pattern, WIN32_FIND_DATAW *fd)
 {
     wchar_t *w = sh_mb_wpath(pattern);
@@ -1744,38 +1717,17 @@ static HANDLE mu_find_first(const char *pattern, WIN32_FIND_DATAW *fd)
     return h;
 }
 
-/* The local save's game.details (savegame.user\<profile>\SNAPMAPS<id>\):
- * its metadata's name and its modified time. 1 when found. */
+/* ---- the saved map's details */
+
+/* The local save's game.details (saved_maps.h): its metadata's name and its modified time. 1 when found. */
 static int mu_saved_details(const char *local_id, char **name, long long *saved)
 {
-    char *root, *pattern;
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    char *text = NULL;
+    char *text;
     const char *c;
     size_t i;
     *name = NULL;
     *saved = 0;
-    /* A saved map's local id is the engine's own: a short token of letters and digits. */
-    if (!local_id || !local_id[0] || strlen(local_id) > 40) return 0;
-    for (c = local_id; *c; c++) if (!((*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z'))) return 0;
-    if (!(root = mu_saves_root())) return 0;
-    pattern = sh_textf("%s\\*", root);
-    h = pattern ? mu_find_first(pattern, &fd) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) { free(root); return 0; }
-    do {
-        char *leaf, *path;
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
-        if ((leaf = sh_mb_utf8(fd.cFileName)) == NULL) continue;
-        path = sh_textf("%s\\%s\\SNAPMAPS%s\\game.details", root, leaf, local_id);
-        free(leaf);
-        text = path ? (char *)sh_mb_read_file(path, 1u << 20, NULL) : NULL;
-        free(path);
-    } while (!text && FindNextFileW(h, &fd));
-    FindClose(h);
-    free(root);
-    if (!text) return 0;
+    if ((text = sh_saved_map_details(local_id)) == NULL) return 0;
     /* Lines: checksum=, itemId=, metadata=<JSON>, modified=<epoch ms>. */
     for (c = text; c && *c;) {
         const char *end = strchr(c, '\n');
@@ -3237,85 +3189,16 @@ static void mu_undo_owe(const char *key)
 
 /* ---- saved maps that use a mod (the Uninstall confirmation) */
 
-/* The text of a local save's map.decl: a 4-byte checksum, then zlib (a
- * 2-byte header, raw DEFLATE, a 4-byte Adler-32) of the map JSON. malloc'd,
- * NUL-terminated, or NULL. */
-static char *mu_saved_map_text(const char *path, size_t *len)
-{
-    size_t n = 0, cap;
-    unsigned char *raw = (unsigned char *)sh_mb_read_file(path, (size_t)-1, &n);
-    char *out = NULL;
-    *len = 0;
-    if (!raw) return NULL;
-    if (n < 4 + 2 + 4 || (raw[4] & 0x0F) != 8 || ((raw[4] << 8) | raw[5]) % 31 || (raw[5] & 0x20)) { free(raw); return NULL; }
-    /* The buffer doubles until the whole text fits, of any size; DEFLATE
-     * expands at most 1032 to 1, so past that the stream is malformed. */
-    for (cap = n * 8 < 65536 ? 65536 : n * 8; cap / 2 <= n * 1032 + 65536 && cap < ((size_t)-1) / 2; cap *= 2) {
-        size_t got;
-        out = (char *)malloc(cap + 1);
-        if (!out) break;
-        got = sh_inflate_raw_upto(raw + 6, n - 6 - 4, (unsigned char *)out, cap);
-        if (got && got < cap) { out[got] = 0; *len = got; break; }
-        free(out);
-        out = NULL;
-    }
-    free(raw);
-    return out;
-}
-
-/* Every local save (My Maps): `fn` gets each readable
- * savegame.user\<profile>\SNAPMAPS<id>\map.decl text. -1 when the saves
- * folder cannot be read, else the number of maps read. */
-typedef void (*mu_saved_fn)(void *ctx, const char *text, size_t len);
-static int mu_saved_maps_each(mu_saved_fn fn, void *ctx)
-{
-    char *root, *pattern, *sub, *path;
-    WIN32_FIND_DATAW fd, sd;
-    HANDLE h, hs;
-    int count = 0;
-    if (!(root = mu_saves_root())) return -1;
-    pattern = sh_textf("%s\\*", root);
-    h = pattern ? mu_find_first(pattern, &fd) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) { free(root); return -1; }
-    do {
-        char *profile;
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
-        if ((profile = sh_mb_utf8(fd.cFileName)) == NULL) continue;
-        sub = sh_textf("%s\\%s\\SNAPMAPS*", root, profile);
-        hs = sub ? mu_find_first(sub, &sd) : INVALID_HANDLE_VALUE;
-        free(sub);
-        if (hs == INVALID_HANDLE_VALUE) { free(profile); continue; }
-        do {
-            char *text, *map;
-            size_t len = 0;
-            if (!(sd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            if ((map = sh_mb_utf8(sd.cFileName)) == NULL) continue;
-            path = sh_textf("%s\\%s\\%s\\map.decl", root, profile, map);
-            free(map);
-            text = path ? mu_saved_map_text(path, &len) : NULL;
-            free(path);
-            if (!text) continue;
-            fn(ctx, text, len);
-            free(text);
-            count++;
-        } while (FindNextFileW(hs, &sd));
-        FindClose(hs);
-        free(profile);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    free(root);
-    return count;
-}
-
 typedef struct mu_salt_use { const char *salt; int count; } mu_salt_use;
 
-static void mu_salt_use_one(void *ctx, const char *text, size_t len)
+static void mu_salt_use_one(void *ctx, const char *local_id, const char *item_id, const char *text, size_t len)
 {
     mu_salt_use *u = (mu_salt_use *)ctx;
     sh_modmanifest_list rows;
     size_t i;
     int uses = 0;
+    (void)local_id;
+    (void)item_id;
     memset(&rows, 0, sizeof rows);
     if (sh_modmanifest_read(text, len, &rows, NULL))
         for (i = 0; i < rows.count && !uses; i++) uses = !_stricmp(rows.rows[i].salt, u->salt);
@@ -3331,7 +3214,7 @@ static int mu_saved_maps_using(const char *salt)
     if (!salt || !salt[0]) return -1;
     u.salt = salt;
     u.count = 0;
-    return mu_saved_maps_each(mu_salt_use_one, &u) < 0 ? -1 : u.count;
+    return sh_saved_maps_each(mu_salt_use_one, &u, NULL) < 0 ? -1 : u.count;
 }
 
 /* ---- map scope (modserve.h): what the open map lists */
