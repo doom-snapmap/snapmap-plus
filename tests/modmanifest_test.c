@@ -629,6 +629,63 @@ static void save_closure(void)
     }
 }
 
+/* R-LV4: a resized Grid Room and a navigation-marked Blocking Box saved with no row and no tag; the owner rules both
+ * mods (PLATFORM, Vanilla stays vanilla). What a map uses of Snapmap+ itself is the product's own entry of the rows:
+ * written by a save while the map uses it, gone when it does not, never a row (nothing to download). */
+static unsigned g_uses_answer;
+static unsigned fake_uses(const char *json, size_t length, const char *const *names, size_t count)
+{
+    (void)json; (void)length; (void)names; (void)count;
+    return g_uses_answer;
+}
+
+static void product_entry(void)
+{
+    static const char room[] = "{\"instances\":[{\"moduleName\":\"maps/modules/smpgrid/v1/m/1536_1536_512.decl\"}],"
+                               "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+    sh_modmanifest_list back = {0};
+    unsigned rejected = 9;
+    size_t n = 0, n2 = 0;
+    char *out, *again;
+    printf("-- what a map uses of Snapmap+ itself: the product's entry, written and removed by the save\n");
+    g_installed_count = 0;
+    sh_modmanifest_reset();
+    sh_modmanifest_set_uses(fake_uses);
+    g_uses_answer = SH_MODMANIFEST_USES_MODULE_SIZES | SH_MODMANIFEST_USES_NAVIGATION;
+    out = sh_modmanifest_on_save(room, sizeof room - 1, &n);
+    CHECK(out && strstr(out, "\"mods\":[{\"mod\":\"snapmap-plus\",\"name\":\"Snapmap+\",\"uses\":[\"module-sizes\",\"navigation\"]}]"));
+    if (out) {
+        CHECK(sh_modmanifest_read(out, n, &back, &rejected) == 0 && rejected == 0 && back.count == 0);   /* not a row */
+        CHECK(back.uses == (SH_MODMANIFEST_USES_MODULE_SIZES | SH_MODMANIFEST_USES_NAVIGATION));
+        sh_modmanifest_list_free(&back);
+        /* The room back at its stock size and the box unmarked: the entry goes. */
+        g_uses_answer = 0;
+        again = sh_modmanifest_on_save(out, n, &n2);
+        CHECK(again && !strstr(again, "snapmap-plus\",\"name\"") && !strstr(again, "\"mods\""));
+        if (again) HeapFree(GetProcessHeap(), 0, again);
+        HeapFree(GetProcessHeap(), 0, out);
+    }
+    /* With a mod's row the entry follows the rows. */
+    g_installed = INSTALLED;
+    g_installed_count = 2;
+    g_uses_answer = SH_MODMANIFEST_USES_NAVIGATION;
+    out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
+    CHECK(out && strstr(out, "{\"mod\":\"alexpink\"") && strstr(out, ",{\"mod\":\"snapmap-plus\",\"name\":\"Snapmap+\",\"uses\":[\"navigation\"]}]"));
+    if (out) {
+        memset(&back, 0, sizeof back);
+        CHECK(sh_modmanifest_read(out, n, &back, &rejected) == 1 && rejected == 0 && back.uses == SH_MODMANIFEST_USES_NAVIGATION);
+        sh_modmanifest_list_free(&back);
+        HeapFree(GetProcessHeap(), 0, out);
+    }
+    /* Vanilla: nothing used, nothing installed serves the map: the engine's bytes, unchanged. */
+    g_installed_count = 0;
+    g_uses_answer = 0;
+    CHECK(sh_modmanifest_on_save(room, sizeof room - 1, &n) == NULL);
+    sh_modmanifest_set_uses(NULL);
+    g_installed = INSTALLED;
+    sh_modmanifest_reset();
+}
+
 static void load_step(void)
 {
     sh_modmanifest_list rows = {0}, current = {0};
@@ -1070,6 +1127,7 @@ int main(void)
     all_parts();
     placed_names();
     save_closure();
+    product_entry();
     editor_substitution();
     activate_by_id();
     load_step();

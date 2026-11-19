@@ -693,6 +693,19 @@ int main(int argc, char **argv)
         CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 2 && F.untag_calls == untags + 1 && !F.tags_present);
         CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.untag_calls == untags + 2);   /* absent */
         CHECK(F.tag_calls == calls + 2);
+        /* R-LV4: a map that uses Snapmap+ itself (a resized room, its own navigation) and no mod is tagged; the tag
+         * goes again when it no longer does. */
+        {
+            static const char RESIZED[] = "{\"entities\":[],\"snapmap-plus\":{\"format\":2,\"mods\":["
+                                          "{\"mod\":\"snapmap-plus\",\"name\":\"Snapmap+\",\"uses\":[\"module-sizes\"]}]}}";
+            int before = F.tag_calls;
+            sh_modpublish_save_seen(RESIZED, sizeof RESIZED - 1);
+            CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tags_present && F.tag_calls == before + 1);
+            sh_modpublish_save_seen(EMPTY_MAP, strlen(EMPTY_MAP));
+            CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 2 && !F.tags_present);
+            calls += 1;
+            untags += 1;
+        }
         /* Back with rows (Ctrl+Z, then save): the tag returns. */
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tags_present && F.tag_calls == calls + 3);

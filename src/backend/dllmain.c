@@ -38,6 +38,7 @@
 #include "modstore.h"
 #include "modcache.h"
 #include "modmanifest.h"
+#include "map_uses.h"
 #include "modstock.h"
 #include "modlook.h"
 #include "modprog.h"
@@ -238,6 +239,8 @@ static void install_features(const sig_result *results, size_t db)
         sh_modmanifest_set_content(sh_cache_on_load);
         sh_cache_sweep_async();
     }
+    /* What a map uses of Snapmap+ itself flags it at every save (map_uses.h). */
+    sh_modmanifest_set_uses(sh_map_uses);
 
     /* Inject custom #str_ entries before the first top-level language-table sort,
      * after the serving index so the first pass already carries the admitted

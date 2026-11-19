@@ -5071,7 +5071,14 @@ bundle), each rescan (one line per mod with warnings), the Refresh result
 (`warnings`, `firstWarning`) and each mod of the Mods tab's payload
 (`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
-map needs Snapmap+. Every local save keeps the tag in step with its rows: the
+map needs Snapmap+. So does a map that uses a feature of Snapmap+ itself that a
+game without it cannot load (`map_uses.c`: a Grid Room resized past its stock
+size, a Blocking Box marked for AI navigation): every save writes the
+product's own entry into the rows, `{"mod":"snapmap-plus","name":"Snapmap+",
+"uses":["module-sizes","navigation"]}` (not a row: nothing downloads and no
+gate holds it; `sh_modmanifest_list.uses`), and drops it when the map no
+longer uses them. Cameras, timelines, water volumes and logic leave a map
+vanilla. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
 save observer saw rows and removes it when it saw none (the model is copied
 back to the editor), so an undo of the last mod's removal, or a save made

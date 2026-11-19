@@ -102,6 +102,7 @@ $tests = @(
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
     @{ name = "engine_dialog_test"; src = 'engine_dialog_test.c ..\src\backend\engine_dialog.c'; defs = '/DSH_ENGINE_DIALOG_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
+    @{ name = "map_uses_test"; src = 'map_uses_test.c ..\src\backend\map_uses.c ..\src\backend\nav_regions.c ..\src\backend\grid_room.c ..\src\backend\mp_json.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; arg = (Join-Path $here 'fixtures\maps') }
     @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; defs = '/DSH_NAVR_TESTING'; arg = "" }
     @{ name = "nav_snapshot_test"; src = 'nav_snapshot_test.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; arg = "" }
     @{ name = "nav_entitydef_test"; src = 'nav_entitydef_test.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; arg = "" }

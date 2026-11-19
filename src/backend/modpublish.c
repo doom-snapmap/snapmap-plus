@@ -140,6 +140,7 @@ typedef struct mp_save {
     size_t length;
     ULONGLONG at;
     size_t count;                              /* distinct bundles named */
+    unsigned uses;                             /* what the map uses of Snapmap+ itself (modmanifest.h) */
     char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;                  /* their sizes, summed */
    int carrier;                               /* the text carries the snapmap-plus member */
@@ -237,6 +238,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
         }
         g_save.count = rows.count;
     }
+    g_save.uses = rows.uses;
     if (rejected) {
         /* A row the reader refused names a mod the upload cannot know:
          * publishing would leave players without it, so the map is not
@@ -283,9 +285,11 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
         else if (!g_tag.local[0] || (local_id && !strcmp(local_id, g_tag.local))) { armed = 1; g_tag.armed = 0; }
     }
     /* The observer reported this save's text just before its write. Every
-     * local save makes the tag match it: present with rows, absent without. */
+     * local save makes the tag match it: present with rows or with a feature of
+     * Snapmap+ the map uses (a resized module, its own navigation), absent
+     * without. */
     if (!g_save.valid || GetTickCount64() - g_save.at > MP_SAVE_FRESH_MS || !model) return 0;
-    if (!g_save.count) {
+    if (!g_save.count && !g_save.uses) {
         if (!g_ops.remove_tag) return 0;
         tagged = g_ops.remove_tag(g_ops.context, model, SH_MODPUBLISH_TAG);
         if (tagged > 0)
