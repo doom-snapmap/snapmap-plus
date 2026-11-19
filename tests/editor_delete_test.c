@@ -671,6 +671,29 @@ static void invalid_targets_refuse_before_any_engine_call(void)
     CHECK(alive(3));
 }
 
+static void builtin_filters_refuse_before_any_engine_call(void)
+{
+    /* The map's built-in filters (IDs below first_placed; 56 in the game) have live
+     * slots and pass the native delete predicate, but the save's snapshot releases
+     * every one of them from their group: a map missing one faults its next save. */
+    CHECK(SH_EDITOR_DELETE_FIRST_PLACED == 56);
+    world_reset(); bind_model();
+    sh_editor_delete_engine e;
+    memset(&e, 0, sizeof e);
+    e.editor = g_ed; e.clear_selection = fake_clear_selection; e.add_to_selection = fake_add_to_selection;
+    e.clear_hover = fake_clear_hover; e.refresh_capabilities = fake_caps; e.blocked = fake_blocked;
+    e.delete_selection = fake_delete; e.on_main_thread = fake_on_main;
+    e.manipulation_in_progress = fake_manipulation; e.heap_enter = fake_heap_enter;
+    e.heap_leave = fake_heap_leave; e.first_placed = 3;
+    CHECK(sh_editor_delete_bind(&e) == 1);
+    sh_editor_delete_result r;
+    int filter[] = { 4, 2 };
+    CHECK(run(filter, 2, &r) == SH_EDITOR_DELETE_INVALID && r.first_id == 2 && g_nlog == 0);
+    CHECK(alive(2) && alive(4));
+    int placed[] = { 3 };
+    CHECK(run(placed, 1, &r) == SH_EDITOR_DELETE_DISPATCHED && !alive(3));
+}
+
 static void duplicate_ids_are_deleted_once(void)
 {
     world_reset(); bind_model();
@@ -1000,6 +1023,7 @@ int main(void)
     native_owners_refuse_before_any_engine_call();
     editor_readiness_refuses_before_any_engine_call();
     invalid_targets_refuse_before_any_engine_call();
+    builtin_filters_refuse_before_any_engine_call();
     duplicate_ids_are_deleted_once();
     portal_entities_refuse_before_any_engine_call();
     connection_hover_touching_a_target_is_cleared();

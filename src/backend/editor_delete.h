@@ -39,7 +39,7 @@ enum sh_editor_delete_status {
     SH_EDITOR_DELETE_NOT_READY   =  -2, /* no editor/map/screen, the editor is changing state, or no process-heap scope */
     SH_EDITOR_DELETE_NOT_ENTITY  =  -3, /* the editor is not in EntityMode */
     SH_EDITOR_DELETE_BUSY        =  -4, /* see busy for the native owner of the selection */
-    SH_EDITOR_DELETE_INVALID     =  -5, /* empty/oversized request, or a dead/out-of-range ID */
+    SH_EDITOR_DELETE_INVALID     =  -5, /* empty/oversized request, or a dead/out-of-range/built-in filter ID */
     SH_EDITOR_DELETE_RESTRICTED  =  -6, /* the editor's restriction set blocks Delete */
     SH_EDITOR_DELETE_PORTAL      =  -7, /* a target is a portal door/frame entity */
     SH_EDITOR_DELETE_PROTECTED   =  -8, /* native capabilities: not every target is deletable */
@@ -85,7 +85,13 @@ typedef struct sh_editor_delete_engine {
     int  (*manipulation_in_progress)(void);  /* product selection guard; null skips */
     int  (*heap_enter)(void);   /* push the process heap; 1 only when the push is verified */
     int  (*heap_leave)(void);   /* pop what heap_enter pushed; 1 when the caller's scope is back */
+    int  first_placed;          /* IDs below this are the map's built-in filters; never deleted */
 } sh_editor_delete_engine;
+
+/* The map's 56 built-in filters hold IDs 0..55 in both executables. The save's
+ * snapshot releases all 56 from their group, so a map missing one faults the
+ * save; install() refuses them (tests bind their own bound). */
+#define SH_EDITOR_DELETE_FIRST_PLACED 56
 
 /* Bind every boundary at once. Return 1 when all required callbacks (the heap
  * scope included) and the editor are present; otherwise unbind and return 0.

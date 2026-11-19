@@ -309,7 +309,7 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     int ntargets = 0;
     for (int i = 0; i < count; i++) {
         int id = ids[i];
-        if (!entity_alive(c.ents, c.ent_count, id)) {
+        if (id < g_engine.first_placed || !entity_alive(c.ents, c.ent_count, id)) {
             r->first_id = id;
             status = SH_EDITOR_DELETE_INVALID;
             goto done;
@@ -544,6 +544,7 @@ int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t 
     e.blocked = (unsigned char (*)(void *, uint32_t))sig_addr_by_name(results, n, "GridPropertiesBlocked");
     e.delete_selection = (void (*)(void *, void *, void *))action;
     e.manipulation_in_progress = manipulation_in_progress;
+    e.first_placed = SH_EDITOR_DELETE_FIRST_PLACED;
     if (sh_process_heap_bind(&g_heap_api, results, n, module_base)) {
         e.heap_enter = heap_enter;
         e.heap_leave = heap_leave;
