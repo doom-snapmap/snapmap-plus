@@ -307,7 +307,7 @@ int main(int argc, char **argv)
     }
 
     /* 2b. A third player with no connection to the store: the map loads with a stand-in for the object and one
-     * notice (S4 at a play, whose fetch found the store unreachable; S2 at an editor open, which asks no store). */
+     * notice (S4 at a play, whose fetch found the store unreachable, and S4 again at an editor open, which repeats it). */
     {
         char root_c[MAX_PATH], path[MAX_PATH * 2], *n, *placed = sh_textf("mods/%s/%s", g_pack.id, placed_name);
         int complete_c = 1;
@@ -335,7 +335,8 @@ int main(int argc, char **argv)
         free(n);
         code = sh_cache_compose_now(row1.build, SH_CACHE_ABSENT_OFFLINE, &why);
         n = sh_cache_take_notice();
-        step(code && n && strstr(n, "which is not on this computer"), "offline player: one notice at an editor open (S2)", n);
+        /* The open says what the play's fetch learned (R-DS6: a load that asks nothing repeats the recorded cause). */
+        step(code && n && strstr(n, "the mod store could not be reached"), "offline player: one notice at an editor open (S4, as the play learned)", n);
         free(n);
         free(placed);
         modnet_set_base_url(store);
