@@ -39,6 +39,7 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
 {
     uint8_t original[48];
     size_t emitted = stolen;
+    size_t jcc_len = 0;         /* a relocated conditional jump's length: 6 near, 2 short */
     uintptr_t rel_target = 0;   /* the absolute target of a relocated call or conditional jump */
     if (!target || !detour || stolen < 14 || stolen > 48) {
         g_last_failure = "bad argument or stolen length outside 14..48";
@@ -72,13 +73,18 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
         if (rel_target >= (uintptr_t)target && rel_target < (uintptr_t)target + stolen) return NULL;
         emitted += 11;
     } else if (relocation == 4) {
-        /* 0F 8x rel32: a near conditional jump; its target must lie outside the window */
-        int32_t displacement;
-        if (offset > stolen - 6 || original[offset] != 0x0f || (original[offset + 1] & 0xf0) != 0x80) return NULL;
-        memcpy(&displacement, original + offset + 2, sizeof(displacement));
-        rel_target = (uintptr_t)target + offset + 6 + (intptr_t)displacement;
+        /* 0F 8x rel32 (near) or 7x rel8 (short): a conditional jump; its target must lie outside the window */
+        if (offset <= stolen - 6 && original[offset] == 0x0f && (original[offset + 1] & 0xf0) == 0x80) {
+            int32_t displacement;
+            memcpy(&displacement, original + offset + 2, sizeof(displacement));
+            rel_target = (uintptr_t)target + offset + 6 + (intptr_t)displacement;
+            jcc_len = 6;
+        } else if (offset <= stolen - 2 && (original[offset] & 0xf0) == 0x70) {
+            rel_target = (uintptr_t)target + offset + 2 + (intptr_t)(int8_t)original[offset + 1];
+            jcc_len = 2;
+        } else return NULL;
         if (rel_target >= (uintptr_t)target && rel_target < (uintptr_t)target + stolen) return NULL;
-        emitted += 10;
+        emitted += 16 - jcc_len;
     }
 
     patch_record *rec = NULL;
@@ -135,11 +141,12 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
         memcpy(tramp + offset + 16, original + offset + 5, stolen - offset - 5);
     } else if (relocation == 4) {
         /* the inverse condition as a short jump over an absolute jump to the target: no register, flags read only */
+        uint8_t cond = (uint8_t)(jcc_len == 6 ? original[offset + 1] : original[offset]) & 0x0f;
         memcpy(tramp, original, offset);
-        tramp[offset] = (uint8_t)(0x70 | ((original[offset + 1] & 0x0f) ^ 1));
+        tramp[offset] = (uint8_t)(0x70 | (cond ^ 1));
         tramp[offset + 1] = 14;
         write_absjmp(tramp + offset + 2, (void *)rel_target);
-        memcpy(tramp + offset + 16, original + offset + 6, stolen - offset - 6);
+        memcpy(tramp + offset + 16, original + offset + jcc_len, stolen - offset - jcc_len);
     } else {
         memcpy(tramp, original, stolen);
     }
