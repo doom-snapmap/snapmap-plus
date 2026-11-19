@@ -10,16 +10,32 @@
  * operations merge, additions union, and a field or keyed entry two bundles
  * set to different values is the map's choice (the manifest's "choices",
  * slot "<type>/<decl name>/<path>") else the first in row order, one line.
- * Every game file goes through the same apply; the one rule per file is the
- * encounter conductor's (entitydef/ai/conductor/coop/snapmap_default):
+ * Every game file goes through the same apply; the rules per file are the
+ * encounter conductor's (entitydef/ai/conductor/coop/snapmap_default) and the
+ * editor's encounter pickers':
  *
- *   conductor   each aiTypeList item a bundle adds whose aiType is a number
- *               that is not a stock SPAWN_AI_TYPE_* bit gets a bit assigned
- *               here per map (the lowest free above the stock bits, 1 << 19
- *               .. 1 << 29, in row order, then by encounter decl name); every
- *               snapAiEncounter memberType and snapAiScore aiType of that
- *               bundle naming the number the author wrote is served
- *               rewritten to the assigned bit.
+ *   conductor   each aiTypeList item a bundle adds whose aiType holds a number
+ *               that is not a stock SPAWN_AI_TYPE_* bit is a ported demon: it
+ *               gets a spawn type of its own here per map (the lowest free
+ *               above the stock bits, 1 << 19 .. 1 << 29, in row order, then
+ *               by encounter decl name). The stock flags the item names beside
+ *               its number say which stock demon it stands in for
+ *               (`aiType = "SPAWN_AI_TYPE_BARON 1048576";`): they are never
+ *               served (the item serves its own type alone) and the kill score
+ *               reads them (sh_modserve_spawn_type_standin). Every number a
+ *               bundle wrote is served as its assigned type wherever that
+ *               bundle wrote it: its own snapAiEncounter memberTypes and
+ *               snapAiScore aiTypes, and every memberType or aiType its edits
+ *               of game files set (a globalAIMods row; a stock encounter's
+ *               member, which the edits of several bundles compose as the
+ *               union of their types: decl_tree.c). With every free type
+ *               taken, a further ported demon shares the type of the first
+ *               one standing in for the same stock demon (else the first
+ *               one), with one line.
+ *   pickers     the Single Demon Encounter, Encounter List and Miniboss
+ *               pickers (SH_MR_GROWN_LISTS) offer every single-demon
+ *               encounter the caller lists (the installed mods' own: a grown
+ *               list never declares a mod, modserve.c), after the game's.
  */
 #ifndef SNAPMAP_PLUS_MODREGISTRY_H
 #define SNAPMAP_PLUS_MODREGISTRY_H
@@ -31,6 +47,12 @@
 #define SH_MR_BIT_LAST  29   /* below SPAWN_AI_TYPE_ANY, 1 << 30 */
 
 #define SH_MR_CLASH_SOURCES 8
+
+/* The editor's encounter pickers an installed mod's single-demon encounters
+ * grow: the Single Demon Encounter, the Encounter List and the Miniboss
+ * event's boss list (snappropertyinspector_whitelistencounterdecl[list]). */
+#define SH_MR_GROWN_LIST_COUNT 3
+extern const char *const SH_MR_GROWN_LISTS[SH_MR_GROWN_LIST_COUNT];
 
 /* ------------------------------------------------------------ generation */
 
@@ -62,6 +84,8 @@ typedef struct sh_mr_choice { const char *slot, *key; } sh_mr_choice;
 typedef struct sh_mr_entry {
     int source;
     unsigned authored, bit;
+    unsigned standin;          /* the stock spawn-type bits the item names beside its number, 0 for none */
+    int shared;                /* 1 when no free type was left and it serves another entry's bit */
     char *def;                 /* malloc'd */
     char *encounter;           /* malloc'd, NULL for none */
 } sh_mr_entry;
@@ -89,9 +113,12 @@ typedef struct sh_mr_result {
     char **lines; int nlines;  /* what was generated and every clash, one line each */
 } sh_mr_result;
 
-/* Generate every target from `n` sources. Returns 1 (0 out of memory). */
+/* Generate every target from `n` sources; a target that is one of
+ * SH_MR_GROWN_LISTS also offers `grown[0..ngrown)` (encounter decl names).
+ * Returns 1 (0 out of memory). */
 int  sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *targets, int ntargets,
-                             const sh_mr_choice *choices, int nchoices, sh_mr_result *out);
+                             const sh_mr_choice *choices, int nchoices, const char *const *grown, int ngrown,
+                             sh_mr_result *out);
 void sh_modregistry_result_free(sh_mr_result *r);
 
 /* The clip blocks of a player body text: each `anim "<clip>" {` block directly
@@ -112,6 +139,26 @@ char *sh_modregistry_rewrite_bits(const char *text, size_t len, const unsigned *
                                   size_t *out_len);
 /* 1 when `value` is one of the game's SPAWN_AI_TYPE_* bits (1 .. 1 << 18, 1 << 30). */
 int  sh_modregistry_stock_bit(unsigned value);
+/* The value of a SPAWN_AI_TYPE_* flag name (`n` characters, any case), with 1;
+ * 0 for another word. Values of the game's spawnAIType_t (13954591). */
+int  sh_modregistry_spawn_flag(const char *word, size_t n, unsigned *bit);
+/* A spawn-type value (a memberType or aiType string without its quotes, `n`
+ * characters): *own the first number that is not a stock bit (0 for none),
+ * *standin the stock bits its other words name (flag names or stock numbers).
+ * Returns 1 when it holds such a number. */
+int  sh_modregistry_type_words(const char *value, size_t n, unsigned *own, unsigned *standin);
+/* An edits JSON array (decl_tree.h) with every number `from[i]` inside the
+ * memberType or aiType value of an operation's statement written as `to[i]`
+ * (the statements are JSON strings: their quotes read \"). Malloc'd; NULL
+ * when nothing changed. */
+char *sh_modregistry_rewrite_edits(const char *edits, size_t len, const unsigned *from, const unsigned *to, int n,
+                                   size_t *out_len);
+/* `text` with `names[0..n)` added to the list block `list` directly inside
+ * its `edit` block (`item[i] = "name";`, num raised), each name the list does
+ * not already hold (any case). Malloc'd; NULL when nothing was added or the
+ * text has no such list. */
+char *sh_modregistry_append_list(const char *text, size_t len, const char *list, const char *const *names, int n,
+                                 size_t *out_len);
 
 /* ------------------------------------------------------------ choices --- */
 

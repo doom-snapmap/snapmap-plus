@@ -847,6 +847,13 @@ int  sh_modserve_scope_relevant(void);
  * any other name, and for a salt no installed mod carries. Any thread. */
 int  sh_modserve_level_hides(const char *name);
 
+/* The stock spawn-type bits a ported demon of the current listing stands in
+ * for, read from its conductor row (modregistry.h): `type` is an AI's spawn
+ * type; 0 for a stock type, a type no declared mod was given, and with
+ * nothing generated. Lock-free; any thread (the kill score's detour,
+ * kill_score.h). */
+unsigned sh_modserve_spawn_type_standin(unsigned type);
+
 typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
     int automatic;           /* "always" because it shadows editor-time content */

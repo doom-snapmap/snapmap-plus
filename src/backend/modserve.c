@@ -217,6 +217,8 @@ typedef struct ms_index {
     unsigned char *reg_xread;
     struct ms_reg_memo *reg_memo;
     struct ms_reg_memo *volatile reg_cur;
+    const char **grown;                   /* the installed mods' single-demon encounters the pickers offer (index arena) */
+    int ngrown;
 } ms_index;
 
 static ms_index *volatile g_index;
@@ -3098,8 +3100,25 @@ typedef struct ms_reg_memo {
     const char **lines;                   /* sh_modserve_registry_report */
     int nlines, nsources;
     int *gate;                            /* per registry file: the source bundle whose requirement gates gate its text, or -1 */
+    unsigned standin[32];                 /* per spawn-type bit assigned to a ported demon: the stock bits it stands in for */
     struct ms_reg_memo *next;
 } ms_reg_memo;
+
+/* The current listing's stand-ins (ms_registry_compute publishes them; the kill
+ * score's detour reads them on the game thread without the scope lock). */
+static volatile LONG g_spawn_standin[32];
+
+unsigned sh_modserve_spawn_type_standin(unsigned type)
+{
+    int b;
+    if (!type || (type & ((1u << 19) - 1u)) || (type & (1u << 30))) return 0;   /* a stock type: the game's own */
+    for (b = 19; b < 32; ++b)
+        if (type & (1u << b)) {
+            unsigned s = (unsigned)InterlockedCompareExchange(&g_spawn_standin[b], 0, 0);
+            if (s) return s;
+        }
+    return 0;
+}
 
 typedef struct ms_scope_choice { char *slot, *key; } ms_scope_choice;   /* both malloc'd */
 static ms_scope_choice *g_scope_choice;   /* the open map's choices between mods' edits (g_scope_lock) */
@@ -3179,6 +3198,48 @@ static void ms_mark_edits(ms_index *x)
     }
 }
 
+/* The single-demon encounters of the installed mods (their root folders'
+ * builds): each snapAiEncounter a mod carries under its own salt with one
+ * member. The editor's encounter pickers offer them (SH_MR_GROWN_LISTS, the
+ * owner's rule: an installed mod grows SnapMap's lists, and a grown list never
+ * declares a mod; a map is modded only when it references the mod's entity). */
+static char *ms_reg_text(const ms_file *f, size_t *len);
+
+static int ms_registry_grown(ms_index *x)
+{
+    const char **names = NULL;
+    int i, k, cap = 0, n = 0;
+    x->grown = NULL;
+    x->ngrown = 0;
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->admitted || b->place) continue;
+        for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
+            const ms_file *f = &x->files[k];
+            size_t len = 0, at;
+            char *t;
+            int members = 0;
+            if (!f->served || f->edit || f->is_shadow || !ms_is_type(f->ptype, "snapAiEncounter") || !f->pname) continue;
+            if (!(t = ms_reg_text(f, &len))) continue;
+            for (at = 0; at + 10 <= len; ++at) if (!_strnicmp(t + at, "memberType", 10)) members++;
+            HeapFree(GetProcessHeap(), 0, t);
+            if (members != 1) continue;
+            if (!ms_grow((void **)&names, &cap, n + 1, sizeof(char *))) { free(names); return 0; }
+            names[n++] = f->pname;
+        }
+    }
+    if (n) {
+        x->grown = (const char **)ms_alloc(x, sizeof(char *) * (size_t)n);
+        if (!x->grown) { free(names); return 0; }
+        memcpy((void *)x->grown, names, sizeof(char *) * (size_t)n);
+        x->ngrown = n;
+    }
+    free(names);
+    if (x->ngrown) ms_log("registry: the editor's encounter pickers offer %d single-demon encounter(s) of the installed mods",
+                          x->ngrown);
+    return 1;
+}
+
 /* The synthetic files, after ms_resolve (winners known), before the tables. */
 static int ms_registry_files(ms_index *x)
 {
@@ -3189,6 +3250,8 @@ static int ms_registry_files(ms_index *x)
     for (i = 0; i < x->nbundles; ++i)
         if (x->bundles[i].admitted && x->bundles[i].edits)
             (void)sh_dt_edits_files(x->bundles[i].edits, x->bundles[i].edits_len, ms_req_list_add, &l);
+    if (!ms_registry_grown(x)) goto oom;
+    for (i = 0; x->ngrown && i < SH_MR_GROWN_LIST_COUNT; ++i) ms_req_list_add(&l, SH_MR_GROWN_LISTS[i], NULL);
     if (l.oom) goto oom;
     if (l.n > 1) qsort(l.reqs, (size_t)l.n, sizeof *l.reqs, ms_req_cmp);
     /* The pseudo-bundle one past the count. */
@@ -3426,12 +3489,17 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
             s->ndecls = nd;
         }
     }
-    if (!sh_modregistry_generate(src, n, tg, x->reg_count, choices, g_scope_nchoice, &r)) goto done;
+    if (!sh_modregistry_generate(src, n, tg, x->reg_count, choices, g_scope_nchoice, x->grown, x->ngrown, &r)) goto done;
     m = (ms_reg_memo *)ms_alloc(x, sizeof *m);
     if (!m) goto done;
     memset(m, 0, sizeof *m);
     m->sig = sig;
     m->nsources = n;
+    for (i = 0; i < r.nentries; ++i) {
+        unsigned bit = r.entries[i].bit;
+        int b;
+        for (b = 19; b < 32; ++b) if (bit == (1u << b) && !m->standin[b]) m->standin[b] = r.entries[i].standin;
+    }
     m->body = (ms_body **)ms_alloc(x, sizeof(ms_body *) * (size_t)(x->reg_count ? x->reg_count : 1));
     m->gate = (int *)ms_alloc(x, sizeof(int) * (size_t)(x->reg_count ? x->reg_count : 1));
     if (!m->body || !m->gate) { m = NULL; goto done; }
@@ -3505,7 +3573,10 @@ static int ms_registry_compute(ms_index *x, int on)
     ms_reg_memo *m = NULL, *was = x->reg_cur;
     int n = 0, i;
     uint64_t sig = 1469598103934665603ull;
-    if (!x->reg_count) return 0;
+    if (!x->reg_count) {
+        for (i = 0; i < 32; ++i) InterlockedExchange(&g_spawn_standin[i], 0);
+        return 0;
+    }
     if (on) {
         set = (ms_bundle **)malloc(sizeof(ms_bundle *) * (size_t)(x->nbundles ? x->nbundles : 1));
         if (!set) return 0;
@@ -3528,13 +3599,14 @@ static int ms_registry_compute(ms_index *x, int on)
             for (p = g_scope_choice[i].key; *p; ++p) sig = (sig ^ (unsigned char)*p) * 1099511628211ull;
             sig = (sig ^ ';') * 1099511628211ull;
         }
-        if (n) {
+        if (n || x->ngrown) {
             for (m = x->reg_memo; m && m->sig != sig; m = m->next) {}
             if (!m) m = ms_registry_generate(x, set, n, sig);
         }
         free(set);
     }
     InterlockedExchangePointer((PVOID volatile *)&x->reg_cur, m);
+    for (i = 0; i < 32; ++i) InterlockedExchange(&g_spawn_standin[i], m ? (LONG)m->standin[i] : 0);
     /* What serves from now on, said when it changes: the lines of the mods the listing declares, never a memo made
      * for another map's listing. */
     if (m != was) {

@@ -1242,6 +1242,8 @@ typedef struct dt_op {
     unsigned long long digest;
     int skip;                          /* lost a clash */
     int lost_to, lost_by_choice;       /* with skip: the source that serves the slot, and whether the map chose it */
+    int unioned;                       /* with skip: its spawn types are in the first source's composed value */
+    char *own_entry;                   /* malloc'd: a composed statement `entry` points to, or NULL */
 } dt_op;
 
 typedef struct dt_src_ops { dj *json; dt_op *ops; int n; } dt_src_ops;
@@ -1249,7 +1251,7 @@ typedef struct dt_src_ops { dj *json; dt_op *ops; int n; } dt_src_ops;
 static void dt_src_ops_free(dt_src_ops *so)
 {
     int k;
-    for (k = 0; so->ops && k < so->n; ++k) free(so->ops[k].slot);
+    for (k = 0; so->ops && k < so->n; ++k) { free(so->ops[k].slot); free(so->ops[k].own_entry); }
     free(so->ops);
     dj_free(so->json);
     so->ops = NULL;
@@ -1595,6 +1597,131 @@ static int dt_apply_op(sh_dt *t, const dt_op *op, int s, const char **why)
     }
 }
 
+#define DT_TYPES_MAX 32      /* memberType values one composed statement holds */
+
+/* The memberType values of a statement: [at, at + n) of each value's inside,
+ * in order; returns the count (-1 past DT_TYPES_MAX). */
+static int dt_type_values(const char *entry, size_t *at, size_t *n)
+{
+    const char *p = entry;
+    int c = 0;
+    while ((p = strstr(p, "memberType")) != NULL) {
+        const char *q = p + 10, *e;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '=') { p = q; continue; }
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '"' || !(e = strchr(q + 1, '"'))) { p = q; continue; }
+        if (c == DT_TYPES_MAX) return -1;
+        at[c] = (size_t)(q + 1 - entry);
+        n[c++] = (size_t)(e - (q + 1));
+        p = e + 1;
+    }
+    return c;
+}
+
+/* `words` gains each word of value[0..n) it does not hold yet (any case). */
+static void dt_union_words(dt_buf *words, const char *value, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        size_t s, m;
+        int held = 0;
+        while (i < n && (value[i] == ' ' || value[i] == '\t')) i++;
+        s = i;
+        while (i < n && value[i] != ' ' && value[i] != '\t') i++;
+        m = i - s;
+        if (!m) continue;
+        if (words->p) {
+            const char *h = words->p;
+            while (*h && !held) {
+                const char *e = strchr(h, ' ');
+                size_t hl = e ? (size_t)(e - h) : strlen(h);
+                held = hl == m && !_strnicmp(h, value + s, m);
+                h = e ? e + 1 : h + hl;
+            }
+        }
+        if (held) continue;
+        if (words->n) dt_put(words, " ", 1);
+        dt_put(words, value + s, m);
+    }
+}
+
+/* Encounter members' spawn types (memberType) are sets of flags, so the values
+ * several sources set compose as the union of their words, in row order,
+ * instead of clashing: two mods that each add their ported demon to a stock
+ * encounter's member both keep theirs. This holds for a set of one memberType
+ * and for a set of a block whose statements differ between the sources only
+ * in memberType values (a whole memberList): the first source's statement
+ * with each value the union of the sources' values at that place. 1 when
+ * `op`'s slot was composed so (the first source's op carries it, the others
+ * merge). */
+static int dt_union_types(dt_src_ops *so, const sh_dt_source *src, const int *who, int nwho, const dt_op *op,
+                          sh_dt_report *report)
+{
+    dt_buf names = { NULL, 0, 0, 0 }, out = { NULL, 0, 0, 0 };
+    dt_buf words[DT_TYPES_MAX];
+    size_t at0[DT_TYPES_MAX], n0[DT_TYPES_MAX], at[DT_TYPES_MAX], nn[DT_TYPES_MAX];
+    dt_op *first = NULL;
+    int w, k, c0 = 0, i, ok = 1;
+    char *entry;
+    if (op->kind != OP_SET || !op->entry) return 0;
+    memset(words, 0, sizeof words);
+    for (w = 0; w < nwho && ok; ++w)
+        for (k = 0; k < so[who[w]].n && ok; ++k) {
+            dt_op *o = &so[who[w]].ops[k];
+            int c;
+            if (_stricmp(o->slot, op->slot)) continue;
+            if (o->kind != OP_SET || !o->entry) { ok = 0; break; }
+            c = dt_type_values(o->entry, at, nn);
+            if (!first) {
+                first = o;
+                c0 = c;
+                memcpy(at0, at, sizeof at);
+                memcpy(n0, nn, sizeof nn);
+                if (c0 <= 0) { ok = 0; break; }
+            } else {
+                /* the same statement around the values: the text between them equal */
+                size_t pa = 0, pb = 0;
+                if (c != c0) { ok = 0; break; }
+                for (i = 0; i <= c0 && ok; ++i) {
+                    size_t ea = i < c0 ? at0[i] : strlen(first->entry), eb = i < c0 ? at[i] : strlen(o->entry);
+                    if (ea - pa != eb - pb || memcmp(first->entry + pa, o->entry + pb, ea - pa)) ok = 0;
+                    if (i < c0) { pa = at0[i] + n0[i]; pb = at[i] + nn[i]; }
+                }
+            }
+            for (i = 0; ok && i < c0; ++i) dt_union_words(&words[i], o->entry + at[i], nn[i]);
+        }
+    if (ok && first) {
+        size_t p = 0;
+        for (i = 0; i < c0; ++i) {
+            dt_put(&out, first->entry + p, at0[i] - p);
+            if (words[i].p) dt_puts(&out, words[i].p);
+            p = at0[i] + n0[i];
+        }
+        dt_puts(&out, first->entry + p);
+    }
+    for (i = 0; i < DT_TYPES_MAX; ++i) free(words[i].p);
+    entry = ok && first && out.p && !out.oom ? out.p : NULL;
+    if (!entry) { free(out.p); return 0; }
+    for (w = 0; w < nwho; ++w)
+        for (k = 0; k < so[who[w]].n; ++k) {
+            dt_op *o = &so[who[w]].ops[k];
+            if (o != first && !_stricmp(o->slot, op->slot)) { o->skip = 1; o->unioned = 1; }
+        }
+    for (w = 0; w < nwho; ++w) {
+        if (w) dt_puts(&names, ", ");
+        dt_puts(&names, src[who[w]].who ? src[who[w]].who : "?");
+    }
+    free(first->own_entry);
+    first->own_entry = entry;
+    first->entry = entry;
+    dt_line(report, "%s: set by %s; serving the spawn types of all of them", op->slot,
+            names.p && !names.oom ? names.p : "");
+    free(names.p);
+    return 1;
+}
+
 static const sh_dt_choice *dt_choice(const sh_dt_choice *ch, int n, const char *slot)
 {
     int i;
@@ -1659,6 +1786,7 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
                     break;
                 }
             if (!differ || nwho < 2) continue;
+            if (dt_union_types(so, src, who, nwho, op, report)) continue;
             serving = who[0];
             ch = dt_choice(choices, nchoices, op->slot);
             if (ch)
@@ -1701,6 +1829,7 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             const dt_op *op = &so[s].ops[k];
             const char *w = NULL;
             int r;
+            if (op->unioned) { merged++; continue; }   /* its types serve in the first source's composed value */
             if (op->skip) {
                 /* lost a clash: another source's value serves the slot */
                 if (lost && (op->lost_to != lost_to || op->lost_by_choice != lost_choice)) lost_mixed = 1;

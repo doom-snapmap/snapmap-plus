@@ -184,6 +184,28 @@ What the game is handed is the same files under the mod's identity: `entities/cr
 `generated/decls/entitydef/mods/<salt>/crate.decl`, the row's `entityDef` as `mods/<salt>/crate`, `#str_crate_name`
 as `#str_<salt>_crate_name`. A material of your own goes in `materials/` and is named the same way
 (`customMaterial = "materials/crate_rust"`); the [Graphics SDK](graphics-sdk.md) shows two.
+## A demon in SnapMap
+
+A demon of your own follows every SnapMap rule a stock demon does once SnapMap knows which stock demon it stands in
+for. That is one row, in your edited copy of the encounter conductor
+(`native/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl`), beside the game's rows:
+
+```
+item[18] = {
+	aiType = "SPAWN_AI_TYPE_MANCUBUS 524288";
+	entityDef = "entities/my_demon";
+}
+```
+
+The flag is the stock demon it stands in for; the number is any one that is not a stock flag (`524288`, then `1048576`
+for a second demon of the mod), the same in your demon's encounter (`memberType = "524288";`) and score
+(`aiType = "524288";`). Snapmap+ gives the demon a spawn type of its own in every map that uses it, so the AI Filter and
+the Cached Object tell it from every other demon; its kill scores in the map's Player Score as its stand-in's; the
+Single Demon Encounter, Encounter List and Miniboss pickers offer its encounter wherever the mod is installed, without
+the mod changing them; and an encounter SnapMap picks for its waves offers it where your edited copy of that encounter
+adds the number beside the stand-in's flag. A converter (Doomforge) writes all of this from the source game's data; its
+author writes nothing.
+
 ## What the build checks
 
 Every file is checked when the mod is built (a Refresh, or the first scan of a folder): its folder and kind, every

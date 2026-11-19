@@ -701,6 +701,156 @@ static void test_leftovers(void)
     sh_mb_set_stock_ops(NULL);
 }
 
+/* ------------------------------------------------------------------ the SnapMap contract (R-SM2) */
+
+#define REQ_E2 "generated/decls/snapaiencounter/e2_imp_pack.decl"
+static const char STOCK_E2[] =
+    "{\n\tedit = {\n\t\tmemberList = {\n\t\t\tnum = 2;\n\t\t\titem[0] = {\n\t\t\t\tmemberType = \"SPAWN_AI_TYPE_IMP\";\n"
+    "\t\t\t\tnumToSpawn = 3;\n\t\t\t}\n\t\t\titem[1] = {\n\t\t\t\tmemberType = \"SPAWN_AI_TYPE_BARON\";\n"
+    "\t\t\t\tnumToSpawn = 1;\n\t\t\t}\n\t\t}\n\t}\n}\n";
+static const char STOCK_SINGLE_LIST[] =
+    "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 2;\n\t\t\titem[0] = \"single_imp\";\n"
+    "\t\t\titem[1] = \"single_baron\";\n\t\t}\n\t}\n}\n";
+
+/* A ported demon's edits as Doomforge writes them: its conductor row (the stand-in's flag beside its own
+ * number) and its globalAIMods row, and the stock group encounter's Imp member offered as the port too. */
+static char *port_edits(unsigned authored, const char *standin, const char *def)
+{
+    char conductor[2048], e2[1024], *a, *b, *out;
+    _snprintf_s(conductor, sizeof conductor, _TRUNCATE,
+        "{\r\n\tinherit = \"ai/base/conductor\";\r\n\tedit = {\r\n\t\taiTypeList = {\r\n\t\t\tnum = 3;\r\n"
+        "\t\t\titem[0] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_IMP\";\r\n\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n"
+        "\t\t\titem[1] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_ARCHVILE\";\r\n\t\t\t\tentityDef = \"ai/demon/archvile_coop\";\r\n\t\t\t}\r\n"
+        "\t\t\titem[2] = {\r\n\t\t\t\taiType = \"%s %u\";\r\n\t\t\t\tentityDef = \"%s\";\r\n\t\t\t}\r\n"
+        "\t\t}\r\n\t\tglobalAIMods = {\r\n\t\t\tnum = 2;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_IMP\";\r\n\t\t\t}\r\n"
+        "\t\t\titem[1] = {\r\n\t\t\t\taiType = \"%u\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}", standin, authored, def, authored);
+    _snprintf_s(e2, sizeof e2, _TRUNCATE,
+        "{\n\tedit = {\n\t\tmemberList = {\n\t\t\tnum = 2;\n\t\t\titem[0] = {\n\t\t\t\tmemberType = \"SPAWN_AI_TYPE_IMP %u\";\n"
+        "\t\t\t\tnumToSpawn = 3;\n\t\t\t}\n\t\t\titem[1] = {\n\t\t\t\tmemberType = \"SPAWN_AI_TYPE_BARON\";\n"
+        "\t\t\t\tnumToSpawn = 1;\n\t\t\t}\n\t\t}\n\t}\n}\n", authored);
+    a = sh_dt_diff(REQ_CONDUCTOR, STOCK_CONDUCTOR, strlen(STOCK_CONDUCTOR), conductor, strlen(conductor), NULL, NULL, 0);
+    b = sh_dt_diff(REQ_E2, STOCK_E2, strlen(STOCK_E2), e2, strlen(e2), NULL, NULL, 0);
+    if (!a || !b) { free(a); free(b); return NULL; }
+    out = (char *)malloc(strlen(a) + strlen(b) + 4);
+    if (out) sprintf_s(out, strlen(a) + strlen(b) + 4, "[%s,%s]", a, b);
+    free(a);
+    free(b);
+    return out;
+}
+
+static void test_contract(void)
+{
+    static const char ENC[] = "{ edit = { memberList = { num = 1; item[0] = { memberType = \"2097152\"; numToSpawn = 1; } } } }";
+    static const char SCORE[] = "{ edit = { aiType = \"2097152\"; baseScore = 900; fallOffRate = 0.3; } }";
+    sh_mr_target tg[3] = {
+        { REQ_CONDUCTOR, STOCK_CONDUCTOR, sizeof STOCK_CONDUCTOR - 1 },
+        { REQ_E2, STOCK_E2, sizeof STOCK_E2 - 1 },
+        { NULL, STOCK_SINGLE_LIST, sizeof STOCK_SINGLE_LIST - 1 },
+    };
+    const char *grown[2] = { "mods/aaaaaaaa/single_tyrant", "single_imp" };
+    sh_mr_decl da[2] = { { "mods/aaaaaaaa/single_tyrant", ENC, sizeof ENC - 1, 0, 101 },
+                         { "mods/aaaaaaaa/tyrant", SCORE, sizeof SCORE - 1, 1, 102 } };
+    sh_mr_decl db[1] = { { "mods/bbbbbbbb/single_arachnotron", ENC, sizeof ENC - 1, 0, 201 } };
+    sh_mr_source src[2];
+    sh_mr_result r;
+    unsigned own = 0, like = 0;
+    char *ea = port_edits(2097152u, "SPAWN_AI_TYPE_BARON", "mods/aaaaaaaa/ai/demon/tyrant");
+    char *eb = port_edits(2097152u, "SPAWN_AI_TYPE_IMP", "mods/bbbbbbbb/ai/demon/arachnotron");
+    int i, ok_rw = 0;
+    printf("-- the SnapMap contract: stand-ins, every number a mod wrote, composed members, grown pickers, vanilla\n");
+    tg[2].request = SH_MR_GROWN_LISTS[0];
+    /* the words of a type */
+    CHECK(sh_modregistry_type_words("SPAWN_AI_TYPE_BARON 1048576", 27, &own, &like) && own == 1048576u && like == 128u);
+    CHECK(!sh_modregistry_type_words("SPAWN_AI_TYPE_IMP 128", 21, &own, &like) && own == 0 && like == (4u | 128u));
+    CHECK(sh_modregistry_spawn_flag("spawn_ai_type_lost_soul", 23, &own) && own == (1u << 15) &&
+          !sh_modregistry_spawn_flag("SPAWN_AI_TYPE_TYRANT", 20, NULL));
+    /* a list grows once per name, whatever the layout */
+    {
+        size_t len = 0;
+        char *t = sh_modregistry_append_list(STOCK_SINGLE_LIST, sizeof STOCK_SINGLE_LIST - 1, "validEncounters", grown, 2, &len);
+        CHECK(t && strstr(t, "num = 3;") && strstr(t, "\t\t\titem[2] = \"mods/aaaaaaaa/single_tyrant\";\n\t\t}") &&
+              count_of(t, "single_imp") == 1);
+        free(t);
+        t = sh_modregistry_append_list("{ edit = { validEncounters = { num = 0; } } }", 44, "validEncounters", grown, 1, &len);
+        CHECK(t && strstr(t, "num = 1;") && strstr(t, "item[0] = \"mods/aaaaaaaa/single_tyrant\"; }"));
+        free(t);
+        CHECK(sh_modregistry_append_list(STOCK_SINGLE_LIST, sizeof STOCK_SINGLE_LIST - 1, "validEncounters", grown + 1, 1,
+                                         &len) == NULL);
+    }
+    CHECK(ea && eb);
+    if (!ea || !eb) { free(ea); free(eb); return; }
+    /* an edits array's numbers, inside its statements' escaped quotes only */
+    {
+        size_t len = 0;
+        unsigned from = 2097152u, to = 524288u;
+        char *t = sh_modregistry_rewrite_edits(ea, strlen(ea), &from, &to, 1, &len);
+        CHECK(t && !strstr(t, "2097152") && strstr(t, "SPAWN_AI_TYPE_IMP 524288") && strstr(t, "SPAWN_AI_TYPE_BARON 524288"));
+        free(t);
+    }
+    memset(src, 0, sizeof src);
+    src[0].key = "aaaaaaaa"; src[0].who = "Tyrant"; src[0].edits = ea; src[0].edits_len = strlen(ea);
+    src[0].decls = da; src[0].ndecls = 2;
+    src[1].key = "bbbbbbbb"; src[1].who = "Arachnotron"; src[1].edits = eb; src[1].edits_len = strlen(eb);
+    src[1].decls = db; src[1].ndecls = 1;
+    CHECK(sh_modregistry_generate(src, 2, tg, 3, NULL, 0, grown, 1, &r));
+    /* each port a type of its own though both wrote 2097152, and the stock demon each stands in for */
+    CHECK(r.nentries == 2 && r.entries[0].bit == 524288u && r.entries[0].standin == 128u && !r.entries[0].shared &&
+          r.entries[1].bit == 1048576u && r.entries[1].standin == 4u);
+    /* the conductor serves each item its own type alone, and every row a mod wrote with its number */
+    CHECK(r.text[0] && strstr(r.text[0], "aiType = \"524288\";") && strstr(r.text[0], "aiType = \"1048576\";") &&
+          !strstr(r.text[0], "SPAWN_AI_TYPE_BARON") && !strstr(r.text[0], "2097152") &&
+          count_of(r.text[0], "aiType = \"524288\"") == 2 && count_of(r.text[0], "aiType = \"1048576\"") == 2);
+    /* the stock group encounter's member offers both ports beside the Imp: the union, never a clash */
+    CHECK(r.text[1] && strstr(r.text[1], "memberType = \"SPAWN_AI_TYPE_IMP 524288 1048576\"") &&
+          strstr(r.text[1], "memberType = \"SPAWN_AI_TYPE_BARON\"") && strstr(r.text[1], "num = 2;") && r.nclashes == 0);
+    /* the pickers offer the installed mods' singles */
+    CHECK(r.text[2] && strstr(r.text[2], "\"mods/aaaaaaaa/single_tyrant\"") && strstr(r.text[2], "num = 3;"));
+    for (i = 0; i < r.nrewrites; ++i)
+        ok_rw += (r.rewrites[i].id == 101 && strstr(r.rewrites[i].text, "memberType = \"524288\"") != NULL) +
+                 (r.rewrites[i].id == 102 && strstr(r.rewrites[i].text, "aiType = \"524288\"") != NULL) +
+                 (r.rewrites[i].id == 201 && strstr(r.rewrites[i].text, "memberType = \"1048576\"") != NULL);
+    CHECK(ok_rw == 3);
+    sh_modregistry_result_free(&r);
+    /* A twelfth port: no free type, so it shares the type of the first port standing in for the same demon. */
+    {
+        sh_mr_source many[12];
+        char *edits[12];
+        int k, made = 1;
+        memset(many, 0, sizeof many);
+        for (k = 0; k < 12; ++k) {
+            char key[16], def[64];
+            _snprintf_s(key, sizeof key, _TRUNCATE, "salt%04d", k);
+            _snprintf_s(def, sizeof def, _TRUNCATE, "mods/%s/ai/demon/port", key);
+            edits[k] = port_edits(2097152u, k == 11 || k == 3 ? "SPAWN_AI_TYPE_MANCUBUS" : "SPAWN_AI_TYPE_BARON", def);
+            made &= edits[k] != NULL;
+            many[k].key = _strdup(key);
+            many[k].who = many[k].key;
+            many[k].edits = edits[k];
+            many[k].edits_len = edits[k] ? strlen(edits[k]) : 0;
+        }
+        CHECK(made && sh_modregistry_generate(many, 12, tg, 1, NULL, 0, NULL, 0, &r));
+        CHECK(r.nentries == 12 && r.entries[11].shared && r.entries[11].bit == r.entries[3].bit &&
+              r.entries[10].bit == (1u << 29));
+        {
+            int said = 0;
+            for (i = 0; i < r.nlines; ++i) said |= strstr(r.lines[i], "shares the type of mods/salt0003/ai/demon/port") != NULL;
+            CHECK(said);
+        }
+        sh_modregistry_result_free(&r);
+        for (k = 0; k < 12; ++k) { free(edits[k]); free((void *)many[k].key); }
+    }
+    /* Vanilla stays vanilla: no declared mod and no installed demon generate nothing at all. */
+    CHECK(sh_modregistry_generate(NULL, 0, tg, 3, NULL, 0, NULL, 0, &r));
+    CHECK(!r.text[0] && !r.text[1] && !r.text[2] && !r.nentries && !r.nrewrites);
+    sh_modregistry_result_free(&r);
+    /* An installed demon grows the pickers only: the game's conductor and encounters serve as they are. */
+    CHECK(sh_modregistry_generate(NULL, 0, tg, 3, NULL, 0, grown, 1, &r));
+    CHECK(!r.text[0] && !r.text[1] && r.text[2] && strstr(r.text[2], "single_tyrant") && !r.nentries);
+    sh_modregistry_result_free(&r);
+    free(ea);
+    free(eb);
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
@@ -711,6 +861,7 @@ int main(int argc, char **argv)
     _snprintf_s(g_top, sizeof g_top, _TRUNCATE, "%ssmp-modregistry-%lu", tmp, GetCurrentProcessId());
     mkdirs(g_top);
     test_text();
+    test_contract();
     test_body_clip_count();
     test_generation();
     test_map_add_remove();
