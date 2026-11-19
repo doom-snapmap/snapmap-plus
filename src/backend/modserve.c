@@ -935,21 +935,16 @@ static int ms_editor_time(const char *request)
     return sh_mb_editor_time(request);
 }
 
-/* A shadow of editor-time content: it changes what the author can set, not
- * what plays, so a placed name it resolves names no bundle (the save closure
- * and the map listing skip it). */
-static int ms_editor_shadow(const ms_file *f)
+/* A file at one of DOOM's own names: a replacement of a DOOM binary (native/,
+ * class REPLACE), an edit of a DOOM decl, an editor tweak, or a registry the
+ * product generates from the declared mods' edits. A mod applies only in the
+ * maps it is set in (PLATFORM, Isolation; owner 2026-11-19): such a file serves
+ * only where a row declares its mod (an editor tweak, local, everywhere), so
+ * reaching DOOM's name never pulls the mod into a map, its listing or its save.
+ * Only the mod's own names do. */
+static int ms_doom_shadow(const ms_file *f)
 {
-    return f->is_shadow && ms_editor_time(f->request);
-}
-
-/* A replacement of a DOOM binary (native/, class REPLACE): it serves only in
- * maps that declare its mod by a row (D-A3, D-A27), so reaching DOOM's file
- * never pulls the mod into a map or its save. A decl edit of a DOOM name keeps
- * the reach rule. */
-static int ms_replacement(const ms_file *f)
-{
-    return f->is_shadow && !f->is_decl;
+    return f->is_shadow;
 }
 
 /* A growable text for the "extra" object. */
@@ -3466,7 +3461,6 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
                 if (m->lines[m->nlines]) m->nlines++;
             }
     }
-    for (i = 0; i < m->nlines; ++i) ms_log("registry: %s", m->lines[i]);
     m->next = x->reg_memo;
     x->reg_memo = m;
 done:
@@ -3541,6 +3535,12 @@ static int ms_registry_compute(ms_index *x, int on)
         free(set);
     }
     InterlockedExchangePointer((PVOID volatile *)&x->reg_cur, m);
+    /* What serves from now on, said when it changes: the lines of the mods the listing declares, never a memo made
+     * for another map's listing. */
+    if (m != was) {
+        if (!m && was) ms_log("registry: no declared mod edits a game file now; the game's own files serve");
+        for (i = 0; m && i < m->nlines; ++i) ms_log("registry: serving for the declared mods: %s", m->lines[i]);
+    }
     return !ms_reg_same(x, was, m);
 }
 
@@ -8273,7 +8273,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
         free(lower);
-        if (f >= 0 && (ms_editor_shadow(&x->files[f]) || ms_replacement(&x->files[f]))) continue;
+        if (f >= 0 && ms_doom_shadow(&x->files[f])) continue;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     while (qh < nq) {
@@ -8285,7 +8285,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         }
         for (k = 0; k < f->need_count; ++k) {
             int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
-            if (p >= 0 && !seen_file[p] && !ms_replacement(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
+            if (p >= 0 && !seen_file[p] && !ms_doom_shadow(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
     free(seen_file); free(seen_bundle); free(queue);
@@ -8313,7 +8313,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
         free(lower);
-        if (f < 0 || ms_editor_shadow(&x->files[f]) || ms_replacement(&x->files[f])) continue;
+        if (f < 0 || ms_doom_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
         if (!seen_bundle[x->files[f].bundle]) { seen_bundle[x->files[f].bundle] = 1; found++; }
@@ -8330,7 +8330,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         }
         for (k = 0; k < f->need_count; ++k) {
             int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
-            if (p >= 0 && !seen_file[p] && !ms_replacement(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
+            if (p >= 0 && !seen_file[p] && !ms_doom_shadow(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
     free(seen_file); free(seen_bundle); free(queue);

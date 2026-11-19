@@ -4034,7 +4034,10 @@ Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
 in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
 rows (the builds `sh_modserve_row_build` answers for them) and the placed
-closure (a salt alone declares nothing), with whether a map is open, the
+closure (a salt alone declares nothing; the closure follows only the mods' own
+names, never a file at one of DOOM's names, so a decl edit, a `native/`
+replacement or an editor tweak never declares its mod by being reached: a mod
+applies only in the maps it is set in, `ms_doom_shadow`), with whether a map is open, the
 loaded map's place (`sh_modserve_place_set`: a hash names the root's folder at
 that build, else the place's, never another map's place), and a mode,
 `sh_modserve_scope_mode`: `SH_MODSERVE_MODE_PLAY` from the Play entry
