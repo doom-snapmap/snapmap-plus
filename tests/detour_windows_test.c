@@ -23,6 +23,7 @@
 #include "attach_tags.h"
 #include "sync_clock.h"
 #include "level_templates.h"
+#include "kill_score.h"
 #include "../src/fault_shield/engine_layout.h"
 
 /* RVA_FRAME is an SH_RVA pair; evaluate it for the image under test rather
@@ -39,11 +40,12 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
                  SITE_CACHE /* a private signature of cachewrites_sigs.c */,
                  SITE_ATTACH /* a private signature of attach_tags_sigs.c */,
                  SITE_SYNC /* a private signature of sync_clock_sigs.c */,
-                 SITE_LEVEL /* the call in a private signature of level_templates_sigs.c */ };
+                 SITE_LEVEL /* the call in a private signature of level_templates_sigs.c */,
+                 SITE_KILL /* the private signature of kill_score_sigs.c */ };
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
-    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load, E8 or near Jcc at reloc is rewritten by the hook */
+    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load, E8 or near or short Jcc at reloc is rewritten by the hook */
     STUB_PADDING      /* a never-replayed stub: its ret at reloc is followed by int3 padding */
 };
 
@@ -142,6 +144,7 @@ static const site SITES[] = {
     { "attach_tags.c",        "TagInfoLookup",              SITE_ATTACH, 0, 15, REPLAYS, 0 },
     { "level_templates.c",    "SnapshotTemplateWalk",       SITE_LEVEL, SH_LT_WALK_CALL, SH_LT_STOLEN, REPLAYS, 0 },
     { "sync_clock.c",         "AnimReanchor",               SITE_SYNC, 0, 15, RELOCATES_AT, 3 },
+    { "kill_score.c",         "SnapPlayerScoreByType",      SITE_KILL, 0, SH_KS_STOLEN, RELOCATES_AT, SH_KS_JCC_OFFSET },
     { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleContext",            SITE_PARTICLE, 0, 15, REPLAYS, 0 },
     { "cachewrites.c",        "AtomicWrite",                SITE_CACHE, 0, 21, REPLAYS, 0 },
@@ -387,6 +390,15 @@ static void check_image(const char *path)
             }
             code = (const uint8_t *)own.addr + s->offset;
         }
+        if (s->kind == SITE_KILL) {
+            sig_result own;
+            if (strcmp(SH_KILL_SCORE_SIGNATURES[0].name, s->name) ||
+                sig_resolve_one(base, &SH_KILL_SCORE_SIGNATURES[0], &own) != SIG_OK || !own.addr) {
+                report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
+                continue;
+            }
+            code = (const uint8_t *)own.addr + s->offset;
+        }
         if (s->kind == SITE_LEVEL) {
             sig_result own;
             size_t k;
@@ -460,7 +472,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
-    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 },
+    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 }, { "backend\\kill_score.c", 1 },
     { "backend\\particlemotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 

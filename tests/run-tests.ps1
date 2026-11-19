@@ -233,6 +233,10 @@ $tests += @{ name = "attach_tags_sigs_test"; src = 'attach_tags_sigs_test.c ..\s
 # one list copy and its detour window.
 $tests += @{ name = "level_templates_test"; src = 'level_templates_test.c ..\src\backend\level_templates_rule.c'; arg = "" }
 $tests += @{ name = "level_templates_sigs_test"; src = 'level_templates_sigs_test.c ..\src\backend\level_templates_sigs.c ..\src\backend\level_templates_rule.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# The kill score (kill_score.h): a ported demon's type read as its stand-in's; with images, the Player Score
+# switch's pattern, its uniqueness, its window's one relocated short branch and its 18 field reads.
+$tests += @{ name = "kill_score_test"; src = 'kill_score_test.c ..\src\backend\kill_score_rule.c'; arg = "" }
+$tests += @{ name = "kill_score_sigs_test"; src = 'kill_score_sigs_test.c ..\src\backend\kill_score_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # The sync clock (sync_clock_rule.c): which animators of a sync run on the player's clock, and one re-anchor's
 # precision; with images, the re-anchor's pattern, the relocated jz of its window and its eight callers.
 $tests += @{ name = "sync_clock_test"; src = 'sync_clock_test.c ..\src\backend\sync_clock_rule.c ..\src\backend\clip_events_rule.c ..\src\backend\mp_json.c'; arg = "" }
@@ -292,7 +296,7 @@ $tests += @{ name = "script_node_test"; src = 'script_node_test.c ..\src\backend
 $tests += @{ name = "modvt_test"; src = 'modvt_test.c ..\src\backend\modvt.c ..\src\backend\modserve.c ..\src\backend\modstore.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\script\script_sdk_lua.c ..\src\backend\script\script_node_row.c ..\src\backend\strkeys.c ..\src\backend\modsalt.c ..\src\backend\modauthor.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\sha256.c'; defs = '/DSH_MODVT_PURE /DSH_MODSERVE_PURE /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib ole32.lib'; arg = $identityImages }
 $tests += @{ name = "native_slots_test"; src = 'native_slots_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Every fixed detour window against the images: boundary and relative operands.
-$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\clip_events_sigs.c ..\src\backend\attach_tags_sigs.c ..\src\backend\sync_clock_sigs.c ..\src\backend\level_templates_sigs.c ..\src\backend\particlemotion_sigs.c ..\src\backend\cachewrites_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
+$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\clip_events_sigs.c ..\src\backend\attach_tags_sigs.c ..\src\backend\sync_clock_sigs.c ..\src\backend\level_templates_sigs.c ..\src\backend\kill_score_sigs.c ..\src\backend\particlemotion_sigs.c ..\src\backend\cachewrites_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
 # The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced
 # it (CI builds first); with images, also their XInput imports.
 $proxyDir = Join-Path (Resolve-Path (Join-Path $here '..')).Path 'build'
