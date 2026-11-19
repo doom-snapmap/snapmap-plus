@@ -1386,36 +1386,6 @@ int modnet_unit_status(const char *const *hashes, size_t n, int *states, const m
     return mn_end(r, t0, code);
 }
 
-int modnet_get_unit(const char *hash, unsigned char **bytes, size_t *len, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char route[96], have[MODNET_HASH_HEX + 1];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (bytes) *bytes = NULL;
-    if (len) *len = 0;
-    if (!modnet_valid_hash(hash) || !bytes || !len) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"GET";
-    q.route = route;
-    q.max_response = 256ull * 1024u * 1024u;   /* a manifest of any unit there is (a few MB for a whole pack) */
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "unit");
-    else if (code == MODNET_OK) {
-        sh_mb_sha256_hex(resp, rlen, have);
-        if (strcmp(have, hash)) code = mn_fail(r, MODNET_E_HASH, "unit %.16s: the manifest is not the unit's", hash);
-    }
-    if (code == MODNET_OK) { *bytes = resp; *len = rlen; resp = NULL; }
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
 /* GET `route` into `out_path`, resuming from `have` bytes the file already holds (Range); a 200 answer to a range
  * means the store sent the whole object, which is written from the start. */
 static int mn_get_resumed(const char *route, const char *out_path, unsigned long long have, const modnet_io *io,
@@ -1481,17 +1451,32 @@ int modnet_get_blob(const char *sha, const char *out_path, unsigned long long ha
     return mn_end(r, t0, mn_get_resumed(route, out_path, have, io, r));
 }
 
-int modnet_get_unit_archive(const char *hash, const char *out_path, unsigned long long have, const modnet_io *io,
-                            modnet_result *r)
+int modnet_get_unit_archive(const char *hash, const unsigned char *mask, size_t mask_len, const char *out_path,
+                            unsigned long long have, const modnet_io *io, modnet_result *r)
 {
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     modnet_result local;
-    char route[112];
+    char *route;
+    size_t i, at;
     double t0;
+    int code;
     if (!r) r = &local;
     mn_begin(r, &t0);
-    if (!modnet_valid_hash(hash) || !out_path || !out_path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/unit/%s/archive", hash);
-    return mn_end(r, t0, mn_get_resumed(route, out_path, have, io, r));
+    if (!modnet_valid_hash(hash) || !out_path || !out_path[0] || (mask_len && !mask)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    /* The route, and the mask as base64url without padding: 4 characters for each 3 bytes. */
+    if (!(route = (char *)malloc(64 + 32 + (mask_len + 2) / 3 * 4 + 1))) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
+    at = (size_t)sprintf_s(route, 64 + 32, "/mods/unit/%s/archive%s", hash, mask_len ? "?want=" : "");
+    for (i = 0; i < mask_len; i += 3) {
+        unsigned v = (unsigned)mask[i] << 16 | (i + 1 < mask_len ? (unsigned)mask[i + 1] << 8 : 0) | (i + 2 < mask_len ? mask[i + 2] : 0);
+        route[at++] = b64[(v >> 18) & 63];
+        route[at++] = b64[(v >> 12) & 63];
+        if (i + 1 < mask_len) route[at++] = b64[(v >> 6) & 63];
+        if (i + 2 < mask_len) route[at++] = b64[v & 63];
+    }
+    route[at] = 0;
+    code = mn_get_resumed(route, out_path, have, io, r);
+    free(route);
+    return mn_end(r, t0, code);
 }
 
 int modnet_begin_unit(const char *hash, const char *manifest, size_t len, const modnet_signer *signer, int *held,

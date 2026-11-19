@@ -167,6 +167,10 @@ const char *sh_nav_regions_drop_reason(int reason);
  */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
+/* 1 when the map text marks a Blocking Box for AI navigation (flags.noFlood): the map carries navigation of its own,
+ * which only Snapmap+ builds. 0 when none does, -1 when the text is not a map document. */
+int sh_nav_regions_marks(const char *json, size_t len);
+
 /* The collision size an omitted clipModelInfo.size member inherits from the
  * box's entityDef, for map-text reads that have no engine snapshot. 0 leaves
  * the member unknown, which drops that box. */

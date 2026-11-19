@@ -1067,6 +1067,26 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
     return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
 }
 
+int sh_nav_regions_marks(const char *json, size_t len)
+{
+    sh_shard_doc doc;
+    int arr, i, marked = 0;
+    if (!json || !len || !sh_shard_doc_build(json, len, &doc)) return -1;
+    if (doc.c[0].kind != '{') { sh_shard_doc_free(&doc); return -1; }
+    arr = navr_member(json, len, &doc, 0, "entities", '[');
+    for (i = arr + 1; arr >= 0 && !marked && (size_t)i < doc.count && doc.c[i].open < doc.c[arr].close; i++) {
+        char text[64];
+        int ed, edit;
+        if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
+        ed = navr_member(json, len, &doc, i, "entityDef", '{');
+        if (ed < 0 || !navr_str(json, len, &doc, ed, "inherit", text, sizeof text) || strcmp(text, NAVR_VOLUME_INHERIT)) continue;
+        edit = navr_member(json, len, &doc, navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
+        marked = edit >= 0 && navr_marked(json, len, &doc, edit);
+    }
+    sh_shard_doc_free(&doc);
+    return marked;
+}
+
 static int navr_read(const char *json, size_t len, sh_nav_map *out,
                      sh_navr_entity_size read_size, void *ctx,
                      sh_navr_default_size defaults, void *defaults_ctx)

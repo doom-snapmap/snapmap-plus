@@ -74,7 +74,22 @@ typedef struct sh_modmanifest_list {
     sh_modmanifest_row *rows;
     size_t count;
     size_t capacity;
+    /* What the map uses of Snapmap+ itself, which a game without Snapmap+ cannot load (SH_MODMANIFEST_USES_*): the
+     * product's own entry in the member's "mods" part, {"mod":"snapmap-plus","name":"Snapmap+","uses":[<words>]},
+     * which is not a row (nothing to download, no gate). A map that has one is modded like a map with rows: the save
+     * writes it and the `mods` search tag (PLATFORM, Vanilla stays vanilla: a resized module and a custom navmesh
+     * are mods), and drops both when the map no longer uses them. */
+    unsigned uses;
 } sh_modmanifest_list;
+
+#define SH_MODMANIFEST_PRODUCT              "snapmap-plus"
+#define SH_MODMANIFEST_USES_MODULE_SIZES    1u   /* "module-sizes": a module resized past its stock size (grid_room.h) */
+#define SH_MODMANIFEST_USES_NAVIGATION      2u   /* "navigation": a Blocking Box marked for AI navigation (nav_regions.h) */
+
+/* The product features a map text uses (bound at install to map_uses.h sh_map_uses): `names` are its placed names
+ * (sh_modmanifest_placed_names). Returns SH_MODMANIFEST_USES_* bits. */
+typedef unsigned (*sh_modmanifest_uses_fn)(const char *json, size_t length, const char *const *names, size_t count);
+void sh_modmanifest_set_uses(sh_modmanifest_uses_fn fn);
 
 void sh_modmanifest_row_free(sh_modmanifest_row *row);
 /* The row's display name, never NULL ("" for none). */

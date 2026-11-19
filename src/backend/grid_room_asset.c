@@ -108,15 +108,63 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
     return 0;
 }
 
+/* ------------------------------------------------------------ module stand-ins (R-DS6) */
+
+static sh_grid_standin_fn g_standin;
+void sh_grid_asset_set_standins(sh_grid_standin_fn fn){g_standin=fn;}
+
+/* A file the native module loader derives from the name of a module that stands in as a Grid Room (its collision,
+ * auxiliary geometry, light probe and navigation below maps/modules/<logical>/, and its palette render model), as the
+ * same file of that Grid Room: the stand-in's whole room is the room's of its size under the module's own name, so the
+ * map's instance keeps its moduleName. The module's decl and its snapModuleInfo are the content cache's (they carry
+ * the absent module's bounds and portals) and are not translated. 1 with the room's name in `out`. */
+int sh_grid_asset_standin_name(const char *name,char *out,size_t cap)
+{
+    static const char *const prefixes[]={"maps/modules/","generated/maps/modules/"};
+    char logical[256],room[128];const char *rest,*leaf,*tail;sh_grid_size size;size_t i,k,n,ll;int r;
+    if(!g_standin||!name||!out||!cap)return 0;
+    if(starts(name,"maps/modules/palettes/")){
+        const char *slash=strchr(name+22,'/');
+        if(!slash||!starts(slash+1,"mods/"))return 0;
+        n=strlen(slash+1);if(n<8||strcmp(slash+1+n-7,".bmodel")||n-7>=sizeof logical)return 0;
+        memcpy(logical,slash+1,n-7);logical[n-7]=0;
+        if(!g_standin(logical,&size)||!sh_grid_name(&size,room,sizeof room))return 0;
+        r=snprintf(out,cap,"%.*s%s.bmodel",(int)(slash+1-name),name,room+13);
+        return r>0&&(size_t)r<cap;
+    }
+    for(i=0;i<2;i++){
+        if(!starts(name,prefixes[i]))continue;
+        rest=name+strlen(prefixes[i]);
+        if(!starts(rest,"mods/"))return 0;
+        /* The module's logical name is the longest leading run of folders the cache knows as a stand-in. */
+        for(k=strlen(rest);k>5;k--){
+            if(rest[k]!='/')continue;
+            if(k>=sizeof logical)continue;
+            memcpy(logical,rest,k);logical[k]=0;
+            if(!g_standin(logical,&size))continue;
+            if(!sh_grid_name(&size,room,sizeof room))return 0;
+            tail=rest+k+1;
+            leaf=strrchr(logical,'/');leaf=leaf?leaf+1:logical;ll=strlen(leaf);
+            /* Its own basename is the room's: hall/hall_floor_collision.bcm -> 1024_1024_432/1024_1024_432_floor_... */
+            if(!strncmp(tail,leaf,ll)&&(tail[ll]=='_'||tail[ll]=='.'))
+                r=snprintf(out,cap,"%s%s/%s%s",prefixes[i],room+13,strrchr(room,'/')+1,tail+ll);
+            else r=snprintf(out,cap,"%s%s/%s",prefixes[i],room+13,tail);
+            return r>0&&(size_t)r<cap;
+        }
+    }
+    return 0;
+}
+
 int sh_grid_asset_canonical(const char *name, char **path)
 {
     sh_grid_size size;
-    char source[768], module[128], canonical[1024];
+    char source[768], module[128], canonical[1024], standin[768];
     const char *kind;
     int type = 0, claimed, n = -1;
     if (!path) return -1;
     *path = NULL;
     if (!name) return 0;
+    if (sh_grid_asset_standin_name(name, standin, sizeof standin)) name = standin;
     claimed = request(name, &size, source, &type);
     if (claimed <= 0) return claimed;
     if (!sh_grid_name(&size, module, sizeof(module))) return -1;
@@ -142,11 +190,12 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
                         sh_grid_asset_release_fn release,void *context,
                         unsigned char **out,size_t *length)
 {
-    sh_grid_size size;sh_grid_warp warp;char source[768],module[128];
+    sh_grid_size size;sh_grid_warp warp;char source[768],module[128],standin[768];
     unsigned char *input=NULL,*result=NULL,*decl=NULL;size_t bytes=0,decl_bytes=0,result_bytes=0;
     int type=0,claimed,ok=0;
     if(out)*out=NULL;if(length)*length=0;
     if(!name||!out||!length)return 0;
+    if(sh_grid_asset_standin_name(name,standin,sizeof standin))name=standin;
     claimed=request(name,&size,source,&type);if(claimed<=0)return claimed;
     if(!read||!release)return -1;
     input=read(context,source,&bytes);

@@ -97,6 +97,7 @@ static tree_destroy_fn g_tree_destroy;
 static tree_free_fn g_tree_free;
 static sh_process_heap_api g_heap;
 static sh_grid_module_served_fn g_module_served;
+static sh_grid_standin_fn g_standin;
 
 static int grid_containing_module_tall(void *collision,const float *point,int result);
 static int grid_containing_module(void *collision,const float *point)
@@ -329,13 +330,17 @@ static void *load_private(void *palette,const sh_grid_size *size,const char *mod
     if(result){log_census("variant",*(unsigned char**)result);log_census("stock",stock_wrapper);}
     return result;
 }
-static void *create(void *palette,const sh_grid_size *size)
+/* A Grid Room of `size`: the variant named by its size, or (`module` not NULL) a mod module that stands in as that
+ * room under its own name (D-A30, R-DS6), whose derived files the asset layer answers with the room's
+ * (grid_room_asset.h sh_grid_asset_standin_name). */
+static void *create_room(void *palette,const sh_grid_size *size,const char *module)
 {
     unsigned i;unsigned char *stock_record,*stock_wrapper;
-    const char *render,*slash;char stock[128],variant[128],info[160],palette_name[128];
+    const char *render,*slash;char stock[128],variant[128],info[160],palette_name[128],identity[112];
     size_t len;
     for(i=0;i<g_count;++i)if(g_entries[i].size.kind==size->kind&&
-        !memcmp(g_entries[i].size.xyz,size->xyz,sizeof size->xyz)){
+        !memcmp(g_entries[i].size.xyz,size->xyz,sizeof size->xyz)&&
+        (module?!_stricmp(g_entries[i].module,module):!g_entries[i].module[0])){
         if(g_entries[i].state==2)return g_entries[i].record;
         REFUSE("variant cache: an earlier construction of this size failed in this session");}
     /* Reload admission runs before the editor becomes active. The palette and
@@ -351,28 +356,33 @@ static void *create(void *palette,const sh_grid_size *size)
     slash=strchr(render+22,'/');if(!slash)REFUSE("stock template: unexpected render model path");
     len=(size_t)(slash-render-22);if(!len||len>=sizeof palette_name)REFUSE("stock template: unexpected palette name");
     memcpy(palette_name,render+22,len);palette_name[len]=0;
-    if(!sh_grid_name(size,variant,sizeof variant))REFUSE("variant name");
-    snprintf(info,sizeof info,"decltree/snapmoduleinfo/%s.decl",variant+13);
-    strcat_s(variant,sizeof variant,".decl");
-    if(!preflight(variant))REFUSE("resource preflight: module declaration");
-    if(!preflight(info))REFUSE("resource preflight: module catalog declaration");
-    {char collision[180],identity[112];const char *leaf;
+    if(module){
+        /* The stand-in's decl and catalog are the content cache's; its derived files are the room's. */
+        size_t n=strlen(module);
+        if(n<18||n-5>=sizeof identity||n>=sizeof variant)REFUSE("module name");
+        memcpy(identity,module,n-5);identity[n-5]=0;
+        strcpy_s(variant,sizeof variant,module);
+    }else{
         if(!sh_grid_name(size,identity,sizeof identity))REFUSE("variant name");
-        leaf=strrchr(identity,'/')+1;
+        snprintf(variant,sizeof variant,"%s.decl",identity);
+        snprintf(info,sizeof info,"decltree/snapmoduleinfo/%s.decl",identity+13);
+        if(!preflight(variant))REFUSE("resource preflight: module declaration");
+        if(!preflight(info))REFUSE("resource preflight: module catalog declaration");
+    }
+    {char collision[180];const char *leaf=strrchr(identity,'/')+1;
         snprintf(collision,sizeof collision,"%s/_combo/world.bcm",identity);
         if(!preflight(collision))REFUSE("resource preflight: world collision");
         snprintf(collision,sizeof collision,"%s/%s_floor_collision.bcm",identity,leaf);
         if(!preflight(collision))REFUSE("resource preflight: floor collision");
     }
-    {char nav[180],identity[112];const char *leaf;unsigned agents[]={48,96,128};
-        if(!sh_grid_name(size,identity,sizeof identity))REFUSE("variant name");
-        leaf=strrchr(identity,'/')+1;
+    {char nav[180];const char *leaf=strrchr(identity,'/')+1;unsigned agents[]={48,96,128};
         for(i=0;i<3;++i){snprintf(nav,sizeof nav,"generated/%s/%s.baas_monster%u",identity,leaf,agents[i]);
             if(!preflight(nav)){backend_log("GRID: resized navigation preflight failed");REFUSE("resource preflight: navigation");}}
     }
-    return load_private(palette,size,NULL,stock_wrapper,palette_name,variant,1);
+    return load_private(palette,size,module,stock_wrapper,palette_name,variant,1);
 }
 void sh_grid_native_set_module_source(sh_grid_module_served_fn served){g_module_served=served;}
+void sh_grid_native_set_standins(sh_grid_standin_fn standin){g_standin=standin;sh_grid_asset_set_standins(standin);}
 int sh_grid_native_module_known(const char *name)
 {
     sh_grid_size size;unsigned i;void *palette,*record;int n=0;
@@ -435,19 +445,22 @@ static void *create_bundle(void *palette,const char *name)
 }
 static void *find_variant(void *palette,const char *name)
 {
-    sh_grid_size size;void *record=NULL;int bundle=0;const char *step;
+    sh_grid_size size;void *record=NULL;int bundle=0,standin=0;const char *step;
     if(!sh_grid_parse_name(name,&size)){
-        bundle=g_module_served&&name&&g_module_served(name,1)==1;
-        if(!bundle)return g_find(palette,name);
+        char logical[160];
+        /* A mod module whose unit is absent stands in as the Grid Room of its recorded size (D-A30). */
+        standin=g_standin&&name&&sh_grid_module_logical(name,logical,sizeof logical)&&g_standin(logical,&size);
+        bundle=!standin&&g_module_served&&name&&g_module_served(name,1)==1;
+        if(!bundle&&!standin)return g_find(palette,name);
     }
     if(InterlockedCompareExchange(&g_faulted,0,0)){g_step="variant creation disabled after an earlier fault";return end_record(palette);}
     if(InterlockedCompareExchange(&g_busy,1,0)){g_step="another variant construction is in progress";return end_record(palette);}
     g_step=NULL;
-    __try {record=bundle?create_bundle(palette,name):create(palette,&size);}
+    __try {record=bundle?create_bundle(palette,name):create_room(palette,&size,standin?name:NULL);}
     __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);g_step="variant construction faulted";
         backend_log("GRID: native variant creation faulted; disabled");}
     InterlockedExchange(&g_busy,0);
-    if(bundle&&!record){
+    if((bundle||standin)&&!record){
         /* One line per module and cause: the membership probe and the lookup
          * ask the same name several times during one map load. */
         static char last[400];char line[400];

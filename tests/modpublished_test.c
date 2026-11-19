@@ -180,11 +180,36 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
 
 static int f_on_main(void *c) { (void)c; return 1; }
 /* The asset rule as modserve.c answers it, over the fixture's two mods. */
+/* The content cache's double (modcache.h): a pinned row is complete or stands in for objects; a composition raises
+ * the one sentence of what the map plays without (pending), which content_notice takes once. */
+static struct {
+    int armed;                 /* a fetch's composition and a resumed load's content step raise the sentence */
+    int complete;              /* content_complete's answer */
+    int served;                /* a pinned row serves (stand-ins included) */
+    int pending, said, said_at_resumes, drops, refreshes, refresh_answer, absent_after_fetch;
+} g_content;
+static int f_resumes_now(void);
+static int f_content_complete(void *c, const sh_modmanifest_row *row) { (void)c; (void)row; return g_content.complete; }
+static char *f_content_notice(void *c)
+{
+    (void)c;
+    if (!g_content.pending) return NULL;
+    g_content.pending = 0;
+    g_content.said++;
+    g_content.said_at_resumes = f_resumes_now();
+    return _strdup("This map is playing without the Tyrant from Eternal Demons: the mod store could not be reached. "
+                   "Open the map again later to get it.");
+}
+static int f_content_pending(void *c) { (void)c; return g_content.pending; }
+static void f_content_drop(void *c) { (void)c; g_content.pending = 0; g_content.drops++; }
+static int f_content_refresh(void *c) { (void)c; g_content.refreshes++; return g_content.refresh_answer; }
+
 static int f_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
     const char *what = subject ? subject : "map";
     (void)c;
     if (cause) *cause = NULL;
+    if (row->pinned) return g_content.served ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
     if (!strcmp(row->build, HASH_A)) {
         if (f_served(row, place) && !F.incomplete_a) return SH_MODPUB_ROW_SERVED;
         if (f_served(row, place)) {
@@ -265,6 +290,11 @@ static int f_fetch_for(void *c, const sh_modmanifest_row *row, const char *place
             if (*cancel) { F.fetch_cancelled++; return -2; }
     }
     if (F.fetch_fails && F.fetch_calls == 1) return F.fetch_fails;
+    /* The fetch composed the row: what stayed absent waits for the notice. */
+    if (g_content.armed) {
+        g_content.pending = g_content.absent_after_fetch;
+        g_content.complete = !g_content.absent_after_fetch;
+    }
     if (F.install_on_fetch && !F.refuse_install) {
         /* Into the place, or the root. */
         if (!strcmp(row->build, HASH_A)) { if (place[0]) strcpy_s(F.place_a, sizeof F.place_a, place); else F.installed_a = 1; }
@@ -312,6 +342,8 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     F.resume_extra = r->extra;
     strcpy_s(F.resume_text, sizeof F.resume_text, r->text ? r->text : "");
     strcpy_s(F.resume_id, sizeof F.resume_id, r->id ? r->id : "");
+    /* The resumed load's content step says what it plays without, from what the fetch recorded. */
+    if (g_content.armed && g_content.absent_after_fetch) g_content.pending = 1;
     /* The resume parses the retained text through the detour; that parse must
      * not abandon the hold it belongs to. */
     if (r->text) {
@@ -445,8 +477,30 @@ static const sh_modpub_ops OPS = {
     f_progress, f_fetch_cause, f_refused_load, f_rows_resolve, f_leave_lobby, f_cold_read, f_scope_play
 };
 
+static int f_resumes_now(void) { return F.resumes; }
+
+/* The last notice: still waiting to be raised, or raised (a notice is raised with the one Accept button). */
+static int said_notice(const char *text, size_t n)
+{
+    return !strncmp(sh_modpub_test_notice(), text, n) || (F.ask_buttons == 0 && !strncmp(F.last_ask, text, n));
+}
+
+/* The ops with the content cache's double bound. */
+static sh_modpub_ops g_ops_content;
+static void use_content(void)
+{
+    g_ops_content = OPS;
+    g_ops_content.content_complete = f_content_complete;
+    g_ops_content.content_notice = f_content_notice;
+    g_ops_content.content_pending = f_content_pending;
+    g_ops_content.content_drop = f_content_drop;
+    g_ops_content.content_refresh = f_content_refresh;
+    sh_modpub_test_set_ops(&g_ops_content);
+}
+
 static void reset(void)
 {
+    memset(&g_content, 0, sizeof g_content);
     if (F.worker) { WaitForSingleObject(F.worker, 5000); CloseHandle(F.worker); }
     sh_modpub_test_reset();
     memset(&F, 0, sizeof F);
@@ -1406,6 +1460,126 @@ static void rawmap_pinned_rows_reach_the_content_step(void)
     sh_modmanifest_set_content(NULL);
 }
 
+/* A pinned map (format 2): one Tyrant whose unit is not here. */
+static const char PINNED_MAP[] =
+    "{\"entities\":[{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT_A "/tyrant\","
+    "\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\"},\"uniqueId\":1,\"~type\":\"idSnapEntity\"}],"
+    "\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+    ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT_A "\",\"name\":\"Eternal Demons\",\"size\":42,"
+    "\"objects\":{\"entities/tyrant\":\"" HASH_A "\"}}]}}";
+
+/* R-LV4: a held load said what it played without twice, once at the hold and once at the load. A load says it once,
+ * after the load ran, from what the fetch recorded. */
+static void a_held_load_says_its_notice_once(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a held load says what it plays without once, after the load\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.absent_after_fetch = 1;
+    F.token = 42;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.asks <= 1 && F.ask_buttons != 6 && F.fetch_calls == 1 && F.resumes == 1);   /* units: no question */
+    CHECK(g_content.said == 1 && g_content.said_at_resumes == 1);  /* once, after the resumed load */
+    CHECK(said_notice("This map is playing without the Tyrant", 38));
+
+    printf("-- a rawmap's hold leaves its notice to the reopened rawmap's load\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.absent_after_fetch = 1;
+    CHECK(sh_modpub_rawmap_missing(PINNED_MAP, strlen(PINNED_MAP), &rows, NULL) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick_until_idle();
+    CHECK(F.resumes == 1 && g_content.said == 0 && g_content.pending == 1);
+    /* The reopened rawmap is the editor's parse: its one notice on the next frame. */
+    g_content.complete = 1;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(2);
+    CHECK(g_content.said == 1);
+}
+
+/* R-LV4: a map opened from My Maps whose Tyrant could not be had never asked the store again. An editor open that
+ * stands in for objects asks the store at once, with no question, and its one notice is the answer. */
+static void editor_open_fetches_its_content(void)
+{
+    printf("-- an editor open that stands in for objects asks the store, with no question\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;            /* the open's content step stood in for the Tyrant */
+    g_content.refresh_answer = 1;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    CHECK(g_content.said == 0);       /* the open's notice waits for the store */
+    tick_until_idle();
+    tick(2);
+    CHECK(F.asks == 0 && F.fetch_calls == 1 && g_content.refreshes == 1 && F.resumes == 0);
+    CHECK(g_content.said == 0 && !sh_modpub_test_notice()[0]);   /* everything came: nothing to say */
+
+    printf("-- what the store could not supply is the open's one notice\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.absent_after_fetch = 1;
+    g_content.refresh_answer = 0;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && g_content.said == 1 && F.asks == 1 && F.ask_buttons == 0);   /* the notice alone */
+    CHECK(said_notice("This map is playing without the Tyrant", 38));
+
+    printf("-- the editor shows what arrived at the next open: it says so\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.refresh_answer = 2;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(said_notice("This map's mod content is here now. It shows when you open the map again.", 80));
+
+    printf("-- the editor left the map before the content arrived: nothing is said\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.refresh_answer = 1;
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(2);
+    sh_modmanifest_current_close();
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    CloseHandle(F.fetch_gate);
+    F.fetch_gate = NULL;
+    tick(2);
+    CHECK(F.fetch_calls == 1 && g_content.refreshes == 0 && !sh_modpub_test_notice()[0] && F.asks == 0);
+
+    printf("-- a complete map asks nothing\n");
+    reset();
+    use_content();
+    g_content.complete = 1;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(2);
+    CHECK(F.fetch_calls == 0 && !sh_modpublished_holding());
+}
+
 static void rawmap_missing_counts_rows(void)
 {
     sh_modmanifest_list rows;
@@ -1965,6 +2139,8 @@ int main(void)
     gate_own_substitutes();
     gate_notes_after_the_decision();
     editor_open_missing_placed_mod();
+    a_held_load_says_its_notice_once();
+    editor_open_fetches_its_content();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

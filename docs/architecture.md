@@ -3349,6 +3349,22 @@ names the module places it. The module decl's bounds decide the placement
 limit check; for a multiplayer map they cover the arena, so it fits the native
 16000 bound at the origin.
 
+A module whose unit cannot be had (D-A30) stands in as a Grid Room under its
+own name. Its composition serves the module's decl (the product's grid room of
+the size the map's row recorded, inheriting `maps/modules/smpgrid/v1/m/<size>`,
+with the recorded bounds and portals) and its snapModuleInfo (the blank
+room's), and marks the module as standing in (`sh_cache_module_standin`).
+FindModule and HasModule then take the Grid Room route for it, not the bundle
+route (which asked the serving index for `_combo/world.bcm` at the module's own
+name and refused the map, R-LV4): `create_room` loads it into a private
+palette under its own name, and every file the loader derives from that name
+(collision, geometry, the light probe, navigation, the palette render model)
+is the Grid Room's file of that size (`sh_grid_asset_standin_name`), while its
+decl and catalog stay the cache's. So the map's instance keeps its
+`moduleName`, its door slots and the entities inside, and a save writes the
+module as it was. When the unit arrives, the next composition clears the mark
+and the bundle route serves the real module.
+
 ### Mod virtual-texture boards
 
 A mod's lit materials draw from the mod's own virtual-texture board: its own
@@ -4034,7 +4050,10 @@ Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
 in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
 rows (the builds `sh_modserve_row_build` answers for them) and the placed
-closure (a salt alone declares nothing), with whether a map is open, the
+closure (a salt alone declares nothing; the closure follows only the mods' own
+names, never a file at one of DOOM's names, so a decl edit, a `native/`
+replacement or an editor tweak never declares its mod by being reached: a mod
+applies only in the maps it is set in, `ms_doom_shadow`), with whether a map is open, the
 loaded map's place (`sh_modserve_place_set`: a hash names the root's folder at
 that build, else the place's, never another map's place), and a mode,
 `sh_modserve_scope_mode`: `SH_MODSERVE_MODE_PLAY` from the Play entry
@@ -4691,8 +4710,9 @@ raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
 map needs <name>, which is not installed on this computer, so the editor
 cannot open the map. Restore the mod's folder from the Recycle Bin, or play
 the map from My Maps to get it from the mod store." (My Maps Play holds and
-asks the store, above.) An editor open does not itself fetch: it has no hold
-point before the engine's load.
+asks the store, above.) An editor open has no hold point before the engine's
+load, so a build row is not fetched there; a pinned row's units are asked for
+after the open, with the map open (see [The map content cache](#the-map-content-cache)).
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be
@@ -5067,7 +5087,14 @@ bundle), each rescan (one line per mod with warnings), the Refresh result
 (`warnings`, `firstWarning`) and each mod of the Mods tab's payload
 (`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
-map needs Snapmap+. Every local save keeps the tag in step with its rows: the
+map needs Snapmap+. So does a map that uses a feature of Snapmap+ itself that a
+game without it cannot load (`map_uses.c`: a Grid Room resized past its stock
+size, a Blocking Box marked for AI navigation): every save writes the
+product's own entry into the rows, `{"mod":"snapmap-plus","name":"Snapmap+",
+"uses":["module-sizes","navigation"]}` (not a row: nothing downloads and no
+gate holds it; `sh_modmanifest_list.uses`), and drops it when the map no
+longer uses them. Cameras, timelines, water volumes and logic leave a map
+vanilla. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
 save observer saw rows and removes it when it saw none (the model is copied
 back to the editor), so an undo of the last mod's removal, or a save made
@@ -5186,19 +5213,34 @@ inheriting `snapmaps/unknown`, so the map, its logic and its saves keep the
 object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
 published-map gate treats a pinned row as missing until its composition is
 complete: it asks no question and probes nothing, fetches the absent units on
-the network worker (`sh_cache_prepare`: the store's status, the manifest, then
-the unit's archive when more than half of its bytes are missing, else each
-file, a broken-off file resumed by Range, every byte checked), composes again,
-says what the map plays without, and resumes. A joiner leaves the lobby while
-it downloads (D27). An editor open composes only from what is here and says S2.
-A module whose unit is absent is left out (a module stand-in is a live check).
+the network worker (`sh_cache_prepare`: the store's status for the row's
+units, then each unit in one request, its archive: unit.json first, which
+brings the manifest when it is not here, and every file, or only the files
+this computer lacks, named by a mask in the manifest's order; a transfer the
+network broke resumed by Range, every byte checked, an entry that did not
+check fetched alone), composes again
+(the composition's sidecar records each absent unit's cause, the store's
+answer), and resumes; the resumed load says once what the map plays without,
+with the cause the fetch recorded, never the hold and the load both. A joiner
+leaves the lobby while it downloads (D27). An editor open (My Maps, a
+rawmap) composes from what is here, then asks the store for the units it stood
+in for on the network worker, with no question (`SH_MODPUB_EDITOR_OPEN`: the
+map is open, so nothing waits); what arrives is served in the open map through
+the refresh after a rescan, and the open's one notice is what the store could
+not supply, or, when the editor shows the new objects only at the next open,
+that they are here.
 
 The sweep (`sh_cache_sweep`, at start on a thread of its own, and from the Mods
-tab) keeps every unit a kept map names (the game's `saved-maps` and, unless
-the player chose Remove content of maps you only played, `published-maps`),
-the open map's and those of uploads in progress, and removes the rest, then the
-files no remaining manifest names, then the compositions no kept map uses. It
-never touches a local mod's files and never runs on a timer. The Mods tab's
+tab) keeps every unit a kept map names (the local saves of My Maps, read
+through `saved_maps.c`, the one reader of the game's save slots, since a map
+saved offline exists only there; the cloud copies in the game's `saved-maps`;
+and, unless the player chose Remove content of maps you only played,
+`published-maps`), the open map's and those of uploads in progress, and
+removes the rest, then the files no remaining manifest names, then the
+compositions no kept map uses. A kept map whose text is there and does not
+read (a slot that does not decode, a row that does not parse, a folder that
+cannot be listed) may use anything, so that sweep removes nothing and says
+why. It never touches a local mod's files and never runs on a timer. The Mods tab's
 "Map content on disk" (the `content` action) reports it from this computer
 alone.
 
@@ -5258,7 +5300,7 @@ publish.
 
 ### The mod store transport
 
-The store now speaks units (`modnet.h`, its units section: status, manifest, blob and archive reads with Range
+The store now speaks units (`modnet.h`, its units section: status, archive (with a mask) and blob reads with Range
 resume, begin, archives, parts, complete, signed claims with a rev, release, asked). It answers the build routes below
 with 410; the publish and download paths that still call them move to units in DS-T.
 

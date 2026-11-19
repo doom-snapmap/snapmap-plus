@@ -708,13 +708,43 @@ static int mm_merge_row(sh_modmanifest_list *out, sh_modmanifest_row *row)
     return ok;
 }
 
-/* The member's "mods" array [from, to): one row object per element. */
+/* The product's own entry (modmanifest.h SH_MODMANIFEST_PRODUCT): what the map uses of Snapmap+ itself, by word. */
+static const struct { unsigned bit; const char *word; } MM_USES[] = {
+    { SH_MODMANIFEST_USES_MODULE_SIZES, "module-sizes" },
+    { SH_MODMANIFEST_USES_NAVIGATION, "navigation" },
+};
+
+/* 1 when the element is the product's entry, its words' bits added to *uses. */
+static int mm_product_entry(const char *json, size_t length, unsigned *uses)
+{
+    sh_json_object object = {0};
+    char mod[32];
+    const char *list;
+    size_t i;
+    int is = 0;
+    if (!sh_native_json_parse_object(json, length, 2, &object)) return 0;
+    if (mm_member_text(&object, "mod", mod, sizeof mod, 1) && !strcmp(mod, SH_MODMANIFEST_PRODUCT)) {
+        is = 1;
+        if ((list = sh_json_object_get(&object, "uses")) != NULL && *list == '[') {
+            for (i = 0; i < sizeof MM_USES / sizeof MM_USES[0]; i++) {
+                char quoted[48];
+                _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", MM_USES[i].word);
+                if (strstr(list, quoted)) *uses |= MM_USES[i].bit;
+            }
+        }
+    }
+    sh_json_object_free(&object);
+    return is;
+}
+
+/* The member's "mods" array [from, to): one row object per element, and the product's entry. */
 static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_list *out, unsigned *bad)
 {
     const char *cursor = from, *elem;
     size_t elem_len, read = 0;
     while (sh_carrier_array_next(&cursor, to, &elem, &elem_len) == 1) {
         sh_modmanifest_row row;
+        if (*elem == '{' && mm_product_entry(elem, elem_len, &out->uses)) continue;
         if (*elem != '{' || !sh_modmanifest_parse_value(elem, elem_len, &row, NULL, 0)) { (*bad)++; continue; }
         if (!mm_merge_row(out, &row)) (*bad)++;
         read++;
@@ -740,20 +770,32 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
 {
     char *out = NULL;
     const char *src = json;
-    size_t src_len = length, i, count = rows ? rows->count : 0, w = 0;
+    size_t src_len = length, i, count = rows ? rows->count + (rows->uses ? 1 : 0) : 0, w = 0;
     mm_text value = {0};
     if (out_length) *out_length = 0;
     if (err && err_cap) err[0] = 0;
     if (!json || !length) { MM_ERR("no map text"); return NULL; }
     if (count) {
         mm_put(&value, "[", 1);
-        for (i = 0; i < count; i++) {
+        for (i = 0; i < rows->count; i++) {
             size_t vlen = 0;
             char *row = sh_modmanifest_format_value(&rows->rows[i], &vlen);
             if (!row) { MM_ERR("The mod %s could not be recorded in the map; the map was saved without its mod list", rows->rows[i].salt); goto done; }
             if (i) mm_put(&value, ",", 1);
             mm_put(&value, row, vlen);
             free(row);
+        }
+        if (rows->uses) {
+            size_t k, words = 0;
+            if (rows->count) mm_put(&value, ",", 1);
+            static const char head[] = "{\"mod\":\"" SH_MODMANIFEST_PRODUCT "\",\"name\":\"Snapmap+\",\"uses\":[";
+            mm_put(&value, head, sizeof head - 1);
+            for (k = 0; k < sizeof MM_USES / sizeof MM_USES[0]; k++) {
+                if (!(rows->uses & MM_USES[k].bit)) continue;
+                if (words++) mm_put(&value, ",", 1);
+                mm_put_quoted(&value, MM_USES[k].word);
+            }
+            mm_put(&value, "]}", 2);
         }
         mm_put(&value, "]", 1);
         if (value.failed) { MM_ERR("Out of memory while recording the map's mods; the map was saved without its mod list"); goto done; }
@@ -1477,6 +1519,8 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve) { g_resolve = resolve; }
 static sh_modmanifest_content_fn volatile g_content;
 void sh_modmanifest_set_content(sh_modmanifest_content_fn fn) { g_content = fn; }
+static sh_modmanifest_uses_fn volatile g_uses;
+void sh_modmanifest_set_uses(sh_modmanifest_uses_fn fn) { g_uses = fn; }
 
 
 /* The load's listing: the rows, and the placed names when the hook asks. */
@@ -1931,16 +1975,17 @@ static int mm_save_pins(mm_save_ctx *ctx)
     return ok;
 }
 
-/* A save step failed (why): the save keeps the rows the open map has, so a
- * map is never written without its declaration. NULL when it has none or they
- * could not be written either. */
-static char *mm_save_fallback(const char *json, size_t length, size_t *out_length, const char *why)
+/* A save step failed (why): the save keeps the rows the open map has, and the product features it uses, so a map is
+ * never written without its declaration. NULL when it has none or they could not be written either. */
+static char *mm_save_fallback(const char *json, size_t length, size_t *out_length, unsigned uses, const char *why)
 {
     sh_modmanifest_list rows;
     char err[192] = "", *out = NULL, *line;
     size_t written = 0;
     memset(&rows, 0, sizeof rows);
-    if (sh_modmanifest_current(&rows) && rows.count) out = sh_modmanifest_write(json, length, &rows, &written, err, sizeof err);
+    (void)sh_modmanifest_current(&rows);
+    rows.uses = uses;
+    if (rows.count || rows.uses) out = sh_modmanifest_write(json, length, &rows, &written, err, sizeof err);
     if (out) line = sh_textf("MODS: save manifest: %s; the save keeps the %zu row(s) the open map has", why, rows.count);
     else if (rows.count) line = sh_textf("MODS: save manifest FAILED: %s, and the open map's %zu row(s) could not be written (%s)", why, rows.count, err[0] ? err : "unknown");
     else line = sh_textf("MODS: save manifest: %s; the open map has no rows", why);
@@ -1959,6 +2004,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     mm_save_ctx ctx;
     sh_modmanifest_list attached;
     sh_modmanifest_scope_fn scope = g_scope;
+    sh_modmanifest_uses_fn uses_fn = g_uses;
     char *out = NULL;
     char err[192] = "", *line, *described;
 
@@ -1967,17 +2013,26 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     memset(&ctx, 0, sizeof ctx);
     stale = mm_carries_rows(json, length);
     /* No installed bundle serves anything, the map carries no rows and no
-     * map-level mod: the save is the engine's own bytes, without walking the
-     * map. */
+     * map-level mod, and nothing asks what it uses of the product: the save is
+     * the engine's own bytes, without walking the map. */
     (void)sh_modmanifest_current_attached(&attached);
-    if (!stale && !attached.count && !sh_modserve_active()) {
+    if (!stale && !attached.count && !sh_modserve_active() && !uses_fn) {
         if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
         return NULL;
     }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
     if (failed) {
         sh_modmanifest_list_free(&attached);
-        return mm_save_fallback(json, length, out_length, "the saved map's JSON did not read cleanly");
+        return mm_save_fallback(json, length, out_length, 0, "the saved map's JSON did not read cleanly");
+    }
+    /* What the map uses of Snapmap+ itself (a resized module, its own navigation) flags it as modded: a game without
+     * Snapmap+ cannot load it (PLATFORM, Vanilla stays vanilla). */
+    ctx.list.uses = uses_fn ? uses_fn(json, length, (const char *const *)names, count) : 0;
+    if (!stale && !attached.count && !sh_modserve_active() && !ctx.list.uses) {
+        sh_modmanifest_names_free(names, count);
+        sh_modmanifest_list_free(&attached);
+        if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
+        return NULL;
     }
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
     if (!ctx.failed) mm_save_names(&ctx);
@@ -1987,12 +2042,13 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {
+        unsigned uses = ctx.list.uses;
         sh_modmanifest_list_free(&ctx.list);
-        return mm_save_fallback(json, length, out_length, "the serving layer reported an invalid mod, or memory ran out");
+        return mm_save_fallback(json, length, out_length, uses, "the serving layer reported an invalid mod, or memory ran out");
     }
     /* What the map now lists: placed entities may have been added since the load. */
     if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
-    if (ctx.list.count == 0 && !stale) return NULL;
+    if (ctx.list.count == 0 && !ctx.list.uses && !stale) return NULL;
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     mm_choices_save(&ctx.list);
@@ -2018,6 +2074,6 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
      * (a map opened from a rawmap had none). */
     if (out) mm_set_current(&ctx.list);
     sh_modmanifest_list_free(&ctx.list);
-    if (!out) out = mm_save_fallback(json, length, out_length, "the new rows could not be written");
+    if (!out) out = mm_save_fallback(json, length, out_length, ctx.list.uses, "the new rows could not be written");
     return out;
 }

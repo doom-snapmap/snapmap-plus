@@ -9,7 +9,6 @@
  *                                  map declares it
  *   served\<composition hash>.json what the composition holds: its units, the units it stands in for, its namespace
  *   partial\<sha256>.part          an interrupted download, resumed by Range
- *   kept.json                      the kept maps' references (5.17), cached by file size and time
  *
  * A pinned map row (modmanifest.h) names units; its composition hash is
  *   SHA-256("snapmap-plus/composition/1\n" + unit format + "\n" + namespace + "\n" + each unit hash in byte order,
@@ -24,8 +23,8 @@
  * class the map saved for its entity, and, for a placed entity, a palette row naming it with the reference slot
  * counts the map saved (R-DS5: the map validator refuses an entity no palette row names), so the map, its logic and
  * its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
- * composed again in full. An absent module is left out (its geometry is missing; R-DS2: a module stand-in is a live
- * check).
+ * composed again in full. An absent module the row records (D-A30) stands in as the product's grid room of its
+ * recorded size under its own name (sh_cache_module_standin); one the row does not record is left out.
  *
  * Nothing here runs on the engine's main thread except sh_cache_compose_now (a composition from present units, the
  * editor's open) and the queries. Downloads (sh_cache_prepare) run on the network worker. */
@@ -160,22 +159,32 @@ int   sh_cache_row_record_modules(struct sh_modmanifest_row *row, const char *ma
 /* The stand-in module decl for one record: the product's grid room of the record's size (*room, malloc'd, its
  * moduleName) with the record's bounds and portals written over it (malloc'd; NULL when the record does not read). */
 char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room);
+/* 1 while the module `logical` ("mods/<salt>/rooms/hall": its moduleName without maps/modules/ and .decl) stands in,
+ * with the grid room size it stands in as in *size: the last composition of a row recording it had no present unit
+ * carrying it. The Grid Room route then builds it under its own name (grid_room_native.h sh_grid_native_set_standins,
+ * bound at install), so the map's instance, its doors and the entities inside load whole. Any thread. */
+struct sh_grid_size;
+int   sh_cache_module_standin(const char *logical, struct sh_grid_size *size);
 char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs);
 
 /* ------------------------------------------------------------ the sweep (5.17) */
 
 typedef struct sh_cache_sweep_stats {
     size_t maps, units_kept, units_removed, blobs_removed, served_removed;
+    size_t unreadable;           /* kept maps or map folders that did not read: the sweep then removed nothing */
     unsigned long long bytes_kept, bytes_removed;
 } sh_cache_sweep_stats;
 
-/* The kept maps' folders: the game's saved-maps and published-maps (NULL: the game's own, under
- * %LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps). Tests set their own. */
+/* The game's folders of map texts: saved-maps (the cloud copies of maps saved online) and published-maps (NULL: the
+ * game's own, under %LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps). Tests set their own; the local saves are read
+ * through saved_maps.h. */
 void  sh_cache_set_map_folders(const char *saved, const char *published);
-/* References: every unit a kept map names (saved maps; published-map texts unless `drop_played`, which is "Remove
- * content of maps you only played"), the open map's rows, and `held` (uploads in progress). Removes manifests no
- * reference names, then blobs no remaining manifest names, then compositions no kept map's row uses. Never touches a
- * local mod's files, never runs on a timer. 1 done. */
+/* References: every unit a kept map names (the local saves of My Maps, the only copy of a map saved offline; the cloud
+ * copies; the published-map texts unless `drop_played`, which is "Remove content of maps you only played"), the open
+ * map's rows, and `held` (uploads in progress). Removes manifests no reference names, then blobs no remaining manifest
+ * names, then compositions no kept map's row uses. A kept map whose text is there and does not read, or a folder of
+ * them that cannot be listed, may use anything here, so the sweep then removes nothing (I5: content a kept map uses
+ * is never removed). Never touches a local mod's files, never runs on a timer. 1 done. */
 int   sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out);
 
 /* The sweep at start (dllmain.c), on a thread of its own. */

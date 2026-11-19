@@ -140,6 +140,7 @@ enum sh_modpub_hook {
     SH_MODPUB_FEED_PLAY,        /* the SnapMap feed completion, play action only */
     SH_MODPUB_LOBBY_LAUNCH,     /* the launch boundary: PublishedMapLobbyLaunch (sh_modpub_launch_gate) */
     SH_MODPUB_OFFLINE_LAUNCH,   /* the launch boundary: PublishedMapOfflineLaunch (refusal only) */
+    SH_MODPUB_EDITOR_OPEN,      /* not an engine hook: the open editor map's content, fetched after it opened */
     SH_MODPUB_HOOKS
 };
 
@@ -376,6 +377,10 @@ typedef struct sh_modpub_ops {
     char *(*content_notice)(void *c);
     int  (*content_pending)(void *c);
     void (*content_drop)(void *c);
+    /* The open editor map's units arrived after it opened (SH_MODPUB_EDITOR_OPEN): what the open map serves follows
+     * the new compositions (the index was rescanned; modserve.h sh_modserve_refresh_after_rescan). 1 the objects show
+     * now, 2 they show when the map is opened again, 0 nothing changed, -1 unavailable. NULL counts as -1. */
+    int  (*content_refresh)(void *c);
 } sh_modpub_ops;
 
 /* The place the next launch serves from, as the last gate or hold decided it

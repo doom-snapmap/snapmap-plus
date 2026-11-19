@@ -436,9 +436,16 @@ static int pub_is_prefab(int hook) { return hook == SH_MODPUB_PREFAB_PLACE; }
 /* "map" or "prefab", for the messages a hold shows. */
 static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" : "map"; }
 /* The sentence that says nothing happened. */
-static const char *pub_not_done(int hook) { return pub_is_prefab(hook) ? "The prefab was not placed." : "The map was not loaded."; }
-/* A hold the rawmap layer or a prefab started: no engine completion behind it. */
-static int pub_is_local(int hook) { return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE; }
+static const char *pub_not_done(int hook)
+{
+    return pub_is_prefab(hook) ? "The prefab was not placed." : hook == SH_MODPUB_EDITOR_OPEN ? "The map stays open without it."
+                                                                                            : "The map was not loaded.";
+}
+/* A hold the rawmap layer, a prefab or an open editor map started: no engine completion behind it. */
+static int pub_is_local(int hook)
+{
+    return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE || hook == SH_MODPUB_EDITOR_OPEN;
+}
 /* A lobby joiner's read of the host's map (cold or warm). A joiner runs no mod
  * script (only the host does, script_hooks.c), so its own scripts setting
  * never refuses the map. */
@@ -504,6 +511,7 @@ static const char *pub_hook_name(int hook)
     case SH_MODPUB_FEED_PLAY: return "SnapMap feed play";
     case SH_MODPUB_LOBBY_LAUNCH: return "lobby launch";
     case SH_MODPUB_OFFLINE_LAUNCH: return "offline launch";
+    case SH_MODPUB_EDITOR_OPEN: return "open map's content";
     default: return "?";
     }
 }
@@ -1269,13 +1277,14 @@ static void pub_progress_step(pub_hold *h, pub_job *job)
         line = pub_progress_text(job->names[current], current, job->count, done, total);
         if (line) {
             if (h->progress_shown) pub_print(line);   /* the first line says only "0.0 MB" */
-            if (g_ops.progress) g_ops.progress(g_ops.context, h->hook, h->owner, line);
+            if (g_ops.progress && h->hook != SH_MODPUB_EDITOR_OPEN) g_ops.progress(g_ops.context, h->hook, h->owner, line);
             h->progress_shown = 1;
         }
         free(line);
     }
-    if (!h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask && g_ops.can_ask(g_ops.context) &&
-        g_ops.ask) {
+    /* An open map holds nothing up while its content downloads, so nothing is asked about it. */
+    if (h->hook != SH_MODPUB_EDITOR_OPEN && !h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask &&
+        g_ops.can_ask(g_ops.context) && g_ops.ask) {
         _snprintf_s(text, sizeof text, _TRUNCATE, "Downloading the %s's mods; the progress shows on screen and on the "
                     "console. Keep downloading? No cancels it and installs nothing more.", pub_thing(h->hook));
         h->ticket = g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_YES_NO, text);
@@ -1315,6 +1324,70 @@ static void pub_start_fetch(void)
 
 
 static void pub_resume(size_t installed);
+static char *pub_content_said(void);
+
+/* 1 when every row of `rows` is still a row of the open map (same salt and build). */
+static int pub_current_has(const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_list now;
+    int all = 1;
+    memset(&now, 0, sizeof now);
+    (void)sh_modmanifest_current(&now);
+    for (size_t i = 0; all && i < rows->count; i++) {
+        int found = 0;
+        for (size_t k = 0; k < now.count && !found; k++)
+            found = !strcmp(now.rows[k].salt, rows->rows[i].salt) && !_stricmp(now.rows[k].build, rows->rows[i].build);
+        all = found;
+    }
+    sh_modmanifest_list_free(&now);
+    return all;
+}
+
+/* The open map's content arrived (SH_MODPUB_EDITOR_OPEN): the open map serves it, and the open's one notice is what
+ * is still absent, or, when the editor shows the new objects only at the next open, that they are here. */
+static void pub_editor_fetched(size_t rows)
+{
+    pub_hold *h = &g_hold;
+    char *said;
+    int shown;
+    if (!pub_current_has(&h->rows)) {
+        pub_log("MODS: the open map's content arrived after the editor left the map; it stays in the content cache");
+        pub_hold_free();
+        return;
+    }
+    shown = g_ops.content_refresh ? g_ops.content_refresh(g_ops.context) : -1;
+    pub_logf("MODS: the open map's content: %u row(s) asked of the mod store; the open map %s", (unsigned)rows,
+             shown == 1 ? "serves what arrived" : shown == 2 ? "shows what arrived when it is opened again"
+                        : shown == 0 ? "already served it" : "could not be refreshed");
+    pub_hold_free();
+    said = pub_content_said();
+    if (!said && (shown == 2 || shown < 0))
+        said = sh_text("This map's mod content is here now. It shows when you open the map again.");
+    if (said) pub_notice(said);
+    free(said);
+}
+
+/* An editor open whose pinned rows stood in for objects (modcache.h) asks the store for them now, with no question:
+ * the map is open already, so nothing waits on the answer. The open's one notice waits for it (pub_editor_fetched).
+ * 1 when the fetch started. */
+static int pub_editor_fetch(void)
+{
+    sh_modmanifest_list now, want;
+    int begun = 0;
+    if (g_hold.state != HOLD_IDLE || !g_ops.content_complete || !g_ops.worker_run) return 0;
+    memset(&now, 0, sizeof now);
+    memset(&want, 0, sizeof want);
+    (void)sh_modmanifest_current(&now);
+    for (size_t i = 0; i < now.count; i++)
+        if (now.rows[i].pinned && !g_ops.content_complete(g_ops.context, &now.rows[i]) &&
+            !sh_modmanifest_list_add(&want, &now.rows[i])) break;
+    if (want.count) begun = pub_hold_begin(SH_MODPUB_EDITOR_OPEN, NULL, NULL, NULL, "", "", "", &want, NULL) == 1;
+    if (begun) pub_logf("MODS: the open map stands in for objects of %u row(s); asking the mod store for them",
+                        (unsigned)g_hold.missing_count);
+    sh_modmanifest_list_free(&now);
+    sh_modmanifest_list_free(&want);
+    return begun;
+}
 
 static void pub_finish(void)
 {
@@ -1402,13 +1475,17 @@ static void pub_finish(void)
         return;
     }
     free(cause);
-    if (g_ops.content_notice) {
-        /* What the map plays without, in one sentence (S2-S6), once it has loaded. */
-        char *said = g_ops.content_notice(g_ops.context);
-        if (said) { pub_print(said); pub_notice(said); }
-        free(said);
-    }
     pub_resume(h->missing_count);
+}
+
+/* What the resumed load plays without, in one sentence (S2-S6), said once the load has run: the fetch recorded the
+ * store's answer beside the composition, and the resumed parse's content step names it, so the hold and the load
+ * never say it twice (R-LV4). NULL when nothing is absent; malloc'd. */
+static char *pub_content_said(void)
+{
+    char *said = g_ops.content_notice ? g_ops.content_notice(g_ops.context) : NULL;
+    if (said) pub_print(said);
+    return said;
 }
 
 /* The hold's mods are in place (fetched into the map's place): the load goes
@@ -1432,19 +1509,33 @@ static void pub_resume(size_t installed)
         pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook), h->id,
                  (unsigned)installed);
         pub_hold_free();
+        {
+            char *said = pub_content_said();
+            if (said) pub_notice(said);
+            free(said);
+        }
         return;
     }
     /* A joiner left the lobby to download (pub_leave_lobby): it joins again,
-     * and that join finds the mods in the map's place. */
+     * and that join finds the mods in the map's place; its one notice says
+     * so, and what the map will play without. */
     if (h->left_lobby) {
         pub_logf("MODS: the held %s of '%s' installed %u mod(s); the joiner left the lobby to download them",
                  pub_hook_name(h->hook), pub_s(h->id), (unsigned)installed);
         {
             int units = h->units;
+            char *said = pub_content_said(), *line;
             pub_hold_free();
-            pub_notice(units ? "The map's mod content is here. Join the lobby again to play it."
-                             : "The map's mods are installed. Join the lobby again to play it.");
+            line = said ? sh_textf("%s Join the lobby again to play it.", said) : NULL;
+            pub_notice(line ? line : units ? "The map's mod content is here. Join the lobby again to play it."
+                                           : "The map's mods are installed. Join the lobby again to play it.");
+            free(line);
+            free(said);
         }
+        return;
+    }
+    if (h->hook == SH_MODPUB_EDITOR_OPEN) {
+        pub_editor_fetched(installed);
         return;
     }
     /* A rawmap hold has no screen of its own; the reopen asks the editor itself. */
@@ -1481,7 +1572,13 @@ static void pub_resume(size_t installed)
     }
     pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook),
              h->id && h->id[0] ? h->id : "local map", (unsigned)installed);
-    pub_hold_free();
+    {
+        /* A rawmap opens again on a later editor frame, whose load says its notice (sh_modpublished_poll). */
+        char *said = h->hook != SH_MODPUB_RAWMAP_LOAD ? pub_content_said() : NULL;
+        pub_hold_free();
+        if (said) pub_notice(said);
+        free(said);
+    }
 }
 
 /* ------------------------------------------------------------ rawmap loads */
@@ -1859,8 +1956,10 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
+        } else if (pub_editor_fetch()) {
+            /* The open's notice is the store's answer (pub_editor_fetched). */
         } else if (g_ops.content_notice) {
-            /* An editor open composed stand-ins (modcache.h): its one notice (S2). */
+            /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
             char *said = g_ops.content_notice(g_ops.context);
             if (said) pub_notice(said);
             free(said);
@@ -2735,6 +2834,18 @@ static int eng_content_complete(void *c, const sh_modmanifest_row *row)
 static char *eng_content_notice(void *c) { (void)c; return sh_cache_take_notice(); }
 static int eng_content_pending(void *c) { (void)c; return sh_cache_notice_pending(); }
 static void eng_content_drop(void *c) { (void)c; sh_cache_notice_drop(); }
+/* The open map serves the units that arrived: the decls they change are parsed again in place (modserve.h). */
+static int eng_content_refresh(void *c)
+{
+    sh_modserve_refresh rf;
+    int state;
+    (void)c;
+    memset(&rf, 0, sizeof rf);
+    state = sh_modserve_refresh_after_rescan(&rf);
+    if (state < 0) return -1;
+    if (!state) return 0;
+    return rf.needs_map_reload > 0 || rf.needs_restart > 0 || rf.pending > 0 ? 2 : 1;
+}
 
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
@@ -2743,7 +2854,8 @@ static const sh_modpub_ops ENG_OPS = {
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
     eng_served_scripts, eng_progress, eng_fetch_cause, eng_refused_load, eng_rows_resolve, eng_leave_lobby,
-    eng_cold_read_op, eng_scope_play_op, eng_content_complete, eng_content_notice, eng_content_pending, eng_content_drop
+    eng_cold_read_op, eng_scope_play_op, eng_content_complete, eng_content_notice, eng_content_pending, eng_content_drop,
+    eng_content_refresh
 };
 
 /* ------------------------------------------------------------ detours */
