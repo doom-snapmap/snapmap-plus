@@ -89,6 +89,54 @@ static void requests(void)
             assert(sh_grid_asset_open(bad[i],read_source,release,&r,&out,&bytes)==-1&&calls==r.calls);}}
     assert(!sh_grid_asset_open("maps/modules/classic/classic_blank_room.decl",read_source,release,&r,&out,&bytes));
 }
+/* R-LV4: a mod module whose unit is absent did not open (its world collision was asked for at its own name, and its
+ * stand-in served only its decl). Every file the module loader derives from a stand-in's name is the grid room's of
+ * its recorded size; its decl and catalog are not translated, and nothing else is. */
+static int fake_standin(const char *logical,sh_grid_size *size)
+{
+    if(strcmp(logical,"mods/lv4modst/rooms/hall"))return 0;
+    size->kind=SH_GRID_MODERN;size->xyz[0]=1024;size->xyz[1]=1024;size->xyz[2]=432;return 1;
+}
+static void standins(void)
+{
+    const char *names[]={
+        "maps/modules/mods/lv4modst/rooms/hall/_combo/world.bcm",
+        "maps/modules/mods/lv4modst/rooms/hall/hall_floor_collision.bcm",
+        "maps/modules/mods/lv4modst/rooms/hall/hall_wall_0.bmodel",
+        "maps/modules/mods/lv4modst/rooms/hall/lightprobes/light_probe_1_compressed.bimage",
+        "generated/maps/modules/mods/lv4modst/rooms/hall/hall.baas_monster48",
+        "maps/modules/palettes/mega_blessed/mods/lv4modst/rooms/hall.bmodel"
+    };
+    const char *rooms[]={
+        "maps/modules/smpgrid/v1/m/1024_1024_432/_combo/world.bcm",
+        "maps/modules/smpgrid/v1/m/1024_1024_432/1024_1024_432_floor_collision.bcm",
+        "maps/modules/smpgrid/v1/m/1024_1024_432/1024_1024_432_wall_0.bmodel",
+        "maps/modules/smpgrid/v1/m/1024_1024_432/lightprobes/light_probe_1_compressed.bimage",
+        "generated/maps/modules/smpgrid/v1/m/1024_1024_432/1024_1024_432.baas_monster48",
+        "maps/modules/palettes/mega_blessed/smpgrid/v1/m/1024_1024_432.bmodel"
+    };
+    const char *kept[]={
+        "maps/modules/mods/lv4modst/rooms/hall.decl",               /* the cache's stand-in decl */
+        "generated/decls/snapmoduleinfo/mods/lv4modst/rooms/hall.decl",
+        "maps/modules/mods/lv4modst/rooms/other/_combo/world.bcm",   /* another module of the mod */
+        "maps/modules/mods/othermod/rooms/hall/_combo/world.bcm"
+    };
+    reader r={0};size_t bytes;unsigned char *out;unsigned i;char room[768];
+    assert(!sh_grid_asset_standin_name(names[0],room,sizeof room));   /* nothing bound: nothing stands in */
+    sh_grid_asset_set_standins(fake_standin);
+    for(i=0;i<sizeof names/sizeof names[0];++i){
+        char *key=NULL,*want=NULL,sa[768],sb[768];
+        assert(sh_grid_asset_standin_name(names[i],room,sizeof room)==1&&!strcmp(room,rooms[i]));
+        assert(sh_grid_asset_canonical(names[i],&key)==1&&sh_grid_asset_canonical(rooms[i],&want)==1&&!strcmp(key,want));
+        free(key);free(want);
+        /* The same stock source is read as for the room itself. */
+        (void)sh_grid_asset_open(names[i],read_source,release,&r,&out,&bytes);strcpy(sa,r.requested);
+        (void)sh_grid_asset_open(rooms[i],read_source,release,&r,&out,&bytes);strcpy(sb,r.requested);
+        assert(!strcmp(sa,sb));
+    }
+    for(i=0;i<sizeof kept/sizeof kept[0];++i)assert(!sh_grid_asset_standin_name(kept[i],room,sizeof room));
+    sh_grid_asset_set_standins(NULL);
+}
 static int installed(const char *root,const char *classic,const char *modern)
 {
     reader r={0};unsigned k,i,passed=0;const char kinds[]={'c','m'};
@@ -142,4 +190,4 @@ static int installed(const char *root,const char *classic,const char *modern)
     assert(r.calls==r.releases);printf("%u installed module, catalog, shell and flight resources transformed\n",passed);return 0;
 }
 int main(int argc,char **argv)
-{requests();if(argc==2||argc==4)return installed(argv[1],argc==4?argv[2]:NULL,argc==4?argv[3]:NULL);puts("grid_room_asset_test: passed");return 0;}
+{requests();standins();if(argc==2||argc==4)return installed(argv[1],argc==4?argv[2]:NULL,argc==4?argv[3]:NULL);puts("grid_room_asset_test: passed");return 0;}

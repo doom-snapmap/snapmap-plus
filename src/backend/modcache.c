@@ -1061,26 +1061,75 @@ static void mc_bounds_decl(char **t, const char *indent, const double v[6])
 }
 
 /* The rebuilt blank room a module of these bounds stands in with: the product's grid room of the bounds' size
- * (modern; clamped to the grid room's limits), "maps/modules/smpgrid/v1/m/<x>_<y>_<z>.decl". */
-static int mc_module_room(const double b[6], char *out, size_t cap)
+ * (modern; clamped to the grid room's limits), "maps/modules/smpgrid/v1/m/<x>_<y>_<z>.decl", and its size. */
+static int mc_module_room(const double b[6], char *out, size_t cap, sh_grid_size *size)
 {
     float req[3];
-    sh_grid_size size;
     int i;
     for (i = 0; i < 3; i++) req[i] = (float)(b[3 + i] - b[i] > 0 ? b[3 + i] - b[i] : 0);
-    if (!sh_grid_clamp(SH_GRID_MODERN, req, &size) || !sh_grid_name(&size, out, cap)) return 0;
+    if (!sh_grid_clamp(SH_GRID_MODERN, req, size) || !sh_grid_name(size, out, cap)) return 0;
     return strcat_s(out, cap, ".decl") == 0;
 }
 
-char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room)
+/* The modules standing in now (R-DS6): a module's logical name ("mods/<salt>/rooms/hall") and the grid room size it
+ * stands in as. A composition sets each of its row's module records here when no present unit carries the module, and
+ * clears it when one does, so the asset layer answers a stand-in's derived files only while it stands in. */
+typedef struct mc_standin_module { char *logical; sh_grid_size size; } mc_standin_module;
+static mc_standin_module *g_standin_modules;
+static size_t g_nstandin_modules;
+
+static void mc_standin_module_set(const char *logical, const sh_grid_size *size)
+{
+    size_t i;
+    AcquireSRWLockExclusive(&g_lock);
+    for (i = 0; i < g_nstandin_modules && _stricmp(g_standin_modules[i].logical, logical); i++) {}
+    if (i < g_nstandin_modules) {
+        if (size) g_standin_modules[i].size = *size;
+        else {
+            free(g_standin_modules[i].logical);
+            g_standin_modules[i] = g_standin_modules[--g_nstandin_modules];
+        }
+    } else if (size) {
+        mc_standin_module *grown = (mc_standin_module *)realloc(g_standin_modules, (g_nstandin_modules + 1) * sizeof *grown);
+        char *copy = sh_text(logical);
+        if (grown && copy) {
+            g_standin_modules = grown;
+            g_standin_modules[g_nstandin_modules].logical = copy;
+            g_standin_modules[g_nstandin_modules].size = *size;
+            g_nstandin_modules++;
+        } else {
+            if (grown) g_standin_modules = grown;
+            free(copy);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+int sh_cache_module_standin(const char *logical, sh_grid_size *size)
+{
+    size_t i;
+    int found = 0;
+    if (!logical) return 0;
+    AcquireSRWLockShared(&g_lock);
+    for (i = 0; i < g_nstandin_modules && !found; i++)
+        if (!_stricmp(g_standin_modules[i].logical, logical)) {
+            if (size) *size = g_standin_modules[i].size;
+            found = 1;
+        }
+    ReleaseSRWLockShared(&g_lock);
+    return found;
+}
+
+static char *mc_module_standin(const char *record_json, size_t len, char **room, sh_grid_size *size_out)
 {
     mpj *r = mpj_parse(record_json, len);
     const mpj *portals = r ? mpj_get(r, "portals") : NULL;
     double b[6];
     char name[160], *t = NULL;
+    sh_grid_size size;
     int i, n = 0;
     if (room) *room = NULL;
-    if (!r || !mc_six(mpj_get(r, "bounds"), b) || !portals || portals->type != MPJ_ARR || !mc_module_room(b, name, sizeof name)) {
+    if (!r || !mc_six(mpj_get(r, "bounds"), b) || !portals || portals->type != MPJ_ARR || !mc_module_room(b, name, sizeof name, &size)) {
         mpj_free(r);
         return NULL;
     }
@@ -1088,6 +1137,7 @@ char *sh_cache_module_standin_text(const char *record_json, size_t len, char **r
      * door slots (RepairAndMigrate's door pass compares their count with the module's portals) and the entities
      * inside keep their places. */
     t = sh_textf("{\n\tinherit = \"%s\";\n\tedit = {\n\t\tmodule = {\n", name);
+    if (size_out) *size_out = size;
     mc_bounds_decl(&t, "\t\t\t", b);
     for (i = 0; i < portals->n; i++) if (mc_six(mpj_get(portals->items[i], "bounds"), b)) n++;
     (void)sh_text_set(&t, "%s\t\t\tportals = {\n\t\t\t\tnum = %d;\n", t ? t : "", n);
@@ -1106,6 +1156,11 @@ char *sh_cache_module_standin_text(const char *record_json, size_t len, char **r
     if (room) *room = sh_text(name);
     mpj_free(r);
     return t;
+}
+
+char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room)
+{
+    return mc_module_standin(record_json, len, room, NULL);
 }
 
 /* The stock resolver, with the product's grid rooms as the game's: a module stand-in inherits one, and the product
@@ -1186,7 +1241,7 @@ static int mc_module_standins(mc_extras *e, const mc_unit *units, size_t nunits,
         path = sh_textf("map-modules/%s.decl", rest);
         info = sh_textf("decls/snapmoduleinfo/%s.decl", rest);
         body = mpj_dump(a->items[i], NULL);
-        text = body ? sh_cache_module_standin_text(body, strlen(body), &room) : NULL;
+        text = body ? mc_module_standin(body, strlen(body), &room, NULL) : NULL;
         if (path && text && !mc_carried(units, nunits, path)) {
             char *stock_info = room ? sh_textf("{\n\tinherit = \"%s\";\n}\n", sh_grid_stock_name(SH_GRID_MODERN) + strlen("maps/modules/"))
                                     : NULL;
@@ -1206,6 +1261,38 @@ static int mc_module_standins(mc_extras *e, const mc_unit *units, size_t nunits,
     }
     mpj_free(a);
     return added;
+}
+
+/* Which of the row's recorded modules stand in now (sh_cache_module_standin): each record whose module no present unit
+ * carries stands in as the grid room of its size, and one a present unit carries does not. Every composition of the
+ * row marks them, a made one or one already on disk. */
+static void mc_module_marks(const mc_unit *units, size_t nunits, const char *salt, const char *modules)
+{
+    mpj *a = modules ? mpj_parse(modules, strlen(modules)) : NULL;
+    char prefix[SH_MODMANIFEST_SALT_CAP + 32];
+    size_t pl;
+    int i;
+    if (!a || a->type != MPJ_ARR) { mpj_free(a); return; }
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "maps/modules/mods/%s/", salt);
+    pl = strlen(prefix);
+    for (i = 0; i < a->n; i++) {
+        const mpj *name = mpj_get(a->items[i], "name");
+        char logical[256], path[256], room[160];
+        double b[6];
+        sh_grid_size size;
+        size_t n;
+        if (!name || name->type != MPJ_STR || _strnicmp(name->text, prefix, pl) || !name->text[pl]) continue;
+        n = strlen(name->text);
+        if (n < 6 || _stricmp(name->text + n - 5, ".decl") || n - 13 - 5 >= sizeof logical) continue;
+        memcpy(logical, name->text + 13, n - 13 - 5);
+        logical[n - 13 - 5] = 0;
+        _strlwr_s(logical, sizeof logical);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "map-modules/%s.decl", logical + strlen("mods/") + strlen(salt) + 1);
+        if (mc_carried(units, nunits, path)) mc_standin_module_set(logical, NULL);
+        else if (mc_six(mpj_get(a->items[i], "bounds"), b) && mc_module_room(b, room, sizeof room, &size))
+            mc_standin_module_set(logical, &size);
+    }
+    mpj_free(a);
 }
 
 /* The sidecar beside a composition: what it holds. */
@@ -1338,6 +1425,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         if (!units[i].root) units[i].root = sh_text(snapshot.roots[i]);
     }
     here = sh_cache_composed(chash, &had_complete);
+    mc_module_marks(units, snapshot.n, snapshot.salt, snapshot.modules);
     if (!complete) {
         if (here) mc_side_causes(chash, units, snapshot.n);
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;

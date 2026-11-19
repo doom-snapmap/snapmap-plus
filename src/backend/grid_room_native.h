@@ -1,6 +1,7 @@
 #ifndef SH_GRID_ROOM_NATIVE_H
 #define SH_GRID_ROOM_NATIVE_H
 #include "grid_room.h"
+#include "grid_room_asset.h"
 #include "signatures.h"
 #include "grid_room_areas.h"
 #include <stdint.h>
@@ -15,6 +16,10 @@ int sh_grid_native_install(const sig_result *results,size_t count,const uint8_t 
  * is (log line "MODS: module <name> loaded into a private palette"). */
 typedef int (*sh_grid_module_served_fn)(const char *request,int module);
 void sh_grid_native_set_module_source(sh_grid_module_served_fn served);
+/* Module stand-ins (D-A30, R-DS6; grid_room_asset.h). A module the content cache stands in for is built by the Grid
+ * Room route under its own name: the room of its recorded size, its decl and catalog the cache's, every derived file
+ * the room's (log lines "GRID: independent native module variant loaded"). Also binds the asset layer. */
+void sh_grid_native_set_standins(sh_grid_standin_fn standin);
 /* Can the open editor build the module `name` names? 1 when it is a record of
  * the editor module palette (found by exact name over every record, as
  * palette_find does), a Grid Room size this adapter makes, a module a mod

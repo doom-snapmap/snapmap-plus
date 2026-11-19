@@ -21,4 +21,14 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
                         sh_grid_asset_release_fn release,void *context,
                         unsigned char **out,size_t *length);
 
+/* Module stand-ins (D-A30, R-DS6). A mod module whose unit cannot be had stands in as the Grid Room of its recorded
+ * size under its own name (modcache.h sh_cache_module_standin answers which, bound at install): `logical` is the
+ * module's name without maps/modules/ and .decl ("mods/<salt>/rooms/hall"); 1 with the room's size. Every file the
+ * native module loader derives from that name (its collision, geometry, light probe, navigation and palette render
+ * model) is then the room's file of that size; its decl and snapModuleInfo stay the content cache's. */
+typedef int (*sh_grid_standin_fn)(const char *logical, sh_grid_size *size);
+void sh_grid_asset_set_standins(sh_grid_standin_fn fn);
+/* `name` as the Grid Room's own name of the file when it is a stand-in's derived file (1, in `out`), else 0. */
+int  sh_grid_asset_standin_name(const char *name, char *out, size_t cap);
+
 #endif

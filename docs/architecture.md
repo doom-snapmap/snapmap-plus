@@ -3349,6 +3349,22 @@ names the module places it. The module decl's bounds decide the placement
 limit check; for a multiplayer map they cover the arena, so it fits the native
 16000 bound at the origin.
 
+A module whose unit cannot be had (D-A30) stands in as a Grid Room under its
+own name. Its composition serves the module's decl (the product's grid room of
+the size the map's row recorded, inheriting `maps/modules/smpgrid/v1/m/<size>`,
+with the recorded bounds and portals) and its snapModuleInfo (the blank
+room's), and marks the module as standing in (`sh_cache_module_standin`).
+FindModule and HasModule then take the Grid Room route for it, not the bundle
+route (which asked the serving index for `_combo/world.bcm` at the module's own
+name and refused the map, R-LV4): `create_room` loads it into a private
+palette under its own name, and every file the loader derives from that name
+(collision, geometry, the light probe, navigation, the palette render model)
+is the Grid Room's file of that size (`sh_grid_asset_standin_name`), while its
+decl and catalog stay the cache's. So the map's instance keeps its
+`moduleName`, its door slots and the entities inside, and a save writes the
+module as it was. When the unit arrives, the next composition clears the mark
+and the bundle route serves the real module.
+
 ### Mod virtual-texture boards
 
 A mod's lit materials draw from the mod's own virtual-texture board: its own

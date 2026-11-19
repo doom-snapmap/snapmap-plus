@@ -278,6 +278,7 @@ static void install_features(const sig_result *results, size_t db)
     /* Bundle modules take the same private palette route. */
     if (grid_installed) {
         sh_grid_native_set_module_source(bundle_module_served);
+        sh_grid_native_set_standins(sh_cache_module_standin);
         need(sh_grid_snap_install(results, db, g_doom_base), "exact doorway attachment is unavailable",
              SH_FEATURE_GRID_DOORWAYS, NULL, NULL);
     }

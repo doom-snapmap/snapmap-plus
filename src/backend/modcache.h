@@ -23,8 +23,8 @@
  * class the map saved for its entity, and, for a placed entity, a palette row naming it with the reference slot
  * counts the map saved (R-DS5: the map validator refuses an entity no palette row names), so the map, its logic and
  * its saves keep the object; the load gets one notice (S2-S6). When the units arrive, the row is
- * composed again in full. An absent module is left out (its geometry is missing; R-DS2: a module stand-in is a live
- * check).
+ * composed again in full. An absent module the row records (D-A30) stands in as the product's grid room of its
+ * recorded size under its own name (sh_cache_module_standin); one the row does not record is left out.
  *
  * Nothing here runs on the engine's main thread except sh_cache_compose_now (a composition from present units, the
  * editor's open) and the queries. Downloads (sh_cache_prepare) run on the network worker. */
@@ -159,6 +159,12 @@ int   sh_cache_row_record_modules(struct sh_modmanifest_row *row, const char *ma
 /* The stand-in module decl for one record: the product's grid room of the record's size (*room, malloc'd, its
  * moduleName) with the record's bounds and portals written over it (malloc'd; NULL when the record does not read). */
 char *sh_cache_module_standin_text(const char *record_json, size_t len, char **room);
+/* 1 while the module `logical` ("mods/<salt>/rooms/hall": its moduleName without maps/modules/ and .decl) stands in,
+ * with the grid room size it stands in as in *size: the last composition of a row recording it had no present unit
+ * carrying it. The Grid Room route then builds it under its own name (grid_room_native.h sh_grid_native_set_standins,
+ * bound at install), so the map's instance, its doors and the entities inside load whole. Any thread. */
+struct sh_grid_size;
+int   sh_cache_module_standin(const char *logical, struct sh_grid_size *size);
 char *sh_cache_standin_row_text(const char *def_source, const char *cls, int entrefs, int varrefs);
 
 /* ------------------------------------------------------------ the sweep (5.17) */

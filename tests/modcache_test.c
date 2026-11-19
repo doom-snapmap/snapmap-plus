@@ -19,6 +19,7 @@
 #include "modunit.h"
 #include "modmanifest.h"
 #include "modserve.h"
+#include "grid_room.h"
 #include "modcache.h"
 #include "modkey.h"
 #include "saved_maps.h"
@@ -661,6 +662,18 @@ static void test_cache(const char *top)
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"ind_dlc/ind_totally_blank_room_4x\";"));
         free(t);
+        /* R-LV4: the map did not open ("world collision is not served"): the module stands in as the grid room of its
+         * size under its own name, so the room route builds it (grid_room_asset.h); a composition already on disk
+         * marks it too (a later start, a load that composes nothing). */
+        {
+            sh_grid_size size;
+            memset(&size, 0, sizeof size);
+            CHECK(sh_cache_module_standin("mods/" SALT "/rooms/hall", &size) && size.kind == SH_GRID_MODERN &&
+                  size.xyz[0] == 1024 && size.xyz[1] == 1024 && size.xyz[2] == 432);
+            CHECK(!sh_cache_module_standin("mods/" SALT "/rooms/gone", NULL));   /* the row records no such module */
+            CHECK(sh_cache_compose_now(chash, SH_CACHE_ABSENT_OFFLINE, NULL));
+            CHECK(sh_cache_module_standin("mods/" SALT "/rooms/hall", NULL));
+        }
         {
             sh_mb_bundle mb;
             size_t r;
