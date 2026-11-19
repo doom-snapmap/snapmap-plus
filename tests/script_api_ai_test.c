@@ -352,12 +352,6 @@ static int f_wound_damage_counts(void *ai, int on)
     ev_cat(on ? "wound_damage_counts on\n" : "wound_damage_counts off\n");
     return g_wound_counts_ready;
 }
-static int g_spawn_teleport_ready = 1;
-static int f_spawn_teleport(void)
-{
-    ev_cat("spawn_teleport\n");
-    return g_spawn_teleport_ready ? 1 : -1;
-}
 static int g_destructible_ready = 1;
 static int f_destructible(void)
 {
@@ -462,7 +456,7 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_spawn_teleport, f_destructible, f_weapon_use, f_wound_damage_counts
+    f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2130,52 +2124,6 @@ static void test_eternal_interrupts(void)
     sh_script_map_end();
 }
 
-/* spawn_teleport: the registry the teleport show reads (whole names from an entity's def chain, without case;
- * a second call replaces; out-of-range values refused) and the script call (its own mod's names only, the
- * hook made ready first, refusals as plain stop lines). */
-static void test_spawn_teleport(void)
-{
-    const char *chain[3] = { "mods/aaaaaaaa/ai/brute_small", "mods/aaaaaaaa/ai/brute", "ai/default" };
-    const char *stock[2] = { "ai/demon/imp", "ai/default" };
-    int delay = 0, backoff = 0;
-    printf("-- spawn_teleport: the registry\n");
-    sh_ai_spawn_teleport_reset();
-    CHECK(!sh_ai_spawn_teleport_find(chain, 3, &delay, &backoff));
-    CHECK(sh_ai_spawn_teleport_add("mods/aaaaaaaa/ai/brute", 2000, 100) == 1);
-    CHECK(sh_ai_spawn_teleport_find(chain, 3, &delay, &backoff) == 1 && delay == 2000 && backoff == 100);
-    CHECK(!sh_ai_spawn_teleport_find(stock, 2, &delay, &backoff));
-    CHECK(sh_ai_spawn_teleport_add("MODS/aaaaaaaa/AI/Brute", 1500, 0) == 1);
-    CHECK(sh_ai_spawn_teleport_find(chain + 1, 1, &delay, &backoff) == 1 && delay == 1500 && backoff == 0);
-    CHECK(sh_ai_spawn_teleport_add("mods/aaaaaaaa/ai/x", 0, 0) == 0);
-    CHECK(sh_ai_spawn_teleport_add("mods/aaaaaaaa/ai/x", 100, 200) == 0);
-    CHECK(sh_ai_spawn_teleport_add("mods/aaaaaaaa/ai/x", 60001, 0) == 0);
-    sh_ai_spawn_teleport_reset();
-    CHECK(!sh_ai_spawn_teleport_find(chain, 3, &delay, &backoff));
-    printf("-- spawn_teleport: the script call\n");
-    g_events[0] = 0;
-    CHECK(start(
-        "api = 1\n"
-        "print('tp ' .. tostring(spawn_teleport('ai/brute', 2000, 100)))\n"));
-    CHECK(strstr(log_of("aaaaaaaa"), "tp true\n") != NULL);
-    CHECK(strstr(g_events, "spawn_teleport\n") != NULL);
-    CHECK(sh_ai_spawn_teleport_find(chain, 3, &delay, &backoff) == 1 && delay == 2000 && backoff == 100);
-    sh_script_map_end();
-    sh_ai_spawn_teleport_reset();
-    g_spawn_teleport_ready = 0;
-    CHECK(start("api = 1\nprint('tp ' .. tostring(spawn_teleport('ai/brute', 2000, 100)))\n"));
-    CHECK(strstr(log_of("aaaaaaaa"), "tp false\n") != NULL);
-    CHECK(!sh_ai_spawn_teleport_find(chain, 3, &delay, &backoff));
-    sh_script_map_end();
-    g_spawn_teleport_ready = 1;
-    (void)start("api = 1\nspawn_teleport('ai/brute', 2000, 2500)\n");
-    CHECK(strstr(stop_of("aaaaaaaa"), "needs the backoff in milliseconds from 0 to the delay, got 2500") != NULL);
-    sh_script_map_end();
-    (void)start("api = 1\nspawn_teleport('mods/bbbbbbbb/ai/brute', 2000, 100)\n");
-    CHECK(strstr(stop_of("aaaaaaaa"), "belongs to another mod") != NULL);
-    sh_script_map_end();
-    sh_ai_spawn_teleport_reset();
-}
-
 /* destructible: DOOM Eternal's activation law, the registry and the script call. */
 static float g_rv[16];
 static int g_ri;
@@ -2415,7 +2363,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 54);
+    CHECK(sh_script_ai_register() == 53);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2452,7 +2400,6 @@ int main(int argc, char **argv)
     test_posed_legs();
     test_fk_reference_pose();
     test_eternal_interrupts();
-    test_spawn_teleport();
     test_destructible();
     test_wound_damage_counts();
     files_clear();
