@@ -1639,36 +1639,77 @@ static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_
     return cause;
 }
 
-/* The unit's files from its archive (more than half of its bytes missing): each entry checked into files\. */
-static int mc_fetch_archive(const mc_unit *u, const modnet_io *io)
+/* The archive of a held unit (one request, R-DS6): unit.json first, then the files this computer lacks: every file
+ * when its manifest is not here or it lacks all of them, else the files a mask names (bit i: the manifest's file i).
+ * A transfer the network broke is resumed (sh_cache_net_retry_ms). The manifest it brings is checked against the
+ * unit's hash; each file against its SHA-256 as it goes into files\. 0, a cause, or -1 cancelled. */
+static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
 {
-    char *dir = mc_path("partial"), *part = mc_path("partial\\%s.zip.part", u->hash), *cause_text = NULL;
+    unsigned char *mask = NULL;
+    size_t mask_len = 0, f, lacking = 0;
+    char *dir = mc_path("partial"), *part = NULL, *cause_text = NULL;
     unsigned long long have = 0;
     modnet_result r;
     sh_zip_reader z;
-    int code, cause = 0;
-    size_t f;
-    if (!dir || !part || !mc_mkdirs(dir)) { free(dir); free(part); return SH_CACHE_ABSENT_DISK; }
-    if (!mc_exists(part, &have)) have = 0;
-    code = modnet_get_unit_archive(u->hash, part, have, io, &r);
+    int code = MODNET_OK, cause = 0, net = 0;
+    if (u->state == 0 && u->nfiles) {
+        mask_len = (u->nfiles + 7) / 8;
+        if ((mask = (unsigned char *)calloc(mask_len, 1)) == NULL) { free(dir); return SH_CACHE_ABSENT_DISK; }
+        for (f = 0; f < u->nfiles; f++) {
+            char *src = mc_source_of(u->files[f].sha, u->files[f].size);
+            if (src) { free(src); continue; }
+            mask[f >> 3] |= (unsigned char)(1u << (f & 7));
+            lacking++;
+        }
+        if (lacking == u->nfiles) { free(mask); mask = NULL; mask_len = 0; }   /* every file: no mask */
+    }
+    if (mask) {
+        char msha[SH_MB_HASH_HEX + 1];
+        sh_mb_sha256_hex(mask, mask_len, msha);
+        part = mc_path("partial\\%s.%.16s.zip.part", hash, msha);   /* another mask is another archive */
+    } else part = mc_path("partial\\%s.zip.part", hash);
+    if (!dir || !part || !mc_mkdirs(dir)) { cause = SH_CACHE_ABSENT_DISK; goto done; }
+    for (;;) {
+        int wait;
+        if (!mc_exists(part, &have)) have = 0;
+        code = modnet_get_unit_archive(hash, mask, mask_len, part, have, io, &r);
+        if (code == MODNET_OK || (wait = sh_cache_net_retry_ms(code, net)) < 0) break;
+        mc_logf("MODS: content: unit %.16s's archive stopped (%s); tried again in %d ms", hash,
+                r.message ? r.message : modnet_code_text(code), wait);
+        Sleep((DWORD)wait);
+        net++;
+    }
+    if (code == MODNET_E_CANCELLED) { cause = -1; goto done; }
     if (code != MODNET_OK) {
-        free(dir);
-        free(part);
-        if (code == MODNET_E_CANCELLED) return -1;
-        /* The files one by one instead: what stopped the archive decides nothing yet. */
-        mc_logf("MODS: content: a unit's archive did not download (%s); it is fetched file by file", r.message ? r.message : modnet_code_text(code));
-        return 1;
+        cause = mc_net_cause(code, &r);
+        mc_logf("MODS: content: unit %.16s's archive did not download (%s; HTTP %d)", hash,
+                r.message ? r.message : modnet_code_text(code), r.status);
+        goto done;
     }
     memset(&z, 0, sizeof z);
     if (!sh_zip_reader_open(&z, part, &cause_text)) {
-        mc_logf("MODS: content: a unit's archive did not read (%s); it is fetched file by file", cause_text ? cause_text : "?");
+        mc_logf("MODS: content: unit %.16s's archive did not read (%s)", hash, cause_text ? cause_text : "?");
         free(cause_text);
         mc_delete(part);
-        free(dir);
-        free(part);
-        return 1;   /* fall back to the blobs */
+        cause = SH_CACHE_ABSENT_UNREACHABLE;
+        goto done;
     }
-    for (f = 0; f < u->nfiles && !cause; f++) {
+    if (u->state == -1) {
+        /* The manifest arrives as the archive's first entry; it must be the unit's (its hash). */
+        long idx = sh_zip_reader_find(&z, "unit.json");
+        size_t len = 0;
+        unsigned char *bytes = idx >= 0 ? sh_zip_reader_read(&z, idx, (size_t)1 << 28, &len, &cause_text) : NULL;
+        free(cause_text);
+        cause_text = NULL;
+        if (!bytes || !sh_cache_put_manifest(hash, bytes, len)) {
+            mc_logf("MODS: content: unit %.16s's archive carries no manifest of the unit", hash);
+            cause = SH_CACHE_ABSENT_UNREACHABLE;
+        }
+        free(bytes);
+        mc_unit_free(u);
+        mc_unit_load(u, hash);
+    }
+    for (f = 0; !cause && u->state >= 0 && f < u->nfiles; f++) {
         long idx;
         unsigned char *bytes;
         size_t len = 0;
@@ -1687,6 +1728,8 @@ static int mc_fetch_archive(const mc_unit *u, const modnet_io *io)
     }
     sh_zip_reader_close(&z);
     mc_delete(part);
+done:
+    free(mask);
     free(dir);
     free(part);
     return cause;
@@ -1773,30 +1816,17 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
                     continue;
                 }
                 mc_unit_load(&u, snapshot.units[i]);
-                if (u.state == -1) {
-                    unsigned char *bytes = NULL;
-                    size_t len = 0;
-                    int g = modnet_get_unit(snapshot.units[i], &bytes, &len, io, &r);
-                    if (g != MODNET_OK) {
-                        causes[i] = mc_net_cause(g, &r);
-                        mc_logf("MODS: content: unit %.16s's manifest did not download (%s; HTTP %d)", snapshot.units[i],
-                                r.message ? r.message : modnet_code_text(g), r.status);
-                        mc_unit_free(&u);
-                        continue;
-                    }
-                    if (!sh_cache_put_manifest(snapshot.units[i], bytes, len)) { causes[i] = SH_CACHE_ABSENT_DISK; free(bytes); mc_unit_free(&u); continue; }
-                    free(bytes);
-                    mc_unit_free(&u);
-                    mc_unit_load(&u, snapshot.units[i]);
-                }
+                /* Its manifest's checks first when it is here; else the archive brings it and they follow. */
                 if (u.state == -2) { causes[i] = SH_CACHE_ABSENT_NEWER; mc_unit_free(&u); continue; }
-                if (!mc_game_ok(&u)) { causes[i] = SH_CACHE_ABSENT_GAME; mc_unit_free(&u); continue; }
-                if (u.state == 0) {
-                    int c = 0;
-                    if (u.bytes_missing * 2 > u.bytes_total) c = mc_fetch_archive(&u, io);
+                if (u.state >= 0 && !mc_game_ok(&u)) { causes[i] = SH_CACHE_ABSENT_GAME; mc_unit_free(&u); continue; }
+                if (u.state != 1) {
+                    int c = mc_fetch_archive(&u, snapshot.units[i], io);
                     if (c < 0) { code = MODNET_E_CANCELLED; mc_unit_free(&u); goto done; }
-                    if (c > 1) causes[i] = c;
-                    for (f = 0; f < u.nfiles && !causes[i]; f++) {
+                    if (c) causes[i] = c;
+                    else if (u.state == -2) causes[i] = SH_CACHE_ABSENT_NEWER;
+                    else if (!mc_game_ok(&u)) causes[i] = SH_CACHE_ABSENT_GAME;
+                    /* An entry the archive lacked or that did not check: fetched alone (a repair, a few files). */
+                    for (f = 0; !causes[i] && u.state >= 0 && f < u.nfiles; f++) {
                         char *src = mc_source_of(u.files[f].sha, u.files[f].size);
                         if (src) { free(src); continue; }
                         c = mc_fetch_blob(u.files[f].sha, u.files[f].size, io);

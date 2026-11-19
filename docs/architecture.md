@@ -5213,9 +5213,12 @@ inheriting `snapmaps/unknown`, so the map, its logic and its saves keep the
 object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
 published-map gate treats a pinned row as missing until its composition is
 complete: it asks no question and probes nothing, fetches the absent units on
-the network worker (`sh_cache_prepare`: the store's status, the manifest, then
-the unit's archive when more than half of its bytes are missing, else each
-file, a broken-off file resumed by Range, every byte checked), composes again
+the network worker (`sh_cache_prepare`: the store's status for the row's
+units, then each unit in one request, its archive: unit.json first, which
+brings the manifest when it is not here, and every file, or only the files
+this computer lacks, named by a mask in the manifest's order; a transfer the
+network broke resumed by Range, every byte checked, an entry that did not
+check fetched alone), composes again
 (the composition's sidecar records each absent unit's cause, the store's
 answer), and resumes; the resumed load says once what the map plays without,
 with the cause the fetch recorded, never the hold and the load both. A joiner
@@ -5297,7 +5300,7 @@ publish.
 
 ### The mod store transport
 
-The store now speaks units (`modnet.h`, its units section: status, manifest, blob and archive reads with Range
+The store now speaks units (`modnet.h`, its units section: status, archive (with a mask) and blob reads with Range
 resume, begin, archives, parts, complete, signed claims with a rev, release, asked). It answers the build routes below
 with 410; the publish and download paths that still call them move to units in DS-T.
 

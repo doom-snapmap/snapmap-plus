@@ -155,6 +155,20 @@ int main(void)
     }
     CHECK(modnet_set_base_url(url));
 
+    /* ---- a unit's archive (R-DS6): one request, every file, or the files a mask names as ?want=<base64url> ---- */
+    {
+        static const unsigned char mask[2] = { 0x05, 0x80 };   /* files 0, 2 and 15 */
+        static const char unit[] = "abababababababababababababababababababababababababababababababab";
+        char out[MAX_PATH * 2];
+        _snprintf_s(out, sizeof out, _TRUNCATE, "%s\\unit-archive.zip", tmp);
+        (void)modnet_get_unit_archive(unit, mask, sizeof mask, out, 0, NULL, &r);
+        CHECK(!strcmp(g_stub.last_get, "/mods/unit/" "abababababababababababababababababababababababababababababababab" "/archive?want=BYA"));
+        (void)modnet_get_unit_archive(unit, NULL, 0, out, 0, NULL, &r);
+        CHECK(!strcmp(g_stub.last_get, "/mods/unit/abababababababababababababababababababababababababababababababab/archive"));
+        CHECK(modnet_get_unit_archive(unit, NULL, 3, out, 0, NULL, &r) == MODNET_E_ARG);   /* a length with no mask */
+        DeleteFileA(out);
+    }
+
     /* ---- argument rules ---- */
     CHECK(modnet_valid_ref("item-41"));
     CHECK(modnet_valid_ref("export:My Map (2)"));

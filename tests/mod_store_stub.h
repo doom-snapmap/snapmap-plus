@@ -65,6 +65,7 @@ typedef struct stub_state {
     int last_cl_headers;          /* Content-Length headers seen */
     long long last_cl_value;
     char last_method[8], last_path[160], last_ctype[64];
+    char last_get[200];           /* the path of the last GET or HEAD */
     char last_refusal[200];       /* the last 422's error text */
     /* faults */
     char fail_prefix[48];         /* the next request whose "METHOD path" starts with this ... */
@@ -593,6 +594,7 @@ static void stub_serve_one(SOCKET s)
     }
     EnterCriticalSection(&g_stub.cs);
     g_stub.requests++;
+    if (!strcmp(method, "GET") || !strcmp(method, "HEAD")) strncpy_s(g_stub.last_get, sizeof g_stub.last_get, path, _TRUNCATE);
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
         g_stub.last_cl_headers = cl_headers;
         g_stub.last_cl_value = cl;

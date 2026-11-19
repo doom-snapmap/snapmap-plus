@@ -210,14 +210,13 @@ typedef struct modnet_signer {
 
 /* POST /mods/units: each hash's state (MODNET_UNIT_*), in batches of MODNET_UNITS_MAX. */
 int  modnet_unit_status(const char *const *hashes, size_t n, int *states, const modnet_io *io, modnet_result *r);
-/* GET /mods/unit/<hash>: the manifest's bytes (malloc'd), checked against the hash (MODNET_E_HASH otherwise);
- * MODNET_E_NOT_FOUND, MODNET_E_BLOCKED (451, removed). */
-int  modnet_get_unit(const char *hash, unsigned char **bytes, size_t *len, const modnet_io *io, modnet_result *r);
 /* GET /mods/blob/<sha> into `out_path`, resuming after the `have` bytes the file holds (Range). Not checked here. */
 int  modnet_get_blob(const char *sha, const char *out_path, unsigned long long have, const modnet_io *io, modnet_result *r);
-/* GET /mods/unit/<hash>/archive (a ZIP of unit.json and every file), resumed the same way. */
-int  modnet_get_unit_archive(const char *hash, const char *out_path, unsigned long long have, const modnet_io *io,
-                             modnet_result *r);
+/* GET /mods/unit/<hash>/archive (a ZIP of unit.json and every file, or with `mask`, ?want=<base64url>, the files whose
+ * bit is set: bit i, byte i >> 3, value 1 << (i & 7), the manifest's file i; `mask_len` bytes, ceil(files / 8)),
+ * resumed the same way. A unit arrives in this one request (R-DS6). */
+int  modnet_get_unit_archive(const char *hash, const unsigned char *mask, size_t mask_len, const char *out_path,
+                             unsigned long long have, const modnet_io *io, modnet_result *r);
 /* POST /mods/unit/<hash>/begin with the manifest: *held 1, or the blobs the store lacks in *missing (malloc'd). */
 int  modnet_begin_unit(const char *hash, const char *manifest, size_t len, const modnet_signer *signer, int *held,
                        char (**missing)[MODNET_HASH_HEX + 1], size_t *nmissing, const modnet_io *io, modnet_result *r);

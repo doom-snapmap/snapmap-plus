@@ -250,8 +250,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 2a. A player who has most of the files already (another map brought them): only the rest is fetched, file by
-     * file, and a file a closed game left half downloaded resumes from where it stopped (Range). */
+    /* 2a. A player who has most of the files already (another map brought them): the rest arrives in the one request
+     * of the unit's archive, which names only the files this computer lacks (R-DS6; a part file a closed game left
+     * of another transfer is not read). */
     {
         char root_d[MAX_PATH], from[MAX_PATH * 2], to[MAX_PATH * 2], dir[MAX_PATH * 2];
         size_t i, skipped = 0, kept = 0;
@@ -300,8 +301,8 @@ int main(int argc, char **argv)
         code = sh_cache_prepare(row1.build, &io);
         {
             char d[160];
-            _snprintf_s(d, sizeof d, _TRUNCATE, "%zu files here, 3 fetched (one resumed from half)", kept);
-            step(code == 0 && sh_cache_composed(row1.build, &complete) && complete, "player: the files it lacks fetched one by one, one resumed", d);
+            _snprintf_s(d, sizeof d, _TRUNCATE, "%zu files here, 3 in one archive request", kept);
+            step(code == 0 && sh_cache_composed(row1.build, &complete) && complete, "player: the files it lacks arrive in one request", d);
         }
     }
 
@@ -386,8 +387,7 @@ int main(int argc, char **argv)
     {
         const char *units[2] = { ua.hash, ub.hash };
         int states[2] = { 9, 9 };
-        unsigned char *bytes = NULL;
-        size_t len = 0;
+        char served[MAX_PATH * 2];
         code = modnet_map_release(ref1, sa1, 2, &sig_a, &rev, &io, &r);
         step(code == MODNET_OK, "author: unpublish map 1", r.message);
         code = modnet_unit_status(units, 2, states, &io, &r);
@@ -399,9 +399,10 @@ int main(int argc, char **argv)
         code = modnet_unit_status(units, 2, states, &io, &r);
         step(code == MODNET_OK && states[0] == MODNET_UNIT_HELD && states[1] == MODNET_UNIT_HELD,
              "unclaimed units are still held during the 24-hour deletion delay", NULL);
-        code = modnet_get_unit(ua.hash, &bytes, &len, &io, &r);
-        step(code == MODNET_OK && len == ua.manifest_len, "an unclaimed unit is still served (a transfer in flight never meets a delete)", r.message);
-        free(bytes);
+        _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\served-after-release.zip", work);
+        code = modnet_get_unit_archive(ua.hash, NULL, 0, served, 0, &io, &r);
+        step(code == MODNET_OK && r.status == 200, "an unclaimed unit is still served (a transfer in flight never meets a delete)", r.message);
+        DeleteFileA(served);
         code = modnet_map_release(ref1, sa1, 3, &sig_a, &rev, &io, &r);
         step(code == MODNET_E_NOT_FOUND, "a released claim is gone", NULL);
     }
