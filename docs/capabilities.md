@@ -1029,7 +1029,7 @@ the pieces' explosion effect tint and fade the pieces themselves as DOOM Eternal
 demons too; `monster_type` names any demon's type, `ground_below` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
 and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
-`hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and
+`hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`, or `ai:launch` with an exact velocity for a thrown arc), sees the projectiles flying at an entity (`e:incoming_projectiles`) and
 steers or explodes them, starts and stops effects (`play_effect`, `move_effect`, `stop_effect`), lets its own effects end the way DOOM Eternal ends them, a stopped model gone in that frame instead of fading and a sound already playing not started a second time over itself (`end_effects_at_once`), plays its own sounds
 (`sound`), reads a tag of its md6Def or a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
 (amount, decl, damage zone, direction, attacker), death, pain reactions, `ae_notify` rows and

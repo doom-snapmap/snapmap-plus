@@ -16,6 +16,8 @@
  *   e:tag(name) -> pos, forward                e:pain() -> reaction or nil
  *     (name: a tag of a demon's md6Def, else a joint)
  *   ai:fire(projectile, tag or joint, target) -> p or nil
+ *   ai:launch(projectile, tag or joint, velocity) -> p or nil
+ *   e:incoming_projectiles(size) -> { {projectile = p, seconds = t}, ... }, soonest first
  *   ai:can_see_from(other, tag or joint) -> boolean
  *   p:steer(target, [speed])                   p:explode()
  * p:steer and p:explode answer nil once the projectile no longer exists, as
@@ -42,6 +44,16 @@
  *                    the AI (300; its handler never reads the animation); the projectile it launches is
  *                    caught by the launch hook. A position target: launched at the AI's own center, then
  *                    steered to the position before its first frame.
+ *   launch           the launch fire makes (its event, its hook and the tag), then setLinearVelocity with the
+ *                    velocity given: the projectile leaves the tag along it at exactly that speed
+ *   incoming_projectiles  every entity number's entity (as entities_near) whose class descends from idProjectile
+ *                    (the game's type information), not launched by e itself: its getLinearVelocity less e's,
+ *                    a ray from its origin along that, and the box (size x forward, y left, z up, standing on
+ *                    e's origin, turned with e's axis). It is incoming when the ray enters the box ahead of it;
+ *                    seconds = its distance from the box's center over the relative speed. The same test as DOOM
+ *                    Eternal's incoming-projectile query (FUN_1409a9b10, build 25216728: ray against box, both
+ *                    distances ahead, the nearest, time = distance over speed), over every projectile instead
+ *                    of the demon's tracked list.
  *   steer            setLinearVelocity on the projectile, at its current speed unless one is given
  *   p:explode        the projectile's own Explode (idProjectile vtable +0xAA0: VK 0x140F38240,
  *                    GL 0x140F37700) with no collision, as the projectile's fuse does
@@ -115,6 +127,8 @@ typedef struct sh_script_combat_engine {
     /* make the FX manager's stop and its request of a sound item follow the hard stop rule for the decls named
      * with sh_fx_hard_add: 1 when either hook is in place, 0 when this executable can serve neither */
     int   (*fx_hard_stops)(void);
+    /* 1 when the entity is a projectile (its class descends from idProjectile) */
+    int   (*is_projectile)(void *ent);
 } sh_script_combat_engine;
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
@@ -307,6 +321,12 @@ static const unsigned char k_combat_fx_request_prologue[SH_COMBAT_FX_REQUEST_STO
 #define SH_COMBAT_PROJ_EXPLODE    0xAA0u   /* idProjectile vtable: Explode(projectile, ignore, collision*) */
 #define SH_COMBAT_ENT_NAME        0x388u   /* idEntity: name char* */
 #define SH_COMBAT_DECL_NAME       0x008u   /* idDecl: name char* */
+
+/* Where a ray from `o` along the unit direction `d` enters and leaves a box
+ * (center `c`, axis rows forward, left, up, half sizes `h`): 1 with both
+ * distances along the ray (negative behind `o`), 0 when it misses. */
+int sh_script_combat_ray_box(const float o[3], const float d[3], const float c[3], const float ax[9],
+                             const float h[3], double *enter, double *leave);
 
 /* The engine's enum tables are arrays of { char *name, char *value, ... }
  * 0x18 bytes apart. Find the table whose first two names are `first` and
