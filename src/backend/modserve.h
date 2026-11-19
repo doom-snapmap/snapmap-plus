@@ -838,8 +838,9 @@ int  sh_modserve_scope_relevant(void);
 
 /* 1 when a level load must not see the resource `name`: a name under an
  * installed mod's salt ("mods/<salt>/...") that the listing does not declare
- * (no admitted build of the salt has a rank) and that is not an editor-tweak
- * bundle. The engine keeps every decl the editor's passes registered for the
+ * (no admitted build of the salt has a rank). An editor tweak is a shadow of a
+ * stock name, so a bundle's editor-time class never keeps its own names here:
+ * they are game content. The engine keeps every decl the editor's passes registered for the
  * session, and a level load builds a snapshot template, parsing the edit
  * state, of every entityDef it holds (level_templates.h): a mod reaches a map
  * only when that map declares it (PLATFORM Isolation). 0 with scope off, for

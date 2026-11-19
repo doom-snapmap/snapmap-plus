@@ -4083,7 +4083,7 @@ int sh_modserve_level_hides(const char *name)
     for (i = 0; i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         if (!b->admitted || !b->id || strlen(b->id) != n || _strnicmp(b->id, salt, n)) continue;
-        if (InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) >= 0 || ms_scope_always(b)) return 0;
+        if (InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) >= 0) return 0;
         known = 1;
     }
     return known;

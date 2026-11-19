@@ -4116,7 +4116,8 @@ static void test_scope(void)
         hash64('6', h_names);
         one[0] = h_names;
         CHECK(sh_modserve_level_hides("mods/nnames00/thing") == 1 && sh_modserve_level_hides("mods/NNAMES00/other") == 1);
-        CHECK(!sh_modserve_level_hides("mods/eeditor0/thing"));    /* an editor tweak bundle serves in every map */
+        /* an editor tweak shadows a stock name; a name under the tweak bundle's own salt is game content */
+        CHECK(sh_modserve_level_hides("mods/eeditor0/thing") == 1);
         CHECK(!sh_modserve_level_hides("mods/zzzzzzzz/thing") && !sh_modserve_level_hides("ai/demon/imp") &&
               !sh_modserve_level_hides("mods/nnames00") && !sh_modserve_level_hides(NULL));
         CHECK(sh_modserve_scope_set(one, 1, 1) >= 1 && !sh_modserve_level_hides("mods/nnames00/thing"));
