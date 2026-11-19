@@ -836,6 +836,16 @@ int  sh_modserve_scope_map_open(void);
  * map manifest reads placed names at a load only then. */
 int  sh_modserve_scope_relevant(void);
 
+/* 1 when a level load must not see the resource `name`: a name under an
+ * installed mod's salt ("mods/<salt>/...") that the listing does not declare
+ * (no admitted build of the salt has a rank) and that is not an editor-tweak
+ * bundle. The engine keeps every decl the editor's passes registered for the
+ * session, and a level load builds a snapshot template, parsing the edit
+ * state, of every entityDef it holds (level_templates.h): a mod reaches a map
+ * only when that map declares it (PLATFORM Isolation). 0 with scope off, for
+ * any other name, and for a salt no installed mod carries. Any thread. */
+int  sh_modserve_level_hides(const char *name);
+
 typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
     int automatic;           /* "always" because it shadows editor-time content */

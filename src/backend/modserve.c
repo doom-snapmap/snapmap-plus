@@ -4068,6 +4068,27 @@ int sh_modserve_scope_mode_get(void)
     return InterlockedCompareExchange(&g_scope_play, 0, 0) ? SH_MODSERVE_MODE_PLAY : SH_MODSERVE_MODE_EDITOR;
 }
 
+int sh_modserve_level_hides(const char *name)
+{
+    const ms_index *x = g_index;
+    const char *salt, *end;
+    size_t n;
+    int i, known = 0;
+    if (!x || !name || _strnicmp(name, "mods/", 5)) return 0;
+    if (!InterlockedCompareExchange(&g_scope_on, 0, 0)) return 0;
+    salt = name + 5;
+    end = strchr(salt, '/');
+    if (!end || end == salt) return 0;
+    n = (size_t)(end - salt);
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->admitted || !b->id || strlen(b->id) != n || _strnicmp(b->id, salt, n)) continue;
+        if (InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) >= 0 || ms_scope_always(b)) return 0;
+        known = 1;
+    }
+    return known;
+}
+
 int sh_modserve_scope_relevant(void)
 {
     const ms_index *x = g_index;

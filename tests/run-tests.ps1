@@ -228,6 +228,10 @@ $tests += @{ name = "clip_events_sigs_test"; src = 'clip_events_sigs_test.c ..\s
 $tests += @{ name = "attach_tags_test"; src = 'attach_tags_test.c ..\src\backend\attach_tags_rule.c ..\src\backend\clip_events_rule.c ..\src\backend\mp_json.c'; arg = "" }
 # With images: the tag-info lookup at its recorded RVA, its pattern's uniqueness and its detour window.
 $tests += @{ name = "attach_tags_sigs_test"; src = 'attach_tags_sigs_test.c ..\src\backend\attach_tags_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Level templates (level_templates.h): the walk's filter and call decoding; with images, the walk sites, their
+# one list copy and its detour window.
+$tests += @{ name = "level_templates_test"; src = 'level_templates_test.c ..\src\backend\level_templates_rule.c'; arg = "" }
+$tests += @{ name = "level_templates_sigs_test"; src = 'level_templates_sigs_test.c ..\src\backend\level_templates_sigs.c ..\src\backend\level_templates_rule.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # The sync clock (sync_clock_rule.c): which animators of a sync run on the player's clock, and one re-anchor's
 # precision; with images, the re-anchor's pattern, the relocated jz of its window and its eight callers.
 $tests += @{ name = "sync_clock_test"; src = 'sync_clock_test.c ..\src\backend\sync_clock_rule.c ..\src\backend\clip_events_rule.c ..\src\backend\mp_json.c'; arg = "" }

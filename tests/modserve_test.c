@@ -4106,6 +4106,29 @@ static void test_scope(void)
     CHECK(ev_first("C:echo hands off") >= 0 && !strcmp(g_text_val[1], "0") && !strcmp(g_text_val[3], "knights"));
     (void)h_maped;
 
+    /* A level load sees an installed mod's names only when its map declares the
+     * mod (R-ED1): the engine keeps what the editor registered, and a level load
+     * templates every entityDef it holds (level_templates.h). */
+    printf("-- map scope: a level load sees only the mods its map declares\n");
+    {
+        char h_names[65];
+        const char *one[1];
+        hash64('6', h_names);
+        one[0] = h_names;
+        CHECK(sh_modserve_level_hides("mods/nnames00/thing") == 1 && sh_modserve_level_hides("mods/NNAMES00/other") == 1);
+        CHECK(!sh_modserve_level_hides("mods/eeditor0/thing"));    /* an editor tweak bundle serves in every map */
+        CHECK(!sh_modserve_level_hides("mods/zzzzzzzz/thing") && !sh_modserve_level_hides("ai/demon/imp") &&
+              !sh_modserve_level_hides("mods/nnames00") && !sh_modserve_level_hides(NULL));
+        CHECK(sh_modserve_scope_set(one, 1, 1) >= 1 && !sh_modserve_level_hides("mods/nnames00/thing"));
+        CHECK(sh_modserve_level_hides("mods/rrows000/knight") == 1);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && !sh_modserve_level_hides("mods/nnames00/thing") &&
+              sh_modserve_level_hides("mods/rrows000/knight") == 1);
+        CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
+        CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 1 && sh_modserve_level_hides("mods/nnames00/thing") == 1);
+        sh_modserve_scope_enable(0);
+        CHECK(!sh_modserve_level_hides("mods/nnames00/thing"));
+    }
+
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
