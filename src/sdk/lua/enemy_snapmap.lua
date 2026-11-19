@@ -15,13 +15,15 @@
 --
 -- Follow orders (SnapMap's Follow action, idSnapMapAction_FollowPath, writes them into the demon's temp memory for
 -- the stock FSM's snapmap state, which takes and removes them): e:snapmap_order() takes one the same way. While an
--- order holds, every move the brain asks for goes to the order's goal instead, and a demon that is not moving is
--- sent there; its attacks stay the brain's own, as the stock state keeps fighting. A path or position order ends
--- on arrival (within ORDER_ARRIVE); an entity order holds while the entity lives; a new order replaces it.
+-- order holds, every move the brain asks for goes to the order's goal instead; its attacks stay the brain's own. The
+-- tier never starts a move of its own: an animation the brain asks for during a move it did not start would cancel
+-- that move (DOOM 2016 restarts the AI off locomotion, TY11), so the demon sets off at the brain's next move. A path
+-- or position order ends on arrival (within ORDER_ARRIVE); an entity order holds while the entity lives; a new order
+-- replaces it.
 --
 -- The engine's state is the truth: team and position are read from the engine every think, never kept. A jump of
--- the position the brain did not walk (SnapMap's Teleport To, or the engine moving the demon) ends the order and the
--- current move, and a defender defends where it now stands.
+-- the position no walk covers in one think (SnapMap's Teleport To, or the engine moving the demon) ends the order and
+-- the current move, and a defender defends where it now stands.
 --
 -- An enemy is a player, or a demon of another team when the map's author gave this demon a team (the editor's Team
 -- property: demons of two teams fight each other). The same team never fights itself, and the last attacker is taken
@@ -37,8 +39,7 @@ P.DEFEND_RADIUS = 512
 P.SIGHT = 4096          -- how far a demon looks for demons of another team
 P.LINK_WAIT = 3         -- seconds a new demon is looked for among the placed objects
 P.ORDER_ARRIVE = 64     -- a path or position order is done this close to its goal
-P.FOLLOW_DISTANCE = 128 -- how close an entity order keeps the demon to the entity
-P.JUMP = 256            -- a think's move past this the brain did not walk is the engine's (a teleport)
+P.JUMP = 256            -- a move past this in one think is the engine's (a teleport): no demon walks it
 
 local REAL = { TEAM_ONE = true, TEAM_TWO = true, TEAM_THREE = true, TEAM_FOUR = true }
 local records = setmetatable({}, { __mode = "k" })
@@ -167,31 +168,24 @@ function P.order_goal(A, e)
 end
 
 --- One think of SnapMap's rules for demon e (call it each think before the brain decides): a new Follow order is
--- taken, a teleport noticed, an order that arrived ended, a demon under an order that stands still sent on, and an
--- enemy given when it has none (P.acquire). b: the brain's record of e.
+-- taken, a teleport noticed, an order that arrived ended, and an enemy given when it has none (P.acquire). b: the
+-- brain's record of e.
 function P.think(A, e, b)
   local s = P.of(e)
   local pos = A.position(e)
   -- a teleport: the engine moved the demon farther than it walked
-  if s.last and pos and dist2d(pos, s.last) > P.JUMP and not s.walked then
+  if s.last and pos and dist2d(pos, s.last) > P.JUMP then
     s.order = nil
     s.home = pos
     if A.stop then A.stop(e) end
   end
-  s.last, s.walked = pos, false
+  s.last = pos
   if type(e.snapmap_order) == "function" then
     local o = e:snapmap_order()
     if o then s.order = o end
   end
   local goal = P.order_goal(A, e)
-  if goal and pos then
-    local o, d = s.order, dist2d(pos, goal)
-    if o.kind ~= "entity" and d <= P.ORDER_ARRIVE then
-      s.order = nil
-    elseif not (o.kind == "entity" and d <= P.FOLLOW_DISTANCE) and A.move_done(e) then
-      A.move_to(e, goal)
-    end
-  end
+  if goal and pos and s.order.kind ~= "entity" and dist2d(pos, goal) <= P.ORDER_ARRIVE then s.order = nil end
   P.acquire(A, e, b)
 end
 
@@ -206,13 +200,11 @@ function P.install(A)
     local goal = P.order_goal(A, e)
     if goal then pos = goal
     elseif s.behavior == "defend" and s.home and pos then pos = P.clamp(pos, s.home, P.DEFEND_RADIUS) end
-    s.walked = true
     return move_to(e, pos, flags)
   end
   A.move_to_entity = function(e, t, radius, flags)
     local s = P.of(e)
     local goal = P.order_goal(A, e)
-    s.walked = true
     if goal then return move_to(e, goal, flags) end
     if s.behavior == "defend" and s.home then
       local tp = A.position(t)
