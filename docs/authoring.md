@@ -201,10 +201,12 @@ The flag is the stock demon it stands in for; the number is any one that is not 
 for a second demon of the mod), the same in your demon's encounter (`memberType = "524288";`) and score
 (`aiType = "524288";`). Snapmap+ gives the demon a spawn type of its own in every map that uses it, so the AI Filter and
 the Cached Object tell it from every other demon; its kill scores in the map's Player Score as its stand-in's; the
-Single Demon Encounter, Encounter List and Miniboss pickers offer its encounter wherever the mod is installed, without
-the mod changing them; and an encounter SnapMap picks for its waves offers it where your edited copy of that encounter
-adds the number beside the stand-in's flag. A converter (Doomforge) writes all of this from the source game's data; its
-author writes nothing.
+Single Demon Encounter, Encounter List and Miniboss pickers offer the encounter your demon's Toybox placeable spawns
+wherever the mod is installed, without the mod changing them; the AI Filter's Include AI offers it in a map that uses
+it; and the waves offer it through encounters of your own: an edited copy of a director table (or of the Group
+Encounter's list) that adds an entry naming your encounter. A mod never replaces a stock demon: leave the game's
+encounters' members as they are. A converter (Doomforge) writes all of this from the source game's data; its author
+writes nothing.
 
 ## What the build checks
 
