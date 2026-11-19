@@ -1,5 +1,6 @@
 /* level_templates_test.c -- the rule half of level_templates (src/backend/level_templates_rule.c): the template
- * walk's list keeps every entry but those the scope hides, in order; a null entry or an unreadable name stays;
+ * walk's list keeps its count and every entry but those the scope hides, which are cleared; a null entry or an
+ * unreadable name stays;
  * the E8 call decoding the install uses to find the list copy. */
 #include <stdio.h>
 #include <string.h>
@@ -20,20 +21,22 @@ int main(void)
              own = { NULL, "mods/declar00/ai/demon/tyrant" }, mod2 = { NULL, "mods/undecl00/snapmaps/enc" },
              unnamed = { NULL, NULL };
     void *items[6];
-    int n, hidden = -1;
+    int hidden;
     const char *first = NULL;
 
+    /* Hidden entries are cleared in place; the list keeps its count (the walk compares it with the manager's). */
     items[0] = &stock; items[1] = &mod1; items[2] = NULL; items[3] = &own; items[4] = &mod2; items[5] = &unnamed;
-    n = sh_level_templates_filter(items, 6, name_of, hides, &hidden, &first);
-    CHECK(n == 4 && hidden == 2 && first == mod1.name);
-    CHECK(items[0] == &stock && items[1] == NULL && items[2] == &own && items[3] == &unnamed);
+    hidden = sh_level_templates_filter(items, 6, name_of, hides, &first);
+    CHECK(hidden == 2 && first == mod1.name);
+    CHECK(items[0] == &stock && items[1] == NULL && items[2] == NULL && items[3] == &own && items[4] == NULL &&
+          items[5] == &unnamed);
 
     /* nothing hidden: the list and *first unchanged */
     first = "unset";
-    n = sh_level_templates_filter(items, 4, name_of, hides, &hidden, &first);
-    CHECK(n == 4 && hidden == 0 && !strcmp(first, "unset"));
-    CHECK(sh_level_templates_filter(NULL, 3, name_of, hides, &hidden, NULL) == 3 && hidden == 0);
-    CHECK(sh_level_templates_filter(items, -1, name_of, hides, &hidden, NULL) == 0);
+    CHECK(sh_level_templates_filter(items, 6, name_of, hides, &first) == 0 && !strcmp(first, "unset"));
+    CHECK(items[0] == &stock && items[3] == &own && items[5] == &unnamed);
+    CHECK(sh_level_templates_filter(NULL, 3, name_of, hides, NULL) == 0);
+    CHECK(sh_level_templates_filter(items, -1, name_of, hides, NULL) == 0);
 
     /* E8 rel32 decoding, forward and backward */
     {

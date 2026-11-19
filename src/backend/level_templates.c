@@ -16,7 +16,8 @@
 
 #pragma intrinsic(_ReturnAddress)
 
-/* idList<idResource *>: the array, then the count. A resource's name is the
+/* idList<idResource *>: the array, then the count (left as it is: a cleared
+ * entry is skipped by both walk loops). A resource's name is the
  * C string at +0x08 (the walk's own "Adding entityDef %s" line reads it). */
 #define LIST_COUNT_OFF   0x08
 #define RESOURCE_NAME_OFF 0x08
@@ -51,19 +52,17 @@ static const char *lt_name(const void *item)
 static void lt_filter(void *list, int again)
 {
     void **items = NULL;
-    int count = 0, kept, hidden = 0;
+    int count = 0, hidden;
     const char *first = NULL;
     __try {
         items = *(void ***)list;
         count = *(int *)((uint8_t *)list + LIST_COUNT_OFF);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     if (!items || count <= 0) return;
-    kept = sh_level_templates_filter(items, count, lt_name, sh_modserve_level_hides, &hidden, &first);
-    if (!hidden) return;
-    __try { *(int *)((uint8_t *)list + LIST_COUNT_OFF) = kept; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-    if (!again)
+    hidden = sh_level_templates_filter(items, count, lt_name, sh_modserve_level_hides, &first);
+    if (hidden && !again)
         lt_log("MODS: scope: the level load builds no entity template for %d entityDef(s) of mods this map does not "
-               "declare (first: %s); %d of %d kept", hidden, first ? first : "?", kept, count);
+               "declare (first: %s); %d of %d kept", hidden, first ? first : "?", count - hidden, count);
 }
 
 static void copy_detour(void *manager, void *list, char sort)

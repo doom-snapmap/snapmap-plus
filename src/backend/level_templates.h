@@ -38,12 +38,15 @@ extern const sig_entry SH_LEVEL_TEMPLATES_SIGNATURES[];
 /* The target of the E8 rel32 call at `call` (0 when the byte is not E8). */
 uintptr_t sh_level_templates_call_target(const uint8_t *call);
 
-/* Remove from items[0..count) every entry whose name `hides` (name_of reads an
- * entry's name; NULL or unreadable keeps the entry), keeping the order of the
- * rest. Returns the new count; *hidden counts the removed entries and *first
- * names the first one (left unchanged when none). */
+/* Clear (set to NULL) every entry of items[0..count) whose name `hides`
+ * (name_of reads an entry's name; a NULL entry or unreadable name stays as it
+ * is). The list keeps its count: both walk loops skip a NULL entry, and the
+ * walk compares the list's count with the manager's to notice a template that
+ * loaded more entityDefs, so a shorter list would make it warn and copy the
+ * list again after every template. Returns how many were cleared; *first
+ * names the first (left unchanged when none). */
 int sh_level_templates_filter(void **items, int count, const char *(*name_of)(const void *item),
-                              int (*hides)(const char *name), int *hidden, const char **first);
+                              int (*hides)(const char *name), const char **first);
 
 /* Resolve both walk sites, check that both call the same list copy, detour it.
  * Returns 1 when the detour is in place. */

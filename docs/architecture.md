@@ -4146,12 +4146,13 @@ holds, and the editor's passes keep every installed mod's rows' closure for
 the session (the entityDef a row builds for the game included), so without a
 rule a stock map's Play parsed every installed mod's entities and one that
 did not parse stopped the load. The product detours the resource list copy
-for the template walk's two calls only and leaves out every name under the
+for the template walk's two calls only and clears every entry named under the
 salt of an installed mod no build of which the listing declares
 (`sh_modserve_level_hides`; editor-time bundles included: an editor tweak is
 a shadow of a stock name, so a name under the mod's own salt is game
-content). Both walk loops read the filtered list, so no template is made or
-demanded for such a name.
+content). Both walk loops skip a cleared entry, so no template is made or
+demanded for such a name; the list keeps its count, which the walk compares
+with the manager's to notice a template that loaded more entityDefs.
 
 Requirements: a declared bundle's apply; an undeclared root build that adds
 Toybox rows keeps them outside Play, because the palette registers its rows

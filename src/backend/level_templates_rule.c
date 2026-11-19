@@ -12,22 +12,16 @@ uintptr_t sh_level_templates_call_target(const uint8_t *call)
 }
 
 int sh_level_templates_filter(void **items, int count, const char *(*name_of)(const void *item),
-                              int (*hides)(const char *name), int *hidden, const char **first)
+                              int (*hides)(const char *name), const char **first)
 {
-    int i, kept = 0, gone = 0;
-    if (!items || count <= 0 || !name_of || !hides) {
-        if (hidden) *hidden = 0;
-        return count < 0 ? 0 : count;
-    }
+    int i, gone = 0;
+    if (!items || count <= 0 || !name_of || !hides) return 0;
     for (i = 0; i < count; ++i) {
         const char *name = items[i] ? name_of(items[i]) : NULL;
-        if (name && hides(name)) {
-            if (!gone && first) *first = name;
-            gone++;
-            continue;
-        }
-        items[kept++] = items[i];
+        if (!name || !hides(name)) continue;
+        if (!gone && first) *first = name;
+        items[i] = NULL;
+        gone++;
     }
-    if (hidden) *hidden = gone;
-    return kept;
+    return gone;
 }
