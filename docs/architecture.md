@@ -4401,7 +4401,17 @@ map's choices).
   2026-11-19: an installed mod grows SnapMap's lists; a grown list never
   declares a mod, a map is modded only when it references the mod's entity).
   They are registry files whenever such an encounter is installed, generated
-  also when no map declares anything.
+  also when no map declares anything, in the editor only: in Play no
+  undeclared mod serves, so the game's lists serve there, and a level load
+  still templates no undeclared mod's entityDef (`level_templates.c`).
+- **A stock entity is its stock row's** (D-A44). A mod's Toybox row whose
+  entityDef is also a stock row's sorts beside it in an unstable order, so
+  load and paste could bind every stock entity of that kind to the mod's row.
+  After the palette build the product lists such pairs, and the editor tick's
+  rebind (`timeline_tile.c`, `sh_tl_stock_row_first`) moves an entity bound to
+  the mod's row to the stock row. No row is refused (an editor tweak shadows
+  the stock row's own name and counts as stock), and the map's listing never
+  followed the row: its placed names come from the entity's own text.
 - **The kill score.** `kill_score.c` detours the map's Player Score switch
   (Vulkan `0x140890390`, OpenGL `0x14088F2C0`, one signature; its window holds
   one short conditional jump the hook relocates): a spawn type the listing gave

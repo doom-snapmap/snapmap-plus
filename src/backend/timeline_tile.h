@@ -39,6 +39,17 @@ extern const char sh_tl_record_json[];
 const void *sh_tl_wanted_sedef(const char *inherit, const char *cls, const void *current,
                                const void *tile, const void *unknown);
 
+/* A stock entity is its stock row's (R-ED1 Q2, D-A44). A mod's row (its sedef
+ * named under mods/) whose entityDef is also a stock row's sorts beside that
+ * row in an unstable order, so load and paste could bind every stock entity
+ * of that kind to the mod's row and the editor would label it so. Such an
+ * entity is rebound to the stock row: returns `stock_row` when `current_row`
+ * (the bound row's sedef name) is a mod's and differs from it, else NULL. An
+ * editor tweak shadows a stock row's own name, so it is a stock row here; no
+ * row is refused. The map's listing never follows the row: its placed names
+ * are read from the entity's own text (iface_engine.c ie_mods_placed_names). */
+const void *sh_tl_stock_row_first(const char *current_row, const void *current, const void *stock_row);
+
 /* EntityMode substates that hold an entity in the editor's hands (held
  * placement 4, wire drag 7). Entities are not rebound during them. */
 int sh_tl_substate_blocks_rebind(int substate);

@@ -139,12 +139,26 @@ static void test_rebind_decision(void)
     CHECK(!sh_tl_substate_blocks_rebind(1) && !sh_tl_substate_blocks_rebind(2) && !sh_tl_substate_blocks_rebind(0));
 }
 
+/* D-A44: a stock entity bound to a mod's row on the same entityDef goes to the stock row; an editor tweak (a stock
+ * row's own name) and the stock row itself stay; nothing moves without a stock row. */
+static void test_stock_row_first(void)
+{
+    int stock, mod;
+    const void *s = &stock, *m = &mod;
+    CHECK(sh_tl_stock_row_first("mods/abcdefgh/demons/ed1brk_enc", m, s) == s);
+    CHECK(sh_tl_stock_row_first("demons/hellknight_enc", s, s) == NULL);
+    CHECK(sh_tl_stock_row_first("demons/hellknight_enc", m, s) == NULL);   /* an editor tweak shadows the stock name */
+    CHECK(sh_tl_stock_row_first("mods/abcdefgh/demons/ed1brk_enc", m, NULL) == NULL);
+    CHECK(sh_tl_stock_row_first(NULL, m, s) == NULL);
+}
+
 int main(void)
 {
     test_table();
     test_tile();
     test_record_json();
     test_rebind_decision();
+    test_stock_row_first();
     if (g_fail) { printf("timeline_tile_test: FAILED\n"); return 1; }
     printf("timeline_tile_test: all passed\n");
     return 0;

@@ -3405,7 +3405,7 @@ static int ms_reg_own(char ***owned, int *n, int *cap, char *text)
 }
 
 /* Generate the registry files for the bundles in `set` (serving order). */
-static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, uint64_t sig)
+static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, uint64_t sig, int grow)
 {
     sh_mr_source *src = (sh_mr_source *)calloc((size_t)(n ? n : 1), sizeof *src);
     sh_mr_decl **decls = (sh_mr_decl **)calloc((size_t)(n ? n : 1), sizeof *decls);
@@ -3489,7 +3489,8 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
             s->ndecls = nd;
         }
     }
-    if (!sh_modregistry_generate(src, n, tg, x->reg_count, choices, g_scope_nchoice, x->grown, x->ngrown, &r)) goto done;
+    if (!sh_modregistry_generate(src, n, tg, x->reg_count, choices, g_scope_nchoice, grow ? x->grown : NULL,
+                                 grow ? x->ngrown : 0, &r)) goto done;
     m = (ms_reg_memo *)ms_alloc(x, sizeof *m);
     if (!m) goto done;
     memset(m, 0, sizeof *m);
@@ -3572,7 +3573,11 @@ static int ms_registry_compute(ms_index *x, int on)
     ms_bundle **set;
     ms_reg_memo *m = NULL, *was = x->reg_cur;
     int n = 0, i;
-    uint64_t sig = 1469598103934665603ull;
+    /* The pickers grow in the editor only: in Play (the editor's, or a launched map) no undeclared mod serves, so
+     * a list naming its encounters would name decls nothing serves; the game's lists serve there. */
+    int grow = x->ngrown > 0 && !(InterlockedCompareExchange(&g_scope_open, 0, 0) &&
+                                  InterlockedCompareExchange(&g_scope_play, 0, 0));
+    uint64_t sig = 1469598103934665603ull ^ (uint64_t)grow;
     if (!x->reg_count) {
         for (i = 0; i < 32; ++i) InterlockedExchange(&g_spawn_standin[i], 0);
         return 0;
@@ -3599,9 +3604,9 @@ static int ms_registry_compute(ms_index *x, int on)
             for (p = g_scope_choice[i].key; *p; ++p) sig = (sig ^ (unsigned char)*p) * 1099511628211ull;
             sig = (sig ^ ';') * 1099511628211ull;
         }
-        if (n || x->ngrown) {
+        if (n || grow) {
             for (m = x->reg_memo; m && m->sig != sig; m = m->next) {}
-            if (!m) m = ms_registry_generate(x, set, n, sig);
+            if (!m) m = ms_registry_generate(x, set, n, sig, grow);
         }
         free(set);
     }

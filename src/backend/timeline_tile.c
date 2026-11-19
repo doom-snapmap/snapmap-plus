@@ -34,6 +34,12 @@ const void *sh_tl_wanted_sedef(const char *inherit, const char *cls, const void 
     return (cls && !strcmp(cls, SH_TL_CLASS)) ? tile : unknown;
 }
 
+const void *sh_tl_stock_row_first(const char *current_row, const void *current, const void *stock_row)
+{
+    if (!current_row || strncmp(current_row, "mods/", 5) || !stock_row || stock_row == current) return NULL;
+    return stock_row;
+}
+
 int sh_tl_substate_blocks_rebind(int substate)
 {
     return substate == 4 || substate == 7;
@@ -349,16 +355,68 @@ static void tl_palette_build(void *palette, void *progress)
 
 /* ------------------------------------------------------------ palette rows */
 
+/* The mod rows that share their entityDef with a stock row, and that row
+ * (sh_tl_stock_row_first). The palette sorts by entityDef, so they are
+ * neighbours. */
+#define SHARED_MAX 64
+static const void *g_shared_mod[SHARED_MAX], *g_shared_stock[SHARED_MAX];
+static int g_nshared;
+
+static const char *tl_row_key(const unsigned char *entry, const char **row)
+{
+    void *sedef = NULL, *name = NULL, *record = NULL, *key = NULL;
+    *row = NULL;
+    if (!rd_ptr(entry, &sedef) || !sedef || !rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name)) return NULL;
+    *row = (const char *)name;
+    if (!rd_ptr(entry + ENTRY_RECORD_OFF, &record) || !record || !rd_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &key))
+        return NULL;
+    return (const char *)key;
+}
+
+static void tl_scan_shared(int count)
+{
+    int i = 0;
+    g_nshared = 0;
+    while (i < count) {
+        const char *row = NULL, *key = tl_row_key(g_pal_entries + (size_t)i * PAL_STRIDE, &row), *other;
+        const void *stock = NULL;
+        int j = i + 1, k;
+        while (j < count) {
+            other = tl_row_key(g_pal_entries + (size_t)j * PAL_STRIDE, &row);
+            if (!key || !other || strcmp(key, other)) break;
+            ++j;
+        }
+        for (k = i; j - i > 1 && k < j && !stock; ++k)
+            if (tl_row_key(g_pal_entries + (size_t)k * PAL_STRIDE, &row) && row && strncmp(row, "mods/", 5))
+                (void)rd_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&stock);
+        for (k = i; stock && k < j; ++k) {
+            const void *sedef = NULL;
+            if (!tl_row_key(g_pal_entries + (size_t)k * PAL_STRIDE, &row) || !row ||
+                !sh_tl_stock_row_first(row, NULL, stock) || g_nshared >= SHARED_MAX)
+                continue;
+            (void)rd_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&sedef);
+            g_shared_mod[g_nshared] = sedef;
+            g_shared_stock[g_nshared++] = stock;
+            if (g_nshared <= REBIND_LOG_MAX)
+                tl_logf("palette: the mod row %s shares the entityDef %s with a stock row; stock entities stay the "
+                        "stock row's", row, key);
+        }
+        i = j;
+    }
+}
+
 static int tl_scan_palette(const unsigned char *palette)
 {
     void *entries = NULL;
     int count = 0, i;
     g_tile_row = g_unknown_row = -1;
     g_tile_sedef = g_unknown_sedef = NULL;
+    g_nshared = 0;
     if (!rd_ptr(palette + PAL_ENTRIES_OFF, &entries) || !rd_i32(palette + PAL_COUNT_OFF, &count)) return 0;
     g_pal_entries = (const unsigned char *)entries;
     g_pal_count = count;
     if (!entries || count <= 0 || count > PAL_MAX) return 1;
+    __try { tl_scan_shared(count); } __except (EXCEPTION_EXECUTE_HANDLER) { g_nshared = 0; }
     for (i = 0; i < count; ++i) {
         void *sedef = NULL, *name = NULL;
         const unsigned char *entry = g_pal_entries + (size_t)i * PAL_STRIDE;
@@ -458,7 +516,7 @@ static void tl_rebind(unsigned char *editor)
     uint32_t count = 0, i;
     uint64_t hash;
     int substate = 0, rebinds = 0;
-    if (!g_tile_sedef || !g_unknown_sedef) return;
+    if ((!g_tile_sedef || !g_unknown_sedef) && !g_nshared) return;
     if (!rd_ptr(editor + ED_MAP_OFF, &map) || !map) { g_ent_seen = 0; return; }
     if (!rd_ptr((unsigned char *)map + MAP_ENTITIES_OFF, &array_ptr) ||
         !rd_i32((unsigned char *)map + MAP_ENTITY_COUNT_OFF, (int *)&count) || !array_ptr || count > ENTITY_MAX)
@@ -471,7 +529,7 @@ static void tl_rebind(unsigned char *editor)
     for (i = SH_TL_FIRST_ENTITY; i < count; ++i) {
         void *holder = array[i], *sedef = NULL, *record = NULL, *inherit = NULL, *cls = NULL;
         const void *want;
-        int refs = 0;
+        int refs = 0, k;
         if (!holder || !rd_ptr((unsigned char *)holder + HOLDER_SEDEF_OFF, &sedef) || !sedef ||
             !rd_ptr((unsigned char *)holder + HOLDER_RECORD_OFF, &record) || !record ||
             !rd_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &inherit) ||
@@ -480,6 +538,7 @@ static void tl_rebind(unsigned char *editor)
         __try { want = sh_tl_wanted_sedef((const char *)inherit, (const char *)cls, sedef,
                                           g_tile_sedef, g_unknown_sedef); }
         __except (EXCEPTION_EXECUTE_HANDLER) { want = NULL; }
+        for (k = 0; !want && k < g_nshared; ++k) if (g_shared_mod[k] == sedef) want = g_shared_stock[k];
         if (!want || want == sedef) continue;
         /* Undo snapshots share holders; write a private copy. Without the
          * helper only an unshared holder is rebound. */
@@ -489,7 +548,8 @@ static void tl_rebind(unsigned char *editor)
         ++rebinds;
         if (InterlockedIncrement(&g_total_rebinds) <= REBIND_LOG_MAX)
             tl_logf("TL tile: entity %u rebound to %s", i,
-                    want == g_tile_sedef ? SH_TL_TILE_SEDEF : SH_TL_UNKNOWN_SEDEF);
+                    want == g_tile_sedef ? SH_TL_TILE_SEDEF : want == g_unknown_sedef ? SH_TL_UNKNOWN_SEDEF
+                                                                                       : "its stock row");
     }
     /* Desharing replaces holders; hash the list as it now stands. */
     g_ent_array = array_ptr;
