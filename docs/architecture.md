@@ -4139,6 +4139,20 @@ the listing and read lock-free (`sv`: names under its salt, shadows, surfaces):
   build in a map's place, nothing (it serves only for a map that declares
   it). In Play: nothing.
 
+A level load sees only the declared bundles' entities (`level_templates.c`).
+Every SnapMap level load (`idGameLocal::LoadMap`) builds a snapshot template,
+parsing the edit state, of every entityDef the engine's resource manager
+holds, and the editor's passes keep every installed mod's rows' closure for
+the session (the entityDef a row builds for the game included), so without a
+rule a stock map's Play parsed every installed mod's entities and one that
+did not parse stopped the load. The product detours the resource list copy
+for the template walk's two calls only and leaves out every name under the
+salt of an installed mod no build of which the listing declares
+(`sh_modserve_level_hides`; editor-time bundles included: an editor tweak is
+a shadow of a stock name, so a name under the mod's own salt is game
+content). Both walk loops read the filtered list, so no template is made or
+demanded for such a name.
+
 Requirements: a declared bundle's apply; an undeclared root build that adds
 Toybox rows keeps them outside Play, because the palette registers its rows
 in every editor map and with none open; in Play (the editor's, or a hub
