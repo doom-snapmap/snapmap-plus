@@ -1043,43 +1043,36 @@ static int aim_axis(const float from[3], const float to[3], float ax[9])
     return 1;
 }
 
-/* ai:fire(projectile, tag or joint, target) -> p. The engine's launch event
- * fires from a joint and takes any other name for the demon's origin
+/* How a launch leaves the tag: toward a target (fire), or with a velocity of
+ * its own (launch). */
+typedef struct launch_aim {
+    void *target;           /* fire at an entity: the engine aims at it */
+    const float *point;     /* fire at a position: launched at the demon itself, then steered there */
+    const float *velocity;  /* launch: the projectile's exact velocity, units per second */
+} launch_aim;
+
+/* The launch ai:fire and ai:launch share. The engine's launch event fires
+ * from a joint and takes any other name for the demon's origin
  * (VK 0x14076E780), so for a tag the launch hook hands idProjectile::Launch
- * the tag's place and the axis toward the target: the projectile, its launch
- * effects and its trail start on the tag. */
-static int l_fire(lua_State *L)
+ * the tag's place and the axis the projectile flies along: the projectile,
+ * its launch effects and its trail start on the tag. Pushes the projectile,
+ * or nil. */
+static int launch_from(lua_State *L, const char *call, void *self, sh_script_handle self_h, void *decl,
+                       const char *joint, const launch_aim *how)
 {
     const sh_script_engine *e = eng();
-    sh_script_handle self_h = 0;
     sh_script_earg a[5];
     char name[128];
-    float point[3];
-    void *self, *decl, *target = NULL;
-    const char *joint;
     uint32_t id;
-    int at_point, from_tag = 0, started_there = 0;
+    int from_tag = 0, started_there = 0;
     float tag_pos[3], tag_axis[9], aim[3];
-    self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
-    decl = check_decl(L, 2, "fire", "projectile", "the projectile");
-    joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", NAME_ANY);
-    if (luaL_testudata(L, 4, "entity")) {
-        at_point = 0;
-        target = sh_script_api_entity(L, 4, "fire", NULL);
-    } else {
-        at_point = 1;
-        if (lua_type(L, 4) != LUA_TTABLE)
-            sh_script_refuse(L, "\"fire\" needs the target (an entity, or a position with x, y and z), got %s",
-                             lua_isnoneornil(L, 4) ? "nothing" : luaL_typename(L, 4));
-        sh_script_api_check_vec(L, 4, "fire", "the target", point);
-    }
-    if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
-        sh_script_refuse(L, "\"fire\" works on demons; this entity is not one");
-    if (!self || !decl || !CE(entity_name) || (!at_point && !target)) return nil1(L);
-    sh_script_api_check_room(L, "fire");
-    if (!g_ce.entity_name(at_point ? self : target, name, sizeof name) || !name[0]) return nil1(L);
+    if (!self || !decl || !CE(entity_name) || (!how->point && !how->velocity && !how->target)) return nil1(L);
+    sh_script_api_check_room(L, call);
+    if (!g_ce.entity_name(how->target ? how->target : self, name, sizeof name) || !name[0]) return nil1(L);
     if (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1) {
-        if (at_point) memcpy(aim, point, sizeof aim); else origin_of(target, aim);
+        if (how->velocity) { aim[0] = tag_pos[0] + how->velocity[0]; aim[1] = tag_pos[1] + how->velocity[1]; aim[2] = tag_pos[2] + how->velocity[2]; }
+        else if (how->point) memcpy(aim, how->point, sizeof aim);
+        else origin_of(how->target, aim);
         from_tag = aim_axis(tag_pos, aim, tag_axis);
     }
     (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
@@ -1095,14 +1088,169 @@ static int l_fire(lua_State *L)
     {
         void *p = e->resolve(id);
         if (!p) return nil1(L);
-        if (from_tag) {
-            /* without the launch hook the projectile started at the origin: put it on the tag */
-            if (!started_there && e->place) (void)e->place(p, tag_pos, tag_axis);
-            memcpy(point, aim, sizeof point);
-            at_point = 1;
+        /* without the launch hook the projectile started at the origin: put it on the tag */
+        if (from_tag && !started_there && e->place) (void)e->place(p, tag_pos, tag_axis);
+        if (how->velocity) {
+            sh_script_earg v = sh_script_earg_vec(how->velocity);
+            (void)sh_script_api_event(p, "setLinearVelocity", &v, 1, NULL);
+        } else if (from_tag || how->point) {
+            steer_to(p, from_tag ? aim : how->point, 0);
         }
-        if (at_point) steer_to(p, point, 0);
         sh_script_api_push_engine_entity(L, p);
+    }
+    return 1;
+}
+
+/* ai:fire(projectile, tag or joint, target) -> p: toward an entity or a
+ * position, at the projectile's own speed. */
+static int l_fire(lua_State *L)
+{
+    sh_script_handle self_h = 0;
+    float point[3];
+    launch_aim how = { NULL, NULL, NULL };
+    void *self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
+    void *decl = check_decl(L, 2, "fire", "projectile", "the projectile");
+    const char *joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", NAME_ANY);
+    if (luaL_testudata(L, 4, "entity")) {
+        how.target = sh_script_api_entity(L, 4, "fire", NULL);
+    } else {
+        if (lua_type(L, 4) != LUA_TTABLE)
+            sh_script_refuse(L, "\"fire\" needs the target (an entity, or a position with x, y and z), got %s",
+                             lua_isnoneornil(L, 4) ? "nothing" : luaL_typename(L, 4));
+        sh_script_api_check_vec(L, 4, "fire", "the target", point);
+        how.point = point;
+    }
+    if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
+        sh_script_refuse(L, "\"fire\" works on demons; this entity is not one");
+    return launch_from(L, "fire", self, self_h, decl, joint, &how);
+}
+
+/* ai:launch(projectile, tag or joint, velocity) -> p: the projectile leaves
+ * with exactly that velocity (units per second), so a thrown projectile can
+ * fly an arc its script solved. */
+static int l_launch(lua_State *L)
+{
+    sh_script_handle self_h = 0;
+    float vel[3];
+    launch_aim how = { NULL, NULL, NULL };
+    void *self = sh_script_api_owned(L, 1, "launch", "launch from", &self_h);
+    void *decl = check_decl(L, 2, "launch", "projectile", "the projectile");
+    const char *joint = sh_script_api_check_text(L, 3, "launch", "the tag or joint to launch from", NAME_ANY);
+    if (lua_type(L, 4) != LUA_TTABLE)
+        sh_script_refuse(L, "\"launch\" needs the velocity (x, y and z in units per second), got %s",
+                         lua_isnoneornil(L, 4) ? "nothing" : luaL_typename(L, 4));
+    sh_script_api_check_vec(L, 4, "launch", "the velocity", vel);
+    if (!(vlen(vel) > 0)) sh_script_refuse(L, "\"launch\" needs a velocity that is not zero");
+    if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
+        sh_script_refuse(L, "\"launch\" works on demons; this entity is not one");
+    how.velocity = vel;
+    return launch_from(L, "launch", self, self_h, decl, joint, &how);
+}
+
+/* ---------------------------------------------------- incoming projectiles */
+
+typedef struct incoming_hit { void *p; double seconds; } incoming_hit;
+
+static int incoming_cmp(const void *a, const void *b)
+{
+    double x = ((const incoming_hit *)a)->seconds, y = ((const incoming_hit *)b)->seconds;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* Where a ray from `o` along unit `d` enters and leaves a box (center c, axis
+ * rows forward, left, up, half sizes h): 1 with both distances, 0 when it
+ * misses. */
+int sh_script_combat_ray_box(const float o[3], const float d[3], const float c[3], const float ax[9],
+                             const float h[3], double *enter, double *leave)
+{
+    double t0 = -1e30, t1 = 1e30;
+    int k;
+    for (k = 0; k < 3; k++) {
+        const float *u = ax + 3 * k;
+        double p = (double)u[0] * (c[0] - o[0]) + (double)u[1] * (c[1] - o[1]) + (double)u[2] * (c[2] - o[2]);
+        double s = (double)u[0] * d[0] + (double)u[1] * d[1] + (double)u[2] * d[2];
+        if (fabs(s) < 1e-9) {
+            if (fabs(p) > h[k]) return 0;   /* parallel to this slab and outside it */
+        } else {
+            double a = (p - h[k]) / s, b = (p + h[k]) / s, t;
+            if (a > b) { t = a; a = b; b = t; }
+            if (a > t0) t0 = a;
+            if (b < t1) t1 = b;
+            if (t0 > t1) return 0;
+        }
+    }
+    *enter = t0;
+    *leave = t1;
+    return 1;
+}
+
+/* e:incoming_projectiles(size) -> { {projectile = p, seconds = t}, ... }, the
+ * soonest first: every projectile in the world, not launched by `e` itself,
+ * whose straight line (its velocity less e's own) enters a box of `size`
+ * (x forward, y left, z up: whole sizes in units) standing on e's origin and
+ * turned with it. `seconds` is the projectile's distance from the box's
+ * center over that relative speed. A projectile already inside the box, or
+ * past it, is not incoming. */
+static int l_incoming(lua_State *L)
+{
+    const sh_script_engine *e = eng();
+    sh_script_handle self_h = 0, owner;
+    float size[3], h[3], c[3], ax[9], ev[3] = { 0, 0, 0 };
+    sh_script_earg r;
+    incoming_hit *hits = NULL, *grown;
+    int n = 0, cap = 0, slots, num, i, buf;
+    void *self = sh_script_api_entity(L, 1, "incoming_projectiles", &self_h);
+    if (lua_type(L, 2) != LUA_TTABLE)
+        sh_script_refuse(L, "\"incoming_projectiles\" needs the box's size (x, y and z in units), got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    sh_script_api_check_vec(L, 2, "incoming_projectiles", "the box's size", size);
+    if (!(size[0] > 0 && size[1] > 0 && size[2] > 0))
+        sh_script_refuse(L, "\"incoming_projectiles\" needs a box size above 0 on x, y and z");
+    lua_pushnil(L);                         /* the hits, as a userdata the collector frees on any exit */
+    buf = lua_gettop(L);
+    lua_newtable(L);
+    if (!self || !e || !e->slots || !e->slot_spawn_id || !e->resolve || !e->origin || !e->axis || !CE(is_projectile))
+        return 1;
+    if (!e->origin(self, c) || !e->axis(self, ax)) return 1;
+    h[0] = size[0] * 0.5f; h[1] = size[1] * 0.5f; h[2] = size[2] * 0.5f;
+    for (i = 0; i < 3; i++) c[i] += ax[6 + i] * h[2];   /* the box stands on the origin */
+    if (sh_script_api_event(self, "getLinearVelocity", NULL, 0, &r) && r.type == 'v') memcpy(ev, r.v, sizeof ev);
+    slots = e->slots();
+    for (num = 0; num < slots; num++) {
+        uint32_t id = e->slot_spawn_id(num);
+        void *p;
+        float o[3], d[3];
+        double speed, enter, leave, dist;
+        if (id == SH_SCRIPT_SPAWN_ID_NONE || id == SH_SCRIPT_SPAWN_ID_WORLD) continue;
+        if (!(p = e->resolve(id)) || p == self || sh_script_api_kind(p) != SH_SCRIPT_KIND_OTHER || !g_ce.is_projectile(p))
+            continue;
+        if (self_h && sh_script_combat_launched(id, NULL, &owner) && owner == self_h) continue;
+        if (!e->origin(p, o) || !sh_script_api_event(p, "getLinearVelocity", NULL, 0, &r) || r.type != 'v') continue;
+        d[0] = r.v[0] - ev[0]; d[1] = r.v[1] - ev[1]; d[2] = r.v[2] - ev[2];
+        speed = vlen(d);
+        if (!(speed > 0) || !normalize(d)) continue;
+        if (!sh_script_combat_ray_box(o, d, c, ax, h, &enter, &leave) || enter < 0 || leave < 0) continue;
+        dist = sqrt(((double)c[0] - o[0]) * (c[0] - o[0]) + ((double)c[1] - o[1]) * (c[1] - o[1]) +
+                    ((double)c[2] - o[2]) * (c[2] - o[2]));
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            grown = (incoming_hit *)lua_newuserdatauv(L, (size_t)cap * sizeof *grown, 0);
+            if (n) memcpy(grown, hits, (size_t)n * sizeof *grown);
+            lua_replace(L, buf);
+            hits = grown;
+        }
+        hits[n].p = p;
+        hits[n].seconds = dist / speed;
+        n++;
+    }
+    if (n) qsort(hits, (size_t)n, sizeof hits[0], incoming_cmp);
+    for (i = 0; i < n; i++) {
+        lua_createtable(L, 0, 2);
+        sh_script_api_push_engine_entity(L, hits[i].p);
+        lua_setfield(L, -2, "projectile");
+        lua_pushnumber(L, hits[i].seconds);
+        lua_setfield(L, -2, "seconds");
+        lua_rawseti(L, -2, i + 1);
     }
     return 1;
 }
@@ -1127,6 +1275,8 @@ void sh_script_combat_register(void)
         { SH_SCRIPT_API_METHOD, "pain", l_pain },
         { SH_SCRIPT_API_METHOD, "can_see_from", l_can_see_from },
         { SH_SCRIPT_API_METHOD, "fire", l_fire },
+        { SH_SCRIPT_API_METHOD, "launch", l_launch },
+        { SH_SCRIPT_API_METHOD, "incoming_projectiles", l_incoming },
         { SH_SCRIPT_API_METHOD, "steer", l_steer },
         { SH_SCRIPT_API_METHOD, "explode", l_p_explode },
     };
@@ -1143,6 +1293,7 @@ void sh_script_combat_register(void)
 #include "../entity.h"
 #include "../engine_build.h"
 #include "../hook.h"
+#include "script_api_reflect.h"
 
 #define DECL_STATE     0x2Cu       /* bit 0 failed to load, bit 1 not loaded */
 #define FX_MAX         1024
@@ -1301,6 +1452,14 @@ static int c_explode(void *p)
     if (!fn || !in_text((const void *)fn)) return 0;
     __try { fn(p, p, NULL); ok = 1; } __except (av_only(GetExceptionCode())) { ok = 0; }
     return ok;
+}
+
+/* The entity is an idProjectile, by the game's own type information (every
+ * projectile class descends from it). */
+static int c_is_projectile(void *ent)
+{
+    const char *cls = ent ? sh_script_reflect_class_of(ent) : NULL;
+    return cls && sh_script_reflect_is_a(cls, "idProjectile");
 }
 
 static int c_pain_reaction(void *ai)
@@ -1510,7 +1669,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
 {
     static const sh_script_combat_engine engine = {
         c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
-        c_start_fx, c_stop_fx, c_player_damage, c_fx_hard_stops
+        c_start_fx, c_stop_fx, c_player_damage, c_fx_hard_stops, c_is_projectile
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;

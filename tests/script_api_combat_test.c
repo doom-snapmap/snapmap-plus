@@ -324,8 +324,10 @@ static int c_stop_fx(void *ent, int cond)
 static int g_hard_hook = 1, g_hard_asked;
 static int c_fx_hard_stops(void) { g_hard_asked++; return g_hard_hook; }
 
+static int c_is_projectile(void *ent) { return ent && !strncmp(((fent *)ent)->def, "projectile/", 11); }
+
 static const sh_script_combat_engine k_combat = { c_decl, c_radius, c_explode, c_pain, c_name, c_fx, c_world,
-                                                 c_start_fx, c_stop_fx, NULL, c_fx_hard_stops };
+                                                 c_start_fx, c_stop_fx, NULL, c_fx_hard_stops, c_is_projectile };
 
 static void *h_resolve(uint32_t id) { return by_id(id); }
 
@@ -340,6 +342,26 @@ static int t_ent(lua_State *L)
     if (!h) h = sh_script_handles_ref(g_ents[n].id);
     sh_script_push_entity(L, h);
     return 1;
+}
+
+/* add_projectile(x, y, z, vx, vy, vz) -> the entity number of a projectile the game launched (no mod's) */
+static int t_add_projectile(lua_State *L)
+{
+    fent *p = add_ent(SH_SCRIPT_KIND_OTHER, "projectile/stock_plasma", (float)luaL_checknumber(L, 1),
+                      (float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3));
+    p->vel[0] = (float)luaL_checknumber(L, 4); p->vel[1] = (float)luaL_checknumber(L, 5); p->vel[2] = (float)luaL_checknumber(L, 6);
+    lua_pushinteger(L, g_nents - 1);
+    return 1;
+}
+
+/* put(e, x, y, z, vx, vy, vz): place an entity and give it a velocity */
+static int t_put(lua_State *L)
+{
+    fent *e = (fent *)sh_script_api_entity(L, 1, "put", NULL);
+    if (!e) return 0;
+    e->pos[0] = (float)luaL_checknumber(L, 2); e->pos[1] = (float)luaL_checknumber(L, 3); e->pos[2] = (float)luaL_checknumber(L, 4);
+    e->vel[0] = (float)luaL_checknumber(L, 5); e->vel[1] = (float)luaL_checknumber(L, 6); e->vel[2] = (float)luaL_checknumber(L, 7);
+    return 0;
 }
 
 static char g_log[65536];
@@ -736,6 +758,70 @@ static void test_fire(void)
     CHECK(has(g_log, "at point\t0\t600"));
 }
 
+static void test_launch(void)
+{
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local p = self:launch('rocket', 'muzzle', {x = 300, y = -40, z = 450})\n"
+        "  local v = p:velocity(); print('launched', p:definition(), v.x, v.y, v.z)\n"
+        "  local q = self:launch('rocket', 'laser_source_1', {x = 0, y = 500, z = 0})\n"
+        "  local w = q:velocity(); print('from tag', q:position().x, q:position().z, w.y)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    /* launched by the engine's event at the demon itself, then given exactly the velocity asked for */
+    CHECK(has(g_events, "ae_launchProjectileAtTarget@mods/" SALT "/ai/brute(NULL,d:mods/" SALT "/rocket,'muzzle','ent0',0);"));
+    CHECK(has(g_events, "setLinearVelocity@projectile/stock_rocket(v300 -40 450);"));
+    CHECK(has(log_now(), "launched\tprojectile/stock_rocket\t300.0\t-40.0\t450.0"));
+    CHECK(has(g_log, "from tag\t20.0\t80.0\t500.0"));      /* started on the tag, flying along the velocity */
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:launch('rocket', 'muzzle', {x = 0, y = 0, z = 0})\nend)\n",
+            "3", "\"launch\" needs a velocity that is not zero");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:launch('rocket', 'muzzle')\nend)\n",
+            "3", "\"launch\" needs the velocity (x, y and z in units per second), got nothing");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  ent(3):launch('rocket', 'muzzle', {x = 1, y = 0, z = 0})\nend)\n",
+            "3", "\"launch\" works on demons; this entity is not one");
+}
+
+static void test_incoming(void)
+{
+    double enter = 0, leave = 0;
+    const float o[3] = { -100, 0, 10 }, d[3] = { 1, 0, 0 }, up[3] = { 0, 0, 1 }, c[3] = { 0, 0, 10 }, h[3] = { 20, 20, 20 };
+    float ax[9];
+    yaw_axis(0, ax);
+    CHECK(sh_script_combat_ray_box(o, d, c, ax, h, &enter, &leave) && fabs(enter - 80) < 1e-6 && fabs(leave - 120) < 1e-6);
+    yaw_axis(90, ax);   /* turned a quarter: the same box on its side */
+    CHECK(sh_script_combat_ray_box(o, d, c, ax, h, &enter, &leave) && fabs(enter - 80) < 1e-4);
+    yaw_axis(0, ax);
+    CHECK(!sh_script_combat_ray_box(o, up, c, ax, h, &enter, &leave));   /* straight up, beside the box */
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local a = ent(add_projectile(1000, 0, 50, -800, 0, 0))\n"      /* at the demon, 1.25 s out */
+        "  local b = ent(add_projectile(1000, 500, 50, -800, 0, 0))\n"    /* passes beside it */
+        "  local c = ent(add_projectile(-300, 0, 50, 0, 0, 0))\n"         /* lying still */
+        "  local d = ent(add_projectile(400, 0, 50, -1600, 0, 0))\n"      /* at the demon, 0.25 s out */
+        "  local f = ent(add_projectile(-1000, 0, 50, -800, 0, 0))\n"     /* flying away */
+        "  local own = self:launch('rocket', 'muzzle', {x = -800, y = 0, z = 0})\n"
+        "  put(own, 500, 0, 50, -800, 0, 0)\n"                           /* the demon's own: never incoming */
+        "  local list = self:incoming_projectiles({x = 105, y = 105, z = 105})\n"
+        "  print('incoming', #list)\n"
+        "  for i, r in ipairs(list) do print('at', i, r.projectile:position().x, string.format('%.3f', r.seconds)) end\n"
+        "  put(self, 0, 0, 0, -800, 0, 0)\n"                             /* the demon runs from them */
+        "  list = self:incoming_projectiles({x = 105, y = 105, z = 105})\n"
+        "  print('running', #list, string.format('%.3f', list[1].seconds), list[2].projectile:position().x)\n"
+        "  print('none', #ent(3):incoming_projectiles({x = 10, y = 10, z = 10}))\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "incoming\t2"));
+    CHECK(has(g_log, "at\t1\t400.0\t0.250"));
+    CHECK(has(g_log, "at\t2\t1000.0\t1.250"));
+    /* the still one now closes at 800 (300 / 800) and d at 400 / 800; a and f keep the demon's pace */
+    CHECK(has(g_log, "running\t2\t0.375\t400.0"));
+    CHECK(has(g_log, "none\t0"));
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:incoming_projectiles()\nend)\n",
+            "3", "\"incoming_projectiles\" needs the box's size (x, y and z in units), got nothing");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  self:incoming_projectiles({x = 1, y = 0, z = 1})\nend)\n",
+            "3", "\"incoming_projectiles\" needs a box size above 0 on x, y and z");
+}
+
 static void test_refusals(void)
 {
     refused("api = 1\non.spawn('ai/brute', function(self)\n  damage(ent(1), 'damage/nosuch', self)\nend)\n",
@@ -966,6 +1052,8 @@ static void test_records(void)
 int main(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "add_projectile", t_add_projectile);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "put", t_put);
     sh_script_api_set_engine(&k_engine);
     sh_script_api_install(NULL, 0, NULL);
     sh_script_combat_set_engine(&k_combat);
@@ -981,6 +1069,8 @@ int main(void)
     test_tag_pain_sight();
     test_tags();
     test_fire();
+    test_launch();
+    test_incoming();
     test_refusals();
     test_hook_records();
     test_projectiles_held();

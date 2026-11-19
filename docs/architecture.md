@@ -3186,6 +3186,16 @@ damage comes from the world entity, as a trigger's does.
   any other name (VK 0x14076E780), so for a tag the launch hook gives
   `idProjectile::Launch` the tag's place and the axis toward the target: the
   projectile, its launch effects and its trail start on the tag);
+  `ai:launch(projectile, tag or joint, velocity)` (the same launch, its axis
+  along the velocity, then `setLinearVelocity` with exactly that velocity in
+  units per second: a script that solved an arc throws along it);
+  `entity:incoming_projectiles(size)` (every projectile in the world whose
+  class descends from `idProjectile`, by the game's type information, except
+  the ones the entity launched: a ray from its origin along its velocity less
+  the entity's enters a box of `size` (x forward, y left, z up) standing on
+  the entity's origin and turned with it; `{projectile, seconds}` soonest
+  first, `seconds` its distance from the box's center over that relative
+  speed, the test of DOOM Eternal's incoming-projectile query);
   `ai:can_see_from(other, tag or joint)`; `ai:focus_tag` refuses a
   name that is not a tag, since the engine aims only at tags; `projectile:steer(target, [speed])`
   (`setLinearVelocity`, at the projectile's speed unless one is given) and
