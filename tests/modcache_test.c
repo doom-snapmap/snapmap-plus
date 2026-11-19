@@ -465,6 +465,23 @@ static void test_cache(const char *top)
         if (t) printf("  %s\n", t);
         free(t);
         CHECK(!sh_cache_take_notice());   /* once */
+        /* R-LV4: the load after a fetch says the fetch's answer, not "not on this computer": the store could not be
+         * reached (a closed port on this computer), the composition records it, and the load that asks nothing
+         * repeats it. */
+        {
+            modnet_io io;
+            memset(&io, 0, sizeof io);
+            CHECK(modnet_set_base_url("http://127.0.0.1:9/"));
+            CHECK(sh_cache_prepare(chash, &io) == 0);
+            CHECK(modnet_set_base_url(NULL));
+            t = sh_cache_take_notice();
+            CHECK(t && strstr(t, "the mod store could not be reached"));
+            free(t);
+            load_rows(rows, 1, placed, 2);
+            t = sh_cache_take_notice();
+            CHECK(t && strstr(t, "the mod store could not be reached") && !strstr(t, "not on this computer"));
+            free(t);
+        }
         download(&barrel, &b, pack, 1);
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && complete);

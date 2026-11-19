@@ -1255,7 +1255,29 @@ static int mc_side_same(const char *chash, const mc_unit *units, size_t n)
     return same;
 }
 
-/* Compose row `chash`. causes[i] (or `cause` when NULL or 0) is the absence cause of unit i when it is not here. */
+/* The absence causes the composition's sidecar recorded, for the absent units whose cause is still 0: what the last
+ * attempt to get each one learned (the store's answer at a fetch), which a later load that asks nothing repeats. */
+static void mc_side_causes(const char *chash, mc_unit *units, size_t n)
+{
+    char *side = mc_path("served\\%s.json", chash);
+    size_t len = 0, i;
+    unsigned char *t = side ? sh_mb_read_file(side, 1u << 24, &len) : NULL;
+    mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
+    const mpj *a = j ? mpj_get(j, "absent") : NULL;
+    int k;
+    for (k = 0; a && a->type == MPJ_ARR && k < a->n; k++) {
+        const mpj *u = mpj_get(a->items[k], "unit"), *c = mpj_get(a->items[k], "cause");
+        for (i = 0; u && c && mpj_is_num(c) && i < n; i++)
+            if (units[i].state != 1 && !units[i].cause && mpj_str_is(u, units[i].hash)) units[i].cause = (int)mpj_int(c);
+    }
+    mpj_free(j);
+    free(t);
+    free(side);
+}
+
+/* Compose row `chash`. The absence cause of unit i when it is not here is causes[i] (a fetch's answer), else the one
+ * the composition on disk recorded, else `cause` (SH_CACHE_ABSENT_OFFLINE: nothing asked). A composition that is not
+ * made again keeps its sidecar, rewritten only when a fetch brought causes. */
 static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built)
 {
     mc_row snapshot;
@@ -1312,12 +1334,26 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         mc_unit_load(&units[i], snapshot.units[i]);
         if (units[i].state == 1) { manifests[nm] = units[i].bytes; lens[nm] = units[i].len; nm++; continue; }
         complete = 0;
-        units[i].cause = units[i].state == -2 ? SH_CACHE_ABSENT_NEWER : (causes && causes[i]) ? causes[i] : cause;
+        units[i].cause = units[i].state == -2 ? SH_CACHE_ABSENT_NEWER : (causes && causes[i]) ? causes[i] : 0;
         if (!units[i].root) units[i].root = sh_text(snapshot.roots[i]);
     }
     here = sh_cache_composed(chash, &had_complete);
+    if (!complete) {
+        if (here) mc_side_causes(chash, units, snapshot.n);
+        for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
+    }
     if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
-    if (here && !complete && mc_side_same(chash, units, snapshot.n)) { ok = 1; goto record; }   /* nothing new is here */
+    if (here && !complete && mc_side_same(chash, units, snapshot.n)) {   /* nothing new is here */
+        if (causes) {
+            char *sp = mc_path("served\\%s.json", chash);
+            AcquireSRWLockExclusive(&g_disk);
+            if (sp) (void)mc_sidecar(sp, &snapshot, units, 0);
+            ReleaseSRWLockExclusive(&g_disk);
+            free(sp);
+        }
+        ok = 1;
+        goto record;
+    }
 
     /* Stand-ins (D60) for what is absent: every name the map places under the namespace that no present unit
      * provides (first, so a placed name keeps its class and row), then the absent roots that are entities. */
