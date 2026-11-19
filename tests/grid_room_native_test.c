@@ -202,11 +202,13 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
 {
     (void)read;(void)release;(void)context;
     /* As the real one: only Grid Room names are claimed (13954591 live: a
-     * bundle module's preflight through here was refused, validator 4). */
-    if(!strstr(name,"smpgrid/v1/"))return 0;
+     * bundle module's preflight through here was refused, validator 4), and a
+     * stand-in's derived names, which the real one answers as the room's. */
+    if(!strstr(name,"smpgrid/v1/")&&!strstr(name,"mods/t.arena/hall/"))return 0;
     ++preflights;
     *out=malloc(1);assert(*out);**out=0;*len=1;return 1;
 }
+void sh_grid_asset_set_standins(sh_grid_standin_fn fn){(void)fn;}
 static void *heap_get(void){return heap_state;}
 static unsigned char collision_resources[2][0x40];
 static unsigned char build_collision(void *collision,void *map,int instance)
@@ -496,6 +498,40 @@ static void bundle_module_checks(void)
     assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
     sh_grid_native_set_module_source(NULL);
 }
+/* R-DS6: a mod module whose unit is absent (the content cache stands in for it) takes the Grid Room route under its
+ * own name, though the serving index serves its decl: the room of its recorded size, its derived files the room's. */
+static int fake_standin(const char *logical,sh_grid_size *size)
+{
+    if(_stricmp(logical,"mods/t.arena/hall"))return 0;
+    size->kind=SH_GRID_MODERN;size->xyz[0]=1024;size->xyz[1]=1024;size->xyz[2]=432;return 1;
+}
+static int fake_served_hall(const char *request,int module)
+{
+    return module&&!_stricmp(request,"maps/modules/mods/t.arena/hall.decl");
+}
+static void standin_module_checks(void)
+{
+    unsigned before=loads,preflights_before=preflights,count;void *r,*end=end_record(editor+0x206c0);
+    sh_grid_native_set_module_source(fake_served_hall);
+    sh_grid_native_set_standins(fake_standin);
+    r=find_variant(editor+0x206c0,"maps/modules/mods/t.arena/hall.decl");
+    assert(r&&r!=end&&loads==before+1);
+    count=g_count;
+    assert(g_entries[count-1].size.kind==SH_GRID_MODERN&&g_entries[count-1].size.xyz[0]==1024&&
+           !strcmp(g_entries[count-1].module,"maps/modules/mods/t.arena/hall.decl")&&g_entries[count-1].state==2);
+    assert(preflights==preflights_before+5);   /* world and floor collision, three navigation sizes, at its own name */
+    /* Cached by its name; a real room of that size is another entry, never the stand-in's. */
+    assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/hall.decl")==r&&loads==before+1);
+    {
+        sh_grid_size size={SH_GRID_MODERN,{1024,1024,432}};
+        void *room=sh_grid_native_wrapper(&size);
+        assert(room&&room!=*(void**)r&&loads==before+2);
+    }
+    /* No longer a stand-in (its unit arrived): the bundle route answers, which refuses without collision served. */
+    sh_grid_native_set_standins(NULL);
+    assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/hall.decl")==end);
+    sh_grid_native_set_module_source(NULL);
+}
 int main(void)
 {
     sh_grid_size compact={SH_GRID_MODERN,{1536,1024,512}},large={SH_GRID_MODERN,{8192,6144,4096}},read;
@@ -691,6 +727,7 @@ int main(void)
     containment_checks();
     bundle_module_checks();
     assert(find_variant(editor+0x206c0,"unrelated.decl")==end_record(editor+0x206c0));
+    standin_module_checks();
     /* A native string destructor fault must still restore the heap scope. */
     compact.xyz[0]=1600;throw_dtor=1;assert(!sh_grid_native_wrapper(&compact));
     assert(g_faulted&&*(int*)(heap_state+0xc4)==0&&constructors==destructors);
