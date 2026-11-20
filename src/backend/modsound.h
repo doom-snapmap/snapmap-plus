@@ -87,7 +87,9 @@
 extern "C" {
 #endif
 
-#define SH_MODSOUND_LEAF_MAX    72      /* <stem>.bnk */
+/* A served bank leaf, <stem>.<16 hex of its hash>.bnk (modserve.c): at most 255 characters, the longest Windows file name, for the
+ * longest stem the builder admits (modbundle.h SH_MB_BANK_STEM_MAX), and its NUL. */
+#define SH_MODSOUND_LEAF_MAX    256
 #define SH_MODSOUND_HW_OFF      0x140u  /* soundSystem -> idSoundHardware_WWise * */
 #define SH_MODSOUND_DEVICE_OFF  0x630u  /* resolver -> AkDeviceID */
 #define SH_MODSOUND_MAX_SLOTS   4
