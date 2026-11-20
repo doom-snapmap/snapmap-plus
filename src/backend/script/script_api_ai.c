@@ -9,6 +9,11 @@
  *   commands      the catalogue events, run with ProcessEventArgs
  *                 (VK 0x140B47350 / GL 0x140B46940) on the demon;
  *   park          IsRunningScript (VK 0x14042FBC0 / GL 0x14042EE60) detoured;
+ *   release       the park slot marked released: the detour gives the engine's
+ *                 own answer until the next park clears the mark;
+ *   anim_variable the anim web's set-variable-by-name (VK 0x14170A950 / GL
+ *                 0x14170B3C0) on the animator at ai +0x222B8, the name made an
+ *                 atom by the engine's atom call (the pain site's);
  *   enemy         idEntityPtr at ai+0x25050, resolved by VK 0x1403935E0 /
  *                 GL 0x140392E10;
  *   awareness     GetAwareness(ai+0x29A88, entity) VK 0x1404A9E30 /
@@ -186,6 +191,19 @@ int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
 {
     return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
 }
+
+int sh_ai_park_drives(const sh_ai_park_slot *s, uint32_t id_now)
+{
+    return s && s->ai && id_now != SH_SCRIPT_SPAWN_ID_NONE && id_now == (uint32_t)s->spawn_id && !s->released;
+}
+
+void sh_ai_park_release(sh_ai_park_slot *s)
+{
+    InterlockedExchange(&s->released, 1);
+    InterlockedExchange(&s->pain_until, 0);
+}
+
+void sh_ai_park_take(sh_ai_park_slot *s) { InterlockedExchange(&s->released, 0); }
 
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame)
 {
@@ -3527,6 +3545,62 @@ static int l_snapmap_order(lua_State *L)
     return 1;
 }
 
+/* ai:release(): the demon goes back to its own behaviour (the park, above)
+ * until the script's next command; whatever the script had left standing
+ * (a held order, a forced via, a facing, a move) goes with it, so nothing of
+ * the script's takes the demon back on its own. */
+static int l_release(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai;
+    int i;
+    NEED_OP(L, release, "release");
+    ai = self_ai(L, "release", &h);
+    if (!ai) { lua_pushboolean(L, 0); return 1; }
+    for (i = 0; i < g_nrecs; i++) {
+        ai_rec *r = g_recs[i];
+        if (r->handle != h) continue;
+        anim_wait_drop(r);
+        r->facing = 0;
+        r->has_dest = 0;
+        r->move.state = SH_AI_MOVE_ARRIVED;
+    }
+    for (i = 0; i < g_nforce; i++)
+        if (g_force_via[i].handle == h) force_via_drop(i--);
+    lua_pushboolean(L, g_engine->release(ai) == 1);
+    return 1;
+}
+
+/* ai:anim_variable(name, value): the demon's anim web variable `name` (a
+ * name its web's blends read, as "hangoutIndex" in anim[hangoutIndex])
+ * becomes `value`, by the engine's own set-by-name. true when set, false when
+ * the web has no variable of that name. */
+static int l_anim_variable(lua_State *L)
+{
+    const char *name;
+    size_t n = 0, i;
+    double v;
+    void *ai;
+    int st;
+    if (lua_type(L, 2) != LUA_TSTRING)
+        sh_script_refuse(L, "\"anim_variable\" needs the variable's name (a string), got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    name = lua_tolstring(L, 2, &n);
+    if (!n) sh_script_refuse(L, "\"anim_variable\" needs the variable's name, got an empty string");
+    for (i = 0; i < n; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
+              (name[i] >= '0' && name[i] <= '9') || name[i] == '_'))
+            sh_script_refuse(L, "\"anim_variable\": \"%s\" is not a variable name (letters, digits and _ only)", name);
+    v = sh_script_api_check_number(L, 3, "anim_variable", "the value");
+    if (v != v || v > 1e9 || v < -1e9) sh_script_refuse(L, "\"anim_variable\" needs a value from -1e9 to 1e9, got %g", v);
+    NEED_OP(L, anim_variable, "anim_variable");
+    ai = self_ai(L, "anim_variable", NULL);
+    st = ai ? g_engine->anim_variable(ai, name, (float)v) : 0;
+    if (st < 0) sh_script_refuse(L, "\"anim_variable\" could not reach this demon's anim web");
+    lua_pushboolean(L, st > 0);
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3559,6 +3633,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
     { "wound_damage_counts", l_wound_damage_counts },
     { "snapmap_order", l_snapmap_order },
+    { "release", l_release },           { "anim_variable", l_anim_variable },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -4053,14 +4128,30 @@ static uint32_t e_frame(void) { return sh_script_hooks_frame(); }
  * can hold at once), read only below the high-water mark; a slot whose demon
  * is gone is reused. */
 #define AI_PARKED_MAX SH_SCRIPT_ENGINE_ENTITIES
-typedef struct {
-    void *volatile ai;
-    volatile LONG  spawn_id;
-    volatile LONG  pain_until;   /* game ms until which the park is open for a pain or death request; 0 none */
-    volatile LONG  fsm_busy;     /* the request detour is inside this demon's request */
-} ai_parked;
-static ai_parked g_parked[AI_PARKED_MAX];
+static sh_ai_park_slot g_parked[AI_PARKED_MAX];   /* sh_ai_park_drives, _release, _take */
 static volatile LONG g_parked_used;   /* slots below this were ever used */
+
+/* The slot of `ai` while it is the same entity (its spawn id matches), -1
+ * none. FSM worker threads and the game thread; reads only. */
+static int parked_slot(void *ai)
+{
+    int i, used = (int)g_parked_used;
+    if (!ai) return -1;
+    for (i = 0; i < used; i++) {
+        if (g_parked[i].ai == ai) {
+            uint32_t id = spawn_id_of(ai);
+            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id) return i;
+        }
+    }
+    return -1;
+}
+
+/* A script drives the demon now: parked and not released. */
+static int script_drives(void *ai)
+{
+    int slot = parked_slot(ai);
+    return slot >= 0 && sh_ai_park_drives(&g_parked[slot], spawn_id_of(ai));
+}
 
 /* What the engine's FSM is told about a parked demon this tick
  * (sh_ai_park_holds): the demon's own fields, read as the FSM threads read
@@ -4080,19 +4171,15 @@ static int parked_now(void *ai, LONG pain_until)
     return sh_ai_park_holds(!(health <= 0.0f), group >= 0 || pain_until != 0, reaction);
 }
 
-/* IsRunningScript(ai): true for a parked demon whose spawn id still matches
- * (the same entity, not a new one in its memory), else the engine's answer.
- * FSM worker threads; reads only. */
+/* IsRunningScript(ai): for a parked demon whose spawn id still matches (the
+ * same entity, not a new one in its memory) and that is not released, what
+ * the park holds now; else the engine's answer. FSM worker threads; reads
+ * only. */
 static uint64_t irs_detour(void *ai)
 {
-    int i, used = (int)g_parked_used;
-    for (i = 0; i < used; i++) {
-        if (g_parked[i].ai == ai && ai) {
-            uint32_t id = spawn_id_of(ai);
-            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id)
-                return (uint64_t)parked_now(ai, g_parked[i].pain_until);
-        }
-    }
+    int slot = parked_slot(ai);
+    if (slot >= 0 && sh_ai_park_drives(&g_parked[slot], spawn_id_of(ai)))
+        return (uint64_t)parked_now(ai, g_parked[slot].pain_until);
     return g_irs_orig(ai);
 }
 
@@ -4105,24 +4192,12 @@ static uint64_t irs_detour(void *ai)
 typedef int (*ai_move_fn)(void *move, void *request, void *out, int kind);
 static ai_move_fn g_move_target, g_move_orig;
 
-static int demon_is_parked(void *ai)
-{
-    int i, used = (int)g_parked_used;
-    for (i = 0; i < used; i++) {
-        if (g_parked[i].ai == ai && ai) {
-            uint32_t id = spawn_id_of(ai);
-            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id) return 1;
-        }
-    }
-    return 0;
-}
-
 static int move_detour(void *move, void *request, void *out, int kind)
 {
     if (kind == SH_AI_MOVE_KIND_TURN && move && request) {
         __try {
             void *ai = *(void *const *)move;
-            if (demon_is_parked(ai)) *((uint8_t *)request + SH_AI_MOVE_REQ_OVERSHOOT) |= 1;
+            if (script_drives(ai)) *((uint8_t *)request + SH_AI_MOVE_REQ_OVERSHOOT) |= 1;
         } __except (EXCEPTION_EXECUTE_HANDLER) { }
     }
     return g_move_orig(move, request, out, kind);
@@ -4216,7 +4291,7 @@ static int parked_slot_of_fsm(void *fsm)
     int i, used = (int)g_parked_used;
     for (i = 0; i < used; i++) {
         void *ai = g_parked[i].ai;
-        if (!ai || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id) continue;
+        if (!ai || g_parked[i].released || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id) continue;
         if (alert_fsm_of(ai) == fsm) return i;
     }
     return -1;
@@ -4283,18 +4358,47 @@ static int e_park(void *ai)
     if (id == SH_SCRIPT_SPAWN_ID_NONE || !commit_detour()) return 0;
     for (i = 0; i < used; i++) {
         void *p = g_parked[i].ai;
-        if (p == ai && (uint32_t)g_parked[i].spawn_id == id) return 1;
+        if (p == ai && (uint32_t)g_parked[i].spawn_id == id) {
+            sh_ai_park_take(&g_parked[i]);   /* a command after ai:release() takes the demon back */
+            return 1;
+        }
         if (free_slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_parked[i].spawn_id)) free_slot = i;
     }
     if (free_slot < 0 && used < AI_PARKED_MAX) free_slot = used;
     if (free_slot < 0) return 0;   /* every entity the game can hold is a parked demon */
     g_parked[free_slot].ai = NULL;
     InterlockedExchange(&g_parked[free_slot].pain_until, 0);
+    InterlockedExchange(&g_parked[free_slot].released, 0);
     InterlockedExchange(&g_parked[free_slot].spawn_id, (LONG)id);
     InterlockedExchangePointer((PVOID volatile *)&g_parked[free_slot].ai, ai);
     if (free_slot >= used) InterlockedExchange(&g_parked_used, free_slot + 1);
     pain_take_commit();
     return 1;
+}
+
+/* ai:release(): the slot stays the demon's (the next park finds it) and is
+ * marked released; a pain the park had opened for is the engine's now. */
+static int e_release(void *ai)
+{
+    int slot = parked_slot(ai);
+    if (slot >= 0) sh_ai_park_release(&g_parked[slot]);
+    return 1;
+}
+
+/* The anim web's set-variable-by-name (SH_AI_SIG_WEB_SCALAR_SET). */
+typedef uint8_t (*ai_web_scalar_set_fn)(void *animator, const char *const *atom, float value);
+static ai_web_scalar_set_fn g_web_scalar_set;
+static const char *atom_of(const char *text);
+
+static int e_anim_variable(void *ai, const char *name, float value)
+{
+    const char *atom = atom_of(name);
+    uint8_t found = 0;
+    if (!g_web_scalar_set || !atom) return -1;
+    __try {
+        found = g_web_scalar_set((uint8_t *)ai + SH_AI_OFF_WEB_ANIMATOR, &atom, value);
+    } __except (av_only(GetExceptionCode())) { return -1; }
+    return found ? 1 : 0;
 }
 
 /* ------------------------------------------ the brain's calls: engine side */
@@ -5433,7 +5537,8 @@ static const sh_script_ai_engine k_engine = {
     e_fire_modes, e_focus_state, e_muzzle_test, e_clear_move, e_idle_turn_entry,
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
-    e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order
+    e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
+    e_release, e_anim_variable
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -5611,6 +5716,11 @@ int sh_script_ai_install(const uint8_t *module_base)
      * detour reads are the sigs test's) */
     if (r[SH_AI_SIG_DAMAGE_WOUND].addr) g_daw_target = (ai_daw_fn)r[SH_AI_SIG_DAMAGE_WOUND].addr;
     else g_live.wound_damage_counts = NULL;
+    /* The anim web's variables: the set-by-name (its offsets are the signature's own bytes) and the engine's atom
+     * call (the pain site), which makes the name the web's rows compare. */
+    if (r[SH_AI_SIG_WEB_SCALAR_SET].addr && g_intern)
+        g_web_scalar_set = (ai_web_scalar_set_fn)r[SH_AI_SIG_WEB_SCALAR_SET].addr;
+    else g_live.anim_variable = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

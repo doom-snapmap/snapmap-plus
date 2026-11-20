@@ -59,6 +59,12 @@ typedef struct shs_mod {
     int       last_line;
     char     *err_file;      /* where the current error was raised, by the message handler; malloc'd or NULL */
     int       err_line;
+    /* the API guard: the name an unknown-call stop names, and the last global the scripts read that is not set
+     * (its chunk and line), which names the nothing a pcall is handed */
+    char      stop_call[96];
+    char      miss_name[96];
+    const char *miss_src;
+    int       miss_line;
 
     /* this map: the hooks' slot (its queue and its handles), the entry files */
     int       hook;          /* sh_script_hooks_mod_add slot, -1 when none */
@@ -99,6 +105,13 @@ double shs_now(void);
 void shs_check_clock(lua_State *L);
 /* Raise the error of a marked stop (never returns). */
 int  shs_raise_stop(lua_State *L, int level);
+/* The API guard: stop the mod for a call to `name`, which does not exist
+ * (stop: SH_SCRIPT_STOP_UNKNOWN_CALL for a global, _METHOD for an entity's),
+ * at the script line `level` up the stack. A pcall cannot catch it. */
+int  shs_stop_unknown_call(lua_State *L, int stop, const char *name, int level);
+/* The global the script read last at the line `level` up the stack when it
+ * was not set, else NULL (the guard's pcall check). */
+const char *shs_missing_global_here(lua_State *L, int level);
 /* One pattern step (script_lstrlib.c). */
 void shs_match_step(lua_State *L);
 

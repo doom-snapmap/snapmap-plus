@@ -173,7 +173,13 @@
  *                      health against the threshold (VK 0x1406E8A80: +0x214 x max health, or +0x210 when +0x214
  *                      is negative), the group's damage-per-second bucket, gore type, distance, directions and
  *                      the clipping spheres. Detoured; 16-byte window (script_api_ai.h, SH_AI_DAW_*;
- *                      snaphak-re R-GAPS-B gap 6). */
+ *                      snaphak-re R-GAPS-B gap 6).
+ *   AiWebScalarSet     VK 0x14170A950  GL 0x14170B3C0  the anim web's set-variable-by-name (animator, atom*, float
+ *                      in xmm2): the row of the animator's variable list (+0x580, count +0x588, 0x18 a row)
+ *                      whose atom is the name's gets the float through the store at +0x52 (VK 0x1417574D0 /
+ *                      GL 0x141758620: the bound member at row +0x10 when the row's short +10 is below 0, else
+ *                      the web's own memory +0x598 at that index); al 1 when found. The game's snippets call it
+ *                      on the animator at ai +0x222B8 (VK 0x1404B02A0). Called. (snaphak-re reports/R-AR7) */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -377,6 +383,11 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 89 45 BF 48 83 B9 30 06 00 00 00 4D 8B E1 4C 63 7D 6F 4D 8B F0 48 8B F2 48 8B D9 0F 84 ?? ?? ?? ?? "
       "48 8D B9 08 06 00 00",
       0x8FC8E0u, 0x8FB910u },
+    { "AiWebScalarSet",
+      "48 83 EC 28 48 63 81 88 05 00 00 45 33 C0 85 C0 7E 27 4C 8B 99 80 05 00 00 4C 8B D0 4C 8B 0A 49 8B C3 "
+      "41 8B D0 4C 39 08 74 16 41 FF C0 48 FF C2 48 83 C0 18 49 3B D2 7C EC 32 C0 48 83 C4 28 C3 "
+      "48 8D 91 98 05 00 00 49 63 C0 48 8D 0C 40 49 8D 0C CB E8 ?? ?? ?? ?? B0 01 48 83 C4 28 C3",
+      0x170A950u, 0x170B3C0u },
     { NULL, NULL, 0, 0 }
 };
 

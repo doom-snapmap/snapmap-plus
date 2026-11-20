@@ -107,6 +107,8 @@ typedef struct fent {
     /* the calls the brain needs */
     float recoil;
     char  weapon_use[64];  /* the weapon-use entry selected */
+    char  anim_var[32];    /* the anim web variable last set (ai:anim_variable) and its value */
+    float anim_val;
     int   ready;           /* weapon_ready answer (-1 no weapon) */
     float aim[3];
     int   aimed;
@@ -219,6 +221,14 @@ static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 }
 
 static int f_park(void *e) { if (!((fent *)e)->parked) ev_cat("park\n"); ((fent *)e)->parked = 1; return 1; }
+static int f_release(void *e) { ev_cat("release\n"); ((fent *)e)->parked = 0; return 1; }
+static int f_anim_variable(void *ai, const char *name, float value)
+{
+    if (strcmp(name, "hangoutIndex") && strcmp(name, "painIndex")) return 0;   /* the web's variables */
+    snprintf(((fent *)ai)->anim_var, sizeof ((fent *)ai)->anim_var, "%s", name);
+    ((fent *)ai)->anim_val = value;
+    return 1;
+}
 static void *f_enemy(void *e) { int id = ((fent *)e)->enemy; return id ? &g_ent[id] : NULL; }
 static int f_awareness(void *ai, void *t) { (void)t; return ((fent *)ai)->awareness; }
 static int f_move_status(void *e) { return ((fent *)e)->move_status; }
@@ -470,7 +480,8 @@ static const sh_script_ai_engine g_fake = {
     f_fire_modes, f_focus_state, f_muzzle_test, f_clear_move, f_idle_turn_entry,
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
-    f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order
+    f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
+    f_release, f_anim_variable
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2410,11 +2421,82 @@ static void test_snapmap_order(void)
     sh_script_map_end();
 }
 
+/* ai:release() hands the demon back to its own behaviour until the next command; ai:anim_variable(name, value)
+ * sets a variable of its anim web by name (R-AR7). */
+static void test_release_and_anim_variable(void)
+{
+    sh_ai_park_slot s;
+    const char *log;
+    printf("-- release: the engine's own behaviour until the next command; anim_variable by name\n");
+    /* the park slot: a parked demon is the script's; released, the engine answers for it; the next park takes it */
+    memset(&s, 0, sizeof s);
+    s.ai = &s;
+    s.spawn_id = 7;
+    CHECK(sh_ai_park_drives(&s, 7) == 1);
+    CHECK(sh_ai_park_drives(&s, 8) == 0);                      /* another entity in its memory */
+    CHECK(sh_ai_park_drives(&s, SH_SCRIPT_SPAWN_ID_NONE) == 0);
+    s.pain_until = 1250;
+    sh_ai_park_release(&s);
+    CHECK(sh_ai_park_drives(&s, 7) == 0 && s.pain_until == 0);  /* IsRunningScript gives the engine's answer */
+    sh_ai_park_take(&s);
+    CHECK(sh_ai_park_drives(&s, 7) == 1);                       /* the next command parks it again */
+    /* through a script: the release, nothing of the script's order left standing, the next command parks again */
+    g_events[0] = 0;
+    CHECK(start(
+        "api = 1\n"
+        "local n = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  n = n + 1\n"
+        "  if n == 1 then self:force_animation_via('idle/idle', 'evade/side') end\n"
+        "  if n == 2 then print('released ' .. tostring(self:release())) end\n"
+        "  if n == 5 then self:move_to({ x = 5, y = 0, z = 0 }) end\n"
+        "  if n == 6 then\n"
+        "    print('var ' .. tostring(self:anim_variable('hangoutIndex', 3)) .. ' ' .. tostring(self:anim_variable('noSuchVar', 1)))\n"
+        "  end\n"
+        "end)\n"));
+    strcpy(g_ent[1].node, "walk/walk");
+    tick();                                                     /* the via is forced: parked */
+    CHECK(g_ent[1].parked == 1 && strstr(g_events, "ForceAnimState(0,evade/side") != NULL);
+    tick();                                                     /* released */
+    CHECK(g_ent[1].parked == 0);
+    strcpy(g_ent[1].node, "evade/side"); tick();                /* the via plays, then the web leaves it: */
+    strcpy(g_ent[1].node, "evade/side_out"); tick();            /* a via left standing would ask its destination */
+    CHECK(strstr(g_events, "ChangeAnimState(0,idle/idle") == NULL && g_ent[1].parked == 0);
+    tick();                                                     /* the next command parks it again */
+    CHECK(g_ent[1].parked == 1);
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "released true\n") != NULL);
+    CHECK(strstr(log, "var true false\n") != NULL);
+    CHECK(!strcmp(g_ent[1].anim_var, "hangoutIndex") && g_ent[1].anim_val == 3.0f);
+    {
+        const char *rel = strstr(g_events, "release\n");
+        CHECK(rel != NULL && strstr(rel, "park\n") != NULL);   /* parked, released, parked again */
+    }
+    if (g_fail) printf("release log:\n%s\nevents:\n%s", log, g_events);
+    sh_script_map_end();
+    /* the refusals, and an engine without the calls */
+    expect_stop("self:anim_variable(5, 1)", "\"anim_variable\" needs the variable's name (a string), got number");
+    expect_stop("self:anim_variable('a b', 1)", "\"anim_variable\": \"a b\" is not a variable name");
+    expect_stop("self:anim_variable('hangoutIndex')", "\"anim_variable\" needs");
+    /* the API guard: an entity method Snapmap+ does not have stops the mod, also inside pcall */
+    expect_stop("pcall(self.fx_condition, self, 'FX_X')", "\"fx_condition\" is not a Snapmap+ call an entity has");
+    {
+        sh_script_ai_engine bare = g_fake;
+        bare.release = NULL;
+        bare.anim_variable = NULL;
+        sh_script_ai_set_engine(&bare);
+        expect_stop("self:release()", "\"release\" is not available in this session");
+        expect_stop("self:anim_variable('hangoutIndex', 1)", "\"anim_variable\" is not available in this session");
+        sh_script_ai_set_engine(&g_fake);
+    }
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 54);
+    CHECK(sh_script_ai_register() == 56);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2439,6 +2521,7 @@ int main(int argc, char **argv)
     test_sight_against_a_wall();
     test_brain_calls();
     test_snapmap_order();
+    test_release_and_anim_variable();
     test_brain_refusals();
     test_fire_calls();
     test_fire_refusals();

@@ -376,6 +376,28 @@ static void check_image(const char *path)
         CHECK(!memcmp(s + 18, "\x48\x8D\x0C\x80\x48\xC1\xE1\x04", 8));   /* index x 5 x 16 = 0x50 an entry */
         CHECK(!memcmp(s + 33, "\x48\x83\xC0\x08", 4));                     /* the entry's data at +8 */
     }
+    if (rva[SH_AI_SIG_WEB_SCALAR_SET]) {
+        /* the set-by-name (script_api_ai.h, SH_AI_WEB_*): the rows, their count and stride, the web's own memory, and
+         * the store it calls (a bound row's member at +0x10 when the short at +10 is below 0, else memory[index]) */
+        static const uint8_t store[] = {
+            0x0F, 0xB7, 0x41, 0x0A, 0x66, 0x85, 0xC0, 0x79, 0x09, 0x48, 0x8B, 0x41, 0x10, 0xF3, 0x0F, 0x11, 0x10, 0xC3,
+            0x48, 0x0F, 0xBF, 0xC8, 0x48, 0x8B, 0x02, 0xF3, 0x0F, 0x11, 0x14, 0x88, 0xC3 };
+        static const uint8_t snippet[] = { 0x0F, 0x5B, 0xD2, 0x48, 0x8D, 0x88, 0xB8, 0x22, 0x02, 0x00, 0xE9 };
+        uint32_t s = rva[SH_AI_SIG_WEB_SCALAR_SET], k, found = 0;
+        CHECK(!memcmp(base + s + 4, "\x48\x63\x81\x88\x05\x00\x00", 7) && SH_AI_WEB_ROW_COUNT == 0x588u);
+        CHECK(!memcmp(base + s + 0x12, "\x4C\x8B\x99\x80\x05\x00\x00", 7) && SH_AI_WEB_ROWS == 0x580u);
+        CHECK(!memcmp(base + s + 0x30, "\x48\x83\xC0\x18", 4) && SH_AI_WEB_ROW_SIZE == 0x18u);
+        CHECK(!memcmp(base + s + 0x40, "\x48\x8D\x91\x98\x05\x00\x00", 7) && SH_AI_WEB_SCALAR_MEMORY == 0x598u);
+        CHECK(base[s + SH_AI_WEB_SCALAR_STORE] == 0xE8);
+        CHECK(!memcmp(base + rel_target(base, s + SH_AI_WEB_SCALAR_STORE, 5, 1), store, sizeof store));
+        /* the game's own snippet (idAISnippet_Shared_SetScalarToProjectileIndex) sets a variable on the animator at
+         * ai +0x222B8 with a float made from an int: cvtdq2ps xmm2; lea rcx,[rax+0x222B8]; jmp set */
+        for (k = 0x1000; k + sizeof snippet + 4 < size; k++) {
+            if (memcmp(base + k, snippet, sizeof snippet)) continue;
+            if (rel_target(base, k + sizeof snippet - 1, 5, 1) == s) found++;
+        }
+        CHECK(found == 1 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8u);
+    }
     if (rva[SH_AI_SIG_FXPHYS_PLACE]) {
         /* mov rdx,[rsp+0x90]: the fifth argument the placement passes as 0 */
         CHECK(!memcmp(base + rva[SH_AI_SIG_FXPHYS_PLACE] + 0x1F, "\x48\x8B\x94\x24\x90\x00\x00\x00", 8));

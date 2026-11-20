@@ -566,7 +566,12 @@ static void test_error_lines(void)
         { "api = 1\nlocal self = {}\nprint(self.target.x)\n",
           "Script stopped: Test Mod, scripts\\main.lua line 3: \"target\" is nothing here. Check that it is set before it is used." },
         { "api = 1\nmove_to(1)\n",
-          "Script stopped: Test Mod, scripts\\main.lua line 2: \"move_to\" is not a function here (it is nothing). Check the spelling of the name." },
+          "Script stopped: Test Mod, scripts\\main.lua line 2: \"move_to\" is not a Snapmap+ call, and this mod's scripts never set it. Check the name, or update Snapmap+ if the mod was made for a newer one." },
+        /* the API guard: a call to a name that does not exist stops the mod even inside pcall (R-AR7) */
+        { "api = 1\nlocal ok = pcall(fx, 1)\n",
+          "Script stopped: Test Mod, scripts\\main.lua line 2: \"fx\" is not a Snapmap+ call, and this mod's scripts never set it. Check the name, or update Snapmap+ if the mod was made for a newer one." },
+        { "api = 1\nlocal ok = pcall(function() fx_stop(1) end)\n",
+          "Script stopped: Test Mod, scripts\\main.lua line 2: \"fx_stop\" is not a Snapmap+ call, and this mod's scripts never set it. Check the name, or update Snapmap+ if the mod was made for a newer one." },
         { "api = 1\nlocal x = nil + 1\n",
           "Script stopped: Test Mod, scripts\\main.lua line 2: a value used here is nothing. Check that it is set before it is used." },
         { "api = 1\nlocal a\nlocal s = 'x' .. a\n",

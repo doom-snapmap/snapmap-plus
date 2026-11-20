@@ -192,6 +192,41 @@ int shs_raise_stop(lua_State *L, int level)
     return lua_error(L);
 }
 
+int shs_stop_unknown_call(lua_State *L, int stop, const char *name, int level)
+{
+    shs_mod *m = shs_mod_of(L);
+    if (m->stop < 0) {
+        m->stop = stop;
+        copyz(m->stop_call, sizeof m->stop_call, name && name[0] ? name : "?");
+    }
+    return shs_raise_stop(L, level);
+}
+
+/* _G's __index: a global that is not set is nothing, as in Lua, and is
+ * remembered with where it was read, so a pcall handed it can name it. */
+static int global_missing(lua_State *L)
+{
+    shs_mod *m = shs_mod_of(L);
+    lua_Debug ar;
+    const char *key = lua_type(L, 2) == LUA_TSTRING ? lua_tostring(L, 2) : NULL;
+    if (key && lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+        copyz(m->miss_name, sizeof m->miss_name, key);
+        m->miss_src = ar.source;
+        m->miss_line = ar.currentline;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+const char *shs_missing_global_here(lua_State *L, int level)
+{
+    shs_mod *m = shs_mod_of(L);
+    lua_Debug ar;
+    if (!m->miss_name[0] || !lua_getstack(L, level, &ar) || !lua_getinfo(L, "Sl", &ar)) return NULL;
+    if (ar.source != m->miss_src || ar.currentline != m->miss_line) return NULL;
+    return m->miss_name;
+}
+
 /* The one protection against a script that never returns: a single
  * delivery (one handler call, one timer, one coroutine resume) that has run
  * longer than the wall-clock stop is stopped. Nothing counts work. */
@@ -345,7 +380,7 @@ static void stop_from_error(shs_mod *m, lua_State *L, int status)
     const char *msg = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
     if (status == LUA_ERRMEM && m->stop < 0) m->stop = SH_SCRIPT_STOP_MEMORY;
     if (m->stop >= 0) {
-        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, &what, &todo);
+        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, m->stop_call, &what, &todo);
         if (m->err_file) { file = _strdup(m->err_file); line = m->err_line; }
         else if (msg) file = msg_file(msg, &line, NULL);
         if (!file && m->last_src) { file = _strdup(m->last_src); line = m->last_line; }
@@ -476,7 +511,8 @@ static int ent_index(lua_State *L)
     }
     lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_METHODS);
     lua_pushvalue(L, 2);
-    lua_rawget(L, -2);
+    if (lua_rawget(L, -2) == LUA_TNIL)   /* the API guard: an entity has no method of that name */
+        return shs_stop_unknown_call(L, SH_SCRIPT_STOP_UNKNOWN_METHOD, key ? key : luaL_typename(L, 2), 1);
     return 1;
 }
 
@@ -1014,6 +1050,13 @@ static int job_open(lua_State *L)
     }
     /* globals other modules open themselves (sh_script_api_add_opener) */
     for (i = 0; i < g_nopeners; i++) g_openers[i](L);
+    /* the API guard's record of the globals read that are not set (global_missing) */
+    lua_pushglobaltable(L);
+    lua_newtable(L);
+    lua_pushcfunction(L, global_missing);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);
     /* fsm: the registration calls for state-machine classes */
     lua_newtable(L);
     for (i = 0; i < SH_FSM_KINDS; i++) {

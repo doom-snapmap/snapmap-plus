@@ -22,6 +22,13 @@ extern "C" {
 #define SH_SCRIPT_STOP_ERROR    0   /* a Lua error: the message says why */
 #define SH_SCRIPT_STOP_MEMORY   3   /* the process had no memory to give */
 #define SH_SCRIPT_STOP_WALL     5   /* one call ran longer than the wall-clock stop */
+/* A call to a name that does not exist (the API guard: script_runtime.c,
+ * script_lib_base.c): a global that is no Snapmap+ call and that the scripts
+ * never set, or an entity method Snapmap+ does not have. A pcall, xpcall or
+ * coroutine around it cannot catch it: the mod stops with one line naming the
+ * call. */
+#define SH_SCRIPT_STOP_UNKNOWN_CALL   6
+#define SH_SCRIPT_STOP_UNKNOWN_METHOD 7
 
 /* Split a Lua message "scripts\x.lua:12: text" into file ("scripts\x.lua"),
  * line (12) and the text after it, which is returned. Without that prefix,
@@ -35,8 +42,9 @@ const char *sh_script_split_where(const char *msg, char **file, int *line);
  * the caller frees them). Neither ends with a period. *todo may be "". */
 void sh_script_reason(const char *text, char **what, char **todo);
 
-/* The same for a stop the runtime decided; `limit` is the wall-clock stop in ms. */
-void sh_script_reason_stop(int stop, unsigned long long limit, char **what, char **todo);
+/* The same for a stop the runtime decided; `limit` is the wall-clock stop in
+ * ms, `call` the name an unknown-call stop names (NULL otherwise). */
+void sh_script_reason_stop(int stop, unsigned long long limit, const char *call, char **what, char **todo);
 
 /* The one stop line:
  *   Script stopped: <mod>, scripts\x.lua line 12: <what>. <todo>.

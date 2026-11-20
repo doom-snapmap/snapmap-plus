@@ -22,9 +22,33 @@
 
 /* After the wrapped call: a stop the runtime decided goes on up; a memory
  * error the script caught becomes the memory stop. Results start at 1. */
+/* The API guard inside a protected call: Lua's "attempt to call a nil value
+ * (global 'x')" for a global that is still not set is a call to a name that
+ * does not exist. */
+static int called_unknown_global(lua_State *L, const char *msg, char *name, size_t cap)
+{
+    static const char key[] = "attempt to call a nil value (global '";
+    const char *at = msg ? strstr(msg, key) : NULL, *end;
+    size_t n;
+    if (!at) return 0;
+    at += sizeof key - 1;
+    end = strchr(at, '\'');
+    if (!end || end[1] != ')' || end[2]) return 0;
+    n = (size_t)(end - at);
+    if (!n || n >= cap) return 0;
+    memcpy(name, at, n);
+    name[n] = 0;
+    lua_pushglobaltable(L);
+    lua_pushstring(L, name);
+    n = (size_t)lua_rawget(L, -2);
+    lua_pop(L, 2);
+    return n == LUA_TNIL;
+}
+
 static int guard_k(lua_State *L, int status, lua_KContext ctx)
 {
     shs_mod *m = shs_mod_of(L);
+    char name[96];
     (void)status;
     (void)ctx;
     if (m->stop >= 0) return shs_raise_stop(L, 1);
@@ -33,14 +57,22 @@ static int guard_k(lua_State *L, int status, lua_KContext ctx)
         m->stop = SH_SCRIPT_STOP_MEMORY;
         return shs_raise_stop(L, 1);
     }
+    if (lua_gettop(L) >= 2 && lua_type(L, 1) == LUA_TBOOLEAN && !lua_toboolean(L, 1) &&
+        lua_type(L, 2) == LUA_TSTRING && called_unknown_global(L, lua_tostring(L, 2), name, sizeof name))
+        return shs_stop_unknown_call(L, SH_SCRIPT_STOP_UNKNOWN_CALL, name, 1);
     return lua_gettop(L);
 }
 
 /* pcall, xpcall, coroutine.resume, coroutine.close: the original is
- * upvalue 1. lua_callk keeps a yield inside a pcall'd function working. */
+ * upvalue 1. lua_callk keeps a yield inside a pcall'd function working. A
+ * pcall handed a global that is not set (pcall(fx, ...)) is a call to a name
+ * that does not exist: the API guard stops the mod. */
 static int guard(lua_State *L)
 {
     int n = lua_gettop(L);
+    const char *missing;
+    if (n >= 1 && lua_isnil(L, 1) && (missing = shs_missing_global_here(L, 1)) != NULL)
+        return shs_stop_unknown_call(L, SH_SCRIPT_STOP_UNKNOWN_CALL, missing, 1);
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
     lua_callk(L, n, LUA_MULTRET, 0, guard_k);

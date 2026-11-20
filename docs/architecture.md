@@ -2391,6 +2391,19 @@ feature.
   written: `Script stopped: <mod>, scripts\<file>.lua line <n>: <what>. <what
   to do>.` `script_reason.c` rewrites Lua's wording by one table (nothing says
   "attempt to index a nil value"; an author's own `error("...")` text is kept).
+  A call to a name that does not exist is always one of these stops, never a
+  silent nothing (the API guard): an entity method Snapmap+ does not have
+  stops the mod as soon as it is read (`e.name`, `e:name()`: `"name" is not a
+  Snapmap+ call an entity has`), and a call to a global that is no Snapmap+
+  call and that the mod's scripts never set stops it with `"name" is not a
+  Snapmap+ call, and this mod's scripts never set it`, both followed by
+  `Check the name, or update Snapmap+ if the mod was made for a newer one`.
+  `pcall`, `xpcall` and `coroutine.resume` cannot catch either: a pcall handed
+  such a global (`pcall(name, ...)`, the global read on the pcall's own line
+  and remembered by `_G`'s `__index`) or whose function made such a call
+  stops the mod as the call itself would. Reading a global that is not set is
+  still nothing, as in Lua (`rawget(_G, name)` and `if name then` stay usable);
+  only calling it stops.
   The mod's log (prints, warnings, the stop line; every line of the map,
   whole; the Mods tab shows the newest 1,000 and Copy log copies all) stays
   readable after the map until the mod's next map start:
@@ -2731,7 +2744,24 @@ is touched, and a removed demon answers nil.
   in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
   alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
   0x145CEDF30) when a command arrives while the demon is elsewhere. No decl
-  is edited and no layers config is named; a demon stays parked for the map.
+  is edited and no layers config is named; a demon stays parked for the map
+  unless its script releases it.
+- **The release.** `release()` hands a parked demon back to the game's own
+  behaviour until the script's next command: its park slot is marked released
+  (`sh_ai_park_release`; the pain the park had opened for is the engine's
+  now), the `IsRunningScript` detour then gives the engine's own answer for it
+  (`sh_ai_park_drives`), so the alert cycle leaves `ExecuteDoomscript` by
+  `Shared_NotExecutingScript` and runs the stock behaviours: 2016's search
+  (`AC_CanUseSearch`, VK 0x140601110) when the demon has lost its enemy, its
+  combat when it finds one. The pain and death request detour and the turn
+  detour leave a released demon alone. Whatever the script left standing on
+  the demon goes with the release (an order held back behind a step, a forced
+  via waiting for its destination, a facing, a move), so nothing of the
+  script's takes the demon back by itself. The next command parks it again
+  (`sh_ai_park_take` clears the mark at every park) and the script proxy forces
+  the alert cycle back into `ExecuteDoomscript`. The Enemy SDK's brains call it
+  when the demon has lost its enemy, so a ported demon searches as DOOM 2016's
+  demons do.
 - **Commands** are catalogue events (`SH_AI_EVENTS`) run on the demon at once
   through the entity calls' event helper, which checks each one's arguments
   against the game's event:
@@ -3068,7 +3098,18 @@ is touched, and a removed demon answers nil.
   then compares with each pain anim's +0x48 string; `block_pain(reaction,
   seconds)` makes a detour of the threat table's row check (VK 0x1406E08D0 /
   GL 0x1406DFD00, 15-byte window) refuse that reaction's rows for the demon
-  until the game clock passes the time. The per-demon pain records are read
+  until the game clock passes the time; `anim_variable(name, value)` sets a
+  variable of the demon's body anim web by name with the engine's own
+  set-by-name (VK 0x14170A950 / GL 0x14170B3C0, on the animator at
+  ai+0x222B8, the name made an atom by the same atomic-string set): the
+  animator keeps one row per variable its web names (+0x580, count +0x588,
+  0x18 a row) and stores the float into the idAI2 member the row is bound to
+  (`idAnimWebAI::blendVariables_t`: `hangoutIndex`, `painIndex` and the rest,
+  which the game's own snippets set the same way, as
+  `Shared_SetScalarToProjectileIndex` does) or into the web's own memory
+  (+0x598); false when the web has no variable of that name. A node whose
+  blend picks its clip by a variable (`anim[hangoutIndex]`, the evade nodes)
+  then plays the clip the script chose. The per-demon pain records are read
   lock-free by spawn id from the threads the engine runs pain on. Each detour
   is committed on the game thread at the first call that needs it.
 - **Shared with the entity calls.** `distance`, `animation_state` and `force_animation`

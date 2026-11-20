@@ -23,6 +23,13 @@
  * author names nothing: any idAI2 entityDef of a mod can be driven.
  * A demon stays parked for the rest of the map, also after its mod's
  * scripts stop; it then idles where it stands and still takes pain and dies.
+ * ai:release() hands it back before that: its park slot is marked released,
+ * IsRunningScript gives the engine's own answer for it again, the alert
+ * cycle leaves ExecuteDoomscript by NotExecutingScript and the demon runs the
+ * game's own behaviours (its search when it has lost its enemy, its combat
+ * when it finds one), with nothing of the script's order left standing; the
+ * next command parks it again (the mark is cleared and the script proxy
+ * forces the alert cycle back into ExecuteDoomscript).
  *
  * Threads: every Lua call runs on the game thread inside the script tick.
  * The IsRunningScript detour runs on FSM worker threads and only reads the
@@ -208,6 +215,21 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
  * the clip, and the script hears of it through on.pain). The demon is the
  * script's again when the reaction is over. Pure. */
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
+/* One parked demon (the engine side's table; the FSM threads read it without
+ * a lock). drives: the slot is this entity's (its spawn id now, id_now,
+ * matches) and not released, so IsRunningScript answers what the park holds;
+ * otherwise the engine's own answer. release marks it released (and ends a
+ * pain the park had opened for); take, at every park, clears the mark. */
+typedef struct sh_ai_park_slot {
+    void *volatile ai;
+    volatile long  spawn_id;
+    volatile long  pain_until;   /* game ms until which the park is open for a pain or death request; 0 none */
+    volatile long  fsm_busy;     /* the request detour is inside this demon's request */
+    volatile long  released;     /* ai:release(): the engine's own behaviour until the next park */
+} sh_ai_park_slot;
+int  sh_ai_park_drives(const sh_ai_park_slot *s, uint32_t id_now);
+void sh_ai_park_release(sh_ai_park_slot *s);
+void sh_ai_park_take(sh_ai_park_slot *s);
 /* The alert cycle transition codes a parked demon's park opens for: TRANSCODE_AC_IN_PAIN (232), _IN_PAIN_LIGHT
  * (233), _IN_STAGGER (237), _IN_STAGGER_ONESHOT (238) and _IS_DYING (242). */
 int      sh_ai_fsm_code_yields(int code);
@@ -549,6 +571,18 @@ typedef struct sh_script_ai_engine {
      * on its slots, AI +0x25B30 on both renderers): 1 with it, 0 none, -1
      * unreadable. It stays there until the caller removes it. */
     int      (*snapmap_order)(void *ai, sh_ai_order *out);
+    /* Hand the parked demon back to its own behaviour: IsRunningScript gives
+     * the engine's own answer for it again, so its alert cycle leaves
+     * ExecuteDoomscript by the NotExecutingScript link and runs the stock
+     * behaviours (its search when it has lost its enemy), until the next park
+     * (the next command) takes it back. 1 done (also for a demon that was not
+     * parked), -1 unavailable. */
+    int      (*release)(void *ai);
+    /* Set the variable `name` of the demon's body anim web to `value`, by the
+     * engine's own set-by-name (sh_ai_web_scalar below): the member it is
+     * bound to, or the web's own scalar memory. 1 set, 0 the web has no
+     * variable of that name, -1 unavailable. */
+    int      (*anim_variable)(void *ai, const char *name, float value);
 } sh_script_ai_engine;
 
 /* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key
@@ -723,6 +757,24 @@ enum { SH_AI_ORDER_CHANGE = 0, SH_AI_ORDER_FORCE = 1, SH_AI_ORDER_FORCE_VIA = 2,
 #define SH_AI_UPDATE_RESET_MODE    0xAB6u   /* update: mov [r12+0x570], r13d (zero) at a transition */
 int sh_ai_order_interrupt(int kind);
 
+/* The anim web's variables (both renderers; SH_AI_SIG_WEB_SCALAR_SET, VK
+ * 0x14170A950 / GL 0x14170B3C0). An idAnimator_AnimWeb holds one row per
+ * variable its web names (rows at +0x580, count +0x588, 0x18 bytes a row): the
+ * name's atom at +0, a short at +10 and a pointer at +0x10. A variable the
+ * owner binds to one of its own members (an idAI2's are idAnimWebAI::
+ * blendVariables_t: hangoutIndex, painIndex, deathAnimIndex ...) has the short
+ * below 0 and the member at +0x10; any other has its index into the web's own
+ * float memory (the pointer at +0x598). The engine's set-by-name finds the row
+ * whose atom is the name's and stores the float there (the store VK
+ * 0x1417574D0 / GL 0x141758620); the game's own snippets set their variables
+ * this way (idAISnippet_Shared_SetScalarToProjectileIndex, VK 0x1404B02A0: the
+ * animator at ai +0x222B8). 1 when a row of that name was found. */
+#define SH_AI_WEB_ROWS             0x580u
+#define SH_AI_WEB_ROW_COUNT        0x588u
+#define SH_AI_WEB_SCALAR_MEMORY    0x598u
+#define SH_AI_WEB_ROW_SIZE         0x18u
+#define SH_AI_WEB_SCALAR_STORE     0x52u    /* the set: call store(row, &memory, value) */
+
 /* Park the mod's own demon `ai` (handle h) without a command: 1 when it is
  * parked. ai:fire uses it, so a demon a script fires from stops its own
  * behaviour like one it moves. Game thread, inside the script tick. */
@@ -870,6 +922,7 @@ enum sh_ai_sig {
     SH_AI_SIG_FXPHYS_PLACE,        /* an effect rigid body's broad phase entry moved (broad phase, entry, pos, axis) */
     SH_AI_SIG_WEAPON_USE,          /* the demon's weapon-use behaviour: the list entry its index names */
     SH_AI_SIG_DAMAGE_WOUND,        /* idGoreComponent::DamageActivatesWound (component, wound, record, ...) (detoured) */
+    SH_AI_SIG_WEB_SCALAR_SET,      /* the anim web's set-variable-by-name (animator, atom*, float) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

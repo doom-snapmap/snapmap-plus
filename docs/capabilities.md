@@ -1036,8 +1036,12 @@ the pieces' explosion effect tint and fade the pieces themselves as DOOM Eternal
 (`destructible`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `animation_state` and `force_animation` work on
 demons too; `monster_type` names any demon's type, `ground_below` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
-`difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
-and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
+`difficulty` reads the game's difficulty, `anim_variable` sets a variable of a demon's anim web by
+name, so a node that picks its clip by it plays the clip the script chose): a commanded demon waits in
+the engine's own script state and keeps its pain and death, and `release` hands it back to its own
+behaviour until the next command (a ported demon that has lost the player then searches with DOOM
+2016's own search). A call to a name Snapmap+ does not have stops the mod's scripts with one line
+naming it, even inside `pcall`. In combat it deals its own damage decls to any entity (`damage`,
 `hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`, or `ai:launch` with an exact velocity for a thrown arc), sees the projectiles flying at an entity (`e:incoming_projectiles`) and
 steers or explodes them, starts and stops effects (`play_effect`, `move_effect`, `stop_effect`), lets its own effects end the way DOOM Eternal ends them, a stopped model gone in that frame instead of fading and a sound already playing not started a second time over itself (`end_effects_at_once`), plays its own sounds
 (`sound`), reads a tag of its md6Def or a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage

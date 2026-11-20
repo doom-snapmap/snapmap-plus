@@ -37,6 +37,10 @@ static char *heap_text(const char *fmt, ...)
     return out;
 }
 
+/* What to do about a call to a name that does not exist (an attempt to call a
+ * global that is nothing, and the runtime's unknown-call stops). */
+#define UNKNOWN_CALL_TODO "Check the name, or update Snapmap+ if the mod was made for a newer one"
+
 static int starts(const char *s, const char *prefix)
 {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -90,13 +94,14 @@ static const char *a_type(const char *t, size_t n)
 
 /* The variable a Lua message names at its end: " (global 'x')", " (field
  * 'x')" and the other kinds ldebug.c's varinfo writes. Returns 1 with the
- * name and the message cut before it. */
-static int var_name(const char *text, size_t *body_len, char *name, size_t cap, int *is_method)
+ * name, its kind (VAR_*) and the message cut before it. */
+enum { VAR_GLOBAL, VAR_LOCAL, VAR_FIELD, VAR_METHOD, VAR_UPVALUE, VAR_CONSTANT, VAR_ITERATOR, VAR_NONE };
+static int var_name(const char *text, size_t *body_len, char *name, size_t cap, int *kind)
 {
     static const char *kinds[] = { "global", "local", "field", "method", "upvalue", "constant", "for iterator" };
     size_t len = strlen(text), i;
     const char *open, *q1, *q2;
-    *is_method = 0;
+    *kind = VAR_NONE;
     if (len < 6 || text[len - 1] != ')' || text[len - 2] != '\'') return 0;
     open = NULL;
     for (i = len; i > 0; i--) if (text[i - 1] == '(' && i >= 2 && text[i - 2] == ' ') { open = text + i - 1; break; }
@@ -113,7 +118,7 @@ static int var_name(const char *text, size_t *body_len, char *name, size_t cap, 
             memcpy(name, q1 + 1, n);
             name[n] = 0;
             *body_len = (size_t)(open - 1 - text);
-            *is_method = (i == 3);
+            *kind = (int)i;
             return strcmp(name, "?") != 0;   /* Lua's "?" names nothing */
         }
     }
@@ -290,18 +295,24 @@ static int attempt(const char *text, char *what, size_t wcap, char *todo, size_t
         const char *t, *v;
         char name[80], body[160];
         size_t body_len = 0;
-        int is_method = 0, named;
+        int kind = VAR_NONE, named;
         if (strncmp(rest, ops[i].op, k) != 0 || strncmp(rest + k, " a ", 3) != 0) continue;
         t = rest + k + 3;
         v = strstr(t, " value");
         if (!v) return 0;
-        named = var_name(text, &body_len, name, sizeof name, &is_method);
+        named = var_name(text, &body_len, name, sizeof name, &kind);
         (void)body;
         {
             const char *plain = a_type(t, (size_t)(v - t));
             int is_nil = (size_t)(v - t) == 3 && strncmp(t, "nil", 3) == 0;
             if (!named) put(name, sizeof name, "%s", "a value used here");
-            if (i == 1 && is_method) {
+            if (i == 1 && is_nil && named && kind == VAR_GLOBAL) {
+                /* a call to a global that is nothing: no Snapmap+ call has the name and the scripts never set it */
+                put(what, wcap, "\"%s\" is not a Snapmap+ call, and this mod's scripts never set it", name);
+                put(todo, tcap, UNKNOWN_CALL_TODO);
+                return 1;
+            }
+            if (i == 1 && kind == VAR_METHOD) {
                 put(what, wcap, is_nil ? "\"%s\" is not something this value can do" : "\"%s\" is %s, not something this value can do",
                     name, plain ? plain : "something else");
                 put(todo, tcap, "Check the name of the call");
@@ -505,10 +516,18 @@ void sh_script_reason(const char *text, char **what, char **todo)
     if (!w) { free(t); *todo = NULL; }
 }
 
-static void reason_stop_into(int stop, unsigned long long limit, char *what, size_t what_cap,
+static void reason_stop_into(int stop, unsigned long long limit, const char *call, char *what, size_t what_cap,
                              char *todo, size_t todo_cap)
 {
     switch (stop) {
+    case SH_SCRIPT_STOP_UNKNOWN_CALL:
+        put(what, what_cap, "\"%s\" is not a Snapmap+ call, and this mod's scripts never set it", call ? call : "?");
+        put(todo, todo_cap, UNKNOWN_CALL_TODO);
+        break;
+    case SH_SCRIPT_STOP_UNKNOWN_METHOD:
+        put(what, what_cap, "\"%s\" is not a Snapmap+ call an entity has", call ? call : "?");
+        put(todo, todo_cap, UNKNOWN_CALL_TODO);
+        break;
     case SH_SCRIPT_STOP_MEMORY:
         put(what, what_cap, "ran out of memory, so this mod's scripts stopped for this map");
         put(todo, todo_cap, "Look for a table or text that keeps growing");
@@ -529,11 +548,11 @@ static void reason_stop_into(int stop, unsigned long long limit, char *what, siz
     }
 }
 
-void sh_script_reason_stop(int stop, unsigned long long limit, char **what, char **todo)
+void sh_script_reason_stop(int stop, unsigned long long limit, const char *call, char **what, char **todo)
 {
     /* The runtime's own wording: 512 bytes hold every sentence. */
     char w[512], t[512];
-    reason_stop_into(stop, limit, w, sizeof w, t, sizeof t);
+    reason_stop_into(stop, limit, call, w, sizeof w, t, sizeof t);
     *what = heap_text("%s", w);
     *todo = heap_text("%s", t);
 }
