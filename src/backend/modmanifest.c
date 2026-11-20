@@ -2110,3 +2110,99 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!out) out = mm_save_fallback(json, length, out_length, ctx.list.uses, "the new rows could not be written");
     return out;
 }
+
+/* ------------------------------------------------------------ the listing (one rule for every mode) */
+
+typedef struct mm_listing {
+    char (*hashes)[SH_MODMANIFEST_HASH_CAP];
+    size_t n, cap;
+    char (*ids)[SH_MODMANIFEST_SALT_CAP];
+    size_t ni, capi;
+    int oom;
+} mm_listing;
+
+static void mm_listing_push(mm_listing *l, const char *hash)
+{
+    size_t i;
+    if (!hash || strlen(hash) != SH_MOD_HASH_CHARS) return;
+    for (i = 0; i < l->n; i++) if (!_stricmp(l->hashes[i], hash)) return;
+    if (l->n == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 16;
+        char (*na)[SH_MODMANIFEST_HASH_CAP] = realloc(l->hashes, nc * sizeof *na);
+        if (!na) { l->oom = 1; return; }
+        l->hashes = na;
+        l->cap = nc;
+    }
+    strcpy_s(l->hashes[l->n++], SH_MODMANIFEST_HASH_CAP, hash);
+}
+
+static void mm_listing_id(mm_listing *l, const char *salt)
+{
+    if (!salt || !salt[0] || strlen(salt) >= SH_MODMANIFEST_SALT_CAP) return;
+    if (l->ni == l->capi) {
+        size_t nc = l->capi ? l->capi * 2 : 16;
+        char (*na)[SH_MODMANIFEST_SALT_CAP] = realloc(l->ids, nc * sizeof *na);
+        if (!na) { l->oom = 1; return; }
+        l->ids = na;
+        l->capi = nc;
+    }
+    strcpy_s(l->ids[l->ni++], SH_MODMANIFEST_SALT_CAP, salt);
+}
+
+/* The build the row resolver names for `row` when it is not the row's own: 1 with its hash in `out`. */
+static int mm_row_served_by(const sh_modmanifest_row *row, char out[SH_MODMANIFEST_HASH_CAP])
+{
+    sh_modserve_bundle_ref ref;
+    int other;
+    memset(&ref, 0, sizeof ref);
+    other = sh_modserve_row_build(row, &ref) && strlen(ref.hash) == SH_MOD_HASH_CHARS && _stricmp(ref.hash, row->build);
+    if (other) strcpy_s(out, SH_MODMANIFEST_HASH_CAP, ref.hash);
+    sh_modserve_bundle_ref_free(&ref);
+    return other;
+}
+
+/* The build a placed name (or its closure) lists. The closure resolves each name under the listing in force, which at
+ * a load is the previous map's, so the build it reports may be one that map declared; the listing instead takes, per
+ * salt, what the new map serves: the build its rows declare (already listed), else the build the row resolver names
+ * for that salt in the open map's context (the root folder's for the player's own map). */
+static void mm_listing_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                             const char *name)
+{
+    mm_listing *l = (mm_listing *)context;
+    sh_modmanifest_row probe;
+    char served[SH_MODMANIFEST_HASH_CAP];
+    size_t i;
+    (void)size; (void)name;
+    for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the salt */
+    memset(&probe, 0, sizeof probe);
+    if (bundle_id && strlen(bundle_id) < sizeof probe.salt && bundle_hash && strlen(bundle_hash) < sizeof probe.build) {
+        strcpy_s(probe.salt, sizeof probe.salt, bundle_id);
+        strcpy_s(probe.build, sizeof probe.build, bundle_hash);
+        if (mm_row_served_by(&probe, served)) { mm_listing_push(l, served); return; }
+    }
+    mm_listing_push(l, bundle_hash);
+}
+
+int sh_modmanifest_listing(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
+                           char (**out)[SH_MODMANIFEST_HASH_CAP])
+{
+    mm_listing l;
+    size_t i;
+    if (out) *out = NULL;
+    memset(&l, 0, sizeof l);
+    for (i = 0; rows && i < rows->count; i++) {
+        const sh_modmanifest_row *r = &rows->rows[i];
+        char sub[SH_MODMANIFEST_HASH_CAP];
+        if (!_stricmp(r->salt, SH_MODMANIFEST_PRODUCT)) continue;
+        if (sh_modmanifest_substituted(r->build, sub, sizeof sub) || mm_row_served_by(r, sub)) mm_listing_push(&l, sub);
+        else mm_listing_push(&l, r->build);
+        mm_listing_id(&l, r->salt);
+    }
+    if (names && name_count && sh_modserve_active())
+        (void)modserve_bundles_for_names_visit(names, name_count, mm_listing_visit, &l);
+    free(l.ids);
+    if (l.oom) { free(l.hashes); return -1; }
+    if (out) *out = l.hashes;
+    else free(l.hashes);
+    return (int)l.n;
+}

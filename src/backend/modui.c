@@ -3287,70 +3287,6 @@ static int mu_launch_idle(void)
     return InterlockedCompareExchange(&g_launch, MU_LAUNCH_ENDED, MU_LAUNCH_RUNNING) == MU_LAUNCH_RUNNING;
 }
 
-typedef struct mu_listing {
-    const char **hashes, **ids;
-    size_t nh, ch, ni, ci;
-    char **own;          /* hashes the listing chose itself (mu_listing_visit), one block each */
-    size_t no, co;
-} mu_listing;
-
-static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const char *s)
-{
-    if (!s || !s[0]) return;
-    if (*n == *cap) {
-        size_t nc = *cap ? *cap * 2 : 16;
-        const char **na = (const char **)realloc((void *)*arr, nc * sizeof *na);
-        if (!na) return;
-        *arr = na;
-        *cap = nc;
-    }
-    (*arr)[(*n)++] = s;
-}
-
-/* The build a placed name (or its closure) lists. The closure resolves each
- * name under the listing in force, which at a load is the previous map's, so
- * the build it reports may be one that map declared (a rawmap opened over a
- * map pinning an older build would save that build). The listing
- * instead takes, per salt, what the new map serves: the build its rows
- * declare (already listed), else the build sh_modserve_row_build names for
- * that salt in the open map's context (the root folder's for the player's own
- * map). A chosen build is copied into the listing. */
-static void mu_listing_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
-                             const char *name)
-{
-    mu_listing *l = (mu_listing *)context;
-    sh_modserve_bundle_ref serving;
-    sh_modmanifest_row probe;
-    size_t i;
-    (void)size; (void)name;
-    for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the salt */
-    memset(&probe, 0, sizeof probe);
-    if (bundle_id && strlen(bundle_id) < sizeof probe.salt && bundle_hash && strlen(bundle_hash) < sizeof probe.build) {
-        strcpy_s(probe.salt, sizeof probe.salt, bundle_id);
-        strcpy_s(probe.build, sizeof probe.build, bundle_hash);
-    }
-    memset(&serving, 0, sizeof serving);
-    if (probe.salt[0] && sh_modserve_row_build(&probe, &serving) && _stricmp(serving.hash, bundle_hash)) {
-        char hash[SH_MODSERVE_HASH_HEX + 1];
-        strcpy_s(hash, sizeof hash, serving.hash);
-        sh_modserve_bundle_ref_free(&serving);
-        if (l->no == l->co) {
-            size_t nc = l->co ? l->co * 2 : 8;
-            char **na = (char **)realloc((void *)l->own, nc * sizeof *na);
-            if (!na) return;
-            l->own = na;
-            l->co = nc;
-        }
-        if ((l->own[l->no] = (char *)malloc(SH_MODSERVE_HASH_HEX + 1)) == NULL) return;
-        strcpy_s(l->own[l->no], SH_MODSERVE_HASH_HEX + 1, hash);
-        mu_listing_push(&l->hashes, &l->nh, &l->ch, l->own[l->no]);
-        l->no++;
-        return;
-    }
-    sh_modserve_bundle_ref_free(&serving);
-    mu_listing_push(&l->hashes, &l->nh, &l->ch, bundle_hash);
-}
-
 /* The build the loaded map's place resolver (sh_modserve_row_build) names for
  * `row` when it is not the row's own: 1 with its hash in `out`. */
 static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap)
@@ -3365,37 +3301,22 @@ static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap
     return other;
 }
 
-/* The listing from manifest rows and placed names, set on the serving layer.
- * Returns the bundles that changed. */
+/* The listing from manifest rows and placed names (modmanifest.h sh_modmanifest_listing, the one rule every mode
+ * declares by), set on the serving layer. Returns the bundles that changed. */
 static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int map_open)
 {
-    mu_listing l;
-    size_t i;
-    int changed;
-    char (*sub)[SH_MODMANIFEST_HASH_CAP] = NULL;
-    memset(&l, 0, sizeof l);
-    if (rows && rows->count) sub = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(rows->count, sizeof *sub);
-    for (i = 0; rows && i < rows->count; i++) {
-        /* The build that serves the row: the one the editor substituted
-         * (2.5), else the one the place resolver names, which for the
-         * player's own map is the root folder's build of the salt whatever
-         * build the row records (a stranger's map keeps the row's own
-         * build). The scope declares the served build. */
-        if (sub && sh_modmanifest_substituted(rows->rows[i].build, sub[i], sizeof sub[i]))
-            mu_listing_push(&l.hashes, &l.nh, &l.ch, sub[i]);
-        else if (sub && mu_row_served_by(&rows->rows[i], sub[i], sizeof sub[i]))
-            mu_listing_push(&l.hashes, &l.nh, &l.ch, sub[i]);
-        else mu_listing_push(&l.hashes, &l.nh, &l.ch, rows->rows[i].build);
-        mu_listing_push(&l.ids, &l.ni, &l.ci, rows->rows[i].salt);
+    char (*hashes)[SH_MODMANIFEST_HASH_CAP] = NULL;
+    const char **list = NULL;
+    int n = sh_modmanifest_listing(rows, names, name_count, &hashes), i, changed;
+    if (n < 0 || (n > 0 && !(list = (const char **)malloc((size_t)n * sizeof *list)))) {
+        free(hashes);
+        mu_log("scope: the map's listing could not be computed (out of memory); the listing in force is kept");
+        return 0;
     }
-    if (names && name_count && sh_modserve_active())
-        (void)modserve_bundles_for_names_visit(names, name_count, mu_listing_visit, &l);
-    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, map_open);
-    free((void *)l.hashes);
-    free((void *)l.ids);
-    for (i = 0; i < l.no; i++) free(l.own[i]);
-    free((void *)l.own);
-    free(sub);
+    for (i = 0; i < n; i++) list[i] = hashes[i];
+    changed = sh_modserve_scope_set(list, n, map_open);
+    free((void *)list);
+    free(hashes);
     return changed;
 }
 
