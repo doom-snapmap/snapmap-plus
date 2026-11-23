@@ -912,8 +912,8 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
         sh_modmanifest_list_free(&rows);
         free(text);
         free(view);
-        pm_msg(msg, "Prefab %s was not exported: it was saved by an earlier version of Snapmap+. Ask its author "
-               "to export it again.", nm);
+        pm_msg(msg, "Prefab %s was not exported: it was saved by an earlier Snapmap+; run the Snapmap+ installer to "
+               "update it.", nm);
 
         pm_logf("PREFABS: export %s refused: %s", zip_utf8, msg && *msg ? *msg : "an earlier version");
         return -1;
@@ -1178,8 +1178,8 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
          * and no block, or rows naming "id" and "bundle") is refused. */
         n = sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows);
         if (n == SH_PREFAB_ROWS_EARLIER) {
-            char *line = sh_textf("Prefab %s was not placed: it was saved by an earlier version of Snapmap+. Ask its "
-                                  "author to export it again.", nm);
+            char *line = sh_textf("Prefab %s was not placed: it was saved by an earlier Snapmap+; run the Snapmap+ "
+                                  "installer to update it.", nm);
             if (line) pm_print(line);
             free(line);
             pm_out(call, SH_PREFAB_EARLIER_TEXT);

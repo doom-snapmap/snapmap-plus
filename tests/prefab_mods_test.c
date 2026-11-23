@@ -1199,8 +1199,8 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.meta_path = old;
         call.name = "Old hall";
         CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
-              !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier version of Snapmap+. "
-                                     "Ask its author to export it again."));
+              !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier Snapmap+; run the "
+                                     "Snapmap+ installer to update it."));
     }
 
     printf("-- META_READ: the view from the block or from a tail of the file; an old sidecar is not read\n");
@@ -1825,8 +1825,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         /* With an earlier version's sidecar and no block: refused. */
         CHECK(put_file(m4, "{\"desc\":\"From the sidecar\",\"tags\":[\"old\"]}"));
         CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == -1 &&
-              !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier version of Snapmap+. Ask its "
-                           "author to export it again."));
+              !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier Snapmap+; run the Snapmap+ "
+                           "installer to update it."));
 
     }
     sh_modmanifest_list_free(&pinned);

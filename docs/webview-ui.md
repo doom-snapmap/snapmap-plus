@@ -258,8 +258,7 @@ The page reads a prefab's details as the view, the flat object
 `{desc, tags, ...summary..., mods}` that `META_READ` returns from the block.
 A prefab whose file has no block but a `<name>.meta.json` beside it, or a block
 in an earlier shape, is refused for placement and export with "This prefab was
-saved by an earlier version of Snapmap+ and cannot be used. Ask its author to
-export it again."; its details show nothing and an edit writes nothing. The list
+saved by an earlier Snapmap+; run the Snapmap+ installer to update it."; its details show nothing and an edit writes nothing. The list
 reads each prefab's view from at most the last 1 MB of its file (where the
 block is) for its tags, module kind and mods; it still never sends a scene,
 and a `.meta.json` is never listed as a prefab.

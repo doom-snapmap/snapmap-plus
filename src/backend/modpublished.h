@@ -277,6 +277,14 @@ enum sh_modpub_lobby_place {
  * is a modded map's lobby, whose start the host holds for its members (modlobby.h). */
 int sh_modpub_lobby_map_modded(const char *item, const char *revision);
 
+/* The host's own content for that map (D-A41 Q2): 1 when every pinned row of it is whole on this computer (nothing
+ * stands in), so the map may be hosted; 0 with the refusal in `out` (under 256 bytes, the native dialog body) when a row
+ * stands in for objects that are not here. Every joiner needs the whole content, so a host playing with stand-ins
+ * would hold every joiner at the map check: "This map cannot be hosted: some of its mod content (Eternal Demons) is not
+ * on this computer, and every player needs all of it. Play the map once online to get it, then host it." A map no gate saw
+ * answers 1. Main thread. */
+int sh_modpub_lobby_map_whole(const char *item, const char *revision, char *out, size_t cap);
+
 /* The joiner's lobby asked it to load (its start byte is set): 1 when a joiner's map content is still downloading in
  * the lobby, so it must not load. The joiner then leaves the lobby at the next tick, keeps downloading, and is told to
  * join again when the content is here. 0 lets the load run. Main thread. */

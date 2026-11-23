@@ -1571,6 +1571,30 @@ int sh_modpub_lobby_map_modded(const char *item, const char *revision)
     return seen && seen->rows.count > 0;
 }
 
+int sh_modpub_lobby_map_whole(const char *item, const char *revision, char *out, size_t cap)
+{
+    pub_seen *seen;
+    char names[160] = "";
+    size_t i, n = 0;
+    if (out && cap) out[0] = 0;
+    if (!item || !item[0] || !revision || !(seen = pub_seen_find(item, revision))) return 1;
+    for (i = 0; i < seen->rows.count; i++) {
+        const sh_modmanifest_row *row = &seen->rows.rows[i];
+        if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        if (n++ < 3) {
+            const char *label = pub_row_label(row);
+            strncat_s(names, sizeof names, n > 1 ? (n == 3 ? " and " : ", ") : "", _TRUNCATE);
+            strncat_s(names, sizeof names, label && label[0] ? label : "a mod", _TRUNCATE);
+        }
+    }
+    if (!n) return 1;
+    if (out && cap)
+        _snprintf_s(out, cap, _TRUNCATE, "This map cannot be hosted: some of its mod content (%s%s) is not on this computer, "
+                    "and every player needs all of it. Play the map once online to get it, then host it.", names,
+                    n > 3 ? " and more" : "");
+    return 0;
+}
+
 void sh_modpublished_poll(void)
 {
     pub_hold *h = &g_hold;
