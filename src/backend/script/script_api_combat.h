@@ -123,9 +123,10 @@ typedef struct sh_script_combat_engine {
      * (an effect entity answers no animation event) */
     int   (*start_fx)(void *ent, int condition);
     int   (*stop_fx)(void *ent, int condition);
-    /* damage a player by the game's own player damage call with an inflictor: 1 done, 0 when the victim is not a
-     * player of that class (the caller then sends the entity's damage event) */
-    int   (*player_damage)(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3]);
+    /* damage an actor (a player, a bot or a demon) by its own Damage, the game's damage call, with an inflictor
+     * and an attacker, so the game's team rule, its percepts and its kill credit see who hit it: 1 done, 0 when
+     * the victim is no actor whose Damage this executable's is (the caller then sends the entity's damage event) */
+    int   (*actor_damage)(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3]);
     /* make the FX manager's stop and its request of a sound item follow the hard stop rule for the decls named
      * with sh_fx_hard_add: 1 when either hook is in place, 0 when this executable can serve neither */
     int   (*fx_hard_stops)(void);
@@ -259,9 +260,13 @@ enum sh_combat_sig {
     SH_COMBAT_SIG_PLAYER_DAMAGE,     /* idPlayer::Damage(player, inflictor, attacker, parms, scale, dir, hit): called */
     SH_COMBAT_SIG_FX_ACTION_STOP,    /* idFXManager's stop of one action (manager, index, time, immediate, recycle): detoured */
     SH_COMBAT_SIG_FX_ACTION_REQUEST, /* idFXManager's request of one action (manager, index, six more): detoured */
+    SH_COMBAT_SIG_AI_DAMAGE,         /* idAI2's Damage (slot SH_COMBAT_DAMAGE_VSLOT, calls the idAI2 body): compared */
     SH_COMBAT_SIG_COUNT
 };
 extern const sig_entry SH_COMBAT_SIGNATURES[];
+/* Damage(actor, inflictor, attacker, parms, scale, direction*, hit*): the same virtual slot in every actor class,
+ * idPlayer and idAI2 alike, in both images. */
+#define SH_COMBAT_DAMAGE_VSLOT 130
 
 /* Detour windows (whole, position-independent instructions; the test proves them). */
 #define SH_COMBAT_DAMAGE_APPLY_STOLEN 14
