@@ -31,6 +31,8 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     return 0;
 }
 
+/* The version rule asks whether the installed version carries a placed name (modserve.c); none here: no move. */
+int sh_modserve_root_carries(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context)
 {

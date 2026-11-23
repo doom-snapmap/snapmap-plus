@@ -1306,6 +1306,35 @@ int sh_modmanifest_current_attach(const sh_modmanifest_row *row)
     return r;
 }
 
+int sh_modmanifest_current_make_local(const char *salt, const char *build, const char *const *names, size_t n)
+{
+    size_t i, k;
+    int r = 0;
+    if (!salt || !mm_salt_ok(salt) || !build || !sh_modmanifest_valid_hash(build, strlen(build))) return -1;
+    AcquireSRWLockExclusive(&g_current_lock);
+    for (i = 0; i < g_current.count; i++) {
+        sh_modmanifest_row *row = &g_current.rows[i];
+        if (strcmp(row->salt, salt) || !row->pinned) continue;
+        /* the pinned row becomes the local row of the installed build: its placed names, no unit */
+        if (row->roots) for (k = 0; k < row->unit_count; k++) free(row->roots[k]);
+        free(row->roots);
+        free(row->units);
+        free(row->modules);
+        row->roots = NULL;
+        row->units = NULL;
+        row->modules = NULL;
+        row->unit_count = 0;
+        row->pinned = 0;
+        strcpy_s(row->build, sizeof row->build, build);
+        for (k = 0; k < n; k++)
+            if (!sh_modmanifest_row_add_name(row, names[k])) { r = -1; break; }
+        if (r == 0) r = 1;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_current_lock);
+    return r;
+}
+
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out)
 {
     size_t i;
@@ -1980,6 +2009,86 @@ static int mm_save_keep_unserved(mm_save_ctx *ctx, char **names, size_t count)
 /* A row the save's closure found served by a composition (its build is the composition hash of one of the open
  * map's pinned rows) keeps that row's units: a downloaded map saved here keeps the units its rows name, and no unit
  * is computed at a save (D-A15). A row served by a local folder is written as a local row. 0 when memory runs out. */
+/* The version rule's notice (S9, D23a), raised by the bound sink (modpublished.c's notice queue). */
+static void (*g_notice)(const char *text);
+
+/* An object's name for a sentence from its placed name ("mods/<salt>/demons/marauder_boss" -> "Marauder boss"). */
+static char *mm_object_title(const char *name)
+{
+    const char *leaf = strrchr(name, '/');
+    char *out = sh_text(leaf ? leaf + 1 : name), *c;
+    if (!out) return NULL;
+    for (c = out; *c; c++) if (*c == '_') *c = ' ';
+    if (out[0] >= 'a' && out[0] <= 'z') out[0] = (char)(out[0] - 'a' + 'A');
+    return out;
+}
+void sh_modmanifest_set_notice(void (*fn)(const char *text)) { g_notice = fn; }
+
+/* Whether the installed version of a salt carries a placed name (modserve.h sh_modserve_root_carries), bound by the
+ * product; without it the version rule never moves a mod (the store tool, tests that do not bind it). */
+static int (*g_carries)(const char *salt, const char *name);
+void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name)) { g_carries = fn; }
+
+/* D23, the version rule (5.2, 5.10): a map holds one version of each mod. When the save finds a mod both in a pinned
+ * row (names its units serve) and in a local row (names only the installed version serves: an object placed from it,
+ * which the editor's overlay shows, D26), every placed object of that mod moves to the installed version: the two rows
+ * become one local row, with S9. D23a: when the installed version lacks an object the pinned row places, the move does
+ * not happen yet and the notice says why (owner question Q9: how the kept object's files travel in a local row). With
+ * `say` 0 (a publish asking what a save would write) nothing is said. Returns 0 when memory ran out. */
+static int mm_save_version(mm_save_ctx *ctx, int say)
+{
+    size_t i, j, k;
+    if (!g_carries) return 1;   /* unbound (the store tool, a test): no version rule */
+    for (i = 0; i < ctx->list.count; i++) {
+        sh_modmanifest_row *p = &ctx->list.rows[i], *l = NULL;
+        size_t lat = 0, missing = 0;
+        const char *gone = NULL;
+        char *line = NULL;
+        if (!p->pinned) continue;
+        for (j = 0; j < ctx->list.count && !l; j++)
+            if (j != i && !ctx->list.rows[j].pinned && !strcmp(ctx->list.rows[j].salt, p->salt)) { l = &ctx->list.rows[j]; lat = j; }
+        if (!l) continue;
+        for (k = 0; k < p->name_count; k++)
+            if (!g_carries || g_carries(p->salt, p->names[k]) != 1) { missing++; if (!gone) gone = p->names[k]; }
+        if (missing) {
+            if (say) {
+                char *object = gone ? mm_object_title(gone) : NULL;
+                line = sh_textf("%s was not moved to the version you have installed: the %s is not in it. Objects placed "
+                                "from your version show in the editor only, until your version has the %s again or "
+                                "you remove it from the map.", sh_modmanifest_row_name(p)[0] ? p->name : "A mod",
+                                object ? object : "object", object ? object : "object");
+                free(object);
+            }
+        } else {
+            size_t moved;
+            for (k = 0; k < p->name_count; k++)
+                if (!sh_modmanifest_row_add_name(l, p->names[k])) return 0;
+            if (p->attached) l->attached = 1;
+            if (!sh_modmanifest_row_name(l)[0] && p->name && !sh_modmanifest_row_set_name(l, p->name)) return 0;
+            moved = l->name_count;
+            if (say)
+                line = moved == 1
+                    ? sh_textf("This map now uses the version of %s you have installed for its object.",
+                               sh_modmanifest_row_name(l)[0] ? l->name : "this mod")
+                    : sh_textf("This map now uses the version of %s you have installed for all %zu of its objects.",
+                               sh_modmanifest_row_name(l)[0] ? l->name : "this mod", moved);
+            sh_modmanifest_row_free(p);
+            memmove(p, p + 1, (ctx->list.count - i - 1) * sizeof *p);
+            ctx->list.count--;
+            (void)lat;
+            i--;
+        }
+        if (line) {
+            char *log = sh_textf("MODS: version: %s", line);
+            backend_log(log ? log : line);
+            free(log);
+            if (g_notice) g_notice(line);
+            free(line);
+        }
+    }
+    return 1;
+}
+
 static int mm_save_pins(mm_save_ctx *ctx)
 {
     sh_modmanifest_list cur;
@@ -2075,6 +2184,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_keep_unserved(&ctx, names, count)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_version(&ctx, 1)) ctx.failed = 1;
     sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {
@@ -2145,6 +2255,7 @@ int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanife
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_keep_unserved(&ctx, (char **)names, count)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_version(&ctx, 0)) ctx.failed = 1;
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) { sh_modmanifest_list_free(&ctx.list); return -1; }
     for (i = 0; i < ctx.list.count; i++)
@@ -2153,6 +2264,43 @@ int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanife
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     *out = ctx.list;
     return (int)out->count;
+}
+
+int sh_modmanifest_version_rule(const char *const *names, size_t count)
+{
+    mm_save_ctx ctx;
+    sh_modmanifest_list cur;
+    size_t i, k;
+    int moved = 0;
+    if (!names || !count) return 0;
+    memset(&ctx, 0, sizeof ctx);
+    memset(&cur, 0, sizeof cur);
+    (void)sh_modmanifest_current(&cur);
+    for (i = 0, k = 0; i < cur.count && !k; i++) k = cur.rows[i].pinned;
+    if (!k) { sh_modmanifest_list_free(&cur); return 0; }   /* nothing pinned: nothing to move */
+    modserve_bundles_for_names_visit(names, count, mm_save_visit, &ctx);
+    if (!ctx.failed) mm_save_names(&ctx);
+    if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_version(&ctx, 1)) ctx.failed = 1;
+    /* A salt the open map has pinned and the rule made local: the open map's row follows. */
+    for (i = 0; !ctx.failed && i < ctx.list.count; i++) {
+        const sh_modmanifest_row *r = &ctx.list.rows[i];
+        size_t j;
+        int still = 0;
+        if (r->pinned) continue;
+        /* the rule merged this salt only when no pinned row of it is left (D23a keeps both) */
+        for (j = 0; j < ctx.list.count && !still; j++) still = ctx.list.rows[j].pinned && !strcmp(ctx.list.rows[j].salt, r->salt);
+        if (still) continue;
+        for (k = 0; k < cur.count; k++)
+            if (cur.rows[k].pinned && !strcmp(cur.rows[k].salt, r->salt) &&
+                sh_modmanifest_current_make_local(r->salt, r->build, (const char *const *)r->names, r->name_count) > 0) {
+                moved++;
+                break;
+            }
+    }
+    sh_modmanifest_list_free(&ctx.list);
+    sh_modmanifest_list_free(&cur);
+    return ctx.failed ? -1 : moved;
 }
 
 /* ------------------------------------------------------------ the listing (one rule for every mode) */

@@ -2118,6 +2118,7 @@ static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
  * placed name reaches (one only another mod needs is listed too). */
 static size_t mu_map_mod_count(const mu_map *mp) { return mp->mod_count; }
 
+static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt);
 static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
     size_t i, k;
@@ -2225,6 +2226,14 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             /* A map-level row and nothing of it placed: "declared, nothing placed". */
             mu_kbool(b, "nothingPlaced", x->attached && !x->uid_count && !x->modules, 0);
             mu_kstr(b, "build", x->hash, 0);
+            {
+                /* 5.10: a row of another version than the installed mod offers Update. */
+                const char *other = mu_update_name(m, mp, x->id);
+                char *line = other ? sh_textf("This map uses another version of %s than the one you have.",
+                                              other[0] ? other : "this mod") : NULL;
+                mu_kstr(b, "update", line ? line : "", 0);
+                free(line);
+            }
             mu_putn(b, "}", 1);
         }
         mu_putn(b, "]", 1);
@@ -2289,6 +2298,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_NEW_MOD: return "newMod";
     case SH_MODS_ACT_ADD_MINE: return "addToMine";
     case SH_MODS_ACT_CONTENT: return "content";
+    case SH_MODS_ACT_MAP_UPDATE: return "mapUpdate";
     default: return "unknown";
     }
 }
@@ -3312,8 +3322,11 @@ static int mu_listing_live(void)
     mu_names placed;
     int changed;
     memset(&placed, 0, sizeof placed);
-    (void)sh_modmanifest_current(&rows);
     if (e->placed_names && e->placed_names(mu_names_add, &placed) < 0) mu_names_free(&placed);
+    /* An object placed from the installed version of a mod the map names by units moves that mod now (D23). */
+    if (placed.count && sh_modmanifest_version_rule((const char *const *)placed.items, placed.count) > 0)
+        InterlockedIncrement(&g_gen);
+    (void)sh_modmanifest_current(&rows);
     changed = mu_listing_set(&rows, (const char *const *)placed.items, placed.count, 1);
     mu_names_free(&placed);
     sh_modmanifest_list_free(&rows);
@@ -4238,6 +4251,97 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
+/* ---- update: the version rule by hand (5.10) */
+
+/* The root folder's loaded build of `salt` (the installed version), or -1. */
+static int mu_root_entry(const mu_model *m, const char *salt)
+{
+    size_t i;
+    for (i = 0; salt && i < m->list.count; i++)
+        if (!m->list.items[i].place[0] && m->list.items[i].loaded && !_stricmp(m->list.items[i].salt, salt)) return (int)i;
+    return -1;
+}
+
+/* The sentence for a map row of a mod whose installed version is another build (5.10), or NULL. */
+static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt)
+{
+    size_t k;
+    for (k = 0; k < mp->rows.count; k++)
+        if (mp->rows.rows[k].pinned && !_stricmp(mp->rows.rows[k].salt, salt) && mu_root_entry(m, salt) >= 0)
+            return sh_modmanifest_row_name(&mp->rows.rows[k]);
+    return NULL;
+}
+
+/* Update (5.10): every placed object of the mod `salt` moves to the installed version's files (D23), unless that
+ * version lacks one of them (D23a, owner question Q9): then nothing moves and the sentence says which. Nothing is
+ * saved until the author saves. */
+static int mu_map_update(const char *salt, const mu_out *o)
+{
+    const int action = SH_MODS_ACT_MAP_UPDATE;
+    const sh_modui_engine *e = mu_engine();
+    mu_model m;
+    mu_map mp;
+    mu_record rec;
+    mu_names placed;
+    char *msg = NULL, cause[300], prefix[SH_MODMANIFEST_SALT_CAP + 8];
+    const char *title, *gone = NULL;
+    const char **mine = NULL;
+    size_t i, n = 0;
+    int entry, ok = 0, r;
+    if (!salt || !salt[0]) return mu_simple_result(action, 0, "Select a mod first.");
+    if (mu_busy(cause, sizeof cause)) {
+        mu_msg(&msg, "Not now: %s.", cause);
+        r = mu_simple_result(action, 0, msg ? msg : "Not now.");
+        free(msg);
+        return r;
+    }
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    mu_record_load(&m, &rec);
+    mu_map_build(&mp, &m, &rec);
+    memset(&placed, 0, sizeof placed);
+    entry = mu_root_entry(&m, salt);
+    title = mu_update_name(&m, &mp, salt);
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", salt);
+    if (mp.entities < 0) mu_msg(&msg, "No map is open in the editor.");
+    else if (entry < 0 || !title) mu_msg(&msg, "This map has no other version of that mod to update.");
+    else if (!e->placed_names || e->placed_names(mu_names_add, &placed) < 0 || placed.oom)
+        mu_msg(&msg, "Snapmap+ could not read the open map's objects; try again.");
+    else if (!(mine = (const char **)calloc(placed.count + 1, sizeof *mine)))
+        mu_msg(&msg, "Snapmap+ ran out of memory; try again.");
+    else {
+        const char *mod = title[0] ? title : mu_entry_title(&m.list.items[entry]);
+        for (i = 0; i < placed.count; i++)
+            if (!_strnicmp(placed.items[i], prefix, strlen(prefix))) {
+                mine[n++] = placed.items[i];
+                if (!gone && sh_modserve_root_carries(salt, placed.items[i]) != 1) gone = placed.items[i];
+            }
+        if (gone) {
+            const char *leaf = strrchr(gone, '/');
+            mu_msg(&msg, "%s was not updated: %s is not in the version you have installed.", mod, leaf ? leaf + 1 : gone);
+        } else if ((r = sh_modmanifest_current_make_local(salt, m.list.items[entry].bundle.hash, mine, n)) <= 0)
+            mu_msg(&msg, r < 0 ? "Snapmap+ ran out of memory; try again." : "This map has no other version of that mod to update.");
+        else {
+            ok = 1;
+            (void)mu_scope_now_declared("map update");
+            InterlockedIncrement(&g_gen);
+            mu_mark_modified("Update Mod In Map");
+            if (n == 1) mu_msg(&msg, "This map now uses the version of %s you have installed for its object.", mod);
+            else mu_msg(&msg, "This map now uses the version of %s you have installed for all %zu of its objects.", mod, n);
+            mu_log("map update %s: the row moved to the installed build %.16s (%zu placed object(s))", salt,
+                   m.list.items[entry].bundle.hash, n);
+        }
+    }
+    mu_line(o, "map update %s: %s", salt, msg ? msg : "");
+    r = mu_simple_result(action, ok, msg ? msg : "");
+    free(msg);
+    free((void *)mine);
+    mu_names_free(&placed);
+    mu_map_free(&mp);
+    mu_record_free(&rec);
+    mu_model_free(&m);
+    return r;
+}
+
 /* ---- registry choice */
 
 /* A slot ("<game file>/<path>", modregistry.h) as the page shows it: "<path>
@@ -5119,6 +5223,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_add_mine(arg);
     case SH_MODS_ACT_CONTENT:
         return mu_content(arg);
+    case SH_MODS_ACT_MAP_UPDATE:
+        return mu_map_update(arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

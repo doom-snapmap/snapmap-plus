@@ -4185,7 +4185,13 @@ it is inert for the map. Each admitted bundle gets serve flags computed from
 the listing and read lock-free (`sv`: names under its salt, shadows, surfaces):
 
 - declared: everything it carries;
-- another build of a declared salt: nothing;
+- another build of a declared salt: nothing, with one exception (D26): in the
+  editor, when the declared build is the map's composition (a row that names
+  units), the root folder's build of that salt serves the names under its salt
+  that the composition does not carry, so the Toybox offers the installed
+  version's objects while every path the map's units carry stays theirs (the
+  declared provider wins per path). Its shadows, surfaces and requirements
+  stay off, and in Play it serves nothing;
 - an editor-time bundle (its shadows include a `generated/decls/snapeditor*`,
   `snappropertyinspector*` or `snappalette*` decl, or the editor's own movies
   under `generated/swf/snapmaps/`): its editor tweaks, in every map this
@@ -5557,6 +5563,24 @@ and names no unit until a publish or an export pins it. It carries the local
 `mods\maps\`, still read for local rows until DS-X retires them). A save
 computes no unit: a pinned row the open map serves through its composition
 keeps its units; a row a local folder serves is written as a local row.
+
+The version rule (D23, `mm_save_version`): a map holds one version of each mod.
+When a save finds a mod both in a pinned row and in a local row (an object
+placed from the installed version, which the editor's overlay offers, D26),
+every placed object of that mod moves to the installed version: the two rows
+become one local row, the open map's rows follow, and the save says "This map
+now uses the version of Eternal Demons you have installed for all 3 of its
+objects." (S9, through `sh_modmanifest_set_notice`). When the installed version
+lacks an object the pinned row places (D23a), nothing moves yet and the notice
+names the object; the objects placed from the installed version then show in
+the editor only. The Mods tab's This map view offers the same move without a
+placement: a row of a mod whose installed version is another build says "This
+map uses another version of Eternal Demons than the one you have." with
+**Update** (`mapUpdate`, `sh_modmanifest_current_make_local`), which refuses
+when the installed version lacks a placed object. The engine reports no
+placement, so the rule runs wherever the open map's placed names are read live
+(`sh_modmanifest_version_rule` from `mu_listing_live`: a Mods tab change, the
+editor's Play) and at every save.
 
 `modcache.c` keeps one cache per machine at `<mods>\.content\`: each file once
 in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in

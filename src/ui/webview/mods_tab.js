@@ -56,7 +56,7 @@ var modsTab = (function () {
      Windows Recycle Bin. */
   var ACTIONS = ['install', 'rescan', 'openFolder', 'openFile', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                 'modFiles', 'modFileText', 'newMod', 'content'];
+                 'modFiles', 'modFileText', 'newMod', 'content', 'mapUpdate'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
   var READS = {modFiles: true, modFileText: true};
   /* What each file of a mod is to the game, as one phrase (the backend's "class"). */
@@ -409,7 +409,7 @@ var modsTab = (function () {
     return {key: str(m.key), salt: str(m.salt), name: str(m.name), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
             references: normRefs(m.references), size: num(m.size), attached: bool(m.attached),
-            nothingPlaced: bool(m.nothingPlaced)};
+            nothingPlaced: bool(m.nothingPlaced), update: str(m.update)};
   }
   function normClash(c) {
     c = obj(c) || {};
@@ -820,6 +820,7 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
+                     mapUpdate: 'Updating the map to your version...',
                      newMod: 'Making the new mod...', addToMine: 'Copying it into your mods...',
                      content: 'Removing the content of maps you only played...'};
 
@@ -1489,8 +1490,11 @@ var modsTab = (function () {
       text.appendChild(el('div', 'mods-map-uses' + (r.attached ? ' mods-map-level' : ''), uses + (info.tone === 'warn' ? '; ' + info.cause : '')));
       if (r.attached) row.setAttribute('data-attached', 'true');
       if (r.references.length) text.appendChild(el('div', 'mods-map-uses', 'Also used by ' + r.references.map(refText).join(', ')));
+      if (r.update) text.appendChild(el('div', 'mods-map-uses', r.update));
       row.appendChild(text);
       var name = modName(r.key, r.name);
+      if (r.update) row.appendChild(modalButton('Update', '', function () { act('mapUpdate', r.salt); },
+        'Use the version of ' + name + ' you have installed for every object of it in this map'));
       row.appendChild(modalButton('Remove from map', 'danger', function () {
         modal.from = 'map';
         act('mapRemoveModPreview', r.key || r.salt);

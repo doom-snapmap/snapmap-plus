@@ -2414,6 +2414,8 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     for (size_t i = 0; i < ENG_HOOKS; i++) if (hook_commit(g_eng.original[i]) != B2_PATCH_OK) goto failed;
     sh_rawmap_set_save_observer(eng_save_observer);
     sh_modmanifest_set_pin(sh_modpublish_pin_save);
+    sh_modmanifest_set_notice(sh_modpublished_notice);   /* the version rule's S9 (D23) */
+    sh_modmanifest_set_carries(sh_modserve_root_carries);
     sh_cache_set_held(modclaim_held);   /* the sweep keeps what this computer's published maps claim */
    sh_modserve_set_miss_reporter(eng_report_asked);
     InterlockedExchange(&g_eng.ready, 1);

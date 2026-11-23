@@ -1182,6 +1182,30 @@ test('the setting: Play maps whose mods include scripts, its one sentence, saved
   assert.deepEqual(saved, [['mods.scripted_maps', true]]);
 });
 
+test('the map modal: a mod whose map row is another version than the installed one offers Update', () => {
+  const doc = clone(v4);
+  const sentence = 'This map uses another version of R2 Imp copy than the one you have.';
+  doc.map.mods[0].update = sentence;
+  const h = live(doc);
+  h.nodes.modsMapBtn.click();
+  const mr = h.nodes.modsMapHost.all('mods-map-row');
+  assert.ok(mr.length >= 2);
+  /* the row with `update` shows the sentence and the button; the others show neither */
+  assert.ok(mr[0].textContent.indexOf(sentence) >= 0, 'the sentence');
+  const buttons = h.nodes.modsMapHost.tags('button').filter(b => b.textContent === 'Update');
+  assert.equal(buttons.length, 1, 'one Update button, on the row that has update');
+  assert.ok(mr[1].textContent.indexOf('another version') < 0 && mr[1].textContent.indexOf('Update') < 0);
+  const before = h.sent.length;
+  buttons[0].click();
+  const sent = h.sent.slice(before).filter(m => m.cmd === 'modsAction');
+  assert.equal(sent.length >= 1, true);
+  assert.deepEqual(sent[0], {cmd: 'modsAction', action: 'mapUpdate', arg: doc.map.mods[0].salt});
+  /* a map with no row that has update shows no Update button */
+  const plain = live(clone(v4));
+  plain.nodes.modsMapBtn.click();
+  assert.equal(plain.nodes.modsMapHost.tags('button').filter(b => b.textContent === 'Update').length, 0);
+  assert.ok(modalText(plain).indexOf('another version') < 0);
+});
 test('page contract', () => {
   assert.ok(html.includes('<button type="button" class="tab" role="tab" id="tab-mods" data-tab="mods" aria-controls="panel-mods" aria-selected="false" tabindex="-1">Mods</button>'));
   IDS.forEach(id => assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id));
