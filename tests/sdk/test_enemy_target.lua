@@ -55,6 +55,16 @@ do
   rows = { row(far, "destroy"), row(near, "hate"), row(wide, "destroy", nil, nil, true) }
   local list, pick = T.available(A, me, {})
   check("beyond 10,000 units a row is out, unless it is not range-limited", #list == 2 and pick == wide)
+  local narrow = T.relations(A, me, { range = 9500 })
+  check("a source game's narrower range", #narrow == 2 and narrow[1].entity == near)
+  near.pos.z = 5000
+  A.flat_distance = function(e, t) return math.abs(t.pos.x - e.pos.x) end
+  local distance = A.distance
+  A.distance = function(e, t) return math.sqrt((t.pos.x - e.pos.x) ^ 2 + (t.pos.z - e.pos.z) ^ 2) end
+  check("flat: the range on the ground plane", #T.relations(A, me, { range = 9500, flat = true }) == 2 and
+        #T.relations(A, me, { range = 9500 }) == 1)
+  A.distance = distance
+  near.pos.z = 0
 end
 
 do

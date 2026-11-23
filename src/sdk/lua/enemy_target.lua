@@ -13,6 +13,9 @@
 --   filters   playersOnly / noPlayers (a bot is a player), the awareness band, filterOutOffLimits;
 --   the pick  the nearest of the most hostile emotion present (VK 0x1404AAD10 / GL 0x1404A9490).
 --
+-- A source game whose condition narrows the range gives it: range (units, instead of the 10,000) and flat (distance on
+-- the ground plane); DOOM Eternal's class has maxRange, rangeString and use2DChecks for them.
+--
 -- The bands' defaults are the class's own (its constructor, VK 0x141302930): respect RESPECT_MIN..RESPECT_MAX,
 -- emotion EMOTION_MIN..EMOTION_MAX, awareness AIAWARE_UNAWARE..AIAWARE_MAX. A source game's brain names the same
 -- condition with the same fields (DOOM Eternal's class has them, its emotion list one longer); a band is read by
@@ -77,8 +80,8 @@ function T.relations(A, e, p)
     local aware = T.AWARE[r.awareness or "unaware"] or 0
     if x ~= nil and x ~= e and respect and emotion and respect >= b[1] and respect <= b[2]
         and emotion >= b[3] and emotion <= b[4] and A.alive(x) then
-      local d = A.distance(e, x)
-      local in_range = r.unlimited or d < T.RANGE
+      local d = p.flat and A.flat_distance and A.flat_distance(e, x) or A.distance(e, x)
+      local in_range = r.unlimited or d < (p.range or T.RANGE)
       local player = is_player(x)
       if in_range and not (p.playersOnly and not player) and not (p.noPlayers and player)
           and aware >= b[5] and aware <= b[6]
