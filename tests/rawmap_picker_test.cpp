@@ -87,6 +87,14 @@ int main()
     CHECK(!folder_from_config("\"bad \\q\"", back));
     CHECK(!folder_from_config(nullptr, back));
 
+    /* Install's one dialog: a picked mod.json installs its folder, a ZIP is itself. */
+    CHECK(wcscmp(kModInstall.pattern, L"*.zip;mod.json") == 0);
+    CHECK(install_target(L"C:\\Users\\a\\Downloads\\bare-hands\\mod.json") == L"C:\\Users\\a\\Downloads\\bare-hands");
+    CHECK(install_target(L"C:\\Users\\a\\Downloads\\bare-hands\\MOD.JSON") == L"C:\\Users\\a\\Downloads\\bare-hands");
+    CHECK(install_target(L"D:\\mod.json") == L"D:\\");
+    CHECK(install_target(L"C:\\Users\\a\\Downloads\\pack.zip") == L"C:\\Users\\a\\Downloads\\pack.zip");
+    CHECK(install_target(L"C:\\Users\\a\\x\\notmod.json") == L"C:\\Users\\a\\x\\notmod.json");
+
     printf("rawmap_picker_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

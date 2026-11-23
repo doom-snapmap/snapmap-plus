@@ -1,15 +1,14 @@
-/* The Mods tab: the player's mods and the mods downloaded maps brought, and the selected mod's
-   details, with the few actions a player uses (install a folder, make a new mod, refresh, open the
-   mods folder, use a mod in the open map or remove it from the map, uninstall). Browser
+/* The Mods tab: the player's mods, the content of the maps on this computer, and the selected mod's
+   details, with the few actions a player uses (install, make a new mod, refresh, use a mod in the
+   open map or remove it from the map, uninstall, copy a kept map's mod into your mods). Browser
    global + CommonJS test export. Pure ASCII.
 
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread
    (payload v4, docs/webview-ui.md): one row per mod folder of mods\ (its key is the folder's path
-   under mods\), the player's own at the root with their organizing folders ("group"), and each
-   downloaded map's mods in that map's place ("place", "placeTitle"); and the open map (the map
-   modal and the rows' in-this-map glyph). The list shows two kinds of groups: "Your mods", with
-   the organizing folders inside it, and one group per downloaded map, titled with the map's name.
-   Each row: the mod's name and size, one status glyph (needs attention, else in this
+   under mods\) with its organizing folder ("group"), and the open map's mods (the rows its save
+   would write now: the In this map block, the rows' glyph and the This map window). The list shows
+   "Your mods", with the organizing folders inside it, then "Maps on this computer" (the content
+   answer). Each row: the mod's name and size, one status glyph (needs attention, else in this
    map, else ready). The details pane: the description, what the mod adds (its Toybox rows by
    name), what it changes in the game (its edits, in words), what it borrows from the game (a
    count, expandable), the console settings it needs, its files, and, for a mod that cannot be
@@ -36,15 +35,15 @@ var modsTab = (function () {
   var READY_TEXT = 'Ready to use.';
   /* A mod that cannot be used and whose cause the backend did not send. */
   var UNUSABLE_TEXT = 'This mod cannot be used right now; press Refresh.';
-  function placeText(b) { return 'Came with the map ' + (b.placeTitle || 'you downloaded') + '; only that map uses it.'; }
   /* The informational hint: near-identical mods are two mods (identity is the salt); nothing merges. */
   function sameFilesText(s) {
     return 'Carries ' + plural(s.count, 'file') + ' that ' + s.name + ' also carries. They stay two separate mods.';
   }
   var IN_MAP_TEXT = 'In this map';
-  var IN_MAP_TITLE = 'The open map uses this mod';
-  /* The row's one glyph for a mod the open map uses (ready and in this map). */
+  /* The one glyph of a mod the open map uses, wherever that shows (the row, the In this map block, the This map
+     window, the Prefabs tab); the block shows the same glyph dimmed for every other state. */
   var IN_MAP_GLYPH = {tone: 'map', icon: 'map', label: IN_MAP_TEXT};
+  var NOT_IN_MAP_GLYPH = {tone: 'mapoff', icon: 'map', label: 'Not in this map'};
   /* There is no folder watcher: Refresh is how a changed mod is read again. */
   var REFRESH_TEXT = "After you change a mod's files, press Refresh to see the change.";
   /* An action whose files landed while the game did not take its part (the host's applyPending). */
@@ -120,12 +119,9 @@ var modsTab = (function () {
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
   /* A folder of editor tweaks only (facts.editorOnly): a map never records it. */
   var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
-  var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
+  var USE_TITLE = 'Use this mod in the whole open map; the map carries all of it when you save';
   /* A downloaded map's mod: the short view, its map, Add to my mods and Remove. */
-  var ADD_MINE_TITLE = 'Copy this mod into your own mods, so your own maps can use it';
-  var PLACE_KEEP_TEXT = 'It stays on this computer until you remove it here.';
-  var MAP_LEVEL_TEXT = 'Used by the whole map';
-  var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
+  var ADD_MINE_TITLE = "Copy this map's objects of the mod into your own mods, so your own maps can use them";
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
      records them and Play never sees them. */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
@@ -153,14 +149,10 @@ var modsTab = (function () {
   var SCRIPT_DYNAMIC_TEXT = 'Some names are set while the map runs, so they are not listed here.';
   /* The player's setting (design: scripts download with maps): on by default. */
   var SCRIPTED_MAPS_KEY = 'mods.scripted_maps';
-  var SCRIPTED_MAPS_LABEL = 'Play maps whose mods include scripts';
+  var SCRIPTED_MAPS_LABEL = 'Play Maps Whose Mods Include Scripts';
   var SCRIPTED_MAPS_NOTE = 'When this is off, Snapmap+ refuses a map whose mods include scripts before it downloads anything.';
   /* How often the tab asks for the script log while it shows a mod with scripts. */
   var SCRIPT_POLL_MS = 1000;
-  /* A downloaded map's mod that carries scripts: the short view says so before anyone plays. */
-  function scriptsShortText(files) {
-    return 'Runs scripts (' + plural(files, 'file') + '). Scripts run only inside this map and cannot read or change your files.';
-  }
   /* "a", "a and b", "a, b and c". */
   function joinWords(list) {
     if (list.length < 2) return list.join('');
@@ -248,7 +240,7 @@ var modsTab = (function () {
     var found = null;
     arr(mods).forEach(function (b) {
       if (b.salt.toLowerCase() !== salt.toLowerCase() || !b.scripts) return;
-      if (!found || (found.place && !b.place)) found = b;   /* your own copy first */
+      if (!found) found = b;
     });
     return found;
   }
@@ -350,11 +342,9 @@ var modsTab = (function () {
     var state = has(STATES, b.state) ? b.state : 'attention';
     return {key: str(b.key), salt: str(b.salt), name: str(b.name), author: str(b.author),
             size: num(b.size), files: num(b.files), state: state, cause: str(b.cause),
-            editorRows: num(b.editorRows), folder: str(b.folder),
+            editorRows: num(b.editorRows), modules: num(b.modules), folder: str(b.folder),
             /* the organizing folder it sits in under mods\ ("" at the top, and for a map's mods) */
             group: str(b.group),
-            /* a downloaded map's place ("maps\<segment>") and the map's name; "" for the player's own */
-            place: str(b.place), placeTitle: str(b.placeTitle),
             description: str(b.description), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: normNames(b.editorRowNames),
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
@@ -409,7 +399,10 @@ var modsTab = (function () {
     return {key: str(m.key), salt: str(m.salt), name: str(m.name), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
             references: normRefs(m.references), size: num(m.size), attached: bool(m.attached),
-            nothingPlaced: bool(m.nothingPlaced), update: str(m.update)};
+            nothingPlaced: bool(m.nothingPlaced), update: str(m.update),
+            /* the objects of it the map places, as the Toybox names them; placed modules; written with units */
+            objects: normNames(m.objects), placedModules: num(m.placedModules), pinned: bool(m.pinned),
+            viaNeeds: bool(m.viaNeeds)};
   }
   function normClash(c) {
     c = obj(c) || {};
@@ -456,7 +449,89 @@ var modsTab = (function () {
     var cause = tone === 'ok' ? STATUS.ok.label : (MAP_CAUSES[r.state] || MAP_CAUSES.skipped);
     return {tone: tone, icon: STATUS[tone].icon, label: STATUS[tone].label, cause: cause};
   }
+  /* ---- a mod and the open map (docs/webview-ui.md, "A mod and the open map"). One state, said with the same
+     words and the same glyph in the details pane's In this map block, the list row, the This map window and the
+     Prefabs tab. It is read from the document's map.mods, which are the rows the open map's save would write now
+     (an object placed, deleted or undone moves the document), and a mod is matched to its entry by its namespace,
+     so every folder of the mod (the player's own, a downloaded map's copy) shows the map's use of it. */
+  var MAP_STATE = {
+    noMap: 'No map open',
+    out: 'Not in this map',
+    editorOnly: 'Not used by maps',
+    inPrefix: 'In this map: '
+  };
+  var MAP_LINES = {
+    placeNoMap: 'Open a map in the editor, then place its objects from the Toybox.',
+    wholeNoMap: 'Open a map in the editor to use it in the whole map.',
+    place: 'Place its objects from the Toybox; the map then carries their pieces.',
+    whole: 'It has nothing to place, so a map uses it as a whole.',
+    editorOnly: "It changes only this computer's editor; a map never carries it.",
+    carriesObjects: "The map carries these objects' pieces.",
+    carriesWhole: 'The map carries all of it.',
+    carriesNeeded: 'The map carries the pieces those objects need; it goes when they go.',
+    published: 'The map holds its own published copy of this mod.'
+  };
+  var USE_TEXT = 'Use in this map', REMOVE_TEXT = 'Remove from map';
+  function sameId(a, b) { return !!a && !!b && a.toLowerCase() === b.toLowerCase(); }
+  /* The map's entry of a mod: by its namespace, else by its folder. */
+  function mapEntry(map, b) {
+    var list = map && map.open && map.mods ? map.mods : [], i;
+    for (i = 0; b && i < list.length; i++) if (sameId(list[i].salt, b.salt)) return list[i];
+    for (i = 0; b && i < list.length; i++) if (list[i].key && list[i].key === b.key) return list[i];
+    return null;
+  }
+  /* What an author can place of it: its Toybox rows, its modules, or demons it lists for SnapMap's encounters. */
+  function placeable(b) {
+    return !!b && (b.editorRows > 0 || b.modules > 0 || !!(b.facts && b.facts.conductor.length));
+  }
+  /* "2 objects placed (Tyrant and Arachnotron)": the objects the map places of the mod. */
+  function objectsText(e) {
+    var names = e.objects.slice(0, 3), n = e.objects.length || e.placedCount + e.placedModules;
+    var more = e.objects.length > 3 ? e.objects.length - 3 : 0;
+    if (more) names.push(more + ' more');
+    return plural(n, 'object') + ' placed' + (names.length ? ' (' + joinWords(names) + ')' : '');
+  }
+  function placedObjects(e) { return e.objects.length || e.placedCount || e.placedModules; }
+  /* What the map uses of the mod, as a phrase after "In this map: " (and, capitalised, in the This map window). */
+  function usesText(e) {
+    if (e.attached) return placedObjects(e) ? 'the whole mod, and ' + objectsText(e) : 'the whole mod';
+    if (placedObjects(e)) return objectsText(e);
+    return 'needed by other objects in the map';
+  }
+  function capital(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+  /* The one state of a mod and the open map: {state, head, line, action ('use', 'remove' or ''), entry, glyph}. */
+  function mapState(map, b) {
+    var e, out;
+    if (b && b.facts && b.facts.editorOnly)
+      return {state: 'editorOnly', head: MAP_STATE.editorOnly, line: MAP_LINES.editorOnly, action: '', entry: null};
+    if (!map || !map.open)
+      return {state: 'noMap', head: MAP_STATE.noMap, line: placeable(b) ? MAP_LINES.placeNoMap : MAP_LINES.wholeNoMap,
+              action: '', entry: null};
+    e = mapEntry(map, b);
+    if (!e) {
+      out = {state: 'out', head: MAP_STATE.out, action: '', entry: null};
+      if (placeable(b)) out.line = MAP_LINES.place;
+      else { out.line = MAP_LINES.whole; out.action = 'use'; }
+      return out;
+    }
+    return {state: e.attached ? 'whole' : placedObjects(e) ? 'objects' : 'needed', head: MAP_STATE.inPrefix + usesText(e),
+            line: e.attached ? MAP_LINES.carriesWhole : placedObjects(e) ? MAP_LINES.carriesObjects : MAP_LINES.carriesNeeded,
+            action: e.attached || placedObjects(e) ? 'remove' : '', entry: e};
+  }
+  function inMapState(s) { return s.state === 'whole' || s.state === 'objects' || s.state === 'needed'; }
   function refText(r) { return REF_KINDS[r.kind] + ': ' + r.name; }
+  /* The content answer: the storage line and one row per kept map's mod ({text, token}); "rows" runs parallel to
+     "lines", "" naming the storage line, a token the map mod Add to my mods copies. */
+  function normContent(d) {
+    d = obj(d) || {};
+    var lines = arr(d.lines).map(str), rows = arr(d.rows).map(str), out = {storage: str(d.storage), rows: [], known: true}, i;
+    for (i = 0; i < lines.length; i++) {
+      if (!lines[i]) continue;
+      if (rows[i]) out.rows.push({text: lines[i], token: rows[i]});
+      else if (!out.storage) out.storage = lines[i];
+    }
+    return out;
+  }
   /* The consequence lines of a dry run, in the order the confirmation lists them. Each line is
      {text, list?} where list is the names behind a count. */
   function consequenceLines(pv) {
@@ -513,15 +588,14 @@ var modsTab = (function () {
     }
     if (b.scriptRun && b.scriptRun.status === 'stopped' && b.scriptRun.stop)
       return {tone: SCRIPT_STOP.tone, icon: SCRIPT_STOP.icon, label: SCRIPT_STOP.label, cause: b.scriptRun.stop, sentence: b.scriptRun.stop};
-    var ok = b.place ? placeText(b) : READY_TEXT;
-    return {tone: 'ok', icon: STATUS.ok.icon, label: STATUS.ok.label, cause: ok, sentence: ok};
+    return {tone: 'ok', icon: STATUS.ok.icon, label: STATUS.ok.label, cause: READY_TEXT, sentence: READY_TEXT};
   }
   function needsAttention(b) { return statusInfo(b).tone === 'warn'; }
 
   function filterMods(mods, query) {
     var q = str(query).trim().toLowerCase();
     if (!q) return mods.slice();
-    return mods.filter(function (b) { return (b.name + '\n' + b.folder + '\n' + b.group + '\n' + b.placeTitle).toLowerCase().indexOf(q) !== -1; });
+    return mods.filter(function (b) { return (b.name + '\n' + b.folder + '\n' + b.group).toLowerCase().indexOf(q) !== -1; });
   }
 
   /* A name as the page shows it: without the mod's own namespace (mods/<salt>/), which only the
@@ -709,7 +783,7 @@ var modsTab = (function () {
 
   /* ------------------------------------------------------------------------------------------ DOM */
 
-  /* env: {document, byId(id), post(message), toast(text, kind), tokens(text)?, menu(x, y, items)?}.
+  /* env: {document, byId(id), post(message), toast(text, kind), tokens(text)?}.
      tokens returns the decl language's tokens for the Files view's highlighting; menu shows the
      page's context menu. The retired collapsed-groups setting (mods.collapsed_groups) is neither
      read nor written: which organizing folders are closed lasts for the session only. */
@@ -724,7 +798,7 @@ var modsTab = (function () {
               titleNode: null, stateNode: null, selNode: null};
     /* Map content on disk: the backend's content answer (the storage line and one line per map), and
        whether the next answer is the result of the Remove button. */
-    var content = {storage: '', lines: [], known: false}, contentSweep = false, contentDue = false;
+    var content = {storage: '', rows: [], known: false}, contentSweep = false, contentDue = false;
     var reveal = '';   /* a mod the last action made or installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
@@ -832,20 +906,13 @@ var modsTab = (function () {
 
     function renderButtons() {
       var b = selectedMod(), sel = !!b;
-      ['modsInstallBtn', 'modsFolderBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn'].forEach(function (id) {
         var n = byId(id);
         if (n) n.disabled = !!busy || (!sel && id === 'modsUninstallBtn');
       });
       /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
-      if (fb) { fb.disabled = !sel; fb.style.display = sel && b.place ? 'none' : ''; }
-      /* A downloaded map's mod is removed from this computer, the same uninstall under its short name. */
-      var un = byId('modsUninstallBtn');
-      if (un) {
-        un.textContent = sel && b.place ? 'Remove' : 'Uninstall';
-        un.title = sel && b.place ? 'Remove this mod of a downloaded map from this computer'
-                                  : 'Uninstall the selected mod; you see everything it changes before you decide';
-      }
+      if (fb) fb.disabled = !sel;
       var mb = byId('modsMapBtn');
       if (mb) {
         var mm = model.map && model.map.open && model.map.mods ? model.map.mods.length : -1;
@@ -853,43 +920,60 @@ var modsTab = (function () {
         mb.title = mm >= 0 ? 'This map: its details and the ' + plural(mm, 'mod') + ' it uses' : 'This map: its details and the mods it uses';
         mb.setAttribute('aria-label', mb.title);
       }
-      renderUse();
+      renderInMap();
       modalButtons.forEach(function (n) { n.disabled = !!busy; });
     }
-    /* The details head's map action: Use in this map, or Remove from map once the open map uses the
-       selected mod. Shown only while a map is open in the editor. */
-    function mapUses(b) {
-      var m = model.map;
-      if (!b || !m || !m.mods) return null;
-      for (var i = 0; i < m.mods.length; i++) if (m.mods[i].key && m.mods[i].key === b.key) return m.mods[i];
-      return null;
-    }
+    /* The open map's entry of a mod, and its one state (mapState, above). */
+    function mapUses(b) { return mapEntry(model.map, b); }
     function editorOnly(b) { return !!(b && b.facts && b.facts.editorOnly); }
-    /* One plain sentence for a file a published map did not carry and a player's game asked for. */
-    function missingSentence(a) {
-      return 'Players of this map were missing ' + a.request + ' from ' + (a.mod || 'one of its mods') +
-        (a.by ? ', which ' + a.by + ' asks for' : '') + '. Publish the map again and it goes with the map.';
-    }
-    function renderUse() {
-      var u = byId('modsUseBtn');
-      if (!u) return;
-      var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
-      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it. */
-      if (b && b.place) {
-        u.style.display = '';
-        u.textContent = 'Add to my mods';
-        u.className = 'btn';
-        u.title = ADD_MINE_TITLE;
-        u.disabled = !!busy || needsAttention(b);
-        return;
+    function stateOf(b) { return mapState(loaded ? model.map : null, b); }
+    /* The details pane's In this map block, in the same place for every mod: the state in plain words, what it
+       means, and the one action that state allows (Use in this map for a mod with nothing to place, Remove from
+       map once the map uses the mod); a map's own published copy of the mod says so, with Update when another
+       version is installed. */
+    function renderInMap() {
+      var box = byId('modsInMap'), b = selectedMod(), s, line, acts, btn, e;
+      if (!box) return;
+      clear(box);
+      if (!b) return;
+      s = stateOf(b);
+      e = s.entry;
+      box.setAttribute('data-state', s.state);
+      box.appendChild(el('div', 'mods-section-head', 'This map'));
+      line = el('div', 'mods-inmap-state');
+      line.appendChild(statusIcon(inMapState(s) ? IN_MAP_GLYPH : NOT_IN_MAP_GLYPH));
+      line.appendChild(el('span', 'mods-inmap-head', s.head));
+      box.appendChild(line);
+      box.appendChild(el('div', 'mods-line muted', s.line));
+      if (e && e.pinned) box.appendChild(el('div', 'mods-line muted', MAP_LINES.published));
+      if (e && e.update) box.appendChild(el('div', 'mods-line', e.update));
+      acts = el('div', 'mods-inmap-actions');
+      if (s.action === 'use') {
+        btn = el('button', 'btn', USE_TEXT);
+        btn.title = needsAttention(b) ? statusInfo(b).cause : USE_TITLE;
+        btn.disabled = !!busy || needsAttention(b);
+        btn.addEventListener('click', function () { act('mapAddMod', b.key); });
+        acts.appendChild(btn);
+      } else if (s.action === 'remove') {
+        btn = el('button', 'btn danger', REMOVE_TEXT);
+        btn.title = 'Remove ' + title(b) + ' and everything that uses it from this map';
+        btn.disabled = !!busy;
+        btn.addEventListener('click', function () {
+          if (busy) return;
+          modal.from = 'details';
+          modal.opener = btn;
+          act('mapRemoveModPreview', b.key);
+        });
+        acts.appendChild(btn);
       }
-      /* A folder of editor tweaks only has no map action: a map never records it. */
-      u.style.display = open && !editorOnly(b) ? '' : 'none';
-      var used = mapUses(b);
-      u.textContent = used ? 'Remove from map' : 'Use in this map';
-      u.className = 'btn' + (used ? ' danger' : '');
-      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : USE_TITLE;
-      u.disabled = !!busy || !b || !open || (!used && needsAttention(b));
+      if (e && e.update) {
+        btn = el('button', 'btn', 'Update');
+        btn.title = 'Use the version of ' + title(b) + ' you have installed for every object of it in this map';
+        btn.disabled = !!busy;
+        btn.addEventListener('click', function () { act('mapUpdate', e.salt); });
+        acts.appendChild(btn);
+      }
+      if (acts.firstChild) box.appendChild(acts);
     }
     function setBusy(action) {
       busy = action || '';
@@ -898,31 +982,54 @@ var modsTab = (function () {
       if (busy) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
     }
 
-    /* ---- Map content on disk: read-only lines from the backend's content action, and one button. */
-    function renderContent() {
-      var host = byId('modsContent');
-      if (!host) return;
-      clear(host);
-      if (!content.known) return;
-      host.appendChild(el('div', 'mods-content-title', 'Map content on disk'));
-      if (content.storage) host.appendChild(el('div', 'mods-content-storage', content.storage));
-      if (content.lines.length) {
+    /* ---- Map content on disk: the list's last group, "Maps on this computer", with the backend's content answer
+       (the storage line and one line per map) and the one action, Remove content of maps you only played. */
+    function contentGroup() {
+      var closed = groupClosed('area:content');
+      var f = el('div', 'pf-folder mods-area mods-content' + (closed ? '' : ' pf-open'));
+      f.setAttribute('data-group', 'area:content');
+      var head = el('div', 'pf-folder-head mods-area-head');
+      head.setAttribute('role', 'button');
+      head.setAttribute('aria-expanded', closed ? 'false' : 'true');
+      head.title = content.storage || 'The content of the maps on this computer';
+      var caret = el('span', 'pf-caret');
+      caret.appendChild(icon('chevron-down'));
+      head.appendChild(caret);
+      head.appendChild(el('span', 'pf-fname', 'Maps on this computer'));
+      head.appendChild(el('span', 'pf-fcount', String(content.rows.length)));
+      head.addEventListener('click', function () { closedGroups['area:content'] = !groupClosed('area:content'); renderList(); });
+      f.appendChild(head);
+      var body = el('div', 'pf-folder-body');
+      if (!closed) {
+        if (content.storage) body.appendChild(el('div', 'mods-content-storage', content.storage));
         var list = el('div', 'mods-content-lines');
         list.setAttribute('role', 'list');
-        content.lines.forEach(function (t) {
-          var row = el('div', 'mods-content-line', t);
+        content.rows.forEach(function (r) {
+          /* A kept map's mod: the map's glyph, its line, and Add to my mods (a copy of the objects that map has). */
+          var row = el('div', 'mods-content-line');
           row.setAttribute('role', 'listitem');
+          row.appendChild(statusIcon(IN_MAP_GLYPH));
+          row.appendChild(el('span', 'mods-content-text', r.text));
+          var add = el('button', 'btn mods-content-add', 'Add to my mods');
+          add.type = 'button';
+          add.title = ADD_MINE_TITLE;
+          add.disabled = !!busy;
+          add.addEventListener('click', function () { act('addToMine', r.token); });
+          row.appendChild(add);
           list.appendChild(row);
         });
-        host.appendChild(list);
+        if (content.rows.length) body.appendChild(list);
+        var b = el('button', 'btn mods-content-remove', 'Remove content of maps you only played');
+        b.type = 'button';
+        b.title = 'Maps you kept are not touched; playing one of the others again gets its content back';
+        b.disabled = !!busy;
+        b.addEventListener('click', function () { contentSweep = true; if (!act('content', 'removePlayed')) contentSweep = false; });
+        body.appendChild(b);
       }
-      var b = el('button', 'btn mods-content-remove', 'Remove content of maps you only played');
-      b.type = 'button';
-      b.title = 'Maps you kept are not touched; playing one of the others again gets its content back';
-      b.disabled = !!busy;
-      b.addEventListener('click', function () { contentSweep = true; if (!act('content', 'removePlayed')) contentSweep = false; });
-      host.appendChild(b);
+      f.appendChild(body);
+      return f;
     }
+    function renderContent() { if (loaded && content.known) renderList(); }
     function askContent() {
       contentDue = false;
       if (!busy) read('content');
@@ -931,7 +1038,7 @@ var modsTab = (function () {
       var swept = contentSweep;
       contentSweep = false;
       if (ok) {
-        content = {storage: str(data.storage), lines: arr(data.lines).map(str).filter(Boolean), known: true};
+        content = normContent(data);
       }
       if (swept) {
         setBusy('');
@@ -986,9 +1093,8 @@ var modsTab = (function () {
       b.addEventListener('click', function () { openNewMod(b); });
       return b;
     }
-    /* The open map uses the mod: the document's map.mods names its folder. */
-    function inMap(b) { return !!(model.map && model.map.open && mapUses(b)); }
-    function areaId(b) { return b.place ? 'map:' + b.place : 'area:own'; }
+    /* The open map uses the mod: the rows its save would write name the mod's namespace. */
+    function inMap(b) { return inMapState(stateOf(b)); }
     function renderList() {
       var box = byId('modsList');
       if (!box) return;
@@ -1009,17 +1115,7 @@ var modsTab = (function () {
         box.appendChild(el('div', 'list-empty', attnOnly ? 'No mod that needs attention matches the filter.' : 'No mod matches the filter.'));
         return;
       }
-      var own = shown.filter(function (b) { return !b.place; });
-      var places = {}, placeIds = [];
-      shown.forEach(function (b) {
-        if (!b.place) return;
-        if (!has(places, b.place)) { places[b.place] = []; placeIds.push(b.place); }
-        places[b.place].push(b);
-      });
-      placeIds.sort(function (x, y) {
-        var a = places[x][0].placeTitle || x, c = places[y][0].placeTitle || y;
-        return cmp(a.toLowerCase(), c.toLowerCase()) || cmp(x, y);
-      });
+      var own = shown;
       view = [];
       if (own.length) {
         box.appendChild(groupRow('area:own', YOUR_MODS, own, function (body) {
@@ -1038,15 +1134,10 @@ var modsTab = (function () {
           root.forEach(function (b) { body.appendChild(modRow(b)); view.push(b); });
         }, true));
       }
-      placeIds.forEach(function (p) {
-        var members = places[p];
-        box.appendChild(groupRow('map:' + p, members[0].placeTitle || p.replace(/^maps\\/, ''), members, function (body) {
-          members.forEach(function (b) { body.appendChild(modRow(b)); view.push(b); });
-        }, true));
-      });
+      if (content.known && (content.rows.length || content.storage) && !str(filter).trim() && !attnOnly) box.appendChild(contentGroup());
     }
     function modRow(b) {
-      var info = statusInfo(b), on = b.key === selectedKey, used = inMap(b);
+      var info = statusInfo(b), on = b.key === selectedKey, ms = stateOf(b), used = inMapState(ms);
       var row = el('div', 'mods-row' + (on ? ' selected' : ''));
       row.setAttribute('role', 'option');
       row.setAttribute('data-key', b.key);
@@ -1054,7 +1145,7 @@ var modsTab = (function () {
       if (used) row.setAttribute('data-in-map', 'true');
       /* One glyph: needs attention wins, then a stopped script, then in this map, then installed;
          the cause is the hover. */
-      row.title = info.cause + (used ? (/\.$/.test(info.cause) ? ' ' : '. ') + IN_MAP_TITLE + '.' : '');
+      row.title = info.cause + (used ? (/\.$/.test(info.cause) ? ' ' : '. ') + ms.head + '.' : '');
       row.appendChild(statusIcon(info.tone === 'ok' && used ? IN_MAP_GLYPH : info));
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', title(b)));
@@ -1069,7 +1160,7 @@ var modsTab = (function () {
     function openGroupsOf(b) {
       var opened = 0;
       if (!b) return 0;
-      if (groupClosed(areaId(b))) { closedGroups[areaId(b)] = false; opened = 1; }
+      if (groupClosed('area:own')) { closedGroups['area:own'] = false; opened = 1; }
       if (b.group && groupClosed(b.group)) { closedGroups[b.group] = false; opened = 1; }
       return opened;
     }
@@ -1122,7 +1213,7 @@ var modsTab = (function () {
       card.appendChild(el('div', 'mods-howto-head', 'How mods work'));
       card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and folders for what its files are: materials\\, meshes\\, scripts\\ and the rest.'));
       card.appendChild(el('p', '', folderRuleText('')));
-      card.appendChild(el('p', '', 'Maps record which mods they use. Players who open one are offered the download, which is listed under the map\'s name.'));
+      card.appendChild(el('p', '', 'A map carries the mods it uses: the pieces of the objects you place, or the whole of a mod used in the whole map. A player who opens the map gets them with it.'));
       card.appendChild(el('p', '', REFRESH_TEXT));
       card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod, or add a mod folder or ZIP with Install.'
                                          : 'Select a mod to see what it adds.'));
@@ -1158,17 +1249,11 @@ var modsTab = (function () {
       b.restartBanks.forEach(function (bank) {
         box.appendChild(el('div', 'mods-note mods-same', 'Restart DOOM to hear the new ' + bank + '.'));
       });
-      /* A downloaded map's mod: the short view. A player who only plays maps needs its name, its
-         map and Remove; Add to my mods (the head) makes it one of their own. Scripts are said
-         here, before anyone plays. */
-      if (b.place) {
-        var shortAbout = section(box, 'about', 'About');
-        field(shortAbout, 'Came with', b.placeTitle || 'a downloaded map');
-        if (b.scripts) field(shortAbout, 'Scripts', scriptsShortText(b.scripts.files)).className += ' mods-field-long';
-        shortAbout.appendChild(el('div', 'mods-note', PLACE_KEEP_TEXT));
-        if (b.scripts) renderScriptLog(box, b);
-        return;
-      }
+      var inmap = el('section', 'mods-section mods-inmap');
+      inmap.id = 'modsInMap';
+      inmap.setAttribute('data-section', 'inmap');
+      box.appendChild(inmap);
+      renderInMap();
       if (b.sameFilesAs) box.appendChild(el('div', 'mods-note mods-same', sameFilesText(b.sameFilesAs)));
 
       var about = section(box, 'about', 'About');
@@ -1239,11 +1324,6 @@ var modsTab = (function () {
 
       var files = section(box, 'files', 'Files');
       field(files, 'In its folder', plural(b.files, 'file') + ', ' + formatSize(b.size));
-      var fv = el('button', 'mods-link', 'Show the files');
-      fv.type = 'button';
-      fv.title = "Browse this mod's files";
-      fv.addEventListener('click', function () { openFiles(b.key, fv); });
-      files.appendChild(fv);
 
       if (b.warnings.length) {
         var wl = section(box, 'warnings', 'Warnings');
@@ -1427,19 +1507,15 @@ var modsTab = (function () {
         var pubd = m.published.state === 'published';
         field(det, 'Published', pubd ? (m.published.at ? 'Yes, ' + formatDate(m.published.at) : 'Yes') : 'Not published');
       }
-      if (m.uploaded) field(det, 'Its mods', m.uploaded.claimed
-        ? 'Uploaded with the published map' + (m.uploaded.at ? ' (' + formatDate(m.uploaded.at) + ')' : '')
-        : 'Not uploaded');
-      /* A file of a mod the published map did not carry, which a player's game asked for. */
-      if (m.asked.length) {
-        var ak = section(body, 'asked', 'Missing for players');
-        m.asked.forEach(function (a) {
-          ak.appendChild(el('div', 'mods-line mods-warning', missingSentence(a)));
-        });
-      }
+      /* Published: its mod content went with it, unless the store could not be reached then (sent at the next start). */
+      if (m.published && m.uploaded && !m.uploaded.claimed)
+        field(det, 'Its mods', 'Snapmap+ sends its mod content to the mod store the next time DOOM starts.');
       if (m.mods) {
+        /* The size a player downloads is known for content the map holds as published; your own mods' rows are
+           sized at the publish, which sends only the pieces of the objects placed. */
         var total = m.mods.reduce(function (a, r) { return a + r.size; }, 0);
-        field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));
+        var all = m.mods.length && m.mods.every(function (r) { return r.pinned; });
+        field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + (all ? ' for a player to download' : '') : ''));
       }
       if (m.saved) field(det, 'Last saved', formatDate(m.saved));
       if (m.clashes.length) {
@@ -1476,26 +1552,26 @@ var modsTab = (function () {
       m.mods.forEach(function (r) { list.appendChild(mapModRow(r)); });
     }
     function mapModRow(r) {
-      var info = mapModStatus(r);
+      var info = mapModStatus(r), installed = info.tone === 'ok';
       var row = el('div', 'mods-map-row');
       row.setAttribute('data-key', r.key || r.salt);
-      row.title = info.cause;
-      row.appendChild(statusIcon(info));
+      row.title = installed ? MAP_STATE.inPrefix + usesText(r) + '.' : info.cause;
+      row.appendChild(statusIcon(installed ? IN_MAP_GLYPH : info));
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', modName(r.key, r.name)));
       text.appendChild(el('div', 'mods-row-sub', formatSize(r.size)));
-      var uses = r.nothingPlaced ? NOTHING_PLACED_TEXT : r.attached
-        ? MAP_LEVEL_TEXT + (r.placedCount ? ', and ' + plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it') : '')
-        : plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it');
-      text.appendChild(el('div', 'mods-map-uses' + (r.attached ? ' mods-map-level' : ''), uses + (info.tone === 'warn' ? '; ' + info.cause : '')));
+      text.appendChild(el('div', 'mods-map-uses' + (r.attached ? ' mods-map-level' : ''),
+                          capital(usesText(r)) + (installed ? '' : '; ' + info.cause)));
       if (r.attached) row.setAttribute('data-attached', 'true');
       if (r.references.length) text.appendChild(el('div', 'mods-map-uses', 'Also used by ' + r.references.map(refText).join(', ')));
+      if (r.pinned) text.appendChild(el('div', 'mods-map-uses', MAP_LINES.published));
       if (r.update) text.appendChild(el('div', 'mods-map-uses', r.update));
       row.appendChild(text);
       var name = modName(r.key, r.name);
       if (r.update) row.appendChild(modalButton('Update', '', function () { act('mapUpdate', r.salt); },
         'Use the version of ' + name + ' you have installed for every object of it in this map'));
-      row.appendChild(modalButton('Remove from map', 'danger', function () {
+      /* Remove from map where the block offers it: a mod the map uses as a whole, or whose objects it places. */
+      if (r.attached || placedObjects(r)) row.appendChild(modalButton(REMOVE_TEXT, 'danger', function () {
         modal.from = 'map';
         act('mapRemoveModPreview', r.key || r.salt);
       }, 'Remove ' + name + ' and everything that uses it from this map'));
@@ -1504,9 +1580,7 @@ var modsTab = (function () {
     function renderConfirm(host, pv) {
       var name = pv.name || modName(pv.key, '');
       var uninstall = pv.action === 'uninstall';
-      var placed = false;
-      model.mods.forEach(function (b) { if (b.key === pv.key && b.place) placed = true; });
-      var verb = placed ? 'Remove' : 'Uninstall';
+      var verb = 'Uninstall';
       modalHead(host, uninstall ? verb + ' ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
@@ -1955,7 +2029,7 @@ var modsTab = (function () {
         at.setAttribute('aria-label', at.title);
       }
       var rootLine = byId('modsRoot');
-      if (rootLine) { rootLine.textContent = model.root; rootLine.title = model.root; }
+      if (rootLine) { rootLine.textContent = model.root; rootLine.title = 'Open the mods folder in Explorer: ' + model.root; }
     }
 
     function renderAll() {
@@ -1991,6 +2065,19 @@ var modsTab = (function () {
        game; the host follows it with a fresh document. Quiet: its result shows only when it failed
        or when a change still needs something (a restart, the next map open). A running action
        already ends with a fresh document. */
+    /* The editor's limits moved (an object or module placed, deleted or undone): ask for the document again, at
+       most every 400 ms, while the tab or the This map window shows. The backend's own poll moves it for every
+       change of what the map places of mods; this covers what that poll cannot read (module instances). */
+    var mapChangeTimer = null;
+    function mapChanged() {
+      if (!loaded || waiting || mapChangeTimer !== null || !(sl.visible || modal.open)) return false;
+      mapChangeTimer = env.after ? env.after(function () {
+        mapChangeTimer = null;
+        if (!busy && !waiting) { waiting = true; env.post({cmd: 'modsList'}); }
+      }, 400) : null;
+      if (!env.after && !busy) { waiting = true; env.post({cmd: 'modsList'}); }
+      return true;
+    }
     function refresh() {
       if (busy || waiting) return false;
       waiting = true;
@@ -2071,16 +2158,13 @@ var modsTab = (function () {
     /* ---- wiring */
     function bind() {
       var on = function (id, ev, fn) { var n = byId(id); if (n) n.addEventListener(ev, fn); };
-      /* Install takes mod folders or mod ZIPs: the button asks which, then the host's picker opens. */
-      on('modsInstallBtn', 'click', function () {
-        if (busy) return;
-        var n = byId('modsInstallBtn'), r = n && n.getBoundingClientRect ? n.getBoundingClientRect() : null;
-        var items = [{label: 'Install mod folders...', run: function () { act('install'); }},
-                     {label: 'Install mod ZIPs...', run: function () { act('install', 'zip'); }}];
-        if (env.menu) env.menu(r ? r.left : 0, r ? r.bottom : 0, items);
-        else act('install');
+      /* Install: one Windows Open dialog for mod ZIPs and a mod folder's mod.json (the host's picker). */
+      on('modsInstallBtn', 'click', function () { if (!busy) act('install'); });
+      /* The mods folder: the foot's path opens it in Explorer. */
+      on('modsRoot', 'click', function () { act('openFolder'); });
+      on('modsRoot', 'keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { if (e.preventDefault) e.preventDefault(); act('openFolder'); }
       });
-      on('modsFolderBtn', 'click', function () { act('openFolder'); });
       on('modsUninstallBtn', 'click', function () {
         var b = selectedMod();
         if (!b || busy) return;
@@ -2088,16 +2172,6 @@ var modsTab = (function () {
         act('uninstallPreview', b.key);
       });
       on('modsMapBtn', 'click', function () { openMap(byId('modsMapBtn')); });
-      on('modsUseBtn', 'click', function () {
-        var b = selectedMod();
-        if (!b || busy) return;
-        if (b.place) act('addToMine', b.key);
-        else if (mapUses(b)) {
-          modal.from = 'details';
-          modal.opener = byId('modsUseBtn');
-          act('mapRemoveModPreview', b.key);
-        } else act('mapAddMod', b.key);
-      });
       on('modsMapModal', 'keydown', onModalKey);
       on('modsMapModal', 'mousedown', function (e) { if (e.target === byId('modsMapModal')) closeMap(); });
       on('modsRefreshBtn', 'click', function () { refresh(); });
@@ -2113,25 +2187,21 @@ var modsTab = (function () {
       on('modsNewModal', 'mousedown', function (e) { if (e.target === byId('modsNewModal')) closeNewMod(); });
       on('modsNewCancel', 'click', closeNewMod);
       on('modsNewCreate', 'click', createNewMod);
-      /* New mod: the header's button, the empty list's button and the list's right-click entry. */
+      /* New mod: the header's button and the empty list's button. */
       on('modsNewBtn', 'click', function () { openNewMod(byId('modsNewBtn')); });
-      on('modsList', 'contextmenu', function (e) {
-        if (!env.menu) return;
-        if (e.preventDefault) e.preventDefault();
-        env.menu(e.pageX, e.pageY, [{label: 'New mod...', run: function () { openNewMod(byId('modsList')); }}]);
-      });
       on('modsAttnBtn', 'click', function () { setAttnOnly(!attnOnly); });
       on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); renderList(); });
       on('modsList', 'keydown', onListKey);
-      /* The setting for scripts from downloaded maps: its label and its one sentence. */
-      var sm = byId('modsScriptedMaps'), smNote = byId('modsScriptedMapsNote'), smLabel = byId('modsScriptedMapsLabel');
+      /* The setting for scripts from downloaded maps: a checkbox item of the Settings menu, with its one sentence. */
+      var sm = byId('menuScriptedMaps'), smNote = byId('menuScriptedMapsNote'), smLabel = byId('menuScriptedMapsLabel');
       if (smLabel) smLabel.textContent = SCRIPTED_MAPS_LABEL;
       if (smNote) smNote.textContent = SCRIPTED_MAPS_NOTE;
       if (sm) {
-        sm.checked = scriptedMaps;
+        sm.setAttribute('aria-checked', scriptedMaps ? 'true' : 'false');
         sm.title = SCRIPTED_MAPS_NOTE;
-        sm.addEventListener('change', function () {
-          scriptedMaps = !!sm.checked;
+        sm.addEventListener('click', function () {
+          scriptedMaps = !scriptedMaps;
+          sm.setAttribute('aria-checked', scriptedMaps ? 'true' : 'false');
           if (env.saveSetting) env.saveSetting(SCRIPTED_MAPS_KEY, scriptedMaps);
         });
       }
@@ -2142,8 +2212,8 @@ var modsTab = (function () {
     /* The saved setting, read by the page at start. */
     function setScriptedMaps(on) {
       scriptedMaps = on !== false;
-      var sm = byId('modsScriptedMaps');
-      if (sm) sm.checked = scriptedMaps;
+      var sm = byId('menuScriptedMaps');
+      if (sm) sm.setAttribute('aria-checked', scriptedMaps ? 'true' : 'false');
     }
 
     return {
@@ -2163,6 +2233,13 @@ var modsTab = (function () {
         return true;
       },
       refresh: refresh,
+      mapChanged: mapChanged,
+      /* The Prefabs tab: a mod's state in the open map, by its namespace (mapState). */
+      mapStateOf: function (salt) {
+        var b = null, i;
+        for (i = 0; i < model.mods.length && !b; i++) if (sameId(model.mods[i].salt, salt)) b = model.mods[i];
+        return loaded ? mapState(model.map, b || {salt: salt, key: '', editorRows: 0, modules: 0, facts: null}) : null;
+      },
       act: act,
       select: select,
       setAttentionOnly: setAttnOnly,
@@ -2194,18 +2271,19 @@ var modsTab = (function () {
   return {STATES: STATES, STATUS: STATUS, ACTIONS: ACTIONS, YOUR_MODS: YOUR_MODS, READY_TEXT: READY_TEXT, REFRESH_TEXT: REFRESH_TEXT,
           APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
-          IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
-          sameFilesText: sameFilesText, bareName: bareName, PLACE_KEEP_TEXT: PLACE_KEEP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
+          IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
+          sameFilesText: sameFilesText, bareName: bareName, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
-          SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, NOTHING_CHANGED_TEXT: NOTHING_CHANGED_TEXT,
+          SCOPE: SCOPE, create: create, normContent: normContent, MAP_STATE: MAP_STATE, MAP_LINES: MAP_LINES, mapState: mapState, mapEntry: mapEntry,
+          inMapState: inMapState, usesText: usesText, placeable: placeable, NOT_IN_MAP_GLYPH: NOT_IN_MAP_GLYPH,
+          EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, NOTHING_CHANGED_TEXT: NOTHING_CHANGED_TEXT,
           changeLines: changeLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass, folderArg: folderArg,
           PATH_TITLES: PATH_TITLES,
           FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, NEW_MOD_HINT: NEW_MOD_HINT, normFiles: normFiles,
           fileTree: fileTree, fileMeta: fileMeta,
-          scriptLines: scriptLines, scriptRunText: scriptRunText, scriptEntityInfo: scriptEntityInfo, scriptsShortText: scriptsShortText,
+          scriptLines: scriptLines, scriptRunText: scriptRunText, scriptEntityInfo: scriptEntityInfo,
           luaTokens: luaTokens, SCRIPT_RUN_TEXT: SCRIPT_RUN_TEXT, SCRIPT_LOG_NOTE: SCRIPT_LOG_NOTE, SCRIPT_LOG_EMPTY: SCRIPT_LOG_EMPTY,
           SCRIPT_DYNAMIC_TEXT: SCRIPT_DYNAMIC_TEXT, SCRIPT_POLL_MS: SCRIPT_POLL_MS,
           SCRIPTED_MAPS_KEY: SCRIPTED_MAPS_KEY, SCRIPTED_MAPS_LABEL: SCRIPTED_MAPS_LABEL, SCRIPTED_MAPS_NOTE: SCRIPTED_MAPS_NOTE};

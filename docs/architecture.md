@@ -4727,6 +4727,18 @@ The tab's map object and its two destructive flows (Remove from map,
 Uninstall) work on the map open in the editor, read when the document is
 built:
 
+- The mods the map uses are the rows its save would write now
+  (`sh_modmanifest_rows_for` over the live placed names, in `mu_map_build`):
+  a bundle the placed names reach that the save folds into another row of the
+  same mod (the version rule) counts there, and a row the load had that the
+  save would drop (its last object deleted) is not listed. Each entry names the
+  installed folder of its mod, a pinned row's included, says whether the row is
+  pinned, and names the placed objects as the Toybox does (`objects`). The
+  editor poll moves the document's generation when the set of the open map's
+  placed names under a mod's namespace changes, so an open tab follows a
+  placement, a delete and an undo. `tests/mods_inmap_test.c` holds the entries
+  equal to what `sh_modmanifest_on_save` writes.
+
 - Entities, wires and references come from the map serialized as a save would
   write it (`sh_rawmap_serialize_live_copy`, a snapshot with no save side
   effects), parsed by `modmap.c`. An entity uses a mod when one of its placed
@@ -4752,8 +4764,8 @@ built:
   `map-claims` sections; the claim's `mods` list names the namespaces its
   units serve (`modclaim_set_mods`), which is what the tab's count of published
   maps per mod reads (`mu_published_maps`). The map document's `asked` list
-  ("Missing for players", `mu_put_asked`) reads the record's `asked` section,
-  which nothing writes now, so it is empty. What none of these say is left out
+  (`mu_put_asked`) reads the record's `asked` section, which nothing writes
+  now, so it is empty; the page does not show it. What none of these say is left out
   of the document, never guessed.
 
 Remove from map deletes the mod's entities through `sh_editor_delete_batch`,

@@ -123,6 +123,20 @@ inline std::wstring folder_of(const std::wstring &path)
     return path.substr(0, cut);
 }
 
+/* The Mods tab's Install: one Open dialog for mod ZIPs and a mod folder's mod.json (a Windows dialog
+ * picks files or folders, never both, so a folder is picked by its mod.json). */
+static const file_type kModInstall = { L"Mod ZIPs and mod folders (*.zip, mod.json)", L"*.zip;mod.json" };
+
+/* What Install takes for one picked file: a mod.json stands for its folder; anything else (a ZIP) is
+ * itself. */
+inline std::wstring install_target(const std::wstring &picked)
+{
+    size_t cut = picked.find_last_of(L"\\/");
+    std::wstring leaf = cut == std::wstring::npos ? picked : picked.substr(cut + 1);
+    if (_wcsicmp(leaf.c_str(), L"mod.json") == 0 && cut != std::wstring::npos) return folder_of(picked);
+    return picked;
+}
+
 /* A kept folder as its config value: a JSON string in ASCII, \uXXXX past it. */
 inline std::string folder_to_config(const std::wstring &folder)
 {
