@@ -8,8 +8,8 @@
  * map whose served content carries scripts the player turned off drop the load
  * with one notice. A missing row that names no unit (a format 1 row nothing
  * serves, a format 2 local row) is refused at the next tick with one sentence
- * and nothing is fetched, for a published play, a My Maps play, a joiner, a
- * rawmap load and a prefab placement. Also covered: a second load abandoning
+ * and nothing is fetched, for a published play, a My Maps play, a joiner and a
+ * rawmap load. Also covered: a second load abandoning
  * the hold (also mid-fetch), the same map launched again mid-fetch, the
  * joiner's host re-check and the co-op lobby download, the warm-cache joiner
  * branch and My Maps play; a parse whose classification another detour broke,
@@ -495,8 +495,8 @@ static const char PINNED_AND_LOCAL[] =
     "This map needs alex.pink-imp, which is not on this computer and cannot be downloaded: the map was saved before " \
     "its content was sent to the mod store. Ask its author to publish it again. The map was not loaded."
 #define SCRIPTS_OFF_TEXT \
-    "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on " \
-    "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
+    "This map's mods include scripts, which you turned off. To play it, turn on " \
+    "\"Play Maps Whose Mods Include Scripts\" in the Settings menu of the Snapmap+ window."
 #define SAID(lit) said_notice((lit), sizeof(lit) - 1)
 
 /* Pinned rows serve once composed: the content cache's double armed, incomplete until the fetch. */
@@ -582,6 +582,31 @@ static void classification(void)
     CHECK(!sh_modpublished_last_parse_published());
 }
 
+
+/* Manager Q8, D6a: a map whose local row's folder is not here loads with its objects stood in; the gate lets it
+ * through with nothing to fetch, and says the parse's one sentence. A map that passes with nothing stood in says
+ * nothing; a stale sentence never reaches the next map. */
+static void a_passing_map_says_its_stand_ins(void)
+{
+    printf("-- a map that plays with stand-ins and nothing to fetch says its one notice at the gate (Q8)\n");
+    reset();
+    use_content();
+    F.installed_a = 1;          /* the row serves (through its stand-in composition, in the product) */
+    g_content.pending = 1;      /* the parse's stand-ins made a notice */
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0);
+    CHECK(g_content.said == 1 && said_notice("This map is playing without the Tyrant", 38));
+    CHECK(strstr(F.last_print, "This map is playing without the Tyrant") != NULL);
+
+    reset();
+    use_content();
+    F.installed_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    tick(3);
+    CHECK(g_content.said == 0 && F.asks == 0);
+}
 
 static void vanilla_and_installed_pass_through(void)
 {
@@ -1121,8 +1146,7 @@ static void scripts_off_at_launch(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(F.served_scripts_calls == 1 && F.fetch_calls == 0 && F.resumes == 0 && F.drop_ui == 1);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on "
-                                           "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."));
+    CHECK(!strcmp(sh_modpub_test_notice(), SCRIPTS_OFF_TEXT));
     CHECK(strstr(F.prints_all, "which you turned off. To play it") != NULL);
     /* A map without scripts in its content still launches with the setting off. */
     reset();
@@ -1345,10 +1369,11 @@ static void rawmap_pinned_rows_reach_the_content_step(void)
     CHECK(g_content_seen.calls == 1 && g_content_seen.rows == 1 && g_content_seen.pinned == 1);
     CHECK(g_content_seen.placed == 1 && !strcmp(g_content_seen.first, "mods/" SALT_A "/crate"));
     sh_modmanifest_list_free(&rows);
-    /* A map with only format 1 rows has nothing for the step. */
+    /* Local rows whose folders are not here reach the step as rows of no units (D6a, manager Q8): their objects
+     * stand in. */
     memset(&g_content_seen, 0, sizeof g_content_seen);
     (void)sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows);
-    CHECK(g_content_seen.calls == 0);
+    CHECK(g_content_seen.calls == 1 && g_content_seen.rows == 2 && g_content_seen.pinned == 2);
     sh_modmanifest_list_free(&rows);
     sh_modmanifest_set_content(NULL);
 }
@@ -1824,8 +1849,8 @@ static void gate_notes_after_the_decision(void)
     reset();
 }
 
-/* A published play, a My Maps play, a joiner and a prefab whose missing row names no unit (a format 1 row
- * "salt@hash", or a format 2 local row): the hold is refused at the next tick with one sentence, and nothing is
+/* A published play, a My Maps play and a joiner whose missing row names no unit (a local row for which no stand-in
+ * could be made: the seam serves none): the hold is refused at the next tick with one sentence, and nothing is
  * fetched. */
 static void a_row_that_names_no_unit_is_refused(void)
 {
@@ -1868,30 +1893,10 @@ static void a_row_that_names_no_unit_is_refused(void)
     CHECK(strstr(F.last_ask, "This map needs Bob Room, which is not on this computer and cannot be downloaded") == F.last_ask);
     CHECK(!strstr(F.last_ask, "Eternal Demons"));
 
-    printf("-- a prefab whose missing row names no unit is refused: 'The prefab was not placed.'\n");
-    reset();
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
-    CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
-    sh_modmanifest_list_free(&rows);
-    CHECK(sh_modpub_prefab_holding() && F.fetch_calls == 0 && F.asks == 0);
-    tick(1);
-    CHECK(!sh_modpublished_holding() && !sh_modpub_prefab_holding() && F.fetch_calls == 0 && F.resumes == 0);
-    CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp, which is not on this computer and cannot be downloaded: "
-                              "the prefab was saved before its content was sent to the mod store. Ask its author to "
-                              "publish it again. The prefab was not placed."));
-    CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a placement is not a launch */
 }
 
-/* The player's own content: a My Maps play, a rawmap load and a prefab placement whose rows a build serves are not
- * held, and a row nothing serves is refused for that mod alone. */
-static int g_ready_calls;
-static char g_ready_name[96];
-static void f_prefab_ready(const char *name, const sh_modmanifest_list *rows)
-{
-    (void)rows;
-    g_ready_calls++;
-    strcpy_s(g_ready_name, sizeof g_ready_name, name ? name : "");
-}
+/* The player's own content: a My Maps play and a rawmap load whose rows a build serves are not held, and a row
+ * nothing serves (no stand-in could be made: the seam serves none) is refused for that mod alone. */
 
 static void own_content_follows_the_installed_builds(void)
 {
@@ -1915,22 +1920,11 @@ static void own_content_follows_the_installed_builds(void)
     CHECK(strstr(F.last_ask, "This map needs bob.room, which is not on this computer and cannot be downloaded") == F.last_ask);
     CHECK(!strstr(F.last_ask, "alex.pink-imp"));
 
-    printf("-- a rawmap load and a prefab placement follow the installed builds the same way\n");
+    printf("-- a rawmap load follows the installed builds the same way\n");
     reset();
     F.installed_a = 1;
     CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
     sh_modmanifest_list_free(&rows);
-    reset();
-    use_units();
-    g_ready_calls = 0;
-    sh_modpub_set_prefab_ready(f_prefab_ready);
-    CHECK(sh_modpub_rawmap_missing(PINNED_MAP, strlen(PINNED_MAP), &rows) == 1);
-    CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
-    sh_modmanifest_list_free(&rows);
-    tick_until_idle();
-    CHECK(F.asks == 0 && !sh_modpublished_holding() && g_ready_calls == 1 && !strcmp(g_ready_name, "Door Kit") &&
-          F.resumes == 0);
-    CHECK(F.fetch_calls == 1);
     reset();
 }
 
@@ -1982,6 +1976,7 @@ int main(void)
     gate_notes_after_the_decision();
     editor_open_missing_placed_mod();
     a_held_load_says_its_notice_once();
+    a_passing_map_says_its_stand_ins();
     editor_open_fetches_its_content();
     coop_lobby_joiner_downloads_in_the_lobby();
     coop_lobby_joiner_cannot_get_it();

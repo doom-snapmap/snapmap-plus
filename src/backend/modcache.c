@@ -759,7 +759,8 @@ static int mc_cause_rank(int cause)
     case SH_CACHE_ABSENT_GAME: return 4;
     case SH_CACHE_ABSENT_NOT_IN_STORE: return 5;
     case SH_CACHE_ABSENT_REMOVED: return 6;
-    default: return 7;
+    case SH_CACHE_ABSENT_LOCAL: return 7;
+    default: return 8;
     }
 }
 
@@ -823,6 +824,9 @@ char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
         break;
     case SH_CACHE_ABSENT_DISK:
         out = sh_textf("This map is playing without %s, because there is not enough free disk space.", subject);
+        break;
+    case SH_CACHE_ABSENT_LOCAL:
+        out = sh_textf("This map is playing without %s, which %s not on this computer.", subject, plural ? "are" : "is");
         break;
     default:
         out = sh_textf("This map is playing without %s.", subject);
@@ -1458,6 +1462,9 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         units[i].cause = units[i].state == -2 ? SH_CACHE_ABSENT_NEWER : (causes && causes[i]) ? causes[i] : 0;
         if (!units[i].root) units[i].root = sh_text(snapshot.roots[i]);
     }
+    /* A row of no units (a local row whose folder is not here, D6a): every object the map places under its namespace
+     * stands in. */
+    if (!snapshot.n) complete = 0;
     here = sh_cache_composed(chash, &had_complete);
     mc_module_marks(units, snapshot.n, snapshot.salt, snapshot.modules);
     if (!complete) {
@@ -1465,7 +1472,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
     }
     if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
-    if (here && !complete && mc_side_same(chash, units, snapshot.n)) {   /* nothing new is here */
+    if (here && !complete && snapshot.n && mc_side_same(chash, units, snapshot.n)) {   /* nothing new is here */
         if (causes) {
             char *sp = mc_path("served\\%s.json", chash);
             AcquireSRWLockExclusive(&g_disk);
@@ -1581,6 +1588,16 @@ record:
                     r->absent[r->nabsent].object = sh_cache_object_name(snapshot.roots[i]);
                     r->absent[r->nabsent].mod = sh_text(snapshot.name ? snapshot.name : snapshot.salt);
                     r->absent[r->nabsent].cause = units[i].cause;
+                    r->nabsent++;
+                }
+                r->notice = r->nabsent > 0;
+            } else if (!snapshot.n && snapshot.nplaced) {
+                /* A local row whose folder is not here (D6a): each object the map places of it. */
+                r->absent = (mc_absent *)calloc(snapshot.nplaced, sizeof *r->absent);
+                for (i = 0; r->absent && i < snapshot.nplaced; i++) {
+                    r->absent[r->nabsent].object = sh_cache_object_name(snapshot.placed[i]);
+                    r->absent[r->nabsent].mod = sh_text(snapshot.name && snapshot.name[0] ? snapshot.name : snapshot.salt);
+                    r->absent[r->nabsent].cause = SH_CACHE_ABSENT_LOCAL;
                     r->nabsent++;
                 }
                 r->notice = r->nabsent > 0;

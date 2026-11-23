@@ -5072,6 +5072,61 @@ static void test_retired_places_not_read(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
+/* Manager Q8, D6a: a local row whose mod folder is not here resolves to the stand-in composition of its salt, named
+ * by the composition hash of none (SHA-256 of "snapmap-plus/composition/1\n1\n<salt>\n"); the root folder, once
+ * installed, wins again. */
+static void test_local_row_standin(void)
+{
+    static const fx_file stood[] = {
+        { "generated/decls/entitydef/mods/lstand00/crate.decl", "entityDef crate { standin }", -1, "entityDef",
+          "mods/lstand00/crate", NULL, '3' },
+    };
+    static const fx_file own[] = {
+        { "generated/decls/entitydef/mods/lstand00/crate.decl", "entityDef crate { own }", -1, "entityDef",
+          "mods/lstand00/crate", NULL, '4' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], folder[160], none[65], path[MAX_PATH];
+    unsigned char text[64];
+    char *slash, *cause = NULL;
+    size_t n;
+    sh_modmanifest_row row;
+    sh_modserve_bundle_ref ref;
+    printf("-- a local row whose mod is not here resolves to its stand-in composition (Q8)\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\localstandin\\mods", top);
+    mkdirs(root);
+    n = (size_t)_snprintf_s((char *)text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", "lstand00");
+    sh_mb_sha256_hex(text, n, none);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, ".content\\served\\%s", none);
+    make_bundle(root, folder, "lstand00", '3', NULL, stood, 1, NULL);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 1);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "lstand00");
+    strcpy_s(row.build, sizeof row.build, SH_MODMANIFEST_LOCAL_BUILD);
+    memset(&ref, 0, sizeof ref);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, none) && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+    sh_modserve_bundle_ref_free(&ref);
+    CHECK(sh_modserve_row_served_for(&row, NULL, &cause) == SH_MODSERVE_ROW_SERVED);
+    free(cause);
+    cause = NULL;
+    /* The mod installed: the root folder serves the local row again, never the stand-ins. */
+    make_bundle(root, "lstand00", "lstand00", '4', NULL, own, 1, "{\"installedAt\": 100}");
+    CHECK(sh_modserve_index_build(root) == 2);   /* both admitted: the stand-ins stay, unused */
+    memset(&ref, 0, sizeof ref);
+    CHECK(sh_modserve_row_build(&row, &ref) && !ref.place[0] && !strcmp(ref.folder, "lstand00"));
+    sh_modserve_bundle_ref_free(&ref);
+    /* A pinned row never resolves to a stand-in composition of none. */
+    row.pinned = 1;
+    strcpy_s(row.build, sizeof row.build, "5555555555555555555555555555555555555555555555555555555555555555");
+    CHECK(!sh_modserve_row_build(&row, NULL));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\localstandin", top);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
 /* The list walks take the engine's resource lock; a callback runs after it is released. */
 static CRITICAL_SECTION g_fake_cs;
 static CRITICAL_SECTION *g_fake_lock_slot = &g_fake_cs;
@@ -6092,6 +6147,7 @@ int main(void)
     test_additive_compose();
     test_salt_and_root();
     test_retired_places_not_read();
+    test_local_row_standin();
     test_resource_lock();
     test_row_served();
     test_dependency_names();

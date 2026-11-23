@@ -121,7 +121,6 @@ enum sh_modpub_hook {
     SH_MODPUB_CACHE_LOBBY,      /* the warm-cache branch only */
     SH_MODPUB_LOCAL_OFFLINE,
     SH_MODPUB_RAWMAP_LOAD,      /* not an engine hook: a rawmap load (sh_modpub_rawmap_hold) */
-    SH_MODPUB_PREFAB_PLACE,     /* not an engine hook: a prefab placement (sh_modpub_prefab_hold) */
     SH_MODPUB_FEED_PLAY,        /* the SnapMap feed completion, play action only */
     SH_MODPUB_LOBBY_LAUNCH,     /* the launch boundary: PublishedMapLobbyLaunch (sh_modpub_launch_gate) */
     SH_MODPUB_OFFLINE_LAUNCH,   /* the launch boundary: PublishedMapOfflineLaunch (refusal only) */
@@ -149,11 +148,13 @@ typedef struct sh_modpub_resume {
 #define SH_MODPUB_ROW_INCOMPLETE 2
 
 /* ------------------------------------------------------------ the hold
- * Every hold (published plays, lobby joins, My Maps, rawmap loads, prefab placements) counts the rows nothing serves
+ * Every hold (published plays, lobby joins, My Maps, rawmap loads, the open editor map) counts the rows nothing serves
  * (the asset rule: modserve.h). Rows that name units (SPEC-distribution 5.7) are fetched at once
  * into the content cache with no question, under the game's own progress line; what cannot be had stands in, with one
  * notice after the load (modcache.h, S2-S6). A row that names no unit (a local row, D6a) whose folder this computer
- * does not have cannot be downloaded: the load is refused with one sentence. While the player has turned off "Play
+ * does not have plays with its objects stood in and one sentence (manager Q8: the parse's content step composed them),
+ * which the gate says when it lets the map through; the load is refused only when no stand-in could be made, or when
+ * a folder of the mod is here and does not carry every name the row lists. While the player has turned off "Play
  * maps whose mods include scripts" (sh_modpub_ops scripted_maps_allowed), a map whose units (its pinned rows: content
  * that came from elsewhere) carry scripts is not loaded, with that setting's sentence (modui.h SH_MODUI_SCRIPTS_OFF);
  * the player's own local rows never count. */
@@ -207,7 +208,7 @@ typedef struct sh_modpub_ops {
     /* A launch was refused (denied, dropped from its hold, or refused at
      * once): nothing was launched, so the parse's rows must not stay
      * declared (modui.h sh_modui_scope_launch_refused). Called after
-     * drop_ui for every hook but a rawmap load and a prefab placement. */
+     * drop_ui for every hook but a rawmap load. */
     void (*launch_refused)(void *c, int hook);
     /* The player's setting "Play maps whose mods include scripts" (modui.h
      * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
@@ -337,36 +338,8 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
  * asked. */
 void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable);
 
-/* ------------------------------------------------------------ prefab placements
- * A prefab records the mods it needs (prefab_mods.h) and is never handed to
- * the engine while one is missing. Its placement is held like a rawmap load:
- * its pinned rows' content is fetched and the ready callback (main thread,
- * from the tick) brings it into the open map, and the placement goes on. A row
- * that names no unit refuses it, with "The prefab was not placed." */
-
-/* Hold a placement whose rows name missing builds; they are fetched to the
- * root (DECISIONS 12). `name` is the prefab's
- * name the messages use. Returns 1 held (its content is being fetched), 0 when
- * nothing is missing, -1 when it could not be held (off the main thread, no
- * memory), -2 when the gates are not bound (nothing raised: the caller
- * refuses). Main thread. */
-int  sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name);
-
-/* 1 while the hold in progress is a prefab placement's. */
-int  sh_modpub_prefab_holding(void);
-
-/* Called once a held placement's mods are installed and admitted, with the
- * prefab's name and every row it names. Main thread (the tick). */
-typedef void (*sh_modpub_prefab_ready_fn)(const char *name, const sh_modmanifest_list *rows);
-void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn);
-
-/* The prefab's refusal notice (shorter than 256 bytes, the game's dialog;
- * names that do not fit summarized as "and K more") and its console line
- * (malloc'd, every name whole): mode 0 the store does not hold them, 1 the
- * store could not be reached, 2 the store was not asked (no gates). `mods`
- * are the mods' names. */
-void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode);
-char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *mods, size_t count, int mode);
+/* A prefab's placement is not held here: a prefab carries units, and placing one never fetches or installs
+ * (prefab_mods.h, D35). */
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISHED_PURE

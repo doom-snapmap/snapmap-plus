@@ -20,9 +20,7 @@
  * its job retired when the worker returns).
  *
  * A rawmap load (sh_modpub_rawmap_hold) has no completion to skip: the rawmap layer never handed the map to the engine.
- * Its resume opens the rawmap again. A prefab placement (sh_modpub_prefab_hold) is held the same way; its resume is the
- * ready callback (prefab_mods.c), which brings the mods into the open map and lets the placement go on. Its texts say
- * "prefab" and "placed" where a map's say "map" and "loaded".
+ * Its resume opens the rawmap again. A prefab is never held: it carries units (prefab_mods.h, D35).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -135,13 +133,31 @@ static unsigned long g_notes_frame;
  * already, so it does not ask again (R-LV6: one load sent two fetches to an unreachable store); its notice is said. */
 static int g_reopen_asked;
 
+/* The content notice the parse's stand-ins made (modcache.h), taken by the gate: said when the gate lets the map
+ * through with nothing to fetch (a local row whose folder is not here stands in, D6a, manager Q8), dropped when a hold
+ * fetches (the hold's resume says what the map plays without). malloc'd, or NULL. */
+static char *g_pass_notice;
+
 static void pub_notes_gated(void)
 {
+    free(g_pass_notice);
+    g_pass_notice = NULL;
     if (!g_notes_held) return;
     g_notes_held = 0;
     (void)sh_modmanifest_load_notes_flush(0);
-    /* The gate's own fetch decides what the map plays without (modcache.h). */
+    g_pass_notice = g_ops.content_notice ? g_ops.content_notice(g_ops.context) : NULL;
     if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
+}
+
+/* The gate let the map through: its stand-ins' one sentence (S2's form), when the parse made one. */
+static void pub_pass_said(void)
+{
+    char *said = g_pass_notice;
+    g_pass_notice = NULL;
+    if (!said) return;
+    pub_print(said);
+    pub_notice(said);
+    free(said);
 }
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
@@ -339,23 +355,21 @@ typedef struct pub_hold {
 } pub_hold;
 
 static pub_hold g_hold;
-static sh_modpub_prefab_ready_fn g_prefab_ready;
 
-static int pub_is_prefab(int hook) { return hook == SH_MODPUB_PREFAB_PLACE; }
-/* "map" or "prefab", for the messages a hold shows. */
-static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" : "map"; }
+/* The word the messages a hold shows use for what is held. */
+static const char *pub_thing(int hook) { (void)hook; return "map"; }
 static int pub_is_joiner(int hook);
 /* The sentence that says nothing happened. A joiner's hold that is dropped leaves the lobby (pub_drop). */
 static const char *pub_not_done(int hook)
 {
-    return pub_is_prefab(hook) ? "The prefab was not placed." : hook == SH_MODPUB_EDITOR_OPEN ? "The map stays open without it."
+    return hook == SH_MODPUB_EDITOR_OPEN ? "The map stays open without it."
          : pub_is_joiner(hook) ? "You left the lobby so the match is not held up; join it again later."
                                : "The map was not loaded.";
 }
-/* A hold the rawmap layer, a prefab or an open editor map started: no engine completion behind it. */
+/* A hold the rawmap layer or an open editor map started: no engine completion behind it. */
 static int pub_is_local(int hook)
 {
-    return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE || hook == SH_MODPUB_EDITOR_OPEN;
+    return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_EDITOR_OPEN;
 }
 /* A lobby joiner's read of the host's map (cold or warm). A joiner runs no mod
  * script (only the host does, script_hooks.c), so its own scripts setting
@@ -423,7 +437,6 @@ static const char *pub_hook_name(int hook)
     case SH_MODPUB_CACHE_LOBBY: return "lobby join (cached map)";
     case SH_MODPUB_LOCAL_OFFLINE: return "My Maps play";
     case SH_MODPUB_RAWMAP_LOAD: return "rawmap load";
-    case SH_MODPUB_PREFAB_PLACE: return "prefab placement";
     case SH_MODPUB_FEED_PLAY: return "SnapMap feed play";
     case SH_MODPUB_LOBBY_LAUNCH: return "lobby launch";
     case SH_MODPUB_OFFLINE_LAUNCH: return "offline launch";
@@ -834,6 +847,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         int rows = record->rows.count > 0;
         pub_record_clear(record);   /* consumed */
         pub_joiner_ready(hook, item, rev, rows);
+        pub_pass_said();
         passed = 1;
         goto out;
     }
@@ -859,7 +873,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         passed = 0;
         goto out;
     }
-    if (!begun) { pub_joiner_ready(hook, item, rev, 1); passed = 1; goto out; }
+    if (!begun) { pub_joiner_ready(hook, item, rev, 1); pub_pass_said(); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
              pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
@@ -893,6 +907,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     missing = pub_count_missing(&record->rows);
     if (!missing) {
         pub_record_clear(record);
+        pub_pass_said();
         passed = 1;
         goto out;
     }
@@ -909,7 +924,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
         passed = 0;
         goto out;
     }
-    if (begun == 0) { passed = 1; goto out; }
+    if (begun == 0) { pub_pass_said(); passed = 1; goto out; }
     {
         /* An offline launch has no map object left to resume with, so nothing is fetched now. A row whose content is
          * composed with stand-ins plays (5.8: the objects that are not here stand in, and the load's one notice says
@@ -1228,26 +1243,6 @@ static void pub_resume(size_t installed)
     pub_hold *h = &g_hold;
     sh_modpub_resume r;
     int ok;
-    if (pub_is_prefab(h->hook)) {
-        /* The placement goes on: the ready callback brings the mods into the
-         * open map (activation, the map-level rows) and the Prefabs tab places
-         * the prefab again. */
-        if (!g_prefab_ready) {
-            pub_drop("The mods were installed, but the prefab could not be placed. Place it again.",
-                     "no prefab callback is bound");
-            return;
-        }
-        g_prefab_ready(h->id, &h->rows);
-        pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook), h->id,
-                 (unsigned)installed);
-        pub_hold_free();
-        {
-            char *said = pub_content_said();
-            if (said) pub_notice(said);
-            free(said);
-        }
-        return;
-    }
     /* A joiner left the lobby to download (pub_leave_lobby): it joins again,
      * and that join finds the content in the cache; its one notice says
      * so, and what the map will play without. */
@@ -1326,19 +1321,15 @@ static const char *pub_row_label(const sh_modmanifest_row *row)
     return pub_title(row);
 }
 
-/* mode 0: the store lacks them; 1: the store could not be reached; 2 (a
- * prefab with no gates bound): the store was not asked. */
-static void pub_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode, int prefab)
+/* mode 0: the store lacks them; 1: the store could not be reached. */
+static void pub_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode)
 {
     static const char gone[] = ": ";
     static const char lacks[] = " and the mod store does not hold: ";
-    const char *head = prefab ? "This prefab was not placed. It needs mods you do not have"
-                              : "This map was not loaded. It needs mods you do not have";
+    const char *head = "This map was not loaded. It needs mods you do not have";
     const char *mid = mode == 0 ? lacks : gone;
-    const char *tail = mode == 1
-        ? (prefab ? ". The mod store could not be reached. Try again, or ask the prefab's author for its .zip export."
-                  : ". The mod store could not be reached. Try again, or ask the map's author for its .zip export.")
-        : (prefab ? ". Ask the prefab's author for its .zip export." : ". Ask the map's author for its .zip export.");
+    const char *tail = mode == 1 ? ". The mod store could not be reached. Try again, or ask the map's author for its .zip export."
+                                 : ". Ask the map's author for its .zip export.";
     char list[PUB_TEXT_CAP];
     size_t room, fixed = strlen(head) + strlen(mid) + strlen(tail);
     if (!out || !cap) return;
@@ -1351,12 +1342,7 @@ static void pub_compose_refusal(char *out, size_t cap, const char *const *mods, 
 
 void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable)
 {
-    pub_compose_refusal(out, cap, mods, count, unreachable ? 1 : 0, 0);
-}
-
-void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode)
-{
-    pub_compose_refusal(out, cap, mods, count, mode < 0 || mode > 2 ? 0 : mode, 1);
+    pub_compose_refusal(out, cap, mods, count, unreachable ? 1 : 0);
 }
 
 /* "<head><mods joined by ", "><tail>", every name whole (malloc'd). */
@@ -1372,20 +1358,6 @@ static char *pub_join(const char *head, const char *const *mods, size_t count, c
         strcat_s(out, n, mods[i]);
     }
     strcat_s(out, n, tail);
-    return out;
-}
-
-char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *mods, size_t count, int mode)
-{
-    char *head = sh_textf("Prefab %s was not placed: it needs ", name && name[0] ? name : "prefab"), *out;
-    if (!head) return NULL;
-    out = pub_join(head, mods, count, mode == 1
-        ? ", which you do not have, and the mod store could not be reached. Try again, or ask the prefab's author "
-          "for its .zip export, which carries the mods."
-        : mode == 2 ? ", which you do not have. Ask the prefab's author for its .zip export, which carries the mods."
-        : ", which you do not have and the mod store does not hold. Ask the prefab's author for its .zip export, "
-          "which carries the mods.");
-    free(head);
     return out;
 }
 
@@ -1432,9 +1404,8 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
 {
     char notice[PUB_TEXT_CAP], *line, *head;
     const char **labels = calloc(count ? count : 1, sizeof(*labels));
-    const char *bare = pub_is_prefab(hook)
-        ? "This prefab was not placed: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and place it again."
-        : "This map was not loaded: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and open it again.";
+    const char *bare = "This map was not loaded: it needs mods you do not have, and Snapmap+ ran out of memory naming them. "
+                       "Restart DOOM and open it again.";
     char *single = NULL;
     /* The asset rule's sentence for each row first; one row's sentence is
      * also the notice. */
@@ -1454,10 +1425,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
         return;
     }
     for (size_t i = 0; i < count; i++) labels[i] = pub_row_label(rows[i]);
-    if (pub_is_prefab(hook)) {
-        line = sh_modpublished_prefab_refusal_line(source, labels, count, unreachable ? 1 : 0);
-        sh_modpublished_compose_prefab_refusal(notice, sizeof notice, labels, count, unreachable ? 1 : 0);
-    } else {
+    {
         head = sh_textf("Rawmap %s was not loaded: it needs ", source && source[0] ? source : "map");
         line = head ? pub_join(head, labels, count, unreachable
             ? ", which you do not have, and the mod store could not be reached. Try again, or ask the map's author "
@@ -1506,34 +1474,12 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
     return 1;
 }
 
-/* ------------------------------------------------------------ prefab placements */
-
-void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn) { g_prefab_ready = fn; }
-
-int sh_modpub_prefab_holding(void)
-{
-    return g_hold.state != HOLD_IDLE && pub_is_prefab(g_hold.hook);
-}
-
-int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
-{
-    const char *nm = pub_s(name);
-    char *line;
-    int begun;
-    if (!rows || !rows->count) return 0;
-    if (!g_ops_set) return -2;
-    if (!pub_on_main()) return -1;
-    /* A prefab's units come into the content cache, as a map's do (D35). */
-    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", rows, NULL);
-    if (begun <= 0) return begun;
-    (void)line;
-    pub_logf("MODS: prefab '%s' needs %u missing mod(s) (%llu bytes)", nm, (unsigned)g_hold.missing_count,
-             g_hold.missing_bytes);
-    return 1;
-}
+/* ------------------------------------------------------------ local rows */
 
 /* Rows that name no unit and that nothing here serves: a local row (D6a) follows its author's folder, so no store has
- * its content. The load is refused with one sentence naming the mods. */
+ * its content. A local row whose folder is not here plays with stand-ins (the content cache's composition of no
+ * units, manager Q8), so this is reached only when none could be made (memory, the cache's folder) or when a folder
+ * is here and does not carry every name the row lists. The load is refused with one sentence naming the mods. */
 static void pub_refuse_local(void)
 {
     pub_hold *h = &g_hold;
@@ -1710,9 +1656,9 @@ void sh_modpub_test_reset(void)
         pub_job_free(job);
     }
     pub_record_clear(&g_record);
-    g_prefab_ready = NULL;
     for (size_t i = 0; i < PUB_SEEN_MAX; i++) pub_seen_clear(&g_seen[i]);
     pub_notice_clear(); g_notice_ticket = 0; g_notice_waited = 0;
+    free(g_pass_notice); g_pass_notice = NULL;
     InterlockedExchange(&g_resuming, 0);
     g_reopen_asked = 0;
 }
@@ -2114,7 +2060,7 @@ static void eng_drop_ui(void *c, int hook, void *owner)
 /* The download's progress in the manager's progress line, the widget
  * CacheMapForLobby fills with its wait text while the game downloads a
  * published map (show_wait replaces the line's text in place; hide_progress
- * takes it down). A rawmap or prefab hold has no owner: the shell's manager.
+ * takes it down). A rawmap hold has no owner: the shell's manager.
  * The widget keeps its own copy of the text, made in process heap 0 as the
  * engine's own call makes it. */
 static void eng_progress(void *c, int hook, void *owner, const char *text)

@@ -50,7 +50,8 @@ enum {
     SH_CACHE_ABSENT_GAME,            /* S4b: a DOOM file of another game revision */
     SH_CACHE_ABSENT_NOT_IN_STORE,    /* S5: never uploaded, or still queued */
     SH_CACHE_ABSENT_REMOVED,         /* S3: moderation removed it */
-    SH_CACHE_ABSENT_DISK             /* N15: not enough free disk space */
+    SH_CACHE_ABSENT_DISK,            /* N15: not enough free disk space */
+    SH_CACHE_ABSENT_LOCAL            /* D6a: a local row whose mod folder is not on this computer (manager Q8) */
 };
 
 /* The cache's folder: <mods root>\.content (modstore.h sh_ms_root), or the folder tests set. malloc'd. */

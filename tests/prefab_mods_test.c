@@ -736,6 +736,72 @@ static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, i
     }
 }
 
+/* D1, D35 (manager, from R-UI1): a prefab of one Tyrant from a two-demon pack brings the pack into the map the way
+ * placed objects do: no map-level row, so a publish pins the Tyrant's unit alone. Only a mod the prefab uses whole
+ * is attached. */
+static void one_demon_of_a_pack(const char *tmp, const char *store)
+{
+    static const char TYRANT_PREFAB[] =
+        "{\"cameraYaw\":0,\"entities\":["
+        "{\"displayName\":\"Tyrant\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/twodemon/tyrant\",\"name\":\"\"}}],"
+        "\"grabDistance\":256,\"~type\":\"idSnapEntityPrefab\"}";
+    char src[MAX_PATH], msg[600], *manifest;
+    sh_modmanifest_row pack, row;
+    sh_modmanifest_list rows;
+    sh_modpin_row_result res;
+    size_t len = 0, k;
+    int seq = 0, r, whole = 0;
+    printf("-- a prefab of one Tyrant from a two-demon pack: its placed object carries the pack, a publish pins the Tyrant alone\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\twodemon-src", tmp);
+    CreateDirectoryA(src, NULL);
+    mt_write(src, "entities\\marauder.decl", "{\r\n\tinherit = \"snapmaps/doors/industrial_door_vertical\";\r\n}");
+    CHECK(install_mod(src, "twodemon", "Two Demons", "entities\\tyrant.decl", DOOR_DECL, &pack));
+    CHECK(sh_modserve_index_build(store) >= 2);
+
+    /* The prefab's row places the Tyrant: activated, never attached. */
+    reset_fakes();
+    row = pack;
+    row.name = NULL;
+    memset(&rows, 0, sizeof rows);
+    CHECK(sh_modmanifest_row_set_name(&row, "Two Demons") && sh_modmanifest_row_add_name(&row, "mods/twodemon/tyrant"));
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    r = HO(msg, sh_prefab_mods_resolve_main(TYRANT_PREFAB, sizeof TYRANT_PREFAB - 1, &rows, "Tyrant", &seq, HO_P(0)));
+    CHECK(r == SH_PREFAB_MODS_PLACE && F.activations == 1 && F.attaches == 0);
+    sh_modmanifest_list_free(&rows);
+
+    /* The save writes that row from what is placed; a publish pins it: the Tyrant's unit, no whole-mod unit, and no
+     * file of the Marauder. */
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned && row.unit_count == 1);
+    for (k = 0; k < row.unit_count; k++) if (!strcmp(row.roots[k], "*")) whole = 1;
+    CHECK(!whole && row.unit_count && !strcmp(row.roots[0], "entities/tyrant"));
+    manifest = row.unit_count ? sh_cache_manifest(row.units[0], &len) : NULL;
+    CHECK(manifest && strstr(manifest, "tyrant") && !strstr(manifest, "marauder"));
+    free(manifest);
+
+    free(res.why);
+    sh_modmanifest_row_free(&row);
+
+    /* The same mod used by the prefab as a whole (its map-level row): attached, and pinned whole. */
+    reset_fakes();
+    row = pack;
+    row.name = NULL;
+    row.attached = 1;
+    memset(&rows, 0, sizeof rows);
+    CHECK(sh_modmanifest_row_set_name(&row, "Two Demons"));
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    r = HO(msg, sh_prefab_mods_resolve_main(TYRANT_PREFAB, sizeof TYRANT_PREFAB - 1, &rows, "Tyrant", &seq, HO_P(0)));
+    CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1);
+    sh_modmanifest_list_free(&rows);
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned);
+    for (whole = 0, k = 0; k < row.unit_count; k++) if (!strcmp(row.roots[k], "*")) whole = 1;
+    CHECK(whole);
+    free(res.why);
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_row_free(&pack);
+}
+
 static void resolving(const sh_modmanifest_row *door)
 {
     sh_modmanifest_list rows;
@@ -916,8 +982,9 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text_len = len;
     call.meta_path = meta;
     call.name = "Door";
-    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 1 &&
-          !strcmp(F.attached[0], SH_MODMANIFEST_LOCAL_BUILD));   /* the row names no build: the root folder serves it */
+    /* The recorded row places the door: it reaches the map through the placed door, not as a map-level row (D1). */
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 0 &&
+          F.activations == 1);
     {
         /* A prefab an earlier version saved: refused with its sentence. */
         char old[MAX_PATH * 2];
@@ -1591,6 +1658,7 @@ int main(int argc, char **argv)
     resolving(&door);
     resolve_through_slot(libA, &door);
     zip(tmp, libA, storeA, &door);
+    one_demon_of_a_pack(tmp, storeA);
 
     sh_cache_set_mods_root(NULL);
     sh_ms_set_root(NULL);

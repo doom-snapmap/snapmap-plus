@@ -714,8 +714,10 @@ static int pm_known(void *ctx, const char *name)
     return k->known ? k->known(name) : -1;
 }
 
-/* Activate the rows' bundles for the open map and attach each one the map
- * does not list. Main thread. */
+/* Activate the rows' bundles for the open map. A mod whose objects the prefab places gets into the map the way
+ * placed objects do: the open map's save writes its row from what is placed, and a publish pins those objects' own
+ * units (D1, D35). Only a mod the prefab uses without placing anything of it (a map-level row of the prefab, or a row
+ * that names nothing) is attached to the open map as a map-level row, which pins the whole mod. Main thread. */
 static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
 {
     const sh_prefab_mods_ops *o = pm_ops();
@@ -728,6 +730,7 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
         const char *label = sh_prefab_mods_label(r);
         char *note = NULL, *line;
         int a;
+        if (r->name_count && !r->attached) continue;   /* its placed objects carry it */
         if (o->listed && o->listed(r) > 0) continue;
         if (!o->attach) continue;
         a = o->attach(r, &note);
@@ -1459,7 +1462,7 @@ static int eng_attach(const sh_modmanifest_row *row, char **note)
     (void)sh_modui_run(SH_MODS_ACT_MAP_ADD, key);
     sh_modserve_bundle_ref_free(&ref);
     if (eng_listed(row)) return 1;
-    pm_msg(note, "the Mods tab can add it with Use in this map");
+    pm_msg(note, "select it in the Mods tab and choose Use in this map");
     return -1;
 }
 

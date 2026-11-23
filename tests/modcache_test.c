@@ -1056,6 +1056,81 @@ static void test_sweep_held(const char *top)
     sh_mb_free(&b);
 }
 
+/* Manager Q8, D6a: a local row whose mod folder is not on this computer loads with its objects stood in and one
+ * sentence; the content step hands it to the cache as a row of no units under the composition hash of none. */
+static void test_local_standins(const char *top)
+{
+    char mods[MAX_PATH * 2], path[MAX_PATH * 3], none[65], *t;
+    const char *placed2[] = { "mods/" SALT "/crate", "mods/" SALT "/barrel" };
+    const char *placed1[] = { "mods/" SALT "/crate" };
+    static const char map[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idInteractable\",\"inherit\":\"mods/" SALT "/crate\"},\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT "\",\"name\":\"Crates and barrels\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/" SALT "/crate\"]}]}}";
+    sh_modmanifest_row row;
+    sh_modmanifest_list list;
+    int complete = 1;
+    unsigned char want_text[64];
+    char want[65];
+    size_t n;
+
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\player-local\\mods", top);
+    CreateDirectoryA(mods, NULL);
+    sh_cache_set_mods_root(mods);
+    (void)sh_cache_take_notice();
+    /* The composition hash of none is 2.13's formula with no unit (modserve.c computes the same for the resolver). */
+    CHECK(sh_modmanifest_composition_hash(SALT, NULL, 0, none));
+    n = (size_t)_snprintf_s((char *)want_text, sizeof want_text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", SALT);
+    sh_mb_sha256_hex(want_text, n, want);
+    CHECK(!strcmp(none, want));
+
+    /* A row of no units: every placed object under the namespace stands in, with one sentence. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, SALT);
+    strcpy_s(row.build, sizeof row.build, none);
+    row.pinned = 1;
+    CHECK(sh_modmanifest_row_set_name(&row, "Crates and barrels"));
+    load_rows(&row, 1, placed2, 2);
+    CHECK(sh_cache_composed(none, &complete) && !complete);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\crate.decl", mods, none);
+    t = read_text(path);
+    CHECK(t && strstr(t, "snapmaps/unknown"));
+    free(t);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    CHECK(mt_exists(path));
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel), which "
+                          "are not on this computer."));
+    free(t);
+    /* Another map of the same mod places other objects: composed again for it, one sentence for its one object. */
+    load_rows(&row, 1, placed1, 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    CHECK(!mt_exists(path));
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
+    free(t);
+    sh_modmanifest_row_free(&row);
+
+    /* The load's content step: the map's local row, nothing at the root serving it, reaches the cache so. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods, none);
+    mt_remove_tree(path);
+    memset(&list, 0, sizeof list);
+    CHECK(sh_modmanifest_read(map, sizeof map - 1, &list, NULL) == 1 && list.count == 1 && !list.rows[0].pinned);
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_modmanifest_content_for(map, sizeof map - 1, &list);
+    sh_modmanifest_set_content(NULL);
+    sh_modmanifest_list_free(&list);
+    CHECK(sh_cache_composed(none, &complete) && !complete);
+    _snprintf_s(path, sizeof path, _TRUNCATE,
+                "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mods, none);
+    t = read_text(path);
+    CHECK(t && strstr(t, "entityDef = \"entities/crate\";"));
+    free(t);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
+    free(t);
+}
+
 static void test_key(const char *top)
 {
     sh_key *k = NULL, *back = NULL;
@@ -1102,6 +1177,8 @@ int main(void)
     test_cache(top);
     test_product_pointer(top);
     test_sweep_held(top);
+    printf("-- a local row whose mod is not here stands in (Q8)\n");
+    test_local_standins(top);
     printf("-- the publishing key\n");
     test_key(top);
     (void)g_current_rows;

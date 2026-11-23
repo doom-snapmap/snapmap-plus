@@ -758,7 +758,9 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   - a pinned row: the content cache's composition of its units (named by the composition hash, its build), only;
  *     a local mod never stands in for a map's units, whatever is installed;
  *   - a local row (the player's own map, D6a): the root folder of the salt (it follows the folder; a local row
- *     names no build, so the root's one build of the salt is the one).
+ *     names no build, so the root's one build of the salt is the one); with no folder of the salt here, the content
+ *     cache's stand-in composition of the salt (no units: the composition hash of none), whose stand-ins (D60) keep
+ *     the map's objects in their places, with one sentence (manager Q8).
  * A bare hash (the listing, plans, bundle state) resolves the same way: the root's folder at the hash, else the
  * composition. Nothing about the map's origin changes this: there is no place to set. Any thread. */
 /* mods\maps\: where earlier versions put the builds a downloaded map brought (places, retired with D4). The index

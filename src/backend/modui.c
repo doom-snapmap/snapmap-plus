@@ -11,6 +11,7 @@
 #include "modui.h"
 #include "modclaim.h"
 #include "modcache.h"
+#include "modauthor.h"  /* sh_ma_engine_name: a Toybox row's entityDef in the engine's spelling */
 #include "modpin.h"     /* sh_modpin_row_differs: Update only when the installed version changes what a map serves */
 #include "feature_health.h"
 #include "modbundle.h"
@@ -791,6 +792,12 @@ static void mu_entry_rows(mu_model *m, size_t i)
             if (!name) name = mu_strdup(own);
         }
         u->row_names[u->row_count] = name;
+        /* The entityDef as the engine names it (what a placed entity's inherit spells: "entities/imp_copy" in the
+         * author's spelling is "mods/<salt>/imp_copy"), so mu_row_name_for compares one spelling. */
+        if (def && e->salt[0]) {
+            char *engine = sh_ma_engine_name(e->salt, def, strlen(def));
+            if (engine) { free(def); def = engine; }
+        }
         u->row_defs[u->row_count] = def ? def : mu_strdup("");
         u->row_count++;
         free(tag);

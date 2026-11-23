@@ -8153,8 +8153,8 @@ static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, con
 }
 
 /* The row resolver (modserve.h): the build that serves a row: a pinned row's composition; a local row's root
- * folder of the salt at the row's hash, else at any build (the player's own map follows the folder). -1 when none:
- * the row is missing. */
+ * folder of the salt at the row's hash, else at any build (the player's own map follows the folder), else (no local
+ * folder of the salt) its stand-in composition. -1 when none: the row is missing. */
 static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
 {
     char salt[SH_MODMANIFEST_SALT_CAP];
@@ -8167,7 +8167,21 @@ static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
     if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
     if (at >= 0) return at;
-    return ms_salt_in(x, salt, NULL, "");
+    if ((at = ms_salt_in(x, salt, NULL, "")) >= 0) return at;
+    /* D6a (manager Q8): a local row whose namespace no local folder serves (the author's map opened on another
+     * computer, the mod folder deleted) plays with its objects stood in: the content cache's stand-in composition of
+     * its salt, which carries no unit and is named by the composition hash of none (modcache.h). */
+    {
+        /* The composition hash of no unit (SPEC-distribution 2.13, modmanifest.c sh_modmanifest_composition_hash with
+         * a count of 0): SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". */
+        char none[SH_MODMANIFEST_HASH_CAP], text[64];
+        int n = _snprintf_s(text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", salt);
+        if (n > 0) {
+            sh_mb_sha256_hex(text, (size_t)n, none);
+            return ms_salt_in(x, salt, none, SH_MODSERVE_CONTENT);
+        }
+    }
+    return -1;
 }
 
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)

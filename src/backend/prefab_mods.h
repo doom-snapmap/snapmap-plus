@@ -34,9 +34,14 @@
  * carries units, not mods):
  *   a local row         (a prefab made on this computer: its mod's folder)
  *                       served by the folder at the root: the mods are
- *                       activated for the open map, and a mod the open map
- *                       does not list is attached to it (a map-level row, as
- *                       the Mods tab's Use in this map) with one console line;
+ *                       activated for the open map, and its placed objects
+ *                       carry a mod into the map as placed objects do (the
+ *                       save writes the row, a publish pins those objects'
+ *                       units); only a mod the prefab uses as a whole (its
+ *                       map-level row, or a row naming nothing placed) that
+ *                       the open map does not list is attached to it (as the
+ *                       Mods tab's Use in this map), with one console line
+ *                       when that fails;
  *   a pinned row        (an imported prefab's units, all in the content cache)
  *                       joins the open map as a pinned row of those units,
  *                       composed and declared (ops.use_pinned; SPEC 5.16

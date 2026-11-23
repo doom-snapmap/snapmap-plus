@@ -2,15 +2,14 @@
  * part of the map's "snapmap-plus" member (map_carrier.h, which describes the
  * member's grammar once).
  *
- * A row is the compact JSON
- * {"mod":"<salt>@<build hash>","name","size","names":[...],"attached"?,"choices"?}
- * where "mod" names the mod by its salt (the eight characters in its
- * mod.json's "snapmap-plus" block) and the build by the SHA-256 of its
- * canonical manifest, which itself records the salt, so a build verified
- * against the hash is proved to be that salt. "name" is the author's, for
- * display only; a mod has no version (a build is named by its hash).
- * "names" lists the placed logical names the build provides (informational; every name is kept, there is no row
- * budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
+ * A row is the compact JSON (format 2, SPEC-distribution 2.7) of a pinned row
+ * {"mod":"<salt>","name","size","objects":{"<root>":"<unit>",...},"whole"?,"modules"?,"choices"?}
+ * or of a local row
+ * {"mod":"<salt>","name","size","local":true,"names":[...],"attached"?,"choices"?}
+ * where "mod" names the mod by its salt (the eight characters in its mod.json's "snapmap-plus" block). A pinned row
+ * names its objects' units, and its build in memory is their composition hash; a local row names no build and follows
+ * the local folder of its salt (D6a). "name" is the author's, for display only. "names" lists the placed logical names
+ * the mod provides (every name is kept, there is no row budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
  * between its mods' edits (modregistry.h: which declared mod's value serves a
  * field or keyed entry several of them edit, slot "<game file>/<path>",
  * "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each
@@ -20,9 +19,10 @@
  * map add`) without placing anything, so the map keeps the row whatever it
  * places. Rows never carry asset bytes, and merge by salt and build.
  *
- * A row object with an "id" or "bundle" member is an earlier shape and does
- * not parse; the parse detour refuses a map carrying one before any of this
- * runs (sh_map_old_shape, map_carrier.h).
+ * A row object with an "id" or "bundle" member, or a "mod" of the form
+ * "<salt>@<build>" (format 1, before units), is an earlier shape and does not
+ * parse; the parse detour refuses a map carrying one before any of this runs
+ * (sh_map_old_shape, map_carrier.h).
  *
  * Load: every parse the DeserializeFromJson detour sees reads the rows from
  * the member, keeps them as the current map's manifest and asks the serving
