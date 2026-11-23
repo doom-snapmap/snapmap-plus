@@ -187,6 +187,12 @@ int sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms)
     return alive && playing == SH_COMBAT_PAIN_NONE && now_ms <= until_ms;
 }
 
+int sh_ai_dying_ask_again(int alive, int alert_cycle, int now_ms, int until_ms)
+{
+    return !alive && alert_cycle != SH_AI_ALERT_DYING && alert_cycle != SH_AI_ALERT_DEAD && alert_cycle >= 0 &&
+           now_ms <= until_ms;
+}
+
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
 {
     return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
@@ -4486,13 +4492,40 @@ static int parked_slot_of_fsm(void *fsm)
     return -1;
 }
 
+/* The alert cycle of a demon (-1 unreadable). */
+static int alert_cycle_of(void *ai)
+{
+    int v = -1;
+    __try { v = *(const int *)((const uint8_t *)ai + SH_AI_OFF_ALERT_CYCLE); }
+    __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* A dying request on a demon this product parked (released or not), said in the backend log with what became of
+ * it: the bench reads it beside the engine's "dead but not ALERTCYCLE_DYING" line (R-TG1). */
+static void dying_note(void *fsm, const char *how, uint8_t taken)
+{
+    int i, used = (int)g_parked_used;
+    for (i = 0; i < used; i++) {
+        void *ai = g_parked[i].ai;
+        if (!ai || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id || alert_fsm_of(ai) != fsm) continue;
+        ai_log("SCRIPTS: dying request on a parked demon (slot %d, released %d): %s, taken %d, alert cycle %d", i,
+               (int)g_parked[i].released, how, (int)taken, alert_cycle_of(ai));
+        return;
+    }
+}
+
 static uint8_t fsm_request_detour(void *fsm, int code)
 {
     uint8_t taken = g_fsm_request_orig(fsm, code);
     int slot, now = 0;
+    if (code == SH_AI_CODE_DYING && fsm && !taken) dying_note(fsm, "first ask", taken);
     if (taken || !fsm || !sh_ai_fsm_code_yields(code)) return taken;
     slot = parked_slot_of_fsm(fsm);
-    if (slot < 0 || InterlockedCompareExchange(&g_parked[slot].fsm_busy, 1, 0) != 0) return taken;
+    if (slot < 0 || InterlockedCompareExchange(&g_parked[slot].fsm_busy, 1, 0) != 0) {
+        if (code == SH_AI_CODE_DYING) dying_note(fsm, slot < 0 ? "not parked now" : "busy", taken);
+        return taken;
+    }
     if (gm_clock(&now)) {
         InterlockedExchange(&g_parked[slot].pain_until, (LONG)(now + SH_AI_PAIN_TAKE_MS));
         __try {
@@ -4500,6 +4533,7 @@ static uint8_t fsm_request_detour(void *fsm, int code)
             taken = g_fsm_request_orig(fsm, code);
         } __except (av_only(GetExceptionCode())) { taken = 0; }
     }
+    if (code == SH_AI_CODE_DYING) dying_note(fsm, "after leaving ExecuteDoomscript", taken);
     InterlockedExchange(&g_parked[slot].fsm_busy, 0);
     return taken;
 }
@@ -4525,6 +4559,14 @@ static void pain_take_step(void)
                     void *fsm = alert_fsm_of(ai);
                     int code = g_pain_code ? g_pain_code(ai) : 0;
                     done = fsm && code && g_fsm_request_target(fsm, code);
+                } else if (sh_ai_dying_ask_again(!(health <= 0.0f), alert_cycle_of(ai), now, (int)until)) {
+                    /* The death's request found the alert cycle in ExecuteDoomscript, whose way out to ac_default
+                     * is a state link the FSM takes at its next update, not inside a request: the dying code is
+                     * asked again each frame, as a stock state's dead check would, until the alert cycle takes it
+                     * (else the think finds the demon dead outside the dying cycle and forces it, R-TG1). */
+                    void *fsm = alert_fsm_of(ai);
+                    done = !fsm || g_fsm_request_target(fsm, SH_AI_CODE_DYING);
+                    if (done) dying_note(fsm, "asked again a frame later", 1);
                 }
             } __except (av_only(GetExceptionCode())) { done = 1; }
         }

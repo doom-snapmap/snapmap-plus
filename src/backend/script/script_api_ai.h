@@ -215,6 +215,9 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
  * the clip, and the script hears of it through on.pain). The demon is the
  * script's again when the reaction is over. Pure. */
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
+/* 1 when a parked demon's death should ask its alert cycle for the dying code again this frame: dead, its alert
+ * cycle readable and neither ALERTCYCLE_DYING nor _DEAD, inside the window the refused request opened. */
+int sh_ai_dying_ask_again(int alive, int alert_cycle, int now_ms, int until_ms);
 /* One parked demon (the engine side's table; the FSM threads read it without
  * a lock). drives: the slot is this entity's (its spawn id now, id_now,
  * matches) and not released, so IsRunningScript answers what the park holds;
@@ -1060,6 +1063,12 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
     0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x30, 0xFE, 0xFF, 0xFF, 0xFF
 };
 #define SH_AI_TRANSCODE_NONE        0
+/* The alert cycle the AI is in (alertCycle_t; written only by VK 0x1403DD2C0): ALERTCYCLE_DYING 5, _DEAD 6. The
+ * think (VK 0x1403E0FE0) prints "is dead but not ALERTCYCLE_DYING or ALERTCYCLE_DEAD" for a dead AI outside both. */
+#define SH_AI_OFF_ALERT_CYCLE       0x21958u
+#define SH_AI_ALERT_DYING           5
+#define SH_AI_ALERT_DEAD            6
+#define SH_AI_CODE_DYING            242
 #define SH_AI_PAIN_TAKE_MS          250      /* how long the park stays open for a request the alert cycle refused */
 #define SH_AI_PATH_LENGTH_STOLEN 14
 /* The footstep table selector's window: two register saves and push rsi,
