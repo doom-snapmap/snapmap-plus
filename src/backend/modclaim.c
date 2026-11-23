@@ -20,6 +20,10 @@
 static SRWLOCK g_lock = SRWLOCK_INIT;      /* the records and the key */
 static sh_key *g_key;
 static char *g_key_folder;
+static char *g_name;                      /* the account name the game showed last (NULL: not read yet) */
+#define MC_OLD_KEYS 8
+static sh_key *g_old[MC_OLD_KEYS];        /* inactive keys read for their claims' secrets */
+#define MC_KEY_SECTION "publishing-key"    /* {"offer": "pending"}: the backup offer after the first publish */
 static char *g_root;
 static ULONGLONG g_deadline;              /* the busy store's waits end here (GetTickCount64), 0 none */
 
@@ -43,12 +47,22 @@ static void mc_why(char **why, const char *fmt, ...)
     va_end(ap);
 }
 
+/* Forget the loaded keys (lock held): the next use reads the active one again. */
+int modclaim_signer_loaded(char id[17]);
+
+static void mc_keys_drop(void)
+{
+    int i;
+    if (g_key) { sh_key_free(g_key); g_key = NULL; }
+    for (i = 0; i < MC_OLD_KEYS; i++) if (g_old[i]) { sh_key_free(g_old[i]); g_old[i] = NULL; }
+}
+
 void modclaim_set_key_folder(const char *folder)
 {
     AcquireSRWLockExclusive(&g_lock);
     free(g_key_folder);
     g_key_folder = folder ? sh_text(folder) : NULL;
-    if (g_key) { sh_key_free(g_key); g_key = NULL; }
+    mc_keys_drop();
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -107,6 +121,7 @@ int modclaim_signer(modnet_signer *out, int *made, char **why)
         free(pattern);
         ok = sh_key_load_or_create(folder, &g_key, why);
         if (ok && !had && made) *made = 1;
+        if (ok && g_name) (void)sh_key_set_name(g_key, g_name[0] ? g_name : NULL);
         if (ok) mc_logf("MODS: publish: %s the publishing key %.16s", had ? "using" : "made", sh_key_public(g_key));
         free(folder);
     }
@@ -115,27 +130,65 @@ int modclaim_signer(modnet_signer *out, int *made, char **why)
     return ok;
 }
 
-static int mc_secret(const char *ref, char out[MODNET_HASH_HEX + 1])
-{
-    int ok;
-    AcquireSRWLockShared(&g_lock);
-    ok = g_key && sh_key_claim_secret(g_key, ref, out);
-    ReleaseSRWLockShared(&g_lock);
-    return ok;
-}
+static mpj *mc_section(const char *section);
 
-static void mc_fingerprint(char out[17])
+/* The id of the key whose secret authorises the claim of `ref`: the record's "key" when it names one, else the
+ * active key's (a new claim). */
+static void mc_claim_key(const char *ref, char out[17])
 {
+    mpj *m;
+    const mpj *c, *k;
     out[0] = 0;
     AcquireSRWLockShared(&g_lock);
-    if (g_key) {
-        char sha[SH_MB_HASH_HEX + 1];
-        const char *pub = sh_key_public(g_key);
-        sh_mb_sha256_hex((const unsigned char *)pub, strlen(pub), sha);
-        memcpy(out, sha, 16);
-        out[16] = 0;
-    }
+    m = mc_section(MODCLAIM_CLAIMS_SECTION);
+    c = m ? mpj_get(m, ref) : NULL;
+    k = c ? mpj_get(c, "key") : NULL;
+    if (k && k->type == MPJ_STR && strlen(k->text) == 16) memcpy(out, k->text, 17);
+    else if (g_key) sh_key_claim_id(g_key, out);
     ReleaseSRWLockShared(&g_lock);
+    mpj_free(m);
+}
+
+/* The secret of the claim of `ref`, from the key that made the claim (SPEC 4.2: a restore keeps the former key as
+ * inactive so its claims' secrets stay derivable). A claim whose key is on no file here is claimed anew with the
+ * active key (4.4: a lost key). `key_id` gets the id of the key used. */
+static int mc_secret(const char *ref, char out[MODNET_HASH_HEX + 1], char key_id[17])
+{
+    char want[17], have[17];
+    int ok = 0, i;
+    mc_claim_key(ref, want);
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_key) {
+        sh_key_claim_id(g_key, have);
+        if (want[0] && strcmp(want, have)) {
+            sh_key *old = NULL;
+            for (i = 0; i < MC_OLD_KEYS && g_old[i] && !old; i++) {
+                char id[17];
+                sh_key_claim_id(g_old[i], id);
+                if (!strcmp(id, want)) old = g_old[i];
+            }
+            if (!old) {
+                char *folder = mc_key_folder();
+                sh_key *found = NULL;
+                if (folder && sh_key_find(folder, want, &found, NULL)) {
+                    for (i = 0; i < MC_OLD_KEYS && g_old[i]; i++) {}
+                    if (i == MC_OLD_KEYS) { sh_key_free(g_old[0]); memmove(g_old, g_old + 1, sizeof g_old - sizeof g_old[0]); i--; }
+                    g_old[i] = old = found;
+                }
+                free(folder);
+            }
+            if (old) {
+                ok = sh_key_claim_secret(old, ref, out);
+                if (ok && key_id) memcpy(key_id, want, 17);
+            } else mc_logf("MODS: publish: the key that claimed item '%s' is not on this computer; it is claimed anew", ref);
+        }
+        if (!ok) {
+            ok = sh_key_claim_secret(g_key, ref, out);
+            if (ok && key_id) memcpy(key_id, have, 17);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    return ok;
 }
 
 /* ------------------------------------------------------------ records */
@@ -221,11 +274,9 @@ static mpj *mc_mods_copy(const mpj *entry)
     return a;
 }
 
-static void mc_claim_store(const char *ref, long long rev, const char *const *units, size_t n)
+static void mc_claim_store(const char *ref, long long rev, const char *const *units, size_t n, const char *fp)
 {
     mpj *m, *c;
-    char fp[17];
-    mc_fingerprint(fp);
     AcquireSRWLockExclusive(&g_lock);
     m = mc_section(MODCLAIM_CLAIMS_SECTION);
     c = mpj_new(MPJ_OBJ);
@@ -516,21 +567,21 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
 {
     modnet_signer signer;
     modnet_result r;
-    char secret[MODNET_HASH_HEX + 1];
+    char secret[MODNET_HASH_HEX + 1], kid[17];
     long long rev, got = 0;
     int code, uploaded = 0;
     unsigned attempt = 0, stale = 0;
     if (removed) *removed = NULL;
     if (nremoved) *nremoved = 0;
     if (!mc_ref_ok(ref)) { mc_why(why, "the published item's id is not one Snapmap+ can claim"); return MODNET_E_ARG; }
-    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret)) return MODNET_E_CONFIG;
+    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, kid)) return MODNET_E_CONFIG;
     rev = mc_rev_of(ref) + 1;
     for (;;) {
         char (*gone)[MODNET_HASH_HEX + 1] = NULL;
         size_t ngone = 0;
         code = modnet_map_claim(ref, units, n, secret, rev, &signer, &got, &gone, &ngone, io, &r);
         if (code == MODNET_OK) {
-            mc_claim_store(ref, got > 0 ? got : rev, units, n);
+            mc_claim_store(ref, got > 0 ? got : rev, units, n, kid);
             mc_pending_drop(ref);
             if (removed) *removed = gone; else free(gone);
             if (nremoved) *nremoved = ngone;
@@ -566,7 +617,7 @@ int modclaim_release(const char *ref, const modnet_io *io, char **why)
     int code;
     unsigned attempt = 0, stale = 0;
     if (!mc_ref_ok(ref)) return MODNET_OK;
-    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret)) return MODNET_E_CONFIG;
+    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, NULL)) return MODNET_E_CONFIG;
     rev = mc_rev_of(ref) + 1;
     for (;;) {
         code = modnet_map_release(ref, secret, rev, &signer, &got, io, &r);
@@ -681,7 +732,7 @@ int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, cha
     held = calloc((size_t)c->n, sizeof *held);
     if (!refs || !secrets || !held) { free((void *)refs); free((void *)secrets); free(held); mpj_free(c); return MODNET_E_NOMEM; }
     for (i = 0; i < c->n; i++) {
-        if (!mc_secret(c->keys[i], held[n])) continue;
+        if (!mc_secret(c->keys[i], held[n], NULL)) continue;
         refs[n] = c->keys[i];
         secrets[n] = held[n];
         n++;
@@ -706,4 +757,193 @@ int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, cha
     mpj_free(answer);
     free(json);
     return MODNET_OK;
+}
+
+/* ------------------------------------------------------------ the key's own surface (SPEC 4.2, 4.3; DS-K) */
+
+void modclaim_set_account_name(const char *name)
+{
+    char *folder = NULL;
+    int changed;
+    AcquireSRWLockExclusive(&g_lock);
+    changed = !g_name || strcmp(g_name, name ? name : "");
+    if (changed) {
+        free(g_name);
+        g_name = sh_text(name ? name : "");
+        if (g_key) {
+            (void)sh_key_set_name(g_key, g_name && g_name[0] ? g_name : NULL);
+            folder = mc_key_folder();
+            if (folder && !sh_key_save(g_key, folder, NULL)) mc_logf("MODS: publish: the key's account name could not be kept");
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    free(folder);
+    if (changed) mc_logf("MODS: publish: the signed-in account name is %s", name && name[0] ? "read" : "empty (signed out)");
+}
+
+/* 1 when this computer has a publishing key (none is made here). */
+static int mc_key_exists(char id[17])
+{
+    char *folder, *pattern;
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int had = 0;
+    id[0] = 0;
+    if (modclaim_signer_loaded(id)) return 1;
+    folder = mc_key_folder();
+    pattern = folder ? sh_textf("%s\\*.key", folder) : NULL;
+    h = pattern ? FindFirstFileA(pattern, &fd) : INVALID_HANDLE_VALUE;
+    if (h != INVALID_HANDLE_VALUE) { had = 1; FindClose(h); }
+    free(pattern);
+    free(folder);
+    if (had && modclaim_signer(NULL, NULL, NULL)) (void)modclaim_signer_loaded(id);
+    return had;
+}
+
+int modclaim_signer_loaded(char id[17])
+{
+    int ok;
+    AcquireSRWLockShared(&g_lock);
+    ok = g_key != NULL;
+    if (ok && id) sh_key_claim_id(g_key, id);
+    ReleaseSRWLockShared(&g_lock);
+    return ok;
+}
+
+void modclaim_key_offer(int pending)
+{
+    mpj *m;
+    AcquireSRWLockExclusive(&g_lock);
+    m = mc_section(MC_KEY_SECTION);
+    if (m && mpj_set(m, "offer", mpj_new_str(pending ? "pending" : "done")))
+        (void)mc_section_save(MC_KEY_SECTION, m);
+    mpj_free(m);
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+int modclaim_key_offer_pending(void)
+{
+    mpj *m;
+    const mpj *o;
+    int pending;
+    AcquireSRWLockShared(&g_lock);
+    m = mc_section(MC_KEY_SECTION);
+    ReleaseSRWLockShared(&g_lock);
+    o = m ? mpj_get(m, "offer") : NULL;
+    pending = o && o->type == MPJ_STR && !strcmp(o->text, "pending");
+    mpj_free(m);
+    return pending;
+}
+
+char *modclaim_key_status_json(void)
+{
+    char id[17];
+    int exists = mc_key_exists(id);
+    return sh_textf("{\"exists\":%s,\"id\":\"%s\",\"offer\":%s}", exists ? "true" : "false", exists ? id : "",
+                    exists && modclaim_key_offer_pending() ? "true" : "false");
+}
+
+int modclaim_key_backup(const char *path, const char *passphrase, char **why)
+{
+    char id[17];
+    int ok;
+    if (why) *why = NULL;
+    if (!mc_key_exists(id)) {
+        mc_why(why, "%s", "You have no publishing key yet. Snapmap+ makes one the first time you publish a map with mods.");
+        return 0;
+    }
+    AcquireSRWLockShared(&g_lock);
+    ok = g_key && sh_key_backup(g_key, passphrase, path, why);
+    ReleaseSRWLockShared(&g_lock);
+    if (ok) {
+        modclaim_key_offer(0);
+        mc_logf("MODS: publish: the publishing key %s was backed up", id);
+    }
+    return ok;
+}
+
+int modclaim_key_restore(const char *path, const char *passphrase, char **why)
+{
+    sh_key *k = NULL;
+    char *folder;
+    char id[17];
+    int r;
+    if (why) *why = NULL;
+    r = sh_key_restore(path, passphrase, &k, why);
+    if (r != SH_KEY_RESTORE_OK) return r;
+    folder = mc_key_folder();
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_name) (void)sh_key_set_name(k, g_name[0] ? g_name : NULL);
+    if (!folder || !sh_key_make_active(k, folder, why)) r = SH_KEY_RESTORE_DAMAGED;
+    else mc_keys_drop();   /* the former key stays on file as an inactive key: its claims keep their secrets */
+    ReleaseSRWLockExclusive(&g_lock);
+    sh_key_claim_id(k, id);
+    sh_key_free(k);
+    free(folder);
+    if (r == SH_KEY_RESTORE_OK) {
+        modclaim_key_offer(0);
+        mc_logf("MODS: publish: the publishing key %s was restored from a backup and is the active key", id);
+    } else if (why && !*why) mc_why(why, "%s", "The restored key could not be kept on this computer.");
+    return r;
+}
+
+int modclaim_secret_for(const char *ref, char out[MODNET_HASH_HEX + 1], char key_id[17])
+{
+    if (!modclaim_signer(NULL, NULL, NULL)) return 0;
+    return mc_secret(ref, out, key_id);
+}
+
+/* A JSON string of `s` with its quotes (malloc'd). */
+static char *mc_jstr(const char *s)
+{
+    size_t n = s ? strlen(s) : 0, i, o = 0;
+    char *out = (char *)malloc(n * 6 + 3);
+    if (!out) return NULL;
+    out[o++] = '"';
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { out[o++] = '\\'; out[o++] = (char)c; }
+        else if (c < 0x20) o += (size_t)_snprintf_s(out + o, 7, _TRUNCATE, "\\u%04x", c);
+        else out[o++] = (char)c;
+    }
+    out[o++] = '"';
+    out[o] = 0;
+    return out;
+}
+
+static char *mc_key_answer(int ok, const char *message)
+{
+    char *st = modclaim_key_status_json(), *msg = mc_jstr(message ? message : ""), *out;
+    out = st && msg ? sh_textf("{\"ok\":%s,\"message\":%s,\"key\":%s}", ok ? "true" : "false", msg, st) : NULL;
+    free(st);
+    free(msg);
+    return out;
+}
+
+char *modclaim_key_action(const char *arg)
+{
+    const char *a = arg ? arg : "", *t1 = strchr(a, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+    char *why = NULL, *path = NULL, *out;
+    int ok;
+    if (!strcmp(a, "status")) return mc_key_answer(1, "");
+    if (!strcmp(a, "later")) { modclaim_key_offer(0); return mc_key_answer(1, ""); }
+    if (!t1 || !t2 || !(path = sh_textn(t1 + 1, (size_t)(t2 - t1 - 1)))) return mc_key_answer(0, "Snapmap+ did not understand that request.");
+    if (!strncmp(a, "backup\t", 7)) {
+        ok = modclaim_key_backup(path, t2 + 1, &why);
+        if (ok) {
+            const char *leaf = strrchr(path, '\\');
+            char *line = sh_textf("Your publishing key is saved in %s. Keep that file and its passphrase somewhere safe: "
+                                  "together they bring your key back on any computer.", leaf ? leaf + 1 : path);
+            out = mc_key_answer(1, line ? line : "");
+            free(line);
+        } else out = mc_key_answer(0, why ? why : "The backup was not written.");
+    } else if (!strncmp(a, "restore\t", 8)) {
+        ok = modclaim_key_restore(path, t2 + 1, &why) == SH_KEY_RESTORE_OK;
+        out = mc_key_answer(ok, ok ? "Snapmap+ now publishes with the key from this backup. Your earlier key stays on "
+                                     "this computer, so the maps it published can still be republished and unpublished."
+                                   : why ? why : "This file is not a Snapmap+ publishing key backup.");
+    } else out = mc_key_answer(0, "Snapmap+ did not understand that request.");
+    free(why);
+    free(path);
+    return out;
 }

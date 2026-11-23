@@ -23,6 +23,13 @@
  *   "map-pending"  {"<item>": {"do": "claim"|"release", "units": [...]}}
  * The secrets are never stored: the key derives them again.
  *
+ * The key (SPEC 4.2-4.4, DS-K): a claim's record names the key whose secret authorises it ("key"); a restore makes the
+ * backup's key active and keeps the former key on file as an inactive one, so republishing or unpublishing a map it
+ * claimed still derives that claim's secret. A claim whose key is on no file here is claimed anew with the active key.
+ * The account name the game shows as signed in (GetProfileUsername, read on the main thread at each publish) is what
+ * the key's requests present (D31); signed out, none. "publishing-key" {"offer": "pending"|"done"}: the backup offer
+ * after the publish that made the key (4.2), answered by a backup, a restore or Not now.
+ *
  * Retry-After: a busy store's answer is waited out within the caller's budget (modclaim_set_budget). Any thread except
  * where noted; the network calls belong on the modnet worker.
  */
@@ -91,6 +98,29 @@ int  modclaim_known(const char *ref);
 /* The units this computer's claims and queued claims name (the sweep keeps them, 5.17 `held`). The count; *out
  * malloc'd. */
 size_t modclaim_held(char (**out)[MODNET_HASH_HEX + 1]);
+
+/* The signed-in account name the key's requests present (UTF-8; "" signed out). Any thread. */
+void modclaim_set_account_name(const char *name);
+/* 1 when the key is loaded in this process (id: its claim id). */
+int  modclaim_signer_loaded(char id[17]);
+/* The backup offer: pending (1) after the publish that made the key, done (0) once answered. */
+void modclaim_key_offer(int pending);
+int  modclaim_key_offer_pending(void);
+/* {"exists":bool,"id":"<16 hex>","offer":bool} (malloc'd): what Settings and the offer show. */
+char *modclaim_key_status_json(void);
+/* Write the active key's passphrase backup to `path`. 1, or 0 with *why (a sentence). Slow (the key derivation). */
+int  modclaim_key_backup(const char *path, const char *passphrase, char **why);
+/* Restore the backup at `path` and make its key the active one: SH_KEY_RESTORE_* (modkey.h), *why its sentence. */
+int  modclaim_key_restore(const char *path, const char *passphrase, char **why);
+
+/* The Settings page's and the offer's requests (the Mods slot's SH_MODS_ACT_KEY, modui.c): "status"; "later" (the
+ * offer's Not now); "backup\t<path>\t<passphrase>"; "restore\t<path>\t<passphrase>". The answer (malloc'd):
+ * {"ok":bool,"message":"<sentence>","key":<modclaim_key_status_json>}. Never logs the passphrase. Any thread; a backup
+ * or a restore takes about half a second. */
+char *modclaim_key_action(const char *arg);
+
+/* The secret of the claim of `ref` as the next claim or release sends it, and the id of the key it came from (tests). */
+int  modclaim_secret_for(const char *ref, char out[MODNET_HASH_HEX + 1], char key_id[17]);
 
 /* The paths players asked of the units this computer's claims name (3.8): fn(unit, root, path) per entry. MODNET_OK. */
 typedef void (*modclaim_asked_fn)(void *context, const char *unit, const char *root, const char *path);

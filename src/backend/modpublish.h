@@ -178,6 +178,11 @@ typedef struct sh_modpublish_ops {
     /* A one-button notice in the menus (a copy refused): the mod system's
      * one notice queue, modpublished.h sh_modpublished_notice. */
     void (*notice)(void *c, const char *text);
+    /* The signed-in account's name (UTF-8; "" signed out): 1, or 0 when the game's read is not available. Main
+     * thread. NULL: no name is read. */
+    int  (*account_name)(void *c, char *out, size_t cap);
+    /* This publish made the computer's publishing key: the backup offer is pending (SPEC 4.2). NULL: nothing. */
+    void (*key_made)(void *c);
 } sh_modpublish_ops;
 
 #ifdef SH_MODPUBLISH_TESTING

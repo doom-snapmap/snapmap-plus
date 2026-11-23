@@ -113,6 +113,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="menu-note" id="menuNavmeshNote">Checking...</div>
         </div>
       </div>
+      <!-- Settings: the publishing key (publishing_key.js; SPEC-distribution 4.2), never the Mods tab. -->
+      <div class="menu">
+        <button type="button" class="menu-label" data-menu="settings" aria-haspopup="menu" aria-expanded="false">Settings</button>
+        <div class="menu-popup" id="menu-settings" role="menu" hidden>
+          <div class="menu-note">Publishing</div>
+          <button type="button" id="menuKeyBackup" role="menuitem"><span>Save a Backup of Your Publishing Key...</span></button>
+          <button type="button" id="menuKeyRestore" role="menuitem"><span>Restore from a Backup...</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <div class="menu-note" id="menuKeyNote">Open the Mods tab to see your publishing key</div>
+        </div>
+      </div>
     </div>
     <div class="spacer"></div>
     <div class="win-controls">
@@ -445,6 +456,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 </div>
 
+<!-- Settings' publishing key (publishing_key.js): the backup offer after the first publish, a backup's passphrase
+     typed twice, a restore's once; the file comes from the native picker after OK. -->
+<div class="modal-overlay" id="pubKeyModal" style="display:none;" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pubKeyTitle">
+    <div class="modal-title" id="pubKeyTitle">Your publishing key</div>
+    <div class="muted" id="pubKeyNote" style="margin-bottom:4px;"></div>
+    <div id="pubKeyPassRow"><label for="pubKeyPass">Passphrase</label><input type="password" id="pubKeyPass" maxlength="256" autocomplete="new-password"></div>
+    <div id="pubKeyPass2Row"><label for="pubKeyPass2">Type it again</label><input type="password" id="pubKeyPass2" maxlength="256" autocomplete="new-password"></div>
+    <div class="muted" id="pubKeyError" role="alert" style="display:none;"></div>
+    <div class="modal-actions"><button type="button" class="btn" id="pubKeyCancel">Cancel</button><button type="button" class="btn primary" id="pubKeyOk">Save backup...</button></div>
+  </div>
+</div>
+
 <!-- Asset browser opened from the Entities tab. Same browser as the Assets tab, mounted a second
      time into #abModalHost, plus a header/footer that name the entity it is scoped to. -->
 <div class="modal-overlay" id="assetModal" style="display:none;" aria-hidden="true">
@@ -526,6 +550,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 <script src="prefab_viewport.js"></script>
 <script src="prefab_budget.js"></script>
 <script src="mods_tab.js"></script>
+<script src="publishing_key.js"></script>
 <script src="page_keys.js"></script>
 <script src="preview_standin.js" data-preview-only></script>
 <script>
@@ -2214,6 +2239,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- messages from native ----
   function onMessage(d) {
+    if (typeof keyUi !== 'undefined' && keyUi.onMessage(d)) return;
     if (typeof modsUi !== 'undefined' && modsUi.onMessage(d)) return;
     if (d.kind === 'installMismatch') {
       document.getElementById('installMismatch').hidden = false;
@@ -3853,6 +3879,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   });
   modsUi.bind();
   configGet(modsTab.SCRIPTED_MAPS_KEY);
+
+  // ---- Settings: the publishing key (publishing_key.js) ----
+  var keyUi = publishingKey.create({
+    byId: function(id){ return document.getElementById(id); },
+    post: post, toast: toast, closeMenus: closeMenus,
+    settingsLabel: document.querySelector('.menu-label[data-menu="settings"]')
+  });
+  keyUi.bind();
 
   // The Entities tab's script label (mods_tab.js scriptEntityInfo): a Script node says which
   // script its name runs, offers the names its mod's scripts handle and fire as the Displayname's

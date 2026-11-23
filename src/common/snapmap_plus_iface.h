@@ -448,7 +448,9 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *          any thread: their file work (copies, salts, builds) runs there with
  *          no time limit, and off the main thread their result says
  *          "apply": true, asking for APPLY on the main thread, which brings the
- *          change into the game and answers the finished result. Runs `action`
+ *          change into the game and answers the finished result. KEY (the
+ *          publishing key's Settings requests) runs on any thread and touches no
+ *          engine; its arg carries a passphrase and is never logged. Runs `action`
  *          with `arg` (INSTALL: absolute folders; UNINSTALL and the map
  *          actions: a mod's folder under mods\, see modui.h) and keeps its
  *          result document. Returns 1 when the action ran (the document's "ok"
@@ -489,6 +491,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_APPLY              23    /* main thread: finish the file action that ran off it (its "apply": true) */
 #define SH_MODS_ACT_ADD_MINE           24    /* arg: a downloaded map's mod folder: copy it to the root as one of your mods (any thread) */
 #define SH_MODS_ACT_MAP_UPDATE         26    /* arg: a salt: move the open map's row of that mod to the installed version (D23) */
+#define SH_MODS_ACT_KEY                27    /* arg: the publishing key's Settings request (modclaim.h modclaim_key_action; any thread, no list follows) */
 #define SH_MODS_ACT_CONTENT            25    /* arg: "" map content on disk; "removePlayed": Remove content of maps you only played, then it (any thread) */
 typedef struct sh_mods_call {
     int          op;

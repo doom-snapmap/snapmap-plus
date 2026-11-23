@@ -337,6 +337,11 @@ int sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation)
 
 unsigned sh_modui_generation(void) { return (unsigned)g_gen; }
 
+/* The publishing key's Settings requests and its state (modclaim.h), bound by the publish layer: unbound, the key
+ * is not offered. */
+static char *(*g_key_action)(const char *arg);
+static char *(*g_key_status)(void);
+
 void sh_modui_note_changed(void) { InterlockedIncrement(&g_gen); }
 
 /* ------------------------------------------------------------------ mod scripts */
@@ -2270,6 +2275,12 @@ int sh_modui_list(void)
     }
     mu_putn(&b, "]", 1);
     mu_put_map(&b, &m, &mp);
+    if (g_key_status) {
+        /* the publishing key's state: the backup offer after the first publish shows from it (SPEC 4.2) */
+        char *k = g_key_status();
+        if (k && k[0] == '{') { mu_puts(&b, ",\"publishingKey\":"); mu_puts(&b, k); }
+        free(k);
+    }
     mu_putn(&b, "}", 1);
     mu_map_free(&mp);
     mu_record_free(&rec);
@@ -2299,6 +2310,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_ADD_MINE: return "addToMine";
     case SH_MODS_ACT_CONTENT: return "content";
     case SH_MODS_ACT_MAP_UPDATE: return "mapUpdate";
+    case SH_MODS_ACT_KEY: return "publishingKey";
     default: return "unknown";
     }
 }
@@ -2316,6 +2328,34 @@ static int mu_result_tail(mu_buf *b)
     mu_knum(b, "gen", (unsigned)g_gen, 0);
     mu_putn(b, "}", 1);
     return mu_publish(b);
+}
+
+void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void))
+{
+    g_key_action = action;
+    g_key_status = status;
+}
+
+static int mu_simple_result(int action, int ok, const char *message);
+
+/* SH_MODS_ACT_KEY: the request's answer (an object with ok, message and key) as the action's result. The arg carries
+ * a passphrase: it is never logged. */
+static int mu_key_request(const char *arg)
+{
+    char *doc = g_key_action ? g_key_action(arg) : NULL;
+    size_t n = doc ? strlen(doc) : 0;
+    mu_buf b;
+    if (!doc || n < 2 || doc[0] != '{' || doc[n - 1] != '}') {
+        free(doc);
+        return mu_simple_result(SH_MODS_ACT_KEY, 0, "Snapmap+ could not reach your publishing key.");
+    }
+    memset(&b, 0, sizeof b);
+    mu_putn(&b, "{", 1);
+    mu_kstr(&b, "action", "publishingKey", 1);
+    mu_putn(&b, ",", 1);
+    mu_putn(&b, doc + 1, n - 2);
+    free(doc);
+    return mu_result_tail(&b);
 }
 
 static int mu_simple_result(int action, int ok, const char *message)
@@ -5167,7 +5207,8 @@ int sh_modui_run(int action, const char *arg)
 {
     const sh_modui_engine *e = mu_engine();
     char note[160];
-    /* Off the main thread only the file actions run, and only their file part. */
+    /* Off the main thread only the file actions run, and only their file part; the key's requests touch no engine. */
+    if (action == SH_MODS_ACT_KEY) return mu_key_request(arg);
     if (!mu_on_main() && !mu_file_action(action)) return -1;
     /* Reading a mod's files needs no engine hook; every other action does. */
     if (action != SH_MODS_ACT_FILES && action != SH_MODS_ACT_FILE_TEXT &&

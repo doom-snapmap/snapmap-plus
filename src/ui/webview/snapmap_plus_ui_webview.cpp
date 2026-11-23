@@ -2965,11 +2965,65 @@ static bool ui_pick_mods(bool zip, std::wstring &out)
 
 static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 
+/* The publishing key's backup file (SPEC-distribution 4.2): Save a backup writes one, Restore reads one. Opens in
+ * Documents; the backup is the player's to keep, never the game's folder. Picker thread only. */
+static bool ui_pick_key_file(bool save, std::wstring &out)
+{
+    IFileDialog *dlg = nullptr;
+    bool ok = false;
+    out.clear();
+    if (FAILED(CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dlg))) || !dlg)
+        return false;
+    static const COMDLG_FILTERSPEC kKey[] = { { L"Snapmap+ publishing key backup (*.snapmap-plus-key)", L"*.snapmap-plus-key" } };
+    dlg->SetFileTypes(1, kKey);
+    dlg->SetFileTypeIndex(1);
+    dlg->SetDefaultExtension(L"snapmap-plus-key");
+    dlg->SetTitle(save ? L"Save a backup of your publishing key" : L"Restore your publishing key from a backup");
+    if (save) dlg->SetFileName(L"publishing-key.snapmap-plus-key");
+    {
+        FILEOPENDIALOGOPTIONS opt = 0;
+        if (SUCCEEDED(dlg->GetOptions(&opt)))
+            dlg->SetOptions(opt | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT |
+                            (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+    }
+    {
+        static const GUID kKeyPickerGuid =
+            { 0x5d1f7c20, 0x9a4e, 0x4c38, { 0xb1, 0x6d, 0x0e, 0x73, 0x2a, 0xf9, 0x44, 0xc5 } };
+        dlg->SetClientGuid(kKeyPickerGuid);
+    }
+    {
+        PWSTR docs = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs)) && docs) {
+            IShellItem *folder = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(docs, nullptr, IID_PPV_ARGS(&folder))) && folder) {
+                dlg->SetDefaultFolder(folder);
+                folder->Release();
+            }
+        }
+        if (docs) CoTaskMemFree(docs);
+    }
+    if (SUCCEEDED(dlg->Show(g_hwnd))) {
+        IShellItem *item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out = path;
+                CoTaskMemFree(path);
+                ok = true;
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
 /* The actions whose file work runs on the worker itself (modui.h): never through run_on_main. */
 static bool ui_mods_file_action(int action)
 {
     return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
-           action == SH_MODS_ACT_ADD_MINE;
+           action == SH_MODS_ACT_ADD_MINE || action == SH_MODS_ACT_KEY;
 }
 
 static DWORD WINAPI ui_mods_thread(LPVOID)
@@ -2985,6 +3039,20 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         if (ok) job.arg = sh_webview_json::to_utf8(picked);
         else job.run_rc = -3;
     }
+    if (job.action == SH_MODS_ACT_KEY) {
+        /* "backup\t<passphrase>" or "restore\t<passphrase>" from the page: the file comes from the native picker
+         * here, so the page never names a path ("<op>\t<path>\t<passphrase>" to the backend). */
+        size_t tab = job.arg.find('\t');
+        std::string op = tab == std::string::npos ? job.arg : job.arg.substr(0, tab);
+        if ((op == "backup" || op == "restore") && tab != std::string::npos) {
+            std::wstring picked;
+            HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            bool ok = ui_pick_key_file(op == "backup", picked);
+            if (SUCCEEDED(init)) CoUninitialize();
+            if (ok) job.arg = op + "\t" + sh_webview_json::to_utf8(picked) + job.arg.substr(tab);
+            else job.run_rc = -3;
+        }
+    }
     if (job.action && job.run_rc != -3 && ui_mods_file_action(job.action)) {
         sh_mods_call call;
         memset(&call, 0, sizeof call);
@@ -2993,6 +3061,7 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         call.arg = job.arg.c_str();
         InterlockedExchange(&g_mods_phase, 1);
         job.run_rc = (ui_mods_slot(&call) == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
+        if (job.action == SH_MODS_ACT_KEY) { SecureZeroMemory(&job.arg[0], job.arg.size()); job.arg.clear(); }   /* the passphrase */
         if (job.run_rc == 1 && job.run_doc.find("\"apply\":true") != std::string::npos) {
             /* The game's part: the serving index and the refresh, on DOOM's main thread. */
             UiModsMain m;
@@ -3043,6 +3112,7 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
     case SH_MODS_ACT_CONTENT:            return L"content";
     case SH_MODS_ACT_MAP_UPDATE:         return L"mapUpdate";
+    case SH_MODS_ACT_KEY:                return L"publishingKey";
     default:                      return L"";
     }
 }
@@ -3050,7 +3120,8 @@ static const wchar_t *ui_mods_action_name(int action)
 /* The Files view's reads change nothing, so no fresh document follows them. */
 static bool ui_mods_read_only(int action)
 {
-    return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT || action == SH_MODS_ACT_CONTENT;
+    return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT || action == SH_MODS_ACT_CONTENT ||
+           action == SH_MODS_ACT_KEY;
 }
 
 static int ui_mods_action_code(const std::wstring &name)
@@ -3070,6 +3141,7 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
     if (name == L"content")             return SH_MODS_ACT_CONTENT;
     if (name == L"mapUpdate")           return SH_MODS_ACT_MAP_UPDATE;
+    if (name == L"publishingKey")       return SH_MODS_ACT_KEY;
     return 0;
 }
 

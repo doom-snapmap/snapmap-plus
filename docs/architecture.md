@@ -5704,8 +5704,35 @@ most one request, a larger file in parts, complete), whoever authored the mod;
 the claim seed under DPAPI in `%LOCALAPPDATA%\snapmap-plus\publishing\`), signs
 every write and derives each map's claim secret. The publish hold, the claim
 and the self-repair are `modpublish.c` and `modclaim.c` (see [Publishing a map
-with mods](#publishing-a-map-with-mods)); the key's backup, restore and the
-account name read are DS-K.
+with mods](#publishing-a-map-with-mods)).
+
+The key's own surface (SPEC-distribution 4.2 to 4.4). `publishing\active`
+names the active key's file; every other `.key` file there is an inactive key,
+kept so the claims it made keep their secrets: a claim's record
+(`map-claims`) names its key (`key`, 16 hex of the SHA-256 of the public
+text), and a claim or release derives its secret from that key, inactive or
+not (`mc_secret`); a claim whose key is on no file here is claimed anew with
+the active key (a lost key). A backup is `<name>.snapmap-plus-key`, JSON with
+the public half, `kdf` (PBKDF2-SHA256, 600000 rounds, a 16-byte salt), a
+12-byte nonce and `sealed` (AES-256-GCM through CNG of the private scalar and
+the seed, then the tag); a restore checks the tag ("That passphrase does not
+open this backup.") and that the sealed scalar signs for the public point
+("This file is not a Snapmap+ publishing key backup."), writes the key and
+makes it active. The Snapmap+ window's **Settings** menu has Publishing: Save a
+Backup of Your Publishing Key and Restore from a Backup (`publishing_key.js`):
+the passphrase is typed twice for a backup, the native host asks for the file
+(Documents first) and runs the request on its worker through the Mods slot's
+`SH_MODS_ACT_KEY` (`publishingKey`, `modclaim_key_action`), and the fields are
+cleared when the dialog closes; the passphrase is never logged. The publish
+that makes the key sets `publishing-key` `{"offer": "pending"}`, the list
+document carries `publishingKey` (`exists`, `id`, `offer`), and the window
+shows the offer once ("Snapmap+ made a publishing key for you. It lets only you
+republish or unpublish your maps' mod content. Save a backup of it?", Save
+backup / Not now); a backup, a restore or Not now answers it. At each publish
+the account name is read on the main thread with the game's
+`GetProfileUsername` (VK 0x141209920, GL 0x141208c50, `signatures.c`), the
+name the main menu's "Signed in as" shows, and the key's requests present it
+(`X-Publisher-Name`, D31); signed out, none is sent.
 
 The closure follows these rules:
 

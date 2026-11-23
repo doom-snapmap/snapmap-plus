@@ -188,3 +188,6 @@ int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, cha
     (void)fn; (void)context; (void)io; (void)why;
     return MODNET_OK;
 }
+
+void modclaim_set_account_name(const char *name) { (void)name; }
+void modclaim_key_offer(int pending) { (void)pending; }

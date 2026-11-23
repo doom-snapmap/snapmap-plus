@@ -787,6 +787,11 @@ int sh_modpublish_publish_start(void *editor, unsigned char overwrite)
     int n;
     if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0) || !mp_on_main()) return 1;
     if (h->state != HOLD_IDLE) return 0;   /* the held publish is still preparing: a second Publish waits for it */
+    if (g_ops.account_name) {
+        /* The name the key's requests present (D31): read from the signed-in game at each publish, never typed. */
+        char name[256];
+        if (g_ops.account_name(g_ops.context, name, sizeof name)) modclaim_set_account_name(name);
+    }
     if (g_ctx.kind != CTX_NONE) mp_ctx_clear();
     memset(&rows, 0, sizeof rows);
     if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) count = 0;
@@ -1440,6 +1445,12 @@ static void mp_prepared(void)
         return;
     }
     h->made_key = job->made_key;
+    if (h->made_key) {
+        /* The first publish made the key: offer its backup once (SPEC 4.2), where the Snapmap+ window shows it. */
+        modclaim_key_offer(1);
+        if (g_ops.key_made) g_ops.key_made(g_ops.context);
+        mp_log("MODS: publish: the publishing key was made; its backup is offered");
+    }
     h->plan = job->plan;
     memset(&job->plan, 0, sizeof job->plan);
     if (job->after) { mp_after_add(h, job->after); }
@@ -2111,12 +2122,39 @@ static int eng_published_query(void *c, const char *cloud_id, unsigned ticket)
 /* The mod system's one notice queue (modpublished.c). */
 static void eng_notice(void *c, const char *text) { (void)c; sh_modpublished_notice(text); }
 
+/* GetProfileUsername(idStr *out) (signatures.c): the name the main menu's "Signed in as" shows. Main thread. */
+typedef char (*eng_profile_name_fn)(void *idstr);
+static eng_profile_name_fn g_profile_name;
+
+static int eng_account_name(void *c, char *out, size_t cap)
+{
+    __declspec(align(16)) uint8_t text[ENG_IDSTR_SIZE];
+    int ok = 0, built = 0;
+    (void)c;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!g_profile_name || !g_eng.idstr_ctor || !g_eng.idstr_dtor || !mp_on_main()) return 0;
+    __try {
+        g_eng.idstr_ctor(text, "");
+        built = 1;
+        if (g_profile_name(text)) {
+            const char *data = *(const char *const *)(text + 0x10);   /* idStr data: inline buffer or heap */
+            if (data) strncpy_s(out, cap, data, _TRUNCATE);
+        }
+        ok = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; out[0] = 0; }
+    if (built) { __try { g_eng.idstr_dtor(text); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    return ok;
+}
+
+static void eng_key_made(void *c) { (void)c; sh_modui_note_changed(); }
+
 static const sh_modpublish_ops ENG_OPS = {
     .on_main = eng_on_main, .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release,
     .editor_token = eng_editor_token, .publish_fail = eng_publish_fail, .start = eng_start, .busy = eng_busy,
     .placed_names = eng_placed_names, .editor_notice = eng_editor_notice, .log = eng_log, .add_tag = eng_add_tag,
     .edit_ids = eng_edit_ids, .published_query = eng_published_query, .remove_tag = eng_remove_tag,
-    .notice = eng_notice
+    .notice = eng_notice, .account_name = eng_account_name, .key_made = eng_key_made
 };
 
 /* ------------------------------------------------------------ detours */
@@ -2377,6 +2415,9 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
         backend_log("MODS: publish: the editor's pacifier did not resolve; a publish with mods prepares without it");
     }
     g_eng.publish_fail = (eng_editor_fn)fail;
+    /* the account name the publishing key presents (D31); without it the key's requests carry no name */
+    g_profile_name = (eng_profile_name_fn)eng_site(results, count, base, "GetProfileUsername");
+    if (!g_profile_name) backend_log("MODS: publish: GetProfileUsername did not resolve; the key presents no account name");
     g_eng.idstr_ctor = (eng_idstr_ctor_fn)ctor;
     g_eng.idstr_dtor = (eng_object_fn)dtor;
     g_eng.main_thread = (DWORD *)thread;
@@ -2417,6 +2458,7 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     sh_modmanifest_set_notice(sh_modpublished_notice);   /* the version rule's S9 (D23) */
     sh_modmanifest_set_carries(sh_modserve_root_carries);
     sh_cache_set_held(modclaim_held);   /* the sweep keeps what this computer's published maps claim */
+    sh_modui_set_key(modclaim_key_action, modclaim_key_status_json);   /* Settings: the key's backup and restore */
    sh_modserve_set_miss_reporter(eng_report_asked);
     InterlockedExchange(&g_eng.ready, 1);
     backend_log("MODS: publish hooks installed (mod content sent before a publish starts, units pinned at its save, "

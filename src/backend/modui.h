@@ -325,6 +325,9 @@ unsigned sh_modui_generation(void);
  * document to an open Mods tab, as after the tab's own actions. The verbs
  * the tab shares (map, uninstall, choose) bump it themselves. Any thread. */
 void sh_modui_note_changed(void);
+/* The publishing key's Settings requests (SH_MODS_ACT_KEY) and its state in the list document ("publishingKey"),
+ * modclaim.h modclaim_key_action and modclaim_key_status_json: each answer malloc'd. Unbound, neither is offered. */
+void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void));
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);

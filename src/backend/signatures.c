@@ -1622,5 +1622,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "44 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 53 56 57 "
       "41 54 41 55 41 56 41 57 48 8D 6C 24 E9 48 81 EC 88 00 00 00",
       0x123C660u, 0x123BB00u },
+    /* GetProfileUsername(idStr *out): the signed-in Bethesda.net account's name, the one the main menu's "Signed in
+     * as" shows; 1 with it assigned, 0 (string untouched) with no account. Takes the lock of its account object, so
+     * main thread only. The publishing key presents it (SPEC-distribution 2.1, D31; R-DS2 5.5, both renderers). */
+    { "GetProfileUsername",
+      "40 56 57 41 56 48 83 EC 50 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 89 AC 24 80 00 00 00 4C 8B F1 "
+      "33 DB 89 5C 24 78 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 E8 ?? ?? ?? ?? 48 8B E8 48 85 C0 74 1D",
+      0x1209920u, 0x1208C50u },
     { NULL, NULL, 0 }   /* terminator */
 };

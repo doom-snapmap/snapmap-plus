@@ -333,7 +333,12 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   yet. Publish?"; No ends it and nothing is published, and Yes uploads with the editor's progress
   line ("Uploading mod content: 84 of 212 MB.") and then publishes. Nothing to send asks nothing.
   The first publish makes this computer's publishing key, which signs what it uploads and claims
-  (it is kept in `%LOCALAPPDATA%\snapmap-plus\publishing\`). A mod the map uses that is not on this
+  (it is kept in `%LOCALAPPDATA%\snapmap-plus\publishing\`), with the SnapMap account name the game
+  shows as signed in. The Snapmap+ window then offers once to save a backup of it, and its Settings
+  menu has Save a Backup of Your Publishing Key and Restore from a Backup: a `.snapmap-plus-key`
+  file sealed with a passphrase, which brings the key back on another computer so the maps it
+  published can still be republished and unpublished (the earlier key stays, for the maps it
+  published). A mod the map uses that is not on this
   computer refuses the publish ("The map was not published: Snapmap+ cannot find the mod Eternal
   Demons on this computer. Build or install it in the Mods tab, or remove its objects, then publish
   again."). Objects whose content is neither on this computer nor in the store, or that the store
