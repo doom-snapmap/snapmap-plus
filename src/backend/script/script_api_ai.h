@@ -235,6 +235,16 @@ void sh_ai_park_take(sh_ai_park_slot *s);
 int      sh_ai_fsm_code_yields(int code);
 /* A refused pain is asked again while the demon lives, no reaction plays and the time is not up (1), else dropped (0). */
 int      sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms);
+/* The index of the state named `want` among an FSM's n state names (a NULL name is skipped), -1 when none. */
+int      sh_ai_fsm_state_find(const char *const *names, int n, const char *want);
+/* The move record an FSM's take-transition virtual is given to enter `target` at once, as the engine's own entrance
+ * move builds it (SH_AI_SIG_FSM_MOVE): zeroed, the target state, idTransitionCode's vtable and code 5. */
+#define SH_AI_FSM_MOVE_SIZE       0x48u
+#define SH_AI_FSM_MOVE_TARGET     0x10u
+#define SH_AI_FSM_MOVE_CODE_VT    0x20u
+#define SH_AI_FSM_MOVE_CODE       0x28u
+#define SH_AI_FSM_MOVE_IMMEDIATE  5
+void     sh_ai_fsm_move_init(unsigned char rec[SH_AI_FSM_MOVE_SIZE], const void *code_vtable, const void *target);
 
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame);
 /* Feed the status read at `frame`; returns the move's state. */
@@ -1001,7 +1011,7 @@ enum sh_ai_sig {
     SH_AI_SIG_WEB_SCALAR_SET,      /* the anim web's set-variable-by-name (animator, atom*, float) */
     SH_AI_SIG_UPDATE_RELATIONS,    /* the senses' UpdateRelations (writes the relation table) */
     SH_AI_SIG_BEST_RELATION,       /* the engine's pick from relations (reads the rows) */
-    SH_AI_SIG_FSM_STATE_ASK,       /* an AI FSM's request through its state links (the pain and death park) */
+    SH_AI_SIG_FSM_MOVE,            /* the entrance move of an AI FSM into a named state (the pain and death park) */
     SH_AI_SIG_GAME_TIME,           /* the game's time record an FSM request is given */
     SH_AI_SIG_COUNT
 };
@@ -1062,6 +1072,15 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
     0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x30, 0xFE, 0xFF, 0xFF, 0xFF
 };
 #define SH_AI_TRANSCODE_NONE        0
+/* The entrance move (SH_AI_SIG_FSM_MOVE, VK 0x14064D330 / GL 0x14064C5B0): an FSM's states are an array at +0x38
+ * with their count at +0x40; the move loads idTransitionCode's vtable with a lea at +0xF0, stores code 5 at +0x10F
+ * and takes the transition through the FSM's vtable +0xA8 at +0x138 (fsm, move, time, 1, 1). */
+#define SH_AI_FSM_STATES            0x38u
+#define SH_AI_FSM_STATE_COUNT       0x40u
+#define SH_AI_FSM_TAKE_SLOT         0xA8u
+#define SH_AI_FSM_MOVE_VT_LEA       0xF0u
+#define SH_AI_FSM_MOVE_CODE_STORE   0x10Fu
+#define SH_AI_FSM_MOVE_TAKE_CALL    0x138u
 /* The alert cycle the AI is in (alertCycle_t; written only by VK 0x1403DD2C0): ALERTCYCLE_DYING 5, _DEAD 6. The
  * think (VK 0x1403E0FE0) prints "is dead but not ALERTCYCLE_DYING or ALERTCYCLE_DEAD" for a dead AI outside both. */
 #define SH_AI_OFF_ALERT_CYCLE       0x21958u

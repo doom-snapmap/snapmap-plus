@@ -2742,9 +2742,18 @@ is touched, and a removed demon answers nil.
   and, found dead outside the dying cycle by its think, was forced dead with
   no death clip. The request is detoured (18-byte window, committed at the
   first park): refused with one of those codes for a parked demon, the park
-  opens for `SH_AI_PAIN_TAKE_MS`, the same request is made with no code, which
-  takes the alert cycle out of `ExecuteDoomscript` by its own link, and the
-  code is asked again, all inside the engine's call. A per-frame step closes
+  opens for `SH_AI_PAIN_TAKE_MS`, the alert cycle is moved from
+  `ExecuteDoomscript` into `ac_default`, and the code is asked again, all inside
+  the engine's call. `ExecuteDoomscript`'s own way out
+  (`Shared_NotExecutingScript`) is a STATE link that the FSM takes only at its
+  next update, after the think has already found a dead demon outside the dying
+  cycle, so neither request takes it inside the call. The move is the one the
+  engine's entrance move makes (VK 0x14064D330, GL 0x14064C5B0; idAI2's entrance
+  animation enters EntranceAnim with it): a record with idTransitionCode's
+  vtable, code 5 and the `ac_default` state from the FSM's states (+0x38, count
+  +0x40), taken through the FSM's vtable +0xA8 with the game time. From
+  `ac_default` an FSMEVENT link leads to `ac_pain_or_death`, which takes the
+  pain or the dying code. A per-frame step closes
   the park when the reaction plays or the time is up, and asks again for a
   pain still refused (the code from the engine's own function, VK
   0x1405FBE70). The command also posts

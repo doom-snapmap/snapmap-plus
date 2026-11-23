@@ -187,6 +187,24 @@ int sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms)
     return alive && playing == SH_COMBAT_PAIN_NONE && now_ms <= until_ms;
 }
 
+int sh_ai_fsm_state_find(const char *const *names, int n, const char *want)
+{
+    int i;
+    if (!names || !want) return -1;
+    for (i = 0; i < n; i++)
+        if (names[i] && !strcmp(names[i], want)) return i;
+    return -1;
+}
+
+void sh_ai_fsm_move_init(unsigned char rec[SH_AI_FSM_MOVE_SIZE], const void *code_vtable, const void *target)
+{
+    int code = SH_AI_FSM_MOVE_IMMEDIATE;
+    memset(rec, 0, SH_AI_FSM_MOVE_SIZE);
+    memcpy(rec + SH_AI_FSM_MOVE_TARGET, &target, sizeof target);
+    memcpy(rec + SH_AI_FSM_MOVE_CODE_VT, &code_vtable, sizeof code_vtable);
+    memcpy(rec + SH_AI_FSM_MOVE_CODE, &code, sizeof code);
+}
+
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
 {
     return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
@@ -4588,38 +4606,67 @@ static void dying_note(void *fsm, const char *how, uint8_t taken)
     }
 }
 
-/* Leave ExecuteDoomscript by its own link, inside the caller's request: ExecuteDoomscript's way out to ac_default
- * (Shared_NotExecutingScript, true once the park opens) is a STATE link, which the plain request (FSMEVENT links
- * only) never takes; the engine's state-link request (SH_AI_SIG_FSM_STATE_ASK) takes it with the game's time, as
- * the FSM's own update would. Without it a parked demon's death found the alert cycle still in ExecuteDoomscript,
- * refused its dying code, and the think forced it dead ("dead but not ALERTCYCLE_DYING", R-TG1 tg1vk32, vk36 to
- * vk38). Falls back to the plain request when either call is missing. */
-typedef uint8_t (*ai_fsm_state_ask_fn)(void *fsm, int code, void *event, int *time);
-typedef void    (*ai_game_time_fn)(void *game, int *out);
-static ai_fsm_state_ask_fn g_fsm_state_ask;
-static ai_game_time_fn     g_game_time;
+/* Leave ExecuteDoomscript inside the caller's request. Its way out to ac_default (Shared_NotExecutingScript, true once
+ * the park opens) is a STATE link, which the FSM takes only at its own next update: neither the plain request
+ * (FSMEVENT links) nor the state-link request (VK 0x14064C900) takes it inside a call (R-TG1 tg1vk48, vk49: the alert
+ * cycle stayed in ExecuteDoomscript, IsRunningScript false). A dead demon's think finds it outside the dying cycle
+ * before that update ("dead but not ALERTCYCLE_DYING"). So the alert cycle is moved into ac_default the way the
+ * engine's own entrance move enters a state (SH_AI_SIG_FSM_MOVE): a move record with idTransitionCode and code 5, taken
+ * through the FSM's vtable +0xA8 with the game time; from ac_default the code the engine asked is accepted (the
+ * FSMEVENT link to ac_pain_or_death, then ac_Dying or the pain). Only an alert cycle in ExecuteDoomscript is moved. */
+typedef void (*ai_game_time_fn)(void *game, int *out);
+typedef void (*ai_fsm_take_fn)(void *fsm, void *move, int *time, uint8_t now, uint8_t forced);
+static ai_game_time_fn g_game_time;
+static const void     *g_fsm_code_vt;   /* idTransitionCode's vtable, from the entrance move's lea */
 
-/* What the leave ask did, for the dying note: the state-link request's answer (0 or 1; 2 + the plain request's answer
- * when a call is missing) and the game time it was given. */
-static int fsm_leave_script(void *fsm, int *time_ms)
+#define FSM_STATES_MAX 256
+
+/* The name of the state an FSM state object holds (its stateData's nameFromDecl), NULL when unreadable. */
+static const char *state_name_of(const uint8_t *st)
 {
-    void *gm = sh_entity_gamemgr();
-    int t[4] = { 0, 0, 0, 0 };
-    *time_ms = -1;
-    if (g_fsm_state_ask && g_game_time && gm) {
-        g_game_time(gm, t);
-        *time_ms = t[0];
-        return g_fsm_state_ask(fsm, SH_AI_TRANSCODE_NONE, NULL, t) ? 1 : 0;
-    }
-    return 2 + (g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE) ? 1 : 0);
+    const uint8_t *data = st ? *(const uint8_t *const *)(st + g_fsm_o_data) : NULL;
+    return data ? *(const char *const *)(data + g_fsm_o_state) : NULL;
 }
 
-static void dying_leave_note(void *fsm, int asked, int time_ms)
+/* 1 the alert cycle was moved into ac_default; 0 it was not in ExecuteDoomscript (nothing done); -1 a call, the
+ * reflection or ac_default is missing; -2 a fault. *time_ms: the game time the move was given. */
+static int fsm_enter_default(void *fsm, int *time_ms)
+{
+    void *gm = sh_entity_gamemgr();
+    int t[4] = { 0, 0, 0, 0 }, n = 0, i, at;
+    const char *names[FSM_STATES_MAX];
+    const uint8_t *const *states = NULL;
+    unsigned char move[SH_AI_FSM_MOVE_SIZE];
+    ai_fsm_take_fn take;
+    *time_ms = -1;
+    if (!fsm || !gm || !g_game_time || !g_fsm_code_vt || !fsm_rf_ready()) return -1;
+    __try {
+        const uint8_t *f = (const uint8_t *)fsm;
+        const char *cur = state_name_of(*(const uint8_t *const *)(f + g_fsm_o_cur));
+        if (!cur || strcmp(cur, "ExecuteDoomscript")) return 0;
+        states = *(const uint8_t *const *const *)(f + SH_AI_FSM_STATES);
+        n = *(const int *)(f + SH_AI_FSM_STATE_COUNT);
+        if (!states || n <= 0) return -1;
+        if (n > FSM_STATES_MAX) n = FSM_STATES_MAX;
+        for (i = 0; i < n; i++) names[i] = state_name_of(states[i]);
+        at = sh_ai_fsm_state_find(names, n, "ac_default");
+        if (at < 0) return -1;
+        take = (ai_fsm_take_fn)vfn(fsm, SH_AI_FSM_TAKE_SLOT);
+        if (!take) return -1;
+        sh_ai_fsm_move_init(move, g_fsm_code_vt, states[at]);
+        g_game_time(gm, t);
+        *time_ms = t[0];
+        take(fsm, move, t, 1, 1);
+    } __except (av_only(GetExceptionCode())) { return -2; }
+    return 1;
+}
+
+static void dying_leave_note(void *fsm, int moved, int time_ms)
 {
     char state[96];
     fsm_state_name(fsm, state, sizeof state);
-    ai_log("SCRIPTS: dying request: the leave ask answered %d at game time %d (state-link request %s, game time %s); "
-           "state now %s", asked, time_ms, g_fsm_state_ask ? "found" : "missing", g_game_time ? "found" : "missing",
+    ai_log("SCRIPTS: dying request: the move into ac_default answered %d at game time %d (entrance move %s, game time "
+           "%s); state now %s", moved, time_ms, g_fsm_code_vt ? "found" : "missing", g_game_time ? "found" : "missing",
            state);
 }
 
@@ -4635,14 +4682,14 @@ static uint8_t fsm_request_detour(void *fsm, int code)
         return taken;
     }
     if (gm_clock(&now)) {
-        int asked = -1, t = -1;
+        int moved = -1, t = -1;
         InterlockedExchange(&g_parked[slot].pain_until, (LONG)(now + SH_AI_PAIN_TAKE_MS));
         __try {
-            asked = fsm_leave_script(fsm, &t);
-            if (code == SH_AI_CODE_DYING) dying_leave_note(fsm, asked, t);
+            moved = fsm_enter_default(fsm, &t);
+            if (code == SH_AI_CODE_DYING) dying_leave_note(fsm, moved, t);
             taken = g_fsm_request_orig(fsm, code);
         } __except (av_only(GetExceptionCode())) { taken = 0; }
-        if (code == SH_AI_CODE_DYING) dying_note(fsm, "after leaving ExecuteDoomscript", taken);
+        if (code == SH_AI_CODE_DYING) dying_note(fsm, "after the move into ac_default", taken);
     } else if (code == SH_AI_CODE_DYING) {
         dying_note(fsm, "no game clock, so not asked again", taken);
     }
@@ -6111,7 +6158,16 @@ int sh_script_ai_install(const uint8_t *module_base)
     else g_live.anim_variable = NULL;
     /* The relations: the senses' table, whose layout the two functions show (the sigs test checks them). */
     if (!r[SH_AI_SIG_UPDATE_RELATIONS].addr || !r[SH_AI_SIG_BEST_RELATION].addr) g_live.relations = NULL;
-    g_fsm_state_ask = (ai_fsm_state_ask_fn)r[SH_AI_SIG_FSM_STATE_ASK].addr;
+    if (r[SH_AI_SIG_FSM_MOVE].addr) {
+        /* idTransitionCode's vtable: lea rcx,[rip+disp] in the entrance move */
+        const uint8_t *m = (const uint8_t *)r[SH_AI_SIG_FSM_MOVE].addr;
+        __try {
+            if (!memcmp(m + SH_AI_FSM_MOVE_VT_LEA, "\x48\x8D\x0D", 3) &&
+                !memcmp(m + SH_AI_FSM_MOVE_CODE_STORE, "\xC7\x44\x24\x78\x05\x00\x00\x00", 8) &&
+                !memcmp(m + SH_AI_FSM_MOVE_TAKE_CALL, "\xFF\x90\xA8\x00\x00\x00", 6))
+                g_fsm_code_vt = m + SH_AI_FSM_MOVE_VT_LEA + 7 + rel32_at(m + SH_AI_FSM_MOVE_VT_LEA + 3);
+        } __except (av_only(GetExceptionCode())) { g_fsm_code_vt = NULL; }
+    }
     g_game_time = (ai_game_time_fn)r[SH_AI_SIG_GAME_TIME].addr;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");

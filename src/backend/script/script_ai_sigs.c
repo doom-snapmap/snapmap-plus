@@ -188,11 +188,13 @@
  *                      nearest entity of the most hostile emotion; a row's emotion at +8 (+0x63), its entity at
  *                      +0x10 (+0x6C), 0x28 bytes a row (+0xD9), starting from EMOTION_MAX 14 (+0x41). Present for
  *                      those offsets; the Enemy SDK's enemy_target.lua makes the same pick.
- *   AiFsmStateAsk      VK 0x14064C900  GL 0x14064BB80  an AI FSM's request through its STATE links (fsm, code, event,
- *                      time): the links an FSM takes at its own update (FUN_14064F1E0, then the transition at
- *                      vtable +0xB0 with group 1). The plain request (VK 0x14064A560) reads FSMEVENT links only, so it
- *                      cannot take ExecuteDoomscript's way out (Shared_NotExecutingScript, VK 0x1405F16D0, a STATE
- *                      link): the death of a parked demon asks this one first (R-TG1, report section 14.4).
+ *   AiFsmMove          VK 0x14064D330  GL 0x14064C5B0  the engine's entrance move of an AI FSM into a named state
+ *                      (owner, path): for each FSM of the path it finds the state among the FSM's states (+0x38,
+ *                      count +0x40), builds a move record (idTransitionCode, code 5, the target) and takes it through
+ *                      the FSM's vtable +0xA8 with the game time. idAI2's entrance animation enters EntranceAnim this
+ *                      way (VK 0x1403D4C80). ExecuteDoomscript's way out (Shared_NotExecutingScript) is a STATE link
+ *                      neither request takes inside a call, so the death of a parked demon moves its alert cycle into
+ *                      ac_default the same way and asks the dying code there (R-TG1, report section 14.4).
  *   AiGameTime         VK 0x14038DE60  GL 0x14038D700  the game time record a request is given (game, out[4]),
  *                      read from the game's +0x49D210 clock. */
 #include <stddef.h>
@@ -412,10 +414,10 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 8B 88 08 08 00 00 48 8B 01 FF 90 80 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 33 ED 4C 8B E0 8B FD 44 8D 7D 0E "
       "41 39 6E 08",
       0x4AAD10u, 0x4A9490u },
-    { "AiFsmStateAsk",
-      "48 8B C4 89 50 10 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 08 48 89 68 18 48 89 70 20 "
-      "49 8B F1 49 8B E8",
-      0x64C900u, 0x64BB80u },
+    { "AiFsmMove",
+      "48 8B C4 57 41 54 41 55 41 56 41 57 48 81 EC A0 00 00 00 48 C7 44 24 30 FE FF FF FF 48 89 58 08 48 89 68 10 "
+      "48 89 70 18 4C 8B FA 4C 8B E9 33 ED 8B F5 8B FD 89 6C 24 38 0F 57 C0 F3 0F 11 44 24 3C",
+      0x64D330u, 0x64C5B0u },
     { "AiGameTime",
       "48 89 5C 24 10 57 48 83 EC 20 48 8D 99 10 D2 49 00 48 8B FA 48 8B 03 48 8D 54 24 30 41 B8 01 00 00 00 "
       "48 8B CB FF 90 D0",

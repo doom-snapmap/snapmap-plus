@@ -730,6 +730,28 @@ static void test_move_state(void)
     CHECK(sh_ai_park_holds(1, 0, 6) == 0);          /* PAIN_FALTER is playing */
     CHECK(sh_ai_park_holds(1, 0, 9) == 0);          /* PAIN_STAGGER is playing */
     CHECK(sh_ai_park_holds(0, 1, 6) == 0);
+    /* the dying park's move into ac_default: the state found by its name among the FSM's states, and the move
+     * record the engine's entrance move builds (zeroed, the target at +0x10, idTransitionCode's vtable at +0x20,
+     * code 5 at +0x28) */
+    {
+        static const char *const states[] = { "ExecuteDoomscript", NULL, "ac_pain_or_death", "ac_default", "ac_Dying" };
+        unsigned char rec[SH_AI_FSM_MOVE_SIZE];
+        void *vt = (void *)(uintptr_t)0x142000123u, *target = (void *)(uintptr_t)0x2000456u, *p = NULL;
+        int code = 0, k, rest = 0;
+        CHECK(sh_ai_fsm_state_find(states, 5, "ac_default") == 3);
+        CHECK(sh_ai_fsm_state_find(states, 5, "ExecuteDoomscript") == 0);
+        CHECK(sh_ai_fsm_state_find(states, 3, "ac_default") == -1);   /* only the first n */
+        CHECK(sh_ai_fsm_state_find(states, 5, "ac_Default") == -1);   /* exact */
+        CHECK(sh_ai_fsm_state_find(NULL, 5, "ac_default") == -1 && sh_ai_fsm_state_find(states, 5, NULL) == -1);
+        memset(rec, 0xCC, sizeof rec);
+        sh_ai_fsm_move_init(rec, vt, target);
+        memcpy(&p, rec + 0x10, 8); CHECK(p == target);
+        memcpy(&p, rec + 0x20, 8); CHECK(p == vt);
+        memcpy(&code, rec + 0x28, 4); CHECK(code == 5);
+        for (k = 0; k < (int)sizeof rec; k++)
+            if ((k < 0x10 || k >= 0x18) && (k < 0x20 || k >= 0x2C) && rec[k]) rest++;
+        CHECK(rest == 0 && SH_AI_FSM_MOVE_SIZE == 0x48u);
+    }
     CHECK(sh_ai_move_step(&m, 0, 10) == SH_AI_MOVE_RUNNING);   /* the command takes effect next think */
     CHECK(sh_ai_move_step(&m, 1, 11) == SH_AI_MOVE_RUNNING);
     CHECK(sh_ai_move_step(&m, 3, 20) == SH_AI_MOVE_RUNNING);
