@@ -4153,6 +4153,17 @@ the count of mod skeletons held at level 4.
 
 ### Map scope
 
+Every mode declares a map by one rule, `sh_modmanifest_listing`: the build that
+serves each row, then (where the caller knows the placed names: the editor's
+load and Play entry) each further build their need closure reaches; a launched
+map (My Maps, the hub, a published or co-op launch) passes its rows alone. The
+save writes a row for every build the placed names reach, so the rows alone
+declare what the editor did. `tests/parity_test.c` holds the rule: it drives a
+map through the editor, Play, a My Maps play, the published map on the author's
+and on a player's machine and both kept copies, and requires every file the
+placed objects reach (found from the served bytes, not the recorded needs) to
+be served with the same bytes in each.
+
 Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
 in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
@@ -5440,8 +5451,12 @@ computes the unit of a name a map places (an entityDef the mod adds, a Toybox
 row, a module, or `*` for the whole mod) when the map leaves the machine. Pure
 file and text work, no engine calls, any thread.
 
-Publish and export do not yet compute the units of their rows (DS-T, DS-X): a
-map row names units once something pins it. `sh_unit_store` writes a manifest
+The pin step (`modpin.c`) turns a map's local rows into pinned rows when the map
+leaves the machine: for each object a row places, the unit from the folder's
+current build, its manifest into the cache, and a module record per placed mod
+module. A unit that does not prove gives the row the whole build, with one log
+line; a row whose folder is not here stays local. Publish and export do not yet
+call it (DS-T, DS-X). `sh_unit_store` writes a manifest
 at `<mods>\.content\units\<hash>.json`. A unit's share of `mod.json` holds only
 the keys the player's build reads (requirements, strings, hud, companions,
 scenes, animation_events, attachment_tags), so a `version` or a note never

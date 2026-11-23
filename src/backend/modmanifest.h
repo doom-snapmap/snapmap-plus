@@ -321,4 +321,14 @@ size_t sh_modmanifest_current_choices(char **out);
  * Returns their count. */
 size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char **out);
 
+/* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
+ * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap
+ * import): per row, the build that serves it (the one the editor substituted, else the one the place resolver names,
+ * which for the player's own map is the root folder's build of the salt whatever build the row records; a pinned
+ * row, its composition), then, when `names` are given, every further build the placed names' closure reaches whose
+ * salt no row declares (per salt the build the row resolver names in the open map's context, else the one the
+ * closure reported). Returns the count and the hashes in *out (malloc'd, free), or -1 when memory ran out. */
+int sh_modmanifest_listing(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
+                           char (**out)[SH_MODMANIFEST_HASH_CAP]);
+
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */

@@ -4721,21 +4721,32 @@ static void test_two_builds_requirements(void)
  * the declared bundles' edits is, never an undeclared local mod's. */
 /* The game's conductor, the text the edits apply to (modregistry.h). */
 #define CONDUCTOR_BASE CONDUCTOR_HEAD "\t\t\tnum = 2;\r\n" CONDUCTOR_STOCK_ITEMS CONDUCTOR_TAIL
+/* The game's whitelist, for a bundle that carries its own copy (a registry file, its diff the bundle's edits). */
+#define WL_BASE "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 2;\n\t\t\titem[0] = \"single_archvile\";\n" \
+    "\t\t\titem[1] = \"single_zombie\";\n\t\t}\n\t}\n}\n"
+static const char *cs_base(const char *source)
+{
+    if (!_stricmp(source, CONDUCTOR)) return CONDUCTOR_BASE;
+    if (!_stricmp(source, WHITELIST)) return WL_BASE;
+    return NULL;
+}
 static int cs_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
 {
+    const char *base = cs_base(source);
     (void)c;
-    if (_stricmp(source, CONDUCTOR)) return SH_MB_STOCK_ABSENT;
-    sh_mb_sha256_hex((const unsigned char *)CONDUCTOR_BASE, strlen(CONDUCTOR_BASE), sha);
-    *size = strlen(CONDUCTOR_BASE);
+    if (!base) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex((const unsigned char *)base, strlen(base), sha);
+    *size = strlen(base);
     return SH_MB_STOCK_OK;
 }
 static int cs_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
 {
+    const char *base = cs_base(source);
     (void)c; (void)sha;
-    if (_stricmp(source, CONDUCTOR)) return SH_MB_STOCK_ABSENT;
-    *len = strlen(CONDUCTOR_BASE);
+    if (!base) return SH_MB_STOCK_ABSENT;
+    *len = strlen(base);
     *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len);
-    memcpy(*bytes, CONDUCTOR_BASE, *len);
+    memcpy(*bytes, base, *len);
     return SH_MB_STOCK_OK;
 }
 
@@ -4811,6 +4822,48 @@ static void test_additive_compose(void)
     CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/hammer") && !strstr(text, "spider_mastermind"));
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+    {
+        /* A bundle whose conductor edits are its block's, and which also carries its own copy of another registry
+         * file (the encounter whitelist): both apply, the copy's diff never replaces the block's edits (the two-demon
+         * pack of R-DS3 lost its conductor rows this way, so its demons had no type in the author's own map). */
+        static const fx_file wl[] = { { WHITELIST, WL_A, -1, "snapPropertyInspector_WhiteListEncounterDecl",
+                                         "single_encounters_white_list_inspector", NULL, 'w' } };
+        static char edits[4096];
+        char wroot[MAX_PATH], hw[65], cause[200], *one;
+        const char *only[1];
+        _snprintf_s(wroot, sizeof wroot, _TRUNCATE, "%s\\compose-both\\mods", top);
+        mkdirs(wroot);
+        one = sh_dt_diff(CONDUCTOR, CONDUCTOR_BASE, strlen(CONDUCTOR_BASE), CONDUCTOR_GUARD, strlen(CONDUCTOR_GUARD), NULL,
+                         cause, sizeof cause);
+        CHECK(one != NULL);
+        _snprintf_s(edits, sizeof edits, _TRUNCATE, "[%s]", one ? one : "");
+        free(one);
+        g_block_edits = edits;
+        make_bundle(wroot, "both", "kbo00000", '9', "\"" WHITELIST "\"", wl, 1, "{\"installedAt\": 400}");
+        {
+            /* another installed mod edits the whitelist, which makes it a file the product generates */
+            static char wedits[4096];
+            static const fx_file none[] = { { CONDUCTOR, CONDUCTOR_SPIDER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'e' } };
+            one = sh_dt_diff(WHITELIST, WL_BASE, strlen(WL_BASE), WL_B, strlen(WL_B), NULL, cause, sizeof cause);
+            CHECK(one != NULL);
+            _snprintf_s(wedits, sizeof wedits, _TRUNCATE, "[%s]", one ? one : "");
+            free(one);
+            g_block_edits = wedits;
+            make_bundle(wroot, "other", "kot00000", '8', "\"" CONDUCTOR "\"", none, 1, "{\"installedAt\": 500}");
+        }
+        g_block_edits = NULL;
+        CHECK(sh_modserve_index_build(wroot) == 2);
+        hash64('9', hw);
+        only[0] = hw;
+        log_clear();
+        CHECK(sh_modserve_scope_set(only, 1, 1) >= 1);
+        CHECK(open_text(WHITELIST, text, sizeof text) == 1);
+        CHECK(log_has("carries its own " WHITELIST));
+        CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/hammer"));
+        CHECK(open_text(WHITELIST, text, sizeof text) == 1 && strstr(text, "single_cyberdemon"));
+        CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+        CHECK(sh_modserve_index_build(root) == 3);
+    }
     /* Converted first-generation packages (their Toybox rows shadow editor
      * decls) follow the declared rule like any mod (owner 2026-11-09): in
      * Play of a map that declares neither, nothing of them serves; a map

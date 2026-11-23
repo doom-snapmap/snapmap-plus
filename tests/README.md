@@ -21,6 +21,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - Installer onboarding tests cover original SnapHak profile relocation, exact
   copies and idempotency, and check that retired package folders are neither
   copied nor created.
+- `parity_test.c` drives one map through every mode (the editor, Play, a My
+  Maps play, the published map on the author's and on a player's machine, both
+  kept copies) through the product's own listing, save, pin and composition,
+  and requires each file the placed objects reach to be served alike in all of
+  them. With `mods=<folder> placed=<names> doom=<install>` it checks a real mod
+  set, copied to a scratch folder first.
 - `nav_heap_test.c` checks full path-search queues, repeated route improvements,
   allocation canaries and the subtree metadata consumed by native removal.
 - `nav_heap_hook_test.c` checks queue hook publication, rollback and bounded

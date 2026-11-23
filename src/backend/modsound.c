@@ -754,7 +754,7 @@ void sh_modsound_test_bind(sh_modsound_open_fn original_open, sh_modsound_loadba
     g_test_hw = hardware;
     if (t && table) {
         for (i = 0; i < table->count; i++) {
-            char req[128];
+            char req[SH_MODSOUND_LEAF_MAX + 32];
             _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s", table->banks[i].leaf);
             sh_modsound_table_add(t, req, table->banks[i].disk_path, table->banks[i].size, table->banks[i].bundle, 0);
         }

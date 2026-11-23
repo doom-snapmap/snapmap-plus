@@ -55,6 +55,18 @@ static void test_names(void)
     CHECK(!sh_modsound_leaf("sound/soundbanks/pc/p6probe_sfx.pck", leaf, sizeof leaf));
     CHECK(!sh_modsound_leaf("generated/decls/sound/mods/p6probe/p6probe_far.decl", leaf, sizeof leaf));
     CHECK(!sh_modsound_leaf("sound/soundbanks/pc/p6probe_sfx.bnk", leaf, 8));
+    {
+        /* The longest stem the builder admits, as the index serves it (<stem>.<16 hex>.bnk): the leaf fits whole. */
+        char req[400], want[300];
+        size_t k;
+        strcpy_s(want, sizeof want, "");
+        for (k = 0; k < SH_MB_BANK_STEM_MAX; k++) want[k] = (char)('a' + (char)(k % 26));
+        want[SH_MB_BANK_STEM_MAX] = 0;
+        strcat_s(want, sizeof want, ".0123456789abcdef.bnk");
+        _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s", want);
+        CHECK(strlen(want) == 255);
+        CHECK(sh_modsound_leaf(req, leaf, sizeof leaf) && !strcmp(leaf, want));
+    }
 
     CHECK(sh_modsound_name_matches(L"p6probe_sfx.bnk", "p6probe_sfx.bnk"));
     CHECK(sh_modsound_name_matches(L"P6Probe_SFX.bnk", "p6probe_sfx.bnk"));

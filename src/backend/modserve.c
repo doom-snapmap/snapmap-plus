@@ -3481,6 +3481,21 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
                        f->request);
             }
         }
+        /* The derived edits join the build's own (an edited copy of another registry file, the conductor's among
+         * them): both apply, neither replaces the other. */
+        if (derived[i] && b->edits && b->edits_len > 2 && b->edits[0] == '[') {
+            size_t dl = strlen(derived[i]), el = b->edits_len;
+            char *both = (char *)malloc(el + dl + 2);
+            while (el > 1 && b->edits[el - 1] != ']') el--;   /* to the array's closing bracket */
+            el--;                                              /* "[a,b" */
+            if (both && el >= 1) {
+                memcpy(both, b->edits, el);   /* "[a,b" */
+                both[el] = ',';
+                memcpy(both + el + 1, derived[i] + 1, dl);   /* "c,d]" and its NUL */
+                free(derived[i]);
+                derived[i] = both;
+            } else free(both);
+        }
         if (derived[i]) { s->edits = derived[i]; s->edits_len = strlen(derived[i]); }
         if (want_decls) {
             decls[i] = (sh_mr_decl *)calloc((size_t)(b->file_count ? b->file_count : 1), sizeof **decls);
