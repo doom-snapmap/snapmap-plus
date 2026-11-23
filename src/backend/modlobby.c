@@ -147,6 +147,65 @@ int sh_modlobby_waiting_line(const sh_modlobby_member *members, size_t count, ch
  * Build 13954591, both renderers: the sites are located by signature and their
  * offsets are equal on both (read in Ghidra on each, R-CO1). Every engine read
  * and call is SEH-guarded; a failed bind installs nothing. */
+
+/* The target of a RIP-relative operand whose opcode bytes are `opcode` at p, else NULL. */
+static void *lb_rip(const uint8_t *p, const char *opcode, size_t n)
+{
+    int32_t d;
+    if (memcmp(p, opcode, n)) return NULL;
+    memcpy(&d, p + n, 4);
+    return (void *)(p + n + 4 + d);
+}
+
+/* The target of a direct call (E8) at p, else NULL. */
+static const void *lb_call(const uint8_t *p)
+{
+    int32_t d;
+    if (p[0] != 0xE8) return NULL;
+    memcpy(&d, p + 1, 4);
+    return p + 5 + d;
+}
+
+static int lb_has(const uint8_t *from, size_t span, const char *bytes, size_t n)
+{
+    for (size_t i = 0; i + n <= span; i++) if (!memcmp(from + i, bytes, n)) return 1;
+    return 0;
+}
+
+/* Every offset the detours and the sender rely on, in the bytes of both renderers' functions (R-CO1, R-LB1). */
+const char *sh_modlobby_check_sites(const sh_modlobby_sites *s, void ***session_slot, const void **acting_lobby)
+{
+    void **session;
+    const void *acting;
+    if (session_slot) *session_slot = NULL;
+    if (acting_lobby) *acting_lobby = NULL;
+    if (!s || !s->try_start || !s->controller || !s->ready || !s->peer || !s->send || !s->confirm) return "a site is missing";
+    /* The sender: the session global at +0x54, the session's game lobby (vtable +0x210) at +0x76, the 0xB6 ready
+     * command at +0x179, the host's own apply on the controller (shell manager +0x918) at +0x146. */
+    if (!(session = (void **)lb_rip(s->send + 0x54, "\x48\x8b\x0d", 3))) return "sender +0x54: the session global";
+    if (memcmp(s->send + 0x76, "\xff\x90\x10\x02\x00\x00", 6)) return "sender +0x76: the session's game lobby";
+    if (memcmp(s->send + 0x179, "\xba\xb6\x00\x00\x00", 5)) return "sender +0x179: the ready command";
+    if (memcmp(s->send + 0x146, "\x48\x8d\x8f\x18\x09\x00\x00", 7)) return "sender +0x146: the host's own apply";
+    /* The controller's start step reads the same session, then its game lobby (session vtable +0x210) and that
+     * lobby's parameters (LB_PARAMETERS, lobby vtable +0x2B8, the same slot CacheReady calls): call [rax+0x210];
+     * mov rcx, rax; mov rdx, [rax]; call [rdx+0x2B8]. The lobby's vtable is in rdx (R-LB1: a check reading the call
+     * through rax could never match, and turned the lobby off on both renderers). */
+    if (lb_rip(s->controller + 0x10, "\x48\x8b\x0d", 3) != (void *)session) return "controller +0x10: the session global";
+    if (memcmp(s->controller + 0xF6, "\xff\x90\x10\x02\x00\x00\x48\x8b\xc8\x48\x8b\x10\xff\x92\xb8\x02\x00\x00", 18))
+        return "controller +0xF6: the game lobby's parameters";
+    /* The joiner's peer state: the acting lobby's call at +0x57, then its start byte. */
+    if (!(acting = lb_call(s->peer + 0x57))) return "peer state +0x57: the acting lobby's call";
+    if (memcmp(s->peer + 0x5C, "\x80\xb8\x8a\xf5\x00\x00\x00", 7)) return "peer state +0x5C: the lobby's start byte";
+    /* The peer records and the users list, as the host's map confirmation and SetLobbyUserReady read them. */
+    if (memcmp(s->confirm + 0x15, "\x48\x69\xdf\xb8\x04\x00\x00\x48\x03\x99\x28\xb7\x00\x00\x83\x3b\x02", 17))
+        return "map confirmation +0x15: the peer records";
+    if (memcmp(s->confirm + 0x28, "\x83\x7b\x04\x01", 4)) return "map confirmation +0x28: the peer's map check";
+    if (!lb_has(s->ready, 0x40, "\x48\x8b\x83\x20\x4e\x00\x00", 7)) return "user ready: the users list";
+    if (session_slot) *session_slot = session;
+    if (acting_lobby) *acting_lobby = acting;
+    return NULL;
+}
+
 #ifndef SH_MODLOBBY_PURE
 #include <stdarg.h>
 #include "hook.h"
@@ -402,64 +461,32 @@ static const uint8_t *lb_site(const sig_result *results, size_t count, const uin
     return site;
 }
 
-static void *lb_rip(const uint8_t *p, const char *opcode, size_t n)
-{
-    int32_t d;
-    if (memcmp(p, opcode, n)) return NULL;
-    memcpy(&d, p + n, 4);
-    return (void *)(p + n + 4 + d);
-}
-
-static void *lb_call(const uint8_t *p)
-{
-    int32_t d;
-    if (p[0] != 0xE8) return NULL;
-    memcpy(&d, p + 1, 4);
-    return (void *)(p + 5 + d);
-}
-
-static int lb_has(const uint8_t *from, size_t span, const char *bytes, size_t n)
-{
-    for (size_t i = 0; i + n <= span; i++) if (!memcmp(from + i, bytes, n)) return 1;
-    return 0;
-}
-
-/* Every offset the detours and the sender rely on, checked in the bytes of both renderers' functions (R-CO1). */
 static int lb_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
-    const uint8_t *confirm;
-    void **session_from_send;
-    g_lb.site_try = lb_site(results, count, base, "SnapmapLobbyTryToStartMatch");
-    g_lb.site_controller = lb_site(results, count, base, "LobbyControllerStartMatch");
-    g_lb.site_ready = lb_site(results, count, base, "LobbySetUserReady");
-    g_lb.site_peer = lb_site(results, count, base, "SessionStateGameLobbyPeer");
-    g_lb.send = lb_site(results, count, base, "SnapmapLobbySendReadyCommand");
-    confirm = lb_site(results, count, base, "LobbyPeerConfirmsMap");
-    if (!g_lb.site_try || !g_lb.site_controller || !g_lb.site_ready || !g_lb.site_peer || !g_lb.send || !confirm) {
+    sh_modlobby_sites sites;
+    const char *failed;
+    void **session = NULL;
+    const void *acting = NULL;
+    g_lb.site_try = sites.try_start = lb_site(results, count, base, "SnapmapLobbyTryToStartMatch");
+    g_lb.site_controller = sites.controller = lb_site(results, count, base, "LobbyControllerStartMatch");
+    g_lb.site_ready = sites.ready = lb_site(results, count, base, "LobbySetUserReady");
+    g_lb.site_peer = sites.peer = lb_site(results, count, base, "SessionStateGameLobbyPeer");
+    g_lb.send = sites.send = lb_site(results, count, base, "SnapmapLobbySendReadyCommand");
+    sites.confirm = lb_site(results, count, base, "LobbyPeerConfirmsMap");
+    if (!sites.try_start || !sites.controller || !sites.ready || !sites.peer || !sites.send || !sites.confirm) {
         backend_log("MODS: lobby: a co-op lobby site did not resolve cleanly");
         return 0;
     }
-    __try {
-        /* The sender: the session's game lobby (vtable +0x210) at +0x76, the 0xB6 ready command at +0x179, the host's
-         * own apply on the controller (shell manager +0x918) at +0x146. */
-        session_from_send = (void **)lb_rip(g_lb.send + 0x54, "\x48\x8b\x0d", 3);
-        if (!session_from_send || memcmp(g_lb.send + 0x76, "\xff\x90\x10\x02\x00\x00", 6) ||
-            memcmp(g_lb.send + 0x179, "\xba\xb6\x00\x00\x00", 5) ||
-            memcmp(g_lb.send + 0x146, "\x48\x8d\x8f\x18\x09\x00\x00", 7)) return 0;
-        /* The controller's start step reads the same session, and its game lobby's parameters (+0x2B8). */
-        if (lb_rip(g_lb.site_controller + 0x10, "\x48\x8b\x0d", 3) != (void *)session_from_send ||
-            memcmp(g_lb.site_controller + 0xF6, "\xff\x90\x10\x02\x00\x00", 6) ||
-            !lb_has(g_lb.site_controller + 0xF6, 0x30, "\xff\x90\xb8\x02\x00\x00", 6)) return 0;
-        /* The joiner's peer state: the acting lobby's call at +0x57, then its start byte. */
-        if (!(g_lb.acting_lobby = (lb_lobby_of_fn)lb_call(g_lb.site_peer + 0x57)) ||
-            memcmp(g_lb.site_peer + 0x5C, "\x80\xb8\x8a\xf5\x00\x00\x00", 7)) return 0;
-        /* The peer records and the users list, as the host's map confirmation and SetLobbyUserReady read them. */
-        if (memcmp(confirm + 0x15, "\x48\x69\xdf\xb8\x04\x00\x00\x48\x03\x99\x28\xb7\x00\x00\x83\x3b\x02", 17) ||
-            memcmp(confirm + 0x28, "\x83\x7b\x04\x01", 4) ||
-            !lb_has(g_lb.site_ready, 0x40, "\x48\x8b\x83\x20\x4e\x00\x00", 7)) return 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-    g_lb.session_slot = session_from_send;
+    __try { failed = sh_modlobby_check_sites(&sites, &session, &acting); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { failed = "a site's bytes could not be read"; }
+    if (failed) {
+        lb_logf("MODS: lobby: the co-op lobby check '%s' did not hold", failed);
+        return 0;
+    }
+    g_lb.session_slot = session;
+    g_lb.acting_lobby = (lb_lobby_of_fn)acting;
     g_lb.shell_slot = (void **)glb_resolve(base, "shell_ptr_slot", NULL);
+    if (!g_lb.shell_slot) backend_log("MODS: lobby: the shell global did not resolve");
     return g_lb.shell_slot != NULL;
 }
 

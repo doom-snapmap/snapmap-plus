@@ -5098,7 +5098,11 @@ that nothing has written for an hour (a running download writes all the time).
 The bind checks every offset it relies on in these functions' bytes (the session
 global, the game lobby slot +0x210, the parameters slot +0x2B8, the 0xB6 command,
 the acting lobby call and its start byte, the peer records and the users list
-+0x4E20) and installs nothing when one differs.
++0x4E20) and installs nothing when one differs; the log names the check that
+did not hold. The checks are one function (`sh_modlobby_check_sites`) that
+`modlobby_sites_test` runs on both executables, also with the four detours'
+windows written over, so a check that cannot match the shipped code fails the
+suite rather than turning publishing maps with mods off in the game.
 
 ### Rawmaps that name mods
 
