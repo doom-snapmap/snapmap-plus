@@ -807,12 +807,12 @@ static void image(const char *path)
     free(base);
 }
 
-/* One salt at the root and in a map's own folder: a stranger's map that
- * brought its copy pages the family from that copy, not the root folder's;
- * with no map open the root folder's serves. */
+/* One salt at the root and as a composition of the content cache: a map that pins the composition pages the
+ * family from that copy, not the root folder's; with no map open the root folder's serves. */
 static void families_follow_the_map(void)
 {
     char root[MAX_PATH], mods[MAX_PATH], own[MAX_PATH], placed[MAX_PATH], hash_own[65], hash_placed[65];
+    static const char COMP[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const char *list[1];
     sh_modvt_family *fams = NULL;
     int n;
@@ -820,20 +820,20 @@ static void families_follow_the_map(void)
     CHECK(mt_temp_dir("modvt_place", root, sizeof root));
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
     _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\vtplace0", mods);
-    _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps\\Vt map\\vtplace0", mods);
+    _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\.content\\served\\%s", mods, COMP);
     CreateDirectoryA(mods, NULL);
     put_mod(own, "vtplace0");
     mt_write(own, "virtual-textures\\fam_sq1.mega2", "root one");
     put_mod(placed, "vtplace0");
     mt_write(placed, "virtual-textures\\fam_sq1.mega2", "the map's own one");
     mt_write(placed, "virtual-textures\\fam_sq2.mega2", "the map's two");
-    CHECK(build_folder(own, hash_own) && build_folder(placed, hash_placed));
+    CHECK(build_folder(own, hash_own) && build_folder(placed, NULL));
+    strcpy_s(hash_placed, sizeof hash_placed, COMP);   /* a composition is named by its folder */
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(mods) == 2);
     n = sh_modvt_collect(&fams);
     CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_own) && fams[0].members == 0x1u);
     free(fams);
-    CHECK(sh_modserve_place_set("maps\\Vt map") >= 0);
     list[0] = hash_placed;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     n = sh_modvt_collect(&fams);
@@ -841,7 +841,6 @@ static void families_follow_the_map(void)
           fams[0].bytes == strlen("the map's own one") + strlen("the map's two"));
     free(fams);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(0);
     mt_remove_tree(root);
 }

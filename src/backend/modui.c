@@ -11,6 +11,8 @@
 #include "modui.h"
 #include "modclaim.h"
 #include "modcache.h"
+#include "modauthor.h"  /* sh_ma_engine_name: a Toybox row's entityDef in the engine's spelling */
+#include "modpin.h"     /* sh_modpin_row_differs: Update only when the installed version changes what a map serves */
 #include "feature_health.h"
 #include "modbundle.h"
 #include "modstore.h"
@@ -544,19 +546,16 @@ static int mu_same_bundle(const mu_model *m, const char *a, const char *b)
     return x >= 0 && x == mu_find_hash(m, b);
 }
 
-/* The entry of `salt`: the root folder's first, else a place's; -1 when none. */
+/* The loaded entry of `salt`; -1 when none. */
 static int mu_find_salt(const mu_model *m, const char *salt, int except)
 {
     size_t i;
-    int pass;
     if (!salt || !salt[0]) return -1;
-    for (pass = 0; pass < 2; pass++)
-        for (i = 0; i < m->list.count; i++) {
-            const sh_ms_entry *e = &m->list.items[i];
-            if ((int)i == except || !e->loaded || _stricmp(e->salt, salt)) continue;
-            if (pass == 0 && e->place[0]) continue;
-            return (int)i;
-        }
+    for (i = 0; i < m->list.count; i++) {
+        const sh_ms_entry *e = &m->list.items[i];
+        if ((int)i == except || !e->loaded || _stricmp(e->salt, salt)) continue;
+        return (int)i;
+    }
     return -1;
 }
 
@@ -617,7 +616,7 @@ static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
     (void)e;
     if (!c[0]) return NULL;
     if (mu_starts(c, "not built: ")) c += 11;
-    if (!strcmp(c, SH_MB_EARLIER) || !strcmp(c, SH_MODSERVE_PLACE_FRESH))   /* already plain sentences */
+    if (!strcmp(c, SH_MB_EARLIER))   /* already a plain sentence */
         return sh_text(c);
     if (mu_starts(c, "scripts\\"))
         /* A script's own message names its file and line, what is wrong and what to do. */
@@ -793,6 +792,12 @@ static void mu_entry_rows(mu_model *m, size_t i)
             if (!name) name = mu_strdup(own);
         }
         u->row_names[u->row_count] = name;
+        /* The entityDef as the engine names it (what a placed entity's inherit spells: "entities/imp_copy" in the
+         * author's spelling is "mods/<salt>/imp_copy"), so mu_row_name_for compares one spelling. */
+        if (def && e->salt[0]) {
+            char *engine = sh_ma_engine_name(e->salt, def, strlen(def));
+            if (engine) { free(def); def = engine; }
+        }
         u->row_defs[u->row_count] = def ? def : mu_strdup("");
         u->row_count++;
         free(tag);
@@ -839,7 +844,7 @@ static void mu_same_files(mu_model *m)
     const char ***blobs = (const char ***)calloc(n ? n : 1, sizeof *blobs);
     size_t *counts = (size_t *)calloc(n ? n : 1, sizeof *counts);
     if (!blobs || !counts) { free((void *)blobs); free(counts); return; }
-    for (i = 0; i < n; i++) if (!m->list.items[i].place[0]) blobs[i] = mu_blobs(&m->list.items[i], &counts[i]);
+    for (i = 0; i < n; i++) blobs[i] = mu_blobs(&m->list.items[i], &counts[i]);
     for (i = 0; i < n; i++) {
         unsigned best = 0;
         int at = -1;
@@ -1009,7 +1014,7 @@ static unsigned mu_published_maps(const mu_model *m, const mu_record *r, int ent
     int k;
     unsigned n = 0;
     const sh_ms_entry *e = entry >= 0 && (size_t)entry < m->list.count ? &m->list.items[entry] : NULL;
-    if (!e || e->place[0]) return 0;
+    if (!e) return 0;
     for (i = 0; i < r->claim_count; i++) {
         int hit = 0;
         for (k = 0; k < r->claims[i].count && !hit; k++) hit = !_stricmp(r->claims[i].salts[k], e->salt);
@@ -1171,19 +1176,6 @@ static void mu_put_borrows(mu_buf *b, const sh_mb_bundle *bd)
     mu_putn(b, "}", 1);
 }
 
-/* The title of the map whose place holds the entry: the record's, else the
- * place's folder name (malloc'd; "" for a root entry). */
-static char *mu_place_title(const sh_ms_entry *e)
-{
-    const char *seg;
-    char *t;
-    if (!e->place[0]) return sh_text("");
-    if ((t = sh_ms_place_title(e->name)) != NULL && t[0]) return t;
-    free(t);
-    seg = strchr(e->place, '\\');
-    return sh_text(seg ? seg + 1 : e->place);
-}
-
 /* One row of the tab: one mod folder (payload v4, docs/webview-ui.md). */
 static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const mu_entry *u)
 {
@@ -1192,7 +1184,6 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     int ok = u->admitted && !u->cause;
     size_t k;
     int i;
-    char *title;
     mu_putn(b, "{", 1);
     mu_kstr(b, "key", e->name, 1);
     mu_kstr(b, "salt", e->salt, 0);
@@ -1210,16 +1201,12 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     mu_kstr(b, "folder", mu_leaf(e->folder), 0);
     {
         /* The organizing folder it sits in at the root of mods\ ("" at the
-         * top, and for a map's place): its name without the last part. */
-        const char *cut = e->place[0] ? NULL : strrchr(e->name, '\\');
+         * top): its name without the last part. */
+        const char *cut = strrchr(e->name, '\\');
         char *group = sh_textn(e->name, cut ? (size_t)(cut - e->name) : 0);
         mu_kstr(b, "group", group ? group : "", 0);
         free(group);
     }
-    mu_kstr(b, "place", e->place, 0);
-    title = mu_place_title(e);
-    mu_kstr(b, "placeTitle", title ? title : "", 0);
-    free(title);
     {
         char *desc = e->loaded ? mu_extra_string(bd, "description") : NULL;
         mu_kstr(b, "description", desc ? desc : "", 0);
@@ -1234,6 +1221,14 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
         mu_str(b, u->row_names[i]);
     }
     mu_putn(b, "]", 1);
+    {
+        /* The SnapMap modules it adds (its own snapModule decls under map-modules/): with its Toybox rows, what an
+         * author can place of it. A mod with neither is used by a map as a whole. */
+        unsigned modules = 0;
+        for (k = 0; e->loaded && k < bd->file_count; k++)
+            if (bd->files[k].is_module && !bd->files[k].stock && !bd->files[k].shadowed) modules++;
+        mu_knum(b, "modules", modules, 0);
+    }
     if (rec->claims_read) mu_knum(b, "publishedMaps", mu_published_maps(m, rec, (int)(u - m->entries)), 0);
     if (e->loaded) {
         mu_put_facts(b, bd);
@@ -1568,6 +1563,8 @@ typedef struct mu_mapmod {
     /* Its row's declared build when the editor serves the row through this
      * (installed) build of its salt (an editor load that substituted it). */
     char declared[SH_MODMANIFEST_HASH_CAP];
+    int pinned;               /* the save writes its row with units (a published or downloaded map's content) */
+    const sh_modmanifest_row *row;   /* the row the save writes for it (in mu_map.save), or NULL */
 } mu_mapmod;
 
 /* A (placed name, mod) match of the closure. */
@@ -1578,6 +1575,10 @@ typedef struct mu_hit { char *name; int mod; } mu_hit;
  * with the map's JSON, its entities, wires and references, and its details. */
 typedef struct mu_map {
     sh_modmanifest_list rows;
+    /* The rows a save would write now (sh_modmanifest_rows_for over the live placed names): the mods the map uses
+     * are exactly these, so the tab never says a map uses a mod the save would drop, or misses one it would add. */
+    sh_modmanifest_list save;
+    int have_save;
     mu_closure closure;
     int entities;             /* entities read, -1 no editor map, -2 not available */
     size_t names;
@@ -1768,16 +1769,23 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
         mp->names = nm.count;
         if (mp->entities >= 0 && nm.count && sh_modserve_active())
             modserve_bundles_for_names_visit((const char *const *)nm.items, nm.count, mu_map_visit, &visit);
+        if (mp->entities >= 0 && !nm.oom)
+            mp->have_save = sh_modmanifest_rows_for((const char *const *)nm.items, nm.count, &mp->save) >= 0;
         mu_names_free(&nm);
     } else if (mp->have_mm) {
         mp->names = count;
         if (count && sh_modserve_active()) modserve_bundles_for_names_visit((const char *const *)names, count, mu_map_visit, &visit);
+        mp->have_save = sh_modmanifest_rows_for((const char *const *)names, count, &mp->save) >= 0;
         sh_modmanifest_names_free(names, count);
     }
     if (mp->entities >= 0) {
         size_t i, k;
-        for (i = 0; i < mp->rows.count; i++) {
-            const sh_modmanifest_row *row = &mp->rows.rows[i];
+        /* The mods the map uses are the rows its save would write; the load's rows stand in only when that could not
+         * be computed (out of memory), and then a row the save would drop still shows until the next save. */
+        const sh_modmanifest_list *src = mp->have_save ? &mp->save : &mp->rows;
+        if (!mp->have_save) mu_log("map: the rows a save would write could not be computed; the tab shows the map's last rows");
+        for (i = 0; i < src->count; i++) {
+            const sh_modmanifest_row *row = &src->rows[i];
             char sub_ok[SH_MODMANIFEST_HASH_CAP];
             int mod = -1;
             sh_modserve_bundle_ref ref;
@@ -1806,11 +1814,32 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             if (mod >= 0) {
                 mp->mods[mod].in_rows = 1;
                 if (row->attached) mp->mods[mod].attached = 1;
+                if (row->pinned) mp->mods[mod].pinned = 1;
+                if (!mp->mods[mod].row) mp->mods[mod].row = row;
                 if (sub_ok[0] && strcmp(row->build, mp->mods[mod].hash))
                     strcpy_s(mp->mods[mod].declared, sizeof mp->mods[mod].declared, row->build);
             }
         }
         if (mp->have_mm) mu_map_attribute(mp);
+        /* A bundle the placed names reached that the save writes no row of is not used by the map: the version rule
+         * (D23) folded it into the installed version's row of the same mod, whose entities and modules it was
+         * serving, so they count there. One mod, one entry, as the saved map will have it. */
+        for (i = 0; mp->have_save && i < mp->mod_count;) {
+            mu_mapmod *x = &mp->mods[i];
+            size_t j, w;
+            if (x->in_rows) { i++; continue; }
+            for (j = 0; j < mp->mod_count; j++) {
+                mu_mapmod *y = &mp->mods[j];
+                if (j == i || !y->in_rows || _stricmp(y->id, x->id)) continue;
+                for (w = 0; w < x->uid_count; w++) mu_mapmod_uid(mp, (int)j, x->uids[w]);
+                y->modules += x->modules;
+                if (x->named) y->named = 1;
+                break;
+            }
+            free(x->uids);
+            memmove(x, x + 1, (mp->mod_count - i - 1) * sizeof *x);
+            mp->mod_count--;
+        }
         if (e->map_info && e->map_info(&mp->info) == 1) {
             mp->have_info = 1;
             /* A rawmap opened as a new map: the ids are the borrowed saved
@@ -1832,6 +1861,7 @@ static void mu_map_free(mu_map *mp)
 {
     size_t i;
     sh_modmanifest_list_free(&mp->rows);
+    sh_modmanifest_list_free(&mp->save);
     mu_closure_free(&mp->closure);
     for (i = 0; i < mp->mod_count; i++) free(mp->mods[i].uids);
     free(mp->mods);
@@ -1849,10 +1879,19 @@ static int mu_row_is_mod(const mu_model *m, const sh_modmanifest_row *row, const
     return mu_same_bundle(m, row->build, x->hash) || (x->id[0] && !_stricmp(row->salt, x->id));
 }
 
-/* The mod a map entry's bundle is installed as (entry index), or -1. */
+/* The installed folder (entry index) a mod of the map is, or -1 when it is not installed: the folder whose build
+ * serves it, else the folder of the build its save row names, else the installed folder of its namespace. A
+ * composition (a published or downloaded map's own content) is no folder, so without the last step the folder of the
+ * same mod installed here would not show as in this map. */
 static int mu_mapmod_entry(const mu_model *m, const mu_mapmod *x)
 {
-    return mu_find_hash(m, x->hash);
+    int at = mu_find_hash(m, x->hash);
+    /* the build the save writes for it (a row moved to the installed version while a composition still serves) */
+    if (at < 0 && x->row) at = mu_find_hash(m, x->row->build);
+    /* a row of the save names the mod by its namespace: a local row follows the installed folder of it (D9), and a
+     * pinned row is served by its composition with that folder alongside in the editor (D26) */
+    if (at < 0 && x->in_rows) at = mu_find_salt(m, x->id, -1);
+    return at;
 }
 
 /* A manifest row's state under the asset rule (modserve.h
@@ -2100,7 +2139,7 @@ static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
         char *salt = mu_copy_str(mpj_get(list->items[i], "salt")), *request = mu_copy_str(mpj_get(list->items[i], "request"));
         char *by = mu_copy_str(mpj_get(list->items[i], "by")), *name = NULL;
         for (k = 0; salt && k < m->list.count && !name; k++)
-            if (!m->list.items[k].place[0] && !_stricmp(m->list.items[k].salt, salt)) name = mu_folder_name(&m->list.items[k]);
+            if (!_stricmp(m->list.items[k].salt, salt)) name = mu_folder_name(&m->list.items[k]);
         if (salt && request && request[0]) {
             if (!first) mu_putn(b, ",", 1);
             first = 0;
@@ -2122,6 +2161,27 @@ static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
 /* The map entries the payload lists: every manifest row and every mod a
  * placed name reaches (one only another mod needs is listed too). */
 static size_t mu_map_mod_count(const mu_map *mp) { return mp->mod_count; }
+
+/* A placed name of a mod (mods/<salt>/<rest>) as the Toybox names it: the row of that mod whose entityDef is it,
+ * written as the engine names it or as its author does (entities/<rest>); else its last part. */
+static const char *mu_placed_title(const mu_model *m, const char *salt, const char *name)
+{
+    const char *rest = NULL, *leaf;
+    size_t i, sl = salt ? strlen(salt) : 0;
+    int k;
+    if (!_strnicmp(name, "mods/", 5) && sl && !_strnicmp(name + 5, salt, sl) && name[5 + sl] == '/') rest = name + 6 + sl;
+    for (i = 0; i < m->list.count; i++) {
+        if (_stricmp(m->list.items[i].salt, salt ? salt : "")) continue;
+        for (k = 0; k < m->entries[i].row_count; k++) {
+            const char *def = m->entries[i].row_defs[k];
+            if (!def || !def[0]) continue;
+            if (!_stricmp(def, name) || (rest && !_strnicmp(def, "entities/", 9) && !_stricmp(def + 9, rest)))
+                return m->entries[i].row_names[k];
+        }
+    }
+    leaf = strrchr(name, '/');
+    return leaf ? leaf + 1 : name;
+}
 
 static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt);
 static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
@@ -2230,6 +2290,27 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_kbool(b, "attached", x->attached, 0);
             /* A map-level row and nothing of it placed: "declared, nothing placed". */
             mu_kbool(b, "nothingPlaced", x->attached && !x->uid_count && !x->modules, 0);
+            mu_kbool(b, "pinned", x->pinned, 0);
+            {
+                /* The objects of the mod the map places, once each, as the Toybox names them (else the name's last
+                 * part): the row the save writes names them, and the map carries their pieces. */
+                size_t q, w;
+                int n = 0;
+                mu_key(b, "objects", 0);
+                mu_putn(b, "[", 1);
+                for (q = 0; x->row && q < x->row->name_count; q++) {
+                    const char *pn = x->row->names[q], *show;
+                    int dup = 0;
+                    if (!pn || !pn[0]) continue;
+                    show = mu_placed_title(m, x->id, pn);
+                    for (w = 0; w < q && !dup; w++)
+                        dup = x->row->names[w] && x->row->names[w][0] && !_stricmp(mu_placed_title(m, x->id, x->row->names[w]), show);
+                    if (dup) continue;
+                    if (n++) mu_putn(b, ",", 1);
+                    mu_str(b, show);
+                }
+                mu_putn(b, "]", 1);
+            }
             mu_kstr(b, "build", x->hash, 0);
             {
                 /* 5.10: a row of another version than the installed mod offers Update. */
@@ -3320,7 +3401,7 @@ static int mu_launch_idle(void)
     return InterlockedCompareExchange(&g_launch, MU_LAUNCH_ENDED, MU_LAUNCH_RUNNING) == MU_LAUNCH_RUNNING;
 }
 
-/* The build the loaded map's place resolver (sh_modserve_row_build) names for
+/* The build the row resolver (sh_modserve_row_build) names for
  * `row` when it is not the row's own: 1 with its hash in `out`. */
 static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap)
 {
@@ -3404,6 +3485,8 @@ static int mu_scope_now_declared(const char *phase)
     (void)e->scope_activate(phase);
     return changed;
 }
+
+int sh_modui_scope_refresh(const char *why) { return mu_on_main() ? mu_scope_now_declared(why) : -1; }
 
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
 
@@ -3636,6 +3719,38 @@ int sh_modui_poll_main(void *context)
     mu_drop_tick();
     mu_undo_tick();
     mu_scope_tick(1);
+    {
+        /* What the map places of mods changed (an object placed, deleted, undone, or picked in an inspector): the
+         * document moves, so an open Mods tab shows at once which mods the map now uses. Read once a second, and only
+         * while some mod is installed: the names of the map's objects under a mod's namespace, as a set. */
+        static ULONGLONG next;
+        static unsigned long long last;
+        static int known;
+        ULONGLONG now = GetTickCount64();
+        if (e->placed_names && sh_modserve_active() && now >= next) {
+            mu_names nm;
+            int r;
+            next = now + 1000;
+            memset(&nm, 0, sizeof nm);
+            r = e->placed_names(mu_names_add, &nm);
+            if (r >= 0 && !nm.oom) {
+                unsigned long long sig = 0, n = 0;
+                size_t i;
+                for (i = 0; i < nm.count; i++) {
+                    const char *p;
+                    for (p = nm.items[i]; *p && _strnicmp(p, "mods/", 5); p++) {}
+                    if (!*p) continue;
+                    sig += (unsigned long long)mu_hash_ci(nm.items[i]) * 2654435761ull + 1;
+                    n++;
+                }
+                sig ^= n << 48;
+                if (known && sig != last) InterlockedIncrement(&g_gen);
+                last = sig;
+                known = 1;
+            }
+            mu_names_free(&nm);
+        }
+    }
     return 1;
 }
 
@@ -3915,18 +4030,13 @@ static const char *mu_entry_title(const sh_ms_entry *s)
 /* The one folder an uninstall of `key` removes, in the tab and the console
  * alike: the folder of that name under mods\, else (the console, by_key) the
  * first folder sh_ms_entry_matches finds for it (a nested folder's own name,
- * or a salt), the player's own before a map's copy. Another folder of the
+ * or a salt). Another folder of the
  * same mod stays, and the dry run says so. Returns the entry, or -1. */
 static int mu_uninstall_target(const mu_model *m, const char *key, int by_key)
 {
     size_t i;
-    int pass;
     for (i = 0; i < m->list.count; i++) if (!strcmp(m->list.items[i].name, key)) return (int)i;
-    for (pass = 0; by_key && pass < 2; pass++)
-        for (i = 0; i < m->list.count; i++) {
-            const sh_ms_entry *s = &m->list.items[i];
-            if ((pass == 0) == (s->place[0] == 0) && sh_ms_entry_matches(s, key)) return (int)i;
-        }
+    for (i = 0; by_key && i < m->list.count; i++) if (sh_ms_entry_matches(&m->list.items[i], key)) return (int)i;
     return -1;
 }
 
@@ -4196,7 +4306,7 @@ static int mu_map_add(const char *key, const mu_out *o)
     mu_map mp;
     mu_record rec;
     mu_buf b;
-    char *msg = NULL, cause[300], *why = NULL, *place = NULL;
+    char *msg = NULL, cause[300], *why = NULL;
     const char *where, *title;
     int entry = -1, ok = 0, r, st;
     size_t i;
@@ -4218,22 +4328,15 @@ static int mu_map_add(const char *key, const mu_out *o)
     for (i = 0; i < m.list.count && entry < 0; i++)
         if (!strcmp(m.list.items[i].name, key) && m.list.items[i].loaded) entry = (int)i;
     for (i = 0; i < m.list.count && entry < 0; i++)
-        if (sh_ms_entry_matches(&m.list.items[i], key) && m.list.items[i].loaded && !m.list.items[i].place[0]) entry = (int)i;
-    for (i = 0; entry >= 0 && m.list.items[entry].place[0] && i < m.list.count; i++)
-        if (!m.list.items[i].place[0] && m.list.items[i].loaded && !_stricmp(m.list.items[i].salt, m.list.items[entry].salt))
-            entry = (int)i;
+        if (sh_ms_entry_matches(&m.list.items[i], key) && m.list.items[i].loaded) entry = (int)i;
     title = entry >= 0 ? mu_entry_title(&m.list.items[entry]) : key;
     where = mp.name && mp.name[0] ? mp.name : "the open map";
     st = entry >= 0 ? sh_modserve_bundle_state(m.list.items[entry].bundle.hash, &why) : 0;
     free(why);
-    if (entry >= 0) place = mu_place_title(&m.list.items[entry]);
     if (mp.entities < 0)
         mu_msg(&msg, mp.entities == -1 ? "No map is open in the editor."
                                                                    : "Snapmap+ cannot read this map in this game version; use Send feedback.");
     else if (entry < 0) mu_msg(&msg, "%s is no longer installed; press Refresh.", mu_leaf(key));
-    else if (m.list.items[entry].place[0])
-        mu_msg(&msg, "%s came with the map %s. Add it to your mods first (Add to my mods); then "
-                    "your own maps can use it.", title, place ? place : "");
     else if (sh_mb_editor_only(&m.list.items[entry].bundle))
         /* Editor tweaks are this computer's: every map opened in
          * this editor already has them, a map never records them. */
@@ -4284,7 +4387,6 @@ static int mu_map_add(const char *key, const mu_out *o)
     mu_line(o, "map add %s: %s", key, msg ? msg : "");
     mu_result_head(&b, action, ok, msg ? msg : "");
     free(msg);
-    free(place);
     mu_map_free(&mp);
     mu_record_free(&rec);
     mu_model_free(&m);
@@ -4298,16 +4400,20 @@ static int mu_root_entry(const mu_model *m, const char *salt)
 {
     size_t i;
     for (i = 0; salt && i < m->list.count; i++)
-        if (!m->list.items[i].place[0] && m->list.items[i].loaded && !_stricmp(m->list.items[i].salt, salt)) return (int)i;
+        if (m->list.items[i].loaded && !_stricmp(m->list.items[i].salt, salt)) return (int)i;
     return -1;
 }
 
-/* The sentence for a map row of a mod whose installed version is another build (5.10), or NULL. */
+/* The name of a pinned map row of `salt` whose installed version would change what the map serves (5.10: Update is
+ * offered only then, when an object's unit, or the whole-mod unit of a map-level row, differs from the pinned one;
+ * modpin.h sh_modpin_row_differs), or NULL. An author's own unchanged published map is never told it uses another
+ * version. */
 static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt)
 {
     size_t k;
     for (k = 0; k < mp->rows.count; k++)
-        if (mp->rows.rows[k].pinned && !_stricmp(mp->rows.rows[k].salt, salt) && mu_root_entry(m, salt) >= 0)
+        if (mp->rows.rows[k].pinned && !_stricmp(mp->rows.rows[k].salt, salt) && mu_root_entry(m, salt) >= 0 &&
+            sh_modpin_row_differs(&mp->rows.rows[k]) == 1)
             return sh_modmanifest_row_name(&mp->rows.rows[k]);
     return NULL;
 }
@@ -4365,7 +4471,8 @@ static int mu_map_update(const char *salt, const mu_out *o)
             (void)mu_scope_now_declared("map update");
             InterlockedIncrement(&g_gen);
             mu_mark_modified("Update Mod In Map");
-            if (n == 1) mu_msg(&msg, "This map now uses the version of %s you have installed for its object.", mod);
+            if (!n) mu_msg(&msg, "This map now uses the version of %s you have installed.", mod);
+            else if (n == 1) mu_msg(&msg, "This map now uses the version of %s you have installed for its object.", mod);
             else mu_msg(&msg, "This map now uses the version of %s you have installed for all %zu of its objects.", mod, n);
             mu_log("map update %s: the row moved to the installed build %.16s (%zu placed object(s))", salt,
                    m.list.items[entry].bundle.hash, n);
@@ -4431,8 +4538,7 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
         /* The page names the chosen mod; the line's salt is for the log. */
         sh_ms_list l;
         if (key && key[0] && sh_ms_enumerate(&l)) {
-            const sh_ms_entry *e = sh_ms_find_salt(&l, key, NULL, NULL);
-            if (!e) e = sh_ms_find_salt(&l, key, "*", NULL);
+            const sh_ms_entry *e = sh_ms_find_salt(&l, key, NULL);
             if (e) name = _strdup(mu_entry_title(e));
             sh_ms_list_free(&l);
         }
@@ -4832,21 +4938,23 @@ static void mu_remove_tree(const wchar_t *dir)
 }
 
 /* content (SPEC-distribution 2.10): the map content on disk, one line per kept or played map's mod and the storage
- * line ("Map content: 1.3 GB for 14 maps."), from this computer alone (the Mods tab never asks the store). With arg
- * "removePlayed", Remove content of maps you only played first (5.17). */
-typedef struct mu_lines { mu_buf *b; int n; } mu_lines;
-static void mu_content_line(void *context, const char *line)
+ * line ("Map content: 1.3 GB for 14 maps."), from this computer alone (the Mods tab never asks the store): "lines"
+ * the texts, and "rows" beside them, one per line, the token Add to my mods takes for that line's map mod (5.15), ""
+ * for the storage line. With arg "removePlayed", Remove content of maps you only played first (5.17). */
+typedef struct mu_lines { mu_buf *b, *rows; int n; } mu_lines;
+static void mu_content_line(void *context, const char *line, const char *row)
 {
     mu_lines *l = (mu_lines *)context;
-    if (l->n++) mu_putn(l->b, ",", 1);
+    if (l->n++) { mu_putn(l->b, ",", 1); mu_putn(l->rows, ",", 1); }
     mu_str(l->b, line);
+    mu_str(l->rows, row ? row : "");
 }
 
 static int mu_content(const char *arg)
 {
     const int action = SH_MODS_ACT_CONTENT;
     char *storage, *message = NULL;
-    mu_buf b;
+    mu_buf b, rows;
     mu_lines lines;
     int swept = arg && !strcmp(arg, "removePlayed");
     if (swept) {
@@ -4864,85 +4972,55 @@ static int mu_content(const char *arg)
     mu_kstr(&b, "storage", storage ? storage : "", 0);
     mu_key(&b, "lines", 0);
     mu_putn(&b, "[", 1);
+    memset(&rows, 0, sizeof rows);
     lines.b = &b;
+    lines.rows = &rows;
     lines.n = 0;
     (void)sh_cache_report(mu_content_line, &lines);
     mu_putn(&b, "]", 1);
+    mu_key(&b, "rows", 0);
+    mu_putn(&b, "[", 1);
+    if (rows.len) mu_putn(&b, rows.p, rows.len);
+    mu_putn(&b, "]", 1);
+    free(rows.p);
     free(storage);
     free(message);
     return mu_result_tail(&b);
 }
-/* addToMine (arg: a folder of a downloaded map's mods): copy it to the root
- * of mods\ as one of the player's own mods, which their own maps can then use
- * A salt the root already holds is that folder. */
-static int mu_add_mine(const char *key)
+/* addToMine (arg: a content line's row, mu_content): Add to my mods from a row of a map on this computer
+ * (SPEC-distribution 5.15): the row's units made a mod folder of the player's own, "<name> (my copy)", with a new
+ * salt, built by the rescan. Only the objects that map has. */
+static int mu_add_mine(const char *row)
 {
     const int action = SH_MODS_ACT_ADD_MINE;
-    sh_ms_list l;
-    const sh_ms_entry *e, *own;
-    char *name, *folder, *ownname = NULL, *made = NULL, *cause = NULL, *msg = NULL;
-    int place, usable, ok, rc;
+    sh_cache_copy copy;
+    char *why = NULL, *made = NULL, *cause = NULL, *msg = NULL;
+    int ok = 0, rc;
     mu_buf x;
     memset(&x, 0, sizeof x);
-    if (!key || !key[0]) return mu_simple_result(action, 0, "Select a mod first.");
-    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "Snapmap+ cannot read your mods folder; press Refresh.");
-    e = mu_entry_named(&l, key);
-    if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
-    name = mu_folder_name(e);
-    if (!name) name = _strdup(mu_leaf(e->folder));
-    folder = _strdup(e->folder);
-    place = e->place[0] != 0;
-    usable = e->loaded && sh_ms_entry_usable(e);
-    own = e->salt[0] ? sh_ms_find_salt(&l, e->salt, NULL, NULL) : NULL;
-    if (own) ownname = _strdup(own->name);
-    sh_ms_list_free(&l);
-    if (!name || !folder) { rc = -1; goto out; }
-    if (!place) {
-        mu_msg(&msg, "%s is already one of your mods.", name);
-        mu_kstr(&x, "key", key, 0);
-        rc = mu_file_result(action, 1, msg ? msg : "", &x, 0);
-        goto out;
+    if (!row || !row[0]) return mu_simple_result(action, 0, "Select a map's mod first.");
+    if (!sh_cache_stage_copy(row, &copy, &why)) {
+        mu_log("add to my mods %.16s: refused: %s", row, why ? why : "");
+        rc = mu_simple_result(action, 0, why ? why : "This mod could not be copied.");
+        free(why);
+        return rc;
     }
-    if (ownname) {
-        mu_msg(&msg, "%s is already one of your mods, in mods\\%s.", name, ownname);
-        mu_kstr(&x, "key", ownname, 0);
-        rc = mu_file_result(action, 1, msg ? msg : "", &x, 0);
-        goto out;
-    }
-    if (!usable) {
-        mu_msg(&msg, "%s cannot be added to your mods while it cannot be used; press Refresh.", name);
-        rc = mu_simple_result(action, 0, msg ? msg : "");
-        goto out;
-    }
-    {
-        sh_mb_resolver r;
-        sh_ms_install_stats st;
-        sh_mb_bundle bd;
-        mu_stock stock = { 0 };
-        memset(&st, 0, sizeof st);
-        memset(&bd, 0, sizeof bd);
-        r.installed = NULL;
-        r.installed_context = NULL;
-        r.stock = mu_stock_exists;
-        r.stock_context = &stock;
-        mu_log("add to my mods %s: copying to the root", key);
-        ok = sh_ms_install_to_root(folder, &r, &made, &st, &bd, &cause);
-        sh_mb_free(&bd);
-    }
+    mu_log("add to my mods %.16s: copying %s (%zu object(s)) into your mods", row, copy.name, copy.objects);
+    ok = sh_ms_add_copy(copy.dir, copy.modjson, copy.modjson_len, copy.salt, copy.name, &made, &cause);
     if (ok) {
-        mu_log("add to my mods %s: now mods\\%s", key, made ? made : "");
+        mu_log("add to my mods %.16s: now mods\\%s", row, made ? made : "");
         mu_sync();
-        mu_msg(&msg, "Added %s to your mods, in mods\\%s; your own maps can use it now.", name, made ? made : "");
+        if (copy.objects)
+            mu_msg(&msg, "%s is now one of your mods: the %zu object%s from this map.", copy.name, copy.objects,
+                   copy.objects == 1 ? "" : "s");
+        else mu_msg(&msg, "%s is now one of your mods: what this map uses of it.", copy.name);
     } else {
-        mu_log("add to my mods %s: refused: %s", key, cause ? cause : "");
-        mu_msg(&msg, "%s was not added to your mods: %s.", name, cause && cause[0] ? cause : "it could not be copied");
+        mu_log("add to my mods %.16s: refused: %s", row, cause ? cause : "");
+        msg = mu_sentence_end(sh_textf("%s was not added to your mods: %s", copy.name, cause && cause[0] ? cause : "it could not be copied"));
     }
+    sh_cache_copy_free(&copy);
     mu_kstr(&x, "key", ok && made ? made : "", 0);
     rc = mu_file_result(action, ok, msg ? msg : "", &x, ok);
-out:
-    free(name);
-    free(folder);
-    free(ownname);
     free(made);
     free(cause);
     free(msg);
@@ -4978,7 +5056,7 @@ static int mu_new_mod(const char *name)
     ok = sh_ms_enumerate(&l);
     for (i = 0; ok && i < l.count && !e; i++)
         if (l.items[i].folder && !_stricmp(l.items[i].folder, folder)) e = &l.items[i];
-    if (!e && ok) e = sh_ms_find_salt(&l, salt, NULL, NULL);
+    if (!e && ok) e = sh_ms_find_salt(&l, salt, NULL);
     key = _strdup(e ? e->name : mu_leaf(folder));
     if (e && sh_ms_entry_usable(e))
         msg = sh_textf("Created %s in mods\\%s. Its Example crate is in the Toybox. After you change its files, press "
@@ -5121,12 +5199,9 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
 {
     const mu_entry *u = &m->entries[i];
     const sh_ms_entry *e = u->e;
-    char *title = mu_place_title(e);
-    mu_say(o, "mod mods\\%s (%s%s%s): %s%s%s", e->name, mu_entry_title(e), title && title[0] ? ", downloaded for " : "",
-           title ? title : "",
+    mu_say(o, "mod mods\\%s (%s): %s%s%s", e->name, mu_entry_title(e),
            u->admitted && !u->cause ? "ready" : !strcmp(u->state, "unindexed") ? "not read yet" : "needs attention",
            u->cause ? ": " : "", u->cause ? u->cause : "");
-    free(title);
     if (e->loaded) {
         size_t k;
         for (k = 0; k < e->bundle.warning_list_count; k++) {
@@ -5145,15 +5220,14 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
     mu_model m;
     mu_out o;
     sh_modserve_stats st;
-    size_t i, places = 0;
+    size_t i;
     if (!mu_on_main()) return -1;
     o.fn = line;
     o.context = context;
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     sh_modserve_get_stats(&st);
-    for (i = 0; i < m.list.count; i++) if (m.list.items[i].place[0]) places++;
-    mu_say(&o, "mods folder %s: %zu mod folder(s), %zu of them downloaded for maps; all listed in the Mods tab%s",
-           m.root_ok ? m.root : "(unresolved)", m.list.count, places, m.listed ? "" : "; the folder cannot be read");
+    mu_say(&o, "mods folder %s: %zu mod folder(s); all listed in the Mods tab%s",
+           m.root_ok ? m.root : "(unresolved)", m.list.count, m.listed ? "" : "; the folder cannot be read");
     mu_say(&o, "in use: %d of %d mod(s), %d file(s), %d replaced game file(s), %d conflict(s) (%d combined), %d Toybox row(s)",
            st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
     for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);

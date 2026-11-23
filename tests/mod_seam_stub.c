@@ -50,6 +50,8 @@ int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 int sh_modserve_active(void) { return 0; }
 
 /* The build that serves a row (sh_modserve_row_build): none installed. */
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;
@@ -65,29 +67,6 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
     free(ref->place);
     ref->name = ref->folder = ref->place = NULL;
 }
-
-/* The loaded map's place (sh_modserve_place_*): a parse sets it, a failed
- * one puts it back. */
-static char *g_stub_place, *g_stub_place_prev;
-int sh_modserve_place_pending(void)
-{
-    return sh_modserve_place_load(SH_MODSERVE_PLACE_PUBLISHED);
-}
-int sh_modserve_place_load(const char *place)
-{
-    free(g_stub_place_prev);
-    g_stub_place_prev = g_stub_place;
-    g_stub_place = _strdup(place ? place : "");
-    return 0;
-}
-int sh_modserve_place_restore(void)
-{
-    free(g_stub_place);
-    g_stub_place = g_stub_place_prev;
-    g_stub_place_prev = NULL;
-    return 1;
-}
-char *sh_modserve_place_get(void) { return _strdup(g_stub_place ? g_stub_place : ""); }
 
 int sh_modserve_index_rescan(void)
 {

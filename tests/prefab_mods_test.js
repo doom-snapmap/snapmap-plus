@@ -56,8 +56,16 @@ check(b && b.text === 'Needs mods: ghost.mod +1', 'only the missing ones are nam
 let d = api.detail(st);
 check(d.rows.length === 2 && d.rows[0].label === 'test.door' && d.rows[0].state === 'Installed' && !d.rows[0].missing &&
       d.rows[1].state === 'Not installed' && d.rows[1].missing, 'one row per mod with its state');
-check(d.note === 'Needs mods: 1 is not installed. Load / Place offers to download them when they are available online; ' +
-      'otherwise ask the prefab\'s author for its export.', 'the note says what Load / Place does: ' + d.note);
+check(d.note === 'Needs mods: 1 is not installed. Install it from the prefab\'s export with Install in the Mods tab, then ' +
+      'Load / Place.', 'the note says what to do: ' + d.note);
+/* A mod and the open map, in the Mods tab's words (its mapStateOf, by the mod's namespace). */
+const inMap = salt => ({state: salt === door.salt ? 'objects' : 'out'});
+d = api.detail(api.parse({mods: [door, Object.assign({}, door, {id: 'other.mod', salt: 'othermod'}), ghost]}), inMap);
+check(d.rows[0].state === 'In this map' && d.rows[0].inMap && d.rows[1].state === 'Not in this map' && !d.rows[1].inMap &&
+      d.rows[2].state === 'Not installed' && d.rows[2].missing, 'with a map open, each mod says whether the map uses it');
+check(api.detail(api.parse({mods: [door]}), () => null).rows[0].state === 'Installed', 'no map: installed');
+b = api.badge(api.parse({mods: [door, ghost]}), inMap);
+check(b && b.title === 'test.door (in this map)\nghost.mod (not installed)', 'the pill title says the same: ' + JSON.stringify(b && b.title));
 check(api.detail(api.parse({mods: [ghost, ghost]})).note.indexOf('Needs mods: 2 are not installed.') === 0, 'plural note');
 check(api.detail(api.parse({mods: [door]})).note === 'Every mod this prefab needs is installed.', 'all installed');
 check(api.detail(api.parse('')).rows.length === 0 && api.detail(api.parse('')).note === '', 'no mods, no section');
@@ -84,7 +92,7 @@ check(src.indexOf("post({cmd:'exportPrefab', name: name, folder: selectedPrefabF
 check(src.indexOf("post({cmd:'importPrefab'})") !== -1, 'Import posts importPrefab');
 check(src.indexOf("['prefabExportBtn', 'prefabDeleteBtn', 'prefabLoadBtn']") !== -1, 'Export follows the selection');
 check(/id="pcMods"[\s\S]*id="pcModsRows"[\s\S]*id="pcModsNote"/.test(src), 'Prefab Details has the Mods section');
-check(src.indexOf('pfShowMods(pfModsParse(d.modsStatus))') !== -1, 'details render the mods status');
+check(src.indexOf('pfModsShown = pfModsParse(d.modsStatus);') !== -1 && src.indexOf('pfShowMods(pfModsShown)') !== -1, 'details render the mods status');
 check(src.indexOf('var mbadge = pfModsBadge(prefabMods[') !== -1, 'the list row shows the pill');
 check(src.indexOf('var dmods = d.mods && typeof d.mods') !== -1 && src.indexOf("['mods', 'needs mods']") !== -1,
       'the list reads the mods map and the filter finds them');

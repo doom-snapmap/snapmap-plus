@@ -28,7 +28,6 @@
 #include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
 #include "plain_reason.h"
 #include "modpublished.h"
-#include "modserve.h"     /* the loaded map's place */
 #include "modui.h"        /* SH_MODUI_SCRIPTS_OFF */
 #include "signatures.h"
 #include "config.h"
@@ -385,31 +384,6 @@ static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted
  * detour's entry by the engine caller's return address. */
 static __declspec(thread) int g_parse_kind;
 
-/* The map's place (modserve.h, DECISIONS 11): read from its member and made
- * the loaded map's before anything resolves its rows; a map without one is
- * the player's own and finds its mods at the root. A published read's place
- * is this machine's fact about the item, which only the gate that takes the
- * read can decide: until it does the place is pending, so no build of the
- * root that the map does not name is listed or activated for it. The parse
- * inside a held map's resume keeps the place its hold decided. */
-static void place_prepare_guarded(const char *json, size_t len)
-{
-    char *place = NULL;
-    __try {
-        if (sh_modpublished_resuming()) return;
-        if (g_parse_kind == SH_MODPUB_PARSE_PUBLISHED_ONLINE || g_parse_kind == SH_MODPUB_PARSE_PUBLISHED_OFFLINE) {
-            (void)sh_modserve_place_pending();
-            return;
-        }
-        if (sh_carrier_place(json, len, &place) != 1) { free(place); place = NULL; }
-        (void)sh_modserve_place_load(place ? place : "");
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("MODS: reading the map's place FAULTED; the map finds its mods at the root");
-        (void)sh_modserve_place_load(NULL);
-    }
-    free(place);
-}
-
 /* Read the map's settings rows into the settings of the map being parsed and
  * strip them (map_settings.h). Returns an owned process-heap buffer, or NULL
  * to keep the input. */
@@ -687,7 +661,6 @@ static char *prepare_map_buffer(const char *json, int *refused)
      * same way. A map with no marked volume must not inherit the last map's. */
     sh_nav_bake_set_map(json, len);
 
-    place_prepare_guarded(json, len);
     manifest = manifest_prepare_guarded(json, len, &faulted);
     if (faulted) { *refused = 1; return NULL; }
     if (manifest) current = manifest;
@@ -745,11 +718,11 @@ static const char *rawmap_base_name(const char *path)
 /* The rows the rawmap names that nothing serves, or (size_t)-1 when the
  * check faulted: the map is then refused, never handed to the engine. */
 #define RAWMAP_MISSING_FAULTED ((size_t)-1)
-static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows, char **place)
+static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows)
 {
     memset(rows, 0, sizeof *rows);
     __try {
-        return sh_modpub_rawmap_missing(text, len, rows, place);
+        return sh_modpub_rawmap_missing(text, len, rows);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap's mod check FAULTED; the map is refused");
         memset(rows, 0, sizeof *rows);   /* leaked on purpose: its state is unknown */
@@ -757,20 +730,20 @@ static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifes
     }
 }
 
-static int rawmap_scripts_off_guarded(const sh_modmanifest_list *rows, const char *place)
+static int rawmap_scripts_off_guarded(const sh_modmanifest_list *rows)
 {
     __try {
-        return sh_modpub_rawmap_scripts_off(rows, place);
+        return sh_modpub_rawmap_scripts_off(rows);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap's scripts check FAULTED; the map is refused");
         return -1;
     }
 }
 
-static int rawmap_hold_guarded(const sh_modmanifest_list *rows, const char *name, const char *place)
+static int rawmap_hold_guarded(const sh_modmanifest_list *rows, const char *name)
 {
     __try {
-        return sh_modpub_rawmap_hold(rows, name, place);
+        return sh_modpub_rawmap_hold(rows, name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap hold FAULTED; the map was not loaded");
         return -1;
@@ -801,7 +774,7 @@ static int rawmap_reload_refused(char *sentence, const char *state, const char *
 
 int sh_rawmap_prepare_reload(char **why)
 {
-    char *path, *place = NULL, *cause = NULL, *line;
+    char *path, *cause = NULL, *line;
     const char *name;
     sh_modmanifest_list rows;
     size_t len = 0, missing;
@@ -839,7 +812,7 @@ int sh_rawmap_prepare_reload(char **why)
         return rc;
     }
     free(cause);
-    missing = rawmap_missing_guarded(text, len, &rows, &place);
+    missing = rawmap_missing_guarded(text, len, &rows);
     if (missing == RAWMAP_MISSING_FAULTED) {
         HeapFree(GetProcessHeap(), 0, text);
         rc = rawmap_reload_refused(sh_textf("%s was not opened: %s", name, RAWMAP_CHECK_FAULTED), "refused", path, len,
@@ -847,12 +820,11 @@ int sh_rawmap_prepare_reload(char **why)
         free(path);
         return rc;
     }
-    /* A rawmap that came with its mods follows "Play maps whose mods include
-     * scripts" at every open, however its mods got here. */
-    if ((held = rawmap_scripts_off_guarded(&rows, rawmap_s(place))) != 0) {
+    /* A rawmap whose content is units (pinned rows: it came from elsewhere) follows "Play maps whose mods include
+     * scripts" at every open, however its content got here. */
+    if ((held = rawmap_scripts_off_guarded(&rows)) != 0) {
         sh_modmanifest_list_free(&rows);
         HeapFree(GetProcessHeap(), 0, text);
-        free(place);
         rc = rawmap_reload_refused(sh_textf(held < 0 ? "%s was not opened: %s" : "%s was not opened. %s", name,
                                             held < 0 ? RAWMAP_CHECK_FAULTED : SH_MODUI_SCRIPTS_OFF),
                                    "refused", path, len, 0, why);
@@ -874,9 +846,8 @@ int sh_rawmap_prepare_reload(char **why)
                         path, (unsigned)missing);
         backend_log(line ? line : "RAWMAP: open held -- the map names mods that are not installed");
         free(line);
-        held = rawmap_hold_guarded(&rows, name, rawmap_s(place));
+        held = rawmap_hold_guarded(&rows, name);
         sh_modmanifest_list_free(&rows);
-        free(place);
         /* Its resume parses these bytes (a ZIP is not imported again). */
         if (held > 0) held_keep(text, len, path);
         else HeapFree(GetProcessHeap(), 0, text);
@@ -888,7 +859,6 @@ int sh_rawmap_prepare_reload(char **why)
         else free(sentence);
         return 0;
     }
-    free(place);
     RAWMAP_DIAG(0, "opening", path, 0, "", len, (int)rows.count);
     sh_modmanifest_list_free(&rows);
     g_prepared_len = len;
@@ -964,8 +934,6 @@ static int deser_prepared(const char *json, void *out_map)
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     /* The parsed map's settings become the open map's before anything selects them. */
     sh_map_settings_loaded(rc);
-    /* A parse that failed leaves the open map's place as it was. */
-    if (!rc) (void)sh_modserve_place_restore();
     /* Beside the manifest the preparation kept: which read this was, the map it
      * filled, and the text, for the published-map and offline-play gates. */
     sh_modpublished_parse_seen(g_parse_kind, json, out_map, rc);
@@ -1007,7 +975,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         int rc;
         if (g_prepared == NULL) {
             /* The reload borrowed another saved map's id: that map must not
-             * open in the rawmap's place. */
+             * open in the rawmap's stead. */
             backend_log("RAWMAP: the reload's checked text is gone; the reload parses nothing");
             return 0;
         }
@@ -1843,7 +1811,6 @@ static void settings_on_save(void *out_idstr);
 static void nav_embed_on_save(void *out_idstr);
 static void nav_regions_on_save(void *out_idstr);
 static void manifest_on_save(void *out_idstr);
-static void place_on_save(void *out_idstr);
 
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
  * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
@@ -1893,7 +1860,6 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, un
             settings_on_save(blk);
             nav_embed_on_save(blk);
             manifest_on_save(blk);
-            place_on_save(blk);
             nav_regions_on_save(blk);
 
             len  = *(const int *)(blk + IDSTR_LEN_OFF);
@@ -2255,44 +2221,6 @@ static void manifest_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* Put the open map's place into the map's member (map_carrier.h): its
- * segment of mods\maps\, or no place for a map that finds its mods at the
- * root. */
-static void place_on_save(void *out_idstr)
-{
-    const char *data = NULL;
-    int len = 0;
-    char *body = NULL, *place, err[96] = "";
-    const char *segment;
-    size_t body_len = 0;
-
-    if (!g_idstr_assign || out_idstr == NULL) return;
-    if (!read_out_idstr(out_idstr, &data, &len)) return;
-    if (!(place = sh_modserve_place_get())) {
-        backend_log("MODS: the map's place was not saved (out of memory); it reopens finding its mods at the root");
-        return;
-    }
-    segment = place[0] ? place + sizeof SH_MODSERVE_PLACES : NULL;
-    __try {
-        body = sh_carrier_put_place(data, (size_t)len, segment, &body_len, err, sizeof err);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        body = NULL;
-        strcpy_s(err, sizeof err, "it faulted");
-    }
-    free(place);
-    if (body == NULL) {
-        if (err[0]) {
-            char *line = sh_textf("MODS: the map's place was not saved (%s); it reopens finding its mods at the root", err);
-            backend_log(line ? line : "MODS: the map's place was not saved; it reopens finding its mods at the root");
-            free(line);
-        }
-        return;
-    }
-    if (!replace_out_idstr(out_idstr, body, body_len))
-        backend_log("MODS: the saved map could not be written back; its place is not in this save");
-    HeapFree(GetProcessHeap(), 0, body);
-}
-
 /* Serialize, then embed delivery payloads into the output. Preserve
  * the native bool result on every return.
  */
@@ -2319,7 +2247,6 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     /* Restore retained navigation so ordinary saves preserve it. */
     nav_embed_on_save(out_idstr);
     manifest_on_save(out_idstr);
-    place_on_save(out_idstr);
     /* A save of a map opened from a rawmap makes it a saved map of its own:
      * the edit's id and name are its from now on. */
     open_identity_set(NULL);

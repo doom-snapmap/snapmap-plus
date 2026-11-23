@@ -686,7 +686,7 @@ static void refused_plainly(int parses_before, int refusals_before)
     CHECK(g_parses == parses_before);
     CHECK(log_refused == refusals_before + 1);
     CHECK(HO(refusal, sh_modmanifest_load_refusal(HO_P(0))) &&
-          !strcmp(refusal, "This map was saved in a format this version does not read."));
+          !strcmp(refusal, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
     (void)sh_modmanifest_load_notes_flush(0);
 }
 
@@ -855,12 +855,12 @@ static void saves_carry_no_package_payload(void)
 #define MVAR(name, value) \
     "{\"info\":{\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\"," \
     "\"~type\":\"snapVarString_t\"}"
-#define MROW(salt, name, hash, size) \
-    "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"size\":" size ",\"names\":[]}"
+#define MROW(salt, name, size) \
+    "{\"mod\":\"" salt "\",\"name\":\"" name "\",\"size\":" size ",\"local\":true,\"names\":[]}"
 static const char MOD_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     MVAR("door_label", "RAWMAP_MARK") "]},"
-    "\"snapmap-plus\":{\"format\":1,\"mods\":[" MROW("testalph", "test.alpha", HASH_A, "1048576") "]}}";
+    "\"snapmap-plus\":{\"format\":2,\"mods\":[" MROW("testalph", "test.alpha", "1048576") "]}}";
 /* The same map with a pinned row: its content downloads with no question. */
 static const char PIN_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
@@ -883,12 +883,12 @@ static struct {
 } R;
 
 static int r_on_main(void *c) { (void)c; return 1; }
-static int r_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
+static int r_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char **cause)
 {
-    (void)c; (void)place; (void)subject;
+    (void)c; (void)subject;
     if (cause) *cause = NULL;
     if (R.fault) *(volatile int *)(uintptr_t)R.fault = 0;
-    return (row->pinned || !strcmp(row->build, HASH_A)) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
+    return (row->pinned || !strcmp(row->build, SH_MODMANIFEST_LOCAL_BUILD)) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
 }
 static int r_rescan(void *c) { (void)c; return 1; }
 static int r_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
@@ -899,10 +899,10 @@ static int r_poll(void *c, int ticket)
 { (void)c; (void)ticket; if (R.answered || !R.answer) return 0; R.answered = 1; return R.answer; }
 static void r_release(void *c, int ticket) { (void)c; (void)ticket; }
 static int r_worker_run(void *c, void (*job)(void *), void *ctx) { (void)c; job(ctx); return 1; }
-static int r_fetch(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+static int r_fetch(void *c, const sh_modmanifest_row *row, sh_modpub_progress_fn progress,
                    volatile int *cancel)
 {
-    (void)c; (void)place; (void)progress; (void)cancel;
+    (void)c; (void)progress; (void)cancel;
     R.fetches++;
     if (R.fetch_fails) return -6;   /* MODNET_E_CANCELLED */
     if (!strcmp(row->salt, "testalph")) R.installed = 1;   /* the job's row carries the salt and build only */
@@ -1153,7 +1153,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     sh_rawmap_set_edit_id_reader(fake_edit_id);
     /* The editor has a map open whose row pins a build. */
     CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1);
-    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD));
     sh_modmanifest_list_free(&cur);
     /* A rawmap without rows opened over it: none of the borrowed map's rows stays. */
     CHECK(write_file("rawmap_own_rows.json", plain, staged, sizeof staged));
@@ -1180,7 +1180,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     CHECK(write_file("rawmap_own_rows2.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     CHECK(open_through_reload(plain) == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
-    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD));
     sh_modmanifest_list_free(&cur);
     sh_rawmap_set_branch_tag(1);
     g_fake_edit_id[0] = 0;

@@ -60,7 +60,52 @@ static void log_clear(void) { g_logat = 0; g_logbuf[0] = 0; }
 #include "modcache.h"
 int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, sh_cache_sweep_stats *out)
 { (void)drop_played; (void)held; (void)held_count; if (out) memset(out, 0, sizeof *out); return 1; }
-int sh_cache_report(sh_cache_line_fn fn, void *context) { (void)fn; (void)context; return 0; }
+/* The content report: the test sets the lines and their row tokens (a NULL row is the storage line's). */
+static const char *g_cache_line[4];
+static const char *g_cache_row[4];
+static int g_cache_lines_n;
+int sh_cache_report(sh_cache_line_fn fn, void *context)
+{
+    int i;
+    for (i = 0; i < g_cache_lines_n; i++) fn(context, g_cache_line[i], g_cache_row[i]);
+    return g_cache_lines_n;
+}
+/* Add to my mods' stage: a refusal sentence (g_stage_why) or a staged folder the test prepared in its temp store. */
+static char g_stage_dir[MAX_PATH * 2];
+static const char *g_stage_why;
+static const char *g_stage_json = "{\"name\":\"Stage Mod (my copy)\",\"version\":\"1.0.0\",\"author\":\"tester\"}";
+static const char *g_stage_name = "Stage Mod (my copy)";
+static const char *g_stage_salt = "stagedsr";
+static size_t g_stage_objects;
+static char g_stage_row_seen[200];
+static int g_stage_calls, g_stage_frees;
+int sh_cache_stage_copy(const char *row, sh_cache_copy *out, char **why)
+{
+    g_stage_calls++;
+    strcpy_s(g_stage_row_seen, sizeof g_stage_row_seen, row ? row : "");
+    memset(out, 0, sizeof *out);
+    if (g_stage_why) { if (why) *why = _strdup(g_stage_why); return 0; }
+    out->dir = _strdup(g_stage_dir);
+    out->modjson = _strdup(g_stage_json);
+    out->modjson_len = strlen(g_stage_json);
+    strcpy_s(out->salt, sizeof out->salt, g_stage_salt);
+    out->name = _strdup(g_stage_name);
+    out->objects = g_stage_objects;
+    return 1;
+}
+void sh_cache_copy_free(sh_cache_copy *copy)
+{
+    if (!copy) return;
+    free(copy->dir);
+    free(copy->modjson);
+    free(copy->name);
+    memset(copy, 0, sizeof *copy);
+    g_stage_frees++;
+}
+/* modpin.c is not linked: whether the installed version would change what the pinned row serves (modpin.h). */
+#include "modpin.h"
+static int g_row_differs;
+int sh_modpin_row_differs(const struct sh_modmanifest_row *row) { (void)row; return g_row_differs; }
 char *sh_cache_storage_line(void) { return _strdup("Map content: 0 KB for 0 maps."); }
 int sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out) { return sh_cache_sweep(drop_played, NULL, 0, out); }
 static int g_sweeps_async;
@@ -895,85 +940,6 @@ static void row_build(const char *key, char *out, size_t cap)
 
 /* ---- the tests ------------------------------------------------------------------------------- */
 
-/* ---- the places cleanup (DECISIONS 22) ------------------------------------------------------ */
-
-/* A directory's creation time set `days` back. */
-static void age_dir(const char *dir, unsigned days)
-{
-    wchar_t *w = sh_mb_wpath(dir);
-    HANDLE h = w ? CreateFileW(w, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                               OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL) : INVALID_HANDLE_VALUE;
-    FILETIME now;
-    ULARGE_INTEGER t;
-    GetSystemTimeAsFileTime(&now);
-    t.LowPart = now.dwLowDateTime;
-    t.HighPart = now.dwHighDateTime;
-    t.QuadPart -= (ULONGLONG)days * 86400ULL * 10000000ULL;
-    now.dwLowDateTime = t.LowPart;
-    now.dwHighDateTime = t.HighPart;
-    CHECK(h != INVALID_HANDLE_VALUE && SetFileTime(h, &now, NULL, NULL));
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    free(w);
-}
-
-static void test_places_stay(const char *tmp)
-{
-    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[HO_TEXT], *doc;
-    static const char *const keeps[] = { "Old Keep", "Other Keep" };
-    sh_mb_bundle b;
-    size_t i;
-    printf("-- places: nothing removes a downloaded map's mods by itself; the short view's Remove removes one folder\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\stay\\mods", tmp);
-    CHECK(sh_ms_set_root(root));
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\stay\\built", tmp);
-    mt_write(src, "mod.json", "{\"name\":\"Crate\"}");
-    mt_write(src, "images\\a.bimage", "crate bytes");
-    memset(&b, 0, sizeof b);
-    CHECK(sh_mb_build(src, "cratebox", NULL, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
-    sh_mb_free(&b);
-    for (i = 0; i < 2; i++) {
-        sh_ms_place pl;
-        char note[MAX_PATH];
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate", root, keeps[i]);
-        mt_mkdirs_for(dir);
-        CHECK(mt_copy_tree(src, dir));
-        memset(&pl, 0, sizeof pl);
-        pl.title = keeps[i];
-        _snprintf_s(note, sizeof note, _TRUNCATE, "maps\\%s", keeps[i]);
-        CHECK(sh_ms_place_note(&pl, note));
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s", root, keeps[i]);
-        age_dir(dir, 365);   /* arrived a year ago, never played since */
-    }
-    /* No saved map of the player records either place. */
-    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\stay\\saves", tmp);
-    CreateDirectoryA(saves, NULL);
-    sh_saved_maps_set_root(saves);
-    /* What the product does at start: both places are still there. */
-    (void)sh_ms_recover_work();
-    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
-    for (i = 0; i < 2; i++) {
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\%s\\Crate\\mod.json", root, keeps[i]);
-        CHECK(mt_exists(dir));
-    }
-    /* The player's Remove of one of them removes exactly that folder. */
-    sh_ms_recycle_refuse_for_test(1);
-    doc = run_doc(SH_MODS_ACT_UNINSTALL, "maps\\Old Keep\\Crate");
-    CHECK(has(doc, "\"ok\":true"));
-    free(doc);
-    sh_ms_recycle_refuse_for_test(0);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep\\Crate", root);
-    CHECK(!mt_exists(dir));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Other Keep\\Crate\\mod.json", root);
-    CHECK(mt_exists(dir));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\built\\mod.json", root);
-    CHECK(!mt_exists(dir));
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod.json", src);
-    CHECK(mt_exists(dir));
-    sh_saved_maps_set_root(NULL);
-    CHECK(sh_ms_set_root(g_root));
-    free(run_doc(SH_MODS_ACT_RESCAN, NULL));
-}
-
 int main(int argc, char **argv)
 {
     char fixture[MAX_PATH], payload[MAX_PATH], tmp[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], saves[MAX_PATH * 2];
@@ -1009,7 +975,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"root\":\"") && has(doc, "store\\\\mods\""));
     free(doc);
     dr = doctor(0);
-    CHECK(has(dr, "MODS: doctor: mods folder ") && has(dr, ": 0 mod folder(s), 0 of them downloaded for maps; all listed in the Mods tab"));
+    CHECK(has(dr, "MODS: doctor: mods folder ") && has(dr, ": 0 mod folder(s); all listed in the Mods tab"));
     CHECK(!has(dr, "migration"));
     CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 replaced game file(s), 0 edited copy(ies) of 0 game file(s)"));
     CHECK(has(dr, "MODS: doctor: done\n"));
@@ -1124,7 +1090,7 @@ int main(int argc, char **argv)
     CHECK(!strcmp(salt1, "alexrimp"));
     CHECK(bundle_has(doc, "alex.r2-imp", "\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\""));
     CHECK(bundle_has(doc, "alex.r2-imp", "\"state\":\"ready\",\"cause\":\"\",\"editorRows\":2,\"folder\":\"alex.r2-imp\","
-                                         "\"group\":\"\",\"place\":\"\",\"placeTitle\":\"\""));
+                                         "\"group\":\"\""));
     CHECK(row_has(doc, "alex.r2-imp", "\"editorRowNames\":[") && row_has(doc, "alex.r2-imp", "\"facts\":{\"adds\":"));
     CHECK(row_has(doc, "alex.r2-imp", "\"borrows\":{\"paths\":["));
     CHECK(!row_has(doc, "alex.r2-imp", "\"sameFilesAs\""));
@@ -1294,147 +1260,117 @@ int main(int argc, char **argv)
         CHECK(!prose_ok("the bundle 0123456789abcdef0123 is gone"));
     }
 
-    printf("-- a downloaded map's place: its own group, kept as the map needs it\n");
+    printf("-- the content answer: lines and, beside them, the row token Add to my mods takes (\"\" for none)\n");
     {
-        char built[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "";
-        sh_ms_install_stats st;
-        sh_ms_place place;
-        sh_mb_bundle bd;
-        _snprintf_s(built, sizeof built, _TRUNCATE, "%s\\authoring\\received", tmp);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp", g_root);
-        CHECK(mt_copy_tree(path, built));
-        memset(&st, 0, sizeof st);
-        memset(&place, 0, sizeof place);
-        memset(&bd, 0, sizeof bd);
-        place.title = "Hell Arena";
-        place.map_id = "6ae40b378bf5037d3d63bd99";
-        {
-            sh_mb_resolver r;
-            memset(&r, 0, sizeof r);
-            r.stock = stock_cb;
-            CHECK(HO2(name, cause, sh_ms_install_placed(built, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
-        }
-        if (cause[0]) printf("    placed: %s\n", cause);
-        sh_mb_free(&bd);
-        doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+        g_cache_line[0] = "Imp Arena: R2 Imp copy, 2 objects, 1.2 MB";
+        g_cache_row[0] = "00aa11bb22cc33dd44ee55ff66778899";
+        g_cache_line[1] = "Solo Arena: Solo, 0.4 MB";
+        g_cache_row[1] = "99887766ff55ee44dd33cc22bb11aa00";
+        g_cache_line[2] = "Map content: 1.6 MB for 2 maps.";
+        g_cache_row[2] = NULL;
+        g_cache_lines_n = 3;
+        doc = run_doc(SH_MODS_ACT_CONTENT, NULL);
+        CHECK(has(doc, "\"lines\":[\"Imp Arena: R2 Imp copy, 2 objects, 1.2 MB\",\"Solo Arena: Solo, 0.4 MB\","
+                       "\"Map content: 1.6 MB for 2 maps.\"]"));
+        CHECK(has(doc, "\"rows\":[\"00aa11bb22cc33dd44ee55ff66778899\",\"99887766ff55ee44dd33cc22bb11aa00\",\"\"]"));
         free(doc);
-        doc = list_doc();
-        CHECK(has(doc, "\"place\":\"maps\\\\Hell Arena\",\"placeTitle\":\"Hell Arena\""));
-        {
-            char ekey[800];
-            size_t q, w = 0;
-            for (q = 0; name[q] && w + 2 < sizeof ekey; q++) { if (name[q] == '\\') ekey[w++] = '\\'; ekey[w++] = name[q]; }
-            ekey[w] = 0;
-            CHECK(!strncmp(name, "maps\\Hell Arena\\", 16));
-            CHECK(bundle_has(doc, ekey, "\"state\":\"ready\"") && bundle_has(doc, ekey, "\"group\":\"\""));
-        }
-        CHECK(doc_prose_ok(doc));
-        union_add(doc);
+        g_cache_lines_n = 0;
+        doc = run_doc(SH_MODS_ACT_CONTENT, NULL);
+        CHECK(has(doc, "\"lines\":[],\"rows\":[]"));
         free(doc);
-        /* Use in this map with the map's copy named: the root folder of its salt is attached. */
-        open_test_map();
-        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
-        CHECK(has(doc, "\"ok\":true,\"message\":\"R2 Imp copy is now used by the whole of "));
-        free(doc);
-        g_map_on = 0;
-        sh_modmanifest_reset();
-        /* Add to my mods: the salt is already yours, so that folder is the one. */
-        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
-        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"R2 Imp copy is already one of your mods, in "
-                       "mods\\\\alex.r2-imp.\"") && has(doc, "\"key\":\"alex.r2-imp\""));
-        free(doc);
-        /* The console's uninstall removes one folder, as the tab's does: yours first; the map's copy stays. */
-        {
-            const char *un_argv[] = { "uninstall", "alex.r2-imp" };
-            int sweeps = g_sweeps_async;
-            g_doctor[0] = 0;
-            CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
-            CHECK(g_sweeps_async == sweeps);   /* a dry run removes nothing: no sweep */
-            CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp to the Windows Recycle Bin"));
-            CHECK(has(g_doctor, "MODS: uninstall: another folder of R2 Imp copy stays installed (mods\\maps\\Hell Arena\\"));
-            CHECK(!has(g_doctor, "folders of"));
-            CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: dry run; add --yes to do it\n"));
-            CHECK(lines_prose_ok(g_doctor));
-        }
-        {
-            int sweeps = g_sweeps_async;
-            doc = run_doc(SH_MODS_ACT_UNINSTALL, name);
-            CHECK(has(doc, "\"ok\":true,\"message\":\"Uninstalled R2 Imp copy."));
-            CHECK(g_sweeps_async == sweeps + 1);   /* a mod was removed: the content cache is swept once */
-            free(doc);
-        }
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, name);
-        CHECK(!mt_exists(path));
     }
 
-    printf("-- Add to my mods: a downloaded map's mod copied to the root, off the game's thread\n");
+    printf("-- Add to my mods: a map's row becomes a mod of the player's own, with a new salt, off the game's thread\n");
     {
-        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "", key[600], esc[800];
-        sh_ms_install_stats st;
-        sh_ms_place place;
-        sh_mb_bundle bd;
-        sh_mb_resolver r;
-        size_t q, w = 0;
-        _snprintf_s(solo, sizeof solo, _TRUNCATE, "%s\\solo", g_root);
-        put_fresh_mod(solo, "Solo", "solo", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tsolo = 1;\r\n}\r\n");
-        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
-        _snprintf_s(recv, sizeof recv, _TRUNCATE, "%s\\authoring\\solo_received", tmp);
-        CHECK(mt_copy_tree(solo, recv));
-        memset(&st, 0, sizeof st);
-        memset(&place, 0, sizeof place);
-        memset(&bd, 0, sizeof bd);
-        memset(&r, 0, sizeof r);
-        r.stock = stock_cb;
-        place.title = "Solo Arena";
-        place.map_id = "6ae40b378bf5037d3d63bd77";
-        CHECK(HO2(name, cause, sh_ms_install_placed(recv, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
-        sh_mb_free(&bd);
-        CHECK(HO(cause, sh_ms_delete_mod_folder(solo, HO_P(0))) != 0);
-        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
-        for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
-        esc[w] = 0;
-        /* Only the map's copy: Use in this map sends the player to Add to my mods, which is there. */
-        open_test_map();
-        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
-        CHECK(has(doc, "\"ok\":false,\"message\":\"Solo came with the map Solo Arena. Add it to your mods first (Add to my "
-                       "mods); then your own maps can use it.\""));
+        char staged[MAX_PATH * 2], leaf[600], esc[700], salt_new[16] = "", salt_second[16] = "", dir[MAX_PATH * 2];
+        static const char ROW[] = "00aa11bb22cc33dd44ee55ff66778899";
+        _snprintf_s(staged, sizeof staged, _TRUNCATE, "%s\\authoring\\staged_copy", tmp);
+        put_fresh_mod(staged, "Stage Mod (my copy)", "stage", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tstaged = 1;\r\n}\r\n");
+        strcpy_s(g_stage_dir, sizeof g_stage_dir, staged);
+        g_stage_why = NULL;
+        g_stage_objects = 2;
+        g_stage_calls = g_stage_frees = 0;
+        (void)leaf;
+
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, "");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"Select a map's mod first.\"") && g_stage_calls == 0);
         free(doc);
+
         g_main = 0;
         g_refreshes = 0;
-        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
-        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"Added Solo to your mods, in mods\\\\Solo; your own "
-                       "maps can use it now.\"") && has(doc, "\"apply\":true") && g_refreshes == 0);
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        if (!has(doc, "\"ok\":true")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"Stage Mod (my copy) is now one of your mods: the 2 "
+                       "objects from this map.\""));
+        CHECK(has(doc, "\"key\":\"Stage Mod (my copy)\"") && has(doc, "\"apply\":true") && g_refreshes == 0);
+        CHECK(!strcmp(g_stage_row_seen, ROW) && g_stage_calls == 1 && g_stage_frees == 1);
         free(doc);
         g_main = 1;
         doc = run_doc(SH_MODS_ACT_APPLY, NULL);
-        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true") && has(doc, "\"key\":\"Solo\"") && g_refreshes == 1);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true") && has(doc, "\"key\":\"Stage Mod (my copy)\"") && g_refreshes == 1);
         free(doc);
         doc = list_doc();
-        CHECK(bundle_has(doc, "Solo", "\"state\":\"ready\"") && bundle_has(doc, "Solo", "\"place\":\"\""));
-        CHECK(bundle_has(doc, esc, "\"state\":\"ready\""));   /* the map's copy stays for its map */
-        {
-            char a[16] = "", b[16] = "";
-            row_salt(doc, "Solo", a, sizeof a);
-            row_salt(doc, esc, b, sizeof b);
-            CHECK(a[0] && !strcmp(a, b));   /* one mod: the same salt at the root and in the place */
-            note_salt(a);
-        }
+        CHECK(bundle_has(doc, "Stage Mod (my copy)", "\"state\":\"ready\""));
+        row_salt(doc, "Stage Mod (my copy)", salt_new, sizeof salt_new);
+        CHECK(sh_salt_valid(salt_new, strlen(salt_new)) && strcmp(salt_new, g_stage_salt));   /* a mod of its own */
+        note_salt(salt_new);
         CHECK(doc_prose_ok(doc));
         free(doc);
-        /* Now the map's copy names your own folder, which the map uses. */
-        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
-        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is now used by the whole of "));
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Stage Mod (my copy)\\mod.json", g_root);
+        CHECK(mt_exists(dir));
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Stage Mod (my copy)\\entities\\twin.decl", g_root);
+        CHECK(mt_exists(dir));
+
+        /* Again, a row that uses only the mod's whole: the same name is taken, so it is the next free folder, with
+         * another salt of its own. */
+        g_stage_objects = 0;
+        g_stage_salt = "stagedss";
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Stage Mod (my copy) is now one of your mods: what this map uses of it.\""));
+        CHECK(has(doc, "\"key\":\"Stage Mod (my copy) (2)\""));
         free(doc);
-        g_map_on = 0;
-        sh_modmanifest_reset();
-        /* Your own mod: nothing to add. */
-        doc = run_doc(SH_MODS_ACT_ADD_MINE, "Solo");
-        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is already one of your mods.\""));
+        doc = list_doc();
+        row_salt(doc, "Stage Mod (my copy) (2)", salt_second, sizeof salt_second);
+        CHECK(sh_salt_valid(salt_second, strlen(salt_second)) && strcmp(salt_second, salt_new));
+        note_salt(salt_second);
         free(doc);
-        strcpy_s(key, sizeof key, name);
-        free(run_doc(SH_MODS_ACT_UNINSTALL, key));
-        free(run_doc(SH_MODS_ACT_UNINSTALL, "Solo"));
-        mt_remove_tree(recv);
+
+        /* One object: the singular. */
+        g_stage_objects = 1;
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        CHECK(has(doc, "\"message\":\"Stage Mod (my copy) is now one of your mods: the 1 object from this map.\""));
+        free(doc);
+
+        /* The stage's refusal is the answer, as it is: nothing is added. */
+        g_stage_why = "Two Demons cannot be copied: some of its content is not on this computer. Play the map once online, then try again.";
+        g_stage_calls = g_stage_frees = 0;
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":false,\"message\":\"Two Demons cannot be copied: some of its content is "
+                       "not on this computer. Play the map once online, then try again.\""));
+        CHECK(g_stage_calls == 1 && !has(doc, "\"apply\":true"));
+        free(doc);
+        g_stage_why = "No map on this computer has that mod's content.";
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"No map on this computer has that mod's content.\""));
+        free(doc);
+        g_stage_why = NULL;
+
+        /* The store cannot take the staged folder: the name and the plain cause, the stage still freed. */
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\authoring\\no_such_stage", tmp);
+        strcpy_s(g_stage_dir, sizeof g_stage_dir, dir);
+        g_stage_frees = 0;
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
+        if (!has(doc, "\"ok\":false")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":false,\"message\":\"Stage Mod (my copy) was not added to your mods: "));
+        CHECK(g_stage_frees == 1 && doc_prose_ok(doc));
+        free(doc);
+
+        (void)esc;
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "Stage Mod (my copy)"));
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "Stage Mod (my copy) (2)"));
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "Stage Mod (my copy) (3)"));
+        mt_remove_tree(staged);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     }
 
     printf("-- the open map: rows by salt, the asset rule's states, plain causes\n");
@@ -1489,7 +1425,22 @@ int main(int argc, char **argv)
             memset(&now, 0, sizeof now);
             CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
             sh_modmanifest_list_free(&now);
-            /* The row is pinned and a root build of its salt is installed: the map row offers the update. */
+            /* The row is pinned and the installed version serves the same bytes (modpin: 0): no Update is offered,
+             * and the action finds nothing to update. */
+            g_row_differs = 0;
+            doc = list_doc();
+            CHECK(!has(doc, "\"update\":\"This map uses another version"));
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "alexrimp");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"This map has no other version of that mod to update.\""));
+            free(doc);
+            /* The same for a row the installed folder cannot be compared with (-1). */
+            g_row_differs = -1;
+            doc = list_doc();
+            CHECK(!has(doc, "\"update\":\"This map uses another version"));
+            free(doc);
+            /* The installed version would change what the row serves: the map row offers the update. */
+            g_row_differs = 1;
             doc = list_doc();
             CHECK(has(doc, "\"update\":\"This map uses another version of R2 Imp copy than the one you have.\""));
             CHECK(doc_prose_ok(doc));
@@ -1512,6 +1463,23 @@ int main(int argc, char **argv)
             doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "");
             CHECK(has(doc, "\"ok\":false,\"message\":\"Select a mod first.\""));
             free(doc);
+            /* The map places none of the mod's objects: the row moves, and the sentence names no object count. */
+            g_placed_count = 0;
+            marks = g_marks;
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "alexrimp");
+            CHECK(has(doc, "\"ok\":true,\"message\":\"This map now uses the version of R2 Imp copy you have installed.\""));
+            CHECK(!has(doc, "all 0 of its objects"));
+            free(doc);
+            CHECK(g_marks == marks + 1);
+            memset(&now, 0, sizeof now);
+            CHECK(sh_modmanifest_current(&now) == 1 && !now.rows[0].pinned && !strcmp(now.rows[0].build, hash1));
+            sh_modmanifest_list_free(&now);
+            /* Pin the row again (the map is loaded afresh). */
+            ploaded = sh_modmanifest_prepare_load(ptext, ptl, &pll);
+            if (ploaded) HeapFree(GetProcessHeap(), 0, ploaded);
+            memset(&now, 0, sizeof now);
+            CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
+            sh_modmanifest_list_free(&now);
             /* The installed version carries everything the map places: the row becomes local, the map is marked
              * modified, and the sentence says so. */
             g_placed[0] = "mods/alexrimp/imp_copy";
@@ -1532,74 +1500,6 @@ int main(int argc, char **argv)
         }
         g_placed_count = -1;
         g_map_on = 0;
-        sh_modmanifest_reset();
-    }
-
-    printf("-- the map scope: an own map follows the root's build, a stranger's map keeps its row's\n");
-    {
-        /* The root holds alexrimp at hash1; the map's row names a build nothing holds. */
-        static const char OLD[] = "00000000000000000000000000000000000000000000000000000000000000aa";
-        char listed[4][SH_MODSERVE_HASH_HEX + 1];
-        int n;
-        sh_modserve_scope_enable(1);
-
-        /* The player's own map (no place): the scope declares the root's build, and the log says so. */
-        CHECK(sh_modserve_place_set(NULL) >= 0);
-        log_clear();
-        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], hash1));
-        CHECK(strstr(g_logbuf, "MODS: map: alexrimp: saved with build 0000000000000000; the root's build") != NULL);
-        CHECK(strstr(g_logbuf, "records that one") != NULL);
-
-        /* A stranger's map (its place): the row's own build, strictly; nothing at the root stands in. */
-        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
-        log_clear();
-        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], OLD));
-        CHECK(strstr(g_logbuf, "the root's build") == NULL);
-
-        /* The same stranger's map naming the root's own build: that build. */
-        load_map_naming("alexrimp", hash1, "R2 Imp copy", NULL);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], hash1));
-
-        /* Back to an own map: it follows the root again. */
-        CHECK(sh_modserve_place_set(NULL) >= 0);
-        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], hash1));
-
-        /* A published read, whose place only its gate decides: the parse lists
-         * and activates the row's own build, never the root's other build of
-         * the salt. */
-        CHECK(sh_modserve_place_pending() >= 0);
-        g_act_last_n = 0;
-        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], OLD));
-        CHECK(g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
-        /* Its gate finds it a stranger's map (the item's place): the row's own
-         * build is listed and activated there. */
-        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
-        g_act_last_n = 0;
-        CHECK(sh_modmanifest_place_decided() >= 0);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], OLD) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], OLD));
-        /* The same read found to be the player's own published map: it follows
-         * the root, listed and activated again with the root's build. */
-        CHECK(sh_modserve_place_pending() >= 0);
-        load_map_naming("alexrimp", OLD, "R2 Imp copy", NULL);
-        CHECK(sh_modserve_place_set(NULL) >= 0);
-        g_act_last_n = 0;
-        log_clear();
-        CHECK(sh_modmanifest_place_decided() >= 0);
-        n = sh_modserve_scope_hashes(listed, 4);
-        CHECK(n == 1 && !_stricmp(listed[0], hash1) && g_act_last_n >= 1 && !_stricmp(g_act_last[0], hash1));
-        CHECK(strstr(g_logbuf, "listed and activated again in the place its gate decided") != NULL);
-        (void)sh_modserve_scope_set(NULL, 0, 0);
-        sh_modserve_scope_enable(0);
         sh_modmanifest_reset();
     }
 
@@ -2040,8 +1940,6 @@ int main(int argc, char **argv)
         mt_remove_tree(sm);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     }
-
-    test_places_stay(tmp);
 
     printf("-- the page's fixture keys are the backend's\n");
     keys_match_fixture(payload, g_union ? g_union : "");

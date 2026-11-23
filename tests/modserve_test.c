@@ -1,7 +1,7 @@
 /* modserve_test.c -- the installed-mod index and provider (modserve.c)
  * against a fixture mods tree written to a temporary folder: admission,
  * failure isolation (size mismatch, unvalidated state, namespace, unbuilt
- * folder), a shadow conflict, two builds of one salt, a map's place,
+ * folder), a shadow conflict, two builds of one salt, a map's composition,
  * lookups and their cost, provider precedence against navigation, the Grid
  * Room and built-in defaults (the real overrides.c), probe claims, the
  * registration plan's dependency order and blocking, plan runs through fake
@@ -178,7 +178,7 @@ static int fx_is_restore(const char *path)
 }
 /* Write <root>\<folder>\mod.json (an author block and its format-2 builder
  * block, keyed by the salt `id`) and its files. A folder under
- * <root>\maps\<segment>\ sits in that map's place. `state` is the old
+ * <root>\.content\served\<hash>\ is a composition of the content cache. `state` is the old
  * .state.json shape, mapped to the block's cause and built. */
 static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
@@ -286,12 +286,12 @@ static void build_fixture(void)
         hash64('a', g_hash_a);
     }
     {
-        /* A later build of the same mod changing one file, in a map's place
-         * (a downloaded map pinned it); the root folder serves with no map. */
+        /* A later build of the same mod changing one file, as a composition of the content cache
+         * (a pinned map row names it); the root folder serves with no map. */
         static const fx_file a2[] = {
             { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alexpink/fireball", NULL, 'b' },
         };
-        make_bundle(g_root, "maps\\Pinks\\alexpink", "alexpink", 'b', NULL, a2, 1,
+        make_bundle(g_root, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alexpink", 'b', NULL, a2, 1,
                     "{\"validated\": true, \"installedAt\": 200}");
         hash64('b', g_hash_a2);
     }
@@ -496,19 +496,8 @@ static void test_empty_index(void)
     CHECK(!sh_modserve_active());
     CHECK(sh_modserve_open(A_ENT, &b, &n) == 0 && b == NULL && n == 0);
     CHECK(log_has("MODS: index built in ") && log_has("(0 bundles, 0 files)"));
-    /* A map without mods, the first of the session: its place is the root,
-     * a failed parse puts the root back, and nothing is listed or served. */
+    /* A map without mods: nothing is listed or served. */
     {
-        char now[HO_TEXT];
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0]);
-        CHECK(sh_modserve_place_load("") == 0);
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0]);
-        CHECK(sh_modserve_place_restore() == 1 && sh_modserve_place_restore() == 0);
-        CHECK(sh_modserve_place_load(NULL) == 0);
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0]);
         CHECK(sh_modserve_scope_hashes(NULL, 0) == 0);
         CHECK(sh_modserve_script_files("anything", NULL, NULL) == 0);
     }
@@ -518,7 +507,7 @@ static void test_index_and_isolation(void)
 {
     sh_modserve_stats st;
     log_clear();
-    CHECK(sh_modserve_index_build(g_root) == 6);   /* alex (root and a place), bob, fay, gail, ivy (nested) */
+    CHECK(sh_modserve_index_build(g_root) == 6);   /* alex (root and a composition), bob, fay, gail, ivy (nested) */
     sh_modserve_get_stats(&st);
     CHECK(st.bundles_seen == 11);
     CHECK(st.bundles_admitted == 6);
@@ -535,7 +524,7 @@ static void test_index_and_isolation(void)
      * the texts are outside the composable grammar). */
     CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alexpink, bobskins; serving "
                   "alexpink (no rule separates them; the first salt in name order"));
-    /* Two builds of one salt (the root and a place) are never a conflict. */
+    /* Two builds of one salt (the root and a composition) are never a conflict. */
     CHECK(log_has("MODS: mod alexpink: builds ") && log_has("each map serves the build it declares"));
     CHECK(!log_has("superseded"));
     CHECK(log_has("MODS: index built in ") && log_has("(6 bundles, "));
@@ -629,7 +618,7 @@ static void test_lookup(void)
     CHECK(!sh_modserve_lookup(A_ENT "x", NULL));
     CHECK(!sh_modserve_lookup("", NULL));
     CHECK(!sh_modserve_lookup(NULL, NULL));
-    /* Bytes; the root folder's build over the one in a map's place. */
+    /* Bytes; the root folder's build over the composition's. */
     CHECK(open_text(A_ENT, text, sizeof text) == 1 && !strcmp(text, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }"));
     CHECK(open_text(A_FIRE, text, sizeof text) == 1 && !strcmp(text, "entityDef fireball {}"));
     CHECK(open_text(F_BLOB, text, sizeof text) == 1 && !strcmp(text, "BLOBBYTES"));
@@ -701,12 +690,7 @@ static void test_plan(void)
     hashes[1] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     hashes[2] = g_hash_a2;
     CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
-    CHECK(unknown == 2);   /* a2 lies in a place: it serves only the map whose place that is */
-    sh_modserve_plan_free(&p);
-    CHECK(sh_modserve_place_set("maps\\Pinks") >= 0);
-    CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
-    CHECK(unknown == 1);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
+    CHECK(unknown == 1);   /* a2 is a composition: a hash names it whatever the map */
     CHECK(step_index(&p, "entityDef", "mods/alexpink/fireball") >= 0);
     CHECK(step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp") < 0);
     CHECK(step_index(&p, "md6Def", "mods/alexpink/imp.md6") < step_index(&p, "entityDef", "mods/alexpink/imp"));
@@ -714,7 +698,7 @@ static void test_plan(void)
     /* A map pass keeps what the editor closure holds unless the engine holds it
      * permanently (2), as the editor pass would: every served file of the
      * root build, which has rows, the fireball included (the row-less 1.1.0
-     * build in the place does not serve its path with no map open). */
+     * build in the composition does not serve its path with no map open). */
     for (i = 0; i < p.count; ++i) CHECK(p.steps[i].persist == 2);
     CHECK(p.steps[step_index(&p, "entityDef", "mods/alexpink/fireball")].persist == 2);
     sh_modserve_plan_free(&p);
@@ -776,7 +760,7 @@ static void test_bundles_for_names(void)
     char out[4][SH_MODSERVE_HASH_HEX + 1];
     const char *names[] = { "mods/alexpink/fireball", "snapmaps/placeablesnapaiencounter/imp", "MODS/bobskins/thing" };
     int n = modserve_bundles_for_names(names, 3, out, 4), i, has_a2 = 0, has_b = 0, has_a = 0;
-    /* fireball comes from the root folder's build (the place's 1.1.0 serves
+    /* fireball comes from the root folder's build (the composition's 1.1.0 serves
      * only for its map); bob's thing needs alex 1.0.0's md6Def. */
     CHECK(n == 2);
     for (i = 0; i < n && i < 4; ++i) {
@@ -2137,7 +2121,7 @@ static void test_conflicts(void)
     mkdirs(root);
     {
         /* The owner's tree, reduced: one authored boss mod at the root and
-         * the build a map pinned in its place, with the same animWeb bytes,
+         * the build a map pinned as a composition, with the same animWeb bytes,
          * another boss pack carrying it with one line different, and two more
          * bosses, all appending to the conductor and the whitelist. */
         static const fx_file cy[] = {
@@ -2158,8 +2142,9 @@ static void test_conflicts(void)
         };
         make_bundle(root, "local cyber", "localcyb", '1',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 10}");
-        make_bundle(root, "maps\\Boss map\\localcyb", "localcyb", '2',
-                    "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 11}");
+        /* (two files: the whitelist's native path under a composition's folder overflows MAX_PATH here) */
+        make_bundle(root, ".content\\served\\2222222222222222222222222222222222222222222222222222222222222222", "localcyb", '2',
+                    "\"" CYB_AW "\", \"" CONDUCTOR "\"", cy, 2, "{\"validated\": true, \"installedAt\": 11}");
         make_bundle(root, "cyberdem", "cyberdem", '3',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\"", dl, 2, "{\"validated\": true, \"installedAt\": 99}");
         make_bundle(root, "local hell", "localhel", '4', "\"" CONDUCTOR "\"", gd, 1,
@@ -2205,15 +2190,15 @@ static void test_conflicts(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 8);
     /* The animWeb the boss bundles carry: one copy serves, never none. */
-    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdem, localcyb, "
+    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by localcyb, cyberdem, "
                   "localcyb; serving localcyb (most providers carry these bytes)"));
     CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "localcyb"));
     CHECK(open_text(CYB_AW, text, sizeof text) == 1 && strstr(text, "AW_CF_IDLE_CYCLE"));
     CHECK(sh_modserve_probe_claims(CYB_AW));
     /* The conductor: every boss's aiTypeList entry is served. */
-    /* (index order: the root folders, then maps' places) */
-    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdem, localcyb, "
-                  "localhel, localspi, localcyb; serving "));
+    /* (index order: by folder, the composition's .content first) */
+    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by localcyb, cyberdem, "
+                  "localcyb, localhel, localspi; serving "));
     CHECK(log_has("'s text with the others' list entries (3 added)"));
     CHECK(sh_modserve_conflict_info(CONDUCTOR, &c) && c.composed && c.count == 5 && strstr(c.reason, "composed: 3 list entries"));
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 6;") && strstr(text, "\"524288\"") &&
@@ -3840,7 +3825,7 @@ static void test_registration_reparse_of_held_permanent(void)
 }
 
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
- * root folders before maps' places, then by salt, then by folder. */
+ * root folders before compositions, then by salt, then by folder. */
 static char g_extra_seen[1024];
 static void collect_extra(void *c, const char *id, const char *hash, int place, const char *extra)
 {
@@ -3870,17 +3855,17 @@ static void test_bundle_extra(void)
     g_bundle_extra = "\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}},";
     make_bundle(mods, "abemod00", "abemod00", '8', NULL, a2, 1, NULL);
     g_bundle_extra = "\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}},";
-    make_bundle(mods, "maps\\Abe map\\abemod00", "abemod00", '9', NULL, a1, 1, NULL);
+    make_bundle(mods, ".content\\served\\9999999999999999999999999999999999999999999999999999999999999999", "abemod00", '9', NULL, a1, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"bad_name\": \"Bad\"}},";
     make_bundle(mods, "badsize0", "badsize0", '0', NULL, bad, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"old_name\": \"Old\"}},";
-    make_bundle(mods, "maps\\Old map\\old", "aaaold00", 'f', NULL, old, 1, NULL);
+    make_bundle(mods, ".content\\served\\ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "aaaold00", 'f', NULL, old, 1, NULL);
     g_bundle_extra = NULL;
     make_bundle(mods, "plainmod", "plainmod", 'e', NULL, plain, 1, NULL);
     CHECK(sh_modserve_index_build(mods) == 5);
     g_extra_seen[0] = 0;
     CHECK(sh_modserve_each_bundle_extra(collect_extra, NULL) == 4);
-    /* Root folders first, then maps' places; by salt, then folder. */
+    /* Root folders first, then compositions; by salt, then folder. */
     CHECK(!strcmp(g_extra_seen, "abemod00;zedmod00;aaaold00(place);abemod00(place);"));
     if (strcmp(g_extra_seen, "abemod00;zedmod00;aaaold00(place);abemod00(place);"))
         fprintf(stderr, "bundle extra order: %s\n", g_extra_seen);
@@ -4099,8 +4084,8 @@ static void test_scope(void)
     CHECK(sh_modserve_scope_set(list, 1, 1) == 1 && sh_modserve_lookup(SC_COOP, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    /* The build a map-level row is rewritten to: for a stranger's map its own
-     * hash, never another build; for the author's own map the root folder's. */
+    /* The build a map-level row is rewritten to: a local row (the author's own map) follows the root folder; a
+     * pinned row never resolves to a local folder (D21). */
     {
         sh_modserve_bundle_ref ref;
         sh_modmanifest_row row;
@@ -4109,10 +4094,12 @@ static void test_scope(void)
         strcpy_s(row.build, sizeof row.build, h_hands);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));
         strcpy_s(row.build, sizeof row.build, h_none);
-        CHECK(sh_modserve_place_set("maps\\Their map") == 0);
-        CHECK(!sh_modserve_row_build(&row, &ref));   /* a map with a place: that build is not installed */
-        CHECK(sh_modserve_place_set(NULL) == 0);
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));   /* no place: the root's build */
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));   /* a local row follows the root's build */
+        row.pinned = 1;
+        CHECK(!sh_modserve_row_build(&row, &ref));   /* a pinned row is its composition only: none is installed */
+        strcpy_s(row.build, sizeof row.build, h_hands);
+        CHECK(!sh_modserve_row_build(&row, &ref));   /* the root's build at that very hash never stands in */
+        row.pinned = 0;
         strcpy_s(row.salt, sizeof row.salt, "rrows000");
         strcpy_s(row.build, sizeof row.build, h_rows);
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.id, "rrows000"));
@@ -4434,15 +4421,15 @@ static void test_additive_same_key(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\samekey\\mods", top);
     mkdirs(root);
     g_bundle_name = "Fork";
-    make_bundle(root, "maps\\Fork map\\fork-a", "kfork000", '6', NULL, b1, 3, "{\"installedAt\": 100}");
+    make_bundle(root, ".content\\served\\6666666666666666666666666666666666666666666666666666666666666666", "kfork000", '6', NULL, b1, 3, "{\"installedAt\": 100}");
     make_bundle(root, "fork-b", "kfork000", '7', NULL, b2, 3, "{\"installedAt\": 200}");
     g_bundle_name = NULL;
     hash64('6', h1); hash64('7', h2); hash64('8', h3);
-    printf("-- additive: one salt at the root and in a map's place, each map served by its own build\n");
+    printf("-- additive: one salt at the root and as a composition, each map served by its own build\n");
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("MODS: mod kfork000: builds 6666666666666666 (maps\\Fork map\\fork-a) and 7777777777777777 (fork-b) both "
+    CHECK(log_has("MODS: mod kfork000: builds 6666666666666666 (.content\\served\\6666666666666666666666666666666666666666666666666666666666666666) and 7777777777777777 (fork-b) both "
                   "provide paths"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
@@ -4461,21 +4448,20 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: Fork is installed 2 times: your own copy and the copies downloaded maps brought. "
-                           "Each map uses its own copy.\n") != NULL);
+    CHECK(strstr(g_report, "scope: Fork is installed 2 times: your own copy and the content maps "
+                           "carry. Each map uses its own.\n") != NULL);
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
-                           "open): a build in maps\\Fork map; it serves only for that map\n") != NULL);
+                           "open): a map's content; it serves only for a map that uses it\n") != NULL);
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
-    /* Map A, whose place holds the first build, pins it: its bytes, its own
-     * names; the other build is inert. */
-    CHECK(sh_modserve_place_set("maps\\Fork map") == 0);
+    /* Map A pins the composition's build: its bytes, its own names; the other build is inert. */
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, 1) == 2);
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { one }"));
-    CHECK(sh_modserve_lookup(AD_OLD, NULL) && !sh_modserve_lookup(AD_NEW, NULL));
-    CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert && !si.listed && !si.names_live);
+    /* In the editor the root folder's build, inert, still serves the names the composition lacks (D26). */
+    CHECK(sh_modserve_lookup(AD_OLD, NULL) && sh_modserve_lookup(AD_NEW, NULL));
+    CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert && !si.listed && si.names_live);
     CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && si.rank == 0);
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
@@ -4496,91 +4482,51 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     /* In Play the same. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
+    CHECK(sh_modserve_lookup(AD_OLD, NULL) && !sh_modserve_lookup(AD_NEW, NULL));   /* in Play the root build serves nothing */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
 
     /* Map B pins the second build. */
     list[0] = h2;
     CHECK(sh_modserve_scope_set(list, 1, 1) == 2);
-    CHECK(sh_modserve_place_set(NULL) == 0);
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { two }"));
     CHECK(!sh_modserve_lookup(AD_OLD, NULL) && sh_modserve_lookup(AD_NEW, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(strstr(seen.order, "kfork000:mods/kfork000/thing:gone=0") != NULL);
     /* Both hashes in one listing (a row and a stale closure) of map A: the first row's build. */
-    CHECK(sh_modserve_place_set("maps\\Fork map") >= 0);
     list[0] = h1; list[1] = h2;
     CHECK(sh_modserve_scope_set(list, 2, 1) == 2 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
     CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert);
 
-    /* The one place resolver (DECISIONS 1 and 11): the root at the row's
-     * hash first, then the map's own place at that hash, never another
-     * map's place; a map without a place follows the root folder whatever
-     * it pins. */
+    /* The row resolver (DECISIONS 1 and 11, D21): a local row follows the root folder whatever build it records; a
+     * pinned row is its composition only, and a local folder never stands in for it. */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kfork000");
-    strcpy_s(row.build, sizeof row.build, h1);
-    CHECK(sh_modserve_place_set("maps\\Other map") >= 0);
-    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
-    CHECK(HO(cause, sh_modserve_row_served_in(&row, "Fork map", NULL, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
-    CHECK(sh_modserve_place_set("maps\\Fork map") >= 0);
-    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
-    strcpy_s(row.build, sizeof row.build, h2);   /* the root holds this one: the root answers first */
+    strcpy_s(row.build, sizeof row.build, h1);   /* the composition's build: the root holds another */
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
-    strcpy_s(row.build, sizeof row.build, h3);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
+    strcpy_s(row.build, sizeof row.build, h2);   /* the root holds this one: the root answers */
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
+    strcpy_s(row.build, sizeof row.build, h3);   /* a build nothing holds: the local row still follows the folder */
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
+    row.pinned = 1;
+    strcpy_s(row.build, sizeof row.build, h1);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
+    strcpy_s(row.build, sizeof row.build, h2);   /* the root holds this one, but a pinned row never resolves to it */
+    CHECK(!sh_modserve_row_build(&row, &ref));
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses Fork, which is not installed."));
+    strcpy_s(row.build, sizeof row.build, h3);
     CHECK(!sh_modserve_row_build(&row, &ref));
-    CHECK(sh_modserve_place_set(NULL) >= 0);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
-    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
-    /* Not a place: refused, and nothing changes. */
-    CHECK(sh_modserve_place_set("maps\\..\\..\\Windows") == -1 && sh_modserve_place_set("..") == -1);
-    CHECK(sh_modserve_place_set("maps\\con") == -1);
-    {
-        char now[HO_TEXT];
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0]);
-        /* A parse remembers the place it replaces; a failed one puts it back. */
-        CHECK(sh_modserve_place_load("Fork map") >= 0);
-        HOS(now, sh_modserve_place_get());
-        CHECK(!strcmp(now, "maps\\Fork map"));
-        CHECK(sh_modserve_place_restore() == 1);
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0] && sh_modserve_place_restore() == 0);
-
-        /* A published read before its gate decides the place: a row resolves
-         * only at the root at its own build. The root's other build of the
-         * salt never stands in (a stranger's map at build 6 with the root at
-         * build 7), the place reads as none, and a failed parse puts back the
-         * place it replaced. */
-        strcpy_s(row.build, sizeof row.build, h1);
-        CHECK(sh_modserve_place_pending() >= 0 && sh_modserve_place_is_pending());
-        CHECK(!sh_modserve_row_build(&row, &ref));
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0]);
-        list[0] = h1;
-        CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
-        CHECK(sh_modserve_bundle_scope(h1, &si) && !si.listed && sh_modserve_bundle_scope(h2, &si) && !si.listed);
-        CHECK(!sh_modserve_lookup(AD_OLD, NULL));   /* the root build's names still serve the Toybox, unlisted */
-        strcpy_s(row.build, sizeof row.build, h2);   /* the root's own build at the row's hash: it answers */
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
-        /* The gate decides the item's place: its build serves the map. */
-        strcpy_s(row.build, sizeof row.build, h1);
-        CHECK(sh_modserve_place_set("maps\\Fork map") >= 0 && !sh_modserve_place_is_pending());
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
-        CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && sh_modserve_lookup(AD_OLD, NULL));
-        CHECK(sh_modserve_place_set(NULL) >= 0 && sh_modserve_place_pending() >= 0 && sh_modserve_place_restore() == 1);
-        HOS(now, sh_modserve_place_get());
-        CHECK(!now[0] && !sh_modserve_place_is_pending());
-    }
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
 }
 
 /* Two builds of one salt whose shared paths need different things: the
- * root folder's md6Def needs skeleton A, a map's own copy needs skeleton B and
+ * root folder's md6Def needs skeleton A, a map's composition needs skeleton B and
  * a decl only that copy carries. With the map that brought its copy open, the
  * holds by name keep B (not A) and the plan orders the copy's needs first; with
  * no map the root folder's needs answer. */
@@ -4595,7 +4541,7 @@ static void test_serving_build_needs(void)
         { C3_ENT, "entityDef thing { a }", -1, "entityDef", "mods/c3mod000/thing",
           "[{\"type\":\"md6Def\",\"name\":\"mods/c3mod000/body.md6\"}]", '2' },
     };
-    static const fx_file place_files[] = {
+    static const fx_file comp_files[] = {
         { C3_MD6, "md6Def body { b }", -1, "md6Def", "mods/c3mod000/body.md6",
           "[{\"type\":\"skeleton\",\"name\":\"md6/stock/b.md6skl\"},"
           "{\"type\":\"entityDef\",\"name\":\"mods/c3mod000/dep\"}]", '3' },
@@ -4618,7 +4564,7 @@ static void test_serving_build_needs(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\servingbuild\\mods", top);
     mkdirs(root);
     make_bundle(root, "c3 mod", "c3mod000", '6', NULL, root_files, 2, "{\"installedAt\": 200}");
-    make_bundle(root, "maps\\C3 map\\c3 mod", "c3mod000", '7', NULL, place_files, 3, "{\"installedAt\": 100}");
+    make_bundle(root, ".content\\served\\7777777777777777777777777777777777777777777777777777777777777777", "c3mod000", '7', NULL, comp_files, 3, "{\"installedAt\": 100}");
     hash64('6', hroot); hash64('7', hplace);
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 2);
@@ -4630,7 +4576,6 @@ static void test_serving_build_needs(void)
     sh_modserve_scope_enable(1);
 
     /* The map that brought its own copy is open: its build serves the path. */
-    CHECK(sh_modserve_place_set("maps\\C3 map") >= 0);
     list[0] = hplace;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     body.level = 4; ska.level = 1; skb.level = 1;
@@ -4643,7 +4588,6 @@ static void test_serving_build_needs(void)
     sh_modserve_plan_free(&plan);
 
     /* No map: the root folder's build answers. */
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     ska.level = 1; skb.level = 1;
     CHECK(sh_modserve_holds_raise(&head, &h) == 1);
@@ -4653,7 +4597,7 @@ static void test_serving_build_needs(void)
 }
 
 /* Two builds of one salt, both with requirements (V1 run 2, in the one
- * shape: the root folder's build and a map's place holding an older one).
+ * shape: the root folder's build and a composition holding an older one).
  * Paths whose bytes the two builds share have one static winner; every step
  * must be gated by the build that serves its path for the listing, not by
  * the static winner's. */
@@ -4693,11 +4637,11 @@ static void test_two_builds_requirements(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\twobuilds\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "maps\\Old map\\a-owner", "twobuild", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
+    make_bundle(root, ".content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "twobuild", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
     make_bundle(root, "b-beside", "twobuild", 'b', NULL, b_new, 4, "{\"installedAt\": 200}");
     g_bundle_extra = NULL;
     hash64('a', h_old); hash64('b', h_new); hash64('c', h_other);
-    printf("-- the root build and a place build of one salt with requirements: rows ready, gates applied once, each map its build\n");
+    printf("-- the root build and a composition of one salt with requirements: rows ready, gates applied once, each map its build\n");
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 2);
     sh_modserve_scope_enable(1);
@@ -4719,14 +4663,13 @@ static void test_two_builds_requirements(void)
     CHECK(log_count("MODS: editor: requirements applied:") == 1);
     sh_modserve_plan_free(&p);
 
-    /* A map pinning the place's build: that build's bytes and names, all ready. */
-    CHECK(sh_modserve_place_set("maps\\Old map") == 0);
+    /* A map pinning the composition's build: that build's bytes and names, all ready. */
     list[0] = h_old;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && si.listed && si.requirements_live);
     CHECK(sh_modserve_bundle_scope(h_new, &si) && si.inert && !si.requirements_live);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { old }"));
-    CHECK(sh_modserve_lookup(TB_OLD, NULL) && !sh_modserve_lookup(TB_NEW, NULL));
+    CHECK(sh_modserve_lookup(TB_OLD, NULL) && sh_modserve_lookup(TB_NEW, NULL));   /* the editor also shows the root's names (D26) */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
     CHECK(sh_modserve_plan_bundles(list, 1, &p, NULL) == 3);
@@ -4737,7 +4680,6 @@ static void test_two_builds_requirements(void)
     sh_modserve_plan_free(&p);
 
     /* A map pinning the root build: the same, the other way round. */
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     list[0] = h_new;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
@@ -4948,12 +4890,10 @@ static void test_additive_compose(void)
 }
 
 /* ONE-SHAPE rules 1, 2, 4 and 6 at the serving index: a mod is its salt,
- * whatever its folder is called; the root holds one build per salt and each
- * map's place one; a stranger's map is served by its place's build at the
- * row's hash, else the root's when it is at that hash, the author's own map
- * by the root's at any hash, and either by any place's at the row's hash; a
- * folder in an earlier shape or whose build failed serves nothing, with a
- * plain cause. */
+ * whatever its folder is called; the root holds one build per salt; a pinned
+ * row is served by its composition (the content cache) at its hash, the
+ * author's own map (a local row) by the root's at any hash; a folder in an
+ * earlier shape or whose build failed serves nothing, with a plain cause. */
 #define SP_THING "generated/decls/entitydef/mods/kown0000/thing.decl"
 static void sp_modjson(const char *root, const char *folder, const char *text)
 {
@@ -4962,7 +4902,7 @@ static void sp_modjson(const char *root, const char *folder, const char *text)
     write_file(path, text, strlen(text));
 }
 
-static void test_salt_and_place(void)
+static void test_salt_and_root(void)
 {
     static const fx_file mine[] = {
         { SP_THING, "entityDef thing { mine }", -1, "entityDef", "mods/kown0000/thing", NULL, '1' },
@@ -4980,7 +4920,7 @@ static void test_salt_and_place(void)
     sh_modserve_hit hit;
     sh_modmanifest_row row;
     const char *list[1];
-    printf("-- one shape: the salt, the root and maps' places, earlier shapes refused\n");
+    printf("-- one shape: the salt, the root and compositions, earlier shapes refused\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -4988,15 +4928,12 @@ static void test_salt_and_place(void)
     mkdirs(root);
     hash64('a', hm); hash64('b', hd); hash64('c', hx);
     /* The author's folder, named as they like; the build a downloaded map
-     * pinned, in its place and in a second map's place. */
+     * pinned, as a composition of the content cache. */
     g_bundle_name = "Doors Pack";
     make_bundle(root, "My doors (work)", "kown0000", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
-    make_bundle(root, "maps\\Doors\\Doors Pack", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
-    make_bundle(root, "maps\\Gates\\Doors Pack", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 950}");
-    /* A copy of the author's folder (same salt, built later) and a second
-     * folder of the salt in one map's place: one build per salt per area. */
+    make_bundle(root, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
+    /* A copy of the author's folder (same salt, built later): one build per salt at the root. */
     make_bundle(root, "My doors (copy)", "kown0000", 'e', NULL, stray, 1, "{\"installedAt\": 300}");
-    make_bundle(root, "maps\\Doors\\Doors Pack (2)", "kown0000", 'f', NULL, stray, 1, "{\"installedAt\": 990}");
     g_bundle_name = NULL;
     /* Earlier shapes and unbuilt or failed folders. */
     sp_modjson(root, "format-one", "{\"name\": \"Old\", \"snapmap-plus\": {\"format\": 1, \"key\": \"old\", \"bundle\": \""
@@ -5010,7 +4947,6 @@ static void test_salt_and_place(void)
     sp_modjson(root, "failed", "{\"name\": \"Failed\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"failedmd\", "
                "\"rules\": 8, \"cause\": \"generated/decls/entitydef/mods/failedmd/a.decl: parse error\"}}");
     sp_modjson(root, "fresh", "{\"name\": \"Fresh\"}");
-    sp_modjson(root, "maps\\Doors\\fresh", "{\"name\": \"Fresh\"}");
     {
         /* A build whose files sit under another salt's namespace. */
         static const fx_file other[] = {
@@ -5020,11 +4956,9 @@ static void test_salt_and_place(void)
     }
     sh_modserve_scope_enable(0);
     log_clear();
-    CHECK(sh_modserve_index_build(root) == 3);
+    CHECK(sh_modserve_index_build(root) == 2);
     CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of mods\\My doors (work) (the same salt kown0000); Refresh "
                   "in the Mods tab makes it a new mod"));
-    CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: This map's folder holds this mod twice (also in "
-                  "maps\\Doors\\Doors Pack). Delete one of the two folders."));
     CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
     CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_EARLIER));
@@ -5034,23 +4968,19 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
-    CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
     /* The mod folder cannot name another salt's file: it would be a native/ path under mods/. */
     CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (native/" SP_THING "). "
                   "Press Refresh to build the mod again."));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
 
-    /* No map: the root folder's build serves; a place build only for its map. */
+    /* No map: the root folder's build serves; a composition only for its map. */
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { mine }"));
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.newest && !si.in_place && si.names_live);
     CHECK(sh_modserve_bundle_scope(hd, &si) && !si.newest && si.in_place && !si.names_live);
 
-    /* Rows of a map with a place: the root at the row's hash; another map's
-     * place never serves it, and another hash is missing (the root serves
-     * such a map only at the row's hash). */
-    CHECK(sh_modserve_place_set("maps\\Elsewhere") >= 0);
+    /* A local row (the player's own map) follows the root folder whatever build it records. */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kown0000");
     row.name = (char *)"Doors Pack";   /* borrowed: this test never frees the row */
@@ -5058,39 +4988,30 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0] && !strcmp(ref.id, "kown0000") &&
           !strcmp(ref.folder, "My doors (work)") && !strcmp(ref.name, "Doors Pack"));
     strcpy_s(row.build, sizeof row.build, hd);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0]);
+    strcpy_s(row.build, sizeof row.build, hx);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
+    /* A pinned row is its composition only: at the composition's hash it resolves there, at the root's own hash or
+     * any other it is missing (a local folder never stands in for a map's units, D21). */
+    row.pinned = 1;
+    strcpy_s(row.build, sizeof row.build, hd);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hd) && !strcmp(ref.place, SH_MODSERVE_CONTENT) &&
+          !strcmp(ref.folder, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    strcpy_s(row.build, sizeof row.build, hm);
     CHECK(!sh_modserve_row_build(&row, &ref));
     strcpy_s(row.build, sizeof row.build, hx);
     CHECK(!sh_modserve_row_build(&row, &ref));
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map uses Doors Pack, which is not installed."));
-    /* In a map's place: that place's folder first (the segment alone names it too). */
-    CHECK(sh_modserve_place_set("maps\\Gates") >= 0);
-    strcpy_s(row.build, sizeof row.build, hd);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Gates") && !strcmp(ref.folder, "maps\\Gates\\Doors Pack"));
-    CHECK(sh_modserve_place_set("Doors") >= 0);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Doors"));
-    strcpy_s(row.build, sizeof row.build, hm);   /* the place does not hold it: the root at that hash */
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0]);
-    strcpy_s(row.build, sizeof row.build, hx);
-    CHECK(!sh_modserve_row_build(&row, &ref));
-    /* The map's listing serves the place's folder of the declared build. */
+    row.pinned = 0;
+    /* The map's listing serves the composition of the declared build. */
     list[0] = hd;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { downloaded }"));
-    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Doors\\Doors Pack\\"));
+    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\.content\\served\\" ));
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.inert);
-    CHECK(sh_modserve_place_set("maps\\Gates\\") >= 0);   /* the same build from the other place */
-    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\maps\\Gates\\Doors Pack\\"));
-    /* A map without a place (the player's own) follows the root folder
-     * whatever it pins. */
-    CHECK(sh_modserve_place_set(NULL) >= 0);
-    strcpy_s(row.build, sizeof row.build, hd);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
-    strcpy_s(row.build, sizeof row.build, hx);
-    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
-    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     /* A salt whose only folder is skipped: the folder's cause. */
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "saltonly");
     strcpy_s(row.build, sizeof row.build, hx);
@@ -5104,6 +5025,104 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\saltplace", top);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
+/* mods\maps\ held the builds earlier versions downloaded per map (places, retired with D4). The index never reads
+ * it: a folder holding a mod.json below it yields no bundle and nothing in the listing, while a mod below another
+ * organizing folder (mapsets\) indexes as any other. */
+static void test_retired_places_not_read(void)
+{
+    static const fx_file gone[] = {
+        { "generated/decls/entitydef/mods/rpmaps00/thing.decl", "entityDef thing { retired }", -1, "entityDef",
+          "mods/rpmaps00/thing", NULL, '1' },
+    };
+    static const fx_file kept[] = {
+        { "generated/decls/entitydef/mods/rpsets00/thing.decl", "entityDef thing { kept }", -1, "entityDef",
+          "mods/rpsets00/thing", NULL, '2' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], h_gone[65], h_kept[65], path[MAX_PATH];
+    char *slash;
+    sh_modserve_stats st;
+    printf("-- a mod below mods\\maps\\ is not read; one below another organizing folder is\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\retiredmaps\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "maps\\X\\rpmaps00", "rpmaps00", '1', NULL, gone, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "mapsets\\Y\\rpsets00", "rpsets00", '2', NULL, kept, 1, "{\"installedAt\": 100}");
+    hash64('1', h_gone); hash64('2', h_kept);
+    sh_modserve_scope_enable(0);
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_get_stats(&st);
+    CHECK(st.bundles_seen == 1 && st.bundles_admitted == 1);
+    CHECK(sh_modserve_bundle_state(h_gone, NULL) == 0 && sh_modserve_bundle_state(h_kept, NULL) == 1);
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/rpmaps00/thing.decl", NULL));
+    CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/rpsets00/thing.decl"), "entityDef thing { kept }"));
+    CHECK(!log_has("rpmaps00") && !log_has("maps\\X"));   /* not skipped, not reported: never looked at */
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(!strstr(g_report, "rpmaps00") && strstr(g_report, "rpsets00") != NULL);
+    sh_modserve_scope_enable(0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\retiredmaps", top);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
+/* Manager Q8, D6a: a local row whose mod folder is not here resolves to the stand-in composition of its salt, named
+ * by the composition hash of none (SHA-256 of "snapmap-plus/composition/1\n1\n<salt>\n"); the root folder, once
+ * installed, wins again. */
+static void test_local_row_standin(void)
+{
+    static const fx_file stood[] = {
+        { "generated/decls/entitydef/mods/lstand00/crate.decl", "entityDef crate { standin }", -1, "entityDef",
+          "mods/lstand00/crate", NULL, '3' },
+    };
+    static const fx_file own[] = {
+        { "generated/decls/entitydef/mods/lstand00/crate.decl", "entityDef crate { own }", -1, "entityDef",
+          "mods/lstand00/crate", NULL, '4' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], folder[160], none[65], path[MAX_PATH];
+    unsigned char text[64];
+    char *slash, *cause = NULL;
+    size_t n;
+    sh_modmanifest_row row;
+    sh_modserve_bundle_ref ref;
+    printf("-- a local row whose mod is not here resolves to its stand-in composition (Q8)\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\localstandin\\mods", top);
+    mkdirs(root);
+    n = (size_t)_snprintf_s((char *)text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", "lstand00");
+    sh_mb_sha256_hex(text, n, none);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, ".content\\served\\%s", none);
+    make_bundle(root, folder, "lstand00", '3', NULL, stood, 1, NULL);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 1);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "lstand00");
+    strcpy_s(row.build, sizeof row.build, SH_MODMANIFEST_LOCAL_BUILD);
+    memset(&ref, 0, sizeof ref);
+    CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, none) && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+    sh_modserve_bundle_ref_free(&ref);
+    CHECK(sh_modserve_row_served_for(&row, NULL, &cause) == SH_MODSERVE_ROW_SERVED);
+    free(cause);
+    cause = NULL;
+    /* The mod installed: the root folder serves the local row again, never the stand-ins. */
+    make_bundle(root, "lstand00", "lstand00", '4', NULL, own, 1, "{\"installedAt\": 100}");
+    CHECK(sh_modserve_index_build(root) == 2);   /* both admitted: the stand-ins stay, unused */
+    memset(&ref, 0, sizeof ref);
+    CHECK(sh_modserve_row_build(&row, &ref) && !ref.place[0] && !strcmp(ref.folder, "lstand00"));
+    sh_modserve_bundle_ref_free(&ref);
+    /* A pinned row never resolves to a stand-in composition of none. */
+    row.pinned = 1;
+    strcpy_s(row.build, sizeof row.build, "5555555555555555555555555555555555555555555555555555555555555555");
+    CHECK(!sh_modserve_row_build(&row, NULL));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\localstandin", top);
     remove_tree(path);
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
@@ -5200,9 +5219,6 @@ static void test_row_served(void)
     names[1] = "MODS/localhel/hell_guard_shield";   /* names fold case */
     row.names = names;
     row.name_count = 2;
-    /* A map with a place: the root serves it only at the row's build. */
-    CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
-
     /* No folder of the salt: missing. */
     CHECK(sh_modserve_index_build(root) >= 0);
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
@@ -5216,28 +5232,28 @@ static void test_row_served(void)
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED && !cause[0]);
 
-    /* Recreated with the same salt and paths but new bytes (a new hash): another build, not this map's. */
+    /* Recreated with the same salt and paths but new bytes (a new hash): the player's own map saved before the
+     * author edited and rebuilt the folder follows the root at any build, in the editor, at Play and from My Maps
+     * alike. */
     remove_tree(top);
     mkdirs(root);
     make_bundle(root, "hand-made", "localhel", 'e', NULL, HG_NEW, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Hell Guards, which is not installed."));
-    /* The player's own map saved before the author edited and rebuilt the
-     * folder: it follows the root at any build, in the editor, at Play and
-     * from My Maps alike (no place: the root). */
     {
         sh_modserve_bundle_ref ref;
         char e_hash[65];
         hash64('e', e_hash);
-        CHECK(HO(cause, sh_modserve_row_served_in(&row, "", "map", HO_P(0))) == SH_MODSERVE_ROW_SERVED && !cause[0]);
-        CHECK(sh_modserve_row_build_in(&row, "", &ref) && !strcmp(ref.hash, e_hash) && !strcmp(ref.folder, "hand-made"));
-        CHECK(sh_modserve_place_set(NULL) >= 0);
-        CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
+        CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, e_hash) && !strcmp(ref.folder, "hand-made"));
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
         CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
-        CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
+        /* A pinned row is its composition only: no composition is installed, so the folder never serves it (D21). */
+        row.pinned = 1;
+        CHECK(!sh_modserve_row_build(&row, &ref));
+        CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
+        CHECK(!strcmp(cause, "This map uses Hell Guards, which is not installed."));
+        row.pinned = 0;
     }
 
     /* The folder at the hash that lacks one listed path: incomplete, naming it. */
@@ -5274,7 +5290,6 @@ static void test_row_served(void)
     }
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, NULL) == SH_MODSERVE_ROW_MISSING);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     remove_tree(top);
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
@@ -5747,7 +5762,7 @@ static void test_mixed_editor_bundle(void)
 
 /* A store whose root holds a character outside ASCII (a profile folder named
  * with an accent): the index boots from the store's own UTF-8 root and reads
- * a map's place under it, as the store wrote it. */
+ * a composition of the content cache under it, as the store wrote it. */
 static void test_store_root_utf8(void)
 {
     static const fx_file plain[] = {
@@ -5758,7 +5773,7 @@ static void test_store_root_utf8(void)
     };
     char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], h8[65];
     char *slash, *accent;
-    printf("-- the store root holds a non-ASCII character: a map's place is read\n");
+    printf("-- the store root holds a non-ASCII character: a composition is read\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
@@ -5769,7 +5784,7 @@ static void test_store_root_utf8(void)
     free(accent);
     mkdirs(root);
     make_bundle(root, "plain", "uplain00", '7', NULL, plain, 1, NULL);
-    make_bundle(root, "maps\\Caf\xc3\xa9\\snap", "usnap000", '8', NULL, placed, 1, NULL);
+    make_bundle(root, ".content\\served\\8888888888888888888888888888888888888888888888888888888888888888", "usnap000", '8', NULL, placed, 1, NULL);
     hash64('8', h8);
 
     /* The boot resolves the store's root, as the product's boot does. */
@@ -5785,9 +5800,8 @@ static void test_store_root_utf8(void)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "usnap000");
         strcpy_s(row.build, sizeof row.build, h8);
-        CHECK(sh_modserve_place_set("maps\\Caf\xc3\xa9") >= 0);
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, "maps\\Caf\xc3\xa9"));
-        CHECK(sh_modserve_place_set(NULL) >= 0);
+        row.pinned = 1;
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, SH_MODSERVE_CONTENT) && !strcmp(ref.hash, h8));
     }
     sh_ms_set_root(NULL);
     strcpy_s(path, sizeof path, root);
@@ -6131,7 +6145,9 @@ int main(void)
     test_two_builds_requirements();
     test_serving_build_needs();
     test_additive_compose();
-    test_salt_and_place();
+    test_salt_and_root();
+    test_retired_places_not_read();
+    test_local_row_standin();
     test_resource_lock();
     test_row_served();
     test_dependency_names();

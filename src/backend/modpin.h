@@ -70,6 +70,14 @@ void sh_modpin_result_free(sh_modpin_result *r);
 int  sh_modpin_rows(struct sh_modmanifest_list *rows, const char *map_json, size_t len, const char *content_root,
                     sh_modpin_result *out);
 
+/* Whether the installed version of a pinned row's mod (the root folder of its salt) would change what the row serves
+ * (the Update of SPEC-distribution 5.10): 1 when one of its objects' units, or its whole-mod unit for a map-level row,
+ * computed from the installed build differs from the unit the row pins (an object the installed build lacks counts:
+ * Update then says so, D23a); 0 when every unit is the same, so the installed version serves the same bytes; -1 when
+ * no built folder of the salt is here or the row is not pinned. Units are remembered by build and root, so a second
+ * ask of the same build costs nothing. Any thread. */
+int  sh_modpin_row_differs(const struct sh_modmanifest_row *row);
+
 /* One row (the same rules). Returns SH_MODPIN_* or -1. */
 int  sh_modpin_row(struct sh_modmanifest_row *row, const char *map_json, size_t len, const char *content_root,
                    sh_modpin_row_result *out);

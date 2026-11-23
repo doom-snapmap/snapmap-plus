@@ -50,7 +50,9 @@ enum {
     SH_CACHE_ABSENT_GAME,            /* S4b: a DOOM file of another game revision */
     SH_CACHE_ABSENT_NOT_IN_STORE,    /* S5: never uploaded, or still queued */
     SH_CACHE_ABSENT_REMOVED,         /* S3: moderation removed it */
-    SH_CACHE_ABSENT_DISK             /* N15: not enough free disk space */
+    SH_CACHE_ABSENT_DISK,            /* N15: not enough free disk space */
+    SH_CACHE_ABSENT_LOCAL,           /* D6a: a local row whose mod folder is not on this computer (manager Q8) */
+    SH_CACHE_ABSENT_BROKEN           /* D6a: a local row whose mod folder is here but cannot be used (its build failed) */
 };
 
 /* The cache's folder: <mods root>\.content (modstore.h sh_ms_root), or the folder tests set. malloc'd. */
@@ -80,6 +82,9 @@ int   sh_cache_composition_hash(const char *salt, const char *const *units, size
 char *sh_cache_blob_path(const char *sha);
 /* Move the file at `from` into files\ when its SHA-256 and size are `sha` and `size` (deleted otherwise). 1 held. */
 int   sh_cache_put_blob(const char *from, const char *sha, unsigned long long size);
+/* Where a file with this SHA-256 and size is on this computer: its blob, else a local mod's file with those bytes (D21);
+ * malloc'd, NULL when neither. An export reads a unit's files from it (SPEC 5.16). */
+char *sh_cache_file_source(const char *sha, unsigned long long size);
 /* Write a manifest whose SHA-256 is `hash`. 1 written or already there; 0 when the bytes are not the unit's. */
 int   sh_cache_put_manifest(const char *hash, const void *bytes, size_t len);
 /* The manifest's bytes (malloc'd, checked against the hash), or NULL. */
@@ -199,9 +204,29 @@ void  sh_cache_sweep_async(void);
 /* ------------------------------------------------------------ the Mods tab (2.10) */
 
 /* Map content on disk: one call per kept map with what its rows hold, then the storage line ("Map content: 1.3 GB
- * for 14 maps."). Lines are plain text; never a hash, salt or path (I11). Returns the lines. */
-typedef void (*sh_cache_line_fn)(void *context, const char *line);
+ * for 14 maps."). Lines are plain text; never a hash, salt or path (I11). `row` is the line's row, its composition
+ * hash, which Add to my mods takes (sh_cache_stage_copy); NULL for the storage line. Returns the lines. */
+typedef void (*sh_cache_line_fn)(void *context, const char *line, const char *row);
 int   sh_cache_report(sh_cache_line_fn fn, void *context);
+
+/* Add to my mods from a row of a map on this computer (SPEC-distribution 5.15, step 1): the pinned row whose
+ * composition hash is `row`, found in the kept and played maps' texts, made a mod folder from its units' files (author
+ * layout already) and their mod shares merged, with the display name "<the row's name> (my copy)", at a staging folder
+ * of the content cache (copies, never links: the folder becomes the player's to edit). The caller salts it into the
+ * store (modstore.h sh_ms_add_copy) and frees the stage (sh_cache_copy_free). A unit whose binaries spell its namespace
+ * copies as any other: the copy's binaries keep that namespace, its build records it as "spelled", and serving maps it
+ * to the copy's salt (D12; D29 as built). 1 staged; 0 with the player's sentence in *why (malloc'd): no map here has
+ * the row, or its content is not all here. Any thread. */
+typedef struct sh_cache_copy {
+    char *dir;                  /* the staged mod folder (UTF-8, absolute) */
+    char *modjson;              /* its author text: the name and the merged mod shares, no builder block */
+    size_t modjson_len;
+    char salt[SH_MB_ID_MAX + 1];  /* the namespace its files are under */
+    char *name;                 /* "<the row's name> (my copy)" */
+    size_t objects;             /* the placed objects it carries (the row's units but the whole-mod one) */
+} sh_cache_copy;
+int   sh_cache_stage_copy(const char *row, sh_cache_copy *out, char **why);
+void  sh_cache_copy_free(sh_cache_copy *copy);
 /* The storage line alone (malloc'd). */
 char *sh_cache_storage_line(void);
 

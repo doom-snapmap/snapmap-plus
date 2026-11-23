@@ -751,7 +751,7 @@ static void convert_era_c(void)
         CHECK(!strstr(out, "\"smpkg.") && member_rows(out) == 1);
         CHECK(string_rows(out) == 1 && alloc4(out, &count) && count == 1);
         CHECK(strstr(out, "door_label") < strstr(out, "\"snapmap-plus\":{\"format\":2,\"mods\":["));
-        CHECK(sh_modmanifest_read(out, on, &rows, NULL) == 1 && rows.count == 1 && !strcmp(rows.rows[0].build, v[0].build) &&
+        CHECK(sh_modmanifest_read(out, on, &rows, NULL) == 1 && rows.count == 1 && !strcmp(rows.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD) &&
               !strcmp(rows.rows[0].salt, v[0].salt));
         /* names: the placed inherit the bundle provides, nothing else */
         CHECK(rows.count == 1 && rows.rows[0].name_count == 1 &&

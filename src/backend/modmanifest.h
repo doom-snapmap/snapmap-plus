@@ -2,15 +2,14 @@
  * part of the map's "snapmap-plus" member (map_carrier.h, which describes the
  * member's grammar once).
  *
- * A row is the compact JSON
- * {"mod":"<salt>@<build hash>","name","size","names":[...],"attached"?,"choices"?}
- * where "mod" names the mod by its salt (the eight characters in its
- * mod.json's "snapmap-plus" block) and the build by the SHA-256 of its
- * canonical manifest, which itself records the salt, so a build verified
- * against the hash is proved to be that salt. "name" is the author's, for
- * display only; a mod has no version (a build is named by its hash).
- * "names" lists the placed logical names the build provides (informational; every name is kept, there is no row
- * budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
+ * A row is the compact JSON (format 2, SPEC-distribution 2.7) of a pinned row
+ * {"mod":"<salt>","name","size","objects":{"<root>":"<unit>",...},"whole"?,"modules"?,"choices"?}
+ * or of a local row
+ * {"mod":"<salt>","name","size","local":true,"names":[...],"attached"?,"choices"?}
+ * where "mod" names the mod by its salt (the eight characters in its mod.json's "snapmap-plus" block). A pinned row
+ * names its objects' units, and its build in memory is their composition hash; a local row names no build and follows
+ * the local folder of its salt (D6a). "name" is the author's, for display only. "names" lists the placed logical names
+ * the mod provides (every name is kept, there is no row budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
  * between its mods' edits (modregistry.h: which declared mod's value serves a
  * field or keyed entry several of them edit, slot "<game file>/<path>",
  * "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each
@@ -20,9 +19,10 @@
  * map add`) without placing anything, so the map keeps the row whatever it
  * places. Rows never carry asset bytes, and merge by salt and build.
  *
- * A row object with an "id" or "bundle" member is an earlier shape and does
- * not parse; the parse detour refuses a map carrying one before any of this
- * runs (sh_map_old_shape, map_carrier.h).
+ * A row object with an "id" or "bundle" member, or a "mod" of the form
+ * "<salt>@<build>" (format 1, before units), is an earlier shape and does not
+ * parse; the parse detour refuses a map carrying one before any of this runs
+ * (sh_map_old_shape, map_carrier.h).
  *
  * Load: every parse the DeserializeFromJson detour sees reads the rows from
  * the member, keeps them as the current map's manifest and asks the serving
@@ -68,6 +68,9 @@ typedef struct sh_modmanifest_row {
      * [x0,y0,z0,x1,y1,z1], "portals": [{"bounds": [...6], "dir": "PORTAL_DIR_..."}, ...]} (sh_cache_module_record).
      * Kept as written (malloc'd), NULL for none. */
     char *modules;
+    /* The content step only (sh_modmanifest_content_for): a row of no units standing in for a local row whose folder
+     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer). */
+    int local_broken;
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -176,19 +179,11 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 /* ------------------------------------------------------------ hooks ------ */
 
 /* Activate the rows' mods: each row through the build that serves it now
- * (sh_modserve_row_build: the root when it has the row's build or the map
- * is the player's own, else the map's own place), else the build the editor
- * substitutes, else its own hash. Returns
+ * (sh_modserve_row_build: a pinned row's composition, a local row's root
+ * folder), else the build the editor substitutes, else its own hash. Returns
 
  * modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
-
-/* A gate decided the loaded map's place after its parse (a published read's
- * place is pending at parse; modserve.h sh_modserve_place_pending): the
- * current rows are listed again through the map scope's hook and activated
- * in the place now set, as the load would have with the place known.
- * Returns the activation's result, 0 when the map has no rows. Main thread. */
-int sh_modmanifest_place_decided(void);
 
 /* The DeserializeFromJson step: read and keep the rows as the current
  * manifest, strip them, then activate them with the builds the map scope
@@ -234,9 +229,9 @@ typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
 
-/* An editor open of the author's own map whose row pins a build that no
- * place serves: another build of the same salt
- * serves in its place for this editor session, with the hashes on
+/* An editor open of the author's own map whose row pins a build that
+ * nothing serves: another build of the same salt
+ * serves in its stead for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
  * (*why: the gate's sentence, malloc'd, or NULL). `placed` says the map's placed
@@ -289,6 +284,9 @@ size_t sh_modmanifest_current_remove(const char *build);
  * The next save writes it (sh_modmanifest_on_save) and every later load keeps
  * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
+/* Add `row` (its names kept) to the current manifest, or merge its names into the row of the same salt and build.
+ * 1 added or merged, -1 invalid or out of memory. The next save writes it (a placed prefab's pinned row, SPEC 5.16). */
+int    sh_modmanifest_current_add_row(const sh_modmanifest_row *row);
 /* A copy of the current manifest's map-level rows. Returns the row count. */
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* The open map's pinned row of `salt` becomes a local row of the installed build `build` naming `names` (the version
@@ -347,7 +345,7 @@ void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name));
 
 /* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
  * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap
- * import): per row, the build that serves it (the one the editor substituted, else the one the place resolver names,
+ * import): per row, the build that serves it (the one the editor substituted, else the one the row resolver names,
  * which for the player's own map is the root folder's build of the salt whatever build the row records; a pinned
  * row, its composition), then, when `names` are given, every further build the placed names' closure reaches whose
  * salt no row declares (per salt the build the row resolver names in the open map's context, else the one the

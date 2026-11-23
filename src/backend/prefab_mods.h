@@ -30,40 +30,39 @@
  * view composes into a block.
  *
  * Load and Place resolve the rows before the engine sees the prefab, in the
- * open map's own context (the root folders, else the map's own place); a
- * placement never changes where the map finds its mods (decision 12):
- *   held by an import     a row's build that a place holds (a prefab ZIP's
- *                         import) and the open map does not serve, while
- *                         the root holds no folder of its salt, is installed
- *                         at the root first (off the game thread, one console
- *                         line): the player is putting the mod to use in
- *                         their own maps, and the import was the approval;
- *   every row served      (the asset rule, modserve.h sh_modserve_row_served)
- *                         the mods are activated for the open map, a mod the
- *                         open map does not list is attached to it (a
- *                         map-level row, as the Mods tab's Use in this map)
- *                         with one console line, and the placement goes on;
- *   some row missing      the placement is held (modpublished.h,
- *                         sh_modpub_prefab_hold): the mod store is asked;
- *                         when it has them all the player is asked Yes/No, Yes
- *                         downloads and installs them, the ready step above
- *                         runs and the Prefabs tab places the prefab; when it
- *                         lacks any or cannot be reached, the placement is
- *                         refused with the native notice and one console line
- *                         naming each mod and asking for the prefab's ZIP;
- *   no gates bound        refused the same way, without asking the store.
+ * open map's own context. Nothing is fetched or installed (D35: a prefab
+ * carries units, not mods):
+ *   a local row         (a prefab made on this computer: its mod's folder)
+ *                       served by the folder at the root: the mods are
+ *                       activated for the open map, and its placed objects
+ *                       carry a mod into the map as placed objects do (the
+ *                       save writes the row, a publish pins those objects'
+ *                       units); only a mod the prefab uses as a whole (its
+ *                       map-level row, or a row naming nothing placed) that
+ *                       the open map does not list is attached to it (as the
+ *                       Mods tab's Use in this map), with one console line
+ *                       when that fails;
+ *   a pinned row        (an imported prefab's units, all in the content cache)
+ *                       joins the open map as a pinned row of those units,
+ *                       composed and declared (ops.use_pinned; SPEC 5.16
+ *                       step 3). A mod the map already uses at another
+ *                       version is left to the installed version when it
+ *                       carries every object the prefab places (D23), else
+ *                       the placement is refused;
+ *   content not here    the placement is refused with one sentence naming
+ *                       the mods, printed and toasted, asking for the
+ *                       prefab's .zip export.
  * A module prefab whose module no row provides and the palette lacks (DLC the
  * player does not own) is refused first, with the module guard's message
  * (module_prefab_map.h): nothing can install it.
  *
  * Export always writes one ZIP (modexport.h): <name>.json, the prefab file
- * with its block, and every mod its rows name as its folder (its mod.json and
- * assets/). Import takes that ZIP, or a .json inside an extracted export
- * folder, adds the prefab to the library, then installs each carried folder
- * nothing serves (modexport_read_prefab: into the ZIP's place, from which the
- * first placement installs it at the root); when the install fails the
- * prefab is taken out again, so a failed import leaves nothing. Importing an
- * export whose mods and prefab are already there writes nothing.
+ * with its block, whose rows the export pins to units, and every unit and file
+ * those rows name. Import takes that ZIP, or a .json inside an extracted
+ * export folder, adds the prefab to the library, then puts its units and files
+ * into the content cache (modexport_read_prefab); when that fails the prefab is
+ * taken out again, so a failed import leaves nothing. Importing an export whose
+ * prefab and content are already here writes nothing.
  *
  * Paths and prefab names are UTF-8 end to end, opened with the wide file
  * calls; only the console's arguments are ANSI, converted on entry.
@@ -250,6 +249,11 @@ typedef struct sh_prefab_mods_ops {
     void (*toast)(const char *text);                               /* one editor toast */
     int  (*refresh)(void);                                         /* after an import installed bundles */
     int  (*call_main)(int (*fn)(void *), void *ctx);               /* run fn on the game thread; 1 ran */
+    /* An imported prefab's pinned rows (their units all in the content cache) join the open map: composed, added to
+     * the current manifest with their names, declared. A row of a salt the map already uses at another version is
+     * left to the installed version when it carries every object the prefab places (D23), else refuses with *cause
+     * (malloc'd, a clause after "was not placed: "). 1 used, -1 refused. Main thread. */
+    int  (*use_pinned)(const sh_modmanifest_list *pinned, char **cause);
 } sh_prefab_mods_ops;
 void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 

@@ -2,8 +2,8 @@
  * found only at the root, read by part, stripped, written compact and last
  * with its parts in order, removed when it carries nothing, refused (read as
  * absent, still stripped) when malformed, and a map without it untouched;
- * the map's place (a plain string, after its mods); the earlier-shape
- * detector (sh_map_old_shape). */
+ * the retired "place" part (an unknown part now: ignored on read, dropped by
+ * a put of another part); the earlier-shape detector (sh_map_old_shape). */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -28,7 +28,7 @@ static int g_failed, g_checks;
     "\"~type\":\"snapVarString_t\"}],\"~type\":\"idSnapVariables\"},\"version\":111,\"~type\":\"idSnapMap\""
 static const char ENGINE[] = ENGINE_HEAD "}";
 
-#define MODS "[{\"mod\":\"aaaabbbb@x\",\"size\":1,\"names\":[]}]"
+#define MODS "[{\"mod\":\"aaaabbbb\",\"size\":1,\"names\":[]}]"
 #define SETTINGS "{\"render\":\"4;0\",\"bounds\":\"1;32671\"}"
 #define NAV "[{\"module\":\"a/b\",\"class\":\"monster48\",\"digest\":\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":[\"QUJD\",\"RUZH\"]}]"
 #define MEMBER(parts) ",\"snapmap-plus\":{\"format\":2" parts "}"
@@ -274,39 +274,47 @@ static void old_shapes(void)
         static const char id_row[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"id\":\"a.b\",\"version\":\"1\",\"size\":1}]") "}";
         static const char bundle_row[] = ENGINE_HEAD MEMBER(",\"mods\":[" "{\"mod\":\"aaaabbbb@x\",\"size\":1},"
                                                             "{\"bundle\":\"x\",\"size\":1}]") "}";
-        static const char names_only[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"mod\":\"aaaabbbb@x\",\"names\":[\"id\",\"bundle\"]}]") "}";
+        static const char names_only[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"mod\":\"aaaabbbb\",\"names\":[\"id\",\"bundle\"]}]") "}";
+        /* Format 1 (before units) named a mod "<salt>@<build hash>": an earlier shape; a format 2 row names the salt. */
+        static const char at_row[] = "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"aaaabbbb@"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":1,\"names\":[]}]}}";
+        static const char fmt2_row[] = "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"aaaabbbb\","
+            "\"size\":1,\"names\":[]}]}}";
         CHECK(sh_map_old_shape(now, sizeof now - 1) == SH_MAP_OLD_NONE);
         CHECK(sh_map_old_shape(id_row, sizeof id_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(bundle_row, sizeof bundle_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(names_only, sizeof names_only - 1) == SH_MAP_OLD_NONE);
+        CHECK(sh_map_old_shape(at_row, sizeof at_row - 1) == SH_MAP_OLD_ROWS);
+        CHECK(sh_map_old_shape(fmt2_row, sizeof fmt2_row - 1) == SH_MAP_OLD_NONE);
     }
-    CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved in a format this version does not read."));
+    CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
 }
 
-static void place_part(void)
+/* "place" (a map's folder under mods\maps\, retired) is no longer a part: an unknown one is ignored on read and
+ * not written back. */
+static void place_retired(void)
 {
-    char err[128], out[HO_TEXT], *a, *b, *c;
-    size_t n = 0;
-    printf("-- the place: a plain string after the mods, read back, removed with nothing else\n");
-    a = put(ENGINE, "mods", MODS, &n, err, sizeof err);
-    b = a ? sh_carrier_put_place(a, n, "Caf\xc3\xa9 arena", &n, err, sizeof err) : NULL;
-    CHECK(b && !strcmp(b, ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":\"Caf\xc3\xa9 arena\"") "}"));
-    CHECK(b && HO(out, sh_carrier_place(b, n, HO_P(0))) == 1 && !strcmp(out, "Caf\xc3\xa9 arena"));
-    CHECK(HO(out, sh_carrier_place(ENGINE, sizeof ENGINE - 1, HO_P(0))) == 0 && !out[0]);
-    /* No place: removed; the mods stay. */
-    c = b ? sh_carrier_put_place(b, n, NULL, &n, err, sizeof err) : NULL;
-    CHECK(c && !strcmp(c, a));
-    /* Not a folder name: refused, nothing written. */
-    CHECK(sh_carrier_put_place(ENGINE, sizeof ENGINE - 1, "a\\b", &n, err, sizeof err) == NULL && err[0]);
-    CHECK(sh_carrier_put_place(ENGINE, sizeof ENGINE - 1, "a\"b", &n, err, sizeof err) == NULL && err[0]);
-    /* A place with an escape, or one too long, does not read; one of the
-     * wrong type makes the member malformed. */
-    {
-        static const char esc[] = ENGINE_HEAD MEMBER(",\"place\":\"..\\\\x\"") "}";
-        static const char num[] = ENGINE_HEAD MEMBER(",\"place\":7") "}";
-        CHECK(HO(out, sh_carrier_place(esc, sizeof esc - 1, HO_P(0))) == -1);
-        CHECK(HO(out, sh_carrier_place(num, sizeof num - 1, HO_P(0))) == -1);
-    }
+    static const char with_place[] = ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":\"Caf\xc3\xa9 arena\"") "}";
+    static const char only_place[] = ENGINE_HEAD MEMBER(",\"place\":\"Caf\xc3\xa9 arena\"") "}";
+    static const char bad_place[] = ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":7") "}";
+    char err[128], *a, *b, *c;
+    size_t n = 0, from = 0, to = 0;
+    sh_carrier_view v;
+    printf("-- the retired place: read as an unknown part (ignored), dropped by a put of another part\n");
+    CHECK(sh_carrier_view_read(with_place, sizeof with_place - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT);
+    CHECK(v.mods.present && span_is(with_place, v.mods.from, v.mods.to, MODS) && !v.settings.present && !v.nav.present);
+    CHECK(sh_carrier_part(with_place, sizeof with_place - 1, "mods", &from, &to) == 1 && span_is(with_place, from, to, MODS));
+    /* Not a part any longer: asking for it is a refused name, and a wrong-typed place does not malform the member. */
+    CHECK(sh_carrier_part(with_place, sizeof with_place - 1, "place", &from, &to) != 1);
+    CHECK(sh_carrier_view_read(bad_place, sizeof bad_place - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT && v.mods.present);
+    /* A put of another part writes the member without it. */
+    a = put(with_place, "settings", SETTINGS, &n, err, sizeof err);
+    CHECK(a && !strcmp(a, ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"settings\":" SETTINGS) "}") && !strstr(a, "place"));
+    b = put(with_place, "mods", NULL, &n, err, sizeof err);
+    CHECK(b && !strstr(b, "place"));
+    /* A member with the place only carries nothing readable. */
+    c = put(only_place, "nav", NAV, &n, err, sizeof err);
+    CHECK(c && !strcmp(c, ENGINE_HEAD MEMBER(",\"nav\":" NAV) "}"));
     if (a) HeapFree(GetProcessHeap(), 0, a);
     if (b) HeapFree(GetProcessHeap(), 0, b);
     if (c) HeapFree(GetProcessHeap(), 0, c);
@@ -320,7 +328,7 @@ int main(void)
     placement();
     malformed();
     readers();
-    place_part();
+    place_retired();
     old_shapes();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

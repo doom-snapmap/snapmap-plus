@@ -107,7 +107,7 @@ static void variables(void)
         CHECK(strstr(out, "\"inherit\":\"mods/alexpink/imp\"") && !strstr(out, "alex.pink-imp"));
         CHECK(sh_map_old_shape(out, n) == SH_MAP_OLD_NONE);
         CHECK(sh_modmanifest_read(out, n, &rows, &rejected) == 1 && !rejected);
-        CHECK(rows.count == 1 && !strcmp(rows.rows[0].salt, "alexpink") && !strcmp(rows.rows[0].build, HASH_B) &&
+        CHECK(rows.count == 1 && !strcmp(rows.rows[0].salt, "alexpink") && !strcmp(rows.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD) &&
               !strcmp(rows.rows[0].name, "Pink Imp") &&
               rows.rows[0].size == 11782 && rows.rows[0].name_count == 1 &&
               !strcmp(rows.rows[0].names[0], "mods/alexpink/imp") && !strcmp(rows.rows[0].choices, "player.hands\talexpink\n"));

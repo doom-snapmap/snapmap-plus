@@ -155,6 +155,7 @@ static int f_published_query(void *c, const char *cloud, unsigned ticket)
 static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)editor; strcpy_s(F.toast, sizeof F.toast, text); }
 static char g_menu_notice[512];
 static void f_menu_notice(void *c, const char *text) { (void)c; strcpy_s(g_menu_notice, sizeof g_menu_notice, text); }
+static int f_window_open(void *c) { (void)c; return 1; }
 static void set_ops(void)
 {
     sh_modpublish_ops ops;
@@ -772,6 +773,32 @@ int main(int argc, char **argv)
         PUMP_UNTIL(idle_all());
         CHECK(g_fc.launches == launches + 1);
         CHECK(strstr(g_log, "MODS: launch: the queue: 1 retried") != NULL);
+    }
+
+    printf("-- the publish that makes the key: with the Snapmap+ window closed, the notice says where its backup is\n");
+    {
+        int k;
+        for (k = 0; k < 2; k++) {
+            sh_modpublish_ops ops;
+            memset(&ops, 0, sizeof ops);
+            ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
+            ops.editor_token = f_token; ops.publish_fail = f_fail; ops.start = f_start; ops.busy = f_busy;
+            ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
+            ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
+            ops.published_query = f_published_query; ops.notice = f_menu_notice;
+            ops.window_open = k ? f_window_open : NULL;
+            sh_modpublish_test_set_ops(&ops);
+            rows_pinned(0);
+            fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
+            g_menu_notice[0] = 0;
+            g_fc.made_key = 1;
+            publish(1);
+            CHECK(k ? !strstr(g_menu_notice, SH_MODPUBLISH_KEY_MADE_TEXT)
+                    : strstr(g_menu_notice, SH_MODPUBLISH_KEY_MADE_TEXT) != NULL);
+            (void)engine_save();
+            PUMP_UNTIL(idle_all());
+        }
+        set_ops();
     }
 
     sh_modmanifest_list_free(&g_rows);

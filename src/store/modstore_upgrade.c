@@ -783,11 +783,10 @@ typedef struct ms_old_entry {
 
 typedef struct ms_old_list { ms_old_entry *v; size_t n, cap; } ms_old_list;
 
-static int ms_old_walk(void *ctx, const char *folder, const char *name, const char *place)
+static int ms_old_walk(void *ctx, const char *folder, const char *name)
 {
     ms_old_list *l = (ms_old_list *)ctx;
     ms_old_entry *e;
-    if (place && place[0]) return 0;   /* a map's place holds received builds only */
     if (l->n == l->cap) {
         size_t cap = l->cap ? l->cap * 2 : 16;
         ms_old_entry *grown = (ms_old_entry *)realloc(l->v, cap * sizeof *grown);

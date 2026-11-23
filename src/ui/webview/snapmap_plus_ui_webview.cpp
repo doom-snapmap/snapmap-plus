@@ -2904,11 +2904,11 @@ static bool ui_mods_fetch(std::string &out)
     return ui_mods_slot(&call, &out) == 1;
 }
 
-/* The dialog for Install, on the worker thread (its own apartment): mod folders, or with `zip` mod
- * ZIPs (a Prefab or map export carries its mods so). Several may be picked; they are joined with
- * newlines, which no path contains, and the backend takes each one as a mod folder, a folder of
- * mods, or a ZIP of mods. */
-static bool ui_pick_mods(bool zip, std::wstring &out)
+/* The dialog for Install, on the worker thread (its own apartment): one Open dialog for mod ZIPs (a
+ * prefab or map export carries its mods so) and a mod folder's mod.json, which stands for its folder
+ * (rawmap_picker.h install_target). Several may be picked; they are joined with newlines, which no
+ * path contains, and the backend takes each one as a mod folder or a ZIP of mods. */
+static bool ui_pick_mods(std::wstring &out)
 {
     IFileOpenDialog *dlg = nullptr;
     bool ok = false;
@@ -2917,13 +2917,13 @@ static bool ui_pick_mods(bool zip, std::wstring &out)
         return false;
     FILEOPENDIALOGOPTIONS opt = 0;
     if (SUCCEEDED(dlg->GetOptions(&opt)))
-        dlg->SetOptions(opt | (zip ? FOS_FILEMUSTEXIST : FOS_PICKFOLDERS) | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM |
+        dlg->SetOptions(opt | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM |
                         FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_PATHMUSTEXIST);
-    if (zip) {
-        static const COMDLG_FILTERSPEC kZip[] = { { L"Mod ZIP", L"*.zip" } };
-        dlg->SetFileTypes(1, kZip);
-        dlg->SetTitle(L"Install mods: choose mod ZIPs");
-    } else dlg->SetTitle(L"Install mods: choose mod folders, or a folder that holds several");
+    {
+        const COMDLG_FILTERSPEC types[] = { { sh_rawmap_picker::kModInstall.label, sh_rawmap_picker::kModInstall.pattern } };
+        dlg->SetFileTypes(1, types);
+    }
+    dlg->SetTitle(L"Install mods: choose mod ZIPs, or the mod.json of a mod folder");
     dlg->SetOkButtonLabel(L"Install");
     {
         static const GUID kModFolderPickerGuid =
@@ -2950,7 +2950,10 @@ static bool ui_pick_mods(bool zip, std::wstring &out)
                 if (FAILED(items->GetItemAt(i, &item)) || !item) continue;
                 PWSTR path = nullptr;
                 if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                    if (path[0]) { if (!out.empty()) out += L"\n"; out += path; }
+                    if (path[0]) {
+                        if (!out.empty()) out += L"\n";
+                        out += sh_rawmap_picker::install_target(path);
+                    }
                     CoTaskMemFree(path);
                 }
                 item->Release();
@@ -3034,7 +3037,7 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
     if (job.pick) {
         std::wstring picked;
         HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        bool ok = ui_pick_mods(job.arg == "zip", picked);
+        bool ok = ui_pick_mods(picked);
         if (SUCCEEDED(init)) CoUninitialize();
         if (ok) job.arg = sh_webview_json::to_utf8(picked);
         else job.run_rc = -3;
@@ -3991,8 +3994,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                                      sh_webview_json::to_utf8(salt));
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
-                /* Install always asks for its folders or ZIPs here, in the native picker: the page
-                 * never names a path to install, only which picker ("zip" or none). */
+                /* Install always asks for its ZIPs or mod folders here, in the native picker: the
+                 * page never names a path to install. */
                 std::wstring act, arg;
                 sh_webview_json::get_string(json, L"action", act);
                 sh_webview_json::get_string(json, L"arg", arg);
@@ -4001,7 +4004,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 else {
                     int code = ui_mods_action_code(act);
                     if (!code) ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);
-                    else if (code == SH_MODS_ACT_INSTALL) ui_mods_begin(code, true, arg == L"zip" ? "zip" : std::string());
+                    else if (code == SH_MODS_ACT_INSTALL) ui_mods_begin(code, true, std::string());
                     else ui_mods_begin(code, false, sh_webview_json::to_utf8(arg));
                 }
             } else if (cmd == L"resolvePrefabModel") {

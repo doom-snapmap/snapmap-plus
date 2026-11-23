@@ -124,12 +124,13 @@ typedef struct ms_req_cvar { const char *name, *value; } ms_req_cvar;   /* canon
 
 /* One mod folder. Its identity is its salt (`id`, the builder block's
  * "salt", ONE-SHAPE rule 1); where it sits is its area: the root of the
- * store (place NULL) or a map's place, mods\maps\<segment> (place
- * "maps\<segment>"). The index holds one build per salt per area. */
+ * store (place NULL) or the content cache's compositions (place
+ * SH_MODSERVE_CONTENT, one per pinned map row). The root holds one build per
+ * salt. */
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *hash, *name;
     const char *extra;                    /* the author block's other keys as JSON, or NULL */
-    const char *place;                    /* "maps\<segment>" for a folder in a map's place; NULL at the root */
+    const char *place;                    /* SH_MODSERVE_CONTENT for a composition; NULL at the root */
     const char *unit;                     /* a composition (block "units_of"): its first unit's hash, NULL for a mod */
     int admitted, first_file, file_count;
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
@@ -1127,10 +1128,10 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         ms_fail(b, "The part of mod.json Snapmap+ writes is damaged. Delete the \"" SH_MB_BLOCK_KEY "\" block and press "
                 "Refresh to build the mod again.");
     else if (!block_v) {
-        /* A fresh folder: the store's scan salts and builds a root folder; a
-         * map's place holds only builds the product received. */
+        /* A fresh folder: the store's scan salts and builds a root folder; a composition is only ever written
+         * built. */
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
-        if (b->place) ms_fail(b, SH_MODSERVE_PLACE_FRESH);
+        if (b->place) ms_fail(b, "it is not a composition of the content cache");
         else {
             char *last = cause_fn && b->dir ? cause_fn(b->dir) : NULL;
             if (last) ms_fail(b, "not built: %s", last);
@@ -1434,10 +1435,10 @@ static char *ms_walk_child(const WIN32_FIND_DATAW *fd, const char *rel)
  * folder under the store root that holds mod.json (or a package.json, which
  * is refused), at any depth: a folder without one is an organizing folder and
  * is entered, as deep as it goes; a mod folder is not entered. At the top,
- * "maps" is the places area: each folder in it is a map's place,
- * mods\maps\<segment>, whose mods are walked the same way. `rel` is the
- * folder's path below the root, a bundle's name; `place` its area (NULL: the
- * root). The folders still to read wait on the heap, in the order a
+ * "maps" (the per-map download folders of earlier versions, retired with D4)
+ * is never read. `rel` is the folder's path below the root, a bundle's name;
+ * `place` its area (NULL: the root; the content cache's compositions are the
+ * area SH_MODSERVE_CONTENT). The folders still to read wait on the heap, in the order a
  * depth-first walk reads them. This scan only reads: salting and building are
  * the store's (ms_sync). */
 typedef struct ms_scan_item {
@@ -1497,27 +1498,16 @@ static void ms_scan_list_folder(const ms_scan_item *at, ms_scan_list *stack)
     }
 }
 
-/* One child folder: the places area, a mod, or an organizing folder. */
+/* One child folder: a mod, or an organizing folder. */
 static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
 {
     const char *leaf = strrchr(at->rel, '\\') ? strrchr(at->rel, '\\') + 1 : at->rel;
     char *probe;
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
-    if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_PLACES)) {
-        /* The places area of the builds a format 1 map brought (mods\maps\<segment>, before units): read for those
-         * maps' local rows until the import and download paths that write it move to the content cache (DS-T, DS-X);
-         * a pinned row never resolves here. Each child folder is a map's place, walked as its own area. */
-        ms_scan_item places = *at;
-        size_t first = stack->n, i;
-        ms_scan_list_folder(&places, stack);
-        for (i = first; i < stack->n; i++) {
-            stack->d[i].kind = MS_SCAN_FOLDER;
-            stack->d[i].top = 0;
-            stack->d[i].place = ms_strdup(x, stack->d[i].rel);
-        }
-        return;
-    }
+    /* mods\maps\ held the builds earlier versions downloaded per map (places, retired with D4: a map's content is
+     * its units in the content cache now). Nothing there is read. */
+    if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_RETIRED_PLACES)) return;
     probe = sh_textf("%s\\mod.json", at->dir);
     is_mod = probe && ms_file_size(probe) >= 0;
     free(probe);
@@ -1597,19 +1587,18 @@ static void ms_scan_folder(ms_index *x, const char *top)
     free(stack.d);
 }
 
-/* 1 when bundles a and b sit in the same area (both at the root, or both in
- * one map's place). */
+/* 1 when bundles a and b sit in the same area (both at the root, or both compositions). */
 static int ms_same_area(const ms_bundle *a, const ms_bundle *b)
 {
     if (!a->place || !b->place) return !a->place && !b->place;
     return !_stricmp(a->place, b->place);
 }
 
-/* One build per salt per area (ONE-SHAPE rules 1 and 4). Of two admitted
- * folders of one salt in one area the one built first keeps it (built time,
- * then folder path); the other serves nothing until the store's next scan
- * makes it a new mod (at the root) or refuses it (in a place). Runs before
- * ms_resolve, which drops a refused bundle's files. */
+/* One build per salt at the root (ONE-SHAPE rules 1 and 4). Of two admitted
+ * folders of one salt the one built first keeps it (built time, then folder
+ * path); the other serves nothing until the store's next scan makes it a new
+ * mod. Compositions are one per map row. Runs before ms_resolve, which drops a
+ * refused bundle's files. */
 static void ms_one_per_area(ms_index *x)
 {
     int i, k;
@@ -1623,11 +1612,8 @@ static void ms_one_per_area(ms_index *x)
             if (b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) break;   /* compositions: one per map row */
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
-            if (b->place)
-                ms_fail(b, "This map's folder holds this mod twice (also in %s). Delete one of the two folders.", o->folder);
-            else
-                ms_fail(b, "it is a copy of mods\\%s (the same salt %s); Refresh in the Mods tab makes it a new mod",
-                        o->folder, b->id);
+            ms_fail(b, "it is a copy of mods\\%s (the same salt %s); Refresh in the Mods tab makes it a new mod",
+                    o->folder, b->id);
             b->admitted = 0;
             b->file_count = 0;
             ms_log("bundle '%s' skipped: %s", b->folder, b->cause);
@@ -1657,8 +1643,8 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
 }
 
 /* Of two builds of one salt, the one that serves with no map declaring it
- * (ONE-SHAPE rule 4): the root folder's over a map's place, else the newer.
- * A place build never serves over the folder its author edits. */
+ * (ONE-SHAPE rule 4): the root folder's over a composition, else the newer.
+ * A composition never serves over the folder its author edits. */
 static int ms_preferred(const ms_index *x, int a, int b)
 {
     const ms_bundle *ba = &x->bundles[a], *bb = &x->bundles[b];
@@ -2387,7 +2373,7 @@ static int ms_resolve(ms_index *x)
             x->files[winner].served = 1;
             if (j - i > 1) ms_record_alts(x, NULL, keys, i, j, winner, 0);
         } else if (same_id) {
-            /* Two builds of one salt (the root folder and a map's place):
+            /* Two builds of one salt (the root folder and a composition):
              * never a conflict. Each map serves the build it declares; the
              * root folder's is the static winner (no map open; ms_preferred). */
             for (k = i + 1; k < j; ++k)
@@ -2637,7 +2623,7 @@ static void ms_resolve_needs(ms_index *x)
  * the keycard md6Def a new row attaches, at level 1, and the keeper could
  * only raise the decl, not its model). Needs are closed under this mark, so a
  * closure decl's parents and models are in it too. A path two builds of one
- * salt carry (the root folder and a map's place) is marked on its winner, and
+ * salt carry (the root folder and a composition) is marked on its winner, and
  * the needs of every build of it are followed: the mark is made once per
  * index, before any map says which build it serves. */
 static void ms_mark_editor_closure(ms_index *x)
@@ -2931,26 +2917,6 @@ static int g_scope_n, g_scope_cap;
 static volatile LONG g_scope_open;
 static volatile LONG g_scope_play;     /* SH_MODSERVE_MODE_PLAY: Play, or a map launched outside the editor */
 static sh_modserve_scope_source_fn volatile g_scope_source;
-
-/* Where the loaded map finds its mods (sh_modserve_place_set): "" for the
- * root, else "maps\<segment>". g_place_prev is the place before the last map
- * parse (sh_modserve_place_load), for a parse or a launch that did not
- * happen. Its own lock: ms_bundle_by_hash reads it under the scope lock and
- * without it. */
-static SRWLOCK g_place_lock = SRWLOCK_INIT;
-static char *g_place;        /* malloc'd; NULL for the root */
-static char *g_place_prev;   /* malloc'd; NULL for the root */
-static int g_place_prev_valid;
-
-/* The loaded map's place (malloc'd: "" for the root), or NULL when memory runs out. */
-static char *ms_scope_place(void)
-{
-    char *out;
-    AcquireSRWLockShared(&g_place_lock);
-    out = _strdup(g_place ? g_place : "");
-    ReleaseSRWLockShared(&g_place_lock);
-    return out;
-}
 
 /* Why a path is served as it is (sh_modserve_layer_report). */
 #define MS_WHY_ONE       0   /* the only provider the listing admits */
@@ -3752,7 +3718,7 @@ static int ms_scope_compute(ms_index *x, int mark)
     if (!x) return 0;
     for (i = 0; i < x->nbundles; ++i) x->bundles[i].inert = 0;
     /* The declared bundles, by hash, in row order (ms_bundle_by_hash picks the
-     * folder of the open map's place, else the root's); a later row (or the
+     * root's folder, else the composition); a later row (or the
      * placed closure) naming another build of a salt already declared is not
      * one. */
     {
@@ -3788,7 +3754,7 @@ static int ms_scope_compute(ms_index *x, int mark)
              * with Toybox rows keeps them outside Play, because the palette
              * registers its rows in every editor map and with none open; in
              * Play no undeclared bundle's apply; an inert build never. A
-             * place build serves only for its map (ONE-SHAPE rule 4). */
+             * composition serves only for its map (ONE-SHAPE rule 4). */
             roff = on && rank[i] < 0 && (inert || play || !(b->has_rows && b->root_build));
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
@@ -4047,116 +4013,6 @@ int sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
     ReleaseSRWLockExclusive(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
     return changed;
-}
-
-char *sh_modserve_place_norm(const char *place)
-{
-    char *seg, *made, *out = NULL;
-    const char *s = place;
-    size_t pl = sizeof SH_MODSERVE_PLACES - 1, n;
-    if (!place || !place[0]) return _strdup("");
-    if (!strcmp(place, SH_MODSERVE_PLACE_PUBLISHED)) return _strdup(place);
-    /* "maps\<segment>", either slash, or the segment alone. */
-    if (!_strnicmp(s, SH_MODSERVE_PLACES, pl) && (s[pl] == '\\' || s[pl] == '/')) s += pl + 1;
-    if (!(seg = _strdup(s))) return NULL;
-    for (n = strlen(seg); n > 0 && (seg[n - 1] == '\\' || seg[n - 1] == '/'); --n) seg[n - 1] = 0;
-    /* A segment is exactly what the store makes of a title: no separator, no
-     * dot step, no character Windows refuses in a name. */
-    made = seg[0] ? sh_ms_title_segment(seg) : NULL;
-    if (made && !strcmp(made, seg)) out = sh_textf("%s\\%s", SH_MODSERVE_PLACES, seg);
-    free(made);
-    free(seg);
-    return out;
-}
-
-/* Make `norm` the loaded map's place and recompute the listing (it resolves
- * its hashes against the place). `remember` keeps the place it replaces for
- * sh_modserve_place_restore. Returns the bundles that changed. */
-static int ms_place_apply(const char *norm, int remember)
-{
-    ms_index *x;
-    int changed = 0, same;
-    char *copy = _strdup(norm);
-    if (!copy) return 0;
-    AcquireSRWLockExclusive(&g_build_lock);
-    x = (ms_index *)g_index;
-    AcquireSRWLockExclusive(&g_scope_lock);
-    AcquireSRWLockExclusive(&g_place_lock);
-    same = !_stricmp(g_place ? g_place : "", norm);
-    if (remember) {
-        free(g_place_prev);
-        g_place_prev = g_place;
-        g_place_prev_valid = 1;
-    } else {
-        free(g_place);
-    }
-    g_place = copy;
-    ReleaseSRWLockExclusive(&g_place_lock);
-    if (!same && x && g_scope_n) changed = ms_scope_compute(x, 1);
-    ReleaseSRWLockExclusive(&g_scope_lock);
-    ReleaseSRWLockExclusive(&g_build_lock);
-    return changed;
-}
-
-int sh_modserve_place_set(const char *place)
-{
-    char *norm = sh_modserve_place_norm(place);
-    int changed;
-    if (!norm) return -1;
-    changed = ms_place_apply(norm, 0);
-    free(norm);
-    return changed;
-}
-
-int sh_modserve_place_load(const char *place)
-{
-    char *norm = sh_modserve_place_norm(place);
-    int changed = ms_place_apply(norm ? norm : "", 1);
-    free(norm);
-    return changed;
-}
-
-int sh_modserve_place_restore(void)
-{
-    char *prev;
-    int valid;
-    AcquireSRWLockExclusive(&g_place_lock);
-    valid = g_place_prev_valid;
-    prev = g_place_prev;
-    g_place_prev = NULL;
-    g_place_prev_valid = 0;
-    ReleaseSRWLockExclusive(&g_place_lock);
-    if (valid) (void)ms_place_apply(prev ? prev : "", 0);
-    free(prev);
-    return valid;
-}
-
-/* The place of a published read whose gate has not decided yet: under the
- * places area, with a character no folder name can hold, so no folder of a
- * salt is in it and a row resolves only at the root at its own build
- * (ms_row_build_in). */
-#define MS_PLACE_PENDING SH_MODSERVE_PLACE_PUBLISHED
-
-int sh_modserve_place_pending(void)
-{
-    return ms_place_apply(MS_PLACE_PENDING, 1);
-}
-
-int sh_modserve_place_is_pending(void)
-{
-    int pending;
-    AcquireSRWLockShared(&g_place_lock);
-    pending = g_place && !strcmp(g_place, MS_PLACE_PENDING);
-    ReleaseSRWLockShared(&g_place_lock);
-    return pending;
-}
-
-char *sh_modserve_place_get(void)
-{
-    char *place = ms_scope_place();
-    /* A pending place is no place to record or install into. */
-    if (place && !strcmp(place, MS_PLACE_PENDING)) place[0] = 0;
-    return place;
 }
 
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -4433,8 +4289,8 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            ms_say(fn, context, "scope: %s is installed %d times: your own copy and the copies downloaded maps "
-                        "brought. Each map uses its own copy.", ms_label(b), builds);
+            ms_say(fn, context, "scope: %s is installed %d times: your own copy and the content maps "
+                        "carry. Each map uses its own.", ms_label(b), builds);
             lines++;
         }
         _snprintf_s(what, sizeof what, _TRUNCATE, " (%d name%s, %d shadow%s, %d surface%s%s)", si.names, si.names == 1 ? "" : "s",
@@ -4448,8 +4304,8 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
                              "declare it", si.editor_path ? si.editor_path : "");
         else if (si.play) state = _strdup("not declared by the map being played: serves nothing");
         else if (!si.newest)
-            state = sh_textf("not declared%s: a build in %s; it serves only for that map",
-                             si.map_open ? " by the open map" : " (no map is open)", b->place ? b->place : "a map's place");
+            state = sh_textf("not declared%s: a map's content; it serves only for a map that uses it",
+                             si.map_open ? " by the open map" : " (no map is open)");
         else
             state = sh_textf("not declared%s: its names serve for the Toybox and its surfaces serve; its shadows do not",
                              si.map_open ? " by the open map" : " (no map is open)");
@@ -5012,7 +4868,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_registry_relevant(x);
     /* The build of each salt that serves for the Toybox with no map
      * declaring it: the root folder's (ONE-SHAPE rule 4; ms_one_per_area left
-     * one per salt). A salt held only in maps' places offers no rows. */
+     * one per salt). A salt held only in compositions offers no rows. */
     for (i = 0; i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
         b->root_build = b->admitted && !b->place;
@@ -5804,7 +5660,7 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
     if (!mark) return -1;
     /* With map scope on, the rows whose path the listing serves: the root
      * folder's build of each undeclared salt, the declared build of a
-     * declared one (a place build serves its names only for its map). */
+     * declared one (a composition serves its names only for its map). */
     for (i = 0; i < x->nfiles; ++i)
         mark[i] = (unsigned char)(x->files[i].served && x->files[i].is_sedef && ms_plannable(x, &x->files[i]) &&
                                   ms_scoped(x, i) >= 0);
@@ -5813,31 +5669,20 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
     return r;
 }
 
-/* The bundle at `hash` for the loaded map, the hash half of the one place
- * resolver (ms_row_build_in): the root's folder at that hash, else the
- * folder of the map's place at that hash; never another map's place. */
+/* The bundle at `hash`, the hash half of the row resolver (ms_row_build): the root's folder at that hash, else the
+ * content cache's composition of that hash (modcache.h), which a pinned row names and which no other folder carries
+ * (R-LV2: without it a pinned row's composition resolved but was never activated or ranked by the map scope). */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only)
 {
     int i, round, at = -1;
-    const char *place;
     if (!x || !hash) return -1;
-    AcquireSRWLockShared(&g_place_lock);
-    place = g_place ? g_place : "";
-    /* The root first, then the open map's place, then the content cache's compositions (modcache.h), which a pinned
-     * row names by their composition hash and which no other folder carries (R-LV2: without this round a pinned
-     * row's composition resolved but was never activated or ranked by the map scope). */
-    for (round = 0; at < 0 && round < 3; ++round) {
-        if (round == 1 && !place[0]) continue;
+    for (round = 0; at < 0 && round < 2; ++round)
         for (i = 0; at < 0 && i < x->nbundles; ++i) {
             const ms_bundle *b = &x->bundles[i];
             if (!b->hash || _stricmp(b->hash, hash) || (admitted_only && !b->admitted)) continue;
-            if (round == 0 ? b->place != NULL
-                : round == 1 ? (!b->place || _stricmp(b->place, place))
-                : (!b->place || strcmp(b->place, SH_MODSERVE_CONTENT))) continue;
+            if (round == 0 ? b->place != NULL : (!b->place || strcmp(b->place, SH_MODSERVE_CONTENT))) continue;
             at = i;
         }
-    }
-    ReleaseSRWLockShared(&g_place_lock);
     return at;
 }
 
@@ -8210,6 +8055,16 @@ unsigned sh_modserve_test_gates_owned(void)
 
 /* ------------------------------------------------------------------ queries */
 
+int sh_modserve_salt_installed(const char *salt)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!x || !salt || !salt[0]) return 0;
+    for (i = 0; i < x->nbundles; ++i)
+        if (!x->bundles[i].place && x->bundles[i].id && !_stricmp(x->bundles[i].id, salt)) return 1;
+    return 0;
+}
+
 int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 {
     const ms_index *x = g_index;
@@ -8291,8 +8146,8 @@ static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
     return hit;
 }
 
-/* The admitted bundle of `salt` at `hash` (NULL: any hash) in the area
- * `place` ("" the root, NULL any map's place), or -1. */
+/* The admitted bundle of `salt` at `hash` (NULL: any hash) in the area `place` ("" the root, SH_MODSERVE_CONTENT the
+ * compositions), or -1. */
 static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, const char *place)
 {
     int i;
@@ -8300,20 +8155,17 @@ static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, con
         const ms_bundle *b = &x->bundles[i];
         if (!b->admitted || !b->id || strcmp(b->id, salt) || !b->hash) continue;
         if (hash && _stricmp(b->hash, hash)) continue;
-        if (!place) { if (!b->place) continue; }
-        else if (!place[0]) { if (b->place) continue; }
+        if (!place[0]) { if (b->place) continue; }
         else if (!b->place || _stricmp(b->place, place)) continue;
         return i;
     }
     return -1;
 }
 
-/* The one place resolver (modserve.h, DECISIONS 1 and 11): the build that
- * serves a row of a map whose place is `place` ("" the root): the root folder
- * of the salt at the row's hash; then, with a place, that place's folder of
- * the salt at the row's hash, and without one, the root folder of the salt at
- * any build. Never another map's place. -1 when none: the row is missing. */
-static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, const char *place)
+/* The row resolver (modserve.h): the build that serves a row: a pinned row's composition; a local row's root
+ * folder of the salt at the row's hash, else at any build (the player's own map follows the folder), else (no local
+ * folder of the salt) its stand-in composition. -1 when none: the row is missing. */
+static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
 {
     char salt[SH_MODMANIFEST_SALT_CAP];
     int at = -1;
@@ -8325,16 +8177,21 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
     if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
     if (at >= 0) return at;
-    if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
-    return ms_salt_in(x, salt, NULL, "");
-}
-
-static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
-{
-    char *place = ms_scope_place();
-    int at = ms_row_build_in(x, row, place ? place : "");
-    free(place);
-    return at;
+    if ((at = ms_salt_in(x, salt, NULL, "")) >= 0) return at;
+    /* D6a (manager Q8): a local row whose namespace no local folder serves (the author's map opened on another
+     * computer, the mod folder deleted) plays with its objects stood in: the content cache's stand-in composition of
+     * its salt, which carries no unit and is named by the composition hash of none (modcache.h). */
+    {
+        /* The composition hash of no unit (SPEC-distribution 2.13, modmanifest.c sh_modmanifest_composition_hash with
+         * a count of 0): SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". */
+        char none[SH_MODMANIFEST_HASH_CAP], text[64];
+        int n = _snprintf_s(text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", salt);
+        if (n > 0) {
+            sh_mb_sha256_hex(text, (size_t)n, none);
+            return ms_salt_in(x, salt, none, SH_MODSERVE_CONTENT);
+        }
+    }
+    return -1;
 }
 
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
@@ -8361,17 +8218,6 @@ static int ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
     return 0;
 }
 
-int sh_modserve_row_build_in(const sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out)
-{
-    const ms_index *x = g_index;
-    char *norm = sh_modserve_place_norm(place);
-    int at = norm ? ms_row_build_in(x, row, norm) : -1;
-    free(norm);
-    if (out) memset(out, 0, sizeof *out);
-    if (at < 0) return 0;
-    return ms_ref_fill(&x->bundles[at], out);
-}
-
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     const ms_index *x = g_index;
@@ -8386,16 +8232,8 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
  * serving index. */
 int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char **cause)
 {
-    char *place = ms_scope_place();
-    int st = sh_modserve_row_served_in(row, place ? place : "", subject, cause);
-    free(place);
-    return st;
-}
-
-int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
-{
     const ms_index *x = g_index;
-    char salt[SH_MODMANIFEST_SALT_CAP], *norm;
+    char salt[SH_MODMANIFEST_SALT_CAP];
     const char *what = subject && subject[0] ? subject : "map", *title;
     int i, declared, skipped = -1, absent = 0;
     size_t k;
@@ -8406,9 +8244,7 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
     }
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
-    norm = sh_modserve_place_norm(place);
-    declared = norm ? ms_row_build_in(x, row, norm) : -1;
-    free(norm);
+    declared = ms_row_build(x, row);
     /* A folder of the salt that was skipped: the one at the row's hash, else,
      * when no folder of the salt serves at all, any. */
     if (declared < 0 && x) {
@@ -8655,7 +8491,7 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)
     }
 }
 
-/* Root folders before maps' places, then salt, then folder. */
+/* Root folders before compositions, then salt, then folder. */
 static const ms_index *g_extra_order_index;
 static int ms_extra_order(const void *a, const void *b)
 {

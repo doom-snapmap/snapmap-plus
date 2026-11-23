@@ -372,6 +372,57 @@ done:
     return state;
 }
 
+int sh_modpin_row_differs(const sh_modmanifest_row *row)
+{
+    sh_modmanifest_row local;
+    sh_mb_bundle b;
+    sh_unit_env env;
+    char *folder;
+    size_t k;
+    int differs = 0;
+    if (!row || !row->pinned || !row->unit_count) return -1;
+    /* The installed version: the row as a local row of its salt resolves to the root folder (D6a). */
+    memset(&local, 0, sizeof local);
+    strcpy_s(local.salt, sizeof local.salt, row->salt);
+    memset(local.build, '0', SH_MOD_HASH_CHARS);
+    local.build[SH_MOD_HASH_CHARS] = 0;
+    memset(&b, 0, sizeof b);
+    folder = mpn_folder(&local);
+    if (!folder || !sh_mb_load_folder(folder, &b) || !b.validated || _stricmp(b.id, row->salt)) {
+        sh_mb_free(&b);
+        free(folder);
+        return -1;
+    }
+    memset(&env, 0, sizeof env);
+    env.game = g_game;
+    env.game_context = g_game_ctx;
+    env.asked = g_asked;
+    env.asked_count = g_nasked;
+    for (k = 0; k < row->unit_count && !differs; k++) {
+        char unit[SH_MB_HASH_HEX + 1], *root = NULL, *why = NULL;
+        const char *name = row->roots && row->roots[k] ? row->roots[k] : SH_UNIT_WHOLE;
+        if (mpn_memo_find(b.hash, name, unit, &root)) {
+            free(root);
+            differs = strcmp(unit, row->units[k]) != 0;
+            continue;
+        }
+        {
+            sh_unit u;
+            memset(&u, 0, sizeof u);
+            if (!sh_unit_of(&b, folder, name, &env, &u, &why)) differs = 1;   /* the installed build lacks it */
+            else {
+                mpn_memo_put(b.hash, name, u.hash, u.root);
+                differs = strcmp(u.hash, row->units[k]) != 0;
+            }
+            sh_unit_free(&u);
+            free(why);
+        }
+    }
+    sh_mb_free(&b);
+    free(folder);
+    return differs;
+}
+
 int sh_modpin_rows(sh_modmanifest_list *rows, const char *map_json, size_t len, const char *content_root,
                    sh_modpin_result *out)
 {

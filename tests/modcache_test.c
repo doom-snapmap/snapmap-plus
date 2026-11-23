@@ -38,6 +38,9 @@ static sh_modmanifest_list g_current_rows;
 int sh_modserve_active(void) { return 1; }
 int modserve_activate_bundles(const char *const *bundle_hashes, int count) { (void)bundle_hashes; (void)count; return 0; }
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref) { (void)ref; }
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+static int g_salt_installed;
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return g_salt_installed; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out) { (void)row; if (out) memset(out, 0, sizeof *out); return 0; }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context)
 { (void)names; (void)count; (void)visit; (void)context; return 0; }
@@ -315,17 +318,15 @@ static void test_rows_format2(void)
     strcpy_s(local.build, sizeof local.build, "3333333333333333333333333333333333333333333333333333333333333333");
     CHECK(sh_modmanifest_row_add_name(&local, "mods/" SALT "/crate"));
     v = sh_modmanifest_format_value(&local, &len);
-    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"build\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"names\":[\"mods/" SALT "/crate\"]}"));
+    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"names\":[\"mods/" SALT "/crate\"]}"));
     CHECK(v && sh_modmanifest_parse_value(v, len, &back, err, sizeof err) && !back.pinned &&
-          !strcmp(back.build, "3333333333333333333333333333333333333333333333333333333333333333"));
+          !strcmp(back.build, SH_MODMANIFEST_LOCAL_BUILD));
     free(v);
     sh_modmanifest_row_free(&back);
-    /* A format 1 row is a local row at its build (D7). */
+    /* A format 1 row ("<salt>@<build>") is an earlier shape: it is not read. */
     {
         const char *old = "{\"mod\":\"" SALT "@3333333333333333333333333333333333333333333333333333333333333333\",\"name\":\"x\",\"size\":1,\"names\":[]}";
-        CHECK(sh_modmanifest_parse_value(old, strlen(old), &back, err, sizeof err) && !back.pinned &&
-              !strcmp(back.build, "3333333333333333333333333333333333333333333333333333333333333333"));
-        sh_modmanifest_row_free(&back);
+        CHECK(!sh_modmanifest_parse_value(old, strlen(old), &back, err, sizeof err));
     }
     sh_modmanifest_row_free(&local);
     sh_modmanifest_row_free(&r);
@@ -779,6 +780,116 @@ static void test_cache(const char *top)
         free(map);
         CHECK(sh_cache_sweep(0, NULL, 0, &st));
         CHECK(st.units_removed == 0 && st.served_removed == 0);   /* both compositions are some kept map's */
+        /* Add to my mods (5.15): the played map's row staged as a mod folder of copies, its author text named
+         * "(my copy)" with no builder block; refusals for a row no map has, a unit that spells its namespace (D29) and
+         * a unit whose files are not here. */
+        {
+            sh_cache_copy copy;
+            char *why = NULL, staged_dir[MAX_PATH * 2];
+            /* The crates' binaries spell their namespace: staged as they are (D29 as built; serving maps it, D12). */
+            CHECK(sh_cache_stage_copy(chash, &copy, &why) == 1 && !why && copy.objects == 2 &&
+                  !strcmp(copy.name, "Crates and barrels (my copy)") && !strcmp(copy.salt, SALT));
+            if (copy.dir) {
+                char *bin;
+                size_t blen = 0, bi;
+                int spells = 0;
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\meshes\\models\\crate.bmodel", copy.dir);
+                bin = (char *)sh_mb_read_file(path, 1u << 20, &blen);
+                for (bi = 0; bin && bi + 14 <= blen && !spells; bi++) spells = !memcmp(bin + bi, "mods/" SALT "/", 14);
+                CHECK(spells && links_of(path) == 1);
+                free(bin);
+            }
+            sh_cache_copy_free(&copy);
+            /* A unit of text only: staged as copies, never links to the cache's blobs. */
+            {
+                static const char decl[] = "{\r\n\tinherit = \"snapmaps/unknown\";\r\n}";
+                char sha[65], man[600], mh[65], src[MAX_PATH * 2], *mtext;
+                const char *roots[1], *units[1];
+                sh_modmanifest_row pr;
+                sh_modmanifest_list one_more;
+                FILE *f = NULL;
+                size_t mlen = 0;
+                int ml;
+                sh_mb_sha256_hex(decl, sizeof decl - 1, sha);
+                _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\plain-src.decl", top);
+                write_file(src, decl, sizeof decl - 1);
+                CHECK(sh_cache_put_blob(src, sha, sizeof decl - 1));
+                ml = _snprintf_s(man, sizeof man, _TRUNCATE, "{\"files\":[{\"path\":\"entities/plain.decl\",\"sha256\":\"%s\","
+                                 "\"size\":%u}],\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"entity\","
+                                 "\"name\":\"entities/plain\"}}", sha, (unsigned)(sizeof decl - 1));
+                sh_mb_sha256_hex(man, (size_t)ml, mh);
+                CHECK(sh_cache_put_manifest(mh, man, (size_t)ml));
+                memset(&pr, 0, sizeof pr);
+                strcpy_s(pr.salt, sizeof pr.salt, "pl4inpk1");
+                roots[0] = "entities/plain"; units[0] = mh;
+                CHECK(sh_modmanifest_row_pin(&pr, roots, units, 1) && sh_modmanifest_row_set_name(&pr, "Plain Pack"));
+                memset(&one_more, 0, sizeof one_more);
+                CHECK(sh_modmanifest_list_add(&one_more, &pr));
+                mtext = sh_modmanifest_write(body, strlen(body), &one_more, &mlen, err, sizeof err);
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\pppp_qqqq_map.decl", saved);
+                if (mtext && !fopen_s(&f, path, "wb") && f) { fwrite(mtext, 1, mlen, f); fclose(f); }
+                free(mtext);
+                CHECK(sh_cache_stage_copy(pr.build, &copy, &why) == 1 && !why);
+                CHECK(copy.dir && copy.objects == 1 && !strcmp(copy.salt, "pl4inpk1") && !strcmp(copy.name, "Plain Pack (my copy)"));
+                CHECK(copy.modjson && strstr(copy.modjson, "\"Plain Pack (my copy)\"") && !strstr(copy.modjson, "snapmap-plus"));
+                if (copy.dir) {
+                    _snprintf_s(staged_dir, sizeof staged_dir, _TRUNCATE, "%s\\entities\\plain.decl", copy.dir);
+                    CHECK(mt_exists(staged_dir) && links_of(staged_dir) == 1);
+                    strcpy_s(staged_dir, sizeof staged_dir, copy.dir);
+                }
+                sh_cache_copy_free(&copy);
+                CHECK(!mt_exists(staged_dir) && !copy.dir);
+                CHECK(DeleteFileA(path));
+                sh_modmanifest_list_free(&one_more);
+                sh_modmanifest_row_free(&pr);
+            }
+            CHECK(sh_cache_stage_copy("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", &copy, &why) == 0 && why &&
+                  !strcmp(why, "No map on this computer uses this mod any more; press Refresh."));
+            free(why);
+            why = NULL;
+            {
+                static const char spelled[] = "{\"files\":[],\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"entity\","
+                                              "\"name\":\"entities/spelt\"},\"spelled\":\"" SALT "\"}";
+                static const char lacking[] = "{\"files\":[{\"path\":\"entities/gone.decl\",\"sha256\":"
+                                              "\"0000000000000000000000000000000000000000000000000000000000000001\",\"size\":7}],"
+                                              "\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"entity\",\"name\":\"entities/gone\"}}";
+                char uh[65], lh[65], *mtext;
+                const char *roots[1], *units[1];
+                sh_modmanifest_row sr, lr;
+                sh_modmanifest_list two;
+                FILE *f = NULL;
+                size_t mlen = 0;
+                sh_mb_sha256_hex(spelled, sizeof spelled - 1, uh);
+                sh_mb_sha256_hex(lacking, sizeof lacking - 1, lh);
+                CHECK(sh_cache_put_manifest(uh, spelled, sizeof spelled - 1) && sh_cache_put_manifest(lh, lacking, sizeof lacking - 1));
+                memset(&sr, 0, sizeof sr);
+                memset(&lr, 0, sizeof lr);
+                strcpy_s(sr.salt, sizeof sr.salt, SALT2);
+                strcpy_s(lr.salt, sizeof lr.salt, "zx9lack1");
+                roots[0] = "entities/spelt"; units[0] = uh;
+                CHECK(sh_modmanifest_row_pin(&sr, roots, units, 1) && sh_modmanifest_row_set_name(&sr, "Spelt"));
+                roots[0] = "entities/gone"; units[0] = lh;
+                CHECK(sh_modmanifest_row_pin(&lr, roots, units, 1) && sh_modmanifest_row_set_name(&lr, "Gone Pack"));
+                memset(&two, 0, sizeof two);
+                CHECK(sh_modmanifest_list_add(&two, &sr) && sh_modmanifest_list_add(&two, &lr));
+                mtext = sh_modmanifest_write(body, strlen(body), &two, &mlen, err, sizeof err);
+                CHECK(mtext != NULL);
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\gggg_hhhh_map.decl", saved);
+                if (mtext && !fopen_s(&f, path, "wb") && f) { fwrite(mtext, 1, mlen, f); fclose(f); }
+                free(mtext);
+                CHECK(sh_cache_stage_copy(sr.build, &copy, &why) == 1 && !why);   /* a unit that spells copies too */
+                sh_cache_copy_free(&copy);
+                CHECK(sh_cache_stage_copy(lr.build, &copy, &why) == 0 && why &&
+                      !strcmp(why, "Gone Pack cannot be copied: some of its content is not on this computer. Play the map once "
+                                   "online, then try again."));
+                free(why);
+                why = NULL;
+                CHECK(DeleteFileA(path));
+                sh_modmanifest_list_free(&two);
+                sh_modmanifest_row_free(&sr);
+                sh_modmanifest_row_free(&lr);
+            }
+        }
         CHECK(sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);
         t = sh_cache_storage_line();
         CHECK(t && !strncmp(t, "Map content: ", 13) && strstr(t, "for 2 maps."));
@@ -1058,6 +1169,125 @@ static void test_sweep_held(const char *top)
     sh_mb_free(&b);
 }
 
+/* Manager Q8, D6a: a local row whose mod folder is not on this computer loads with its objects stood in and one
+ * sentence; the content step hands it to the cache as a row of no units under the composition hash of none. */
+static void test_local_standins(const char *top)
+{
+    char mods[MAX_PATH * 2], path[MAX_PATH * 3], none[65], *t;
+    const char *placed2[] = { "mods/" SALT "/crate", "mods/" SALT "/barrel" };
+    const char *placed1[] = { "mods/" SALT "/crate" };
+    static const char map[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idInteractable\",\"inherit\":\"mods/" SALT "/crate\"},\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT "\",\"name\":\"Crates and barrels\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/" SALT "/crate\"]}]}}";
+    sh_modmanifest_row row;
+    sh_modmanifest_list list;
+    int complete = 1;
+    unsigned char want_text[64];
+    char want[65];
+    size_t n;
+
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\player-local\\mods", top);
+    CreateDirectoryA(mods, NULL);
+    sh_cache_set_mods_root(mods);
+    (void)sh_cache_take_notice();
+    /* The composition hash of none is 2.13's formula with no unit (modserve.c computes the same for the resolver). */
+    CHECK(sh_modmanifest_composition_hash(SALT, NULL, 0, none));
+    n = (size_t)_snprintf_s((char *)want_text, sizeof want_text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", SALT);
+    sh_mb_sha256_hex(want_text, n, want);
+    CHECK(!strcmp(none, want));
+
+    /* A row of no units: every placed object under the namespace stands in, with one sentence. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, SALT);
+    strcpy_s(row.build, sizeof row.build, none);
+    row.pinned = 1;
+    CHECK(sh_modmanifest_row_set_name(&row, "Crates and barrels"));
+    load_rows(&row, 1, placed2, 2);
+    CHECK(sh_cache_composed(none, &complete) && !complete);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\crate.decl", mods, none);
+    t = read_text(path);
+    CHECK(t && strstr(t, "snapmaps/unknown"));
+    free(t);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    CHECK(mt_exists(path));
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel), which "
+                          "are not on this computer."));
+    free(t);
+    /* Another map of the same mod places other objects: composed again for it, one sentence for its one object. */
+    load_rows(&row, 1, placed1, 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    CHECK(!mt_exists(path));
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
+    free(t);
+    sh_modmanifest_row_free(&row);
+
+    /* The load's content step: the map's local row, nothing at the root serving it, reaches the cache so. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods, none);
+    mt_remove_tree(path);
+    memset(&list, 0, sizeof list);
+    CHECK(sh_modmanifest_read(map, sizeof map - 1, &list, NULL) == 1 && list.count == 1 && !list.rows[0].pinned);
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_modmanifest_content_for(map, sizeof map - 1, &list);
+    sh_modmanifest_set_content(NULL);
+    sh_modmanifest_list_free(&list);
+    CHECK(sh_cache_composed(none, &complete) && !complete);
+    _snprintf_s(path, sizeof path, _TRUNCATE,
+                "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mods, none);
+    t = read_text(path);
+    CHECK(t && strstr(t, "entityDef = \"entities/crate\";"));
+    free(t);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
+    free(t);
+
+    /* Loaded again with the same objects: the composition stays as it is (a marker in it survives), one sentence. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, SALT);
+    strcpy_s(row.build, sizeof row.build, none);
+    row.pinned = 1;
+    CHECK(sh_modmanifest_row_set_name(&row, "Crates and barrels"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\marker.txt", mods, none);
+    write_file(path, "x", 1);
+    load_rows(&row, 1, placed1, 1);
+    CHECK(mt_exists(path));
+    t = sh_cache_take_notice();
+    CHECK(t && strstr(t, "the Crate from Crates and barrels"));
+    free(t);
+    /* The mod's folder is here and cannot be used: stood in too, and the sentence says so. */
+    row.local_broken = 1;
+    load_rows(&row, 1, placed2, 2);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel): your folder "
+                          "of it cannot be used. The Mods tab says why."));
+    free(t);
+    sh_modmanifest_row_free(&row);
+
+    /* The sweep keeps the open map's stand-ins; once no map is open, they go. */
+    {
+        char saved[MAX_PATH * 2], played[MAX_PATH * 2], saves[MAX_PATH * 2];
+        sh_cache_sweep_stats st;
+        _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\local-saved", top);
+        _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\local-played", top);
+        _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\local-saves", top);
+        CreateDirectoryA(saved, NULL);
+        CreateDirectoryA(played, NULL);
+        CreateDirectoryA(saves, NULL);
+        sh_cache_set_map_folders(saved, played);
+        sh_saved_maps_set_root(saves);
+        (void)sh_modmanifest_prepare_load(map, sizeof map - 1, NULL);
+        CHECK(sh_cache_sweep(0, NULL, 0, &st) && st.unreadable == 0);
+        CHECK(sh_cache_composed(none, NULL));
+        sh_modmanifest_reset();
+        CHECK(sh_cache_sweep(0, NULL, 0, &st) && st.served_removed >= 1);
+        CHECK(!sh_cache_composed(none, NULL));
+        sh_saved_maps_set_root(NULL);
+        sh_cache_set_map_folders(NULL, NULL);
+    }
+}
+
 static void test_key(const char *top)
 {
     sh_key *k = NULL, *back = NULL;
@@ -1104,6 +1334,8 @@ int main(void)
     test_cache(top);
     test_product_pointer(top);
     test_sweep_held(top);
+    printf("-- a local row whose mod is not here stands in (Q8)\n");
+    test_local_standins(top);
     printf("-- the publishing key\n");
     test_key(top);
     (void)g_current_rows;

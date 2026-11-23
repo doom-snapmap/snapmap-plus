@@ -4,9 +4,9 @@
  * needs to see:
  *   mods      one row per mod folder of the store (modstore enumeration):
  *             the player's own mods at the root of mods\ (with their
- *             organizing folders as "group"), and the mods a downloaded map
- *             brought, in that map's place mods\maps\<map title>\ ("place"
- *             and "placeTitle"). A row is "ready" when its build serves, else
+ *             organizing folders as "group"). A map's content is not a mod
+ *             folder: it is the content cache's, listed by the content action
+ *             (modcache.h) with Add to my mods. A row is "ready" when its build serves, else
  *             "attention" with one plain sentence saying what is wrong and
  *             what to do ("cause"). It carries what the details pane shows:
  *             the Toybox rows the mod adds, what it changes in the game (its
@@ -276,10 +276,7 @@ int  sh_modui_poll_main(void *context);
  * serving mode is Play. The Play entry then keeps this listing instead of
  * reading the editor, and the tick clears it once that Play has run and is
  * over (launched, loading, playing, running, ended: modui.c). Main thread.
- * Returns the builds whose serving changed. It keeps the serving context
- * the gate set (sh_modserve_place_set). Nothing in this file resets the
- * place: where a map finds its mods is a fact of that map, set from its
- * record at every load. */
+ * Returns the builds whose serving changed. */
 /* The names the open editor map places now (live, not its last save): *names malloc'd, each freed with free(), as
  * sh_modmanifest_names_free does. The count, -1 outside the editor or on failure. Main thread. */
 int  sh_modui_placed_names(char ***names, size_t *count);
@@ -328,6 +325,9 @@ void sh_modui_note_changed(void);
 /* The publishing key's Settings requests (SH_MODS_ACT_KEY) and its state in the list document ("publishingKey"),
  * modclaim.h modclaim_key_action and modclaim_key_status_json: each answer malloc'd. Unbound, neither is offered. */
 void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void));
+/* The open map's listing again from its live placed names and rows, applied when it changed (a placement added rows
+ * to the current manifest: an imported prefab's units). Main thread: 1 changed, 0 not, -1 off the main thread. */
+int  sh_modui_scope_refresh(const char *why);
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
@@ -337,11 +337,15 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
  * scripts is not played (modpublished.c, at the launch and after its content
  * is fetched), with SH_MODUI_SCRIPTS_OFF. A rawmap or prefab ZIP import (modexport.c)
  * whose mods carry scripts is refused with the same sentence while the
- * setting is off, and installs nothing. The Mods tab offers the setting
+ * setting is off, and installs nothing. The Snapmap+ window's Settings menu offers the setting
  * ("mods.scripted_maps", on by default). */
 #define SH_MODUI_SCRIPTS_OFF \
-    "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on " \
-    "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
+    "This map's mods include scripts, which you turned off. To play it, turn on " \
+    "\"Play Maps Whose Mods Include Scripts\" in the Settings menu of the Snapmap+ window."
+/* The same refusal of a prefab's .zip import whose content carries scripts. */
+#define SH_MODUI_SCRIPTS_OFF_PREFAB \
+    "This prefab's mods include scripts, which you turned off. To use it, turn on " \
+    "\"Play Maps Whose Mods Include Scripts\" in the Settings menu of the Snapmap+ window."
 int  sh_modui_scripted_maps_allowed(void);
 
 #ifdef SH_MODUI_TESTING

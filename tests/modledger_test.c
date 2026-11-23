@@ -415,10 +415,10 @@ static void test_anim_kind(const char *top)
     sh_modledger_rec rec;
     sh_modledger_ident now;
     seen s;
-    printf("-- refresh: the anim kind, one salt at two hashes (a map's place and the root)\n");
+    printf("-- refresh: the anim kind, one salt at two hashes (a composition and the root)\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\anims\\mods", top);
     mkdirs(root);
-    make_bundle(root, "maps\\Anim map\\anim-a", "kanim000", 'a', 100, b1, 4);
+    make_bundle(root, ".content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "kanim000", 'a', 100, b1, 4);
     make_bundle(root, "anim-b", "kanim000", 'b', 200, b2, 4);
     hash64('a', h1);
     hash64('b', h2);
@@ -437,9 +437,8 @@ static void test_anim_kind(const char *top)
     CHECK(sh_modledger_decide(&rec, &now, 0, 1) == SH_MODLEDGER_KEEP);
     CHECK(rec.id.bundle == 0xbbbbbbbbbbbbbbbbull && rec.id.file == 0x3333333333333333ull);
 
-    /* A map pinning its place's build: the anim whose bytes differ is marked,
+    /* A map pinning the composition's build: the anim whose bytes differ is marked,
      * as an anim; the one both builds carry is not. */
-    CHECK(sh_modserve_place_set("maps\\Anim map") >= 0);
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h1));
@@ -474,7 +473,6 @@ static void test_anim_kind(const char *top)
     sh_modserve_each_refresh(on_refresh, &s);
     CHECK(s.walk == 1 && s.idle == 0);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(0);
 
     /* A rescan that changes the root build's anim and skeleton: the anim is

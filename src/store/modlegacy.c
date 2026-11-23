@@ -2116,14 +2116,15 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
     final = stripped;
     final_len = stripped_len;
     if (rows.count) {
-        /* Keep any manifest rows the map already carries; add the converted ones. */
+        /* Keep any manifest rows the map already carries; add the converted ones. A map holds one row per mod (D23),
+         * and a row read back from a map is a local row, which carries no build: rows match by their salt. */
         sh_modmanifest_list merged = {0};
         char err[192] = "";
         size_t r;
         sh_modmanifest_read(stripped, stripped_len, &merged, NULL);
         for (r = 0; r < rows.count; r++) {
             size_t m, dup = 0;
-            for (m = 0; m < merged.count; m++) if (!strcmp(merged.rows[m].build, rows.rows[r].build)) dup = 1;
+            for (m = 0; m < merged.count; m++) if (!strcmp(merged.rows[m].salt, rows.rows[r].salt)) dup = 1;
             if (!dup) sh_modmanifest_list_add(&merged, &rows.rows[r]);
         }
         final = sh_modmanifest_write(stripped, stripped_len, &merged, &final_len, err, sizeof err);

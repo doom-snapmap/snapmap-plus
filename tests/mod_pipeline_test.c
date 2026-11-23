@@ -320,7 +320,7 @@ static void fresh_mod(const char *fixture, const char *root)
     if (saved) {
         CHECK(!strstr(saved, "smpmod1.") && strstr(saved, "\"snapmap-plus\":{\"format\":2,\"mods\":[") != NULL);
         CHECK(sh_modmanifest_read(saved, saved_len, &rows, NULL) == 1 && rows.count == 1 &&
-              !strcmp(rows.rows[0].build, b.hash) && !strcmp(rows.rows[0].salt, "alexrimp") && rows.rows[0].size == b.total_size &&
+              !strcmp(rows.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD) && !strcmp(rows.rows[0].salt, "alexrimp") && rows.rows[0].size == b.total_size &&
               rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alexrimp/imp_copy"));
         sh_modmanifest_list_free(&rows);
         /* Load: the row is read (the member itself is stripped last, by the

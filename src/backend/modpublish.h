@@ -183,7 +183,13 @@ typedef struct sh_modpublish_ops {
     int  (*account_name)(void *c, char *out, size_t cap);
     /* This publish made the computer's publishing key: the backup offer is pending (SPEC 4.2). NULL: nothing. */
     void (*key_made)(void *c);
+    /* 1 when the Snapmap+ window is showing (it shows the backup offer itself). NULL or 0: the publish's notice says
+     * where the offer is (SH_MODPUBLISH_KEY_MADE_TEXT). */
+    int  (*window_open)(void *c);
 } sh_modpublish_ops;
+
+/* After a publish that made the key while the Snapmap+ window was closed (the editor has no passphrase field). */
+#define SH_MODPUBLISH_KEY_MADE_TEXT "Your publishing key was made. Open Snapmap+ to save a backup of it."
 
 #ifdef SH_MODPUBLISH_TESTING
 void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops);

@@ -5,8 +5,8 @@
  * refused swap leave it untouched; a renamed folder keeps its salt; a copied
  * folder gets a new one by "built", ties by path; an installed copy is the
  * newer), earlier shapes refused with their reason and nothing written, the
- * places under mods\maps\<map>\<mod> (one folder per salt per place, never
- * built), New mod, the rebuild rule from the block's tree, the store lock,
+ * mods\maps\ retired (never walked, listed, built or written), add to my mods
+ * (a staged folder copied under a new salt), New mod, the rebuild rule from the block's tree, the store lock,
  * the boot scan, crash leftovers, nested folders, removal through the Recycle
  * Bin.
  *
@@ -212,11 +212,12 @@ static void test_install(const char *fixture, const char *tmp)
 
     CHECK(sh_ms_enumerate(&list) && list.count == 1);
     e = find_entry(&list, "alex.r2-imp");
-    CHECK(e && sh_ms_entry_usable(e) && e->installed_at > 0 && !strcmp(e->salt, "alexrimp") && !e->place[0]);
+    CHECK(e && sh_ms_entry_usable(e) && e->installed_at > 0 && !strcmp(e->salt, "alexrimp"));
     CHECK(e && e->state == SH_MB_DESC_BUILT && !strcmp(e->key, "alexrimp") && e->bundle.file_count == 13);
     CHECK(e && sh_ms_entry_matches(e, "alex.r2-imp") && sh_ms_entry_matches(e, "ALEXRIMP") && !sh_ms_entry_matches(e, "alex"));
-    CHECK(sh_ms_resolve(&list, h1) == e && sh_ms_find_salt(&list, "alexrimp", NULL, NULL) == e);
-    CHECK(sh_ms_find_salt(&list, "alexrimp", NULL, h1) == e && !sh_ms_find_salt(&list, "alexrimp", "*", NULL));
+    CHECK(sh_ms_resolve(&list, h1) == e && sh_ms_find_salt(&list, "alexrimp", NULL) == e);
+    CHECK(sh_ms_find_salt(&list, "alexrimp", h1) == e &&
+          !sh_ms_find_salt(&list, "alexrimp", "0000000000000000000000000000000000000000000000000000000000000000"));
     CHECK(!sh_ms_resolve(&list, "0000000000000000000000000000000000000000000000000000000000000000"));
     CHECK(sh_ms_resolve_need(&list, "md6Def", "mods/alexrimp/imp_copy.md6", &hit) == SH_MS_HIT && hit.providers == 1);
     CHECK(sh_ms_resolve_need(&list, "MD6DEF", "Mods/AlexRimp/Imp_Copy.md6", &hit) == SH_MS_HIT);
@@ -524,8 +525,9 @@ static void test_fresh_folder_refusals(const char *tmp)
 /* An outside converter (Doomforge) writes a new folder already salted: its
  * builder part is only {"format":2,"salt":"<salt>"}, and its binaries name
  * that salt. The first scan keeps the salt and builds it; a second such folder
- * of the same salt is a copy of the first, and as its binaries name the salt
- * it cannot be given another: it is refused with a plain cause, untouched. */
+ * of the same salt is a copy of the first and gets a new salt: its texts follow,
+ * its binaries keep naming the first salt, and its build records that as
+ * "spelled", which serving maps to its own salt (SPEC-distribution D12). */
 static void conv_make(const char *dir, const char *salt)
 {
     char rel[MAX_PATH * 2], text[600], path[MAX_PATH * 2];
@@ -547,7 +549,7 @@ static void test_converter_salt(const char *tmp)
     sh_ms_list list;
     const sh_ms_entry *e;
     int usable;
-    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is refused\n");
+    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is a new mod whose binaries serving maps\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\converted\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\Converted demon", root);
@@ -558,17 +560,17 @@ static void test_converter_salt(const char *tmp)
     _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\Converted demon again", root);
     conv_make(b, "cvsalt00");
     dir_names(b, before, sizeof before);
-    mj0 = slurp(b, "mod.json", NULL);
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 0);
+    mj0 = slurp(b, "meshes\\m.bmd6model", NULL);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "Converted demon again");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "inside a binary file"));
-    if (e) printf("   %s\n", e->cause);
+    CHECK(e && sh_ms_entry_usable(e) && strcmp(e->salt, "cvsalt00") && !strcmp(e->bundle.spelled, "cvsalt00"));
     CHECK(sh_ms_entry_usable(find_entry(&list, "Converted demon")));
     sh_ms_list_free(&list);
     dir_names(b, after, sizeof after);
-    mj1 = slurp(b, "mod.json", NULL);
-    CHECK(!strcmp(before, after) && same_text(mj0, mj1));
+    mj1 = slurp(b, "meshes\\m.bmd6model", NULL);
+    CHECK(mj0 && mj1 && !memcmp(mj0, mj1, 30));   /* the binary as the converter wrote it */
+    (void)after;
     free(mj0);
     free(mj1);
     CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));
@@ -690,104 +692,149 @@ static void test_earlier_shapes(const char *tmp)
     sh_ms_list_free(&list);
 }
 
-/* ------------------------------------------------------------- places */
+/* ------------------------------------------------- mods\maps\ retired */
 
-static void test_place_folders(const char *fixture, const char *tmp)
+typedef struct walk_seen { unsigned count; int saw_top, saw_maps; } walk_seen;
+static int walk_note(void *context, const char *folder, const char *name)
 {
-    char root[MAX_PATH], src[MAX_PATH], src2[MAX_PATH], name[HO_TEXT + 1], cause[600] = "", dir[HO_TEXT + 1];
-    char title[200], path[MAX_PATH * 2], *t;
+    walk_seen *w = (walk_seen *)context;
+    (void)folder;
+    w->count++;
+    if (!strcmp(name, "top")) w->saw_top = 1;
+    if (!_strnicmp(name, "maps", 4)) w->saw_maps = 1;
+    return 0;
+}
+
+#define RETIRED_WORDS "where earlier versions kept the mods of downloaded maps"
+
+static void test_retired_places(const char *fixture, const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], dir2[MAX_PATH * 2], src[MAX_PATH], name[HO_TEXT + 1], cause[HO_TEXT + 1] = "";
+    char *before, *after;
     sh_ms_install_stats st;
     sh_ms_sync_stats ss;
     sh_ms_list list;
-    const sh_ms_entry *e;
-    sh_ms_place arena = { "Hell Arena: Part 1?", "1234567" }, other = { "Hell Arena: Part 1?", "7654321" };
-    sh_ms_place zip = { "pack.rawmap.zip", "zip:pack.rawmap.zip" };
-    printf("-- places: mods\\maps\\<map>\\<mod>, one folder per salt per place, never built\n");
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\places\\mods", tmp);
-    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\places\\in\\one", tmp);
-    _snprintf_s(src2, sizeof src2, _TRUNCATE, "%s\\places\\in\\two", tmp);
+    walk_seen seen;
+    char **mods = NULL;
+    size_t count = 0;
+    printf("-- mods\\maps\\ is retired: never walked, listed, built or written; named explicitly it is refused\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\retired\\mods", tmp);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\retired\\in\\one", tmp);
     mt_mkdirs_for(src);
     CHECK(mt_copy_tree(fixture, src));
     CHECK(sh_ms_set_root(root));
-    CHECK(HOS(dir, sh_ms_place_dir(&arena)) && !strcmp(dir, "maps\\Hell Arena Part 1"));
-    CHECK(HO2(name, cause, sh_ms_install_placed(src, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
-    if (cause[0]) fprintf(stderr, "  placed: %s\n", cause);
-    CHECK(!strcmp(name, "maps\\Hell Arena Part 1\\R2 Imp copy") && st.copied == 13 && !st.replaced);
-    CHECK(HO2(dir, title, sh_ms_place_of("1234567", HO_P(0), HO_P(1))) && !strcmp(dir, "maps\\Hell Arena Part 1") &&
-          !strcmp(title, "Hell Arena: Part 1?"));
-    CHECK(HOS(title, sh_ms_place_title("maps\\Hell Arena Part 1\\R2 Imp copy")) && !strcmp(title, "Hell Arena: Part 1?"));
-    CHECK(HOS(title, sh_ms_place_title("maps/Hell Arena Part 1")));
-    CHECK(!HOS(title, sh_ms_place_title("alex.r2-imp")));
-    CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "maps\\Hell Arena Part 1\\R2 Imp copy");
-    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->place, "maps\\Hell Arena Part 1") && !strcmp(e->salt, "alexrimp"));
-    CHECK(sh_ms_find_salt(&list, "alexrimp", "maps\\Hell Arena Part 1", NULL) == e && sh_ms_find_salt(&list, "alexrimp", "*", NULL) == e);
-    CHECK(!sh_ms_find_salt(&list, "alexrimp", NULL, NULL));   /* not a root build */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\top", root);
+    make_small_mod(dir, "top");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\X", root);
+    make_small_mod(dir, "x");
+    _snprintf_s(dir2, sizeof dir2, _TRUNCATE, "%s\\maps\\Hell Arena\\Y", root);
+    make_small_mod(dir2, "y");
+    before = slurp(dir, "mod.json", NULL);
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_ms_walk(walk_note, &seen) && seen.count == 1 && seen.saw_top && !seen.saw_maps);
+    CHECK(sh_ms_find_mods(root, &mods, &count) && count == 1);
+    sh_ms_find_free(mods, count);
+    CHECK(sh_ms_enumerate(&list) && list.count == 1 && find_entry(&list, "top") && !find_entry(&list, "maps\\X") &&
+          !find_entry(&list, "maps\\Hell Arena\\Y"));
     sh_ms_list_free(&list);
-    CHECK(HO(dir, sh_ms_place_folder(&arena, "R2 Imp copy", "alexrimp", HO_P(0))) == 2 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy"));
-    CHECK(HO(dir, sh_ms_place_folder(&arena, "R2 Imp copy", "otherimp", HO_P(0))) == 1 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy (2)"));
-    /* F's note: a mod's folder names its place. */
-    CHECK(sh_ms_place_note(&arena, "maps/Hell Arena Part 1/R2 Imp copy") && HO(dir, sh_ms_place_of("1234567", HO_P(0), NULL)) &&
-          !strcmp(dir, "maps\\Hell Arena Part 1"));
-    /* Another build of the same salt for the same map replaces the place's folder. */
-    mt_append(src, "entities\\imp_copy.decl", "\r\n// republished\r\n");
-    CHECK(HO2(name, cause, sh_ms_install_placed(src, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
-    CHECK(!strcmp(name, "maps\\Hell Arena Part 1\\R2 Imp copy") && st.replaced);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1", root);
-    {
-        char names[512];
-        dir_names(path, names, sizeof names);
-        CHECK(!strcmp(names, "R2 Imp copy;"));
-    }
-    /* A build with a file at another mod's name (a native/ path under mods/) is refused; nothing placed. */
-    CHECK(mt_copy_tree(fixture, src2));
-    mt_write(src2, "native\\generated\\decls\\entitydef\\mods\\otherimp\\x.decl", "{\r\n}");
-    CHECK(!HO2(name, cause, sh_ms_install_placed(src2, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "native/ holds DOOM's own files the mod changes"));
-    /* The same title for another map: a place of its own. */
-    CHECK(HOS(dir, sh_ms_place_dir(&other)) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
-    CHECK(HO2(name, cause, sh_ms_install_placed(src, &other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
-    CHECK(!strcmp(name, "maps\\Hell Arena Part 1 (7654321)\\R2 Imp copy"));
-    CHECK(HO2(name, cause, sh_ms_install_placed(src, &zip, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
-    CHECK(!strcmp(name, "maps\\pack.rawmap.zip\\R2 Imp copy"));
-    /* A new folder dropped into a place is refused; place folders are never built. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
-    fb_make(path, "dropped");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\R2 Imp copy", root);
-    mt_append(path, "entities\\imp_copy.decl", "\r\n// edited by hand\r\n");
+    /* The scan builds the root's mod and leaves mods\maps\ as it was. */
+    CHECK(sh_ms_sync_pending() == 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.folders == 1 && ss.failed == 0);
     CHECK(sh_ms_sync_pending() == 0);
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.salted == 0 && ss.folders == 0);
-    CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "maps\\Hell Arena Part 1\\dropped");
-    CHECK(e && e->refused && strstr(e->cause, "where Snapmap+ builds nothing"));
+    after = slurp(dir, "mod.json", NULL);
+    CHECK(same_text(before, after) && after && !strstr(after, "salt"));
+    free(before);
+    free(after);
+    CHECK(sh_ms_enumerate(&list) && list.count == 1 && !find_entry(&list, "maps\\X"));
     sh_ms_list_free(&list);
+    /* Named explicitly, a folder of mods\maps\ is refused with the sentence and nothing is written. */
+    cause[0] = 0;
+    CHECK(HO(cause, sh_ms_assign_salt(dir, "x", NULL, HO_P(0))) == -1 && strstr(cause, "This folder is in mods\\maps") &&
+          strstr(cause, RETIRED_WORDS));
+    cause[0] = 0;
+    CHECK(!HO2(name, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
+          strstr(cause, "This folder is in mods\\maps") && strstr(cause, RETIRED_WORDS));
+    cause[0] = 0;
+    CHECK(!HO2(name, cause, sh_ms_install_from_folder(dir2, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
+          strstr(cause, RETIRED_WORDS));
+    cause[0] = 0;
+    CHECK(!HO2(name, cause, sh_ms_install_to_root(dir, NULL, HO_P(0), &st, NULL, HO_P(1))) && strstr(cause, RETIRED_WORDS));
+    after = slurp(dir, "mod.json", NULL);
+    CHECK(after && !strstr(after, "salt") && mt_exists(dir2));
+    free(after);
     {
-        char built[HO_TEXT + 1], c2[600], dropped[MAX_PATH * 2];
-        sh_ms_install_stats s2;
-        _snprintf_s(dropped, sizeof dropped, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
-        CHECK(HO(c2, sh_ms_assign_salt(dropped, "dropped", NULL, HO_P(0))) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
-        CHECK(!HO2(built, c2, sh_ms_install_from_folder(path, &RESOLVER, HO_P(0), &s2, NULL, HO_P(1))) &&
-              strstr(c2, "came with a downloaded map"));
+        char dest[MAX_PATH * 2];
+        _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s\\X", root);
+        CHECK(!mt_exists(dest));   /* nothing landed at the root */
     }
-    /* A hand copy inside one place: the newer one is refused. */
-    {
-        char copy[MAX_PATH * 2];
-        _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\maps\\pack.rawmap.zip\\R2 Imp copy (hand)", root);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\pack.rawmap.zip\\R2 Imp copy", root);
-        CHECK(mt_copy_tree(path, copy));
-        CHECK(sh_ms_enumerate(&list));
-        e = find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy (hand)");
-        CHECK(e && e->refused && strstr(e->cause, "Another folder of this map's mods, mods\\maps\\pack.rawmap.zip\\R2 Imp copy, holds the same mod"));
-        CHECK(sh_ms_entry_usable(find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy")));
-        sh_ms_list_free(&list);
-        mt_remove_tree(copy);
-    }
-    /* Removal: an emptied place goes with its record entry. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1 (7654321)\\R2 Imp copy", root);
-    CHECK(HO(cause, sh_ms_delete_mod_folder(path, HO_P(0))));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1 (7654321)", root);
-    CHECK(!mt_exists(path) && !HO(dir, sh_ms_place_of("7654321", HO_P(0), NULL)));
-    CHECK(HO(dir, sh_ms_place_of("1234567", HO_P(0), NULL)));
+    CHECK(sh_ms_enumerate(&list) && list.count == 1);
+    sh_ms_list_free(&list);
+}
+
+/* ------------------------------------------------------ add to my mods */
+
+#define AC_SALT "stagedsl"
+#define AC_FILE "assets\\data\\mods\\" AC_SALT "\\thing.txt"
+#define AC_REF  "entities\\ref.decl"
+
+static void test_add_copy(const char *tmp)
+{
+    char root[MAX_PATH], staged[MAX_PATH], path[MAX_PATH * 2], name[HO_TEXT + 1], cause[HO_TEXT + 1] = "", s1[SH_SALT_LEN + 1],
+        s2[SH_SALT_LEN + 1], rel[MAX_PATH * 2], names0[512], names1[512], *t, *mj0, *mj1;
+    static const char MODJSON[] = "{\"name\":\"Staged thing\",\"version\":\"1.0.0\",\"author\":\"tester\"}";
+    sh_ms_sync_stats ss;
+    printf("-- add to my mods: a staged folder becomes mods\\<name> under a new salt, its files and references moved\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\addcopy\\mods", tmp);
+    _snprintf_s(staged, sizeof staged, _TRUNCATE, "%s\\addcopy\\staged\\one", tmp);
+    mt_mkdirs_for(staged);
+    CHECK(sh_ms_set_root(root));
+    mt_write(staged, "mod.json", MODJSON);
+    mt_write(staged, AC_FILE, "{\r\n\tinherit = \"mods/" AC_SALT "/base\";\r\n}");
+    mt_write(staged, AC_REF, "{\r\n\tinherit = \"mods/" AC_SALT "/thing\";\r\n}");
+    mt_write(staged, "images\\a.bimage", "bytes of the staged image");
+    dir_names(staged, names0, sizeof names0);
+    mj0 = slurp(staged, "mod.json", NULL);
+
+    CHECK(HO2(name, cause, sh_ms_add_copy(staged, MODJSON, strlen(MODJSON), AC_SALT, "My Copy", HO_P(0), HO_P(1))));
+    if (cause[0]) fprintf(stderr, "  add_copy: %s\n", cause);
+    CHECK(!strcmp(name, "My Copy"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\My Copy", root);
+    CHECK(mt_has(path, "mod.json") && mt_has(path, "images\\a.bimage"));
+    CHECK(entry_of("My Copy", s1, NULL, NULL) && sh_salt_valid(s1, strlen(s1)) && strcmp(s1, AC_SALT));
+    /* The file moved to the new salt's folder; the old salt's path is gone. */
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\data\\mods\\%s\\thing.txt", s1);
+    CHECK(mt_has(path, rel) && !mt_has(path, AC_FILE));
+    t = slurp(path, rel, NULL);
+    CHECK(t && strstr(t, s1) && !strstr(t, AC_SALT));
+    free(t);
+    t = slurp(path, AC_REF, NULL);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "mods/%s/thing", s1);
+    CHECK(t && strstr(t, rel) && !strstr(t, "mods/" AC_SALT "/"));
+    free(t);
+    /* The staged folder is only read. */
+    dir_names(staged, names1, sizeof names1);
+    mj1 = slurp(staged, "mod.json", NULL);
+    CHECK(!strcmp(names0, names1) && same_text(mj0, mj1) && mt_has(staged, AC_FILE));
+    t = slurp(staged, AC_REF, NULL);
+    CHECK(t && strstr(t, "mods/" AC_SALT "/thing"));
+    free(t);
+    free(mj0);
+    free(mj1);
+    /* The scan keeps the new salt (the folder's block holds it: it is not a copy). */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 0);
+    CHECK(entry_of("My Copy", s2, NULL, NULL) && !strcmp(s1, s2));
+
+    /* A second copy with the same name is "(2)" with a salt of its own. */
+    cause[0] = 0;
+    CHECK(HO2(name, cause, sh_ms_add_copy(staged, MODJSON, strlen(MODJSON), AC_SALT, "My Copy", HO_P(0), HO_P(1))));
+    if (cause[0]) fprintf(stderr, "  add_copy 2: %s\n", cause);
+    CHECK(!strcmp(name, "My Copy (2)"));
+    CHECK(entry_of("My Copy (2)", s2, NULL, NULL) && sh_salt_valid(s2, strlen(s2)) && strcmp(s2, s1) && strcmp(s2, AC_SALT));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\My Copy (2)", root);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\data\\mods\\%s\\thing.txt", s2);
+    CHECK(mt_has(path, rel));
+    /* Nothing to copy: refused with a cause. */
+    CHECK(!HO2(name, cause, sh_ms_add_copy(staged, MODJSON, strlen(MODJSON), "bad", "x", HO_P(0), HO_P(1))) && cause[0]);
 }
 
 /* ------------------------------------------------------------- new mod */
@@ -927,7 +974,7 @@ static void test_named_locks(const char *tmp)
     CHECK(th != NULL);
     while (th && !InterlockedCompareExchange(&j.held, 0, 0)) Sleep(1);
     CHECK(j.held == 1);
-    (void)sh_mb_record_get(root, "places", &text);
+    (void)sh_mb_record_get(root, "salts", &text);
     got = GetTickCount64();
     free(text);
     CHECK(got >= j.released_at && j.released_at != 0);
@@ -1199,21 +1246,23 @@ static void test_crash_leftovers(const char *tmp)
     CHECK(sh_ms_enumerate(&list) && list.count == 1);
     sh_ms_list_free(&list);
     g_logged = 0;
-    CHECK(sh_ms_recover_work() == 2);
+    CHECK(sh_ms_recover_work() == 1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gone", root);
     CHECK(mt_has(dir, "mod.json"));
+    /* mods\\maps\\ is retired: nothing there is read or written, leftovers included. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested.old-%lu", root, DEAD);
     CHECK(mt_has(dir, "mod.json"));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\here.old-%lu", root, DEAD);
     CHECK(!mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\live.staging-%lu", root, (unsigned long)GetCurrentProcessId());
     CHECK(mt_exists(dir));
     CHECK(log_has("MODS: store: put gone back from gone.old-4294967280: an earlier session ended while it was being replaced"));
-    CHECK(log_has("MODS: store: put maps\\Arena\\nested back from maps\\Arena\\nested.old-4294967280"));
     CHECK(log_has("MODS: store: removed here.old-4294967280, a work folder an earlier session left"));
     CHECK(log_has("MODS: store: removed gone.staging-4294967280, a work folder"));
-    CHECK(log_count("MODS: store: ") == 4);
-    CHECK(sh_ms_enumerate(&list) && list.count == 3);
+    CHECK(log_count("MODS: store: ") == 3);
+    CHECK(sh_ms_enumerate(&list) && list.count == 2);
     sh_ms_list_free(&list);
     g_logged = 0;
     CHECK(sh_ms_recover_work() == 0 && log_count("MODS: store: ") == 0);
@@ -1337,7 +1386,7 @@ static void test_ordinary_names(const char *tmp)
 }
 
 /* sh_ms_install_to_root: a map's place copied to the root under its salt;
- * the place keeps its copy; the root's own folder of a salt stays theirs. */
+ * the source keeps its copy; the root's own folder of a salt stays theirs. */
 static void test_install_to_root(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH * 2], place[MAX_PATH * 2], salt[SH_SALT_LEN + 1], hash[65], s2[SH_SALT_LEN + 1],
@@ -1345,7 +1394,7 @@ static void test_install_to_root(const char *tmp)
     sh_ms_sync_stats ss;
     sh_ms_install_stats st;
     int usable;
-    printf("-- install to root: a map's mod becomes the player's own under the same salt\n");
+    printf("-- install to root: a built folder from outside the store becomes the player's own under the same salt\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\toroot\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\crate", root);
@@ -1355,11 +1404,9 @@ static void test_install_to_root(const char *tmp)
     /* The root's own folder is not a source. */
     CHECK(!HO2(name, cause, sh_ms_install_to_root(dir, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "already one of your mods"));
-    /* Moved into a map's place, it installs at the root from there. */
-    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep", root);
+    /* Moved outside the store, it installs at the root from there. */
+    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\toroot\\outside\\crate", tmp);
     mt_mkdirs_for(place);
-    CreateDirectoryA(place, NULL);
-    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep\\crate", root);
     CHECK(MoveFileA(dir, place));
     CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && !st.present);
     if (cause[0]) printf("   %s\n", cause);
@@ -1384,7 +1431,7 @@ static void test_nested(const char *tmp)
     sh_ms_verify_stats vs;
     const sh_ms_entry *e;
     int r, ci = getenv("CI") != NULL;
-    printf("-- nested: organizing folders are looked into, a mod is not; mods\\maps is the places\n");
+    printf("-- nested: organizing folders are looked into, a mod is not; mods\\maps is never entered\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\nested\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\top", root);
@@ -1395,7 +1442,7 @@ static void test_nested(const char *tmp)
     make_small_mod(dir, "spider");
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\top\\inner", root);
     make_small_mod(dir, "inner");
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\notaplace", root);   /* a mod.json right in a place folder */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\notaplace", root);   /* a mod.json right in the retired folder */
     make_small_mod(dir, "notaplace");
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\empty-group\\deeper", root);
     mt_mkdirs_for(dir);
@@ -1457,7 +1504,8 @@ int main(int argc, char **argv)
     test_copy_gets_new_salt(tmp);
     test_converter_salt(tmp);
     test_earlier_shapes(tmp);
-    test_place_folders(fixture, tmp);
+    test_retired_places(fixture, tmp);
+    test_add_copy(tmp);
     test_new_mod(tmp);
     test_lock(tmp);
     test_named_locks(tmp);
@@ -1473,7 +1521,7 @@ int main(int argc, char **argv)
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, salt, copies, earlier shapes, places, new mod, lock, removal, leftovers, nested, "
+    printf("modstore_test: install, salt, copies, earlier shapes, mods\\maps retired, add to my mods, new mod, lock, removal, leftovers, nested, "
            "the store tool's half and the boot scan pass\n");
     return 0;
 }
