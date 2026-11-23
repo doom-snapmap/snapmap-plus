@@ -2926,6 +2926,13 @@ is touched, and a removed demon answers nil.
   do, with `Shared_SocialRelationAvailable` (VK 0x1405F4930), which a
   script-driven demon does not run. The Enemy SDK's `enemy_target.lua` is that
   condition on these rows, so a script picks the enemy the game would.
+  `off_limits()` answers an actor's off-limits flag (idActor volatile
+  `offLimits`, a byte its virtual +0x580 returns: idAI2's and idPlayer's VK
+  0x140427550 / GL 0x140426600, `movzx eax, byte [rcx+0x9408]; ret`), which a
+  sync interaction sets on its instigator (`markInstigatorOffLimits`) and
+  `Shared_SocialRelationAvailable`'s `filterOutOffLimits` drops; the call
+  checks the getter it finds in the vtable is that instruction before it reads
+  the byte, and answers nil for anything that is no actor.
   `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
   game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
   (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage

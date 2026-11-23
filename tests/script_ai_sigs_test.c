@@ -192,6 +192,16 @@ static void check_image(const char *path)
         printf("  idAI2 typeinfo 0x%X\n", ti);
         CHECK(ti == (vk ? 0x5CF7A90u : 0x45FD110u));
     }
+    /* the off-limits getter (script_api_ai.h, SH_AI_VSLOT_OFF_LIMITS): idAI2's and idPlayer's vtables name the same
+     * function, movzx eax, byte [rcx+0x9408]; ret */
+    {
+        uint32_t vts[2] = { vk ? 0x2035B30u : 0x204F900u, vk ? 0x22A1298u : 0x22BAFC8u }, k;
+        for (k = 0; k < 2; k++) {
+            uint32_t fn = (uint32_t)(qword_at(base, vts[k] + SH_AI_VSLOT_OFF_LIMITS) - image_base);
+            CHECK(fn == (vk ? 0x427550u : 0x426600u));
+            CHECK(sh_ai_off_limits_getter(base + fn));
+        }
+    }
 
     /* The brain's calls. */
     if (rva[SH_AI_SIG_RECOIL_PLAY])
