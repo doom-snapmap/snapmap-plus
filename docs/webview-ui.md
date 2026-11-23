@@ -454,7 +454,7 @@ of editor tweaks only is never a row, and the Snapmap+ entry of a map that uses 
 so every folder of a mod shows the map's use of it. `tests/mods_inmap_test.c` holds `map.mods` equal to
 what `sh_modmanifest_on_save` writes at every step an author takes (placing before any save, a second
 object, a mod reached through needs, Use in this map, deleting the last object, undo, an editor tweak,
-two folders of one mod, Remove from map, a published map's content, Update, the D6b entry, no map), and
+a downloaded map's content beside the installed folder of its mod, Remove from map, a published map's content, Update, the D6b entry, no map), and
 `tests/mods_inmap_test.js` runs the page's rule over the same steps.
 
 **When it moves.** The backend's editor poll reads the set of the open map's placed names under a mod's

@@ -7,8 +7,8 @@
  *
  *   nothing placed; a mod's object placed before any save; a second object of it; a mod reached only through another
  *   mod's object; a mod used by the whole map (Use in this map); the last object of a saved mod deleted; that delete
- *   undone; a mod of editor tweaks only installed while a stock object it tweaks is placed; a downloaded map's copy of
- *   a mod beside the player's own folder of it; Remove from map; a published map's content (a pinned row) opened with
+ *   undone; a mod of editor tweaks only installed while a stock object it tweaks is placed; a downloaded map's content (in the
+ *   content cache) of a mod the player has installed too; Remove from map; a published map's content (a pinned row) opened with
  *   the installed folder alongside (D26); Update; the Snapmap+ entry of a map that uses Snapmap+'s own features (D6b),
  *   which is no mod.
  *
@@ -158,8 +158,9 @@ static int fake_preload(const char *why) { (void)why; return 0; }
 static char *author_folder(void *ctx, const sh_modmanifest_row *row)
 {
     (void)ctx;
-    if (_stricmp(row->salt, "alexrimp")) return NULL;
-    return sh_textf("%s\\alex.r2-imp", g_root);
+    if (!_stricmp(row->salt, "alexrimp")) return sh_textf("%s\\alex.r2-imp", g_root);
+    if (!_stricmp(row->salt, "cratebox")) return sh_textf("%s\\crates", g_root);
+    return NULL;
 }
 static char *author_read(void *ctx, const char *request, size_t *len)
 {
@@ -401,6 +402,49 @@ static int install(const char *src)
     return ok;
 }
 
+/* The open map as a map whose rows of `salt` hold content (a published or downloaded map's): the map is saved, the
+ * rows of that mod are pinned to their objects' units (modpin, as a publish does), the text with them is loaded in the
+ * editor, and the content cache composes them, with the installed folder of the same mod alongside (D26). The
+ * other rows stay as the save wrote them. */
+static void load_as_content(const char *salt)
+{
+    sh_modmanifest_list rows, pin;
+    sh_modpin_result pr;
+    char err[256], *text, *loaded, *saved, content[MAX_PATH * 2], **placed = NULL;
+    size_t tl = 0, ll = 0, jl = 0, sl = 0, np, i;
+    int failed = 0, pinned = 0;
+    unsigned rej = 0;
+    const char *json = map_text(&jl);
+    saved = sh_modmanifest_on_save(json, jl, &sl);
+    CHECK(saved != NULL);
+    memset(&rows, 0, sizeof rows);
+    memset(&pin, 0, sizeof pin);
+    memset(&pr, 0, sizeof pr);
+    if (saved) (void)sh_modmanifest_read(saved, sl, &rows, &rej);
+    for (i = 0; i < rows.count; i++) if (!_stricmp(rows.rows[i].salt, salt)) CHECK(sh_modmanifest_list_add(&pin, &rows.rows[i]));
+    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", g_root);
+    CHECK(sh_modpin_rows(&pin, saved ? saved : json, saved ? sl : jl, content, &pr) >= 0);
+    for (i = 0; i < pin.count; i++) pinned += pin.rows[i].pinned != 0;
+    CHECK(pin.count == 1 && pinned == 1);
+    /* the map's rows: the pinned row of the mod, every other row as saved */
+    for (i = 0; i < rows.count; i++) if (_stricmp(rows.rows[i].salt, salt)) CHECK(sh_modmanifest_list_add(&pin, &rows.rows[i]));
+    text = sh_modmanifest_write(json, jl, &pin, &tl, err, sizeof err);
+    CHECK(text != NULL);
+    if (text) {
+        loaded = sh_modmanifest_prepare_load(text, tl, &ll);
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    np = sh_modmanifest_placed_names(json, jl, &placed, &failed);
+    sh_cache_on_load(&pin, placed, np);
+    sh_modmanifest_names_free(placed, np);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+    sh_modpin_result_free(&pr);
+    sh_modmanifest_list_free(&pin);
+    sh_modmanifest_list_free(&rows);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+}
+
 static char *read_all(const char *path, size_t *len)
 {
     FILE *f = NULL;
@@ -473,22 +517,10 @@ int main(int argc, char **argv)
     put_mod(src, "{\"name\":\"Crates\",\"snapmap-plus\":{\"format\":2,\"salt\":\"cratebox\"}}", "entities\\crate.decl",
             "{\r\n\tinherit = \"prop/prop_base\";\r\n}\r\n");
     CHECK(install(src));
-    {
-        /* The copy a downloaded map brought: the same mod in the map's place. */
-        sh_ms_place pl;
-        char from[MAX_PATH * 2];
-        _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\crates", g_root);
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Old Keep\\Crates", g_root);
-        mt_mkdirs_for(dir);
-        CHECK(mt_copy_tree(from, dir));
-        memset(&pl, 0, sizeof pl);
-        pl.title = "Old Keep";
-        CHECK(sh_ms_place_note(&pl, "maps\\Old Keep"));
-    }
     free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     doc = list_doc();
     CHECK(has(doc, "\"key\":\"alex.r2-imp\"") && has(doc, "\"key\":\"imp-escort\"") && has(doc, "\"key\":\"bare-hands\"") &&
-          has(doc, "\"key\":\"editor-grid\"") && has(doc, "\"key\":\"crates\"") && has(doc, "\"key\":\"maps\\\\Old Keep\\\\Crates\""));
+          has(doc, "\"key\":\"editor-grid\"") && has(doc, "\"key\":\"crates\""));
     CHECK(has(doc, "\"editorRows\":2,") || has(doc, "\"editorRows\":2}"));
     CHECK(has(doc, "\"modules\":0"));
     if (failures) printf("%s\n", doc ? doc : "(null)");
@@ -537,53 +569,25 @@ int main(int argc, char **argv)
 
     g_ents[5].uid = 5; g_ents[5].inherit = "mods/cratebox/crate"; g_ents[5].alive = 1;
     g_ent_n = 6;
-    step("a mod the player has, of which a downloaded map brought a copy");
+    /* A downloaded map opened in the editor: its crates are its own content (in the content cache), and the player
+     * has the same mod installed (D26). The installed folder shows as in this map, which holds its own copy. */
+    load_as_content("cratebox");
+    doc = list_doc();
+    CHECK(has(doc, "\"key\":\"crates\",\"salt\":\"cratebox\""));
+    free(doc);
+    step("a downloaded map's content of a mod the player has installed too");
 
     free(run_doc(SH_MODS_ACT_MAP_REMOVE, "bare-hands"));
     step("Remove from map of the mod used by the whole map");
 
-    {
-        /* The author publishes the map: its local row is pinned to its objects' units (modpin, as the publish's save
-         * does), and the published text opened in the editor composes them (the content cache), with the installed
-         * folder of the same mod alongside (D26). */
-        sh_modmanifest_list rows;
-        sh_modpin_result pr;
-        char err[256], *text, *loaded, *saved, content[MAX_PATH * 2], **placed = NULL;
-        size_t tl = 0, ll = 0, jl = 0, sl = 0, np;
-        int failed = 0;
-        unsigned rej = 0;
-        const char *json;
-        for (i = 0; i < g_ent_n; i++) g_ents[i].alive = i <= 1;
-        json = map_text(&jl);
-        saved = sh_modmanifest_on_save(json, jl, &sl);
-        CHECK(saved != NULL);
-        memset(&rows, 0, sizeof rows);
-        memset(&pr, 0, sizeof pr);
-        if (saved) (void)sh_modmanifest_read(saved, sl, &rows, &rej);
-        _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", g_root);
-        CHECK(sh_modpin_rows(&rows, saved ? saved : json, saved ? sl : jl, content, &pr) >= 0);
-        CHECK(rows.count == 1 && rows.rows[0].pinned);
-        text = sh_modmanifest_write(json, jl, &rows, &tl, err, sizeof err);
-        CHECK(text != NULL);
-        if (text) {
-            loaded = sh_modmanifest_prepare_load(text, tl, &ll);
-            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-            HeapFree(GetProcessHeap(), 0, text);
-        }
-        np = sh_modmanifest_placed_names(json, jl, &placed, &failed);
-        sh_cache_on_load(&rows, placed, np);
-        sh_modmanifest_names_free(placed, np);
-        CHECK(sh_modserve_index_build(g_root) >= 0);
-        sh_modpin_result_free(&pr);
-        sh_modmanifest_list_free(&rows);
-        if (saved) HeapFree(GetProcessHeap(), 0, saved);
-        doc = list_doc();
-        /* the installed folder is the map's mod, and the map holds it as its published content */
-        CHECK(has(doc, "\"key\":\"alex.r2-imp\",\"salt\":\"alexrimp\""));
-        CHECK(has(doc, "\"pinned\":true"));
-        if (!has(doc, "\"pinned\":true")) printf("%s\n", doc ? doc : "(null)");
-        free(doc);
-    }
+    /* The author publishes the map: its imp row holds the published units, and the published text opened in the
+     * editor composes them, with the installed folder of the same mod alongside (D26). */
+    for (i = 0; i < g_ent_n; i++) g_ents[i].alive = i <= 1;
+    load_as_content("alexrimp");
+    doc = list_doc();
+    CHECK(has(doc, "\"key\":\"alex.r2-imp\",\"salt\":\"alexrimp\""));   /* the installed folder is the map's mod */
+    CHECK(has(doc, "\"pinned\":true"));
+    free(doc);
     step("a published map's content, the installed folder of the mod alongside");
 
     free(run_doc(SH_MODS_ACT_MAP_UPDATE, "alexrimp"));

@@ -59,8 +59,17 @@ cases.forEach(c => {
  'that delete undone', 'a mod reached only through another mod\'s object', 'a mod used by the whole map (Use in this map)',
  'a published map\'s content, the installed folder of the mod alongside', 'Update to the installed version',
  'a stock object placed that a mod of editor tweaks changes', 'Remove from map of the mod used by the whole map',
+ 'a downloaded map\'s content of a mod the player has installed too',
  'a map that uses Snapmap+\'s own features (its entry is no mod)'].forEach(n =>
   assert.ok(cases.some(c => c.name === n), 'the cases have the step: ' + n));
+/* The downloaded map's crates are its own content, and the installed folder of the mod shows as in this map. */
+const dl = cases.filter(c => /downloaded map's content/.test(c.name))[0];
+assert.ok(dl.save.some(r => r.salt === 'cratebox' && r.pinned) &&
+          dl.map.mods.some(m => m.salt === 'cratebox' && m.pinned && m.key === 'crates'),
+          'the downloaded map holds its crates as content, and the installed folder is the map\'s mod');
+const crates = modsTab.normalize({v: 4, mods: dl.mods, map: dl.map}).mods.filter(b => b.salt === 'cratebox')[0];
+const dlState = modsTab.mapState(modsTab.normalize({v: 4, mods: dl.mods, map: dl.map}).map, crates);
+assert.equal(dlState.state, 'objects', 'the block says the map places the crate: ' + dlState.head);
 const pub = cases.filter(c => /published map's content/.test(c.name))[0];
 assert.ok(pub.save.some(r => r.pinned) && pub.map.mods.some(m => m.pinned && m.key === 'alex.r2-imp'),
           'the published step pins the row, and the installed folder is the map\'s mod');
