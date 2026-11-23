@@ -3647,6 +3647,21 @@ static int l_relations(lua_State *L)
     return 1;
 }
 
+/* e:off_limits() -> true when the engine marks the actor (a demon, a player, a bot) off-limits to the demons around
+ * it (a sync interaction's instigator), false when not; nil when the entity is no actor or is gone. */
+static int l_off_limits(lua_State *L)
+{
+    uint64_t h = sh_script_check_entity(L, 1, "off_limits");
+    void *ent;
+    int st;
+    NEED_OP(L, off_limits, "off_limits");
+    ent = h ? g_engine->entity((sh_script_handle)h) : NULL;
+    st = ent ? g_engine->off_limits(ent) : -1;
+    if (st < 0) { lua_pushnil(L); return 1; }
+    lua_pushboolean(L, st == 1);
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3680,7 +3695,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "wound_damage_counts", l_wound_damage_counts },
     { "snapmap_order", l_snapmap_order },
     { "release", l_release },           { "anim_variable", l_anim_variable },
-    { "relations", l_relations },
+    { "relations", l_relations },       { "off_limits", l_off_limits },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3913,6 +3928,23 @@ static int e_relations(void *ai, sh_ai_relation *out, int cap)
         out[n++] = r;
     }
     return n;
+}
+
+/* The actor's off-limits flag through the getter in its vtable (script_api_ai.h, SH_AI_VSLOT_OFF_LIMITS). */
+static int e_off_limits(void *actor)
+{
+    const uint8_t *fn = NULL;
+    uint8_t code[8], v = 0;
+    int kind = sh_script_api_kind(actor);
+    if (kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER) return -1;
+    __try {
+        fn = (*(const uint8_t * const * const *)actor)[SH_AI_VSLOT_OFF_LIMITS / 8];
+        memcpy(code, fn, sizeof code);
+    } __except (av_only(GetExceptionCode())) { return -1; }
+    if (!sh_ai_off_limits_getter(code)) return -1;
+    __try { v = *((const uint8_t *)actor + SH_AI_OFF_OFF_LIMITS); }
+    __except (av_only(GetExceptionCode())) { return -1; }
+    return v != 0;
 }
 
 static int e_move_status(void *ai)
@@ -5614,7 +5646,7 @@ static const sh_script_ai_engine k_engine = {
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
-    e_release, e_anim_variable, e_relations
+    e_release, e_anim_variable, e_relations, e_off_limits
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */

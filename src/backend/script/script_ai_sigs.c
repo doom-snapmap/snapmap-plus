@@ -485,3 +485,12 @@ size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const
     memcpy(code + n, &r, 8); n += 8;
     return n;
 }
+
+/* The off-limits getter (script_api_ai.h): movzx eax, byte [rcx + SH_AI_OFF_OFF_LIMITS]; ret. */
+int sh_ai_off_limits_getter(const uint8_t code[8])
+{
+    uint32_t disp;
+    if (!code || code[0] != 0x0F || code[1] != 0xB6 || code[2] != 0x81 || code[7] != 0xC3) return 0;
+    memcpy(&disp, code + 3, 4);
+    return disp == SH_AI_OFF_OFF_LIMITS;
+}

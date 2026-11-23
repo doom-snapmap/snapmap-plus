@@ -286,6 +286,16 @@ typedef struct sh_ai_relation {
  * "destroy_at_all_costs", "destroy", "hate", "anger", "dislike", "annoyed",
  * "neutral", "friendly", "squadmate", "partner", "max"; NULL outside. */
 const char *sh_ai_respect_name(int respect);
+/* An actor's off-limits flag (both renderers, 13954591): idActor volatile offLimits, a byte the actor's virtual
+ * +SH_AI_VSLOT_OFF_LIMITS answers (idAI2's and idPlayer's VK 0x140427550 / GL 0x140426600: movzx eax, byte
+ * [rcx+0x9408]; ret) and its +0x588 sets; a sync interaction that marks its instigator off-limits
+ * (idDeclSyncInteraction markInstigatorOffLimits) sets it. Shared_SocialRelationAvailable's filterOutOffLimits drops
+ * an actor that has it (VK 0x1405F4930). The call reads the byte through the getter it finds in the actor's vtable,
+ * after checking the getter is that one instruction with this displacement. */
+#define SH_AI_VSLOT_OFF_LIMITS    0x580u
+#define SH_AI_OFF_OFF_LIMITS      0x9408u
+/* 1 when `code` is the off-limits getter: movzx eax, byte [rcx + SH_AI_OFF_OFF_LIMITS]; ret. */
+int sh_ai_off_limits_getter(const uint8_t code[8]);
 const char *sh_ai_emotion_name(int emotion);
 
 /* Degrees from a demon's facing (yaw, degrees) to `to` seen from `from`,
@@ -631,6 +641,8 @@ typedef struct sh_script_ai_engine {
      * order, rows whose entity is gone left out: their count (at most cap),
      * -1 unreadable. */
     int      (*relations)(void *ai, sh_ai_relation *out, int cap);
+    /* The actor's off-limits flag (sh_ai_off_limits_getter above): 1 set, 0 not, -1 not an actor or unreadable. */
+    int      (*off_limits)(void *actor);
 } sh_script_ai_engine;
 
 /* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key
