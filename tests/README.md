@@ -142,34 +142,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   names; skins decls pass by their mesh path; a cut-content bundle's
   requirements are set before its first registration. `MOD_PIPELINE_ECHO=1`
   prints the log lines.
-- `modmigrate_test.c` moves a small synthetic `overrides\` tree into a
-  temporary store with the real builder, store and legacy converter: an era C
-  pack (an unsupported cvar dropped, strings and composes kept, a sidecar left
-  out), an era B pack without an id, two packs with one id, a delivered
-  `map-<16 hex>\<package>`, a stray ZIP, a folder holding one package one level
-  down (migrated under its id) and one holding two (skipped), a folder over the 512 MiB cap and one over the bundle cap (sparse
-  files, no disk cost), and an empty `override-backups`. It checks the store,
-  `mods\.migrated.json`, the log lines, that `overrides\` is byte for byte
-  unchanged, that a second pass does nothing and `--again` rebuilds the same
-  bundles, that a map carrying the same delivery or the same authored tree is
-  answered by the migrated bundle without a conversion, a non-empty
-  `override-backups` left alone, the rerun of an unfinished record, and the
-  store lock (a pass waits for a holder). It links store-tool sources
-  (`src/store/`) only. `MODMIGRATE_ECHO=1` prints the log lines.
 - `store_upgrade_test.c` checks the store tool's readers of earlier store
   layouts: the retired `removed-mods\` bin swept, the second upgrade step over
   format-1 folders, a Contract 2 folder this release cannot read left as it
   was, and the reader of earlier `mod.json` shapes (`modbundle_old.h`).
-- `store_tool_test.c` runs `snapmap-plus-store` (`src/store/`) on a copy of
-  `fixtures\store-retired\data`, a store of an earlier release (a folder of the
-  retired layout with `bundle.json`, an old record file, a `removed-mods\`
-  entry and an `overrides\` package), with `blobs\` and a hard link added at
-  run time and a synthetic DOOM install: `check`'s list and exit codes,
-  `migrate` without and with the game folder, a second `migrate` that changes
-  nothing, every delete through the discard (a stand-in Recycle Bin folder),
-  the hard-link conversion through a failed copy, a failed retire and an
-  interrupted run, and the errors that exit 2 and change nothing.
-  `STORE_TOOL_ECHO=1` prints the tool's output.
 - `modstock_test.c` covers stock pointers end to end over two synthetic
   installs (`mod_stock_fixture.h` writes `gameresources` and
   `snap_gameresources` indexes with `.resources` and `.patch` slices, stored
@@ -236,10 +212,6 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   date, and `programs_rp_test.js` checks that the `.rp` sources translate and compile
   and that each call block loads what the SPIR-V splice loads. `modprog_test`
   takes `dump=<dir>` to write the derived decls (to read them with another compiler).
-- `modstock_migrate_test.c` runs the overrides migration over a synthetic
-  install and tree: an authored pack and a delivered package whose unchanged
-  stock files become pointers, with the counts in each folder's line, the
-  summary and `mods\.migrated.json`, and only the edited file in `blobs\`.
 - `modswf_test.c` drives the cooked-movie Load replacement against synthetic
   engine functions (a served `generated/swf/...bswf` takes the engine's below-2
   open; anything else, a failed open or a failed allocation goes to the
