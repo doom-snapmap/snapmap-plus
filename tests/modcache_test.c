@@ -969,6 +969,13 @@ static void test_product_pointer(const char *top)
     _snprintf_s(pointer, sizeof pointer, _TRUNCATE, "\"game\":[{\"path\":\"%s\",\"sha256\":\"%s\",\"source\":\"snapmapplus\"}]",
                 PRODUCT_FILE, sha);
     n13_variant(top, 3, pointer, 1);
+    /* a file the product names by its bytes' hash (a look's image) that this process has not derived yet: the unit's own
+     * material derives it when it serves, so the unit is whole (R-HD1) */
+    n13_variant(top, 4, "\"game\":[{\"path\":\"generated/image/snapmapplus/look/0123456789abcdef.bimage\","
+                        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", 1);
+    /* a name of that place without the hash's shape is no such file: refused as before */
+    n13_variant(top, 5, "\"game\":[{\"path\":\"generated/image/snapmapplus/look/not_a_hash.bimage\","
+                        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", 0);
 }
 
 /* 5.17 and B3: what this computer's published maps claim is kept by the sweep through a bound provider; a composition

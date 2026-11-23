@@ -221,6 +221,8 @@ static void install_features(const sig_result *results, size_t db)
     sh_modserve_set_material_filter(sh_sdk_serve_compile);
     /* What the product derives itself is registered by every pass as a mod's own decl is (R-GS3). */
     sh_modserve_set_product_owner(sh_modprog_owns);
+    /* and a look's derived images are served wherever their material has compiled, with no pointer (R-HD1) */
+    sh_modserve_set_product_reader(sh_modprog_read);
     sh_mb_set_look_compiler(sh_look_compile_notes);
     sh_mb_set_sdk_compiler(sh_sdk_compile);           /* the build refuses a mistake in any of them */
     sh_sdk_runtime_install();                         /* the script calls that play them */
