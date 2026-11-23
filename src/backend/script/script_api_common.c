@@ -307,6 +307,31 @@ int sh_script_api_post(void *ent, const char *name, const sh_script_earg *args, 
     return g_engine.event(ent, name, args, n, NULL, 1);
 }
 
+static float earg_number(const sh_script_earg *r, int *ok)
+{
+    *ok = 1;
+    if (r->type == 'f') return r->f;
+    if (r->type == 'i') return (float)r->i;
+    *ok = 0;
+    return 0;
+}
+
+int sh_script_api_health(void *ent, float *cur, float *max)
+{
+    int kind = sh_script_api_kind(ent);
+    if (kind == SH_SCRIPT_KIND_AI) return ENG(ai_health) && g_engine.ai_health(ent, cur, max);
+    if (kind == SH_SCRIPT_KIND_PLAYER) {
+        sh_script_earg r;
+        int ok = 0, ok2 = 0;
+        if (!sh_script_api_event(ent, "getPlayerHealth", NULL, 0, &r)) return 0;
+        *cur = earg_number(&r, &ok);
+        if (!ok || !sh_script_api_event(ent, "getPlayerMaxHealth", NULL, 0, &r)) return 0;
+        *max = earg_number(&r, &ok2);
+        return ok2;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------- animation observation */
 
 /* One row per entity with a standing request, made by the request and

@@ -183,19 +183,7 @@ static float earg_number(const sh_script_earg *r, int *ok)
 /* The entity's health and its maximum. 1 when it has health. */
 static int health_of(void *ent, float *cur, float *max)
 {
-    const sh_script_engine *e = eng();
-    int kind = sh_script_api_kind(ent);
-    if (kind == SH_SCRIPT_KIND_AI) return e && e->ai_health && e->ai_health(ent, cur, max);
-    if (kind == SH_SCRIPT_KIND_PLAYER) {
-        sh_script_earg r;
-        int ok = 0, ok2 = 0;
-        if (!sh_script_api_event(ent, "getPlayerHealth", NULL, 0, &r)) return 0;
-        *cur = earg_number(&r, &ok);
-        if (!ok || !sh_script_api_event(ent, "getPlayerMaxHealth", NULL, 0, &r)) return 0;
-        *max = earg_number(&r, &ok2);
-        return ok2;
-    }
-    return 0;
+    return sh_script_api_health(ent, cur, max);
 }
 
 static int l_health(lua_State *L)

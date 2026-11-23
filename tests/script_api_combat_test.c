@@ -518,6 +518,56 @@ static void test_actor_damage(void)
     sh_script_combat_set_engine(&k_combat);
 }
 
+/* damage() answers whether the hit landed: a demon whose health reads answers true only when its health fell. The
+ * fake actor Damage stops a hit on a demon at 60 health (as the game's team rule or an invulnerable demon would). */
+static int f_ai_health(void *ai, float *cur, float *max)
+{
+    fent *e = (fent *)ai;
+    if (e->kind != SH_SCRIPT_KIND_AI) return 0;
+    *cur = e->cur;
+    *max = 100;
+    return 1;
+}
+
+static int c_actor_damage_stops_at_60(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
+{
+    fent *v = (fent *)victim;
+    (void)decl; (void)inflictor; (void)attacker; (void)dir;
+    if (v->kind != SH_SCRIPT_KIND_AI && v->kind != SH_SCRIPT_KIND_PLAYER) return 0;
+    if (v->cur > 60) v->cur -= 25;
+    return 1;
+}
+
+static void test_damage_landed(void)
+{
+    sh_script_engine eng = k_engine;
+    sh_script_combat_engine with = k_combat;
+    eng.ai_health = f_ai_health;
+    with.actor_damage = c_actor_damage_stops_at_60;
+    sh_script_api_set_engine(&eng);
+    sh_script_combat_set_engine(&with);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local imp = ent(1)\n"
+        "  print('l1', damage(imp, 'damage/rock', self), imp:health())\n"
+        "  print('l2', damage(imp, 'damage/rock', self), imp:health())\n"
+        "  print('l3', damage(imp, 'damage/rock', self), imp:health())\n"
+        "  print('l4', imp:damage('damage/rock'), imp:health())\n"
+        "  print('l5', ent(3):damage('damage/rock', self))\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    /* 100 -> 75 -> 50: landed twice; at 50 the hit is stopped and lands nothing */
+    CHECK(has(log_now(), "l1\ttrue\t75"));
+    CHECK(has(g_log, "l2\ttrue\t50"));
+    CHECK(has(g_log, "l3\tfalse\t50"));
+    /* no attacker: the damage event (the fake's takes 10) */
+    CHECK(has(g_log, "l4\ttrue\t40"));
+    /* a crate has no health: whether the engine ran its damage event */
+    CHECK(has(g_log, "l5\ttrue"));
+    sh_script_combat_set_engine(&k_combat);
+    sh_script_api_set_engine(&k_engine);
+}
+
 static void test_hitscan_radius(void)
 {
     run("api = 1\n"
@@ -1129,6 +1179,7 @@ int main(void)
 
     test_damage();
     test_actor_damage();
+    test_damage_landed();
     test_hitscan_radius();
     test_effects_sound();
     test_sdk_calls();

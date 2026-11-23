@@ -3286,7 +3286,15 @@ damage comes from the world entity, as a trigger's does.
   attacker of the victim's own team, other than TEAM_NONE, does no damage), its
   percepts and its kill credit see who hit it; without an attacker, or on any
   other entity, the entity's own `damage` event (decl, direction angles,
-  activator, which credits no attacker);
+  activator, which credits no attacker). The call answers true when the hit
+  landed: a demon's or a player's health is read before and after and fell. A
+  hit the game's own rules stop (the team rule, an invulnerable demon, god mode,
+  a corpse) answers false. An entity without health answers whether the engine
+  ran its damage. idAI2's Damage is given no hit: its body copies hits only
+  from one that is not NULL, and Damage_Calculate gives a record with none the
+  default damage joint, or the bounds' centre, as its location. The game applies
+  the hit inside the call, because the script tick runs after the AI think phase,
+  outside the window in which idAI2's Damage defers a hit (VK 0x145B147A8);
   `hitscan(from, dir, damage, [range], [attacker])` (the game trace, then the
   damage event on what it hits; answers `{pos, normal, entity}` or nil);
   `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the

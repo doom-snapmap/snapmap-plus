@@ -266,6 +266,10 @@ int sh_script_api_event(void *ent, const char *name, const sh_script_earg *args,
 /* Queue an event for this frame's event service. 1 when queued. */
 int sh_script_api_post(void *ent, const char *name, const sh_script_earg *args, int n);
 
+/* A demon's or a player's health and its maximum, read now. 1 when it has
+ * health (any other entity, or an unreadable one, answers 0). */
+int sh_script_api_health(void *ent, float *cur, float *max);
+
 /* Argument builders. */
 sh_script_earg sh_script_earg_int(int v);
 sh_script_earg sh_script_earg_float(float v);

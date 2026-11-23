@@ -532,6 +532,20 @@ static int damage_event(void *victim, void *decl, const float dir[3], void *atta
     return sh_script_api_event(victim, "damage", a, 6, NULL);
 }
 
+/* What damage() answers. A demon or a player whose health reads is measured before and after: true when its health
+ * fell, so a hit the game's own rules stop (the team rule, an invulnerable demon, god mode, a corpse) answers false.
+ * The game applies the hit inside the call: the script tick runs on the main thread after the AI think phase, while
+ * idAI2's Damage defers a hit only inside that phase (VK 0x145B147A8, set and cleared around it in
+ * idGameLocal::RunFrame). Anything without health answers whether the engine ran the damage. */
+static int damage_landed(void *victim, void *decl, const float dir[3], void *attacker, int named_attacker)
+{
+    float before = 0, after = 0, max = 0;
+    int measured = sh_script_api_health(victim, &before, &max);
+    if (!damage_event(victim, decl, dir, attacker, named_attacker)) return 0;
+    if (!measured) return 1;
+    return sh_script_api_health(victim, &after, &max) && after < before;
+}
+
 /* ------------------------------------------------------------ damage */
 
 /* damage(e, damage, [attacker], [from]) and e:damage(damage, [attacker], [from]) */
@@ -552,7 +566,7 @@ static int do_damage(lua_State *L, int target, const char *call)
     }
     dir[0] = to[0] - from[0]; dir[1] = to[1] - from[1]; dir[2] = to[2] - from[2];
     if (!normalize(dir)) { dir[0] = 0; dir[1] = 0; dir[2] = -1; }
-    return bool1(L, damage_event(victim, decl, dir, attacker, !lua_isnoneornil(L, target + 2)));
+    return bool1(L, damage_landed(victim, decl, dir, attacker, !lua_isnoneornil(L, target + 2)));
 }
 
 /* The global and the method take the same values: damage(e, ...) and e:damage(...). */
@@ -1433,7 +1447,11 @@ void *sh_script_combat_decl(const char *type, const char *name)
 
 /* The victim's own Damage (its vtable slot SH_COMBAT_DAMAGE_VSLOT, the same virtual in every actor class) when it
  * is the player's or idAI2's as this executable has them: call it. Both take (actor, inflictor, attacker, parms,
- * scale, direction, hit); idAI2's passes them on to its body with one hit, and no hit is no location. */
+ * scale, direction, hit); idAI2's passes them on to its body with a hit count of 1. The body copies hits only from a
+ * hit that is not NULL (VK 0x1403F8C40), and Damage_Calculate (VK 0x1403FB1D0) gives a record with no hit the
+ * location the game gives any hit without one: the demon's default damage joint, or its bounds' centre, set back
+ * along the direction. So a NULL hit is the engine's own no-location case (tests/script_combat_sigs_test.c). 1 when
+ * the call returned; whether it landed is the health the caller measures (damage_landed). */
 static int c_actor_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
 {
     const uint8_t *parms = (const uint8_t *)decl + SH_COMBAT_DECL_PARMS;

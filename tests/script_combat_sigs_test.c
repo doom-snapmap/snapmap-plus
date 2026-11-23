@@ -272,6 +272,22 @@ static void check_image(const char *path)
             CHECK(slot - image_base == rva[SH_COMBAT_SIG_AI_DAMAGE]);
             CHECK(call_in(base, rva[SH_COMBAT_SIG_AI_DAMAGE], 0x40, damage) != 0);
         }
+        /* c_actor_damage passes no hit. The body takes the hit (its 7th argument) and the count the slot gives it
+         * (1), and copies hits only from a hit that is not NULL; its Damage_Calculate counts no hit as one and gives
+         * a record with none the default location. Both images, the same offsets. */
+        {
+            uint32_t calc = vk ? 0x3FB1D0u : 0x3FA6B0u;
+            const uint8_t *b = base + damage, *c = base + calc;
+            CHECK(!memcmp(b + 0x55, "\x4C\x8B\xAD\x50\x1A\x00\x00", 7));        /* mov r13, [rbp+0x1A50]   the hit */
+            CHECK(!memcmp(b + 0x20A, "\x48\x63\xB5\x58\x1A\x00\x00", 7));       /* movsxd rsi, [rbp+0x1A58] the count */
+            CHECK(!memcmp(b + 0x211, "\x4D\x85\xED\x0F\x84", 5));               /* test r13, r13 ; jz past the copy */
+            CHECK(!memcmp(b + 0x21A, "\x85\xF6\x0F\x8E", 4));                   /* test esi, esi ; jle */
+            CHECK(call_in(base, damage, 1180, calc) == damage + 0x312);
+            /* mov eax, [rsi+0x648] ; test eax, eax ; mov ecx, 1 ; cmovz eax, ecx   (record +0x648: the hits copied) */
+            CHECK(!memcmp(c + 0x3BF, "\x8B\x86\x48\x06\x00\x00\x85\xC0\xB9\x01\x00\x00\x00\x0F\x44\xC1", 16));
+            /* cmp [rsi+0x648], r15d (0) ; jle   to the default damage joint, or the bounds' centre */
+            CHECK(!memcmp(c + 0x419, "\x44\x39\xBE\x48\x06\x00\x00\x0F\x8E", 9));
+        }
         if (rva[SH_COMBAT_SIG_RADIUS_DAMAGE])
             CHECK(call_in(base, radius_handler, 0x200, rva[SH_COMBAT_SIG_RADIUS_DAMAGE]) != 0);
         /* idEntity StartFX / StopFX: each loads the entity's FX manager (lea rcx,[rbx+0x30]) and calls its start
