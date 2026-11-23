@@ -525,8 +525,9 @@ static void test_fresh_folder_refusals(const char *tmp)
 /* An outside converter (Doomforge) writes a new folder already salted: its
  * builder part is only {"format":2,"salt":"<salt>"}, and its binaries name
  * that salt. The first scan keeps the salt and builds it; a second such folder
- * of the same salt is a copy of the first, and as its binaries name the salt
- * it cannot be given another: it is refused with a plain cause, untouched. */
+ * of the same salt is a copy of the first and gets a new salt: its texts follow,
+ * its binaries keep naming the first salt, and its build records that as
+ * "spelled", which serving maps to its own salt (SPEC-distribution D12). */
 static void conv_make(const char *dir, const char *salt)
 {
     char rel[MAX_PATH * 2], text[600], path[MAX_PATH * 2];
@@ -548,7 +549,7 @@ static void test_converter_salt(const char *tmp)
     sh_ms_list list;
     const sh_ms_entry *e;
     int usable;
-    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is refused\n");
+    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is a new mod whose binaries serving maps\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\converted\\mods", tmp);
     CHECK(sh_ms_set_root(root));
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\Converted demon", root);
@@ -559,17 +560,17 @@ static void test_converter_salt(const char *tmp)
     _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\Converted demon again", root);
     conv_make(b, "cvsalt00");
     dir_names(b, before, sizeof before);
-    mj0 = slurp(b, "mod.json", NULL);
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 0);
+    mj0 = slurp(b, "meshes\\m.bmd6model", NULL);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "Converted demon again");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "inside a binary file"));
-    if (e) printf("   %s\n", e->cause);
+    CHECK(e && sh_ms_entry_usable(e) && strcmp(e->salt, "cvsalt00") && !strcmp(e->bundle.spelled, "cvsalt00"));
     CHECK(sh_ms_entry_usable(find_entry(&list, "Converted demon")));
     sh_ms_list_free(&list);
     dir_names(b, after, sizeof after);
-    mj1 = slurp(b, "mod.json", NULL);
-    CHECK(!strcmp(before, after) && same_text(mj0, mj1));
+    mj1 = slurp(b, "meshes\\m.bmd6model", NULL);
+    CHECK(mj0 && mj1 && !memcmp(mj0, mj1, 30));   /* the binary as the converter wrote it */
+    (void)after;
     free(mj0);
     free(mj1);
     CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));

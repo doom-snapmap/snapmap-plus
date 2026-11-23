@@ -368,7 +368,7 @@ static void old_shape_rows(void)
     sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);
     CHECK(sh_modmanifest_load_notes_pending() == 1);
     CHECK(HO(refusal, sh_modmanifest_load_refusal(HO_P(0))) &&
-          !strcmp(refusal, "This map was saved in a format this version does not read."));
+          !strcmp(refusal, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
     CHECK(sh_modmanifest_load_notes_flush(0) == 1 && !HO(refusal, sh_modmanifest_load_refusal(HO_P(0))));
     sh_modmanifest_reset();
 }

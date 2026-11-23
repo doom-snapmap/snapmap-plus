@@ -39,7 +39,7 @@
 /* Every refusal below is a sentence in *cause (malloc'd, any length; the
  * old one freed; the caller frees it), NULL cause for none. */
 /* The refusal of an export in an earlier shape (ONE-SHAPE rule 6). */
-#define MODEXPORT_EARLIER "This export was saved in a format this version does not read."
+#define MODEXPORT_EARLIER "This export was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."
 
 typedef struct modexport_stats {
     unsigned bundles;              /* the rows (mods) the map or prefab names */

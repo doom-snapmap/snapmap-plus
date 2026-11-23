@@ -786,10 +786,20 @@ static void test_cache(const char *top)
         {
             sh_cache_copy copy;
             char *why = NULL, staged_dir[MAX_PATH * 2];
-            /* The crates' binaries spell their namespace: D29 holds the copy until the mapping (D12). */
-            CHECK(sh_cache_stage_copy(chash, &copy, &why) == 0 && why && !strcmp(why, SH_CACHE_COPY_SPELLED));
-            free(why);
-            why = NULL;
+            /* The crates' binaries spell their namespace: staged as they are (D29 as built; serving maps it, D12). */
+            CHECK(sh_cache_stage_copy(chash, &copy, &why) == 1 && !why && copy.objects == 2 &&
+                  !strcmp(copy.name, "Crates and barrels (my copy)") && !strcmp(copy.salt, SALT));
+            if (copy.dir) {
+                char *bin;
+                size_t blen = 0, bi;
+                int spells = 0;
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\meshes\\models\\crate.bmodel", copy.dir);
+                bin = (char *)sh_mb_read_file(path, 1u << 20, &blen);
+                for (bi = 0; bin && bi + 14 <= blen && !spells; bi++) spells = !memcmp(bin + bi, "mods/" SALT "/", 14);
+                CHECK(spells && links_of(path) == 1);
+                free(bin);
+            }
+            sh_cache_copy_free(&copy);
             /* A unit of text only: staged as copies, never links to the cache's blobs. */
             {
                 static const char decl[] = "{\r\n\tinherit = \"snapmaps/unknown\";\r\n}";
@@ -867,9 +877,8 @@ static void test_cache(const char *top)
                 _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\gggg_hhhh_map.decl", saved);
                 if (mtext && !fopen_s(&f, path, "wb") && f) { fwrite(mtext, 1, mlen, f); fclose(f); }
                 free(mtext);
-                CHECK(sh_cache_stage_copy(sr.build, &copy, &why) == 0 && why && !strcmp(why, SH_CACHE_COPY_SPELLED));
-                free(why);
-                why = NULL;
+                CHECK(sh_cache_stage_copy(sr.build, &copy, &why) == 1 && !why);   /* a unit that spells copies too */
+                sh_cache_copy_free(&copy);
                 CHECK(sh_cache_stage_copy(lr.build, &copy, &why) == 0 && why &&
                       !strcmp(why, "Gone Pack cannot be copied: some of its content is not on this computer. Play the map once "
                                    "online, then try again."));

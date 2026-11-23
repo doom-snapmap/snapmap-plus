@@ -36,8 +36,9 @@
  * Load: every parse the DeserializeFromJson detour sees (rawmap.c
  * prepare_map_buffer: My Maps, a published read, a lobby joiner's download, a
  * rawmap) first asks sh_map_old_shape whether the text is in an earlier shape
- * (below); such a map is refused with "This map was saved in a format this
- * version does not read." and its text is not changed. Otherwise each
+ * (below); such a map is refused with "This map was saved by an earlier
+ * Snapmap+; run the Snapmap+ installer to update it." and its text is not
+ * changed. Otherwise each
  * subsystem reads its part from the member, and the member itself is
  * stripped last, so the engine never sees it.
  *
@@ -134,6 +135,6 @@ void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
  * SH_MAP_OLD_NONE. The installer's store tool converts them (map_old.h). */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
 int sh_map_old_shape(const char *json, size_t len);
-#define SH_MAP_OLD_REFUSAL "This map was saved in a format this version does not read."
+#define SH_MAP_OLD_REFUSAL "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."
 
 #endif /* SNAPMAP_PLUS_MAP_CARRIER_H */

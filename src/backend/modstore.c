@@ -1206,7 +1206,8 @@ static char g_ms_fixed_salt[SH_SALT_LEN + 1];
 /* The salting's plan (sh_ms_assign_salt): every file of the folder read and
  * rewritten in memory first, mods/<from>/ to mods/<salt>/ in texts and in the
  * folder segments of paths under assets/; a binary file naming mods/<from>/
- * refuses the folder. Nothing of a new folder serves before it is salted and
+ * refuses a new folder (from its folder name) and is kept as it is in a copy
+ * of a salted mod (D12 maps it at serve). Nothing of a new folder serves before it is salted and
  * built: an entry serves only when its block records a build. */
 #define MS_RK_CHUNK    (4u << 20)   /* a binary is scanned in pieces; a text, of any size, is read whole */
 
@@ -1225,6 +1226,9 @@ typedef struct ms_rk {
     size_t nskeys;
     char bank_from[SH_MB_BANK_STEM_MAX + 1];   /* a bank stem prefix that becomes "<salt>_", or "" */
     int keep;                    /* a folder that has its salt: binaries naming mods/<from>/ are left alone */
+    int spelled_ok;              /* `from` is the salt a copy carried: a binary naming mods/<from>/ keeps it, and the
+                                    build records it as "spelled", which serving maps to the new salt (D12) */
+    unsigned spelled;            /* such binaries kept */
     unsigned refs, rewritten, moved, srefs, banks;
     int failed;
     char *cause;                 /* the first failure (ms_rk_fail) */
@@ -1554,6 +1558,7 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
              * salt keeps its binaries as they are: the build decides. */
             int hit = r->leaf || r->nskeys ? ms_rk_binary_names(path, r) : 0;
             if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
+            else if (hit == 1 && r->spelled_ok) r->spelled++;   /* D12: served under the new salt, length for length */
             else if (hit == 1)
                 ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
                            "New mod in the Mods tab first, then export the file under the new mod's folder", child,
@@ -1708,6 +1713,10 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     r.leaf = from;
     r.key = salt;
     r.keep = keep != NULL;
+    /* A copy of a salted mod (`from` the salt it carried): its binaries keep naming that namespace and serving maps it
+     * to the new salt (SPEC-distribution D12, modserve.c ms_respelled); a binary can name a folder name in no way
+     * serving could map, so a new mod's binary naming its folder still refuses it. */
+    r.spelled_ok = !from_name && from && sh_salt_valid(from, strlen(from));
     if (from_name && from) ms_bank_prefix(from, r.bank_from, sizeof r.bank_from);
     /* Read and rewrite everything in memory first. */
     if (given) {

@@ -199,8 +199,8 @@ int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len
 /* Add to my mods (SPEC-distribution 5.15): the folder `staged` (outside the store, its files under `salt`'s
  * namespace) becomes a new mod of the player's own at mods\<sh_ms_title_segment(name)> (" (2)" ... when taken),
  * with `modjson` (an author text: no block) as its descriptor and a new salt drawn now: its files move from
- * mods\<salt>\ to the new salt and every reference follows, as a copied folder's do (ms_assign_to, `from` the salt
- * it carried). `staged` is only read; files the salting does not rewrite are hard-linked from it, so the caller
+ * mods\<salt>\ to the new salt and every text reference follows, as a copied folder's do (ms_assign_to, `from` the
+ * salt it carried); a binary that names mods/<salt>/ is kept as it is, and serving maps it (D12). `staged` is only read; files the salting does not rewrite are hard-linked from it, so the caller
  * removes it after. The scan builds the new folder. Returns 1 with its name under mods\ in *name_out (malloc'd),
  * else 0 with the plain cause. Takes the store lock. */
 int  sh_ms_add_copy(const char *staged, const char *modjson, size_t modjson_len, const char *salt, const char *name,

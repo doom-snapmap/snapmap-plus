@@ -287,7 +287,7 @@ static void old_shapes(void)
         CHECK(sh_map_old_shape(at_row, sizeof at_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(fmt2_row, sizeof fmt2_row - 1) == SH_MAP_OLD_NONE);
     }
-    CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved in a format this version does not read."));
+    CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
 }
 
 /* "place" (a map's folder under mods\maps\, retired) is no longer a part: an unknown one is ignored on read and
