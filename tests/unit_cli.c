@@ -2,6 +2,8 @@
  * own (the units' proof instrument, SPEC-distribution 3; R-DS3).
  *
  *   unit_cli mod=<mod folder> out=<folder> doom=<install root> names=<name>[,<name>...] [compose=1]
+ *   unit_cli ... names=@objects   every object of the mod (each snapModule, Toybox row and entityDef it adds, by its
+ *                                 engine name), one "object <name>\t<type>" line each before its unit line
  *
  * The folder is built by the product's builder (the look compiler and the script check installed, as served_cli
  * does) and its block written. Each name (a placed name, an author name, or * for the whole mod) gets its unit:
@@ -121,7 +123,24 @@ int main(int argc, char **argv)
            b.spelled[0] ? b.spelled : "-");
     memset(&env, 0, sizeof env);
     env.game = game;
-    list = _strdup(names);
+    if (!strcmp(names, "@objects")) {
+        /* Every object a map can place of this mod: the walk's root types (modunit.c uw_root_file) that the mod adds
+         * under its namespace (a DOOM entityDef it replaces is a change of the mod, placed as DOOM's own). */
+        static const char *const types[] = { "snapModule", "snapEditorEntityDef", "entityDef" };
+        size_t i, t, len = 1;
+        for (i = 0; i < b.file_count; i++) if (b.files[i].pname) len += strlen(b.files[i].pname) + 1;
+        list = (char *)calloc(len, 1);
+        for (t = 0; list && t < 3; t++)
+            for (i = 0; i < b.file_count; i++) {
+                const sh_mb_file *f = &b.files[i];
+                if (f->absent || f->cls != SH_MB_CLASS_ADD || !f->pname || !f->ptype || _stricmp(f->ptype, types[t]))
+                    continue;
+                printf("object %s\t%s\n", f->pname, types[t]);
+                if (list[0]) strcat_s(list, len, ",");
+                strcat_s(list, len, f->pname);
+            }
+        if (!list) return 1;
+    } else list = _strdup(names);
     for (name = strtok_s(list, ",", &ctxp); name; name = strtok_s(NULL, ",", &ctxp), n++) {
         sh_unit u;
         char *why = NULL;

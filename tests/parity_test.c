@@ -31,8 +31,12 @@
  *
  *   parity_test.exe                                   the fixture cases (the suite)
  *   parity_test.exe mods=<folder> placed=<a>,<b>[,...] [map=<map text>] [doom=<install>] [out=<report>]
+ *                   [attach=<salt>[,<salt>...]]
  *                                                     a real mod set: <folder> is COPIED to a scratch folder first
- *                                                     (nothing in it is written); exit 1 on any divergence
+ *                                                     (nothing in it is written); exit 1 on any divergence. attach=
+ *                                                     uses each mod named in the map as a whole before it is saved (a
+ *                                                     map-level row, the Mods tab's Use in this map); placed= may then
+ *                                                     be empty
  *
  * To look into a divergence: PARITY_DEBUG=1 lists what each mode reached, PARITY_TOKENS=1 the mod names each served
  * file spells, PARITY_REG=1 the registries and scope per mode, PARITY_DUMP=<part of a request> writes that file's served
@@ -145,8 +149,13 @@ static void ps_free(pset *s) { size_t i; for (i = 0; i < s->n; i++) free(s->v[i]
 /* The files the last run served in the editor mode (the fixtures look into it). */
 static pset g_last_served;
 /* The DOOM files the installed mods change (native/: replacements and edited decls, the conductor among them): the
- * engine reads them in every map that declares their mod, whatever it places. */
-static pset g_doom_seeds;
+ * engine reads them in every map that declares their mod, whatever it places. A surface (DOOM's own bytes at DOOM's
+ * name: an unchanged native/ copy, or a campaign file the builder's closure points at) changes nothing a map reads
+ * until a name asks for it, so it is no seed: the closure reaches it by the names served bytes spell. */
+static pset g_doom_seeds, g_surfaces;
+/* The DOOM decls a mod edits (a registry: the product serves DOOM's text with the mod's edits, and a unit's copy keeps
+ * the edits for what the unit carries, R-DS5). */
+static pset g_registries;
 
 /* ------------------------------------------------------------ the name universe (every installed file, by the names
  * that reach it) */
@@ -273,6 +282,8 @@ static void u_from_build(const sh_mb_bundle *b)
         if (!f->request || strlen(f->request) >= sizeof low) continue;
         strcpy_s(low, sizeof low, f->request);
         u_lower(low);
+        if (f->cls == SH_MB_CLASS_SURFACE) { ps_add(&g_surfaces, low); continue; }
+        if (f->edit || f->edited) ps_add(&g_registries, low);
         if (!strstr(low, "/mods/") && strncmp(low, "mods/", 5)) ps_add(&g_doom_seeds, low);
     }
 }
@@ -358,7 +369,7 @@ static void shadow_seed(void *ctx, const char *request, uint64_t size, const cha
     if (!request || strlen(request) >= sizeof low) return;
     strcpy_s(low, sizeof low, request);
     u_lower(low);
-    if (strstr(low, "/mods/") || !strncmp(low, "mods/", 5)) return;
+    if (strstr(low, "/mods/") || !strncmp(low, "mods/", 5) || ps_has(&g_surfaces, low)) return;
     ps_add((pset *)ctx, low);
 }
 
@@ -546,6 +557,9 @@ static char *author_read(void *ctx, const char *request, size_t *len)
     HeapFree(GetProcessHeap(), 0, bytes);
     return out;
 }
+static const char *g_attach;   /* attach=: the salts used in the map as a whole */
+static size_t g_last_q6;       /* the last run's divergences of own play's whole build (Q6) */
+
 /* The save's row resolver (what modui.c binds: the build sh_modserve_row_build names). */
 static int resolve_row(const char *build, const char *salt, sh_modmanifest_row *out)
 {
@@ -595,17 +609,22 @@ static void declare(const sh_modmanifest_list *rows, const char *const *placed, 
     free(choices);
 }
 
-/* Entities the level would template: every entityDef of a namespace this mode does not declare must be hidden. */
+/* Entities the level would template: every entityDef of a namespace this mode does not declare must be hidden. A DOOM
+ * entityDef a mod replaces is DOOM's own name, never hidden: that the mod's text is not served for it where the mod is
+ * not declared is the files' comparison. */
 static void check_hidden(mode_run *m, const world *w, const sh_modmanifest_list *rows)
 {
     size_t i, k, r;
     for (i = 0; i < w->nb; i++) {
         int declared = 0;
+        size_t il = strlen(w->builds[i].id);
         for (r = 0; rows && r < rows->count; r++) declared |= !_stricmp(rows->rows[r].salt, w->builds[i].id);
         if (declared) continue;
         for (k = 0; k < w->builds[i].file_count; k++) {
             const sh_mb_file *f = &w->builds[i].files[k];
             if (!f->pname || !f->ptype || _stricmp(f->ptype, "entityDef")) continue;
+            if (_strnicmp(f->pname, "mods/", 5) || _strnicmp(f->pname + 5, w->builds[i].id, il) || f->pname[5 + il] != '/')
+                continue;
             if (!sh_modserve_level_hides(f->pname)) ps_add(&m->hidden_wrong, f->pname);
         }
     }
@@ -617,6 +636,7 @@ typedef struct parity {
     mode_run m[NMODES];
     pset all;
     size_t divergences;
+    size_t q6;            /* divergences of own play's whole build (Q6), counted apart */
     FILE *report;
 } parity;
 
@@ -660,6 +680,21 @@ static size_t run_parity(const char *label, const char *author_root, const char 
     world_index(&A);
     g_author = &A;
     np = sh_modmanifest_placed_names(json, json_len, &placed, &failed);
+    /* attach=: each mod used as a whole, as the Mods tab's Use in this map marks the open map */
+    for (k = 0; g_attach && k < A.nb; k++) {
+        const char *at = g_attach;
+        size_t il = strlen(A.builds[k].id);
+        for (; at && *at; at = strchr(at, ',') ? strchr(at, ',') + 1 : NULL) {
+            sh_modmanifest_row row;
+            if (_strnicmp(at, A.builds[k].id, il) || (at[il] && at[il] != ',')) continue;
+            memset(&row, 0, sizeof row);
+            strcpy_s(row.salt, sizeof row.salt, A.builds[k].id);
+            strcpy_s(row.build, sizeof row.build, A.builds[k].hash);
+            row.size = A.builds[k].total_size;
+            CHECK(sh_modmanifest_current_attach(&row) == 1);
+            say(&p, "  attached: %s", A.builds[k].id, NULL, NULL);
+        }
+    }
 
     /* The author saves the map: the save's rows (the product's own save step). */
     sh_modmanifest_set_resolver(resolve_row);
@@ -703,8 +738,13 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", author_root);
         CHECK(sh_modpin_rows(&pinned, saved ? saved : json, saved ? saved_len : json_len, content, &pr) >= 0);
     }
-    for (k = 0; k < pr.count; k++)
+    for (k = 0; k < pr.count; k++) {
+        char units[64];
+        _snprintf_s(units, sizeof units, _TRUNCATE, "%zu unit(s), %llu bytes", pr.rows[k].units, pr.rows[k].bytes);
+        say(&p, "  pin: row %s: %s, %s", pr.rows[k].salt,
+            pr.rows[k].state == SH_MODPIN_PINNED ? "proved" : pr.rows[k].state == SH_MODPIN_WHOLE ? "WHOLE" : "ABSENT", units);
         if (pr.rows[k].state != SH_MODPIN_PINNED) say(&p, "  pin: row %s: %s", pr.rows[k].salt, pr.rows[k].why, NULL);
+    }
     sh_cache_set_mods_root(author_root);
     sh_cache_on_load(&pinned, placed, np);
     world_index(&A);
@@ -804,8 +844,20 @@ static size_t run_parity(const char *label, const char *author_root, const char 
     }
     for (k = 0; k < p.all.n; k++) {
         const char *ref = p.m[0].a[k].sha;
-        int anywhere = 0;
+        int anywhere = 0, q6 = 1, unit_reach = 0;
         for (i = 0; i < NMODES; i++) anywhere |= p.m[i].a[k].sha[0] != 0;
+        /* Q6 (open, report 4.5): own play serves the whole local build (editor, editor-play, launch), a published map
+         * its units (pub-author, pub-player, kept-player). A file whose answer splits exactly along that line, that is
+         * a DOOM decl the mod edits (its edits cut to the units) or that no unit mode reaches (only the whole build's
+         * registry names it), is that divergence, told apart from a unit's defect. */
+        for (i = 1; i < 3; i++) q6 &= !strcmp(p.m[i].a[k].sha, ref);
+        for (i = 5; i < NMODES; i++) q6 &= !strcmp(p.m[i].a[k].sha, p.m[3].a[k].sha);
+        q6 &= strcmp(p.m[3].a[k].sha, ref) != 0;
+        /* kept-author is the published map in its author's editor: the local mod fills the names the units lack (D26),
+         * so it answers as either side */
+        q6 &= !strcmp(p.m[4].a[k].sha, ref) || !strcmp(p.m[4].a[k].sha, p.m[3].a[k].sha);
+        for (i = 3; i < NMODES; i++) if (i != 4) unit_reach |= ps_has(&p.m[i].reached, p.all.v[k]);
+        q6 &= ps_has(&g_registries, p.all.v[k]) || !unit_reach;
         /* A name the bytes spell that nothing serves in any mode is the same in every mode (the engine meets the
          * game's file or none): not a divergence, listed for the reader. */
         if (!anywhere && getenv("PARITY_DEBUG")) say(&p, "  nowhere: %s", p.all.v[k], NULL, NULL);
@@ -821,15 +873,18 @@ static size_t run_parity(const char *label, const char *author_root, const char 
             for (j = 0; j < nk; j++)
                 if (!strcmp(kn[j].mode, p.m[i].name) && strstr(p.all.v[k], kn[j].part)) { kn[j].met = 1; listed = 1; }
             p.divergences++;
+            if (q6 && !listed) { listed = 2; p.q6++; }
             if (!listed) unexpected++;
             {
                 char line[1024];
-                _snprintf_s(line, sizeof line, _TRUNCATE, "  %s: %s: editor %.12s, %s %.12s", listed ? "known" : "DIVERGES",
+                _snprintf_s(line, sizeof line, _TRUNCATE, "  %s: %s: editor %.12s, %s %.12s",
+                            listed == 2 ? "Q6" : listed ? "known" : "DIVERGES",
                             p.all.v[k], ref[0] ? ref : "(nothing)", p.m[i].name, p.m[i].a[k].sha[0] ? p.m[i].a[k].sha : "(nothing)");
                 say(&p, "%s", line, NULL, NULL);
             }
         }
     }
+    g_last_q6 = p.q6;
     for (i = 0; i < NMODES; i++)
         for (k = 0; k < p.m[i].hidden_wrong.n; k++) {
             unexpected++;
@@ -837,8 +892,8 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         }
     {
         char line[256];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "  %zu file(s) reached; %zu divergence(s), %zu not known", p.all.n,
-                    p.divergences, unexpected);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "  %zu file(s) reached; %zu divergence(s), %zu not known; %zu of own play's whole build (Q6)",
+                    p.all.n, p.divergences, unexpected, p.q6);
         say(&p, "%s", line, NULL, NULL);
     }
     ps_free(&g_last_served);
@@ -971,6 +1026,203 @@ static void case_two_mods(void)
     mt_remove_tree(work);
 }
 
+/* ------------------------------------------------------------ every root kind and seed rule, in today's shape
+ * The fixture DOOM: the files below are DOOM's with these bytes (the builder identifies a native/ copy against them and
+ * derives a decl copy's edits from them); every other name outside mods/ is DOOM's with no bytes to read. */
+#define K_CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
+#define K_PLAYER    "generated/decls/entitydef/player/coop.decl"
+#define K_ROCK_IMG  "generated/image/models/rock_kit_d.bimage"
+#define K_HUD_IMG   "generated/image/guis/hud/ammo.bimage"
+static const char k_conductor[] =
+    "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 1;\n"
+    "\t\t\titem[0] = {\n\t\t\t\taiType = \"1\";\n\t\t\t\tentityDef = \"ai/demon/imp\";\n\t\t\t}\n\t\t}\n\t}\n}\n";
+static const char k_player[] = "{\n\tinherit = \"player/base\";\n\tedit = {\n\t\thealth = 100;\n\t}\n}\n";
+static const char k_rock_img[] = "ROCKIMAGE-DOOM-BYTES-0123456789";
+static const char k_hud_img[] = "HUDIMAGE-DOOM-BYTES-0123456789";
+static const struct { const char *request; const char *bytes; } k_doom[] = {
+    { K_CONDUCTOR, k_conductor }, { K_PLAYER, k_player }, { K_ROCK_IMG, k_rock_img }, { K_HUD_IMG, k_hud_img },
+};
+static const char *k_find(const char *source)
+{
+    size_t i;
+    for (i = 0; i < sizeof k_doom / sizeof k_doom[0]; i++) if (!_stricmp(source, k_doom[i].request)) return k_doom[i].bytes;
+    return NULL;
+}
+static int k_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    const char *t = k_find(source);
+    (void)c;
+    if (!t) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(t, strlen(t), sha);
+    *size = strlen(t);
+    return SH_MB_STOCK_OK;
+}
+static int k_match(void *c, const char *request, unsigned long long size, const char *sha256, char **source)
+{
+    char sha[SH_MB_HASH_HEX + 1];
+    unsigned long long n = 0;
+    (void)c;
+    if (k_identify(NULL, request, sha, &n) != SH_MB_STOCK_OK || n != size || strcmp(sha, sha256)) return SH_MB_STOCK_ABSENT;
+    *source = _strdup(request);
+    return *source ? SH_MB_STOCK_OK : SH_MB_STOCK_UNAVAILABLE;
+}
+static int k_verify(void *c, const char *source, const char *sha256, unsigned long long *size)
+{
+    char sha[SH_MB_HASH_HEX + 1];
+    (void)c;
+    if (k_identify(NULL, source, sha, size) != SH_MB_STOCK_OK) return SH_MB_STOCK_ABSENT;
+    return strcmp(sha, sha256) ? SH_MB_STOCK_MISMATCH : SH_MB_STOCK_OK;
+}
+static int k_read(void *c, const char *source, const char *sha256, unsigned char **bytes, size_t *len)
+{
+    const char *t = k_find(source);
+    (void)c; (void)sha256;
+    if (!t) return SH_MB_STOCK_ABSENT;
+    *len = strlen(t);
+    if (!(*bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len + 1))) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, t, *len);
+    return SH_MB_STOCK_OK;
+}
+static int k_container(void *c, const char *source, const char *sha256, char *out, size_t cap)
+{
+    (void)c; (void)sha256;
+    if (!k_find(source)) return SH_MB_STOCK_ABSENT;
+    strcpy_s(out, cap, "gameresources");
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops k_ops = { NULL, k_match, k_identify, k_verify, k_read, k_container, NULL };
+
+#define SP "pd4salt4"   /* props: two props, a Toybox row, a DOOM file it changes, a DOOM file it surfaces */
+#define SI "pe5salt5"   /* an interactable: a Toybox row, its entity and the script that binds it */
+#define SM "pf6salt6"   /* a module and its info */
+#define SH "pg7salt7"   /* a player and HUD mod: DOOM's player and an image it changes, nothing placeable */
+#define SD "ph8salt8"   /* two demons and the conductor that pairs their AI types */
+
+static void kinds_world(const char *author)
+{
+    char text[1024];
+    /* props */
+    write_mod(author, "props", SP, "Props");
+    crate(author, "props", SP, "crate", 1);
+    crate(author, "props", SP, "lamp", 5);
+    put_text(author, "props", "decls\\snapeditorentitydef\\crate_row.decl",
+             "{\n\tinherit = \"action/door/open\";\n\tedit = {\n\t\tentityDef = \"entities/crate\";\n\t}\n}\n");
+    /* a prop whose material names DOOM's image, which the mod's native/ holds unchanged (a surface) */
+    put_text(author, "props", "entities\\rock.decl",
+             "{\n\tinherit = \"snapmaps/props/crate\";\n\tedit = {\n\t\trenderModelInfo = {\n"
+             "\t\t\tmodel = \"meshes/models/rock.lwo\";\n\t\t}\n\t}\n}\n");
+    put_bin(author, "props", "meshes\\models\\rock.bmodel", "mods/" SP "/rock_skin", 11);
+    put_text(author, "props", "materials\\rock_skin.decl", "{\ndiffusemap\t\"models/rock_kit_d.tga\"\n}\n");
+    put_text(author, "props", "native\\generated\\image\\models\\rock_kit_d.bimage", k_rock_img);
+    /* a DOOM image it changes: wherever the mod is used */
+    put_text(author, "props", "native\\generated\\image\\guis\\hud\\ammo.bimage", "HUDIMAGE-PROPS-CHANGED");
+    /* interactable */
+    write_mod(author, "panel", SI, "Panel");
+    crate(author, "panel", SI, "panel", 21);
+    put_text(author, "panel", "decls\\snapeditorentitydef\\panel_row.decl",
+             "{\n\tinherit = \"action/door/open\";\n\tedit = {\n\t\tentityDef = \"entities/panel\";\n\t}\n}\n");
+    put_text(author, "panel", "scripts\\panel.lua", "api = 1\nlocal def = \"entities/panel\"\nlocal snd = \"materials/panel_glow\"\n");
+    put_text(author, "panel", "materials\\panel_glow.decl", "{\ndiffusemap\t\"images/panel_d.tga\"\n}\n");
+    /* module */
+    write_mod(author, "room", SM, "Room");
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\n\tedit = {\nmodule = {\n\tname = \"modules/mods/%s/room.map\";\n\tportals = {\n\t\tnum = 0;\n\t}\n"
+                "\tentities = {\n\t\tnum = 0;\n\t}\n}\n\t}\n}\n", SM);
+    put_text(author, "room", "map-modules\\room.decl", text);
+    put_text(author, "room", "decls\\snapmoduleinfo\\room.decl", "{\n\tedit = {\n\t\tmoduleType = \"MODULE_TYPE_C\";\n\t}\n}\n");
+    put_bin(author, "room", "map-modules\\room\\_combo\\world.bcm", NULL, 31);
+    /* player and HUD */
+    write_mod(author, "player", SH, "Player");
+    put_text(author, "player", "native\\generated\\decls\\entitydef\\player\\coop.decl",
+             "{\n\tinherit = \"player/base\";\n\tedit = {\n\t\thealth = 150;\n\t\thudIcon = \"images/ammo_icon\";\n\t}\n}\n");
+    put_bin(author, "player", "images\\ammo_icon.bimage", NULL, 41);
+    put_text(author, "player", "native\\generated\\image\\guis\\hud\\ammo.bimage", "HUDIMAGE-PLAYER-CHANGED");
+    /* demons */
+    write_mod(author, "demons", SD, "Demons");
+    crate(author, "demons", SD, "imp_red", 51);
+    crate(author, "demons", SD, "imp_blue", 61);
+    put_text(author, "demons", "native\\generated\\decls\\entitydef\\ai\\conductor\\coop\\snapmap_default.decl",
+             "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 3;\n"
+             "\t\t\titem[0] = {\n\t\t\t\taiType = \"1\";\n\t\t\t\tentityDef = \"ai/demon/imp\";\n\t\t\t}\n"
+             "\t\t\titem[1] = {\n\t\t\t\taiType = \"2\";\n\t\t\t\tentityDef = \"entities/imp_red\";\n\t\t\t}\n"
+             "\t\t\titem[2] = {\n\t\t\t\taiType = \"3\";\n\t\t\t\tentityDef = \"entities/imp_blue\";\n\t\t\t}\n"
+             "\t\t}\n\t}\n}\n");
+}
+
+static size_t kinds_run(const char *label, const char *author, const char *player, const char *json)
+{
+    size_t bad = run_parity(label, author, player, json, strlen(json), NULL, 0, NULL);
+    mt_remove_tree(player);
+    CreateDirectoryA(player, NULL);
+    return bad;
+}
+
+static void case_kinds(void)
+{
+    static const struct { const char *label, *json; } placed[] = {
+        { "an entityDef placed alone", "{\"entities\":[{\"inherit\":\"mods/" SP "/crate\"}],\"instances\":[]}" },
+        { "a Toybox row placed alone", "{\"entities\":[{\"inherit\":\"mods/" SP "/crate_row\"}],\"instances\":[]}" },
+        { "a prop drawn with a DOOM image the mod surfaces", "{\"entities\":[{\"inherit\":\"mods/" SP "/rock\"}],\"instances\":[]}" },
+        { "the interactable's row and the script that binds its entity",
+          "{\"entities\":[{\"inherit\":\"mods/" SI "/panel_row\"}],\"instances\":[]}" },
+        { "a module placed alone", "{\"entities\":[],\"instances\":[{\"moduleName\":\"maps/modules/mods/" SM "/room.decl\"}]}" },
+        { "the props placed together, the interactable and the module",
+          "{\"entities\":[{\"inherit\":\"mods/" SP "/crate\"},{\"inherit\":\"mods/" SP "/lamp\"},{\"inherit\":\"mods/" SP "/rock\"},"
+          "{\"inherit\":\"mods/" SI "/panel\"}],\"instances\":[{\"moduleName\":\"maps/modules/mods/" SM "/room.decl\"}]}" },
+    };
+    char work[MAX_PATH], author[MAX_PATH * 2], player[MAX_PATH * 2];
+    size_t i;
+    CHECK(mt_temp_dir("parityk", work, sizeof work));
+    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\author", work);
+    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\player", work);
+    CreateDirectoryA(author, NULL);
+    CreateDirectoryA(player, NULL);
+    sh_mb_set_stock_ops(&k_ops);
+    kinds_world(author);
+    {
+        /* what each native/ file is to the game: the unchanged image a surface, the changed one a replacement */
+        char folder[MAX_PATH * 2];
+        sh_mb_bundle b;
+        size_t f;
+        int surface = 0, replace = 0;
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\props", author);
+        if (sh_mb_build(folder, SP, &g_resolver, &b) && !b.errors)
+            for (f = 0; f < b.file_count; f++) {
+                if (!_stricmp(b.files[f].request, K_ROCK_IMG)) surface = b.files[f].cls == SH_MB_CLASS_SURFACE;
+                if (!_stricmp(b.files[f].request, K_HUD_IMG)) replace = b.files[f].cls == SH_MB_CLASS_REPLACE;
+            }
+        CHECK(surface && replace);
+        sh_mb_free(&b);
+    }
+    for (i = 0; i < sizeof placed / sizeof placed[0]; i++) {
+        CHECK(kinds_run(placed[i].label, author, player, placed[i].json) == 0);
+        CHECK(g_last_q6 == 0);
+    }
+    CHECK(ps_has(&g_last_served, K_ROCK_IMG));    /* the surface serves where its name is reached */
+    /* A player and HUD mod used as a whole (a map-level row): its DOOM files and what they name serve in every mode. */
+    g_attach = SH;
+    CHECK(kinds_run("a player and HUD mod attached as a map-level row", author, player,
+                    "{\"entities\":[],\"instances\":[]}") == 0);
+    CHECK(g_last_q6 == 0);
+    CHECK(ps_has(&g_last_served, "generated/image/mods/" SH "/ammo_icon.bimage"));
+    g_attach = NULL;
+    {
+        sh_modmanifest_list cur;
+        size_t r;
+        memset(&cur, 0, sizeof cur);
+        sh_modmanifest_current(&cur);
+        for (r = 0; r < cur.count; r++) sh_modmanifest_current_remove(cur.rows[r].build);
+        sh_modmanifest_list_free(&cur);
+    }
+    /* One of two demons the conductor pairs: own play serves the whole build's conductor, a published map the unit's
+     * cut of it (R-DS5). The difference is Q6's, told apart, and nothing else diverges. */
+    CHECK(kinds_run("one demon of two the mod's conductor pairs", author, player,
+                    "{\"entities\":[{\"inherit\":\"mods/" SD "/imp_red\"}],\"instances\":[]}") == 0);
+    CHECK(g_last_q6 > 0);
+    sh_mb_set_stock_ops(NULL);
+    mt_remove_tree(work);
+}
+
 int main(int argc, char **argv)
 {
     const char *mods = NULL, *placed = NULL, *map = NULL, *doom = NULL, *out = NULL;
@@ -981,6 +1233,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[k], "map=", 4)) map = argv[k] + 4;
         else if (!strncmp(argv[k], "doom=", 5)) doom = argv[k] + 5;
         else if (!strncmp(argv[k], "out=", 4)) out = argv[k] + 4;
+        else if (!strncmp(argv[k], "attach=", 7)) g_attach = argv[k] + 7;
     }
     sh_mb_set_script_check(sh_script_compile_check);
     sh_mb_set_look_compiler(sh_look_compile_notes);
@@ -993,7 +1246,11 @@ int main(int argc, char **argv)
         size_t len = 0;
         FILE *rep = NULL;
         size_t bad;
-        if (!placed && !map) { fprintf(stderr, "usage: parity_test mods=<folder> placed=<a>,<b> [map=<text>] [doom=<install>]\n"); return 2; }
+        if (!placed && !map && !g_attach) {
+            fprintf(stderr, "usage: parity_test mods=<folder> placed=<a>,<b> [map=<text>] [doom=<install>] [attach=<salt>]\n");
+            return 2;
+        }
+        if (!placed) placed = "";
         if (!mt_temp_dir("parity_real", work, sizeof work)) return 2;
         _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\author", work);
         _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\player", work);
@@ -1041,7 +1298,7 @@ int main(int argc, char **argv)
             len = strlen(json);
         }
         if (out && (fopen_s(&rep, out, "wb") || !rep)) rep = NULL;
-        bad = run_parity(map ? map : placed, author, player, json, len, NULL, 0, rep);
+        bad = run_parity(map ? map : placed[0] ? placed : g_attach, author, player, json, len, NULL, 0, rep);
         if (rep) fclose(rep);
         free(json);
         printf("parity: work folder %s (remove it when done)\n", work);
@@ -1049,6 +1306,7 @@ int main(int argc, char **argv)
     }
     case_one_mod();
     case_two_mods();
+    case_kinds();
     if (failures) { fprintf(stderr, "parity_test: %d failure(s)\n", failures); return 1; }
     printf("parity_test: every mode served every placed object the same\n");
     return 0;
