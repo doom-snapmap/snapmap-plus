@@ -13,6 +13,7 @@
 #include <string.h>
 #include "module_prefab_map.h"
 #include "mp_json.h"
+#include "image_sites.h"
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -503,7 +504,7 @@ static void test_module_guard(void)
     }
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     test_json_roundtrip();
     test_is_module_file();
@@ -514,3 +515,32 @@ int main(void)
     printf("module_prefab_test: all passed\n");
     return 0;
 }
+
+/* The Redo decode the DLL's bind runs (sh_module_prefab_install calls the same sh_mp_redo_target) on each real
+ * executable: ModuleRedoAction's E8 at +SH_MP_ACTION_REDO_CALL_OFF reaches a function inside the image. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *action;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    action = image_site(base, results, n, "ModuleRedoAction", identity->vulkan);
+    if (action) {
+        uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+        const uint8_t *redo = (const uint8_t *)sh_mp_redo_target(action);
+        printf("  ModuleRedoAction rva 0x%x: Redo %s (rva 0x%x)\n", (unsigned)(action - base),
+               redo ? "decoded" : "NOT decoded", redo ? (unsigned)(redo - base) : 0u);
+        IMG_CHECK(redo != NULL);
+        IMG_CHECK(redo == NULL || (redo > base && redo < base + size));
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("module_prefab_test", check_image, synthetic_main)

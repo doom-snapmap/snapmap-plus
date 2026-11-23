@@ -4946,12 +4946,7 @@ static float plen_detour(void *move_fsm, const uint8_t *path)
     return g_plen_orig(move_fsm, path);
 }
 
-static const uint8_t k_threat_prologue[SH_AI_THREAT_STOLEN] = {
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x48, 0x83, 0xEC, 0x40
-};
-static const uint8_t k_plen_prologue[SH_AI_PATH_LENGTH_STOLEN] = {
-    0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0x4A, 0x70, 0x0F, 0x57, 0xE4, 0x48, 0x85, 0xC9
-};
+/* k_threat_prologue and k_plen_prologue: script_api_ai.h, where tests/script_ai_sigs_test.c compares them with the images. */
 
 static int commit_hook(void *target, void *detour, const uint8_t *want, size_t stolen, void **orig, int *failed,
                        const char *what)

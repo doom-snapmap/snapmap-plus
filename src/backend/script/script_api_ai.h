@@ -1050,6 +1050,9 @@ static const uint8_t k_ai_pain_stolen[SH_AI_PAIN_STUB_STOLEN] = {
 size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const void *resume);
 /* Detour windows, whole and position-independent. */
 #define SH_AI_THREAT_STOLEN 15
+static const unsigned char k_threat_prologue[SH_AI_THREAT_STOLEN] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x48, 0x83, 0xEC, 0x40
+};
 /* The pain start (SH_AI_SIG_PAIN_START, a site): its call of the alert cycle's FSM request, its call of the pain
  * transition code, and where it finds that FSM (the object at idAI2 +0x123B8, vtable +0x78); the signature holds
  * the last two. The FSM request is detoured: its window and the transition codes the detour acts on. */
@@ -1070,6 +1073,9 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
 #define SH_AI_CODE_DYING            242
 #define SH_AI_PAIN_TAKE_MS          250      /* how long the park stays open for a request the alert cycle refused */
 #define SH_AI_PATH_LENGTH_STOLEN 14
+static const unsigned char k_plen_prologue[SH_AI_PATH_LENGTH_STOLEN] = {
+    0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0x4A, 0x70, 0x0F, 0x57, 0xE4, 0x48, 0x85, 0xC9
+};
 /* The footstep table selector's window: two register saves and push rsi,
  * r14, r15 (whole, position-independent). */
 /* The rig (SH_AI_SIG_RIG_*). The entry's window: a register save, push rdi,

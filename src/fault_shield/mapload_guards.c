@@ -79,6 +79,18 @@ static int prologue_matches(const uint8_t *target, const uint8_t *expect, size_t
     return 1;
 }
 
+/* The two installs' stolen-prologue checks, public so the build-image test (fault_shield_sites_test) runs them on each
+ * executable's own functions. 1 when the bytes at `target` are the expected ones. */
+int sh_evlink_prologue_ok(const uint8_t *target)
+{
+    return target != NULL && prologue_matches(target, k_evlink_prologue, EVLINK_STOLEN);
+}
+
+int sh_interactable_prologue_ok(const uint8_t *target)
+{
+    return target != NULL && prologue_matches(target, k_ia_spawn_prologue, INTERACTABLE_STOLEN);
+}
+
 /* Log the first GUARD_LOG_MAX repairs, one suppression notice, then stay silent. */
 #define GUARD_LOG_MAX 32
 
@@ -216,7 +228,7 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
         shield_emit(&f);
         return 0;
     }
-    if (!prologue_matches((const uint8_t *)target, k_evlink_prologue, EVLINK_STOLEN)) {
+    if (!sh_evlink_prologue_ok((const uint8_t *)target)) {
         shield_fault f = { "load", -1,
             "evwire-guard: prologue MISMATCH at the resolved EventLink -- NOT installed (the function is "
             "already hooked, or its stolen-byte window changed). Re-derive the STOLEN count.",
@@ -323,7 +335,7 @@ int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *
         shield_emit(&f);
         return 0;
     }
-    if (!prologue_matches((const uint8_t *)target, k_ia_spawn_prologue, INTERACTABLE_STOLEN)) {
+    if (!sh_interactable_prologue_ok((const uint8_t *)target)) {
         shield_fault f = { "load", -1,
             "interactable-guard: prologue MISMATCH at 0x1232830 -- NOT installed (different DOOM build, or "
             "the function is already hooked). Re-derive the RVA + STOLEN count for this build.",

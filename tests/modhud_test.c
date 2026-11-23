@@ -219,7 +219,7 @@ static void test_image(const char *path)
     const sh_build_identity *id;
     const sig_entry *site_e = entry_named("WeaponHudModeCall"), *pred_e = entry_named("WeaponHudGameMode");
     sig_result site, pred;
-    int32_t d;
+    unsigned char expected[5];
     CHECK(base && site_e && pred_e);
     if (!base || !site_e || !pred_e) { free(base); return; }
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);
@@ -230,11 +230,24 @@ static void test_image(const char *path)
     CHECK(sig_resolve_one(base, pred_e, &pred) == SIG_OK);
     CHECK(site.rva == (id->vulkan ? site_e->rva_vk : site_e->rva_gl));
     CHECK(pred.rva == (id->vulkan ? pred_e->rva_vk : pred_e->rva_gl));
-    memcpy(&d, base + site.rva + 1, sizeof d);
-    CHECK(base[site.rva] == 0xE8 && site.rva + 5 + d == pred.rva);
-    CHECK(((site.rva + 1) & 3u) == 0);
-    /* The widget is RBX: MOV RAX,[RBX+0x1F8] right after the TEST/JZ. */
-    CHECK(!memcmp(base + site.rva + 9, "\x48\x8B\x83\xF8\x01\x00\x00", 7));
+    /* The product's own check (the one hud_route runs before it swaps the call): the call at the site is E8 to
+     * the predicate, and the widget load at +9 shows RBX is the widget the relay passes on. */
+    CHECK(sh_modhud_check_site(&site, &pred, expected));
+    CHECK(((site.rva + 1) & 3u) == 0);   /* test-only: the rel32 is 4-byte aligned for the aligned swap */
+    {
+        uint8_t *at = base + site.rva;
+        uint8_t keep = at[9], keep_op = at[0];
+        sig_result wrong = pred;
+        wrong.addr++;
+        CHECK(!sh_modhud_check_site(&site, &wrong, expected));
+        at[9] ^= 0x01;
+        CHECK(!sh_modhud_check_site(&site, &pred, expected));
+        at[9] = keep;
+        at[0] = 0xE9;
+        CHECK(!sh_modhud_check_site(&site, &pred, expected));
+        at[0] = keep_op;
+        CHECK(sh_modhud_check_site(&site, &pred, expected));
+    }
     printf("%s %s: WeaponHudModeCall 0x%x -> WeaponHudGameMode 0x%x\n", g_fail ? "BAD" : "OK ",
            id->vulkan ? "Vulkan" : "OpenGL", site.rva, pred.rva);
     free(base);

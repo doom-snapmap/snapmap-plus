@@ -209,6 +209,22 @@ void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the 
 #endif
 
 /* ------------------------------------------------------------ engine */
+/* The engine functions the publish hooks read, each at its signature's address in the running image (or in a mapped
+ * executable, for the image test). */
+typedef struct sh_modpublish_sites {
+    const uint8_t *fail, *copy, *browser, *start, *after_save, *str_ctor, *str_dtor;
+} sh_modpublish_sites;
+/* What the checks decode out of those functions' code. */
+typedef struct sh_modpublish_bound {
+    const void *toast, *screen_shell, *shell_manager, *record, *entry, *browser_state, *hide_progress;
+    const void *tags_grow, *idstr_assign;
+} sh_modpublish_bound;
+/* Every byte the publish hooks rely on (PublishFail's toast, the two copy entries' record and model reads,
+ * PublishStart's tag append and Save callback), checked in the functions' own code: NULL when each holds (*out
+ * filled), else the name of the first check that failed, for the log. The bind and tests/modpub_sites_test.c both
+ * run this function. */
+const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpublish_bound *out);
+
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
 /* Bind PublishAfterSave, PublishFail, PublishFeedPost, PublishStart (held for mod content), the editor's pacifier,

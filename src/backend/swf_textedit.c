@@ -270,6 +270,32 @@ static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *
     return ret;
 }
 
+/* The slot holding the interned "TextField" id: the `mov rdx,[rip+rel32]` at TF_STRPTR_INSN_OFF in the onKey
+ * handler, checked for its opcode before the displacement is believed. NULL when the bytes differ or are
+ * unreadable. The install and the image-backed test both call this. */
+static const void *const *swf_decode_textfield_slot(const uint8_t *handler)
+{
+    const void *const *slot = NULL;
+    __try {
+        const uint8_t *insn = handler + TF_STRPTR_INSN_OFF;
+        if (memcmp(insn, TF_STRPTR_INSN, sizeof TF_STRPTR_INSN) == 0) {
+            int32_t rel = *(const int32_t *)(insn + sizeof TF_STRPTR_INSN);
+            slot = (const void *const *)(insn + TF_STRPTR_INSN_LEN + rel);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { slot = NULL; }
+    return slot;
+}
+
+/* The interned id the slot holds at run time (the engine fills the slot when it interns the type name). */
+static const void *swf_decode_textfield_id(const uint8_t *handler)
+{
+    const void *const *slot = swf_decode_textfield_slot(handler);
+    const void *id = NULL;
+    if (slot == NULL) return NULL;
+    __try { id = *slot; } __except (EXCEPTION_EXECUTE_HANDLER) { id = NULL; }
+    return id;
+}
+
 void sh_swf_textedit_install(const uint8_t *module_base)
 {
     if (g_orig_onkey) {
@@ -292,16 +318,7 @@ void sh_swf_textedit_install(const uint8_t *module_base)
 
     /* Decode the interned type pointer before any patch. Without it the type
      * check cannot succeed, so leave the handler untouched. */
-    if (r.status == SIG_OK) {
-        __try {
-            const uint8_t *insn = (const uint8_t *)r.addr + TF_STRPTR_INSN_OFF;
-            if (memcmp(insn, TF_STRPTR_INSN, sizeof TF_STRPTR_INSN) == 0) {
-                int32_t rel = *(const int32_t *)(insn + sizeof TF_STRPTR_INSN);
-                const void *const *slot = (const void *const *)(insn + TF_STRPTR_INSN_LEN + rel);
-                g_textfield_id = *slot;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { g_textfield_id = NULL; }
-    }
+    if (r.status == SIG_OK) g_textfield_id = swf_decode_textfield_id((const uint8_t *)r.addr);
     if (g_textfield_id == NULL) {
         backend_log("swf-textedit: NOT armed (could not decode the interned \"TextField\" id from the "
                     "handler prologue -- re-derive TF_STRPTR_INSN_OFF for this DOOM build)");

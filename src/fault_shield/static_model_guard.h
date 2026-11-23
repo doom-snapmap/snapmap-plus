@@ -15,6 +15,13 @@
  * own empty model). Returns 1 when armed. */
 int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *results, size_t count);
 
+/* The two installs' own byte checks, for the build-image test. sh_static_model_update_check: 0 when
+ * StaticModelUpdate's head, counter compare and list LEA are as expected and the counter is the list's reload
+ * counter (*list, *counter set), 1 when the head or an instruction differs, 2 when the counter is not the
+ * list's. sh_static_model_incref_head_ok: 1 when StaticModelIncRef's head is as expected. */
+int sh_static_model_update_check(const uint8_t *target, const uint8_t **list, const uint8_t **counter);
+int sh_static_model_incref_head_ok(const uint8_t *target);
+
 /* Times the guard drew a render model empty this session. */
 long sh_static_model_guard_fires(void);
 

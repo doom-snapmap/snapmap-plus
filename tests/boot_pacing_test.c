@@ -2,6 +2,7 @@
 #include "../src/backend/boot_pacing.c"
 #include <assert.h>
 #include <stdio.h>
+#include "image_sites.h"
 
 static char last_log[512];
 void backend_log(const char *message){strncpy_s(last_log,sizeof last_log,message,_TRUNCATE);}
@@ -50,7 +51,7 @@ static int other_thread_can_enter(void)
 }
 static DWORD WINAPI probe_during_sleep(LPVOID p){(void)p;Sleep(3);try_lock(NULL);return 0;}
 
-int main(void)
+static int synthetic(void)
 {
     unsigned char *img=place();uintptr_t a,b,c;int32_t disp;unsigned char stub[32];
     sig_result r[3]={{"BootVideoLock",SIG_OK,0,0},{"BootVideoSleep",SIG_OK,0,0},{"BootReadPoll",SIG_OK,0,0}};
@@ -179,3 +180,37 @@ int main(void)
     puts("boot_pacing_test: passed");
     return 0;
 }
+
+/* The product's own bind checks (sh_boot_pacing_match, sh_boot_video_check, sh_boot_poll_check) on each executable. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result m[SH_BOOT_PACING_SIGS];
+    const uint8_t *lock_site, *sleep_site, *poll_site;
+    uintptr_t lock = 0, video_sleep = 0, poll_sleep = 0;
+    const char *why;
+    uint32_t size;
+    if (!base) return;
+    size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    IMG_CHECK(sh_boot_pacing_match(base, m, SH_BOOT_PACING_SIGS) == SH_BOOT_PACING_SIGS);
+    lock_site = image_site(base, m, SH_BOOT_PACING_SIGS, "BootVideoLock", identity->vulkan);
+    sleep_site = image_site(base, m, SH_BOOT_PACING_SIGS, "BootVideoSleep", identity->vulkan);
+    poll_site = image_site(base, m, SH_BOOT_PACING_SIGS, "BootReadPoll", identity->vulkan);
+    if (lock_site && sleep_site) {
+        why = sh_boot_video_check(lock_site, sleep_site, &lock, &video_sleep);
+        printf("  video draw (lock rva 0x%X, sleep rva 0x%X): %s\n", (unsigned)(lock_site - base),
+               (unsigned)(sleep_site - base), why ? why : "all checks hold");
+        IMG_CHECK(why == NULL);
+        IMG_CHECK(lock > (uintptr_t)base && lock < (uintptr_t)base + size);
+        IMG_CHECK(video_sleep > (uintptr_t)base && video_sleep < (uintptr_t)base + size);
+    }
+    if (poll_site) {
+        why = sh_boot_poll_check(poll_site, &poll_sleep);
+        printf("  read poll (rva 0x%X): %s\n", (unsigned)(poll_site - base), why ? why : "all checks hold");
+        IMG_CHECK(why == NULL);
+        IMG_CHECK(poll_sleep > (uintptr_t)base && poll_sleep < (uintptr_t)base + size);
+    }
+    free(base);
+}
+IMAGE_TEST_MAIN("boot_pacing_test", check_image, synthetic)

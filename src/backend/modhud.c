@@ -345,6 +345,19 @@ static void *hud_near_relay(uintptr_t call, void *handler)
     return NULL;
 }
 
+int sh_modhud_check_site(const sig_result *site, const sig_result *predicate, unsigned char expected[5])
+{
+    /* MOV RAX,[RBX+0x1F8], at +9 (after the call, TEST AL,AL and a short JZ): the relay hands RBX to the handler
+     * as the widget, so the code after the call must read the widget's weapon decl through RBX. */
+    static const unsigned char widget_load[7] = { 0x48, 0x8b, 0x83, 0xf8, 0x01, 0x00, 0x00 };
+    int32_t displacement;
+    if (!site || !predicate || site->status != SIG_OK || predicate->status != SIG_OK) return 0;
+    memcpy(expected, (void *)site->addr, 5);
+    memcpy(&displacement, expected + 1, sizeof displacement);
+    if (expected[0] != 0xe8 || site->addr + 5 + (intptr_t)displacement != predicate->addr) return 0;
+    return memcmp((void *)(site->addr + 9), widget_load, sizeof widget_load) == 0;
+}
+
 static int hud_route(const sig_result *results, size_t count)
 {
     const sig_result *site = NULL, *predicate = NULL;
@@ -359,9 +372,7 @@ static int hud_route(const sig_result *results, size_t count)
         if (!strcmp(results[i].name, "WeaponHudGameMode")) predicate = &results[i];
     }
     if (!site || !predicate || site->status != SIG_OK || predicate->status != SIG_OK) goto refused;
-    memcpy(expected, (void *)site->addr, sizeof expected);
-    memcpy(&displacement, expected + 1, sizeof displacement);
-    if (expected[0] != 0xe8 || site->addr + 5 + (intptr_t)displacement != predicate->addr) goto refused;
+    if (!sh_modhud_check_site(site, predicate, expected)) goto refused;
     g_relay = hud_near_relay(site->addr, (void *)hud_mode);
     if (!g_relay) goto refused;
     distance = (intptr_t)g_relay - (intptr_t)(site->addr + 5);
@@ -447,15 +458,19 @@ static DWORD WINAPI hud_test_run(LPVOID parameter)
 }
 
 /* An owned synthetic caller: push rbx; sub rsp,0x20; mov rbx,rdx; call
- * predicate; add rsp,0x20; pop rbx; ret, and predicate: mov al,[rcx]; ret.
- * The call's rel32 starts at +12, 4-byte aligned. No game image is used. */
+ * predicate; test al,al; jmp over a dead mov rax,[rbx+0x1f8] (the widget load
+ * the route checks for at call +9); add rsp,0x20; pop rbx; ret, and predicate:
+ * mov al,[rcx]; ret. The call's rel32 starts at +12, 4-byte aligned. No game
+ * image is used. */
 int sh_modhud_test_relay(void)
 {
     unsigned char *code = (unsigned char *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     unsigned char widget[0x208] = {0}, decl[16] = {0}, game = 1;
     const char *name = "weapon/test/unlimited";
     static const unsigned char caller[] = { 0x90, 0x90, 0x90, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0xd3,
-                                            0xe8, 0x30, 0, 0, 0, 0x48, 0x83, 0xc4, 0x20, 0x5b, 0xc3 };
+                                            0xe8, 0x30, 0, 0, 0, 0x84, 0xc0, 0xeb, 0x07,
+                                            0x48, 0x8b, 0x83, 0xf8, 0x01, 0, 0,
+                                            0x48, 0x83, 0xc4, 0x20, 0x5b, 0xc3 };
     static const unsigned char predicate[] = { 0x8a, 0x01, 0xc3 };
     sig_result results[2] = { { "WeaponHudModeCall", SIG_OK, 0, 0 }, { "WeaponHudGameMode", SIG_OK, 0, 0 } };
     DWORD old;

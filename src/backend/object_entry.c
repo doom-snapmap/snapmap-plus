@@ -62,15 +62,22 @@ static int read_float(uintptr_t at,float *out)
     __try {*out=*(const volatile float*)at;return 1;}
     __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
 }
+/* The bind's byte checks, the install's and the image test's one function: the load's bytes, then its constant. */
+const char *sh_object_entry_check(const unsigned char *site,uintptr_t *constant)
+{
+    float native=0;
+    if(!sh_object_entry_site(site,constant))return "the entry drop load has unexpected bytes";
+    if(!read_float(*constant,&native)||native!=SH_OBJECT_ENTRY_NATIVE_DROP)return "the entry drop constant is not 18364";
+    return NULL;
+}
 int sh_object_entry_install(const sig_result *results,size_t count)
 {
-    const sig_result *site;uintptr_t constant=0;float native=0;int32_t old_disp,new_disp;
+    const sig_result *site;uintptr_t constant=0;int32_t old_disp,new_disp;
     const char *why;char line[320];
     if(g_live)return 1;
     site=binding(results,count,"ObjectEntryDrop");
     if(!site){why="the entry drop load was not found";goto unavailable;}
-    if(!sh_object_entry_site((const unsigned char*)site->addr,&constant)){why="the entry drop load has unexpected bytes";goto unavailable;}
-    if(!read_float(constant,&native)||native!=SH_OBJECT_ENTRY_NATIVE_DROP){why="the entry drop constant is not 18364";goto unavailable;}
+    if((why=sh_object_entry_check((const unsigned char*)site->addr,&constant)))goto unavailable;
     /* The load's disp32 is relative to the instruction's end, site + 9. */
     if(!g_page&&!(g_page=(drop_page*)sh_near_page_alloc(site->addr+9))){why="no page within reach of the entry drop load";goto unavailable;}
     /* Written before the patch: the redirected load never reads an empty page. */

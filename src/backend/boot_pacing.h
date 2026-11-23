@@ -49,6 +49,13 @@ int sh_boot_video_sleep_site(const unsigned char *site, uintptr_t *first, uintpt
                              uintptr_t *sleep);
 /* *sleep = the poll's Sleep(1) destination. */
 int sh_boot_read_poll_site(const unsigned char *site, uintptr_t *sleep);
+/* The load-screen video draw's bind checks, in the order the install makes them: both sites' bytes, that they are one
+ * draw, and that the draw's sleep goes to the engine's Sleep thunk. NULL when all hold (*lock = the lock global,
+ * *video_sleep = the thunk), else the reason. The install and the image test run this one function. */
+const char *sh_boot_video_check(const unsigned char *lock_site, const unsigned char *sleep_site,
+                                uintptr_t *lock, uintptr_t *video_sleep);
+/* The read poll's bind checks: the site's bytes and that its sleep goes to the engine's Sleep thunk. NULL or the reason. */
+const char *sh_boot_poll_check(const unsigned char *site, uintptr_t *poll_sleep);
 /* A rel32 operand from next (the address after the instruction) to dest. */
 int sh_boot_rel32(uintptr_t next, uintptr_t dest, int32_t *disp);
 /* A Sleep thunk: REX JMP qword [rip+disp32]. */

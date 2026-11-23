@@ -63,6 +63,8 @@ int sh_strids_scope_check(void);
 int sh_strids_refresh_pending(void);
 
 #ifdef SH_STRIDS_TESTING
+/* The install's table-global decode (the first LEA RCX,[rip+disp32] in StridsTableLea), on a real executable. */
+void *sh_strids_test_decode_table_global(const uint8_t *table_lea_fn);
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);

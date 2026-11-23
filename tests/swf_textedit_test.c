@@ -15,13 +15,12 @@ int sh_clipboard_get(char *out, int cap);
 int sh_clipboard_set(const char *text);
 
 #include "../src/backend/swf_textedit.c"
+#include "image_sites.h"
 
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
 /* ---- the engine and host surface the module links against */
-const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL } };
-sig_status sig_resolve_one(const uint8_t *m, const sig_entry *s, sig_result *o) { (void)m; (void)s; (void)o; return SIG_NOT_FOUND; }
 void *sh_prepare_detour_sig(const sig_result *r, void *d, size_t n) { (void)r; (void)d; (void)n; return NULL; }
 sh_patch_status sh_commit_detour(void *t) { (void)t; return B2_PATCH_OK; }
 int sh_uninstall_detour(void *t) { (void)t; return 1; }
@@ -70,7 +69,7 @@ static void field(const char *text, int sel_a, int sel_b, int maxchars)
     *(int *)(ti + TI_MAXCHARS_OFF) = maxchars;
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     g_vtbl.toast = fake_toast;
     g_iface_obj.vtbl = &g_vtbl;
@@ -112,3 +111,31 @@ int main(void)
     puts("swf text edit tests passed");
     return 0;
 }
+
+/* The install's own decode of the interned "TextField" id (swf_decode_textfield_id) on the shipped executable:
+ * SwfTextOnKeyCall's `mov rdx,[rip+rel32]` at TF_STRPTR_INSN_OFF must be there and name an in-image slot. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    {
+        const uint8_t *fn = image_site(base, results, n, SIG_SWF_ONKEY, identity->vulkan);
+        if (fn) {
+            const uint8_t *slot = (const uint8_t *)swf_decode_textfield_slot(fn);
+            printf("  the interned TextField id slot: rva 0x%X\n", slot ? (unsigned)(slot - base) : 0u);
+            IMG_CHECK(slot != NULL && slot > base &&
+                      slot < base + ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("swf_textedit_test", check_image, synthetic_main)

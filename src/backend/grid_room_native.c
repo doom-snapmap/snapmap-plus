@@ -1381,6 +1381,32 @@ int sh_grid_native_selected(int instance,const float *requested,sh_grid_size *ou
     if(out)*out=current;
     return 1;
 }
+/* GridReconnectPortals reads the environment-bounds cvar's float with a RIP-relative `movss xmm6,[rip+d]` at +0x8f
+ * (both native reconnect implementations): the cvar's address, NULL when the bytes there are not that load. The
+ * install and the image test run this same decode. */
+const float *sh_grid_native_decode_environment_bounds(const void *reconnect)
+{
+    const unsigned char *p=(const unsigned char*)reconnect;int32_t displacement;
+    if(!p||memcmp(p+0x8f,"\xf3\x0f\x10\x35",4))return NULL;
+    memcpy(&displacement,p+0x93,4);return (const float*)(p+0x97+displacement);
+}
+/* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
+ * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
+ * delete only when its two leading calls reach the resolved getter and applier.
+ * Its live destroy/free check stays open: no live check has reached it yet.
+ * 1 with *destroy and *release set; 0 (both untouched) when any check fails. */
+int sh_grid_native_decode_reapply(const void *reapply,const void *entity_tree,const void *apply_tree,
+                                  void **destroy,void **release)
+{
+    const unsigned char *p=(const unsigned char*)reapply;int32_t displacement;
+    if(!p||!entity_tree||!apply_tree||p[0x17]!=0xe8||p[0x25]!=0xe8||p[0x38]!=0xe8||p[0x45]!=0xe8||
+       memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8))return 0;
+    memcpy(&displacement,p+0x18,4);if((const void*)(p+0x1c+displacement)!=entity_tree)return 0;
+    memcpy(&displacement,p+0x26,4);if((const void*)(p+0x2a+displacement)!=apply_tree)return 0;
+    memcpy(&displacement,p+0x39,4);*destroy=(void*)(p+0x3d+displacement);
+    memcpy(&displacement,p+0x46,4);*release=(void*)(p+0x4a+displacement);
+    return 1;
+}
 int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
 {
     void *find=clean(r,n,"GridFindModule"),*has=clean(r,n,"GridHasModule");
@@ -1397,12 +1423,8 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
     g_generic_load=(generic_load_fn)clean(r,n,"ResourceGenericLoad");
     g_replace=(replace_instance_fn)clean(r,n,"GridReplaceInstance");
     g_reconnect=(reconnect_fn)clean(r,n,"GridReconnectPortals");
-    if(g_reconnect){const unsigned char *p=(const unsigned char*)g_reconnect;int32_t displacement;
-        /* Both native reconnect implementations read this cvar at +0x8f. */
-        if(!memcmp(p+0x8f,"\xf3\x0f\x10\x35",4)){
-            memcpy(&displacement,p+0x93,4);g_environment_bounds=(const float*)(p+0x97+displacement);
-        }
-    }
+    if(g_reconnect){const float *bounds=sh_grid_native_decode_environment_bounds(g_reconnect);
+        if(bounds)g_environment_bounds=bounds;}
     g_edit_entity=(edit_entity_fn)clean(r,n,"GridEditEntity");
     g_set_transform=(set_transform_fn)clean(r,n,"GridSetEntityTransform");
     g_portal_bounds=(portal_bounds_fn)clean(r,n,"GridPortalBounds");
@@ -1412,22 +1434,10 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
     g_read_properties=(entity_tree_apply_fn)clean(r,n,"GridReadEntityProperties");
     g_tree_vec=(tree_vec_fn)clean(r,n,"GridTreeSetVec3");
     g_tree_float=(tree_float_fn)clean(r,n,"GridTreeSetFloat");
-    {const unsigned char *p=(const unsigned char*)clean(r,n,"GridReapplyEntityTree");int32_t displacement;
-        /* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
-         * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
-         * delete only when its two leading calls reach the resolved getter and applier.
-         * Its live destroy/free check stays open: no live check has reached it yet. */
-        if(p&&g_entity_tree&&g_apply_tree&&p[0x17]==0xe8&&p[0x25]==0xe8&&p[0x38]==0xe8&&p[0x45]==0xe8&&
-           !memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8)){
-            memcpy(&displacement,p+0x18,4);
-            if((const void*)(p+0x1c+displacement)==(const void*)g_entity_tree){
-                memcpy(&displacement,p+0x26,4);
-                if((const void*)(p+0x2a+displacement)==(const void*)g_apply_tree){
-                    memcpy(&displacement,p+0x39,4);g_tree_destroy=(tree_destroy_fn)(p+0x3d+displacement);
-                    memcpy(&displacement,p+0x46,4);g_tree_free=(tree_free_fn)(p+0x4a+displacement);
-                }
-            }
-        }
+    {void *destroy=NULL,*release=NULL;
+        if(sh_grid_native_decode_reapply(clean(r,n,"GridReapplyEntityTree"),(const void*)g_entity_tree,
+                                         (const void*)g_apply_tree,&destroy,&release)){
+            g_tree_destroy=(tree_destroy_fn)destroy;g_tree_free=(tree_free_fn)release;}
     }
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);
     g_cvar_slot=(const void*)glb_resolve(base,"cvar_system_slot",NULL);

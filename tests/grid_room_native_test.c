@@ -1,6 +1,7 @@
 /* Exercise the private-palette lifecycle with native-call doubles. */
 #include "../src/backend/grid_room_native.c"
 #include <assert.h>
+#include "image_sites.h"
 
 static unsigned char editor[0x20750], anchor[32], heap_state[0x100];
 static void *registry_slot,*registry_object[1],*registry_vtable[12];
@@ -532,7 +533,7 @@ static void standin_module_checks(void)
     assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/hall.decl")==end);
     sh_grid_native_set_module_source(NULL);
 }
-int main(void)
+static int synthetic_main(void)
 {
     sh_grid_size compact={SH_GRID_MODERN,{1536,1024,512}},large={SH_GRID_MODERN,{8192,6144,4096}},read;
     void *a,*b,*again;void *edit_data[1]={map_data};unsigned i;int32_t displacement;
@@ -734,3 +735,48 @@ int main(void)
     for(i=0;i<allocation_count;++i)free(allocations[i]);
     puts("grid_room_native_test: passed");return 0;
 }
+
+/* The two byte checks the DLL's bind runs (sh_grid_native_install calls the same decodes) on each real executable:
+ * GridReconnectPortals's cvar load at +0x8f, and GridReapplyEntityTree's four calls with its two leading callees
+ * being the resolved GridEntityTree and GridApplyEntityTree. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *reconnect, *reapply, *tree, *apply;
+    uint32_t size;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    reconnect = image_site(base, results, n, "GridReconnectPortals", identity->vulkan);
+    reapply = image_site(base, results, n, "GridReapplyEntityTree", identity->vulkan);
+    tree = image_site(base, results, n, "GridEntityTree", identity->vulkan);
+    apply = image_site(base, results, n, "GridApplyEntityTree", identity->vulkan);
+    if (reconnect) {
+        const float *bounds = sh_grid_native_decode_environment_bounds(reconnect);
+        printf("  GridReconnectPortals rva 0x%x: environment bounds %s (rva 0x%x)\n", (unsigned)(reconnect - base),
+               bounds ? "decoded" : "NOT decoded", bounds ? (unsigned)((const uint8_t *)bounds - base) : 0u);
+        IMG_CHECK(bounds != NULL);
+        IMG_CHECK(!bounds || ((const uint8_t *)bounds > base && (const uint8_t *)bounds + 4 <= base + size));
+    }
+    if (reapply && tree && apply) {
+        void *destroy = NULL, *release = NULL;
+        int ok = sh_grid_native_decode_reapply(reapply, tree, apply, &destroy, &release);
+        printf("  GridReapplyEntityTree rva 0x%x: destroy and free callees %s (rva 0x%x, 0x%x)\n",
+               (unsigned)(reapply - base), ok ? "decoded" : "NOT decoded",
+               ok ? (unsigned)((uint8_t *)destroy - base) : 0u, ok ? (unsigned)((uint8_t *)release - base) : 0u);
+        IMG_CHECK(ok);
+        IMG_CHECK(!ok || ((uint8_t *)destroy > base && (uint8_t *)destroy < base + size &&
+                          (uint8_t *)release > base && (uint8_t *)release < base + size));
+        IMG_CHECK(!ok || destroy != release);
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("grid_room_native_test", check_image, synthetic_main)

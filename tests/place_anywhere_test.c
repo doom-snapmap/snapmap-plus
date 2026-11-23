@@ -1,6 +1,7 @@
 /* The unrestricted placement patch on scratch code, never game bytes. */
 #include "../src/backend/place_anywhere.c"
 #include <assert.h>
+#include "image_sites.h"
 
 static char last_log[512];
 void backend_log(const char *message){strncpy_s(last_log,sizeof last_log,message,_TRUNCATE);}
@@ -25,7 +26,7 @@ static unsigned char *scratch(void)
     memcpy(p,k_commit,sizeof k_commit);memcpy(p+0x100,k_element,sizeof k_element);
     return p;
 }
-int main(void)
+static int synthetic(void)
 {
     unsigned char *p=scratch();
     sig_result r[2]={{"PlaceGateCommit",SIG_OK,0,0},{"PlaceGateElement",SIG_OK,0,0}};
@@ -75,3 +76,32 @@ int main(void)
     puts("place_anywhere_test: ok");
     return 0;
 }
+
+/* The product's own site check (sh_place_gate_branch, the install's) on each executable: both gates match their
+ * exact bytes and the branch the install rewrites is the JNZ it expects. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    int g;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    for (g = 0; g < SH_PLACE_GATE_COUNT; g++) {
+        const uint8_t *site = image_site(base, results, n, k_gate[g].name, identity->vulkan);
+        int branch;
+        if (!site) continue;
+        branch = sh_place_gate_branch(site, g);
+        printf("  %s rva 0x%X: %s (branch at +0x%X)\n", k_gate[g].name, (unsigned)(site - base),
+               branch >= 0 ? "bytes match" : "bytes do NOT match", branch);
+        IMG_CHECK(branch >= 0);
+        if (branch >= 0) IMG_CHECK(site[branch] == SH_PLACE_GATE_JNZ);
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+IMAGE_TEST_MAIN("place_anywhere_test", check_image, synthetic)

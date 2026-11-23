@@ -38,7 +38,8 @@
 #define OV_PINNED_IDFILE_COMPARE_RVA    SH_RVA(0x2996D0u, 0x299930u)
 #define OV_PINNED_IDFILE_WRITESTR_RVA   SH_RVA(0x29A0B0u, 0x29A310u)
 /* Base idFile implementation of slot +0x50 (build 13954591 base idFile vtable). */
-#define OV_BASE_HELPER_RVA              SH_RVA(0x2997D0u, 0x299A30u)
+#define OV_BASE_HELPER_RVA_VK           0x2997D0u
+#define OV_BASE_HELPER_RVA_GL           0x299A30u
 #define OV_PINNED_PROVIDER_VTABLE_RVA   SH_RVA(0x1FF4CA0u, 0x200EA70u)
 
 /* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode
@@ -950,6 +951,48 @@ int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, co
 }
 #endif
 
+/* +0x50 (inserted in build 13954591) borrows the engine's base idFile
+ * implementation, like the idStr helpers. Its RVA comes from the base idFile
+ * vtable of this exact executable; require the recorded prologue there. */
+static const uint8_t OV_BASE_HELPER_PROLOGUE[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
+                                                   0x48, 0x89, 0x74, 0x24, 0x18 };
+
+/* The install's byte checks on the executable's own code: the base idFile helper's prologue at its
+ * recorded RVA, then the vtable decoded from the provider constructor, which must be a read-only location
+ * inside the image. Returns NULL when both hold, else the log line naming what failed. *helper_out is set
+ * once the prologue held, *vtable_out once the vtable decoded (either may be left NULL by a failure). */
+const char *sh_overrides_check_sites(const uint8_t *module_base, const void *ctor_fn,
+                                     const uint8_t **helper_out, void **vtable_out)
+{
+    uint8_t got[sizeof OV_BASE_HELPER_PROLOGUE];
+    uint32_t rva = sh_host_image_rva(module_base, OV_BASE_HELPER_RVA_VK, OV_BASE_HELPER_RVA_GL);
+    const uint8_t *helper = rva ? module_base + rva : NULL;
+    void *vtable;
+
+    if (helper_out) *helper_out = NULL;
+    if (vtable_out) *vtable_out = NULL;
+    if (!helper || !ov_address_in_image(module_base, helper) ||
+        !safe_read_n(helper, got, sizeof got) ||
+        memcmp(got, OV_BASE_HELPER_PROLOGUE, sizeof OV_BASE_HELPER_PROLOGUE) != 0)
+        return "B1: overrides file-shadow SKIPPED -- the base idFile helper for slot +0x50 is "
+               "not at its recorded address on this executable";
+    if (helper_out) *helper_out = helper;
+
+    vtable = decode_vtable_global((const uint8_t *)ctor_fn);
+    if (vtable == NULL)
+        return "B1: overrides file-shadow SKIPPED -- could not decode the vtable LEA "
+               "(ResProviderCtor layout shifted?)";
+    /* Require the decoded vtable to lie in a read-only host section. The
+     * pinned Vulkan RVA is for audit only.
+     */
+    if (!ov_address_in_image(module_base, vtable) ||
+        !ov_address_in_readonly_section(module_base, vtable))
+        return "B1: overrides file-shadow SKIPPED -- decoded provider vtable is not a read-only "
+               "location inside the host image (the LEA decode did not land on a vtable)";
+    if (vtable_out) *vtable_out = vtable;
+    return NULL;
+}
+
 /* ============================================================ the install (slot swap) ==============*/
 
 int sh_overrides_install(const uint8_t *module_base,
@@ -999,37 +1042,14 @@ int sh_overrides_install(const uint8_t *module_base,
         return 0;
     }
 
-    /* +0x50 (inserted in build 13954591) borrows the engine's base idFile
-     * implementation, like the idStr helpers. Its RVA comes from the base idFile
-     * vtable of this exact executable; require the recorded prologue there. */
-    {
-        static const uint8_t prologue[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
-                                            0x48, 0x89, 0x74, 0x24, 0x18 };
-        uint8_t got[sizeof prologue];
-        uint32_t rva = OV_BASE_HELPER_RVA;
-        const uint8_t *helper = rva ? module_base + rva : NULL;
-        if (!helper || !ov_address_in_image(module_base, helper) ||
-            !safe_read_n(helper, got, sizeof got) || memcmp(got, prologue, sizeof prologue) != 0) {
-            backend_log("B1: overrides file-shadow SKIPPED -- the base idFile helper for slot +0x50 is "
-                        "not at its recorded address on this executable");
-            return 0;
-        }
-        g_stream_vtable[OV_SLOT_BASE_HELPER] = (void *)helper;
-    }
-
-    void *vtable = decode_vtable_global((const uint8_t *)ctor_fn);
-    if (vtable == NULL) {
-        backend_log("B1: overrides file-shadow SKIPPED -- could not decode the vtable LEA "
-                    "(ResProviderCtor layout shifted?)");
-        return 0;
-    }
-    /* Require the decoded vtable to lie in a read-only host section. The
-     * pinned Vulkan RVA is for audit only.
-     */
-    if (!ov_address_in_image(module_base, vtable) ||
-        !ov_address_in_readonly_section(module_base, vtable)) {
-        backend_log("B1: overrides file-shadow SKIPPED -- decoded provider vtable is not a read-only "
-                    "location inside the host image (the LEA decode did not land on a vtable)");
+    /* The bind-time byte checks live in sh_overrides_check_sites, which the image-backed test calls
+     * against the shipped executables too. */
+    const uint8_t *helper = NULL;
+    void *vtable = NULL;
+    const char *refused = sh_overrides_check_sites(module_base, ctor_fn, &helper, &vtable);
+    if (helper != NULL) g_stream_vtable[OV_SLOT_BASE_HELPER] = (void *)helper;
+    if (refused != NULL) {
+        backend_log(refused);
         return 0;
     }
 

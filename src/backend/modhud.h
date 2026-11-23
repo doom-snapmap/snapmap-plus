@@ -82,6 +82,12 @@ void sh_modhud_mark_stale(void);
 /* Follow the serving index and route the HUD call. Returns 1 when the call is
  * routed. */
 int sh_modhud_install(const sig_result *results, size_t count);
+
+/* The checks the install makes before it swaps the call (and the test makes on each executable): `site` and
+ * `predicate` resolved; the call at `site` is E8 to `predicate`; and the widget load that follows the call's
+ * TEST/JZ (MOV RAX,[RBX+0x1F8]) shows RBX is the widget the relay passes on. Writes the call's five bytes to
+ * `expected` and returns 1 when all hold. */
+int sh_modhud_check_site(const sig_result *site, const sig_result *predicate, unsigned char expected[5]);
 #endif
 
 #ifdef SH_MODHUD_TESTING

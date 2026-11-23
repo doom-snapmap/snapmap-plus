@@ -86,6 +86,10 @@ int sh_settings_tab_register_group(const sh_settings_group *group);
  * shown but nothing is committed unless the rows' owner does so itself. */
 int sh_settings_tab_register(const char *title, sh_settings_populate_fn populate);
 
+/* Install byte checks over a Populate call site: 1 when it is an E8 whose target holds the 16-byte dirty prefix
+ * (target returned), and 1 when it is an E8 to the given SettingsPanelClear. */
+int sh_settings_tab_check_dirty(uintptr_t call, uintptr_t *target);
+int sh_settings_tab_check_clear(uintptr_t call, uintptr_t clear);
 int sh_settings_tab_install(const sig_result *results, size_t count);
 sh_settings_tab_mode sh_settings_tab_current_mode(void);
 

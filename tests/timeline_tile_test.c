@@ -5,6 +5,7 @@
 
 #include "overrides_baked.h"
 #include "timeline_tile.h"
+#include "image_sites.h"
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -152,7 +153,7 @@ static void test_stock_row_first(void)
     CHECK(sh_tl_stock_row_first(NULL, m, s) == NULL);
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     test_table();
     test_tile();
@@ -163,3 +164,34 @@ int main(void)
     printf("timeline_tile_test: all passed\n");
     return 0;
 }
+
+/* The sort-guard's byte check (timeline_tile.c sh_timeline_tile_sort_target, the function the install calls) on each
+ * build 13954591 executable named on the command line: SnapPaletteSortCall + 37 is an E8 to a sort that starts with
+ * the wrapper's prologue. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    uintptr_t lo, hi;
+    if (!base) return;
+    lo = (uintptr_t)base;
+    hi = lo + ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    const uint8_t *site = image_site(base, results, n, "SnapPaletteSortCall", identity->vulkan);
+    if (site) {
+        const unsigned char *target = sh_timeline_tile_sort_target(site + SH_TIMELINE_SORT_CALL_OFF);
+        printf("  SnapPaletteSortCall +%d E8 and the sort's prologue: %s\n", SH_TIMELINE_SORT_CALL_OFF,
+               target ? "holds" : "FAIL");
+        IMG_CHECK(target != NULL);
+        IMG_CHECK((uintptr_t)target > lo && (uintptr_t)target < hi);
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("timeline_tile_test", check_image, synthetic_main)

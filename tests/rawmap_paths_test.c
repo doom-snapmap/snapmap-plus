@@ -34,8 +34,7 @@
 #include "cvars.h"
 #include "hook.h"
 #include "modpublished.h"
-
-const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL, NULL, 0u } };
+#include "image_sites.h"
 
 static int log_refused;
 void backend_log(const char *line)
@@ -54,9 +53,6 @@ char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
 
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 { (void)target; (void)detour; (void)stolen; return NULL; }
-
-sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
-{ (void)module_base; (void)sig; (void)out; return SIG_NOT_FOUND; }
 
 void  sh_navmesh_build_from_map(const char *json, size_t len) { (void)json; (void)len; }
 char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
@@ -1513,7 +1509,7 @@ static void a_unicode_path_is_read_and_written(void)
     clean_state();
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     char archive[MAX_PATH];
 
@@ -1561,3 +1557,43 @@ int main(void)
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
+
+/* The rawmap bind checks the DLL runs, on the shipped executable: the IsBranchMap scan (its pattern plus the callee
+ * that names "map:branch", callee_names_branch) and the live-serialize bind, which decodes the idStr constructor and
+ * destructor from the two CALLs in SnapMapAddBranchTag (decode_rel32_call at ADDTAG_CALL_IDSTR_CTOR/_DTOR). */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    {
+        uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+        const unsigned char *is_branch = (const unsigned char *)find_is_branch_map(base);
+        const uint8_t *to_json = image_site(base, results, n, "SnapMapToJson", identity->vulkan);
+        const uint8_t *tag = image_site(base, results, n, "SnapMapAddBranchTag", identity->vulkan);
+        const uint8_t *ctor = image_site(base, results, n, "IdStrCtor", identity->vulkan);
+        const uint8_t *dtor = image_site(base, results, n, "IdStrDtor", identity->vulkan);
+        printf("  IsBranchMap found at rva 0x%X\n", is_branch ? (unsigned)(is_branch - base) : 0u);
+        IMG_CHECK(is_branch != NULL && is_branch > base && is_branch < base + size);
+        IMG_CHECK(is_branch != NULL && callee_names_branch(is_branch));
+        if (to_json && tag && ctor && dtor) {
+            IMG_CHECK(sh_rawmap_set_live_serialize((void *)to_json, (void *)tag) == 1);
+            printf("  idStr ctor rva 0x%X, dtor rva 0x%X (live serialize %s)\n",
+                   g_idstr_ctor ? (unsigned)((const uint8_t *)g_idstr_ctor - base) : 0u,
+                   g_idstr_dtor ? (unsigned)((const uint8_t *)g_idstr_dtor - base) : 0u,
+                   sh_rawmap_live_serialize_ready() ? "ready" : "unavailable");
+            IMG_CHECK((const uint8_t *)g_idstr_ctor == ctor);
+            IMG_CHECK((const uint8_t *)g_idstr_dtor == dtor);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("rawmap_paths_test", check_image, synthetic_main)

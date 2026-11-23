@@ -245,10 +245,13 @@ static void check_image(const char *path)
     {
         static const int win[2] = { SH_AI_SIG_THREAT_ROW, SH_AI_SIG_PATH_LENGTH };
         static const size_t len[2] = { SH_AI_THREAT_STOLEN, SH_AI_PATH_LENGTH_STOLEN };
+        /* the install compares these two windows with the product's own tables before it hooks */
+        static const unsigned char *const want[2] = { k_threat_prologue, k_plen_prologue };
         int k;
         for (k = 0; k < 2; k++) {
             unsigned flags = 0;
             if (!rva[win[k]]) continue;
+            CHECK(!memcmp(base + rva[win[k]], want[k], len[k]));
             CHECK(sh_x64_stolen_boundary(base + rva[win[k]], 64, 14, 48, &flags) == len[k]);
             CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
         }

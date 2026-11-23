@@ -1,6 +1,7 @@
 /* The world-area cell size redirect on scratch code, never game bytes. */
 #include "../src/backend/world_area_cell.c"
 #include <assert.h>
+#include "image_sites.h"
 
 static char last_log[512];
 static int adaptive=-1,count_ok=1,map_n;
@@ -31,7 +32,7 @@ static float site_reads(const unsigned char *site)
     int32_t disp;memcpy(&disp,site+4,4);
     return *(const volatile float*)(site+8+disp);
 }
-int main(void)
+static int synthetic(void)
 {
     sig_result r={"WorldAreaCellLoad",SIG_OK,0,0};
     unsigned char *site=make_site(512.0f),*bad;uintptr_t constant;int32_t disp;
@@ -129,3 +130,35 @@ int main(void)
     puts("world_area_cell_test: passed");
     return 0;
 }
+
+/* The product's own bind check (sh_world_area_cell_check, the install's) on each executable. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *site;
+    uintptr_t constant = 0;
+    const char *why;
+    float value = 0;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    site = image_site(base, results, n, "WorldAreaCellLoad", identity->vulkan);
+    if (site) {
+        why = sh_world_area_cell_check(site, &constant);
+        printf("  WorldAreaCellLoad rva 0x%X: %s\n", (unsigned)(site - base), why ? why : "all checks hold");
+        IMG_CHECK(why == NULL);
+        if (!why) {
+            memcpy(&value, (const void *)constant, 4);
+            IMG_CHECK(value == SH_RENDER_AREA_CELL);
+            printf("  constant at rva 0x%X = %.1f\n", (unsigned)(constant - (uintptr_t)base), value);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+IMAGE_TEST_MAIN("world_area_cell_test", check_image, synthetic)

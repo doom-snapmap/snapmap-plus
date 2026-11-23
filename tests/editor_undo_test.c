@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "editor_undo.h"
+#include "image_sites.h"
 
 static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -85,7 +86,7 @@ static void free_history(void)
     *(model_list **)(g_editor + SH_EDITOR_UNDO_LIST_OFF) = NULL;
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     int before, after;
     model_list *list;
@@ -175,3 +176,34 @@ int main(void)
     printf("editor_undo_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }
+
+/* The decode the DLL's bind runs (sh_editor_undo_install calls the same sh_editor_undo_decode_push), on each real
+ * executable: EditorCommitEdit's E8 then the wrapper reach the push, which the header records at these RVAs. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *commit;
+    uintptr_t push;
+    uint32_t size;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    commit = image_site(base, results, n, "EditorCommitEdit", identity->vulkan);
+    if (commit) {
+        push = sh_editor_undo_decode_push(commit, base, size);
+        printf("  EditorCommitEdit rva 0x%x: push %s (rva 0x%x)\n", (unsigned)(commit - base),
+               push ? "decoded" : "NOT decoded", push ? (unsigned)(push - (uintptr_t)base) : 0u);
+        IMG_CHECK(push != 0);
+        IMG_CHECK(push == (uintptr_t)base + (identity->vulkan ? 0x12039F0u : 0x1202CE0u));
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("editor_undo_test", check_image, synthetic_main)

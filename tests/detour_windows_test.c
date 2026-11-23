@@ -16,6 +16,7 @@
 #include "signatures.h"
 #include "host_image.h"
 #include "companion_engine.h"
+#include "nav_preview_sites.h"   /* the two post-process heads nav_preview.c steals, one home */
 #include "modscene_decl.h"
 #include "particlemotion.h"
 #include "cachewrites.h"
@@ -165,14 +166,6 @@ static const site SITES[] = {
     { "algo.c",               "AlgoPackRGBA",               SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
     { "algo.c",               "AlgoCurveEval",              SITE_DECODED, 0, 0, REPLAYS, 0 },
 };
-
-/* nav_preview.c accepts exactly these heads for the post-process function it
- * reads through NavPostProcessSlot at runtime; it steals the whole head. */
-static const uint8_t NAV_POST_VK_HEAD[] = {
-    0x48,0x89,0x5c,0x24,0x20,0x55,0x56,0x57,0x48,0x83,0xec,0x60,
-    0x65,0x48,0x8b,0x04,0x25,0x58,0,0,0 };
-static const uint8_t NAV_POST_GL_HEAD[] = {
-    0x40,0x53,0x57,0x48,0x83,0xec,0x68,0x65,0x48,0x8b,0x04,0x25,0x58,0,0,0 };
 
 /* rawmap.c's IsBranchMap scan: the first 16 bytes of its 39-byte pattern. */
 static const uint8_t ISBRANCH_HEAD[] = {
@@ -434,9 +427,9 @@ static void check_image(const char *path)
              * is set at run time, so audit the two heads nav_preview accepts. */
             site head = *s;
             head.name = "NavPostProcess (VK head)";
-            audit_bytes(label, &head, NAV_POST_VK_HEAD, 0, sizeof NAV_POST_VK_HEAD);
+            audit_bytes(label, &head, SH_NAV_POST_VK_HEAD, 0, sizeof SH_NAV_POST_VK_HEAD);
             head.name = "NavPostProcess (GL head)";
-            audit_bytes(label, &head, NAV_POST_GL_HEAD, 0, sizeof NAV_POST_GL_HEAD);
+            audit_bytes(label, &head, SH_NAV_POST_GL_HEAD, 0, sizeof SH_NAV_POST_GL_HEAD);
             continue;
         } else if (s->kind == SITE_DECODED) {
             unsigned flags = 0;

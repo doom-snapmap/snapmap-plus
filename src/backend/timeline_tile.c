@@ -45,6 +45,29 @@ int sh_tl_substate_blocks_rebind(int substate)
     return substate == 4 || substate == 7;
 }
 
+#include <windows.h>
+#include <string.h>
+#define PALETTE_SORT_STOLEN 16    /* sub rsp,0x48; movzx eax,[rsp+0x28]; lea rdx,[rip+comparator] */
+#define PALETTE_SORT_LEA_OFF 9    /* the lea the trampoline relocates */
+#define PALETTE_SORT_CALL_OFF SH_TIMELINE_SORT_CALL_OFF  /* the E8 to the sort inside SnapPaletteSortCall */
+
+/* The sort reached through the E8 at call_site, when its first 16 bytes are
+ * the wrapper's (the comparator's displacement differs per renderer). */
+const unsigned char *sh_timeline_tile_sort_target(const unsigned char *call_site)
+{
+    static const unsigned char prologue[PALETTE_SORT_STOLEN] =
+        { 0x48, 0x83, 0xEC, 0x48, 0x0F, 0xB6, 0x44, 0x24, 0x28, 0x48, 0x8D, 0x15, 0, 0, 0, 0 };
+    const unsigned char *target;
+    int32_t rel;
+    __try {
+        if (call_site[0] != 0xE8) return NULL;
+        memcpy(&rel, call_site + 1, 4);
+        target = call_site + 5 + rel;
+        if (memcmp(target, prologue, 12)) return NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    return target;
+}
+
 #ifndef SH_TIMELINE_TILE_PURE
 #include "apply_engine.h"
 #include "backend_log.h"
@@ -297,26 +320,6 @@ static void tl_register(void)
 typedef void (*palette_sort_fn)(void *);
 static palette_sort_fn g_sort_orig;
 static volatile LONG g_sorts, g_sorts_unscoped;
-#define PALETTE_SORT_STOLEN 16    /* sub rsp,0x48; movzx eax,[rsp+0x28]; lea rdx,[rip+comparator] */
-#define PALETTE_SORT_LEA_OFF 9    /* the lea the trampoline relocates */
-#define PALETTE_SORT_CALL_OFF 37  /* the E8 to the sort inside SnapPaletteSortCall */
-
-/* The sort reached through the E8 at call_site, when its first 16 bytes are
- * the wrapper's (the comparator's displacement differs per renderer). */
-static const unsigned char *tl_sort_target(const unsigned char *call_site)
-{
-    static const unsigned char prologue[PALETTE_SORT_STOLEN] =
-        { 0x48, 0x83, 0xEC, 0x48, 0x0F, 0xB6, 0x44, 0x24, 0x28, 0x48, 0x8D, 0x15, 0, 0, 0, 0 };
-    const unsigned char *target;
-    int32_t rel;
-    __try {
-        if (call_site[0] != 0xE8) return NULL;
-        memcpy(&rel, call_site + 1, 4);
-        target = call_site + 5 + rel;
-        if (memcmp(target, prologue, 12)) return NULL;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
-    return target;
-}
 
 static void tl_palette_sort(void *palette)
 {
@@ -613,7 +616,7 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
         /* The sort guard (tl_palette_sort). Its absence costs the fix for A-D3
          * only; the build hook above stands either way. */
         const sig_result *site = clean_result(results, count, "SnapPaletteSortCall");
-        const unsigned char *target = site ? tl_sort_target((const unsigned char *)site->addr + PALETTE_SORT_CALL_OFF) : NULL;
+        const unsigned char *target = site ? sh_timeline_tile_sort_target((const unsigned char *)site->addr + PALETTE_SORT_CALL_OFF) : NULL;
         void *st = target ? hook_prepare_rip_lea((void *)target, (void *)tl_palette_sort, PALETTE_SORT_STOLEN,
                                                  PALETTE_SORT_LEA_OFF)
                           : NULL;

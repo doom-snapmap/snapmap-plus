@@ -151,9 +151,21 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
     FlushInstructionCache(GetCurrentProcess(),relay,at);return relay;
 }
 
+/* The contents gate's expected bytes (cmp byte [rbx+0xc8e],0; je +0xa), and the E8 the three call sites
+ * hold: checked here, by the installs and by the image test on the executables' own code. */
+static const unsigned char k_gate_expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
+static int nav_play_gate_hold(const unsigned char *at){return !memcmp(at,k_gate_expected,sizeof k_gate_expected);}
+/* 1 and the call's target when the site is an E8 near call. */
+static int nav_play_call_target(uintptr_t site,uintptr_t *target)
+{
+    int32_t relative;
+    if(*(const unsigned char*)site!=0xe8)return 0;
+    memcpy(&relative,(const void*)(site+1),4);*target=site+5+(intptr_t)relative;return 1;
+}
+
 int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
 {
-    const unsigned char expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
+    const unsigned char *expected=k_gate_expected;
     unsigned char patch[9]={0xe8,0,0,0,0,0x84,0xc0,0x74,0x0a};
     size_t i;intptr_t distance;int32_t relative;
     nav_heap_install(results, count);
@@ -198,10 +210,11 @@ int sh_nav_play_install_instances(const sig_result *results,size_t count)
     for(k=0;k<2;k++)if(!sites[k]||sites[k]->status!=SIG_OK)goto failed;
     for(k=0;k<2;k++) {
         unsigned char expected[5],patch[5]={0xe8};int32_t relative;intptr_t distance;
-        memcpy(expected,(void*)sites[k]->addr,5);if(expected[0]!=0xe8)goto failed;
-        memcpy(&relative,expected+1,4);
-        if(k==0)g_find=(nav_find_fn)(sites[k]->addr+5+relative);
-        else g_load=(nav_load_fn)(sites[k]->addr+5+relative);
+        uintptr_t target;
+        if(!nav_play_call_target(sites[k]->addr,&target))goto failed;
+        memcpy(expected,(void*)sites[k]->addr,5);
+        if(k==0)g_find=(nav_find_fn)target;
+        else g_load=(nav_load_fn)target;
         g_instance_relays[k]=nav_near_relay(sites[k]->addr,
             k==0?(void*)nav_instance_find:(void*)nav_instance_load,k==0);
         if(!g_instance_relays[k])goto failed;
@@ -348,9 +361,8 @@ int sh_nav_play_install_overlay(const sig_result *results,size_t count)
             g_assign=(nav_assign_fn)results[i].addr;
     }
     if(!site||site->status!=SIG_OK||!g_assign)goto failed;
-    memcpy(expected,(void*)site->addr,5);if(expected[0]!=0xe8)goto failed;
-    memcpy(&relative,expected+1,4);
-    g_concat=(nav_concat_fn)(site->addr+5+relative);
+    {uintptr_t target;if(!nav_play_call_target(site->addr,&target))goto failed;g_concat=(nav_concat_fn)target;}
+    memcpy(expected,(void*)site->addr,5);
     g_overlay_relay=nav_near_relay(site->addr,(void*)nav_overlay_name,3);
     if(!g_overlay_relay)goto failed;
     distance=(intptr_t)g_overlay_relay-(intptr_t)(site->addr+5);

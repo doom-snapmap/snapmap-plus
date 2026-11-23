@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "image_sites.h"
 static int no_metadata_logs,unlocked_logs,stored_logs,off_logs;
 void backend_log(const char *s)
 {
@@ -65,7 +66,7 @@ static void parse_map(const char *value,int broken)
     assert(!out);
     sh_map_settings_loaded(1);
 }
-int main(void)
+static int synthetic_main(void)
 {
     unsigned char saved[0x770]={0},edit[0x800]={0},block[48]={0},ops[72]={0};
     const char *names[]={"unrelated","maxviewdistance","fogcolor","fogscale","fogend","fogstart",
@@ -172,3 +173,34 @@ int main(void)
     settings.unlocked=2;assert(!sh_map_render_write(edit,&settings));
     puts("map_render_native_test: passed");return 0;
 }
+
+/* The decode the DLL's bind runs (sh_map_render_install calls the same sh_map_render_decode_read) on each real
+ * executable: RenderClipRead is an E8 call to a function inside the image. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *read;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    read = image_site(base, results, n, "RenderClipRead", identity->vulkan);
+    if (read) {
+        uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+        unsigned char bytes[5];
+        uintptr_t callee = 0;
+        int ok = sh_map_render_decode_read((uintptr_t)read, bytes, &callee);
+        printf("  RenderClipRead rva 0x%x: call %s (callee rva 0x%x)\n", (unsigned)(read - base),
+               ok ? "decoded" : "NOT decoded", ok ? (unsigned)(callee - (uintptr_t)base) : 0u);
+        IMG_CHECK(ok);
+        IMG_CHECK(!ok || (callee > (uintptr_t)base && callee < (uintptr_t)base + size));
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("map_render_native_test", check_image, synthetic_main)

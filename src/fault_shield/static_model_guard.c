@@ -300,10 +300,32 @@ static void smg_log(const char *msg)
     backend_log(msg);
 }
 
-int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *results, size_t count)
+/* StaticModelUpdate's byte checks, public so the build-image test runs them on each executable's own function:
+ * 0 when the 12-byte head, the counter compare and the list LEA are as expected and the counter is the list's reload
+ * counter (list +0x60), with *list and *counter set; 1 when the head or the two instructions differ; 2 when the
+ * counter is not the list's. SEH-guarded: unreadable counts as 1. */
+int sh_static_model_update_check(const uint8_t *target, const uint8_t **list, const uint8_t **counter)
 {
     static const uint8_t head[] = { 0x40, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05 };
-    const uint8_t *target, *list, *counter;
+    int same = 0;
+    if (!target) return 1;
+    __try {
+        same = !memcmp(target, head, sizeof head) && target[SMU_COUNTER_CMP_OFF] == 0x3B &&
+               target[SMU_COUNTER_CMP_OFF + 1] == 0x05 && target[SMU_LIST_LEA_OFF] == 0x48 &&
+               target[SMU_LIST_LEA_OFF + 1] == 0x8D && target[SMU_LIST_LEA_OFF + 2] == 0x0D;
+        if (same) {
+            *counter = smg_rip_target(target, SMU_COUNTER_CMP_OFF + 2, SMU_COUNTER_CMP_OFF + 6);
+            *list = smg_rip_target(target, SMU_LIST_LEA_OFF + 3, SMU_LIST_LEA_OFF + 7);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    if (!same) return 1;
+    return *counter == *list + 0x60 ? 0 : 2;
+}
+
+int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *results, size_t count)
+{
+    const uint8_t *target, *list = NULL, *counter = NULL;
+    int checked;
     void *tramp;
     if (!module_base || !results) return 0;
     if (g_orig_smu) {
@@ -324,18 +346,14 @@ int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *
         const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
         g_image_lo = (uintptr_t)module_base;
         g_image_hi = g_image_lo + nt->OptionalHeader.SizeOfImage;
-        if (memcmp(target, head, sizeof head) || target[SMU_COUNTER_CMP_OFF] != 0x3B ||
-            target[SMU_COUNTER_CMP_OFF + 1] != 0x05 || target[SMU_LIST_LEA_OFF] != 0x48 ||
-            target[SMU_LIST_LEA_OFF + 1] != 0x8D || target[SMU_LIST_LEA_OFF + 2] != 0x0D) target = NULL;
     } __except (EXCEPTION_EXECUTE_HANDLER) { target = NULL; }
-    if (!target) {
+    checked = target ? sh_static_model_update_check(target, &list, &counter) : 1;
+    if (checked == 1) {
         smg_log("static-model-guard: StaticModelUpdate's head, counter compare or list address differs -- "
                 "NOT installed (re-derive the offsets for this build)");
         return 0;
     }
-    counter = smg_rip_target(target, SMU_COUNTER_CMP_OFF + 2, SMU_COUNTER_CMP_OFF + 6);
-    list = smg_rip_target(target, SMU_LIST_LEA_OFF + 3, SMU_LIST_LEA_OFF + 7);
-    if (counter != list + 0x60) {
+    if (checked == 2) {
         smg_log("static-model-guard: the counter StaticModelUpdate compares is not its list's reload counter -- "
                 "NOT installed");
         return 0;
@@ -440,10 +458,20 @@ static void sh_incref_detour(void *model)
     }
 }
 
-int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_result *results, size_t count)
+/* StaticModelIncRef's 15-byte head, public so the build-image test runs the same check on each executable's own
+ * function. 1 when it is as expected. SEH-guarded. */
+int sh_static_model_incref_head_ok(const uint8_t *target)
 {
     static const uint8_t head[] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x60,
                                     0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF };
+    int same = 0;
+    if (!target) return 0;
+    __try { same = !memcmp(target, head, sizeof head); } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    return same;
+}
+
+int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_result *results, size_t count)
+{
     const uint8_t *target;
     void *tramp;
     int same = 0;
@@ -459,7 +487,7 @@ int sh_static_model_heap_rule_install(const uint8_t *module_base, const sig_resu
         backend_log("static-model-heap: StaticModelIncRef or the heap stack is unresolved on this build -- NOT installed");
         return 0;
     }
-    __try { same = !memcmp(target, head, sizeof head); } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    same = sh_static_model_incref_head_ok(target);
     if (!same) {
         backend_log("static-model-heap: StaticModelIncRef's head differs -- NOT installed");
         return 0;

@@ -5,12 +5,13 @@
 #include <string.h>
 #include "map_payload.h"
 #include "patch.h"
+#include "image_sites.h"
 
 void backend_log(const char *line) { (void)line; }
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); failures++; } } while (0)
 
-int main(void)
+static int synthetic(void)
 {
     /* Authored executable fixtures implement both native decisions. They
      * return acceptance directly; no game function bodies are copied here. */
@@ -86,3 +87,28 @@ int main(void)
     if (failures) return 1;
     puts("native map payload length checks passed"); return 0;
 }
+
+/* The product's own preflight (sh_map_payload_check_sites, the install's) on each executable. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results, patched[2];
+    size_t n, cap = sig_db_count();
+    const char *failed;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    memset(patched, 0, sizeof patched);
+    IMG_CHECK(image_site(base, results, n, "SnapMapSaveSizeLimit", identity->vulkan) != NULL);
+    IMG_CHECK(image_site(base, results, n, "SnapMapReadSizeLimit", identity->vulkan) != NULL);
+    failed = sh_map_payload_check_sites(results, n, patched);
+    printf("  map payload sites (save rva 0x%X, read rva 0x%X): %s%s\n", (unsigned)(patched[0].addr - (uintptr_t)base),
+           (unsigned)(patched[1].addr - (uintptr_t)base), failed ? "the check failed for " : "all checks hold", failed ? failed : "");
+    IMG_CHECK(failed == NULL);
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+IMAGE_TEST_MAIN("map_payload_test", check_image, synthetic)

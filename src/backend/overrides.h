@@ -58,6 +58,12 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
  */
 int sh_overrides_uninstall(void);
 
+/* The install's byte checks on the executable's code (the base idFile helper's prologue at its recorded RVA,
+ * the provider vtable decoded from the constructor). NULL when they hold, else the log line naming the failure.
+ * The install and the image-backed test both call this. */
+const char *sh_overrides_check_sites(const uint8_t *module_base, const void *ctor_fn,
+                                     const uint8_t **helper_out, void **vtable_out);
+
 #ifdef SH_OVERRIDES_TESTING
 void *sh_overrides_test_open(const char *name, unsigned int mode);
 void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length);
