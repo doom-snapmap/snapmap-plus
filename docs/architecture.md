@@ -1663,7 +1663,12 @@ image (a DOOM 2016 `.bimage`), `sh_modprog_register_param_image` serves it at
 `generated/image/snapmapplus/look/<16 hex digits of its SHA-256>.bimage` in the
 product's container (the same vectors, the same path; the builder records no need
 of it, since the material derives it again wherever it serves, so a unit never
-points at one a player's product has not derived yet), and `SH_MODPROG_ML_PARMS`
+points at one a player's product has not derived yet; the provider serves such a
+name, which no build lists, from the product's registry once the material that
+spells it has compiled in the process, `sh_modserve_set_product_reader`, in every
+mode; a unit that still points at one is satisfied by this product's compiler,
+`sh_mb_product_hashed`; without the serve the layered program read no numbers
+and the surface drew black, R-HD1), and `SH_MODPROG_ML_PARMS`
 names the vectors by the material keys they had. Layer 0's height has no sampler
 of its own: vector 9 says whether it is a constant or the red channel of an
 extra map. A material written with the old keys (the 28 vectors and

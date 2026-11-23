@@ -3147,6 +3147,50 @@ static int pd_load(void *c, const char *type, const char *name, int persist, uns
 }
 static const sh_modserve_engine_ops g_pd_ops = { NULL, fake_source, fake_register, pd_load };
 
+/* The product's registry, as a double: one look image registered. */
+#define PH_IMG "generated/image/snapmapplus/look/0123456789abcdef.bimage"
+static int ph_owns(const char *request) { return request && (!_stricmp(request, PH_IMG) || !strncmp(request, "generated/renderprogs/", 22)); }
+static int ph_read(const char *request, unsigned char **bytes, size_t *len)
+{
+    static const char b[] = "PARAMETER-IMAGE";
+    if (!ph_owns(request)) return SH_MB_STOCK_ABSENT;
+    *len = sizeof b - 1;
+    if (!(*bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len))) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, b, *len);
+    return SH_MB_STOCK_OK;
+}
+
+/* A file the product names by its bytes' hash (a look's image) is served with no build listing it, once the product
+ * has registered it (its material compiled); nothing else is served without an index entry (R-HD1). */
+static void test_product_hashed_served(void)
+{
+    char missing[MAX_PATH];
+    unsigned char *b = NULL;
+    size_t n = 0;
+    printf("-- a look's derived image is served wherever its material compiled, with no pointer\n");
+    CHECK(sh_mb_product_hashed(PH_IMG) && sh_mb_product_hashed("generated/image/snapmapplus/look/c0123456789ABCDEF.bimage"));
+    CHECK(sh_mb_product_hashed("generated/decls/particle/snapmapplus/sdk/0123456789abcdef.decl") &&
+          sh_mb_product_hashed("generated/decls/table/snapmapplus_sdk_fedcba9876543210.decl"));
+    CHECK(!sh_mb_product_hashed("generated/image/snapmapplus/look/0123456789abcde.bimage") &&
+          !sh_mb_product_hashed("generated/image/snapmapplus/look/0123456789abcdefa.bimage") &&
+          !sh_mb_product_hashed("generated/image/snapmapplus/layered/0123456789abcdef.bimage") &&
+          !sh_mb_product_hashed("generated/decls/renderprog/snapmapplus/layered/skinvmtr.decl") &&
+          !sh_mb_product_hashed("generated/image/mods/abcdefgh/0123456789abcdef.bimage") && !sh_mb_product_hashed(NULL));
+    _snprintf_s(missing, sizeof missing, _TRUNCATE, "%s\\does-not-exist", g_root);
+    CHECK(sh_modserve_index_build(missing) == 0);
+    sh_modserve_set_product_owner(ph_owns);
+    CHECK(sh_modserve_open(PH_IMG, &b, &n) == 0 && !b);              /* no reader: nothing without an index entry */
+    sh_modserve_set_product_reader(ph_read);
+    CHECK(sh_modserve_open(PH_IMG, &b, &n) == 1 && b && n == 15 && !memcmp(b, "PARAMETER-IMAGE", 15));
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    b = NULL;
+    CHECK(!sh_modserve_lookup(PH_IMG, NULL));                          /* the product's content, not a mod's */
+    CHECK(sh_modserve_open("generated/image/snapmapplus/look/fedcba9876543210.bimage", &b, &n) == 0 && !b);  /* not registered */
+    CHECK(sh_modserve_open("generated/renderprogs/x_pc_vulkan.bin", &b, &n) == 0 && !b);   /* owned, not hashed */
+    sh_modserve_set_product_reader(NULL);
+    sh_modserve_set_product_owner(NULL);
+}
+
 static void test_product_decls_planned(void)
 {
     static const char *const restores[] = { PD_EMIT, PD_PRT, PD_TAB, PD_PROG, PD_SURF, NULL };
@@ -6042,6 +6086,7 @@ int main(void)
     build_fixture();
     test_index_listeners();
     test_empty_index();
+    test_product_hashed_served();
 
     test_index_and_isolation();
     test_unopened_shadows();
