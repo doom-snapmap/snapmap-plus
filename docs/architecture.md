@@ -1661,7 +1661,9 @@ k is the texel (k % 8, k / 8), fetched exactly with `texelFetch`, and a layer's
 vectors only where its mask is non-zero. `sh_modprog_param_image` writes the
 image (a DOOM 2016 `.bimage`), `sh_modprog_register_param_image` serves it at
 `generated/image/snapmapplus/look/<16 hex digits of its SHA-256>.bimage` in the
-product's container (the same vectors, the same path), and `SH_MODPROG_ML_PARMS`
+product's container (the same vectors, the same path; the builder records no need
+of it, since the material derives it again wherever it serves, so a unit never
+points at one a player's product has not derived yet), and `SH_MODPROG_ML_PARMS`
 names the vectors by the material keys they had. Layer 0's height has no sampler
 of its own: vector 9 says whether it is a constant or the red channel of an
 extra map. A material written with the old keys (the 28 vectors and
