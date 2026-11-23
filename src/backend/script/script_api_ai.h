@@ -244,6 +244,50 @@ int  sh_ai_move_step(sh_ai_move *m, int status, uint32_t frame);
  * NULL for any other value. */
 const char *sh_ai_awareness_name(int level);
 
+/* A demon's social relations, as DOOM 2016's senses keep them (both
+ * renderers, 13954591). The senses (ai +SH_AI_OFF_PERCEPTION) rebuild a table
+ * every AI think, whatever drives the demon (UpdateRelations VK 0x1404AA490 /
+ * GL 0x1404A8C10, called by the senses' update from the AI think VK
+ * 0x1403E0D40): one row per entity the demon perceives, players and bots
+ * (the idPlayer classes) and demons, with the respect and emotion its faction
+ * graph gives the two factions (a SnapMap team makes them "team_<n>_demon" and
+ * "team_<n>_player", the co-op mode's VK 0x14088FAF0) or what it perceived of
+ * that entity (being hurt raises the emotion), whichever is farther from
+ * neutral; sorted by emotion, most hostile first. Rows at +0x28, count at
+ * +0x30, 0x28 bytes a row: a word at +0 (0x1FFFFFE when the row has no entity
+ * of its own: the 10,000-unit range of GetRelations, VK 0x1404AAA30, does not
+ * limit it), respect +4, emotion +8, the entity's idEntityPtr +0x10. The
+ * engine's pick reads the same rows (VK 0x1404AAD10 / GL 0x1404A9490). */
+#define SH_AI_REL_ROWS            0x28u
+#define SH_AI_REL_COUNT           0x30u
+#define SH_AI_REL_SIZE            0x28u
+#define SH_AI_REL_WORD            0x00u
+#define SH_AI_REL_RESPECT         0x04u
+#define SH_AI_REL_EMOTION         0x08u
+#define SH_AI_REL_ENTITY          0x10u
+#define SH_AI_REL_NO_ENTITY       0x1FFFFFEu
+/* where the two functions show them (tests/script_ai_sigs_test.c) */
+#define SH_AI_UPDREL_ROWS_DISP    0x27u     /* UpdateRelations: lea rbx,[rcx+0x28] */
+#define SH_AI_UPDREL_COUNT_DISP   0x2Au     /* mov dword [rbx+8],0: the count, rows + 8 */
+#define SH_AI_UPDREL_FACTION_IMM  0x3Cu     /* add rdx,0x4EC0: the entity's faction */
+#define SH_AI_BEST_EMOTION_DISP   0x66u     /* the pick: mov eax,[rbx+rcx+8] */
+#define SH_AI_BEST_ENTITY_IMM     0x6Fu     /* add rcx,0x10 */
+#define SH_AI_BEST_STRIDE_IMM     0xDCu     /* add rbx,0x28 */
+#define SH_AI_BEST_START_DISP     0x44u     /* lea r15d,[rbp+0xE]: EMOTION_MAX */
+#define SH_AI_REL_MAX             256       /* rows read at most (the engine's table holds 64 before it says so) */
+typedef struct sh_ai_relation {
+    void *entity;
+    int   respect;      /* socialRespect_t: RESPECT_MIN 0 .. RESPECT_MAX 6 */
+    int   emotion;      /* socialEmotion_t: EMOTION_MIN 0 .. EMOTION_MAX 14 */
+    int   unlimited;    /* 1: the row has no entity of its own (no range limit) */
+} sh_ai_relation;
+/* The words ai:relations answers: "min", "peon", "minion", "peer", "leader",
+ * "worship", "max" and "min", "terrified", "fear", "wary",
+ * "destroy_at_all_costs", "destroy", "hate", "anger", "dislike", "annoyed",
+ * "neutral", "friendly", "squadmate", "partner", "max"; NULL outside. */
+const char *sh_ai_respect_name(int respect);
+const char *sh_ai_emotion_name(int emotion);
+
 /* Degrees from a demon's facing (yaw, degrees) to `to` seen from `from`,
  * in the horizontal plane: -180..180, positive to the demon's left. */
 float sh_ai_angle_to(const float from[3], float yaw, const float to[3]);
@@ -583,6 +627,10 @@ typedef struct sh_script_ai_engine {
      * bound to, or the web's own scalar memory. 1 set, 0 the web has no
      * variable of that name, -1 unavailable. */
     int      (*anim_variable)(void *ai, const char *name, float value);
+    /* The demon's social relations (sh_ai_relation above), in the engine's
+     * order, rows whose entity is gone left out: their count (at most cap),
+     * -1 unreadable. */
+    int      (*relations)(void *ai, sh_ai_relation *out, int cap);
 } sh_script_ai_engine;
 
 /* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key
@@ -923,6 +971,8 @@ enum sh_ai_sig {
     SH_AI_SIG_WEAPON_USE,          /* the demon's weapon-use behaviour: the list entry its index names */
     SH_AI_SIG_DAMAGE_WOUND,        /* idGoreComponent::DamageActivatesWound (component, wound, record, ...) (detoured) */
     SH_AI_SIG_WEB_SCALAR_SET,      /* the anim web's set-variable-by-name (animator, atom*, float) */
+    SH_AI_SIG_UPDATE_RELATIONS,    /* the senses' UpdateRelations (writes the relation table) */
+    SH_AI_SIG_BEST_RELATION,       /* the engine's pick from relations (reads the rows) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

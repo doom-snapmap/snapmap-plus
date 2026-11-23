@@ -506,17 +506,21 @@ static void dir_axis(const float f[3], float ax[9])
     ax[8] = f[0] * l[1] - f[1] * l[0];
 }
 
-/* The entity's own `damage` event: decl, from direction, no radius, full
- * multiplier, the attacker as activator. 1 when the engine ran it. The event
- * carries no inflictor, and the player's damage code takes the direction of
- * a decl with radialDmgUseInflictorToTargetDir from the inflictor (it warns
- * and falls back to the attacker): when a script names the attacker, a
- * player is damaged by the game's own call with that attacker as inflictor. */
+/* Damage from a script. When the script names the attacker and the victim is
+ * an actor (a player, a bot or a demon), the victim's own Damage takes it
+ * with the attacker as inflictor and attacker: the game's damage route, so
+ * its team rule (idAI2 Damage_Calculate, VK 0x1403FB1D0: in a SnapMap mode
+ * an attacker of the victim's own team, other than TEAM_NONE, does no
+ * damage), the percepts that make the victim hate whoever hurt it, and the
+ * kill credit all see the attacker. Anything else gets its own `damage`
+ * event: decl, from direction, no radius, full multiplier, the attacker as
+ * activator (an event that carries no inflictor and does not credit the
+ * activator). 1 when the engine ran it. */
 static int damage_event(void *victim, void *decl, const float dir[3], void *attacker, int named_attacker)
 {
     sh_script_earg a[6];
     float ang[3];
-    if (named_attacker && g_ce.player_damage && g_ce.player_damage(victim, decl, attacker, attacker, dir)) return 1;
+    if (named_attacker && g_ce.actor_damage && g_ce.actor_damage(victim, decl, attacker, attacker, dir)) return 1;
     dir_angles(dir, ang);
     memset(a, 0, sizeof a);
     a[0].type = 'd'; a[0].p = decl;
@@ -1324,15 +1328,15 @@ typedef void  (*explode_fn)(void *projectile, void *ignore, const void *collisio
 typedef void *(*type_fn)(void *registry, const char *type);
 typedef void *(*find_decl_fn)(void *manager, const char *name, unsigned char make_default);
 typedef void  (*ent_fx_fn)(void *entity, int condition, int extra_condition);
-typedef void  (*player_damage_fn)(void *player, void *inflictor, void *attacker, void *parms, float scale,
+typedef void  (*actor_damage_fn)(void *actor, void *inflictor, void *attacker, void *parms, float scale,
                                   const float *dir, void *hit);
-#define SH_COMBAT_DAMAGE_VSLOT 130       /* idPlayer::Damage in the player's vtable, both images */
 
 static const uint8_t *g_base;
 static size_t        g_text_lo, g_text_hi;   /* the image's executable range, RVAs */
 static radius_fn     g_radius;
 static ent_fx_fn     g_ent_start_fx, g_ent_stop_fx;   /* idEntity StartFX / StopFX */
-static player_damage_fn g_player_damage;              /* idPlayer::Damage */
+static actor_damage_fn g_player_damage;               /* idPlayer::Damage */
+static actor_damage_fn g_ai_damage;                   /* idAI2's Damage (its vtable slot's function) */
 static const uint8_t *g_decl_anchor;
 static void         *g_decl_register;
 static type_fn       g_decl_type;
@@ -1427,21 +1431,25 @@ void *sh_script_combat_decl(const char *type, const char *name)
     return g_decl_find ? c_decl(type, name) : NULL;
 }
 
-/* The victim's own Damage is the player's (its vtable slot holds the function found by signature): call it. */
-static int c_player_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
+/* The victim's own Damage (its vtable slot SH_COMBAT_DAMAGE_VSLOT, the same virtual in every actor class) when it
+ * is the player's or idAI2's as this executable has them: call it. Both take (actor, inflictor, attacker, parms,
+ * scale, direction, hit); idAI2's passes them on to its body with one hit, and no hit is no location. */
+static int c_actor_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
 {
     const uint8_t *parms = (const uint8_t *)decl + SH_COMBAT_DECL_PARMS;
     void *slot = NULL;
+    actor_damage_fn fn;
     float d[3];
     int ok = 0;
-    if (!g_player_damage || !victim || !decl || !inflictor) return 0;
+    if ((!g_player_damage && !g_ai_damage) || !victim || !decl || !inflictor) return 0;
     __try { slot = (*(void ***)victim)[SH_COMBAT_DAMAGE_VSLOT]; }
     __except (av_only(GetExceptionCode())) { slot = NULL; }
-    if (slot != (void *)g_player_damage) return 0;
+    if (!slot || (slot != (void *)g_player_damage && slot != (void *)g_ai_damage)) return 0;
+    fn = (actor_damage_fn)slot;
     /* the call takes the decl's parms, which name their own decl (as radius damage checks) */
     if (read_ptr(parms, SH_COMBAT_PARMS_DECL) != decl) return 0;
     memcpy(d, dir, sizeof d);
-    __try { g_player_damage(victim, inflictor, attacker, (void *)parms, 1.0f, d, NULL); ok = 1; }
+    __try { fn(victim, inflictor, attacker, (void *)parms, 1.0f, d, NULL); ok = 1; }
     __except (av_only(GetExceptionCode())) { ok = 0; }
     return ok;
 }
@@ -1689,7 +1697,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
 {
     static const sh_script_combat_engine engine = {
         c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
-        c_start_fx, c_stop_fx, c_player_damage, c_fx_hard_stops, c_is_projectile
+        c_start_fx, c_stop_fx, c_actor_damage, c_fx_hard_stops, c_is_projectile
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;
@@ -1714,7 +1722,9 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
         combat_off("the game's radius damage was not found in this executable, so radius_damage and explode do "
                    "nothing");
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PLAYER_DAMAGE], &r) == SIG_OK)
-        g_player_damage = (player_damage_fn)r.addr;     /* without it a player takes the damage event, as before */
+        g_player_damage = (actor_damage_fn)r.addr;      /* without it a player takes the damage event */
+    if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_AI_DAMAGE], &r) == SIG_OK)
+        g_ai_damage = (actor_damage_fn)r.addr;          /* without it a demon takes the damage event */
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_START_FX], &r) == SIG_OK)
         g_ent_start_fx = (ent_fx_fn)r.addr;
     if (sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_ENT_STOP_FX], &r) == SIG_OK)

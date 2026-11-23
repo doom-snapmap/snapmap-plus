@@ -473,6 +473,51 @@ static void test_damage(void)
     CHECK(has(g_events, "damage@ai/demon/imp(d:mods/" SALT "/damage/rock,a0 90 0,0,1,e:mods/" SALT "/ai/brute,0);"));
 }
 
+/* The game's own Damage of an actor (script_api_combat.h actor_damage): the fake takes players and demons and logs
+ * the inflictor and the attacker; anything else is no actor it can damage. */
+static int c_actor_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
+{
+    char line[256];
+    fent *v = (fent *)victim;
+    (void)dir;
+    if (v->kind != SH_SCRIPT_KIND_AI && v->kind != SH_SCRIPT_KIND_PLAYER) return 0;
+    _snprintf_s(line, sizeof line, _TRUNCATE, "Damage@%s(d:%s,i:%s,a:%s);", v->def, ((fdecl *)decl)->name,
+                ((fent *)inflictor)->def, ((fent *)attacker)->def);
+    ev_cat(line);
+    v->cur -= 10;
+    return 1;
+}
+
+static void test_actor_damage(void)
+{
+    sh_script_combat_engine with = k_combat;
+    with.actor_damage = c_actor_damage;
+    sh_script_combat_set_engine(&with);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  print('a1', damage(ent(1), 'damage/rock', self))\n"
+        "  print('a2', ent(2):damage('damage/beam', self))\n"
+        "  print('a3', ent(2):damage('damage/beam'))\n"
+        "  print('a4', ent(3):damage('damage/rock', self))\n"
+        "  local h = hitscan({x = 0, y = 0, z = 10}, {x = 1, y = 0, z = 0}, 'damage/beam', nil, self)\n"
+        "  print('a5', h.entity:definition())\n"
+        "end)\n");
+    CHECK(has(log_now(), "a1\ttrue") && has(g_log, "a2\ttrue") && has(g_log, "a3\ttrue") && has(g_log, "a4\ttrue"));
+    /* a demon and a player with an attacker: their own Damage, the attacker as inflictor and attacker */
+    CHECK(has(g_events, "Damage@ai/demon/imp(d:mods/" SALT "/damage/rock,i:mods/" SALT "/ai/brute,a:mods/" SALT
+              "/ai/brute);"));
+    CHECK(has(g_events, "Damage@player/sp(d:mods/" SALT "/damage/beam,i:mods/" SALT "/ai/brute,a:mods/" SALT
+              "/ai/brute);"));
+    CHECK(strstr(g_events, "damage@ai/demon/imp(") == NULL);
+    /* no attacker: the world's damage, by the event; not an actor: its own damage event */
+    CHECK(has(g_events, "damage@player/sp(d:mods/" SALT "/damage/beam,a90 0 0,0,1,e:world,0);"));
+    CHECK(has(g_events, "damage@mods/" SALT "/props/crate("));
+    /* a hitscan with an attacker that hits the wall, no actor: the wall's own damage event */
+    CHECK(has(g_log, "a5\tdecor/wall") && strstr(g_events, "Damage@decor/wall") == NULL &&
+          has(g_events, "damage@decor/wall(d:mods/" SALT "/damage/beam,"));
+    sh_script_combat_set_engine(&k_combat);
+}
+
 static void test_hitscan_radius(void)
 {
     run("api = 1\n"
@@ -1083,6 +1128,7 @@ int main(void)
     sh_script_handles_set_resolver(h_resolve);
 
     test_damage();
+    test_actor_damage();
     test_hitscan_radius();
     test_effects_sound();
     test_sdk_calls();

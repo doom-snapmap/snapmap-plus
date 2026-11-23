@@ -234,6 +234,20 @@ const char *sh_ai_awareness_name(int level)
     }
 }
 
+const char *sh_ai_respect_name(int respect)
+{
+    static const char *const k[] = { "min", "peon", "minion", "peer", "leader", "worship", "max" };
+    return respect >= 0 && respect < (int)(sizeof k / sizeof k[0]) ? k[respect] : NULL;
+}
+
+const char *sh_ai_emotion_name(int emotion)
+{
+    static const char *const k[] = { "min", "terrified", "fear", "wary", "destroy_at_all_costs", "destroy", "hate",
+                                     "anger", "dislike", "annoyed", "neutral", "friendly", "squadmate", "partner",
+                                     "max" };
+    return emotion >= 0 && emotion < (int)(sizeof k / sizeof k[0]) ? k[emotion] : NULL;
+}
+
 float sh_ai_angle_to(const float from[3], float yaw, const float to[3])
 {
     double dx = to[0] - from[0], dy = to[1] - from[1], a;
@@ -3601,6 +3615,38 @@ static int l_anim_variable(lua_State *L)
     return 1;
 }
 
+/* ai:relations() -> { { entity =, respect =, emotion =, awareness = [, unlimited = true] }, ... }: the demon's
+ * social relations as DOOM 2016's senses keep them every think (script_api_ai.h, sh_ai_relation), in the engine's
+ * order (the most hostile emotion first), with its awareness of each entity ("unaware" .. "confirmed"). Players,
+ * bots and demons alike; who is hostile is the engine's (its faction graph, the SnapMap teams, who hurt it). nil
+ * when the engine's table cannot be read. */
+static int l_relations(lua_State *L)
+{
+    sh_ai_relation rows[SH_AI_REL_MAX];
+    void *ai;
+    int n, i, k = 0;
+    NEED_OP(L, relations, "relations");
+    ai = self_ai(L, "relations", NULL);
+    if (!ai) { lua_pushnil(L); return 1; }
+    n = g_engine->relations(ai, rows, SH_AI_REL_MAX);
+    if (n < 0) { lua_pushnil(L); return 1; }
+    lua_createtable(L, n, 0);
+    for (i = 0; i < n; i++) {
+        const char *respect = sh_ai_respect_name(rows[i].respect), *emotion = sh_ai_emotion_name(rows[i].emotion);
+        const char *aware = g_engine->awareness ? sh_ai_awareness_name(g_engine->awareness(ai, rows[i].entity)) : NULL;
+        sh_script_handle h = g_engine->handle_of(rows[i].entity);
+        if (!h || !respect || !emotion) continue;
+        lua_createtable(L, 0, 5);
+        sh_script_push_entity(L, h); lua_setfield(L, -2, "entity");
+        lua_pushstring(L, respect); lua_setfield(L, -2, "respect");
+        lua_pushstring(L, emotion); lua_setfield(L, -2, "emotion");
+        lua_pushstring(L, aware ? aware : "unaware"); lua_setfield(L, -2, "awareness");
+        if (rows[i].unlimited) { lua_pushboolean(L, 1); lua_setfield(L, -2, "unlimited"); }
+        lua_rawseti(L, -2, ++k);
+    }
+    return 1;
+}
+
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
     { "stop", l_stop },                 { "move_done", l_move_done },
@@ -3634,6 +3680,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "wound_damage_counts", l_wound_damage_counts },
     { "snapmap_order", l_snapmap_order },
     { "release", l_release },           { "anim_variable", l_anim_variable },
+    { "relations", l_relations },
 };
 
 void sh_script_ai_spawned(void *ent)
@@ -3837,6 +3884,35 @@ static int e_awareness(void *ai, void *target)
     __try { v = g_get_awareness((uint8_t *)ai + SH_AI_OFF_PERCEPTION, target); }
     __except (av_only(GetExceptionCode())) { v = -1; }
     return v;
+}
+
+/* The senses' relation table (script_api_ai.h, SH_AI_REL_*), rows whose entity is gone left out. */
+static int e_relations(void *ai, sh_ai_relation *out, int cap)
+{
+    const uint8_t *senses = (const uint8_t *)ai + SH_AI_OFF_PERCEPTION, *rows = NULL;
+    int count = 0, i, n = 0;
+    if (!g_ptr_get || !out || cap <= 0) return -1;
+    __try {
+        rows = *(const uint8_t * const *)(senses + SH_AI_REL_ROWS);
+        count = *(const int *)(senses + SH_AI_REL_COUNT);
+    } __except (av_only(GetExceptionCode())) { return -1; }
+    if (count < 0 || count > 4096 || (count && !rows)) return -1;
+    for (i = 0; i < count && n < cap; i++) {
+        const uint8_t *row = rows + (size_t)i * SH_AI_REL_SIZE;
+        sh_ai_relation r;
+        uint32_t word = 0;
+        memset(&r, 0, sizeof r);
+        __try {
+            word = *(const uint32_t *)(row + SH_AI_REL_WORD);
+            r.respect = *(const int *)(row + SH_AI_REL_RESPECT);
+            r.emotion = *(const int *)(row + SH_AI_REL_EMOTION);
+            r.entity = g_ptr_get((void *)(row + SH_AI_REL_ENTITY));
+        } __except (av_only(GetExceptionCode())) { return -1; }
+        if (!r.entity) continue;
+        r.unlimited = word == SH_AI_REL_NO_ENTITY;
+        out[n++] = r;
+    }
+    return n;
 }
 
 static int e_move_status(void *ai)
@@ -5538,7 +5614,7 @@ static const sh_script_ai_engine k_engine = {
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
-    e_release, e_anim_variable
+    e_release, e_anim_variable, e_relations
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -5721,6 +5797,8 @@ int sh_script_ai_install(const uint8_t *module_base)
     if (r[SH_AI_SIG_WEB_SCALAR_SET].addr && g_intern)
         g_web_scalar_set = (ai_web_scalar_set_fn)r[SH_AI_SIG_WEB_SCALAR_SET].addr;
     else g_live.anim_variable = NULL;
+    /* The relations: the senses' table, whose layout the two functions show (the sigs test checks them). */
+    if (!r[SH_AI_SIG_UPDATE_RELATIONS].addr || !r[SH_AI_SIG_BEST_RELATION].addr) g_live.relations = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;
