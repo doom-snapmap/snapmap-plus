@@ -1821,6 +1821,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             none.name = r->name;   /* copied by the add */
             none.size = r->size;
             none.pinned = 1;
+            none.local_broken = sh_modserve_salt_installed(r->salt);
             (void)sh_modmanifest_list_add(&rows_here, &none);
         }
     }

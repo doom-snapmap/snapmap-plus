@@ -96,6 +96,8 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
     if (fn) fn(context, "main.lua", "mods/" SALT "/scripts/main.lua", sizeof k_script - 1, "sum", HASH);
     return 1;
 }
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;

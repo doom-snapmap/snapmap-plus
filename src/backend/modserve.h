@@ -892,6 +892,11 @@ int  sh_modserve_scope_source(int when);
  * first cause, malloc'd, in *cause when cause is not NULL). */
 int sh_modserve_bundle_state(const char *bundle_hash, char **cause);
 
+/* 1 when a root folder of `salt` is installed, admitted or skipped (its build failed, an earlier shape): a local row
+ * of that salt whose folder serves nothing is then the player's folder that cannot be used, not one that is not on
+ * this computer (manager Q8: both stand in, with different sentences). Lock-free; any thread. */
+int sh_modserve_salt_installed(const char *salt);
+
 /* The asset rule. A map, rawmap or prefab needs the builds its manifest rows
  * name. A row is SERVED when the build sh_modserve_row_build names for it is
  * admitted and every name the row lists resolves, in that build or through

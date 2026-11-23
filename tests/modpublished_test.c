@@ -153,6 +153,8 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
     ref->name = ref->folder = ref->place = NULL;
 }
 
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     if (out) memset(out, 0, sizeof *out);

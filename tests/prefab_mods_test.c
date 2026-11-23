@@ -802,6 +802,120 @@ static void one_demon_of_a_pack(const char *tmp, const char *store)
     sh_modmanifest_row_free(&pack);
 }
 
+/* Manager Q8, D6a, end to end in one process: a map whose local row names a mod this computer does not have loads
+ * with its objects stood in from the real content cache and serving index, the row is served, the load's one sentence
+ * names the placed entity only (not a name a value spells), and the save writes the row back as one local row with
+ * every name. */
+static void absent_local_row_stands_in(void)
+{
+    static const char MAP_ABSENT[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/absnt001/crate\","
+        "\"name\":\"\",\"state\":{\"edit\":{\"skins\":[\"mods/absnt001/skin\"]}}},\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"absnt001\",\"name\":\"Absent Pack\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/absnt001/crate\",\"mods/absnt001/skin\"]}]}}";
+    sh_modmanifest_list cur, back;
+    sh_modserve_bundle_ref ref;
+    char *t, *cause = NULL, *saved;
+    size_t n = 0, k;
+    int crate = 0, skin = 0;
+    printf("-- a map whose local row's mod is not here loads with stand-ins, says one sentence, and saves its row (Q8)\n");
+    (void)sh_cache_take_notice();
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_cache_set_rescan(sh_modserve_index_rescan);
+    (void)sh_modmanifest_prepare_load(MAP_ABSENT, sizeof MAP_ABSENT - 1, NULL);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !cur.rows[0].pinned);
+    memset(&ref, 0, sizeof ref);
+    CHECK(cur.count && sh_modserve_row_build(&cur.rows[0], &ref) && ref.place && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+    sh_modserve_bundle_ref_free(&ref);
+    CHECK(cur.count && sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
+    free(cause);
+    sh_modmanifest_list_free(&cur);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Crate from Absent Pack, which is not on this computer."));
+    free(t);
+    saved = sh_modmanifest_on_save(MAP_ABSENT, sizeof MAP_ABSENT - 1, &n);
+    memset(&back, 0, sizeof back);
+    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.count == 1 && !back.rows[0].pinned &&
+          !strcmp(back.rows[0].salt, "absnt001"));
+    for (k = 0; back.count && k < back.rows[0].name_count; k++) {
+        if (!strcmp(back.rows[0].names[k], "mods/absnt001/crate")) crate = 1;
+        if (!strcmp(back.rows[0].names[k], "mods/absnt001/skin")) skin = 1;
+    }
+    CHECK(crate && skin);
+    CHECK(saved && strstr(saved, "\"local\":true") && !strstr(saved, "\"objects\""));
+    sh_modmanifest_list_free(&back);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_set_content(NULL);
+    sh_cache_set_rescan(NULL);
+    sh_modmanifest_reset();
+}
+
+/* Add to my mods end to end: a played map's row staged from the content cache, made a mod of the player's own with a
+ * new salt by the store, built by the scan, and served from the root. */
+static void add_to_my_mods_end_to_end(const char *tmp, const char *store)
+{
+    static const char decl[] = "{\r\n\tinherit = \"snapmaps/unknown\";\r\n}";
+    char sha[65], man[600], mh[65], src[MAX_PATH], played[MAX_PATH], saved[MAX_PATH], path[MAX_PATH], err[128];
+    char *mtext, *made = NULL, *cause = NULL, *why = NULL;
+    const char *roots[1], *units[1];
+    sh_modmanifest_row pr;
+    sh_modmanifest_list one;
+    sh_cache_copy copy;
+    sh_ms_list l;
+    size_t mlen = 0, i;
+    int ml, found = 0;
+    FILE *f = NULL;
+    printf("-- Add to my mods: a map's row becomes a mod of your own with a new salt, built and served (5.15)\n");
+    sh_mb_sha256_hex(decl, sizeof decl - 1, sha);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\copy-src.decl", tmp);
+    CHECK(spit(src, decl, sizeof decl - 1));
+    CHECK(sh_cache_put_blob(src, sha, sizeof decl - 1));
+    ml = _snprintf_s(man, sizeof man, _TRUNCATE, "{\"files\":[{\"path\":\"entities/copied.decl\",\"sha256\":\"%s\","
+                     "\"size\":%u}],\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"entity\","
+                     "\"name\":\"entities/copied\"}}", sha, (unsigned)(sizeof decl - 1));
+    sh_mb_sha256_hex(man, (size_t)ml, mh);
+    CHECK(sh_cache_put_manifest(mh, man, (size_t)ml));
+    memset(&pr, 0, sizeof pr);
+    strcpy_s(pr.salt, sizeof pr.salt, "cpysrc01");
+    roots[0] = "entities/copied"; units[0] = mh;
+    CHECK(sh_modmanifest_row_pin(&pr, roots, units, 1) && sh_modmanifest_row_set_name(&pr, "Copied Pack"));
+    memset(&one, 0, sizeof one);
+    CHECK(sh_modmanifest_list_add(&one, &pr));
+    mtext = sh_modmanifest_write("{\"entities\":[]}", 15, &one, &mlen, err, sizeof err);
+    _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\copy-played", tmp);
+    _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\copy-saved", tmp);
+    CreateDirectoryA(played, NULL);
+    CreateDirectoryA(saved, NULL);
+    sh_cache_set_map_folders(saved, played);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cpy1_cpy2_map.decl", played);
+    if (mtext && !fopen_s(&f, path, "wb") && f) { fwrite(mtext, 1, mlen, f); fclose(f); }
+    free(mtext);
+    CHECK(sh_cache_stage_copy(pr.build, &copy, &why) == 1 && !why);
+    CHECK(sh_ms_add_copy(copy.dir, copy.modjson, copy.modjson_len, copy.salt, copy.name, &made, &cause) == 1);
+    CHECK(made && !strcmp(made, "Copied Pack (my copy)"));
+    sh_cache_copy_free(&copy);
+    CHECK(sh_ms_sync(NULL, NULL) >= 0);
+    CHECK(sh_ms_enumerate(&l));
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        if (made && !strcmp(e->name, made)) {
+            found = 1;
+            CHECK(sh_ms_entry_usable(e) && e->salt[0] && strcmp(e->salt, "cpysrc01"));
+            CHECK(e->bundle.name && !strcmp(e->bundle.name, "Copied Pack (my copy)"));
+        }
+    }
+    CHECK(found);
+    sh_ms_list_free(&l);
+    CHECK(sh_modserve_index_build(store) >= 1);
+    free(made);
+    free(cause);
+    free(why);
+    sh_modmanifest_list_free(&one);
+    sh_modmanifest_row_free(&pr);
+    sh_cache_set_map_folders(NULL, NULL);
+}
+
 static void resolving(const sh_modmanifest_row *door)
 {
     sh_modmanifest_list rows;
@@ -1659,6 +1773,8 @@ int main(int argc, char **argv)
     resolve_through_slot(libA, &door);
     zip(tmp, libA, storeA, &door);
     one_demon_of_a_pack(tmp, storeA);
+    absent_local_row_stands_in();
+    add_to_my_mods_end_to_end(tmp, storeA);
 
     sh_cache_set_mods_root(NULL);
     sh_ms_set_root(NULL);

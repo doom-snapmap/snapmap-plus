@@ -50,6 +50,8 @@ int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 int sh_modserve_active(void) { return 0; }
 
 /* The build that serves a row (sh_modserve_row_build): none installed. */
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;

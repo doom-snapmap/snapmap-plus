@@ -1245,21 +1245,23 @@ static void test_crash_leftovers(const char *tmp)
     CHECK(sh_ms_enumerate(&list) && list.count == 1);
     sh_ms_list_free(&list);
     g_logged = 0;
-    CHECK(sh_ms_recover_work() == 2);
+    CHECK(sh_ms_recover_work() == 1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gone", root);
     CHECK(mt_has(dir, "mod.json"));
+    /* mods\\maps\\ is retired: nothing there is read or written, leftovers included. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested", root);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested.old-%lu", root, DEAD);
     CHECK(mt_has(dir, "mod.json"));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\here.old-%lu", root, DEAD);
     CHECK(!mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\live.staging-%lu", root, (unsigned long)GetCurrentProcessId());
     CHECK(mt_exists(dir));
     CHECK(log_has("MODS: store: put gone back from gone.old-4294967280: an earlier session ended while it was being replaced"));
-    CHECK(log_has("MODS: store: put maps\\Arena\\nested back from maps\\Arena\\nested.old-4294967280"));
     CHECK(log_has("MODS: store: removed here.old-4294967280, a work folder an earlier session left"));
     CHECK(log_has("MODS: store: removed gone.staging-4294967280, a work folder"));
-    CHECK(log_count("MODS: store: ") == 4);
-    CHECK(sh_ms_enumerate(&list) && list.count == 2);   /* the one put back under mods\\maps\\ is not listed */
+    CHECK(log_count("MODS: store: ") == 3);
+    CHECK(sh_ms_enumerate(&list) && list.count == 2);
     sh_ms_list_free(&list);
     g_logged = 0;
     CHECK(sh_ms_recover_work() == 0 && log_count("MODS: store: ") == 0);

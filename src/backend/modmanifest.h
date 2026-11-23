@@ -68,6 +68,9 @@ typedef struct sh_modmanifest_row {
      * [x0,y0,z0,x1,y1,z1], "portals": [{"bounds": [...6], "dir": "PORTAL_DIR_..."}, ...]} (sh_cache_module_record).
      * Kept as written (malloc'd), NULL for none. */
     char *modules;
+    /* The content step only (sh_modmanifest_content_for): a row of no units standing in for a local row whose folder
+     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer). */
+    int local_broken;
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {

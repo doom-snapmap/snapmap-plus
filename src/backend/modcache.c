@@ -544,6 +544,7 @@ typedef struct mc_row {
     mc_placed_info *pinfo;             /* per placed name, when the map text was read */
     char *modules;                     /* the row's module records (D-A30), JSON, or NULL */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
+    int broken;                        /* a row of no units: the local folder is here and cannot be used */
     int notice;                        /* the absent objects wait for the notice */
 } mc_row;
 
@@ -662,6 +663,7 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
         strcpy_s(r->salt, sizeof r->salt, row->salt);
         r->name = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
         r->modules = row->modules ? sh_text(row->modules) : NULL;
+        r->broken = row->local_broken;
         r->n = row->unit_count;
         r->units = row->unit_count ? calloc(row->unit_count, sizeof *r->units) : NULL;
         r->roots = row->unit_count ? (char **)calloc(row->unit_count, sizeof *r->roots) : NULL;
@@ -759,8 +761,9 @@ static int mc_cause_rank(int cause)
     case SH_CACHE_ABSENT_GAME: return 4;
     case SH_CACHE_ABSENT_NOT_IN_STORE: return 5;
     case SH_CACHE_ABSENT_REMOVED: return 6;
-    case SH_CACHE_ABSENT_LOCAL: return 7;
-    default: return 8;
+    case SH_CACHE_ABSENT_BROKEN: return 7;
+    case SH_CACHE_ABSENT_LOCAL: return 8;
+    default: return 9;
     }
 }
 
@@ -827,6 +830,9 @@ char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
         break;
     case SH_CACHE_ABSENT_LOCAL:
         out = sh_textf("This map is playing without %s, which %s not on this computer.", subject, plural ? "are" : "is");
+        break;
+    case SH_CACHE_ABSENT_BROKEN:
+        out = sh_textf("This map is playing without %s: your folder of it cannot be used. The Mods tab says why.", subject);
         break;
     default:
         out = sh_textf("This map is playing without %s.", subject);
@@ -1349,7 +1355,14 @@ static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, i
         (void)sh_text_set(&t, "%s%s{\"unit\":\"%s\",\"cause\":%d}", t, first ? "" : ",", units[i].hash, units[i].cause);
         first = 0;
     }
-    (void)sh_text_set(&t, "%s]}", t ? t : "");
+    (void)sh_text_set(&t, "%s]", t ? t : "");
+    if (!r->n) {
+        /* A row of no units stands in for what the map places: the names it was composed for. */
+        (void)sh_text_set(&t, "%s,\"placed\":[", t ? t : "");
+        for (i = 0; t && i < r->nplaced; i++) (void)sh_text_set(&t, "%s%s\"%s\"", t, i ? "," : "", r->placed[i]);
+        (void)sh_text_set(&t, "%s]", t ? t : "");
+    }
+    (void)sh_text_set(&t, "%s}", t ? t : "");
     ok = t && mc_write(path, t, strlen(t));
     free(t);
     return ok;
@@ -1372,6 +1385,27 @@ static int mc_side_same(const char *chash, const mc_unit *units, size_t n)
         same = found;
     }
     if (same && (size_t)u->n != present) same = 0;
+    mpj_free(j);
+    free(t);
+    free(side);
+    return same;
+}
+
+/* 1 when a row of no units' composition was made for exactly the names the map places now. */
+static int mc_side_same_placed(const char *chash, const mc_row *r)
+{
+    char *side = mc_path("served\\%s.json", chash);
+    size_t len = 0, i;
+    unsigned char *t = side ? sh_mb_read_file(side, 1u << 24, &len) : NULL;
+    mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
+    const mpj *p = j ? mpj_get(j, "placed") : NULL;
+    int same = p && p->type == MPJ_ARR && (size_t)p->n == r->nplaced;
+    for (i = 0; same && i < r->nplaced; i++) {
+        int k, found = 0;
+        for (k = 0; k < p->n && !found; k++)
+            found = p->items[k]->type == MPJ_STR && p->items[k]->text && !_stricmp(p->items[k]->text, r->placed[i]);
+        same = found;
+    }
     mpj_free(j);
     free(t);
     free(side);
@@ -1427,6 +1461,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             strcpy_s(snapshot.salt, sizeof snapshot.salt, r->salt);
             snapshot.name = sh_text(r->name ? r->name : r->salt);
             snapshot.modules = r->modules ? sh_text(r->modules) : NULL;
+            snapshot.broken = r->broken;
             snapshot.n = r->n;
             snapshot.units = r->n ? calloc(r->n, sizeof *snapshot.units) : NULL;
             snapshot.roots = r->n ? (char **)calloc(r->n, sizeof *snapshot.roots) : NULL;
@@ -1472,7 +1507,8 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
     }
     if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
-    if (here && !complete && snapshot.n && mc_side_same(chash, units, snapshot.n)) {   /* nothing new is here */
+    if (here && !complete &&
+        (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot))) {   /* nothing new */
         if (causes) {
             char *sp = mc_path("served\\%s.json", chash);
             AcquireSRWLockExclusive(&g_disk);
@@ -1592,12 +1628,16 @@ record:
                 }
                 r->notice = r->nabsent > 0;
             } else if (!snapshot.n && snapshot.nplaced) {
-                /* A local row whose folder is not here (D6a): each object the map places of it. */
+                /* A local row whose folder is not here (D6a): each object the map places of it, an entity's inherit
+                 * (a name only a value spells, a skin, is no object); every name when the map text was not read. */
+                int read = 0;
+                for (i = 0; snapshot.pinfo && i < snapshot.nplaced; i++) read |= snapshot.pinfo[i].known;
                 r->absent = (mc_absent *)calloc(snapshot.nplaced, sizeof *r->absent);
                 for (i = 0; r->absent && i < snapshot.nplaced; i++) {
+                    if (read && !snapshot.pinfo[i].known) continue;
                     r->absent[r->nabsent].object = sh_cache_object_name(snapshot.placed[i]);
                     r->absent[r->nabsent].mod = sh_text(snapshot.name && snapshot.name[0] ? snapshot.name : snapshot.salt);
-                    r->absent[r->nabsent].cause = SH_CACHE_ABSENT_LOCAL;
+                    r->absent[r->nabsent].cause = snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;
                     r->nabsent++;
                 }
                 r->notice = r->nabsent > 0;
@@ -2220,7 +2260,13 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     if (sh_modmanifest_current(&cur)) {
         for (i = 0; i < cur.count; i++) {
             size_t k;
-            if (!cur.rows[i].pinned) continue;
+            if (!cur.rows[i].pinned) {
+                /* The open map's local row may be served by its stand-ins (a row of no units, D6a). */
+                char none[SH_CACHE_HASH_HEX + 1];
+                if (strcmp(cur.rows[i].salt, SH_MODMANIFEST_PRODUCT) && sh_modmanifest_composition_hash(cur.rows[i].salt, NULL, 0, none))
+                    mc_set_add(&kept.comps, none);
+                continue;
+            }
             mc_set_add(&kept.comps, cur.rows[i].build);
             for (k = 0; k < cur.rows[i].unit_count; k++) mc_set_add(&kept.units, cur.rows[i].units[k]);
         }

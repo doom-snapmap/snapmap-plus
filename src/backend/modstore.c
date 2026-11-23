@@ -3351,8 +3351,9 @@ static void ms_recover_dir(const wchar_t *dir, const wchar_t *rel, const wchar_t
         old_at = ms_work_at(fd.cFileName, L".old-");
         at = old_at ? old_at : ms_work_at(fd.cFileName, L".staging-");
         if (!at) {
-            /* An organizing folder is looked into, as the listing does; a mod is not. */
+            /* An organizing folder is looked into, as the listing does; a mod is not, and nor is mods\maps\. */
             if (!ms_candidate(&fd)) continue;
+            if (!(rel && rel[0]) && !_wcsicmp(fd.cFileName, L"" SH_MS_RETIRED_PLACES)) continue;
             child = ms_wjoin(dir, fd.cFileName);
             crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
             if (child && crel && !ms_has_descriptor(child) && ms_found_push(pending, child, crel)) continue;

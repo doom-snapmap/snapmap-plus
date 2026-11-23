@@ -34,6 +34,8 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, 
 int sh_modserve_active(void) { return 0; }
 
 /* The manifest's activation asks which build serves a row: none here. */
+/* A local row's folder that is here but cannot be used (modserve.h): none here. */
+int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;

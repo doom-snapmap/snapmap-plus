@@ -8055,6 +8055,16 @@ unsigned sh_modserve_test_gates_owned(void)
 
 /* ------------------------------------------------------------------ queries */
 
+int sh_modserve_salt_installed(const char *salt)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!x || !salt || !salt[0]) return 0;
+    for (i = 0; i < x->nbundles; ++i)
+        if (!x->bundles[i].place && x->bundles[i].id && !_stricmp(x->bundles[i].id, salt)) return 1;
+    return 0;
+}
+
 int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 {
     const ms_index *x = g_index;
