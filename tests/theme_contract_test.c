@@ -180,7 +180,8 @@ int main(int argc, char **argv)
     CHECK(count_text(html, "id=\"camX\"") == 1);
     CHECK(count_text(html, "id=\"camY\"") == 1);
     CHECK(count_text(html, "id=\"camZ\"") == 1);
-    CHECK(strstr(html, "<span id=\"stamp\">Updated: --</span>") != NULL);
+    /* The status bar carries no heartbeat stamp: nothing acts on it. */
+    CHECK(strstr(html, "id=\"stamp\"") == NULL && strstr(html, "Updated: ") == NULL);
     CHECK(strstr(html,
           ".status-camera { gap: 8px; margin-left: 22px; padding-left: 22px; border-left: 1px solid var(--border); }") != NULL);
     CHECK(strstr(html,
