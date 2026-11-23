@@ -556,7 +556,7 @@ mod id, and Refresh builds what is in the folder.
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
 folder can be restored from the Recycle Bin by hand. Uninstalling:" (with a map open; without one,
 the second sentence alone) and lists the map part, the Toybox rows it removes, "Moves the folder
-mods\<folder> to the Windows Recycle Bin." and "N of your saved maps use it; they will not open until
+mods\<folder> to the Windows Recycle Bin." and "N of your saved maps use it; they will open without its objects until
 you restore it from the Recycle Bin." (`install.savedMaps` above 0), or, when another folder of the
 mod stays installed (`install.keptBuild`: the player's own, or the copy a map brought), "Another
 folder of this mod stays installed (mods\<folder>); maps that use the mod open with it."
