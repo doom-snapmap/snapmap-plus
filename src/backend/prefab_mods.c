@@ -878,8 +878,8 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         InterlockedExchange(&g_wait_seq, s);
         if (seq) *seq = (int)s;
     }
-    pm_msg(msg, "This prefab needs %u mod%s you do not have; checking the mod store.", (unsigned)missing,
-           missing == 1 ? "" : "s");
+    pm_msg(msg, "This prefab needs %u mod%s you do not have; getting %s content.", (unsigned)missing,
+           missing == 1 ? "" : "s", missing == 1 ? "its" : "their");
     return SH_PREFAB_MODS_HELD;
 }
 

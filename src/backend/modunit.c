@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "backend_log.h"
 #include "modunit.h"
 #include "modauthor.h"
 #include "modsalt.h"
@@ -1793,9 +1794,16 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
             if (!to) { oom = 1; break; }
             for (char *c = to; *c; c++) if (*c == '/') *c = '\\';
             if (sh_mb_sha256_file(to, &size, have)) {
-                if (strcmp(have, sha->text)) sh_text_set(&reason, "two units carry %s with other bytes", p->text);
+                /* One file two units carry. With other bytes (a hand-made or damaged map, or a kept object of an
+                 * earlier build, N32), the first unit in object order keeps the path: one log line, no notice. */
+                if (strcmp(have, sha->text)) {
+                    char *line = sh_textf("MODS: content: two objects of this mod carry %s with other bytes; the first "
+                                          "object's file is kept", p->text);
+                    backend_log(line ? line : "MODS: content: two objects of this mod carry one file with other bytes");
+                    free(line);
+                }
                 free(to);
-                continue;   /* one file two units carry */
+                continue;
             }
             if (!(from = source(source_context, p->text))) { sh_text_set(&reason, "%s is not here", p->text); free(to); break; }
             wf = sh_mb_wpath(from);

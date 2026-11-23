@@ -156,16 +156,6 @@ static const config_descriptor g_registry[] = {
         NULL
     },
     {
-        /* The player has agreed, once per installation, that publishing a
-         * map uploads the mods it uses to the mod store (modpublish.c). The
-         * first publish of a map with mods asks; Yes sets this.
-         */
-        "mods.upload_confirmed", SH_JSON_BOOL, "false",
-        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE,
-        NULL,
-        normalize_bool
-    },
-    {
         /* The player plays maps whose mods include scripts (the Mods tab's
          * setting). Off, the download gate refuses such a map before any
          * download (modui.h sh_modui_scripted_maps_allowed).

@@ -62,6 +62,10 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
 { (void)drop_played; (void)held; (void)held_count; if (out) memset(out, 0, sizeof *out); return 1; }
 int sh_cache_report(sh_cache_line_fn fn, void *context) { (void)fn; (void)context; return 0; }
 char *sh_cache_storage_line(void) { return _strdup("Map content: 0 KB for 0 maps."); }
+int sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out) { return sh_cache_sweep(drop_played, NULL, 0, out); }
+static int g_sweeps_async;
+static int g_sweeps_before_refusal;
+void sh_cache_sweep_async(void) { g_sweeps_async++; }
 
 /* The map manifest's load step activates bundles through the serving layer's
  * engine half; the tab only reads the record it keeps. */
@@ -1342,17 +1346,23 @@ int main(int argc, char **argv)
         /* The console's uninstall removes one folder, as the tab's does: yours first; the map's copy stays. */
         {
             const char *un_argv[] = { "uninstall", "alex.r2-imp" };
+            int sweeps = g_sweeps_async;
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
+            CHECK(g_sweeps_async == sweeps);   /* a dry run removes nothing: no sweep */
             CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp to the Windows Recycle Bin"));
             CHECK(has(g_doctor, "MODS: uninstall: another folder of R2 Imp copy stays installed (mods\\maps\\Hell Arena\\"));
             CHECK(!has(g_doctor, "folders of"));
             CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: dry run; add --yes to do it\n"));
             CHECK(lines_prose_ok(g_doctor));
         }
-        doc = run_doc(SH_MODS_ACT_UNINSTALL, name);
-        CHECK(has(doc, "\"ok\":true,\"message\":\"Uninstalled R2 Imp copy."));
-        free(doc);
+        {
+            int sweeps = g_sweeps_async;
+            doc = run_doc(SH_MODS_ACT_UNINSTALL, name);
+            CHECK(has(doc, "\"ok\":true,\"message\":\"Uninstalled R2 Imp copy."));
+            CHECK(g_sweeps_async == sweeps + 1);   /* a mod was removed: the content cache is swept once */
+            free(doc);
+        }
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, name);
         CHECK(!mt_exists(path));
     }
@@ -1524,9 +1534,9 @@ int main(int argc, char **argv)
     sh_saved_maps_set_root(saves);
     {
         char claims[400];
-        _snprintf_s(claims, sizeof claims, _TRUNCATE,
-                    "{\"item123\":{\"bundles\":[\"%s\"],\"claim\":\"c\",\"secret\":\"s\",\"updated\":1793164663}}", hash1);
-        CHECK(sh_mb_record_put(g_root, "claims", claims));
+        /* A claim names the namespaces (salts) of the published map's units; no secret is stored. */
+        _snprintf_s(claims, sizeof claims, _TRUNCATE, "{\"item123\":{\"mods\":[\"alexrimp\"],\"at\":1793164663}}");
+        CHECK(sh_mb_record_put(g_root, "map-claims", claims));
         CHECK(sh_mb_record_put(g_root, "links", "{\"item123\":{\"cloud\":\"6ae40b378bf5037d3d63bd23\","
                                                 "\"local\":\"ABCDEF0123456789ABCD\",\"at\":1793164563}}"));
     }
@@ -1620,6 +1630,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"editorRows\":[") && doc_prose_ok(doc));
     free(doc);
     g_undo_available = 0;
+    g_sweeps_before_refusal = g_sweeps_async;
     doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.r2-imp");
     CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy was not uninstalled: the editor's undo history cannot be "
                    "cleared on this build. Close the map, then uninstall it.\""));
@@ -1630,6 +1641,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy was not uninstalled: the editor is busy"));
     free(doc);
     g_delete_status = SH_EDITOR_DELETE_DISPATCHED;
+    CHECK(g_sweeps_async == g_sweeps_before_refusal);   /* uninstalls that removed nothing sweep nothing */
     CHECK(ent_alive(1) && ent_alive(2));
 
     printf("-- the console verbs share the dry runs and actions in the same words; --yes performs them\n");
@@ -1655,7 +1667,9 @@ int main(int argc, char **argv)
         g_doctor[0] = 0;
         g_deleted_n = 0;
         g_undo_pending = 1;
+        g_sweeps_before_refusal = g_sweeps_async;
         CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
+        CHECK(g_sweeps_async == g_sweeps_before_refusal + 1);   /* the folder went: one sweep */
         CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: Uninstalled R2 Imp copy and removed it from the open map."));
         CHECK(lines_prose_ok(g_doctor));
         CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2));
@@ -1945,12 +1959,6 @@ int main(int argc, char **argv)
         free(doc);
         g_bank[0] = 0;
 
-        /* The download approval's sentence for scripted mods. */
-        sh_modui_scripts_approval(2, lua, sizeof lua);
-        CHECK(!strcmp(lua, "These mods include scripts (2 files). Scripts run only inside this map and cannot read or change "
-                           "your files."));
-        sh_modui_scripts_approval(1, lua, sizeof lua);
-        CHECK(has(lua, "(1 file)."));
         CHECK(prose_ok(SH_MODUI_SCRIPTS_OFF));
         mt_remove_tree(sm);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));

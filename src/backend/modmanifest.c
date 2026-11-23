@@ -1543,6 +1543,9 @@ static sh_modmanifest_scope_fn volatile g_scope;
 static int (*volatile g_scope_armed)(void);
 static sh_modmanifest_resolve_fn volatile g_resolve;
 
+static sh_modmanifest_pin_fn g_pin;
+void sh_modmanifest_set_pin(sh_modmanifest_pin_fn pin) { g_pin = pin; }
+
 void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 {
     g_scope = scope;
@@ -2088,7 +2091,22 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
-    out = sh_modmanifest_write(json, length, &ctx.list, &written, err, sizeof err);
+    {
+        /* A publish's save writes its rows pinned (modpin.h, bound by modpublish.c while a publish is armed); the open
+         * map keeps the rows it has, so its session goes on serving what it served. */
+        sh_modmanifest_pin_fn pin = g_pin;
+        sh_modmanifest_list pinned;
+        size_t k;
+        int use_pinned = 0;
+        memset(&pinned, 0, sizeof pinned);
+        if (pin) {
+            pinned.uses = ctx.list.uses;
+            for (k = 0; k < ctx.list.count && sh_modmanifest_list_add(&pinned, &ctx.list.rows[k]); k++) {}
+            use_pinned = k == ctx.list.count && pin(&pinned, json, length) > 0;
+        }
+        out = sh_modmanifest_write(json, length, use_pinned ? &pinned : &ctx.list, &written, err, sizeof err);
+        sh_modmanifest_list_free(&pinned);
+    }
     described = mm_describe(&ctx.list);
     if (out) {
         line = sh_textf("MODS: save manifest wrote %zu row(s) into the snapmap-plus member%s%s%s; %zu -> %zu bytes",
@@ -2109,6 +2127,32 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     sh_modmanifest_list_free(&ctx.list);
     if (!out) out = mm_save_fallback(json, length, out_length, ctx.list.uses, "the new rows could not be written");
     return out;
+}
+
+/* ------------------------------------------------------------ the rows a save would write */
+
+int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanifest_list *out)
+{
+    mm_save_ctx ctx;
+    sh_modmanifest_list attached;
+    size_t i;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    memset(&ctx, 0, sizeof ctx);
+    (void)sh_modmanifest_current_attached(&attached);
+    if (count) modserve_bundles_for_names_visit(names, count, mm_save_visit, &ctx);
+    if (!ctx.failed) mm_save_names(&ctx);
+    if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_keep_unserved(&ctx, (char **)names, count)) ctx.failed = 1;
+    if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    sh_modmanifest_list_free(&attached);
+    if (ctx.failed) { sh_modmanifest_list_free(&ctx.list); return -1; }
+    for (i = 0; i < ctx.list.count; i++)
+        if (ctx.list.rows[i].name_count > 1)
+            qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
+    qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
+    *out = ctx.list;
+    return (int)out->count;
 }
 
 /* ------------------------------------------------------------ the listing (one rule for every mode) */

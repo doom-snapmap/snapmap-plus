@@ -37,7 +37,7 @@
  * published map whose mods are absent.
  *
  * Threads: every entry point except the fetch job runs on DOOM's main thread;
- * network waits run on the modsync worker; the dialog is polled from the
+ * network waits run on the modnet worker; the dialog is polled from the
  * main-thread tick (sh_modpublished_poll). Nothing here blocks the engine.
  */
 #ifndef SH_MODPUBLISHED_H
@@ -117,16 +117,6 @@ int sh_modpublished_resuming(void);
  * Main thread. */
 void sh_modpublished_notice(const char *text);
 
-/* The question as raised: "This map needs N mod(s): <names> (<size>).
- * Download and install now?", the mods' names, those that do not fit
- * summarized as "and K more", and the total size of their archives. When
- * `scripts` is a sentence (the store says some of the builds carry scripts:
- * modui.h sh_modui_scripts_approval), it stands before "Download and install
- * now?" whole, and the names give way to it. Always shorter than 256 bytes
- * (the native dialog body). */
-void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
-                                      unsigned long long bytes, const char *scripts);
-
 /* ------------------------------------------------------------ seam */
 
 enum sh_modpub_hook {
@@ -163,74 +153,15 @@ typedef struct sh_modpub_resume {
 #define SH_MODPUB_ROW_SERVED     1
 #define SH_MODPUB_ROW_INCOMPLETE 2
 
-/* ------------------------------------------------------------ the denial gate
- * Every hold (published plays, lobby joins, My Maps, rawmap loads, prefab
- * placements) knows the map's place (modserve.h, DECISIONS 11): a published
- * map this machine did not publish is served from its item's place
- * (mods\maps\<map title>\, the item_place op); a My Maps play, a launch no
- * gate saw and a rawmap use the place the map records ("" when it records
- * none: the root); a prefab placement and a map this machine published use
- * the root. It counts the rows nothing serves in that place (the asset rule,
- * without changing what the loaded map serves), asks the mod store about
- * each one on the worker (the probe: HEAD of the build's archive) and then
- * makes one decision per build, sh_modpub_gate_decide. A build the store
- * holds is obtainable. The store also says how many scripts each carries:
- * when any does and the player turned off "Play maps whose mods include
- * scripts" (sh_modpub_ops scripted_maps_allowed), nothing is downloaded and
- * the map is refused with that setting's sentence (modui.h
- * SH_MODUI_SCRIPTS_OFF). The same holds at every launch: a map with a place
- * (one that arrived with its mods) whose served builds carry scripts is not
- * loaded while the setting is off, though it was downloaded while it was on.
- * Otherwise the player is asked once, with the mods'
- * names, the total size and, when they carry scripts, the scripts sentence,
- * and Yes fetches each archive into that place (the root, or
- * mods\maps\<segment>\<mod name>\). A gate that lets a map through, or a
- * hold that resumes it, makes its place the loaded map's (the place_set op)
- * and the place its launch serves from (sh_modpub_launch_place). Every other
- * build denies the launch, in exactly one of four causes, each with its own
- * sentence in the game's own dialog and one console line:
- *
- *   1 GONE             published, and the store answers not found (404, or
- *                      451 on the takedown list): its author unpublished it,
- *                      or it was removed. Permanent for this machine.
- *   2 UNREACHABLE      the store could not be asked or did not answer.
- *   3 NEVER_PUBLISHED  the player's own content (a My Maps save, a rawmap, a
- *                      prefab) whose mod no folder of this machine holds, no
- *                      claim of this machine names, and the store lacks.
- *   4 GAME_REVISION    the store had it, but a borrow in it names game bytes
- *                      this machine lacks (a different game revision), learned
- *                      when the archive is installed. Permanent.
- *
- * There is no substitution: a map without a place (the player's own) follows
- * the root folder of each salt at whatever build it holds, so its rows are
- * missing only when no root folder holds the salt; a map with a place is
- * served by the root's folder at the row's build, else its place's, else it
- * fetches (sh_modserve_row_build_in).
- *
- * Placeholders (phase 6) plug in here and nowhere else: a placeholder system
- * adds a verdict that sh_modpub_gate_decide returns instead of a denial, and
- * the hold resumes with stand-ins for the builds so decided. */
-enum sh_modpub_store_answer {
-    SH_MODPUB_STORE_UNREACHABLE = -1,
-    SH_MODPUB_STORE_ABSENT      = 0,
-    SH_MODPUB_STORE_HAS         = 1
-};
-enum sh_modpub_verdict {
-    SH_MODPUB_GATE_OBTAIN          = 0,   /* fetch the archive into the map's place */
-    SH_MODPUB_GATE_GONE            = 1,
-    SH_MODPUB_GATE_UNREACHABLE     = 2,
-    SH_MODPUB_GATE_NEVER_PUBLISHED = 3,
-    SH_MODPUB_GATE_GAME_REVISION   = 4
-};
-typedef struct sh_modpub_gate_facts {
-    int store;          /* sh_modpub_store_answer for the build's hash */
-    int game_lacks;     /* the store has it, and a borrow in it names game bytes this machine lacks */
-    int published;      /* the map came from the map service (any published hook), or a claim this
-                           machine holds names the build */
-} sh_modpub_gate_facts;
-
-/* The one decision: a sh_modpub_verdict. */
-int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
+/* ------------------------------------------------------------ the hold
+ * Every hold (published plays, lobby joins, My Maps, rawmap loads, prefab placements) counts the rows nothing serves
+ * (the asset rule, in the map's place: modserve.h). Rows that name units (SPEC-distribution 5.7) are fetched at once
+ * into the content cache with no question, under the game's own progress line; what cannot be had stands in, with one
+ * notice after the load (modcache.h, S2-S6). A row that names no unit (a local row, D6a) whose folder this computer
+ * does not have cannot be downloaded: the load is refused with one sentence. While the player has turned off "Play
+ * maps whose mods include scripts" (sh_modpub_ops scripted_maps_allowed), a map whose served content carries scripts
+ * is not loaded, with that setting's sentence (modui.h SH_MODUI_SCRIPTS_OFF). A hold that resumes makes its place the
+ * loaded map's (the place_set op) and the place its launch serves from (sh_modpub_launch_place). */
 
 /* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
  * for an editor open of a map whose row nothing serves: nothing substitutes
@@ -241,25 +172,6 @@ int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
  * dialog. */
 int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
                                  char **why);
-
-/* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
- * line say it: "This <subject> needs <title>, which ...". `subject` is "map"
- * or "prefab" (NULL: "map"), `title` the mod's name (the row's, else its
- * salt), `source` the borrow's installed path (verdict 4), `store_code` the
- * MODNET_E_ code of the store's failure (verdict 2; 0 when unknown), worded
- * by plain_reason.h. The sentence (malloc'd, whole), NULL for another
- * verdict. The console says it whole; the game's dialog holds 255 bytes, so
- * a longer one is shown in the dialog as a pointer to the console. */
-char *sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
-                             int store_code);
-
-/* What the probe learned about one build (modsync.h modsync_probe_build). */
-typedef struct sh_modpub_probe {
-    int found;          /* sh_modpub_store_answer */
-    int code;           /* unreachable: the MODNET_E_ code of the failure, 0 when unknown */
-    unsigned long long size;   /* found: the archive's bytes (what Yes downloads) */
-    unsigned scripts;          /* found: the script files the build carries */
-} sh_modpub_probe;
 
 /* Everything the state machine asks of the engine and of the lanes it depends
  * on. Production binds these at install; tests supply fakes. */
@@ -281,9 +193,8 @@ typedef struct sh_modpub_ops {
     int  (*poll)(void *c, int ticket);          /* an sh_engine_dialog_result */
     void (*release)(void *c, int ticket);
     int  (*worker_run)(void *c, void (*job)(void *), void *job_context);   /* 1 started */
-    /* Fetch the row's build into `place` ("maps\<segment>": that place's
-     * folder of the salt; "" the root). Worker thread; stops early when
-     * *cancel is set; 0 ok, else a MODNET_E_ code. */
+    /* Fetch the row's units into the content cache and compose it (modcache.h sh_cache_prepare). Worker thread;
+     * stops early when *cancel is set; 0 ok (what could not be had stands in), else a MODNET_E_ code. */
     int  (*fetch_for)(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
                       volatile int *cancel);
     void *(*metadata_copy)(void *c, const void *metadata);
@@ -301,14 +212,6 @@ typedef struct sh_modpub_ops {
     void (*log)(void *c, const char *line);
     /* One line on the game console. */
     void (*print)(void *c, const char *line);
-    /* The gate's probe (modsync_probe_build): fills *out and returns
-     * out->found. Worker thread. */
-    int  (*store_probe)(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out);
-    /* 1 when a claim this machine holds names the build (modsync_claim_names). */
-    int  (*claimed)(void *c, const char *hash);
-    /* After a fetch that failed with game content this machine lacks: the
-     * borrow's source path in *out (malloc'd), else 0. */
-    int  (*fetch_detail)(void *c, const char *hash, char **out);
     /* A launch was refused (denied, dropped from its hold, or refused at
      * once): nothing was launched, so the parse's rows must not stay
      * declared (modui.h sh_modui_scope_launch_refused). Called after
@@ -332,9 +235,6 @@ typedef struct sh_modpub_ops {
     /* The player's setting "Play maps whose mods include scripts" (modui.h
      * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
     int  (*scripted_maps_allowed)(void *c);
-    /* The question's sentence for builds carrying `files` script files
-     * (modui.h sh_modui_scripts_approval). */
-    void (*scripts_approval)(void *c, unsigned files, char *out, size_t cap);
     /* The script files of the builds that serve `rows` in `place` (a map
      * that arrived with its mods), as their folders record them. */
     unsigned (*served_scripts)(void *c, const sh_modmanifest_list *rows, const char *place);
@@ -342,10 +242,6 @@ typedef struct sh_modpub_ops {
      * shows while it downloads a published map), its text replaced in place:
      * `text` shows or updates it, NULL hides it. */
     void (*progress)(void *c, int hook, void *owner, const char *text);
-    /* After a fetch that failed: what stopped it, in its own words (the
-     * store's sentence, or why the downloaded mod could not be installed), in
-     * *out (malloc'd), else 0. NULL counts as none. */
-    int  (*fetch_cause)(void *c, const char *hash, char **out);
     /* The editor could not open a map because a mod one of its entities uses
      * is not installed: the map is sound, so the engine's own "damaged" notice
      * and its offer to replace the map with its published version are
@@ -442,15 +338,11 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
  * makes SnapMap's own validator refuse the map as corrupt. The rawmap layer
  * asks which rows are missing before any parse (the asset rule:
  * modserve.h sh_modserve_row_served) and, when some are, never hands the map
- * to the engine. The hold
- * then asks the mod store on the worker about every missing build (the
- * denial gate above, as for every hold). When each is obtainable, the player
- * gets the question a My Maps launch asks and Yes fetches, installs and opens
- * the rawmap again (the resume, hook SH_MODPUB_RAWMAP_LOAD). Otherwise the
- * load is denied with the gate's sentence for the first denied build in a
- * one-button notice and one console line per denied build. Rows are only counted when
- * the gates are bound (sh_modpub_test_set_ops, or the install); otherwise
- * nothing is missing and the rawmap loads as before. */
+ * to the engine. The hold fetches the content of its pinned rows (the hold above,
+ * as for every hold) and opens the rawmap again (the resume, hook
+ * SH_MODPUB_RAWMAP_LOAD); a row that names no unit refuses it with one sentence.
+ * Rows are only counted when the gates are bound (sh_modpub_test_set_ops, or
+ * the install); otherwise nothing is missing and the rawmap loads as before. */
 
 /* Read every row of `text` into *rows (cleared first; free with
  * sh_modmanifest_list_free) and the place the text records into *place
@@ -468,8 +360,8 @@ int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *pl
 
 /* Hold a rawmap load whose rows name missing builds in `place` (as
  * sh_modpub_rawmap_missing gave it; the fetch fills that place, or the root).
- * `source` is the file name the messages use. Returns 1 held (the store is
- * being asked), 0 when nothing is missing after all, -1 when it could not be
+ * `source` is the file name the messages use. Returns 1 held (its content is
+ * being fetched), 0 when nothing is missing after all, -1 when it could not be
  * held (off the main thread, no gates, no memory); the -1 case raises the
  * refusal notice itself. Main thread. */
 int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, const char *place);
@@ -483,17 +375,13 @@ void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *m
 /* ------------------------------------------------------------ prefab placements
  * A prefab records the mods it needs (prefab_mods.h) and is never handed to
  * the engine while one is missing. Its placement is held like a rawmap load:
- * the store is asked on the worker; when every missing build is obtainable
- * the player is asked "This prefab needs N mod(s): ..."; Yes fetches and
- * installs them and calls the ready callback (main thread, from the tick),
- * which brings them into the open map, and the placement goes on. Otherwise
- * the placement is denied with the gate's sentences ("This prefab needs ...").
- * No, a failed download and a build that will not install behave as for a
- * map, with "The prefab was not placed." */
+ * its pinned rows' content is fetched and the ready callback (main thread,
+ * from the tick) brings it into the open map, and the placement goes on. A row
+ * that names no unit refuses it, with "The prefab was not placed." */
 
 /* Hold a placement whose rows name missing builds; they are fetched to the
  * root (DECISIONS 12). `name` is the prefab's
- * name the messages use. Returns 1 held (the store is being asked), 0 when
+ * name the messages use. Returns 1 held (its content is being fetched), 0 when
  * nothing is missing, -1 when it could not be held (off the main thread, no
  * memory), -2 when the gates are not bound (nothing raised: the caller
  * refuses). Main thread. */

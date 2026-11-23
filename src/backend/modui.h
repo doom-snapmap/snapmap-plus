@@ -280,6 +280,9 @@ int  sh_modui_poll_main(void *context);
  * the gate set (sh_modserve_place_set). Nothing in this file resets the
  * place: where a map finds its mods is a fact of that map, set from its
  * record at every load. */
+/* The names the open editor map places now (live, not its last save): *names malloc'd, each freed with free(), as
+ * sh_modmanifest_names_free does. The count, -1 outside the editor or on failure. Main thread. */
+int  sh_modui_placed_names(char ***names, size_t *count);
 int  sh_modui_scope_launch(const char *why);
 
 /* A hub launch the published-map gate refused (denied, or dropped from its
@@ -326,20 +329,16 @@ void sh_modui_note_changed(void);
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
-/* Scripts from downloaded maps (design: the one download approval and the
- * player's setting). The store says how many script files each build
- * carries (its index records it; HEAD answers X-Mod-Scripts), so the
- * download gate (modpublished.c) knows before it asks: it adds
- * sh_modui_scripts_approval's sentence to its one question, and, while
- * sh_modui_scripted_maps_allowed() is 0, refuses the map before any download
- * with SH_MODUI_SCRIPTS_OFF. A rawmap or prefab ZIP import (modexport.c)
+/* Scripts from downloaded maps (the player's setting). While
+ * sh_modui_scripted_maps_allowed() is 0, a map whose served content carries
+ * scripts is not played (modpublished.c, at the launch and after its content
+ * is fetched), with SH_MODUI_SCRIPTS_OFF. A rawmap or prefab ZIP import (modexport.c)
  * whose mods carry scripts is refused with the same sentence while the
  * setting is off, and installs nothing. The Mods tab offers the setting
  * ("mods.scripted_maps", on by default). */
 #define SH_MODUI_SCRIPTS_OFF \
     "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on " \
     "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
-void sh_modui_scripts_approval(unsigned files, char *out, size_t cap);
 int  sh_modui_scripted_maps_allowed(void);
 
 #ifdef SH_MODUI_TESTING

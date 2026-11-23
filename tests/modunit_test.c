@@ -22,7 +22,8 @@
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
-void backend_log(const char *message) { (void)message; }
+static char g_last_log[512];
+void backend_log(const char *message) { if (message) strcpy_s(g_last_log, sizeof g_last_log, message); }
 
 /* The game holds every name outside mods/; nothing under it. */
 static int game_exists(void *ctx, const char *request)
@@ -604,6 +605,49 @@ static void test_compose(const char *top)
     CHECK(why && why[0]);
     free(why);
     CHECK(!mt_exists(bad));
+
+    /* N32: two units carrying one path with other bytes compose; the first in object order keeps the path, with one
+     * log line */
+    {
+        char clash[MAX_PATH * 2], *second, *at, have[SH_MB_HASH_HEX + 1], want[SH_MB_HASH_HEX + 1];
+        const char *two[2];
+        size_t two_lens[2], k;
+        unsigned long long size = 0;
+        int done = 0;
+        _snprintf_s(clash, sizeof clash, _TRUNCATE, "%s\\comp_clash", top);
+        ctx.swap_path = NULL;
+        second = (char *)malloc(u.manifest_len + 1);
+        CHECK(second != NULL);
+        if (second) {
+            memcpy(second, u.manifest, u.manifest_len);
+            second[u.manifest_len] = 0;
+            /* the image's SHA-256 in the second manifest becomes another file's */
+            at = strstr(second, "\"path\":\"images/crate_d.bimage\",\"sha256\":\"");
+            CHECK(at != NULL);
+            if (at) {
+                at += strlen("\"path\":\"images/crate_d.bimage\",\"sha256\":\"");
+                memcpy(want, at, SH_MB_HASH_HEX);
+                want[SH_MB_HASH_HEX] = 0;
+                for (k = 0; k < SH_MB_HASH_HEX; k++) at[k] = 'f';
+                two[0] = u.manifest; two[1] = second;
+                two_lens[0] = u.manifest_len; two_lens[1] = u.manifest_len;
+                memset(&out, 0, sizeof out);
+                g_last_log[0] = 0;
+                done = sh_unit_compose(two, two_lens, 2, source_of, &ctx, SALT, "Composed", &g_game, clash, &out, &why);
+                if (why) { fprintf(stderr, "clash compose: %s\n", why); free(why); why = NULL; }
+                CHECK(done);
+                CHECK(strstr(g_last_log, "two objects of this mod carry images/crate_d.bimage with other bytes; the first "
+                                         "object's file is kept") != NULL);
+                {
+                    char path[MAX_PATH * 2];
+                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\images\\crate_d.bimage", clash);
+                    CHECK(sh_mb_sha256_file(path, &size, have) && !strcmp(have, want));
+                }
+                if (done) sh_mb_free(&out);
+            }
+            free(second);
+        }
+    }
     sh_unit_free(&u);
     sh_mb_free(&b);
 }

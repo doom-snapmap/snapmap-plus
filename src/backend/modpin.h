@@ -38,6 +38,9 @@ void sh_modpin_set_read(sh_modpin_read_fn fn, void *context);
 /* The game's files for the units' pointers (modunit.h sh_unit_game_fn). The default reads the installed game
  * (modstock.h) and the product's own container (modprog.h, source "snapmapplus"). */
 void sh_modpin_set_game(sh_unit_game_fn fn, void *context);
+/* The requests players asked a unit for that it lacked (3.8: the store's asked list for this computer's claims),
+ * seeds of the units computed from now on (modunit.h sh_unit_env.asked). Copied; forgets the units remembered so far. */
+void sh_modpin_set_asked(const sh_unit_asked *asked, size_t n);
 /* The default game reader, for tools that pin as the product does. */
 int  sh_modpin_game_installed(void *context, const char *request, char sha256[SH_MB_HASH_HEX + 1], char *source,
                               size_t cap);

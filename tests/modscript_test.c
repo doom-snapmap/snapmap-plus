@@ -32,7 +32,6 @@
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
-#include "../src/backend/modsync.h"
 #include "../src/backend/modui.h"
 #include "../src/backend/modzip.h"
 #include "../src/backend/script/script_compile.h"
@@ -400,9 +399,6 @@ static void test_store(void)
     modexport_stats es;
     listing l;
     size_t len = 0;
-    unsigned long long size = 0;
-    unsigned pointers = 0;
-    int code = 0;
     unsigned char *text;
 
     printf("-- a new folder: paths lower-cased at install, the mod's own names in .lua as the author writes them\n");
@@ -453,14 +449,6 @@ static void test_store(void)
     CHECK(sh_modserve_script_files(salt, list_cb, &l) == 2 && !strcmp(l.list, "door.lua|lib/fsm.lua|") && l.match == 2);
     if (strcmp(l.list, "door.lua|lib/fsm.lua|")) fprintf(stderr, "  listed %s\n", l.list);
     CHECK(sh_modserve_script_files("zzzzzzzz", NULL, NULL) == 0);
-
-    printf("-- the publish archive carries them under their game names\n");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", a, name);
-    _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\publish.zip", g_tmp);
-    CHECK(HO(cause, modsync_write_archive(path, b.hash, zip, &size, &pointers, &code, HO_P(0))));
-    zip_names(zip, names, sizeof names);
-    CHECK(strstr(names, "scripts/door.lua\n") != NULL);
-    CHECK(strstr(names, "entities/ai/door.decl\n") != NULL);
 
     printf("-- a rawmap export carries them; its import installs and serves them\n");
     map = map_with(&row);

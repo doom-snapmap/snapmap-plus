@@ -136,6 +136,9 @@ typedef struct sh_cache_absent { const char *object, *mod; int cause; } sh_cache
 /* The one sentence for `n` absent objects (malloc'd): the most actionable cause's (S2, S4, S6, S4b, S5, S3)
  * naming all of them, "the Tyrant" or "3 objects from 2 mods (the Tyrant, the Marauder and the Hell Guard)". */
 char *sh_cache_notice_text(const sh_cache_absent *absent, size_t n);
+/* The objects a sentence names (malloc'd): "the Tyrant from Eternal Demons", or "3 objects from 2 mods (the Tyrant, the
+ * Marauder and the Hell Guard)", at most three names then "and N more". */
+char *sh_cache_objects_subject(const sh_cache_absent *absent, size_t n);
 /* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. */
 char *sh_cache_object_name(const char *root);
 
@@ -201,6 +204,13 @@ typedef void (*sh_cache_line_fn)(void *context, const char *line);
 int   sh_cache_report(sh_cache_line_fn fn, void *context);
 /* The storage line alone (malloc'd). */
 char *sh_cache_storage_line(void);
+
+/* The units this computer's published maps claim (modclaim.h modclaim_held: the count, *out malloc'd), which the sweep
+ * at start keeps (5.17 `held`). NULL: none. */
+typedef size_t (*sh_cache_held_fn)(char (**out)[SH_CACHE_HASH_HEX + 1]);
+void  sh_cache_set_held(sh_cache_held_fn fn);
+/* sh_cache_sweep with what this computer's published maps claim kept (sh_cache_set_held). */
+int   sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out);
 
 /* ------------------------------------------------------------ uploading a unit (5.3 steps 2-6) */
 

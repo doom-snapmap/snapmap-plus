@@ -37,10 +37,8 @@
  * and the cost (index load, bytes hashed, time).
  */
 #include "heap_out.h"
-#include "mod_store_stub.h"
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modnet.h"
-#include "../src/backend/modsync.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modstock.h"
@@ -970,18 +968,14 @@ static int count_files(const char *dir)
 
 static void test_store(const char *tmp, const char *d1, const char *d2)
 {
-    char dir[MAX_PATH * 2], store[MAX_PATH * 2], store2[MAX_PATH * 2], store3[MAX_PATH * 2], path[MAX_PATH * 2];
-    char key[HO_TEXT + 1], key2[HO_TEXT + 1], cause[HO_TEXT], url[64], hash[65];
+    char dir[MAX_PATH * 2], store[MAX_PATH * 2], path[MAX_PATH * 2];
+    char key[HO_TEXT + 1], key2[HO_TEXT + 1], cause[HO_TEXT], hash[65];
     sh_ms_install_stats st;
     sh_ms_verify_stats vs;
     sh_mb_bundle b;
     unsigned char *bytes = NULL;
     size_t len = 0;
     sh_modserve_hit hit;
-    modsync_stats ss;
-    sh_modmanifest_row row;
-    sh_ms_place place;
-    char salt[SH_SALT_LEN + 1] = "", mod[MODSYNC_MOD_MAX + 1];
 
     sh_modstock_set_install(d1);
     _snprintf_s(store, sizeof store, _TRUNCATE, "%s\\store", tmp);
@@ -1051,69 +1045,6 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     sh_modstock_set_install(d1);
 
-    /* The store client: the archive carries only the carried file. */
-    CHECK(stub_start() > 0);
-    stub_url(url, sizeof url);
-    CHECK(modnet_set_base_url(url));
-    {
-        sh_ms_list l;
-        size_t i;
-        CHECK(sh_ms_enumerate(&l));
-        for (i = 0; i < l.count; i++)
-            if (!strcmp(l.items[i].bundle.hash, hash)) strcpy_s(salt, sizeof salt, l.items[i].salt);
-        sh_ms_list_free(&l);
-    }
-    _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s@%s", salt, hash);
-    {
-        const char *one[1];
-        one[0] = mod;
-        memset(&ss, 0, sizeof ss);
-        CHECK(modsync_upload_builds(one, 1, "map-stock", NULL, &ss));
-        CHECK(ss.builds_sent == 1 && ss.stock_files == 2 && stub_has_build(hash));
-    }
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.salt, sizeof row.salt, salt);
-    strcpy_s(row.build, sizeof row.build, hash);
-    row.name = (char *)"Stock test";   /* borrowed: this test never frees the row */
-    place.title = "Stock map";
-    place.map_id = NULL;
-    /* Download into an empty store: the one carried file, the pointers resolved. */
-    _snprintf_s(store2, sizeof store2, _TRUNCATE, "%s\\store2", tmp);
-    CHECK(sh_ms_set_root(store2));
-    CHECK(sh_modserve_index_build(store2) == 0);
-    memset(&ss, 0, sizeof ss);
-    CHECK(modsync_fetch_build_for(&row, &place, NULL, &ss));
-    if (ss.code != MODNET_OK) fprintf(stderr, "  fetch: %s\n", ss.cause);
-    CHECK(sh_modserve_bundle_state(hash, NULL) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store2, ss.folder);
-    CHECK(count_files(path) == 2);   /* mod.json and the one carried file */
-    /* A player on another revision: the archive is refused before anything is placed. */
-    _snprintf_s(store3, sizeof store3, _TRUNCATE, "%s\\store3", tmp);
-    CHECK(sh_ms_set_root(store3));
-    sh_modstock_set_install(d2);
-    memset(&ss, 0, sizeof ss);
-    CHECK(!modsync_fetch_build_for(&row, &place, NULL, &ss) && ss.code == MODNET_E_GAME && ss.game_lacks);
-    CHECK(count_files(store3) <= 1);   /* at most the record */
-    {
-        /* The same through the install core with a local archive. */
-        modsync_install_info info;
-        char archive[MAX_PATH * 2];
-        unsigned long long asize = 0;
-        unsigned pointers = 0;
-        int code = 0;
-        CHECK(sh_ms_set_root(store));
-        _snprintf_s(archive, sizeof archive, _TRUNCATE, "%s\\stock.zip", tmp);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
-        CHECK(HO(cause, modsync_write_archive(path, hash, archive, &asize, &pointers, &code, HO_P(0))) && pointers == 2);
-        CHECK(sh_ms_set_root(store3));
-        memset(&info, 0, sizeof info);
-        CHECK(!HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))) && info.game_lacks);
-        sh_modstock_set_install(d1);
-        memset(&info, 0, sizeof info);
-        CHECK(HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))));
-        CHECK(info.files == 1 && info.stock_files == 2);
-    }
-    stub_stop();
     sh_ms_set_root(NULL);
     sh_modstock_set_install(d1);
 }
