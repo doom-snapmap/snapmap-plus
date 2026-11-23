@@ -22,6 +22,7 @@
 /* ------------------------------------------------------------ state */
 
 static SRWLOCK g_lock = SRWLOCK_INIT;     /* the rows, the notices, the local index, the settings */
+static SRWLOCK g_blob_fetch = SRWLOCK_INIT;   /* a file fetched alone: one at a time (sh_cache_prepare's threads) */
 static SRWLOCK g_disk = SRWLOCK_INIT;     /* the cache's folders: a composition put in place, the sweep */
 static char *g_mods_root;                  /* override (tests, tools); NULL: the product's */
 static char *g_saved_dir, *g_published_dir;
@@ -261,7 +262,11 @@ int sh_cache_put_blob(const char *from, const char *sha, unsigned long long size
     dest = mc_path("files\\%.2s\\%s", sha, sha);
     ok = dir && dest && mc_mkdirs(dir);
     if (ok && mc_exists(dest, NULL)) mc_delete(from);
-    else if (ok) ok = mc_move(from, dest);
+    else if (ok && !(ok = mc_move(from, dest)) && mc_exists(dest, NULL)) {
+        /* another fetch stored the same file meanwhile (units share files; four fetch at once) */
+        mc_delete(from);
+        ok = 1;
+    }
     if (ok && (w = sh_mb_wpath(dest)) != NULL) { SetFileAttributesW(w, FILE_ATTRIBUTE_READONLY); free(w); }
     free(dir);
     free(dest);
@@ -756,14 +761,13 @@ static int mc_cause_rank(int cause)
     }
 }
 
-char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
+char *sh_cache_objects_subject(const sh_cache_absent *a, size_t n)
 {
-    char *subject = NULL, *out = NULL;
-    size_t i, k, mods = 0, best = 0;
+    char *subject = NULL;
+    size_t i, k, mods = 0;
     const char *mod0 = NULL;
     int plural = n > 1;
     if (!a || !n) return NULL;
-    for (i = 1; i < n; i++) if (mc_cause_rank(a[i].cause) < mc_cause_rank(a[best].cause)) best = i;
     for (i = 0; i < n; i++) {
         int seen = 0;
         for (k = 0; k < i && !seen; k++) seen = !strcmp(a[k].mod ? a[k].mod : "", a[i].mod ? a[i].mod : "");
@@ -782,7 +786,17 @@ char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
                            : sh_textf("%u objects from %s (%s)", (unsigned)n, mod0 ? mod0 : "a mod", list ? list : "");
         free(list);
     }
-    if (!subject) return NULL;
+    return subject;
+}
+
+char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
+{
+    char *subject, *out = NULL;
+    size_t i, best = 0;
+    int plural = n > 1;
+    if (!a || !n) return NULL;
+    for (i = 1; i < n; i++) if (mc_cause_rank(a[i].cause) < mc_cause_rank(a[best].cause)) best = i;
+    if (!(subject = sh_cache_objects_subject(a, n))) return NULL;
     switch (a[best].cause) {
     case SH_CACHE_ABSENT_OFFLINE:
         out = sh_textf("This map is playing without %s, which %s not on this computer. Connect to the internet and open the map "
@@ -1381,6 +1395,7 @@ static void mc_side_causes(const char *chash, mc_unit *units, size_t n)
 /* Compose row `chash`. The absence cause of unit i when it is not here is causes[i] (a fetch's answer), else the one
  * the composition on disk recorded, else `cause` (SH_CACHE_ABSENT_OFFLINE: nothing asked). A composition that is not
  * made again keeps its sidecar, rewritten only when a fetch brought causes. */
+static int mc_product_ok(const mc_unit *u);
 static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built)
 {
     mc_row snapshot;
@@ -1435,6 +1450,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (snapshot.n && (!units || !manifests || !lens)) { reason = sh_text("out of memory"); goto done; }
     for (i = 0; i < snapshot.n; i++) {
         mc_unit_load(&units[i], snapshot.units[i]);
+        if (units[i].state == 1 && !mc_product_ok(&units[i])) units[i].state = -2;
         if (units[i].state == 1) { manifests[nm] = units[i].bytes; lens[nm] = units[i].len; nm++; continue; }
         complete = 0;
         units[i].cause = units[i].state == -2 ? SH_CACHE_ABSENT_NEWER : (causes && causes[i]) ? causes[i] : 0;
@@ -1602,6 +1618,8 @@ int sh_cache_compose_now(const char *chash, int cause, char **why)
 /* A failure's absence cause. */
 static int mc_net_cause(int code, const modnet_result *r)
 {
+    /* No name resolved: this computer is not connected, which S2 says (B2), not a store that did not answer (S4). */
+    if (code == MODNET_E_NET && r && r->offline) return SH_CACHE_ABSENT_OFFLINE;
     if (code == MODNET_E_BLOCKED) return SH_CACHE_ABSENT_REMOVED;
     if (code == MODNET_E_NOT_FOUND) return SH_CACHE_ABSENT_NOT_IN_STORE;
     if (code == MODNET_E_ARG && r && r->message && strstr(r->message, "(error 112)")) return SH_CACHE_ABSENT_DISK;
@@ -1737,7 +1755,7 @@ static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
         free(cause_text);
         cause_text = NULL;
         if (!bytes) continue;
-        tmp = mc_path("partial\\%s.part", u->files[f].sha);
+        tmp = mc_path("partial\\%s.%lu.part", u->files[f].sha, GetCurrentThreadId());
         if (!tmp || !mc_write(tmp, bytes, len)) cause = SH_CACHE_ABSENT_DISK;
         else if (sh_cache_put_blob(tmp, u->files[f].sha, u->files[f].size)) stored++;
         free(tmp);
@@ -1768,6 +1786,36 @@ int sh_cache_pointer_checked(const char *source)
     return !(source && (!strcmp(source, SH_MODPROG_CONTAINER) || !strcmp(source, "product")));
 }
 
+/* N13: the unit's pointers into the product's own container name bytes this product derives (modprog.h); a product
+ * that derives other bytes, or none, does not have the unit's content (S6, a different product version). 1 ok. */
+static int mc_product_ok(const mc_unit *u)
+{
+    mpj *m = mpj_parse(u->bytes, u->len);
+    const mpj *game = m ? mpj_get(m, "game") : NULL;
+    int i, ok = 1;
+    for (i = 0; ok && game && game->type == MPJ_ARR && i < game->n; i++) {
+        const mpj *p = mpj_get(game->items[i], "path"), *s = mpj_get(game->items[i], "sha256"), *src = mpj_get(game->items[i], "source");
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        char have[SH_MB_HASH_HEX + 1];
+        if (!p || p->type != MPJ_STR || !s || s->type != MPJ_STR || !src || src->type != MPJ_STR) continue;
+        if (sh_cache_pointer_checked(src->text)) continue;   /* DOOM's own files: mc_game_ok */
+        if (!sh_modprog_owns(p->text) || sh_modprog_read(p->text, &bytes, &len) != SH_MB_STOCK_OK || !bytes) {
+            mc_logf("MODS: content: a unit names %s of Snapmap+'s own files, which this Snapmap+ does not make", p->text);
+            ok = 0;
+            continue;
+        }
+        sh_mb_sha256_hex(bytes, len, have);
+        HeapFree(GetProcessHeap(), 0, bytes);
+        if (strcmp(have, s->text)) {
+            mc_logf("MODS: content: a unit names other bytes of Snapmap+'s own %s than this Snapmap+ makes", p->text);
+            ok = 0;
+        }
+    }
+    mpj_free(m);
+    return ok;
+}
+
 static int mc_game_ok(const mc_unit *u)
 {
     mpj *m = mpj_parse(u->bytes, u->len);
@@ -1789,12 +1837,94 @@ static int mc_game_ok(const mc_unit *u)
     return ok;
 }
 
+/* The held units of a row fetched on up to four threads (5.7): each takes the next unit, fetches its archive (and
+ * alone any file the archive lacked) and records its cause. Progress is the sum of every transfer, reported to the
+ * caller's callback under one lock. */
+#define MC_FETCH_AT_ONCE 4
+typedef struct mc_fetch_pool {
+    const char (*units)[SH_MB_HASH_HEX + 1];
+    const size_t *todo;
+    size_t ntodo;
+    volatile LONG next;
+    int *causes;
+    const modnet_io *outer;
+    CRITICAL_SECTION lock;
+    unsigned long long done[MC_FETCH_AT_ONCE * 4], total[MC_FETCH_AT_ONCE * 4];   /* per unit slot, mod the table */
+    volatile LONG cancelled;
+} mc_fetch_pool;
+
+typedef struct mc_fetch_slot { mc_fetch_pool *pool; size_t slot; } mc_fetch_slot;
+
+static void mc_fetch_progress(void *context, unsigned long long done, unsigned long long total)
+{
+    mc_fetch_slot *s = (mc_fetch_slot *)context;
+    mc_fetch_pool *p = s->pool;
+    unsigned long long sum = 0, all = 0;
+    size_t k;
+    EnterCriticalSection(&p->lock);
+    p->done[s->slot] = done;
+    if (total > p->total[s->slot]) p->total[s->slot] = total;
+    for (k = 0; k < sizeof p->done / sizeof p->done[0]; k++) { sum += p->done[k]; all += p->total[k]; }
+    if (p->outer && p->outer->progress) p->outer->progress(p->outer->context, sum, all);
+    LeaveCriticalSection(&p->lock);
+}
+
+static DWORD WINAPI mc_fetch_worker(LPVOID context)
+{
+    mc_fetch_pool *p = (mc_fetch_pool *)context;
+    for (;;) {
+        LONG n = InterlockedIncrement(&p->next) - 1;
+        size_t i, f;
+        mc_unit u;
+        mc_fetch_slot slot;
+        modnet_io io;
+        int c;
+        if (n < 0 || (size_t)n >= p->ntodo || InterlockedCompareExchange(&p->cancelled, 0, 0)) break;
+        i = p->todo[n];
+        slot.pool = p;
+        slot.slot = (size_t)n % (sizeof p->done / sizeof p->done[0]);
+        memset(&io, 0, sizeof io);
+        if (p->outer) io.cancel = p->outer->cancel;
+        io.progress = mc_fetch_progress;
+        io.context = &slot;
+        mc_unit_load(&u, p->units[i]);
+        /* Its manifest's checks first when it is here; else the archive brings it and they follow. */
+        if (u.state == -2) { p->causes[i] = SH_CACHE_ABSENT_NEWER; mc_unit_free(&u); continue; }
+        if (u.state >= 0 && !mc_product_ok(&u)) { p->causes[i] = SH_CACHE_ABSENT_NEWER; mc_unit_free(&u); continue; }
+        if (u.state >= 0 && !mc_game_ok(&u)) { p->causes[i] = SH_CACHE_ABSENT_GAME; mc_unit_free(&u); continue; }
+        if (u.state != 1) {
+            c = mc_fetch_archive(&u, p->units[i], &io);
+            if (c < 0) { InterlockedExchange(&p->cancelled, 1); mc_unit_free(&u); break; }
+            if (c) p->causes[i] = c;
+            else if (u.state == -2) p->causes[i] = SH_CACHE_ABSENT_NEWER;
+            else if (!mc_product_ok(&u)) p->causes[i] = SH_CACHE_ABSENT_NEWER;
+            else if (!mc_game_ok(&u)) p->causes[i] = SH_CACHE_ABSENT_GAME;
+            /* An entry the archive lacked or that did not check: fetched alone (a repair, a few files), one at a time
+             * across the threads, since two units may lack the same file. */
+            for (f = 0; !p->causes[i] && u.state >= 0 && f < u.nfiles; f++) {
+                char *src = mc_source_of(u.files[f].sha, u.files[f].size);
+                if (src) { free(src); continue; }
+                AcquireSRWLockExclusive(&g_blob_fetch);
+                src = mc_source_of(u.files[f].sha, u.files[f].size);
+                c = src ? 0 : mc_fetch_blob(u.files[f].sha, u.files[f].size, &io);
+                ReleaseSRWLockExclusive(&g_blob_fetch);
+                free(src);
+                if (c < 0) { InterlockedExchange(&p->cancelled, 1); break; }
+                if (c) p->causes[i] = c;
+            }
+        }
+        mc_unit_free(&u);
+        if (InterlockedCompareExchange(&p->cancelled, 0, 0)) break;
+    }
+    return 0;
+}
+
 int sh_cache_prepare(const char *chash, const modnet_io *io)
 {
     mc_row snapshot;
     const char **want = NULL;
     int *states = NULL, *causes = NULL;
-    size_t i, nwant = 0, f;
+    size_t i, nwant = 0;
     modnet_result r;
     int code = MODNET_OK, ok;
     char *why = NULL;
@@ -1819,11 +1949,12 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
     for (i = 0; i < snapshot.n; i++)
         if (sh_cache_unit_state(snapshot.units[i], NULL, NULL, NULL) != 1) want[nwant++] = snapshot.units[i];
     if (nwant) {
-        /* The store's state of each absent unit (held, missing, removed); then each held one fetched. */
+        /* The store's state of each absent unit (held, missing, removed); then the held ones fetched, four at a time
+         * (5.7). */
         int st = modnet_unit_status(want, nwant, states, io, &r);
-        size_t w = 0;
+        size_t w = 0, *todo = (size_t *)calloc(snapshot.n ? snapshot.n : 1, sizeof *todo), ntodo = 0;
+        if (!todo) { code = MODNET_E_NOMEM; goto done; }
         for (i = 0; i < snapshot.n; i++) {
-            mc_unit u;
             if (w < nwant && want[w] == snapshot.units[i]) {
                 int state = states[w++];
                 if (st != MODNET_OK) {
@@ -1838,28 +1969,31 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
                     causes[i] = SH_CACHE_ABSENT_NOT_IN_STORE;
                     continue;
                 }
-                mc_unit_load(&u, snapshot.units[i]);
-                /* Its manifest's checks first when it is here; else the archive brings it and they follow. */
-                if (u.state == -2) { causes[i] = SH_CACHE_ABSENT_NEWER; mc_unit_free(&u); continue; }
-                if (u.state >= 0 && !mc_game_ok(&u)) { causes[i] = SH_CACHE_ABSENT_GAME; mc_unit_free(&u); continue; }
-                if (u.state != 1) {
-                    int c = mc_fetch_archive(&u, snapshot.units[i], io);
-                    if (c < 0) { code = MODNET_E_CANCELLED; mc_unit_free(&u); goto done; }
-                    if (c) causes[i] = c;
-                    else if (u.state == -2) causes[i] = SH_CACHE_ABSENT_NEWER;
-                    else if (!mc_game_ok(&u)) causes[i] = SH_CACHE_ABSENT_GAME;
-                    /* An entry the archive lacked or that did not check: fetched alone (a repair, a few files). */
-                    for (f = 0; !causes[i] && u.state >= 0 && f < u.nfiles; f++) {
-                        char *src = mc_source_of(u.files[f].sha, u.files[f].size);
-                        if (src) { free(src); continue; }
-                        c = mc_fetch_blob(u.files[f].sha, u.files[f].size, io);
-                        if (c < 0) { code = MODNET_E_CANCELLED; mc_unit_free(&u); goto done; }
-                        if (c) causes[i] = c;
-                    }
-                }
-                mc_unit_free(&u);
+                todo[ntodo++] = i;
             }
         }
+        if (ntodo) {
+            mc_fetch_pool pool;
+            HANDLE threads[MC_FETCH_AT_ONCE];
+            DWORD started = 0, t;
+            memset(&pool, 0, sizeof pool);
+            pool.units = (const char (*)[SH_MB_HASH_HEX + 1])snapshot.units;
+            pool.todo = todo;
+            pool.ntodo = ntodo;
+            pool.causes = causes;
+            pool.outer = io;
+            InitializeCriticalSection(&pool.lock);
+            for (t = 0; t < MC_FETCH_AT_ONCE && t < ntodo; t++) {
+                threads[started] = CreateThread(NULL, 0, mc_fetch_worker, &pool, 0, NULL);
+                if (threads[started]) started++;
+            }
+            if (!started) (void)mc_fetch_worker(&pool);   /* no thread could start: this one fetches them */
+            else WaitForMultipleObjects(started, threads, TRUE, INFINITE);
+            for (t = 0; t < started; t++) CloseHandle(threads[t]);
+            DeleteCriticalSection(&pool.lock);
+            if (pool.cancelled) { free(todo); code = MODNET_E_CANCELLED; goto done; }
+        }
+        free(todo);
     }
     ok = mc_compose(chash, causes, SH_CACHE_ABSENT_UNREACHABLE, &why, NULL);
     if (!ok) { mc_logf("MODS: content: the map's row could not be composed: %s", why ? why : "?"); code = -1; }
@@ -2126,6 +2260,9 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         char hash[SH_CACHE_HASH_HEX + 1], *path = sh_textf("%s\\%s", sdir, names[i]);
         int stale = strlen(names[i]) != 64;
         if (!stale) { memcpy(hash, names[i], 65); stale = !mc_hex64(hash) || !mc_set_has(&kept.comps, hash); }
+        /* A composition being made or replaced right now (B3: built outside this lock) is left alone; only one nothing
+         * has written for an hour is what a crash left. */
+        else stale = path && mc_untouched_for(path, MC_PARTIAL_IDLE_S);
         if (path && stale && mc_rmtree(path)) {
             char *side = strlen(names[i]) == 64 ? sh_textf("%s.json", path) : NULL;
             if (side) mc_delete(side);
@@ -2310,11 +2447,30 @@ int sh_cache_report(sh_cache_line_fn fn, void *context)
     return (int)rep.lines;
 }
 
-/* The sweep at start, off the boot thread. */
+/* The units this computer's published maps claim (modclaim.h modclaim_held), kept by every sweep (5.17): a claim's
+ * units serve its self-repair (5.21) after its map left this computer. Bound at install. */
+static sh_cache_held_fn g_held;
+void sh_cache_set_held(sh_cache_held_fn fn) { g_held = fn; }
+
+int sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out)
+{
+    char (*held)[SH_CACHE_HASH_HEX + 1] = NULL;
+    const char **list = NULL;
+    size_t n = g_held ? g_held(&held) : 0, i;
+    int r;
+    if (n && (list = (const char **)calloc(n, sizeof *list)) != NULL)
+        for (i = 0; i < n; i++) list[i] = held[i];
+    r = sh_cache_sweep(drop_played, list, list ? n : 0, out);
+    free((void *)list);
+    free(held);
+    return r;
+}
+
+/* The sweep at start and after a map is deleted or a mod uninstalled (5.17), off the calling thread. */
 static DWORD WINAPI mc_sweep_thread(LPVOID unused)
 {
     (void)unused;
-    (void)sh_cache_sweep(0, NULL, 0, NULL);
+    (void)sh_cache_sweep_kept(0, NULL);
     return 0;
 }
 

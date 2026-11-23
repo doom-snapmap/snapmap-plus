@@ -19,7 +19,6 @@
 #include "plain_reason.h"
 #include "modzip.h"
 #include "map_carrier.h"
-#include "modsync.h"
 #include "modui.h"
 #include "../common/text.h"
 
@@ -1402,27 +1401,3 @@ int modexport_validate_source(const char *path, char **out_msg)
     return ok;
 }
 
-/* ------------------------------------------------------------ received builds */
-
-int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const modnet_io *io, modsync_stats *st,
-                          char **where)
-{
-    sh_ms_place at;
-    char *key = NULL;
-    const char *segment = place && place[0] ? strchr(place, '\\') : NULL;
-    int ok;
-    if (where) *where = NULL;
-    if (segment) {
-        /* The map's place, under a record key that names exactly that folder. */
-        if (!(key = sh_textf("place:%s", segment + 1))) return 0;
-        at.title = segment + 1;
-        at.map_id = key;
-        (void)sh_ms_place_note(&at, place);
-    }
-    /* Without a place the build installs at the root, as the player's own mod. */
-    ok = modsync_fetch_build_for(row, segment ? &at : NULL, io, st);
-    free(key);
-    if (!ok) return 0;
-    if (where) *where = sh_text(st->folder ? st->folder : "");
-    return 1;
-}

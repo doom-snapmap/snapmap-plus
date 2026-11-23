@@ -5894,8 +5894,8 @@ static int mb_write_wfile(const wchar_t *path, const void *data, size_t len)
     _snwprintf_s(tmp, n + 16, _TRUNCATE, L"%s.tmp%lu", path, GetCurrentProcessId());
     /* A virus scanner, the indexer or a reader holds the file open for a moment after it is
      * written or read, and the replace then fails with a sharing or access error. mb_record_read
-     * waits those out; the write waits them out the same way (a load-dependent flake: the asked
-     * list was not saved, so modsync_asked_refresh returned -1 under load). */
+     * waits those out; the write waits them out the same way (a load-dependent flake: a record section was not
+     * saved under load). */
     for (attempt = 0; attempt < 20; attempt++) {
         SetLastError(ERROR_SUCCESS);
         h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

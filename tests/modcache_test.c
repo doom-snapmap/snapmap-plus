@@ -490,6 +490,13 @@ static void test_cache(const char *top)
             t = sh_cache_take_notice();
             CHECK(t && strstr(t, "the mod store could not be reached") && !strstr(t, "not on this computer"));
             free(t);
+            /* B2: no name resolves (this computer is not connected): S2, not S4. */
+            CHECK(modnet_set_base_url("https://snapmapplus-offline-test.invalid/"));
+            CHECK(sh_cache_prepare(chash, &io) == 0);
+            CHECK(modnet_set_base_url(NULL));
+            t = sh_cache_take_notice();
+            CHECK(t && strstr(t, "which is not on this computer. Connect to the internet"));
+            free(t);
         }
         download(&barrel, &b, pack, 1);
         load_rows(rows, 1, placed, 2);
@@ -875,6 +882,175 @@ static void test_cache(const char *top)
     sh_mb_free(&b);
 }
 
+/* The product's own derived files (modprog.h), as a double: one path with known bytes. */
+#define PRODUCT_FILE  "snapmapplus/layered/derived_by_this_product.bimage"
+static const char PRODUCT_BYTES[] = "bytes this product derives";
+int sh_modprog_owns(const char *path) { return path && !_stricmp(path, PRODUCT_FILE); }
+int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
+{
+    if (!sh_modprog_owns(path)) return SH_MB_STOCK_ABSENT;
+    *len = sizeof PRODUCT_BYTES - 1;
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, PRODUCT_BYTES, *len);
+    return SH_MB_STOCK_OK;
+}
+
+/* N13: a unit naming a pointer into the product's own container (source "snapmapplus") is checked against what this
+ * product derives: a path it does not derive, or derives with other bytes, makes the unit absent with the S6 cause (the
+ * object stands in and the notice says a newer Snapmap+ is needed); the product's own bytes compose in full. */
+static void n13_variant(const char *top, int variant, const char *pointer, int expect_complete)
+{
+    char pack[MAX_PATH * 2], mods[MAX_PATH * 2], path[MAX_PATH * 3], newhash[65], *t, *text;
+    static const char EMPTY[] = "\"game\":[]";
+    const char *at, *placed[] = { "mods/" SALT "/crate" };
+    sh_mb_bundle b;
+    sh_unit crate, forged;
+    const sh_unit *units[1];
+    sh_modmanifest_row row;
+    size_t len, plen = strlen(pointer);
+    int complete = 1;
+    _snprintf_s(pack, sizeof pack, _TRUNCATE, "%s\\author_n13_%d\\crates", top, variant);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\player_n13_%d\\mods", top, variant);
+    write_pack(pack);
+    if (!build(pack, &b)) return;
+    if (!unit(&b, pack, "mods/" SALT "/crate", &crate)) { sh_mb_free(&b); return; }
+    at = strstr(crate.manifest, EMPTY);
+    CHECK(at != NULL);
+    if (!at) { sh_mb_free(&b); return; }
+    len = crate.manifest_len - (sizeof EMPTY - 1) + plen;
+    text = (char *)malloc(len + 1);
+    CHECK(text != NULL);
+    if (!text) { sh_mb_free(&b); return; }
+    memcpy(text, crate.manifest, (size_t)(at - crate.manifest));
+    memcpy(text + (at - crate.manifest), pointer, plen);
+    memcpy(text + (at - crate.manifest) + plen, at + sizeof EMPTY - 1,
+           crate.manifest_len - (size_t)(at - crate.manifest) - (sizeof EMPTY - 1));
+    text[len] = 0;
+    sh_mb_sha256_hex(text, len, newhash);
+    forged = crate;                                   /* the same objects and files, the other manifest */
+    strcpy_s(forged.hash, sizeof forged.hash, newhash);
+
+    CreateDirectoryA(mods, NULL);
+    sh_cache_set_mods_root(mods);
+    download(&crate, &b, pack, 1);                    /* its files */
+    CHECK(sh_cache_put_manifest(newhash, text, len));
+    units[0] = &forged;
+    row_of(&row, SALT, units, 1);
+    (void)sh_cache_take_notice();
+    load_rows(&row, 1, placed, 1);
+    CHECK(sh_cache_composed(row.build, &complete) && !!complete == !!expect_complete);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\crate.decl", mods, row.build);
+    t = read_text(path);
+    CHECK(t && (strstr(t, "snapmaps/unknown") != NULL) == !expect_complete);   /* the object stands in, or is whole */
+    free(t);
+    t = sh_cache_take_notice();
+    if (expect_complete) CHECK(!t);
+    else CHECK(t && strstr(t, "which needs a newer Snapmap+; run the Snapmap+ installer to update."));
+    if (t) printf("  %s\n", t);
+    free(t);
+    free(text);
+    sh_mb_free(&b);
+}
+
+static void test_product_pointer(const char *top)
+{
+    char pointer[400], sha[SH_MB_HASH_HEX + 1];
+    printf("-- a unit's pointer into the product's own files is checked against what this product derives (N13, S6)\n");
+    /* a file this product does not derive */
+    n13_variant(top, 1, "\"game\":[{\"path\":\"snapmapplus/layered/not_derived_by_this_product.bimage\","
+                        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", 0);
+    /* a file it derives, with other bytes */
+    _snprintf_s(pointer, sizeof pointer, _TRUNCATE, "\"game\":[{\"path\":\"%s\","
+                "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", PRODUCT_FILE);
+    n13_variant(top, 2, pointer, 0);
+    /* a file it derives, with the same bytes: the unit is whole */
+    sh_mb_sha256_hex(PRODUCT_BYTES, sizeof PRODUCT_BYTES - 1, sha);
+    _snprintf_s(pointer, sizeof pointer, _TRUNCATE, "\"game\":[{\"path\":\"%s\",\"sha256\":\"%s\",\"source\":\"snapmapplus\"}]",
+                PRODUCT_FILE, sha);
+    n13_variant(top, 3, pointer, 1);
+}
+
+/* 5.17 and B3: what this computer's published maps claim is kept by the sweep through a bound provider; a composition
+ * folder still being built ("<chash>.staging-...") is removed only when nothing wrote it for an hour. */
+static char g_held_hash[SH_CACHE_HASH_HEX + 1];
+static size_t held_provider(char (**out)[SH_CACHE_HASH_HEX + 1])
+{
+    *out = (char (*)[SH_CACHE_HASH_HEX + 1])malloc(sizeof **out);
+    if (!*out) return 0;
+    strcpy_s((*out)[0], sizeof **out, g_held_hash);
+    return 1;
+}
+
+static void age_path(const char *path)
+{
+    FILETIME old_time;
+    SYSTEMTIME sys = { 2020, 1, 3, 1, 0, 0, 0, 0 };
+    HANDLE h = CreateFileA(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    SystemTimeToFileTime(&sys, &old_time);
+    if (h != INVALID_HANDLE_VALUE) { SetFileTime(h, &old_time, &old_time, &old_time); CloseHandle(h); }
+}
+
+static void test_sweep_held(const char *top)
+{
+    char pack[MAX_PATH * 2], mods[MAX_PATH * 2], saved[MAX_PATH * 2], played[MAX_PATH * 2], saves[MAX_PATH * 2];
+    char fresh[MAX_PATH * 3], aged[MAX_PATH * 3], inner[MAX_PATH * 3];
+    static const char HASH[] = "3333333333333333333333333333333333333333333333333333333333333333";
+    sh_mb_bundle b;
+    sh_unit crate;
+    sh_cache_sweep_stats st;
+    printf("-- the sweep keeps what this computer's published maps claim; a composition being built is kept for an hour\n");
+    _snprintf_s(pack, sizeof pack, _TRUNCATE, "%s\\author_held\\crates", top);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\player_held\\mods", top);
+    _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\player_held\\saved-maps", top);
+    _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\player_held\\published-maps", top);
+    _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\player_held\\saves", top);
+    write_pack(pack);
+    if (!build(pack, &b)) return;
+    if (!unit(&b, pack, "mods/" SALT "/crate", &crate)) { sh_mb_free(&b); return; }
+    CreateDirectoryA(mods, NULL);
+    sh_cache_set_mods_root(mods);
+    CreateDirectoryA(saved, NULL);
+    CreateDirectoryA(played, NULL);
+    CreateDirectoryA(saves, NULL);
+    sh_cache_set_map_folders(saved, played);
+    sh_saved_maps_set_root(saves);
+    download(&crate, &b, pack, 1);
+    CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+
+    /* No kept map names it, but a held claim does: the sweep through the provider keeps it. */
+    strcpy_s(g_held_hash, sizeof g_held_hash, crate.hash);
+    sh_cache_set_held(held_provider);
+    CHECK(sh_cache_sweep_kept(0, &st) && st.units_removed == 0);
+    CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+    CHECK(sh_cache_sweep_kept(1, &st) && st.units_removed == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+
+    /* A fresh staging folder (a composition being built) survives; one nothing wrote for an hour goes. */
+    _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s\\.content\\served\\%s.staging-1-2", mods, HASH);
+    _snprintf_s(aged, sizeof aged, _TRUNCATE, "%s\\.content\\served\\%s.staging-3-4", mods, HASH);
+    mt_mkdirs_for(fresh);
+    CreateDirectoryA(fresh, NULL);
+    CreateDirectoryA(aged, NULL);
+    _snprintf_s(inner, sizeof inner, _TRUNCATE, "%s\\x.bin", fresh);
+    write_file(inner, "x", 1);
+    _snprintf_s(inner, sizeof inner, _TRUNCATE, "%s\\x.bin", aged);
+    write_file(inner, "x", 1);
+    age_path(inner);
+    age_path(aged);
+    CHECK(sh_cache_sweep_kept(0, &st));
+    CHECK(GetFileAttributesA(fresh) != INVALID_FILE_ATTRIBUTES);   /* written just now: being built */
+    CHECK(GetFileAttributesA(aged) == INVALID_FILE_ATTRIBUTES);    /* nothing wrote it for an hour */
+    CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+
+    /* Without the provider the same sweep removes the unit nothing else names. */
+    sh_cache_set_held(NULL);
+    CHECK(sh_cache_sweep_kept(0, &st) && st.units_removed == 1);
+    CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == -1);
+    CHECK(GetFileAttributesA(fresh) != INVALID_FILE_ATTRIBUTES);   /* still being built */
+    sh_mb_free(&b);
+}
+
 static void test_key(const char *top)
 {
     sh_key *k = NULL, *back = NULL;
@@ -919,6 +1095,8 @@ int main(void)
     test_notices();
     printf("-- the cache: compose, one copy, determinism, stand-ins, local mods, sweep\n");
     test_cache(top);
+    test_product_pointer(top);
+    test_sweep_held(top);
     printf("-- the publishing key\n");
     test_key(top);
     (void)g_current_rows;

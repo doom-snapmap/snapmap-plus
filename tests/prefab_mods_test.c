@@ -44,7 +44,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include "../src/common/text.h"
 #include "heap_out.h"
-#include "mod_store_stub.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +60,6 @@
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/module_prefab_map.h"
-#include "../src/backend/modsync.h"
 #include "../src/backend/modnet.h"
 #include "../src/common/snapmap_plus_iface.h"
 #include "mod_test_util.h"
@@ -106,6 +104,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     return 0;
 }
 
+#define HASH_UNIT "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define GHOST "9999999999999999999999999999999999999999999999999999999999999999"
 
 /* ---- engine doubles -------------------------------------------------------------------------- */
@@ -119,7 +118,6 @@ typedef struct fake {
     int prints, toasts, refreshes, main_calls;
     char last_print[1200], prints_all[8192], last_toast[512];
     int ghost_installed;        /* the download installed GHOST */
-    int store;                  /* store_has for GHOST: 1, 0, -1 */
     int asks, ask_buttons, answer, answered;
     char last_ask[512];
     int fetches;
@@ -131,7 +129,7 @@ static fake F;
 static int f_row_state(const sh_modmanifest_row *row, char **cause)
 {
     if (cause) *cause = NULL;
-    if (!strcmp(row->build, GHOST)) {
+    if (!strcmp(row->build, GHOST) || !strcmp(row->salt, "ghostmod")) {
         if (F.ghost_installed) return SH_MODPUB_ROW_SERVED;
         if (cause) ho_setf(cause, "This prefab uses %s, which is not installed.", row->name);
         return SH_MODPUB_ROW_MISSING;
@@ -204,23 +202,16 @@ static int p_fetch_for(void *c, const sh_modmanifest_row *row, const char *place
 {
     (void)c; (void)place; (void)progress; (void)cancel;
     F.fetches++;
-    if (!strcmp(row->build, GHOST)) F.ghost_installed = 1;
+    if (!strcmp(row->build, GHOST) || !strcmp(row->salt, "ghostmod")) F.ghost_installed = 1;
     return 0;
 }
 static void p_log(void *c, const char *line) { (void)c; backend_log(line); }
-static int p_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
-{
-    (void)c; (void)cancel;
-    memset(out, 0, sizeof *out);
-    out->found = !strcmp(hash, GHOST) ? F.store : 1;
-    return out->found;
-}
 static void p_print(void *c, const char *line) { (void)c; f_print(line); }
 
 static const sh_modpub_ops PUB_OPS = {
-    NULL, p_on_main, p_row_state, p_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
-    p_worker_run, p_fetch_for, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, p_log,
-    p_print, p_store_probe
+    .on_main = p_on_main, .row_state = p_row_state, .rescan = p_rescan, .activate = p_activate,
+    .can_ask = p_can_ask, .ask = p_ask, .poll = p_poll, .release = p_release,
+    .worker_run = p_worker_run, .fetch_for = p_fetch_for, .log = p_log, .print = p_print
 };
 
 static void reset_fakes(void)
@@ -667,6 +658,7 @@ static void status(const sh_modmanifest_row *door)
     sh_modmanifest_list_free(&rows);
 }
 
+static int g_ghost_pinned;   /* the ghost row names units (pinned): its content is fetched, not refused */
 static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, int with_ghost)
 {
     sh_modmanifest_row ghost;
@@ -679,7 +671,12 @@ static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, i
         strcpy_s(ghost.build, sizeof ghost.build, GHOST);
         ghost.size = 1048576;
         sh_modmanifest_row_add_name(&ghost, "maps/modules/mods/ghostmod/room.decl");
+        if (g_ghost_pinned) {   /* names a unit: the build becomes the composition's */
+            static const char *const roots[1] = { "entities/ghost" }, *const units[1] = { HASH_UNIT };
+            sh_modmanifest_row_pin(&ghost, roots, units, 1);
+        }
         sh_modmanifest_list_add(rows, &ghost);
+        sh_modmanifest_row_free(&ghost);
     }
 }
 
@@ -703,64 +700,50 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(HO(msg, sh_prefab_mods_resolve_main(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, &rows, "Crate", &seq, HO_P(0))) ==
           SH_PREFAB_MODS_PLACE && F.activations == 2);
 
-    printf("-- the store has the missing mod: the prefab's question, Yes downloads, then it is ready\n");
+    printf("-- a row nothing serves and no unit names: held, refused at the next tick with the prefab's sentence, nothing fetched\n");
     reset_fakes();
-    F.store = 1;
-    F.answer = 1;
     rows_of(&rows, door, 1);
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_HELD && seq > 0 && sh_prefab_mods_poll(seq) == 2);
-    CHECK(!strcmp(msg, "This prefab needs 1 mod you do not have; checking the mod store."));
-    CHECK(!strcmp(F.last_print, "Prefab Door needs 1 mod you do not have; checking the mod store."));
-    CHECK(F.attaches == 0);   /* nothing reaches the map before the answer */
+    CHECK(!strcmp(msg, "This prefab needs 1 mod you do not have; getting its content."));
+    /* The hold says each missing row's asset-rule sentence; the placement adds no console line of its own. */
+    CHECK(!strcmp(F.last_print, "This prefab uses ghost.mod, which is not installed."));
+    CHECK(F.attaches == 0 && F.fetches == 0 && F.asks == 0);   /* nothing reaches the map, nothing is asked */
     tick(3);
-    CHECK(F.asks == 1 && F.ask_buttons == 6 &&
-          !strcmp(F.last_ask, "This prefab needs 1 mod: ghost.mod (1.0 MB). Download and install now?"));
+    CHECK(sh_prefab_mods_poll(seq) == 0 && !sh_modpublished_holding() && F.fetches == 0 && F.attaches == 0);
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which is not on this computer and cannot be downloaded: "
+                                "the prefab was saved before its content was sent to the mod store. Ask its author to "
+                                "publish it again. The prefab was not placed."));
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
+    sh_modmanifest_list_free(&rows);
+
+    printf("-- a prefab recording only the unserved row: the same refusal, nothing fetched\n");
+    reset_fakes();
+    rows_of(&rows, NULL, 1);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     tick(3);
-    CHECK(F.fetches == 1 && F.ghost_installed && sh_prefab_mods_poll(seq) == 1);
+    CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
+    CHECK(strstr(F.last_ask, "This prefab needs ghost.mod, which is not on this computer") == F.last_ask &&
+          strstr(F.last_ask, "The prefab was not placed.") != NULL);
+    sh_modmanifest_list_free(&rows);
+
+    printf("-- pinned rows: held, the content is fetched with no question, then it is ready\n");
+    reset_fakes();
+    g_ghost_pinned = 1;
+    rows_of(&rows, door, 1);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
+    CHECK(r == SH_PREFAB_MODS_HELD && seq > 0 && sh_prefab_mods_poll(seq) == 2);
+    CHECK(!strcmp(msg, "This prefab needs 1 mod you do not have; getting its content."));
+    CHECK(F.attaches == 0 && F.fetches == 0);   /* nothing reaches the map before the content is here */
+    tick(3);
+    CHECK(F.asks == 0 && F.fetches == 1 && F.ghost_installed && sh_prefab_mods_poll(seq) == 1);
     CHECK(F.attaches == 2 && F.activations == 1 && F.main_calls == 1);   /* both rows reach the open map */
     CHECK(!sh_modpublished_holding());
     /* Placed again: everything is there now. */
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 2);
     sh_modmanifest_list_free(&rows);
-
-    printf("-- the store lacks it: denied (never published), naming the mod and the ZIP, never placed\n");
-    reset_fakes();
-    F.store = 0;
-    rows_of(&rows, door, 1);
-    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    CHECK(r == SH_PREFAB_MODS_HELD);
-    tick(3);
-    CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which is not installed, and the mod store does not have it. "
-                                "Restore its folder from the Recycle Bin or load the prefab's ZIP export. The prefab was not "
-                                "placed."));
-    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
-    sh_modmanifest_list_free(&rows);
-
-    printf("-- the store cannot be reached: said so, nothing downloaded\n");
-    reset_fakes();
-    F.store = -1;
-    rows_of(&rows, NULL, 1);
-    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    tick(3);
-    CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
-    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which could not be downloaded: the mod store did "
-                                "not answer; try again in a few minutes. The prefab was not placed."));
-    CHECK(!strcmp(F.last_ask, F.last_print));
-    sh_modmanifest_list_free(&rows);
-
-    printf("-- No: nothing downloaded, the prefab is not placed\n");
-    reset_fakes();
-    F.store = 1;
-    F.answer = 2;
-    rows_of(&rows, NULL, 1);
-    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    tick(4);
-    CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(F.asks == 2 && !strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed."));
-    sh_modmanifest_list_free(&rows);
+    g_ghost_pinned = 0;
 
     printf("-- no gates bound: refused with the console line and the toast, the store not asked\n");
     reset_fakes();
@@ -777,7 +760,6 @@ static void resolving(const sh_modmanifest_row *door)
 
     printf("-- a module prefab: DLC no row provides is refused first; a module a row provides is a mod\n");
     reset_fakes();
-    F.store = 1;
     rows_of(&rows, NULL, 1);
     {
         static const char DLC[] = MODULE_PREFAB("maps/modules/ind_dlc/dlc_room.decl");
@@ -1262,565 +1244,6 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     }
 }
 
-/* ==================================================================== */
-/* The denial gate end to end: the real probe and fetch (modsync.c,       */
-/* modnet.c) against the loopback store stub (mod_store_stub.h), the real */
-/* serving index's asset rule, and a rawmap hold.                         */
-/* ==================================================================== */
-
-static char g_e_source[260];
-static int g_e_resumes;
-static int g_e_game_lacks;
-
-static int e_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
-{
-    (void)c;
-    return sh_modserve_row_served_in(row, place, subject, cause);
-}
-static int e_rescan(void *c) { (void)c; return sh_modserve_index_rescan() >= 0; }
-/* As eng_fetch_for: the archive where the map finds it (its place, or the root). */
-static int e_fetch_for(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
-                       volatile int *cancel)
-{
-    modnet_io io;
-    modsync_stats st;
-    char where[MAX_PATH];
-    (void)c; (void)progress;
-    memset(&io, 0, sizeof io);
-    memset(&st, 0, sizeof st);
-    io.cancel = (volatile long *)cancel;
-    F.fetches++;
-    g_e_source[0] = 0;
-    if (HO(where, modexport_fetch_build(row, place, &io, &st, HO_P(0)))) return 0;
-    if (st.game_lacks) strcpy_s(g_e_source, sizeof g_e_source, st.game_source);
-    return st.code ? st.code : -1;
-}
-static int e_fetch_detail(void *c, const char *hash, char **out)
-{
-    (void)c; (void)hash;
-    if (!g_e_source[0]) return 0;
-    ho_set(out, g_e_source);
-    return 1;
-}
-static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
-{
-    modnet_io io;
-    modsync_probe pr;
-    (void)c;
-    memset(&io, 0, sizeof io);
-    memset(&pr, 0, sizeof pr);
-    io.cancel = (volatile long *)cancel;
-    (void)modsync_probe_build(hash, &io, &pr);
-    memset(out, 0, sizeof *out);
-    out->found = pr.found > 0 ? SH_MODPUB_STORE_HAS : pr.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
-    out->code = pr.found < 0 ? pr.code : 0;   /* as eng_store_probe */
-    out->size = pr.found > 0 ? pr.size : 0;
-    return out->found;
-}
-static int e_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
-static int e_resume(void *c, const sh_modpub_resume *r) { (void)c; (void)r; g_e_resumes++; return 1; }
-/* As eng_item_place and eng_place_set. */
-static int e_item_place(void *c, const char *title, const char *item, char **out)
-{
-    sh_ms_place place;
-    (void)c;
-    *out = NULL;
-    if (item && item[0] && sh_ms_place_of(item, out, NULL)) return 1;
-    free(*out);
-    place.title = title && title[0] ? title : "map";
-    place.map_id = item && item[0] ? item : NULL;
-    *out = sh_ms_place_dir(&place);
-    return *out && sh_ms_place_note(&place, *out);
-}
-static void e_place_set(void *c, const char *place) { (void)c; (void)sh_modserve_place_set(place); }
-static int e_place_norm(void *c, const char *place, char **out)
-{ (void)c; *out = sh_modserve_place_norm(place); return *out != NULL; }
-
-static const sh_modpub_ops E_OPS = {
-    NULL, p_on_main, e_row_state, e_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
-    p_worker_run, e_fetch_for, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, e_resume, p_log,
-    p_print, e_store_probe, e_claimed, e_fetch_detail, NULL, NULL, NULL, e_item_place, e_place_set, e_place_norm
-};
-
-/* A fake installed game: one file at ROCK_SRC, with the bytes a mod borrows,
- * and (g_e_game_lacks) another revision holding other bytes there. */
-#define ROCK_SRC "generated/image/stock/rock.bimage"
-static const char ROCK_BYTES[] = "ROCK-GAME-BYTES-0123456789";
-static int e_rock_ok(unsigned long long size, const char *sha)
-{
-    char h[65];
-    sh_mb_sha256_hex(ROCK_BYTES, strlen(ROCK_BYTES), h);
-    return !g_e_game_lacks && size == strlen(ROCK_BYTES) && !strcmp(h, sha);
-}
-static int e_match(void *ctx, const char *request, unsigned long long size, const char *sha, char **source)
-{
-    (void)ctx; (void)request;
-    if (!e_rock_ok(size, sha)) return SH_MB_STOCK_ABSENT;
-    ho_set(source, ROCK_SRC);
-    return SH_MB_STOCK_OK;
-}
-static int e_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
-{
-    (void)ctx;
-    if (g_e_game_lacks || strcmp(source, ROCK_SRC)) return SH_MB_STOCK_ABSENT;
-    sh_mb_sha256_hex(ROCK_BYTES, strlen(ROCK_BYTES), sha);
-    *size = strlen(ROCK_BYTES);
-    return SH_MB_STOCK_OK;
-}
-static int e_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
-{
-    (void)ctx;
-    if (strcmp(source, ROCK_SRC)) return SH_MB_STOCK_ABSENT;
-    if (!e_rock_ok(strlen(ROCK_BYTES), sha)) return SH_MB_STOCK_MISMATCH;
-    if (size) *size = strlen(ROCK_BYTES);
-    return SH_MB_STOCK_OK;
-}
-static int e_read(void *ctx, const char *source, const char *sha, unsigned char **bytes, size_t *len)
-{
-    int r = e_verify(ctx, source, sha, NULL);
-    if (r != SH_MB_STOCK_OK) return r;
-    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, sizeof ROCK_BYTES);
-    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
-    memcpy(*bytes, ROCK_BYTES, strlen(ROCK_BYTES));
-    *len = strlen(ROCK_BYTES);
-    return SH_MB_STOCK_OK;
-}
-static const sh_mb_stock_ops E_GAME = { NULL, e_match, e_identify, e_verify, e_read };
-
-/* Install a one-image mod of `salt` (and, with `borrow`, a borrowed game
- * image) from src at the root. */
-static int e_install(const char *src, const char *salt, const char *name, const char *bytes, int borrow,
-                     sh_modmanifest_row *row, char *folder_out, size_t folder_cap)
-{
-    char json[256], key[HO_TEXT + 1], cause[HO_TEXT];
-    sh_ms_install_stats st;
-    sh_mb_bundle b;
-    int ok;
-    _snprintf_s(json, sizeof json, _TRUNCATE,
-                "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
-    mt_write(src, "mod.json", json);
-    mt_write(src, "images\\own.bimage", bytes);
-    if (borrow) mt_write(src, "images\\rock.bimage", ROCK_BYTES);
-    memset(&b, 0, sizeof b);
-    ok = HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1)));
-    if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
-    memset(row, 0, sizeof *row);
-    if (ok) {
-        strcpy_s(row->salt, sizeof row->salt, b.id);
-        if (b.name) sh_modmanifest_row_set_name(row, b.name);
-        strcpy_s(row->build, sizeof row->build, b.hash);
-        row->size = b.total_size;
-        if (folder_out) strcpy_s(folder_out, folder_cap, key);
-    }
-    sh_mb_free(&b);
-    return ok;
-}
-
-/* The store took the build down (its archive is gone). */
-static void e_stub_drop(const char *hash)
-{
-    int i;
-    EnterCriticalSection(&g_stub.cs);
-    for (i = 0; i < g_stub.nbuilds; i++)
-        if (!strcmp(g_stub.builds[i].hash, hash)) {
-            free(g_stub.builds[i].bytes);
-            g_stub.builds[i] = g_stub.builds[--g_stub.nbuilds];
-            break;
-        }
-    LeaveCriticalSection(&g_stub.cs);
-}
-
-static void e_upload(const sh_modmanifest_row *row, const char *ref)
-{
-    char mod[MODSYNC_MOD_MAX + 1];
-    const char *mods[1];
-    modsync_stats st;
-    memset(&st, 0, sizeof st);
-    _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s@%s", row->salt, row->build);
-    mods[0] = mod;
-    CHECK(modsync_upload_builds(mods, 1, ref, NULL, &st));
-    if (modsync_cause(&st)[0] && st.code) fprintf(stderr, "  upload %s: %s\n", ref, modsync_cause(&st));
-}
-
-/* Hold a rawmap naming `row` and run it to the end: the one-button notice, or
- * the question (answered `answer`, 0 to leave it asked). */
-static void e_hold(const sh_modmanifest_row *row, int answer)
-{
-    sh_modmanifest_list rows;
-    int i;
-    memset(&rows, 0, sizeof rows);
-    sh_modmanifest_list_add(&rows, row);
-    sh_modpub_test_reset();   /* the last notice, left asked, goes */
-    memset(&F, 0, sizeof F);
-    F.answer = answer;
-    CHECK(sh_modpub_rawmap_hold(&rows, "e2e.json", "") == 1);
-    sh_modmanifest_list_free(&rows);
-    for (i = 0; i < 400 && (sh_modpublished_holding() || i < 6); i++) tick(1);
-}
-
-static void gate_end_to_end(const char *tmp)
-{
-    char url[64], author[MAX_PATH * 2], player[MAX_PATH * 2], srcd[MAX_PATH * 2], folder[HO_TEXT + 1];
-    char path[MAX_PATH * 2];
-    sh_modmanifest_row gone, never, borrow, twob;
-    printf("-- the denial gate against the loopback store: each cause worded, the download into the place\n");
-    CHECK(stub_start() > 0);
-    stub_url(url, sizeof url);
-    CHECK(modnet_set_base_url(url));
-    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\e2e_author", tmp);
-    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\e2e_player", tmp);
-    sh_modpub_test_reset();
-    sh_modpub_test_set_ops(&E_OPS);
-
-    /* The author's machine: four mods built, three published (claims kept). */
-    CHECK(sh_ms_set_root(author));
-    sh_mb_set_stock_ops(&E_GAME);
-    g_e_game_lacks = 0;
-    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\gone", tmp);
-    CHECK(e_install(srcd, "testgone", "Gone Mod", "gone bytes", 0, &gone, NULL, 0));
-    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\never", tmp);
-    CHECK(e_install(srcd, "testnevr", "Never Mod", "never bytes", 0, &never, NULL, 0));
-    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\borrow", tmp);
-    CHECK(e_install(srcd, "testborw", "Borrowing Mod", "borrow bytes", 1, &borrow, NULL, 0));
-    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\twob", tmp);
-    CHECK(e_install(srcd, "testtwob", "Two Builds", "first build bytes", 0, &twob, folder, sizeof folder));
-    CHECK(!strcmp(folder, "twob"));
-    e_upload(&gone, "map-gone");
-    e_upload(&borrow, "map-borrow");
-    e_upload(&twob, "map-twob");
-    CHECK(sh_modserve_index_build(author) >= 4);
-
-    /* Cause 1, on the author's machine: the map was published from here (a
-     * claim names the build), the build was taken down at the store, and
-     * the author's folder is gone. */
-    e_stub_drop(gone.build);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\gone", author);
-    CHECK(sh_ms_remove_folder(path));
-    CHECK(sh_modserve_index_build(author) >= 3);
-    e_hold(&gone, 0);
-    CHECK(!strcmp(F.last_print, "This map needs Gone Mod, which is no longer available: its author "
-                                "unpublished it, or it was removed. It can be downloaded again only if its author publishes it again."));
-    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print) && F.fetches == 0);
-    printf("    cause 1: %s\n", F.last_ask);
-
-    /* Cause 3: never published, and no folder of its salt. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\never", author);
-    CHECK(sh_ms_remove_folder(path));
-    CHECK(sh_modserve_index_build(author) >= 2);
-    e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs Never Mod, which is not installed, and the mod store does not have it. "
-                              "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
-    CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
-    printf("    cause 3: %s\n", F.last_ask);
-
-    /* The player's machine: nothing installed. */
-    CHECK(sh_ms_set_root(player));
-    CHECK(sh_modserve_index_build(player) == 0);
-
-    /* Cause 4: the store has it, but its borrow names a file this game holds
-     * with other bytes (another game revision): learned at the install. */
-    g_e_game_lacks = 1;
-    e_hold(&borrow, 1);
-    CHECK(F.fetches == 1 && !strcmp(F.last_print, "This map needs Borrowing Mod, which needs a file this game does not "
-                                                   "hold (generated/image/stock/rock.bimage): a different game revision. "
-                                                   "This is permanent on this machine."));
-    printf("    cause 4: %s\n", F.last_print);
-    g_e_game_lacks = 0;
-
-    /* Cause 2: the store setting points where nothing answers. */
-    CHECK(modnet_set_base_url("http://127.0.0.1:1"));
-    e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs Never Mod, which could not be downloaded: the mod store could "
-                              "not be reached; check the internet connection and try again."));
-    printf("    cause 2: %s\n", F.last_ask);
-    CHECK(modnet_set_base_url(url));
-
-    /* Obtainable: one question with the name and the size; Yes fetches the
-     * archive for a rawmap without a place into the root, mods\<mod name>\,
-     * and the rawmap opens again. */
-    g_e_resumes = 0;
-    e_hold(&twob, 1);
-    CHECK(F.asks == 1 && F.ask_buttons == 6 && strstr(F.last_ask, "This map needs 1 mod: Two Builds (") == F.last_ask);
-    printf("    obtainable: %s\n", F.last_ask);
-    CHECK(!sh_modpublished_holding() && F.fetches == 1 && g_e_resumes == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\%s", player, twob.salt);
-    CHECK(!mt_exists(path));   /* the download's own place went with the move */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Two Builds\\mod.json", player);
-    CHECK(mt_exists(path));
-    CHECK(sh_modserve_row_served(&twob, NULL) == SH_MODSERVE_ROW_SERVED);
-
-    sh_mb_set_stock_ops(NULL);
-    sh_modpub_test_reset();
-    sh_modpub_test_set_ops(NULL);
-    modnet_shutdown();
-    stub_stop();
-}
-
-/* ---------------------------------------------- names and paths of any length */
-
-/* A UTF-8 path in the long-path form Windows opens past MAX_PATH (malloc'd). */
-static wchar_t *lv_wide(const char *path)
-{
-    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    wchar_t *w = (wchar_t *)malloc(sizeof(wchar_t) * ((size_t)n + 4)), *p;
-    if (!w) return NULL;
-    wcscpy_s(w, (size_t)n + 4, L"\\\\?\\");
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, w + 4, n);
-    for (p = w + 4; *p; p++) if (*p == L'/') *p = L'\\';
-    return w;
-}
-
-/* Every folder of `path` (a file's folders when `file`), however deep. */
-static int lv_mkdirs(const char *path, int file)
-{
-    wchar_t *w = lv_wide(path), *p;
-    int ok = 1;
-    if (!w) return 0;
-    for (p = w + 7; *p; p++) {   /* past \\?\C:\ */
-        if (*p != L'\\') continue;
-        *p = 0;
-        if (!CreateDirectoryW(w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) ok = 0;
-        *p = L'\\';
-    }
-    if (!file && !CreateDirectoryW(w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) ok = 0;
-    free(w);
-    return ok;
-}
-
-static int lv_write(const char *path, const char *bytes, size_t len)
-{
-    wchar_t *w;
-    HANDLE h;
-    DWORD put = 0;
-    if (!lv_mkdirs(path, 1) || !(w = lv_wide(path))) return 0;
-    h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    free(w);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    WriteFile(h, bytes, (DWORD)len, &put, NULL);
-    CloseHandle(h);
-    return put == (DWORD)len;
-}
-
-static int lv_exists(const char *path)
-{
-    wchar_t *w = lv_wide(path);
-    DWORD a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
-    free(w);
-    return a != INVALID_FILE_ATTRIBUTES;
-}
-
-static void lv_rmtree_w(const wchar_t *dir)
-{
-    WIN32_FIND_DATAW fd;
-    size_t n = wcslen(dir) + 4;
-    wchar_t *pat = (wchar_t *)malloc(sizeof(wchar_t) * n);
-    HANDLE h;
-    if (!pat) return;
-    swprintf_s(pat, n, L"%s\\*", dir);
-    h = FindFirstFileW(pat, &fd);
-    free(pat);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            size_t cn;
-            wchar_t *child;
-            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-            cn = wcslen(dir) + wcslen(fd.cFileName) + 2;
-            if (!(child = (wchar_t *)malloc(sizeof(wchar_t) * cn))) continue;
-            swprintf_s(child, cn, L"%s\\%s", dir, fd.cFileName);
-            SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                lv_rmtree_w(child);
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(child);
-            else DeleteFileW(child);
-            free(child);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    RemoveDirectoryW(dir);
-}
-
-/* text of n characters: `unit` repeated, cut to n bytes (ASCII units). */
-static char *lv_text(const char *unit, size_t n)
-{
-    char *s = (char *)malloc(n + 1);
-    size_t u = strlen(unit), i;
-    if (!s) return NULL;
-    for (i = 0; i < n; i++) s[i] = unit[i % u];
-    s[n] = 0;
-    return s;
-}
-
-/* A 2,000-character name and author and a 10,000-character homepage, and a
- * carried file 60 folders deep whose request path is 5,000 bytes, in a
- * mods folder under a long path: built, archived, published to the store
- * (the loopback stub, or the Worker's local runtime when SMP_STORE_URL names
- * it), saved into a map's rows and read back, downloaded into the map's
- * place and installed, each value whole. */
-static void long_values_end_to_end(const char *tmp)
-{
-    const char *store_url = getenv("SMP_STORE_URL");
-    char url[256], *base, *author, *player, *src, *request, *name, *who, *home, *json, *path, *apath, *where = NULL;
-    char *key = NULL, *cause = NULL, err[512];
-    size_t used, i;
-    sh_ms_install_stats st;
-    sh_mb_bundle b;
-    sh_modmanifest_row row;
-    sh_modmanifest_list rows, back;
-    static const char MAPTEXT[] = "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
-    printf("-- names, authors, homepages and paths of any length: build, archive, publish, map rows, download, install\n");
-    if (store_url && store_url[0]) {
-        strcpy_s(url, sizeof url, store_url);
-        printf("    against the store at %s\n", url);
-    } else {
-        CHECK(stub_start() > 0);
-        stub_url(url, sizeof url);
-    }
-    CHECK(modnet_set_base_url(url));
-    /* The mods folders sit under a 600-byte path. */
-    {
-        char *l1 = lv_text("long-folder-", 200), *l2 = lv_text("deeper-folder-", 200), *l3 = lv_text("deepest-", 180);
-        base = sh_textf("%s\\%s\\%s\\%s", tmp, l1, l2, l3);
-        free(l1); free(l2); free(l3);
-    }
-    author = sh_textf("%s\\author\\mods", base);
-    player = sh_textf("%s\\player\\mods", base);
-    src = sh_textf("%s\\src\\Long Values", base);
-    CHECK(base && strlen(base) > 600 && lv_mkdirs(author, 0) && lv_mkdirs(player, 0));
-    /* The request: 60 folders of 80 bytes, then a 110-byte leaf: 5,000 bytes. */
-    {
-        const char *head = "generated/image/mods/testlong/";
-        char *r = (char *)malloc(5001);
-        used = strlen(head);
-        memcpy(r, head, used);
-        for (i = 0; i < 60; i++) {
-            int w = sprintf_s(r + used, 5001 - used, "f%02u_", (unsigned)i);
-            memset(r + used + w, 'x', 80 - (size_t)w);
-            used += 80;
-            r[used++] = '/';
-        }
-        memcpy(r + used, "deep", 4);
-        memset(r + used + 4, 'z', 5000 - 7 - 4 - used);
-        memcpy(r + 5000 - 7, ".bimage", 8);
-        request = r;
-    }
-    CHECK(strlen(request) == 5000);
-    apath = sh_ma_path("testlong", request);   /* where the mod folder holds it: images/<60 folders>/<leaf> */
-    CHECK(apath && strlen(apath) == 5000 - 30 + 7);
-    {
-        size_t slashes = 0;
-        for (i = 0; request[i]; i++) slashes += request[i] == '/';
-        CHECK(slashes == 4 + 60);   /* generated/image/mods/testlong/ then 60 folders */
-    }
-    name = lv_text("Long Name ", 2000);
-    who = lv_text("Author ", 2000);
-    name[1999] = '!';   /* a display name is trimmed: end on a character */
-    who[1999] = '!';
-    home = sh_textf("https://example.test/%s", "");
-    {
-        char *tail = lv_text("h", 10000 - strlen(home));
-        free(home);
-        home = sh_textf("https://example.test/%s", tail);
-        free(tail);
-    }
-    CHECK(strlen(home) == 10000);
-    json = sh_textf("{\"name\":\"%s\",\"author\":\"%s\",\"homepage\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"testlong\"}}",
-                    name, who, home);
-    path = sh_textf("%s\\mod.json", src);
-    CHECK(lv_write(path, json, strlen(json)));
-    free(path);
-    path = sh_textf("%s\\%s", src, apath);
-    CHECK(strlen(path) > 5570 && lv_write(path, "deep bytes", 10));
-    free(path);
-
-    /* Build into the author's long mods folder. */
-    CHECK(sh_ms_set_root(author));
-    memset(&b, 0, sizeof b);
-    CHECK(sh_ms_install_from_folder(src, NULL, &key, &st, &b, &cause));
-    if (cause) fprintf(stderr, "  long install: %s\n", cause);
-    CHECK(b.name && !strcmp(b.name, name));
-    memset(&row, 0, sizeof row);
-    strcpy_s(row.salt, sizeof row.salt, b.id);
-    strcpy_s(row.build, sizeof row.build, b.hash);
-    row.size = b.total_size;
-    CHECK(sh_modmanifest_row_set_name(&row, b.name ? b.name : ""));
-    sh_mb_free(&b);
-    {
-        char *built = sh_textf("%s\\%s\\%s", author, key ? key : "", apath);
-        CHECK(built && lv_exists(built));
-        free(built);
-    }
-    free(cause); cause = NULL;
-
-    /* Publish: the archive carries the deep file and mod.json whole. */
-    e_upload(&row, "map-long-values");
-
-    /* Save the map with its row, and load it back: the name whole. */
-    memset(&rows, 0, sizeof rows);
-    memset(&back, 0, sizeof back);
-    CHECK(sh_modmanifest_list_add(&rows, &row));
-    {
-        size_t len = 0;
-        unsigned rejected = 0;
-        char *saved = sh_modmanifest_write(MAPTEXT, sizeof MAPTEXT - 1, &rows, &len, err, sizeof err);
-        CHECK(saved != NULL);
-        if (!saved) fprintf(stderr, "  long map write: %s\n", err);
-        if (saved) {
-            size_t got = sh_modmanifest_read(saved, len, &back, &rejected);
-            if (got != 1 || rejected) fprintf(stderr, "  long map read: %u rows, %u rejected\n", (unsigned)got, rejected);
-            CHECK(got == 1 && !rejected);
-            CHECK(back.count == 1 && !strcmp(sh_modmanifest_row_name(&back.rows[0]), name) &&
-                  !strcmp(back.rows[0].build, row.build));
-            HeapFree(GetProcessHeap(), 0, saved);
-        }
-    }
-
-    /* The player's machine: download into the map's place, installed whole. */
-    CHECK(sh_ms_set_root(player));
-    {
-        modnet_io io;
-        modsync_stats ms;
-        memset(&io, 0, sizeof io);
-        memset(&ms, 0, sizeof ms);
-        CHECK(modexport_fetch_build(&back.rows[0], "maps\\Long Values Map", &io, &ms, &where));
-        if (modsync_cause(&ms)[0]) fprintf(stderr, "  long download: %s\n", modsync_cause(&ms));
-        modsync_stats_free(&ms);
-    }
-    if (where) {
-        char *deep = sh_textf("%s\\%s\\%s", player, where, apath);
-        char *mj = sh_textf("%s\\%s\\mod.json", player, where);
-        sh_mb_bundle got;
-        CHECK(deep && lv_exists(deep));
-        memset(&got, 0, sizeof got);
-        CHECK(mj && sh_mb_load(mj, &got) && got.name && !strcmp(got.name, name));
-        CHECK(got.author && !strcmp(got.author, who) && got.homepage && !strcmp(got.homepage, home));
-        sh_mb_free(&got);
-        free(deep);
-        free(mj);
-    }
-    printf("    a %u-byte request %u folders deep under a %u-byte mods folder, a %u-character name: carried whole\n",
-           (unsigned)strlen(request), 60u, (unsigned)strlen(player), (unsigned)strlen(name));
-
-    sh_modmanifest_list_free(&rows);
-    sh_modmanifest_list_free(&back);
-    sh_modmanifest_row_free(&row);
-    sh_ms_set_root(NULL);
-    {
-        char *top = sh_textf("%s\\%s", tmp, "x");
-        wchar_t *w;
-        free(top);
-        w = lv_wide(base);
-        if (w) {
-            /* the first long folder under tmp */
-            wchar_t *cut = wcsstr(w + 4, L"\\long-folder-");
-            if (cut) { cut = wcschr(cut + 1, L'\\'); if (cut) *cut = 0; }
-            lv_rmtree_w(w);
-            free(w);
-        }
-    }
-    free(where); free(key); free(base); free(author); free(player); free(src); free(request); free(apath);
-    free(name); free(who); free(home); free(json);
-}
-
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], libA[MAX_PATH * 2];
@@ -1829,12 +1252,6 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash keeps what was said */
 
     CHECK(mt_temp_dir("prefabmods", tmp, sizeof tmp));
-    if (getenv("SMP_LONG_ONLY")) {
-        long_values_end_to_end(tmp);
-        mt_remove_tree(tmp);
-        printf("prefab_mods_test: %d checks, %d failed\n", g_checks, g_failed);
-        return g_failed ? 1 : 0;
-    }
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\door", tmp);
     _snprintf_s(storeA, sizeof storeA, _TRUNCATE, "%s\\storeA", tmp);
     _snprintf_s(libA, sizeof libA, _TRUNCATE, "%s\\libA", tmp);
@@ -1853,8 +1270,6 @@ int main(int argc, char **argv)
     resolving(&door);
     resolve_through_slot(libA, &door);
     zip(tmp, libA, storeA, &door);
-    gate_end_to_end(tmp);
-    long_values_end_to_end(tmp);
 
     sh_modpub_test_reset();
     sh_ms_set_root(NULL);

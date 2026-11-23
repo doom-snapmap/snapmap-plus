@@ -686,7 +686,7 @@ char *sh_mb_module_info_request(const char *request);
  * palette decls, the editor's own movies). A shadow of one changes what an
  * author can set, never what a player sees, so it is no dependency of a map
  * (modserve.c's save closure skips it) and a bundle made only of such files
- * is not installed when a map a player opens names it (modsync.c). */
+ * serves nothing in a map a player opens. */
 int  sh_mb_editor_time(const char *request);
 
 /* 1 when every file of a loaded bundle is editor-time content and it asks no

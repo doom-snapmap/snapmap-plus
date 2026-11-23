@@ -848,8 +848,8 @@ static void saves_carry_no_package_payload(void)
 
 /* ---- the mods a rawmap names ------------------------------------------------------------------
  * The engine never parses a rawmap whose mods are missing: the swap falls back to the engine's own
- * map and the rawmap hold (modpublished.c, linked for real) asks the store, then refuses or offers
- * the download. A map with mods also writes the export beside its JSON. The store, the dialog and
+ * map and the rawmap hold (modpublished.c, linked for real) fetches the content of its pinned rows, or
+ * refuses a row that names no unit. A map with mods also writes the export beside its JSON. The store, the dialog and
  * the worker are doubles behind sh_modpub_ops; the worker runs its job on the calling thread. */
 #define HASH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define MVAR(name, value) \
@@ -861,6 +861,12 @@ static const char MOD_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     MVAR("door_label", "RAWMAP_MARK") "]},"
     "\"snapmap-plus\":{\"format\":1,\"mods\":[" MROW("testalph", "test.alpha", HASH_A, "1048576") "]}}";
+/* The same map with a pinned row: its content downloads with no question. */
+static const char PIN_MAP[] =
+    "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
+    MVAR("door_label", "RAWMAP_MARK") "]},"
+    "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"testalph\",\"name\":\"test.alpha\",\"size\":1048576,"
+    "\"objects\":{\"entities/alpha\":\"" HASH_A "\"}}]}}";
 static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
 
 extern unsigned long long g_mod_stub_export_result;
@@ -871,19 +877,18 @@ extern const char *g_mod_stub_import_text;
 extern int g_mod_stub_import_calls;
 
 static struct {
-    int installed, store, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
+    int installed, fetch_fails, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
     int fault;                                   /* the mod check faults (an access violation) */
     char ask[256], print[1600], toast[1600], resume_note[256];
 } R;
 
 static int r_on_main(void *c) { (void)c; return 1; }
-static int r_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                       size_t cap)
+static int r_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
     (void)c; (void)place; (void)subject;
-    if (cause && cap) cause[0] = 0;
+    if (cause) *cause = NULL;
     if (R.fault) *(volatile int *)(uintptr_t)R.fault = 0;
-    return !strcmp(row->build, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
+    return (row->pinned || !strcmp(row->build, HASH_A)) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
 }
 static int r_rescan(void *c) { (void)c; return 1; }
 static int r_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
@@ -899,7 +904,8 @@ static int r_fetch(void *c, const sh_modmanifest_row *row, const char *place, sh
 {
     (void)c; (void)place; (void)progress; (void)cancel;
     R.fetches++;
-    if (!strcmp(row->build, HASH_A)) R.installed = 1;
+    if (R.fetch_fails) return -6;   /* MODNET_E_CANCELLED */
+    if (!strcmp(row->salt, "testalph")) R.installed = 1;   /* the job's row carries the salt and build only */
     return 0;
 }
 static int r_resume(void *c, const sh_modpub_resume *r)
@@ -910,19 +916,12 @@ static int r_resume(void *c, const sh_modpub_resume *r)
     /* What the engine's resume does for a rawmap hold. */
     return HO(R.resume_note, sh_rawmap_reopen_after_mods(HO_P(0)));
 }
-static int r_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
-{
-    (void)c; (void)cancel;
-    memset(out, 0, sizeof *out);
-    out->found = strcmp(hash, HASH_A) ? 0 : R.store;
-    return out->found;
-}
 static void r_print(void *c, const char *line) { (void)c; R.prints++; strcpy_s(R.print, sizeof R.print, line); }
 
 static const sh_modpub_ops RAWMAP_OPS = {
-    NULL, r_on_main, r_row_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
-    r_worker_run, r_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, r_resume, NULL,
-    r_print, r_store_probe
+    .on_main = r_on_main, .row_state = r_row_state, .rescan = r_rescan, .activate = r_activate,
+    .can_ask = r_can_ask, .ask = r_ask, .poll = r_poll, .release = r_release,
+    .worker_run = r_worker_run, .fetch_for = r_fetch, .resume = r_resume, .print = r_print
 };
 
 static void notify_toast(const char *title, const char *text)
@@ -972,9 +971,8 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
 {
     char staged[MAX_PATH], why[256];
     unsigned long swaps;
-    printf("\n-- a rawmap whose mods are missing and not in the store is refused before the engine parses it\n");
+    printf("\n-- a rawmap whose missing mod names no unit is refused before the engine parses it\n");
     mods_begin();
-    R.store = 0;
     CHECK(write_file("rawmap_mods_missing.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     swaps = sh_rawmap_swap_count();
@@ -982,13 +980,12 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
     CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
-    CHECK(sh_modpub_test_state() == 4 && R.prints == 1);
-    CHECK(strstr(R.print, "Rawmap rawmap_mods_missing.json needs 1 mod you do not have") != NULL);
+    CHECK(sh_modpub_test_state() == 1 && R.fetches == 0 && R.asks == 0);   /* held; the next tick refuses it */
     ticks(4);
     CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
-    /* The denial gate's cause 3: never published, and no folder at its hash. */
-    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed, and the mod store does not have it. "
-                           "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not on this computer and cannot be downloaded: the map "
+                           "was saved before its content was sent to the mod store. Ask its author to publish it again. "
+                           "The map was not loaded."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
     DeleteFileA(staged);
     mods_end();
@@ -1018,17 +1015,14 @@ static void a_fault_in_the_mod_check_refuses_the_rawmap(void)
 static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
 {
     char staged[MAX_PATH], why[256];
-    printf("\n-- a rawmap whose mods the store has: the My Maps question, the download, then it opens\n");
+    printf("\n-- a rawmap with pinned rows: the content downloads with no question, then it opens\n");
     mods_begin();
-    R.store = 1;
-    CHECK(write_file("rawmap_mods_offer.json", MOD_MAP, staged, sizeof staged));
+    CHECK(write_file("rawmap_mods_offer.json", PIN_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
-    ticks(3);
-    CHECK(R.asks == 1 && !strcmp(R.ask, "This map needs 1 mod: test.alpha (1.0 MB). Download and install now?"));
-    R.answer = 1;
-    ticks(3);
+    ticks(6);
+    CHECK(R.asks == 0);
     CHECK(R.fetches == 1 && R.installed && R.resumes == 1 && R.resume_hook == SH_MODPUB_RAWMAP_LOAD);
     /* No editor in this test, so nothing opens and the note says how to load it again. */
     CHECK(!strcmp(R.resume_note, "The mods are installed. Open a map in the editor, then load "
@@ -1059,10 +1053,9 @@ static void a_held_zip_is_imported_once(void)
     char staged[MAX_PATH], why[256];
     printf("\n-- a rawmap ZIP held for its mods is imported once; the resumed load reuses that import\n");
     mods_begin();
-    R.store = 1;
     CHECK(write_file("rawmap_held_once.zip", "PK", staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    g_mod_stub_import_text = MOD_MAP;
+    g_mod_stub_import_text = PIN_MAP;
     g_mod_stub_import_calls = 0;
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "Importing rawmap_held_once.zip and its mods; it opens when that is done.") != NULL);
@@ -1072,9 +1065,7 @@ static void a_held_zip_is_imported_once(void)
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
     CHECK(g_mod_stub_import_calls == 1);
-    ticks(3);
-    R.answer = 1;
-    ticks(3);
+    ticks(6);
     CHECK(R.fetches == 1 && R.installed && R.resumes == 1);
     CHECK(g_mod_stub_import_calls == 1);   /* the resume itself reads nothing */
     /* The reopened load: the hold's bytes, not a second import. */
@@ -1087,7 +1078,7 @@ static void a_held_zip_is_imported_once(void)
 
     printf("-- a hold that never resumed: the next load imports the file again\n");
     R.installed = 0;
-    R.store = 0;
+    R.fetch_fails = 1;   /* the download is stopped: the hold is dropped, nothing resumes */
     R.fetches = R.resumes = 0;
     sh_modpub_test_reset();
     sh_modpub_test_set_ops(&RAWMAP_OPS);
@@ -1106,14 +1097,11 @@ static void a_resumed_load_is_never_held_again(void)
     char staged[MAX_PATH], why[256];
     printf("\n-- a resumed rawmap load that still misses its mods opens with what is here, never held again\n");
     mods_begin();
-    R.store = 1;
-    CHECK(write_file("rawmap_resumed_once.json", MOD_MAP, staged, sizeof staged));
+    CHECK(write_file("rawmap_resumed_once.json", PIN_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
-    ticks(3);
-    R.answer = 1;
-    ticks(3);
+    ticks(6);
     CHECK(R.fetches == 1 && R.resumes == 1);
     /* The mod is still not served when the resumed load reads (a pinned row's units that could not be had). */
     R.installed = 0;

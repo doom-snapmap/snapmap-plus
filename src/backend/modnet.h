@@ -1,47 +1,26 @@
-/* modnet.h -- the backend's HTTP client for the mod store (ONE-SHAPE rule 5).
+/* modnet.h -- the backend's HTTP client for the mod store (SPEC-distribution section 10).
  *
- * The store keeps one object per build: a stored ZIP of the mod folder
- * (mod.json and assets/<request> for every carried file, modzip.h), named by
- * the build hash, at /mods/build/<hash>. Claims keep builds served; a release
- * drops the claim and every build no claim names any more. The transport is
- * untrusted: the downloader (modsync.c) verifies every file of an archive
- * against its mod.json and the build hash against the map's row before
- * anything is installed.
+ * The store keeps units (the closure of one placed object, named by the SHA-256 of its manifest, modunit.h) and their
+ * files (blobs, named by their SHA-256); a published map claims the units its rows name (modclaim.h). Reads are
+ * anonymous; every write is signed by the publisher's key (modkey.h). The transport is untrusted: the content cache
+ * (modcache.h) checks every manifest and blob against the hash a map names before anything serves (I10).
  *
- * Nothing here limits a build's size or how many builds a claim names. One
- * request body is the platform's limit (100 MB on the Worker's plan), and one
- * connection is slower than several, so an archive larger than
- * MODNET_PART_SIZE goes up in parts, MODNET_PART_WORKERS of them at a time,
- * each on its own connection:
- *   POST /mods/build/<hash>/parts {"size"} starts the upload, or resumes the
- *        one of that build and size, answering {"partSize","parts","have"};
- *   PUT  /mods/build/<hash>/parts/<n> (application/octet-stream, X-Build-Size)
- *        sends part n, every part but the last exactly partSize bytes; a part
- *        the store has ("have") is never sent again;
- *   POST /mods/build/<hash>/complete {"size"} joins them, and the store checks
- *        the whole archive by the same rules as a one-request upload.
- * The store's answers say how many scripts a build carries (X-Mod-Scripts on
- * GET and HEAD, "scripts" in an upload's answer). An archive past 4 GiB or
- * 65,535 entries is ZIP64 (modzip.h), which the store reads too.
+ * Transport: WinHTTP, one process-wide session. The base URL is the product setting "mods.store" (config.c; default
+ * https://api.snapmapplus.com). HTTPS only, TLS 1.2 or newer; plain http is accepted for a loopback host (127.0.0.1,
+ * localhost, [::1]) so tests can run a local store. The system's own proxy configuration is used (none for loopback);
+ * redirects are never followed. Every request with a body sends Content-Length and the User-Agent
+ * "snapmap-plus/<version>". Timeouts: resolve and connect 15 s, send and receive 30 s per operation step. Bodies are
+ * never logged; a refusal's short "error" text (sanitised, at most 160 characters) is carried back in the result,
+ * with the store's Retry-After and whether the name did not resolve (this computer is offline). A route the store has
+ * retired answers 410 (MODNET_E_RETIRED: this client is too old), and X-Snapmap-Plus-Minimum names the oldest version
+ * the store serves (modnet_newer_needed).
  *
- * Transport: WinHTTP, one process-wide session. The base URL is the product
- * setting "mods.store" (config.c; default https://api.snapmapplus.com). HTTPS
- * only, TLS 1.2 or newer; plain http is accepted for a loopback host
- * (127.0.0.1, localhost, [::1]) so tests can run a local stub. The system's
- * own proxy configuration is used (none for loopback); redirects are never
- * followed. Every request with a body sends Content-Length. Timeouts: resolve
- * and connect 15 s, send and receive 30 s per operation step. Bodies are never
- * logged; a refusal's short "error" text (sanitised, at most 160 characters)
- * is carried back in the result. An archive is streamed from and to a file,
- * never held whole in memory.
- *
- * Every call blocks; the caller picks the thread. The engine's main thread
- * must never call these. A cancel flag (modnet_io) is checked between chunks
- * and between requests, so cancelling takes effect within one chunk or one
+ * Every call blocks; the caller picks the thread. The engine's main thread must never call these. A cancel flag
+ * (modnet_io) is checked between chunks and between requests, so cancelling takes effect within one chunk or one
  * timeout.
  *
- * The job helper at the end runs one network job at a time on a worker thread
- * with a progress callback and a cancel flag.
+ * The job helper at the end runs one network job at a time on a worker thread with a progress callback and a cancel
+ * flag.
  */
 #ifndef SNAPMAP_PLUS_MODNET_H
 #define SNAPMAP_PLUS_MODNET_H
@@ -49,13 +28,7 @@
 #include <stddef.h>
 
 #define MODNET_HASH_HEX       64
-#define MODNET_CLAIM_HEX      32
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
-/* The largest archive one request sends; a larger one goes up in parts of
- * the size the store's own answer names (api/mods_store.js PART_SIZE, 16
- * MiB), several at a time. Two parts' worth: below that, parts gain nothing. */
-#define MODNET_PART_SIZE      (32ull * 1024u * 1024u)
-#define MODNET_PART_WORKERS   4
 #define MODNET_ARCHIVE_TYPE   "application/zip"
 /* A claim reference (the published item a claim names) has no length of the
  * product's or the store's: any text without control characters. */
@@ -81,11 +54,10 @@ enum {
     MODNET_E_RATE        = -15,   /* 429 */
     MODNET_E_BLOCKED     = -16,   /* 451: on the takedown list */
     MODNET_E_UNAVAILABLE = -17,   /* 5xx */
-    /* Not a store answer: the build was obtained, but a borrow (stock
-     * pointer) in it names game bytes this machine does not hold, a different
-     * game revision, so it cannot be installed here (DESIGN-additive 2.8,
-     * case 4). modsync sets it; no request returns it. */
-    MODNET_E_GAME        = -18
+    /* Not a store answer: content was obtained, but a pointer in it names game bytes this machine does not hold (a
+     * different game revision, S4b). No request returns it. */
+    MODNET_E_GAME        = -18,
+    MODNET_E_RETIRED     = -19    /* 410: the store no longer serves this version of the product (5.22) */
 };
 
 /* The codes that mean the store could not be asked or did not answer:
@@ -103,6 +75,8 @@ typedef struct modnet_result {
     double ms;                    /* wall time of the call */
     double check_ms;              /* an upload in parts: the wait for the store to join and check the archive */
     unsigned parts;               /* an upload in parts: parts sent by this call */
+    unsigned long long retry_after_ms;   /* a busy store's Retry-After, 0 when it gave none */
+    int  offline;                 /* the store's name did not resolve: this computer is not connected */
     const char *message;          /* the cause, whole (the store's own sentence when it gave one), never a
                                      body; valid until this thread's next modnet call */
 } modnet_result;
@@ -115,6 +89,16 @@ typedef struct modnet_io {
     modnet_progress_fn progress;  /* may be NULL */
     void *context;
 } modnet_io;
+
+/* The product's version as the User-Agent sends it ("dev" for a local build). */
+const char *modnet_version(void);
+/* a < b: -1, equal 0, a > b: 1, by dot-separated numbers; "dev" is newest. */
+int  modnet_version_cmp(const char *a, const char *b);
+/* 1 once per process when a store answer named a minimum version newer than this product (D41): the caller says
+ * "A newer Snapmap+ is available; run the Snapmap+ installer to update." */
+int  modnet_newer_needed(void);
+#define MODNET_NEWER_SENTENCE "A newer Snapmap+ is available; run the Snapmap+ installer to update."
+#define MODNET_RETIRED_SENTENCE "This version of Snapmap+ cannot use the mod store; run the Snapmap+ installer to update."
 
 /* Short static text for a code ("network error", "not found", ...). */
 const char *modnet_code_text(int code);
@@ -138,55 +122,6 @@ int  modnet_valid_hash(const char *text);
 /* 1 when `ref` is a claim reference the store accepts: valid UTF-8 text of
  * any length without control characters (MODNET_REF_RULE). */
 int  modnet_valid_ref(const char *ref);
-
-/* HEAD /mods/build/<hash>. MODNET_OK with *size (optional) the archive's
- * bytes and *scripts (optional) the script files it carries, when the store
- * serves it; MODNET_E_NOT_FOUND when it does not (never uploaded, purged, or
- * unclaimed past its hour); MODNET_E_BLOCKED on the takedown list. */
-int  modnet_head_build(const char *hash, unsigned long long *size, unsigned *scripts, const modnet_io *io,
-                       modnet_result *r);
-
-/* Upload the archive file at `path` (UTF-8, `size` its size), streamed: up
- * to MODNET_PART_SIZE in one PUT /mods/build/<hash> (application/zip), a
- * larger one in parts (above), sending only the parts the store does not
- * hold yet, so a later call resumes an interrupted upload. Progress counts
- * the whole archive. 201 (created) and 200 (already stored) are success;
- * r->created tells them apart. A 422 carries the store's first cause. */
-int  modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
-                      modnet_result *r);
-
-/* GET /mods/build/<hash> into the file `out_path` (UTF-8, created or
- * replaced), streamed to disk a chunk at a time, of any size, with progress
- * (done of the declared length). r->received is its size. On any failure the
- * file is removed. The bytes are not checked here: the archive's mod.json
- * names the build, which the caller verifies before anything is installed. */
-int  modnet_get_build(const char *hash, const char *out_path, const modnet_io *io, modnet_result *r);
-
-/* POST /mods/claim {"builds":[...],"ref":...,"secret"?}: one claim per
- * published item. secret NULL makes a new claim; a stored secret replaces the
- * build set of the claim for this ref (403 when it matches none). 409 when a
- * build named is not stored. claim_out and secret_out receive the claim id
- * and its secret. */
-int  modnet_claim(const char *ref, const char *const *builds, int n, const char *secret,
-                  char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1],
-                  const modnet_io *io, modnet_result *r);
-
-/* POST /mods/release. 204 is success; 404 (no such claim) and 403 (wrong
- * secret) come back as their codes. The store deletes every build no claim
- * names any more at once. */
-int  modnet_release(const char *claim, const char *secret, const modnet_io *io, modnet_result *r);
-
-/* A published map ships whole builds, or units of them (modunit.h). POST
- * /mods/build/<hash>/asked {"request","by"} tells the store a player's game
- * asked a unit's build for a file it lacks (`by`, the load that asked, may be
- * ""); 204 is success, 404 a build the store does not hold or one that is a
- * whole build. Nothing about the player is sent. */
-int  modnet_report_asked(const char *hash, const char *request, const char *by, const modnet_io *io, modnet_result *r);
-
-/* POST /mods/asked {"claim","secret"}: what players asked for of the builds
- * a claim names, {"asked":[{"build","salt","request","by"}...]}. MODNET_OK
- * with the answer's text in *json (malloc'd; free), of any size. */
-int  modnet_list_asked(const char *claim, const char *secret, char **json, const modnet_io *io, modnet_result *r);
 
 /* ------------------------------------------------------------ units ---- */
 /* The store's unit routes (SPEC-distribution 10.2). A unit is the closure of one placed object, named by the
