@@ -213,8 +213,8 @@ static void u_add_file(const char *request, const char *pname)
 }
 static int u_cmp(const void *a, const void *b) { return strcmp(((const uentry *)a)->key, ((const uentry *)b)->key); }
 static void u_sort(void) { if (!g_u.sorted) { qsort(g_u.v, g_u.n, sizeof *g_u.v, u_cmp); g_u.sorted = 1; } }
-/* Every request `name` reaches. */
-static void u_requests(const char *name, pset *out)
+/* Every request `name` reaches; `lua`: the name is a script's (a bare word is a Lua module only in a script's text). */
+static void u_requests(const char *name, pset *out, int lua)
 {
     uentry key;
     char low[600], stem[600];
@@ -230,7 +230,7 @@ static void u_requests(const char *name, pset *out)
             /* a Lua module name: lib.foo is scripts/lib/foo.lua, and a bare module the SDK finds in scripts/ or
              * scripts/lib/ (any namespace's) */
             char *p;
-            if (strchr(low, '/')) continue;
+            if (!lua || strchr(low, '/')) continue;
             _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s", low);
             for (p = stem; *p; p++) if (*p == '.') *p = '/';
             {
@@ -382,7 +382,7 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
     size_t q = 0, i;
     memset(&queue, 0, sizeof queue);
     memset(&names, 0, sizeof names);
-    for (i = 0; i < np; i++) u_requests(placed[i], &queue);
+    for (i = 0; i < np; i++) u_requests(placed[i], &queue, 0);
     if (getenv("PARITY_REG")) { printf("  -- %s registries:\n", m->name); sh_modserve_registry_report(print_line, NULL); sh_modserve_scope_report(print_line, NULL); }
     /* Every DOOM file the map's mods change (a native/ replacement, an edited decl, a registry the product generates:
      * the conductor that pairs an encounter's AI type with its entityDef) is read by the engine whatever the map
@@ -396,6 +396,7 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
             unsigned char *bytes = NULL;
             size_t len = 0, k;
             const char *r = queue.v[q++];
+            int lua = strstr(r, "/scripts/") && strlen(r) > 4 && !strcmp(r + strlen(r) - 4, ".lua");
             ps_add(&m->reached, r);
             serve_sha(r, sha, &bytes, &len);
             if (!bytes) continue;
@@ -404,7 +405,7 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
             HeapFree(GetProcessHeap(), 0, bytes);
             for (k = 0; k < names.n; k++) {
                 if (getenv("PARITY_TOKENS") && strstr(names.v[k], "mods/")) printf("  %s: %s spells %s\n", m->name, r, names.v[k]);
-                u_requests(names.v[k], &queue);
+                u_requests(names.v[k], &queue, lua);
             }
             ps_free(&names);
         }
