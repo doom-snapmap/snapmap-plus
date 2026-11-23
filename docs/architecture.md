@@ -4795,8 +4795,8 @@ headed "Undo history is cleared. The folder can be restored from the Recycle
 Bin by hand." with a map open and "The folder can be restored from the Recycle
 Bin by hand." without, plus the Toybox rows, "Moves the folder mods\<folder> to
 the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
-mod, "N of your saved maps use it; they will not open until a mod folder
-provides its assets again"). The list is computed per key: when another build
+mod, "N of your saved maps use it; they will open without its objects until
+you restore it from the Recycle Bin"). The list is computed per key: when another build
 of the key stays installed (`install.keptBuild`), only the Toybox rows no
 staying build adds are listed, and the saved-maps line becomes "Another build
 of this mod stays installed (mods\<folder>); maps that use the mod open with
