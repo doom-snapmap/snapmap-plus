@@ -725,6 +725,15 @@ static void test_move_state(void)
     CHECK(sh_ai_pain_take_next(1, 0, 1251, 1250) == 0);
     CHECK(sh_ai_pain_take_next(1, 7, 1000, 1250) == 0);
     CHECK(sh_ai_pain_take_next(0, 0, 1000, 1250) == 0);
+    /* a dead parked demon's dying code is asked again each frame while its alert cycle is neither dying (5) nor
+     * dead (6): the request found it in ExecuteDoomscript (11), whose way out is a state link the FSM takes at its
+     * next update (R-TG1 tg1vk32: refused twice, then the think's "dead but not ALERTCYCLE_DYING") */
+    CHECK(sh_ai_dying_ask_again(0, 11, 1000, 1250) == 1 && sh_ai_dying_ask_again(0, 0, 1250, 1250) == 1);
+    CHECK(sh_ai_dying_ask_again(0, SH_AI_ALERT_DYING, 1000, 1250) == 0);
+    CHECK(sh_ai_dying_ask_again(0, SH_AI_ALERT_DEAD, 1000, 1250) == 0);
+    CHECK(sh_ai_dying_ask_again(1, 11, 1000, 1250) == 0);     /* alive: a pain's retry, not a death's */
+    CHECK(sh_ai_dying_ask_again(0, 11, 1251, 1250) == 0);     /* the window is over */
+    CHECK(sh_ai_dying_ask_again(0, -1, 1000, 1250) == 0);     /* the alert cycle could not be read */
     CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */
     CHECK(sh_ai_park_holds(1, 1, 0) == 0);          /* this frame's damage asked for a pain */
     CHECK(sh_ai_park_holds(1, 0, 6) == 0);          /* PAIN_FALTER is playing */
