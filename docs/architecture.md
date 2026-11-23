@@ -5735,7 +5735,10 @@ that makes the key sets `publishing-key` `{"offer": "pending"}`, the list
 document carries `publishingKey` (`exists`, `id`, `offer`), and the window
 shows the offer once ("Snapmap+ made a publishing key for you. It lets only you
 republish or unpublish your maps' mod content. Save a backup of it?", Save
-backup / Not now); a backup, a restore or Not now answers it. At each publish
+backup / Not now); a backup, a restore or Not now answers it. When the window
+is closed or minimized at that publish (`eng_window_open`: this process's
+`SnapmapPlusStudioWebView` window), the publish's notice adds "Your publishing
+key was made. Open Snapmap+ to save a backup of it." At each publish
 the account name is read on the main thread with the game's
 `GetProfileUsername` (VK 0x141209920, GL 0x141208c50, `signatures.c`), the
 name the main menu's "Signed in as" shows, and the key's requests present it

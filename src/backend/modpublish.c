@@ -1449,6 +1449,8 @@ static void mp_prepared(void)
         /* The first publish made the key: offer its backup once (SPEC 4.2), where the Snapmap+ window shows it. */
         modclaim_key_offer(1);
         if (g_ops.key_made) g_ops.key_made(g_ops.context);
+        /* the offer shows in the Snapmap+ window; closed, the publish's notice says where it is */
+        if (!g_ops.window_open || !g_ops.window_open(g_ops.context)) mp_after_add(h, SH_MODPUBLISH_KEY_MADE_TEXT);
         mp_log("MODS: publish: the publishing key was made; its backup is offered");
     }
     h->plan = job->plan;
@@ -2149,12 +2151,27 @@ static int eng_account_name(void *c, char *out, size_t cap)
 
 static void eng_key_made(void *c) { (void)c; sh_modui_note_changed(); }
 
+/* The Snapmap+ window (snapmap_plus_ui_webview.cpp, class SnapmapPlusStudioWebView) of this process, shown and not
+ * minimized. */
+static int eng_window_open(void *c)
+{
+    HWND w = NULL;
+    (void)c;
+    while ((w = FindWindowExW(NULL, w, L"SnapmapPlusStudioWebView", NULL)) != NULL) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (pid == GetCurrentProcessId()) return IsWindowVisible(w) && !IsIconic(w);
+    }
+    return 0;
+}
+
 static const sh_modpublish_ops ENG_OPS = {
     .on_main = eng_on_main, .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release,
     .editor_token = eng_editor_token, .publish_fail = eng_publish_fail, .start = eng_start, .busy = eng_busy,
     .placed_names = eng_placed_names, .editor_notice = eng_editor_notice, .log = eng_log, .add_tag = eng_add_tag,
     .edit_ids = eng_edit_ids, .published_query = eng_published_query, .remove_tag = eng_remove_tag,
-    .notice = eng_notice, .account_name = eng_account_name, .key_made = eng_key_made
+    .notice = eng_notice, .account_name = eng_account_name, .key_made = eng_key_made,
+    .window_open = eng_window_open
 };
 
 /* ------------------------------------------------------------ detours */
