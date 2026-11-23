@@ -23,7 +23,11 @@
  * the builder or the unit walk misses still shows. For every file reached in any mode, each mode's answer (the
  * SHA-256 of the bytes served, or nothing) must be the same. Also: every entityDef of a namespace a Play mode does not
  * declare is hidden from the level's templates (sh_modserve_level_hides), so the engine never caches a failed load of
- * it in one mode and reuses it in another; and a declared build's requirements are live in every mode.
+ * it in one mode and reuses it in another; and a declared build's requirements are live in every mode. And in every
+ * mode on its own, whatever the others answer: every image a served material draws with (its served bytes scanned as
+ * the builder scans a decl) is served there, the game's own, or an engine image; a name of a mod or one the product
+ * derives (a look's parameter and colour images) that nothing serves is DRAWS BLACK (R-HD1). Each mode starts from a
+ * fresh process state: a new index, and nothing the product derived in an earlier mode.
  *
  * What it cannot see: names the engine builds at run time from parts (a board square's _sq<N>, a bank's event ids),
  * which have their own rules (the square rule and the bank-per-event rule of modunit.h), and engine caching of a name
@@ -326,6 +330,8 @@ typedef struct mode_run {
     size_t n, cap;
     pset reached;
     pset hidden_wrong;    /* entityDefs a Play mode does not declare that the level would still template */
+    pset black;           /* "<material> -> <image>": an image a served material draws with that nothing answers */
+    size_t derived;       /* the images the product derives (a look's) that this mode's materials drew with, served */
 } mode_run;
 
 static const char *serve_sha(const char *request, char sha[SH_MB_HASH_HEX + 1], unsigned char **bytes_out, size_t *len_out)
@@ -374,6 +380,75 @@ static void shadow_seed(void *ctx, const char *request, uint64_t size, const cha
 }
 
 static void print_line(void *ctx, const char *line) { (void)ctx; printf("     %s\n", line); }
+
+/* ------------------------------------------------------------ what a served material draws with
+ * Every image a served material names (its served bytes, as the engine parses them: a look compiled, the builder's own
+ * reference scan) must be answered in the mode that serves the material: a file the mode serves (the mod's own, a
+ * surface, or one the product derives, which no build lists: a look's parameter and colour images), or the game's own.
+ * The mode comparison cannot see a hole every mode shares (nothing everywhere is no divergence), and a name no build
+ * lists never joins the universe; a pitch-black surface was exactly that (R-HD1). */
+typedef struct draw_ctx { pset *images; } draw_ctx;
+static void draw_need(void *ctx, const char *type, const char *name, size_t n)
+{
+    char t[600];
+    if (!type || _stricmp(type, "image") || !n || n >= sizeof t) return;
+    memcpy(t, name, n);
+    t[n] = 0;
+    ps_add(((draw_ctx *)ctx)->images, t);
+}
+
+/* 1 when the mode answers image `name`: a request it serves; else the game's own (outside every mod's namespace, not a
+ * name the product derives, and, with the installed game, a file it holds or an engine image). */
+static int draw_answered(const char *name, int *derived)
+{
+    char *cand[2];
+    int n = sh_mb_need_requests("image", name, cand, 2), i, ok = 0, ours = 0;
+    *derived = 0;
+    if (name[0] == '_') { sh_mb_requests_free(cand, n); return 1; }   /* _black, _white, _default: the engine's */
+    for (i = 0; i < n && !ok; i++) {
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        if (sh_mb_product_hashed(cand[i])) *derived = ours = 1;
+        if (strstr(cand[i], "mods/")) ours = 1;
+        if (sh_modserve_open(cand[i], &bytes, &len) == 1 && bytes) { HeapFree(GetProcessHeap(), 0, bytes); ok = 1; }
+    }
+    if (!ok && !ours) {
+        if (!g_doom) ok = 1;   /* the fixtures: every other name is DOOM's */
+        else
+            for (i = 0; i < n && !ok; i++)
+                ok = !sh_modprog_owns(cand[i]) && sh_modstock_exists(cand[i]) == 1;
+    }
+    sh_mb_requests_free(cand, n);
+    return ok;
+}
+
+static void mode_draws(mode_run *m)
+{
+    size_t i, k;
+    for (i = 0; i < m->reached.n; i++) {
+        const char *r = m->reached.v[i];
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        pset images;
+        draw_ctx c;
+        if (strncmp(r, "generated/decls/material/", 25) && strncmp(r, "generated/decls/material2/", 26)) continue;
+        if (sh_modserve_open(r, &bytes, &len) != 1 || !bytes) continue;
+        memset(&images, 0, sizeof images);
+        c.images = &images;
+        sh_mb_scan_needs("material", bytes, len, draw_need, &c);
+        HeapFree(GetProcessHeap(), 0, bytes);
+        for (k = 0; k < images.n; k++) {
+            int derived = 0;
+            if (draw_answered(images.v[k], &derived)) { if (derived) m->derived++; continue; }
+            {
+                char line[1300];
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s -> %s", r, images.v[k]);
+                ps_add(&m->black, line);
+            }
+        }
+        ps_free(&images);
+    }
+}
 
 /* The reference closure from the placed names under the scope in force. */
 static void mode_reach(mode_run *m, const char *const *placed, size_t np)
@@ -444,6 +519,7 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
     }
     ps_free(&queue);
     ps_free(&names);
+    mode_draws(m);
 }
 
 static void mode_answer(mode_run *m, const char *request)
@@ -469,11 +545,11 @@ typedef struct world {
 } world;
 
 /* The fixtures' folders and their namespaces (a real mod set keeps the salt its folder records). */
-static const char *g_fixture_salts[8][2];
+static const char *g_fixture_salts[16][2];
 static const char *fixture_salt(const char *folder)
 {
     int i;
-    for (i = 0; i < 8 && g_fixture_salts[i][0]; i++) if (!_stricmp(g_fixture_salts[i][0], folder)) return g_fixture_salts[i][1];
+    for (i = 0; i < 16 && g_fixture_salts[i][0]; i++) if (!_stricmp(g_fixture_salts[i][0], folder)) return g_fixture_salts[i][1];
     return NULL;
 }
 
@@ -560,6 +636,7 @@ static char *author_read(void *ctx, const char *request, size_t *len)
 }
 static const char *g_attach;   /* attach=: the salts used in the map as a whole */
 static size_t g_last_q6;       /* the last run's divergences of own play's whole build (Q6) */
+static size_t g_last_derived[7];   /* the last run's derived images drawn and served, per mode */
 
 /* The save's row resolver (what modui.c binds: the build sh_modserve_row_build names). */
 static int resolve_row(const char *build, const char *salt, sh_modmanifest_row *out)
@@ -716,11 +793,18 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         free(v);
     }
 
+    /* Each mode starts from a fresh process state (world_index: nothing the product derived in an earlier mode is left,
+     * a new index): a mode met first in its own process must serve what the map draws without help from another (an
+     * editor mode deriving a look's images early hid a published map's refusal on a clean player, and a shared hole
+     * hid a pitch-black surface, R-HD1). */
+    world_index(&A);
     declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR);
     mode_reach(&p.m[0], (const char *const *)placed, np);
+    world_index(&A);
     declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_PLAY);
     mode_reach(&p.m[1], (const char *const *)placed, np);
     check_hidden(&p.m[1], &A, &rows);
+    world_index(&A);
     declare(&rows, NULL, 0, SH_MODSERVE_MODE_PLAY);
     mode_reach(&p.m[2], (const char *const *)placed, np);
     check_hidden(&p.m[2], &A, &rows);
@@ -752,6 +836,7 @@ static size_t run_parity(const char *label, const char *author_root, const char 
     declare(&pinned, NULL, 0, SH_MODSERVE_MODE_PLAY);
     mode_reach(&p.m[3], (const char *const *)placed, np);
     check_hidden(&p.m[3], &A, &pinned);
+    world_index(&A);
     declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR);
     mode_reach(&p.m[4], (const char *const *)placed, np);
 
@@ -796,11 +881,14 @@ static size_t run_parity(const char *label, const char *author_root, const char 
             free(manifest);
         }
     }
+    /* the player's process has derived nothing and serves none of the map's mods when the map's units are composed */
+    world_index(&B);
     sh_cache_on_load(&pinned, placed, np);
     world_index(&B);
     declare(&pinned, NULL, 0, SH_MODSERVE_MODE_PLAY);
     mode_reach(&p.m[5], (const char *const *)placed, np);
     check_hidden(&p.m[5], &B, &pinned);
+    world_index(&B);
     declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR);
     mode_reach(&p.m[6], (const char *const *)placed, np);
 
@@ -815,13 +903,14 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         for (i = 0; i < NMODES; i++) {
             /* put each mode back, then answer */
             switch (order[i]) {
+            /* each from a fresh process state, as in the reach */
             case 0: world_index(&A); declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR); break;
-            case 1: declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_PLAY); break;
-            case 2: declare(&rows, NULL, 0, SH_MODSERVE_MODE_PLAY); break;
-            case 3: declare(&pinned, NULL, 0, SH_MODSERVE_MODE_PLAY); break;
-            case 4: declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR); break;
+            case 1: world_index(&A); declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_PLAY); break;
+            case 2: world_index(&A); declare(&rows, NULL, 0, SH_MODSERVE_MODE_PLAY); break;
+            case 3: world_index(&A); declare(&pinned, NULL, 0, SH_MODSERVE_MODE_PLAY); break;
+            case 4: world_index(&A); declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR); break;
             case 5: sh_cache_set_mods_root(player_root); world_index(&B); declare(&pinned, NULL, 0, SH_MODSERVE_MODE_PLAY); break;
-            case 6: declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR); break;
+            case 6: world_index(&B); declare(&pinned, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR); break;
             }
             /* as the engine reads: every file once (the product's derived files exist once their material was read),
              * then the answers */
@@ -891,6 +980,14 @@ static size_t run_parity(const char *label, const char *author_root, const char 
             unexpected++;
             say(&p, "  DIVERGES: %s: %s is not hidden from the level's templates", p.m[i].name, p.m[i].hidden_wrong.v[k], NULL);
         }
+    /* every mode alike or not, a material drawing with an image nothing answers draws black */
+    for (i = 0; i < NMODES; i++) {
+        g_last_derived[i] = p.m[i].derived;
+        for (k = 0; k < p.m[i].black.n; k++) {
+            unexpected++;
+            say(&p, "  DRAWS BLACK: %s: %s, which nothing serves", p.m[i].name, p.m[i].black.v[k], NULL);
+        }
+    }
     {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE, "  %zu file(s) reached; %zu divergence(s), %zu not known; %zu of own play's whole build (Q6)",
@@ -904,6 +1001,7 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         free(p.m[i].a);
         ps_free(&p.m[i].reached);
         ps_free(&p.m[i].hidden_wrong);
+        ps_free(&p.m[i].black);
     }
     ps_free(&p.all);
     sh_modpin_result_free(&pr);
@@ -930,7 +1028,7 @@ static void write_mod(const char *root, const char *folder, const char *salt, co
     CreateDirectoryA(dir, NULL);
     _snprintf_s(text, sizeof text, _TRUNCATE, "{\n  \"name\": \"%s\"\n}\n", name);
     mt_write(dir, "mod.json", text);
-    for (i = 0; i < 7 && g_fixture_salts[i][0] && _stricmp(g_fixture_salts[i][0], folder); i++) {}
+    for (i = 0; i < 15 && g_fixture_salts[i][0] && _stricmp(g_fixture_salts[i][0], folder); i++) {}
     g_fixture_salts[i][0] = folder;
     g_fixture_salts[i][1] = salt;
 }
@@ -1024,6 +1122,32 @@ static void case_two_mods(void)
     CHECK(run_parity("two mods placed in one map, a third installed", author, player, json, strlen(json), NULL, 0, NULL) == 0);
     CHECK(ps_has(&g_last_served, "generated/image/mods/" SA "/crate_d.bimage"));
     CHECK(ps_has(&g_last_served, "generated/image/mods/" SB "/red_d.bimage"));
+    mt_remove_tree(work);
+}
+
+/* A demon's head drawn with a layered look (the Graphics SDK's `type layered`, as Doomforge writes a converted head):
+ * the served material names the look's parameter image and colour images, which the product derives from it and no
+ * build lists. Every mode, each from a fresh process, must serve them: the Tyrant's head drew pitch black when none
+ * did (R-HD1). */
+static void case_look(void)
+{
+    char work[MAX_PATH], author[MAX_PATH * 2], player[MAX_PATH * 2], json[4096];
+    const char *names[] = { "head" };
+    int i;
+    CHECK(mt_temp_dir("parityl", work, sizeof work));
+    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\author", work);
+    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\player", work);
+    CreateDirectoryA(author, NULL);
+    write_mod(author, "heads", SA, "Heads");
+    crate(author, "heads", SA, "head", 3);
+    put_text(author, "heads", "materials\\head_skin.decl",
+             "{\ntype\tlayered\ndiffusemap\t\"mods/" SA "/head_d.tga\"\nlayermask\t\"mods/" SA "/head_mask.tga\"\n"
+             "layer1\t\"mods/" SA "/pores.tga\"\nlayer1repeat\t20\nlayer1weights\t{ -0.1, 0.3, 0, 0, 1 }\n}\n");
+    put_bin(author, "heads", "images\\head_mask.bimage", NULL, 5);
+    put_bin(author, "heads", "images\\pores.bimage", NULL, 7);
+    map_of(SA, names, 1, json, sizeof json);
+    CHECK(run_parity("a head drawn with a layered look", author, player, json, strlen(json), NULL, 0, NULL) == 0);
+    for (i = 0; i < NMODES; i++) CHECK(g_last_derived[i] > 0);   /* the look's images were drawn with, and served */
     mt_remove_tree(work);
 }
 
@@ -1238,6 +1362,9 @@ int main(int argc, char **argv)
     }
     sh_mb_set_script_check(sh_script_compile_check);
     sh_mb_set_look_compiler(sh_look_compile_notes);
+    /* the product's own files, as dllmain.c wires them */
+    sh_modserve_set_product_owner(sh_modprog_owns);
+    sh_modserve_set_product_reader(sh_modprog_read);
     sh_cache_set_resolver(&g_resolver);
     if (doom) { sh_modstock_set_install(doom); sh_modstock_register(); g_doom = 1; }
     else sh_modpin_set_game(fixture_game, NULL);
@@ -1307,6 +1434,7 @@ int main(int argc, char **argv)
     }
     case_one_mod();
     case_two_mods();
+    case_look();
     case_kinds();
     if (failures) { fprintf(stderr, "parity_test: %d failure(s)\n", failures); return 1; }
     printf("parity_test: every mode served every placed object the same\n");

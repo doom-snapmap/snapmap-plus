@@ -1215,6 +1215,34 @@ int sh_mb_product_decl(const char *request)
            strlen(name) > pn + 1 + 5;
 }
 
+/* `s` holds 16 hex digits and then exactly `tail`. */
+static int mb_hex16_then(const char *s, const char *tail)
+{
+    int i;
+    for (i = 0; i < 16; i++) if (!isxdigit((unsigned char)s[i])) return 0;
+    return _stricmp(s + 16, tail) == 0;
+}
+
+int sh_mb_product_hashed(const char *request)
+{
+    static const char img[] = "generated/image/" SH_MB_PRODUCT_ROOT "/look/";
+    const char *slash, *name;
+    if (!request) return 0;
+    if (!_strnicmp(request, img, sizeof img - 1)) {
+        name = request + sizeof img - 1;
+        if (*name == 'c' || *name == 'C') name++;
+        return mb_hex16_then(name, ".bimage");
+    }
+    if (_strnicmp(request, "generated/decls/", 16) != 0 || !(slash = strchr(request + 16, '/')) || slash == request + 16)
+        return 0;
+    name = slash + 1;
+    if (!_strnicmp(name, SH_MB_PRODUCT_ROOT "/sdk/", sizeof SH_MB_PRODUCT_ROOT + 4))
+        return mb_hex16_then(name + sizeof SH_MB_PRODUCT_ROOT + 4, ".decl");
+    if (!_strnicmp(name, SH_MB_PRODUCT_ROOT "_sdk_", sizeof SH_MB_PRODUCT_ROOT + 4))
+        return mb_hex16_then(name + sizeof SH_MB_PRODUCT_ROOT + 4, ".decl");
+    return 0;
+}
+
 /* maps/modules/<path>.decl outside maps/modules/palettes/: a snapModule decl. */
 static int mb_is_module_request(const char *r)
 {
@@ -2445,7 +2473,8 @@ static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
     /* A look's images (snapmapplus/look/<hash>: a parameter or colour image) are what the look compiler derives from
      * this very material, again wherever the material serves: no need of it. Recorded, each became a pointer in the
      * material's units that a player's product cannot answer before the unit's material has served (the composition
-     * was refused and stood in: the all-mods unit proof, DS-E). */
+     * was refused and stood in: the all-mods unit proof, DS-E). The provider serves such an image without a pointer
+     * once the material that names it has compiled in the process (modserve.c ms_open_derived, R-HD1). */
     if (n > 17 && !_strnicmp(name, "snapmapplus/look/", 17)) return;
     if (!mb_add_need(c->file, type, name, n)) c->oom = 1;
 }

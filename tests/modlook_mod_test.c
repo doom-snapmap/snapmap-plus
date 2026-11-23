@@ -373,6 +373,8 @@ static void test_serve(const char *tmp)
 
     sh_modprog_reset();
     sh_modserve_set_material_filter(sh_look_compile);
+    sh_modserve_set_product_owner(sh_modprog_owns);   /* as dllmain.c wires the product's own files */
+    sh_modserve_set_product_reader(sh_modprog_read);
     CHECK(sh_modserve_index_build(root) == 1);
 
     for (i = 0; i < sizeof LOOKS / sizeof LOOKS[0]; i++) {
@@ -428,6 +430,14 @@ static void test_serve(const char *tmp)
                 if (dot) strcpy(dot, ".bimage");
                 CHECK(sh_modprog_owns(ipath));
                 CHECK(sh_modprog_read(ipath, &bytes, &bn) == SH_MB_STOCK_OK && bytes && bn > 62);
+                {
+                    /* and the provider serves it to the engine, though no build lists it (R-HD1: none did, and the
+                     * layered surface drew black) */
+                    unsigned char *sv = NULL;
+                    size_t svn = 0;
+                    CHECK(sh_modserve_open(ipath, &sv, &svn) == 1 && sv && bytes && svn == bn && !memcmp(sv, bytes, bn));
+                    if (sv) HeapFree(GetProcessHeap(), 0, sv);
+                }
                 if (bytes) {
                     /* the parameter image's file name is the SHA-256 of its bytes; a constant's follows a 'c' */
                     char hex[65];
